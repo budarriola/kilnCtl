@@ -51,6 +51,15 @@ bool recovery_io_relay_fault(void);
 // True once the expander answered and the relay hold was verified.
 bool recovery_io_relays_verified_off(void);
 
+// NVS partitions that could not be initialised this boot (recovery never
+// erases or reformats any of them; it continues without). Bit 0 = default
+// `nvs`, bit 1 = `wifi_nvs`, bit 2 = `kiln_nvs`. Zero means all came up.
+#define RECOVERY_NVS_FAIL_DEFAULT (1u << 0)
+#define RECOVERY_NVS_FAIL_WIFI    (1u << 1)
+#define RECOVERY_NVS_FAIL_KILN    (1u << 2)
+void recovery_io_nvs_mark_failed(unsigned bit);
+unsigned recovery_io_nvs_failed_mask(void);
+
 // LCD helpers (D/C = expander IO15, ~RESET = expander IO14). Only those two
 // bits can be changed through this call; relay bits are never touched.
 // Returns ESP_ERR_INVALID_STATE if the expander is not up.

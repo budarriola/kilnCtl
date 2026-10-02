@@ -621,19 +621,29 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     // esp_image_verify(), cached (see app_image_verified()).
     bool desc_present = app_has_valid_image(app);
     bool valid = desc_present && app_image_verified(app);
-    char body[512];
+    // Static body: the httpd stack is 8 KB and only the single httpd task
+    // runs this handler, so a static buffer costs no stack.
+    static char body[640];
+    unsigned nvs_failed = recovery_io_nvs_failed_mask();
     int n = snprintf(body, sizeof(body),
                       "{\"running\":\"%s\",\"app_present\":%s,\"app_size\":%u,"
                       "\"app_desc_present\":%s,\"app_valid\":%s,\"max_upload\":%u,%s,"
-                      "\"relay_fault\":%s,\"relays_verified_off\":%s,\"free_heap\":%u}",
+                      "\"relay_fault\":%s,\"relays_verified_off\":%s,"
+                      "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
+                      "\"heap_internal_min_free\":%u,\"free_heap\":%u}",
                       running ? running->label : "?", app ? "true" : "false",
                       (unsigned)(app ? app->size : 0), desc_present ? "true" : "false",
                       valid ? "true" : "false",
                       (unsigned)(app ? app->size : 0), bgs, relay_fault ? "true" : "false",
                       relays_off ? "true" : "false",
+                      nvs_failed ? "true" : "false", nvs_failed,
+                      (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                       (unsigned)esp_get_free_heap_size());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (n < 0 || (size_t)n >= sizeof(body)) {
+        return httpd_resp_send_500(req);
+    }
     return httpd_resp_send(req, body, n);
 }
 

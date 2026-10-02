@@ -14,6 +14,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "recovery_io.h"
 #include "recovery_lcd.h"
 
 static const char *TAG = "recovery_wifi";
@@ -155,6 +156,9 @@ void recovery_wifi_start(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_DEFAULT) {
+        init_cfg.nvs_enable = 0; // default nvs unusable (and never erased): driver runs RAM-only
+    }
     ESP_ERROR_CHECK(esp_wifi_init(&init_cfg));
     /* docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md section 3
      * part A note: recovery also owns no read path for the driver's own

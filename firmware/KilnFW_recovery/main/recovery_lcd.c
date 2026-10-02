@@ -301,14 +301,19 @@ static void draw_status(void)
     (void)draw_line(Y_TITLE, TITLE_SCALE, COL_TITLE, COL_BG, "RECOVERY MODE");
     (void)draw_line(Y_SUB, TEXT_SCALE, COL_DIM, COL_BG, "KilnFW recovery image");
 
-    if (s_boot_count >= 0) {
+    if (recovery_io_nvs_failed_mask() != 0) {
+        (void)draw_line(Y_BOOT, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "NVS UNAVAILABLE");
+        buf[0] = 0;
+    } else if (s_boot_count >= 0) {
         snprintf(buf, sizeof(buf), "Boot guard count: %d", s_boot_count);
     } else if (s_boot_record_present) {
         snprintf(buf, sizeof(buf), "Boot guard count: unreadable");
     } else {
         snprintf(buf, sizeof(buf), "Boot guard count: none");
     }
-    (void)draw_line(Y_BOOT, TEXT_SCALE, COL_TEXT, COL_BG, buf);
+    if (buf[0]) {
+        (void)draw_line(Y_BOOT, TEXT_SCALE, COL_TEXT, COL_BG, buf);
+    }
 
     snprintf(buf, sizeof(buf), "Reset reason: %s", recovery_reset_reason_name(s_reset_reason));
     (void)draw_line(Y_RESET, TEXT_SCALE, COL_TEXT, COL_BG, buf);

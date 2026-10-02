@@ -181,6 +181,18 @@ bool recovery_io_relay_fault(void)
     return s_fault;
 }
 
+static volatile unsigned s_nvs_failed;
+
+void recovery_io_nvs_mark_failed(unsigned bit)
+{
+    s_nvs_failed |= bit;
+}
+
+unsigned recovery_io_nvs_failed_mask(void)
+{
+    return s_nvs_failed;
+}
+
 bool recovery_io_relays_verified_off(void)
 {
     return s_verified;

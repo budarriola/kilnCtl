@@ -75,7 +75,7 @@ x.onload=function(){ok({s:x.status,t:x.responseText})};
 x.onerror=function(){no(new Error("network error (board may have rejected the upload or restarted)"))};
 x.send(body)})}
 function status(){xhr("GET","/api/recovery/status").then(function(r){
-try{$("st").textContent=JSON.stringify(JSON.parse(r.t),null,1)}catch(e){$("st").textContent=r.t}
+try{var j=JSON.parse(r.t);$("st").textContent=(j.nvs_unavailable?"NVS UNAVAILABLE (never erased by recovery; config unreadable, Wi-Fi settings not loaded)\n":"")+JSON.stringify(j,null,1)}catch(e){$("st").textContent=r.t}
 },function(e){$("st").textContent=e.message})}
 function signed(path,ctx,body,prog){
 var pw=$("pw").value;if(!pw)return Promise.reject(new Error("enter the AP password"));

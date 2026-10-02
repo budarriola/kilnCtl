@@ -36,26 +36,32 @@ void app_main(void)
 
     ESP_LOGI(TAG, "KilnFW recovery image starting");
 
+    // Recovery must NEVER erase any NVS partition it shares with the app:
+    // not `kiln_nvs`/`wifi_nvs`, and not the default `nvs` partition either
+    // (the app's own Wi-Fi driver/PHY data lives there, and a recovery boot
+    // is exactly when the board is already in trouble). On any init failure
+    // -- including NO_FREE_PAGES / NEW_VERSION_FOUND -- log it, record it so
+    // the LCD, the page and /api/recovery/status say "nvs unavailable", and
+    // carry on: uploads and the relay hold need no NVS.
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        // Recovery never repairs config, but its OWN `nvs` partition (not
-        // `kiln_nvs`/`wifi_nvs`) is fair game to reformat if corrupt --
-        // it holds nothing but Wi-Fi driver internals and PHY calibration
-        // data, both regenerable.
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_flash_init() failed: %s -- NVS UNAVAILABLE, NOT erasing it; recovery "
+                 "continues without NVS", esp_err_to_name(err));
+        recovery_io_nvs_mark_failed(RECOVERY_NVS_FAIL_DEFAULT);
     }
-    ESP_ERROR_CHECK(err);
 
     // recovery_wifi.c / recovery_http.c open wifi_nvs and kiln_nvs by
     // partition name, which fails with ESP_ERR_NVS_NOT_INITIALIZED unless
     // the partition was initialised first. Failures are logged, not fatal.
     static const char *const extra_parts[] = {"wifi_nvs", "kiln_nvs"};
+    static const unsigned extra_bits[] = {RECOVERY_NVS_FAIL_WIFI, RECOVERY_NVS_FAIL_KILN};
     for (size_t i = 0; i < sizeof(extra_parts) / sizeof(extra_parts[0]); i++) {
         esp_err_t perr = nvs_flash_init_partition(extra_parts[i]);
         if (perr != ESP_OK) {
-            ESP_LOGW(TAG, "nvs_flash_init_partition(%s) failed: %s", extra_parts[i],
-                     esp_err_to_name(perr));
+            // Never erased or reformatted here, whatever the error code.
+            ESP_LOGE(TAG, "nvs_flash_init_partition(%s) failed: %s -- NVS UNAVAILABLE, NOT erasing",
+                     extra_parts[i], esp_err_to_name(perr));
+            recovery_io_nvs_mark_failed(extra_bits[i]);
         }
     }
 

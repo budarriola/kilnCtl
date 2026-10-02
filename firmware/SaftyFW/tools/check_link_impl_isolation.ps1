@@ -329,7 +329,20 @@ $allowlistPaths = @(
     # (test_ota_image_crc.c needs no entry -- it defines no function whose
     # name matches, only void test_* helpers, and must stay scanned.)
     (Join-Path $firmwareRoot "KilnFW\App\drivers\http\ota_image_crc.c"),
-    (Join-Path $firmwareRoot "KilnFW\App\drivers\http\ota_image_crc.h")
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\http\ota_image_crc.h"),
+    # firmware/KilnFW_recovery: ric_crc32() (recovery_image_check) and
+    # rpp_crc32() (recovery_pico_proto) are standard reflected CRC-32 (IEEE
+    # 802.3/zlib) whole-image integrity checks -- the first over an uploaded app
+    # image, the second over a Pico slot image streamed over kilnlink, each
+    # compared to the CRC-32 the image header / staging protocol carries. They
+    # are NOT the link frame CRC16-CCITT-FALSE. The recovery image is a
+    # separate IDF project that cannot link CommonFW, and both must stay pure
+    # so their host tests (check_recovery_*) build standalone. Allowlisted by
+    # path with this reason; $crcPattern is deliberately not widened.
+    (Join-Path $firmwareRoot "KilnFW_recovery\main\recovery_image_check.c"),
+    (Join-Path $firmwareRoot "KilnFW_recovery\main\recovery_image_check.h"),
+    (Join-Path $firmwareRoot "KilnFW_recovery\main\recovery_pico_proto.c"),
+    (Join-Path $firmwareRoot "KilnFW_recovery\main\recovery_pico_proto.h")
 )
 
 # Concurrent sessions are the norm in this repo: another agent's in-flight
