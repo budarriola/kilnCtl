@@ -57,6 +57,12 @@ _VALID_CONTEXTS = ("esp", "boot-guard-reset", "sw-reset", "recovery-exit", "wifi
 
 DEFAULT_TIMEOUT_S = 10.0
 
+#: recovery_http.c's AUTH_QUERY_MAX: the longest query string the firmware
+#: will MAC ("crc=xxxxxxxx&slot=A" is 19, "&slot=auto" 22). A longer one is
+#: refused by the board with 400 AND burns the nonce plus one lockout failure,
+#: so this module refuses it locally instead of ever sending it.
+AUTH_QUERY_MAX = 95
+
 
 class RecoveryOtaAuthError(RuntimeError):
     """A challenge fetch or signed POST against the recovery image failed."""
@@ -67,8 +73,29 @@ class RecoveryOtaAuthError(RuntimeError):
         self.detail = detail
 
 
-def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
-    """HMAC-SHA256(HMAC-SHA256(ap_password, "kilnctl-ota-v1"), nonce || context).
+def _check_query(query: str) -> None:
+    """The query string the firmware MACs is the RAW one httpd hands back
+    (httpd_req_get_url_query_str() does not percent-decode), so the signer
+    and the URL must carry byte-identical text. Refuse anything that could not
+    be sent verbatim in a request line."""
+    if query.startswith("?") or "#" in query:
+        raise ValueError(f"query must be the text after '?' with no fragment, got {query!r}")
+    if not all(33 <= ord(c) < 127 for c in query):
+        raise ValueError(f"query must be printable ASCII with no spaces (percent-encode it first), got {query!r}")
+    if len(query) > AUTH_QUERY_MAX:
+        raise ValueError(f"query is {len(query)} chars, the recovery image MACs at most {AUTH_QUERY_MAX}")
+
+
+def derive_mac(ap_password: str, nonce: bytes, context: str, query: str = "") -> bytes:
+    """HMAC-SHA256(HMAC-SHA256(ap_password, "kilnctl-ota-v1"),
+    nonce || context || ("?" + query, only when query is non-empty)).
+
+    The query term is recovery_http.c's recovery_authenticate_request()
+    (W4, query-bound MAC): ``msg = nonce || context``, then, when
+    httpd_req_get_url_query_len() > 0, ``msg[msg_len++] = '?'`` and the raw
+    query bytes. The browser page's signed() appends the same "?query" to the
+    context. Routes without parameters (everything but pico-upload) pass
+    ``query=""`` and sign exactly as before.
 
     Byte-for-byte the same derivation the main app used before 2026-09-29
     (see that history in git blame of the old kilnctrl.ota_http_client
@@ -86,8 +113,11 @@ def derive_mac(ap_password: str, nonce: bytes, context: str) -> bytes:
     if context not in _VALID_CONTEXTS:
         raise ValueError(
             f"context must be one of {_VALID_CONTEXTS!r} (recovery-image routes only), got {context!r}")
+    _check_query(query)
     key = hmac.new(ap_password.encode("utf-8"), OTA_KDF_CONTEXT, hashlib.sha256).digest()
     msg = nonce + context.encode("ascii")
+    if query:
+        msg += b"?" + query.encode("ascii")
     return hmac.new(key, msg, hashlib.sha256).digest()
 
 
@@ -126,7 +156,8 @@ def _url(host: str, path: str) -> str:
 
 
 def signed_post(host: str, path: str, context: str, ap_password: str, *,
-                 data: bytes = b"", timeout: float = DEFAULT_TIMEOUT_S) -> dict:
+                 data: bytes = b"", query: str = "",
+                 timeout: float = DEFAULT_TIMEOUT_S) -> dict:
     """Fetches a fresh challenge from the recovery image, signs it for
     `context`, and POSTs `data` (default empty body) with the resulting
     X-Ota-Mac header to `path` on that same host. Returns
@@ -141,11 +172,19 @@ def signed_post(host: str, path: str, context: str, ap_password: str, *,
     same one-shot-nonce contract the main app used to enforce, mirrored in
     recovery_http.c's ota_auth.c copy -- so this always calls get_challenge()
     itself rather than accepting a caller-supplied nonce.
+
+    `query` (text after '?', already percent-encoded, default none) is bound
+    into the MAC AND appended to the URL as ``path?query`` -- one string
+    feeds both, so what is signed is byte-for-byte what is sent. `path`
+    itself must therefore not contain a '?'.
     """
+    if "?" in path:
+        raise ValueError("pass the query via query=, not inside path")
+    _check_query(query)  # before the challenge fetch: never burn a nonce on a bad query
     nonce = get_challenge(host, timeout)
-    mac_hex = derive_mac(ap_password, nonce, context).hex()
+    mac_hex = derive_mac(ap_password, nonce, context, query).hex()
     req = urllib.request.Request(
-        _url(host, path),
+        _url(host, path + ("?" + query if query else "")),
         data=data,
         method="POST",
         headers={"X-Ota-Mac": mac_hex, "Content-Type": "application/octet-stream"},
@@ -194,3 +233,37 @@ def recovery_sw_reset(host: str, ap_password: str, timeout: float = DEFAULT_TIME
     kilnctrl.ota_http_client.sw_reset(), which targets the MAIN APP's
     (ROUTE_TIER_ADMIN, no MAC) copy."""
     return signed_post(host, "/api/sw_reset", "sw-reset", ap_password, timeout=timeout)
+
+
+def recovery_exit(host: str, ap_password: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
+    """POST /api/recovery/exit (recovery_exit_post()) -- context "recovery-exit"."""
+    return signed_post(host, "/api/recovery/exit", "recovery-exit", ap_password, timeout=timeout)
+
+
+def recovery_wifi_reset(host: str, ap_password: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
+    """POST /api/recovery/wifi_reset (wifi_reset_post()) -- context "wifi-reset"."""
+    return signed_post(host, "/api/recovery/wifi_reset", "wifi-reset", ap_password, timeout=timeout)
+
+
+def pico_upload_query(crc32: int, slot: Optional[str] = None) -> str:
+    """The exact query string for POST /api/recovery/pico/upload:
+    ``crc=<8 lowercase hex>[&slot=A|B]`` (parse_pico_query() in
+    recovery_http.c; crc is required and must be exactly 8 hex digits)."""
+    if not 0 <= crc32 <= 0xFFFFFFFF:
+        raise ValueError(f"crc32 out of range: {crc32!r}")
+    q = f"crc={crc32:08x}"
+    if slot is not None:
+        if slot not in ("A", "B"):
+            raise ValueError(f"slot must be 'A', 'B' or None (auto), got {slot!r}")
+        q += f"&slot={slot}"
+    return q
+
+
+def recovery_pico_upload(host: str, image_bytes: bytes, crc32: int, ap_password: str,
+                          slot: Optional[str] = None, timeout: float = 60.0) -> dict:
+    """POST /api/recovery/pico/upload?crc=..[&slot=..] (pico_upload_post()) --
+    context "pico-upload", query bound into the MAC. A 202 JSON body
+    (``{"started":true,"image_slot":"A"}``) means the relay STARTED, nothing
+    more; the outcome is only ever in GET /api/recovery/pico/status."""
+    return signed_post(host, "/api/recovery/pico/upload", "pico-upload", ap_password,
+                        data=image_bytes, query=pico_upload_query(crc32, slot), timeout=timeout)

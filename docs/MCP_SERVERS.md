@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 198 tools (197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 203 tools (198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -438,17 +438,32 @@ same as the rest of the auth-off collapse. The separate, standalone recovery
 firmware image (`firmware/KilnFW_recovery/`) is unaffected and still
 implements the AP-password HMAC on its own routes.
 
-**RECOVERY-IMAGE-ONLY signer kept in PcTools, unwired to any MCP tool today:**
+**Recovery-image tools (2026-10-02):** `recovery_status` (READ-ONLY: `GET /api/recovery/status` plus
+`GET /api/recovery/pico/status`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset` and
+`recovery_pico_upload`, in `tools/PcTools/src/kilnctrl/mcp_server_recovery.py`. They talk ONLY to
+`firmware/KilnFW_recovery/` and refuse (404 or `running` not `recovery`) against the main app. Every mutator refuses
+unless `confirm is True` exactly, before any network access; reads `KILNCTL_AP_PASSWORD` from the environment
+(reports `[bool]` only, never the value); reads both status routes before acting and refuses while the Pico relay
+is busy or has no PSRAM; and reads status back afterward, failing loud on disagreement. `recovery_pico_upload`
+reports the relay's terminal phase honestly: success only for phase done with bytes_sent equal to total_bytes equal
+to the image length; `outcome_unknown` (the relay stopped after END was sent) is reported as NOT success, as is a
+timeout or lost contact. The wifi-reset credential clear is not readable from status, so that tool verifies only
+the restart. No pico-abort, sw-reset or ESP-push tool exists. Unit tests use a fake board only
+(`tools/PcTools/tests/test_mcp_server_recovery.py`); never run against hardware.
+
+**Recovery-image signer in PcTools:**
 `tools/PcTools/src/kilnctrl/recovery_ota_auth_client.py` restores exactly the
 narrow capability the above retirement removed, scoped ONLY to
 `firmware/KilnFW_recovery/` -- `derive_mac()`/`get_challenge()`/
-`signed_post()` plus `recovery_push_esp_image()`/`recovery_boot_guard_reset()`/
-`recovery_sw_reset()`, for a board that has fallen back to the recovery image
+`signed_post()` plus `recovery_push_esp_image()`/`recovery_sw_reset()`/`recovery_exit()`/
+`recovery_wifi_reset()`/`recovery_pico_upload()`, for a board that has fallen back to the recovery image
 and cannot be reached through the main app's (now-unauthenticated) routes at
-all. It reads no environment variable itself -- a future MCP-level caller is
-expected to read `KILNCTL_AP_PASSWORD` and pass it through, never logging or
-echoing it, same discipline as every other credential-reading tool in this
-file. Full rationale: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` section 2.
+all. The MAC covers nonce16, context and, when present, `?` plus the raw query
+(recovery_http.c signs the query for the Pico upload route: crc and slot). The query is validated
+locally (at most 95 chars, printable, no space) BEFORE a challenge is fetched, since any failure after a
+valid nonce burns it and counts toward the shared lockout. It reads no environment variable itself --
+`mcp_server_recovery.py` reads `KILNCTL_AP_PASSWORD` and passes it through, never logging or
+echoing it. Full rationale: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` section 2.
 
 **Data-partition erase during a commission reflash (owner decision
 2026-09-21).** `flash_firmware()` takes `erase_partitions: list[str] = None`

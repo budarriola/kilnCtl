@@ -176,5 +176,107 @@ class SignedPostTest(unittest.TestCase):
         self.assertNotIn("super-secret-password", str(ctx.exception))
 
 
+def _firmware_msg(nonce: bytes, context: str, query: str) -> bytes:
+    """Transcription of recovery_http.c recovery_authenticate_request()'s
+    message construction: memcpy nonce; memcpy context; then, only when
+    httpd_req_get_url_query_len() > 0, msg[msg_len++] = '?' and the raw query
+    bytes. Written from the C, not from the client under test."""
+    msg = bytearray(nonce)
+    msg += context.encode("ascii")
+    if len(query) > 0:
+        msg += b"?"
+        msg += query.encode("ascii")
+    return bytes(msg)
+
+
+class QueryBoundMacTest(unittest.TestCase):
+    PW = "ap-pass-test"
+    NONCE = bytes(range(16))
+
+    def test_matches_firmware_message_construction(self):
+        key = hmac.new(self.PW.encode(), b"kilnctl-ota-v1", hashlib.sha256).digest()
+        for q in ("", "crc=deadbeef", "crc=deadbeef&slot=A", "crc=00000000&slot=B"):
+            expected = hmac.new(key, _firmware_msg(self.NONCE, "pico-upload", q), hashlib.sha256).digest()
+            self.assertEqual(rec.derive_mac(self.PW, self.NONCE, "pico-upload", q), expected, q)
+
+    def test_frozen_vectors(self):
+        # Computed independently from the C construction above (HMAC key =
+        # HMAC(pw, "kilnctl-ota-v1"); msg = nonce||ctx||"?"||query).
+        self.assertEqual(rec.derive_mac(self.PW, self.NONCE, "pico-upload", "crc=deadbeef&slot=A").hex(),
+                         "de9db9c86361082805a5136cb3ed3b10cca85fee923eb66be86d66d60bed6359")
+        self.assertEqual(rec.derive_mac(self.PW, self.NONCE, "pico-upload", "crc=deadbeef").hex(),
+                         "78f5c341d4f8e80934f8cb8d59e4e8dc166493526816bc6a2fc15fcef1d37fd1")
+        # No query: byte-identical to the pre-W4 signature (no trailing '?').
+        self.assertEqual(rec.derive_mac(self.PW, self.NONCE, "pico-upload").hex(),
+                         "a06055fbeb3cc3564b74ebabd6767cd49b2d193d3e44c638f3fea5fc12971a9f")
+
+    def test_query_changes_the_mac(self):
+        a = rec.derive_mac(self.PW, self.NONCE, "pico-upload", "crc=deadbeef&slot=A")
+        b = rec.derive_mac(self.PW, self.NONCE, "pico-upload", "crc=deadbeef&slot=B")
+        c = rec.derive_mac(self.PW, self.NONCE, "pico-upload")
+        self.assertEqual(len({a, b, c}), 3)
+
+    def test_bad_queries_refused(self):
+        for q in ("?crc=deadbeef", "crc=dead beef", "crc=dead#beef", "crc=é", "x" * 96):
+            with self.assertRaises(ValueError, msg=q):
+                rec.derive_mac(self.PW, self.NONCE, "pico-upload", q)
+        rec.derive_mac(self.PW, self.NONCE, "pico-upload", "x" * 95)  # exactly AUTH_QUERY_MAX is fine
+
+    def test_pico_upload_query_builder(self):
+        self.assertEqual(rec.pico_upload_query(0xDEADBEEF), "crc=deadbeef")
+        self.assertEqual(rec.pico_upload_query(0x1, "B"), "crc=00000001&slot=B")
+        for bad in ((-1, None), (1 << 32, None), (1, "C"), (1, "a")):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                rec.pico_upload_query(*bad)
+
+    def test_signed_post_signs_exactly_what_it_sends(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            if "challenge" in req.full_url:
+                return _fake_response(json.dumps({"nonce": self.NONCE.hex()}).encode("utf-8"))
+            captured["url"] = req.full_url
+            captured["mac"] = req.get_header("X-ota-mac")
+            captured["data"] = req.data
+            return _fake_response(b'{"started":true,"image_slot":"A"}', 202)
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            r = rec.recovery_pico_upload("10.0.0.5", b"IMG", 0xDEADBEEF, self.PW, slot="A")
+        self.assertEqual(r["status"], 202)
+        self.assertEqual(captured["url"], "http://10.0.0.5/api/recovery/pico/upload?crc=deadbeef&slot=A")
+        self.assertEqual(captured["data"], b"IMG")
+        query = captured["url"].split("?", 1)[1]
+        self.assertEqual(captured["mac"],
+                         rec.derive_mac(self.PW, self.NONCE, "pico-upload", query).hex())
+        self.assertEqual(captured["mac"],
+                         "de9db9c86361082805a5136cb3ed3b10cca85fee923eb66be86d66d60bed6359")
+
+    def test_bad_query_never_fetches_a_challenge(self):
+        with unittest.mock.patch("urllib.request.urlopen") as m:
+            with self.assertRaises(ValueError):
+                rec.signed_post("10.0.0.5", "/x", "pico-upload", "pw", query="a b")
+            with self.assertRaises(ValueError):
+                rec.signed_post("10.0.0.5", "/x?crc=1", "pico-upload", "pw")
+        m.assert_not_called()
+
+    def test_exit_and_wifi_reset_contexts(self):
+        for fn, ctx, path in ((rec.recovery_exit, "recovery-exit", "/api/recovery/exit"),
+                              (rec.recovery_wifi_reset, "wifi-reset", "/api/recovery/wifi_reset")):
+            captured = {}
+
+            def fake_urlopen(req, timeout=None, _c=captured):
+                if "challenge" in req.full_url:
+                    return _fake_response(json.dumps({"nonce": self.NONCE.hex()}).encode("utf-8"))
+                _c["url"] = req.full_url
+                _c["mac"] = req.get_header("X-ota-mac")
+                return _fake_response(b"ok")
+
+            with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                fn("10.0.0.5", self.PW)
+            self.assertTrue(captured["url"].endswith(path))
+            self.assertNotIn("?", captured["url"])
+            self.assertEqual(captured["mac"], rec.derive_mac(self.PW, self.NONCE, ctx).hex())
+
+
 if __name__ == "__main__":
     unittest.main()
