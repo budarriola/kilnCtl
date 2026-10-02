@@ -256,6 +256,24 @@ recovery mode. It only reports, never resumes or resets. Every `debug_reset`
 call appends a JSON line to `logs/debug_reset/history.jsonl` (gitignored, not
 rotated; `kilnctrl/reset_probe.py`).
 
+**Dark-rereset guard.** `debug_reset(peer="esp")` (any mode) REFUSES, before
+touching OpenOCD, if the previous ESP reset in that history was a run-mode
+reset whose probe never got an HTTP answer and it is less than 120 s old
+(`reset_probe.LINK_DEAD_HARD_S_DEFAULT`, the firmware default of the Pico's
+configurable `link_dead_hard_s`, `firmware/SaftyFW/src/safety_guards.c`; the
+tool does not read the live value). Reason: a JTAG reset sends no
+ANNOUNCE_REBOOT grace, so stacking resets on an ESP that is still dark
+extends the link silence toward S6b (SAFETY_TRIP_LINK_DEAD, mask 0x0040), and
+clearing S6b needs owner authorization. It refuses rather than warns because
+an output warning is easily missed by an agent, and uses the same
+explicit-override convention as `debug_program`'s `confirm`/`allow_stale`:
+pass `allow_dark_rereset=True` (exactly `True`). The refusal reports the
+previous reset's age and the seconds left in the window. Only the last ESP
+record counts; a record with no probe (`verify=False`, halt/init mode, a probe
+that raised, a failed reset) is unknown, not dark; a missing or corrupt
+history never blocks. Pico resets are not gated (they do not lengthen ESP
+link silence).
+
 **Dual reflash (both processors reset close together) trips S6a only if the
 ESP is up and asserting `mainFault` while its link handshake comes up; an ESP
 that stays silent for more than 120 s trips S6b instead. The S6a case is

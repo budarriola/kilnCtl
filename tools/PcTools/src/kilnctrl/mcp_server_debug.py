@@ -302,6 +302,7 @@ def debug_reset(
     mode: str = "run",
     verify: bool = True,
     verify_window_s: float = reset_probe.DEFAULT_WINDOW_S,
+    allow_dark_rereset: bool = False,
 ) -> str:
     """Resets `peer` ("esp"/"pico"). `mode` is "run" (default, resumes
     execution), "halt" (resets and halts), or "init" (resets and runs any
@@ -318,7 +319,31 @@ def debug_reset(
 
     Cost: an ESP run-mode reset now blocks while it verifies -- typically ~20-25 s (bench-measured 2026-10-01: UART 20.0 s, HTTP 23.2 s)
     on a healthy board, up to the full `verify_window_s` on a silent one.
-    Pass verify=False to skip."""
+    Pass verify=False to skip.
+
+    Guard (peer="esp", any mode): REFUSES if the previous ESP reset in
+    history.jsonl was a run-mode reset whose probe never got an HTTP answer and
+    it was less than reset_probe.LINK_DEAD_HARD_S_DEFAULT (120 s, the firmware
+    default of the Pico's configurable link_dead_hard_s) ago. A JTAG reset sends
+    no ANNOUNCE_REBOOT grace, so resetting an ESP that is still dark extends the
+    link silence toward S6b (SAFETY_TRIP_LINK_DEAD, mask 0x0040), and clearing
+    S6b needs owner authorization. The refusal states how many seconds remain
+    in the window. Pass allow_dark_rereset=True (exactly True) to override. A
+    missing/corrupt history never blocks. The Pico peer is not gated: resetting
+    the Pico does not lengthen ESP link silence (it re-handshakes on boot)."""
+    if peer == debug_probe.PEER_ESP and allow_dark_rereset is not True:
+        dark = reset_probe.recent_dark_esp_reset(debug_probe._repo_root())
+        if dark is not None:
+            return (
+                f"error: refusing ESP reset -- the previous ESP reset ({dark.ts}, "
+                f"{dark.age_s:.0f}s ago) never got an HTTP answer, so the board may still be dark. "
+                "A JTAG reset sends no ANNOUNCE_REBOOT grace; stacking resets extends the ESP link "
+                f"silence toward S6b (SAFETY_TRIP_LINK_DEAD, mask 0x0040) at "
+                f"{reset_probe.LINK_DEAD_HARD_S_DEFAULT:.0f}s (firmware default of link_dead_hard_s, "
+                f"about {dark.remaining_s:.0f}s from now if the board stays dark) and clearing S6b needs owner authorization. "
+                "Check the board first (boot_guard_get / safety_get_status), wait out the window, "
+                "or pass allow_dark_rereset=True to proceed anyway."
+            )
     record: dict = {"peer": peer, "mode": mode, "openocd_ok": None, "probe": None}
 
     def _append() -> None:

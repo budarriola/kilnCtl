@@ -291,6 +291,90 @@ class DebugResetWiringTest(unittest.TestCase):
         self.assertIn("bad mode", rec["reset_raised"])
         self.assertIsNone(rec["openocd_ok"])
 
+    # --- dark-rereset guard (S6b stacking) ---------------------------------
+
+    def _seed(self, age_s, probe="dark", peer="esp", mode="run", ok=True, raw=None):
+        import datetime
+        path = reset_probe.history_path(self.tmp.name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        ts = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(seconds=age_s)).isoformat(timespec="seconds")
+        rec = {"ts": ts, "peer": peer, "mode": mode, "openocd_ok": ok}
+        if probe == "dark":
+            rec["probe"] = {"http_answered_s": None, "any_answered": False}
+        elif probe == "answered":
+            rec["probe"] = {"http_answered_s": 4.0, "any_answered": True}
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write((raw if raw is not None else json.dumps(rec)) + "\n")
+
+    def _reset(self, **kw):
+        with unittest.mock.patch.object(md, "_probe_esp_after_reset",
+                                        return_value=reset_probe.ProbeResult(window_s=60.0, http_answered_s=3.0)):
+            return md.debug_reset(peer="esp", mode="run", **kw)
+
+    def test_recent_dark_reset_refuses_without_resetting(self):
+        self._seed(30)
+        with unittest.mock.patch.object(md, "_probe_esp_after_reset"):
+            out = md.debug_reset(peer="esp", mode="run")
+        self.assertTrue(out.startswith("error: refusing ESP reset"), out)
+        self.assertIn("S6b", out)
+        self.assertIn("allow_dark_rereset=True", out)
+        debug_probe.reset.assert_not_called()
+        self.assertEqual(len(self._history()), 1)  # refusal is not a reset record
+
+    def test_recent_dark_reset_refuses_halt_mode_too(self):
+        self._seed(10)
+        out = md.debug_reset(peer="esp", mode="halt")
+        self.assertTrue(out.startswith("error: refusing"), out)
+
+    def test_recent_answered_reset_ok(self):
+        self._seed(30, probe="answered")
+        self.assertEqual(self._reset().splitlines()[0], "reset esp (run) OK")
+
+    def test_dark_then_answered_later_ok(self):
+        self._seed(60)
+        self._seed(20, probe="answered")
+        self.assertTrue(self._reset().startswith("reset esp"))
+
+    def test_old_dark_reset_ok(self):
+        self._seed(121)
+        self.assertTrue(self._reset().startswith("reset esp"))
+
+    def test_unprobed_previous_reset_is_unknown_not_dark(self):
+        self._seed(10, probe=None)
+        self.assertTrue(self._reset().startswith("reset esp"))
+
+    def test_missing_history_ok(self):
+        self.assertTrue(self._reset().startswith("reset esp"))
+
+    def test_corrupt_history_ok(self):
+        self._seed(0, raw="{not json")
+        self._seed(0, raw="\\xffgarbage-not-json")
+        self._seed(0, raw=json.dumps({"ts": "bogus", "peer": "esp", "mode": "run",
+                                      "openocd_ok": True, "probe": {"http_answered_s": None}}))
+        self.assertTrue(self._reset().startswith("reset esp"))
+
+    def test_corrupt_tail_falls_back_to_last_good_record(self):
+        self._seed(30)
+        self._seed(0, raw="{truncated")
+        out = md.debug_reset(peer="esp", mode="run")
+        self.assertTrue(out.startswith("error: refusing"), out)
+
+    def test_override_only_with_exactly_true(self):
+        self._seed(30)
+        for bad in (1, "yes", "True", [1]):
+            out = md.debug_reset(peer="esp", mode="run", allow_dark_rereset=bad)
+            self.assertTrue(out.startswith("error: refusing"), (bad, out))
+        self.assertTrue(self._reset(allow_dark_rereset=True).startswith("reset esp"))
+
+    def test_pico_reset_not_gated(self):
+        self._seed(30)
+        self.assertEqual(md.debug_reset(peer="pico", mode="run"), "reset pico (run) OK")
+
+    def test_helper_never_raises_on_unreadable_root(self):
+        self.assertIsNone(reset_probe.recent_dark_esp_reset(os.path.join(self.tmp.name, "nope")))
+        self.assertIsNone(reset_probe.recent_dark_esp_reset(None))
+
     def test_probe_wiring_passes_right_callables(self):
         import kilnctrl.mcp_server_flash as mf
         fake_info = unittest.mock.Mock()

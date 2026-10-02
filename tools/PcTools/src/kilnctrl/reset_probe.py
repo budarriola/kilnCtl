@@ -45,6 +45,14 @@ HISTORY_REL_PATH = os.path.join("logs", "debug_reset", "history.jsonl")
 
 _HISTORY_LOCK = threading.Lock()
 
+#: Seconds of ESP link silence after which the RP2040 safety processor latches
+#: S6b (SAFETY_TRIP_LINK_DEAD, reason 7, mask 0x0040). This is the FIRMWARE
+#: DEFAULT of `link_dead_hard_s` (firmware/SaftyFW/src/safety_guards.c); the
+#: parameter is configurable on the Pico, so a commissioned board may differ and
+#: this tool does not read it. A JTAG reset sends no ANNOUNCE_REBOOT grace, so a
+#: second ESP reset while the first still has no HTTP answer extends the silence.
+LINK_DEAD_HARD_S_DEFAULT = 120.0
+
 
 @dataclass
 class ProbeResult:
@@ -260,3 +268,73 @@ def append_history(repo_root: str, record: dict) -> Optional[str]:
         return None
     except Exception as exc:  # noqa: BLE001
         return f"{type(exc).__name__}: {exc}"
+
+
+@dataclass
+class DarkReset:
+    """The previous ESP reset in history never got an HTTP answer, recently."""
+    age_s: float
+    remaining_s: float
+    ts: str
+
+
+def _parse_ts(ts: object) -> Optional[datetime.datetime]:
+    try:
+        dt = datetime.datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def recent_dark_esp_reset(
+    repo_root: str,
+    now: Optional[datetime.datetime] = None,
+    window_s: float = LINK_DEAD_HARD_S_DEFAULT,
+    tail_bytes: int = 65536,
+) -> Optional[DarkReset]:
+    """Return a DarkReset if the most recent ESP reset in the history file was a
+    successful OpenOCD run-mode reset whose probe ran and never saw an HTTP
+    answer, and it is less than ``window_s`` old; otherwise None.
+
+    Only the LAST ESP record is considered (an answered reset since then proves
+    the board came back). A record with no probe (verify=False, halt/init mode,
+    a probe that raised, a failed OpenOCD reset) is unknown, not dark. Never
+    raises: a missing, unreadable or corrupt file, or an unparseable timestamp,
+    yields None.
+    """
+    try:
+        path = history_path(repo_root)
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - tail_bytes))
+            data = fh.read()
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        if size > tail_bytes:
+            lines = lines[1:]  # first line is likely cut mid-record
+        for line in reversed(lines):
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("peer") != "esp":
+                continue
+            probe = rec.get("probe")
+            if not (rec.get("openocd_ok") is True and rec.get("mode") == "run"
+                    and isinstance(probe, dict)):
+                return None
+            if probe.get("http_answered_s") is not None:
+                return None
+            then = _parse_ts(rec.get("ts"))
+            if then is None:
+                return None
+            now = now or datetime.datetime.now(datetime.timezone.utc)
+            age = (now - then).total_seconds()
+            if age < 0 or age >= window_s:
+                return None
+            return DarkReset(age_s=age, remaining_s=window_s - age, ts=str(rec.get("ts")))
+        return None
+    except Exception:  # noqa: BLE001 - a guard read must never break a reset
+        return None
