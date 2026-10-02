@@ -198,11 +198,12 @@ ORDER_MARKERS = [
 def check_ordering(recovery_text: str) -> list:
     """Returns a list of problems (empty if none)."""
     problems = []
-    # recovery_authenticate_request() takes a per-route `context`/`lockout`
-    # pair (2026-09-19 fix -- see recovery_http.c's file header on why one
-    # shared lockout across three routes was itself a finding); the ordering
-    # check only cares about the body, so the signature match is loose about
-    # the parameter list rather than pinning the exact parameter names.
+    # recovery_authenticate_request() takes a per-route `context` and the ONE
+    # shared `lockout` (2026-10-02 review fix, reversing the 2026-09-19
+    # per-route split: all routes guard the same key, so per-route counters
+    # multiplied a guesser's attempts; see check_single_lockout() below). The
+    # ordering check only cares about the body, so the signature match is
+    # loose about the parameter list rather than pinning parameter names.
     handler_match = re.search(
         r"static bool recovery_authenticate_request\([^)]*\)\n\{\n(.*?)\n\}\n",
         recovery_text,
@@ -276,6 +277,36 @@ def check_route_contexts(recovery_text: str) -> list:
                 "reject every legitimate caller or, worse, accept a MAC computed for a "
                 "different route"
             )
+    return problems
+
+
+# --- single shared lockout check ---------------------------------------------
+
+LOCKOUT_DECL_RE = re.compile(r"^static\s+ota_auth_lockout_state_t\s+(\w+)\s*;", re.MULTILINE)
+AUTH_CALL_RE = re.compile(r"recovery_authenticate_request\(([^;]*?)\)\) \{", re.DOTALL)
+
+
+def check_single_lockout(recovery_text: str) -> list:
+    """Exactly ONE ota_auth_lockout_state_t may exist in recovery_http.c
+    (s_lockout), and every call to recovery_authenticate_request() from a
+    handler must pass &s_lockout, so a failed MAC on any route counts toward
+    the same lockout. Returns a list of problems (empty if none)."""
+    problems = []
+    text = strip_comments(recovery_text)
+    decls = LOCKOUT_DECL_RE.findall(text)
+    if decls != ["s_lockout"]:
+        problems.append(
+            f"expected exactly one lockout state named s_lockout, found {decls!r} -- "
+            "per-route lockouts let a guesser multiply attempts across routes"
+        )
+    calls = AUTH_CALL_RE.findall(text)
+    if not calls:
+        problems.append("found zero recovery_authenticate_request() handler calls -- "
+                        "update AUTH_CALL_RE rather than letting this pass vacuously")
+    for args in calls:
+        if not args.rstrip().endswith("&s_lockout"):
+            problems.append(f"recovery_authenticate_request({args.strip()}) does not pass "
+                            "&s_lockout as its lockout argument")
     return problems
 
 
@@ -405,13 +436,20 @@ def main() -> int:
             print(f"  {p}")
         failed = True
 
+    lockout_problems = check_single_lockout(recovery_text)
+    if lockout_problems:
+        print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (single shared lockout)")
+        for p in lockout_problems:
+            print(f"  {p}")
+        failed = True
+
     if failed:
         return 1
 
     mutating_count = len(discover_mutating_handlers(recovery_text))
     print(
         "RECOVERY OTA-AUTH MIRROR DRIFT CHECK: OK (hex_decode golden copy, "
-        "header->hex->lockout ordering and wire strings confirmed; "
+        "header->hex->lockout ordering and wire strings confirmed, single shared lockout; "
         f"{mutating_count} mutating routes all call recovery_authenticate_request())"
     )
     return 0

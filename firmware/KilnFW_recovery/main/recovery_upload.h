@@ -63,7 +63,8 @@ recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery
                                                 const char **msg);
 
 // Sends the error response for a non-OK result (status line + plain text
-// body, "Connection: close"). Returns the esp_err_t to return from the handler.
+// body, "Connection: close"). Always returns ESP_FAIL (after the response was
+// sent) so httpd closes the socket rather than draining an unread body.
 esp_err_t recovery_upload_send_error(httpd_req_t *req, int http_status, const char *msg);
 
 // ESP application sink over an OTA partition (esp_ota_begin with the known

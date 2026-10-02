@@ -16,6 +16,7 @@ idf_component_register(
         esp_netif
         esp_event
         nvs_flash
+        bootloader_support
         esp_http_server
         app_update
         mbedtls

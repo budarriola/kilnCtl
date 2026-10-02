@@ -9,8 +9,8 @@
 // "recovery-exit" for POST /api/recovery/exit and "wifi-reset" for POST
 // /api/recovery/wifi_reset -- matching recovery_ota_auth_client.py's
 // derive_mac() _VALID_CONTEXTS and the browser page's deriveMac() calls
-// exactly (see recovery_authenticate_request()'s own comment for the
-// per-route lockout state that goes with each context).
+// exactly (see recovery_authenticate_request()'s own comment for the single
+// shared lockout state).
 // carried in the request as header "X-Ota-Mac", hex-encoded, checked
 // against a single-use, 30s-expiry nonce from GET /api/ota/challenge via
 // the same ota_auth.c state machine the main KilnFW image uses (copied in
@@ -58,6 +58,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_image_format.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -79,6 +80,11 @@ static const char *TAG = "recovery_http";
 
 // Defined by recovery_io.c (relay-forced-off driver) once that lands; a weak
 // undefined reference resolves to NULL until then, which reads as "no fault".
+// INTEGRATION TODO: this MUST become a strong declaration (#include
+// "recovery_io.h") when recovery_io.c is merged. A weak reference alone never
+// pulls an archive member out of a static library: if recovery_io.c ends up in
+// libmain.a (or any .a) and nothing else references it, the linker leaves this
+// symbol NULL and relay_fault silently reads "false" even with a real fault.
 extern bool recovery_io_relay_fault(void) __attribute__((weak));
 
 // The page (recovery_page.html) is linked in via EMBED_FILES.
@@ -104,15 +110,12 @@ static const char *const WIFI_RESET_KEYS[] = {
 #define BOOT_GUARD_NAMESPACE_LEGACY "boot_guard"
 
 static ota_auth_nonce_state_t s_nonce;
-// Per-route lockouts, mirroring ota_http.c:408-414's s_lockout_esp /
-// s_lockout_sw_reset / s_lockout_boot_guard_reset -- a shared lockout would
-// let repeated failures against one route (e.g. boot_guard_reset) lock out
-// an unrelated route (e.g. ota_esp_post) that never saw a bad MAC itself.
-static ota_auth_lockout_state_t s_lockout_esp;
-static ota_auth_lockout_state_t s_lockout_boot_guard_reset;
-static ota_auth_lockout_state_t s_lockout_sw_reset;
-static ota_auth_lockout_state_t s_lockout_recovery_exit;
-static ota_auth_lockout_state_t s_lockout_wifi_reset;
+// ONE lockout counter shared by every authenticated route (owner/review
+// decision 2026-10-02, reversing the earlier per-route split): all five routes
+// guard the same secret (the AP-password-derived key), so a guesser spreading
+// attempts across routes must not get N times the attempts. Failed MACs on any
+// route count toward the same lockout.
+static ota_auth_lockout_state_t s_lockout;
 
 static uint32_t now_ms(void)
 {
@@ -159,6 +162,16 @@ static bool hex_decode(const char *in, uint8_t *out, size_t out_len)
         out[i] = (uint8_t)((hi << 4) | lo);
     }
     return true;
+}
+
+// Volatile-pointer wipe the compiler cannot elide (explicit_bzero is not
+// guaranteed in this libc configuration).
+static void secure_zero(void *p, size_t n)
+{
+    volatile uint8_t *v = (volatile uint8_t *)p;
+    while (n--) {
+        *v++ = 0;
+    }
 }
 
 static void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t msg_len,
@@ -210,6 +223,11 @@ static void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, 
     mbedtls_md_update(&ctx, inner, sizeof(inner));
     mbedtls_md_finish(&ctx, out);
     mbedtls_md_free(&ctx);
+
+    secure_zero(key_block, sizeof(key_block));
+    secure_zero(ipad, sizeof(ipad));
+    secure_zero(opad, sizeof(opad));
+    secure_zero(inner, sizeof(inner));
 }
 
 // GET /api/ota/challenge
@@ -240,12 +258,10 @@ static esp_err_t challenge_get(httpd_req_t *req)
 // hand-copy.
 //
 // `context` is the per-route HMAC context string appended after the nonce
-// ("esp" / "boot-guard-reset" / "sw-reset" -- must match the caller's route
-// exactly, see the file header comment) and `lockout` is that route's own
-// ota_auth_lockout_state_t. Each caller passes its own static lockout
-// instance (s_lockout_esp / s_lockout_boot_guard_reset / s_lockout_sw_reset)
-// so repeated failures against one route cannot lock out an unrelated one,
-// mirroring ota_http.c:408-414's per-context lockouts.
+// ("esp" / "boot-guard-reset" / "sw-reset" / ... -- must match the caller's
+// route exactly, see the file header comment) and `lockout` is the ONE shared
+// ota_auth_lockout_state_t (s_lockout): every route passes the same instance,
+// so failed MACs against any route count toward a single lockout.
 //
 // On success: returns true, sends nothing (caller proceeds).
 // On failure: returns false, having already sent the appropriate error
@@ -303,6 +319,7 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     char ap_password[65];
     if (!recovery_wifi_get_ap_password(ap_password, sizeof(ap_password))) {
         ota_auth_nonce_invalidate(&s_nonce);
+        secure_zero(ap_password, sizeof(ap_password));
         httpd_resp_set_status(req, "500 Internal Server Error");
         *out_err = httpd_resp_send(req, "no AP password on record", HTTPD_RESP_USE_STRLEN);
         return false;
@@ -328,6 +345,8 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     size_t context_len = strlen(context);
     uint8_t msg[OTA_AUTH_NONCE_LEN + 16];
     if (context_len > sizeof(msg) - OTA_AUTH_NONCE_LEN) {
+        secure_zero(ap_password, sizeof(ap_password));
+        secure_zero(key, sizeof(key));
         // Cannot happen with today's three call sites (all compile-time
         // literals covered by the _Static_assert()s above) -- this guards
         // only against a future caller passing a longer context without
@@ -341,12 +360,17 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     memcpy(msg + OTA_AUTH_NONCE_LEN, context, context_len);
     uint8_t expected_mac[32];
     hmac_sha256(key, sizeof(key), msg, OTA_AUTH_NONCE_LEN + context_len, expected_mac);
+    // Key material is no longer needed; wipe before any return path.
+    secure_zero(ap_password, sizeof(ap_password));
+    secure_zero(key, sizeof(key));
 
     // Invalidate the nonce unconditionally before deciding pass/fail --
     // UPDATE_PROTOCOL.md section 2 step 4.
     ota_auth_nonce_invalidate(&s_nonce);
 
-    if (!ota_auth_constant_time_equal(claimed_mac, expected_mac, sizeof(expected_mac))) {
+    bool mac_ok = ota_auth_constant_time_equal(claimed_mac, expected_mac, sizeof(expected_mac));
+    secure_zero(expected_mac, sizeof(expected_mac));
+    if (!mac_ok) {
         ota_auth_lockout_record_failure(lockout, t);
         httpd_resp_set_status(req, "403 Forbidden");
         *out_err = httpd_resp_send(req, "bad MAC", HTTPD_RESP_USE_STRLEN);
@@ -370,6 +394,35 @@ static bool app_has_valid_image(const esp_partition_t *part)
     esp_app_desc_t desc;
     return part && esp_ota_get_partition_description(part, &desc) == ESP_OK;
 }
+
+// --- full-image verification (cached) ------------------------------------
+// esp_image_verify() on `app` reads the whole image (~2.5 MB of flash) and
+// hashes it, so it must never run per status GET. The result is cached and
+// invalidated when an upload starts or ends; the next status/exit read refills
+// it lazily. httpd is effectively single-task here, so no lock is needed.
+static bool s_verify_known;
+static bool s_verify_valid;
+
+static void app_verify_invalidate(void)
+{
+    s_verify_known = false;
+}
+
+static bool app_image_verified(const esp_partition_t *part)
+{
+    if (!part) {
+        return false;
+    }
+    if (!s_verify_known) {
+        const esp_partition_pos_t pos = {.offset = part->address, .size = part->size};
+        esp_image_metadata_t meta;
+        s_verify_valid = esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) == ESP_OK;
+        s_verify_known = true;
+    }
+    return s_verify_valid;
+}
+
+static bool clear_boot_guard(char *msg, size_t cap);
 
 static void restart_task(void *arg)
 {
@@ -395,15 +448,15 @@ static void restart_soon(uint32_t delay_ms)
 static esp_err_t ota_esp_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "esp", &s_lockout_esp)) {
+    if (!recovery_authenticate_request(req, &auth_err, "esp", &s_lockout)) {
         return auth_err;
     }
 
     const esp_partition_t *target = find_app_partition();
     if (!target) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        return httpd_resp_send(req, "no app partition in the flashed table",
-                                HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send(req, "no app partition in the flashed table", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL; // body unread: close the socket rather than drain it
     }
 
     recovery_upload_cfg_t cfg = {
@@ -415,21 +468,33 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     recovery_esp_sink_state_t sink_state;
     recovery_upload_esp_sink_init(&sink, &sink_state, target);
 
+    app_verify_invalidate(); // `app` is about to change (or be half-erased)
     int http_status = 500;
     const char *msg = "upload failed";
     recovery_upload_result_t r = recovery_upload_stream(req, &cfg, &sink, &http_status, &msg);
+    app_verify_invalidate();
     if (r != RECOVERY_UPLOAD_OK) {
+        // Sends the error then returns ESP_FAIL so httpd closes the socket.
         return recovery_upload_send_error(req, http_status, msg);
     }
 
     esp_err_t err = esp_ota_set_boot_partition(target);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        return httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
+        httpd_resp_set_hdr(req, "Connection", "close");
+        httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it");
-    esp_err_t sent = httpd_resp_sendstr(req, "ok, rebooting into new application image");
+    // Full success: the new image is the boot target, so the next boot must
+    // not be counted toward recovery. Verified clear, reported either way.
+    char bg_msg[96];
+    bool bg_ok = clear_boot_guard(bg_msg, sizeof(bg_msg));
+    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s)", bg_msg);
+    char body[192];
+    snprintf(body, sizeof(body), "ok, rebooting into new application image; boot_guard %s",
+             bg_ok ? "cleared and verified" : bg_msg);
+    esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
 }
@@ -523,13 +588,18 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
 
     bool relay_fault = recovery_io_relay_fault ? recovery_io_relay_fault() : false;
 
-    char body[448];
+    // app_desc_present: cheap descriptor/magic check. app_valid: full
+    // esp_image_verify(), cached (see app_image_verified()).
+    bool desc_present = app_has_valid_image(app);
+    bool valid = desc_present && app_image_verified(app);
+    char body[480];
     int n = snprintf(body, sizeof(body),
                       "{\"running\":\"%s\",\"app_present\":%s,\"app_size\":%u,"
-                      "\"app_valid\":%s,\"max_upload\":%u,%s,\"relay_fault\":%s,"
-                      "\"free_heap\":%u}",
+                      "\"app_desc_present\":%s,\"app_valid\":%s,\"max_upload\":%u,%s,"
+                      "\"relay_fault\":%s,\"free_heap\":%u}",
                       running ? running->label : "?", app ? "true" : "false",
-                      (unsigned)(app ? app->size : 0), app_has_valid_image(app) ? "true" : "false",
+                      (unsigned)(app ? app->size : 0), desc_present ? "true" : "false",
+                      valid ? "true" : "false",
                       (unsigned)(app ? app->size : 0), bgs, relay_fault ? "true" : "false",
                       (unsigned)esp_get_free_heap_size());
     httpd_resp_set_type(req, "application/json");
@@ -537,33 +607,83 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     return httpd_resp_send(req, body, n);
 }
 
-static void clear_boot_guard(void)
+// Erase one key; ESP_ERR_NVS_NOT_FOUND (key or namespace) counts as success.
+static esp_err_t erase_key_in(const char *ns, const char *key)
 {
     nvs_handle_t h;
-    if (nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE, NVS_READWRITE, &h) ==
-        ESP_OK) {
-        nvs_erase_key(h, BOOT_GUARD_KEY); // ESP_ERR_NVS_NOT_FOUND is fine -- already clear
-        nvs_commit(h);
-        nvs_close(h);
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READWRITE, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
     }
-    // Legacy namespace/key, same reasoning as boot_guard.c's own dual-read.
-    if (nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE_LEGACY, NVS_READWRITE,
-                                 &h) == ESP_OK) {
-        nvs_erase_key(h, BOOT_GUARD_KEY_LEGACY);
-        nvs_commit(h);
-        nvs_close(h);
+    if (err != ESP_OK) {
+        return err;
     }
+    err = nvs_erase_key(h, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+// Read back: true only when the key is positively absent (namespace missing
+// counts as absent). Any other error reads as "not verified".
+static bool key_absent(const char *ns, const char *key)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READONLY, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return true;
+    }
+    if (err != ESP_OK) {
+        return false;
+    }
+    nvs_type_t type;
+    err = nvs_find_key(h, key, &type);
+    nvs_close(h);
+    return err == ESP_ERR_NVS_NOT_FOUND;
+}
+
+// Clears the boot_guard record (current and legacy locations), then reads both
+// back. Returns true only when every erase succeeded AND the read-back shows
+// the keys absent. `msg` always receives a short human-readable outcome
+// (never silent success, never silent failure).
+static bool clear_boot_guard(char *msg, size_t cap)
+{
+    esp_err_t e1 = erase_key_in(BOOT_GUARD_NAMESPACE, BOOT_GUARD_KEY);
+    esp_err_t e2 = erase_key_in(BOOT_GUARD_NAMESPACE_LEGACY, BOOT_GUARD_KEY_LEGACY);
+    if (e1 != ESP_OK || e2 != ESP_OK) {
+        snprintf(msg, cap, "boot_guard clear failed (erase: %s / legacy: %s)", esp_err_to_name(e1),
+                 esp_err_to_name(e2));
+        ESP_LOGW(TAG, "%s", msg);
+        return false;
+    }
+    if (!key_absent(BOOT_GUARD_NAMESPACE, BOOT_GUARD_KEY) ||
+        !key_absent(BOOT_GUARD_NAMESPACE_LEGACY, BOOT_GUARD_KEY_LEGACY)) {
+        snprintf(msg, cap, "boot_guard clear failed (erased but read-back not verified)");
+        ESP_LOGW(TAG, "%s", msg);
+        return false;
+    }
+    snprintf(msg, cap, "boot_guard cleared and verified");
+    return true;
 }
 
 // POST /api/ota/esp/boot_guard_reset
 static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "boot-guard-reset", &s_lockout_boot_guard_reset)) {
+    if (!recovery_authenticate_request(req, &auth_err, "boot-guard-reset", &s_lockout)) {
         return auth_err;
     }
-    clear_boot_guard();
-    return httpd_resp_sendstr(req, "boot_guard counter cleared");
+    char bg_msg[96];
+    if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
+    }
+    return httpd_resp_sendstr(req, bg_msg);
 }
 
 // POST /api/recovery/exit -- boot the application: refused (409) unless `app`
@@ -572,20 +692,30 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 static esp_err_t recovery_exit_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "recovery-exit", &s_lockout_recovery_exit)) {
+    if (!recovery_authenticate_request(req, &auth_err, "recovery-exit", &s_lockout)) {
         return auth_err;
     }
     const esp_partition_t *app = find_app_partition();
-    if (!app_has_valid_image(app)) {
+    if (!app_has_valid_image(app) || !app_image_verified(app)) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "no valid application image in app", HTTPD_RESP_USE_STRLEN);
     }
-    if (esp_ota_set_boot_partition(app) != ESP_OK) {
+    esp_err_t serr = esp_ota_set_boot_partition(app);
+    if (serr == ESP_ERR_OTA_VALIDATE_FAILED) {
+        app_verify_invalidate();
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "application image failed validation", HTTPD_RESP_USE_STRLEN);
+    }
+    if (serr != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
     }
-    clear_boot_guard();
-    esp_err_t sent = httpd_resp_sendstr(req, "ok, rebooting into the application");
+    // Exit still proceeds if the clear fails, but the response says so.
+    char bg_msg[96];
+    clear_boot_guard(bg_msg, sizeof(bg_msg));
+    char body[160];
+    snprintf(body, sizeof(body), "ok, rebooting into the application; %s", bg_msg);
+    esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
 }
@@ -596,7 +726,7 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
 static esp_err_t wifi_reset_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "wifi-reset", &s_lockout_wifi_reset)) {
+    if (!recovery_authenticate_request(req, &auth_err, "wifi-reset", &s_lockout)) {
         return auth_err;
     }
     nvs_handle_t h;
@@ -628,7 +758,7 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
 static esp_err_t sw_reset_post(httpd_req_t *req)
 {
     esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "sw-reset", &s_lockout_sw_reset)) {
+    if (!recovery_authenticate_request(req, &auth_err, "sw-reset", &s_lockout)) {
         return auth_err;
     }
 

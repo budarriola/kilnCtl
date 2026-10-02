@@ -153,7 +153,10 @@ esp_err_t recovery_upload_send_error(httpd_req_t *req, int http_status, const ch
     // The body is usually only partly consumed; do not leave the socket open
     // for a keep-alive request that would parse leftover image bytes.
     httpd_resp_set_hdr(req, "Connection", "close");
-    return httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+    // ESP_FAIL makes esp_http_server close the socket instead of draining
+    // the (possibly huge) unread request body.
+    return ESP_FAIL;
 }
 
 // --- ESP application sink -------------------------------------------------
@@ -161,7 +164,11 @@ esp_err_t recovery_upload_send_error(httpd_req_t *req, int http_status, const ch
 static bool esp_begin(void *ctx, size_t total_len)
 {
     recovery_esp_sink_state_t *st = ctx;
-    if (esp_ota_begin(st->part, total_len, &st->handle) != ESP_OK) {
+    // Sequential-writes mode: the erase is spread across esp_ota_write calls
+    // (one sector at a time) instead of one long erase of the whole partition
+    // inside esp_ota_begin, which would stall the httpd task and the upload.
+    (void)total_len;
+    if (esp_ota_begin(st->part, OTA_WITH_SEQUENTIAL_WRITES, &st->handle) != ESP_OK) {
         return false;
     }
     st->begun = true;
