@@ -42,7 +42,8 @@
 #     hash-tracked reconfigure guard here as check_00_kilnfw_target_build.ps1
 #     uses for the main sdkconfig -- see "STALE CACHED BUILD CONFIG GUARD"
 #     below.
-#   * No submodule dependency (no LVGL, no PSRAM, no touch driver).
+#   * No submodule dependency (no LVGL, no touch driver). PSRAM is enabled
+#     but optional (CONFIG_SPIRAM_IGNORE_NOTFOUND), so the build needs no board.
 #   * The whole project is ~14 files. A full `idf.py build` here has been
 #     observed to run well under the main target's ~138s cold build (no
 #     LVGL/PSRAM bring-up), so this check does a plain always-fresh build

@@ -18,6 +18,13 @@ update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT_PLA
   absent or fails (`CONFIG_SPIRAM_IGNORE_NOTFOUND`), degrading to small internal buffers.
 - A Pico update stall must NOT block exiting recovery.
 - WPA2 only: WPA3-SAE, WPA enterprise and IPv6 are off.
+- The Pico RUN pin is NOT wired (main board A1 pad 30 net unconnected; no BOOTSEL or 3V3_EN
+  route either), so the ESP cannot reset the Pico. After a Pico update the page tells the
+  operator to power-cycle; if the Pico app answers, recovery may offer SAFETY_CMD_REBOOT
+  0x29 (the Pico refuses it while a relay is energized).
+- Recovery checks the Pico image's initial SP (SRAM) and reset vector against the target
+  slot and refuses the wrong slot variant ("upload the other slot file").
+- A latched trip: recovery only shows the refusal. No CLEAR_TRIP in recovery.
 - At least 8 KB internal RAM free at runtime (owner rule, heap_internal min_free >= 8192 B).
 - Recovery keeps its own AP-password HMAC auth on its routes (the 2026-09-29 HMAC
   retirement applied to the main app only). `recovery_ota_auth_mirror_drift_check.py` and
@@ -25,15 +32,18 @@ update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT_PLA
 
 ## Waves
 
-**W1 build trims + PSRAM -- landed with this plan's commit.** `sdkconfig.defaults`: size
-optimization, WPA3-SAE/OWE/enterprise/IPv6 off, log level WARN, silent assertions, optional
-PSRAM (memtest off, ignore-not-found on). Measured before/after in the commit message.
-Remove this paragraph once W2 starts.
+**W1 build trims + PSRAM -- landed.** `sdkconfig.defaults`: size optimization,
+WPA3-SAE/OWE/enterprise/IPv6 off, 16 MB flash header, optional PSRAM via
+`SPIRAM_USE_CAPS_ALLOC` (malloc and network buffers stay internal; big upload buffers come
+from `heap_caps_malloc(MALLOC_CAP_SPIRAM)` and must handle NULL). Assertions enabled, log
+level INFO, task-watchdog panic off until W5 measures the erase. Remove this paragraph once
+W2 starts.
 
 **W2 LCD fix + relays forced low at boot.**
-- The panel is an ST7796, not an ILI9488. DC = SX1509 IO15, RST = IO14
-  (`firmware/KilnFW/App/drivers/hw/settings.h` lines 157-161;
-  `firmware/KilnFW/docs/DISPLAY_ST7796_WIRING.md`).
+- The panel is an ST7796, not an ILI9488. DC = SX1509 IO15, RST = IO14 is UNCONFIRMED until
+  the bench: `firmware/KilnFW/App/drivers/hw/settings.h` lines 157-161 and
+  `firmware/KilnFW/App/drivers/common/uart_task_ids.h` lines 367-368 disagree
+  (`firmware/KilnFW/docs/DISPLAY_ST7796_WIRING.md`).
 - Font must cover digits and lowercase.
 - Page shows: boot_guard count, reset reason, crash reason, IP and SSID. Static, 480x320,
   no scrolling.
@@ -51,8 +61,14 @@ Remove this paragraph once W2 starts.
 
 **W4 Pico relay.**
 - kilnlink UPDATE_BEGIN/DATA/END/ABORT/STATUS per `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
-  section 4; send SAFETY_CMD_ANNOUNCE_REBOOT first; reset the Pico into its bootloader if
-  needed.
+  section 4; send SAFETY_CMD_ANNOUNCE_REBOOT first. Send BEGIN to whichever receiver
+  answers (Pico app or Pico bootloader; wire-compatible). If nothing answers, the page says
+  "Pico not responding -- power-cycle"; the ESP cannot reset the Pico.
+- Recovery-with-PSRAM is the exception to UPDATE_PROTOCOL.md section 4's "the ESP cannot
+  buffer the image".
+- Pace DATA frames (the bootloader has a 32-byte UART FIFO and programs with interrupts off)
+  and use generous erase timeouts (the bootloader can be silent up to about 120 s after
+  BEGIN).
 - Whole image in PSRAM (browser-supplied CRC32 checked); abort the relay on browser
   disconnect; a stalled relay must not block recovery_exit.
 - No PSRAM: refuse the Pico upload with a clear message (ESP upload still works with small
@@ -60,12 +76,17 @@ Remove this paragraph once W2 starts.
 
 **W5 bench verification.** Flash the recovery image to the bench board, force recovery,
 exercise ESP upload, Pico upload, exit, LCD page, relays low, and a no-PSRAM boot (if the
-fixture can simulate it). Check internal heap floor >= 8192 B during an upload.
+fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
+PSRAM and the no-PSRAM boot. Measure the `app` erase time and idle-task starvation, then
+decide on `CONFIG_ESP_TASK_WDT_PANIC`.
 
 ## Open risks
 
 - The Pico bootloader's recovery frame set may differ from the application's frame set;
   confirm against `firmware/SaftyFW/docs/BOOTLOADER.md` before W4.
+- A partially working PSRAM chip with an unknown MR2 density asserts at esp_psram.c:219,
+  which would put the factory image in a reboot loop (IGNORE_NOTFOUND does not cover it).
+- After PSRAM not-found the MSPI stays in low-speed mode (flash about 20 MHz for that boot).
 - The recovery image has never been bench-verified end to end.
 - `flash_firmware()` does not write `otadata` (see CLAUDE.md): a blank `otadata` boots
   `recovery`, not `app`, so a from-scratch board lands in recovery after a JTAG flash.

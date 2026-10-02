@@ -20,11 +20,17 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # (a whole Pico image held for the Pico's gap-retransmit rounds, ESP image
 # chunk staging; docs/RECOVERY_IMAGE_PLAN.md), which do not fit internal DRAM.
 # Settings mirror firmware/KilnFW/sdkconfig.defaults (octal, CLK_IO 30, CS_IO
-# 26, 40 MHz -- this board's wiring). Two deliberate differences from the main
-# app: SPIRAM_MEMTEST is OFF (it adds seconds to every boot of the one image
-# that must come up fast), and SPIRAM_IGNORE_NOTFOUND is ON so a missing or
-# failed PSRAM degrades to small internal buffers instead of an init abort --
-# this image must still boot with no PSRAM at all.
+# 26, 40 MHz -- this board's wiring) with these deliberate differences:
+#  * SPIRAM_MEMTEST is OFF (seconds added to every boot of the one image that
+#    must come up fast).
+#  * SPIRAM_IGNORE_NOTFOUND is ON so a missing or failed PSRAM degrades to
+#    small internal buffers instead of an init abort -- this image must still
+#    boot with no PSRAM at all.
+#  * USE_CAPS_ALLOC, not USE_MALLOC, and TRY_ALLOCATE_WIFI_LWIP left unset:
+#    malloc() and all Wi-Fi/lwIP/httpd buffers stay in internal RAM (so a
+#    flaky PSRAM cannot take the network down); only the big upload buffers
+#    are taken explicitly with heap_caps_malloc(..., MALLOC_CAP_SPIRAM), and
+#    code must handle NULL (no PSRAM) by falling back to a small internal buffer.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_TYPE_AUTO=y
@@ -33,32 +39,42 @@ CONFIG_SPIRAM_CS_IO=26
 CONFIG_SPIRAM_SPEED_40M=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # CONFIG_SPIRAM_MEMTEST is not set
-CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+
+# Flash size 16 MB, like the main app: this board's flash is 16 MB and the
+# `app` slot lives at 0x210000 for 8 MiB, past a 2 MB header's range. (The
+# flashed bootloader's own header governs at runtime; this keeps the image
+# header and any size check honest.)
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
 
 # Size trims. WPA2-PSK is the only Wi-Fi mode this image uses (the STA and
 # SoftAP both pick WIFI_AUTH_WPA2_PSK or OPEN in recovery_wifi.c), so WPA3-SAE
 # (and its dependents H2E/SAE-PK/SoftAP-SAE/WPA3-compatible), OWE and WPA
 # enterprise are removed, and IPv6 is off (IPv4 only, the web page is reached
 # by IPv4 address). A WPA3-only AP is therefore not joinable from recovery.
+# Assertions stay ENABLED (default) on purpose: robustness beats the rodata
+# saved by silent assertions (measured about 47 KB).
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # CONFIG_ESP_WIFI_ENABLE_WPA3_SAE is not set
 # CONFIG_ESP_WIFI_ENABLE_WPA3_OWE_STA is not set
 # CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT is not set
 # CONFIG_LWIP_IPV6 is not set
 
-# Log level WARN by default. Recovery has no log consumer in the field; WARN
-# keeps real faults on the UART without ESP_LOGI strings and formatting cost.
-# The bootloader keeps its own (INFO) level -- it is built separately, its
-# partition/boot-selection lines are the useful trail for an otadata problem,
-# and it is not part of the recovery.bin size.
-CONFIG_LOG_DEFAULT_LEVEL_WARN=y
-# Silent assertions: a failed assert still abort()s (same reset behaviour and
-# the same panic handler/coredump path), only the file/line/expression text is
-# dropped. Safe here because the abort address symbolizes against the ELF the
-# same way, and recovery has no behaviour keyed on assert text.
-CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y
+# Log level stays at the IDF default (INFO) so recovery's own boot/identity
+# trail (reason, IP, SSID) still prints; a WARN default (which also strips
+# INFO at compile time) saved about 11 KB.
+# Coredump is NOT enabled in this image (CONFIG_ESP_COREDUMP_ENABLE_TO_NONE is
+# the default): a panic prints its
+# backtrace on the UART and resets, nothing is written to flash.
+#
+# Task watchdog PANIC is deliberately NOT enabled here (the main app does).
+# The TWDT default (5 s, idle tasks watched, nothing else subscribed) only
+# prints a warning on expiry. esp_ota_begin() erases the whole ~8 MiB `app`
+# partition in one call, which can run for far longer than 5 s, and whether
+# the flash driver yields to the idle tasks during that erase is unverified;
+# with PANIC on, a healthy upload could be reset mid-erase. Revisit after W5
+# measures the real erase time and idle-task starvation on the bench.
 
 # Single, small nonce/HMAC-scale HTTP server -- no need for esp-tls's larger
 # receive buffers or many concurrent sockets.
