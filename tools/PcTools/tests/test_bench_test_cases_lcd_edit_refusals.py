@@ -101,6 +101,7 @@ class FakeBoard:
         self.http_window_accepts = kw.get("http_window_accepts", False)
         self.http_bound_status = kw.get("http_bound_status", 400)
         self.never_advances = kw.get("never_advances", False)
+        self.prev_ignored = kw.get("prev_ignored", False)
         self.page_ignores_end = kw.get("page_ignores_end", False)
         self.no_pending_decision = kw.get("no_pending_decision", False)
         self.discard_works = kw.get("discard_works", True)
@@ -187,7 +188,7 @@ class FakeBoard:
             return
         if (x, y) == (NEXT_X, 20) and self.page_active():
             self.cur_seg = min(self.cur_seg + 1, len(self.page_segs) - 1)
-        elif (x, y) == (PREV_X, 20) and self.page_active():
+        elif (x, y) == (PREV_X, 20) and self.page_active() and not self.prev_ignored:
             self.cur_seg = max(self.cur_seg - 1, 0)
         else:
             for field, ry in ROW_Y.items():
@@ -535,10 +536,28 @@ class Lcd23GeometryAndLimitsTest(unittest.TestCase):
         self.assertEqual(b.calls.count("stop"), 2)
         self.assertEqual(b.exec_state()[0], "idle")
 
+    def test_bound_probe_accepted_is_fail_and_stops_the_firing_at_once(self):
+        result, b = run23(http_bound_status=200)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        first_edits = [i for i, c in enumerate(b.calls) if c == "edit_live"]
+        # window probe, then bound probe; stop must directly follow the bound probe
+        self.assertEqual(b.calls[first_edits[1] + 1], "stop")
+        self.assertEqual(b.calls.count("stop"), 2)
+        self.assertEqual(b.exec_state()[0], "idle")
+
+    def test_prev_tap_not_moving_page_is_inconclusive_without_apply(self):
+        result, b = run23(prev_ignored=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("segment 0", result.reason)
+        self.assertEqual(b.calls.count("click:Apply"), 1)
+        self.assertNotIn("edit_live", b.calls)
+
     def test_ceiling_probe_skipped_when_ceiling_unusable(self):
         for mt in (0.0, 2010.0):
             result, b = run23(max_temp=mt)
             self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+            self.assertTrue(result.observed["ceiling_probe_skipped"])
+            self.assertIn("ceiling probe skipped", result.reason)
             self.assertIsNone(result.observed["http_ceiling"])
             self.assertEqual(b.calls.count("edit_live"), 2)
 

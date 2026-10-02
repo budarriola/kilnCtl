@@ -4735,6 +4735,11 @@ def _lcd23_body(env: dict) -> CaseResult:
     why = _lcd_edit_nav_tap(env, "prev")
     if why:
         return _lcd_edit_tap_failure(env, "Prev", why, cid)
+    st_prev = _lcd_edit_page_state(ui)
+    if not st_prev["readable"] or st_prev["topbar"]["prev"] is not None or st_prev["topbar"]["next"] is None:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+            "page did not show segment 0 after the Prev tap (Prev still present or Next absent); "
+            "stale edit not applied"))
     ex_now = _lcd22_exec_dict(srv)
     if not ex_now or ex_now.get("segment_index") != 0 or ex_now.get("state_name") != "running":
         return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
@@ -4794,6 +4799,12 @@ def _lcd23_body(env: dict) -> CaseResult:
     bound_segs[2] = dict(bound_segs[2], target_c=_LCD_EDIT_BOUND_TARGET_C)
     http_window = _post(window_segs)
     http_bound = _post(bound_segs)
+    if http_bound[0] is None:
+        # Accepted: stop the firing at once so it can never reach that segment.
+        try:
+            srv._profiles.stop()
+        except Exception:  # noqa: BLE001
+            pass
     # HARD validator probe: a FUTURE segment (3) target 10 C above the zone's
     # own max_temp_c (still a legal 0-2015 value, so only profiles_validate_
     # candidate() in HARD mode can refuse it). Skipped when the ceiling is
@@ -4802,8 +4813,12 @@ def _lcd23_body(env: dict) -> CaseResult:
     # never reach that segment (cleanup then discards the working copy).
     max_temp = (env.get("limits") or {}).get("max_temp_c")
     http_ceiling = None
-    if (max_temp is not None and max_temp > 0.0
+    if not (max_temp is not None and max_temp > 0.0
             and max_temp + _LCD_EDIT_CEILING_PROBE_C <= _LCD_EDIT_MAX_TARGET_FIELD_C):
+        observed["ceiling_probe_skipped"] = (
+            f"zone max_temp_c unreadable or unset ({max_temp!r})" if not (max_temp and max_temp > 0.0)
+            else f"max_temp_c {max_temp!r} + {_LCD_EDIT_CEILING_PROBE_C} C exceeds {_LCD_EDIT_MAX_TARGET_FIELD_C} C")
+    else:
         ceiling_segs = [dict(s) for s in expected]
         ceiling_segs[2] = dict(ceiling_segs[2], target_c=max_temp + _LCD_EDIT_CEILING_PROBE_C)
         http_ceiling = _post(ceiling_segs)
@@ -4819,6 +4834,8 @@ def _lcd23_body(env: dict) -> CaseResult:
                                       http_ceiling=http_ceiling)
     result.observed = dict(result.observed or {})
     result.observed.update(observed)
+    if result.verdict == Verdict.PASS and observed.get("ceiling_probe_skipped"):
+        result.reason = f"{result.reason} (HARD ceiling probe skipped: {observed['ceiling_probe_skipped']})"
     return result
 
 
