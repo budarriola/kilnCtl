@@ -514,7 +514,7 @@ lv_obj_t *ui_page_edit_firing_build(void)
 
     lv_obj_t *hint = lv_label_create(scr);
     lv_obj_set_style_text_color(hint, UI_THEME_COLOR_TEXT_SECONDARY, 0);
-    lv_label_set_text(hint, "When the firing ends, save or discard this edit here or on the web.");
+    lv_label_set_text(hint, "After the firing, save or discard this edit here or on web.");
 
     ui_topbar_raise(&s_pg->tb);
 

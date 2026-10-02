@@ -23,6 +23,8 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "dashboard_json.h" /* json_escape() */
 #include "http_auth_http.h"
@@ -511,6 +513,11 @@ bool profiles_live_decide_default_name(const profiles_live_decide_status_t *st, 
         size_t blen = strlen(base);
         if (blen > keep) {
             blen = keep;
+            /* Back off to a UTF-8 character boundary: never leave a lead byte
+             * or a partial continuation sequence at the cut. */
+            while (blen > 0 && ((unsigned char)base[blen] & 0xC0) == 0x80) {
+                blen--;
+            }
         }
         memcpy(out, base, blen);
         strcpy(out + blen, suffix);
@@ -521,7 +528,36 @@ bool profiles_live_decide_default_name(const profiles_live_decide_status_t *st, 
     return false;
 }
 
-profiles_live_decide_result_t profiles_live_decide_apply(live_edit_decision_kind_t kind, const char *name, bool confirm,
+/* Serialises whole decisions. profiles_live_decide_apply() runs on both the
+ * httpd task (web route) and the LVGL task (LCD page); without this a web
+ * Overwrite/Save-as and an LCD Discard could interleave their load-record /
+ * save / clear steps. Statically allocated (no heap, ~80 B .bss), created once
+ * from profiles_live_http_start() before either caller can reach it. A NULL
+ * handle (host tests that never call the init) means "no lock, single-threaded
+ * caller", the same default safety_ceiling_sync.c uses.
+ *
+ * LEAF lock: taken only at the top of profiles_live_decide_apply() by a caller
+ * that holds no other module lock, and never taken anywhere else, so no other
+ * lock can be waiting on it -- it cannot take part in a cycle. Under it the
+ * apply path calls only the live_profile NVS accessors, profiles_http_save()
+ * (zones_config getters, flash/NVS) and the name lookups; none of those touch
+ * s_exec.lock/s_at.lock or re-enter this mutex.
+ *
+ * Timeout (DECIDE_LOCK_WAIT_MS): returns LIVE_DECIDE_SERVER_ERROR ("another
+ * decision is in progress"), i.e. HTTP 500 on the web and a "Refused:" status
+ * line on the LCD -- the same bucket the other transient storage failures use. */
+#define DECIDE_LOCK_WAIT_MS 1000
+static StaticSemaphore_t s_decide_lock_storage;
+static SemaphoreHandle_t s_decide_lock;
+
+static void decide_lock_init(void)
+{
+    if (!s_decide_lock) {
+        s_decide_lock = xSemaphoreCreateMutexStatic(&s_decide_lock_storage);
+    }
+}
+
+static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind_t kind, const char *name, bool confirm,
                                                           uint8_t *out_id, char *err, size_t err_cap)
 {
     if (err && err_cap) {
@@ -616,6 +652,22 @@ profiles_live_decide_result_t profiles_live_decide_apply(live_edit_decision_kind
     return LIVE_DECIDE_BAD_REQUEST;
 }
 
+profiles_live_decide_result_t profiles_live_decide_apply(live_edit_decision_kind_t kind, const char *name, bool confirm,
+                                                          uint8_t *out_id, char *err, size_t err_cap)
+{
+    if (s_decide_lock && xSemaphoreTake(s_decide_lock, pdMS_TO_TICKS(DECIDE_LOCK_WAIT_MS)) != pdTRUE) {
+        if (err && err_cap) {
+            snprintf(err, err_cap, "another decision is in progress");
+        }
+        return LIVE_DECIDE_SERVER_ERROR;
+    }
+    profiles_live_decide_result_t r = decide_apply_locked(kind, name, confirm, out_id, err, err_cap);
+    if (s_decide_lock) {
+        xSemaphoreGive(s_decide_lock);
+    }
+    return r;
+}
+
 static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_result_t r, const char *err)
 {
     switch (r) {
@@ -686,6 +738,7 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
 
 esp_err_t profiles_live_http_start(void)
 {
+    decide_lock_init();
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {
         ESP_LOGE(TAG, "no httpd server");

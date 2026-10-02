@@ -4286,8 +4286,9 @@ def _case_lcd22(ctx: dict) -> CaseResult:
 #           nothing) and the HTTP 409 (window) / 400 (bound) answers.
 #   LCD-24: a firing with an adopted edit ends on its own; the open Edit page
 #           must show the ended state and the live status must report a
-#           pending decision. The LCD has NO save/discard UI (the decision is
-#           made on the web), so the decision half is an HTTP Discard.
+#           pending decision. The LCD now has a Keep Edit? decide page (Discard /
+#           Save as / Overwrite), but this case still makes the decision over
+#           HTTP (an HTTP Discard); the LCD page is exercised separately.
 #
 # The Edit page's status line ("Refused: ...", "Applied.", "Firing ended.") is
 # a plain lv_label with no tap name, so UI_TEST cannot read it; every check

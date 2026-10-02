@@ -27,6 +27,7 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "hal_kv.h"
+#include "fake_kv.h"
 
 // Pull the REAL type/prototype declarations in ahead of the fakes below
 // (profiles_http_internal.h/profiles_builtin.h/profile_executor.h are also
@@ -814,6 +815,111 @@ static void test_decide_core_default_name(void)
                "clipped to 15 chars keeping the suffix");
 }
 
+static void test_decide_core_default_name_utf8_boundary(void)
+{
+    TEST_SECTION("profiles_live_decide_default_name -- clip never splits a UTF-8 sequence");
+    reset_fakes();
+    profiles_live_decide_status_t st;
+    memset(&st, 0, sizeof(st));
+    char name[PROFILE_NAME_MAX_LEN + 1];
+
+    /* keep = 13 bytes of base. 12 ASCII + 2-byte e-acute: bytes 12..13, so a
+     * 13-byte cut lands between the lead and continuation byte. */
+    strcpy(st.origin_name, "ABCDEFGHIJKL\xC3\xA9Z");
+    TEST_CHECK(profiles_live_decide_default_name(&st, name, sizeof(name)), "2-byte straddle: name generated");
+    TEST_CHECK(strcmp(name, "ABCDEFGHIJKL-E") == 0, "2-byte sequence dropped whole, not split");
+
+    /* 11 ASCII + 3-byte euro sign: bytes 11..13, cut at 13 leaves 2 of 3. */
+    strcpy(st.origin_name, "ABCDEFGHIJK\xE2\x82\xACZ");
+    TEST_CHECK(profiles_live_decide_default_name(&st, name, sizeof(name)), "3-byte straddle: name generated");
+    TEST_CHECK(strcmp(name, "ABCDEFGHIJK-E") == 0, "3-byte sequence dropped whole, not split");
+
+    /* A multibyte char that ends exactly on the cut is kept. */
+    strcpy(st.origin_name, "ABCDEFGHIJK\xC3\xA9Z");
+    TEST_CHECK(profiles_live_decide_default_name(&st, name, sizeof(name)), "exact-fit: name generated");
+    TEST_CHECK(strcmp(name, "ABCDEFGHIJK\xC3\xA9-E") == 0, "complete sequence at the cut is kept");
+}
+
+static void test_decide_core_default_name_all_collide(void)
+{
+    TEST_SECTION("auto-name -- all nine -E..-E9 names taken: clean failure, no overwrite");
+    reset_fakes();
+    fork_for_tests(0);
+    static const char *const taken[9] = {"origin-E",  "origin-E2", "origin-E3", "origin-E4", "origin-E5",
+                                         "origin-E6", "origin-E7", "origin-E8", "origin-E9"};
+    for (uint8_t i = 0; i < 9; i++) {
+        profiles_slot_set((uint8_t)(i + 1));
+        strncpy(g_fake_profiles_state.profiles[i + 1].name, taken[i],
+                sizeof(g_fake_profiles_state.profiles[i + 1].name) - 1);
+    }
+    profiles_live_decide_status_t st;
+    profiles_live_decide_status(&st);
+    char name[PROFILE_NAME_MAX_LEN + 1] = "untouched";
+    TEST_CHECK(!profiles_live_decide_default_name(&st, name, sizeof(name)), "no free auto-name -> false");
+
+    /* The LCD falls back to "save on the web"; forcing a colliding name through
+     * apply must be refused, never silently replace the existing profile. */
+    char err[96];
+    uint8_t id = 0xFF;
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, "origin-E", false, &id, err, sizeof(err)) ==
+                   LIVE_DECIDE_BAD_REQUEST,
+               "save_as onto a taken auto-name -> BAD_REQUEST");
+    TEST_CHECK(err[0] != '\0', "refusal carries a reason");
+    TEST_CHECK(id == 0xFF, "no slot id reported");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "record still pending after the refusal");
+}
+
+static void test_decide_discard_clear_failure_500(void)
+{
+    TEST_SECTION("discard -- live_profile_clear failure is a 500, record stays pending");
+    reset_fakes();
+    fork_for_tests(0);
+    fake_kv_set_write_safe_here(false); /* live_profile_clear() refuses on a non-write-safe caller */
+    char err[96];
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_SERVER_ERROR,
+               "core: discard with a failing clear -> SERVER_ERROR");
+    TEST_CHECK(err[0] != '\0', "core: reason reported");
+
+    httpd_req_t req = make_req("action=discard");
+    esp_err_t e = api_profile_live_decide_post_handler(&req);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(e == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_resp_status, "500 Internal Server Error") == 0, "HTTP 500, not a false ok:true");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "body does not claim success");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "record still pending");
+}
+
+static void test_decide_lock_timeout_is_server_error(void)
+{
+    TEST_SECTION("decide lock -- timeout refuses with SERVER_ERROR and touches nothing");
+    reset_fakes();
+    fork_for_tests(0);
+    decide_lock_init();
+    TEST_CHECK(s_decide_lock != NULL, "lock created");
+
+    g_test_stub_semaphore_take_default = pdTRUE;
+    g_test_stub_lock_depth = 0;
+    char err[96];
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_OK,
+               "lock acquired -> discard proceeds");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "lock released after the apply");
+
+    fork_for_tests(0);
+    g_test_stub_semaphore_take_default = pdFALSE; /* simulate another decision holding the lock */
+    g_test_stub_lock_depth = 0;
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) ==
+                   LIVE_DECIDE_SERVER_ERROR,
+               "lock timeout -> SERVER_ERROR");
+    TEST_CHECK(strstr(err, "in progress") != NULL, "reason names the cause");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "record untouched on timeout");
+    g_test_stub_semaphore_take_default = pdTRUE;
+}
+
 /* ---- landing-pass review-fix regression tests --------------------------- */
 
 // working_id must be -1 until a fork has actually happened. Before this fix
@@ -972,6 +1078,11 @@ int main(void)
     // main() documents. LIVE_PROFILE_NVS_PARTITION's literal is duplicated
     // here since that macro is private to live_profile.c.
     hal_kv_init_partition("profiles_nvs");
+    // The host stub's xSemaphoreTake() defaults to pdFALSE (timeout); the
+    // decide lock (created here exactly as profiles_live_http_start() does)
+    // must be takeable for every other test.
+    g_test_stub_semaphore_take_default = pdTRUE;
+    decide_lock_init();
 
     test_get_status_inactive();
     test_get_status_active_with_refusal();
@@ -994,6 +1105,10 @@ int main(void)
     test_decide_core_discard_save_overwrite();
     test_decide_core_overwrite_builtin_forbidden_even_with_confirm();
     test_decide_core_default_name();
+    test_decide_core_default_name_utf8_boundary();
+    test_decide_core_default_name_all_collide();
+    test_decide_discard_clear_failure_500();
+    test_decide_lock_timeout_is_server_error();
     test_get_status_working_id_minus_one_until_forked();
     test_get_status_last_refusal_is_null_not_false();
     test_get_content_requires_a_working_copy();

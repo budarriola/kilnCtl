@@ -57,6 +57,10 @@ docs/LIVE_PROFILE_EDIT_PLAN.md section 10. Mirrored here, not re-derived:
           origin (live_edit_can_overwrite()'s own refusal text).
        -> 409 {"ok":false,"error":"nothing pending"} if there is no pending
           working copy at all.
+       -> 500 {"ok":false,"error":"..."} when the pending record could not be
+          cleared (discard, e.g. an NVS failure), on out of memory / an
+          unreadable working copy, or when another decision (web or LCD) holds
+          the firmware's decide lock for over 1 s.
 
 Unlike ota_http_client.py's plain-text error bodies, EVERY refusal on this
 surface is JSON: {"ok":false,"error":"..."} with the right HTTP status
@@ -261,7 +265,9 @@ def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: flo
 
 def decide_live_discard(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
     """POST /api/profile/live/decide action=discard -> {"ok":true}. Raises
-    ProfileLiveHttpError(status=409) if there is nothing pending."""
+    ProfileLiveHttpError(status=409) if there is nothing pending, or
+    status=500 if the firmware could not clear the pending record (the
+    discard did NOT happen and the record is still pending)."""
     return _post_form(host, "/api/profile/live/decide", {"action": "discard"}, timeout)
 
 

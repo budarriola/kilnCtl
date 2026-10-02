@@ -37,7 +37,10 @@ esp_err_t profiles_live_http_start(void);
  * neither re-implements a rule. The handler only maps the result code to an
  * HTTP status; the LCD maps it to a message. NVS is written on the CALLING
  * task (profiles_http_save()/live_profile_clear()), so the caller must not
- * be a PSRAM-stack task (the httpd task and the LVGL task are both fine). */
+ * be a PSRAM-stack task (the httpd task and the LVGL task are both fine).
+ * Whole decisions are serialised by a static leaf mutex (created in
+ * profiles_live_http_start()); if it cannot be taken within 1 s the call
+ * returns LIVE_DECIDE_SERVER_ERROR ("another decision is in progress"). */
 typedef enum {
     LIVE_DECIDE_OK = 0,
     LIVE_DECIDE_NOTHING_PENDING, /* HTTP 409 */

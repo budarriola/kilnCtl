@@ -12,15 +12,14 @@
 
 /* Layout against the no-scroll content budget:
  *     topbar ........................................ owned by ui_topbar.c
- *     info line (origin / built-in note) ............ 18px
+ *     info line (origin / built-in note) ............ 1 text line
  *     three action buttons, 52px each ............... 156px
- *     status line ................................... 18px
- *     hint line ..................................... 18px
- *     gap x5 ........................................ 20px
- *                                                      -----
- *                                                       230px */
+ *     status line ................................... 1 text line
+ *     hint line ..................................... 1 text line
+ *     gap x5 ........................................ 5 * (padding / 2)
+ *     (a text line is UI_THEME_FONT_LINE_HEIGHT_PX) */
 #define BTN_HEIGHT_PX 52
-#define UI_PAGE_LIVE_DECIDE_WORST_CASE_HEIGHT_PX (18 + 3 * BTN_HEIGHT_PX + 18 + 18 + 5 * (UI_THEME_PADDING_PX / 2))
+#define UI_PAGE_LIVE_DECIDE_WORST_CASE_HEIGHT_PX (3 * UI_THEME_FONT_LINE_HEIGHT_PX + 3 * BTN_HEIGHT_PX + 5 * (UI_THEME_PADDING_PX / 2))
 _Static_assert(UI_PAGE_LIVE_DECIDE_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
                "ui_page_live_decide.c: content exceeds UI_THEME_PAGE_CONTENT_BUDGET_PX -- split across "
                "more pages, do not scroll.");
@@ -89,11 +88,18 @@ static void refresh(void)
         snprintf(buf, sizeof(buf), "Edited %s", s_pg->st.origin_name);
     }
     lv_label_set_text(s_pg->info_label, buf);
-    set_btn_enabled(s_pg->discard_btn, true);
-    set_btn_enabled(s_pg->save_btn, true);
+    /* A decision is owed only once the firing is over (pending_decision, the
+     * same flag GET /api/profile/live reports); while it is RUNNING/PAUSED/
+     * FAULTED the record exists but the buttons stay off. */
+    bool can_decide = s_pg->st.pending_decision;
+    if (!can_decide) {
+        set_status("Decision available when the firing ends.", true);
+    }
+    set_btn_enabled(s_pg->discard_btn, can_decide);
+    set_btn_enabled(s_pg->save_btn, can_decide);
     /* Mirrors the web's 403: disabled, not hidden, so the reason stays visible
      * in the info line. profiles_live_decide_apply() refuses it regardless. */
-    set_btn_enabled(s_pg->overwrite_btn, !s_pg->st.origin_is_builtin);
+    set_btn_enabled(s_pg->overwrite_btn, can_decide && !s_pg->st.origin_is_builtin);
 }
 
 void ui_page_live_decide_prepare(void)
@@ -256,6 +262,8 @@ lv_obj_t *ui_page_live_decide_build(void)
 
     lv_obj_t *hint = lv_label_create(scr);
     lv_obj_set_style_text_color(hint, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
+    lv_obj_set_width(hint, lv_pct(100));
     lv_label_set_text(hint, "Rename a saved copy on the web.");
 
     ui_topbar_raise(&s_pg->tb);
