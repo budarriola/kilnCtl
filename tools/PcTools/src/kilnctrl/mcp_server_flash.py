@@ -22,7 +22,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -1494,6 +1494,168 @@ def flash_firmware(
     finally:
         if erase_tmp_dir:
             shutil.rmtree(erase_tmp_dir, ignore_errors=True)
+
+
+def _recovery_board_state_refusals(host: Optional[str]) -> "list[str]":
+    """Live precondition read for flash_recovery(): profile idle, and (if the
+    safety processor reads ARMED) no firing evidence. Imports are lazy --
+    those modules import this package's mcp_server, which is mid-import when
+    this module is loaded. Any read that raises is a refusal."""
+    from . import mcp_server_coordinated_gpio_test as gpio_tool  # noqa: PLC0415
+    from . import mcp_server_ota_matrix as ota_matrix  # noqa: PLC0415
+
+    try:
+        pf = gpio_tool._gpio_test_preflight(gpio_tool._gpio_test_resolve_host(host))
+    except Exception as exc:  # noqa: BLE001 -- unreadable must refuse
+        return [f"board state (profile/ARMED) could not be read: {exc}"]
+    return recovery_flash.board_state_refusals(pf, ota_matrix._read_armed_latch_conditions)
+
+
+@_srv._tool()
+def flash_recovery(
+    recovery_bin: Optional[str] = None,
+    kiln_fw_root: Optional[str] = None,
+    confirm: bool = False,
+    dry_run: bool = False,
+    board_cfg: str = "board/esp32s3-builtin.cfg",
+    retry_once: bool = True,
+    host: Optional[str] = None,
+    skip_board_state_check: bool = False,
+) -> str:
+    """Writes the ESP32-S3 RECOVERY image (firmware/KilnFW_recovery's
+    recovery.bin) into the `recovery` (factory-subtype) partition over JTAG
+    via OpenOCD -- the sanctioned way to do it (never esptool). A separate
+    tool from flash_firmware() on purpose: that one writes bootloader +
+    partition table + `app` with HTTP landing verification and a boot_guard
+    reset, none of which apply here, and its erase allowlist deliberately
+    forbids `recovery`; this one writes exactly one range and nothing else.
+
+    Offset and size come from the partition named `recovery` in
+    `<kiln_fw_root>/partitions.csv` (resolved fresh, never hardcoded).
+    `recovery_bin` defaults to `<kiln_fw_root>/../KilnFW_recovery/build/
+    recovery.bin`, where check_00_kilnfw_recovery_target_build.ps1
+    publishes it. OpenOCD is pinned to the main board's JTAG adapter serial
+    (refuses before OpenOCD if it is not enumerated), same as flash_firmware().
+
+    `dry_run=True` resolves and validates everything and reports what would
+    be written -- zero board access, no `confirm` needed.
+
+    Refuses (naming the reason) when: `confirm` is not exactly True; the
+    image is missing or empty; larger than the partition; image magic is not
+    0xE9; chip id is not ESP32-S3; the esp_app_desc_t is missing or its
+    project_name is not `recovery`; the JTAG adapter is absent; a profile is
+    running/paused, or the safety processor is ARMED with autotune active, a
+    relay energized or a latched trip (or any of those cannot be read --
+    `skip_board_state_check=True` is the bring-up escape hatch for a board
+    whose HTTP/UART link is not up).
+
+    Never writes otadata, app, nvs, the bootloader or the partition table:
+    exactly one `program_esp ... verify` command, for the recovery range.
+    The write is followed by a reset (OpenOCD must not leave the CPU halted);
+    the board comes back up on `app` (otadata is untouched), the ESP reset
+    may latch S6a (mainFault) while the safety link re-handshakes -- check
+    safety_get_status before safety_clear_trip().
+
+    The result says plainly: written and read-back-verified over JTAG, NOT
+    booted. Proving a recovery boot is a separate, owner-present step.
+    Provenance (hash, size, app_desc version/build time, git HEAD/dirty set)
+    goes to firmware/KilnFW/recovery_flash_provenance.json, and a
+    recovery.elf next to the image is archived under
+    firmware/KilnFW/recovery_elf_archive/."""
+    if kiln_fw_root is not None:
+        if not os.path.isabs(kiln_fw_root):
+            return f"error: kiln_fw_root must be an absolute path, got {kiln_fw_root!r}"
+        if not os.path.isdir(kiln_fw_root):
+            return f"error: kiln_fw_root does not exist or is not a directory: {kiln_fw_root}"
+        effective_root = kiln_fw_root
+    else:
+        effective_root = _kiln_fw_root()
+
+    try:
+        target = recovery_flash.resolve_recovery_target(effective_root)
+        bin_path = recovery_bin or recovery_flash.default_recovery_bin(effective_root)
+        image = recovery_flash.validate_image(bin_path, target)
+    except recovery_flash.RecoveryFlashRefusal as exc:
+        return f"error: refusing to flash recovery -- {exc}"
+
+    summary = (
+        f"image: {image.path}\n"
+        f"  size {image.size} B, sha256 {image.sha256}\n"
+        f"  app_desc: project={image.app_desc.project_name} version={image.app_desc.version} "
+        f"build={image.app_desc.build_timestamp}\n"
+        f"target: partition {target.name!r} offset=0x{target.offset:x} size=0x{target.size:x} "
+        f"({target.size} B) per {os.path.join(effective_root, 'partitions.csv')}"
+    )
+    if dry_run:
+        return (
+            "dry run -- no board access, nothing written.\n" + summary + "\n"
+            "would send to OpenOCD: " + recovery_flash.build_tcl(MAIN_BOARD_JTAG_SERIAL, image.path, target)
+            + "\nthat is the ONLY write; otadata/app/nvs/bootloader/partition table are not touched."
+        )
+
+    if confirm is not True:
+        return (
+            "error: refusing to flash recovery without confirm=True (exactly True). "
+            "Use dry_run=True to preview.\n" + summary
+        )
+
+    openocd_exe = _find_openocd_exe()
+    if not openocd_exe:
+        return "error: openocd.exe not found under ~/.espressif/tools/openocd-esp32/ or C:\\Espressif\\ -- is it installed?"
+    adapter_refusal = _refuse_if_adapter_absent(MAIN_BOARD_JTAG_SERIAL, "main board (ESP32-S3)")
+    if adapter_refusal:
+        return adapter_refusal
+
+    if not skip_board_state_check:
+        reasons = _recovery_board_state_refusals(host)
+        if reasons:
+            return "error: refusing to flash recovery -- " + "; ".join(reasons)
+
+    provenance_path = recovery_flash.recovery_provenance_path(elf_archive._repo_root())
+    archive_dir = recovery_flash.recovery_archive_dir(elf_archive._repo_root())
+    elf_archive._guard_against_test_write(provenance_path)
+    elf_archive._guard_against_test_write(archive_dir)
+    provenance_repo_root = (
+        os.path.normpath(os.path.join(kiln_fw_root, "..", "..")) if kiln_fw_root else None
+    )
+    tree_state = flash_provenance.capture_tree_state(repo_root=provenance_repo_root)
+    recovery_flash.write_provenance(provenance_path, image, target, tree_state, outcome="pending")
+
+    kill_openocd_sessions()
+    tcl = recovery_flash.build_tcl(MAIN_BOARD_JTAG_SERIAL, image.path, target)
+    ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_root, timeout_s=90)
+    if not ok and retry_once:
+        _srv._session_log.warning("flash_recovery: first attempt failed, retrying once")
+        ok, output = _run_openocd(openocd_exe, board_cfg, tcl, cwd=effective_root, timeout_s=90)
+    if not ok:
+        tail = "\n".join(output.strip().splitlines()[-25:])
+        recovery_flash.write_provenance(provenance_path, image, target, tree_state,
+                                        outcome="flash_failed", detail=tail)
+        return (
+            f"error: recovery flash failed{' twice' if retry_once else ''}:\n{tail}\n"
+            "Do not run a raw `flash erase_sector` recovery by hand."
+        )
+
+    archive_note = ""
+    archived: Optional[str] = None
+    try:
+        archived = recovery_flash.archive_recovery_elf(image.path, archive_dir, image, tree_state.head)
+        archive_note = (f"\nelf archived: {archived}" if archived
+                        else "\nelf archive: no recovery.elf next to the image, nothing archived")
+    except Exception as exc:  # noqa: BLE001 -- surfaced, never fails the flash
+        archive_note = f"\nWARNING: recovery elf archiving FAILED (flash itself succeeded): {exc}"
+    recovery_flash.write_provenance(provenance_path, image, target, tree_state,
+                                    outcome="flashed_ok", elf_archived=archived)
+    return (
+        "recovery image WRITTEN and READ-BACK-VERIFIED over JTAG (OpenOCD program_esp ... verify, "
+        "recovery range only) -- NOT BOOTED: the board was reset and is running `app` (otadata "
+        "untouched); no HTTP verification is possible. Proving a recovery boot is a separate, "
+        "owner-present step.\n" + summary + archive_note + "\n"
+        f"provenance: {provenance_path} (git head {tree_state.head}, "
+        f"{len(tree_state.dirty_files)} dirty file(s))\n"
+        "NOTE: this reset the ESP; a correct S6a (mainFault) trip may latch while the safety link "
+        "re-handshakes -- check safety_get_status before safety_clear_trip()."
+    )
 
 
 def _reject_kiln_fw_build_path(path: str) -> Optional[str]:

@@ -34,6 +34,8 @@ elf_archive/
 # (was itself inside build/ and lost with it). Machine-generated, never
 # committed. See elf_archive.kiln_provenance_path().
 flash_provenance.json
+recovery_flash_provenance.json
+recovery_elf_archive/
 
 # Durable coredump archive (kilnctrl coredump_fetch.py, 2026-09-16,
 # RELEASE_HARDENING_PLAN.md blocker 1 item 1) -- same "sibling of build/,

@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 197 tools (195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 198 tools (197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -515,6 +515,27 @@ and finally to IDF's own default (0x8000) if neither file sets the key --
 `_resolve_partition_table_offset()`, whose result note always says which
 path was used or why the default applied. `fixture_flash()` shares the same
 resolver for its own partition-table image.
+
+**Recovery partition: `flash_recovery()` (2026-10-02).** `flash_firmware()` never
+writes `recovery` (and its erase allowlist forbids it), so the recovery image
+(`firmware/KilnFW_recovery`, published by `check_00_kilnfw_recovery_target_build.ps1`
+as `firmware/KilnFW_recovery/build/recovery.bin`, the default `recovery_bin`) has
+its own tool, a separate one rather than a mode because none of
+`flash_firmware()`'s landing verification, boot_guard reset or three-image
+sequence applies. It resolves offset/size from the partition named `recovery`
+in `<kiln_fw_root>/partitions.csv`, pins OpenOCD to the main board's adapter
+serial, and sends exactly one `program_esp ... verify` over that range (never
+otadata/app/nvs). Refuses: `confirm` not exactly True; image missing, empty or
+larger than the partition; magic not 0xE9; chip id not ESP32-S3; esp_app_desc_t
+missing or `project_name` not `recovery`; adapter absent; a profile running or
+paused, or ARMED with autotune active/relay energized/latched trip (unreadable
+refuses; `skip_board_state_check=True` is the bring-up escape). `dry_run=True`
+needs no board and no confirm. The result states the image was written and
+read-back-verified over JTAG but NOT booted (the board resets and keeps running
+`app`; proving a recovery boot is a separate owner-present step). Provenance goes
+to `firmware/KilnFW/recovery_flash_provenance.json`, and a `recovery.elf` beside
+the image to `firmware/KilnFW/recovery_elf_archive/`. Logic:
+`kilnctrl/recovery_flash.py`; tests: `tests/test_flash_recovery.py`.
 
 ## Building from a clean worktree for `kiln_fw_root`
 

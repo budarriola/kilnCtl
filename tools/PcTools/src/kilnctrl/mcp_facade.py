@@ -94,6 +94,7 @@ GROUP_OVERRIDES = {
     "nvs_list_keys": "system",
     # OpenOCD, shared by both processors.
     "flash_firmware": "debug",
+    "flash_recovery": "debug",
     "kill_openocd_sessions": "debug",
     "set_openocd_path": "debug",
     "get_openocd_status": "debug",
@@ -238,6 +239,9 @@ KEYWORDS = {
     "debug_read_symbol": ("variable", "global", "inspect", "elf", "nm"),
     "debug_read_registers": ("pc", "sp", "primask", "core", "cpu"),
     "flash_firmware": ("esp32", "jtag", "openocd", "program"),
+    "flash_recovery": ("recovery", "recovery image", "recovery.bin", "recovery partition",
+                       "factory", "esp32", "jtag", "openocd", "program", "write", "burn",
+                       "KilnFW_recovery", "flash recovery image"),
     "debug_check_partition_table": ("partitions.csv", "on-chip", "verify",
                                     "confirm", "gen_esp32part", "flash layout"),
     "find_crash_elf": ("symbolize", "backtrace", "coredump", "panic", "elf_archive",
@@ -404,6 +408,7 @@ RECIPES = """\
   safety processor:       kiln_batch(calls=[{"name":"safety_get_status"},{"name":"safety_get_link_stats"}])
   tail the firmware log:  kiln_call(name="get_device_log", args={"n":80})
   flash the ESP32-S3:     kiln_call(name="flash_firmware")           (JTAG/OpenOCD, never esptool)
+  flash the recovery img: kiln_call(name="flash_recovery", args={"dry_run":true})   (JTAG, recovery partition only)
   flash the RP2040:       kiln_call(name="debug_program", args={"peer":"pico","confirm":true})
   read a firmware global: kiln_call(name="debug_read_symbol", args={"peer":"pico","symbol":"s_tc_type_verified"})
   everything off, now:    kiln_call(name="io_all_relays_off")
