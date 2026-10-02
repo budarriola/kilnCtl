@@ -86,6 +86,7 @@ class FakeBoard:
         self.calls = []
         self.presses = []
         self.origin = None          # saved profile segments (list of dicts)
+        self.adopted_log = []       # every working copy ever adopted
         self.working = None         # adopted working copy (list of dicts) or None
         self.working_id = 9
         self.last_refusal = None
@@ -113,6 +114,12 @@ class FakeBoard:
         self.max_ramp = kw.get("max_ramp", 1000.0)
         self.ceiling_accepts = kw.get("ceiling_accepts", False)
         self.foreign_wid_at_end = kw.get("foreign_wid_at_end", False)
+        # Segment the executor is ALREADY in when the page opens (hardware run
+        # 20261002T013957Z: the firing was at segment_index 1 by the time Edit
+        # was tapped, and ui_page_edit_firing.c:214 opens the page on the
+        # RUNNING segment, not segment 0).
+        self.start_seg = kw.get("start_seg", 0)
+        self.edit_never_listed = kw.get("edit_never_listed", False)
         if self.preexisting_working:
             self.working = [{"target_c": 99.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}]
             self.working_id = 5
@@ -124,11 +131,12 @@ class FakeBoard:
         if self.started_at is None:
             return "idle", 0
         el = self.clock.now() - self.started_at
+        last = max(len(self.origin or []) - 1, 0)
         if self.kind == "lcd24" and not self.never_advances and el >= END_AT:
-            return self.ends_as, 1
+            return self.ends_as, min(self.start_seg, last)
         if self.kind == "lcd23" and not self.never_advances and el >= ADVANCE_AT:
-            return "running", 1
-        return "running", 0
+            return "running", min(self.start_seg + 1, last)
+        return "running", min(self.start_seg, last)
 
     def seg_index(self):
         return self.exec_state()[1]
@@ -205,6 +213,7 @@ class FakeBoard:
             return  # the LCD's own window check refuses; nothing saved
         if self.apply_works:
             self.working = copy.deepcopy(self.page_segs)
+            self.adopted_log.append(copy.deepcopy(self.working))
 
 
 class FakeProfiles:
@@ -269,6 +278,8 @@ class FakeUi:
             return {"targets": _KEYPAD, "truncated": False}
         if b.page == "edit_firing":
             return {"targets": b.targets(), "truncated": False}
+        if b.edit_never_listed:
+            return {"targets": [{"name": "Start", "cx": 240, "cy": 280, "hidden": False}], "truncated": False}
         return {"targets": [{"name": "Edit", "cx": 240, "cy": 280, "hidden": False}], "truncated": False}
 
     def click_by_name(self, name):
@@ -430,9 +441,31 @@ class Lcd23Test(unittest.TestCase):
         self.assertEqual(b.calls.count("click:Apply"), 2)
         self.assertNotIn("click:Confirm Stop", b.calls)
         self.assertEqual(result.observed["cleanup"]["own_working_id"], 9)
-        # net edit: target -5, ramp +5, dwell -5 on segment index 1
-        self.assertEqual(result.observed["expected"][1],
-                         {"target_c": BASE + 5.0, "ramp_c_per_hr": 605.0, "dwell_min": 25.0})
+        # net edit: target -5, ramp +5, dwell -5 on segment index 2
+        self.assertEqual(result.observed["expected"][2],
+                         {"target_c": BASE + 15.0, "ramp_c_per_hr": 605.0, "dwell_min": 25.0})
+
+    def test_pass_when_executor_is_already_past_segment_zero_at_open(self):
+        # Hardware run 20261002T013957Z: the page opens on the RUNNING segment
+        # (ui_page_edit_firing.c:214), which was already 1 when Edit was tapped.
+        result, b = run23(start_seg=1)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        exp = result.observed["expected"]
+        orig = result.observed["orig"]
+        changed = [i for i in range(len(exp)) if exp[i] != orig[i]]
+        self.assertEqual(changed, [2])
+        # the segment actually adopted is the one the case intended to edit
+        first = b.adopted_log[0]
+        self.assertEqual(first[2]["target_c"], orig[2]["target_c"] - 5.0)
+        self.assertEqual(first[1], orig[1])
+        self.assertEqual(first[3], orig[3])
+
+    def test_executor_already_at_the_edit_segment_is_inconclusive_no_edit(self):
+        result, b = run23(start_seg=2)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertNotIn("click:Apply", b.calls)
+        self.assertNotIn("edit_live", b.calls)
+        self.assertTrue(result.observed["cleanup"]["verified"])
 
     def test_stepper_taps_cover_ramp_minus_and_plus(self):
         result, b = run23()
@@ -548,8 +581,9 @@ class Lcd23GeometryAndLimitsTest(unittest.TestCase):
     def test_prev_tap_not_moving_page_is_inconclusive_without_apply(self):
         result, b = run23(prev_ignored=True)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
-        self.assertIn("segment 0", result.reason)
-        self.assertEqual(b.calls.count("click:Apply"), 1)
+        self.assertIn("page did not show segment", result.reason)
+        # navigation is verified before any edit, so no Apply is ever sent
+        self.assertEqual(b.calls.count("click:Apply"), 0)
         self.assertNotIn("edit_live", b.calls)
 
     def test_ceiling_probe_skipped_when_ceiling_unusable(self):
@@ -564,8 +598,8 @@ class Lcd23GeometryAndLimitsTest(unittest.TestCase):
     def test_low_ramp_ceiling_lowers_the_base_ramp(self):
         result, b = run23(max_ramp=100.0)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
-        self.assertEqual(result.observed["orig"][1]["ramp_c_per_hr"], 90.0)
-        self.assertEqual(result.observed["expected"][1]["ramp_c_per_hr"], 95.0)
+        self.assertEqual(result.observed["orig"][2]["ramp_c_per_hr"], 90.0)
+        self.assertEqual(result.observed["expected"][2]["ramp_c_per_hr"], 95.0)
 
     def test_ramp_ceiling_with_no_room_is_inconclusive_no_action(self):
         for run in (run23, run24):
@@ -578,7 +612,7 @@ class Lcd23GeometryAndLimitsTest(unittest.TestCase):
         for ceiling in (20.0, 37.5, 100.0, 605.0, 614.0, 700.0):
             result, b = run23(max_ramp=ceiling)
             self.assertEqual(result.verdict, Verdict.PASS, (ceiling, result.reason))
-            self.assertLessEqual(result.observed["expected"][1]["ramp_c_per_hr"], ceiling)
+            self.assertLessEqual(result.observed["expected"][2]["ramp_c_per_hr"], ceiling)
 
 
 class NavSlotTest(unittest.TestCase):
@@ -615,6 +649,28 @@ class NavSlotTest(unittest.TestCase):
 
 
 class Lcd24Test(unittest.TestCase):
+    def test_pass_when_executor_is_already_past_segment_zero_at_open(self):
+        result, b = run24(start_seg=1)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["edit_segment"], 2)
+        orig = result.observed["orig"]
+        first = b.adopted_log[0]
+        self.assertEqual(first[2]["ramp_c_per_hr"], orig[2]["ramp_c_per_hr"] + 5.0)
+        self.assertEqual(first[1], orig[1])
+
+    def test_records_the_edit_wait(self):
+        result, b = run24()
+        self.assertIn("edit_wait_s", result.observed)
+
+    def test_edit_never_listed_while_running_is_inconclusive_with_diagnostic(self):
+        result, b = run24(edit_never_listed=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("still running", result.reason)
+        self.assertIn("waited", result.reason)
+        self.assertIn("edit_wait_s", result.observed)
+        self.assertNotIn("click:Edit", b.calls)
+        self.assertTrue(result.observed["cleanup"]["verified"])
+
     def test_pass(self):
         result, b = run24()
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)

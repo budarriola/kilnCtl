@@ -4313,14 +4313,27 @@ _LCD_EDIT_SEG0_DWELL_MIN = 1
 _LCD_EDIT_RAMP_C_PER_HR = 600.0
 _LCD_EDIT_MAX_TARGET_C = 60.0
 _LCD_EDIT_MIN_RAMP_C_PER_HR = 10.0
+#: LCD-23 profile: [0] base/1 min, [1] base+10/1 min, [2] base+20/30 min (the
+#: segment the steppers edit), [3] base+25/5 min (the last, untouched except by
+#: the refused HTTP probes). The Edit page opens on the RUNNING segment
+#: (ui_page_edit_firing.c:214, cur_seg = running_seg), and the executor may
+#: already be past segment 0 by the time Edit is tapped (first hardware run:
+#: segment_index 1), so the case reads the running segment and navigates by
+#: topbar state; it never assumes segment 0. Segments 0 and 1 give runway for
+#: running segment 0 or 1; running segment >= 2 leaves no future edit segment.
 _LCD23_SEG1_OFFSET_C = 10.0
 _LCD23_SEG2_OFFSET_C = 20.0
-_LCD23_SEG1_DWELL_MIN = 30
-_LCD23_SEG2_DWELL_MIN = 5
+_LCD23_SEG3_OFFSET_C = 25.0
+_LCD23_SEG1_DWELL_MIN = 1
+_LCD23_SEG2_DWELL_MIN = 30
+_LCD23_SEG3_DWELL_MIN = 5
+_LCD23_EDIT_SEG = 2
 #: Bounded waits (total wall time stays under about 3 minutes).
 _LCD23_ADVANCE_WAIT_S = 100.0
 _LCD24_END_WAIT_S = 120.0
 _LCD_EDIT_ENDED_WAIT_S = 4.0
+#: ui_page_home_internal.h:79 UI_PAGE_HOME_REFRESH_MS.
+UI_HOME_REFRESH_MS = 1000
 _LCD_EDIT_BOUND_TARGET_C = 5000.0
 _LCD_EDIT_CEILING_PROBE_C = 10.0
 _LCD_EDIT_MAX_TARGET_FIELD_C = 2015.0
@@ -4410,6 +4423,68 @@ def _lcd_edit_nav_tap(env: dict, which: str) -> "Optional[str]":
     ok = _lcd22_tap(env["ctx"], xy)
     env["observed"].setdefault("taps", []).append({"nav": which, "xy": list(xy), "ok": ok})
     return None if ok else "inject_failed"
+
+
+def _lcd_edit_nav_signature_ok(st: dict, k: int, count: int) -> bool:
+    """True when the topbar shows segment `k` of `count`: Prev present iff
+    k > 0 and Next present iff k < count - 1 (a disabled icon is absent)."""
+    tb = st.get("topbar") or {}
+    return (tb.get("prev") is not None) == (k > 0) and (tb.get("next") is not None) == (k < count - 1)
+
+
+def _lcd_edit_goto(env: dict, target: int, count: int) -> "Optional[str]":
+    """Put the Edit page on segment `target` of `count` WITHOUT assuming which
+    segment it opened on (firmware opens it on the running segment). Drives to
+    the nearer end first -- tapping Prev (or Next) until that icon is absent,
+    bounded by `count` taps, which verifies the anchor segment -- then steps
+    back toward `target`, checking the topbar signature after every tap
+    (bounded poll). Intermediate segments of 3+ steps share a signature and
+    cannot be told apart, so with <= 4 segments every target is anchor or
+    anchor +/- 1 and fully verified. Returns None when the page is verified
+    on `target`, else a reason (nothing is retried)."""
+    if not 0 <= target < count:
+        return f"segment {target} is outside 0..{count - 1}"
+    ui, sleep, now = env["ui"], env["sleep"], env["now"]
+    to_end = (count - 1 - target) < target
+    anchor = count - 1 if to_end else 0
+    drive, back = ("next", "prev") if to_end else ("prev", "next")
+    for _ in range(count):
+        st = _lcd_edit_page_state(ui)
+        if not st["readable"]:
+            return "unreadable"
+        if st["keypad"]:
+            return "keypad"
+        if _lcd_edit_nav(st, drive) is None:
+            break
+        why = _lcd_edit_nav_tap(env, drive)
+        if why:
+            return why
+        sleep(0.3)
+    st = _lcd_edit_page_state(ui)
+    if not st["readable"]:
+        return "unreadable"
+    if st["keypad"]:
+        return "keypad"
+    if _lcd_edit_nav(st, drive) is not None or not _lcd_edit_nav_signature_ok(st, anchor, count):
+        return f"page never reached segment {anchor} (the {drive} icon is still present or the topbar is inconsistent)"
+    k = anchor
+    while k != target:
+        k += -1 if to_end else 1
+        why = _lcd_edit_nav_tap(env, back)
+        if why:
+            return why
+        deadline = now() + 2.0
+        while True:
+            sleep(0.3)
+            st = _lcd_edit_page_state(ui)
+            if st.get("keypad"):
+                return "keypad"
+            if st["readable"] and _lcd_edit_nav_signature_ok(st, k, count):
+                break
+            if now() >= deadline:
+                return f"page did not show segment {k} after the {back} tap"
+    env["observed"].setdefault("nav_path", []).append({"anchor": anchor, "target": target})
+    return None
 
 
 def _lcd_edit_tap_failure(env: dict, what: str, why: str, cid: str) -> CaseResult:
@@ -4563,8 +4638,17 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
 
         _wake_and_home(ctx)
         edit_settle_log: list = []
+        # The home page rebuilds its Start/Pause/Edit buttons from the executor
+        # state on a UI_PAGE_HOME_REFRESH_MS = 1000 ms timer
+        # (ui_page_home_internal.h:79), so Edit appears within about one
+        # refresh of the firing running; _LCD22_EDIT_WAIT_S (10 s) is ten
+        # periods plus the settle reads. A longer wait cannot help a firing
+        # that is no longer running, so the timeout path reads the executor
+        # and says which it was.
+        edit_wait_t0 = now()
         edit_ready = _wait_for_home_settled(
             ctx, ui, "Edit", min_wait_s=0.0, timeout_s=_LCD22_EDIT_WAIT_S, log=edit_settle_log)
+        observed["edit_wait_s"] = round(now() - edit_wait_t0, 2)
         observed["edit_settle_reads"] = edit_settle_log[-5:]
         if not edit_ready:
             last = edit_settle_log[-1] if edit_settle_log else {}
@@ -4572,10 +4656,19 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
                 page_now = ui.get_current_page()
             except Exception:  # noqa: BLE001
                 page_now = None
+            exec_now = _lcd22_exec_dict(srv)
+            observed["exec_at_edit_timeout"] = exec_now
+            if not exec_now or exec_now.get("state_name") != "running":
+                why_not = (
+                    f"the firing is no longer running (exec={exec_now!r}): it ended before Edit could be "
+                    "tapped, which is a profile that is too short, not home-page refresh latency")
+            else:
+                why_not = (f"the firing is still running (exec={exec_now!r}) so the home page was expected to "
+                           f"show Edit within a {UI_HOME_REFRESH_MS} ms refresh")
             result = CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
                 f"'Edit' never became a visible, unobstructed tap target within {_LCD22_EDIT_WAIT_S:.0f} s "
-                f"of the firing reaching running (page={page_now!r}, last names={last.get('names')!r}); "
-                "no tap was sent"))
+                f"(waited {observed['edit_wait_s']} s) of the firing reaching running "
+                f"(page={page_now!r}, last names={last.get('names')!r}); {why_not}; no tap was sent"))
             return result
         # ONE Edit click (swallow retries only); NOT via _click_then_page: on a
         # PIN-locked panel Edit raises the keypad while the page still reads
@@ -4689,9 +4782,10 @@ def _lcd23_plan(ctx: dict, zone_temp: float):
         _lcd_edit_seg(base, ramp, _LCD_EDIT_SEG0_DWELL_MIN),
         _lcd_edit_seg(base + _LCD23_SEG1_OFFSET_C, ramp, _LCD23_SEG1_DWELL_MIN),
         _lcd_edit_seg(base + _LCD23_SEG2_OFFSET_C, ramp, _LCD23_SEG2_DWELL_MIN),
+        _lcd_edit_seg(base + _LCD23_SEG3_OFFSET_C, ramp, _LCD23_SEG3_DWELL_MIN),
     ]
     return ([_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig,
-            base + _LCD23_SEG2_OFFSET_C, limits)
+            base + _LCD23_SEG3_OFFSET_C, limits)
 
 
 def _lcd23_body(env: dict) -> CaseResult:
@@ -4700,24 +4794,36 @@ def _lcd23_body(env: dict) -> CaseResult:
     client, host, ui = env["client"], env["host"], env["ui"]
     now, sleep = env["now"], env["sleep"]
 
-    # Part 1: the page opens on the running segment (0); Next reaches segment
-    # 1 (future). target -, ramp +, ramp +, ramp -, dwell - => net target -5 C,
-    # ramp +5 C/hr, dwell -5 min.
+    # Part 1: the page opens on the RUNNING segment (ui_page_edit_firing.c:214),
+    # which is not necessarily 0. Navigate by topbar state to segment T (a
+    # FUTURE one), verified, then target -, ramp +, ramp +, ramp -, dwell - =>
+    # net target -5 C, ramp +5 C/hr, dwell -5 min.
+    edit_seg = _LCD23_EDIT_SEG
+    count = len(orig)
+    ex_open = _lcd22_exec_dict(srv)
+    observed["exec_at_page_open"] = ex_open
+    run_seg = (ex_open or {}).get("segment_index")
+    if not ex_open or ex_open.get("state_name") != "running" or not isinstance(run_seg, int) or run_seg >= edit_seg:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+            f"the firing is already at segment {run_seg!r} (exec={ex_open!r}) so segment {edit_seg} is no longer "
+            "in the future (or the firing is not running); nothing was edited"))
     expected = [dict(s) for s in orig]
-    expected[1] = _lcd_edit_seg(orig[1]["target_c"] - _LCD22_TARGET_STEP_C,
-                                orig[1]["ramp_c_per_hr"] + 5.0,
-                                orig[1]["dwell_min"] - _LCD22_DWELL_STEP_MIN)
+    expected[edit_seg] = _lcd_edit_seg(orig[edit_seg]["target_c"] - _LCD22_TARGET_STEP_C,
+                                       orig[edit_seg]["ramp_c_per_hr"] + 5.0,
+                                       orig[edit_seg]["dwell_min"] - _LCD22_DWELL_STEP_MIN)
     observed["expected"] = expected
-    plan = [("nav", "next"), ("step", "target", "-"), ("step", "ramp", "+"), ("step", "ramp", "+"),
-            ("step", "ramp", "-"), ("step", "dwell", "-")]
-    for item in plan:
-        why = _lcd_edit_nav_tap(env, item[1]) if item[0] == "nav" else _lcd_edit_step(env, item[1], item[2])
+    why = _lcd_edit_goto(env, edit_seg, count)
+    if why:
+        return _lcd_edit_tap_failure(env, f"navigating to segment {edit_seg}", why, cid)
+    for item in (("step", "target", "-"), ("step", "ramp", "+"), ("step", "ramp", "+"),
+                 ("step", "ramp", "-"), ("step", "dwell", "-")):
+        why = _lcd_edit_step(env, item[1], item[2])
         if why:
             return _lcd_edit_tap_failure(env, f"{item[0]} {item[1:]}", why, cid)
     fail = _lcd_edit_apply(env, cid)
     if fail:
         return fail
-    status, content = _lcd_edit_wait_adopted(env, 1, expected[1]["target_c"])
+    status, content = _lcd_edit_wait_adopted(env, edit_seg, expected[edit_seg]["target_c"])
     exec_after = _lcd22_exec_dict(srv)
     part1 = J.judge_lcd_edit_ramp_steppers(expected, status, content, exec_after,
                                            refusal_before=env["refusal_before"])
@@ -4728,31 +4834,36 @@ def _lcd23_body(env: dict) -> CaseResult:
         return part1
     wid_before = J._lcd_edit_wid(status)
 
-    # Part 2: back to the RUNNING segment 0, make a stale edit there, wait for
-    # the firing to move on (segment 0 becomes 'already run'), then Apply.
-    # The candidate = the page's working copy = adopted + the segment-0 edit,
-    # which live_edit_check_window() must refuse on the LCD, before any save.
-    why = _lcd_edit_nav_tap(env, "prev")
-    if why:
-        return _lcd_edit_tap_failure(env, "Prev", why, cid)
-    st_prev = _lcd_edit_page_state(ui)
-    if not st_prev["readable"] or st_prev["topbar"]["prev"] is not None or st_prev["topbar"]["next"] is None:
-        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
-            "page did not show segment 0 after the Prev tap (Prev still present or Next absent); "
-            "stale edit not applied"))
+    # Part 2: back to the RUNNING segment (read now, not assumed to be 0), make
+    # a stale edit there, wait for the firing to move on (that segment becomes
+    # 'already run'), then Apply. The candidate = the page's working copy =
+    # adopted + the running-segment edit, which live_edit_check_window() must
+    # refuse on the LCD, before any save. The page's own segment is verified
+    # by topbar state (_lcd_edit_goto), and the running segment is re-read
+    # after navigating so the edit is on the segment that is running.
     ex_now = _lcd22_exec_dict(srv)
-    if not ex_now or ex_now.get("segment_index") != 0 or ex_now.get("state_name") != "running":
+    run_now = (ex_now or {}).get("segment_index")
+    if not ex_now or ex_now.get("state_name") != "running" or not isinstance(run_now, int) or run_now >= edit_seg:
         return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
-            f"segment 0 was no longer the running segment when the stale edit was due ({ex_now!r}); "
+            f"the firing is at segment {run_now!r} (exec={ex_now!r}) with no later short segment left to "
+            "advance into before the edited one; refusal path not exercised"))
+    why = _lcd_edit_goto(env, run_now, count)
+    if why:
+        return _lcd_edit_tap_failure(env, f"navigating to the running segment {run_now}", why, cid)
+    ex_now = _lcd22_exec_dict(srv)
+    if not ex_now or ex_now.get("segment_index") != run_now or ex_now.get("state_name") != "running":
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+            f"segment {run_now} was no longer the running segment when the stale edit was due ({ex_now!r}); "
             "refusal path not exercised"))
+    observed["stale_edit_segment"] = run_now
     why = _lcd_edit_step(env, "target", "+")
     if why:
-        return _lcd_edit_tap_failure(env, "segment-0 target +", why, cid)
+        return _lcd_edit_tap_failure(env, f"segment-{run_now} target +", why, cid)
     deadline = now() + _LCD23_ADVANCE_WAIT_S
     advanced = None
     while True:
         ex_now = _lcd22_exec_dict(srv)
-        if ex_now and ex_now.get("state_name") == "running" and (ex_now.get("segment_index") or 0) >= 1:
+        if ex_now and ex_now.get("state_name") == "running" and (ex_now.get("segment_index") or 0) > run_now:
             advanced = ex_now
             break
         if not ex_now or ex_now.get("state_name") != "running" or now() >= deadline:
@@ -4761,7 +4872,7 @@ def _lcd23_body(env: dict) -> CaseResult:
     observed["advanced"] = advanced
     if advanced is None:
         return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
-            f"the firing did not leave segment 0 within {_LCD23_ADVANCE_WAIT_S:.0f} s "
+            f"the firing did not leave segment {run_now} within {_LCD23_ADVANCE_WAIT_S:.0f} s "
             f"(exec={ex_now!r}); the finished-segment refusal was not exercised"))
     # Wait (bounded) for the page's 1 s poll to lock segment 0's steppers.
     locked_seen = False
@@ -4793,10 +4904,12 @@ def _lcd23_body(env: dict) -> CaseResult:
             return (None, "accepted")
         except Exception as exc:  # noqa: BLE001
             return (getattr(exc, "status", None), str(getattr(exc, "detail", "") or exc)[:120])
+    last_seg = count - 1
     window_segs = [dict(s) for s in expected]
-    window_segs[0] = dict(window_segs[0], target_c=window_segs[0]["target_c"] + _LCD22_TARGET_STEP_C)
+    window_segs[run_now] = dict(window_segs[run_now],
+                                target_c=window_segs[run_now]["target_c"] + _LCD22_TARGET_STEP_C)
     bound_segs = [dict(s) for s in expected]
-    bound_segs[2] = dict(bound_segs[2], target_c=_LCD_EDIT_BOUND_TARGET_C)
+    bound_segs[last_seg] = dict(bound_segs[last_seg], target_c=_LCD_EDIT_BOUND_TARGET_C)
     http_window = _post(window_segs)
     http_bound = _post(bound_segs)
     if http_bound[0] is None:
@@ -4805,7 +4918,7 @@ def _lcd23_body(env: dict) -> CaseResult:
             srv._profiles.stop()
         except Exception:  # noqa: BLE001
             pass
-    # HARD validator probe: a FUTURE segment (3) target 10 C above the zone's
+    # HARD validator probe: a FUTURE segment (the last) target 10 C above the zone's
     # own max_temp_c (still a legal 0-2015 value, so only profiles_validate_
     # candidate() in HARD mode can refuse it). Skipped when the ceiling is
     # unreadable/unset or +10 would leave the 0-2015 range. If the board
@@ -4820,7 +4933,7 @@ def _lcd23_body(env: dict) -> CaseResult:
             else f"max_temp_c {max_temp!r} + {_LCD_EDIT_CEILING_PROBE_C} C exceeds {_LCD_EDIT_MAX_TARGET_FIELD_C} C")
     else:
         ceiling_segs = [dict(s) for s in expected]
-        ceiling_segs[2] = dict(ceiling_segs[2], target_c=max_temp + _LCD_EDIT_CEILING_PROBE_C)
+        ceiling_segs[last_seg] = dict(ceiling_segs[last_seg], target_c=max_temp + _LCD_EDIT_CEILING_PROBE_C)
         http_ceiling = _post(ceiling_segs)
         observed["ceiling_probe_target_c"] = max_temp + _LCD_EDIT_CEILING_PROBE_C
         if http_ceiling[0] is None:
@@ -4852,6 +4965,7 @@ def _lcd24_plan(ctx: dict, zone_temp: float):
         return CaseResult(Verdict.INCONCLUSIVE, reason=f"{why}; no action taken")
     orig = [
         _lcd_edit_seg(base, ramp, _LCD_EDIT_SEG0_DWELL_MIN),
+        _lcd_edit_seg(base, ramp, 1),
         _lcd_edit_seg(base, ramp, 0),
     ]
     return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + 5.0, limits
@@ -4863,24 +4977,41 @@ def _lcd24_body(env: dict) -> CaseResult:
     client, host, ui = env["client"], env["host"], env["ui"]
     now, sleep = env["now"], env["sleep"]
 
+    # The page opens on the RUNNING segment (ui_page_edit_firing.c:214), which
+    # may already be past segment 0: edit the segment right after it (any
+    # future one will do), navigating by topbar state, never by assumption.
+    count = len(orig)
+    ex_open = _lcd22_exec_dict(srv)
+    observed["exec_at_page_open"] = ex_open
+    run_seg = (ex_open or {}).get("segment_index")
+    if not ex_open or ex_open.get("state_name") != "running" or not isinstance(run_seg, int) \
+            or run_seg + 1 >= count:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+            f"the firing is at segment {run_seg!r} of {count} (exec={ex_open!r}) so no future segment is left "
+            "to edit (or the firing is not running); nothing was edited"))
+    edit_seg = run_seg + 1
+    observed["edit_segment"] = edit_seg
     expected = [dict(s) for s in orig]
-    expected[1] = dict(orig[1], ramp_c_per_hr=orig[1]["ramp_c_per_hr"] + 5.0)
+    expected[edit_seg] = dict(orig[edit_seg], ramp_c_per_hr=orig[edit_seg]["ramp_c_per_hr"] + 5.0)
     observed["expected"] = expected
-    for item in (("nav", "next"), ("step", "ramp", "+")):
-        why = _lcd_edit_nav_tap(env, item[1]) if item[0] == "nav" else _lcd_edit_step(env, item[1], item[2])
-        if why:
-            return _lcd_edit_tap_failure(env, f"{item[0]} {item[1:]}", why, cid)
+    why = _lcd_edit_goto(env, edit_seg, count)
+    if why:
+        return _lcd_edit_tap_failure(env, f"navigating to segment {edit_seg}", why, cid)
+    why = _lcd_edit_step(env, "ramp", "+")
+    if why:
+        return _lcd_edit_tap_failure(env, "step ('ramp', '+')", why, cid)
     fail = _lcd_edit_apply(env, cid)
     if fail:
         return fail
-    status, content = _lcd_edit_wait_adopted(env, 1, expected[1]["target_c"])
+    status, content = _lcd_edit_wait_adopted(env, edit_seg, expected[edit_seg]["target_c"])
     # Segment 1's target is unchanged, so "landed" above is trivially true;
     # wait for the ramp itself before judging.
     deadline = now() + 10.0
     while True:
         segs = (content or {}).get("segments") or []
         try:
-            if len(segs) > 1 and abs(float(segs[1].get("ramp_c_per_hr")) - expected[1]["ramp_c_per_hr"]) \
+            if len(segs) > edit_seg and abs(float(segs[edit_seg].get("ramp_c_per_hr"))
+                                            - expected[edit_seg]["ramp_c_per_hr"]) \
                     <= J.LCD_EDIT_FIRING_TOL:
                 break
         except (TypeError, ValueError):
