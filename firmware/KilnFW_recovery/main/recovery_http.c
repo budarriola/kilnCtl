@@ -268,7 +268,7 @@ static esp_err_t challenge_get(httpd_req_t *req)
 // ota_esp_post()'s, now just a caller) against ota_http_authenticate_
 // request()/ota_http_hex_decode() in the main app -- see that check's
 // header comment before changing wire strings or ordering here.
-// Longest query string the MAC will cover (the Pico upload's "crc=..&slot=A" is 18).
+// Longest query string the MAC will cover ("crc=xxxxxxxx&slot=A" is 19 chars, 22 with slot=auto).
 #define AUTH_QUERY_MAX 95u
 
 static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
@@ -493,6 +493,10 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     esp_err_t auth_err = ESP_OK;
     if (!recovery_authenticate_request(req, &auth_err, "esp", &s_lockout)) {
         return auth_err;
+    }
+    if (recovery_pico_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
     }
 
     const esp_partition_t *target = find_app_partition();
@@ -750,6 +754,10 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
     if (!recovery_authenticate_request(req, &auth_err, "recovery-exit", &s_lockout)) {
         return auth_err;
     }
+    if (recovery_pico_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
+    }
     const esp_partition_t *app = find_app_partition();
     if (!app_has_valid_image(app) || !app_image_verified(app)) {
         httpd_resp_set_status(req, "409 Conflict");
@@ -815,6 +823,10 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
     esp_err_t auth_err = ESP_OK;
     if (!recovery_authenticate_request(req, &auth_err, "sw-reset", &s_lockout)) {
         return auth_err;
+    }
+    if (recovery_pico_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
     }
 
     httpd_resp_sendstr(req, "resetting");

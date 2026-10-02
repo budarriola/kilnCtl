@@ -280,7 +280,9 @@ static void handle_frame(relay_t *r, const kilnlink_frame_t *f)
     }
     r->st = st;
     r->st_seq++;
-    if (!r->app_seen) {
+    // Only an idle report proves a bootloader: a busy application with a
+    // stale transfer can also answer GET_STATUS with UPDATE_STATUS.
+    if (!r->app_seen && rpp_status_proves_bootloader(&st)) {
         r->boot_seen = true;
     }
     lock();
@@ -635,6 +637,26 @@ static bool begin_transfer(relay_t *r)
     }
 }
 
+#define STOP_AFTER_END_TEXT \
+    "stopped after END was sent - outcome unknown: power-cycle and check the Pico version; do NOT retry blindly"
+
+// END was sent and its result never arrived (or the operator/browser stopped
+// us after END): the Pico may already have committed the image. Do not send
+// ABORT -- it cannot revert a committed slot (it is a no-op once the receiver
+// is inactive), and sending it would only let this report claim "aborted" for
+// an image that may be live. Never call it FAILED or ABORTED either: say so and
+// have the operator power-cycle and check the Pico's version before any retry.
+static void finish_unknown(relay_t *r, const char *why)
+{
+    set_text(s_error, sizeof(s_error),
+             why ? why : "outcome unknown - power-cycle and check the Pico version");
+    lock();
+    s_power_cycle = true;
+    unlock();
+    r->unknown = true;
+    set_phase(RECOVERY_PICO_UNKNOWN);
+}
+
 // END, gap rounds and completion: driven by rpp_fin_step (see the proto header
 // for why the ESP must send END itself -- the receivers go silent once every
 // chunk is in).
@@ -657,17 +679,7 @@ static bool finish_transfer(relay_t *r)
             return false;
         }
         if (act == RPP_FIN_UNKNOWN) {
-            // END was sent and its result never arrived: the Pico may have
-            // committed the image. Never ABORT (that could revert a committed
-            // slot) and never call it FAILED: say so and have the operator
-            // power-cycle and check the Pico's version before any retry.
-            set_text(s_error, sizeof(s_error),
-                     f.why ? f.why : "outcome unknown - power-cycle and check the Pico version");
-            lock();
-            s_power_cycle = true;
-            unlock();
-            r->unknown = true;
-            set_phase(RECOVERY_PICO_UNKNOWN);
+            finish_unknown(r, f.why);
             return false;
         }
         if (act == RPP_FIN_RETRANSMIT) {
@@ -681,6 +693,9 @@ static bool finish_transfer(relay_t *r)
                     continue;
                 }
                 if (!send_chunk_paced(r, idx)) {
+                    if (rpp_fin_stop_is_unknown(&f, r->fatal)) {
+                        finish_unknown(r, STOP_AFTER_END_TEXT);
+                    }
                     return false;
                 }
             }
@@ -690,6 +705,9 @@ static bool finish_transfer(relay_t *r)
             // END is a frame too: honour the pace after the last DATA, and treat
             // every status queued before it as history (only its reply counts).
             if (!pace_wait(r)) {
+                if (rpp_fin_stop_is_unknown(&f, r->fatal)) {
+                    finish_unknown(r, STOP_AFTER_END_TEXT);
+                }
                 return false;
             }
             pump(r);
@@ -704,6 +722,12 @@ static bool finish_transfer(relay_t *r)
         }
         int w = wait_status(r, seen, RPP_GAP_ROUND_WAIT_MS);
         if (w < 0) {
+            // Stopped after END went out (operator Abort, browser gone): the
+            // Pico may have committed. A Pico-terminal-state stop (fatal) is
+            // a real answer and keeps its own report.
+            if (rpp_fin_stop_is_unknown(&f, r->fatal)) {
+                finish_unknown(r, STOP_AFTER_END_TEXT);
+            }
             return false;
         }
         if (w > 0) {
@@ -937,6 +961,11 @@ static bool json_fmt(char *out, size_t cap, size_t *pos, const char *fmt, ...)
     }
     *pos += (size_t)n;
     return true;
+}
+
+bool recovery_pico_busy(void)
+{
+    return s_busy != BUSY_NONE;
 }
 
 const char *recovery_pico_status_json(int *len)

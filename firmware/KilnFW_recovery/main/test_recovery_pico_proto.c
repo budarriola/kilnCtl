@@ -458,19 +458,23 @@ static void test_image_and_slots(void)
 //  - END with everything in goes VERIFYING, then COMPLETE (or FAILED on a CRC
 //    mismatch) after the synchronous CRC check, each reported once.
 //  - DATA/END while no transfer is active are discarded.
+//  - BEGIN sends ERASING exactly once, immediately before the synchronous
+//    erase (recovery_update.c:323 via blocking uart_putc_raw, :215;
+//    update_task.c:958). A BEGIN while a transfer is already active RESTARTS
+//    it: re-erase, received ranges reset, a fresh ERASING (update_task.c:
+//    874-985, recovery_update.c:274-337).
 //
 //  Bootloader only
 //  - polls a 32-byte UART FIFO and programs flash with interrupts off: a DATA
 //    frame arriving < 12 ms after the previous one overruns it and is lost;
-//  - silent for the whole (synchronous) erase;
+//  - silent for the whole (synchronous) erase after its one ERASING status;
 //  - once a transfer ended (COMPLETE/FAILED) it keeps beaconing IDLE every 1 s
 //    (recovery_update.c:435-437) -- it does NOT go quiet.
 //
 //  Application only
 //  - sends NO IDLE beacons, before BEGIN or after a transfer (update_task.c:
 //    1279); it reports only while a transfer is active;
-//  - sends ERASING exactly once, immediately before the synchronous erase
-//    (update_task.c:958), then is blocked (no drain, no beacons) until done;
+//  - then is blocked (no drain, no beacons) until the erase is done;
 //  - every UPDATE_* frame goes through a 4-deep queue
 //    (UPDATE_TASK_QUEUE_DEPTH, update_task.c:134) drained once per wake of
 //    UPDATE_TASK_POLL_MS = 100 ms (update_task.c:131, 1683-1697); a frame
@@ -520,7 +524,7 @@ typedef struct {
     fr_msg_t inq[FR_APP_QUEUE_DEPTH];
     int qn;
     // observations
-    uint32_t begins_seen, begins_while_erasing, ends_seen, aborts_seen, overruns, statuses_emitted;
+    uint32_t begins_restarted, begins_seen, begins_while_erasing, ends_seen, aborts_seen, overruns, statuses_emitted;
     uint32_t queue_drops, idle_beacons, erasing_statuses, random_losses;
     int64_t min_data_gap_ms;
     // output queue of encoded status payloads
@@ -664,21 +668,19 @@ static void fr_do_begin(fake_rx_t *r)
     if (r->state == RPP_STATE_ERASING) {
         r->begins_while_erasing++;
     }
-    if (!r->active || r->state == RPP_STATE_ERASING) {
-        if (!r->active) {
-            memset(r->have_chunk, 0, sizeof(r->have_chunk));
-            r->received = 0;
-            r->cursor = 0;
-            r->pass_had_gap = false;
-            r->round_count = 0;
-        }
-        r->active = true;
-        r->state = RPP_STATE_ERASING;
-        r->erase_done = g_now_ms + r->erase_ms;
-        if (!r->bootloader) {
-            fr_emit(r, RPP_STATE_ERASING, 0, NULL, 0); // once, before the erase (update_task.c:958)
-        }
+    // Both receivers restart on a BEGIN while active: re-erase, ranges reset.
+    if (r->active) {
+        r->begins_restarted++;
     }
+    memset(r->have_chunk, 0, sizeof(r->have_chunk));
+    r->received = 0;
+    r->cursor = 0;
+    r->pass_had_gap = false;
+    r->round_count = 0;
+    r->active = true;
+    r->state = RPP_STATE_ERASING;
+    r->erase_done = g_now_ms + r->erase_ms;
+    fr_emit(r, RPP_STATE_ERASING, 0, NULL, 0); // once per BEGIN, before the erase (recovery_update.c:323)
 }
 
 static void fr_do_data(fake_rx_t *r, uint32_t idx)
@@ -927,6 +929,8 @@ static bool state_is_terminal(uint8_t s)
            s == RPP_STATE_REJECTED_SLOT_LINKAGE || s == RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP;
 }
 
+static int g_stop_mode; // 0 none, 1 stop right after the first END, 2 stop before END
+
 static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
 {
     drive_t d;
@@ -947,6 +951,12 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
     }
     rpp_fin_t f;
     rpp_fin_start(&f);
+    if (g_stop_mode == 2) { // stop requested before END goes out: ordinary abort
+        fr_abort(r);
+        d.abort_sent = true;
+        d.elapsed_ms = g_now_ms - start;
+        return d;
+    }
     rpp_fin_action_t act = RPP_FIN_SEND_END;
     int64_t t_end = g_now_ms;
     int64_t deadline = g_now_ms + 900000;
@@ -993,6 +1003,16 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
             rpp_fin_end_sent(&f);
             d.end_sends++;
             t_end = g_now_ms;
+            if (g_stop_mode == 1) { // operator Abort / client gone, right after END
+                if (rpp_fin_stop_is_unknown(&f, false)) {
+                    d.unknown = true;
+                    d.why = "stopped after END - outcome unknown";
+                } else {
+                    fr_abort(r);
+                    d.abort_sent = true;
+                }
+                break;
+            }
         }
         // Wait for a status for up to one gap round.
         bool got = false;
@@ -1014,6 +1034,14 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
         d.why = "driver deadline (never finished)";
     }
     d.elapsed_ms = g_now_ms - start;
+    return d;
+}
+
+static drive_t drive_transfer_stop(fake_rx_t *r, uint32_t pace_ms, bool after_end)
+{
+    g_stop_mode = after_end ? 1 : 2;
+    drive_t d = drive_transfer(r, pace_ms);
+    g_stop_mode = 0;
     return d;
 }
 
@@ -1179,8 +1207,8 @@ static void test_receiver_model(void)
         free(r);
     }
 
-    // ERASING: the app sends it once, before the synchronous erase; the
-    // bootloader is silent throughout (update_task.c:958).
+    // ERASING: BOTH receivers send it once, before the synchronous erase, then
+    // are silent until it ends (recovery_update.c:323, update_task.c:958).
     for (int v = 0; v < 2; v++) {
         fake_rx_t *r = fr_new(v == 0, 30);
         r->erase_ms = 30000;
@@ -1191,8 +1219,8 @@ static void test_receiver_model(void)
         while (fr_pop(r, &st)) {
             erasing += st.state == RPP_STATE_ERASING;
         }
-        CHECK(v == 0 ? erasing == 0 : erasing == 1,
-              v == 0 ? "bootloader never reports ERASING" : "app reports ERASING exactly once");
+        CHECK(erasing == 1, v == 0 ? "bootloader reports ERASING exactly once"
+                                    : "app reports ERASING exactly once");
         free(r);
     }
 }
@@ -1246,7 +1274,26 @@ static void test_finish_driver(void)
         snprintf(nm, sizeof(nm), "%s clean transfer: no FIFO overrun, no queue drop, pace respected", vn);
         CHECK(r->overruns == 0 && r->queue_drops == 0 && r->min_data_gap_ms >= (int64_t)(v == 0 ? pace : 0), nm);
         snprintf(nm, sizeof(nm), "%s clean transfer: BEGIN sent once", vn);
-        CHECK(r->begins_seen == 1, nm);
+        CHECK(r->begins_seen == 1 && r->begins_restarted == 0 && r->erasing_statuses == 1, nm);
+        free(r);
+
+        // BEGIN while a transfer is active restarts it on BOTH receivers:
+        // re-erase, ranges reset, a fresh ERASING, counted.
+        r = fr_new(v == 0, 50);
+        fr_begin(r);
+        advance(r, 3000);
+        for (uint32_t i = 0; i < 20; i++) {
+            fr_data(r, i);
+            advance(r, 50);
+        }
+        advance(r, 300);
+        CHECK(r->state == RPP_STATE_RECEIVING && r->received == 20, "restart setup: 20 chunks in");
+        fr_begin(r);
+        advance(r, 300);
+        snprintf(nm, sizeof(nm), "%s BEGIN while active: restarts (ranges reset, re-erase, counted)", vn);
+        CHECK(r->begins_restarted == 1 && r->received == 0 && r->state == RPP_STATE_ERASING &&
+                  r->erasing_statuses == 2,
+              nm);
         free(r);
 
         // Dropped chunks, including the tail chunk (missing past the beacon's cursor).
@@ -1340,6 +1387,21 @@ static void test_finish_driver(void)
         snprintf(nm, sizeof(nm), "%s lost VERIFYING+COMPLETE: outcome unknown, no ABORT (%s)", vn,
                  d.why ? d.why : "?");
         CHECK(!d.ok && d.unknown && !d.abort_sent && r->aborts_seen == 0 && r->state == RPP_STATE_COMPLETE, nm);
+        free(r);
+
+        // A stop (operator Abort / browser gone) AFTER END went out: the Pico
+        // may already have committed, so the outcome is UNKNOWN and NO ABORT
+        // is sent (rpp_fin_stop_is_unknown, used by recovery_pico.c).
+        r = fr_new(v == 0, 100);
+        d = drive_transfer_stop(r, pace, true);
+        snprintf(nm, sizeof(nm), "%s stop after END: outcome unknown, no ABORT sent", vn);
+        CHECK(!d.ok && d.unknown && !d.abort_sent && r->aborts_seen == 0 && r->ends_seen >= 1, nm);
+        free(r);
+        // A stop BEFORE END is an ordinary abort and does send ABORT.
+        r = fr_new(v == 0, 100);
+        d = drive_transfer_stop(r, pace, false);
+        snprintf(nm, sizeof(nm), "%s stop before END: plain abort sends ABORT", vn);
+        CHECK(!d.ok && !d.unknown && d.abort_sent && r->aborts_seen == 1 && r->ends_seen == 0, nm);
         free(r);
 
         // Full-size image through the whole flow.
@@ -1585,6 +1647,21 @@ static void test_fin_unit(void)
           "END sends exhausted -> outcome unknown");
 }
 
+static void test_discover_classify(void)
+{
+    rpp_status_t st;
+    memset(&st, 0, sizeof(st));
+    st.state = RPP_STATE_IDLE;
+    CHECK(rpp_status_proves_bootloader(&st), "IDLE status proves a bootloader");
+    st.state = RPP_STATE_RECEIVING;
+    st.total_chunks = 0;
+    CHECK(rpp_status_proves_bootloader(&st), "no transfer (total_chunks 0) proves a bootloader");
+    st.total_chunks = 3436;
+    CHECK(!rpp_status_proves_bootloader(&st), "busy RECEIVING with a transfer is NOT taken for a bootloader");
+    st.state = RPP_STATE_COMPLETE;
+    CHECK(!rpp_status_proves_bootloader(&st), "stale COMPLETE with a transfer is NOT taken for a bootloader");
+}
+
 static void test_pace(void)
 {
     CHECK(rpp_pace_wait_us(1000, 16000) == 15000u, "pace wait remaining");
@@ -1629,6 +1706,7 @@ int main(void)
     test_begin_wait();
     test_fin_unit();
     test_pace();
+    test_discover_classify();
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }

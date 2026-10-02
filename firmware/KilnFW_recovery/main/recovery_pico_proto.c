@@ -497,6 +497,16 @@ void rpp_fin_start(rpp_fin_t *f)
     memset(f, 0, sizeof(*f));
 }
 
+bool rpp_status_proves_bootloader(const rpp_status_t *st)
+{
+    return st->state == RPP_STATE_IDLE || st->total_chunks == 0;
+}
+
+bool rpp_fin_stop_is_unknown(const rpp_fin_t *f, bool pico_terminal)
+{
+    return f->end_sent_once && !pico_terminal;
+}
+
 void rpp_fin_end_sent(rpp_fin_t *f)
 {
     f->end_outstanding = true;
@@ -512,8 +522,9 @@ static rpp_fin_action_t fin_fail(rpp_fin_t *f, const char *why)
 
 // The result was lost after END had (or may have) been accepted: the Pico can
 // be COMPLETE, mid-verify or untouched, and the ESP cannot tell which. Never
-// reported as FAILED and never followed by an ABORT (an ABORT sent to a Pico
-// that just committed the image would revert the target slot). Before any END
+// reported as FAILED and never followed by an ABORT (ABORT cannot revert a
+// committed slot -- it is a no-op once the receiver is inactive -- so sending
+// it would only let the report claim "aborted" for an image that may be live). Before any END
 // was sent there is nothing that could have been accepted, so that case stays
 // an ordinary failure with `fail_why`.
 static rpp_fin_action_t fin_lost(rpp_fin_t *f, const char *fail_why)

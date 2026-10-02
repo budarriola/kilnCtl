@@ -61,6 +61,10 @@ bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operato
                          const char **why);
 // Asks a running transfer to stop (it sends ABORT to the Pico). Safe any time.
 void recovery_pico_abort(void);
+// True while a relay is reserved or running (phase not idle/done/failed/aborted/
+// unknown). Reset and ESP-upload routes refuse (409) during it: they would kill
+// or starve a Pico write in flight.
+bool recovery_pico_busy(void);
 
 // Builds the status JSON (also counts as the client's "still here" poll) into
 // an internal PSRAM buffer and returns it (*len = bytes, excluding the NUL), or

@@ -91,6 +91,9 @@ try {
         @{ Name = "fin_beacon_stall"; Needle = 'return rpp_fin_step(f, RPP_EV_QUIET, NULL, since_end_ms);'; Repl = 'return RPP_FIN_WAIT;' },
         # A lost COMPLETE reported as a plain failure (which makes the relay ABORT).
         @{ Name = "fin_unknown_as_fail"; Needle = 'return RPP_FIN_UNKNOWN;'; Repl = 'return fin_fail(f, "mutant");' },
+        # A stop after END reported as an ordinary abort (which sends ABORT).
+        @{ Name = "fin_stop_after_end_aborts"; Needle = 'return f->end_sent_once && !pico_terminal;'; Repl = 'return 0;' },
+        @{ Name = "discover_any_status_is_boot"; Needle = 'return st->state == RPP_STATE_IDLE || st->total_chunks == 0;'; Repl = 'return 1;' },
         @{ Name = "pace_floor"; Needle = '+ tick_us - 1u'; Repl = '+ 0u' },
         @{ Name = "target_assumed"; Needle = 't.target_slot = RPP_SLOT_UNKNOWN;'; Repl = 't.target_slot = RPP_SLOT_B;' }
     )
@@ -119,7 +122,12 @@ try {
         # The app beaconing IDLE (it never does).
         @{ Name = "fake_app_idles"; Needle = '#define FR_IDLE_ONLY_BOOTLOADER (r->bootloader)'; Repl = '#define FR_IDLE_ONLY_BOOTLOADER (1)' },
         # The bootloader going silent after COMPLETE (it beacons IDLE).
-        @{ Name = "fake_boot_silent"; Needle = '#define FR_IDLE_ONLY_BOOTLOADER (r->bootloader)'; Repl = '#define FR_IDLE_ONLY_BOOTLOADER (0)' }
+        @{ Name = "fake_boot_silent"; Needle = '#define FR_IDLE_ONLY_BOOTLOADER (r->bootloader)'; Repl = '#define FR_IDLE_ONLY_BOOTLOADER (0)' },
+        # The bootloader omitting ERASING (it does send it).
+        @{ Name = "fake_boot_no_erasing"; Needle = 'fr_emit(r, RPP_STATE_ERASING, 0, NULL, 0); // once per BEGIN';
+           Repl = 'if (!r->bootloader) fr_emit(r, RPP_STATE_ERASING, 0, NULL, 0); // once per BEGIN' },
+        # A BEGIN while active ignored (both receivers restart).
+        @{ Name = "fake_begin_ignored_active"; Needle = 'r->begins_restarted++;'; Repl = 'r->begins_restarted++; return;' }
     )
     foreach ($m in $tmutants) {
         $mutant = $tsrc.Replace($m.Needle, $m.Repl)

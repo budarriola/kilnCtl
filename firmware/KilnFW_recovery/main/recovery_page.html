@@ -91,7 +91,7 @@ if(!f)return log("choose a .bin file first");
 $("up").disabled=true;$("pr").value=0;
 signed("/api/ota/esp","esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
 var pt=null,punk=false;
-function pshow(j){punk=j.phase=="outcome_unknown";var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
+function pshow(j){punk=j.phase=="outcome_unknown";var ab=document.getElementById("pab");if(ab)ab.textContent=(j.phase=="finishing"||j.phase=="retransmit")?"Stop (END sent: outcome will be UNKNOWN)":"Abort";var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
 if(j.total_bytes)t+=" "+j.bytes_sent+"/"+j.total_bytes+" bytes";
 if(j.gap_count)t+=", "+j.gap_count+" gaps (round "+j.gap_rounds+")";
 if(j.target_slot!="unknown")t+=", target slot "+j.target_slot+(j.target_source=="operator"?" (TARGET UNVERIFIED: chosen by you)":" ["+j.target_source+"]");
