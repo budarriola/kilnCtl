@@ -136,6 +136,16 @@ class FakeBoard:
         self.origin_builtin = kw.get("origin_builtin", False)
         self.overwrite_shown_wrong = kw.get("overwrite_shown_wrong", False)
         self.decide_truncated = kw.get("decide_truncated", False)
+        # names a TRUNCATED decide-page read silently drops (a real partial walk loses entries)
+        self.decide_truncated_drops = set(kw.get("decide_truncated_drops", ()))
+        self.decide_unreadable = kw.get("decide_unreadable", False)
+        # the first N decide-page reads are flagged truncated (names all present), then clean
+        self.decide_truncated_reads = kw.get("decide_truncated_reads", 0)
+        # confirm dialog read: empty list, or truncated (dropping the named entries)
+        self.confirm_unreadable = kw.get("confirm_unreadable", False)
+        self.confirm_truncated = kw.get("confirm_truncated", False)
+        self.confirm_truncated_drops = set(kw.get("confirm_truncated_drops", ()))
+        self.confirm_tap_unknown = kw.get("confirm_tap_unknown", False)
         self.no_confirm_dialog = kw.get("no_confirm_dialog", False)
         self.lcd_discard_works = kw.get("lcd_discard_works", True)
         self.orig_changed_on_discard = kw.get("orig_changed_on_discard", False)
@@ -224,10 +234,18 @@ class FakeBoard:
 
     def decide_targets(self):
         if self.confirm:
-            return [{"name": n, "cx": 10, "cy": 10, "hidden": False} for n in ("Cancel", "Discard")]
+            names = [n for n in ("Cancel", "Discard")
+                     if not (self.confirm_truncated and n in self.confirm_truncated_drops)]
+            if self.confirm_unreadable:
+                names = []
+            return [{"name": n, "cx": 10, "cy": 10, "hidden": False} for n in names]
         names = ["back", "home", "Discard edit", "Save as new (auto-named)"]
         if (not self.origin_builtin) != self.overwrite_shown_wrong:
             names.append("Overwrite original")
+        if self.decide_unreadable:
+            names = []
+        elif self.decide_truncated:
+            names = [n for n in names if n not in self.decide_truncated_drops]
         return [{"name": n, "cx": 10, "cy": 10, "hidden": False} for n in names]
 
     def targets(self):
@@ -351,7 +369,11 @@ class FakeUi:
         if b.keypad:
             return {"targets": _KEYPAD, "truncated": False}
         if b.page == "live_decide":
-            return {"targets": b.decide_targets(), "truncated": b.decide_truncated}
+            if b.decide_truncated_reads > 0 and not b.confirm:
+                b.decide_truncated_reads -= 1
+                return {"targets": b.decide_targets(), "truncated": True}
+            return {"targets": b.decide_targets(),
+                    "truncated": b.decide_truncated or (b.confirm and b.confirm_truncated)}
         if b.page == "home" and b.keep_owed():
             return {"targets": [{"name": "Keep?", "cx": 240, "cy": 280, "hidden": False}], "truncated": False}
         if b.page == "edit_firing":
@@ -400,7 +422,7 @@ class FakeUi:
                 b.origin = [dict(b.origin[0], target_c=b.origin[0]["target_c"] + 5.0)] + b.origin[1:]
             if b.stray_profile_on_discard:
                 b.profile_ids.append(40)
-            return {"result": "ok"}
+            return {"result": "verdict_unknown" if b.confirm_tap_unknown else "ok"}
         if name in ("home", "back"):
             b.page = "home"
             b.confirm = False
@@ -1095,10 +1117,65 @@ class Lcd25Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         self.assertTrue(result.observed["origin_is_builtin"])
 
-    def test_truncated_page_read_does_not_judge_overwrite(self):
+    def test_truncated_page_read_is_inconclusive_and_taps_nothing(self):
         result, b = run25(overwrite_shown_wrong=True, decide_truncated=True)
-        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
         self.assertTrue(result.observed["page_truncated"])
+        self.assertNotIn("click:Discard edit", b.calls)
+        self.assertTrue(result.observed["cleanup"]["verified"])
+        self.assertEqual(b.calls.count("discard"), 1)  # cleanup only
+
+    def test_truncated_read_that_drops_a_name_is_not_a_missing_button_fail(self):
+        for dropped in ("Discard edit", "Save as new (auto-named)"):
+            result, b = run25(decide_truncated=True, decide_truncated_drops={dropped})
+            self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, (dropped, result.reason))
+            self.assertNotIn("has no", result.reason)
+            self.assertNotIn("click:Discard edit", b.calls)
+            self.assertTrue(result.observed["page_truncated"])
+
+    def test_transient_truncated_page_read_is_repolled_until_clean(self):
+        result, b = run25(decide_truncated_reads=2)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(b.decide_truncated_reads, 0)
+
+    def test_unreadable_page_read_is_inconclusive_and_taps_nothing(self):
+        result, b = run25(decide_unreadable=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertTrue(result.observed["page_unreadable"])
+        self.assertNotIn("click:Discard edit", b.calls)
+        self.assertNotIn("raised no confirm dialog", result.reason)
+        self.assertTrue(result.observed["cleanup"]["verified"])
+
+    def test_unreadable_confirm_dialog_is_inconclusive_and_never_taps_discard(self):
+        result, b = run25(confirm_unreadable=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertTrue(result.observed["confirm_unreadable"])
+        self.assertNotIn("click:Discard", b.calls)
+        self.assertNotIn("click:Cancel", b.calls)  # nothing readable to dismiss with
+        self.assertIn("no 'Cancel' was readable", result.reason)
+
+    def test_truncated_confirm_dialog_is_cancelled_never_discarded(self):
+        result, b = run25(confirm_truncated=True, confirm_truncated_drops={"Discard"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertNotIn("click:Discard", b.calls)
+        self.assertIn("click:Cancel", b.calls)
+        self.assertFalse(b.confirm)
+        self.assertEqual(result.observed["confirm_cancel_click"], "ok")
+
+    def test_truncated_confirm_dialog_without_cancel_taps_nothing(self):
+        result, b = run25(confirm_truncated=True, confirm_truncated_drops={"Cancel", "Discard"})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertNotIn("click:Discard", b.calls)
+        self.assertNotIn("click:Cancel", b.calls)
+
+    def test_confirm_tap_verdict_unknown_with_working_copy_left_is_inconclusive(self):
+        result, b = run25(confirm_tap_unknown=True, lcd_discard_works=False)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("confirm tap outcome unknown", result.reason)
+
+    def test_confirm_tap_verdict_unknown_that_cleared_the_copy_passes(self):
+        result, b = run25(confirm_tap_unknown=True)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
     def test_confirm_dialog_never_appearing_is_fail_and_cleanup_discards_over_http(self):
         result, b = run25(no_confirm_dialog=True)
@@ -1180,10 +1257,7 @@ class KeepDiscardJudgeTest(unittest.TestCase):
         self.assertEqual(self._j(origin_is_builtin=True).verdict, Verdict.FAIL)
         self.assertEqual(self._j(origin_is_builtin=True, page_names=self.NAMES - {"Overwrite original"}).verdict,
                          Verdict.PASS)
-        self.assertEqual(self._j(page_truncated=True, page_names=self.NAMES - {"Overwrite original"}).verdict,
-                         Verdict.PASS)
         self.assertEqual(self._j(confirm_seen=False).verdict, Verdict.FAIL)
-        self.assertEqual(self._j(confirm_seen=None).verdict, Verdict.FAIL)
         self.assertEqual(self._j(status_after=dict(self.DONE, working_id=9)).verdict, Verdict.FAIL)
         self.assertEqual(self._j(status_after=dict(self.DONE, pending_decision=True)).verdict, Verdict.FAIL)
         self.assertEqual(self._j(orig_unchanged=False).verdict, Verdict.FAIL)
@@ -1194,10 +1268,49 @@ class KeepDiscardJudgeTest(unittest.TestCase):
 
     def test_inconclusive_when_facts_are_missing(self):
         self.assertEqual(self._j(origin_is_builtin=None).verdict, Verdict.INCONCLUSIVE)
+        # ... but a problem already collected is never discarded by the unknown origin
+        self.assertEqual(self._j(origin_is_builtin=None, orig_unchanged=False).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(origin_is_builtin=None, confirm_seen=False).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(origin_is_builtin=None, page_names=self.NAMES - {"Discard edit"}).verdict,
+                         Verdict.FAIL)
         self.assertEqual(self._j(status_after=None).verdict, Verdict.INCONCLUSIVE)
         self.assertEqual(self._j(orig_unchanged=None).verdict, Verdict.INCONCLUSIVE)
         self.assertEqual(self._j(heap_internal_min_free=None).verdict, Verdict.INCONCLUSIVE)
         self.assertEqual(self._j(status_after=None, confirm_seen=False).verdict, Verdict.FAIL)
+
+
+class KeepDiscardJudgeUnreadableTest(unittest.TestCase):
+    """Unreadable / truncated page reads and an untapped Discard edit never read as a
+    missing button or a missing confirm dialog."""
+    _j = KeepDiscardJudgeTest._j
+    NAMES = KeepDiscardJudgeTest.NAMES
+    DONE = KeepDiscardJudgeTest.DONE
+
+    def test_unreadable_page_is_inconclusive_not_missing_buttons(self):
+        r = self._j(page_names=None, confirm_seen=None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE, r.reason)
+        self.assertNotIn("has no", r.reason)
+        self.assertNotIn("raised no confirm dialog", r.reason)
+        self.assertIsNone(r.observed["page_names"])
+
+    def test_truncated_page_dropping_a_name_is_inconclusive(self):
+        for dropped in ("Discard edit", "Save as new (auto-named)", "Overwrite original"):
+            r = self._j(page_truncated=True, page_names=self.NAMES - {dropped}, confirm_seen=None)
+            self.assertEqual(r.verdict, Verdict.INCONCLUSIVE, (dropped, r.reason))
+            self.assertNotIn("has no", r.reason)
+
+    def test_truncated_page_with_everything_visible_still_not_a_pass(self):
+        self.assertEqual(self._j(page_truncated=True).verdict, Verdict.INCONCLUSIVE)
+
+    def test_untapped_discard_edit_is_not_a_no_dialog_fail(self):
+        r = self._j(confirm_seen=None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE, r.reason)
+        self.assertNotIn("raised no confirm dialog", r.reason)
+
+    def test_unreadable_page_still_fails_on_real_problems(self):
+        r = self._j(page_names=None, confirm_seen=None, orig_unchanged=False)
+        self.assertEqual(r.verdict, Verdict.FAIL, r.reason)
+        self.assertNotIn("has no", r.reason)
 
 
 class PlanCountTest(unittest.TestCase):

@@ -3177,22 +3177,32 @@ def judge_lcd_keep_discard(origin_is_builtin: "bool | None", page_names: "set | 
                 "page_truncated": page_truncated, "confirm_seen": confirm_seen,
                 "status_after": status_after, "orig_unchanged": orig_unchanged,
                 "stray_profile_ids": stray_profile_ids}
-    names = page_names or set()
     problems = []
-    if not any(n == "Discard edit" for n in names):
-        problems.append("the decide page has no 'Discard edit' button")
-    if not any(str(n).startswith("Save as new") for n in names):
-        problems.append("the decide page has no 'Save as new' button")
+    unknowns = []
+    # Names are judged for ABSENCE only on a non-truncated, non-None read: an unreadable
+    # or partial list proves nothing about a button being missing.
+    page_readable = page_names is not None and not page_truncated
+    names = page_names if page_names is not None else set()
+    if page_readable:
+        if not any(n == "Discard edit" for n in names):
+            problems.append("the decide page has no 'Discard edit' button")
+        if not any(str(n).startswith("Save as new") for n in names):
+            problems.append("the decide page has no 'Save as new' button")
+    else:
+        unknowns.append("the decide page's tap targets were " + (
+            "unreadable" if page_names is None else "truncated") + ", so button presence was not judged")
     if origin_is_builtin is None:
-        return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
-                          reason="live status did not report origin_is_builtin")
-    if not page_truncated:
+        unknowns.append("live status did not report origin_is_builtin")
+    elif page_readable:
         has_overwrite = "Overwrite original" in names
         if has_overwrite == bool(origin_is_builtin):
             problems.append("'Overwrite original' is " + ("offered" if has_overwrite else "missing")
                             + f" but the origin is {'a built-in' if origin_is_builtin else 'a user profile'}")
-    if confirm_seen is not True:
+    if confirm_seen is False:
         problems.append("tapping 'Discard edit' raised no confirm dialog")
+    elif confirm_seen is None:
+        # Discard edit was never tapped (page lacked it, or the read was unusable).
+        unknowns.append("'Discard edit' was never tapped, so the confirm dialog was not exercised")
     if status_after is None:
         if problems:
             return CaseResult(Verdict.FAIL, observed=observed, reason="; ".join(problems))
@@ -3212,6 +3222,8 @@ def judge_lcd_keep_discard(origin_is_builtin: "bool | None", page_names: "set | 
                         f"{LCD_KEEP_MIN_FREE_INTERNAL_B} B floor after using the decide page")
     if problems:
         return CaseResult(Verdict.FAIL, observed=observed, reason="; ".join(problems))
+    if unknowns:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason="; ".join(unknowns))
     if orig_unchanged is None:
         return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
                           reason="could not re-read the original profile to confirm it is unchanged")

@@ -5231,16 +5231,20 @@ def _lcd25_names(ui) -> "tuple[Optional[set], bool]":
     if not tap or tap.get("busy"):
         return None, False
     names = {t.get("name") for t in tap.get("targets", []) if t.get("name") and not t.get("hidden")}
+    if not names:
+        return None, bool(tap.get("truncated"))
     return names, bool(tap.get("truncated"))
 
 
 def _lcd25_wait_names(env: dict, pred, timeout_s: float) -> "tuple[Optional[set], bool]":
-    """Poll until pred(names) holds; returns the last read either way."""
+    """Poll until pred(names) holds on a NON-truncated read; returns the last read
+    either way (names None = unreadable, trunc True = a partial list that must never
+    be judged for absence)."""
     now, sleep = env["now"], env["sleep"]
     deadline = now() + timeout_s
     while True:
         names, trunc = _lcd25_names(env["ui"])
-        if names is not None and pred(names):
+        if names is not None and not trunc and pred(names):
             return names, trunc
         if now() >= deadline:
             return names, trunc
@@ -5365,22 +5369,47 @@ def _lcd25_body(env: dict) -> CaseResult:
     if fail is not None:
         return fail
 
-    names, trunc = _lcd25_wait_names(env, lambda n: "Discard edit" in n, _LCD25_NAMES_WAIT_S)
+    names, trunc = _lcd25_wait_names(
+        env, lambda n: "Discard edit" in n and any(str(x).startswith("Save as new") for x in n),
+        _LCD25_NAMES_WAIT_S)
     observed["page_truncated"] = trunc
+    observed["page_unreadable"] = names is None
+    if names is None or trunc:
+        # Unreadable or partial: a missing name could just be a dropped one, so judge
+        # nothing and tap nothing (the wrapper's cleanup discards the working copy).
+        return _lcd25_inconclusive(env, (
+            "the decide page's tap targets could not be read" if names is None else
+            "the decide page's tap-target list was truncated before 'Discard edit' and 'Save as new' "
+            "were both visible") + "; nothing was tapped")
     confirm_seen: "Optional[bool]" = None
-    if names is not None and "Discard edit" in names:
+    confirm_unknown = False
+    if "Discard edit" in names:
         click = ui.click_by_name("Discard edit")
         observed["discard_click"] = click.get("result")
         if click.get("result") not in ("ok", "verdict_unknown"):
             return _lcd25_inconclusive(env, f"click_by_name('Discard edit') returned {click.get('result')!r}")
-        cnames, _ = _lcd25_wait_names(env, lambda n: "Discard" in n and "Cancel" in n, _LCD25_NAMES_WAIT_S)
-        confirm_seen = bool(cnames and "Discard" in cnames and "Cancel" in cnames)
+        cnames, ctrunc = _lcd25_wait_names(env, lambda n: "Discard" in n and "Cancel" in n, _LCD25_NAMES_WAIT_S)
+        observed["confirm_truncated"] = ctrunc
+        observed["confirm_unreadable"] = cnames is None
+        if cnames is None or ctrunc:
+            # Dialog state unknown: never tap Discard on it. Cancel it if (and only
+            # if) Cancel is readable, so no dialog is left open.
+            can_cancel = cnames is not None and "Cancel" in cnames
+            if can_cancel:
+                cancel = ui.click_by_name("Cancel")
+                observed["confirm_cancel_click"] = cancel.get("result")
+            return _lcd25_inconclusive(env, (
+                "the confirm dialog's tap targets could not be read" if cnames is None else
+                "the confirm dialog's tap-target list was truncated") + "; 'Discard' was not tapped"
+                + ("" if can_cancel else " and no 'Cancel' was readable to dismiss it"))
+        confirm_seen = "Discard" in cnames and "Cancel" in cnames
         if confirm_seen:
             confirm = ui.click_by_name("Discard")
             observed["confirm_click"] = confirm.get("result")
             if confirm.get("result") not in ("ok", "verdict_unknown"):
                 return _lcd25_inconclusive(env, f"click_by_name('Discard') returned {confirm.get('result')!r}",
                                            dismiss=True)
+            confirm_unknown = confirm.get("result") == "verdict_unknown"
     status_after = None
     deadline = now() + _LCD25_CLEAR_WAIT_S
     while True:
@@ -5393,6 +5422,10 @@ def _lcd25_body(env: dict) -> CaseResult:
         if confirm_seen is not True or now() >= deadline:
             break
         sleep(0.5)
+    if confirm_unknown and status_after is not None and (
+            J._lcd_edit_wid(status_after) >= 0 or status_after.get("pending_decision")):
+        return _lcd25_inconclusive(env, "confirm tap outcome unknown (click_by_name('Discard') returned "
+                                        "'verdict_unknown') and the working copy remains")
     try:
         detail = srv._profiles.get(slot)
         segs = None if detail is None else _lcd25_segs(detail)
