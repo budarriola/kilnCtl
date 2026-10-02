@@ -1633,8 +1633,9 @@ def flash_recovery(
     K4), and without this flag a broken Pico would block recovery forever. The
     interlock short-circuits at link-down, so its heater-commanded and
     over-temperature checks are NOT run; in this mode the tool instead reads
-    autotune idle, expander relays off, K4 off and no latched trip whether or
-    not ARMED, keeps the profile-idle check a hazard, and says so in the
+    autotune idle and expander relays off live, and checks K4 off and no
+    latched trip against the CACHED Pico status/diag (last values before the
+    link dropped, not live; age unknown), whether or not ARMED, keeps the profile-idle check a hazard, and says so in the
     result. It never waives a running profile, an energized relay, or any
     other interlock refusal.
 

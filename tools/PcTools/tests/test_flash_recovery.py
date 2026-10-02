@@ -334,6 +334,8 @@ class LinkDownWaiverTest(unittest.TestCase):
         self.assertEqual(len(calls), 1)  # armed-latch conditions read although not ARMED
         self.assertIn("heater-commanded", notes[0])
         self.assertIn("over-temperature", notes[0])
+        self.assertIn("CACHED", notes[0])
+        self.assertIn("not live", notes[0])
 
     def test_does_not_waive_running_profile(self):
         h, _, _, _ = self._go(self._pf(profile_running_or_paused=True, profile_state_name="running"))

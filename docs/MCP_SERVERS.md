@@ -546,8 +546,9 @@ one acknowledgeable refusal; it short-circuits the interlock's later checks).
 With the link down heat is already cut (a live Pico trips S6b and drops K4; a
 dead one cannot drive K4) and a broken Pico would otherwise block recovery
 forever. Because the interlock skipped its heater-commanded and over-temperature
-checks, in this mode the tool reads autotune idle, expander relays off, K4 off
-and no latched trip whether or not ARMED, keeps the UART profile-idle check a
+checks, in this mode the tool reads autotune idle and expander relays off live,
+and checks K4 off and no latched trip against the CACHED Pico status/diag (last
+values before the link dropped, not live; age unknown), whether or not ARMED, keeps the UART profile-idle check a
 hazard, and says in the result that heater-commanded/over-temperature were not
 checked. It never waives a running profile, an energized relay or any other
 interlock refusal.

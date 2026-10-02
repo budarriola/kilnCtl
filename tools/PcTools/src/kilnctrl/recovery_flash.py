@@ -258,8 +258,10 @@ _UNREADABLE_MARKERS = ("could not be read", "could not be confirmed", "no diag r
 LINK_DOWN_INTERLOCK_REASON = "safety link is down"
 LINK_DOWN_NOTE = (
     "allow_link_down=True: the safety link was down; the OTA interlock short-circuits at "
-    "link-down, so its heater-commanded and over-temperature checks were NOT run. Compensating "
-    "reads that were made: profile idle, autotune idle, expander relays off, K4 off, no latched trip."
+    "link-down, so its heater-commanded and over-temperature checks were NOT run. Live reads "
+    "made instead: profile idle, autotune idle, expander relays off. K4 off and no latched trip "
+    "are CACHED values, the last Pico status/diag the ESP received before the link dropped "
+    "(age unknown), not live reads."
 )
 
 
