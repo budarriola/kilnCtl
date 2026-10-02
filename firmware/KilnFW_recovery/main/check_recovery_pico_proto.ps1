@@ -39,11 +39,11 @@ if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 New-Item -ItemType Directory -Path $work | Out-Null
 
 function Build-And-Run {
-    param([string]$ImplC, [string]$Tag)
+    param([string]$ImplC, [string]$Tag, [string]$TestC = "")
     $exe = Join-Path $work "t_$Tag.exe"
     $obj = Join-Path $work $Tag
     New-Item -ItemType Directory -Path $obj -Force | Out-Null
-    $test = Join-Path $here "test_recovery_pico_proto.c"
+    $test = if ($TestC) { $TestC } else { Join-Path $here "test_recovery_pico_proto.c" }
     $crc = Join-Path $common "src\kilnlink_crc.c"
     $frm = Join-Path $common "src\kilnlink_frame.c"
     $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$common\include`" `"$test`" `"$ImplC`" `"$crc`" `"$frm`" /Fe:`"$exe`" /Fo:`"$obj\\`""
@@ -89,6 +89,8 @@ try {
         @{ Name = "begin_resend_early"; Needle = 'b->idle_beacons >= RPP_BEGIN_IDLE_BEACONS &&'; Repl = 'b->idle_beacons >= 2u &&' },
         @{ Name = "begin_erasing_ignored"; Needle = 'if (st->state == RPP_STATE_ERASING) {'; Repl = 'if (0) {' },
         @{ Name = "fin_beacon_stall"; Needle = 'return rpp_fin_step(f, RPP_EV_QUIET, NULL, since_end_ms);'; Repl = 'return RPP_FIN_WAIT;' },
+        # A lost COMPLETE reported as a plain failure (which makes the relay ABORT).
+        @{ Name = "fin_unknown_as_fail"; Needle = 'return RPP_FIN_UNKNOWN;'; Repl = 'return fin_fail(f, "mutant");' },
         @{ Name = "pace_floor"; Needle = '+ tick_us - 1u'; Repl = '+ 0u' },
         @{ Name = "target_assumed"; Needle = 't.target_slot = RPP_SLOT_UNKNOWN;'; Repl = 't.target_slot = RPP_SLOT_B;' }
     )
@@ -104,7 +106,34 @@ try {
             throw "NEGATIVE TEST FAILED: the $($m.Name) mutant still passed -- the host test is vacuous there."
         }
     }
-    Write-Host "check_recovery_pico_proto: PASS ($passCount assertions; $($mutants.Count) negative-test mutants failed as required)"
+    # Mutants of the TEST's fake receiver: each reintroduces a behaviour the
+    # receivers do not have (or removes one they do), and the same assertions
+    # must catch it, else the fake is not what pins the relay to the real thing.
+    $tsrc = Get-Content (Join-Path $here "test_recovery_pico_proto.c") -Raw
+    $tmutants = @(
+        # Early END answered with the gap list (the old, wrong model).
+        @{ Name = "fake_end_lists_gaps"; Needle = 'fr_emit(r, RPP_STATE_RECEIVING, 0, NULL, 0); // early-END reply';
+           Repl = '{ uint16_t g_[RPP_STATUS_MAX_GAPS]; uint32_t n_ = fr_find_gaps(r, 0, g_, RPP_STATUS_MAX_GAPS); fr_emit(r, RPP_STATE_RECEIVING, 0, g_, n_); }' },
+        # The app's 4-deep, once-per-wake queue dropped from the model.
+        @{ Name = "fake_no_app_queue"; Needle = '#ifndef FR_NO_APP_QUEUE'; Repl = '#if 0' },
+        # The app beaconing IDLE (it never does).
+        @{ Name = "fake_app_idles"; Needle = '#define FR_IDLE_ONLY_BOOTLOADER (r->bootloader)'; Repl = '#define FR_IDLE_ONLY_BOOTLOADER (1)' },
+        # The bootloader going silent after COMPLETE (it beacons IDLE).
+        @{ Name = "fake_boot_silent"; Needle = '#define FR_IDLE_ONLY_BOOTLOADER (r->bootloader)'; Repl = '#define FR_IDLE_ONLY_BOOTLOADER (0)' }
+    )
+    foreach ($m in $tmutants) {
+        $mutant = $tsrc.Replace($m.Needle, $m.Repl)
+        if ($mutant -eq $tsrc) {
+            throw "negative test: could not find '$($m.Needle)' in test_recovery_pico_proto.c to mutate -- update this check."
+        }
+        $mpath = Join-Path $work "tmutant_$($m.Name).c"
+        Set-Content -Path $mpath -Value $mutant -Encoding ascii
+        $bad = Build-And-Run -ImplC $impl -Tag $m.Name -TestC $mpath
+        if ($bad.Exit -eq 0) {
+            throw "NEGATIVE TEST FAILED: the $($m.Name) test-source mutant still passed -- the fake receiver is not pinned."
+        }
+    }
+    Write-Host "check_recovery_pico_proto: PASS ($passCount assertions; $($mutants.Count) impl + $($tmutants.Count) fake-receiver negative-test mutants failed as required)"
     exit 0
 }
 finally {

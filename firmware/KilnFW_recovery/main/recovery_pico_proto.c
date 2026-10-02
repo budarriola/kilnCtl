@@ -457,6 +457,11 @@ void rpp_begin_start(rpp_begin_t *b, int64_t now_ms)
     b->first_send_ms = now_ms;
 }
 
+uint32_t rpp_data_pace_ms(bool bootloader)
+{
+    return bootloader ? RPP_DATA_PACE_MS : RPP_DATA_PACE_APP_MS;
+}
+
 rpp_begin_action_t rpp_begin_step(rpp_begin_t *b, const rpp_status_t *st, int64_t now_ms)
 {
     if (st) {
@@ -495,6 +500,7 @@ void rpp_fin_start(rpp_fin_t *f)
 void rpp_fin_end_sent(rpp_fin_t *f)
 {
     f->end_outstanding = true;
+    f->end_sent_once = true;
     f->end_sends++;
 }
 
@@ -504,20 +510,39 @@ static rpp_fin_action_t fin_fail(rpp_fin_t *f, const char *why)
     return RPP_FIN_FAIL;
 }
 
+// The result was lost after END had (or may have) been accepted: the Pico can
+// be COMPLETE, mid-verify or untouched, and the ESP cannot tell which. Never
+// reported as FAILED and never followed by an ABORT (an ABORT sent to a Pico
+// that just committed the image would revert the target slot). Before any END
+// was sent there is nothing that could have been accepted, so that case stays
+// an ordinary failure with `fail_why`.
+static rpp_fin_action_t fin_lost(rpp_fin_t *f, const char *fail_why)
+{
+    if (!f->end_sent_once) {
+        return fin_fail(f, fail_why);
+    }
+    f->why = f->verifying_seen
+                 ? "outcome unknown: the Pico reported verifying but its final result was lost - "
+                   "power-cycle and check the Pico version; do NOT retry blindly"
+                 : "outcome unknown: the Pico stopped answering after END - power-cycle and check "
+                   "the Pico version; do NOT retry blindly";
+    return RPP_FIN_UNKNOWN;
+}
+
 rpp_fin_action_t rpp_fin_step(rpp_fin_t *f, rpp_fin_event_t ev, const rpp_status_t *st,
                               uint32_t since_end_ms)
 {
     if (ev == RPP_EV_QUIET || !st) {
         if (!f->end_outstanding) {
             // Receivers go silent once every chunk is in: silence means "send END".
-            return f->end_sends >= RPP_MAX_END_SENDS ? fin_fail(f, "Pico stopped answering")
+            return f->end_sends >= RPP_MAX_END_SENDS ? fin_lost(f, "Pico stopped answering")
                                                      : RPP_FIN_SEND_END;
         }
         if (since_end_ms < RPP_END_REPLY_TIMEOUT_MS) {
             return RPP_FIN_WAIT;
         }
         if (f->end_sends >= RPP_MAX_END_SENDS) {
-            return fin_fail(f, "Pico did not answer END");
+            return fin_lost(f, "Pico did not answer END");
         }
         return RPP_FIN_SEND_END;
     }
@@ -531,8 +556,13 @@ rpp_fin_action_t rpp_fin_step(rpp_fin_t *f, rpp_fin_event_t ev, const rpp_status
     case RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP:
         return fin_fail(f, "Pico ended the update");
     case RPP_STATE_IDLE:
-        return fin_fail(f, "Pico left the transfer (reset?)");
+        // After END an IDLE beacon is ambiguous: the bootloader beacons IDLE
+        // every second once its transfer ended, COMPLETE included
+        // (recovery_update.c:435-437), so a dropped COMPLETE looks exactly
+        // like a reset Pico.
+        return fin_lost(f, "Pico left the transfer (reset?)");
     case RPP_STATE_VERIFYING:
+        f->verifying_seen = true;
         f->restart_timer = true;
         f->end_outstanding = true;
         f->end_sends = 0;

@@ -67,7 +67,7 @@ board (bench risks in W5). Code: `main/recovery_pico.c` (relay task),
 `components/kilnlink` (links CommonFW framing), routes `/api/recovery/pico/{upload,status,abort}`
 (contexts `pico-upload`, `pico-abort`). Deviations and facts: the whole image is buffered
 and CRC-checked in PSRAM BEFORE the relay starts (202 returned, then status polled), not
-streamed live; DATA pace is `RPP_DATA_PACE_MS` (15 ms, tune on the bench); no REBOOT 0x29
+streamed live; DATA pace is `RPP_DATA_PACE_MS` (15 ms, bootloader) or `RPP_DATA_PACE_APP_MS` (40 ms, application: 4-deep queue drained per 100 ms wake); a lost COMPLETE after END is reported as outcome unknown (no ABORT); no REBOOT 0x29
 offer (the bootloader ignores it; the page says power-cycle); no CLEAR_TRIP; a missing
 status poll for 90 s aborts the relay. Target slot: Frame A active slot gives the opposite
 slot ("pico-app", read after sending ANNOUNCE_VERSION protocol 16); else the operator's slot

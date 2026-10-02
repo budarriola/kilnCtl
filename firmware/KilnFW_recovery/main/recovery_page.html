@@ -90,8 +90,8 @@ function upload(){var f=$("f").files[0];
 if(!f)return log("choose a .bin file first");
 $("up").disabled=true;$("pr").value=0;
 signed("/api/ota/esp","esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
-var pt=null;
-function pshow(j){var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
+var pt=null,punk=false;
+function pshow(j){punk=j.phase=="outcome_unknown";var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
 if(j.total_bytes)t+=" "+j.bytes_sent+"/"+j.total_bytes+" bytes";
 if(j.gap_count)t+=", "+j.gap_count+" gaps (round "+j.gap_rounds+")";
 if(j.target_slot!="unknown")t+=", target slot "+j.target_slot+(j.target_source=="operator"?" (TARGET UNVERIFIED: chosen by you)":" ["+j.target_source+"]");
@@ -100,7 +100,8 @@ if(j.total_bytes)$("ppr").value=100*j.bytes_sent/j.total_bytes;
 var w=[];if(j.refusal)w.push("Refused: "+j.refusal+".");
 if(j.error&&j.error!=j.refusal)w.push(j.error+".");
 if(j.message)w.push(j.message);
-if(j.power_cycle&&j.phase!="done")w.push("Power-cycle the board before retrying (recovery cannot clear a safety trip).");
+if(punk)w.push("OUTCOME UNKNOWN: the Pico may or may not have taken the new image. Power-cycle the board and check the Pico version BEFORE doing anything else. Do NOT retry blindly.");
+else if(j.power_cycle&&j.phase!="done")w.push("Power-cycle the board before retrying (recovery cannot clear a safety trip).");
 $("pwarn").textContent=w.join(" ")}
 function ppoll(){if(pt)clearTimeout(pt);pt=null;
 xhr("GET","/api/recovery/pico/status").then(function(r){var j=JSON.parse(r.t);pshow(j);
@@ -108,6 +109,7 @@ if(j.busy){pt=setTimeout(ppoll,1000)}else{$("pup").disabled=false}},
 function(e){$("pst").textContent=e.message;pt=setTimeout(ppoll,2000)})}
 function picoUpload(){var f=$("pf").files[0];
 if(!f)return log("choose a Pico .bin file first");
+if(punk&&!confirm("The last Pico transfer's outcome is UNKNOWN. Power-cycle the board and check the Pico version first. Retry anyway?"))return;
 $("pup").disabled=true;$("ppr").value=0;$("pwarn").textContent="";
 f.arrayBuffer().then(function(ab){var b=new Uint8Array(ab);
 var c=("0000000"+crc32(b).toString(16)).slice(-8);

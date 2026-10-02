@@ -36,6 +36,10 @@ typedef enum {
     RECOVERY_PICO_DONE,
     RECOVERY_PICO_FAILED,
     RECOVERY_PICO_ABORTED,
+    // END was sent and the Pico's final result never arrived. Neither success
+    // nor failure, and no ABORT is sent: the operator must power-cycle and check
+    // the Pico's version, and must NOT retry blindly.
+    RECOVERY_PICO_UNKNOWN,
 } recovery_pico_phase_t;
 
 const char *recovery_pico_phase_name(recovery_pico_phase_t p);
@@ -60,8 +64,10 @@ void recovery_pico_abort(void);
 
 // Builds the status JSON (also counts as the client's "still here" poll) into
 // an internal PSRAM buffer and returns it (*len = bytes, excluding the NUL), or
-// NULL if it cannot be built. The pointer is valid until the next call; only
-// the httpd task calls this, so the caller needs no buffer of its own.
+// NULL if it cannot be built. The pointer is valid until the next call.
+// SINGLE READER: only the httpd task may call this (the recovery server runs one
+// httpd task and the buffer is consumed before the handler returns); a second
+// concurrent caller would overwrite the shared buffer mid-send.
 const char *recovery_pico_status_json(int *len);
 
 #ifdef __cplusplus

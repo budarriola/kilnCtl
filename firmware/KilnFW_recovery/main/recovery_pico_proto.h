@@ -78,11 +78,25 @@ typedef enum {
 // --- timing ---------------------------------------------------------------
 // The bootloader receiver polls a 32-byte UART FIFO and programs flash with
 // interrupts off, so a DATA frame arriving while it programs the previous one
-// overruns the FIFO. One ~260 B frame is ~11.3 ms on the wire at 230400 baud
-// (10 bits/byte); the flash page program adds a few ms on top, so DATA frames
-// are started this far apart. Tune from the bench; the gap-retransmit rounds
-// absorb the occasional loss either way.
+// overruns the FIFO (SaftyFW bootloader/recovery_update.c). One ~260 B frame is
+// ~11.3 ms on the wire at 230400 baud (10 bits/byte); the flash page program
+// adds a few ms on top, so DATA frames are started this far apart. Tune from
+// the bench; the gap-retransmit rounds absorb the occasional loss either way.
 #define RPP_DATA_PACE_MS 15u
+// The APPLICATION receiver has no FIFO problem but a different one: link_task
+// hands every UPDATE_* frame to update_task through a 4-deep queue
+// (UPDATE_TASK_QUEUE_DEPTH) that is drained once per wake, and a wake is
+// UPDATE_TASK_POLL_MS = 100 ms plus whatever the drained frames cost (a flash
+// page program each, a few ms; update_task.c:131-134, 1683-1697). A frame that
+// finds the queue full is silently dropped (update_task.c:1610-1622). With N
+// frames at spacing `pace` the most that can land inside one wake window of
+// length L is floor(L / pace) + 1, which stays <= 4 only while L < 4 * pace.
+// Taking L up to ~130 ms (100 ms poll + a worst-case drain of four flash
+// writes) needs pace > 32.5 ms; 40 ms covers L up to 159 ms, a ~20% margin
+// over that bound, and costs 137 s for a full 3436-chunk image.
+#define RPP_DATA_PACE_APP_MS 40u
+// Pace for the connected receiver (bootloader or application).
+uint32_t rpp_data_pace_ms(bool bootloader);
 // Discovery: give up (and report "not responding") after this long.
 #define RPP_DISCOVER_TIMEOUT_MS 12000u
 #define RPP_DISCOVER_PROBE_MS 700u
@@ -253,6 +267,12 @@ void rpp_describe_state(uint8_t state, uint8_t err, char *out, size_t cap);
 // BEGIN is resent only when the Pico demonstrably never saw it: several IDLE
 // beacons AND a minimum time since the last send. A slow erase is silent (not
 // IDLE), so it is never restarted.
+//
+// Only the BOOTLOADER beacons IDLE while no transfer is active
+// (recovery_update.c:435-437). The application sends no IDLE beacons at all
+// (update_task.c:1279 returns while no transfer is active), so for it a lost
+// BEGIN can never be detected and is NEVER resent: the wait just runs to
+// RPP_ERASE_TIMEOUT_MS and fails closed (RPP_BEGIN_FAIL).
 #define RPP_BEGIN_IDLE_BEACONS 4u
 #define RPP_BEGIN_RESEND_MIN_MS 5000u
 #define RPP_BEGIN_MAX_SENDS 3u
@@ -295,6 +315,12 @@ typedef enum {
     RPP_FIN_RETRANSMIT = 2, // resend the status's gap chunks, then send END
     RPP_FIN_DONE = 3,       // COMPLETE
     RPP_FIN_FAIL = 4,       // give up; f->why says why
+    // The Pico may or may not have finished: END was sent (or VERIFYING seen)
+    // and the final result never arrived (lost COMPLETE/FAILED, IDLE beacon,
+    // silence, ENDs ignored). NOT a failure and NOT retryable blindly: the
+    // caller must send no ABORT and tell the operator to power-cycle and check
+    // the Pico's version. f->why carries the text.
+    RPP_FIN_UNKNOWN = 5,
 } rpp_fin_action_t;
 
 #define RPP_MAX_END_SENDS 3u
@@ -306,6 +332,8 @@ typedef struct {
     uint32_t end_sends;   // unanswered END sends since the last progress
     bool end_outstanding; // an END was sent and has not been answered yet
     bool restart_timer;   // caller: restart the END reply timer, then clear this
+    bool end_sent_once;   // an END has been sent at some point (it may have been accepted)
+    bool verifying_seen;  // the Pico reported VERIFYING (END was certainly accepted)
     const char *why;      // static text, set with RPP_FIN_FAIL
 } rpp_fin_t;
 

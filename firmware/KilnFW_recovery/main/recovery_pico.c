@@ -5,7 +5,10 @@
 // wire-compatible with the application receiver, ota_pico_relay.c in KilnFW):
 //  - The bootloader beacons UPDATE_STATUS about once a second, polls a 32-byte
 //    UART FIFO and programs flash with interrupts off, so DATA frames are
-//    paced (RPP_DATA_PACE_MS) rather than streamed back to back.
+//    paced (RPP_DATA_PACE_MS) rather than streamed back to back. The
+//    application receiver instead has a 4-deep queue drained every ~100 ms
+//    that drops frames when full, so it gets the slower RPP_DATA_PACE_APP_MS
+//    (rpp_data_pace_ms() picks by the mode discover() saw).
 //  - BEGIN erases the whole target slot synchronously; the bootloader may be
 //    silent for tens of seconds, so waits for RECEIVING allow RPP_ERASE_TIMEOUT_MS.
 //  - It has no timeout of its own and does not reboot itself after COMPLETE.
@@ -111,6 +114,7 @@ const char *recovery_pico_phase_name(recovery_pico_phase_t p)
     case RECOVERY_PICO_DONE: return "done";
     case RECOVERY_PICO_FAILED: return "failed";
     case RECOVERY_PICO_ABORTED: return "aborted";
+    case RECOVERY_PICO_UNKNOWN: return "outcome_unknown";
     }
     return "?";
 }
@@ -248,6 +252,7 @@ typedef struct {
     bool armed;      // BEGIN has been sent: terminal states are now ours
     bool fatal;      // a terminal Pico state arrived; text already published
     bool stop_text;  // abort/client-gone text already published
+    bool unknown;    // END was sent and the outcome was lost: no ABORT, operator must check
     int64_t next_send_us;
     uint32_t chunks;
 } relay_t;
@@ -419,7 +424,8 @@ static bool send_chunk_paced(relay_t *r, uint32_t index)
         n = RPP_CHUNK_LEN;
     }
     size_t pl = rpp_pack_data(r->payload, offset, s_buf + offset, n);
-    r->next_send_us = esp_timer_get_time() + (int64_t)RPP_DATA_PACE_MS * 1000;
+    r->next_send_us =
+        esp_timer_get_time() + (int64_t)rpp_data_pace_ms(!r->app_seen) * 1000;
     if (pl == 0 || !send_payload(r, pl)) {
         set_text(s_error, sizeof(s_error), "could not write to the Pico UART");
         r->fatal = true;
@@ -650,6 +656,20 @@ static bool finish_transfer(relay_t *r)
             fail(r, f.why ? f.why : "Pico did not confirm completion");
             return false;
         }
+        if (act == RPP_FIN_UNKNOWN) {
+            // END was sent and its result never arrived: the Pico may have
+            // committed the image. Never ABORT (that could revert a committed
+            // slot) and never call it FAILED: say so and have the operator
+            // power-cycle and check the Pico's version before any retry.
+            set_text(s_error, sizeof(s_error),
+                     f.why ? f.why : "outcome unknown - power-cycle and check the Pico version");
+            lock();
+            s_power_cycle = true;
+            unlock();
+            r->unknown = true;
+            set_phase(RECOVERY_PICO_UNKNOWN);
+            return false;
+        }
         if (act == RPP_FIN_RETRANSMIT) {
             set_phase(RECOVERY_PICO_RETRANSMIT);
             lock();
@@ -787,7 +807,7 @@ static void relay_task(void *arg)
             fail(r, "not enough free internal memory to run the Pico relay (UART driver)");
         } else {
             pump(r);
-            if (!run_transfer(r) && (r->fatal || s_abort)) {
+            if (!run_transfer(r) && !r->unknown && (r->fatal || s_abort)) {
                 finish_stopped(r);
             }
         }
@@ -805,6 +825,8 @@ static void relay_task(void *arg)
     unlock();
     vTaskDelete(NULL);
 }
+
+static char *json_buf_locked(void); // status JSON buffer, defined with the JSON builder
 
 bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operator_slot,
                          const char **why)
@@ -838,6 +860,7 @@ bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operato
     s_operator_slot = operator_slot;
     s_abort = false;
     s_last_poll_us = esp_timer_get_time();
+    (void)json_buf_locked(); // pre-allocate the status buffer (best effort; retried lazily)
     s_phase = RECOVERY_PICO_DISCOVER;
     s_busy = BUSY_RUNNING;
     unlock();
@@ -856,12 +879,25 @@ bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operato
 }
 
 // --- status JSON ----------------------------------------------------------------------
-// Built into one PSRAM buffer (allocated on first use) while holding the relay
-// lock, straight from the published state: no stack copies of the text fields.
-// Only the httpd task calls this, and the buffer is consumed (sent) before the
-// handler returns.
+// Built into one PSRAM buffer while holding the relay lock, straight from the
+// published state: no stack copies of the text fields. The buffer is allocated
+// by recovery_pico_start() (under the lock) and, if that failed or the status
+// is read before any start, lazily under the same lock -- never outside it.
+// SINGLE READER: only the httpd task calls recovery_pico_status_json()
+// (the recovery server runs one httpd task); the buffer is consumed (sent)
+// before the handler returns, so one static buffer is enough. A second
+// concurrent reader would overwrite it mid-send.
 #define JSON_CAP 1536
 static char *s_json;
+
+// Caller holds the lock.
+static char *json_buf_locked(void)
+{
+    if (!s_json) {
+        s_json = heap_caps_malloc(JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    return s_json;
+}
 
 // Minimal JSON string escape into out; returns the new write position, or
 // (size_t)-1 when it does not fit.
@@ -911,19 +947,17 @@ const char *recovery_pico_status_json(int *len)
         *len = (int)(sizeof(no_psram) - 1);
         return no_psram;
     }
-    if (!s_json) {
-        s_json = heap_caps_malloc(JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s_json) {
-            return NULL;
-        }
-    }
     static const char *const modes[] = {"unknown", "application", "bootloader"};
     static const char *const srcs[] = {"pico-app", "operator", "unresolved"};
-    char *out = s_json;
     size_t pos = 0;
     bool ok;
 
     lock();
+    char *out = json_buf_locked();
+    if (!out) {
+        unlock();
+        return NULL;
+    }
     bool busy = s_busy != BUSY_NONE;
     if (busy) {
         s_last_poll_us = esp_timer_get_time(); // the page is still watching

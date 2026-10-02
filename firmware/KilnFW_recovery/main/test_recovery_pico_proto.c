@@ -433,19 +433,62 @@ static void test_image_and_slots(void)
 
 // ---------------------------------------------------------------------------
 // Fake receiver (SaftyFW bootloader / application behaviour as read from
-// recovery_update.c and update_task.c) driven in virtual time. The properties
-// that matter, and that the old relay got wrong:
-//  - it beacons UPDATE_STATUS only WHILE RECEIVING with chunks still missing,
-//    and is SILENT once every chunk is in (until END);
-//  - END with chunks missing is answered RECEIVING + the gap list;
+// bootloader/recovery_update.c, src/tasks/update_task.c and
+// src/update/received_ranges.c) driven in virtual time. The properties that
+// matter, and that earlier versions of this fake got wrong, with the receiver
+// source each one comes from:
+//
+//  Both receivers
+//  - While a transfer is active and chunks are missing they beacon
+//    UPDATE_STATUS(RECEIVING) with up to 32 gap indices taken from a ROTATING
+//    cursor: update_received_ranges_find_gaps() scans circularly from the
+//    cursor (received_ranges.c:61-82), the cursor then moves to the last
+//    reported gap + 1, and a pass that reaches the final chunk counts one
+//    retransmit round (recovery_update.c:443-470, update_task.c:1286-1315).
+//    A list can therefore wrap past the end of the image and so name TAIL
+//    gaps, and it is NOT "every gap behind the highest chunk received".
+//    A round count that stops update_retransmit_should_continue() (< 10)
+//    ends the transfer with FAILED + RETRANSMIT_CAP.
+//  - Once every chunk is in they are SILENT until END (the periodic report
+//    returns when update_received_ranges_is_complete(), recovery_update.c:
+//    438-440, update_task.c:1281-1283).
+//  - END with chunks still missing is answered RECEIVING with ZERO gaps, not a
+//    gap list (recovery_update.c:383-386, update_task.c:1146); the gaps arrive
+//    with the next periodic beacon.
 //  - END with everything in goes VERIFYING, then COMPLETE (or FAILED on a CRC
-//    mismatch) after the CRC check, each reported once;
-//  - the bootloader is silent for the whole erase;
-//  - a DATA frame arriving sooner than ~12 ms after the previous one overruns
-//    the FIFO and is lost.
+//    mismatch) after the synchronous CRC check, each reported once.
+//  - DATA/END while no transfer is active are discarded.
+//
+//  Bootloader only
+//  - polls a 32-byte UART FIFO and programs flash with interrupts off: a DATA
+//    frame arriving < 12 ms after the previous one overruns it and is lost;
+//  - silent for the whole (synchronous) erase;
+//  - once a transfer ended (COMPLETE/FAILED) it keeps beaconing IDLE every 1 s
+//    (recovery_update.c:435-437) -- it does NOT go quiet.
+//
+//  Application only
+//  - sends NO IDLE beacons, before BEGIN or after a transfer (update_task.c:
+//    1279); it reports only while a transfer is active;
+//  - sends ERASING exactly once, immediately before the synchronous erase
+//    (update_task.c:958), then is blocked (no drain, no beacons) until done;
+//  - every UPDATE_* frame goes through a 4-deep queue
+//    (UPDATE_TASK_QUEUE_DEPTH, update_task.c:134) drained once per wake of
+//    UPDATE_TASK_POLL_MS = 100 ms (update_task.c:131, 1683-1697); a frame
+//    that finds the queue full is DROPPED (update_task.c:1610-1622). The
+//    time the drained frames themselves cost is modelled by
+//    app_wake_extra_ms (it lengthens each wake window).
 // ---------------------------------------------------------------------------
 #define FR_MAX_CHUNKS 3600
 #define FR_QUEUE 64
+#define FR_APP_QUEUE_DEPTH 4 // update_task.c:134
+#define FR_APP_POLL_MS 100   // update_task.c:131
+#define FR_ROUND_CAP 10      // update_retransmit_should_continue(): round_count < 10
+#define FR_FIFO_GAP_MS 12    // bootloader: a frame < 12 ms after the last overruns the FIFO
+
+typedef struct {
+    uint8_t kind; // 'B' begin, 'D' data, 'E' end, 'A' abort
+    uint32_t idx;
+} fr_msg_t;
 
 typedef struct {
     bool bootloader;
@@ -457,14 +500,28 @@ typedef struct {
     bool deaf_first_begin;  // the first BEGIN is not seen
     bool drop_all_data;     // never accepts DATA
     uint32_t drop_ends;
+    bool drop_verifying;    // the VERIFYING status is lost on the way to the ESP
+    bool drop_complete;     // the COMPLETE status is lost on the way to the ESP
+    uint32_t app_wake_extra_ms; // app: extra time each wake takes beyond the 100 ms poll
+    uint32_t loss_ppm;      // random loss of DATA frames (all transmissions), parts per million
+    uint32_t lcg;
     bool drop_first[FR_MAX_CHUNKS]; // lose this chunk's first transmission
-    // state
-    int state; // RPP_STATE_*
+    // receiver state
+    bool active;            // a transfer is active (the real s_transfer_active)
+    int state;              // RPP_STATE_*
     bool have_chunk[FR_MAX_CHUNKS];
     uint32_t received;
-    int64_t erase_done, verify_done, last_beacon, last_data;
+    uint32_t cursor;        // s_gap_cursor
+    bool pass_had_gap;      // s_pass_had_gap
+    uint32_t round_count;   // s_retransmit_round_count
+    uint32_t max_round_count;
+    int64_t erase_done, verify_done, last_beacon, last_data, next_wake;
+    // app input queue
+    fr_msg_t inq[FR_APP_QUEUE_DEPTH];
+    int qn;
     // observations
-    uint32_t begins_seen, begins_while_erasing, ends_seen, overruns, statuses_emitted;
+    uint32_t begins_seen, begins_while_erasing, ends_seen, aborts_seen, overruns, statuses_emitted;
+    uint32_t queue_drops, idle_beacons, erasing_statuses, random_losses;
     int64_t min_data_gap_ms;
     // output queue of encoded status payloads
     uint8_t q[FR_QUEUE][16 + 2 * RPP_STATUS_MAX_GAPS];
@@ -487,34 +544,42 @@ static void fr_init(fake_rx_t *r, bool bootloader, uint32_t total)
     r->min_data_gap_ms = 1000000;
     r->last_data = -1000000;
     r->last_beacon = g_now_ms;
+    r->next_wake = g_now_ms + FR_APP_POLL_MS;
+    r->lcg = 12345u;
 }
 
-static uint32_t fr_gaps(const fake_rx_t *r, uint16_t *gaps, bool up_to_total)
+static fake_rx_t *fr_new(bool bootloader, uint32_t total)
 {
-    // Gaps behind the highest chunk received (beacon) or anywhere (END reply).
-    uint32_t hi = 0;
-    for (uint32_t i = 0; i < r->total; i++) {
-        if (r->have_chunk[i]) {
-            hi = i + 1;
-        }
+    fake_rx_t *r = calloc(1, sizeof(*r));
+    g_now_ms = 0;
+    fr_init(r, bootloader, total);
+    return r;
+}
+
+// update_received_ranges_find_gaps(): circular scan from `start`.
+static uint32_t fr_find_gaps(const fake_rx_t *r, uint32_t start, uint16_t *out, uint32_t max_out)
+{
+    if (r->total == 0 || max_out == 0) {
+        return 0;
     }
-    uint32_t lim = up_to_total ? r->total : hi;
-    uint32_t n = 0;
-    for (uint32_t i = 0; i < lim; i++) {
+    uint32_t found = 0;
+    uint32_t i = start % r->total;
+    for (uint32_t scanned = 0; scanned < r->total && found < max_out; scanned++) {
         if (!r->have_chunk[i]) {
-            if (n < RPP_STATUS_MAX_GAPS) {
-                gaps[n] = (uint16_t)i;
-            }
-            n++;
+            out[found++] = (uint16_t)i;
         }
+        i = (i + 1u) % r->total;
     }
-    return n > RPP_STATUS_MAX_GAPS ? RPP_STATUS_MAX_GAPS : n;
+    return found;
 }
 
-static void fr_emit(fake_rx_t *r, int state, uint8_t err, bool up_to_total)
+// Delivers one status to the ESP (unless the scenario loses it on the wire).
+static void fr_emit(fake_rx_t *r, int state, uint8_t err, const uint16_t *gaps, uint32_t ng)
 {
-    uint16_t gaps[RPP_STATUS_MAX_GAPS];
-    uint32_t ng = (state == RPP_STATE_RECEIVING) ? fr_gaps(r, gaps, up_to_total) : 0;
+    if ((state == RPP_STATE_COMPLETE && r->drop_complete) ||
+        (state == RPP_STATE_VERIFYING && r->drop_verifying)) {
+        return;
+    }
     uint8_t *p = r->q[r->qt % FR_QUEUE];
     memset(p, 0, 16);
     p[0] = RPP_CMD_UPDATE_STATUS;
@@ -531,64 +596,94 @@ static void fr_emit(fake_rx_t *r, int state, uint8_t err, bool up_to_total)
     r->qlen[r->qt % FR_QUEUE] = 16 + 2 * ng;
     r->qt++;
     r->statuses_emitted++;
+    if (state == RPP_STATE_IDLE) {
+        r->idle_beacons++;
+    }
+    if (state == RPP_STATE_ERASING) {
+        r->erasing_statuses++;
+    }
 }
 
-static void fr_tick(fake_rx_t *r)
+static bool fr_complete(const fake_rx_t *r)
 {
-    if (r->state == RPP_STATE_ERASING && g_now_ms >= r->erase_done) {
-        r->state = RPP_STATE_RECEIVING;
-        r->last_beacon = g_now_ms;
-        fr_emit(r, RPP_STATE_RECEIVING, 0, false);
+    return r->received >= r->total;
+}
+
+// recovery_periodic_status() / update_task_periodic_status().
+#ifndef FR_IDLE_ONLY_BOOTLOADER
+#define FR_IDLE_ONLY_BOOTLOADER (r->bootloader)
+#endif
+static void fr_beacon(fake_rx_t *r)
+{
+    if (!r->active) {
+        if (FR_IDLE_ONLY_BOOTLOADER) {
+            fr_emit(r, RPP_STATE_IDLE, 0, NULL, 0); // recovery_update.c:435-437
+        }
+        return; // application: no IDLE beacons (update_task.c:1279)
     }
-    if (r->state == RPP_STATE_VERIFYING && g_now_ms >= r->verify_done) {
-        if (r->crc_good) {
-            r->state = RPP_STATE_COMPLETE;
-            fr_emit(r, RPP_STATE_COMPLETE, 0, false);
+    if (r->state != RPP_STATE_RECEIVING) {
+        return; // erase / verify are synchronous: nothing beacons meanwhile
+    }
+    if (fr_complete(r)) {
+        return; // END will finish this transfer
+    }
+    uint16_t gaps[RPP_STATUS_MAX_GAPS];
+    uint32_t n = fr_find_gaps(r, r->cursor, gaps, RPP_STATUS_MAX_GAPS);
+    if (n > 0) {
+        r->pass_had_gap = true;
+        uint32_t next_cursor = (uint32_t)gaps[n - 1] + 1u;
+        if (next_cursor >= r->total) {
+            if (r->pass_had_gap) {
+                r->round_count++;
+                if (r->round_count > r->max_round_count) {
+                    r->max_round_count = r->round_count;
+                }
+            }
+            r->pass_had_gap = false;
+            r->cursor = 0;
         } else {
-            r->state = RPP_STATE_FAILED;
-            fr_emit(r, RPP_STATE_FAILED, RPP_ERR_CRC_MISMATCH, false);
+            r->cursor = next_cursor;
         }
+    } else {
+        r->cursor = 0;
+        r->pass_had_gap = false;
     }
-    if ((int64_t)(g_now_ms - r->last_beacon) >= (int64_t)r->beacon_ms) {
-        r->last_beacon = g_now_ms;
-        if (r->state == RPP_STATE_IDLE) {
-            fr_emit(r, RPP_STATE_IDLE, 0, false);
-        } else if (r->state == RPP_STATE_RECEIVING && r->received < r->total) {
-            fr_emit(r, RPP_STATE_RECEIVING, 0, false);
-        } else if (r->state == RPP_STATE_ERASING && !r->bootloader) {
-            fr_emit(r, RPP_STATE_ERASING, 0, false);
-        }
-        // complete / verifying / bootloader-erasing: silent
-    }
-}
-
-static void fr_begin(fake_rx_t *r)
-{
-    r->begins_seen++;
-    if (r->deaf_first_begin && r->begins_seen == 1) {
+    if (!(r->round_count < FR_ROUND_CAP)) {
+        r->active = false;
+        r->state = RPP_STATE_FAILED;
+        fr_emit(r, RPP_STATE_FAILED, RPP_ERR_RETRANSMIT_CAP, NULL, 0);
         return;
     }
+    fr_emit(r, RPP_STATE_RECEIVING, 0, gaps, n);
+}
+
+// --- frame handlers (identical for both receivers; the app runs them from its
+// wake, the bootloader straight off the UART) -------------------------------
+static void fr_do_begin(fake_rx_t *r)
+{
     if (r->state == RPP_STATE_ERASING) {
         r->begins_while_erasing++;
     }
-    if (r->state == RPP_STATE_IDLE || r->state == RPP_STATE_ERASING) {
+    if (!r->active || r->state == RPP_STATE_ERASING) {
+        if (!r->active) {
+            memset(r->have_chunk, 0, sizeof(r->have_chunk));
+            r->received = 0;
+            r->cursor = 0;
+            r->pass_had_gap = false;
+            r->round_count = 0;
+        }
+        r->active = true;
         r->state = RPP_STATE_ERASING;
         r->erase_done = g_now_ms + r->erase_ms;
+        if (!r->bootloader) {
+            fr_emit(r, RPP_STATE_ERASING, 0, NULL, 0); // once, before the erase (update_task.c:958)
+        }
     }
 }
 
-static void fr_data(fake_rx_t *r, uint32_t idx)
+static void fr_do_data(fake_rx_t *r, uint32_t idx)
 {
-    if (r->state != RPP_STATE_RECEIVING || r->drop_all_data || idx >= r->total) {
-        return;
-    }
-    int64_t gap = g_now_ms - r->last_data;
-    r->last_data = g_now_ms;
-    if (gap < r->min_data_gap_ms) {
-        r->min_data_gap_ms = gap;
-    }
-    if (gap < 12) {
-        r->overruns++; // FIFO overrun: the frame is lost
+    if (!r->active || r->state != RPP_STATE_RECEIVING || r->drop_all_data || idx >= r->total) {
         return;
     }
     if (r->drop_first[idx]) {
@@ -601,6 +696,94 @@ static void fr_data(fake_rx_t *r, uint32_t idx)
     }
 }
 
+static void fr_do_end(fake_rx_t *r)
+{
+    if (!r->active || r->state != RPP_STATE_RECEIVING) {
+        return; // discarded while no transfer is active (update_task.c:1132)
+    }
+    if (!fr_complete(r)) {
+        // END too early: RECEIVING with ZERO gaps (recovery_update.c:383-386,
+        // update_task.c:1146); the missing chunks come with the next beacon.
+        fr_emit(r, RPP_STATE_RECEIVING, 0, NULL, 0); // early-END reply
+        return;
+    }
+    r->state = RPP_STATE_VERIFYING;
+    r->verify_done = g_now_ms + r->verify_ms;
+    fr_emit(r, RPP_STATE_VERIFYING, 0, NULL, 0);
+}
+
+static void fr_do_abort(fake_rx_t *r)
+{
+    if (!r->active) {
+        return;
+    }
+    r->active = false;
+    r->state = RPP_STATE_ABORTED;
+    fr_emit(r, RPP_STATE_ABORTED, 0, NULL, 0);
+}
+
+static void fr_dispatch(fake_rx_t *r, const fr_msg_t *m)
+{
+    switch (m->kind) {
+    case 'B': fr_do_begin(r); break;
+    case 'D': fr_do_data(r, m->idx); break;
+    case 'E': fr_do_end(r); break;
+    case 'A': fr_do_abort(r); break;
+    }
+}
+
+// A frame arrives on the wire. The application queues it; the bootloader
+// handles it on the spot.
+static void fr_arrive(fake_rx_t *r, uint8_t kind, uint32_t idx)
+{
+    fr_msg_t m = {kind, idx};
+    if (r->bootloader) {
+        fr_dispatch(r, &m);
+        return;
+    }
+#ifndef FR_NO_APP_QUEUE
+    if (r->qn >= FR_APP_QUEUE_DEPTH) {
+        r->queue_drops++; // xQueueSend(..., 0) on a full queue (update_task.c:1610-1622)
+        return;
+    }
+    r->inq[r->qn++] = m;
+#else
+    fr_dispatch(r, &m);
+#endif
+}
+
+static void fr_begin(fake_rx_t *r)
+{
+    r->begins_seen++;
+    if (r->deaf_first_begin && r->begins_seen == 1) {
+        return;
+    }
+    fr_arrive(r, 'B', 0);
+}
+
+static void fr_data(fake_rx_t *r, uint32_t idx)
+{
+    if (r->bootloader) {
+        int64_t gap = g_now_ms - r->last_data;
+        r->last_data = g_now_ms;
+        if (r->state == RPP_STATE_RECEIVING && gap < r->min_data_gap_ms) {
+            r->min_data_gap_ms = gap;
+        }
+        if (gap < FR_FIFO_GAP_MS) {
+            r->overruns++; // FIFO overrun: the frame is lost
+            return;
+        }
+    }
+    if (r->loss_ppm) {
+        r->lcg = r->lcg * 1664525u + 1013904223u;
+        if ((r->lcg >> 8) % 1000000u < r->loss_ppm) {
+            r->random_losses++;
+            return;
+        }
+    }
+    fr_arrive(r, 'D', idx);
+}
+
 static void fr_end(fake_rx_t *r)
 {
     r->ends_seen++;
@@ -608,16 +791,13 @@ static void fr_end(fake_rx_t *r)
         r->drop_ends--;
         return; // the END frame was lost on the wire: the receiver never saw it
     }
-    if (r->state != RPP_STATE_RECEIVING) {
-        return;
-    }
-    if (r->received < r->total) {
-        fr_emit(r, RPP_STATE_RECEIVING, 0, true); // END too early: gaps again
-        return;
-    }
-    r->state = RPP_STATE_VERIFYING;
-    r->verify_done = g_now_ms + r->verify_ms;
-    fr_emit(r, RPP_STATE_VERIFYING, 0, false);
+    fr_arrive(r, 'E', 0);
+}
+
+static void fr_abort(fake_rx_t *r)
+{
+    r->aborts_seen++;
+    fr_arrive(r, 'A', 0);
 }
 
 static bool fr_pop(fake_rx_t *r, rpp_status_t *st)
@@ -632,6 +812,48 @@ static bool fr_pop(fake_rx_t *r, rpp_status_t *st)
     return false;
 }
 
+static void fr_tick(fake_rx_t *r)
+{
+    if (r->state == RPP_STATE_ERASING && g_now_ms >= r->erase_done) {
+        r->state = RPP_STATE_RECEIVING;
+        r->last_beacon = g_now_ms;
+        fr_emit(r, RPP_STATE_RECEIVING, 0, NULL, 0);
+    }
+    if (r->state == RPP_STATE_VERIFYING && g_now_ms >= r->verify_done) {
+        r->active = false;
+        if (r->crc_good) {
+            r->state = RPP_STATE_COMPLETE;
+            fr_emit(r, RPP_STATE_COMPLETE, 0, NULL, 0);
+        } else {
+            r->state = RPP_STATE_FAILED;
+            fr_emit(r, RPP_STATE_FAILED, RPP_ERR_CRC_MISMATCH, NULL, 0);
+        }
+    }
+    if (r->bootloader) {
+        if ((int64_t)(g_now_ms - r->last_beacon) >= (int64_t)r->beacon_ms) {
+            r->last_beacon = g_now_ms;
+            fr_beacon(r);
+        }
+        return;
+    }
+    // Application: one wake per poll period. The task is blocked inside a
+    // synchronous erase / CRC check, so no wake happens until those finish.
+    if (r->state == RPP_STATE_ERASING || r->state == RPP_STATE_VERIFYING) {
+        return;
+    }
+    if (g_now_ms >= r->next_wake) {
+        for (int i = 0; i < r->qn; i++) {
+            fr_dispatch(r, &r->inq[i]);
+        }
+        r->qn = 0;
+        if ((int64_t)(g_now_ms - r->last_beacon) >= (int64_t)r->beacon_ms) {
+            r->last_beacon = g_now_ms;
+            fr_beacon(r);
+        }
+        r->next_wake = g_now_ms + FR_APP_POLL_MS + r->app_wake_extra_ms;
+    }
+}
+
 static void advance(fake_rx_t *r, int64_t ms)
 {
     for (int64_t i = 0; i < ms; i++) {
@@ -644,6 +866,8 @@ static void advance(fake_rx_t *r, int64_t ms)
 // helpers (rpp_begin_*, rpp_fin_*, rpp_pace_*) -------------------------------
 typedef struct {
     bool ok;
+    bool unknown;      // RPP_FIN_UNKNOWN: outcome unknown, no ABORT sent
+    bool abort_sent;   // the driver sent ABORT (a plain failure)
     const char *why;
     uint32_t end_sends;
     uint32_t retransmits;
@@ -697,6 +921,12 @@ static void paced_send(fake_rx_t *r, uint32_t idx, int64_t *next_send_us, uint32
     *next_send_us = g_now_ms * 1000 + (int64_t)pace_ms * 1000;
 }
 
+static bool state_is_terminal(uint8_t s)
+{
+    return s == RPP_STATE_FAILED || s == RPP_STATE_ABORTED || s == RPP_STATE_REFUSED ||
+           s == RPP_STATE_REJECTED_SLOT_LINKAGE || s == RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP;
+}
+
 static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
 {
     drive_t d;
@@ -712,6 +942,7 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
     }
     // Statuses that arrived mid-pass are stale: discard, then END first.
     rpp_status_t st;
+    memset(&st, 0, sizeof(st));
     while (fr_pop(r, &st)) {
     }
     rpp_fin_t f;
@@ -724,8 +955,18 @@ static drive_t drive_transfer(fake_rx_t *r, uint32_t pace_ms)
             d.ok = true;
             break;
         }
+        if (act == RPP_FIN_UNKNOWN) {
+            // Outcome unknown: NO ABORT (recovery_pico.c finish_unknown()).
+            d.unknown = true;
+            d.why = f.why;
+            break;
+        }
         if (act == RPP_FIN_FAIL) {
             d.why = f.why;
+            if (!state_is_terminal(st.state)) { // the Pico did not end it itself
+                fr_abort(r);
+                d.abort_sent = true;
+            }
             break;
         }
         if (act == RPP_FIN_RETRANSMIT) {
@@ -788,7 +1029,7 @@ static bool legacy_relay_sees_complete_status(fake_rx_t *r)
     memset(&d, 0, sizeof(d));
     int64_t next_us = g_now_ms * 1000;
     for (uint32_t i = 0; i < r->total; i++) {
-        paced_send(r, i, &next_us, RPP_DATA_PACE_MS, &d);
+        paced_send(r, i, &next_us, rpp_data_pace_ms(r->bootloader), &d);
     }
     rpp_status_t st;
     while (fr_pop(r, &st)) {
@@ -805,120 +1046,346 @@ static bool legacy_relay_sees_complete_status(fake_rx_t *r)
 static void test_receiver_model(void)
 {
     for (int v = 0; v < 2; v++) {
-        fake_rx_t *r = calloc(1, sizeof(*r));
-        g_now_ms = 0;
-        fr_init(r, v == 0, 120);
+        fake_rx_t *r = fr_new(v == 0, 120);
         CHECK(!legacy_relay_sees_complete_status(r),
               "old relay waited for a no-gap status the silent receiver never sends");
         CHECK(r->received == r->total, "legacy path: every chunk was delivered");
         free(r);
     }
-    // END sent too early is answered RECEIVING + gaps.
-    fake_rx_t *r = calloc(1, sizeof(*r));
-    g_now_ms = 0;
-    fr_init(r, true, 50);
-    fr_begin(r);
-    advance(r, 3000);
-    rpp_status_t st;
-    while (fr_pop(r, &st)) {
+
+    // END sent too early is answered RECEIVING with ZERO gaps (recovery_update.c:383-386,
+    // update_task.c:1146), never the gap list: the gaps come with the next beacon.
+    for (int v = 0; v < 2; v++) {
+        const char *vn = v == 0 ? "bootloader" : "app";
+        char nm[160];
+        fake_rx_t *r = fr_new(v == 0, 50);
+        fr_begin(r);
+        advance(r, 3000);
+        rpp_status_t st;
+        while (fr_pop(r, &st)) {
+        }
+        for (uint32_t i = 0; i < 40; i++) {
+            advance(r, 40);
+            fr_data(r, i);
+        }
+        advance(r, 200);
+        while (fr_pop(r, &st)) {
+        }
+        fr_end(r);
+        advance(r, 150); // app: the END is handled at its next wake
+        snprintf(nm, sizeof(nm), "%s early END answered RECEIVING with 0 gaps", vn);
+        CHECK(fr_pop(r, &st) && st.state == RPP_STATE_RECEIVING && st.gap_count == 0 &&
+                  st.received_chunks == 40,
+              nm);
+        free(r);
     }
-    for (uint32_t i = 0; i < 40; i++) {
-        advance(r, 15);
-        fr_data(r, i);
+
+    // Rotating-cursor gap lists (received_ranges.c:61-82; recovery_update.c:443-470).
+    {
+        fake_rx_t *r = fr_new(true, 100);
+        r->active = true;
+        r->state = RPP_STATE_RECEIVING;
+        for (uint32_t i = 0; i < 40; i++) {
+            r->have_chunk[i] = true;
+        }
+        r->received = 40;
+        rpp_status_t st;
+        fr_beacon(r);
+        CHECK(fr_pop(r, &st) && st.gap_count == 32 && st.gaps[0] == 40 && st.gaps[31] == 71 &&
+                  r->cursor == 72 && r->round_count == 0,
+              "first beacon lists 32 gaps from the cursor and moves it past the last one");
+        fr_beacon(r);
+        // The scan is circular: it names the TAIL gaps 72..99, then wraps to the
+        // front and picks up 40..43 to fill the 32 slots. The cursor lands on 44
+        // and no round is counted (the last listed gap is not the final chunk).
+        CHECK(fr_pop(r, &st) && st.gap_count == 32 && st.gaps[0] == 72 && st.gaps[27] == 99 &&
+                  st.gaps[28] == 40 && st.gaps[31] == 43,
+              "second beacon reports the TAIL gaps then wraps to the front");
+        CHECK(r->cursor == 44 && r->round_count == 0, "a wrapped list not ending at the last chunk counts no round");
+        free(r);
+
+        // A pass whose list ENDS at the final chunk counts one retransmit round
+        // (recovery_update.c:454-460) and rewinds the cursor.
+        r = fr_new(true, 100);
+        r->active = true;
+        r->state = RPP_STATE_RECEIVING;
+        for (uint32_t i = 0; i < 90; i++) {
+            r->have_chunk[i] = true;
+        }
+        r->received = 90;
+        fr_beacon(r);
+        CHECK(fr_pop(r, &st) && st.gap_count == 10 && st.gaps[0] == 90 && st.gaps[9] == 99 &&
+                  r->round_count == 1 && r->cursor == 0,
+              "a list ending at the final chunk counts one round and rewinds the cursor");
+        free(r);
+
+        r = fr_new(true, 100);
+        r->active = true;
+        r->state = RPP_STATE_RECEIVING;
+        for (uint32_t i = 50; i < 100; i++) {
+            r->have_chunk[i] = true;
+        }
+        r->received = 50;
+        r->cursor = 30;
+        fr_beacon(r);
+        CHECK(fr_pop(r, &st) && st.gap_count == 32 && st.gaps[0] == 30 && st.gaps[19] == 49 &&
+                  st.gaps[20] == 0 && st.gaps[31] == 11 && r->cursor == 12,
+              "a gap list wraps past the end of the image back to chunk 0");
+        free(r);
+
+        // The round cap ends the transfer (update_retransmit_should_continue: < 10).
+        r = fr_new(true, 100);
+        r->active = true;
+        r->state = RPP_STATE_RECEIVING;
+        r->received = 0;
+        for (int i = 0; i < 2000 && r->active; i++) {
+            fr_beacon(r);
+        }
+        CHECK(!r->active && r->state == RPP_STATE_FAILED && r->round_count == FR_ROUND_CAP,
+              "ten rounds with gaps end the transfer");
+        CHECK(fr_pop(r, &st) && st.state != RPP_STATE_FAILED, "earlier beacons were ordinary reports");
+        free(r);
     }
-    while (fr_pop(r, &st)) {
+
+    // Bootloader keeps beaconing IDLE after COMPLETE (recovery_update.c:435-437);
+    // the application sends no IDLE beacons, ever (update_task.c:1279).
+    for (int v = 0; v < 2; v++) {
+        const char *vn = v == 0 ? "bootloader" : "app";
+        char nm[160];
+        fake_rx_t *r = fr_new(v == 0, 30);
+        advance(r, 5000);
+        snprintf(nm, sizeof(nm), "%s before BEGIN: %s", vn, v == 0 ? "IDLE beacons" : "silent");
+        CHECK(v == 0 ? r->idle_beacons >= 4 : r->statuses_emitted == 0, nm);
+        drive_t d = drive_transfer(r, rpp_data_pace_ms(v == 0));
+        CHECK(d.ok && r->state == RPP_STATE_COMPLETE, "transfer completes before the IDLE-after-COMPLETE check");
+        rpp_status_t st;
+        while (fr_pop(r, &st)) {
+        }
+        uint32_t idle_before = r->idle_beacons, em_before = r->statuses_emitted;
+        advance(r, 3500);
+        if (v == 0) {
+            int idles = 0;
+            bool only_idle = true;
+            while (fr_pop(r, &st)) {
+                idles += st.state == RPP_STATE_IDLE;
+                only_idle = only_idle && st.state == RPP_STATE_IDLE;
+            }
+            CHECK(idles >= 3 && only_idle && r->idle_beacons - idle_before >= 3,
+                  "bootloader beacons IDLE every second after COMPLETE, it does not go silent");
+        } else {
+            CHECK(r->statuses_emitted == em_before && r->idle_beacons == 0,
+                  "app sends no IDLE beacon after COMPLETE");
+        }
+        free(r);
     }
-    fr_end(r);
-    CHECK(fr_pop(r, &st) && st.state == RPP_STATE_RECEIVING && st.gap_count == 10 && st.gaps[0] == 40,
-          "early END answered RECEIVING plus the missing chunks");
+
+    // ERASING: the app sends it once, before the synchronous erase; the
+    // bootloader is silent throughout (update_task.c:958).
+    for (int v = 0; v < 2; v++) {
+        fake_rx_t *r = fr_new(v == 0, 30);
+        r->erase_ms = 30000;
+        fr_begin(r);
+        advance(r, 40000);
+        rpp_status_t st;
+        uint32_t erasing = 0;
+        while (fr_pop(r, &st)) {
+            erasing += st.state == RPP_STATE_ERASING;
+        }
+        CHECK(v == 0 ? erasing == 0 : erasing == 1,
+              v == 0 ? "bootloader never reports ERASING" : "app reports ERASING exactly once");
+        free(r);
+    }
+}
+
+// App input queue: 4 deep, drained once per 100 ms wake; frames dropped when full.
+static uint32_t app_queue_drops(uint32_t pace_ms, uint32_t wake_extra_ms, bool *completed)
+{
+    fake_rx_t *r = fr_new(false, 400);
+    r->app_wake_extra_ms = wake_extra_ms;
+    drive_t d = drive_transfer(r, pace_ms);
+    uint32_t drops = r->queue_drops;
+    if (completed) {
+        *completed = d.ok;
+    }
     free(r);
+    return drops;
+}
+
+static void test_app_queue(void)
+{
+    bool ok = false;
+    CHECK(RPP_DATA_PACE_APP_MS >= 25u, "app pace at least 4 frames per 100 ms wake");
+    CHECK(rpp_data_pace_ms(true) == RPP_DATA_PACE_MS && rpp_data_pace_ms(false) == RPP_DATA_PACE_APP_MS,
+          "pace follows the connected receiver");
+    CHECK(app_queue_drops(RPP_DATA_PACE_MS, 0, NULL) > 0,
+          "the bootloader's 15 ms pace overflows the app's 4-deep queue (frames dropped)");
+    CHECK(app_queue_drops(20, 0, NULL) > 0, "20 ms pace: more than 4 frames per wake, queue drops");
+    CHECK(app_queue_drops(30, 30, NULL) > 0,
+          "30 ms pace with a 30 ms-longer wake still overflows (5 frames in 130 ms)");
+    CHECK(app_queue_drops(RPP_DATA_PACE_APP_MS, 0, &ok) == 0 && ok, "app pace: no drops on a nominal 100 ms wake");
+    CHECK(app_queue_drops(RPP_DATA_PACE_APP_MS, 30, &ok) == 0 && ok,
+          "app pace: no drops when each wake runs 30 ms long (the margin)");
+    CHECK(app_queue_drops(RPP_DATA_PACE_APP_MS, 70, NULL) > 0,
+          "the margin has a limit: a 170 ms wake window holds 5 frames at 40 ms");
 }
 
 static void test_finish_driver(void)
 {
     for (int v = 0; v < 2; v++) {
         const char *vn = v == 0 ? "bootloader" : "app";
-        fake_rx_t *r = calloc(1, sizeof(*r));
+        uint32_t pace = rpp_data_pace_ms(v == 0);
+        fake_rx_t *r = fr_new(v == 0, 200);
         char nm[160];
 
         // Clean transfer.
-        g_now_ms = 0;
-        fr_init(r, v == 0, 200);
-        drive_t d = drive_transfer(r, RPP_DATA_PACE_MS);
+        drive_t d = drive_transfer(r, pace);
         snprintf(nm, sizeof(nm), "%s clean transfer completes (%s)", vn, d.why ? d.why : "ok");
         CHECK(d.ok && r->state == RPP_STATE_COMPLETE, nm);
         snprintf(nm, sizeof(nm), "%s clean transfer: exactly one END", vn);
         CHECK(d.end_sends == 1 && r->ends_seen == 1, nm);
-        snprintf(nm, sizeof(nm), "%s clean transfer: no FIFO overrun, pace respected", vn);
-        CHECK(r->overruns == 0 && r->min_data_gap_ms >= (int64_t)RPP_DATA_PACE_MS, nm);
+        snprintf(nm, sizeof(nm), "%s clean transfer: no FIFO overrun, no queue drop, pace respected", vn);
+        CHECK(r->overruns == 0 && r->queue_drops == 0 && r->min_data_gap_ms >= (int64_t)(v == 0 ? pace : 0), nm);
         snprintf(nm, sizeof(nm), "%s clean transfer: BEGIN sent once", vn);
         CHECK(r->begins_seen == 1, nm);
+        free(r);
 
         // Dropped chunks, including the tail chunk (missing past the beacon's cursor).
-        g_now_ms = 0;
-        fr_init(r, v == 0, 200);
+        r = fr_new(v == 0, 200);
         for (uint32_t i = 3; i < 200; i += 7) {
             r->drop_first[i] = true;
         }
         r->drop_first[199] = true;
-        d = drive_transfer(r, RPP_DATA_PACE_MS);
+        d = drive_transfer(r, pace);
         snprintf(nm, sizeof(nm), "%s dropped chunks recovered by gap rounds (%s)", vn, d.why ? d.why : "ok");
         CHECK(d.ok && r->state == RPP_STATE_COMPLETE && r->received == r->total, nm);
         snprintf(nm, sizeof(nm), "%s dropped chunks needed retransmit rounds", vn);
         CHECK(d.retransmits >= 1 && d.chunks_sent > 200, nm);
+        free(r);
 
         // Heavy loss: every other chunk dropped on first send.
-        g_now_ms = 0;
-        fr_init(r, v == 0, 300);
+        r = fr_new(v == 0, 300);
         for (uint32_t i = 0; i < 300; i += 2) {
             r->drop_first[i] = true;
         }
-        d = drive_transfer(r, RPP_DATA_PACE_MS);
+        d = drive_transfer(r, pace);
         snprintf(nm, sizeof(nm), "%s heavy loss still completes (%s)", vn, d.why ? d.why : "ok");
         CHECK(d.ok && r->state == RPP_STATE_COMPLETE, nm);
+        free(r);
 
         // Two END replies lost: END is resent after the reply timeout, still completes.
-        g_now_ms = 0;
-        fr_init(r, v == 0, 100);
+        r = fr_new(v == 0, 100);
         r->drop_ends = 2;
-        d = drive_transfer(r, RPP_DATA_PACE_MS);
+        d = drive_transfer(r, pace);
         snprintf(nm, sizeof(nm), "%s lost END frames are resent (%s)", vn, d.why ? d.why : "ok");
         CHECK(d.ok && d.end_sends == 3, nm);
+        free(r);
 
-        // Every END reply lost: bounded, fails (never loops forever).
-        g_now_ms = 0;
-        fr_init(r, v == 0, 100);
+        // Every END lost (an ignored END): bounded, and reported as outcome
+        // UNKNOWN with no ABORT -- never a plain failure, never a hang.
+        r = fr_new(v == 0, 100);
         r->drop_ends = 100;
-        d = drive_transfer(r, RPP_DATA_PACE_MS);
-        snprintf(nm, sizeof(nm), "%s endless silence after END fails loudly", vn);
-        CHECK(!d.ok && d.end_sends == RPP_MAX_END_SENDS && d.why != NULL, nm);
+        d = drive_transfer(r, pace);
+        advance(r, 500);
+        snprintf(nm, sizeof(nm), "%s endless silence after END is outcome-unknown, bounded (%s)", vn,
+                 d.why ? d.why : "?");
+        CHECK(!d.ok && d.unknown && d.end_sends == RPP_MAX_END_SENDS && d.why != NULL &&
+                  strstr(d.why, "outcome unknown") && strstr(d.why, "power-cycle"),
+              nm);
+        snprintf(nm, sizeof(nm), "%s endless silence after END sends no ABORT", vn);
+        CHECK(!d.abort_sent && r->aborts_seen == 0 && r->state != RPP_STATE_ABORTED, nm);
+        free(r);
 
-        // CRC mismatch on the Pico: FAILED is reported as a failure.
-        g_now_ms = 0;
-        fr_init(r, v == 0, 100);
+        // CRC mismatch on the Pico: FAILED is reported as a failure (the Pico
+        // ended it itself, so no ABORT either).
+        r = fr_new(v == 0, 100);
         r->crc_good = false;
-        d = drive_transfer(r, RPP_DATA_PACE_MS);
+        d = drive_transfer(r, pace);
         snprintf(nm, sizeof(nm), "%s CRC mismatch (FAILED) fails the transfer", vn);
-        CHECK(!d.ok && r->state == RPP_STATE_FAILED, nm);
+        CHECK(!d.ok && !d.unknown && r->state == RPP_STATE_FAILED && !d.abort_sent, nm);
+        free(r);
 
-        // Receiver that never accepts DATA: the stall limit ends it.
-        g_now_ms = 0;
-        fr_init(r, v == 0, 60);
+        // Receiver that never accepts DATA: the stall limit ends it (a plain
+        // failure, so the relay aborts the Pico).
+        r = fr_new(v == 0, 60);
         r->drop_all_data = true;
-        d = drive_transfer(r, RPP_DATA_PACE_MS);
+        d = drive_transfer(r, pace);
+        advance(r, 500);
         snprintf(nm, sizeof(nm), "%s a dead data path ends in failure, not a hang", vn);
-        CHECK(!d.ok && d.why != NULL, nm);
+        CHECK(!d.ok && !d.unknown && d.why != NULL && d.abort_sent && r->aborts_seen == 1, nm);
+        free(r);
+
+        // Lost COMPLETE: the Pico finished (or is finishing) and its result
+        // never arrives. After VERIFYING was seen this must NOT be FAILED and
+        // must send no ABORT: the operator is told the outcome is unknown.
+        r = fr_new(v == 0, 100);
+        r->drop_complete = true;
+        d = drive_transfer(r, pace);
+        advance(r, 500);
+        snprintf(nm, sizeof(nm), "%s lost COMPLETE after VERIFYING: outcome unknown (%s)", vn, d.why ? d.why : "?");
+        CHECK(!d.ok && d.unknown && d.why && strstr(d.why, "outcome unknown") &&
+                  strstr(d.why, "power-cycle and check the Pico version") &&
+                  strstr(d.why, "do NOT retry blindly"),
+              nm);
+        snprintf(nm, sizeof(nm), "%s lost COMPLETE: the Pico really did complete, and no ABORT was sent", vn);
+        CHECK(r->state == RPP_STATE_COMPLETE && !d.abort_sent && r->aborts_seen == 0, nm);
+        free(r);
+
+        // Lost VERIFYING and COMPLETE: END was accepted but nothing was heard
+        // (the bootloader then beacons IDLE, the app goes silent).
+        r = fr_new(v == 0, 100);
+        r->drop_verifying = true;
+        r->drop_complete = true;
+        d = drive_transfer(r, pace);
+        advance(r, 500);
+        snprintf(nm, sizeof(nm), "%s lost VERIFYING+COMPLETE: outcome unknown, no ABORT (%s)", vn,
+                 d.why ? d.why : "?");
+        CHECK(!d.ok && d.unknown && !d.abort_sent && r->aborts_seen == 0 && r->state == RPP_STATE_COMPLETE, nm);
+        free(r);
 
         // Full-size image through the whole flow.
-        g_now_ms = 0;
-        fr_init(r, v == 0, 3436);
+        r = fr_new(v == 0, 3436);
         for (uint32_t i = 5; i < 3436; i += 97) {
             r->drop_first[i] = true;
         }
-        d = drive_transfer(r, RPP_DATA_PACE_MS);
+        d = drive_transfer(r, pace);
         snprintf(nm, sizeof(nm), "%s full 3436-chunk image completes (%s)", vn, d.why ? d.why : "ok");
-        CHECK(d.ok && r->state == RPP_STATE_COMPLETE && r->overruns == 0, nm);
+        CHECK(d.ok && r->state == RPP_STATE_COMPLETE && r->overruns == 0 && r->queue_drops == 0, nm);
         free(r);
+    }
+}
+
+// Convergence under modelled loss: both receivers, a full-size image, random
+// loss on EVERY DATA transmission (retransmissions included) on top of fixed
+// first-send drops, within the receivers' round cap (a round counted every
+// time the gap cursor reaches the final chunk, recovery_update.c:454-460).
+static void test_convergence(void)
+{
+    static const uint32_t ppm[] = {0, 5000, 20000, 50000};
+    for (int v = 0; v < 2; v++) {
+        const char *vn = v == 0 ? "bootloader" : "app";
+        for (size_t k = 0; k < sizeof(ppm) / sizeof(ppm[0]); k++) {
+            char nm[200];
+            fake_rx_t *r = fr_new(v == 0, 3436);
+            r->loss_ppm = ppm[k];
+            r->app_wake_extra_ms = v == 0 ? 0 : 30; // app drain costs time, see RPP_DATA_PACE_APP_MS
+            for (uint32_t i = 11; i < 3436; i += 53) {
+                r->drop_first[i] = true;
+            }
+            r->drop_first[3435] = true; // the final chunk too: it makes every beacon a counted round
+            drive_t d = drive_transfer(r, rpp_data_pace_ms(v == 0));
+            printf("  convergence %-10s loss=%5.1f%% ok=%d rounds_max=%u/%d retransmits=%u sent=%u losses=%u drops=%u t=%llds\n",
+                   vn, ppm[k] / 10000.0, d.ok, r->max_round_count, FR_ROUND_CAP, d.retransmits,
+                   d.chunks_sent, r->random_losses, r->queue_drops, (long long)(d.elapsed_ms / 1000));
+            snprintf(nm, sizeof(nm), "%s converges at %.1f%% loss (%s)", vn, ppm[k] / 10000.0,
+                     d.why ? d.why : "ok");
+            CHECK(d.ok && r->state == RPP_STATE_COMPLETE && r->received == r->total, nm);
+            snprintf(nm, sizeof(nm), "%s at %.1f%% loss stays inside the receiver's round cap", vn,
+                     ppm[k] / 10000.0);
+            CHECK(r->max_round_count < FR_ROUND_CAP, nm);
+            snprintf(nm, sizeof(nm), "%s at %.1f%% loss: no FIFO overrun, no queue drop", vn, ppm[k] / 10000.0);
+            CHECK(r->overruns == 0 && r->queue_drops == 0, nm);
+            free(r);
+        }
     }
 }
 
@@ -926,35 +1393,47 @@ static void test_begin_wait(void)
 {
     // Slow erase: a bootloader is silent for 100 s, then RECEIVING. BEGIN is
     // sent once and never restarted.
-    fake_rx_t *r = calloc(1, sizeof(*r));
-    g_now_ms = 0;
-    fr_init(r, true, 40);
+    fake_rx_t *r = fr_new(true, 40);
     r->erase_ms = 100000;
     drive_t d = drive_transfer(r, RPP_DATA_PACE_MS);
     CHECK(d.ok && r->begins_seen == 1 && r->begins_while_erasing == 0,
           "100 s silent erase completes without a BEGIN resend");
+    free(r);
 
     // Erase longer than the window fails (bounded).
-    g_now_ms = 0;
-    fr_init(r, true, 40);
+    r = fr_new(true, 40);
     r->erase_ms = RPP_ERASE_TIMEOUT_MS + 30000u;
     d = drive_transfer(r, RPP_DATA_PACE_MS);
     CHECK(!d.ok && r->begins_seen == 1, "an erase past the window fails without restarting it");
+    free(r);
 
-    // Application variant reports ERASING beacons: also never restarted.
-    g_now_ms = 0;
-    fr_init(r, false, 40);
+    // Application: ERASING is sent once, then the task is blocked in the erase;
+    // BEGIN is never restarted.
+    r = fr_new(false, 40);
     r->erase_ms = 60000;
-    d = drive_transfer(r, RPP_DATA_PACE_MS);
-    CHECK(d.ok && r->begins_while_erasing == 0, "app erase beacons never trigger a resend");
+    d = drive_transfer(r, RPP_DATA_PACE_APP_MS);
+    CHECK(d.ok && r->begins_while_erasing == 0 && r->erasing_statuses == 1,
+          "app erase never triggers a resend");
+    free(r);
 
-    // A BEGIN the Pico never saw is resent, but only after several IDLE beacons
-    // AND the minimum time.
-    g_now_ms = 0;
-    fr_init(r, true, 40);
+    // A BEGIN the BOOTLOADER never saw is resent, but only after several IDLE
+    // beacons AND the minimum time.
+    r = fr_new(true, 40);
     r->deaf_first_begin = true;
     d = drive_transfer(r, RPP_DATA_PACE_MS);
     CHECK(d.ok && r->begins_seen == 2, "a missed BEGIN is resent once and the transfer completes");
+    free(r);
+
+    // The APPLICATION sends no IDLE beacons, so a BEGIN it never saw can never
+    // be detected: it is NEVER resent and the wait fails closed at the erase
+    // timeout (rpp_begin_step doc).
+    r = fr_new(false, 40);
+    r->deaf_first_begin = true;
+    d = drive_transfer(r, RPP_DATA_PACE_APP_MS);
+    CHECK(!d.ok && !d.unknown && r->begins_seen == 1 && r->statuses_emitted == 0,
+          "app lost BEGIN: never resent, nothing heard");
+    CHECK(d.elapsed_ms >= (int64_t)RPP_ERASE_TIMEOUT_MS && d.chunks_sent == 0 && r->received == 0,
+          "app lost BEGIN: fails closed at the timeout without sending any DATA");
     free(r);
 
     // Pure decision: two IDLE beacons never resend; four plus the time do.
@@ -982,6 +1461,10 @@ static void test_begin_wait(void)
     er.state = RPP_STATE_ERASING;
     CHECK(rpp_begin_step(&b, &er, 7000) == RPP_BEGIN_ERASING && b.idle_beacons == 0,
           "an ERASING status clears the idle count");
+    // No beacons at all (the application): only the timeout ends the wait.
+    rpp_begin_start(&b, 0);
+    CHECK(rpp_begin_step(&b, NULL, 60000) == RPP_BEGIN_WAIT && b.sends == 1, "silence: no resend");
+    CHECK(rpp_begin_step(&b, NULL, (int64_t)RPP_ERASE_TIMEOUT_MS) == RPP_BEGIN_FAIL, "silence: fail at the timeout");
 }
 
 static void test_fin_unit(void)
@@ -996,7 +1479,7 @@ static void test_fin_unit(void)
     rpp_fin_end_sent(&f);
     CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, 100) == RPP_FIN_WAIT, "quiet right after END -> wait");
     st.state = RPP_STATE_VERIFYING;
-    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 200) == RPP_FIN_WAIT && f.restart_timer,
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 200) == RPP_FIN_WAIT && f.restart_timer && f.verifying_seen,
           "VERIFYING -> wait and restart the END timer");
     st.state = RPP_STATE_COMPLETE;
     CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 300) == RPP_FIN_DONE, "COMPLETE -> done");
@@ -1014,6 +1497,8 @@ static void test_fin_unit(void)
     rpp_fin_end_sent(&f);
     CHECK(f.end_sends == 1, "end sends reset by a gap round");
 
+    // Before any END nothing can have been accepted: IDLE is a plain failure.
+    // Terminal Pico states are always failures.
     int fails[] = {RPP_STATE_FAILED, RPP_STATE_ABORTED, RPP_STATE_REFUSED, RPP_STATE_REJECTED_SLOT_LINKAGE,
                    RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP, RPP_STATE_IDLE};
     for (size_t i = 0; i < sizeof(fails) / sizeof(fails[0]); i++) {
@@ -1022,6 +1507,49 @@ static void test_fin_unit(void)
         CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_FAIL && f.why != NULL,
               "terminal or lost-transfer state fails");
     }
+    for (size_t i = 0; i < sizeof(fails) / sizeof(fails[0]) - 1; i++) {
+        rpp_fin_start(&f);
+        rpp_fin_end_sent(&f);
+        f.verifying_seen = true;
+        st.state = (uint8_t)fails[i];
+        CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_FAIL,
+              "a Pico-reported terminal state stays a failure even after END/VERIFYING");
+    }
+
+    // After END (or VERIFYING) an IDLE beacon is ambiguous -- a dropped COMPLETE
+    // looks like a reset Pico -- so it is outcome-unknown, never FAILED.
+    rpp_fin_start(&f);
+    rpp_fin_end_sent(&f);
+    st.state = RPP_STATE_IDLE;
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 100) == RPP_FIN_UNKNOWN && f.why &&
+              strstr(f.why, "outcome unknown") && strstr(f.why, "do NOT retry blindly"),
+          "IDLE after END -> outcome unknown");
+    rpp_fin_start(&f);
+    rpp_fin_end_sent(&f);
+    st.state = RPP_STATE_VERIFYING;
+    (void)rpp_fin_step(&f, RPP_EV_STATUS, &st, 100);
+    st.state = RPP_STATE_IDLE;
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 200) == RPP_FIN_UNKNOWN && f.why && strstr(f.why, "verifying") &&
+              strstr(f.why, "power-cycle and check the Pico version"),
+          "IDLE after VERIFYING -> outcome unknown, says it saw VERIFYING");
+    // Silence after VERIFYING: the END timer restarts, then ENDs run out.
+    rpp_fin_start(&f);
+    rpp_fin_end_sent(&f);
+    (void)rpp_fin_step(&f, RPP_EV_STATUS, &st, 0); // IDLE -> unknown (consumed)
+    rpp_fin_start(&f);
+    rpp_fin_end_sent(&f);
+    st.state = RPP_STATE_VERIFYING;
+    (void)rpp_fin_step(&f, RPP_EV_STATUS, &st, 100);
+    rpp_fin_action_t a2 = RPP_FIN_WAIT;
+    uint32_t guard = 0;
+    while (a2 != RPP_FIN_UNKNOWN && a2 != RPP_FIN_FAIL && guard++ < 10) {
+        a2 = rpp_fin_step(&f, RPP_EV_QUIET, NULL, RPP_END_REPLY_TIMEOUT_MS);
+        if (a2 == RPP_FIN_SEND_END) {
+            rpp_fin_end_sent(&f);
+        }
+    }
+    CHECK(a2 == RPP_FIN_UNKNOWN && f.end_sends == RPP_MAX_END_SENDS,
+          "silence after VERIFYING -> unknown after the allowed END resends");
 
     // No-progress gap reports end; steady progress does not; hard batch cap.
     rpp_fin_start(&f);
@@ -1046,14 +1574,15 @@ static void test_fin_unit(void)
     st.received_chunks++;
     CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_FAIL, "hard batch cap");
 
-    // END reply timeout: resend, then fail after the allowed sends.
+    // END reply timeout: resend, then outcome-unknown after the allowed sends.
     rpp_fin_start(&f);
     rpp_fin_end_sent(&f);
     CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, RPP_END_REPLY_TIMEOUT_MS - 1) == RPP_FIN_WAIT, "before the END reply timeout");
     CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, RPP_END_REPLY_TIMEOUT_MS) == RPP_FIN_SEND_END, "END resent after the reply timeout");
     rpp_fin_end_sent(&f);
     rpp_fin_end_sent(&f);
-    CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, RPP_END_REPLY_TIMEOUT_MS) == RPP_FIN_FAIL, "END sends exhausted -> fail");
+    CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, RPP_END_REPLY_TIMEOUT_MS) == RPP_FIN_UNKNOWN,
+          "END sends exhausted -> outcome unknown");
 }
 
 static void test_pace(void)
@@ -1075,13 +1604,11 @@ static void test_pace(void)
     }
     // Behavioural: a sender that ignores the pace overruns the receiver's FIFO,
     // one that honours it does not (the receiver model above drops < 12 ms).
-    fake_rx_t *r = calloc(1, sizeof(*r));
-    g_now_ms = 0;
-    fr_init(r, true, 100);
+    fake_rx_t *r = fr_new(true, 100);
     drive_t d = drive_transfer(r, 4); // 4 ms pace: too fast
     CHECK(r->overruns > 0, "a 4 ms pace overruns the bootloader FIFO model");
-    g_now_ms = 0;
-    fr_init(r, true, 100);
+    free(r);
+    r = fr_new(true, 100);
     d = drive_transfer(r, RPP_DATA_PACE_MS);
     CHECK(d.ok && r->overruns == 0 && r->min_data_gap_ms >= 12, "the configured pace never overruns");
     free(r);
@@ -1096,7 +1623,9 @@ int main(void)
     test_frame_a();
     test_image_and_slots();
     test_receiver_model();
+    test_app_queue();
     test_finish_driver();
+    test_convergence();
     test_begin_wait();
     test_fin_unit();
     test_pace();

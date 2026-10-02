@@ -349,9 +349,22 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     // are authenticated, not just the route. The browser's signed() appends the
     // same "?query" to the context. Static: httpd runs handlers on one task
     // (like s_nonce/s_lockout), and this keeps the extra bytes off its stack.
+    //
+    // The statics `msg` and `q` are shared by every call, which is only safe
+    // because all handlers run on the ONE httpd task: recovery_http_start()
+    // starts exactly one server (asserted there) and nothing here is reached
+    // from another task or from an async httpd work item.
+    //
+    // Every failure from here on has already been handed a valid, unexpired
+    // nonce and a request that passed the header checks, so each one -- the
+    // early 400s below included, not just a MAC mismatch -- consumes the nonce
+    // and counts one lockout failure. Otherwise an oversized or unreadable
+    // query would be a free, lockout-exempt retry against the same nonce.
     static uint8_t msg[OTA_AUTH_NONCE_LEN + 16 + 1 + AUTH_QUERY_MAX];
     size_t query_len = httpd_req_get_url_query_len(req);
     if (query_len > AUTH_QUERY_MAX) {
+        ota_auth_nonce_invalidate(&s_nonce);
+        ota_auth_lockout_record_failure(lockout, t);
         secure_zero(ap_password, sizeof(ap_password));
         secure_zero(key, sizeof(key));
         httpd_resp_set_status(req, "400 Bad Request");
@@ -377,6 +390,8 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
         msg[msg_len++] = '?';
         static char q[AUTH_QUERY_MAX + 1];
         if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
+            ota_auth_nonce_invalidate(&s_nonce);
+            ota_auth_lockout_record_failure(lockout, t);
             secure_zero(ap_password, sizeof(ap_password));
             secure_zero(key, sizeof(key));
             httpd_resp_set_status(req, "400 Bad Request");
@@ -940,6 +955,12 @@ static esp_err_t pico_abort_post(httpd_req_t *req)
 
 void recovery_http_start(void)
 {
+    // recovery_authenticate_request()'s static msg/q buffers (and s_nonce,
+    // s_lockout) assume every handler runs on this ONE httpd task. Starting a
+    // second server would silently break that, so refuse it outright.
+    static bool s_started;
+    configASSERT(!s_started);
+    s_started = true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
     // 13 routes below (3 are the Pico update relay).
