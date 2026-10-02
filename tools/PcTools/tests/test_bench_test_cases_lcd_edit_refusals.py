@@ -124,6 +124,8 @@ class FakeBoard:
         self.edit_never_listed = kw.get("edit_never_listed", False)
         # first N edit-page tap lists come back truncated, with the Prev/Next glyphs missing
         self.truncated_lists = kw.get("truncated_lists", 0)
+        # truncate every edit-page list once the firing has advanced (LCD-23 lock wait)
+        self.truncated_lists_late = kw.get("truncated_lists_late", False)
         if self.preexisting_working:
             self.working = [{"target_c": 99.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}]
             self.working_id = 5
@@ -138,8 +140,6 @@ class FakeBoard:
         segs = self.origin or []
         last = max(len(segs) - 1, 0)
         entry = self.entry_seg()
-        if entry >= len(segs):
-            return "done", 0   # warm start skipped every segment: nothing to run
         first = min(entry + self.start_seg, last)
         if self.kind == "lcd24" and not self.never_advances:
             end_at = sum(float(s["dwell_min"]) * 60.0 for s in segs[entry:])
@@ -150,13 +150,24 @@ class FakeBoard:
         return "running", first
 
     def entry_seg(self):
-        """Mirror of the executor's warm start (profile_executor_start.c:371-479):
-        the firing enters at the first segment whose target is above the zone's
-        current temperature; every earlier one is skipped."""
-        for i, s in enumerate(self.origin or []):
-            if float(s["target_c"]) > self.zone_temp:
+        """Mirror of profile_executor_plan_warm_start() (profile_executor_start.c:
+        371-479): over the leading non-descending ascent, enter at the first
+        segment with zone_temp <= target (a target equal to the reading is NOT
+        skipped); if the reading is above the whole ascent, land on the last
+        ascent segment already dwelling (lines 470-477), so it runs only its
+        dwell."""
+        segs = self.origin or []
+        ascent_end, last = len(segs), None
+        for i, sg in enumerate(segs):
+            t = float(sg["target_c"])
+            if last is not None and t < last:
+                ascent_end = i
+                break
+            last = t
+        for i in range(ascent_end):
+            if self.zone_temp <= float(segs[i]["target_c"]):
                 return i
-        return len(self.origin or [])
+        return max(ascent_end - 1, 0)
 
     def seg_index(self):
         return self.exec_state()[1]
@@ -297,8 +308,10 @@ class FakeUi:
         if b.keypad:
             return {"targets": _KEYPAD, "truncated": False}
         if b.page == "edit_firing":
-            if b.truncated_lists > 0:
-                b.truncated_lists -= 1
+            late = b.truncated_lists_late and b.exec_state()[1] > b.entry_seg() + b.start_seg
+            if b.truncated_lists > 0 or late:
+                if not late:
+                    b.truncated_lists -= 1
                 return {"targets": [t for t in b.targets() if t["cy"] != 20 or t["name"] in ("back", "home")],
                         "truncated": True}
             return {"targets": b.targets(), "truncated": False}
@@ -656,6 +669,25 @@ class TruncatedListTest(unittest.TestCase):
         self.assertEqual(b.truncated_lists, 0)
 
 
+class LockWaitTruncationTest(unittest.TestCase):
+    def test_truncated_reads_during_lock_wait_are_inconclusive_not_fail(self):
+        # steppers never lock (fake) AND the lock-wait reads are truncated
+        result, b = run23(steppers_stay_when_locked=True, truncated_lists_late=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("unreadable", result.reason)
+        self.assertGreater(result.observed["edit_page_truncated_reads"], 0)
+
+    def test_steppers_not_locked_with_clean_reads_is_still_fail(self):
+        result, b = run23(steppers_stay_when_locked=True)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_navigation_failure_reason_reports_truncated_reads(self):
+        result, b = run23(truncated_lists=1000)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertIn("truncated", result.reason)
+        self.assertGreater(result.observed["edit_page_truncated_reads"], 0)
+
+
 class NavSlotTest(unittest.TestCase):
     """_lcd_edit_nav derives Prev/Next from computed topbar slots, so a disabled
     Next (absent from the listing) is never mistaken for the rightmost Prev."""
@@ -717,12 +749,24 @@ class WarmStartRegressionTest(unittest.TestCase):
         b.started_at = 0.0
         self.assertEqual(b.exec_state(), ("running", 1))
 
-    def test_fake_ends_a_floor_base_lcd24_profile_instantly(self):
+    def test_fake_lands_on_the_last_ascent_segment_when_hotter_than_all(self):
+        # firmware lines 470-477: hotter than the whole ascent -> last ascent
+        # segment, already dwelling; for the old LCD-24 plan that is the
+        # zero-dwell segment, so the firing ends at once.
         clock = _Clock()
         b = FakeBoard(clock, kind="lcd24", zone_temp=ZONE_TEMP)
-        b.origin = [{"target_c": BASE_FLOOR, "ramp_c_per_hr": 600.0, "dwell_min": 1.0}] * 3
+        b.origin = [{"target_c": BASE_FLOOR, "ramp_c_per_hr": 600.0, "dwell_min": float(d)} for d in (1, 1, 0)]
         b.started_at = 0.0
-        self.assertEqual(b.exec_state()[0], "done")
+        self.assertEqual(b.entry_seg(), 2)
+        self.assertEqual(b.exec_state(), ("done", 2))
+
+    def test_target_equal_to_the_reading_is_not_skipped(self):
+        clock = _Clock()
+        b = FakeBoard(clock, kind="lcd23", zone_temp=30.0)
+        b.origin = [{"target_c": 30.0, "ramp_c_per_hr": 600.0, "dwell_min": 1.0},
+                    {"target_c": 40.0, "ramp_c_per_hr": 600.0, "dwell_min": 1.0}]
+        b.started_at = 0.0
+        self.assertEqual(b.entry_seg(), 0)
 
     def test_current_plans_enter_segment_zero(self):
         for case, kind in ((C._case_lcd23, "lcd23"), (C._case_lcd24, "lcd24")):

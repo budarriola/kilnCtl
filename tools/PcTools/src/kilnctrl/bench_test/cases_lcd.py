@@ -4331,14 +4331,15 @@ _LCD_EDIT_MIN_RAMP_C_PER_HR = 10.0
 #: LCD-23 profile: [0] base/1 min, [1] base+10/1 min, [2] base+20/30 min (the
 #: segment the steppers edit), [3] base+25/5 min (the last, untouched except by
 #: the refused HTTP probes). The Edit page opens on the RUNNING segment
-#: (ui_page_edit_firing.c:214, cur_seg = running_seg), and the executor may
-#: already be past segment 0 by the time Edit is tapped (first hardware run:
-#: segment_index 1), so the case reads the running segment and navigates by
-#: topbar state; it never assumes segment 0. Segments 0 and 1 give runway for
-#: running segment 0 or 1; running segment >= 2 leaves no future edit segment.
-#: Every target is above the zone reading (warm start, see above), so the
-#: firing enters segment 0 and the running segment at Edit time is 0 unless a
-#: slow bench step let segment 0's dwell run out.
+#: (ui_page_edit_firing.c:214, cur_seg = running_seg), so the case reads the
+#: running segment and navigates by topbar state; it never assumes a segment.
+#: The first hardware run opened on segment_index 1 because the warm start
+#: skipped segment 0 (its target was at floor(zone temp), below the reading);
+#: every target now sits above the reading (see the warm-start note above), so
+#: the firing enters segment 0 and the running segment at Edit time is 0
+#: unless a slow bench step let segment 0's dwell run out (then 1). Running
+#: segment 0 or 1 leaves segment 2 as a future edit segment; running segment
+#: >= 2 leaves none and the case is INCONCLUSIVE with nothing edited.
 _LCD23_SEG1_OFFSET_C = 10.0
 _LCD23_SEG2_OFFSET_C = 20.0
 _LCD23_SEG3_OFFSET_C = 25.0
@@ -4478,6 +4479,21 @@ def _lcd_edit_nav_signature_ok(st: dict, k: int, count: int) -> bool:
     return (tb.get("prev") is not None) == (k > 0) and (tb.get("next") is not None) == (k < count - 1)
 
 
+def _lcd_edit_note_read(env: dict, st: dict) -> None:
+    """Count unreadable / truncated Edit-page tap-list reads into observed."""
+    obs = env["observed"]
+    if not st.get("readable") and not st.get("keypad"):
+        obs["edit_page_unreadable_reads"] = obs.get("edit_page_unreadable_reads", 0) + 1
+    if st.get("truncated"):
+        obs["edit_page_truncated_reads"] = obs.get("edit_page_truncated_reads", 0) + 1
+
+
+def _lcd_edit_read_note(env: dict) -> str:
+    obs = env["observed"]
+    t, u = obs.get("edit_page_truncated_reads", 0), obs.get("edit_page_unreadable_reads", 0)
+    return f" ({t} truncated and {u} unreadable tap-list reads seen)" if (t or u) else ""
+
+
 def _lcd_edit_read_settled(env: dict) -> dict:
     """Page state, re-polled (bounded 2 s) while unreadable (busy, empty or a
     truncated tap list) so navigation never decides from a partial read."""
@@ -4485,6 +4501,7 @@ def _lcd_edit_read_settled(env: dict) -> dict:
     deadline = now() + 2.0
     while True:
         st = _lcd_edit_page_state(ui)
+        _lcd_edit_note_read(env, st)
         if st["readable"] or st.get("keypad") or now() >= deadline:
             return st
         sleep(0.3)
@@ -4535,6 +4552,7 @@ def _lcd_edit_goto(env: dict, target: int, count: int) -> "Optional[str]":
         while True:
             sleep(0.3)
             st = _lcd_edit_page_state(ui)
+            _lcd_edit_note_read(env, st)
             if st.get("keypad"):
                 return "keypad"
             if st["readable"] and _lcd_edit_nav_signature_ok(st, k, count):
@@ -4553,7 +4571,7 @@ def _lcd_edit_tap_failure(env: dict, what: str, why: str, cid: str) -> CaseResul
         return CaseResult(Verdict.INCONCLUSIVE, observed=env["observed"], reason=(
             f"a PIN keypad appeared during {what}; {cid} never types a PIN"))
     return CaseResult(Verdict.INCONCLUSIVE, observed=env["observed"], reason=(
-        f"could not tap {what} ({why}); Apply was not pressed"))
+        f"could not tap {what} ({why}){_lcd_edit_read_note(env)}; Apply was not pressed"))
 
 
 def _lcd_edit_apply(env: dict, cid: str) -> "Optional[CaseResult]":
@@ -4942,8 +4960,10 @@ def _lcd23_body(env: dict) -> CaseResult:
     # Wait (bounded) for the page's 1 s poll to lock the finished segment's steppers.
     locked_seen = False
     lock_deadline = now() + _LCD_EDIT_ENDED_WAIT_S
+    lock_reads0 = (observed.get("edit_page_truncated_reads", 0), observed.get("edit_page_unreadable_reads", 0))
     while True:
         st = _lcd_edit_page_state(ui)
+        _lcd_edit_note_read(env, st)
         if st.get("keypad"):
             return _lcd_edit_tap_failure(env, "the locked-segment check", "keypad", cid)
         if st.get("readable") and all(st["steppers"][f] is None for f in ("target", "ramp", "dwell")):
@@ -4953,6 +4973,12 @@ def _lcd23_body(env: dict) -> CaseResult:
             break
         sleep(0.5)
     observed["locked_seen"] = locked_seen
+    if not locked_seen and lock_reads0 != (observed.get("edit_page_truncated_reads", 0),
+                                           observed.get("edit_page_unreadable_reads", 0)):
+        # Never judge "steppers not locked" from a partial or empty tap list.
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed, reason=(
+            "could not confirm the finished segment's steppers locked: the page's tap list was unreadable "
+            f"during the wait{_lcd_edit_read_note(env)}; Apply was not pressed"))
     fail = _lcd_edit_apply(env, cid)
     if fail:
         return fail
