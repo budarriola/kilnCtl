@@ -96,7 +96,7 @@ int pico_update_attempts_select_slot(bool have_record, int last_slot, bool wire_
  * answer is the opposite of it. When unknown, it alternates from whichever
  * slot was tried last for this exact pair, and a fresh pair starts at slot 0
  * (A). On a disagreement between the wire and the persisted guess it logs
- * once at WARN and rewrites the persisted last_slot to the reported slot
+ * once (INFO when a prior attempt is on record, since a failed push legitimately leaves the Pico on the old slot; WARN otherwise) and rewrites the persisted last_slot to the reported slot
  * (count and failed flag preserved). Returns true iff a record for
  * `pair_hash` existed.
  *

@@ -466,7 +466,9 @@ static void pico_auto_update_task(void *arg)
          * guess is used only while it is unknown (a fresh pair defaults to
          * slot 0/A) -- see pico_update_attempts_next_slot(). Only read once
          * the peer identity is known (link handshake + ANNOUNCE_VERSION done),
-         * else treated as unknown. */
+         * else treated as unknown. A Pico without slot metadata (plain dev
+         * target) never reports it, so it costs the full ACTIVE_SLOT_WAIT_MS
+         * (3 s) every boot while use_embedded. */
         bool wire_is_b = false;
         bool wire_known = in.fw_version_known && wait_for_wire_active_slot(&wire_is_b);
         (void)pico_update_attempts_next_slot(pair_hash, wire_known, wire_is_b, &use_slot);

@@ -45,7 +45,7 @@ typedef struct {
     uint32_t pair_hash;
     uint32_t attempt_count;
     uint32_t failed;    /* 0 or 1 -- kept as uint32_t so the struct stays 4-aligned throughout */
-    uint32_t last_slot; /* 0 = SaftyFW_slotA, 1 = SaftyFW_slotB; which embedded image the last attempt for this pair pushed */
+    uint32_t last_slot; /* 0 = SaftyFW_slotA, 1 = SaftyFW_slotB; the slot last pushed for this pair, or the Pico's reported active slot after a disagreement correction. The unknown-wire fallback treats it as the believed active slot (next = the other one). */
     uint32_t crc32;
 } pico_update_attempts_record_t;
 
@@ -305,9 +305,21 @@ bool pico_update_attempts_next_slot(uint32_t pair_hash, bool wire_known, bool wi
                                                 wire_active_is_b, &disagree);
     if (disagree) {
         int active = wire_active_is_b ? 1 : 0;
-        ESP_LOGW(TAG, "persisted last_slot=%c disagrees with the Pico's reported active slot %c -- "
-                      "trusting the Pico, next slot %c, updating the persisted guess",
-                 rec.last_slot != 0u ? 'B' : 'A', active != 0 ? 'B' : 'A', next != 0 ? 'B' : 'A');
+        /* After a failed push the Pico still runs the old slot, so last pushed != reported active
+         * is expected on an ordinary retry boot (count > 0): INFO. WARN otherwise. */
+        const bool expected_after_failed_push = rec.attempt_count > 0u;
+        const char fmt_last = rec.last_slot != 0u ? 'B' : 'A';
+        const char fmt_wire = active != 0 ? 'B' : 'A';
+        const char fmt_next = next != 0 ? 'B' : 'A';
+        if (expected_after_failed_push) {
+            ESP_LOGI(TAG, "persisted last_slot=%c differs from the Pico's reported active slot %c -- "
+                          "using the Pico's report, next slot %c, updating the persisted guess",
+                     fmt_last, fmt_wire, fmt_next);
+        } else {
+            ESP_LOGW(TAG, "persisted last_slot=%c differs from the Pico's reported active slot %c -- "
+                          "using the Pico's report, next slot %c, updating the persisted guess",
+                     fmt_last, fmt_wire, fmt_next);
+        }
         if (!write_verified(pair_hash, rec.attempt_count, rec.failed != 0u, active)) {
             ESP_LOGW(TAG, "could not persist the corrected last_slot guess (the Pico's report still "
                           "decides the slot next boot)");
