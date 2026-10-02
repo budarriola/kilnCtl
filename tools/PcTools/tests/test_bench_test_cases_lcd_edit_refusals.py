@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Unit tests for LCD-23 (Edit firing steppers + refusal paths) and LCD-24
-(end-of-firing), cases_lcd._case_lcd23/_case_lcd24 and the three judgments
-judge_lcd_edit_ramp_steppers / judge_lcd_edit_refusal / judge_lcd_edit_firing_end.
+"""Unit tests for LCD-23 (Edit firing steppers + refusal paths), LCD-24
+(end-of-firing) and LCD-25 (the PIN-gated Keep? decision page),
+cases_lcd._case_lcd23/_case_lcd24/_case_lcd25 and the judgments
+judge_lcd_edit_ramp_steppers / judge_lcd_edit_refusal / judge_lcd_edit_firing_end /
+judge_lcd_keep_discard.
 One fake board models the executor (driven by a fake clock), the live working
 copy, the Edit page (positions of steppers/topbar icons, local working copy,
 window check) and the relays -- never a real board.
@@ -126,6 +128,22 @@ class FakeBoard:
         self.truncated_lists = kw.get("truncated_lists", 0)
         # truncate every edit-page list once the firing has advanced (LCD-23 lock wait)
         self.truncated_lists_late = kw.get("truncated_lists_late", False)
+        # LCD-25: the home Keep? button, the PIN gate, the live_decide page and its confirm dialog
+        self.keep_never_listed = kw.get("keep_never_listed", False)
+        self.decide_locked = kw.get("decide_locked", False)
+        self.pin_accepts = kw.get("pin_accepts", True)
+        self.pin_incomplete = kw.get("pin_incomplete", False)
+        self.origin_builtin = kw.get("origin_builtin", False)
+        self.overwrite_shown_wrong = kw.get("overwrite_shown_wrong", False)
+        self.decide_truncated = kw.get("decide_truncated", False)
+        self.no_confirm_dialog = kw.get("no_confirm_dialog", False)
+        self.lcd_discard_works = kw.get("lcd_discard_works", True)
+        self.orig_changed_on_discard = kw.get("orig_changed_on_discard", False)
+        self.stray_profile_on_discard = kw.get("stray_profile_on_discard", False)
+        self.confirm = False
+        self.decide_unlocked = False
+        self.pin_entries = 0
+        self.profile_ids = [7]
         if self.preexisting_working:
             self.working = [{"target_c": 99.0, "ramp_c_per_hr": 1.0, "dwell_min": 1.0}]
             self.working_id = 5
@@ -141,7 +159,7 @@ class FakeBoard:
         last = max(len(segs) - 1, 0)
         entry = self.entry_seg()
         first = min(entry + self.start_seg, last)
-        if self.kind == "lcd24" and not self.never_advances:
+        if self.kind in ("lcd24", "lcd25") and not self.never_advances:
             end_at = sum(float(s["dwell_min"]) * 60.0 for s in segs[entry:])
             if el >= end_at:
                 return self.ends_as, first
@@ -200,6 +218,18 @@ class FakeBoard:
             return False
         return self.steppers_stay_when_locked or self.cur_seg >= self.seg_index()
 
+    def keep_owed(self):
+        return (self.working is not None and not self.running() and not self.no_pending_decision
+                and not self.keep_never_listed)
+
+    def decide_targets(self):
+        if self.confirm:
+            return [{"name": n, "cx": 10, "cy": 10, "hidden": False} for n in ("Cancel", "Discard")]
+        names = ["back", "home", "Discard edit", "Save as new (auto-named)"]
+        if (not self.origin_builtin) != self.overwrite_shown_wrong:
+            names.append("Overwrite original")
+        return [{"name": n, "cx": 10, "cy": 10, "hidden": False} for n in names]
+
     def targets(self):
         t = [{"name": "back", "cx": 333, "cy": 20, "hidden": False},
              {"name": "home", "cx": 373, "cy": 20, "hidden": False}]
@@ -220,6 +250,9 @@ class FakeBoard:
         return t
 
     def press(self, x, y):
+        if self.keypad and (x, y) == C._KEYPAD_BACKDROP_XY:
+            self.keypad = False
+            return
         if self.page != "edit_firing":
             return
         if self.keypad_on_nav and (x, y) == (NEXT_X, 20):
@@ -272,6 +305,16 @@ class FakeProfiles:
     def delete(self, slot):
         self.b.calls.append("delete")
 
+    def get(self, slot):
+        if self.b.origin is None:
+            return None
+        return SimpleNamespace(id=slot, segments=[
+            SimpleNamespace(target_c=s["target_c"], ramp_c_per_hr=s["ramp_c_per_hr"], dwell_min=s["dwell_min"])
+            for s in self.b.origin])
+
+    def list_all(self):
+        return [SimpleNamespace(id=i) for i in self.b.profile_ids]
+
     def get_exec_status(self):
         st, idx = self.b.exec_state()
         return SimpleNamespace(state_name=st, profile_id=7, segment_count=len(self.b.origin or []),
@@ -307,6 +350,10 @@ class FakeUi:
         b = self.b
         if b.keypad:
             return {"targets": _KEYPAD, "truncated": False}
+        if b.page == "live_decide":
+            return {"targets": b.decide_targets(), "truncated": b.decide_truncated}
+        if b.page == "home" and b.keep_owed():
+            return {"targets": [{"name": "Keep?", "cx": 240, "cy": 280, "hidden": False}], "truncated": False}
         if b.page == "edit_firing":
             late = b.truncated_lists_late and b.exec_state()[1] > b.entry_seg() + b.start_seg
             if b.truncated_lists > 0 or late:
@@ -333,13 +380,52 @@ class FakeUi:
         if name == "Cancel" and b.keypad:
             b.keypad = False
             return {"result": "ok"}
+        if name == "Keep?" and b.page == "home" and b.keep_owed():
+            if b.decide_locked and not b.decide_unlocked:
+                b.keypad = True
+            else:
+                b.page = "live_decide"
+            return {"result": "ok"}
+        if name == "Discard edit" and b.page == "live_decide" and not b.confirm:
+            b.confirm = not b.no_confirm_dialog
+            return {"result": "ok"}
+        if name == "Cancel" and b.confirm:
+            b.confirm = False
+            return {"result": "ok"}
+        if name == "Discard" and b.confirm:
+            b.confirm = False
+            if b.lcd_discard_works:
+                b.working = None
+            if b.orig_changed_on_discard:
+                b.origin = [dict(b.origin[0], target_c=b.origin[0]["target_c"] + 5.0)] + b.origin[1:]
+            if b.stray_profile_on_discard:
+                b.profile_ids.append(40)
+            return {"result": "ok"}
         if name in ("home", "back"):
             b.page = "home"
+            b.confirm = False
             return {"result": "ok"}
         if name == "Apply" and b.page == "edit_firing":
             b.apply()
             return {"result": "ok"}
         return {"result": "not_found"}
+
+
+    def enter_pin_verified(self, pin):
+        """Models UiTestClient.enter_pin_verified: records only that an entry happened."""
+        b = self.b
+        b.pin_entries += 1
+        ok = {"result": "ok"}
+        entry = {"digit_results": [dict(ok) for _ in pin], "ok_result": dict(ok)}
+        if b.pin_incomplete:
+            entry["ok_result"] = None
+            entry["entry_incomplete"] = True
+            return entry
+        if b.pin_accepts:
+            b.keypad = False
+            b.decide_unlocked = True
+            b.page = "live_decide"
+        return entry
 
 
 class FakeLiveClient:
@@ -351,7 +437,8 @@ class FakeLiveClient:
         wid = b.working_id if b.working is not None else -1
         if b.foreign_wid_at_end and b.working is not None and not b.running():
             wid = 11
-        return {"active": b.running(), "working_id": wid,
+        return {"active": b.running(), "working_id": wid, "origin_id": 7,
+                "origin_is_builtin": b.origin_builtin,
                 "pending_decision": (b.working is not None and not b.running() and not b.no_pending_decision),
                 "last_refusal": b.last_refusal}
 
@@ -394,7 +481,7 @@ def _http(b):
     return get
 
 
-def _run(case, kind, edit_heat=True, allow_heat=True, ambient=ZONE_TEMP, **kw):
+def _run(case, kind, edit_heat=True, allow_heat=True, ambient=ZONE_TEMP, ctx_extra=None, **kw):
     clock = _Clock()
     b = FakeBoard(clock, kind=kind, zone_temp=ambient, **kw)
     srv = SimpleNamespace(
@@ -410,6 +497,7 @@ def _run(case, kind, edit_heat=True, allow_heat=True, ambient=ZONE_TEMP, **kw):
             {"index": 0, "max_temp_c": b.max_temp, "max_ramp_c_per_hr": b.max_ramp}]},
         "_http_get_json": _http(b),
     }
+    ctx.update(ctx_extra or {})
     with mock.patch("kilnctrl.dashboard_http_client.get_status", side_effect=lambda h: dict(
             safety_relay_energized=b.relays_energized)):
         result = case(ctx)
@@ -424,9 +512,26 @@ def run24(**kw):
     return _run(C._case_lcd24, "lcd24", **kw)
 
 
+PIN = "7391"
+
+
+def run25(pin=PIN, heap=20000, **kw):
+    extra = {"lcd_admin_pin": pin} if pin else {}
+    if heap == "raise":
+        def _heap(host):
+            raise OSError("unreachable")
+    else:
+        def _heap(host):
+            return {"heap_internal": {"min_free": heap}}
+    extra["_get_heap_status"] = _heap
+    with mock.patch.dict(os.environ):
+        os.environ.pop("KILNCTL_LCD_PIN", None)
+        return _run(C._case_lcd25, "lcd25", ctx_extra=extra, **kw)
+
+
 class RegistryTest(unittest.TestCase):
     def test_registered_heat_cases_with_judge(self):
-        for cid, fn in (("LCD-23", C._case_lcd23), ("LCD-24", C._case_lcd24)):
+        for cid, fn in (("LCD-23", C._case_lcd23), ("LCD-24", C._case_lcd24), ("LCD-25", C._case_lcd25)):
             spec = R.get_case(cid)
             self.assertTrue(spec.heat, cid)
             self.assertIs(spec.judge, fn)
@@ -898,6 +1003,214 @@ class Lcd24Test(unittest.TestCase):
         result, b = run24(locked=True)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
         self.assertEqual(b.presses, [C._KEYPAD_BACKDROP_XY])  # dismissal only, never a digit
+
+
+class Lcd25Test(unittest.TestCase):
+    def test_pass_via_lcd_discard_only(self):
+        result, b = run25()
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(b.calls.count("click:Keep?"), 1)
+        i = [c for c in b.calls if c in ("click:Keep?", "click:Discard edit", "click:Discard")]
+        self.assertEqual(i, ["click:Keep?", "click:Discard edit", "click:Discard"])
+        self.assertEqual(b.calls.count("discard"), 0)  # the HTTP discard was never needed
+        self.assertIsNone(b.working)
+        self.assertFalse(result.observed["origin_is_builtin"])
+        self.assertTrue(result.observed["cleanup"]["verified"])
+        self.assertEqual(b.pin_entries, 0)  # unlocked panel: no keypad, no PIN typed
+
+    def test_locked_panel_enters_the_pin_once_and_never_logs_it(self):
+        result, b = run25(decide_locked=True)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(b.pin_entries, 1)
+        self.assertEqual(result.observed["pin_entry"]["digit_count"], len(PIN))
+        self.assertNotIn(PIN, repr(result.observed))
+        self.assertNotIn(PIN, repr(b.calls))
+
+    def test_locked_panel_pin_from_the_environment(self):
+        with mock.patch.dict(os.environ, {"KILNCTL_LCD_PIN": PIN}):
+            result, b = _run(C._case_lcd25, "lcd25", decide_locked=True,
+                            ctx_extra={"_get_heap_status": lambda h: {"heap_internal": {"min_free": 20000}}})
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_locked_without_a_pin_is_inconclusive_and_types_nothing(self):
+        result, b = run25(pin=None, decide_locked=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(b.pin_entries, 0)
+        self.assertFalse(result.observed["pin_available"])
+        self.assertEqual(b.presses[-1:], [C._KEYPAD_BACKDROP_XY])  # dismissal only
+        self.assertNotIn("click:Discard edit", b.calls)
+        self.assertTrue(result.observed["cleanup"]["verified"])
+        self.assertEqual(b.calls.count("discard"), 1)  # cleanup discarded only the case's own copy
+
+    def test_malformed_pin_counts_as_no_pin(self):
+        result, b = run25(pin="12ab", decide_locked=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(b.pin_entries, 0)
+
+    def test_wrong_pin_keypad_stays_is_inconclusive_one_attempt(self):
+        result, b = run25(decide_locked=True, pin_accepts=False)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(b.pin_entries, 1)
+        self.assertIn("PIN rejected", result.reason)
+        self.assertNotIn("click:Discard edit", b.calls)
+        self.assertFalse(b.keypad)
+
+    def test_incomplete_pin_entry_is_inconclusive(self):
+        result, b = run25(decide_locked=True, pin_incomplete=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertNotIn("click:Discard edit", b.calls)
+
+    def test_keep_never_appearing_is_inconclusive_with_no_tap(self):
+        result, b = run25(keep_never_listed=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertNotIn("click:Keep?", b.calls)
+        self.assertEqual(b.pin_entries, 0)
+        self.assertTrue(result.observed["cleanup"]["verified"])
+        self.assertIsNone(b.working)  # the HTTP fallback discard of its own working id
+        self.assertEqual(b.calls.count("discard"), 1)
+
+    def test_no_pending_decision_is_fail_before_any_lcd_tap(self):
+        result, b = run25(no_pending_decision=True)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("no LCD tap", result.reason)
+        self.assertNotIn("click:Keep?", b.calls)
+
+    def test_firing_not_done_is_inconclusive_with_no_tap(self):
+        result, b = run25(ends_as="faulted")
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertNotIn("click:Keep?", b.calls)
+
+    def test_overwrite_missing_for_a_user_origin_is_fail(self):
+        result, b = run25(overwrite_shown_wrong=True)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("'Overwrite original' is missing", result.reason)
+
+    def test_overwrite_offered_for_a_builtin_origin_is_fail(self):
+        result, b = run25(origin_builtin=True, overwrite_shown_wrong=True)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("'Overwrite original' is offered", result.reason)
+
+    def test_builtin_origin_without_overwrite_passes(self):
+        result, b = run25(origin_builtin=True)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertTrue(result.observed["origin_is_builtin"])
+
+    def test_truncated_page_read_does_not_judge_overwrite(self):
+        result, b = run25(overwrite_shown_wrong=True, decide_truncated=True)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertTrue(result.observed["page_truncated"])
+
+    def test_confirm_dialog_never_appearing_is_fail_and_cleanup_discards_over_http(self):
+        result, b = run25(no_confirm_dialog=True)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("no confirm dialog", result.reason)
+        self.assertNotIn("click:Discard", b.calls)
+        self.assertIsNone(b.working)
+        self.assertEqual(b.calls.count("discard"), 1)
+        self.assertTrue(result.observed["cleanup"]["verified"])
+
+    def test_discard_that_leaves_the_working_copy_is_fail(self):
+        result, b = run25(lcd_discard_works=False)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("remains after the LCD discard", result.reason)
+        self.assertEqual(b.calls.count("discard"), 1)  # cleanup, own working id only
+        self.assertIsNone(b.working)
+
+    def test_changed_original_is_fail(self):
+        result, b = run25(orig_changed_on_discard=True)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("original profile changed", result.reason)
+
+    def test_stray_new_profile_is_fail(self):
+        result, b = run25(stray_profile_on_discard=True)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("unexpected new profile", result.reason)
+
+    def test_relays_still_energized_forces_fail(self):
+        result, b = run25(relays_energized=True)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+
+    def test_gates(self):
+        for kw in ({"edit_heat": False}, {"allow_heat": False}):
+            result, b = run25(**kw)
+            self.assertEqual(result.verdict, Verdict.NOT_RUN)
+            self.assertEqual(b.calls, [])
+
+    def test_preexisting_live_edit_is_inconclusive_untouched(self):
+        result, b = run25(preexisting_working=True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        self.assertEqual(b.calls, [])
+
+    def test_heap_floor(self):
+        result, b = run25(heap=8192)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["heap_internal_min_free"], 8192)
+        result, b = run25(heap=8191)
+        self.assertEqual(result.verdict, Verdict.FAIL, result.reason)
+        self.assertIn("below the 8192 B floor", result.reason)
+        self.assertIsNone(b.working)
+
+    def test_unreadable_heap_is_inconclusive(self):
+        for heap in ("raise", None, "n/a"):
+            result, b = run25(heap=heap)
+            self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, (heap, result.reason))
+
+    def test_save_as_and_overwrite_are_never_tapped(self):
+        result, b = run25()
+        self.assertNotIn("click:Overwrite original", b.calls)
+        self.assertFalse([c for c in b.calls if c.startswith("click:Save as new")])
+
+
+class KeepDiscardJudgeTest(unittest.TestCase):
+    NAMES = {"back", "home", "Discard edit", "Save as new (auto-named)", "Overwrite original"}
+    DONE = {"active": False, "working_id": -1, "pending_decision": False}
+
+    def _j(self, **kw):
+        args = dict(origin_is_builtin=False, page_names=set(self.NAMES), page_truncated=False,
+                    confirm_seen=True, status_after=dict(self.DONE), orig_unchanged=True,
+                    stray_profile_ids=[], heap_internal_min_free=20000)
+        args.update(kw)
+        return J.judge_lcd_keep_discard(**args)
+
+    def test_pass_and_each_failure(self):
+        self.assertEqual(self._j().verdict, Verdict.PASS)
+        self.assertEqual(self._j(page_names=self.NAMES - {"Discard edit"}).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(page_names=self.NAMES - {"Save as new (auto-named)"}).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(page_names=self.NAMES - {"Overwrite original"}).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(origin_is_builtin=True).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(origin_is_builtin=True, page_names=self.NAMES - {"Overwrite original"}).verdict,
+                         Verdict.PASS)
+        self.assertEqual(self._j(page_truncated=True, page_names=self.NAMES - {"Overwrite original"}).verdict,
+                         Verdict.PASS)
+        self.assertEqual(self._j(confirm_seen=False).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(confirm_seen=None).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(status_after=dict(self.DONE, working_id=9)).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(status_after=dict(self.DONE, pending_decision=True)).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(orig_unchanged=False).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(stray_profile_ids=[40]).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(heap_internal_min_free=8192).verdict, Verdict.PASS)
+        self.assertEqual(self._j(heap_internal_min_free=8191).verdict, Verdict.FAIL)
+        self.assertEqual(self._j(heap_internal_min_free=True).verdict, Verdict.INCONCLUSIVE)
+
+    def test_inconclusive_when_facts_are_missing(self):
+        self.assertEqual(self._j(origin_is_builtin=None).verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(self._j(status_after=None).verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(self._j(orig_unchanged=None).verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(self._j(heap_internal_min_free=None).verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(self._j(status_after=None, confirm_seen=False).verdict, Verdict.FAIL)
+
+
+class PlanCountTest(unittest.TestCase):
+    def test_lcd_suite_and_plan_counts_match(self):
+        ids = R.SUITES["lcd"]
+        self.assertEqual(len(ids), 25)
+        heat = [c for c in ids if R.get_case(c).heat]
+        self.assertEqual(heat, ["LCD-22", "LCD-23", "LCD-24", "LCD-25"])
+        plan = os.path.join(os.path.dirname(__file__), "..", "..", "..", "docs", "BENCH_TEST_SYSTEM_PLAN.md")
+        with open(plan, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("| LCD | 25 | 4 (LCD-22, LCD-23, LCD-24, LCD-25) |", text)
+        self.assertIn("| LCD-25 |", text)
 
 
 class JudgeTest(unittest.TestCase):

@@ -5069,8 +5069,11 @@ def _lcd24_plan(ctx: dict, zone_temp: float):
     return [_lcd_edit_pstep(devices.ProfileSegment, s) for s in orig], orig, base + 5.0, limits
 
 
-def _lcd24_body(env: dict) -> CaseResult:
-    cid = "LCD-24"
+def _lcd24_edit_and_end(env: dict, cid: str):
+    """Shared by LCD-24/LCD-25: edit a FUTURE segment through the LCD, Apply, check the
+    edit was adopted, then let the firing end on its own (bounded). Returns a final
+    CaseResult (INCONCLUSIVE/FAIL, nothing further to do) or, on success,
+    {"own_wid", "expected", "end_state"}."""
     observed, orig, srv = env["observed"], env["orig"], env["srv"]
     client, host, ui = env["client"], env["host"], env["ui"]
     now, sleep = env["now"], env["sleep"]
@@ -5150,6 +5153,19 @@ def _lcd24_body(env: dict) -> CaseResult:
     observed["end_state"] = end_state
     if end_state is None:
         return J.judge_lcd_edit_firing_end(expected, own_wid, None, None, None, None, None, None)
+    return {"own_wid": own_wid, "expected": expected, "end_state": end_state}
+
+
+def _lcd24_body(env: dict) -> CaseResult:
+    cid = "LCD-24"
+    observed, orig, srv = env["observed"], env["orig"], env["srv"]
+    client, host, ui = env["client"], env["host"], env["ui"]
+    now, sleep = env["now"], env["sleep"]
+
+    ctx_state = _lcd24_edit_and_end(env, cid)
+    if isinstance(ctx_state, CaseResult):
+        return ctx_state
+    own_wid, expected, end_state = ctx_state["own_wid"], ctx_state["expected"], ctx_state["end_state"]
     # Give the page's 1 s poll time to notice, then read the panel.
     lcd_ended: "Optional[bool]" = None
     ended_deadline = now() + _LCD_EDIT_ENDED_WAIT_S
@@ -5191,6 +5207,219 @@ def _case_lcd24(ctx: dict) -> CaseResult:
     return _lcd_edit_run(ctx, "LCD-24", _lcd24_plan, _lcd24_body)
 
 
+# ---------------------------------------------------------------------------
+# LCD-25 -- the end-of-run "Keep?" decision on the LCD (live_decide page, PIN-gated).
+# Same firing as LCD-24 (one LCD edit, Apply, firing ends); then the home page's
+# "Keep?" button -> PIN -> decide page -> "Discard edit" -> confirm "Discard".
+# The "Save as new" leg is deliberately NOT run: the first decision consumes the
+# pending working copy, so it would need a second firing, and the profile it
+# creates would need srv._profiles.delete to clean up. Its button's presence is
+# still checked.
+# ---------------------------------------------------------------------------
+_LCD25_KEEP_WAIT_S = 10.0
+_LCD25_PAGE_WAIT_S = 12.0
+_LCD25_NAMES_WAIT_S = 5.0
+_LCD25_CLEAR_WAIT_S = 10.0
+
+
+def _lcd25_names(ui) -> "tuple[Optional[set], bool]":
+    """(visible tap-target names or None when unreadable, truncated)."""
+    try:
+        tap, _ = _list_tap_targets_resolving_busy(ui)
+    except Exception:  # noqa: BLE001
+        return None, False
+    if not tap or tap.get("busy"):
+        return None, False
+    names = {t.get("name") for t in tap.get("targets", []) if t.get("name") and not t.get("hidden")}
+    return names, bool(tap.get("truncated"))
+
+
+def _lcd25_wait_names(env: dict, pred, timeout_s: float) -> "tuple[Optional[set], bool]":
+    """Poll until pred(names) holds; returns the last read either way."""
+    now, sleep = env["now"], env["sleep"]
+    deadline = now() + timeout_s
+    while True:
+        names, trunc = _lcd25_names(env["ui"])
+        if names is not None and pred(names):
+            return names, trunc
+        if now() >= deadline:
+            return names, trunc
+        sleep(0.5)
+
+
+def _lcd25_pin(ctx: dict) -> "Optional[str]":
+    """The admin PIN from ctx / the environment, never written anywhere. LCD-25 does not
+    seed or change a PIN (unlike LCD-19)."""
+    from . import cases_web_rw as _web  # local import: avoids a module-load cycle
+    pin = (ctx.get("_lcd_pin") or {}).get("right_pin") or ctx.get("lcd_admin_pin") \
+        or os.environ.get(_web._LCD_PIN_ENV)
+    return pin if pin and _web._lcd_pin_well_formed(pin) else None
+
+
+def _lcd25_segs(detail) -> "Optional[list]":
+    try:
+        return [(float(sg.target_c), float(sg.ramp_c_per_hr), int(sg.dwell_min)) for sg in detail.segments]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _lcd25_heap_min_free(ctx: dict, host: str) -> "Optional[int]":
+    """heap_internal min_free (bytes) from the existing read-only GET /api/status heap read;
+    None when it cannot be read. ctx["_get_heap_status"] is injectable for tests."""
+    getter = ctx.get("_get_heap_status")
+    try:
+        if getter is None:
+            from .. import dashboard_http_client
+            getter = dashboard_http_client.get_heap_status
+        value = (getter(host) or {}).get("heap_internal", {}).get("min_free")
+    except Exception:  # noqa: BLE001
+        return None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _lcd25_inconclusive(env: dict, reason: str, dismiss: bool = False) -> CaseResult:
+    if dismiss:
+        env["observed"]["overlay_dismiss"] = _dismiss_lcd19_overlay(env["ctx"], env["ui"])
+    return CaseResult(Verdict.INCONCLUSIVE, observed=env["observed"], reason=reason)
+
+
+def _lcd25_open_decide_page(env: dict) -> "Optional[CaseResult]":
+    """Tap Keep? once, enter the PIN if a keypad appears (once, never retried), wait for
+    the live_decide page. None when on the page, else the INCONCLUSIVE to return."""
+    ui, observed, now, sleep = env["ui"], env["observed"], env["now"], env["sleep"]
+    log: list = []
+    settled = _wait_for_home_settled(env["ctx"], ui, "Keep?", min_wait_s=0.0,
+                                     timeout_s=_LCD25_KEEP_WAIT_S, log=log)
+    observed["keep_settled"] = settled
+    if not settled:
+        observed["keep_settle_reads"] = log[-3:]
+        return _lcd25_inconclusive(env, "the home page never showed a 'Keep?' button although live status "
+                                        "reports a pending decision; nothing was tapped")
+    click = ui.click_by_name("Keep?")
+    observed["keep_click"] = click.get("result")
+    if click.get("result") not in ("ok", "verdict_unknown"):
+        return _lcd25_inconclusive(env, f"click_by_name('Keep?') returned {click.get('result')!r}")
+    deadline = now() + _LCD25_PAGE_WAIT_S
+    pin_deadline = None
+    while True:
+        if ui.get_current_page() == "live_decide":
+            return None
+        names, _ = _lcd25_names(ui)
+        if names is not None and _is_keypad_names(names):
+            if pin_deadline is None:
+                pin = _lcd25_pin(env["ctx"])
+                observed["pin_available"] = bool(pin)
+                if not pin:
+                    return _lcd25_inconclusive(env, "the Keep? tap raised a PIN keypad and no valid PIN is "
+                                                    "available (KILNCTL_LCD_PIN / ctx); keypad dismissed",
+                                               dismiss=True)
+                entry = ui.enter_pin_verified(pin)
+                observed["pin_entry"] = _entry_result_summary(entry)
+                if entry is None or entry.get("entry_incomplete") or not _entry_all_clicked_ok(entry):
+                    return _lcd25_inconclusive(env, "PIN entry did not complete cleanly; keypad dismissed",
+                                               dismiss=True)
+                pin_deadline = now() + _PIN_SUBMIT_POLL_TIMEOUT_S
+            elif now() >= pin_deadline:
+                return _lcd25_inconclusive(env, "the keypad stayed open after the PIN was entered "
+                                                "(PIN rejected?); keypad dismissed", dismiss=True)
+        if now() >= deadline:
+            observed["page_after_keep"] = ui.get_current_page()
+            return _lcd25_inconclusive(env, "the live_decide page never opened after tapping Keep?")
+        sleep(0.5)
+
+
+def _lcd25_body(env: dict) -> CaseResult:
+    cid = "LCD-25"
+    observed, orig, srv = env["observed"], env["orig"], env["srv"]
+    client, host, ui = env["client"], env["host"], env["ui"]
+    now, sleep = env["now"], env["sleep"]
+    from . import cases_heat as _heat  # local import: avoids a module-load cycle
+    slot = _heat.BENCH_PROFILE_SLOT_ID
+
+    st = _lcd24_edit_and_end(env, cid)
+    if isinstance(st, CaseResult):
+        return st
+    own_wid = st["own_wid"]
+    if st["end_state"] != "done":
+        return _lcd25_inconclusive(env, f"the firing ended as {st['end_state']!r}, not 'done'; no decision tapped")
+    status, _content = _lcd22_read_live(client, host)
+    if status is None:
+        return _lcd25_inconclusive(env, "could not read live status after the firing ended")
+    if not status.get("pending_decision") or J._lcd_edit_wid(status) != own_wid:
+        observed["status_ended"] = status
+        return CaseResult(Verdict.FAIL, observed=observed, reason=(
+            "after an edited firing ended, live status shows no pending decision for this run's working copy "
+            f"(pending_decision={status.get('pending_decision')!r}, working_id={J._lcd_edit_wid(status)}, "
+            f"expected {own_wid}); no LCD tap was made"))
+    ob = status.get("origin_is_builtin")
+    origin_is_builtin = ob if isinstance(ob, bool) else None
+    observed["origin_id"] = status.get("origin_id")
+    observed["origin_is_builtin"] = origin_is_builtin
+    try:
+        ids_before = {p.id for p in srv._profiles.list_all()}
+    except Exception as exc:  # noqa: BLE001
+        return _lcd25_inconclusive(env, f"could not list profiles before the decision ({type(exc).__name__})")
+
+    observed["navigate_home"] = _navigate_home(ui)
+    fail = _lcd25_open_decide_page(env)
+    if fail is not None:
+        return fail
+
+    names, trunc = _lcd25_wait_names(env, lambda n: "Discard edit" in n, _LCD25_NAMES_WAIT_S)
+    observed["page_truncated"] = trunc
+    confirm_seen: "Optional[bool]" = None
+    if names is not None and "Discard edit" in names:
+        click = ui.click_by_name("Discard edit")
+        observed["discard_click"] = click.get("result")
+        if click.get("result") not in ("ok", "verdict_unknown"):
+            return _lcd25_inconclusive(env, f"click_by_name('Discard edit') returned {click.get('result')!r}")
+        cnames, _ = _lcd25_wait_names(env, lambda n: "Discard" in n and "Cancel" in n, _LCD25_NAMES_WAIT_S)
+        confirm_seen = bool(cnames and "Discard" in cnames and "Cancel" in cnames)
+        if confirm_seen:
+            confirm = ui.click_by_name("Discard")
+            observed["confirm_click"] = confirm.get("result")
+            if confirm.get("result") not in ("ok", "verdict_unknown"):
+                return _lcd25_inconclusive(env, f"click_by_name('Discard') returned {confirm.get('result')!r}",
+                                           dismiss=True)
+    status_after = None
+    deadline = now() + _LCD25_CLEAR_WAIT_S
+    while True:
+        try:
+            status_after = client.get_live_status(host)
+        except Exception:  # noqa: BLE001
+            status_after = None
+        if status_after is not None and J._lcd_edit_wid(status_after) < 0 and not status_after.get("pending_decision"):
+            break
+        if confirm_seen is not True or now() >= deadline:
+            break
+        sleep(0.5)
+    try:
+        detail = srv._profiles.get(slot)
+        segs = None if detail is None else _lcd25_segs(detail)
+        orig_unchanged = None if segs is None else segs == [
+            (float(x["target_c"]), float(x["ramp_c_per_hr"]), int(x["dwell_min"])) for x in orig]
+    except Exception:  # noqa: BLE001
+        orig_unchanged = None
+    try:
+        stray = sorted({p.id for p in srv._profiles.list_all()} - ids_before)
+    except Exception:  # noqa: BLE001
+        stray = None
+    try:
+        _navigate_home(ui)
+    except Exception:  # noqa: BLE001
+        pass
+    heap_min_free = _lcd25_heap_min_free(env["ctx"], host)
+    result = J.judge_lcd_keep_discard(origin_is_builtin, names, trunc, confirm_seen, status_after,
+                                      orig_unchanged, stray, heap_min_free)
+    result.observed = dict(result.observed or {})
+    result.observed.update(observed)
+    return result
+
+
+def _case_lcd25(ctx: dict) -> CaseResult:
+    return _lcd_edit_run(ctx, "LCD-25", _lcd24_plan, _lcd25_body)
+
+
 _CASE_FUNCS = {
     "LCD-01": _case_lcd01,
     "LCD-02": _case_lcd02,
@@ -5205,6 +5434,7 @@ _CASE_FUNCS = {
     "LCD-22": _case_lcd22,
     "LCD-23": _case_lcd23,
     "LCD-24": _case_lcd24,
+    "LCD-25": _case_lcd25,
 }
 
 for _cid, _fn in _CASE_FUNCS.items():

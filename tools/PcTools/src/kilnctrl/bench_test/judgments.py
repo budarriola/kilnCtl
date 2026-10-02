@@ -3155,3 +3155,67 @@ def judge_totp_reset_roundtrip(
         Verdict.PASS,
         observed={"forgot_status": forgot_status, "reset_status": reset_status, "login_ok": True},
     )
+
+
+#: Owner requirement 2026-10-01: at least 8 KB of internal RAM must stay free at runtime.
+LCD_KEEP_MIN_FREE_INTERNAL_B = 8192
+
+
+def judge_lcd_keep_discard(origin_is_builtin: "bool | None", page_names: "set | None", page_truncated: bool,
+                           confirm_seen: "bool | None", status_after: "dict | None",
+                           orig_unchanged: "bool | None", stray_profile_ids: "list | None",
+                           heap_internal_min_free: "int | None" = None) -> CaseResult:
+    """LCD-25: the home "Keep?" button opens the PIN-gated decide page after an edited
+    firing ends. The page must offer "Discard edit" and "Save as new ...", and
+    "Overwrite original" exactly when the origin is not a built-in. Tapping Discard
+    edit must raise a confirm dialog; confirming it must clear the working copy and
+    leave the original profile and the profile list untouched. Read after the page was
+    used, heap_internal min_free must be >= LCD_KEEP_MIN_FREE_INTERNAL_B (below: FAIL;
+    unreadable: INCONCLUSIVE)."""
+    observed = {"origin_is_builtin": origin_is_builtin, "heap_internal_min_free": heap_internal_min_free,
+                "page_names": sorted(page_names) if page_names is not None else None,
+                "page_truncated": page_truncated, "confirm_seen": confirm_seen,
+                "status_after": status_after, "orig_unchanged": orig_unchanged,
+                "stray_profile_ids": stray_profile_ids}
+    names = page_names or set()
+    problems = []
+    if not any(n == "Discard edit" for n in names):
+        problems.append("the decide page has no 'Discard edit' button")
+    if not any(str(n).startswith("Save as new") for n in names):
+        problems.append("the decide page has no 'Save as new' button")
+    if origin_is_builtin is None:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                          reason="live status did not report origin_is_builtin")
+    if not page_truncated:
+        has_overwrite = "Overwrite original" in names
+        if has_overwrite == bool(origin_is_builtin):
+            problems.append("'Overwrite original' is " + ("offered" if has_overwrite else "missing")
+                            + f" but the origin is {'a built-in' if origin_is_builtin else 'a user profile'}")
+    if confirm_seen is not True:
+        problems.append("tapping 'Discard edit' raised no confirm dialog")
+    if status_after is None:
+        if problems:
+            return CaseResult(Verdict.FAIL, observed=observed, reason="; ".join(problems))
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                          reason="could not read live status after the discard")
+    if _lcd_edit_wid(status_after) >= 0:
+        problems.append("a working copy remains after the LCD discard")
+    if status_after.get("pending_decision"):
+        problems.append("pending_decision is still true after the LCD discard")
+    if orig_unchanged is False:
+        problems.append("the original profile changed")
+    if stray_profile_ids:
+        problems.append(f"unexpected new profile ids {sorted(stray_profile_ids)}")
+    heap_ok = isinstance(heap_internal_min_free, int) and not isinstance(heap_internal_min_free, bool)
+    if heap_ok and heap_internal_min_free < LCD_KEEP_MIN_FREE_INTERNAL_B:
+        problems.append(f"heap_internal min_free {heap_internal_min_free} B is below the "
+                        f"{LCD_KEEP_MIN_FREE_INTERNAL_B} B floor after using the decide page")
+    if problems:
+        return CaseResult(Verdict.FAIL, observed=observed, reason="; ".join(problems))
+    if orig_unchanged is None:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                          reason="could not re-read the original profile to confirm it is unchanged")
+    if not heap_ok:
+        return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                          reason="could not read heap_internal min_free after using the decide page")
+    return CaseResult(Verdict.PASS, observed=observed)
