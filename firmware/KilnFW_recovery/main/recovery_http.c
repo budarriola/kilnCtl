@@ -73,19 +73,11 @@
 
 #include "ota_auth.h"
 #include "recovery_image_check.h"
+#include "recovery_io.h"
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
 
 static const char *TAG = "recovery_http";
-
-// Defined by recovery_io.c (relay-forced-off driver) once that lands; a weak
-// undefined reference resolves to NULL until then, which reads as "no fault".
-// INTEGRATION TODO: this MUST become a strong declaration (#include
-// "recovery_io.h") when recovery_io.c is merged. A weak reference alone never
-// pulls an archive member out of a static library: if recovery_io.c ends up in
-// libmain.a (or any .a) and nothing else references it, the linker leaves this
-// symbol NULL and relay_fault silently reads "false" even with a real fault.
-extern bool recovery_io_relay_fault(void) __attribute__((weak));
 
 // The page (recovery_page.html) is linked in via EMBED_FILES.
 extern const uint8_t recovery_page_html_start[] asm("_binary_recovery_page_html_start");
@@ -586,21 +578,23 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     char bgs[128];
     fmt_boot_guard(bgs, sizeof(bgs), &bg);
 
-    bool relay_fault = recovery_io_relay_fault ? recovery_io_relay_fault() : false;
+    bool relay_fault = recovery_io_relay_fault();
+    bool relays_off = recovery_io_relays_verified_off();
 
     // app_desc_present: cheap descriptor/magic check. app_valid: full
     // esp_image_verify(), cached (see app_image_verified()).
     bool desc_present = app_has_valid_image(app);
     bool valid = desc_present && app_image_verified(app);
-    char body[480];
+    char body[512];
     int n = snprintf(body, sizeof(body),
                       "{\"running\":\"%s\",\"app_present\":%s,\"app_size\":%u,"
                       "\"app_desc_present\":%s,\"app_valid\":%s,\"max_upload\":%u,%s,"
-                      "\"relay_fault\":%s,\"free_heap\":%u}",
+                      "\"relay_fault\":%s,\"relays_verified_off\":%s,\"free_heap\":%u}",
                       running ? running->label : "?", app ? "true" : "false",
                       (unsigned)(app ? app->size : 0), desc_present ? "true" : "false",
                       valid ? "true" : "false",
                       (unsigned)(app ? app->size : 0), bgs, relay_fault ? "true" : "false",
+                      relays_off ? "true" : "false",
                       (unsigned)esp_get_free_heap_size());
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
