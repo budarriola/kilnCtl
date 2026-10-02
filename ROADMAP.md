@@ -4324,7 +4324,11 @@ Owner instruction, 2026-09-21.
   its resolution. **2026-10-01 follow-up:** run `20261001T172420Z_lcd_lcd22run` --
   LCD-19 PASS with `lcd_stop_heat=True` (real firing, Stop PIN-gated); first
   LCD-22 board run FAILed (`click_by_name('Edit')` -> `not_found` while running);
-  rerun after `e52f256d` PASSed (`20261001T183045Z_lcd_lcd22rerun`); see
+  rerun after `e52f256d` PASSed (`20261001T183045Z_lcd_lcd22rerun`). **2026-10-02:**
+  new LCD-23/LCD-24 first run `20261002T013957Z_lcd_lcdedit23_24` -- LCD-23 FAIL,
+  LCD-24 INCONCLUSIVE (harness assumed the Edit page opens on segment 0 and the
+  executor warm start skipped segment 0); rerun `20261002T021747Z_lcd_lcdedit23_24_r2`
+  after `8200e7b1`/`010239ef`/`b7eb48c9` -- both PASS; see
   `docs/BENCH_TEST_LOG.md`.
 - [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
   `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
