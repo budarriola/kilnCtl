@@ -72,9 +72,11 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
     try:
         interlock = ota_http.get_interlock(resolved_host)
         ota_ok = bool(interlock.get("ok"))
+        ota_needs_ack = bool(interlock["needs_ack"]) if "needs_ack" in interlock else None
         ota_reason = str(interlock.get("reason") or "ok")
     except Exception as exc:  # noqa: BLE001
         ota_ok = None
+        ota_needs_ack = None
         ota_reason = f"could not read /api/ota/interlock at {resolved_host}: {exc}"
     return GpioTestPreflight(
         safety_armed=safety_armed,
@@ -83,6 +85,7 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
         ota_interlock_ok=ota_ok,
         ota_interlock_reason=ota_reason,
         link_up=link_up,
+        ota_interlock_needs_ack=ota_needs_ack,
     )
 
 

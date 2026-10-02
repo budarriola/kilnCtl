@@ -118,6 +118,8 @@ class GpioTestPreflight:
     ota_interlock_ok: Optional[bool]
     ota_interlock_reason: str
     link_up: Optional[bool]
+    #: GET /api/ota/interlock's `needs_ack` (None = not reported / unread).
+    ota_interlock_needs_ack: Optional[bool] = None
 
     def refusal_reasons(self) -> "list[str]":
         reasons: "list[str]" = []

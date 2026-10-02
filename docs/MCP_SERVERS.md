@@ -529,13 +529,28 @@ otadata/app/nvs). Refuses: `confirm` not exactly True; a duplicate or non-factor
 `recovery` CSV row; image path containing any of `[ ] $ { } "` or a backtick (Tcl
 injection); image missing, empty or larger than the partition; magic not 0xE9;
 chip id not ESP32-S3; esp_app_desc_t missing or `project_name` not `recovery`;
-image mtime older than the newest file under `firmware/KilnFW_recovery`
-(excluding `build/`; `allow_stale=True`, and the image age is always printed);
+image mtime older than the newest git-tracked file (all files if git cannot
+answer) under the `KilnFW_recovery` tree that holds the image (derived from
+`<tree>/build/recovery.bin`, else `<kiln_fw_root>/../KilnFW_recovery`), excluding
+`build/` (`allow_stale=True`, and the image age is always printed);
 adapter absent. Board state is split: a positively observed hazard (profile
 running/paused, ARMED with autotune active/relay energized/latched trip, OTA
-interlock busy, link down) ALWAYS refuses and no flag waives it; only reasons
-that are merely "could not be read" are waived, by
-`allow_unreadable_board_state=True` (the old `skip_board_state_check` is gone).
+interlock busy, link down) ALWAYS refuses and no flag waives it, with one narrow
+exception below; only reasons that are merely "could not be read" (including
+the armed-latch reader's "could not be read/confirmed"/"no diag received yet"
+strings) are waived, by `allow_unreadable_board_state=True` (the old
+`skip_board_state_check` is gone). `allow_link_down=True` (a separate flag,
+`is not True` gate) waives ONLY a down safety link: `link_up` False and an OTA
+interlock refusal that is `needs_ack` with reason "safety link is down" (the
+one acknowledgeable refusal; it short-circuits the interlock's later checks).
+With the link down heat is already cut (a live Pico trips S6b and drops K4; a
+dead one cannot drive K4) and a broken Pico would otherwise block recovery
+forever. Because the interlock skipped its heater-commanded and over-temperature
+checks, in this mode the tool reads autotune idle, expander relays off, K4 off
+and no latched trip whether or not ARMED, keeps the UART profile-idle check a
+hazard, and says in the result that heater-commanded/over-temperature were not
+checked. It never waives a running profile, an energized relay or any other
+interlock refusal.
 Before writing it reads the board's live `/api/partitions`: a readable table
 whose single `recovery` row disagrees with the CSV in offset/size/type/subtype
 always refuses; an unreachable board or a recovery-image-shaped answer refuses

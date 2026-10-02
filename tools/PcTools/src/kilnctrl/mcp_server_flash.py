@@ -1496,10 +1496,11 @@ def flash_firmware(
             shutil.rmtree(erase_tmp_dir, ignore_errors=True)
 
 
-def _recovery_board_state_refusals(host: Optional[str]) -> "tuple[list[str], list[str]]":
+def _recovery_board_state_refusals(host: Optional[str], allow_link_down: bool = False
+                                   ) -> "tuple[list[str], list[str], list[str]]":
     """Live precondition read for flash_recovery(): returns (hazards,
-    unreadable) -- see recovery_flash.board_state_refusals(). Imports are
-    lazy -- those modules import this package's mcp_server, which is
+    unreadable, notes) -- see recovery_flash.board_state_refusals(). Imports
+    are lazy -- those modules import this package's mcp_server, which is
     mid-import when this module is loaded. Any read that raises is
     "unreadable", never a pass."""
     from . import mcp_server_coordinated_gpio_test as gpio_tool  # noqa: PLC0415
@@ -1508,8 +1509,11 @@ def _recovery_board_state_refusals(host: Optional[str]) -> "tuple[list[str], lis
     try:
         pf = gpio_tool._gpio_test_preflight(gpio_tool._gpio_test_resolve_host(host))
     except Exception as exc:  # noqa: BLE001 -- unreadable
-        return [], [f"board state (profile/ARMED/interlock/link) could not be read: {exc}"]
-    return recovery_flash.board_state_refusals(pf, ota_matrix._read_armed_latch_conditions)
+        return [], [f"board state (profile/ARMED/interlock/link) could not be read: {exc}"], []
+    notes: "list[str]" = []
+    hazards, unreadable = recovery_flash.board_state_refusals(
+        pf, ota_matrix._read_armed_latch_conditions, allow_link_down=allow_link_down, notes=notes)
+    return hazards, unreadable, notes
 
 
 def _probe_board_partitions(host: Optional[str]):
@@ -1583,6 +1587,7 @@ def flash_recovery(
     allow_unconfirmed_partition_table: bool = False,
     allow_reset_into_recovery: bool = False,
     allow_stale: bool = False,
+    allow_link_down: bool = False,
 ) -> str:
     """Writes the ESP32-S3 RECOVERY image (firmware/KilnFW_recovery's
     recovery.bin) into the `recovery` (factory-subtype) partition over JTAG
@@ -1608,9 +1613,11 @@ def flash_recovery(
     missing, empty, larger than the partition, wrong magic (not 0xE9), wrong
     chip id (not ESP32-S3), or its esp_app_desc_t is missing or its
     project_name is not `recovery`; the image's mtime predates the newest
-    file under firmware/KilnFW_recovery (excluding build/) -- override with
+    git-tracked file (all files if git cannot answer) under the
+    firmware/KilnFW_recovery tree holding the image (excluding build/) -- override with
     `allow_stale=True` (the image age is always printed); the JTAG adapter is
-    absent; the board reports `ota_interlock` not ok or the safety link down.
+    absent; the board reports `ota_interlock` not ok or the safety link down
+    (the link-down case alone is waivable with `allow_link_down=True`, below).
 
     Board-state gate, split in two on purpose. POSITIVELY OBSERVED hazards --
     a running/paused profile, ARMED with autotune active / a relay energized /
@@ -1618,6 +1625,18 @@ def flash_recovery(
     waives them. Reasons that are only "could not be read" (HTTP/UART link
     not up, probe raised) refuse unless `allow_unreadable_board_state=True`,
     the bring-up escape hatch; it waives nothing else.
+
+    `allow_link_down=True` (separate flag) waives ONLY a safety link that is
+    down: `link_up` False, and an OTA-interlock refusal that is needs_ack AND
+    whose reason is "safety link is down". With the ESP-Pico link down heat is
+    already cut (a live Pico trips S6b and drops K4; a dead one cannot drive
+    K4), and without this flag a broken Pico would block recovery forever. The
+    interlock short-circuits at link-down, so its heater-commanded and
+    over-temperature checks are NOT run; in this mode the tool instead reads
+    autotune idle, expander relays off, K4 off and no latched trip whether or
+    not ARMED, keeps the profile-idle check a hazard, and says so in the
+    result. It never waives a running profile, an energized relay, or any
+    other interlock refusal.
 
     Live partition-table gate: before writing, GET /api/partitions must show
     the chip's single `recovery` entry matching the CSV target in offset,
@@ -1665,7 +1684,8 @@ def flash_recovery(
         image = recovery_flash.validate_image(bin_path, target)
         age_note = recovery_flash.image_age_note(
             image.path,
-            os.path.normpath(os.path.join(effective_root, "..", "KilnFW_recovery")),
+            recovery_flash.recovery_tree_for_image(
+                image.path, os.path.normpath(os.path.join(effective_root, "..", "KilnFW_recovery"))),
             allow_stale,
         )
     except recovery_flash.RecoveryFlashRefusal as exc:
@@ -1700,7 +1720,7 @@ def flash_recovery(
     if adapter_refusal:
         return adapter_refusal
 
-    hazards, unreadable = _recovery_board_state_refusals(host)
+    hazards, unreadable, state_notes = _recovery_board_state_refusals(host, allow_link_down)
     if hazards:
         return ("error: refusing to flash recovery -- observed hazard (no flag overrides this): "
                 + "; ".join(hazards))
@@ -1779,6 +1799,7 @@ def flash_recovery(
         + summary + archive_note + "\n"
         f"provenance: {provenance_path} (git head {tree_state.head}, "
         f"{len(tree_state.dirty_files)} dirty file(s))\n"
+        + "".join(f"NOTE: {n}\n" for n in state_notes) +
         "NOTE: this reset the ESP; before safety_clear_trip(), safety_get_status must show "
         "trip_reason 6 (SAFETY_TRIP_MAIN_FAULT) with trip_mask 0x0020 only. Anything else "
         "(e.g. reason 7 LINK_DEAD, mask 0x0040 -- plausible, the ESP was halted during the JTAG "

@@ -81,6 +81,8 @@ class RecoveryFlashBase(unittest.TestCase):
         self.chip_entries = partition_table.parse_partitions_csv(os.path.join(self.fw_root, "partitions.csv"))
         self.probe_result = ("192.168.1.50", self.chip_entries, "app")
         self.boot_report = "app -- the board answered at 192.168.1.50 running 'app'"
+        self.state_notes: "list[str]" = []
+        self.link_down_seen: "list[bool]" = []
 
         def fake_run(exe, cfg, tcl, cwd, timeout_s):
             self.tcl_calls.append(tcl)
@@ -93,7 +95,7 @@ class RecoveryFlashBase(unittest.TestCase):
             unittest.mock.patch.object(mf, "_refuse_if_adapter_absent", return_value=None),
             unittest.mock.patch.object(mf, "_run_openocd", side_effect=lambda *a, **k: self.fake_run(*a, **k)),
             unittest.mock.patch.object(mf, "_recovery_board_state_refusals",
-                                       side_effect=lambda host: (list(self.hazards), list(self.unreadable))),
+                                       side_effect=lambda host, ald=False: self._state(ald)),
             unittest.mock.patch.object(mf, "_probe_board_partitions",
                                        side_effect=lambda host: self.probe_result),
             unittest.mock.patch.object(mf, "_observe_boot_after_recovery_flash",
@@ -103,6 +105,10 @@ class RecoveryFlashBase(unittest.TestCase):
         ):
             p.start()
             self.addCleanup(p.stop)
+
+    def _state(self, allow_link_down):
+        self.link_down_seen.append(allow_link_down)
+        return list(self.hazards), list(self.unreadable), list(self.state_notes)
 
     def write_bin(self, data: bytes) -> None:
         with open(self.bin, "wb") as f:
@@ -253,7 +259,8 @@ class BoardStateTest(unittest.TestCase):
     def _pf(self, armed, running, name="idle", interlock=True, link=True):
         return types.SimpleNamespace(safety_armed=armed, profile_running_or_paused=running,
                                      profile_state_name=name, ota_interlock_ok=interlock,
-                                     ota_interlock_reason="ok" if interlock else "busy", link_up=link)
+                                     ota_interlock_reason="ok" if interlock else "busy", link_up=link,
+                                     ota_interlock_needs_ack=None)
 
     def test_profile_running_is_a_hazard_not_unreadable(self):
         h, u = recovery_flash.board_state_refusals(self._pf(False, True, "running"), lambda: [])
@@ -292,10 +299,95 @@ class BoardStateTest(unittest.TestCase):
         self.assertEqual((h, len(u)), ([], 1))
 
 
+class LinkDownWaiverTest(unittest.TestCase):
+    LINK = "safety link is down"
+
+    def _pf(self, **kw):
+        d = dict(safety_armed=False, profile_running_or_paused=False, profile_state_name="idle",
+                 ota_interlock_ok=False, ota_interlock_reason=self.LINK, link_up=False,
+                 ota_interlock_needs_ack=True)
+        d.update(kw)
+        return types.SimpleNamespace(**d)
+
+    def _go(self, pf, armed=None, allow=True):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            return list(armed or [])
+        notes: "list[str]" = []
+        h, u = recovery_flash.board_state_refusals(pf, fn, allow_link_down=allow, notes=notes)
+        return h, u, notes, calls
+
+    def test_link_down_refuses_without_flag(self):
+        h, u, notes, _ = self._go(self._pf(), allow=False)
+        self.assertEqual(len(h), 2)
+        self.assertEqual(notes, [])
+
+    def test_flag_must_be_exactly_true(self):
+        h, _, _, _ = self._go(self._pf(), allow=1)
+        self.assertTrue(h)
+
+    def test_waiver_works_and_notes_unchecked_interlock_items(self):
+        h, u, notes, calls = self._go(self._pf())
+        self.assertEqual((h, u), ([], []))
+        self.assertEqual(len(calls), 1)  # armed-latch conditions read although not ARMED
+        self.assertIn("heater-commanded", notes[0])
+        self.assertIn("over-temperature", notes[0])
+
+    def test_does_not_waive_running_profile(self):
+        h, _, _, _ = self._go(self._pf(profile_running_or_paused=True, profile_state_name="running"))
+        self.assertEqual(len(h), 1)
+        self.assertIn("profile", h[0])
+
+    def test_unreadable_profile_stays_unreadable(self):
+        h, u, _, _ = self._go(self._pf(profile_running_or_paused=None))
+        self.assertEqual((h, len(u)), ([], 1))
+
+    def test_does_not_waive_energized_relay(self):
+        h, _, _, _ = self._go(self._pf(), armed=["relay output(s) energized: [1]"])
+        self.assertEqual(len(h), 1)
+        self.assertIn("energized", h[0])
+
+    def test_does_not_waive_non_link_interlock_refusal(self):
+        for reason, ack in (("heater commanded", True), (self.LINK, False), (self.LINK, None),
+                            ("autotune active", False)):
+            h, _, _, _ = self._go(self._pf(ota_interlock_reason=reason, ota_interlock_needs_ack=ack))
+            self.assertTrue(any("OTA interlock" in x for x in h), (reason, ack, h))
+
+    def test_link_up_busy_interlock_not_waived(self):
+        h, _, _, _ = self._go(self._pf(link_up=True, ota_interlock_reason="busy",
+                                       ota_interlock_needs_ack=False))
+        self.assertTrue(any("OTA interlock" in x for x in h))
+
+    def test_armed_conditions_read_failure_is_unreadable_in_link_down_mode(self):
+        def boom():
+            raise RuntimeError("uart")
+        h, u = recovery_flash.board_state_refusals(self._pf(), boom, allow_link_down=True)
+        self.assertEqual(h, [])
+        self.assertIn("uart", u[0])
+
+
+class ArmedConditionSplitTest(unittest.TestCase):
+    def test_unreadable_strings_go_to_unreadable(self):
+        pf = types.SimpleNamespace(safety_armed=True, profile_running_or_paused=False,
+                                   profile_state_name="idle", ota_interlock_ok=True,
+                                   ota_interlock_reason="ok", link_up=True)
+        strings = ["autotune state could not be read", "K4 could not be confirmed off",
+                   "no diag received yet", "relay output(s) energized: [2]"]
+        h, u = recovery_flash.board_state_refusals(pf, lambda: strings)
+        self.assertEqual(len(u), 3)
+        self.assertEqual(len(h), 1)
+        self.assertIn("energized", h[0])
+
+
 class RecoveryBoardStateUnmockedTest(unittest.TestCase):
     """_recovery_board_state_refusals() with fakes only at ITS dependencies."""
 
-    def _run(self, pf=None, pf_exc=None, armed=None, armed_exc=None):
+    def _run(self, *a, **kw):
+        return self._run3(*a, **kw)[:2]
+
+    def _run3(self, pf=None, pf_exc=None, armed=None, armed_exc=None, allow_link_down=False):
         from kilnctrl import mcp_server_coordinated_gpio_test as gt
         from kilnctrl import mcp_server_ota_matrix as om
 
@@ -312,11 +404,12 @@ class RecoveryBoardStateUnmockedTest(unittest.TestCase):
         with unittest.mock.patch.object(gt, "_gpio_test_preflight", side_effect=fake_pf), \
              unittest.mock.patch.object(gt, "_gpio_test_resolve_host", return_value="h"), \
              unittest.mock.patch.object(om, "_read_armed_latch_conditions", side_effect=fake_armed):
-            return _REAL_BOARD_STATE("h")
+            return _REAL_BOARD_STATE("h", allow_link_down)
 
     def _pf(self, **kw):
         d = dict(safety_armed=False, profile_running_or_paused=False, profile_state_name="idle",
-                 ota_interlock_ok=True, ota_interlock_reason="ok", link_up=True)
+                 ota_interlock_ok=True, ota_interlock_reason="ok", link_up=True,
+                 ota_interlock_needs_ack=None)
         d.update(kw)
         return types.SimpleNamespace(**d)
 
@@ -340,6 +433,15 @@ class RecoveryBoardStateUnmockedTest(unittest.TestCase):
     def test_running_profile_is_hazard(self):
         h, u = self._run(self._pf(profile_running_or_paused=True))
         self.assertEqual(len(h), 1)
+
+    def test_link_down_waiver_flows_through_with_note(self):
+        pf = self._pf(ota_interlock_ok=False, ota_interlock_reason="safety link is down",
+                      ota_interlock_needs_ack=True, link_up=False)
+        h, u, notes = self._run3(pf, allow_link_down=True)
+        self.assertEqual((h, u), ([], []))
+        self.assertEqual(len(notes), 1)
+        h, u, notes = self._run3(pf)
+        self.assertEqual(len(h), 2)
 
 
 class LiveTableGateTest(RecoveryFlashBase):
@@ -474,6 +576,19 @@ class ProbeAndObserveTest(unittest.TestCase):
         out = _REAL_OBSERVE(None, None)
         self.assertTrue(out.startswith("unreachable"))
         self.assertIn("UNKNOWN", out)
+
+
+class LinkDownFlagTest(RecoveryFlashBase):
+    def test_flag_is_passed_through_and_notes_reach_the_result(self):
+        self.state_notes = ["allow_link_down=True: heater-commanded and over-temperature NOT checked"]
+        out = self.call(allow_link_down=True)
+        self.assertIn("WRITTEN", out)
+        self.assertEqual(self.link_down_seen, [True])
+        self.assertIn("over-temperature", out)
+
+    def test_default_is_false(self):
+        self.call()
+        self.assertEqual(self.link_down_seen, [False])
 
 
 class DryRunTest(RecoveryFlashBase):
@@ -655,6 +770,69 @@ class StalenessTest(RecoveryFlashBase):
         out = self.call()
         self.assertIn("WRITTEN", out)
         self.assertIn("image age:", out)
+
+    def test_untracked_file_is_not_a_source_change_when_git_answers(self):
+        self._touch(self.bin, self.now - 100)
+        self._touch(self.src_file, self.now)
+        with unittest.mock.patch.object(recovery_flash, "_tracked_files", return_value=[]) as m:
+            out = self.call()
+        self.assertTrue(m.called)
+        self.assertIn("WRITTEN", out)
+
+    def test_tracked_newer_file_still_refuses(self):
+        self._touch(self.bin, self.now - 100)
+        self._touch(self.src_file, self.now)
+        with unittest.mock.patch.object(recovery_flash, "_tracked_files", return_value=[self.src_file]):
+            self.assertIn("stale", self.call())
+
+    def test_git_failure_falls_back_to_all_files(self):
+        self._touch(self.bin, self.now - 100)
+        self._touch(self.src_file, self.now)
+        with unittest.mock.patch.object(recovery_flash, "_tracked_files", return_value=None):
+            self.assertIn("stale", self.call())
+
+    def test_real_git_ls_files_ignores_untracked(self):
+        import shutil
+        import subprocess
+        if shutil.which("git") is None:
+            self.skipTest("git not available")
+        tree = os.path.join(self.tmp, "firmware", "KilnFW_recovery")
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                   GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "init", "-q", self.tmp], check=True, env=env)
+        subprocess.run(["git", "-C", self.tmp, "add", "firmware/KilnFW_recovery/main/recovery_http.c"],
+                       check=True, env=env)
+        scratch = os.path.join(tree, "main", "scratch.tmp")
+        with open(scratch, "w") as f:
+            f.write("x")
+        self._touch(self.src_file, self.now - 200)
+        self._touch(scratch, self.now + 500)
+        newest = recovery_flash.newest_source_mtime(tree)
+        self.assertEqual(os.path.normpath(newest[1]), os.path.normpath(self.src_file))
+
+    def test_tree_derived_from_bin_path(self):
+        other = os.path.join(self.tmp, "other", "firmware", "KilnFW_recovery")
+        self.assertEqual(
+            recovery_flash.recovery_tree_for_image(os.path.join(other, "build", "recovery.bin"), "FALLBACK"),
+            os.path.abspath(other))
+        self.assertEqual(recovery_flash.recovery_tree_for_image(os.path.join(self.tmp, "x", "r.bin"), "FALLBACK"),
+                         "FALLBACK")
+
+    def test_bin_in_other_tree_compares_against_that_tree(self):
+        other_tree = os.path.join(self.tmp, "other", "firmware", "KilnFW_recovery")
+        os.makedirs(os.path.join(other_tree, "build"))
+        os.makedirs(os.path.join(other_tree, "main"))
+        obin = os.path.join(other_tree, "build", "recovery.bin")
+        with open(obin, "wb") as f:
+            f.write(_image())
+        osrc = os.path.join(other_tree, "main", "x.c")
+        with open(osrc, "w") as f:
+            f.write("x")
+        self._touch(self.src_file, self.now + 1000)
+        self._touch(osrc, self.now - 500)
+        self._touch(obin, self.now)
+        out = self.call(recovery_bin=obin)
+        self.assertIn("WRITTEN", out)
 
     def test_age_is_always_printed(self):
         self._touch(self.src_file, self.now - 100)

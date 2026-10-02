@@ -136,21 +136,56 @@ def compare_chip_recovery_row(chip_entries, target: partition_table.PartitionEnt
     return "; ".join(diffs) if diffs else None
 
 
+def recovery_tree_for_image(bin_path: str, fallback_tree: str) -> str:
+    """The recovery source tree holding `bin_path` when it sits at
+    `<tree>/build/<file>` and `<tree>` is a `KilnFW_recovery` directory;
+    otherwise `fallback_tree`."""
+    build_dir = os.path.dirname(os.path.abspath(bin_path))
+    tree = os.path.dirname(build_dir)
+    if os.path.basename(build_dir) == "build" and os.path.basename(tree) == "KilnFW_recovery":
+        return tree
+    return fallback_tree
+
+
+def _tracked_files(tree: str) -> "Optional[list[str]]":
+    """Absolute paths of git-tracked files under `tree`, or None if git is
+    unavailable / `tree` is not in a repo / nothing is tracked."""
+    import subprocess  # noqa: PLC0415
+    try:
+        r = subprocess.run(["git", "-C", tree, "ls-files", "-z", "--", "."],
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    names = [n for n in r.stdout.decode("utf-8", errors="replace").split("\0") if n]
+    return [os.path.join(tree, n) for n in names] or None
+
+
 def newest_source_mtime(recovery_tree: str) -> "Optional[tuple[float, str]]":
-    """(mtime, path) of the newest file under `recovery_tree`, skipping its
-    top-level `build/` directory; None if there is nothing to compare."""
+    """(mtime, path) of the newest source file under `recovery_tree`,
+    skipping its top-level `build/` directory; None if there is nothing to
+    compare. Only git-tracked files count (an untracked scratch/editor file
+    is not a source change); if git cannot answer, every file counts."""
+    build = os.path.normpath(os.path.join(recovery_tree, "build"))
+    tracked = _tracked_files(recovery_tree)
+    if tracked is not None:
+        candidates = [f for f in tracked
+                      if not os.path.normpath(f).startswith(build + os.sep)]
+    else:
+        candidates = []
+        for dirpath, dirnames, filenames in os.walk(recovery_tree):
+            if os.path.normpath(dirpath) == os.path.normpath(recovery_tree):
+                dirnames[:] = [d for d in dirnames if d != "build"]
+            candidates.extend(os.path.join(dirpath, n) for n in filenames)
     best: "Optional[tuple[float, str]]" = None
-    for dirpath, dirnames, filenames in os.walk(recovery_tree):
-        if os.path.normpath(dirpath) == os.path.normpath(recovery_tree):
-            dirnames[:] = [d for d in dirnames if d != "build"]
-        for name in filenames:
-            full = os.path.join(dirpath, name)
-            try:
-                m = os.path.getmtime(full)
-            except OSError:
-                continue
-            if best is None or m > best[0]:
-                best = (m, full)
+    for full in candidates:
+        try:
+            m = os.path.getmtime(full)
+        except OSError:
+            continue
+        if best is None or m > best[0]:
+            best = (m, full)
     return best
 
 
@@ -216,17 +251,45 @@ def validate_image(bin_path: str, target: partition_table.PartitionEntry) -> Rec
     return RecoveryImage(path=bin_path, size=size, sha256=hashlib.sha256(data).hexdigest(), app_desc=desc)
 
 
-def board_state_refusals(preflight, armed_conditions_fn) -> "tuple[list[str], list[str]]":
+#: Substrings in a `_read_armed_latch_conditions()` string that mean "the
+#: read failed / was inconclusive", not "a hazard was observed".
+_UNREADABLE_MARKERS = ("could not be read", "could not be confirmed", "no diag received yet")
+#: ota_interlock.c's link-down reason (result OTA_INTERLOCK_REFUSED_NEEDS_ACK).
+LINK_DOWN_INTERLOCK_REASON = "safety link is down"
+LINK_DOWN_NOTE = (
+    "allow_link_down=True: the safety link was down; the OTA interlock short-circuits at "
+    "link-down, so its heater-commanded and over-temperature checks were NOT run. Compensating "
+    "reads that were made: profile idle, autotune idle, expander relays off, K4 off, no latched trip."
+)
+
+
+def _is_unreadable_reason(reason: str) -> bool:
+    return any(m in reason for m in _UNREADABLE_MARKERS)
+
+
+def board_state_refusals(preflight, armed_conditions_fn, allow_link_down: bool = False,
+                         notes: "Optional[list[str]]" = None) -> "tuple[list[str], list[str]]":
     """(hazards, unreadable) from a GpioTestPreflight-shaped snapshot
     (tri-state fields; None = could not read). `hazards` are POSITIVELY
-    OBSERVED unsafe states -- profile running/paused, ARMED with autotune
-    active / relay energized / latched trip, OTA interlock busy, link down --
-    and must refuse regardless of any flag. `unreadable` are reasons that are
-    only "could not be read"; the caller may waive exactly those with
-    allow_unreadable_board_state. ARMED alone is acceptable (the safety
-    processor's latched idle state, owner decision 2026-10-01)."""
+    OBSERVED unsafe states -- profile running/paused, ARMED (or link-down
+    mode) with autotune active / relay energized / latched trip, OTA interlock
+    busy, link down -- and must refuse regardless of any flag except the one
+    narrow waiver below. `unreadable` are reasons that are only "could not be
+    read"; the caller may waive exactly those with allow_unreadable_board_state.
+    ARMED alone is acceptable (the safety processor's latched idle state,
+    owner decision 2026-10-01).
+
+    `allow_link_down=True` waives ONLY (a) link_up is False and (b) an OTA
+    interlock refusal that is needs_ack AND whose reason is the link-down one.
+    With the link down, heat is already cut by the safety processor (it trips
+    S6b and drops K4; a dead one cannot drive K4), and the interlock
+    short-circuits before its heater/over-temperature checks, so in that mode
+    the armed-latch conditions are read whether or not ARMED, and the profile
+    check stays a hazard. A non-link interlock refusal is never waived. A
+    NOTE is appended to `notes` when the waiver applied."""
     hazards: "list[str]" = []
     unreadable: "list[str]" = []
+    link_down_mode = False
     if preflight.profile_running_or_paused is True:
         hazards.append(
             f"a profile is running or paused (profile_state={preflight.profile_state_name!r}) "
@@ -237,22 +300,34 @@ def board_state_refusals(preflight, armed_conditions_fn) -> "tuple[list[str], li
             f"profile state could not be read (profile_state={preflight.profile_state_name!r})"
         )
     if preflight.ota_interlock_ok is False:
-        hazards.append(f"OTA interlock is not idle: {preflight.ota_interlock_reason}")
+        link_only = (getattr(preflight, "ota_interlock_needs_ack", None) is True
+                     and str(preflight.ota_interlock_reason).strip() == LINK_DOWN_INTERLOCK_REASON)
+        if allow_link_down is True and link_only:
+            link_down_mode = True
+        else:
+            hazards.append(f"OTA interlock is not idle: {preflight.ota_interlock_reason}")
     elif preflight.ota_interlock_ok is not True:
         unreadable.append(f"OTA interlock could not be confirmed: {preflight.ota_interlock_reason}")
     if preflight.link_up is False:
-        hazards.append("safety link is down (link_up=False)")
+        if allow_link_down is True:
+            link_down_mode = True
+        else:
+            hazards.append("safety link is down (link_up=False)")
     elif preflight.link_up is not True:
         unreadable.append(f"safety link state could not be confirmed (link_up={preflight.link_up!r})")
     if preflight.safety_armed is None:
         unreadable.append("safety ARMED state could not be read (safety_armed=None)")
-    elif preflight.safety_armed is True:
+    if preflight.safety_armed is True or link_down_mode:
+        prefix = "safety is ARMED and " if preflight.safety_armed is True else "with the safety link down, "
         try:
             extra = armed_conditions_fn()
         except Exception as exc:  # noqa: BLE001 -- unreadable
-            unreadable.append(f"safety is ARMED and its conditions could not be read: {exc}")
+            unreadable.append(f"{prefix}its conditions could not be read: {exc}")
         else:
-            hazards.extend(f"safety is ARMED and {r}" for r in extra)
+            for r in extra:
+                (unreadable if _is_unreadable_reason(r) else hazards).append(prefix + r)
+    if link_down_mode and notes is not None:
+        notes.append(LINK_DOWN_NOTE)
     return hazards, unreadable
 
 
