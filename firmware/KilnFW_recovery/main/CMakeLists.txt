@@ -5,6 +5,8 @@ idf_component_register(
         "recovery_http.c"
         "recovery_image_check.c"
         "recovery_upload.c"
+        "recovery_pico_proto.c"
+        "recovery_pico.c"
         "recovery_lcd.c"
         "recovery_io.c"
         "recovery_text.c"
@@ -24,6 +26,9 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_i2c
         esp_driver_spi
+        esp_driver_uart
+        esp_rom
+        kilnlink
         esp_timer
         esp_partition
         esp_system

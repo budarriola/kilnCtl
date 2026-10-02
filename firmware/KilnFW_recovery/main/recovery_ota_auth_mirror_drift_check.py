@@ -70,8 +70,8 @@ WHAT IS COMPARED, and why each normalization exists:
    boot_guard_reset_post() were reverted to call with "esp" instead of its
    own "boot-guard-reset". That specific hazard is covered separately by
    check_route_contexts()/ROUTE_CONTEXT_MARKERS below, which pins each of
-   the five mutating handlers (ota_esp_post/boot_guard_reset_post/recovery_exit_post/wifi_reset_post/
-   sw_reset_post) to its own expected context literal in its own call site.
+   the seven mutating handlers (ota_esp_post/boot_guard_reset_post/recovery_exit_post/wifi_reset_post/
+   sw_reset_post/pico_upload_post/pico_abort_post) to its own expected context literal in its own call site.
    Both ORDER_MARKERS and ROUTE_CONTEXT_MARKERS's three context strings
    ("esp" / "boot-guard-reset" / "sw-reset") are asserted here against a
    hardcoded transcription of ota_http.c's OTA_HTTP_CONTEXT_* strings
@@ -244,6 +244,8 @@ ROUTE_CONTEXT_MARKERS = [
     ("sw_reset_post", 'recovery_authenticate_request(req, &auth_err, "sw-reset"'),
     ("recovery_exit_post", 'recovery_authenticate_request(req, &auth_err, "recovery-exit"'),
     ("wifi_reset_post", 'recovery_authenticate_request(req, &auth_err, "wifi-reset"'),
+    ("pico_upload_post", 'recovery_authenticate_request(req, &auth_err, "pico-upload"'),
+    ("pico_abort_post", 'recovery_authenticate_request(req, &auth_err, "pico-abort"'),
 ]
 
 

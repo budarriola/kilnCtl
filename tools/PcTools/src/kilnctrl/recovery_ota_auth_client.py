@@ -46,13 +46,14 @@ log = logging.getLogger("kilnctrl.recovery_ota_auth_client")
 #: literal KDF context string -- UPDATE_PROTOCOL.md section 2 step 2.
 OTA_KDF_CONTEXT = b"kilnctl-ota-v1"
 
-#: Contexts the recovery image's three mutating routes sign under -- see
+#: Contexts the recovery image's mutating routes sign under -- see
 #: recovery_http.c's ROUTE_CONTEXT_MARKERS-equivalent call sites
-#: (recovery_ota_auth_mirror_drift_check.py mirrors these same three
+#: (recovery_ota_auth_mirror_drift_check.py mirrors these same
 #: strings). Deliberately a small, closed set: a caller asking for any other
 #: context is almost certainly confusing this module with the retired
 #: main-app scheme, which had six.
-_VALID_CONTEXTS = ("esp", "boot-guard-reset", "sw-reset", "recovery-exit", "wifi-reset")
+_VALID_CONTEXTS = ("esp", "boot-guard-reset", "sw-reset", "recovery-exit", "wifi-reset",
+                   "pico-upload", "pico-abort")
 
 DEFAULT_TIMEOUT_S = 10.0
 

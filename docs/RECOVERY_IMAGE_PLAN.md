@@ -59,7 +59,18 @@ W2 starts.
 - Wi-Fi credential reset (HMAC-gated, Wi-Fi scope only).
 - New routes need the recovery server's handler cap checked.
 
-**W4 Pico relay.**
+**W4 Pico relay.** Landed 2026-10-02, host-tested and target-built only; never run on a
+board (bench risks in W5). Code: `main/recovery_pico.c` (relay task),
+`main/recovery_pico_proto.c` (pure, host-tested by `check_recovery_pico_proto.ps1`),
+`components/kilnlink` (links CommonFW framing), routes `/api/recovery/pico/{upload,status,abort}`
+(contexts `pico-upload`, `pico-abort`). Deviations and facts: the whole image is buffered
+and CRC-checked in PSRAM BEFORE the relay starts (202 returned, then status polled), not
+streamed live; DATA pace is `RPP_DATA_PACE_MS` (15 ms, tune on the bench); no REBOOT 0x29
+offer (the bootloader ignores it; the page says power-cycle); no CLEAR_TRIP; a missing
+status poll for 90 s aborts the relay. Target slot: Frame A active slot gives the opposite
+slot ("pico-app"); else the operator's slot choice; else assumed B (bootloader default). The
+file's slot comes from its reset vector and a mismatch is refused before BEGIN. Original
+requirements below.
 - kilnlink UPDATE_BEGIN/DATA/END/ABORT/STATUS per `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
   section 4; send SAFETY_CMD_ANNOUNCE_REBOOT first. Send BEGIN to whichever receiver
   answers (Pico app or Pico bootloader; wire-compatible). If nothing answers, the page says

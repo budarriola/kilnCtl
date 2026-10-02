@@ -23,8 +23,15 @@ progress{width:100%}
 <input id="f" type="file" accept=".bin"><br>
 <button id="up" onclick="upload()">Upload and boot</button>
 <progress id="pr" value="0" max="100"></progress><div id="pp"></div></fieldset>
-<fieldset id="pico" disabled><h2>Upload Pico firmware</h2>
-<div>Not available in this build.</div></fieldset>
+<fieldset id="pico"><h2>Upload Pico firmware</h2>
+<div>Choose SaftyFW_slotA.bin or SaftyFW_slotB.bin. The board buffers the image, checks it, then writes it to the safety processor over its UART (a few minutes).</div>
+<input id="pf" type="file" accept=".bin"><br>
+<label>Target slot <select id="ps"><option value="">auto</option><option value="A">A</option><option value="B">B</option></select></label>
+<div>Auto reads the slot from the Pico application. If the Pico is in its bootloader the slot cannot be read: select the slot the Pico will write (the one that is not its active slot) or leave auto to assume B.</div>
+<button id="pup" onclick="picoUpload()">Upload to Pico</button>
+<button id="pab" onclick="picoAbort()">Abort</button>
+<progress id="ppr" value="0" max="100"></progress><div id="ppp"></div>
+<div id="pst"></div><div id="pwarn" class="w"></div></fieldset>
 <fieldset><h2>Actions</h2>
 <button onclick="act('/api/recovery/exit','recovery-exit','Exit recovery and boot the application?')">Exit Recovery</button>
 <button onclick="act('/api/recovery/wifi_reset','wifi-reset','Forget the saved home Wi-Fi network and restart?')">Wi-Fi Reset</button></fieldset>
@@ -83,5 +90,34 @@ function upload(){var f=$("f").files[0];
 if(!f)return log("choose a .bin file first");
 $("up").disabled=true;$("pr").value=0;
 signed("/api/ota/esp","esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
-status();
+var pt=null;
+function pshow(j){var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
+if(j.total_bytes)t+=" "+j.bytes_sent+"/"+j.total_bytes+" bytes";
+if(j.gap_count)t+=", "+j.gap_count+" gaps (round "+j.gap_rounds+")";
+if(j.target_slot!="unknown")t+=", target slot "+j.target_slot+" ["+j.target_source+"]";
+$("pst").textContent=t;
+if(j.total_bytes)$("ppr").value=100*j.bytes_sent/j.total_bytes;
+var w=[];if(j.refusal)w.push("Refused: "+j.refusal+".");
+if(j.error&&j.error!=j.refusal)w.push(j.error+".");
+if(j.message)w.push(j.message);
+if(j.power_cycle&&j.phase!="done")w.push("Power-cycle the board before retrying.");
+$("pwarn").textContent=w.join(" ")}
+function ppoll(){if(pt)clearTimeout(pt);pt=null;
+xhr("GET","/api/recovery/pico/status").then(function(r){var j=JSON.parse(r.t);pshow(j);
+if(j.busy){pt=setTimeout(ppoll,1000)}else{$("pup").disabled=false}},
+function(e){$("pst").textContent=e.message;pt=setTimeout(ppoll,2000)})}
+function picoUpload(){var f=$("pf").files[0];
+if(!f)return log("choose a Pico .bin file first");
+$("pup").disabled=true;$("ppr").value=0;$("pwarn").textContent="";
+f.arrayBuffer().then(function(ab){var b=new Uint8Array(ab);
+var c=("0000000"+crc32(b).toString(16)).slice(-8);
+var q="?crc="+c;var s=$("ps").value;if(s)q+="&slot="+s;
+log("Pico image "+b.length+" bytes, CRC32 "+c);
+return signed("/api/recovery/pico/upload"+q,"pico-upload",b,function(a,t){$("ppr").value=100*a/t;$("ppp").textContent="uploading "+a+" / "+t+" bytes"})})
+.then(function(r){log(r.s+" "+r.t);
+if(r.s==202){$("ppp").textContent="uploaded; Pico transfer running";ppoll()}
+else{$("pwarn").textContent=r.t;$("pup").disabled=false}},
+function(e){log(e.message);$("pup").disabled=false})}
+function picoAbort(){signed("/api/recovery/pico/abort","pico-abort",null).then(function(r){log(r.s+" "+r.t);ppoll()},function(e){log(e.message)})}
+status();ppoll();
 </script></body></html>

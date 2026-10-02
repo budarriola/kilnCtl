@@ -6,8 +6,9 @@
 //   mac = HMAC-SHA256(key, nonce || context)
 // where context is "esp" for POST /api/ota/esp, "boot-guard-reset" for POST
 // /api/ota/esp/boot_guard_reset, "sw-reset" for POST /api/sw_reset,
-// "recovery-exit" for POST /api/recovery/exit and "wifi-reset" for POST
-// /api/recovery/wifi_reset -- matching recovery_ota_auth_client.py's
+// "recovery-exit" for POST /api/recovery/exit, "wifi-reset" for POST
+// /api/recovery/wifi_reset, "pico-upload" for POST /api/recovery/pico/upload
+// and "pico-abort" for POST /api/recovery/pico/abort -- matching recovery_ota_auth_client.py's
 // derive_mac() _VALID_CONTEXTS and the browser page's deriveMac() calls
 // exactly (see recovery_authenticate_request()'s own comment for the single
 // shared lockout state).
@@ -19,7 +20,8 @@
 //
 // Every mutating POST route in this file (POST /api/ota/esp, POST
 // /api/ota/esp/boot_guard_reset, POST /api/sw_reset, POST /api/recovery/exit,
-// POST /api/recovery/wifi_reset) authenticates via the
+// POST /api/recovery/wifi_reset, POST /api/recovery/pico/upload, POST
+// /api/recovery/pico/abort) authenticates via the
 // single shared recovery_authenticate_request() below -- 2026-09-19 closed
 // docs/audits/web_code_duplication_drift_2026-09-18.md section 2.2's open
 // follow-up, which found the latter two routes had no X-Ota-Mac check at
@@ -74,6 +76,8 @@
 #include "ota_auth.h"
 #include "recovery_image_check.h"
 #include "recovery_io.h"
+#include "recovery_pico.h"
+#include "recovery_pico_proto.h"
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
 
@@ -334,6 +338,8 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     _Static_assert(sizeof("sw-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
     _Static_assert(sizeof("recovery-exit") - 1 <= 16, "context literal exceeds msg[] headroom");
     _Static_assert(sizeof("wifi-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
+    _Static_assert(sizeof("pico-upload") - 1 <= 16, "context literal exceeds msg[] headroom");
+    _Static_assert(sizeof("pico-abort") - 1 <= 16, "context literal exceeds msg[] headroom");
     size_t context_len = strlen(context);
     uint8_t msg[OTA_AUTH_NONCE_LEN + 16];
     if (context_len > sizeof(msg) - OTA_AUTH_NONCE_LEN) {
@@ -762,11 +768,141 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Reads exactly `want` body bytes into buf. Returns bytes read (less on a dead
+// or stalled connection).
+static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
+{
+    size_t got = 0;
+    int timeouts = 0;
+    while (got < want) {
+        int n = httpd_req_recv(req, (char *)buf + got, want - got);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 20) {
+                break;
+            }
+            continue;
+        }
+        if (n <= 0) {
+            break;
+        }
+        timeouts = 0;
+        got += (size_t)n;
+    }
+    return got;
+}
+
+// Parses "?crc=<8 hex>[&slot=A|B|auto]". crc is required.
+static bool parse_pico_query(httpd_req_t *req, uint32_t *crc, int *operator_slot)
+{
+    char q[96];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
+        return false;
+    }
+    char v[16];
+    if (httpd_query_key_value(q, "crc", v, sizeof(v)) != ESP_OK || strlen(v) != 8) {
+        return false;
+    }
+    uint32_t c = 0;
+    for (int i = 0; i < 8; i++) {
+        char ch = v[i];
+        int d = (ch >= '0' && ch <= '9')   ? ch - '0'
+                : (ch >= 'a' && ch <= 'f') ? ch - 'a' + 10
+                : (ch >= 'A' && ch <= 'F') ? ch - 'A' + 10
+                                           : -1;
+        if (d < 0) {
+            return false;
+        }
+        c = (c << 4) | (uint32_t)d;
+    }
+    *crc = c;
+    *operator_slot = RPP_SLOT_UNKNOWN;
+    if (httpd_query_key_value(q, "slot", v, sizeof(v)) == ESP_OK) {
+        if (strcmp(v, "A") == 0 || strcmp(v, "a") == 0) {
+            *operator_slot = RPP_SLOT_A;
+        } else if (strcmp(v, "B") == 0 || strcmp(v, "b") == 0) {
+            *operator_slot = RPP_SLOT_B;
+        }
+    }
+    return true;
+}
+
+// POST /api/recovery/pico/upload?crc=<hex>[&slot=A|B] -- authenticated. The
+// body (a SaftyFW slot image) is received whole into PSRAM, validated (size,
+// vectors against the target slot, CRC32 recomputed here) and only then handed
+// to the relay task (recovery_pico.c), which does the erase/transfer over the
+// UART while GET /api/recovery/pico/status keeps answering. 202 on start.
+static esp_err_t pico_upload_post(httpd_req_t *req)
+{
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err, "pico-upload", &s_lockout)) {
+        return auth_err;
+    }
+    uint32_t claimed_crc = 0;
+    int operator_slot = RPP_SLOT_UNKNOWN;
+    if (!parse_pico_query(req, &claimed_crc, &operator_slot)) {
+        return recovery_upload_send_error(req, 400, "want ?crc=<8 hex digits>[&slot=A|B]");
+    }
+    size_t len = req->content_len;
+    int http_status = 503;
+    const char *why = "unavailable";
+    uint8_t *buf = recovery_pico_reserve(len, &http_status, &why);
+    if (!buf) {
+        return recovery_upload_send_error(req, http_status, why);
+    }
+    if (read_body_exact(req, buf, len) != len) {
+        recovery_pico_release();
+        return recovery_upload_send_error(req, 400,
+                                          "upload interrupted before the whole image arrived");
+    }
+    int image_slot = RPP_SLOT_UNKNOWN;
+    rpp_image_result_t ir = rpp_check_image(buf, len, claimed_crc, &image_slot);
+    if (ir != RPP_IMG_OK) {
+        recovery_pico_release();
+        return recovery_upload_send_error(req, 422, rpp_image_result_str(ir));
+    }
+    if (!recovery_pico_start(len, claimed_crc, image_slot, operator_slot, &why)) {
+        return recovery_upload_send_error(req, 503, why);
+    }
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    char body[96];
+    int n = snprintf(body, sizeof(body), "{\"started\":true,\"image_slot\":\"%s\"}",
+                     image_slot == RPP_SLOT_A ? "A" : "B");
+    return httpd_resp_send(req, body, n);
+}
+
+// GET /api/recovery/pico/status -- unauthenticated, read-only. Polling it is
+// also the relay's "the browser is still here" signal.
+static esp_err_t pico_status_get(httpd_req_t *req)
+{
+    char body[768];
+    int n = recovery_pico_status_json(body, sizeof(body));
+    if (n <= 0) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "status unavailable", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, n);
+}
+
+// POST /api/recovery/pico/abort -- authenticated. Asks the relay to stop; it
+// sends ABORT to the Pico and ends in phase "aborted". Harmless when idle.
+static esp_err_t pico_abort_post(httpd_req_t *req)
+{
+    esp_err_t auth_err = ESP_OK;
+    if (!recovery_authenticate_request(req, &auth_err, "pico-abort", &s_lockout)) {
+        return auth_err;
+    }
+    recovery_pico_abort();
+    return httpd_resp_sendstr(req, "abort requested");
+}
+
 void recovery_http_start(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    // 10 routes below; headroom for the later Pico upload route.
+    // 13 routes below (3 are the Pico update relay).
     config.max_uri_handlers = 16;
     config.lru_purge_enable = true;
     httpd_handle_t server = NULL;
@@ -787,6 +923,9 @@ void recovery_http_start(void)
         {.uri = "/api/ota/esp/boot_guard_reset", .method = HTTP_POST,
          .handler = boot_guard_reset_post},
         {.uri = "/api/sw_reset", .method = HTTP_POST, .handler = sw_reset_post},
+        {.uri = "/api/recovery/pico/upload", .method = HTTP_POST, .handler = pico_upload_post},
+        {.uri = "/api/recovery/pico/status", .method = HTTP_GET, .handler = pico_status_get},
+        {.uri = "/api/recovery/pico/abort", .method = HTTP_POST, .handler = pico_abort_post},
     };
     _Static_assert(sizeof(routes) / sizeof(routes[0]) <= 16, "routes exceed max_uri_handlers");
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {

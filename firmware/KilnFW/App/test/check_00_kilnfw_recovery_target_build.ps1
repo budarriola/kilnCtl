@@ -192,6 +192,17 @@ try {
         Fail "robocopy mirror of $srcRoot failed (exit $LASTEXITCODE)"
     }
 
+    # components/kilnlink links firmware/CommonFW's framing sources by the
+    # relative path ../../../CommonFW (sibling of KilnFW_recovery in the real
+    # tree), so the build directory needs the same sibling. Only src/ and
+    # include/ are read by that component.
+    $commonSrc = Join-Path $repoRoot "firmware\CommonFW"
+    $commonDst = Join-Path $WorktreePath "CommonFW"
+    & robocopy $commonSrc $commonDst "/MIR" "/NFL" "/NDL" "/NJH" "/NJS" "/NP" "/XD" (Join-Path $commonSrc "test") (Join-Path $commonSrc "docs") | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        Fail "robocopy mirror of $commonSrc failed (exit $LASTEXITCODE)"
+    }
+
     # Full-content verification: this project is small (~14 files today), so
     # a full hash comparison is cheap and leaves no sampling gap -- unlike
     # check_00_kilnfw_target_build.ps1's tree, there is no cost reason to
