@@ -268,6 +268,9 @@ static esp_err_t challenge_get(httpd_req_t *req)
 // ota_esp_post()'s, now just a caller) against ota_http_authenticate_
 // request()/ota_http_hex_decode() in the main app -- see that check's
 // header comment before changing wire strings or ordering here.
+// Longest query string the MAC will cover (the Pico upload's "crc=..&slot=A" is 18).
+#define AUTH_QUERY_MAX 95u
+
 static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
                                            const char *context, ota_auth_lockout_state_t *lockout)
 {
@@ -341,8 +344,21 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     _Static_assert(sizeof("pico-upload") - 1 <= 16, "context literal exceeds msg[] headroom");
     _Static_assert(sizeof("pico-abort") - 1 <= 16, "context literal exceeds msg[] headroom");
     size_t context_len = strlen(context);
-    uint8_t msg[OTA_AUTH_NONCE_LEN + 16];
-    if (context_len > sizeof(msg) - OTA_AUTH_NONCE_LEN) {
+    // The MAC also covers the request's query string ("?" + query, nothing when
+    // there is none), so a route's parameters (the Pico upload's ?crc=&slot=)
+    // are authenticated, not just the route. The browser's signed() appends the
+    // same "?query" to the context. Static: httpd runs handlers on one task
+    // (like s_nonce/s_lockout), and this keeps the extra bytes off its stack.
+    static uint8_t msg[OTA_AUTH_NONCE_LEN + 16 + 1 + AUTH_QUERY_MAX];
+    size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len > AUTH_QUERY_MAX) {
+        secure_zero(ap_password, sizeof(ap_password));
+        secure_zero(key, sizeof(key));
+        httpd_resp_set_status(req, "400 Bad Request");
+        *out_err = httpd_resp_send(req, "query string too long", HTTPD_RESP_USE_STRLEN);
+        return false;
+    }
+    if (context_len > 16) {
         secure_zero(ap_password, sizeof(ap_password));
         secure_zero(key, sizeof(key));
         // Cannot happen with today's three call sites (all compile-time
@@ -356,8 +372,22 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     }
     memcpy(msg, s_nonce.nonce, OTA_AUTH_NONCE_LEN);
     memcpy(msg + OTA_AUTH_NONCE_LEN, context, context_len);
+    size_t msg_len = OTA_AUTH_NONCE_LEN + context_len;
+    if (query_len > 0) {
+        msg[msg_len++] = '?';
+        static char q[AUTH_QUERY_MAX + 1];
+        if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
+            secure_zero(ap_password, sizeof(ap_password));
+            secure_zero(key, sizeof(key));
+            httpd_resp_set_status(req, "400 Bad Request");
+            *out_err = httpd_resp_send(req, "could not read query string", HTTPD_RESP_USE_STRLEN);
+            return false;
+        }
+        memcpy(msg + msg_len, q, query_len);
+        msg_len += query_len;
+    }
     uint8_t expected_mac[32];
-    hmac_sha256(key, sizeof(key), msg, OTA_AUTH_NONCE_LEN + context_len, expected_mac);
+    hmac_sha256(key, sizeof(key), msg, msg_len, expected_mac);
     // Key material is no longer needed; wipe before any return path.
     secure_zero(ap_password, sizeof(ap_password));
     secure_zero(key, sizeof(key));
@@ -875,9 +905,9 @@ static esp_err_t pico_upload_post(httpd_req_t *req)
 // also the relay's "the browser is still here" signal.
 static esp_err_t pico_status_get(httpd_req_t *req)
 {
-    char body[768];
-    int n = recovery_pico_status_json(body, sizeof(body));
-    if (n <= 0) {
+    int n = 0;
+    const char *body = recovery_pico_status_json(&n);
+    if (!body || n <= 0) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "status unavailable", HTTPD_RESP_USE_STRLEN);
     }

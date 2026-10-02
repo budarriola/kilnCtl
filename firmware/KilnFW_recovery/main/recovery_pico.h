@@ -58,9 +58,11 @@ bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operato
 // Asks a running transfer to stop (it sends ABORT to the Pico). Safe any time.
 void recovery_pico_abort(void);
 
-// Writes the status JSON (also counts as the client's "still here" poll).
-// Returns bytes written (excluding NUL).
-int recovery_pico_status_json(char *out, size_t cap);
+// Builds the status JSON (also counts as the client's "still here" poll) into
+// an internal PSRAM buffer and returns it (*len = bytes, excluding the NUL), or
+// NULL if it cannot be built. The pointer is valid until the next call; only
+// the httpd task calls this, so the caller needs no buffer of its own.
+const char *recovery_pico_status_json(int *len);
 
 #ifdef __cplusplus
 }

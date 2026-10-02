@@ -107,15 +107,55 @@ rpp_target_t rpp_resolve_target(int app_active_slot, int operator_slot)
         t.target_slot = operator_slot;
         t.source = RPP_TARGET_OPERATOR;
     } else {
-        t.target_slot = RPP_SLOT_B;
-        t.source = RPP_TARGET_ASSUMED_DEFAULT;
+        t.target_slot = RPP_SLOT_UNKNOWN;
+        t.source = RPP_TARGET_UNRESOLVED;
     }
     return t;
 }
 
 bool rpp_image_matches_target(int image_slot, rpp_target_t t)
 {
-    return (image_slot == RPP_SLOT_A || image_slot == RPP_SLOT_B) && image_slot == t.target_slot;
+    return (image_slot == RPP_SLOT_A || image_slot == RPP_SLOT_B) &&
+           (t.target_slot == RPP_SLOT_A || t.target_slot == RPP_SLOT_B) &&
+           image_slot == t.target_slot;
+}
+
+static char slot_ch(int s)
+{
+    return s == RPP_SLOT_A ? 'A' : s == RPP_SLOT_B ? 'B' : '?';
+}
+
+bool rpp_describe_target_refusal(rpp_target_t t, int image_slot, bool bootloader, char *out,
+                                 size_t cap)
+{
+    if (!out || cap == 0) {
+        return false;
+    }
+    if (rpp_image_matches_target(image_slot, t)) {
+        return false;
+    }
+    if (t.source == RPP_TARGET_UNRESOLVED) {
+        if (bootloader) {
+            snprintf(out, cap,
+                     "target unverified: the Pico is in its bootloader, which cannot report "
+                     "which slot it will write. Choose the target slot (A or B) on the page. A "
+                     "wrong choice leaves the Pico unbootable until it is reprogrammed over SWD.");
+        } else {
+            snprintf(out, cap,
+                     "target unverified: the Pico application did not report its active slot. "
+                     "Choose the target slot (A or B) on the page. A wrong choice leaves the "
+                     "Pico unbootable until it is reprogrammed over SWD.");
+        }
+        return true;
+    }
+    snprintf(out, cap,
+             "image is linked for slot %c but the Pico will write slot %c (%s): use "
+             "SaftyFW_slot%c.bin or choose the other slot",
+             slot_ch(image_slot), slot_ch(t.target_slot),
+             t.source == RPP_TARGET_FROM_APP ? "read from the Pico application"
+                                             : "target unverified, chosen by the operator",
+             slot_ch(t.target_slot));
+    return true;
 }
 
 // --- frame building -------------------------------------------------------
@@ -189,6 +229,22 @@ size_t rpp_pack_begin(uint8_t *payload, uint32_t length, uint32_t crc32, const c
         memcpy(h + 20, version, n);
     }
     return 1u + RPP_BEGIN_HEADER_LEN;
+}
+
+size_t rpp_pack_announce(uint8_t *payload)
+{
+    // cmd, protocol u16, min_compatible u16, dirty, commit_len, datetime_len,
+    // boot_id (CommonFW kilnlink_announce.h, empty strings).
+    payload[0] = RPP_CMD_ANNOUNCE_VERSION;
+    payload[1] = (uint8_t)RPP_ANNOUNCE_PROTOCOL;
+    payload[2] = (uint8_t)(RPP_ANNOUNCE_PROTOCOL >> 8);
+    payload[3] = (uint8_t)RPP_ANNOUNCE_MIN_COMPATIBLE;
+    payload[4] = (uint8_t)(RPP_ANNOUNCE_MIN_COMPATIBLE >> 8);
+    payload[5] = 1; // dirty/unknown
+    payload[6] = 0;
+    payload[7] = 0;
+    payload[8] = 0;
+    return 9;
 }
 
 size_t rpp_pack_data(uint8_t *payload, uint32_t offset, const uint8_t *data, size_t len)
@@ -364,7 +420,12 @@ void rpp_describe_state(uint8_t state, uint8_t err, char *out, size_t cap)
     rpp_format_err_bits(err, bits, sizeof(bits));
     switch (state) {
     case RPP_STATE_REFUSED:
-        if (err & (RPP_ERR_RELAY_CLOSED | RPP_ERR_TRIP_PENDING | RPP_ERR_TOO_HOT)) {
+        if (err & RPP_ERR_TRIP_PENDING) {
+            snprintf(out, cap,
+                     "Pico refused the update: %s. Recovery cannot reset the trip: power-cycle the "
+                     "board, then retry",
+                     bits);
+        } else if (err & (RPP_ERR_RELAY_CLOSED | RPP_ERR_TOO_HOT)) {
             snprintf(out, cap, "Pico refused the update: %s", bits);
         } else {
             snprintf(out, cap, "Pico refused the update (%s)", bits);
@@ -388,30 +449,133 @@ void rpp_describe_state(uint8_t state, uint8_t err, char *out, size_t cap)
     }
 }
 
-void rpp_gap_tracker_init(rpp_gap_tracker_t *t)
+void rpp_begin_start(rpp_begin_t *b, int64_t now_ms)
 {
-    memset(t, 0, sizeof(*t));
+    memset(b, 0, sizeof(*b));
+    b->sends = 1;
+    b->last_send_ms = now_ms;
+    b->first_send_ms = now_ms;
 }
 
-rpp_gap_action_t rpp_gap_next(rpp_gap_tracker_t *t, const rpp_status_t *st)
+rpp_begin_action_t rpp_begin_step(rpp_begin_t *b, const rpp_status_t *st, int64_t now_ms)
 {
-    t->batches++;
-    if (t->batches > RPP_MAX_GAP_BATCHES) {
-        return RPP_GAP_FAIL;
+    if (st) {
+        if (st->state == RPP_STATE_RECEIVING) {
+            return RPP_BEGIN_RECEIVING;
+        }
+        if (st->state == RPP_STATE_ERASING) {
+            b->idle_beacons = 0;
+            return RPP_BEGIN_ERASING;
+        }
+        if (st->state == RPP_STATE_IDLE) {
+            b->idle_beacons++;
+        }
     }
-    if (st->gap_count == 0 && st->total_chunks > 0 && st->received_chunks >= st->total_chunks) {
-        return RPP_GAP_SEND_END;
+    if (now_ms - b->first_send_ms >= (int64_t)RPP_ERASE_TIMEOUT_MS) {
+        return RPP_BEGIN_FAIL;
     }
-    if (st->received_chunks > t->last_received) {
-        t->stalled = 0;
-    } else {
-        t->stalled++;
+    if (b->idle_beacons >= RPP_BEGIN_IDLE_BEACONS &&
+        now_ms - b->last_send_ms >= (int64_t)RPP_BEGIN_RESEND_MIN_MS) {
+        if (b->sends >= RPP_BEGIN_MAX_SENDS) {
+            return RPP_BEGIN_FAIL;
+        }
+        b->sends++;
+        b->idle_beacons = 0;
+        b->last_send_ms = now_ms;
+        return RPP_BEGIN_RESEND;
     }
-    t->last_received = st->received_chunks;
-    if (t->stalled >= RPP_MAX_RETRANSMIT_ROUNDS) {
-        return RPP_GAP_FAIL;
+    return RPP_BEGIN_WAIT;
+}
+
+void rpp_fin_start(rpp_fin_t *f)
+{
+    memset(f, 0, sizeof(*f));
+}
+
+void rpp_fin_end_sent(rpp_fin_t *f)
+{
+    f->end_outstanding = true;
+    f->end_sends++;
+}
+
+static rpp_fin_action_t fin_fail(rpp_fin_t *f, const char *why)
+{
+    f->why = why;
+    return RPP_FIN_FAIL;
+}
+
+rpp_fin_action_t rpp_fin_step(rpp_fin_t *f, rpp_fin_event_t ev, const rpp_status_t *st,
+                              uint32_t since_end_ms)
+{
+    if (ev == RPP_EV_QUIET || !st) {
+        if (!f->end_outstanding) {
+            // Receivers go silent once every chunk is in: silence means "send END".
+            return f->end_sends >= RPP_MAX_END_SENDS ? fin_fail(f, "Pico stopped answering")
+                                                     : RPP_FIN_SEND_END;
+        }
+        if (since_end_ms < RPP_END_REPLY_TIMEOUT_MS) {
+            return RPP_FIN_WAIT;
+        }
+        if (f->end_sends >= RPP_MAX_END_SENDS) {
+            return fin_fail(f, "Pico did not answer END");
+        }
+        return RPP_FIN_SEND_END;
     }
-    return st->gap_count > 0 ? RPP_GAP_RETRANSMIT : RPP_GAP_WAIT;
+    switch (st->state) {
+    case RPP_STATE_COMPLETE:
+        return RPP_FIN_DONE;
+    case RPP_STATE_FAILED:
+    case RPP_STATE_ABORTED:
+    case RPP_STATE_REFUSED:
+    case RPP_STATE_REJECTED_SLOT_LINKAGE:
+    case RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP:
+        return fin_fail(f, "Pico ended the update");
+    case RPP_STATE_IDLE:
+        return fin_fail(f, "Pico left the transfer (reset?)");
+    case RPP_STATE_VERIFYING:
+        f->restart_timer = true;
+        f->end_outstanding = true;
+        f->end_sends = 0;
+        return RPP_FIN_WAIT;
+    case RPP_STATE_RECEIVING:
+        break;
+    default: // ERASING etc.: keep waiting
+        return RPP_FIN_WAIT;
+    }
+    if (f->batches >= RPP_MAX_GAP_BATCHES) {
+        return fin_fail(f, "too many gap reports");
+    }
+    if (st->gap_count > 0) {
+        f->batches++;
+        if (st->received_chunks > f->last_received) {
+            f->stalled = 0;
+        } else {
+            f->stalled++;
+        }
+        f->last_received = st->received_chunks;
+        if (f->stalled >= RPP_MAX_RETRANSMIT_ROUNDS) {
+            return fin_fail(f, "Pico did not accept the missing chunks (no progress)");
+        }
+        f->end_outstanding = false;
+        f->end_sends = 0;
+        return RPP_FIN_RETRANSMIT;
+    }
+    // RECEIVING with no listed gaps: either everything is in (and END is due)
+    // or the status only lists gaps behind its cursor.
+    if (f->end_outstanding) {
+        // END reply may still be in flight -- but a receiver that keeps beaconing
+        // without ever answering END must still hit the reply timeout.
+        return rpp_fin_step(f, RPP_EV_QUIET, NULL, since_end_ms);
+    }
+    return RPP_FIN_SEND_END;
+}
+
+uint32_t rpp_pace_delay_ticks(uint32_t wait_us, uint32_t tick_us)
+{
+    if (wait_us == 0 || tick_us == 0) {
+        return 0;
+    }
+    return (uint32_t)(((uint64_t)wait_us + tick_us - 1u) / tick_us);
 }
 
 uint32_t rpp_pace_wait_us(int64_t now_us, int64_t next_send_us)

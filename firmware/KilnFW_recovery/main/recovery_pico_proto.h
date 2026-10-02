@@ -31,6 +31,9 @@ extern "C" {
 
 // --- commands / addressing -------------------------------------------------
 #define RPP_CMD_GET_STATUS 0x01u
+#define RPP_CMD_ANNOUNCE_VERSION 0x0Fu
+#define RPP_ANNOUNCE_PROTOCOL 16u
+#define RPP_ANNOUNCE_MIN_COMPATIBLE 7u
 #define RPP_CMD_UPDATE_BEGIN 0x10u
 #define RPP_CMD_UPDATE_DATA 0x11u
 #define RPP_CMD_UPDATE_END 0x12u
@@ -83,6 +86,9 @@ typedef enum {
 // Discovery: give up (and report "not responding") after this long.
 #define RPP_DISCOVER_TIMEOUT_MS 12000u
 #define RPP_DISCOVER_PROBE_MS 700u
+// After the application first answers, how long to wait for a V3 Frame A (its
+// active slot) before falling back to the operator's slot.
+#define RPP_APP_SLOT_WAIT_MS 3000u
 // BEGIN reply (the precondition check is synchronous on the Pico).
 #define RPP_BEGIN_REPLY_TIMEOUT_MS 5000u
 // Erase of the whole 832 KB slot: the bootloader may be silent throughout.
@@ -146,18 +152,20 @@ rpp_image_result_t rpp_check_image(const uint8_t *img, size_t len, uint32_t clai
 // that will be written. Sources, in order of trust:
 //   1. The Pico application answers GET_STATUS with Frame A V3 whose flags2
 //      carries ACTIVE_SLOT_KNOWN/ACTIVE_SLOT_B: target = the other slot.
-//   2. Otherwise (bootloader, or an older application) the active slot cannot
-//      be read. The operator may assert the target slot; absent that, the
-//      bootloader's default for empty metadata is assumed (active = A, so
-//      target = B).
+//   2. Otherwise (bootloader, or an application that did not report it) the
+//      active slot cannot be read and the OPERATOR must name the target. That
+//      choice is never verifiable, so everything it produces says "target
+//      unverified".
+//   3. With neither, the target is UNRESOLVED and the relay refuses: it never
+//      assumes a slot (a wrong guess leaves the Pico unbootable until SWD).
 typedef enum {
-    RPP_TARGET_FROM_APP = 0,        // derived from Frame A's active slot
-    RPP_TARGET_OPERATOR = 1,        // operator-asserted, not verifiable
-    RPP_TARGET_ASSUMED_DEFAULT = 2, // bootloader default for empty metadata (B)
+    RPP_TARGET_FROM_APP = 0,   // derived from Frame A's active slot
+    RPP_TARGET_OPERATOR = 1,   // operator-asserted, not verifiable
+    RPP_TARGET_UNRESOLVED = 2, // nothing known: refuse
 } rpp_target_source_t;
 
 typedef struct {
-    int target_slot; // RPP_SLOT_A / RPP_SLOT_B
+    int target_slot; // RPP_SLOT_A / RPP_SLOT_B, or RPP_SLOT_UNKNOWN when unresolved
     rpp_target_source_t source;
 } rpp_target_t;
 
@@ -167,8 +175,15 @@ typedef struct {
 rpp_target_t rpp_resolve_target(int app_active_slot, int operator_slot);
 
 // True when `image_slot` (from rpp_check_image) is the slot `t` says will be
-// written. When it is not, the relay refuses before BEGIN so nothing is erased.
+// written. False for an unresolved target, so nothing is erased.
 bool rpp_image_matches_target(int image_slot, rpp_target_t t);
+
+// Operator-facing refusal text for a target that is unresolved or does not
+// match the image. `bootloader` selects the wording (the bootloader can never
+// report its slot). Returns false (out untouched) when there is nothing to
+// refuse, i.e. the target matches the image.
+bool rpp_describe_target_refusal(rpp_target_t t, int image_slot, bool bootloader, char *out,
+                                 size_t cap);
 
 // --- frame building (ESP -> Pico, stuffed wire bytes) ----------------------
 // `cap` must be >= KILNLINK_FRAME_STUFFED_MAX. Returns wire bytes written, or
@@ -179,6 +194,10 @@ size_t rpp_build_frame(uint16_t msg_index, const uint8_t *payload, size_t payloa
 // Payload packers: write into `payload` (>= KILNLINK_FRAME_MAX_PAYLOAD bytes),
 // return the payload length (0 on a bad argument).
 size_t rpp_pack_get_status(uint8_t *payload);
+// ESP -> Pico ANNOUNCE_VERSION (0x0F, kilnlink protocol 16, min compatible 7,
+// dirty, empty commit/datetime strings). The application only reports Frame A
+// V3 (and so its active slot) to a peer that announced; a bootloader ignores it.
+size_t rpp_pack_announce(uint8_t *payload);
 size_t rpp_pack_begin(uint8_t *payload, uint32_t length, uint32_t crc32, const char *version);
 size_t rpp_pack_data(uint8_t *payload, uint32_t offset, const uint8_t *data, size_t len);
 size_t rpp_pack_end(uint8_t *payload, uint32_t crc32);
@@ -230,25 +249,77 @@ void rpp_format_err_bits(uint8_t err, char *out, size_t cap);
 // Never says "clear the trip": recovery has no CLEAR_TRIP path.
 void rpp_describe_state(uint8_t state, uint8_t err, char *out, size_t cap);
 
-// --- gap-retransmit round logic (pure) --------------------------------------
+// --- BEGIN wait (pure) -------------------------------------------------------
+// BEGIN is resent only when the Pico demonstrably never saw it: several IDLE
+// beacons AND a minimum time since the last send. A slow erase is silent (not
+// IDLE), so it is never restarted.
+#define RPP_BEGIN_IDLE_BEACONS 4u
+#define RPP_BEGIN_RESEND_MIN_MS 5000u
+#define RPP_BEGIN_MAX_SENDS 3u
+
 typedef enum {
-    RPP_GAP_WAIT = 0,       // nothing actionable yet: wait for the next status
-    RPP_GAP_RETRANSMIT = 1, // resend the chunks the status lists
-    RPP_GAP_SEND_END = 2,   // every chunk is in: send UPDATE_END
-    RPP_GAP_FAIL = 3,       // no progress / too many reports: give up
-} rpp_gap_action_t;
+    RPP_BEGIN_WAIT = 0,
+    RPP_BEGIN_RESEND = 1,    // send BEGIN again
+    RPP_BEGIN_RECEIVING = 2, // the Pico is ready for DATA
+    RPP_BEGIN_ERASING = 3,   // informational: erase in progress, keep waiting
+    RPP_BEGIN_FAIL = 4,      // erase window elapsed (or resends exhausted)
+} rpp_begin_action_t;
+
+typedef struct {
+    uint32_t sends;
+    uint32_t idle_beacons;
+    int64_t last_send_ms;
+    int64_t first_send_ms;
+} rpp_begin_t;
+
+// Records the first BEGIN send.
+void rpp_begin_start(rpp_begin_t *b, int64_t now_ms);
+// Feed a status (st != NULL) or a time tick (st == NULL).
+rpp_begin_action_t rpp_begin_step(rpp_begin_t *b, const rpp_status_t *st, int64_t now_ms);
+
+// --- finish phase: END, gap rounds, completion (pure) -----------------------
+// Both receivers beacon UPDATE_STATUS ONLY while receiving, so once every chunk
+// has arrived they go SILENT: a relay that waits for a "no gaps" status never
+// gets one. The ESP must send END itself -- after the first pass, on any status
+// with no gaps, and after a quiet round -- and let END's reply decide:
+// RECEIVING + gaps = run a gap round and send END again; VERIFYING/COMPLETE =
+// wait; FAILED/REJECTED = fail. Silence before END is never fatal by itself.
+typedef enum {
+    RPP_EV_STATUS = 0, // a fresh UPDATE_STATUS arrived
+    RPP_EV_QUIET = 1,  // a full quiet round passed with no status
+} rpp_fin_event_t;
+
+typedef enum {
+    RPP_FIN_WAIT = 0,       // nothing to do yet
+    RPP_FIN_SEND_END = 1,   // send UPDATE_END, then call rpp_fin_end_sent()
+    RPP_FIN_RETRANSMIT = 2, // resend the status's gap chunks, then send END
+    RPP_FIN_DONE = 3,       // COMPLETE
+    RPP_FIN_FAIL = 4,       // give up; f->why says why
+} rpp_fin_action_t;
+
+#define RPP_MAX_END_SENDS 3u
 
 typedef struct {
     uint32_t last_received;
     uint32_t stalled;
     uint32_t batches;
-} rpp_gap_tracker_t;
+    uint32_t end_sends;   // unanswered END sends since the last progress
+    bool end_outstanding; // an END was sent and has not been answered yet
+    bool restart_timer;   // caller: restart the END reply timer, then clear this
+    const char *why;      // static text, set with RPP_FIN_FAIL
+} rpp_fin_t;
 
-void rpp_gap_tracker_init(rpp_gap_tracker_t *t);
-// Feed one fresh RECEIVING status. Complete means gap_count == 0 AND
-// received_chunks >= total_chunks (a status can list no gaps while chunks past
-// its cursor are still missing).
-rpp_gap_action_t rpp_gap_next(rpp_gap_tracker_t *t, const rpp_status_t *st);
+void rpp_fin_start(rpp_fin_t *f);
+// The caller sent END (call right after every RPP_FIN_SEND_END / retransmit).
+void rpp_fin_end_sent(rpp_fin_t *f);
+// `st` is only read for RPP_EV_STATUS. `since_end_ms` is the time since the
+// last END send (only read while an END is outstanding).
+rpp_fin_action_t rpp_fin_step(rpp_fin_t *f, rpp_fin_event_t ev, const rpp_status_t *st,
+                              uint32_t since_end_ms);
+
+// Whole RTOS ticks to delay for `wait_us`, rounded UP (never short of the
+// full pace); 0 when wait_us is 0.
+uint32_t rpp_pace_delay_ticks(uint32_t wait_us, uint32_t tick_us);
 
 // Microseconds still to wait before the next DATA frame may start, 0 when the
 // pacing deadline has passed.

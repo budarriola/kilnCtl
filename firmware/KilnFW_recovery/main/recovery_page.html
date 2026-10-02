@@ -27,7 +27,7 @@ progress{width:100%}
 <div>Choose SaftyFW_slotA.bin or SaftyFW_slotB.bin. The board buffers the image, checks it, then writes it to the safety processor over its UART (a few minutes).</div>
 <input id="pf" type="file" accept=".bin"><br>
 <label>Target slot <select id="ps"><option value="">auto</option><option value="A">A</option><option value="B">B</option></select></label>
-<div>Auto reads the slot from the Pico application. If the Pico is in its bootloader the slot cannot be read: select the slot the Pico will write (the one that is not its active slot) or leave auto to assume B.</div>
+<div>Auto reads the slot from the running Pico application. If the Pico is in its bootloader the target slot CANNOT be read from it: you must choose A or B (the slot that is not the one the Pico last booted), and the transfer will say "target unverified". A wrong choice leaves the Pico unbootable until it is reprogrammed over SWD.</div>
 <button id="pup" onclick="picoUpload()">Upload to Pico</button>
 <button id="pab" onclick="picoAbort()">Abort</button>
 <progress id="ppr" value="0" max="100"></progress><div id="ppp"></div>
@@ -81,7 +81,7 @@ function signed(path,ctx,body,prog){
 var pw=$("pw").value;if(!pw)return Promise.reject(new Error("enter the AP password"));
 return xhr("GET","/api/ota/challenge").then(function(r){
 if(r.s!=200)throw new Error("challenge failed: "+r.s);
-var mac=hex(deriveMac(pw,unhex(JSON.parse(r.t).nonce),ctx));
+var qi=path.indexOf("?");var mac=hex(deriveMac(pw,unhex(JSON.parse(r.t).nonce),qi<0?ctx:ctx+path.slice(qi)));
 return xhr("POST",path,{"X-Ota-Mac":mac},body,prog)})}
 function done(r){log(r.s+" "+r.t);if(r.s==200)log("The board is restarting; reload this page in a few seconds.")}
 function act(path,ctx,q){if(!confirm(q))return;
@@ -94,13 +94,13 @@ var pt=null;
 function pshow(j){var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
 if(j.total_bytes)t+=" "+j.bytes_sent+"/"+j.total_bytes+" bytes";
 if(j.gap_count)t+=", "+j.gap_count+" gaps (round "+j.gap_rounds+")";
-if(j.target_slot!="unknown")t+=", target slot "+j.target_slot+" ["+j.target_source+"]";
+if(j.target_slot!="unknown")t+=", target slot "+j.target_slot+(j.target_source=="operator"?" (TARGET UNVERIFIED: chosen by you)":" ["+j.target_source+"]");
 $("pst").textContent=t;
 if(j.total_bytes)$("ppr").value=100*j.bytes_sent/j.total_bytes;
 var w=[];if(j.refusal)w.push("Refused: "+j.refusal+".");
 if(j.error&&j.error!=j.refusal)w.push(j.error+".");
 if(j.message)w.push(j.message);
-if(j.power_cycle&&j.phase!="done")w.push("Power-cycle the board before retrying.");
+if(j.power_cycle&&j.phase!="done")w.push("Power-cycle the board before retrying (recovery cannot clear a safety trip).");
 $("pwarn").textContent=w.join(" ")}
 function ppoll(){if(pt)clearTimeout(pt);pt=null;
 xhr("GET","/api/recovery/pico/status").then(function(r){var j=JSON.parse(r.t);pshow(j);
@@ -111,7 +111,7 @@ if(!f)return log("choose a Pico .bin file first");
 $("pup").disabled=true;$("ppr").value=0;$("pwarn").textContent="";
 f.arrayBuffer().then(function(ab){var b=new Uint8Array(ab);
 var c=("0000000"+crc32(b).toString(16)).slice(-8);
-var q="?crc="+c;var s=$("ps").value;if(s)q+="&slot="+s;
+var q="?crc="+c;var s=$("ps").value;if(s){if(!confirm("Write Pico slot "+s+"? The target cannot be verified. A wrong choice leaves the Pico unbootable until SWD."))return Promise.reject(new Error("cancelled"));q+="&slot="+s}
 log("Pico image "+b.length+" bytes, CRC32 "+c);
 return signed("/api/recovery/pico/upload"+q,"pico-upload",b,function(a,t){$("ppr").value=100*a/t;$("ppp").textContent="uploading "+a+" / "+t+" bytes"})})
 .then(function(r){log(r.s+" "+r.t);

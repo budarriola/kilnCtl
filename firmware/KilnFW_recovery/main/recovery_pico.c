@@ -50,9 +50,6 @@ static const char *TAG = "rec_pico";
 #define INTERNAL_FLOOR 8192u
 #define RELAY_INTERNAL_NEED (RELAY_STACK + 3072u + 4096u)
 
-#define BEGIN_MAX_SENDS 3
-#define END_MAX_ATTEMPTS 3
-#define STATUS_SILENCE_LIMIT 4
 
 typedef enum { BUSY_NONE = 0, BUSY_RESERVED = 1, BUSY_RUNNING = 2 } busy_t;
 
@@ -82,7 +79,7 @@ static uint8_t s_pico_err;
 static bool s_power_cycle;
 static char s_refusal[160];
 static char s_error[192];
-static char s_message[144];
+static char s_message[192];
 
 // Task-only: never reset between uploads (the Pico's dedup state outlives one).
 static uint16_t s_msg_index;
@@ -233,7 +230,10 @@ static void set_text(char *dst, size_t cap, const char *src)
     unlock();
 }
 
-// --- relay context (internal heap, one per transfer) -------------------------------
+// --- relay context (PSRAM, one per transfer) ---------------------------------------
+// The deframer and the wire/payload buffers are the only large pieces; they live
+// in PSRAM (heap_caps_calloc, MALLOC_CAP_SPIRAM) so the relay costs internal RAM
+// only for its task stack and the UART driver.
 
 typedef struct {
     rpp_rx_t rx;
@@ -244,6 +244,7 @@ typedef struct {
     bool app_seen;
     bool boot_seen;
     int app_active_slot;
+    int64_t app_first_ms; // when the application first answered (-1 = not yet)
     bool armed;      // BEGIN has been sent: terminal states are now ours
     bool fatal;      // a terminal Pico state arrived; text already published
     bool stop_text;  // abort/client-gone text already published
@@ -290,10 +291,17 @@ static void handle_frame(relay_t *r, const kilnlink_frame_t *f)
     case RPP_STATE_REFUSED:
     case RPP_STATE_REJECTED_SLOT_LINKAGE:
     case RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP: {
-        char t[160];
+        char t[256];
         rpp_describe_state(st.state, st.err, t, sizeof(t));
         set_text(s_refusal, sizeof(s_refusal), t);
         set_text(s_error, sizeof(s_error), t);
+        if (st.err & RPP_ERR_TRIP_PENDING) {
+            // Recovery never sends CLEAR_TRIP; a power-cycle re-arms the
+            // application or boots the Pico's bootloader.
+            lock();
+            s_power_cycle = true;
+            unlock();
+        }
         r->fatal = true;
         break;
     }
@@ -375,11 +383,12 @@ static int wait_status(relay_t *r, uint32_t seq, uint32_t timeout_ms)
     return 0;
 }
 
-// Sends chunk `index` once the pacing deadline passes. Coarse waits yield with
-// vTaskDelay(1) (a 10 ms tick, so the effective pace is a little slower than
-// RPP_DATA_PACE_MS -- the safe side); only the last sub-millisecond is spun.
-// false = stop requested.
-static bool send_chunk_paced(relay_t *r, uint32_t index)
+// Waits out the pacing deadline of the previous frame. The delay is whole RTOS
+// ticks rounded UP (rpp_pace_delay_ticks), never a shortfall; the loop re-checks
+// the deadline each pass, and only the last sub-millisecond is spun. Applies to
+// every frame that follows a DATA frame (DATA, END), and the deadline is NOT
+// reset between rounds. false = stop requested.
+static bool pace_wait(relay_t *r)
 {
     for (;;) {
         pump(r);
@@ -388,13 +397,21 @@ static bool send_chunk_paced(relay_t *r, uint32_t index)
         }
         uint32_t w = rpp_pace_wait_us(esp_timer_get_time(), r->next_send_us);
         if (w == 0) {
-            break;
+            return true;
         }
         if (w >= 1000u) {
-            vTaskDelay(1);
+            vTaskDelay(rpp_pace_delay_ticks(w, (uint32_t)portTICK_PERIOD_MS * 1000u));
         } else {
             esp_rom_delay_us(w);
         }
+    }
+}
+
+// Sends chunk `index` once the pacing deadline passes. false = stop requested.
+static bool send_chunk_paced(relay_t *r, uint32_t index)
+{
+    if (!pace_wait(r)) {
+        return false;
     }
     uint32_t offset = index * RPP_CHUNK_LEN;
     uint32_t n = (uint32_t)s_len - offset;
@@ -488,23 +505,47 @@ static void finish_stopped(relay_t *r)
     }
 }
 
+static int64_t now_ms(void)
+{
+    return esp_timer_get_time() / 1000;
+}
+
+static bool send_probe(relay_t *r)
+{
+    // ANNOUNCE_VERSION makes the application publish Frame A V3 (its active
+    // slot); a bootloader ignores it. GET_STATUS draws a reply from either.
+    size_t pl = rpp_pack_announce(r->payload);
+    bool ok = send_payload(r, pl);
+    pl = rpp_pack_get_status(r->payload);
+    return send_payload(r, pl) && ok;
+}
+
 static bool discover(relay_t *r)
 {
     set_phase(RECOVERY_PICO_DISCOVER);
-    int64_t t0 = esp_timer_get_time();
+    int64_t t0 = now_ms();
     int64_t last_probe = 0;
     bool probed = false;
-    while ((esp_timer_get_time() - t0) / 1000 < (int64_t)RPP_DISCOVER_TIMEOUT_MS) {
+    while (now_ms() - t0 < (int64_t)RPP_DISCOVER_TIMEOUT_MS) {
         if (should_stop(r)) {
             return false;
         }
-        if (r->app_seen || r->boot_seen) {
+        int64_t now = now_ms();
+        if (r->boot_seen) {
             return true;
         }
-        int64_t now = esp_timer_get_time();
-        if (!probed || (now - last_probe) / 1000 >= (int64_t)RPP_DISCOVER_PROBE_MS) {
-            size_t pl = rpp_pack_get_status(r->payload);
-            (void)send_payload(r, pl);
+        if (r->app_seen) {
+            if (r->app_active_slot != RPP_SLOT_UNKNOWN) {
+                return true;
+            }
+            if (r->app_first_ms < 0) {
+                r->app_first_ms = now;
+            } else if (now - r->app_first_ms >= (int64_t)RPP_APP_SLOT_WAIT_MS) {
+                return true; // slot never reported: the operator must name it
+            }
+        }
+        if (!probed || now - last_probe >= (int64_t)RPP_DISCOVER_PROBE_MS) {
+            (void)send_probe(r);
             last_probe = now;
             probed = true;
         }
@@ -521,71 +562,62 @@ static bool discover(relay_t *r)
     return false;
 }
 
-// Returns true when the transfer completed (phase DONE).
-static bool run_transfer(relay_t *r)
+static void publish_done(bool operator_target)
 {
-    if (!discover(r)) {
-        return false;
-    }
+    set_phase(RECOVERY_PICO_DONE);
     lock();
-    s_pico_mode = r->app_seen ? 1 : 2;
+    s_power_cycle = true;
+    s_bytes_sent = (uint32_t)s_len;
+    snprintf(s_message, sizeof(s_message),
+             "Pico firmware written and verified%s. Power-cycle the board to run it (Pico "
+             "reset line is not wired).",
+             operator_target ? " (target unverified: slot chosen by the operator)" : "");
     unlock();
+}
 
-    // Target-slot resolution, before anything is erased (see the proto header).
-    rpp_target_t t = rpp_resolve_target(r->app_seen ? r->app_active_slot : RPP_SLOT_UNKNOWN,
-                                        s_operator_slot);
-    lock();
-    s_target_slot = t.target_slot;
-    s_target_source = (int)t.source;
-    unlock();
-    if (!rpp_image_matches_target(s_image_slot, t)) {
-        char m[192];
-        snprintf(m, sizeof(m),
-                 "image is linked for slot %c but the Pico will write slot %c (%s): use "
-                 "SaftyFW_slot%c.bin or choose the other slot",
-                 s_image_slot == RPP_SLOT_A ? 'A' : 'B', t.target_slot == RPP_SLOT_A ? 'A' : 'B',
-                 t.source == RPP_TARGET_FROM_APP     ? "read from the Pico application"
-                 : t.source == RPP_TARGET_OPERATOR   ? "as you selected"
-                                                     : "assumed: slot cannot be read from the bootloader",
-                 t.target_slot == RPP_SLOT_A ? 'A' : 'B');
-        set_text(s_error, sizeof(s_error), m);
-        set_phase(RECOVERY_PICO_FAILED);
-        return false;
-    }
-
-    // BEGIN
+// BEGIN, then wait for RECEIVING through the (possibly silent) erase.
+static bool begin_transfer(relay_t *r)
+{
     set_phase(RECOVERY_PICO_BEGIN);
-    r->chunks = rpp_chunk_count((uint32_t)s_len);
-    r->armed = true;
-    int begin_sends = 1;
     size_t pl = rpp_pack_begin(r->payload, (uint32_t)s_len, s_crc, "recovery");
     if (pl == 0 || !send_payload(r, pl)) {
         fail(r, "could not write BEGIN to the Pico UART");
         return false;
     }
-    int64_t t_begin = esp_timer_get_time();
+    rpp_begin_t bg;
+    rpp_begin_start(&bg, now_ms());
+    int64_t t_begin = now_ms();
     uint32_t seen = r->st_seq;
-    uint32_t idle_count = 0;
-    bool receiving = false;
-    while ((esp_timer_get_time() - t_begin) / 1000 < (int64_t)RPP_ERASE_TIMEOUT_MS) {
+    for (;;) {
         pump(r);
         if (should_stop(r)) {
             return false;
         }
+        int64_t now = now_ms();
+        rpp_begin_action_t a;
         if (r->st_seq != seen) {
             seen = r->st_seq;
-            if (r->st.state == RPP_STATE_RECEIVING) {
-                receiving = true;
-                break;
-            }
-            if (r->st.state == RPP_STATE_ERASING) {
-                set_phase(RECOVERY_PICO_ERASING);
-            } else if (r->st.state == RPP_STATE_IDLE) {
-                idle_count++;
-            }
+            a = rpp_begin_step(&bg, &r->st, now);
+        } else {
+            a = rpp_begin_step(&bg, NULL, now);
         }
-        int64_t waited_ms = (esp_timer_get_time() - t_begin) / 1000;
-        if (waited_ms > (int64_t)RPP_BEGIN_REPLY_TIMEOUT_MS) {
+        if (a == RPP_BEGIN_RECEIVING) {
+            return true;
+        }
+        if (a == RPP_BEGIN_FAIL) {
+            lock();
+            s_power_cycle = true;
+            unlock();
+            fail(r, "Pico did not start receiving (erase timed out or BEGIN ignored): "
+                    "power-cycle the board and retry");
+            return false;
+        }
+        if (a == RPP_BEGIN_ERASING) {
+            set_phase(RECOVERY_PICO_ERASING);
+        } else if (a == RPP_BEGIN_RESEND) {
+            // Several IDLE beacons and the minimum wait: the Pico never saw BEGIN.
+            (void)send_payload(r, pl);
+        } else if (now - t_begin > (int64_t)RPP_BEGIN_REPLY_TIMEOUT_MS) {
             // Silent for the reply window: a bootloader erases without answering.
             lock();
             if (s_phase == RECOVERY_PICO_BEGIN) {
@@ -593,24 +625,121 @@ static bool run_transfer(relay_t *r)
             }
             unlock();
         }
-        if (idle_count >= 2 && begin_sends < BEGIN_MAX_SENDS) {
-            // Two idle beacons after BEGIN: the Pico never saw it. Resend.
-            (void)send_payload(r, pl);
-            begin_sends++;
-            idle_count = 0;
-        }
         vTaskDelay(1);
     }
-    if (!receiving) {
-        lock();
-        s_power_cycle = true;
-        unlock();
-        fail(r, "Pico did not start receiving (erase timed out or BEGIN ignored): power-cycle "
-                "the board and retry");
+}
+
+// END, gap rounds and completion: driven by rpp_fin_step (see the proto header
+// for why the ESP must send END itself -- the receivers go silent once every
+// chunk is in).
+static bool finish_transfer(relay_t *r)
+{
+    set_phase(RECOVERY_PICO_FINISHING);
+    rpp_fin_t f;
+    rpp_fin_start(&f);
+    rpp_fin_action_t act = RPP_FIN_SEND_END;
+    rpp_status_t cur;
+    memset(&cur, 0, sizeof(cur));
+    uint32_t seen = r->st_seq;
+    int64_t t_end = now_ms();
+    for (;;) {
+        if (act == RPP_FIN_DONE) {
+            return true;
+        }
+        if (act == RPP_FIN_FAIL) {
+            fail(r, f.why ? f.why : "Pico did not confirm completion");
+            return false;
+        }
+        if (act == RPP_FIN_RETRANSMIT) {
+            set_phase(RECOVERY_PICO_RETRANSMIT);
+            lock();
+            s_batches = f.batches;
+            unlock();
+            for (uint8_t g = 0; g < cur.gap_count; g++) {
+                uint32_t idx = cur.gaps[g];
+                if (idx >= r->chunks) {
+                    continue;
+                }
+                if (!send_chunk_paced(r, idx)) {
+                    return false;
+                }
+            }
+        }
+        if (act == RPP_FIN_SEND_END || act == RPP_FIN_RETRANSMIT) {
+            set_phase(RECOVERY_PICO_FINISHING);
+            // END is a frame too: honour the pace after the last DATA, and treat
+            // every status queued before it as history (only its reply counts).
+            if (!pace_wait(r)) {
+                return false;
+            }
+            pump(r);
+            seen = r->st_seq;
+            size_t el = rpp_pack_end(r->payload, s_crc);
+            if (el == 0 || !send_payload(r, el)) {
+                fail(r, "could not write END to the Pico UART");
+                return false;
+            }
+            rpp_fin_end_sent(&f);
+            t_end = now_ms();
+        }
+        int w = wait_status(r, seen, RPP_GAP_ROUND_WAIT_MS);
+        if (w < 0) {
+            return false;
+        }
+        if (w > 0) {
+            seen = r->st_seq;
+            cur = r->st;
+        }
+        act = rpp_fin_step(&f, w > 0 ? RPP_EV_STATUS : RPP_EV_QUIET, w > 0 ? &cur : NULL,
+                           (uint32_t)(now_ms() - t_end));
+        if (f.restart_timer) {
+            t_end = now_ms();
+            f.restart_timer = false;
+        }
+    }
+}
+
+// Returns true when the transfer completed (phase DONE).
+static bool run_transfer(relay_t *r)
+{
+    if (!discover(r)) {
+        return false;
+    }
+    bool bootloader = !r->app_seen;
+    lock();
+    s_pico_mode = bootloader ? 2 : 1;
+    unlock();
+
+    // Target-slot resolution, before anything is erased (see the proto header).
+    // Never assumed: the bootloader cannot report its slot, so it always needs
+    // the operator's choice.
+    rpp_target_t t = rpp_resolve_target(bootloader ? RPP_SLOT_UNKNOWN : r->app_active_slot,
+                                        s_operator_slot);
+    lock();
+    s_target_slot = t.target_slot;
+    s_target_source = (int)t.source;
+    unlock();
+    char m[240];
+    if (rpp_describe_target_refusal(t, s_image_slot, bootloader, m, sizeof(m))) {
+        set_text(s_refusal, sizeof(s_refusal), m);
+        set_text(s_error, sizeof(s_error), m);
+        set_phase(RECOVERY_PICO_FAILED);
+        return false;
+    }
+    if (t.source == RPP_TARGET_OPERATOR) {
+        snprintf(m, sizeof(m),
+                 "target unverified: writing slot %c as you chose; the Pico cannot confirm it. A "
+                 "wrong choice leaves it unbootable until SWD.",
+                 t.target_slot == RPP_SLOT_A ? 'A' : 'B');
+        set_text(s_message, sizeof(s_message), m);
+    }
+
+    r->chunks = rpp_chunk_count((uint32_t)s_len);
+    r->armed = true;
+    if (!begin_transfer(r)) {
         return false;
     }
     if (r->st.total_chunks != 0 && r->st.total_chunks != r->chunks) {
-        char m[96];
         snprintf(m, sizeof(m), "Pico expects %u chunks but the image has %u",
                  (unsigned)r->st.total_chunks, (unsigned)r->chunks);
         fail(r, m);
@@ -630,119 +759,46 @@ static bool run_transfer(relay_t *r)
         unlock();
     }
 
-    // Gap rounds, then END (a few attempts: END can be answered with RECEIVING
-    // again when the Pico still lists gaps).
-    for (int attempt = 0; attempt < END_MAX_ATTEMPTS; attempt++) {
-        rpp_gap_tracker_t gt;
-        rpp_gap_tracker_init(&gt);
-        int silent = 0;
-        for (;;) {
-            pump(r);
-            uint32_t seq0 = r->st_seq;
-            int w = wait_status(r, seq0, RPP_GAP_ROUND_WAIT_MS);
-            if (w < 0) {
-                return false;
-            }
-            if (w == 0) {
-                if (++silent >= STATUS_SILENCE_LIMIT) {
-                    fail(r, "Pico stopped reporting status during the transfer");
-                    return false;
-                }
-                continue;
-            }
-            silent = 0;
-            if (r->st.state != RPP_STATE_RECEIVING) {
-                if (r->st.state == RPP_STATE_IDLE) {
-                    fail(r, "Pico left the transfer (reset?): power-cycle and retry");
-                    return false;
-                }
-                continue; // VERIFYING etc: keep waiting
-            }
-            rpp_gap_action_t act = rpp_gap_next(&gt, &r->st);
-            lock();
-            s_batches = gt.batches;
-            unlock();
-            if (act == RPP_GAP_FAIL) {
-                fail(r, "Pico did not accept the missing chunks (no progress)");
-                return false;
-            }
-            if (act == RPP_GAP_SEND_END) {
-                break;
-            }
-            if (act == RPP_GAP_RETRANSMIT) {
-                set_phase(RECOVERY_PICO_RETRANSMIT);
-                r->next_send_us = esp_timer_get_time();
-                for (uint8_t g = 0; g < r->st.gap_count; g++) {
-                    uint32_t idx = r->st.gaps[g];
-                    if (idx >= r->chunks) {
-                        continue;
-                    }
-                    if (!send_chunk_paced(r, idx)) {
-                        return false;
-                    }
-                }
-                pump(r); // consume any status that arrived mid-burst
-            }
-        }
-
-        // END
-        set_phase(RECOVERY_PICO_FINISHING);
-        size_t el = rpp_pack_end(r->payload, s_crc);
-        if (el == 0 || !send_payload(r, el)) {
-            fail(r, "could not write END to the Pico UART");
-            return false;
-        }
-        uint32_t seq1 = r->st_seq;
-        int64_t t_end = esp_timer_get_time();
-        bool again = false;
-        while ((esp_timer_get_time() - t_end) / 1000 < (int64_t)RPP_END_REPLY_TIMEOUT_MS) {
-            int w = wait_status(r, seq1, 500);
-            if (w < 0) {
-                return false;
-            }
-            if (w == 0) {
-                continue;
-            }
-            seq1 = r->st_seq;
-            if (r->st.state == RPP_STATE_COMPLETE) {
-                set_phase(RECOVERY_PICO_DONE);
-                lock();
-                s_power_cycle = true;
-                s_bytes_sent = (uint32_t)s_len;
-                snprintf(s_message, sizeof(s_message),
-                         "Pico firmware written and verified. Power-cycle the board to run it "
-                         "(the Pico reset line is not wired).");
-                unlock();
-                return true;
-            }
-            if (r->st.state == RPP_STATE_RECEIVING) {
-                again = true; // END arrived with chunks still missing
-                break;
-            }
-        }
-        if (!again) {
-            continue; // no answer: resend END via the next attempt
-        }
+    if (!finish_transfer(r)) {
+        return false;
     }
-    fail(r, "Pico did not confirm completion");
-    return false;
+    publish_done(t.source == RPP_TARGET_OPERATOR);
+    return true;
+}
+
+static bool internal_ram_ok(void)
+{
+    return heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= INTERNAL_FLOOR;
 }
 
 static void relay_task(void *arg)
 {
     relay_t *r = (relay_t *)arg;
+    bool uart_up = false;
 
-    if (!uart_open()) {
+    if (!internal_ram_ok()) {
+        // The task stack itself has just been allocated: re-check the floor.
+        fail(r, "not enough free internal memory to run the Pico relay");
+    } else if (!uart_open()) {
         fail(r, "could not open the Pico UART");
     } else {
-        pump(r);
-        if (!run_transfer(r) && (r->fatal || s_abort)) {
-            finish_stopped(r);
+        uart_up = true;
+        if (!internal_ram_ok()) {
+            fail(r, "not enough free internal memory to run the Pico relay (UART driver)");
+        } else {
+            pump(r);
+            if (!run_transfer(r) && (r->fatal || s_abort)) {
+                finish_stopped(r);
+            }
         }
+    }
+    if (uart_up) {
         uart_close();
     }
-    ESP_LOGI(TAG, "relay finished, phase=%s", recovery_pico_phase_name(s_phase));
-    free(r);
+    ESP_LOGI(TAG, "relay finished, phase=%s, stack high-water %u B free",
+             recovery_pico_phase_name(s_phase),
+             (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+    heap_caps_free(r);
     lock();
     free_buffer_locked();
     s_busy = BUSY_NONE;
@@ -753,14 +809,27 @@ static void relay_task(void *arg)
 bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operator_slot,
                          const char **why)
 {
-    relay_t *r = calloc(1, sizeof(*r));
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) <
+        INTERNAL_FLOOR + RELAY_STACK + PICO_RX_BUF + 1024u) {
+        recovery_pico_release();
+        *why = "not enough free internal memory to run the Pico relay";
+        return false;
+    }
+    relay_t *r = heap_caps_calloc(1, sizeof(*r), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!r) {
         recovery_pico_release();
-        *why = "out of internal memory";
+        *why = "out of PSRAM for the relay buffers";
         return false;
     }
     rpp_rx_init(&r->rx);
     r->app_active_slot = RPP_SLOT_UNKNOWN;
+    r->app_first_ms = -1;
+    if (!internal_ram_ok()) {
+        heap_caps_free(r);
+        recovery_pico_release();
+        *why = "not enough free internal memory to run the Pico relay";
+        return false;
+    }
 
     lock();
     s_len = len;
@@ -774,7 +843,7 @@ bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operato
     unlock();
 
     if (xTaskCreate(relay_task, "rec_pico", RELAY_STACK, r, RELAY_PRIO, NULL) != pdPASS) {
-        free(r);
+        heap_caps_free(r);
         lock();
         free_buffer_locked();
         s_busy = BUSY_NONE;
@@ -786,14 +855,27 @@ bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operato
     return true;
 }
 
-// Minimal JSON string escape into out; returns the new write position.
+// --- status JSON ----------------------------------------------------------------------
+// Built into one PSRAM buffer (allocated on first use) while holding the relay
+// lock, straight from the published state: no stack copies of the text fields.
+// Only the httpd task calls this, and the buffer is consumed (sent) before the
+// handler returns.
+#define JSON_CAP 1536
+static char *s_json;
+
+// Minimal JSON string escape into out; returns the new write position, or
+// (size_t)-1 when it does not fit.
 static size_t json_str(char *out, size_t cap, size_t pos, const char *s)
 {
-    if (pos < cap) {
-        out[pos++] = '"';
+    if (pos + 1 >= cap) {
+        return (size_t)-1;
     }
-    for (; *s && pos + 2 < cap; s++) {
+    out[pos++] = '"';
+    for (; *s; s++) {
         unsigned char c = (unsigned char)*s;
+        if (pos + 3 >= cap) { // room for an escape pair plus the closing quote
+            return (size_t)-1;
+        }
         if (c == '"' || c == '\\') {
             out[pos++] = '\\';
             out[pos++] = (char)c;
@@ -803,71 +885,79 @@ static size_t json_str(char *out, size_t cap, size_t pos, const char *s)
             out[pos++] = (char)c;
         }
     }
-    if (pos < cap) {
-        out[pos++] = '"';
-    }
+    out[pos++] = '"';
     return pos;
 }
 
-int recovery_pico_status_json(char *out, size_t cap)
+// Appends a snprintf result, clamping: false when it would not fit.
+static bool json_fmt(char *out, size_t cap, size_t *pos, const char *fmt, ...)
 {
-    char refusal[sizeof(s_refusal)], error[sizeof(s_error)], message[sizeof(s_message)];
-    recovery_pico_phase_t phase;
-    uint32_t sent, total, gaps, batches;
-    int tslot, tsrc, mode;
-    uint8_t pstate, perr;
-    bool pc, busy;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out + *pos, cap - *pos, fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= cap - *pos) {
+        return false;
+    }
+    *pos += (size_t)n;
+    return true;
+}
+
+const char *recovery_pico_status_json(int *len)
+{
+    static const char no_psram[] = "{\"phase\":\"idle\",\"busy\":false,\"psram\":false}";
+    *len = 0;
+    if (!recovery_pico_psram_available()) {
+        *len = (int)(sizeof(no_psram) - 1);
+        return no_psram;
+    }
+    if (!s_json) {
+        s_json = heap_caps_malloc(JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_json) {
+            return NULL;
+        }
+    }
+    static const char *const modes[] = {"unknown", "application", "bootloader"};
+    static const char *const srcs[] = {"pico-app", "operator", "unresolved"};
+    char *out = s_json;
+    size_t pos = 0;
+    bool ok;
 
     lock();
-    phase = s_phase;
-    sent = s_bytes_sent;
-    total = s_total_bytes;
-    gaps = s_gap_count;
-    batches = s_batches;
-    tslot = s_target_slot;
-    tsrc = s_target_source;
-    mode = s_pico_mode;
-    pstate = s_pico_state;
-    perr = s_pico_err;
-    pc = s_power_cycle;
-    busy = s_busy != BUSY_NONE;
-    memcpy(refusal, s_refusal, sizeof(refusal));
-    memcpy(error, s_error, sizeof(error));
-    memcpy(message, s_message, sizeof(message));
+    bool busy = s_busy != BUSY_NONE;
     if (busy) {
         s_last_poll_us = esp_timer_get_time(); // the page is still watching
     }
+    int mode = s_pico_mode;
+    int tsrc = s_target_source;
+    ok = json_fmt(out, JSON_CAP, &pos,
+                  "{\"phase\":\"%s\",\"busy\":%s,\"psram\":true,\"bytes_sent\":%u,"
+                  "\"total_bytes\":%u,\"gap_count\":%u,\"gap_rounds\":%u,"
+                  "\"pico_mode\":\"%s\",\"pico_state\":%u,\"pico_err\":%u,"
+                  "\"target_slot\":\"%s\",\"target_source\":\"%s\",\"power_cycle\":%s,"
+                  "\"refusal\":",
+                  recovery_pico_phase_name(s_phase), busy ? "true" : "false", (unsigned)s_bytes_sent,
+                  (unsigned)s_total_bytes, (unsigned)s_gap_count, (unsigned)s_batches,
+                  modes[mode >= 0 && mode < 3 ? mode : 0], (unsigned)s_pico_state,
+                  (unsigned)s_pico_err,
+                  s_target_slot == RPP_SLOT_A ? "A" : s_target_slot == RPP_SLOT_B ? "B" : "unknown",
+                  tsrc >= 0 && tsrc < 3 ? srcs[tsrc] : "unknown", s_power_cycle ? "true" : "false");
+    if (ok) {
+        pos = json_str(out, JSON_CAP, pos, s_refusal);
+        ok = pos != (size_t)-1 && json_fmt(out, JSON_CAP, &pos, ",\"error\":");
+    }
+    if (ok) {
+        pos = json_str(out, JSON_CAP, pos, s_error);
+        ok = pos != (size_t)-1 && json_fmt(out, JSON_CAP, &pos, ",\"message\":");
+    }
+    if (ok) {
+        pos = json_str(out, JSON_CAP, pos, s_message);
+        ok = pos != (size_t)-1 && json_fmt(out, JSON_CAP, &pos, "}");
+    }
     unlock();
-
-    static const char *const modes[] = {"unknown", "application", "bootloader"};
-    static const char *const srcs[] = {"pico-app", "operator", "assumed-default"};
-    int n = snprintf(out, cap,
-                     "{\"phase\":\"%s\",\"busy\":%s,\"psram\":%s,\"bytes_sent\":%u,"
-                     "\"total_bytes\":%u,\"gap_count\":%u,\"gap_rounds\":%u,"
-                     "\"pico_mode\":\"%s\",\"pico_state\":%u,\"pico_err\":%u,"
-                     "\"target_slot\":\"%s\",\"target_source\":\"%s\",\"power_cycle\":%s,"
-                     "\"refusal\":",
-                     recovery_pico_phase_name(phase), busy ? "true" : "false",
-                     recovery_pico_psram_available() ? "true" : "false", (unsigned)sent,
-                     (unsigned)total, (unsigned)gaps, (unsigned)batches, modes[mode >= 0 && mode < 3 ? mode : 0],
-                     (unsigned)pstate, (unsigned)perr,
-                     tslot == RPP_SLOT_A ? "A" : tslot == RPP_SLOT_B ? "B" : "unknown",
-                     tsrc >= 0 && tsrc < 3 ? srcs[tsrc] : "unknown", pc ? "true" : "false");
-    if (n < 0 || (size_t)n >= cap) {
-        return 0;
+    if (!ok) {
+        return NULL;
     }
-    size_t pos = (size_t)n;
-    pos = json_str(out, cap, pos, refusal);
-    n = snprintf(out + pos, cap - pos, ",\"error\":");
-    pos += (size_t)n;
-    pos = json_str(out, cap, pos, error);
-    n = snprintf(out + pos, cap - pos, ",\"message\":");
-    pos += (size_t)n;
-    pos = json_str(out, cap, pos, message);
-    if (pos + 2 >= cap) {
-        return 0;
-    }
-    out[pos++] = '}';
-    out[pos] = '\0';
-    return (int)pos;
+    *len = (int)pos;
+    return out;
 }

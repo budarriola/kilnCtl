@@ -10,10 +10,12 @@ update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT_PLA
 - The `recovery` partition size does not change; `partitions.csv` is not touched.
 - Scope: static LCD status page; web pages to upload a new ESP image AND a new Pico
   (RP2040) image; hold the kiln off; exit-recovery; show WHY the board is in recovery.
-- Uploads stream live. ESP image is written into `app` as it arrives (first-chunk header
-  check; the boot partition is set only after `esp_ota_end` verifies). Pico image: the
-  browser computes CRC32 and sends it with the upload; recovery keeps the whole image in a
-  PSRAM copy while relaying so the Pico's gap-retransmit rounds can be served.
+- ESP uploads stream live: the image is written into `app` as it arrives (first-chunk header
+  check; the boot partition is set only after `esp_ota_end` verifies). **Owner decision
+  change (2026-10-02, after the W4 review): the Pico upload does NOT stream live.** The owner
+  accepted buffer-then-relay: the browser computes CRC32 and sends it with the upload,
+  recovery receives and validates the whole image in PSRAM first, and only then relays it to
+  the Pico, serving the Pico's gap-retransmit rounds from that copy.
 - PSRAM enabled in recovery with buffers in PSRAM, but recovery must still boot if PSRAM is
   absent or fails (`CONFIG_SPIRAM_IGNORE_NOTFOUND`), degrading to small internal buffers.
 - A Pico update stall must NOT block exiting recovery.
@@ -68,9 +70,22 @@ and CRC-checked in PSRAM BEFORE the relay starts (202 returned, then status poll
 streamed live; DATA pace is `RPP_DATA_PACE_MS` (15 ms, tune on the bench); no REBOOT 0x29
 offer (the bootloader ignores it; the page says power-cycle); no CLEAR_TRIP; a missing
 status poll for 90 s aborts the relay. Target slot: Frame A active slot gives the opposite
-slot ("pico-app"); else the operator's slot choice; else assumed B (bootloader default). The
-file's slot comes from its reset vector and a mismatch is refused before BEGIN. Original
-requirements below.
+slot ("pico-app", read after sending ANNOUNCE_VERSION protocol 16); else the operator's slot
+choice, reported everywhere as "target unverified"; else the transfer is refused. The slot is
+NEVER assumed: the bootloader cannot report which slot it will write, so in bootloader mode
+the operator must choose, and a wrong choice leaves the Pico unbootable until SWD. The
+file's slot comes from its reset vector and a mismatch is refused before BEGIN.
+Review fixes (second commit): the relay sends END itself (both receivers go silent once
+every chunk is in, so waiting for a "no gaps" status never ends: `rpp_fin_step` in
+`recovery_pico_proto.c`, modelled on `ota_pico_relay.c`); the BEGIN resend waits at least 4
+IDLE beacons and 5 s and never restarts during an erase; the pace delay is rounded up to
+whole ticks and also applies before END; relay buffers live in PSRAM with an 8 KB
+internal-free check after context allocation, task creation and UART install; the status
+JSON is built into one PSRAM buffer under the relay lock; a trip-pending refusal tells the
+operator to power-cycle (still no CLEAR_TRIP); the MAC covers the query string, so `?crc=` and
+`&slot=` are authenticated. SaftyFW follow-up (not done here, the bootloader is untouched):
+the bootloader IDLE status should report `active_slot`, which would remove the operator
+choice. Original requirements below.
 - kilnlink UPDATE_BEGIN/DATA/END/ABORT/STATUS per `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
   section 4; send SAFETY_CMD_ANNOUNCE_REBOOT first. Send BEGIN to whichever receiver
   answers (Pico app or Pico bootloader; wire-compatible). If nothing answers, the page says

@@ -81,8 +81,16 @@ try {
     $src = Get-Content $impl -Raw
     $mutants = @(
         @{ Name = "sram_end"; Needle = 'sp > RPP_SRAM_END'; Repl = '0' },
-        @{ Name = "gap_complete"; Needle = 'st->received_chunks >= st->total_chunks'; Repl = '1' },
-        @{ Name = "slot_bit"; Needle = '(flags2 & 0x10u) ? RPP_SLOT_B : RPP_SLOT_A'; Repl = 'RPP_SLOT_A' }
+        @{ Name = "slot_bit"; Needle = '(flags2 & 0x10u) ? RPP_SLOT_B : RPP_SLOT_A'; Repl = 'RPP_SLOT_A' },
+        # Silence before END is never sent: the old relay's deadlock.
+        @{ Name = "fin_quiet_no_end"; Needle = 'if (!f->end_outstanding) {'; Repl = 'if (0) {' },
+        @{ Name = "fin_never_done"; Needle = 'return RPP_FIN_DONE;'; Repl = 'return RPP_FIN_WAIT;' },
+        @{ Name = "fin_gaps_ignored"; Needle = 'return RPP_FIN_RETRANSMIT;'; Repl = 'return RPP_FIN_SEND_END;' },
+        @{ Name = "begin_resend_early"; Needle = 'b->idle_beacons >= RPP_BEGIN_IDLE_BEACONS &&'; Repl = 'b->idle_beacons >= 2u &&' },
+        @{ Name = "begin_erasing_ignored"; Needle = 'if (st->state == RPP_STATE_ERASING) {'; Repl = 'if (0) {' },
+        @{ Name = "fin_beacon_stall"; Needle = 'return rpp_fin_step(f, RPP_EV_QUIET, NULL, since_end_ms);'; Repl = 'return RPP_FIN_WAIT;' },
+        @{ Name = "pace_floor"; Needle = '+ tick_us - 1u'; Repl = '+ 0u' },
+        @{ Name = "target_assumed"; Needle = 't.target_slot = RPP_SLOT_UNKNOWN;'; Repl = 't.target_slot = RPP_SLOT_B;' }
     )
     foreach ($m in $mutants) {
         $mutant = $src.Replace($m.Needle, $m.Repl)
