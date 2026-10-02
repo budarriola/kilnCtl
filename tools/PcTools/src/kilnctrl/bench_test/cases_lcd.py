@@ -4672,7 +4672,11 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
 
     result: Optional[CaseResult] = None
     started = False
-    observed: Dict[str, Any] = {"zone_temp_c": zone_temp, "orig": orig}
+    # Both Edit-page read counters exist on EVERY outcome (0 when nothing was seen):
+    # _lcd_edit_note_read only increments, so a clean run used to omit them.
+    observed: Dict[str, Any] = {"zone_temp_c": zone_temp, "orig": orig,
+                                "edit_page_truncated_reads": 0, "edit_page_unreadable_reads": 0,
+                                "edit_settle_truncated_reads": 0}
     ui = srv._ui_test
     now = ctx.get("_now", time.monotonic)
     sleep = ctx.get("_sleep", time.sleep)
@@ -4726,6 +4730,9 @@ def _lcd_edit_run(ctx: dict, cid: str, plan, body) -> CaseResult:
             ctx, ui, "Edit", min_wait_s=0.0, timeout_s=_LCD22_EDIT_WAIT_S, log=edit_settle_log)
         observed["edit_wait_s"] = round(now() - edit_wait_t0, 2)
         observed["edit_settle_reads"] = edit_settle_log[-5:]
+        # Home-page (Edit button) settle reads that were truncated. A truncated read may qualify for
+        # PRESENCE of Edit (see _wait_for_home_settled); counted so the record shows how many did.
+        observed["edit_settle_truncated_reads"] = sum(1 for r in edit_settle_log if r.get("truncated"))
         if not edit_ready:
             last = edit_settle_log[-1] if edit_settle_log else {}
             try:

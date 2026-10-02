@@ -669,6 +669,43 @@ class TruncatedListTest(unittest.TestCase):
         self.assertEqual(b.truncated_lists, 0)
 
 
+class ReadCounterPresenceTest(unittest.TestCase):
+    """The Edit-page read counters are recorded on every outcome, 0 when nothing was seen."""
+    KEYS = ("edit_page_truncated_reads", "edit_page_unreadable_reads", "edit_settle_truncated_reads")
+
+    def _zero(self, result):
+        for k in self.KEYS:
+            self.assertIn(k, result.observed)
+            self.assertEqual(result.observed[k], 0, k)
+
+    def test_lcd23_pass_records_zero_counters(self):
+        result, _b = run23()
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self._zero(result)
+
+    def test_lcd24_pass_records_zero_counters(self):
+        result, _b = run24()
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self._zero(result)
+
+    def test_lcd23_fail_records_zero_counters(self):
+        result, _b = run23(steppers_stay_when_locked=True)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self._zero(result)
+
+    def test_inconclusive_before_the_page_opens_still_has_counters(self):
+        result, _b = run24(page_ignores_end=True)
+        for k in self.KEYS:
+            self.assertIn(k, result.observed)
+
+    def test_truncated_run_counts_are_nonzero_and_keys_unchanged(self):
+        result, _b = run23(truncated_lists=1000)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE, result.reason)
+        for k in self.KEYS:
+            self.assertIn(k, result.observed)
+        self.assertGreater(result.observed["edit_page_truncated_reads"], 0)
+
+
 class LockWaitTruncationTest(unittest.TestCase):
     def test_truncated_reads_during_lock_wait_are_inconclusive_not_fail(self):
         # steppers never lock (fake) AND the lock-wait reads are truncated
