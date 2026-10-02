@@ -36,10 +36,10 @@
 > home network when no web users are logged in is being implemented.
 > **Pending bench work:** flash the landed firmware above; verify the login
 > gates on real hardware; bench-verify the live-edit feature end to end. **LCD end-of-run decision
-(2026-10-01, in source, not flashed):** the home "Keep?" button and the Edit
+(2026-10-01, flashed and bench-verified 2026-10-01: LCD-22..LCD-25 all PASS, run `20261002T061918Z_lcd_lcd22_25`):** the home "Keep?" button and the Edit
 firing page open a PIN-gated Discard / Save as / Overwrite page that calls the
 same `profiles_live_decide_apply()` the web decide route uses; LCD bench case
-still to write.
+LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 > **Bench rerun sweep, 2026-09-30 (`4de7b489`):** heat suite HP-01..08 reran
 > clean 8/8 PASS on the dwell-fault-panic and same-zone start-race fixes
 > (`773ec669`, `540b2d72`); `backup_import` round trip re-measured at 0.80 s
