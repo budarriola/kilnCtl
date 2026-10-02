@@ -178,6 +178,16 @@ static esp_err_t set_window(int x0, int y0, int x1, int y1)
 
 static esp_err_t spi_init(void)
 {
+    // The three MAX31856 ~CS lines (KILNCTL_THERMO_CS0/1/2_IO = GPIO14/17/18,
+    // App/drivers/Kconfig) share this SPI bus; park them high as outputs so
+    // panel traffic can never select a thermocouple chip.
+    static const int tc_cs[] = {14, 17, 18};
+    for (size_t i = 0; i < sizeof(tc_cs) / sizeof(tc_cs[0]); i++) {
+        gpio_set_level(tc_cs[i], 1);
+        gpio_config_t cs = {.pin_bit_mask = 1ULL << tc_cs[i], .mode = GPIO_MODE_OUTPUT};
+        gpio_config(&cs);
+        gpio_set_level(tc_cs[i], 1);
+    }
     spi_bus_config_t bus = {
         .mosi_io_num = LCD_MOSI_GPIO,
         .miso_io_num = -1,
@@ -342,12 +352,16 @@ static void gather_status(void)
     // here). The partition has to be initialised before nvs_open_from_partition().
     s_boot_count = -1;
     s_boot_record_present = false;
+    // Only ESP_ERR_NVS_NOT_FOUND means "no record" (count 0); any other NVS
+    // error leaves s_boot_count at -1, shown as "unreadable".
     if (nvs_flash_init_partition("kiln_nvs") == ESP_OK) {
         nvs_handle_t h;
-        if (nvs_open_from_partition("kiln_nvs", "kiln_cfg", NVS_READONLY, &h) == ESP_OK) {
+        esp_err_t oerr = nvs_open_from_partition("kiln_nvs", "kiln_cfg", NVS_READONLY, &h);
+        if (oerr == ESP_OK) {
             uint8_t rec[12];
             size_t len = sizeof(rec);
-            if (nvs_get_blob(h, "bootguard", rec, &len) == ESP_OK) {
+            esp_err_t gerr = nvs_get_blob(h, "bootguard", rec, &len);
+            if (gerr == ESP_OK) {
                 s_boot_record_present = true;
                 uint32_t crc_stored = (uint32_t)rec[8] | ((uint32_t)rec[9] << 8) |
                                       ((uint32_t)rec[10] << 16) | ((uint32_t)rec[11] << 24);
@@ -355,12 +369,12 @@ static void gather_status(void)
                     s_boot_count = (int)((uint32_t)rec[4] | ((uint32_t)rec[5] << 8) |
                                          ((uint32_t)rec[6] << 16) | ((uint32_t)rec[7] << 24));
                 }
-            } else {
+            } else if (gerr == ESP_ERR_NVS_NOT_FOUND) {
                 s_boot_count = 0; // no record: a clean (or just-cleared) counter
             }
             nvs_close(h);
-        } else {
-            s_boot_count = 0;
+        } else if (oerr == ESP_ERR_NVS_NOT_FOUND) {
+            s_boot_count = 0; // namespace never created
         }
     }
 

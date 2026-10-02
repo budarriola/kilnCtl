@@ -40,8 +40,7 @@ void recovery_text_scanline(const char *s, int scale, int glyph_row, uint16_t fg
                             int width_px, uint8_t *out);
 
 // Short name for an esp_reset_reason_t value (passed as int so this file stays
-// free of ESP-IDF includes; numeric values are esp_system.h's enum and are
-// pinned by the host test). Never returns NULL; unknown values give "UNKNOWN".
+// free of ESP-IDF includes; numeric values mirror esp_system.h's enum). Never returns NULL; unknown values give "UNKNOWN".
 const char *recovery_reset_reason_name(int reason);
 
 #ifdef __cplusplus

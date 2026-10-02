@@ -33,6 +33,11 @@ static const char *TAG = "recovery_io";
 // SX1509_LCD_RESET_PIN = 14 (CONFIG_KILNCTL_DISPLAY_SWAP_DC_RESET off, the
 // default, per DISPLAY_ST7796_WIRING.md).
 #define RELAY_MASK   ((uint16_t)0x000Fu)
+// IO5 = SX1509_IO2_PIN, the opto-isolated output to J25: kiln_io.c's
+// KILN_IO_OUTPUT_MASK drives it as an output too (RegDir 0x3FD0 there with
+// the LCD pins), so recovery does the same and holds it low.
+#define IO2_J25_BIT  ((uint16_t)(1u << 5))
+#define HOLD_MASK    ((uint16_t)(RELAY_MASK | IO2_J25_BIT))
 #define LCD_DC_BIT   ((uint16_t)(1u << 15))
 #define LCD_RST_BIT  ((uint16_t)(1u << 14))
 #define LCD_MASK     ((uint16_t)(LCD_DC_BIT | LCD_RST_BIT))
@@ -41,7 +46,7 @@ static const char *TAG = "recovery_io";
 // high (data) and ~RESET high (not held in reset) -- kiln_io.c's
 // KILN_IO_SAFE_DATA. RegDir: 1 = input, so outputs are the cleared bits.
 #define SAFE_DATA    ((uint16_t)LCD_MASK)
-#define OUT_DIR_MASK ((uint16_t)(RELAY_MASK | LCD_MASK))
+#define OUT_DIR_MASK ((uint16_t)(HOLD_MASK | LCD_MASK))
 #define DIR_VALUE    ((uint16_t)~OUT_DIR_MASK)
 
 #define HOLD_ATTEMPTS 3
@@ -102,13 +107,14 @@ static void expander_reset(bool first)
     gpio_set_level(SX1509_RESET_GPIO, 0);
     esp_rom_delay_us(10);
     gpio_set_level(SX1509_RESET_GPIO, 1);
-    vTaskDelay(pdMS_TO_TICKS(5));
+    // CONFIG_FREERTOS_HZ=100 makes pdMS_TO_TICKS(5)==0, so busy-wait for real.
+    esp_rom_delay_us(5000);
 
     uint8_t m1[2] = {SX1509_REG_RESET, 0x12};
     uint8_t m2[2] = {SX1509_REG_RESET, 0x34};
     if (i2c_master_write_to_device(I2C_PORT, SX1509_ADDR, m1, 2, pdMS_TO_TICKS(100)) == ESP_OK) {
         (void)i2c_master_write_to_device(I2C_PORT, SX1509_ADDR, m2, 2, pdMS_TO_TICKS(100));
-        vTaskDelay(pdMS_TO_TICKS(5));
+        esp_rom_delay_us(5000);
     }
 }
 
@@ -136,14 +142,14 @@ static bool hold_once(bool first)
         return false;
     }
     bool dir_ok = (uint16_t)(dir & OUT_DIR_MASK) == 0; // relay + LCD pins are outputs
-    bool data_ok = (uint16_t)(data & RELAY_MASK) == 0; // relay pins read low
+    bool data_ok = (uint16_t)(data & HOLD_MASK) == 0; // relay pins read low
     if (!dir_ok || !data_ok) {
         ESP_LOGE(TAG, "RELAY HOLD MISMATCH: RegDir=0x%04X (want output bits 0x%04X clear) "
-                      "RegData=0x%04X (want relay bits 0x%04X low)",
-                 dir, OUT_DIR_MASK, data, RELAY_MASK);
+                      "RegData=0x%04X (want hold bits 0x%04X low)",
+                 dir, OUT_DIR_MASK, data, HOLD_MASK);
         return false;
     }
-    ESP_LOGI(TAG, "relays IO0..IO3 held low and driven: RegDir=0x%04X RegData=0x%04X", dir, data);
+    ESP_LOGI(TAG, "relays IO0..IO3 and IO5 held low and driven: RegDir=0x%04X RegData=0x%04X", dir, data);
     return true;
 }
 

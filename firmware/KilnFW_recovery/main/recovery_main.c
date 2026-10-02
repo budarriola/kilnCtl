@@ -15,6 +15,8 @@
 // profiles access, the safety link, the Pico image, the control loop.
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "recovery_http.h"
@@ -26,6 +28,12 @@ static const char *TAG = "recovery_main";
 
 void app_main(void)
 {
+    // Hold the kiln OFF before anything else -- before NVS init, which can
+    // erase/abort and reboot-loop -- so relays IO0..IO3 (and IO5) are forced
+    // low and driven, verified by read-back. Never blocks boot on failure
+    // (uploads must still work) but sets a fault flag. Needs no NVS.
+    recovery_io_hold_relays_off();
+
     ESP_LOGI(TAG, "KilnFW recovery image starting");
 
     esp_err_t err = nvs_flash_init();
@@ -38,11 +46,6 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
-
-    // Hold the kiln OFF before anything else (Wi-Fi, HTTP, LCD): relays
-    // IO0..IO3 forced low and driven, verified by read-back. Never blocks
-    // boot on failure -- uploads must still work -- but sets a fault flag.
-    recovery_io_hold_relays_off();
 
     // recovery_wifi.c / recovery_http.c open wifi_nvs and kiln_nvs by
     // partition name, which fails with ESP_ERR_NVS_NOT_INITIALIZED unless
@@ -72,4 +75,8 @@ void app_main(void)
     recovery_http_start();
 
     ESP_LOGI(TAG, "recovery image up: wifi=%s", recovery_wifi_is_up() ? "up" : "down");
+    // WARN level so it survives a trimmed log level: measured app_main stack
+    // headroom, in bytes (uxTaskGetStackHighWaterMark is words * 1 on ESP-IDF).
+    ESP_LOGW(TAG, "stack hwm: app_main min free = %u bytes",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 }
