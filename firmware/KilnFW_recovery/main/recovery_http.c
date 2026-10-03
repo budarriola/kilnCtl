@@ -76,6 +76,7 @@
 #include "ota_auth.h"
 #include "recovery_image_check.h"
 #include "recovery_io.h"
+#include "recovery_lcd.h"
 #include "recovery_pico.h"
 #include "recovery_pico_proto.h"
 #include "recovery_upload.h"
@@ -316,11 +317,14 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     }
 
     char ap_password[65];
-    if (!recovery_wifi_get_ap_password(ap_password, sizeof(ap_password))) {
+    // Stored ap_pass when usable (8..63 chars), else the eFuse-MAC fallback
+    // secret (recovery_auth.h) -- so a board with no ap_pass still has working,
+    // authenticated routes instead of a 500 behind an OPEN AP.
+    if (!recovery_wifi_get_auth_secret(ap_password, sizeof(ap_password), NULL)) {
         ota_auth_nonce_invalidate(&s_nonce);
         secure_zero(ap_password, sizeof(ap_password));
         httpd_resp_set_status(req, "500 Internal Server Error");
-        *out_err = httpd_resp_send(req, "no AP password on record", HTTPD_RESP_USE_STRLEN);
+        *out_err = httpd_resp_send(req, "no auth secret available", HTTPD_RESP_USE_STRLEN);
         return false;
     }
 
@@ -623,6 +627,16 @@ static esp_err_t boot_guard_get(httpd_req_t *req)
     return httpd_resp_send(req, body, n);
 }
 
+// True when the stored ap_pass is usable (not the fallback secret).
+static bool auth_secret_is_stored(void)
+{
+    char secret[65];
+    bool fallback = true;
+    bool ok = recovery_wifi_get_auth_secret(secret, sizeof(secret), &fallback);
+    secure_zero(secret, sizeof(secret));
+    return ok && !fallback;
+}
+
 // GET /api/recovery/status -- unauthenticated, read-only.
 static esp_err_t recovery_status_get(httpd_req_t *req)
 {
@@ -642,14 +656,19 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     bool valid = desc_present && app_image_verified(app);
     // Static body: the httpd stack is 8 KB and only the single httpd task
     // runs this handler, so a static buffer costs no stack.
-    static char body[640];
+    static char body[704];
     unsigned nvs_failed = recovery_io_nvs_failed_mask();
+    // auth_secret_present: wifi_nvs holds a usable stored ap_pass (8..63 chars).
+    // false means the eFuse-MAC fallback secret is in force (never an OPEN AP).
+    bool auth_present = auth_secret_is_stored();
     int n = snprintf(body, sizeof(body),
-                      "{\"running\":\"%s\",\"app_present\":%s,\"app_size\":%u,"
+                      "{\"auth_secret_present\":%s,\"auth_fallback\":%s,"
+                      "\"running\":\"%s\",\"app_present\":%s,\"app_size\":%u,"
                       "\"app_desc_present\":%s,\"app_valid\":%s,\"max_upload\":%u,%s,"
                       "\"relay_fault\":%s,\"relays_verified_off\":%s,"
                       "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
                       "\"heap_internal_min_free\":%u,\"free_heap\":%u}",
+                      auth_present ? "true" : "false", auth_present ? "false" : "true",
                       running ? running->label : "?", app ? "true" : "false",
                       (unsigned)(app ? app->size : 0), desc_present ? "true" : "false",
                       valid ? "true" : "false",
@@ -973,6 +992,7 @@ void recovery_http_start(void)
     static bool s_started;
     configASSERT(!s_started);
     s_started = true;
+    recovery_lcd_set_auth_fallback(!auth_secret_is_stored());
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
     // 13 routes below (3 are the Pico update relay).

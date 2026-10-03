@@ -11,6 +11,7 @@ idf_component_register(
         "recovery_io.c"
         "recovery_text.c"
         "ota_auth.c"
+        "recovery_auth.c"
     INCLUDE_DIRS "."
     EMBED_FILES "recovery_page.html"
     REQUIRES
@@ -32,4 +33,5 @@ idf_component_register(
         esp_timer
         esp_partition
         esp_system
+        esp_hw_support
 )

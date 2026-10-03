@@ -47,6 +47,12 @@ bool recovery_wifi_is_up(void);
 // every board's recovery image share the same derived HMAC key.
 bool recovery_wifi_get_ap_password(char *out, size_t out_len);
 
+// The secret the AP passphrase and the HTTP auth key are derived from: the
+// stored ap_pass when it is 8..63 chars, otherwise the eFuse-MAC fallback
+// secret (recovery_auth.h). *fallback (optional) reports which. Returns false
+// only if even the fallback cannot be derived (eFuse MAC unreadable).
+bool recovery_wifi_get_auth_secret(char *out, size_t out_len, bool *fallback);
+
 #ifdef __cplusplus
 }
 #endif

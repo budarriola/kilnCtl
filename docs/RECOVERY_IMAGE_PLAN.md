@@ -108,6 +108,35 @@ fixture can simulate it). Measure internal heap floor >= 8192 B during an upload
 PSRAM and the no-PSRAM boot. Measure the `app` erase time and idle-task starvation, then
 decide on `CONFIG_ESP_TASK_WDT_PANIC`.
 
+## Audit fixes (2026-10-02)
+
+**Auth fallback secret (landed).** A `wifi_nvs` with no `ap_pass`, or one outside 8..63
+characters (WPA2 passphrase limits), no longer yields an OPEN AP plus HTTP 500 on every
+mutating route. The image derives a fallback secret and uses it both as the SoftAP WPA2
+passphrase and in place of `ap_pass` as the HMAC key material:
+
+```
+preimage = "kilnctl-recovery-auth-v1|" || BUILD_KEY || "|" || mac[6]
+secret   = lowercase hex of the first 8 bytes of SHA-256(preimage)      (16 characters)
+key      = HMAC-SHA256(secret, "kilnctl-ota-v1")      (the unchanged auth scheme from there)
+```
+
+`mac` is the factory eFuse base MAC (`esp_efuse_mac_get_default`, the same six bytes as the
+station MAC), raw bytes, not text. `BUILD_KEY` is `RECOVERY_AUTH_BUILD_KEY` in
+`main/recovery_wifi.c` (default `kilnctl-recovery-fallback-key-1`; override with
+`-DRECOVERY_AUTH_BUILD_KEY=...`). This is a defence against an OPEN AP, not a secret from
+anyone holding the binary and the board's MAC. `GET /api/recovery/status` reports
+`auth_secret_present` (stored `ap_pass` usable) and `auth_fallback` (its inverse); the LCD
+shows "AUTH: FALLBACK". Pure pieces: `main/recovery_auth.c`, host-tested by
+`check_recovery_auth.ps1`.
+
+PcTools mirror (TODO, not done): `recovery_ota_auth_client.py` still takes the AP password
+from its caller. A board that reports `auth_fallback: true` needs the client to derive the
+secret above from the board's MAC (the PC knows it from the AP BSSID or the status route) and
+`BUILD_KEY`. `recovery_ota_auth_mirror_drift_check.py` pins only the header, lockout,
+context and query markers of `recovery_authenticate_request()`, none of which changed, so it
+does not require this mirror yet.
+
 ## Open risks
 
 - The Pico bootloader's recovery frame set may differ from the application's frame set;

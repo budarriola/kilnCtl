@@ -12,9 +12,12 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "esp_mac.h"
+#include "mbedtls/md.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "recovery_auth.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
 
@@ -74,6 +77,60 @@ static bool nvs_read_str(const char *ns, const char *key, char *out, size_t out_
 bool recovery_wifi_get_ap_password(char *out, size_t out_len)
 {
     return nvs_read_str(NVS_NAMESPACE, NVS_KEY_AP_PASS, out, out_len);
+}
+
+// Build-time key mixed into the fallback secret. Override with
+// -DRECOVERY_AUTH_BUILD_KEY=\"...\" per product build; PcTools must use the
+// same string (docs/RECOVERY_IMAGE_PLAN.md, "Auth fallback secret").
+#ifndef RECOVERY_AUTH_BUILD_KEY
+#define RECOVERY_AUTH_BUILD_KEY "kilnctl-recovery-fallback-key-1"
+#endif
+
+// Derives the fallback secret from the factory eFuse MAC. false on failure.
+static bool derive_fallback_secret(char out[RAUTH_FALLBACK_LEN + 1])
+{
+    uint8_t mac[6];
+    if (esp_efuse_mac_get_default(mac) != ESP_OK) {
+        return false;
+    }
+    uint8_t pre[96];
+    size_t n = rauth_fallback_preimage(RECOVERY_AUTH_BUILD_KEY, mac, pre, sizeof(pre));
+    if (n == 0) {
+        return false;
+    }
+    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+    uint8_t digest[32];
+    bool ok = mbedtls_md_setup(&ctx, info, 0) == 0 && mbedtls_md_starts(&ctx) == 0 &&
+              mbedtls_md_update(&ctx, pre, n) == 0 && mbedtls_md_finish(&ctx, digest) == 0;
+    mbedtls_md_free(&ctx);
+    if (ok) {
+        rauth_fallback_format(digest, out);
+    }
+    return ok;
+}
+
+bool recovery_wifi_get_auth_secret(char *out, size_t out_len, bool *fallback)
+{
+    char stored[65] = {0};
+    bool have = nvs_read_str(NVS_NAMESPACE, NVS_KEY_AP_PASS, stored, sizeof(stored));
+    if (have && rauth_ap_pass_usable(stored) && strlen(stored) < out_len) {
+        strcpy(out, stored);
+        if (fallback) {
+            *fallback = false;
+        }
+        return true;
+    }
+    char fb[RAUTH_FALLBACK_LEN + 1];
+    if (out_len < sizeof(fb) || !derive_fallback_secret(fb)) {
+        return false;
+    }
+    strcpy(out, fb);
+    if (fallback) {
+        *fallback = true;
+    }
+    return true;
 }
 
 static bool start_softap(void);
@@ -194,7 +251,14 @@ static bool start_softap(void)
     if (!nvs_read_str(NVS_NAMESPACE, NVS_KEY_AP_SSID, ap_ssid, sizeof(ap_ssid))) {
         strncpy(ap_ssid, RECOVERY_AP_SSID_DEFAULT, sizeof(ap_ssid) - 1);
     }
-    bool have_pass = nvs_read_str(NVS_NAMESPACE, NVS_KEY_AP_PASS, ap_pass, sizeof(ap_pass));
+    // Never an OPEN AP: a missing/short ap_pass yields the eFuse-MAC fallback
+    // secret (same secret the HTTP auth uses as its key material).
+    bool fallback = false;
+    bool have_pass = recovery_wifi_get_auth_secret(ap_pass, sizeof(ap_pass), &fallback);
+    recovery_lcd_set_auth_fallback(have_pass && fallback);
+    if (have_pass && fallback) {
+        ESP_LOGW(TAG, "no usable ap_pass in wifi_nvs -- SoftAP uses the eFuse-MAC fallback secret");
+    }
 
     if (!s_ap_netif) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
@@ -209,10 +273,14 @@ static bool start_softap(void)
     cfg.ap.ssid_len = (uint8_t)strlen(ap_ssid);
     cfg.ap.channel = 1;
     cfg.ap.max_connection = 4;
-    if (have_pass && strlen(ap_pass) >= 8) {
+    if (have_pass) {
         strncpy((char *)cfg.ap.password, ap_pass, sizeof(cfg.ap.password) - 1);
         cfg.ap.authmode = WIFI_AUTH_WPA2_PSK;
     } else {
+        // Secret derivation itself failed (eFuse MAC unreadable): an open AP
+        // is the only way left to stay reachable, and every mutating route
+        // returns 500 without a key, so say so loudly.
+        ESP_LOGE(TAG, "no AP secret available -- SoftAP is OPEN and mutating routes will 500");
         cfg.ap.authmode = WIFI_AUTH_OPEN;
     }
 
