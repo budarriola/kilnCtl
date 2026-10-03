@@ -59,7 +59,7 @@ static SafetyLinkClass *s_link = NULL;
 static kiln_io_t *s_hw_io = NULL; // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler() only
 
 /* Single-flight wrapper for every SYNCHRONOUS SET_PARAM/COMMIT_CONFIG writer
- * in this file (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 residual). Claims
+ * in this file (docs/HTTP_POST_OWNER_MIGRATION.md A2 residual). Claims
  * SAFETY_CFG_WRITER_HTTP_SYNC for the whole handler body and releases it on
  * the way out, owner-checked, whatever the body returned -- so no early
  * return inside `fn` can leak the claim. A claim refusal (an async job, sweep,

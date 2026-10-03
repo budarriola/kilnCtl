@@ -2638,7 +2638,7 @@ static void test_commissioning_post_in_range_gain_is_accepted(void)
     TEST_CHECK(s_stub_set_param_calls == 1, "the trim was staged to the Pico");
 }
 
-/* S7 residual (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2): every synchronous
+/* S7 residual (docs/HTTP_POST_OWNER_MIGRATION.md A2): every synchronous
  * SET_PARAM/COMMIT writer in this file claims SAFETY_CFG_WRITER_HTTP_SYNC for
  * its whole body via cfg_writer_guarded(), refuses with a 409 + busy JSON when
  * ANY other writer (sweep, swap, reconcile, another sync writer) owns the
