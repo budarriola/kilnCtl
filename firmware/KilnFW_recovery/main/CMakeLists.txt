@@ -12,11 +12,13 @@ idf_component_register(
         "recovery_text.c"
         "ota_auth.c"
         "recovery_auth.c"
+        "recovery_hold.c"
     INCLUDE_DIRS "."
     EMBED_FILES "recovery_page.html"
     REQUIRES
         esp_wifi
         esp_netif
+        lwip
         esp_event
         nvs_flash
         bootloader_support

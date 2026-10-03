@@ -9,7 +9,11 @@
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+
+#include "esp_timer.h"
+#include "recovery_hold.h"
 
 static const char *TAG = "recovery_io";
 
@@ -50,6 +54,8 @@ static const char *TAG = "recovery_io";
 #define DIR_VALUE    ((uint16_t)~OUT_DIR_MASK)
 
 #define HOLD_ATTEMPTS 3
+
+static void start_hold_task(void);
 
 static bool s_i2c_ready = false;
 static bool s_verified = false;
@@ -166,6 +172,7 @@ void recovery_io_hold_relays_off(void)
         if (hold_once(i == 0)) {
             s_verified = true;
             s_fault = false;
+            start_hold_task();
             return;
         }
         ESP_LOGW(TAG, "relay hold attempt %d/%d failed", i + 1, HOLD_ATTEMPTS);
@@ -174,11 +181,110 @@ void recovery_io_hold_relays_off(void)
     ESP_LOGE(TAG, "RELAY CTRL FAULT: could not verify relays low after %d attempts. Recovery "
                   "keeps running (uploads must still work); heaters are NOT confirmed off "
                   "by this image.", HOLD_ATTEMPTS);
+    // Keep trying every second: a late-recovering expander gets the hold applied.
+    start_hold_task();
 }
 
 bool recovery_io_relay_fault(void)
 {
     return s_fault;
+}
+
+// ---- periodic hold watchdog -------------------------------------------------
+// Serialises s_data/expander writes between this task and recovery_io_set_lcd_pins
+// (the LCD task), so a re-assert can never write back a stale LCD-pin value.
+static SemaphoreHandle_t s_io_lock;
+static StaticSemaphore_t s_io_lock_buf;
+static rhold_state_t s_hold;
+static portMUX_TYPE s_hold_mux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t s_hold_task;
+
+#define HOLD_TASK_STACK_BYTES 3072
+#define HOLD_TASK_PERIOD_MS   1000
+
+static uint32_t uptime_s(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000000);
+}
+
+static bool read_hold_regs(uint16_t *dir, uint16_t *data)
+{
+    return read16(SX1509_REG_DIR_B, dir) == ESP_OK && read16(SX1509_REG_DATA_B, data) == ESP_OK;
+}
+
+static void hold_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(HOLD_TASK_PERIOD_MS));
+        xSemaphoreTake(s_io_lock, portMAX_DELAY);
+        uint16_t dir = 0, data = 0;
+        bool read_ok = read_hold_regs(&dir, &data);
+        uint32_t now = uptime_s();
+        rhold_action_t act;
+        bool was_fault;
+        portENTER_CRITICAL(&s_hold_mux);
+        was_fault = s_hold.fault;
+        act = rhold_observe(&s_hold, read_ok, dir, data, OUT_DIR_MASK, HOLD_MASK, now);
+        portEXIT_CRITICAL(&s_hold_mux);
+        if (act == RHOLD_REASSERT) {
+            if (!was_fault) {
+                ESP_LOGE(TAG, "RELAY HOLD LOST at %us: read_ok=%d RegDir=0x%04X RegData=0x%04X "
+                              "-- re-asserting", (unsigned)now, (int)read_ok, dir, data);
+            }
+            // Same order as the boot hold: latches first, then directions. s_data's
+            // relay bits are always 0, so this can never raise a relay.
+            bool ok = write16(SX1509_REG_DATA_B, s_data) == ESP_OK &&
+                      write16(SX1509_REG_DIR_B, DIR_VALUE) == ESP_OK &&
+                      read_hold_regs(&dir, &data) &&
+                      rhold_regs_match(dir, data, OUT_DIR_MASK, HOLD_MASK);
+            portENTER_CRITICAL(&s_hold_mux);
+            rhold_reassert_result(&s_hold, ok, uptime_s());
+            portEXIT_CRITICAL(&s_hold_mux);
+            if (!ok) {
+                ESP_LOGE(TAG, "relay hold re-assert did NOT verify (RegDir=0x%04X RegData=0x%04X)",
+                         dir, data);
+            }
+        }
+        xSemaphoreGive(s_io_lock);
+    }
+}
+
+void recovery_io_hold_status(recovery_io_hold_status_t *out)
+{
+    rhold_state_t snap;
+    portENTER_CRITICAL(&s_hold_mux);
+    snap = s_hold;
+    portEXIT_CRITICAL(&s_hold_mux);
+    out->task_running = s_hold_task != NULL;
+    out->fault = snap.fault;
+    out->fault_valid = snap.fault_seen_s_valid;
+    out->fault_s = snap.fault_s;
+    out->last_ok_valid = snap.ever_ok;
+    out->last_ok_s = snap.last_ok_s;
+    out->mismatch_count = snap.mismatch_count;
+    out->reassert_fail_count = snap.reassert_fail_count;
+    // Local report: the recovery image has no stack_margin API (that lives in
+    // the main app), so the task's own high-water mark is surfaced here.
+    out->task_stack_free_bytes =
+        s_hold_task ? (uint32_t)uxTaskGetStackHighWaterMark(s_hold_task) : 0;
+}
+
+static void start_hold_task(void)
+{
+    s_io_lock = xSemaphoreCreateMutexStatic(&s_io_lock_buf);
+    rhold_init(&s_hold);
+    // Seed "last ok" from the boot verification so status is meaningful before
+    // the first tick.
+    if (s_verified) {
+        s_hold.ever_ok = true;
+        s_hold.last_ok_s = uptime_s();
+    }
+    if (xTaskCreate(hold_task, "relay_hold", HOLD_TASK_STACK_BYTES, NULL, 3, &s_hold_task) !=
+        pdPASS) {
+        s_hold_task = NULL;
+        ESP_LOGE(TAG, "could not start the relay hold watchdog task");
+    }
 }
 
 static volatile unsigned s_nvs_failed;
@@ -215,9 +321,11 @@ esp_err_t recovery_io_set_lcd_pins(bool dc_high, bool reset_high)
     }
     // s_data's relay bits are always 0 (SAFE_DATA), so a single 16-bit write
     // can never raise a relay.
+    xSemaphoreTake(s_io_lock, portMAX_DELAY);
     esp_err_t err = write16(SX1509_REG_DATA_B, next);
     if (err == ESP_OK) {
         s_data = next;
     }
+    xSemaphoreGive(s_io_lock);
     return err;
 }

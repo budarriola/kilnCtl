@@ -800,6 +800,31 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                       recovery_io_relays_verified_off() ? "true" : "false");
     }
     if (e == ESP_OK) {
+        recovery_io_hold_status_t hs;
+        recovery_io_hold_status(&hs);
+        char fs_buf[16], ok_buf[16];
+        if (hs.fault_valid) {
+            snprintf(fs_buf, sizeof(fs_buf), "%u", (unsigned)hs.fault_s);
+        } else {
+            snprintf(fs_buf, sizeof(fs_buf), "null");
+        }
+        if (hs.last_ok_valid) {
+            snprintf(ok_buf, sizeof(ok_buf), "%u", (unsigned)hs.last_ok_s);
+        } else {
+            snprintf(ok_buf, sizeof(ok_buf), "null");
+        }
+        e = send_frag(req, "\"relay_hold_task\":%s,\"relay_hold_fault\":%s,"
+                           "\"relay_hold_fault_s\":%s,\"relay_hold_last_ok_s\":%s,",
+                      hs.task_running ? "true" : "false", hs.fault ? "true" : "false", fs_buf,
+                      ok_buf);
+        if (e == ESP_OK) {
+            e = send_frag(req, "\"relay_hold_mismatches\":%u,\"relay_hold_reassert_fails\":%u,"
+                               "\"relay_hold_stack_free\":%u,",
+                          (unsigned)hs.mismatch_count, (unsigned)hs.reassert_fail_count,
+                          (unsigned)hs.task_stack_free_bytes);
+        }
+    }
+    if (e == ESP_OK) {
         e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
                            "\"heap_internal_min_free\":%u,\"free_heap\":%u}",
                       nvs_failed ? "true" : "false", nvs_failed,

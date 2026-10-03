@@ -51,6 +51,22 @@ bool recovery_io_relay_fault(void);
 // True once the expander answered and the relay hold was verified.
 bool recovery_io_relays_verified_off(void);
 
+// Periodic relay-hold watchdog (recovery_hold.h has the decision logic): a 1 s
+// task reads RegDir/RegData back, re-asserts the hold on a mismatch and LATCHES
+// `fault` (with the uptime second it first happened) until reboot.
+typedef struct {
+    bool task_running;
+    bool fault;
+    bool fault_valid;
+    uint32_t fault_s;
+    bool last_ok_valid;
+    uint32_t last_ok_s;
+    uint32_t mismatch_count;
+    uint32_t reassert_fail_count;
+    uint32_t task_stack_free_bytes; // uxTaskGetStackHighWaterMark of that task
+} recovery_io_hold_status_t;
+void recovery_io_hold_status(recovery_io_hold_status_t *out);
+
 // NVS partitions that could not be initialised this boot (recovery never
 // erases or reformats any of them; it continues without). Bit 0 = default
 // `nvs`, bit 1 = `wifi_nvs`, bit 2 = `kiln_nvs`. Zero means all came up.
