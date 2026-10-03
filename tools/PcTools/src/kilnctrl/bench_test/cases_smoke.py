@@ -31,33 +31,46 @@ from .registry import CaseResult, Verdict, get_case
 #: push, which only refreshes every LINK_DIAG_TX_PERIOD_MS = 2000 ms
 #: (firmware/SaftyFW/src/tasks/link_task.c:209) -- a single immediate
 #: read-back after clearing a trip can see a stale trip_reason even though
-#: the clear itself succeeded. This timeout sits comfortably above that
+#: the clear itself succeeded. The diag context age is observed up to ~3.5 s,
+#: so a 3.0 s window FAILed a working clear (HP-07, 2026-10-03, elapsed
+#: 3.04 s). 10.0 s is > 2x that worst-case context age plus the 2 s DIAG
 #: period. Shared by HP-07 (cases_heat.py) and FL-11 (cases_fl.py).
-_TRIP_CLEAR_POLL_TIMEOUT_S = 3.0
+_TRIP_CLEAR_POLL_TIMEOUT_S = 10.0
 _TRIP_CLEAR_POLL_INTERVAL_S = 0.3
 
 
 def wait_for_trip_clear(
     ctx: dict, srv, timeout_s: float = _TRIP_CLEAR_POLL_TIMEOUT_S,
     interval_s: float = _TRIP_CLEAR_POLL_INTERVAL_S,
+    observed: "Optional[dict]" = None,
 ) -> "tuple[Optional[int], float]":
     """Calls `srv.safety_clear_trip()` (fire-and-forget) then polls
     `srv.safety_get_diag()` until `trip_reason` reads 0 or `timeout_s`
     elapses, using `ctx`'s `_sleep`/`_now` seam so fake-board unit tests
     stay fast. Returns `(last_trip_reason_seen, elapsed_seconds)` -- on a
     timeout, the caller has both the last reason actually observed and how
-    long it waited, for an informative failure message."""
+    long it waited, for an informative failure message.
+
+    When `observed` is given, also records `clear_ack` (safety_clear_trip()'s
+    return value, as a string) and `trip_reason_timeline` (a list of
+    `(elapsed_s rounded to 2 dp, trip_reason)` per poll) into it."""
     sleep = ctx.get("_sleep", time.sleep)
     now = ctx.get("_now", time.monotonic)
-    srv.safety_clear_trip()
+    ack = srv.safety_clear_trip()
     start = now()
+    timeline: list = []
+    if observed is not None:
+        observed["clear_ack"] = None if ack is None else str(ack)
+        observed["trip_reason_timeline"] = timeline
     last_reason: Optional[int] = J.parse_trip_reason(srv.safety_get_diag())
+    timeline.append((round(now() - start, 2), last_reason))
     while last_reason != 0:
         elapsed = now() - start
         if elapsed >= timeout_s:
             return last_reason, elapsed
         sleep(interval_s)
         last_reason = J.parse_trip_reason(srv.safety_get_diag())
+        timeline.append((round(now() - start, 2), last_reason))
     return last_reason, now() - start
 
 

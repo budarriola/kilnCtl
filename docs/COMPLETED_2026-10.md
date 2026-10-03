@@ -75,3 +75,15 @@ reads or prints it, by design (never a call parameter, never echoed).
 ## `recovery_status` rendering (`c7bd87d9`)
 
 The MCP tool renders the recovery image's new diagnostic keys.
+
+## Bench runner: trip-clear poll window
+
+`wait_for_trip_clear` (`tools/PcTools/src/kilnctrl/bench_test/cases_smoke.py`, shared by
+HP-07 and FL-11) polled `safety_get_diag()` for only 3.0 s after `safety_clear_trip()`.
+The ESP serves a cache of the Pico's 2000 ms DIAG push and its context age is observed up
+to ~3.5 s, so a working clear could still read `trip_reason` 6 at the deadline: HP-07
+FAILed in run 20261003T032924Z_heat_b3_hp after 3.04 s, and a manual clear minutes later
+read 0. The window is now 10.0 s (interval unchanged, 0.3 s). The helper also records
+`clear_ack` (the return string of `safety_clear_trip()`) and `trip_reason_timeline`
+(`(elapsed_s, trip_reason)` per poll) into the case's observed dict when given
+`observed=`. Fake-board tests: `tools/PcTools/tests/test_bench_test_trip_clear.py`.

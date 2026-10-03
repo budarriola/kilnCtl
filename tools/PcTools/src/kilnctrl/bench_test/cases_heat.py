@@ -1271,7 +1271,7 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
         # reflects the Pico's last DIAG push (LINK_DIAG_TX_PERIOD_MS,
         # firmware/SaftyFW/src/tasks/link_task.c:209) -- poll rather than
         # reading back once immediately (see wait_for_trip_clear's docstring).
-        after_reason, clear_elapsed_s = _wait_for_trip_clear(ctx, srv)
+        after_reason, clear_elapsed_s = _wait_for_trip_clear(ctx, srv, observed=merged_observed)
         merged_observed["trip_reason_after_clear"] = after_reason
         merged_observed["trip_clear_elapsed_s"] = clear_elapsed_s
         if after_reason is not None:

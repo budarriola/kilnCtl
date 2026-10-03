@@ -404,6 +404,7 @@ def _case_fl11(ctx: dict) -> CaseResult:
 
     cleared_after: "bool | None" = None
     clear_elapsed_s: "float | None" = None
+    clear_observed: dict = {}
     # Plan section 6 rule 5: exactly-matched reason AND mask before any
     # safety_clear_trip(). S6a is reason 6, so the mask must be 0x0020 and
     # nothing else -- a mask the report omits is not a match.
@@ -412,7 +413,7 @@ def _case_fl11(ctx: dict) -> CaseResult:
         # reflects the Pico's last DIAG push (LINK_DIAG_TX_PERIOD_MS,
         # firmware/SaftyFW/src/tasks/link_task.c:209) -- poll rather than
         # reading back once immediately (see wait_for_trip_clear's docstring).
-        after_reason, clear_elapsed_s = _wait_for_trip_clear(ctx, srv)
+        after_reason, clear_elapsed_s = _wait_for_trip_clear(ctx, srv, observed=clear_observed)
         if after_reason is not None:
             cleared_after = after_reason == 0
 
@@ -420,6 +421,7 @@ def _case_fl11(ctx: dict) -> CaseResult:
     if clear_elapsed_s is not None:
         observed = dict(result.observed or {})
         observed["trip_clear_elapsed_s"] = clear_elapsed_s
+        observed.update(clear_observed)
         return CaseResult(result.verdict, reason=result.reason, observed=observed)
     return result
 
