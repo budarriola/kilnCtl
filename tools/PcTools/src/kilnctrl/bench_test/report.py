@@ -218,7 +218,11 @@ def list_recent_runs(logs_root: Optional[str] = None, n: int = 1) -> "list[Dict[
         reverse=True,
     )
     out = []
-    for d in run_dirs[:n]:
+    # Run dirs now exist (with runner.log only) before summary.json does, so
+    # walk until n summaries are found rather than slicing first.
+    for d in run_dirs:
+        if len(out) >= n:
+            break
         summary_path = os.path.join(root, d, "summary.json")
         if not os.path.isfile(summary_path):
             continue

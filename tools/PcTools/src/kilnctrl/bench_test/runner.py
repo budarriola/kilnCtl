@@ -37,8 +37,8 @@ def _safe_call(fn, *args, **kwargs) -> "tuple[bool, Any]":
 #: socket opened with no timeout) is unbounded -- ROADMAP B3 (2026-10-02): a
 #: heat run took `.board_lock` and then sat forever with no run directory.
 #: Overridable per run via ctx["preflight_timeout_s"] / ctx["teardown_timeout_s"].
-DEFAULT_PREFLIGHT_TIMEOUT_S = 180.0
-DEFAULT_TEARDOWN_TIMEOUT_S = 120.0
+DEFAULT_PREFLIGHT_TIMEOUT_S = 120.0
+DEFAULT_TEARDOWN_TIMEOUT_S = 60.0
 
 #: Name of the always-written, timestamped, flushed-per-line progress log in
 #: the run directory (created right after the board lock is taken).
@@ -49,7 +49,23 @@ class _StepTimeout(Exception):
     """A bounded step did not finish inside its deadline."""
 
 
-def _run_bounded(fn, timeout_s: float, label: str):
+class _Abandoned(Exception):
+    """Raised inside an abandoned worker thread at its next checkpoint."""
+
+
+#: Worker threads whose step timed out and were abandoned (they cannot be
+#: killed). A later preflight() in this process refuses while any is still
+#: alive: an unwedged worker could otherwise issue board calls into a LATER
+#: run, defeating board-lock serialization.
+_ABANDONED_THREADS: List[threading.Thread] = []
+
+
+def _live_abandoned() -> List[threading.Thread]:
+    _ABANDONED_THREADS[:] = [t for t in _ABANDONED_THREADS if t.is_alive()]
+    return list(_ABANDONED_THREADS)
+
+
+def _run_bounded(fn, timeout_s: float, label: str, stalled: Optional[threading.Event] = None):
     """Run `fn()` on a daemon thread and wait at most `timeout_s`. Returns
     its result, re-raises its exception, or raises `_StepTimeout`. The
     abandoned thread cannot be killed; it is a daemon so it never keeps the
@@ -66,6 +82,9 @@ def _run_bounded(fn, timeout_s: float, label: str):
     t.start()
     t.join(timeout_s)
     if t.is_alive():
+        if stalled is not None:
+            stalled.set()
+        _ABANDONED_THREADS.append(t)
         raise _StepTimeout(f"{label} did not finish within {timeout_s:g} s")
     if "exc" in box:
         raise box["exc"]
@@ -130,6 +149,9 @@ class BenchTestRunner:
         self._runner_log_path: Optional[str] = None
         self._step = "not started"
         self._pf_board_before: Dict[str, Any] = {}
+        #: Set once a bounded step is declared stalled; the abandoned worker
+        #: checks it (via `_mark`, and before each mutating call) and stops.
+        self._stalled = threading.Event()
 
     def _log(self, line: str) -> None:
         self.transcript.append(line)
@@ -142,6 +164,7 @@ class BenchTestRunner:
         path = self._runner_log_path
         if path is None:
             return
+        line = report_mod._redact(line)
         now = time.time()
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
         try:
@@ -153,6 +176,8 @@ class BenchTestRunner:
 
     def _mark(self, step: str) -> None:
         """Record the step about to start (named in a timeout message)."""
+        if self._stalled.is_set():
+            raise _Abandoned(step)
         self._step = step
         self._runner_log(f"step: {step}")
 
@@ -164,8 +189,18 @@ class BenchTestRunner:
         in, never an indefinite hang while the board lock is held."""
         timeout_s = float(self.ctx.get("preflight_timeout_s", DEFAULT_PREFLIGHT_TIMEOUT_S))
         self._pf_board_before = {}
+        live = _live_abandoned()
+        if live:
+            reason = (
+                "preflight refused: abandoned worker thread(s) from an earlier stalled "
+                f"step are still alive ({', '.join(t.name for t in live)}); the board "
+                "link is presumed wedged"
+            )
+            self._runner_log(reason)
+            return False, reason, {"preflight_stall": reason}
+        self._stalled = threading.Event()
         try:
-            return _run_bounded(self._preflight_unbounded, timeout_s, "preflight")
+            return _run_bounded(self._preflight_unbounded, timeout_s, "preflight", self._stalled)
         except _StepTimeout as exc:
             reason = f"preflight stalled: {exc} (last step: {self._step})"
             self._runner_log(reason)
@@ -188,6 +223,8 @@ class BenchTestRunner:
         if srv is None:
             try:
                 from .. import mcp_server as srv  # noqa: PLC0415
+                if self._stalled.is_set():
+                    raise _Abandoned("srv import")
                 ctx["srv"] = srv
             except Exception as exc:  # noqa: BLE001
                 return False, f"could not import kilnctrl.mcp_server: {exc}", board_before
@@ -286,8 +323,9 @@ class BenchTestRunner:
         as `preflight`); a stall is reported in board_after, not raised."""
         timeout_s = float(self.ctx.get("teardown_timeout_s", DEFAULT_TEARDOWN_TIMEOUT_S))
         self._mark("teardown")
+        self._stalled = threading.Event()
         try:
-            return _run_bounded(self._teardown_unbounded, timeout_s, "teardown")
+            return _run_bounded(self._teardown_unbounded, timeout_s, "teardown", self._stalled)
         except _StepTimeout as exc:
             msg = f"teardown stalled: {exc}"
             self._runner_log(msg)
@@ -300,13 +338,16 @@ class BenchTestRunner:
         this exact teardown rather than inventing their own."""
         ctx = self.ctx
         srv = ctx.get("srv")
+        stalled = self._stalled
         board_after: Dict[str, Any] = {}
         if srv is not None:
             ok, exec_status = _safe_call(srv._profiles.get_exec_status)
-            if ok and exec_status.state_name == "running":
+            # An abandoned worker must never issue a mutating call: check the
+            # stall flag immediately before each one.
+            if ok and exec_status.state_name == "running" and not stalled.is_set():
                 _safe_call(srv.profiles_stop)
             ok, at_status = _safe_call(srv._autotune.get_status)
-            if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling"):
+            if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling")                     and not stalled.is_set():
                 _safe_call(srv.autotune_abort)
             ok, heap = _safe_call(srv.get_heap_status, ctx.get("host"))
             board_after["get_heap_status"] = heap if ok else f"error: {heap}"
@@ -401,7 +442,7 @@ class BenchTestRunner:
             except OSError as exc:
                 self._runner_log_path = None
                 self.transcript.append(f"WARNING: could not create run dir {run_dir}: {exc}")
-            self._log(f"board lock: {'held' if lock is not None else 'not needed (read-only suite)'}")
+            self._runner_log(f"board lock: {'held' if lock is not None else 'not needed (read-only suite)'}")
             if lock is not None and lock.reclaimed_from is not None:
                 self._log(
                     f"board lock: reclaimed stale lock from dead {lock.reclaimed_from.describe()}"
@@ -484,7 +525,14 @@ class BenchTestRunner:
                 self._log(f"verdict: {result.verdict} ({dt:.2f}s) {result.reason}".rstrip())
                 results[cid] = result
 
-        board_after = self.teardown()
+        if "preflight_stall" in board_before:
+            # Preflight is read-only and the link is presumed wedged: probing
+            # again would only stall a second time (and push the call past
+            # the MCP client's 300 s timeout). Nothing ran, nothing to stop.
+            board_after = {"teardown_skipped": "preflight stalled; no case ran"}
+            self._log("teardown: skipped (preflight stalled; no case ran)")
+        else:
+            board_after = self.teardown()
         ended = time.time()
 
         outcome = RunOutcome(
