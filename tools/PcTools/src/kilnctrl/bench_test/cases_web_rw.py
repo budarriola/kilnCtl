@@ -826,9 +826,17 @@ def _case_web_zone14(ctx: dict) -> CaseResult:
     result = J.judge_web_zone_graphic(status, body)
     if result.verdict == Verdict.PASS:
         status2, body2 = _get_json(ctx, "/api/zones")
+        if status2 != 200 or not isinstance(body2, dict):
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=f"second read failed (status={status2}); stability not confirmed",
+                observed=result.observed,
+            )
         g1 = body.get("generation") if isinstance(body, dict) else None
-        g2 = body2.get("generation") if status2 == 200 and isinstance(body2, dict) else None
-        if g1 != g2:
+        g2 = body2.get("generation")
+        if g1 is None and g2 is None:
+            result.observed["generation"] = "not reported"
+        elif g1 != g2:
             return CaseResult(
                 Verdict.INCONCLUSIVE,
                 reason=f"zones config generation moved between reads ({g1!r} -> {g2!r}); not judged",

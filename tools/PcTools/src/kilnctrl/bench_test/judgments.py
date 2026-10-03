@@ -3256,10 +3256,17 @@ def judge_web_zone_graphic(status: Optional[int], body: Any) -> CaseResult:
 
     problems: List[str] = []
     tc = body.get("thermo_count")
-    if not _int(tc) or not 1 <= tc <= 3:
+    if not _int(tc) or not 0 <= tc <= 3:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"thermo_count {tc!r} is not an integer in 1..3 (ring count)",
+            reason=f"thermo_count {tc!r} is not an integer in 0..3 (ring count)",
+            observed={"thermo_count": tc},
+        )
+    if tc == 0:
+        # A legitimately saved empty config (zones_config_accessors.h), not a fault.
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="no zones configured (thermo_count 0); nothing to draw",
             observed={"thermo_count": tc},
         )
     zones = body.get("zones")
@@ -3272,18 +3279,28 @@ def judge_web_zone_graphic(status: Optional[int], body: Any) -> CaseResult:
         )
     owned = 0
     zsummary = []
+    no_tc_zones: List[int] = []
     for i in range(tc):
         z = zones[i]
         if not isinstance(z, dict):
             problems.append(f"zones[{i}] is not an object")
             continue
-        for key, lo, hi in (("relay_mask", 0, 15), ("thermo_mask", 1, 7),
+        for key, lo, hi in (("relay_mask", 0, 15), ("thermo_mask", 0, 7),
                             ("ct_mask", 0, 7), ("zone_type", 0, 1)):
             v = z.get(key)
             if not _int(v) or not lo <= v <= hi:
                 problems.append(f"zones[{i}].{key} {v!r} not an integer in {lo}..{hi}")
         if _int(z.get("relay_mask")):
             owned |= z["relay_mask"] & 0xF
+        tm = z.get("thermo_mask")
+        if _int(tm) and 0 <= tm <= 7:
+            if tm & ~((1 << tc) - 1):
+                problems.append(
+                    f"zones[{i}].thermo_mask {tm} has a bit outside thermo_count {tc} "
+                    "(the POST's own rule)"
+                )
+            if tm == 0:
+                no_tc_zones.append(i)
         zsummary.append({k: z.get(k) for k in ("relay_mask", "thermo_mask", "ct_mask", "zone_type")})
     declared = body.get("relay_zone_owned_mask")
     if not _int(declared):
@@ -3301,7 +3318,7 @@ def judge_web_zone_graphic(status: Optional[int], body: Any) -> CaseResult:
         problems.append(f"relay_types {types!r} is not a list of 4 integers in 0..6")
     observed = {
         "thermo_count": tc, "zones": zsummary, "relay_zone_owned_mask": declared,
-        "relay_types": types,
+        "relay_types": types, "zones_without_thermocouple": no_tc_zones,
     }
     if problems:
         return CaseResult(Verdict.FAIL, reason="; ".join(problems), observed=observed)

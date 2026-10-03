@@ -836,7 +836,7 @@ class WebZone14Test(unittest.TestCase):
         self.assertIn("relay_zone_owned_mask", result.reason)
 
     def test_thermo_count_out_of_range_fails(self):
-        for bad in (0, 4, "3", None):
+        for bad in (-1, 4, "3", None):
             result, _ = self._run(_zones_body(thermo_count=bad))
             self.assertEqual(result.verdict, Verdict.FAIL, bad)
 
@@ -872,6 +872,56 @@ class WebZone14Test(unittest.TestCase):
     def test_generation_change_between_reads_is_inconclusive(self):
         result, _ = self._run(_zones_body(), _zones_body(generation=8))
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_on_off_zone_with_no_thermocouple_passes_and_is_reported(self):
+        body = _zones_body()
+        body["zones"][2]["thermo_mask"] = 0
+        result, _ = self._run(body)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["zones_without_thermocouple"], [2])
+
+    def test_thermo_mask_bit_outside_thermo_count_fails(self):
+        body = _zones_body(thermo_count=2, relay_zone_owned_mask=0b0011)
+        body["zones"][0]["thermo_mask"] = 4
+        result, _ = self._run(body)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("zones[0].thermo_mask", result.reason)
+
+    def test_empty_config_is_inconclusive(self):
+        result, _ = self._run(_zones_body(thermo_count=0, zones=[], relay_zone_owned_mask=0))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_negative_thermo_count_fails(self):
+        result, _ = self._run(_zones_body(thermo_count=-1))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_mask_ranges_fail(self):
+        for key, bad in (("relay_mask", 16), ("relay_mask", -1), ("thermo_mask", 8),
+                         ("ct_mask", 8), ("ct_mask", -1)):
+            body = _zones_body()
+            body["zones"][0][key] = bad
+            result, _ = self._run(body)
+            self.assertEqual(result.verdict, Verdict.FAIL, (key, bad))
+
+    def test_non_dict_zone_entry_fails(self):
+        body = _zones_body()
+        body["zones"][1] = "oops"
+        result, _ = self._run(body)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("zones[1] is not an object", result.reason)
+
+    def test_second_read_failure_is_reported_separately(self):
+        fake = FakeHttp(get_queues={"/api/zones": [(200, _zones_body()), (503, None)]}, post_responses={})
+        result = C._case_web_zone14({"http_get_json": fake.get, "http_post_json": fake.post})
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("second read failed (status=503)", result.reason)
+
+    def test_missing_generation_is_noted_not_silent(self):
+        body = _zones_body()
+        del body["generation"]
+        result, _ = self._run(body)
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed["generation"], "not reported")
 
     def test_registered_and_in_full_suite_only(self):
         from kilnctrl.bench_test.registry import SUITES
