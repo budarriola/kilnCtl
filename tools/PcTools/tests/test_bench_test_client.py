@@ -93,6 +93,14 @@ def test_error_result_raises_with_content_text(monkeypatch, flags):
     assert str(ei.value) == "boom\ndetail"
 
 
+def test_error_result_with_no_content_uses_default_message(monkeypatch):
+    _install_fakes(monkeypatch, ("R", "W"), _Result([], is_error=True))
+    with pytest.raises(RuntimeError) as ei:
+        _run()
+    assert str(ei.value) == "tool call reported an error"
+
+
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="ExceptionGroup is 3.11+")
 def test_print_leaves_nested_group(capsys):
     inner = ExceptionGroup("inner", [ValueError("v"), KeyError("k")])
     outer = ExceptionGroup("outer", [inner, OSError("o")])
