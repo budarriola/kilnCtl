@@ -108,7 +108,12 @@ static bool ota_pico_req_force_version(httpd_req_t *req)
 // without releasing the update mutex (see ota_http.h's header comment for
 // why); on any failure, releases the mutex itself and responds with a
 // specific error.
-static void ota_pico_do_stage(httpd_req_t *req, const char *ip)
+//
+// Returns true when staging/relay start FAILED (response already sent, body
+// possibly unread) so the caller returns ESP_FAIL and httpd closes the
+// connection instead of draining it -- see the comment in
+// ota_esp_post_handler() (ota_http_esp.c) for the IDF evidence.
+static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
 {
     bool force_version = ota_pico_req_force_version(req);
     bool started_relay = false;
@@ -364,6 +369,7 @@ cleanup:
     if (!started_relay) {
         ota_http_update_end();
     }
+    return !started_relay;
 }
 
 esp_err_t ota_pico_post_handler(httpd_req_t *req)
@@ -381,7 +387,8 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
                                                             sizeof(reason));
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: refused by interlock: %s", ip, reason);
-        return ota_http_send_interlock_refusal(req, gate, reason);
+        (void)ota_http_send_interlock_refusal(req, gate, reason);
+        return ESP_FAIL; // close, don't drain the unread body (see ota_esp_post_handler())
     }
 
     if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_PICO)) {
@@ -389,14 +396,13 @@ esp_err_t ota_pico_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        return ESP_FAIL; // close, don't drain the unread body
     }
 
     // From here, ota_pico_do_stage() owns the mutex -- either it releases
     // it itself (staging failure) or it starts the relay task, which then
     // owns release. See that function's own doc comment.
-    ota_pico_do_stage(req, ip);
-    return ESP_OK;
+    return ota_pico_do_stage(req, ip) ? ESP_FAIL : ESP_OK;
 }
 
 // File-scope (not handler-local) so ota_pico_rollback_task() below can null

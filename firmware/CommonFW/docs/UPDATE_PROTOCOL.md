@@ -922,6 +922,20 @@ during development will be driven by an agent:
 now exist -- `ota_http_verify_request()` has real callers. See the "ESP OTA"
 and "Pico update" sections below for what each actually covers.
 
+**Refusals on the application image (2026-10-03):** `POST /api/ota/esp` on the
+application image answers `409 Conflict` ("single-slot design ... recovery
+image") when `esp_ota_get_next_update_partition()` is the running `app`
+partition itself -- the single-slot table has no spare slot, so an ESP image is
+pushed through the recovery image's route instead (`recovery_enter`;
+`docs/OTA_SINGLE_SLOT_PLAN.md`). Every early refusal on both `POST /api/ota/esp`
+and `POST /api/ota/pico` (interlock 409/428, update-in-progress 409, size/magic/
+chip checks, staging failures) now returns `ESP_FAIL` from the handler after
+sending its response, so esp_http_server closes the connection instead of
+draining the unread body 32 bytes at a time on the CPU0 httpd task (that drain
+starved IDLE0 into a TASK_WDT panic on the bench). Status codes and bodies are
+unchanged; a client still mid-upload may see the connection reset right after
+the response.
+
 **Version compatibility** (`LINK_PROTOCOL.md`, `ANNOUNCE_VERSION`)
 - [x] `ANNOUNCE_VERSION` = `0x0F` implemented: the ESP announces itself, unprompted
 - [x] `min_compatible` field added to both version frames at a fixed offset.

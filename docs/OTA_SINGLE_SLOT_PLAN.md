@@ -101,6 +101,8 @@ With one OTA slot and `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, the fallback pa
 
 **Implemented 2026-10-02 (deliberate half).** `POST /api/ota/esp/recovery_boot` (`ota_http_recovery.c`) plus MCP tool `recovery_enter` (confirm-gated). The HMAC context named above was retired 2026-09-29; the route is `ROUTE_TIER_ADMIN`. It refuses (409) via `system_mode_gate` `SYS_ACTION_RECOVERY_BOOT` while a firing/autotune runs or any relay is on or unreadable, then via `ota_http_check_interlocks()`, then the single update mutex, then re-reads the relays with the mutex held; it uses the same verify-then-set helper as the threshold path and sets the boot target before replying, reverting it if the reboot task cannot start.
 
+**Application refuses a self-push (2026-10-03).** With one OTA slot, `esp_ota_get_next_update_partition()` returns the running `app`, so `POST /api/ota/esp` on the application image used to fail in `esp_ota_begin()` (500, `PARTITION_CONFLICT`). It now refuses up front with `409` naming this design and `recovery_enter` (`ota_http_esp_target_usable()`, host-tested; guarded by `tools/check_ota_esp_refuses_running_target.ps1`). The recovery image does not compile that handler. Every early refusal on the ESP and Pico OTA handlers also returns `ESP_FAIL` so httpd closes the connection instead of draining the unread body 32 bytes at a time on CPU0 (the bench TASK_WDT on IDLE0).
+
 ## 5. Failure matrix
 
 | Failure | What happens | Recoverable without physical access |

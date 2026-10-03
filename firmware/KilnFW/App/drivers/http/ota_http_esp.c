@@ -100,7 +100,12 @@ static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 // `ok`/`fail_reason` and falls through to the one cleanup block at the
 // bottom, which appends the NVS record and updates the progress snapshot
 // exactly once regardless of which path got there.
-static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
+//
+// Returns true when the transfer FAILED (a response has already been sent and
+// the request body may be partly or wholly unread), so the caller returns
+// ESP_FAIL and httpd closes the connection instead of draining the body. See
+// the comment at that return in ota_esp_post_handler().
+static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
 {
     bool ok = false;
     char fail_reason[OTA_RECORD_REASON_MAX] = "unknown failure";
@@ -136,6 +141,22 @@ static void ota_esp_do_transfer(httpd_req_t *req, const char *ip)
         ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "no free OTA partition");
         ESP_LOGE(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_reason);
+        goto cleanup;
+    }
+    // Single-slot table: the "next" OTA slot is the RUNNING `app` partition
+    // itself, so esp_ota_begin() would fail with PARTITION_CONFLICT (bench
+    // 2026-10-03: a 500 "esp_ota_begin failed", then a TASK_WDT while httpd
+    // drained the body). Refuse up front; ota_began stays false and this goes
+    // through the same cleanup: label as every other refusal. Application
+    // build only -- firmware/KilnFW_recovery does not compile this file.
+    if (!ota_http_esp_target_usable(target, esp_ota_get_running_partition())) {
+        ota_http_set_fail_reason(fail_reason, sizeof(fail_reason),
+                 "this image runs from the only OTA slot (single-slot design); push ESP images through the "
+                 "recovery image (recovery_enter, then POST /api/ota/esp there)");
+        ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: refused: %s", ip, fail_reason);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, fail_reason, HTTPD_RESP_USE_STRLEN);
         goto cleanup;
     }
     if (content_len > target->size) {
@@ -386,6 +407,7 @@ cleanup:
     // satisfy. Idempotent even if something above went wrong before the
     // claim was actually held, per ota_http_update_end()'s own doc comment.
     ota_http_update_end();
+    return !ok;
 }
 
 esp_err_t ota_esp_post_handler(httpd_req_t *req)
@@ -408,7 +430,25 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
                                                             sizeof(reason));
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: refused by interlock: %s", ip, reason);
-        return ota_http_send_interlock_refusal(req, gate, reason);
+// Why this returns ESP_FAIL after an early refusal instead of ESP_OK (bench
+// finding 2026-10-03: a refused 2.5 MB push left the httpd task draining the
+// whole unread body and tripped TASK_WDT on IDLE0): with ESP_OK,
+// httpd_sess_process() (esp_http_server/src/httpd_sess.c, ~line 434) calls
+// httpd_req_delete() (httpd_parse.c ~lines 850-859), which loops
+// httpd_req_recv() in CONFIG_HTTPD_PURGE_BUF_LEN (32 B) pieces until
+// remaining_len is 0 -- on the httpd task, pinned to CPU0, each read
+// round-tripping to the tcpip task. A handler return other than ESP_OK is
+// turned into ESP_FAIL by httpd_uri() (httpd_uri.c ~line 367), which
+// httpd_req_new() (httpd_parse.c ~line 840) propagates, and
+// httpd_sess_process() then returns BEFORE it reaches httpd_req_delete()
+// (httpd_sess.c ~lines 428-431); the caller (httpd_main.c ~line 264) deletes
+// the session and closes the socket. httpd_sess_trigger_close() is NOT a
+// substitute: it only queues a close (httpd_sess.c ~line 478) and
+// httpd_req_delete() would still run first and drain. The response was
+// already written synchronously by httpd_resp_send*(), so the client still
+// gets its status/body; the connection just closes after it.
+        (void)ota_http_send_interlock_refusal(req, gate, reason);
+        return ESP_FAIL;
     }
 
     // 4. Single update mutex -- claimed before any body byte is read, so a
@@ -419,14 +459,15 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_OK;
+        return ESP_FAIL; // close, don't drain the unread body -- see the comment above
     }
 
     // From here, the mutex is held and ota_esp_do_transfer() owns releasing
     // it exactly once, on every exit path -- see that function's own doc
     // comment.
-    ota_esp_do_transfer(req, ip);
-    return ESP_OK;
+    // Failure -> ESP_FAIL (response already sent) so httpd closes rather than
+    // drains; success -> ESP_OK.
+    return ota_esp_do_transfer(req, ip) ? ESP_FAIL : ESP_OK;
 }
 
 // --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------

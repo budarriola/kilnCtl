@@ -74,6 +74,19 @@ int ota_http_pico_rollback_format_body(safety_link_rollback_outcome_t outcome, u
  * unaffected either way. */
 bool ota_http_client_ip_finalize(char *out, size_t out_len, const char *formatted_addr);
 
+/* Pure core of ota_esp_do_transfer()'s target check (ota_http_esp.c): true only
+ * when `target` (esp_ota_get_next_update_partition(NULL)) is a real partition
+ * AND is not the partition this image is RUNNING from. Pointers are compared as
+ * opaque identities (esp_partition_t pointers from the IDF are unique per
+ * partition), so no IDF type is needed here.
+ *
+ * Single-slot table (partitions.csv: `app` ota_0 + factory `recovery`):
+ * next-update-partition returns ota_0, which is the running `app` itself, and
+ * esp_ota_begin() then fails with ESP_ERR_OTA_PARTITION_CONFLICT. An ESP image
+ * push goes through the recovery image's route instead
+ * (docs/OTA_SINGLE_SLOT_PLAN.md); the application refuses up front with 409. */
+bool ota_http_esp_target_usable(const void *target, const void *running);
+
 #ifdef __cplusplus
 }
 #endif

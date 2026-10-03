@@ -2062,6 +2062,21 @@ static void test_client_ip_finalize_terminates_with_undersized_buffer(void)
     TEST_CHECK(out[sizeof(out) - 1] == '\0', "out is NUL-terminated within the caller's buffer size");
 }
 
+// Bench 2026-10-03: with the single-slot table esp_ota_get_next_update_partition()
+// returns the RUNNING `app` partition, and the application's POST /api/ota/esp
+// went on to esp_ota_begin() (PARTITION_CONFLICT). The pure target check refuses
+// that up front. ota_http_esp.c itself is target-only; the handler wiring is
+// pinned by tools/check_ota_esp_refuses_running_target.ps1.
+static void test_esp_target_usable_refuses_running_partition(void)
+{
+    TEST_SECTION("ota_http_esp_target_usable -- the running partition and NULL are refused, a distinct slot is allowed");
+    static const int slot_a = 0, slot_b = 0; // distinct addresses stand in for two esp_partition_t
+    TEST_CHECK(!ota_http_esp_target_usable(&slot_a, &slot_a), "target == running is refused (single-slot self-push)");
+    TEST_CHECK(!ota_http_esp_target_usable(NULL, &slot_a), "a NULL target is refused");
+    TEST_CHECK(!ota_http_esp_target_usable(NULL, NULL), "NULL target with NULL running is still refused");
+    TEST_CHECK(ota_http_esp_target_usable(&slot_a, &slot_b), "a target distinct from the running partition is allowed");
+}
+
 // ---------------------------------------------------------------------------
 // Review finding D6: pico_img_stage.c (linked in for real above) writes
 // offset/CRC bookkeeping that a caller's own chunk-length arithmetic must
@@ -2264,6 +2279,7 @@ void run_test_ota_http(void)
     test_client_ip_finalize_writes_real_address_on_success();
     test_client_ip_finalize_defined_on_null_formatted_addr();
     test_client_ip_finalize_terminates_with_undersized_buffer();
+    test_esp_target_usable_refuses_running_partition();
 
     test_pico_img_stage_offset_and_crc_bookkeeping();
     test_pico_img_stage_write_chunk_refuses_overrun();

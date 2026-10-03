@@ -98,3 +98,8 @@ bool ota_http_client_ip_finalize(char *out, size_t out_len, const char *formatte
     snprintf(out, out_len, "unknown");
     return false;
 }
+
+bool ota_http_esp_target_usable(const void *target, const void *running)
+{
+    return target != NULL && target != running;
+}
