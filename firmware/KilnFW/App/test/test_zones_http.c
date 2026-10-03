@@ -855,7 +855,7 @@ static void test_cfg_set_f32(uint16_t param_id, float v, bool is_set)
     s_cfg_row_count++;
 }
 
-// u8 twin of test_cfg_set_f32 above, added for docs/CT_CHANNEL_MASK_PLAN.md
+// u8 twin of test_cfg_set_f32 above, added for docs/CT_CHANNEL_MASK.md
 // step 5's zone_ct_channel map (0x0320-0x0322). Deliberately a separate
 // setter rather than a widened one: the two write DIFFERENT members of the
 // same union, and a test that set a u8 field through the f32 setter would
@@ -12380,7 +12380,7 @@ static void test_record_ct_channels_summed_mode_nan_sample_leaves_zone_unmeasure
     nvs_test_clear();
 }
 
-/* --- docs/CT_CHANNEL_MASK_PLAN.md step 5: the generalised member() sweep ---
+/* --- docs/CT_CHANNEL_MASK.md step 5: the generalised member() sweep ---
  * Same three properties, in the same order of how much they can hurt, as the
  * step-4 guard tests: collapse onto both legacy topologies, a genuine split,
  * and a forced-wrong-membership negative test. Readings stay deliberately
@@ -13983,7 +13983,7 @@ static void test_zone_sweep_plan_k_ct_implausible_reason_is_not_truncated(void)
                "the operator sees the WHOLE reason, not a %.70s-truncated fragment of it");
 }
 
-// ---- docs/CT_CHANNEL_MASK_PLAN.md step 5: the member()-aware planner ------
+// ---- docs/CT_CHANNEL_MASK.md step 5: the member()-aware planner ------
 //
 // Why these need their own fixture, rather than reusing kct_setup_clean_run()
 // directly (this is exactly what two earlier passes stalled on): the mapped
@@ -15578,7 +15578,7 @@ void run_test_zones_http(void)
     test_zone_sweep_plan_k_ct_refuses_after_a_failed_map_push();
     test_zone_sweep_plan_k_ct_refuses_an_unanswered_nameplate();
     test_zone_sweep_plan_k_ct_implausible_reason_is_not_truncated();
-    /* docs/CT_CHANNEL_MASK_PLAN.md step 5 -- the mapped planner's collapse tests. */
+    /* docs/CT_CHANNEL_MASK.md step 5 -- the mapped planner's collapse tests. */
     test_zone_sweep_plan_k_ct_identity_map_collapses_onto_per_zone();
     test_zone_sweep_plan_k_ct_all_two_map_collapses_onto_summed();
     test_zone_sweep_plan_k_ct_split_map_plans_only_member_channels();

@@ -1,6 +1,6 @@
 # check_sim_scenarios.ps1 -- wires sim_scenarios.exe's own PASS/FAIL/SEP-pin/
 # WI-4 acceptance-check assertions, AND the WI-7 sharded-determinism proof
-# (docs/SCENARIO_SIMULATION_PLAN.md sec 4.3/5.3/8), into run_all_checks.ps1's
+# (docs/SCENARIO_SIMULATION.md sec 4.3/5.3/8), into run_all_checks.ps1's
 # check_*.ps1 glob.
 #
 # Until this file, sim_scenarios.exe's canonical (--of 1) run was gated only

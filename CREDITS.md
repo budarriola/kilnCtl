@@ -111,7 +111,7 @@ design into the repo, add an entry here in the same pull request.
 
 ## Research and control literature (scenario-simulation and coupling-model passes)
 
-Sources actually consulted in `docs/research/` and `docs/SCENARIO_SIMULATION_PLAN.md`
+Sources actually consulted in `docs/research/` and `docs/SCENARIO_SIMULATION.md`
 §3, beyond the PID-autotune papers already credited above. Full detail, quotations, and
 retrieval caveats (abstract-only, search-summary-only, paywalled) live in the two
 `docs/research/*.md` files themselves — this entry only records which findings actually
@@ -124,7 +124,7 @@ what was used.
   (engineering knowledge-base article, no publication date given on the page),
   <https://www.watlow.com/resources-and-support/engineering-tools/knowledge-base/sensor-placement-in-a-thermal-system>
   — states the near-source-vs-near-load sensor-placement tradeoff (loop stability vs.
-  load fidelity) that `docs/SCENARIO_SIMULATION_PLAN.md` §2.1's three-node sensor model
+  load fidelity) that `docs/SCENARIO_SIMULATION.md` §2.1's three-node sensor model
   (`sensor_bias_p`, exercised by `firmware/KilnFW/App/test/sim_plant.c`) is built around.
   Per §3.1, the source supports the tradeoff qualitatively only — it gives no
   conductance ratio; the plan's own 5:1 numeric interpretation is this project's
@@ -152,7 +152,7 @@ above; do not treat these as informing any shipped design):
 - Jin, Renjie, *"Research on Optimized Fuzzy PID Temperature Control Strategy Based on
   Improved Particle Swarm Optimization"*, arXiv:2609.00001 (2026) —
   <https://arxiv.org/abs/2609.00001> — abstract only; per
-  `docs/SCENARIO_SIMULATION_PLAN.md` §3.2, its reported effect sizes are for a
+  `docs/SCENARIO_SIMULATION.md` §3.2, its reported effect sizes are for a
   full-authority fuzzy design and do not transfer to this project's bounded ±50% nudge
   (`pid_fuzzy.c`).
 - Comparative expert-adjustable-fuzzy-control study (injection-molding temperature

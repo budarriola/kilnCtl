@@ -1,4 +1,4 @@
-// Tests for sim_mistune.c (WI-3, docs/SCENARIO_SIMULATION_PLAN.md sec 2.4).
+// Tests for sim_mistune.c (WI-3, docs/SCENARIO_SIMULATION.md sec 2.4).
 // Every constant in this file is a TEST FIXTURE -- never shipped, never
 // written into zones_config, a preset, or a firmware default.
 #include <math.h>

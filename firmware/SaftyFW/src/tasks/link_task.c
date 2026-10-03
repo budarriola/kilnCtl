@@ -2584,7 +2584,7 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 
     config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
-    config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK_PLAN.md step 2
+    config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK.md step 2
     // Must run AFTER finalize_zone_ct_channel() (so to_write's group bit is
     // settled) and BEFORE finalize_i_present_a() (so an invalidated zone
     // cannot still win that function's smallest-normal search). Closes the
@@ -2731,7 +2731,7 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
 
     config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
-    config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK_PLAN.md step 2
+    config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK.md step 2
     // Same ordering requirement as link_task_handle_commit_config(): after
     // finalize_zone_ct_channel(), before finalize_i_present_a(). Closes the
     // CT-commissioning HIGH finding for the volatile-install path too --

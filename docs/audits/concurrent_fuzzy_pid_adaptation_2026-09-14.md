@@ -538,7 +538,7 @@ carried forward as a live caveat, not waved off.
 - **No production code was written; no board was flashed; no firing was
   run.** Files owned by concurrent sessions (`pid_fuzzy.c`/`.h`,
   `profile_executor_pid_tick.c`, `sim_fuzzy_overshoot.c`, `ROADMAP.md`,
-  `docs/FUZZY_CONTROLLER_PLAN.md`, `docs/SCENARIO_SIMULATION_PLAN.md`) were
+  `docs/FUZZY_CONTROLLER_PLAN.md`, `docs/SCENARIO_SIMULATION.md`) were
   read only.
 
 ## 7. Verification performed

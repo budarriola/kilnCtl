@@ -1,4 +1,4 @@
-// sim_scenario_table -- WI-4 (docs/SCENARIO_SIMULATION_PLAN.md sec 4.2/4.3).
+// sim_scenario_table -- WI-4 (docs/SCENARIO_SIMULATION.md sec 4.2/4.3).
 //
 // One row per scenario, DATA ONLY -- no function pointers, no per-scenario
 // code anywhere in sim_scenarios.c. Adding a scenario is appending one

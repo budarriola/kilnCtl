@@ -1,4 +1,4 @@
-# run_sim_scenarios.ps1 -- WI-7 (docs/SCENARIO_SIMULATION_PLAN.md sec 4.3,
+# run_sim_scenarios.ps1 -- WI-7 (docs/SCENARIO_SIMULATION.md sec 4.3,
 # WI-7's own acceptance criterion).
 #
 # Runs kilnctl_sim_scenarios.exe at --of 1 (the canonical, single-process

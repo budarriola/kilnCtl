@@ -230,7 +230,7 @@ void config_params_finalize_i_present_a(config_store_record_t *rec);
 // config_params_finalize_ct_channel_map() above: two of three zones answered
 // must leave the map untrusted (so readers fall back to the ct_topology-
 // derived map via config_store_effective_zone_ct_channel()), never
-// half-applied. docs/CT_CHANNEL_MASK_PLAN.md step 2.
+// half-applied. docs/CT_CHANNEL_MASK.md step 2.
 void config_params_finalize_zone_ct_channel(config_store_record_t *rec);
 
 // Closes the CT-commissioning finding: a topology flip (0x031F) or a

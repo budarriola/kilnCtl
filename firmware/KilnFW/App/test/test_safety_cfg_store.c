@@ -298,7 +298,7 @@ static void test_index_for_id_finds_known_and_rejects_unknown(void)
     TEST_SECTION("index_for_id -- every table row is reachable by its own id, an unknown id is not");
 
     // 0x0101 is the table's first row (tc_source); 0x0322 (zone_ct_channel[2],
-    // docs/CT_CHANNEL_MASK_PLAN.md step 2) is now its last, appended at the very
+    // docs/CT_CHANNEL_MASK.md step 2) is now its last, appended at the very
     // end per this table's own "only ever appended to" rule -- 0x0321
     // (zone_ct_channel[1]) is now second-to-last. Both ends, not just one, so a
     // future off-by-one in the table's bounds shows up here.

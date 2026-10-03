@@ -2,7 +2,7 @@
 //
 // Ports tools/PcTools/src/kilnctrl/plant_sim.py's loss_conductance_scale()
 // into C for the scenario suite's high-temperature work (WI-2,
-// docs/SCENARIO_SIMULATION_PLAN.md sec 2.3), and supplies a kiln-scale
+// docs/SCENARIO_SIMULATION.md sec 2.3), and supplies a kiln-scale
 // sim_plant_cfg_t (SIM_NODE_THREE, WI-1) anchored to that file's physical
 // high-temperature model (PHYS_P_MAX_W etc.) rather than the bench rig's
 // measured constants -- the rig's own identified K_diag cannot reach 40 C
@@ -65,7 +65,7 @@ void sim_high_temp_scale_conductances(sim_plant_cfg_t *cfg, float base_g_ea_w_pe
  * effect; without it this cfg behaves as an ordinary, unscaled three-node
  * plant and will NOT reach kiln-scale temperatures.
  *
- * Chosen (see docs/SCENARIO_SIMULATION_PLAN.md WI-2 acceptance) so that,
+ * Chosen (see docs/SCENARIO_SIMULATION.md WI-2 acceptance) so that,
  * with the scaler applied every tick using the LOAD node's own temperature,
  * full duty held forever asymptotes the LOAD node (load_c -- the
  * chamber/ware node a real controller's thermocouple sits closest to)

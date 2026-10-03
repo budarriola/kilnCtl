@@ -1,7 +1,7 @@
 # Fuzzy scenario evidence, consolidated — 2026-09-14
 
 Answers one question: **did the fuzzy layer show promise in simulation of the
-cases we can't bench test?** Consolidates `docs/SCENARIO_SIMULATION_PLAN.md`
+cases we can't bench test?** Consolidates `docs/SCENARIO_SIMULATION.md`
 (`32b10a34`), `docs/audits/scenario_factorial_design_2026-09-14.md`
 (`75bb7b8e`), `docs/audits/scenario_simulation_implementation_2026-09-14.md`,
 `docs/audits/fuzzy_first_hardware_run_2026-09-14.md`, and a fresh run of
@@ -148,7 +148,7 @@ expectation is it cannot").
 
 **This entire result carries `[f_rad=0.05 ASSUMED]`** — the radiative-loss
 split constant is unmeasured at any temperature in this dataset
-(`SCENARIO_SIMULATION_PLAN.md` §2.3). A different assumed split changes the
+(`SCENARIO_SIMULATION.md` §2.3). A different assumed split changes the
 plant's high-temperature character and could change this outcome; it is not
 re-derivable from what exists today.
 
@@ -224,7 +224,7 @@ per-tick `(error_bucket, rate_bucket)`, which does not exist in
    own axis (e.g., mass at ×0.5 and ×3.0 only, no intermediate; sensor bias
    at only 0 and 5/6). **They cannot establish an interaction** between two
    mismatch types except at the single compound point S12 already ran — the
-   factorial exists specifically because `SCENARIO_SIMULATION_PLAN.md` §1
+   factorial exists specifically because `SCENARIO_SIMULATION.md` §1
    and the factorial-design doc's P11 predict placement and unevenness act
    through *products*, not sums, and a one-factor-at-a-time sweep cannot see
    that. S2/S4/S5 in isolation vs. S12 combined is suggestive (S12's lag

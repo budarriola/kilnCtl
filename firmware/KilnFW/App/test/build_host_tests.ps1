@@ -2501,7 +2501,7 @@ try {
             "`"$(Join-Path $driversDir 'control/pid.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`""
     Invoke-HostTestExe -Name "sim_fuzzy_closedloop" -ExePath $exeFuzzyCl -BuildCmd $cmdFuzzyCl
 
-    # ---- sim_scenarios.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-4/5/6/7
+    # ---- sim_scenarios.exe: docs/SCENARIO_SIMULATION.md WI-4/5/6/7
     # (runner, scenario table S0-S12, arm selection, all six arms; see
     # sim_scenarios.c's own top comment for exactly what is and is not real
     # yet, e.g. SIM_ARM_PID_AT/SIM_ARM_FUZZY_AT are single-firing stand-ins
@@ -2524,7 +2524,7 @@ try {
             "`"$(Join-Path $driversDir 'control/pid_autotune.c')`" `"$(Join-Path $driversDir 'control/firing_score.c')`""
     Invoke-HostTestExe -Name "sim_scenarios" -ExePath $exeScenarios -BuildCmd $cmdScenarios
 
-    # ---- sim_scenarios_adaptive.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-8
+    # ---- sim_scenarios_adaptive.exe: docs/SCENARIO_SIMULATION.md WI-8
     # -- SIM_ARM_PID_AT/SIM_ARM_FUZZY_AT as a chain of 9 firings with
     # adaptation state carried across them, driving the REAL adaptive_
     # tune.c/adaptive_tune_model.c/adaptive_tune_ki.c (not a mirror) against
@@ -2559,7 +2559,7 @@ try {
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     Invoke-HostTestExe -Name "sim_scenarios_adaptive" -ExePath $exeScenariosAdaptive -BuildCmd $cmdScenariosAdaptive
 
-    # ---- sim_strength_pct_adapt.exe: docs/SCENARIO_SIMULATION_PLAN.md WI-10
+    # ---- sim_strength_pct_adapt.exe: docs/SCENARIO_SIMULATION.md WI-10
     # (docs/audits/strength_pct_adapter_design_2026-09-16.md is the design;
     # this executable is its simulation arm). A cross-firing scalar
     # hill-climb over strength_pct for S2/S5/S7/S12, adjudicated ONLY by the
@@ -2781,11 +2781,11 @@ try {
     # HostTestExe call -- docs/audits/saftyfw_live_stack_reporting_impl_
     # 2026-09-14.md's HTTP surface for SaftyFW's nine live stack marks.
     # 39 -> 40: this pass added sim_scenarios.c as its own 40th Invoke-
-    # HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-4's runner
+    # HostTestExe call -- docs/SCENARIO_SIMULATION.md WI-4's runner
     # skeleton (S0/S1/S3, all six arms), same gating posture as
     # sim_fuzzy_closedloop.c above (deterministic, no external captures).
     # 40 -> 41: this pass added sim_scenarios_adaptive.c as its own 41st
-    # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-8's
+    # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION.md WI-8's
     # 9-firing chained-adaptation harness, driving the real adaptive_tune.c
     # against a zones_config test fake (see that file's own header).
     # 42 -> 45: two Invoke-HostTestExe calls were added by other work without
@@ -2799,7 +2799,7 @@ try {
     # edit time (47), not by incrementing the stale prior value by one, since
     # this counter had already drifted before (see the 42->45 note above).
     # 47 -> 48: this pass added sim_strength_pct_adapt.c as its own 48th
-    # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION_PLAN.md WI-10's
+    # Invoke-HostTestExe call -- docs/SCENARIO_SIMULATION.md WI-10's
     # strength_pct cross-firing adapter simulation arm (design doc
     # docs/audits/strength_pct_adapter_design_2026-09-16.md).
     # 49 -> 50: test_lcd_credential_bridge.c added as its own 50th

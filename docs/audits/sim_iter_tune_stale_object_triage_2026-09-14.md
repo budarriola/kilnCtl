@@ -2,7 +2,7 @@
 
 ## The claim
 
-An agent implementing WI-1 of `docs/SCENARIO_SIMULATION_PLAN.md` (opt-in
+An agent implementing WI-1 of `docs/SCENARIO_SIMULATION.md` (opt-in
 three-node plant model, landed as HEAD commit `7729f3c8`, `git cat-file -t
 7729f3c8` -> `commit`) reported two things:
 

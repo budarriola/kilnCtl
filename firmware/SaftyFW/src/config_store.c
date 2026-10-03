@@ -14,7 +14,7 @@
 
 // --- v3 byte layout (little-endian, same convention as bootloader/metadata.c)
 //
-// v3 (CT_CHANNEL_MASK_PLAN.md step 2) changed the record in two ways: it
+// v3 (CT_CHANNEL_MASK.md step 2) changed the record in two ways: it
 // widened fields_set from 2 to 4 bytes IN PLACE at offset 12, which pushed
 // every field from tc_source onward up by exactly 2, and it carved
 // zone_ct_channel[3] out of the front of the reserved tail. Every v2 offset
@@ -127,7 +127,7 @@
 //               configuration must never select the polarity that cannot
 //               detect a broken E-stop line.
 //    237     3  zone_ct_channel[3] (u8 x3) -- which CT channel each zone is
-//               read on, params 0x0320-0x0322, CT_CHANNEL_MASK_PLAN.md
+//               read on, params 0x0320-0x0322, CT_CHANNEL_MASK.md
 //               step 2. Gated by CONFIG_STORE_SET_ZONE_CT_CHANNEL; when
 //               that bit is clear the map is derived from ct_topology at
 //               230 instead (config_store_effective_zone_ct_channel()).
@@ -236,7 +236,7 @@
 // (the one where a cut E-stop line reads as STOP), never on the one that
 // cannot see a broken wire at all.
 #define REC_OFF_ESTOP_ACTIVE_LEVEL     (REC_OFF_TC_OFFSET_C + 4u)         /* 236 */
-// zone_ct_channel (CT_CHANNEL_MASK_PLAN.md step 2), carved out of the front
+// zone_ct_channel (CT_CHANNEL_MASK.md step 2), carved out of the front
 // of the reserved tail like every field above. Raw 0-2 bytes, NOT a marker
 // convention: the field is meaningless unless CONFIG_STORE_SET_ZONE_CT_
 // CHANNEL is set, and that bit cannot be set on any record written before
@@ -695,7 +695,7 @@ static void unpack_v2_fields(const uint8_t *in, config_store_record_t *out)
     uint32_t oc_time_raw = get_u32_le(&in[REC_OFF_OVERCURRENT_TIME_S]);
     out->overcurrent_time_s = (oc_time_raw == 0xFFFFFFFFu) ? 0u : oc_time_raw;
 
-    // zone_ct_channel (CT_CHANNEL_MASK_PLAN.md step 2). Gated by
+    // zone_ct_channel (CT_CHANNEL_MASK.md step 2). Gated by
     // CONFIG_STORE_SET_ZONE_CT_CHANNEL, which no pre-v3 record can have set,
     // so the raw bytes are only ever trusted on a record this build's own
     // commissioning flow wrote. The extra range check below is belt and
@@ -813,7 +813,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
     }
 
     if (version == CONFIG_STORE_FORMAT_VERSION_V2) {
-        // Legacy v2 layout (CT_CHANNEL_MASK_PLAN.md step 2). Its CRC covers
+        // Legacy v2 layout (CT_CHANNEL_MASK.md step 2). Its CRC covers
         // [0, REC_V2_OFF_CRC) -- numerically the same region v3 uses, over
         // different contents, which is why format_version and not the CRC is
         // what got us into this branch.
@@ -846,7 +846,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         config_store_record_t scratch;
         unpack_v2_fields(v3, &scratch);
         // zone_ct_channel: derived from the migrated ct_topology byte, per
-        // CT_CHANNEL_MASK_PLAN.md's old-record rule. The bytes at the new
+        // CT_CHANNEL_MASK.md's old-record rule. The bytes at the new
         // offset are meaningless on a v2 record (they were reserved fill)
         // and the gating bit stays clear, so every reader that goes through
         // config_store_effective_zone_ct_channel() would derive the same map

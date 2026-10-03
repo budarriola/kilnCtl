@@ -1,6 +1,6 @@
 # Scenario coverage as an experiment: a factorial design for the simulation suite
 
-Date: 2026-09-14. Status: DESIGN AMENDMENT to `docs/SCENARIO_SIMULATION_PLAN.md`
+Date: 2026-09-14. Status: DESIGN AMENDMENT to `docs/SCENARIO_SIMULATION.md`
 (`32b10a34`). **This document writes no production code and edits no plan.** It
 is written to be folded into that plan by whoever is implementing it; until it
 is, the plan as written stands. No board was flashed and no heating run was

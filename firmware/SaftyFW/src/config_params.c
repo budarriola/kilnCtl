@@ -136,7 +136,7 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
     { 0x031Fu, KILNLINK_PARAM_TYPE_U8 },  // ct_topology -- CT_COMMISSIONING_PLAN.md
                                            // step 3, NEW; next unallocated id
                                            // after 0x031E in this section-3 group
-    // zone_ct_channel[0..2] -- CT_CHANNEL_MASK_PLAN.md step 2, NEW; next
+    // zone_ct_channel[0..2] -- CT_CHANNEL_MASK.md step 2, NEW; next
     // three unallocated ids after 0x031F in this section-3 group.
     { 0x0320u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[0]
     { 0x0321u, KILNLINK_PARAM_TYPE_U8 },  // zone_ct_channel[1]
@@ -163,7 +163,7 @@ static const config_param_id_type_t CONFIG_PARAM_TABLE[] = {
 // paired array in link_task.c was raised in the same edit; the two numbers
 // are not independent and must never be changed apart.
 //
-// The three zone_ct_channel ids (0x0320-0x0322, CT_CHANNEL_MASK_PLAN.md
+// The three zone_ct_channel ids (0x0320-0x0322, CT_CHANNEL_MASK.md
 // step 2) took the table to 68 entries, still inside the same 72 bound --
 // no change to this assert or to link_task.c's paired array was needed.
 typedef char config_params_table_fits_72 [(CONFIG_PARAM_TABLE_LEN <= 72u) ? 1 : -1];
@@ -944,7 +944,7 @@ void config_params_finalize_zone_ct_channel(config_store_record_t *rec)
     if (!rec) {
         return;
     }
-    // CT_CHANNEL_MASK_PLAN.md step 2, and the exact shape of
+    // CT_CHANNEL_MASK.md step 2, and the exact shape of
     // config_params_finalize_ct_channel_map() above: the group bit is only
     // ever newly set here, once all three per-zone bits are present. Two of
     // three leaves it unset on purpose -- a half-answered zone-to-channel
@@ -959,7 +959,7 @@ void config_params_finalize_zone_ct_channel(config_store_record_t *rec)
     }
 }
 
-// docs/CT_CHANNEL_MASK_PLAN.md / the CT commissioning HIGH-severity finding
+// docs/CT_CHANNEL_MASK.md / the CT commissioning HIGH-severity finding
 // this closes: i_normal_a[z] is a per-ZONE "normal current" measurement, and
 // it is only meaningful under the CT wiring that was in effect the moment it
 // was measured. Neither ct_topology's SET_PARAM handler (0x031F) nor

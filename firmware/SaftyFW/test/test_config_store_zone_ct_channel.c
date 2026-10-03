@@ -1,4 +1,4 @@
-// test_config_store_zone_ct_channel.c -- docs/CT_CHANNEL_MASK_PLAN.md step 2.
+// test_config_store_zone_ct_channel.c -- docs/CT_CHANNEL_MASK.md step 2.
 //
 // Step 2 is "purely additive storage, verifiable by round-tripping every
 // existing config-store host test unmodified plus new ones for the migration

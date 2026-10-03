@@ -82,7 +82,7 @@ bench scale), and a thermocouple positioned close to the elements rather
 than at the load — which shortens apparent dead time and adds a fast mode
 the FOPDT fit does not represent, a plant/model mismatch of exactly the
 kind a gain-adaptation layer exists to absorb, and one the simulator
-cannot currently express at all. `docs/SCENARIO_SIMULATION_PLAN.md`
+cannot currently express at all. `docs/SCENARIO_SIMULATION.md`
 (authored separately, in progress as of this note) is scoping simulation
 coverage of these conditions — cite it as in-progress only; no outcome
 exists yet. Separately, the owner has decided fuzzy constants, like PID

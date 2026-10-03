@@ -1,4 +1,4 @@
-// Tests for sim_high_temp.c (WI-2, docs/SCENARIO_SIMULATION_PLAN.md sec
+// Tests for sim_high_temp.c (WI-2, docs/SCENARIO_SIMULATION.md sec
 // 2.3). Every constant in this file is a TEST FIXTURE -- never shipped,
 // never written into zones_config, a preset, or a firmware default.
 #include <math.h>

@@ -960,7 +960,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * channels -- three zones on one kiln can legitimately differ 2x in
          * draw. */
         if (cfg->zone_ct_channel_valid) {
-            /* --- Generalised per-channel attribution (CT_CHANNEL_MASK_PLAN.md
+            /* --- Generalised per-channel attribution (CT_CHANNEL_MASK.md
              * step 4). member(ch) = { z : zone_ct_channel[z] == ch }. Every
              * channel is evaluated against the sum of its own commanded
              * members' normals, and S15 -- which needs a SHARED CT to have a

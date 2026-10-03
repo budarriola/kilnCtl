@@ -321,7 +321,7 @@ static float q1(float c) { return roundf(c * 10.0f) / 10.0f; }
 #define KILN_T1_OFFSET_C 175.0f  // ambient+175 = 200
 #define KILN_T2_OFFSET_C 1225.0f // ambient+1225 = 1250
 
-// A6 tune mismatch triples (m_k, m_tau, m_L), SCENARIO_SIMULATION_PLAN.md
+// A6 tune mismatch triples (m_k, m_tau, m_L), SCENARIO_SIMULATION.md
 // sec 2.4 -- link the SIMC formula via pid_autotune_tune_from_fopdt(),
 // never reimplement it; these are just the model-vs-plant multipliers.
 //

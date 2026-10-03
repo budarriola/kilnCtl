@@ -165,7 +165,7 @@ extern "C" {
 #define CONFIG_STORE_FORMAT_VERSION_V1 1u
 
 // The second prior format version, added by the zone_ct_channel pass
-// (docs/CT_CHANNEL_MASK_PLAN.md step 2). v2 is the layout in which
+// (docs/CT_CHANNEL_MASK.md step 2). v2 is the layout in which
 // fields_set was a uint16_t at offset 12 and every field from tc_source
 // onward sat 2 bytes earlier than it does in v3; its CRC covered bytes
 // [0, REC_V2_OFF_CRC) == [0, 504) -- the same region v3 uses, over
@@ -383,13 +383,13 @@ extern "C" {
 //
 // THIS WAS THE LAST FREE BIT of the old uint16_t fields_set. That widening
 // has now happened: fields_set is a uint32_t as of CONFIG_STORE_FORMAT_
-// VERSION 3 (docs/CT_CHANNEL_MASK_PLAN.md step 2), which is exactly the
+// VERSION 3 (docs/CT_CHANNEL_MASK.md step 2), which is exactly the
 // record-layout change plus format_version bump this comment predicted.
 // Bits 20-31 are free again, and a new bit in that upper half is a drop-in
 // (the record already carries all four bytes), not another version bump.
 #define CONFIG_STORE_SET_CT_INSTALLED         (1u << 15)
 
-// zone_ct_channel[0..2] -- docs/CT_CHANNEL_MASK_PLAN.md. ONE group bit for
+// zone_ct_channel[0..2] -- docs/CT_CHANNEL_MASK.md. ONE group bit for
 // all three zones, not three per-zone bits: unlike i_normal_a (where a
 // half-measured set is a strictly correct partial result), a half-answered
 // zone-to-channel map is an unsafe subset in exactly the way a
@@ -441,7 +441,7 @@ extern "C" {
 #define CONFIG_STORE_CT_TOPOLOGY_SUMMED   1u
 
 // config_store_derive_zone_ct_channel() -- the legacy ct_topology byte's
-// equivalent zone-to-channel map, docs/CT_CHANNEL_MASK_PLAN.md's
+// equivalent zone-to-channel map, docs/CT_CHANNEL_MASK.md's
 // "old record read by new firmware" rule. PER_ZONE (0) becomes the identity
 // {0,1,2}; SUMMED (1) -- and, deliberately, ANY unrecognised byte -- becomes
 // {2,2,2}.
@@ -465,7 +465,7 @@ static inline void config_store_derive_zone_ct_channel(uint8_t ct_topology, uint
 }
 
 // config_store_ct_topology_from_zone_ct_channel() -- the reverse direction,
-// docs/CT_CHANNEL_MASK_PLAN.md's "new record read by old firmware" rule.
+// docs/CT_CHANNEL_MASK.md's "new record read by old firmware" rule.
 // Returns the legacy byte new firmware must keep writing so a downgraded
 // board still reads something meaningful:
 //   identity {0,1,2} (all three distinct) -> PER_ZONE
@@ -866,7 +866,7 @@ typedef struct {
     uint8_t ct_topology;
 
     // zone_ct_channel[z] -- which physical CT channel (0-2) zone z's current
-    // is read on, params 0x0320-0x0322, docs/CT_CHANNEL_MASK_PLAN.md. The
+    // is read on, params 0x0320-0x0322, docs/CT_CHANNEL_MASK.md. The
     // semantic INVERSE of ct_channel_map[ch] -> relay id above, and strictly
     // more expressive: many zones may name the same channel (they are summed
     // on it), which is what makes a two-shared-CT kiln representable at all.
@@ -978,7 +978,7 @@ static inline void config_store_effective_zone_ct_channel(const config_store_rec
     config_store_derive_zone_ct_channel(rec->ct_topology, out);
 }
 
-// config_store_backfill_legacy_ct_topology() -- docs/CT_CHANNEL_MASK_PLAN.md
+// config_store_backfill_legacy_ct_topology() -- docs/CT_CHANNEL_MASK.md
 // step 3, the "new record read by old firmware" rule. New firmware must keep
 // the legacy ct_topology byte in sync with whatever zone_ct_channel says on
 // EVERY write, so a board downgraded to firmware that has never heard of

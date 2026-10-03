@@ -182,7 +182,7 @@ document, do not solve.
    presentation remain step 4, not touched by this pass.
 
    **Superseded by the per-zone selector surface (2026-09-18,
-   `docs/CT_CHANNEL_MASK_PLAN.md`).** The commissioning question an operator
+   `docs/CT_CHANNEL_MASK.md`).** The commissioning question an operator
    answers is no longer one whole-kiln `ct_topology` enum but three per-zone
    ones: `zone_ct_channel[0..2]` (params `0x0320-0x0322`, U8, 0-2), asked on
    `safety_commissioning_page.html` immediately below the `ct_topology` row

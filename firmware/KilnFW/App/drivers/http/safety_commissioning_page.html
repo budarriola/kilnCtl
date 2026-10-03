@@ -609,7 +609,7 @@ var GROUPS = [
        *
        * These three used to be 800/801/802, which is decimal for 0x0320-
        * 0x0322 -- unallocated param space at the time, and allocated to
-       * zone_ct_channel[0..2] by docs/CT_CHANNEL_MASK_PLAN.md step 2. That
+       * zone_ct_channel[0..2] by docs/CT_CHANNEL_MASK.md step 2. That
        * collision was never visible as a wrong number (the ct_cal branch
        * ignores paramsById entirely, and these inputs deliberately carry no
        * data-id so the save pass cannot SET_PARAM them), but fieldBlock()
@@ -743,7 +743,7 @@ var GROUPS = [
           'Kept, still written, and still what the guards use on any board that has not ' +
           'answered the per-zone selectors -- answer those three and this one stops ' +
           'deciding anything. It cannot describe a kiln where only SOME zones share a CT.' },
-      /* docs/CT_CHANNEL_MASK_PLAN.md step 6: the per-zone selector surface.
+      /* docs/CT_CHANNEL_MASK.md step 6: the per-zone selector surface.
        * These are real wire params (0x0320-0x0322 = 800-802), U8, range-
        * checked to 0-2 by the Pico's own config_params.c.
        *
@@ -1486,7 +1486,7 @@ function wireCtCalButtons() {
 // silently restaged under an answer of "no CTs" would write a mapping nobody
 // confirmed, the precise failure the backup-map mechanism was retired for.
 // 262-264 are ct_channel_map[0..2] (channel -> relay); 800-802 are
-// zone_ct_channel[0..2] (zone -> channel, docs/CT_CHANNEL_MASK_PLAN.md).
+// zone_ct_channel[0..2] (zone -> channel, docs/CT_CHANNEL_MASK.md).
 // Both are CT wiring answers, and both are unanswerable on a board that
 // declares no CTs, so both are struck out and CLEARED together -- leaving
 // the per-zone map typed-but-hidden under an answer of "no CTs" would

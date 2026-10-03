@@ -1,6 +1,6 @@
 # Scenario simulation implementation — progress, 2026-09-14
 
-Implementing `docs/SCENARIO_SIMULATION_PLAN.md` (commit `32b10a34`). Work items
+Implementing `docs/SCENARIO_SIMULATION.md` (commit `32b10a34`). Work items
 1-10 defined in its sec 7. This note records what was completed and why
 implementation was **stopped after WI-1**, before WI-2.
 
@@ -168,7 +168,7 @@ coordinator after a roadmap survey:**
 - **WI-9 is dropped, not merely deferred.** Its premise (a fuzzy/Ki mutual
   exclusion to remove) no longer exists: `88bb4333` deleted
   `adaptive_tune_ki.c`'s write path entirely, not just the guard. WI-9's
-  section in `docs/SCENARIO_SIMULATION_PLAN.md` is now struck through with a
+  section in `docs/SCENARIO_SIMULATION.md` is now struck through with a
   dated note; it was never implemented and must not be.
 - **WI-8 acceptance criterion (b) was rewritten in place** in the plan doc:
   the original text ("every `A_FUZZY_AT` row carries `ki_state = KI_WITHHELD`")
@@ -246,7 +246,7 @@ clean rebuild, unchanged.
 
 **CI budget:** `sim_scenarios_adaptive.exe` runs in a few seconds (11
 scenarios x 2 arms x 9 firings, each firing well under the per-firing cost
-`docs/SCENARIO_SIMULATION_PLAN.md` sec 8 already budgets) — it is its own
+`docs/SCENARIO_SIMULATION.md` sec 8 already budgets) — it is its own
 `build_host_tests.ps1` step (41st -> now 42nd `Invoke-HostTestExe` call, own
 object directory `atsim/`) rather than folded into `sim_scenarios.c`'s own
 budget line, so neither suite's ~60 s ceiling is put at risk by the other's
@@ -258,7 +258,7 @@ against the host stub).
 `SIM_ARM_PID_AT`/`SIM_ARM_FUZZY_AT` enum comments (previously said "WI-8"
 and "KI_WITHHELD until WI-9 lands"); `sim_scenarios.c`'s own header/banner/
 notes-column text (previously `WI8_PENDING`, now names the separate
-9-firing harness); `docs/SCENARIO_SIMULATION_PLAN.md`'s top-of-file Status
+9-firing harness); `docs/SCENARIO_SIMULATION.md`'s top-of-file Status
 line (previously "Status: PLAN. No production code is written by this
 document," stale since WI-1) and its WI-9 section (struck through, dated,
 explains why).

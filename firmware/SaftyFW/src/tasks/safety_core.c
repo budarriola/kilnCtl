@@ -431,7 +431,7 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
     // answers.
     s_guard_cfg.ct_topology_summed = (rec->ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED);
 
-    // zone_ct_channel (params 0x0320-0x0322, CT_CHANNEL_MASK_PLAN.md step 4).
+    // zone_ct_channel (params 0x0320-0x0322, CT_CHANNEL_MASK.md step 4).
     // config_store_effective_zone_ct_channel() is THE single place that knows
     // whether the stored bytes are an operator answer or the ct_topology-
     // derived fallback, so this is a straight projection of it -- do not

@@ -1,5 +1,5 @@
 // Tests for sim_plant.c's opt-in three-node model (WI-1,
-// docs/SCENARIO_SIMULATION_PLAN.md sec 2.1/2.2). Every constant in this file
+// docs/SCENARIO_SIMULATION.md sec 2.1/2.2). Every constant in this file
 // is a TEST FIXTURE -- never shipped, never written into zones_config, a
 // preset, or a firmware default.
 //

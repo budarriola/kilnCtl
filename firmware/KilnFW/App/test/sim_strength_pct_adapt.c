@@ -1,4 +1,4 @@
-// sim_strength_pct_adapt -- WI-10 (docs/SCENARIO_SIMULATION_PLAN.md sec 6.2/7,
+// sim_strength_pct_adapt -- WI-10 (docs/SCENARIO_SIMULATION.md sec 6.2/7,
 // docs/audits/strength_pct_adapter_design_2026-09-16.md).
 //
 // The DESIGN is the audit doc above; this file is its simulation arm. A

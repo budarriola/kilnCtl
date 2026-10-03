@@ -1,6 +1,6 @@
 # `strength_pct` cross-firing adapter: design (WI-10)
 
-Date: 2026-09-16. `docs/SCENARIO_SIMULATION_PLAN.md` sec 6.2/7 WI-10:
+Date: 2026-09-16. `docs/SCENARIO_SIMULATION.md` sec 6.2/7 WI-10:
 "Design (do not build) a `strength_pct` adapter, tested in simulation only."
 This document is the design; `firmware/KilnFW/App/test/sim_strength_pct_adapt.c`
 is the simulation arm that exercises it. **No firmware change. No hardware.**

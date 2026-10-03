@@ -1895,7 +1895,7 @@ static void test_s14(void)
  * what a real ADC-counts-derived reading looks like (e.g. 10.04A, not an
  * exact 10.0A), so a comparison that only happens to work against an exact
  * boundary cannot pass here by accident. */
-/* --- CT_CHANNEL_MASK_PLAN.md step 4: the generalised per-channel member()
+/* --- CT_CHANNEL_MASK.md step 4: the generalised per-channel member()
  * attribution. Three properties, in order of how much they can hurt:
  *   1. collapse -- with the committed map set to either legacy shape the
  *      generalised arm must produce exactly what the legacy arm produces;

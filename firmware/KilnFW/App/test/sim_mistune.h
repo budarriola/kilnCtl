@@ -1,6 +1,6 @@
 // sim_mistune -- TEST FIXTURE: never shipped; bench values never ship.
 //
-// WI-3 (docs/SCENARIO_SIMULATION_PLAN.md sec 2.4): gives "a PID tune that
+// WI-3 (docs/SCENARIO_SIMULATION.md sec 2.4): gives "a PID tune that
 // was never good" a reproducible, interpretable, directional meaning by
 // running the project's OWN tuning rule (pid_autotune_tune_from_fopdt(),
 // real production code -- LINKED here, never reimplemented) against a

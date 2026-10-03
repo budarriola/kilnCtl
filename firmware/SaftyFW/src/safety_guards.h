@@ -296,7 +296,7 @@ typedef struct {
     bool ct_topology_summed;
 
     /* zone_ct_channel (config params 0x0320-0x0322,
-     * docs/CT_CHANNEL_MASK_PLAN.md step 4): which physical CT channel (0-2)
+     * docs/CT_CHANNEL_MASK.md step 4): which physical CT channel (0-2)
      * each ZONE's current appears on. This generalises ct_topology_summed
      * above -- the identity map {0,1,2} IS per_zone and {2,2,2} IS summed --
      * and additionally expresses the split topologies (two CTs across three

@@ -103,7 +103,7 @@ void sim_plant_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float 
 }
 
 /* ------------------------------ WI-1 ------------------------------------
- * Three-node model (SCENARIO_SIMULATION_PLAN.md sec 2.1). Opt-in via
+ * Three-node model (SCENARIO_SIMULATION.md sec 2.1). Opt-in via
  * cfg->node_model == SIM_NODE_THREE; sim_plant_step() above is completely
  * untouched and remains the SIM_NODE_LEGACY path. */
 void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s)

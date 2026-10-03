@@ -1,4 +1,4 @@
-// sim_scenarios_adaptive -- WI-8 (docs/SCENARIO_SIMULATION_PLAN.md sec 4.1/7).
+// sim_scenarios_adaptive -- WI-8 (docs/SCENARIO_SIMULATION.md sec 4.1/7).
 //
 // Runs SIM_ARM_PID_AT and SIM_ARM_FUZZY_AT as a CHAIN OF NINE FIRINGS with
 // adaptation state carried across them, driving the REAL production

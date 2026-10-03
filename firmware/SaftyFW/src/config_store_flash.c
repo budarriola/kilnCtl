@@ -1434,7 +1434,7 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
-    // CT_CHANNEL_MASK_PLAN.md step 3: keep the legacy ct_topology byte in
+    // CT_CHANNEL_MASK.md step 3: keep the legacy ct_topology byte in
     // sync with zone_ct_channel on every write, so a board downgraded to
     // firmware that cannot see zone_ct_channel still reads a meaningful
     // topology (a genuine split collapsing to SUMMED, never PER_ZONE).
@@ -1651,7 +1651,7 @@ bool config_store_write_volatile(const config_store_record_t *rec, const char **
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
-    // CT_CHANNEL_MASK_PLAN.md step 3: keep the legacy ct_topology byte in
+    // CT_CHANNEL_MASK.md step 3: keep the legacy ct_topology byte in
     // sync with zone_ct_channel on every write, so a board downgraded to
     // firmware that cannot see zone_ct_channel still reads a meaningful
     // topology (a genuine split collapsing to SUMMED, never PER_ZONE).

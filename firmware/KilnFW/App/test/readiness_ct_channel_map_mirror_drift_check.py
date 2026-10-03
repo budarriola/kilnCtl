@@ -62,7 +62,7 @@ ESP_REL = "firmware/KilnFW/App/drivers/http/readiness_http.h"
 #
 # The cast width is matched loosely on purpose: fields_set widened from
 # uint16_t to uint32_t when CONFIG_STORE_FORMAT_VERSION went 2 -> 3
-# (docs/CT_CHANNEL_MASK_PLAN.md step 2), and pinning the old width here
+# (docs/CT_CHANNEL_MASK.md step 2), and pinning the old width here
 # turned a real mirror check into an extraction failure. Accept either.
 #   }
 PICO_RE = re.compile(

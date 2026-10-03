@@ -80,7 +80,7 @@ does not go into `zones_cfg_t`.**
 
 This is a choice, not a constraint. The owner has authorized a zones-schema
 bump for the per-zone CT channel field landing in parallel
-(`docs/CT_CHANNEL_MASK_PLAN.md`), having been shown and accepted the rollback
+(`docs/CT_CHANNEL_MASK.md`), having been shown and accepted the rollback
 hazard, so a bump is available to this feature too. It is declined anyway, for
 the reasons below — and the version constant is cited by name throughout this
 document rather than by number, because that parallel work may move it while
@@ -256,7 +256,7 @@ read as-is; nothing is added to it.
 Work is concurrently reworking CT presence and the
 `current_sensing_commissioned` gate in `firmware/SaftyFW/`, moving the meaning
 of "is this channel fitted" from a declared topology toward a derived per-zone
-selection — `docs/CT_CHANNEL_MASK_PLAN.md` replaces the binary `ct_topology`
+selection — `docs/CT_CHANNEL_MASK.md` replaces the binary `ct_topology`
 with a per-zone CT channel selection, so any split of zones across the three
 channels becomes expressible. **This plan therefore specifies the CT annotation against the
 concept — "which CT does this zone use, and is it fitted?" — and not against

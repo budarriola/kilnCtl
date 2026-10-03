@@ -849,7 +849,7 @@ change.
   `firmware/KilnFW/docs/PID_CONTROL.md`, `PID_EXPANSION_PLAN.md`,
   `AB_EXPERIMENT_CHECKLIST.md`, `PROJECT_STATUS.md`, `UI_PLAN.md`,
   `PER_ZONE_TARGET_DESIGN_STUDY.md`, `ROADMAP.md`, `CREDITS.md`,
-  `docs/SCENARIO_SIMULATION_PLAN.md`, `docs/ITER_TUNE_REDESIGN_PLAN.md`,
+  `docs/SCENARIO_SIMULATION.md`, `docs/ITER_TUNE_REDESIGN_PLAN.md`,
   `docs/SETUP_WIZARD.md`, `CLAUDE.md`.
 - **Do not delete this factorial suite** (`sim_factorial_*`,
   `run_sim_factorial.ps1`) as part of a fuzzy removal — it is the evidence for

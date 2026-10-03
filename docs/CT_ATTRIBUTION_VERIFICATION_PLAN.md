@@ -265,7 +265,7 @@ shared-CT case or a foreign load, neither of which is derivable. Its refusal is
 the correct behaviour and must be preserved, not softened.
 
 The verdict then compares the derived channel against the configured one. Because
-this plan lands after step 4 of `docs/CT_CHANNEL_MASK_PLAN.md` (owner decision 4),
+this plan lands after step 4 of `docs/CT_CHANNEL_MASK.md` (owner decision 4),
 the configured channel is per-zone `zone_ct_channel[z]`, with
 `member(ch) = {z : zone_ct_channel[z] == ch}`, not the `ct_channel_map` plus
 `ct_topology` pair it replaces. Read it through a single accessor rather than
@@ -411,7 +411,7 @@ The bump must therefore land together with a real v1→v2 branch that carries th
 existing pair forward and seeds the trim at unity. A bump without that migration
 would silently de-commission a commissioned board, which is the same
 "configuration quietly reverts to defaults" hazard recorded for the Pico
-rollback in `docs/CT_CHANNEL_MASK_PLAN.md`.
+rollback in `docs/CT_CHANNEL_MASK.md`.
 
 ### What the verification threshold then is
 
@@ -622,13 +622,13 @@ deny it. `ZONES_CFG_VERSION` is KilnFW's zones blob on the ESP32-S3
 (`firmware/KilnFW/App/drivers/persist/zones_config_json.h`); the schema that
 bumps for `zone_ct_channel` is **SaftyFW's `CONFIG_STORE_FORMAT_VERSION`, 2 to
 3** (`firmware/SaftyFW/src/config_store.h`), a different schema on a different
-processor, and that bump belongs to `docs/CT_CHANNEL_MASK_PLAN.md` step 2 — see
+processor, and that bump belongs to `docs/CT_CHANNEL_MASK.md` step 2 — see
 that plan's storage-decision section, revised at 7e517564, and the Pico-rollback
 cost it records. This plan inherits that bump by landing after it; it adds none
 of its own, because it adds a new ESP-side NVS store rather than widening any
 existing blob.
 
-It must be written against the accessor `docs/CT_CHANNEL_MASK_PLAN.md`
+It must be written against the accessor `docs/CT_CHANNEL_MASK.md`
 introduces, and lands after that plan's step 4, so the fingerprint hashes
 `zone_ct_channel` rather than the `ct_topology` byte that work supersedes.
 
@@ -735,6 +735,6 @@ questions for the owner in this document.
    `SAFETY_CT_CAL_BLOB_VERSION` 1→2 step that must ship with a real migration.
    Full derivation in "The response threshold" above.
 4. **Land order: confirmed.** This plan lands after step 4 of
-   `docs/CT_CHANNEL_MASK_PLAN.md`, so the fingerprint hashes `zone_ct_channel`
+   `docs/CT_CHANNEL_MASK.md`, so the fingerprint hashes `zone_ct_channel`
    rather than the `ct_topology` byte that work replaces, and the fitted
    predicate it builds on is `config_store_ct_channel_fitted()` from bdded44b.

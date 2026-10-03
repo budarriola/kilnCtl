@@ -31,7 +31,7 @@ extern "C" {
  * silent. */
 #define SIM_PLANT_DELAY_MAX_STEPS 128
 
-/* SCENARIO_SIMULATION_PLAN.md WI-1: opt-in three-node model (element / bulk
+/* SCENARIO_SIMULATION.md WI-1: opt-in three-node model (element / bulk
  * load / sensor tip), selected per-plant via sim_plant_cfg_t::node_model.
  * SIM_NODE_LEGACY (0, the default) takes the ORIGINAL one-node code path in
  * sim_plant_step() completely unchanged -- not a three-node model run with
@@ -55,7 +55,7 @@ typedef struct {
     float sensor_delay_s;        /* transport delay between element and thermocouple reading */
     float sensor_lag_tau_s;      /* first-order lag on the thermocouple reading itself (thermal mass of the TC) */
 
-    /* -------- SIM_NODE_THREE only (SCENARIO_SIMULATION_PLAN.md sec 2.1/2.2) -------- */
+    /* -------- SIM_NODE_THREE only (SCENARIO_SIMULATION.md sec 2.1/2.2) -------- */
     sim_node_model_t node_model;  /* SIM_NODE_LEGACY (0) default */
     float c_e_j_per_c;   /* element/near-element gas capacity C_e */
     float c_l_j_per_c;   /* bulk load (ware + refractory) capacity C_l, before load_mass_mult */
@@ -114,7 +114,7 @@ void sim_plant_reset(sim_plant_state_t *state, const sim_plant_cfg_t *cfg);
  * general-purpose variable-timestep integrator. */
 void sim_plant_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s);
 
-/* WI-1: the opt-in three-node step (SCENARIO_SIMULATION_PLAN.md sec 2.1).
+/* WI-1: the opt-in three-node step (SCENARIO_SIMULATION.md sec 2.1).
  * Only valid when cfg->node_model == SIM_NODE_THREE -- the caller is
  * responsible for choosing which step function to call per plant; this file
  * does not dispatch on node_model itself, so SIM_NODE_LEGACY plants must go

@@ -189,7 +189,7 @@ static safety_rate_guard_meta_blob_t s_rate_guard_meta;
  * 3 -> 4 (2026-09-08, owner request): tc_offset_c (0x010A) appended at the
  * END of the table, same no-remap-hazard shape as the 2 -> 3 bump.
  *
- * 5 -> 6 (2026-09-18, docs/CT_CHANNEL_MASK_PLAN.md step 2): zone_ct_channel
+ * 5 -> 6 (2026-09-18, docs/CT_CHANNEL_MASK.md step 2): zone_ct_channel
  * [0..2] (0x0320-0x0322) appended at the END of the table, same tail-append
  * discipline as every bump above. */
 #define SAFETY_CFG_STORE_VERSION 6u
@@ -319,7 +319,7 @@ static const safety_cfg_table_row_t SAFETY_CFG_PARAM_TABLE[] = {
      * installation, which cannot see a broken line. The Pico is the
      * authority on the value; this table only names it. */
     { 0x0212, KILNLINK_PARAM_TYPE_U8, "estop_active_level" },
-    /* 0x0320-0x0322 zone_ct_channel[0..2] -- docs/CT_CHANNEL_MASK_PLAN.md
+    /* 0x0320-0x0322 zone_ct_channel[0..2] -- docs/CT_CHANNEL_MASK.md
      * step 2. Which physical CT channel (0-2) each zone's current is read
      * on, superseding the kiln-wide ct_topology enum (0x031F, which new
      * firmware keeps writing as a derived label so an older board still

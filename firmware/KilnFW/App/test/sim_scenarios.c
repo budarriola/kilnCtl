@@ -1,4 +1,4 @@
-// sim_scenarios -- WI-4/5/6/7 (docs/SCENARIO_SIMULATION_PLAN.md sec 4.3, 7).
+// sim_scenarios -- WI-4/5/6/7 (docs/SCENARIO_SIMULATION.md sec 4.3, 7).
 //
 // Runner + scenario table + arm selection, S0-S12, all six arms. See
 // sim_scenario_table.h for the data table and its "adding a scenario needs
@@ -8,7 +8,7 @@
 //   - SIM_ARM_PID_AT / SIM_ARM_FUZZY_AT run ONE firing here, in THIS
 //     six-arm comparison table, identical to SIM_ARM_PID / SIM_ARM_FUZZY50
 //     respectively -- adaptive_tune is never invoked in this file. WI-8
-//     (docs/SCENARIO_SIMULATION_PLAN.md) is DONE, but as its own separate
+//     (docs/SCENARIO_SIMULATION.md) is DONE, but as its own separate
 //     harness, sim_scenarios_adaptive.c/.exe: a chain of 9 firings per
 //     scenario with adaptation state carried across them, driving the REAL
 //     adaptive_tune_zone_tick()/adaptive_tune_run_end() against a

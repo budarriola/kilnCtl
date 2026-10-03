@@ -52,7 +52,7 @@ static void zone_sweep_task_set_zone_index(void *ctx, uint8_t zi)
  * unmodified per-zone-CT behaviour. */
 static bool s_ct_topology_summed = false;
 
-/* docs/CT_CHANNEL_MASK_PLAN.md step 5: the committed per-zone "which physical
+/* docs/CT_CHANNEL_MASK.md step 5: the committed per-zone "which physical
  * CT channel does this zone's current appear on" map, sampled fresh at the
  * start of every run exactly like s_ct_topology_summed above.
  * s_zone_ct_channel_valid is the gate, and it is the safety property of this
@@ -113,12 +113,12 @@ static bool zone_cfg_ct_topology_row_set(void)
     return false;
 }
 
-/* The wire id of zone_ct_channel[zi] -- docs/CT_CHANNEL_MASK_PLAN.md step 2,
+/* The wire id of zone_ct_channel[zi] -- docs/CT_CHANNEL_MASK.md step 2,
  * 0x0320-0x0322, U8, value 0-2. One place, same discipline as
  * ZONE_KCT_PARAM_ID/ZONE_CT_MAP_PARAM_ID below. */
 #define ZONE_CT_CHANNEL_PARAM_ID(zi) ((uint16_t)(0x0320u + (zi)))
 
-/* docs/CT_CHANNEL_MASK_PLAN.md step 5 -- the per-zone CT channel map, read
+/* docs/CT_CHANNEL_MASK.md step 5 -- the per-zone CT channel map, read
  * from the same committed cache as zone_cfg_committed_ct_topology() above so
  * that a change committed on the Pico is picked up by the very next sweep,
  * exactly the way a topology change already is.
@@ -253,7 +253,7 @@ static void zone_sweep_task_record_normal(void *ctx, uint8_t zi, float avg_a)
     (void)ctx;
     uint8_t shared_ch = 0u;
     if (zone_sweep_shared_ch_for_zone(zi, &shared_ch)) {
-        /* CT_COMMISSIONING_PLAN.md step 3 / CT_CHANNEL_MASK_PLAN.md step 5:
+        /* CT_COMMISSIONING_PLAN.md step 3 / CT_CHANNEL_MASK.md step 5:
          * on a shared channel the normal comes from that channel alone
          * (zone_sweep_task_record_ct_channels() below), not from
          * sample_current()'s ct_mask-based sum -- avg_a here is simply not
@@ -333,7 +333,7 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
     }
     uint8_t shared_ch = 0u;
     if (zone_sweep_shared_ch_for_zone(zi, &shared_ch)) {
-        /* CT_COMMISSIONING_PLAN.md step 3 / CT_CHANNEL_MASK_PLAN.md step 5: a
+        /* CT_COMMISSIONING_PLAN.md step 3 / CT_CHANNEL_MASK.md step 5: a
          * SHARED channel has no per-relay channel mapping to derive at all --
          * two or more zones read on one CT, so the one-relay-one-channel
          * check (GUARD_TEST_MATRIX.md sec 3.3) is skipped entirely rather
@@ -964,7 +964,7 @@ static uint8_t zone_sweep_plan_k_ct_summed(float *out_k, char *note, size_t note
     return (uint8_t)(1u << ch);
 }
 
-/* docs/CT_CHANNEL_MASK_PLAN.md step 5: the member()-aware planner, used
+/* docs/CT_CHANNEL_MASK.md step 5: the member()-aware planner, used
  * whenever a per-zone CT map is committed. It replaces the CHOICE between the
  * two planners below, not their arithmetic.
  *
@@ -1859,7 +1859,7 @@ static void zone_sweep_task(void *arg)
      * this sample is genuinely an idle baseline. */
     s_ct_topology_summed = (zone_cfg_committed_ct_topology() != 0u);
     memset(s_ct_idle_a, 0, sizeof(s_ct_idle_a));
-    /* CT_CHANNEL_MASK_PLAN.md step 5: the committed per-zone map, read fresh
+    /* CT_CHANNEL_MASK.md step 5: the committed per-zone map, read fresh
      * on the same cadence and for the same reason as the topology byte above.
      * Sampled BEFORE the idle baseline because whether an idle sample is
      * needed at all depends on it. */
