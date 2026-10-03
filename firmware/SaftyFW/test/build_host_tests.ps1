@@ -423,6 +423,42 @@ try {
     & $configStoreFlashExe
     $configStoreFlashExit = $LASTEXITCODE
 
+    # bootloader/recovery_update.c's own host test -- a SEPARATE executable: it
+    # #includes the real recovery_update.c (to reach its static dispatch/status
+    # entry points) against bare-metal SDK stubs (stubs\bootloader_sdk_stub:
+    # XIP_BASE is a RAM array, flash erase/program have real flash semantics),
+    # and defines flash_range_*/uart_*/time_us_64 itself. Links the real
+    # persist.c/metadata.c/crc32.c and the pure update decision modules, so the
+    # slot-linkage gate and revert paths run the shipped code.
+    $blRecoveryStubDir = Join-Path $testDir "stubs\bootloader_sdk_stub"
+    $blRecoveryExe = Join-Path $outDir "bootloader_recovery_update_tests.exe"
+    $blRecoveryObjDir = Join-Path $outDir "bootloader_recovery_update_obj"
+    New-Item -ItemType Directory -Force -Path $blRecoveryObjDir | Out-Null
+    $blRecoverySources = @(
+        (Join-Path $testDir "test_bootloader_recovery_update_main.c"),
+        (Join-Path $testDir "test_bootloader_recovery_update.c"),
+        (Join-Path $bootDir "persist.c"),
+        (Join-Path $bootDir "metadata.c"),
+        (Join-Path $bootDir "crc32.c"),
+        (Join-Path $updateDir "image_header.c"),
+        (Join-Path $updateDir "received_ranges.c"),
+        (Join-Path $updateDir "update_receiver.c"),
+        (Join-Path $srcDir "tasks\update_task_slot_linkage.c"),
+        (Join-Path $commonSrcDir "kilnlink_frame.c"),
+        (Join-Path $commonSrcDir "kilnlink_crc.c")
+    )
+    $blRecoverySourceArgs = ($blRecoverySources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $blRecoveryCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+        "/I `"$blRecoveryStubDir`" /I `"$bootDir`" /I `"$updateDir`" /I `"$srcDir\tasks`" " +
+        "/I `"$commonIncDir`" /I `"$testDir`" " +
+        "/Fo:`"$blRecoveryObjDir\\`" /Fe:`"$blRecoveryExe`" $blRecoverySourceArgs"
+    cmd.exe /c $blRecoveryCmd
+    if ($LASTEXITCODE -ne 0) {
+        throw "bootloader recovery_update host test build failed"
+    }
+    & $blRecoveryExe
+    $blRecoveryExit = $LASTEXITCODE
+
     # Each executable above prints its own "all passed"/"ALL PASS" line on
     # success, so whichever one happens to run last leaves that string as the
     # visible console tail even when an EARLIER executable failed -- the exit
@@ -434,6 +470,7 @@ try {
         "kilnlink_fuzz_payloads.exe"   = $fuzzExit
         "hal_spi_pico_tests.exe"       = $halSpiPicoExit
         "config_store_flash_tests.exe" = $configStoreFlashExit
+        "bootloader_recovery_update_tests.exe" = $blRecoveryExit
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
@@ -452,7 +489,10 @@ try {
     if ($halSpiPicoExit -ne 0) {
         exit $halSpiPicoExit
     }
-    exit $configStoreFlashExit
+    if ($configStoreFlashExit -ne 0) {
+        exit $configStoreFlashExit
+    }
+    exit $blRecoveryExit
 } finally {
     Exit-BuildLock -Lock $buildLock
 }
