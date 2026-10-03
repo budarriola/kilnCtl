@@ -23,6 +23,7 @@ from kilnctrl import recovery_http_client as rhc  # noqa: E402
 from kilnctrl import recovery_ota_auth_client as roac  # noqa: E402
 
 HOST = "192.0.2.7"
+BG_OK_REPLY = "ok, rebooting into new application image; boot_guard cleared and verified"
 SECRET = "unit-test-ap-secret"
 
 
@@ -504,6 +505,22 @@ class PicoAbortTest(_Base):
         self.assertTrue(board.posts[0]["password_given"])
         self.assertNoSecret(out)
 
+    def test_relay_self_abort_is_unverified_not_ok(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True),
+                                _pico(phase="aborted", busy=False,
+                                      error="browser stopped polling status: update aborted")],
+                          post_reply={"status": 200, "text": "abort requested"})
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertIn("browser stopped polling", out)
+
+    def test_operator_abort_text_still_ok(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True),
+                                _pico(phase="aborted", busy=False, error="update aborted")],
+                          post_reply={"status": 200, "text": "abort requested"})
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("ok - "), out)
+
     def test_idle_relay_sends_no_post(self):
         board = FakeBoard()
         out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
@@ -611,7 +628,7 @@ class PushEspImageTest(_Base):
 
     def test_ok_when_application_answers(self):
         board = FakeBoard(status=[_status(), _status(), _unreachable(), _not_found()],
-                          post_reply={"status": 200, "text": "ok, rebooting into new application image"})
+                          post_reply={"status": 200, "text": BG_OK_REPLY})
         out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
         self.assertTrue(out.startswith("ok - "), out)
         self.assertEqual(len(board.posts), 1)
@@ -676,6 +693,45 @@ class PushEspImageTest(_Base):
         out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
         self.assertTrue(out.startswith("FAILED"), out)
         self.assertIn("422", out)
+
+    def test_boot_guard_not_cleared_is_ok_with_warning(self):
+        for text in ("ok, rebooting into new application image; boot_guard clear failed (erased but "
+                     "read-back not verified)", "ok, rebooting into new application image"):
+            board = FakeBoard(status=[_status(), _status(), _unreachable(), _not_found()],
+                              post_reply={"status": 200, "text": text})
+            out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+            self.assertTrue(out.startswith("ok-with-warning"), out)
+            self.assertIn("boot_guard", out)
+            self.assertNotIn("ok - ", out)
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _not_found()],
+                          post_reply={"status": 200, "text": "ok, rebooting into new application "
+                                      "image; boot_guard clear failed (erased but read-back not verified)"})
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertIn("clear failed (erased but read-back not verified)", out)
+
+    def test_mid_stream_rejection_warns_app_may_be_erased_with_app_valid(self):
+        for code in (400, 422, 500):
+            board = FakeBoard(status=[_status(), _status(app_valid=False, app_present=False)],
+                              post_error=roac.RecoveryOtaAuthError(f"HTTP {code}", code, "x"))
+            out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+            self.assertTrue(out.startswith("FAILED"), out)
+            self.assertIn("partition", out)
+            self.assertIn("recovery_status", out)
+            self.assertIn("app_valid=False", out)
+
+    def test_mid_stream_rejection_status_reread_failure_still_warns(self):
+        board = FakeBoard(status=[_status(), _unreachable()],
+                          post_error=roac.RecoveryOtaAuthError("HTTP 400", 400, "lost"))
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertIn("do NOT trust a reboot", out)
+        self.assertIn("could not re-read status", out)
+
+    def test_pre_erase_refusal_has_no_erase_warning(self):
+        board = FakeBoard(post_error=roac.RecoveryOtaAuthError("HTTP 403", 403, "bad MAC"))
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertNotIn("erased", out)
+        self.assertEqual(board.status_gets, 1)  # preflight only, no re-read
 
     def test_back_in_recovery_is_failed(self):
         board = FakeBoard(status=[_status(), _status(), _unreachable(), _status()])

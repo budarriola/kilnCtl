@@ -111,6 +111,39 @@ def _post_error(path: str, exc: "roac.RecoveryOtaAuthError") -> str:
     return f"FAILED: POST {path} -- {exc}"
 
 
+#: recovery_pico.c should_stop(): the relay's own abort when the browser stops
+#: polling. finish_stopped() ends in phase "aborted" with this error text, which
+#: is indistinguishable by phase from an operator abort.
+RELAY_SELF_ABORT_TEXT = "browser stopped polling"
+
+#: recovery_http.c ota_esp_post(): reply is "ok, rebooting into new application
+#: image; boot_guard <cleared and verified | boot_guard clear failed (...)>".
+BOOT_GUARD_CLEARED_TEXT = "boot_guard cleared and verified"
+
+#: HTTP statuses the board answers BEFORE ota_esp_post() invalidates/erases
+#: `app` (auth refusal, Pico busy). Any other board-reported failure may have
+#: left `app` partly erased.
+_PRE_ERASE_STATUSES = (401, 403, 409, 429)
+
+
+def _boot_guard_outcome(text: str) -> str:
+    """The boot_guard part of the board's push reply, or a note when absent."""
+    idx = text.find("boot_guard")
+    return text[idx:] if idx >= 0 else "reply does not mention boot_guard"
+
+
+def _app_may_be_erased_note(host: str) -> str:
+    """Appended to a push FAILED message: `app` may already be partly erased.
+    Re-reads status so the report carries app_valid."""
+    note = ("\nWARNING: the board may already have erased part of the `app` partition before this failure; "
+            "do NOT trust a reboot until recovery_status shows app_valid=True")
+    try:
+        st = rhc.get_status(host)
+    except rhc.RecoveryHttpError as exc:
+        return note + f" (could not re-read status: {exc})"
+    return note + f" (re-read just now: app_valid={st.get('app_valid')!r}, app_present={st.get('app_present')!r})"
+
+
 def _reply_lost(exc: "roac.RecoveryOtaAuthError") -> bool:
     """True when the signed POST was sent but no HTTP status came back
     (timeout, reset): the board may have acted, so this is never a plain
@@ -454,8 +487,9 @@ def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_
     (bool only). Reads both status routes first; if the relay is not busy
     there is nothing to abort and NO POST is sent (reported, not an error).
     After the POST it polls /api/recovery/pico/status for a terminal phase:
-      aborted         -> "ok"
-      done            -> NOT aborted: the transfer finished first (reported)
+      aborted         -> "ok", unless the error text says the relay aborted
+                         itself ("browser stopped polling"): then UNVERIFIED
+      done           -> NOT aborted: the transfer finished first (reported)
       failed          -> the relay had already failed (reported)
       outcome_unknown -> UNKNOWN (END was sent, result lost; check the Pico)
       still running at `wait_s` / contact lost / reply lost with no terminal
@@ -507,6 +541,11 @@ def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_
             return (f"UNKNOWN: relay still running {wait_s:g}s after the abort request ({_fmt_pico(last)}) "
                     f"-- NOT confirmed aborted")
     if phase == "aborted":
+        if RELAY_SELF_ABORT_TEXT in str(last.get("error", "")):
+            return (f"UNVERIFIED: relay reports aborted, but its error text says the RELAY aborted itself "
+                    f"({last.get('error')!r}), not necessarily in answer to this POST (reply "
+                    f"{reply['text']!r}); the transfer is stopped either way, but this abort request is "
+                    f"not proven to be the cause ({_fmt_pico(last)}) (host={resolved})")
         if lost_reply:
             return (f"UNKNOWN: the abort reply was lost ({lost_reply}) but the relay now reports "
                     f"aborted ({_fmt_pico(last)}); likely this abort, not proven (host={resolved})")
@@ -589,6 +628,10 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     mid-upload, or a board silent by `wait_s` -> UNKNOWN/UNVERIFIED, never ok
     (read recovery_status: app_valid says whether the image landed).
     This does NOT prove the new application is healthy beyond answering HTTP.
+    A 200 reply that does not say boot_guard was cleared and verified is
+    reported "ok-with-warning". A board-reported failure past the auth/busy
+    gates (400/422/500...) FAILED message warns that `app` may be partly erased
+    and includes a fresh app_valid read.
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_push_esp_image (rewrites the application partition and reboots)")
@@ -622,7 +665,10 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
         reply = roac.recovery_push_esp_image(resolved, image, pw, timeout=ESP_PUSH_TIMEOUT_S)
     except roac.RecoveryOtaAuthError as exc:
         if not _reply_lost(exc):
-            return _post_error("/api/ota/esp", exc)
+            msg = _post_error("/api/ota/esp", exc)
+            if exc.status in _PRE_ERASE_STATUSES:
+                return msg  # refused before the board touched `app`
+            return msg + _app_may_be_erased_note(resolved)
         reply = {"status": None, "text": f"<reply lost: {exc}>"}
     verdict, detail = _poll_restart(resolved, wait_s)
     prefix = f"{len(image)} bytes (host={resolved})"
@@ -630,6 +676,11 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
         return (f"UNKNOWN: the upload reply was lost ({reply['text']}); afterward the board is "
                 f"'{verdict}' {detail} -- NOT confirmed; read recovery_status (app_valid) -- {prefix}")
     if verdict == "app":
+        if BOOT_GUARD_CLEARED_TEXT not in reply["text"]:
+            return (f"ok-with-warning - the application is answering ({detail}) but boot_guard was NOT "
+                    f"confirmed cleared: {_boot_guard_outcome(reply['text'])!r}; the counter may still "
+                    f"push the next boot toward recovery -- run recovery_boot_guard_reset or read "
+                    f"boot_guard_get; board replied {reply['text']!r}; {prefix}")
         return f"ok - board replied {reply['text']!r} and the application is answering ({detail}); {prefix}"
     if verdict == "recovery_again":
         return (f"FAILED: board replied {reply['text']!r} but came back as the RECOVERY image ({detail}) -- "

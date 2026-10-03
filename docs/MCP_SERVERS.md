@@ -456,7 +456,12 @@ reply is UNKNOWN. `recovery_push_esp_image` (POST `/api/ota/esp`, context `esp`)
 absolute path, does not start with the ESP image magic 0xE9, or exceeds the board's reported `max_upload` (the `app`
 partition size), refuses while the Pico relay is busy, and counts success only when the recovery routes then answer
 404 (the application is up); back-as-recovery or never restarted is FAILED, and a lost reply or silent board is
-UNKNOWN/UNVERIFIED. Unit tests use a fake board only
+UNKNOWN/UNVERIFIED. Hardening (2026-10-02): `recovery_pico_abort` reports UNVERIFIED, not ok, when the relay's
+`aborted` phase carries the error text "browser stopped polling" (`recovery_pico.c` `should_stop()`: the relay aborted
+itself, not necessarily because of this POST). `recovery_push_esp_image` appends a loud "`app` may be partly erased"
+warning, with a fresh `app_valid` read from the status route, to any board-reported failure other than the
+pre-erase refusals (401/403/409/429), and reports `ok-with-warning` (never plain ok) when the 200 reply does not say
+"boot_guard cleared and verified". Unit tests use a fake board only
 (`tools/PcTools/tests/test_mcp_server_recovery.py`); never run against hardware.
 
 **Recovery-image signer in PcTools:**
