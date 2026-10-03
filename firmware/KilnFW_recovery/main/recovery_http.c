@@ -83,6 +83,8 @@
 #include "recovery_text.h"
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
+#include "recovery_auth.h"
+#include "lwip/sockets.h"
 
 static const char *TAG = "recovery_http";
 
@@ -108,7 +110,26 @@ static const char *const WIFI_RESET_KEYS[] = {
 #define BOOT_GUARD_KEY_LEGACY "count"
 #define BOOT_GUARD_NAMESPACE_LEGACY "boot_guard"
 
-static ota_auth_nonce_state_t s_nonce;
+// Per-client nonce ring (recovery_auth.h): a challenge only replaces the SAME
+// client's previous nonce, so one host cannot retire another's mid-handshake.
+static rauth_nonce_ring_t s_ring;
+
+// Opaque key for the peer of `req`: its IPv4 address. 0 if the socket has no
+// readable peer, which is then one shared client.
+static uint32_t client_key(httpd_req_t *req)
+{
+    int fd = httpd_req_to_sockfd(req);
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof(ss);
+    if (fd < 0 || getpeername(fd, (struct sockaddr *)&ss, &len) != 0) {
+        return 0;
+    }
+    if (ss.ss_family == AF_INET) {
+        return (uint32_t)((struct sockaddr_in *)&ss)->sin_addr.s_addr;
+    }
+    // This lwIP build has IPv6 off (no sockaddr_in6); any other family is one shared client.
+    return 0;
+}
 // ONE lockout counter shared by every authenticated route (owner/review
 // decision 2026-10-02, reversing the earlier per-route split): all five routes
 // guard the same secret (the AP-password-derived key), so a guesser spreading
@@ -234,7 +255,7 @@ static esp_err_t challenge_get(httpd_req_t *req)
 {
     uint8_t nonce[OTA_AUTH_NONCE_LEN];
     esp_fill_random(nonce, sizeof(nonce));
-    ota_auth_nonce_issue(&s_nonce, nonce, now_ms());
+    (void)rauth_ring_issue(&s_ring, client_key(req), nonce, now_ms());
 
     char hex[OTA_AUTH_NONCE_LEN * 2 + 1];
     hex_encode(nonce, sizeof(nonce), hex);
@@ -311,7 +332,9 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
         return false;
     }
 
-    ota_auth_nonce_check_t check = ota_auth_nonce_check(&s_nonce, t);
+    rauth_nonce_slot_t *slot = rauth_ring_find(&s_ring, client_key(req));
+    ota_auth_nonce_check_t check =
+        slot ? ota_auth_nonce_check(&slot->st, t) : OTA_AUTH_NONCE_NOT_ISSUED;
     if (check != OTA_AUTH_NONCE_OK) {
         httpd_resp_set_status(req, "403 Forbidden");
         *out_err = httpd_resp_send(req, "no valid challenge outstanding", HTTPD_RESP_USE_STRLEN);
@@ -323,7 +346,7 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     // secret (recovery_auth.h) -- so a board with no ap_pass still has working,
     // authenticated routes instead of a 500 behind an OPEN AP.
     if (!recovery_wifi_get_auth_secret(ap_password, sizeof(ap_password), NULL)) {
-        ota_auth_nonce_invalidate(&s_nonce);
+        ota_auth_nonce_invalidate(&slot->st);
         secure_zero(ap_password, sizeof(ap_password));
         httpd_resp_set_status(req, "500 Internal Server Error");
         *out_err = httpd_resp_send(req, "no auth secret available", HTTPD_RESP_USE_STRLEN);
@@ -354,7 +377,7 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     // there is none), so a route's parameters (the Pico upload's ?crc=&slot=)
     // are authenticated, not just the route. The browser's signed() appends the
     // same "?query" to the context. Static: httpd runs handlers on one task
-    // (like s_nonce/s_lockout), and this keeps the extra bytes off its stack.
+    // (like s_ring/s_lockout), and this keeps the extra bytes off its stack.
     //
     // The statics `msg` and `q` are shared by every call, which is only safe
     // because all handlers run on the ONE httpd task: recovery_http_start()
@@ -369,7 +392,7 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
     static uint8_t msg[OTA_AUTH_NONCE_LEN + 16 + 1 + AUTH_QUERY_MAX];
     size_t query_len = httpd_req_get_url_query_len(req);
     if (query_len > AUTH_QUERY_MAX) {
-        ota_auth_nonce_invalidate(&s_nonce);
+        ota_auth_nonce_invalidate(&slot->st);
         ota_auth_lockout_record_failure(lockout, t);
         secure_zero(ap_password, sizeof(ap_password));
         secure_zero(key, sizeof(key));
@@ -389,23 +412,25 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
                                     HTTPD_RESP_USE_STRLEN);
         return false;
     }
-    memcpy(msg, s_nonce.nonce, OTA_AUTH_NONCE_LEN);
-    memcpy(msg + OTA_AUTH_NONCE_LEN, context, context_len);
-    size_t msg_len = OTA_AUTH_NONCE_LEN + context_len;
-    if (query_len > 0) {
-        msg[msg_len++] = '?';
-        static char q[AUTH_QUERY_MAX + 1];
-        if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
-            ota_auth_nonce_invalidate(&s_nonce);
-            ota_auth_lockout_record_failure(lockout, t);
-            secure_zero(ap_password, sizeof(ap_password));
-            secure_zero(key, sizeof(key));
-            httpd_resp_set_status(req, "400 Bad Request");
-            *out_err = httpd_resp_send(req, "could not read query string", HTTPD_RESP_USE_STRLEN);
-            return false;
-        }
-        memcpy(msg + msg_len, q, query_len);
-        msg_len += query_len;
+    static char q[AUTH_QUERY_MAX + 1];
+    if (query_len > 0 && httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
+        ota_auth_nonce_invalidate(&slot->st);
+        ota_auth_lockout_record_failure(lockout, t);
+        secure_zero(ap_password, sizeof(ap_password));
+        secure_zero(key, sizeof(key));
+        httpd_resp_set_status(req, "400 Bad Request");
+        *out_err = httpd_resp_send(req, "could not read query string", HTTPD_RESP_USE_STRLEN);
+        return false;
+    }
+    size_t msg_len = rauth_build_msg(msg, sizeof(msg), slot->st.nonce, context, q, query_len);
+    if (msg_len == 0) {
+        ota_auth_nonce_invalidate(&slot->st);
+        secure_zero(ap_password, sizeof(ap_password));
+        secure_zero(key, sizeof(key));
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        *out_err = httpd_resp_send(req, "internal error: auth message too long",
+                                    HTTPD_RESP_USE_STRLEN);
+        return false;
     }
     uint8_t expected_mac[32];
     hmac_sha256(key, sizeof(key), msg, msg_len, expected_mac);
@@ -415,7 +440,7 @@ static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
 
     // Invalidate the nonce unconditionally before deciding pass/fail --
     // UPDATE_PROTOCOL.md section 2 step 4.
-    ota_auth_nonce_invalidate(&s_nonce);
+    ota_auth_nonce_invalidate(&slot->st);
 
     bool mac_ok = ota_auth_constant_time_equal(claimed_mac, expected_mac, sizeof(expected_mac));
     secure_zero(expected_mac, sizeof(expected_mac));
@@ -1178,7 +1203,7 @@ static esp_err_t pico_abort_post(httpd_req_t *req)
 
 void recovery_http_start(void)
 {
-    // recovery_authenticate_request()'s static msg/q buffers (and s_nonce,
+    // recovery_authenticate_request()'s static msg/q buffers (and s_ring,
     // s_lockout) assume every handler runs on this ONE httpd task. Starting a
     // second server would silently break that, so refuse it outright.
     static bool s_started;

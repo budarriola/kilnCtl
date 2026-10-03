@@ -314,13 +314,18 @@ def check_single_lockout(recovery_text: str) -> list:
 
 # --- query-string binding check ----------------------------------------------
 
-def check_query_binding(recovery_text: str, page_text: str) -> list:
+def check_query_binding(recovery_text: str, page_text: str, auth_text: str = "") -> list:
     """The MAC must cover the request's query string on BOTH sides: the firmware
-    helper appends "?" + query to the nonce||context message, and the page's
-    signed() appends the same "?query" to the context. Otherwise the Pico
-    upload's ?crc=&slot= (the CRC and the operator's target slot) travel
-    unauthenticated. Returns a list of problems (empty if none)."""
+    helper appends "?" + query to the nonce||context message (the message is
+    built by recovery_auth.c's rauth_build_msg(), host-tested by
+    check_recovery_auth.ps1), and the page's signed() appends the same "?query"
+    to the context. Otherwise the Pico upload's ?crc=&slot= (the CRC and the
+    operator's target slot) travel unauthenticated. Returns a list of problems
+    (empty if none)."""
     problems = []
+    for marker in ("out[n++] = '?';", "memcpy(out + n, query, query_len);"):
+        if marker not in auth_text:
+            problems.append(f"recovery_auth.c rauth_build_msg() no longer appends the query: missing {marker!r}")
     m = re.search(
         r"static bool recovery_authenticate_request\([^)]*\)\n\{\n(.*?)\n\}\n",
         recovery_text,
@@ -328,7 +333,7 @@ def check_query_binding(recovery_text: str, page_text: str) -> list:
     )
     body = m.group(1) if m else ""
     for marker in ("httpd_req_get_url_query_len(req)",
-                   "msg[msg_len++] = '?';",
+                   "rauth_build_msg(msg, sizeof(msg), slot->st.nonce, context, q, query_len)",
                    "hmac_sha256(key, sizeof(key), msg, msg_len, expected_mac);"):
         if marker not in body:
             problems.append(f"firmware MAC no longer covers the query string: missing {marker!r}")
@@ -472,7 +477,9 @@ def main() -> int:
 
     page_path = recovery_path.parent / "recovery_page.html"
     page_text = page_path.read_text(encoding="utf-8") if page_path.is_file() else ""
-    query_problems = check_query_binding(recovery_text, page_text)
+    auth_path = recovery_path.parent / "recovery_auth.c"
+    auth_text = auth_path.read_text(encoding="utf-8") if auth_path.is_file() else ""
+    query_problems = check_query_binding(recovery_text, page_text, auth_text)
     if query_problems:
         print("RECOVERY OTA-AUTH MIRROR DRIFT CHECK: FAILED (query-string binding)")
         for p in query_problems:

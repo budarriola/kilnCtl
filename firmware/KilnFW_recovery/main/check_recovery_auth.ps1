@@ -86,21 +86,49 @@ function Test-Mutant {
 
 try {
     $auth = Join-Path $here "recovery_auth.c"
-    $good = Build-And-Run -Impls @($auth) -Tag "real"
+    $otaAuth = Join-Path $here "ota_auth.c"
+    $good = Build-And-Run -Impls @($auth, $otaAuth) -Tag "real"
     Write-Host $good.Output
     if ($good.Exit -ne 0) { throw "test_recovery_auth reported failures (exit $($good.Exit))." }
     if ($good.Output -notmatch "RESULT pass=(\d+) fail=0") {
         throw "test_recovery_auth never printed a passing RESULT line."
     }
     $passCount = [int]$Matches[1]
-    if ($passCount -lt 15) { throw "only $passCount assertions ran -- test looks gutted." }
+    if ($passCount -lt 60) { throw "only $passCount assertions ran -- test looks gutted." }
 
+    $o = @("ota_auth.c")
+    $r = @("recovery_auth.c")
     # Short ap_pass (< 8) must not be usable (would start a weak/failing WPA2 AP).
     Test-Mutant -File "recovery_auth.c" -Needle "n >= RAUTH_AP_PASS_MIN" -Replacement "n >= 1" `
-        -Others @() -Tag "minlen"
+        -Others $o -Tag "minlen"
     # Build key must feed the preimage.
     Test-Mutant -File "recovery_auth.c" -Needle "memcpy(out + plen, build_key, klen);" `
-        -Replacement "(void)build_key;" -Others @() -Tag "key"
+        -Replacement "(void)build_key;" -Others $o -Tag "key"
+    # Query must be signed.
+    Test-Mutant -File "recovery_auth.c" -Needle "memcpy(out + n, query, query_len);" `
+        -Replacement "(void)query;" -Others $o -Tag "query"
+    # Ring: a client must reuse its own slot.
+    Test-Mutant -File "recovery_auth.c" -Needle "pick = rauth_ring_find(r, client);" `
+        -Replacement "pick = NULL;" -Others $o -Tag "ringown"
+    # Ring: eviction must take the OLDEST nonce.
+    Test-Mutant -File "recovery_auth.c" -Needle "- pick->seq) < 0" `
+        -Replacement "- pick->seq) > 0" -Others $o -Tag "ringold"
+    # Ring: a spent/expired slot must be reclaimed before a live one is evicted.
+    Test-Mutant -File "recovery_auth.c" -Needle "now_ms) != OTA_AUTH_NONCE_OK) {" `
+        -Replacement "now_ms) == 12345) {" -Others $o -Tag "ringspent"
+    # Nonce: single use.
+    Test-Mutant -File "ota_auth.c" -Needle "s->used = true;" -Replacement "s->used = false;" `
+        -Others $r -Tag "reuse"
+    # Nonce: 30 s expiry.
+    Test-Mutant -File "ota_auth.c" -Needle "> OTA_AUTH_NONCE_EXPIRY_MS)" `
+        -Replacement "> OTA_AUTH_NONCE_EXPIRY_MS * 100u)" -Others $r -Tag "expiry"
+    # Lockout: doubling backoff.
+    Test-Mutant -File "ota_auth.c" -Needle "backoff_ms *= 2u;" -Replacement "backoff_ms *= 1u;" `
+        -Others $r -Tag "backoff"
+    # Lockout: 15 min cap.
+    # (both the in-loop clamp and the final clamp name the macro, so replace every use)
+    Test-Mutant -File "ota_auth.c" -Needle "OTA_AUTH_LOCKOUT_MAX_MS" `
+        -Replacement "0x7FFFFFFFu" -Others $r -Tag "cap"
 
     Write-Host "check_recovery_auth: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0
