@@ -2092,6 +2092,22 @@ def judge_dual_reset_trip(
 OTA_SELF_PUSH_REFUSAL_WINDOW_S = 120.0
 
 
+#: Slack, seconds, for the "uptime advanced by about the elapsed time" check
+#: (clock granularity, polling latency between the two readbacks).
+OTA_UPTIME_CONTINUITY_SLACK_S = 5.0
+
+
+def uptime_continuous(uptime_before: Optional[float], uptime_after: Optional[float],
+                      elapsed_s: Optional[float]) -> bool:
+    """True when ``uptime_s`` advanced by at least the wall-clock time the
+    action took (minus slack). `after >= before` alone misses a reboot early
+    in a long push: a board that was up 20 s, reboots, and is read 60 s later
+    reads 40 s (> 20) despite having restarted."""
+    if uptime_before is None or uptime_after is None or elapsed_s is None:
+        return False
+    return uptime_after >= uptime_before + elapsed_s - OTA_UPTIME_CONTINUITY_SLACK_S
+
+
 def judge_ota_self_push_refused(
     refusal_form: Optional[str],
     status_code: Optional[int],
@@ -2142,9 +2158,12 @@ def judge_ota_self_push_refused(
         )
     if uptime_before is None or uptime_after is None:
         return CaseResult(Verdict.FAIL, reason="uptime_s unreadable before or after the push; cannot rule out a reboot", observed=observed)
-    if uptime_after < uptime_before:
+    if not uptime_continuous(uptime_before, uptime_after, elapsed_s):
         return CaseResult(
-            Verdict.FAIL, reason=f"board rebooted: uptime_s {uptime_before!r} -> {uptime_after!r}", observed=observed,
+            Verdict.FAIL,
+            reason=(f"board rebooted or uptime_s did not advance with the push: uptime_s {uptime_before!r} -> "
+                    f"{uptime_after!r} over {elapsed_s!r} s"),
+            observed=observed,
         )
     if crash_before is None or crash_after is None:
         return CaseResult(Verdict.FAIL, reason="/api/crash_report unreadable before or after the push", observed=observed)

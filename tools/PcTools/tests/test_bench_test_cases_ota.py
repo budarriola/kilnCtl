@@ -559,6 +559,19 @@ class _OtaHttpErr(Exception):
         self.status = status
 
 
+def _reset_err():
+    """OtaHttpError(status=None) caused by URLError(ConnectionResetError), as
+    ota_http_client._push_image() raises on a mid-upload close."""
+    import urllib.error
+    try:
+        try:
+            raise urllib.error.URLError(ConnectionResetError(10054, "reset"))
+        except urllib.error.URLError as inner:
+            raise _OtaHttpErr(None, "unreachable: reset") from inner
+    except _OtaHttpErr as e:
+        return e
+
+
 class _RaisingPushClient(_FakeOtaClient):
     def __init__(self, exc, **kw):
         super().__init__(**kw)
@@ -585,7 +598,7 @@ class Ote01Test(unittest.TestCase):
     def _ctx(self, **overrides):
         ctx = {
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5",
-            "ota_image_path": "/tmp/image.bin",
+            "ota_image_path": "/tmp/image.bin", "_isfile_fn": lambda p: True,
             "ota_http_client": _RaisingPushClient(_OtaHttpErr(409, "refused: single-slot")),
             "_now": _Clock(),
             "_esp_uptime_fn": lambda: 100.0,
@@ -623,7 +636,7 @@ class Ote01Test(unittest.TestCase):
         self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
 
     def test_connection_reset_with_live_board_passes_with_note(self):
-        ctx = self._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(None, "unreachable: reset")))
+        ctx = self._ctx(ota_http_client=_RaisingPushClient(_reset_err()))
         result = C._case_ote01(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         self.assertEqual(result.observed["refusal_form"], "connection_closed")
@@ -635,7 +648,7 @@ class Ote01Test(unittest.TestCase):
         def uptime():
             return next(uptimes)  # second read raises StopIteration -> unreadable
 
-        ctx = self._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(None, "unreachable")),
+        ctx = self._ctx(ota_http_client=_RaisingPushClient(_reset_err()),
                         _esp_uptime_fn=uptime)
         self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
 
@@ -652,10 +665,38 @@ class Ote01Test(unittest.TestCase):
         self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
 
     def test_slow_refusal_passes_but_over_ceiling_fails(self):
-        r = C._case_ote01(self._ctx(_now=_Clock(step=30.0)))
+        uptimes = iter([100.0, 130.0])
+        r = C._case_ote01(self._ctx(_now=_Clock(step=30.0), _esp_uptime_fn=lambda: next(uptimes)))
         self.assertEqual(r.verdict, Verdict.PASS, r.reason)
         self.assertGreater(r.observed["elapsed_s"], 5.0)
-        self.assertEqual(C._case_ote01(self._ctx(_now=_Clock(step=130.0))).verdict, Verdict.FAIL)
+        uptimes = iter([100.0, 230.0])
+        self.assertEqual(C._case_ote01(self._ctx(_now=_Clock(step=130.0), _esp_uptime_fn=lambda: next(uptimes))).verdict,
+                         Verdict.FAIL)
+
+    def test_early_reboot_with_larger_uptime_after_fails(self):
+        """uptime 20 -> 40 over a 60 s push: after > before but the board
+        restarted early in the push."""
+        uptimes = iter([20.0, 40.0])
+        ctx = self._ctx(_now=_Clock(step=60.0), _esp_uptime_fn=lambda: next(uptimes))
+        r = C._case_ote01(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("rebooted", r.reason)
+
+    def test_no_such_file_error_is_not_connection_closed(self):
+        ctx = self._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(None, "no such file: x")))
+        r = C._case_ote01(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertNotEqual(r.observed["refusal_form"], "connection_closed")
+
+    def test_type_error_is_not_connection_closed(self):
+        ctx = self._ctx(ota_http_client=_RaisingPushClient(TypeError("bad arg")))
+        r = C._case_ote01(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertNotEqual(r.observed["refusal_form"], "connection_closed")
+
+    def test_skips_when_image_is_not_a_file(self):
+        r = C._case_ote01(self._ctx(_isfile_fn=lambda p: False))
+        self.assertEqual(r.verdict, Verdict.SKIP)
 
     def test_interlock_not_ok_skips_before_pushing(self):
         """Plan doc section 6 rule 1: the interlock is confirmed ok
@@ -1149,7 +1190,7 @@ class Ote10Test(unittest.TestCase):
     def _transport_ctx(self, uptimes, crashes, user_exc=True):
         def push(cookie):
             if cookie == "sid-admin" or user_exc:
-                raise _OtaHttpErr(None, "unreachable: reset")
+                raise _reset_err()
             return _OtaPushResult(False, 403)
 
         u, c = iter(uptimes), iter(crashes)
@@ -1171,9 +1212,19 @@ class Ote10Test(unittest.TestCase):
         self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
 
     def test_admin_connection_closed_unreadable_fails(self):
-        ctx = self._ctx(_push_with_session_fn=lambda cookie: (_ for _ in ()).throw(_OtaHttpErr(None)),
+        ctx = self._ctx(_push_with_session_fn=lambda cookie: (_ for _ in ()).throw(_reset_err()),
                         _esp_uptime_fn=lambda: None, _crash_report_fn=lambda: None)
         self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
+
+    def test_admin_early_reboot_with_larger_uptime_fails(self):
+        ctx = self._transport_ctx([20.0, 40.0], [{"p": 0}, {"p": 0}], user_exc=False)
+        ctx["_now"] = _Clock(step=60.0)
+        self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
+
+    def test_admin_non_transport_error_fails(self):
+        for exc in (_OtaHttpErr(None, "no such file: x"), TypeError("bad")):
+            ctx = self._ctx(_push_with_session_fn=lambda cookie, e=exc: (_ for _ in ()).throw(e))
+            self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
 
     def test_user_transport_error_fails(self):
         ctx = self._transport_ctx([10.0, 12.0], [{"p": 0}, {"p": 0}], user_exc=True)

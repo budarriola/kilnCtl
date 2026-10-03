@@ -182,6 +182,28 @@ def _default_readiness_trip_ok_fn(ctx: dict) -> Optional[bool]:
     return not any("trip" in str(key).lower() or "trip" in str(label).lower() for key, label, _detail in blocked)
 
 
+def _is_transport_reset(exc: BaseException, _depth: int = 0) -> bool:
+    """True only for a genuine mid-upload socket close: ConnectionResetError,
+    BrokenPipeError or http.client.RemoteDisconnected, found on the exception
+    itself, a URLError ``.reason``, or the ``__cause__``/``__context__``
+    chain. An OtaHttpError carrying an HTTP status is never one. A mistyped
+    image path ("no such file"), an empty image, a TypeError or a refused
+    connection are NOT transport resets."""
+    import http.client
+    import urllib.error
+    if _depth > 6 or exc is None:
+        return False
+    if getattr(exc, "status", None) is not None:
+        return False
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected)):
+        return True
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, BaseException):
+        if _is_transport_reset(exc.reason, _depth + 1):
+            return True
+    return (_is_transport_reset(exc.__cause__, _depth + 1) if exc.__cause__ is not None else False) or \
+           (_is_transport_reset(exc.__context__, _depth + 1) if exc.__context__ is not None else False)
+
+
 def _esp_uptime_s(ctx: dict, host) -> Optional[float]:
     """ESP ``uptime_s`` from GET /api/status (None when the field is absent)."""
     return _dashboard_client(ctx).get_status(host).get("uptime_s")
@@ -505,6 +527,8 @@ def _case_ote01(ctx: dict) -> CaseResult:
     image_path = ctx.get("ota_image_path")
     if not image_path:
         return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E01")
+    if not (ctx.get("_isfile_fn") or os.path.isfile)(image_path):
+        return CaseResult(Verdict.SKIP, reason=f"ota_image_path is not a file: {image_path!r}")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
@@ -541,14 +565,15 @@ def _case_ote01(ctx: dict) -> CaseResult:
             refusal_form = "http_409"
         elif status_code is not None:
             refusal_form = "http_other"
-        else:
+        elif _is_transport_reset(exc):
             # ota_http_client._push_image() turns a mid-upload reset
             # (ECONNRESET / EPIPE) into OtaHttpError(status=None,
-            # "unreachable"). That is indistinguishable here from a board
-            # that is genuinely down, so it is only "connection_closed"
-            # when the readbacks below prove the board is alive; the judge
-            # FAILs on unreadable uptime_s / crash report.
+            # "unreachable") caused by a URLError wrapping the socket error.
+            # Only that is "connection_closed", and the judge still requires
+            # readbacks proving the board is alive and was not rebooted.
             refusal_form = "connection_closed"
+        else:
+            refusal_form = f"error:{type(exc).__name__}"
     elapsed_s = now() - t0
 
     uptime_after = _read(uptime_fn)
@@ -1081,8 +1106,11 @@ def _case_ote10(ctx: dict) -> CaseResult:
     uptime_before = _read(uptime_fn)
     crash_before = _read(crash_fn)
 
+    import time as _time
+    now = ctx.get("_now") or _time.monotonic
     admin_ok = None
     admin_note = None
+    t0 = now()
     try:
         admin_result = push_with_session_fn(admin_cookie)
         admin_ok = bool(getattr(admin_result, "ok", False)) or getattr(admin_result, "status_code", None) == 409
@@ -1090,13 +1118,13 @@ def _case_ote10(ctx: dict) -> CaseResult:
         status = getattr(exc, "status", None)
         if status == 409:
             admin_ok = True
-        elif status is None:
+        elif _is_transport_reset(exc):
             # Mid-upload close: no response readable. Accepted past the auth
             # gate only if the board is provably alive and unharmed.
+            elapsed_s = now() - t0
             uptime_after = _read(uptime_fn)
             crash_after = _read(crash_fn)
-            alive = (uptime_before is not None and uptime_after is not None
-                     and uptime_after >= uptime_before
+            alive = (J.uptime_continuous(uptime_before, uptime_after, elapsed_s)
                      and crash_before is not None and crash_after == crash_before)
             admin_ok = alive
             if alive:

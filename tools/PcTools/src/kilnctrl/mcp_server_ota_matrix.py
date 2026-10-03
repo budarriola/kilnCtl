@@ -360,7 +360,9 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
     `ota_image_path`/`ota_corrupt_image_path`/`ota_truncated_image_path`/
     `ota_wrong_build_image_path`/`ota_image_build` (ESP cases) and/or
     `ota_pico_image_path`/`ota_pico_image_commit`/
-    `ota_pico_corrupt_image_path` (Pico cases) to let more of the matrix run;
+    `ota_pico_corrupt_image_path` (Pico cases) to let more of the matrix run
+    (`ota_image_build` is no longer used by OT-E01, which only needs
+    `ota_image_path` to push at the running app and expect a 409);
     `cases` can narrow to just the ones you have images for.
 
     Refuses with an `error:` line unless `confirm is True` exactly (not
