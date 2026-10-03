@@ -10,6 +10,8 @@ because later waves that DO write board state plug into this same
 from __future__ import annotations
 
 import dataclasses
+import os
+import threading
 import time
 import traceback
 from typing import Any, Dict, List, Optional
@@ -26,6 +28,48 @@ def _safe_call(fn, *args, **kwargs) -> "tuple[bool, Any]":
         return True, fn(*args, **kwargs)
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
+
+
+#: Wall-clock bound, in seconds, on everything that runs between taking the
+#: board lock and the first case (preflight) and on teardown. Each individual
+#: probe has its own serial/HTTP timeout, but the sum of ~10 probes against a
+#: wedged link (or a probe that blocks on a lock, a held serial hub, or a
+#: socket opened with no timeout) is unbounded -- ROADMAP B3 (2026-10-02): a
+#: heat run took `.board_lock` and then sat forever with no run directory.
+#: Overridable per run via ctx["preflight_timeout_s"] / ctx["teardown_timeout_s"].
+DEFAULT_PREFLIGHT_TIMEOUT_S = 180.0
+DEFAULT_TEARDOWN_TIMEOUT_S = 120.0
+
+#: Name of the always-written, timestamped, flushed-per-line progress log in
+#: the run directory (created right after the board lock is taken).
+RUNNER_LOG_NAME = "runner.log"
+
+
+class _StepTimeout(Exception):
+    """A bounded step did not finish inside its deadline."""
+
+
+def _run_bounded(fn, timeout_s: float, label: str):
+    """Run `fn()` on a daemon thread and wait at most `timeout_s`. Returns
+    its result, re-raises its exception, or raises `_StepTimeout`. The
+    abandoned thread cannot be killed; it is a daemon so it never keeps the
+    process alive, and the caller must treat the board state as unknown."""
+    box: Dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
+            box["exc"] = exc
+
+    t = threading.Thread(target=_target, name=f"bench-{label}", daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        raise _StepTimeout(f"{label} did not finish within {timeout_s:g} s")
+    if "exc" in box:
+        raise box["exc"]
+    return box.get("value")
 
 
 @dataclasses.dataclass
@@ -83,13 +127,53 @@ class BenchTestRunner:
         self.ctx = ctx
         self.logs_root = logs_root
         self.transcript: List[str] = []
+        self._runner_log_path: Optional[str] = None
+        self._step = "not started"
+        self._pf_board_before: Dict[str, Any] = {}
 
     def _log(self, line: str) -> None:
         self.transcript.append(line)
+        self._runner_log(line)
+
+    def _runner_log(self, line: str) -> None:
+        """Append one timestamped line to runner.log, flushed immediately so
+        a stall leaves the last completed step on disk. Best-effort: a log
+        write failure never takes down the run."""
+        path = self._runner_log_path
+        if path is None:
+            return
+        now = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{int(now * 1000) % 1000:03d}Z"
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{stamp} {line}\n")
+                f.flush()
+        except OSError:
+            pass
+
+    def _mark(self, step: str) -> None:
+        """Record the step about to start (named in a timeout message)."""
+        self._step = step
+        self._runner_log(f"step: {step}")
 
     # -- preflight (plan §2.4 step 1) --------------------------------------
 
     def preflight(self) -> "tuple[bool, str, dict]":
+        """Bounded wrapper over `_preflight_unbounded`: a stall anywhere in
+        the probes becomes a preflight FAILURE naming the step it stalled
+        in, never an indefinite hang while the board lock is held."""
+        timeout_s = float(self.ctx.get("preflight_timeout_s", DEFAULT_PREFLIGHT_TIMEOUT_S))
+        self._pf_board_before = {}
+        try:
+            return _run_bounded(self._preflight_unbounded, timeout_s, "preflight")
+        except _StepTimeout as exc:
+            reason = f"preflight stalled: {exc} (last step: {self._step})"
+            self._runner_log(reason)
+            board_before = dict(self._pf_board_before)
+            board_before["preflight_stall"] = reason
+            return False, reason, board_before
+
+    def _preflight_unbounded(self) -> "tuple[bool, str, dict]":
         """Best-effort, never raises: any probe that itself fails to reach
         the board is reported as a preflight failure rather than crashing
         the run. dry_run still executes preflight -- it is a read-only
@@ -97,7 +181,9 @@ class BenchTestRunner:
         ctx = self.ctx
         reasons: List[str] = []
         board_before: Dict[str, Any] = {}
+        self._pf_board_before = board_before
 
+        self._mark("preflight: resolve server module")
         srv = ctx.get("srv")
         if srv is None:
             try:
@@ -106,6 +192,7 @@ class BenchTestRunner:
             except Exception as exc:  # noqa: BLE001
                 return False, f"could not import kilnctrl.mcp_server: {exc}", board_before
 
+        self._mark("preflight: stale banner")
         ok, banner = _safe_call(srv._stale_banner)
         if ok and banner:
             reasons.append(f"MCP server reports stale: {banner.strip()}")
@@ -114,6 +201,7 @@ class BenchTestRunner:
         # "RUNNING" also matches inside "NOT RUNNING", and "trip_reason 0"
         # matched inside "trip_reason 10". `_running()`/`_active()` below
         # compare the actual state code the client decoded off the wire.
+        self._mark("preflight: profiles_get_exec_status")
         ok, exec_status = _safe_call(srv._profiles.get_exec_status)
         board_before["profiles_get_exec_status"] = (
             f"state={exec_status.state_name}" if ok else f"error: {exec_status}"
@@ -121,6 +209,7 @@ class BenchTestRunner:
         if ok and exec_status.state_name == "running":
             reasons.append("profiles_get_exec_status is not idle")
 
+        self._mark("preflight: autotune_get_status")
         ok, at_status = _safe_call(srv._autotune.get_status)
         board_before["autotune_get_status"] = (
             f"state={at_status.state_name}" if ok else f"error: {at_status}"
@@ -128,6 +217,7 @@ class BenchTestRunner:
         if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling"):
             reasons.append("autotune_get_status is active")
 
+        self._mark("preflight: safety_get_status")
         ok, safety_status = _safe_call(srv._safety.get_status)
         board_before["safety_get_status"] = (
             f"link_up={safety_status.link_up}" if ok else f"error: {safety_status}"
@@ -135,6 +225,7 @@ class BenchTestRunner:
         if ok and not safety_status.link_up:
             reasons.append("safety link is not up")
 
+        self._mark("preflight: safety_get_diag")
         ok, safety_diag = _safe_call(srv._safety.get_diag)
         board_before["safety_get_diag"] = (
             f"trip_reason={safety_diag.trip_reason}" if ok else f"error: {safety_diag}"
@@ -144,6 +235,7 @@ class BenchTestRunner:
             # exactly S6a mid-clear, which no wave-0 case attempts.
             reasons.append(f"a safety trip is latched (trip_reason={safety_diag.trip_reason}); operator must clear it")
 
+        self._mark("preflight: get_heap_status (HTTP)")
         ok, crash = _safe_call(srv.get_heap_status, ctx.get("host"))
         board_before["get_heap_status"] = crash if ok else f"error: {crash}"
 
@@ -155,6 +247,7 @@ class BenchTestRunner:
         # required" -- the crash/readiness checks run regardless of preset.
         # `ctx["capability_preflight_run"]` lets tests inject a fake
         # report producer instead of hitting a real board.
+        self._mark("preflight: capability_preflight (HTTP)")
         from .. import capability_preflight  # noqa: PLC0415
 
         cp_run = ctx.get("capability_preflight_run", capability_preflight.run_preflight)
@@ -166,6 +259,7 @@ class BenchTestRunner:
         # (report.append_log_line) -- best-effort, never a second board
         # round trip: cp_report already carries the ESP's fw_build.
         board_before["esp_fw_build"] = getattr(cp_report.board, "fw_build", None) if ok else None
+        self._mark("preflight: safety_get_fw_version")
         ok_pico, pico_fw = _safe_call(getattr(srv._safety, "get_fw_version", lambda: None))
         board_before["safety_get_fw_version"] = (
             pico_fw.describe() if ok_pico and hasattr(pico_fw, "describe") else
@@ -188,6 +282,18 @@ class BenchTestRunner:
     # -- teardown (plan §2.4 step 3) ---------------------------------------
 
     def teardown(self) -> dict:
+        """Bounded wrapper over `_teardown_unbounded` (same stall rationale
+        as `preflight`); a stall is reported in board_after, not raised."""
+        timeout_s = float(self.ctx.get("teardown_timeout_s", DEFAULT_TEARDOWN_TIMEOUT_S))
+        self._mark("teardown")
+        try:
+            return _run_bounded(self._teardown_unbounded, timeout_s, "teardown")
+        except _StepTimeout as exc:
+            msg = f"teardown stalled: {exc}"
+            self._runner_log(msg)
+            return {"teardown_stall": msg}
+
+    def _teardown_unbounded(self) -> dict:
         """try/finally-called by run(); read-only in wave 0 (no case here
         writes board state), so this only takes the closing snapshot -- the
         stop/restore calls are present so later waves' writing cases share
@@ -281,14 +387,28 @@ class BenchTestRunner:
         # regardless of whether the HTTP reply was ever read, so the lock
         # must track the run's real lifetime, not the reply.
         lock = board_lock.acquire(suite, tag=tag, logs_root=self.logs_root)
-        if lock is not None and lock.reclaimed_from is not None:
-            self._log(
-                f"board lock: reclaimed stale lock from dead {lock.reclaimed_from.describe()}"
-            )
-        self._log(f"# bench_test run {run_id} (suite={suite}, dry_run={dry_run})")
-        self._log(f"requested cases: {', '.join(requested)}")
-
+        # Everything after the acquire is inside the try so the lock is
+        # released on EVERY exit path, including an exception from the log
+        # setup below.
         try:
+            # Create the run directory and runner.log immediately (ROADMAP
+            # B3): a stall anywhere before the first case now leaves a
+            # timestamped trail naming the last step, instead of nothing.
+            run_dir = self.ctx["run_dir"]
+            try:
+                os.makedirs(run_dir, exist_ok=True)
+                self._runner_log_path = os.path.join(run_dir, RUNNER_LOG_NAME)
+            except OSError as exc:
+                self._runner_log_path = None
+                self.transcript.append(f"WARNING: could not create run dir {run_dir}: {exc}")
+            self._log(f"board lock: {'held' if lock is not None else 'not needed (read-only suite)'}")
+            if lock is not None and lock.reclaimed_from is not None:
+                self._log(
+                    f"board lock: reclaimed stale lock from dead {lock.reclaimed_from.describe()}"
+                )
+            self._log(f"# bench_test run {run_id} (suite={suite}, dry_run={dry_run})")
+            self._log(f"requested cases: {', '.join(requested)}")
+
             outcome = self._run_locked(
                 suite=suite, requested=requested, run_id=run_id, started=started,
                 dry_run=dry_run, allow_heat=allow_heat,
