@@ -149,7 +149,10 @@ class ConfirmGateTest(_Base):
 
     def _tools(self):
         img = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
-        img.write(b"x" * 64)
+        # 0xE9 first: an image every LATER local check accepts, so the
+        # confirm gate is the only thing that can refuse here (a bad-magic
+        # image let push_esp_image's gate test pass with the gate removed).
+        img.write(b"\xe9" + b"x" * 63)
         img.close()
         self.addCleanup(os.unlink, img.name)
         return [
