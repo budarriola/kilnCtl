@@ -104,9 +104,10 @@ choice. Original requirements below.
 
 **W5 bench verification.** Done 2026-10-03 (`docs/BENCH_TEST_LOG.md`): recovery flashed with
 `flash_recovery`, forced with `recovery_enter`, LCD page, AP join with the LCD passphrase, status
-route, relays verified off, `recovery_exit`. Remaining: ESP upload, Pico upload (blocked, the
-debug probe is disconnected), `wifi_reset`, the boot_guard threshold switch, the "wifi_storage_fail"
-path and a no-PSRAM boot (if the fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
+route, relays verified off, `recovery_exit`. ESP upload through the recovery AP also verified
+2026-10-03 (`docs/BENCH_TEST_LOG.md`, "ESP upload through the recovery image (W5)"). Remaining: the
+boot_guard threshold switch, Pico upload (blocked, the SaftyFW debug probe is disconnected),
+`wifi_reset`, the "wifi_storage_fail" path and a no-PSRAM boot (if the fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
 PSRAM and the no-PSRAM boot. Measure the `app` erase time and idle-task starvation, then
 decide on `CONFIG_ESP_TASK_WDT_PANIC`.
 

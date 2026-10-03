@@ -497,6 +497,8 @@ should read the passphrase from the environment variable `KILNCTL_RECOVERY_AP_PA
 never echoed or logged; report presence as a bool only). `recovery_exit(host=192.168.4.1)` reports
 UNVERIFIED even on success: the recovery image is AP-only, and the AP address disappears when the app boots onto
 the LAN. Verify afterwards over the STA address (`recovery_status` answers 404, the running partition is `app`).
+`recovery_push_esp_image` behaves the same way: it only polls the AP address, so it reports UNVERIFIED after a successful push;
+verify the application over its STA address afterward with `get_fw_version`/`boot_guard_get`.
 Standing host checks:
 `check_recovery_passphrase.ps1` (generator) and `check_recovery_page_crc.ps1` (the browser page carries the Pico CRC
 and no auth code).

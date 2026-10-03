@@ -55,6 +55,7 @@ the same way, and the `recovery_enter` MCP tool wraps the route (facade count
 `recovery_enter(confirm=True)` answered 200 and the board booted the recovery
 image; `recovery_exit` returned it to `app` with boot_guard cleared and verified.
 The boot_guard threshold switch itself was not exercised.
+The ESP upload path (`recovery_push_esp_image` over the recovery AP) was also verified on hardware 2026-10-03 (`docs/BENCH_TEST_LOG.md`, "ESP upload through the recovery image (W5)").
 
 ## Pico bootloader hardening (`79264f5f`..`d7d6e9fc`)
 
