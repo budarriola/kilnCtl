@@ -16,9 +16,6 @@ progress{width:100%}
 <p class="w">The main application is not running. Upload a KilnCtrl.bin to restore it.</p>
 <fieldset><h2>Status</h2><pre id="st">loading...</pre>
 <button onclick="status()">Refresh</button></fieldset>
-<fieldset><h2>Authentication</h2>
-<label>AP password <input id="pw" type="password" autocomplete="off"></label>
-<div>Every action below is signed in this page; the password never leaves it.</div></fieldset>
 <fieldset><h2>Upload ESP application</h2>
 <input id="f" type="file" accept=".bin"><br>
 <button id="up" onclick="upload()">Upload and boot</button>
@@ -33,38 +30,13 @@ progress{width:100%}
 <progress id="ppr" value="0" max="100"></progress><div id="ppp"></div>
 <div id="pst"></div><div id="pwarn" class="w"></div></fieldset>
 <fieldset><h2>Actions</h2>
-<button onclick="act('/api/recovery/exit','recovery-exit','Exit recovery and boot the application?')">Exit Recovery</button>
-<button onclick="act('/api/recovery/wifi_reset','wifi-reset','Forget the saved home Wi-Fi network and restart?')">Wi-Fi Reset</button></fieldset>
+<button onclick="act('/api/recovery/exit','Exit recovery and boot the application?')">Exit Recovery</button>
+<button onclick="act('/api/recovery/wifi_reset','Forget the saved home Wi-Fi network and restart?')">Wi-Fi Reset</button></fieldset>
 <pre id="log"></pre>
 <script>
-/*CRYPTO-BEGIN*/
-function R(x,n){return x>>>n|x<<32-n}
-function cat(a,b){var r=new Uint8Array(a.length+b.length);r.set(a);r.set(b,a.length);return r}
-function sha256(d){
-var K=[],H=[],i,j,c=2;
-for(;K.length<64;c++){for(j=2;j*j<=c&&c%j;j++);if(j*j>c){if(H.length<8)H.push(Math.pow(c,.5)*4294967296|0);K.push(Math.pow(c,1/3)*4294967296|0)}}
-var l=d.length,n=l+9+63>>6<<6,b=new Uint8Array(n),w=[],o,x,y,a,e,t,u;
-b.set(d);b[l]=128;u=l*8;b[n-4]=u>>>24;b[n-3]=u>>>16;b[n-2]=u>>>8;b[n-1]=u;
-for(o=0;o<n;o+=64){
-for(i=0;i<16;i++)w[i]=b[o+4*i]<<24|b[o+4*i+1]<<16|b[o+4*i+2]<<8|b[o+4*i+3];
-for(;i<64;i++){x=w[i-15];y=w[i-2];w[i]=w[i-16]+(R(x,7)^R(x,18)^x>>>3)+w[i-7]+(R(y,17)^R(y,19)^y>>>10)|0}
-a=H.slice();
-for(i=0;i<64;i++){e=a[4];
-t=a[7]+(R(e,6)^R(e,11)^R(e,25))+(e&a[5]^~e&a[6])+K[i]+w[i]|0;
-u=(R(a[0],2)^R(a[0],13)^R(a[0],22))+(a[0]&a[1]^a[0]&a[2]^a[1]&a[2])|0;
-a.unshift(t+u|0);a[4]=a[4]+t|0;a.pop()}
-for(i=0;i<8;i++)H[i]=H[i]+a[i]|0}
-var r=new Uint8Array(32);for(i=0;i<32;i++)r[i]=H[i>>2]>>>24-8*(i&3);return r}
-function hmac(k,m){if(k.length>64)k=sha256(k);
-var a=new Uint8Array(64),b=new Uint8Array(64),i;a.set(k);b.set(k);
-for(i=0;i<64;i++){a[i]^=54;b[i]^=92}
-return sha256(cat(b,sha256(cat(a,m))))}
+/*CRC-BEGIN*/
 function crc32(d){var c=-1,i,j;for(i=0;i<d.length;i++){c^=d[i];for(j=0;j<8;j++)c=c>>>1^-(c&1)&0xEDB88320}return(~c)>>>0}
-function utf8(s){return new TextEncoder().encode(s)}
-function hex(u){var s="";for(var i=0;i<u.length;i++)s+=(u[i]+256).toString(16).slice(1);return s}
-function unhex(s){var r=new Uint8Array(s.length/2);for(var i=0;i<r.length;i++)r[i]=parseInt(s.substr(2*i,2),16);return r}
-function deriveMac(pw,nonce,ctx){return hmac(hmac(utf8(pw),utf8("kilnctl-ota-v1")),cat(nonce,utf8(ctx)))}
-/*CRYPTO-END*/
+/*CRC-END*/
 var $=function(i){return document.getElementById(i)};
 function log(s){$("log").textContent+=s+"\n"}
 function xhr(m,u,h,body,prog){return new Promise(function(ok,no){
@@ -77,19 +49,14 @@ x.send(body)})}
 function status(){xhr("GET","/api/recovery/status").then(function(r){
 try{var j=JSON.parse(r.t);$("st").textContent=(j.nvs_unavailable?"NVS UNAVAILABLE (never erased by recovery; config unreadable, Wi-Fi settings not loaded)\n":"")+JSON.stringify(j,null,1)}catch(e){$("st").textContent=r.t}
 },function(e){$("st").textContent=e.message})}
-function signed(path,ctx,body,prog){
-var pw=$("pw").value;if(!pw)return Promise.reject(new Error("enter the AP password"));
-return xhr("GET","/api/ota/challenge").then(function(r){
-if(r.s!=200)throw new Error("challenge failed: "+r.s);
-var qi=path.indexOf("?");var mac=hex(deriveMac(pw,unhex(JSON.parse(r.t).nonce),qi<0?ctx:ctx+path.slice(qi)));
-return xhr("POST",path,{"X-Ota-Mac":mac},body,prog)})}
+function post(path,body,prog){return xhr("POST",path,{},body,prog)}
 function done(r){log(r.s+" "+r.t);if(r.s==200)log("The board is restarting; reload this page in a few seconds.")}
-function act(path,ctx,q){if(!confirm(q))return;
-signed(path,ctx,null).then(done,function(e){log(e.message)})}
+function act(path,q){if(!confirm(q))return;
+post(path,null).then(done,function(e){log(e.message)})}
 function upload(){var f=$("f").files[0];
 if(!f)return log("choose a .bin file first");
 $("up").disabled=true;$("pr").value=0;
-signed("/api/ota/esp","esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
+post("/api/ota/esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
 var pt=null,punk=false;
 function pshow(j){punk=j.phase=="outcome_unknown";var ab=document.getElementById("pab");if(ab)ab.textContent=(j.phase=="finishing"||j.phase=="retransmit")?"Stop (END sent: outcome will be UNKNOWN)":"Abort";var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
 if(j.total_bytes)t+=" "+j.bytes_sent+"/"+j.total_bytes+" bytes";
@@ -115,11 +82,11 @@ f.arrayBuffer().then(function(ab){var b=new Uint8Array(ab);
 var c=("0000000"+crc32(b).toString(16)).slice(-8);
 var q="?crc="+c;var s=$("ps").value;if(s){if(!confirm("Write Pico slot "+s+"? The target cannot be verified. A wrong choice leaves the Pico unbootable until SWD."))return Promise.reject(new Error("cancelled"));q+="&slot="+s}
 log("Pico image "+b.length+" bytes, CRC32 "+c);
-return signed("/api/recovery/pico/upload"+q,"pico-upload",b,function(a,t){$("ppr").value=100*a/t;$("ppp").textContent="uploading "+a+" / "+t+" bytes"})})
+return post("/api/recovery/pico/upload"+q,b,function(a,t){$("ppr").value=100*a/t;$("ppp").textContent="uploading "+a+" / "+t+" bytes"})})
 .then(function(r){log(r.s+" "+r.t);
 if(r.s==202){$("ppp").textContent="uploaded; Pico transfer running";ppoll()}
 else{$("pwarn").textContent=r.t;$("pup").disabled=false}},
 function(e){log(e.message);$("pup").disabled=false})}
-function picoAbort(){signed("/api/recovery/pico/abort","pico-abort",null).then(function(r){log(r.s+" "+r.t);ppoll()},function(e){log(e.message)})}
+function picoAbort(){post("/api/recovery/pico/abort",null).then(function(r){log(r.s+" "+r.t);ppoll()},function(e){log(e.message)})}
 status();ppoll();
 </script></body></html>

@@ -28,9 +28,10 @@ update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT_PLA
   slot and refuses the wrong slot variant ("upload the other slot file").
 - A latched trip: recovery only shows the refusal. No CLEAR_TRIP in recovery.
 - At least 8 KB internal RAM free at runtime (owner rule, heap_internal min_free >= 8192 B).
-- Recovery keeps its own AP-password HMAC auth on its routes (the 2026-09-29 HMAC
-  retirement applied to the main app only). `recovery_ota_auth_mirror_drift_check.py` and
-  `check_recovery_ota_auth_mirror.ps1` stay.
+- **Recovery is UNAUTHENTICATED (owner decision 2026-10-02, supersedes the earlier "keeps its
+  own AP-password HMAC auth" decision):** "No password, no key. The esp should present its own
+  access point only, showing a random password on the LCD for the wifi access point." Physical
+  sight of the LCD is the only access control. See "Unauthenticated recovery" below.
 
 ## Waves
 
@@ -57,15 +58,15 @@ W2 starts.
 - First-chunk validation of the ESP upload: `esp_image_header_t` magic 0xE9, chip ESP32-S3,
   `esp_app_desc_t` project_name "KilnCtrl"; total size bounded by the `app` partition.
 - Routes: `recovery_exit`, status (why in recovery, counters, versions), upload.
-- Browser page with a self-contained JS SHA-256/HMAC (no SubtleCrypto on plain http).
-- Wi-Fi credential reset (HMAC-gated, Wi-Fi scope only).
+- Browser page (self-contained; the browser still computes the Pico CRC32).
+- Wi-Fi credential reset (Wi-Fi scope only).
 - New routes need the recovery server's handler cap checked.
 
 **W4 Pico relay.** Landed 2026-10-02, host-tested and target-built only; never run on a
 board (bench risks in W5). Code: `main/recovery_pico.c` (relay task),
 `main/recovery_pico_proto.c` (pure, host-tested by `check_recovery_pico_proto.ps1`),
 `components/kilnlink` (links CommonFW framing), routes `/api/recovery/pico/{upload,status,abort}`
-(contexts `pico-upload`, `pico-abort`). Deviations and facts: the whole image is buffered
+. Deviations and facts: the whole image is buffered
 and CRC-checked in PSRAM BEFORE the relay starts (202 returned, then status polled), not
 streamed live; DATA pace is `RPP_DATA_PACE_MS` (15 ms, bootloader) or `RPP_DATA_PACE_APP_MS` (40 ms, application: 4-deep queue drained per 100 ms wake); a lost COMPLETE after END is reported as outcome unknown (no ABORT); no REBOOT 0x29
 offer (the bootloader ignores it; the page says power-cycle); no CLEAR_TRIP; a missing
@@ -84,8 +85,7 @@ IDLE beacons and 5 s and never restarts during an erase; the pace delay is round
 whole ticks and also applies before END; relay buffers live in PSRAM with an 8 KB
 internal-free check after context allocation, task creation and UART install; the status
 JSON is built into one PSRAM buffer under the relay lock; a trip-pending refusal tells the
-operator to power-cycle (still no CLEAR_TRIP); the MAC covers the query string, so `?crc=` and
-`&slot=` are authenticated. SaftyFW follow-up (not done here, the bootloader is untouched):
+operator to power-cycle (still no CLEAR_TRIP). SaftyFW follow-up (not done here, the bootloader is untouched):
 the bootloader IDLE status should report `active_slot`, which would remove the operator
 choice. Original requirements below.
 - kilnlink UPDATE_BEGIN/DATA/END/ABORT/STATUS per `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
@@ -110,44 +110,29 @@ decide on `CONFIG_ESP_TASK_WDT_PANIC`.
 
 ## Audit fixes (2026-10-02)
 
-**Auth fallback secret (landed).** A `wifi_nvs` with no `ap_pass`, or one outside 8..63
-characters (WPA2 passphrase limits), no longer yields an OPEN AP plus HTTP 500 on every
-mutating route. The image derives a fallback secret and uses it both as the SoftAP WPA2
-passphrase and in place of `ap_pass` as the HMAC key material:
-
-```
-preimage = "kilnctl-recovery-auth-v1|" || BUILD_KEY || "|" || mac[6]
-secret   = lowercase hex of the first 8 bytes of SHA-256(preimage)      (16 characters)
-key      = HMAC-SHA256(secret, "kilnctl-ota-v1")      (the unchanged auth scheme from there)
-```
-
-`mac` is the factory eFuse base MAC (`esp_efuse_mac_get_default`, the same six bytes as the
-station MAC), raw bytes, not text. `BUILD_KEY` is `RECOVERY_AUTH_BUILD_KEY` in
-`main/recovery_wifi.c` (default `kilnctl-recovery-fallback-key-1`; override with
-`-DRECOVERY_AUTH_BUILD_KEY=...`). This is a defence against an OPEN AP, not a secret from
-anyone holding the binary and the board's MAC. `GET /api/recovery/status` reports
-`auth_secret_present` (stored `ap_pass` usable) and `auth_fallback` (its inverse); the LCD
-shows "AUTH: FALLBACK". Pure pieces: `main/recovery_auth.c`, host-tested by
-`check_recovery_auth.ps1`.
-
-PcTools mirror (TODO, not done): `recovery_ota_auth_client.py` still takes the AP password
-from its caller. A board that reports `auth_fallback: true` needs the client to derive the
-secret above from the board's MAC (the PC knows it from the AP BSSID or the status route) and
-`BUILD_KEY`. `recovery_ota_auth_mirror_drift_check.py` pins only the header, lockout,
-context and query markers of `recovery_authenticate_request()`, none of which changed, so it
-does not require this mirror yet.
-
-**Per-client nonce ring (landed).** `GET /api/ota/challenge` used to keep ONE global nonce, so
-any host that fetched a challenge retired the operator's nonce mid-handshake (a cheap denial of
-service). `main/recovery_auth.c` now holds a ring of `RAUTH_NONCE_SLOTS` (4) nonces keyed by the
-peer IPv4 address (`httpd_req_to_sockfd` + `getpeername`; key 0 when unreadable, which is one
-shared client). A challenge replaces only the SAME client's previous nonce; a full ring reclaims
-a spent or expired slot first and otherwise evicts the oldest live nonce. Single use and the 30 s
-expiry are still `ota_auth.c`'s. The lockout stays ONE shared counter (owner decision above), so
-a client cannot multiply guesses by changing address. Follow-up, not done (F-body): the MAC
-covers nonce, context and query string but not the request BODY, so an on-path attacker who
-has seen one authenticated upload's headers could in principle swap the body; a body digest in
-the MAC needs the PC client and page to change together and is deferred.
+**Unauthenticated recovery (landed 2026-10-02; supersedes the auth-fallback-secret and per-client
+nonce-ring sections that used to be here).** All HMAC challenge-response code is gone from the
+recovery image: the challenge route, nonce ring, `X-*` signature headers, lockout, the
+`ap_pass`-derived key, the eFuse fallback secret and the `auth_secret_present`/`auth_fallback`
+status fields. `GET /api/recovery/status` reports `auth_mode:"lcd_passphrase"`. The SoftAP:
+- AP only, WPA2-PSK; the STA interface is never created. Reason: the routes are open, so only a
+  client that joined the LCD-guarded AP may reach them; a station on a home network would expose
+  them. `esp_http_server` cannot be bound to one netif, so "no STA" is what makes the AP the only
+  path.
+- A fresh random 12-character passphrase per boot from a 32-character unambiguous alphabet
+  (`main/recovery_passphrase.c`, host-tested by `check_recovery_passphrase.ps1`), from
+  `esp_fill_random`. RAM only: never in HTTP, JSON, logs, serial or NVS (the driver's own config
+  copy is also kept in RAM via `esp_wifi_set_storage`). A stored `ap_pass` is ignored; the SSID
+  still comes from `wifi_nvs` `ap_ssid` (default `kilnctl-recovery`).
+- LCD (480x320, no scrolling): SSID and passphrase in a large font, the AP IP 192.168.4.1, the
+  Heat/relay status line and the latched hold-fault indication.
+- PcTools: `recovery_post_client.py` posts unsigned; no recovery tool reads
+  `KILNCTL_AP_PASSWORD`. No tool joins the AP; automation that does should read the passphrase
+  from `KILNCTL_RECOVERY_AP_PASSPHRASE`. Removed with the auth: `recovery_auth.c`, the
+  nonce-ring and mirror-drift checks. `check_recovery_page_crc.ps1` keeps the page-CRC test and
+  asserts the page carries no auth code.
+- Residual: nobody on the AP is authenticated; anyone who has seen the screen can flash the board.
+  Accepted by the owner.
 
 **Relay-hold watchdog (landed).** `recovery_io_hold_relays_off()` verified the SX1509 hold once
 at boot only. A 1 s task (`relay_hold`, priority 3, 3072 B stack) now reads RegDir/RegData back,

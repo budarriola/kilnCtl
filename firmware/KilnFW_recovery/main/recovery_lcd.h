@@ -30,26 +30,23 @@ extern "C" {
 #endif
 
 // Brings up SPI + panel and draws the full status screen (title, boot_guard
-// count, reset reason, crash/coredump presence, relay state, network line,
-// upload instruction). Requires recovery_io_hold_relays_off() to have run
+// count, reset reason, crash/coredump presence, relay state, SoftAP SSID and
+// passphrase, upload instruction). Requires recovery_io_hold_relays_off() to have run
 // (it owns I2C and the expander). Logs and returns on failure; a display
 // fault must never stop Wi-Fi/HTTP/OTA from coming up.
 void recovery_lcd_show_message(void);
 
-// Updates the network line and the "Open http://<ip>/" instruction and
-// redraws the screen. `name` is the station SSID or the AP's own SSID; `ip`
-// is dotted-quad text. Safe to call from any task, before or after
-// recovery_lcd_show_message() (it then only records the values), and with
-// the panel down (no-op).
-void recovery_lcd_set_network(bool is_ap, const char *name, const char *ip);
+// Shows the SoftAP's SSID, this boot's random WPA2 passphrase (large) and the
+// AP IP, plus the "Open http://<ip>/" instruction, and redraws the screen. The
+// passphrase is the recovery image's only access control (owner decision
+// 2026-10-02): it is shown here and nowhere else, kept in RAM only. Safe to
+// call from any task, before or after recovery_lcd_show_message() (it then
+// only records the values), and with the panel down (no-op).
+void recovery_lcd_set_ap(const char *ssid, const char *passphrase, const char *ip);
 
 // Shows "NO NETWORK" in place of the network lines (every Wi-Fi bring-up path
-// failed). A later recovery_lcd_set_network() clears it. Same safety rules.
+// failed). A later recovery_lcd_set_ap() clears it. Same safety rules.
 void recovery_lcd_set_no_network(void);
-
-// Shows/clears "AUTH: FALLBACK": the challenge key is derived from the
-// eFuse-MAC fallback secret because wifi_nvs holds no usable ap_pass.
-void recovery_lcd_set_auth_fallback(bool fallback);
 
 // Redraws the status screen if the relay-fault state changed since the last
 // draw (a hold-watchdog fault latched after boot). Call from a task that may

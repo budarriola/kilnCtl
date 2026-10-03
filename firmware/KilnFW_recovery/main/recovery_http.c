@@ -1,41 +1,13 @@
 // recovery_http.c -- see recovery_http.h.
 //
-// Auth mechanism: docs/OTA_SINGLE_SLOT_PLAN.md section 3 item 3 /
-// firmware/CommonFW/docs/UPDATE_PROTOCOL.md section 2 --
-//   key = HMAC-SHA256(ap_password, "kilnctl-ota-v1")
-//   mac = HMAC-SHA256(key, nonce || context)
-// where context is "esp" for POST /api/ota/esp, "boot-guard-reset" for POST
-// /api/ota/esp/boot_guard_reset, "sw-reset" for POST /api/sw_reset,
-// "recovery-exit" for POST /api/recovery/exit, "wifi-reset" for POST
-// /api/recovery/wifi_reset, "pico-upload" for POST /api/recovery/pico/upload
-// and "pico-abort" for POST /api/recovery/pico/abort -- matching recovery_ota_auth_client.py's
-// derive_mac() _VALID_CONTEXTS and the browser page's deriveMac() calls
-// exactly (see recovery_authenticate_request()'s own comment for the single
-// shared lockout state).
-// carried in the request as header "X-Ota-Mac", hex-encoded, checked
-// against a single-use, 30s-expiry nonce from GET /api/ota/challenge via
-// the same ota_auth.c state machine the main KilnFW image uses (copied in
-// verbatim -- see main/ota_auth.c's header for why it is pure/host-testable
-// and therefore safe to reuse unmodified rather than re-derive).
-//
-// Every mutating POST route in this file (POST /api/ota/esp, POST
-// /api/ota/esp/boot_guard_reset, POST /api/sw_reset, POST /api/recovery/exit,
-// POST /api/recovery/wifi_reset, POST /api/recovery/pico/upload, POST
-// /api/recovery/pico/abort) authenticates via the
-// single shared recovery_authenticate_request() below -- 2026-09-19 closed
-// docs/audits/web_code_duplication_drift_2026-09-18.md section 2.2's open
-// follow-up, which found the latter two routes had no X-Ota-Mac check at
-// all. A new mutating route must call it too, or
-// check_recovery_ota_auth_mirror.ps1's route-coverage assertion fails.
-//
-// SCOPE OF THIS PASS: uses mbedtls's classic mbedtls_md_hmac() API rather
-// than the main app's PSA Crypto calls (psa_import_key()/psa_mac_compute())
-// -- both compute the same standard HMAC-SHA256, but PSA needs its own
-// key-slot lifecycle that adds bring-up surface with no correctness benefit
-// for a single, short-lived, never-persisted key. Documented here rather
-// than silently diverging from the plan's "PSA HMAC-SHA256" phrasing in
-// section 1/3: the primitive is identical, only the calling convention
-// differs.
+// NO AUTHENTICATION (owner decision 2026-10-02, docs/RECOVERY_IMAGE_PLAN.md):
+// every route in this file is open. The only access control is the SoftAP
+// itself: recovery_wifi.c brings up a WPA2-PSK access point whose random
+// per-boot passphrase is shown ONLY on the LCD (recovery_lcd.c). A client that
+// can reach these routes has been told the passphrase by someone who can see
+// the screen. The passphrase never appears in any response, log or NVS. The
+// station interface is never started in this image, so the SoftAP is the only
+// network path to this httpd (it binds all interfaces, and only one exists).
 //
 // GET /api/boot_guard and GET /api/recovery/status report whether the shared
 // `kiln_cfg`/"bootguard" NVS record exists and its raw length, and decode its
@@ -48,9 +20,8 @@
 // path) already treats "key not found" as counter-zero.
 //
 // Upload plumbing (first-chunk validation, streaming, sink abort) lives in
-// recovery_upload.c; a new authenticated upload route authenticates here
-// with recovery_authenticate_request() and then calls
-// recovery_upload_stream() with its own validator and sink.
+// recovery_upload.c; an upload route calls recovery_upload_stream() with its
+// own validator and sink.
 #include "recovery_http.h"
 
 #include <stdarg.h>
@@ -66,15 +37,12 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "esp_random.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "mbedtls/md.h"
 #include "nvs.h"
 
-#include "ota_auth.h"
 #include "recovery_image_check.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
@@ -83,8 +51,6 @@
 #include "recovery_text.h"
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
-#include "recovery_auth.h"
-#include "lwip/sockets.h"
 
 static const char *TAG = "recovery_http";
 
@@ -94,9 +60,9 @@ extern const uint8_t recovery_page_html_end[] asm("_binary_recovery_page_html_en
 
 #define APP_PARTITION_LABEL "app"
 // Wi-Fi namespace shared with the main app (wifi_prov_nvs.c NVS_NAMESPACE) and
-// the keys that describe the HOME network / addressing. ap_ssid/ap_pass are
-// deliberately NOT erased: ap_pass is the HMAC key material, so erasing it
-// would make this image's own authenticated routes unusable (500).
+// the keys that describe the HOME network / addressing. ap_ssid is
+// deliberately NOT erased (the SoftAP reuses it); a stored ap_pass is ignored
+// by this image and left alone.
 #define WIFI_NVS_PARTITION "wifi_nvs"
 #define WIFI_NVS_NAMESPACE "wifi_cfg"
 static const char *const WIFI_RESET_KEYS[] = {
@@ -109,350 +75,6 @@ static const char *const WIFI_RESET_KEYS[] = {
 #define BOOT_GUARD_KEY "bootguard"
 #define BOOT_GUARD_KEY_LEGACY "count"
 #define BOOT_GUARD_NAMESPACE_LEGACY "boot_guard"
-
-// Per-client nonce ring (recovery_auth.h): a challenge only replaces the SAME
-// client's previous nonce, so one host cannot retire another's mid-handshake.
-static rauth_nonce_ring_t s_ring;
-
-// Opaque key for the peer of `req`: its IPv4 address. 0 if the socket has no
-// readable peer, which is then one shared client.
-static uint32_t client_key(httpd_req_t *req)
-{
-    int fd = httpd_req_to_sockfd(req);
-    struct sockaddr_storage ss;
-    socklen_t len = sizeof(ss);
-    if (fd < 0 || getpeername(fd, (struct sockaddr *)&ss, &len) != 0) {
-        return 0;
-    }
-    if (ss.ss_family == AF_INET) {
-        return (uint32_t)((struct sockaddr_in *)&ss)->sin_addr.s_addr;
-    }
-    // This lwIP build has IPv6 off (no sockaddr_in6); any other family is one shared client.
-    return 0;
-}
-// ONE lockout counter shared by every authenticated route (owner/review
-// decision 2026-10-02, reversing the earlier per-route split): all five routes
-// guard the same secret (the AP-password-derived key), so a guesser spreading
-// attempts across routes must not get N times the attempts. Failed MACs on any
-// route count toward the same lockout.
-static ota_auth_lockout_state_t s_lockout;
-
-static uint32_t now_ms(void)
-{
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
-
-static void hex_encode(const uint8_t *in, size_t len, char *out)
-{
-    static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < len; i++) {
-        out[i * 2] = hex[in[i] >> 4];
-        out[i * 2 + 1] = hex[in[i] & 0x0F];
-    }
-    out[len * 2] = '\0';
-}
-
-// Mirrors firmware/KilnFW/App/drivers/http/ota_http_util.c's
-// ota_http_hex_decode() nibble-by-nibble: strict [0-9a-fA-F] table, no
-// sscanf (which also accepts a leading sign/space/"0x" per byte). Kept
-// textually identical to that function's per-nibble logic on purpose --
-// see check_recovery_ota_auth_mirror.ps1, which diffs this against it so
-// the two cannot silently diverge again. Length here is always out_len*2
-// (the caller already enforced the header's exact 64-char length before
-// calling this), unlike ota_http_hex_decode() which takes hex_len
-// explicitly; the decode logic itself is the same.
-static bool hex_decode(const char *in, uint8_t *out, size_t out_len)
-{
-    if (strlen(in) != out_len * 2) {
-        return false;
-    }
-    for (size_t i = 0; i < out_len; i++) {
-        int hi = -1, lo = -1;
-        char ch = in[2 * i];
-        if (ch >= '0' && ch <= '9') hi = ch - '0';
-        else if (ch >= 'a' && ch <= 'f') hi = ch - 'a' + 10;
-        else if (ch >= 'A' && ch <= 'F') hi = ch - 'A' + 10;
-        ch = in[2 * i + 1];
-        if (ch >= '0' && ch <= '9') lo = ch - '0';
-        else if (ch >= 'a' && ch <= 'f') lo = ch - 'a' + 10;
-        else if (ch >= 'A' && ch <= 'F') lo = ch - 'A' + 10;
-        if (hi < 0 || lo < 0) {
-            return false;
-        }
-        out[i] = (uint8_t)((hi << 4) | lo);
-    }
-    return true;
-}
-
-// Volatile-pointer wipe the compiler cannot elide (explicit_bzero is not
-// guaranteed in this libc configuration).
-static void secure_zero(void *p, size_t n)
-{
-    volatile uint8_t *v = (volatile uint8_t *)p;
-    while (n--) {
-        *v++ = 0;
-    }
-}
-
-static void hmac_sha256(const uint8_t *key, size_t key_len, const uint8_t *msg, size_t msg_len,
-                         uint8_t out[32])
-{
-    // Both mbedtls_md_hmac() (one-shot) and the mbedtls_md_hmac_starts/
-    // _update/_finish() family are gated behind
-    // MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS in this IDF's mbedtls 4.x headers
-    // and are not visible here. Build the standard HMAC construction
-    // (RFC 2104) directly from the always-public plain-hash
-    // mbedtls_md_starts/update/finish -- same classic HMAC-SHA256, no
-    // gated API, no PSA key-slot lifecycle (see the file header comment on
-    // that scope decision).
-    const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    const size_t block_len = 64; // SHA-256 block size
-    uint8_t key_block[64] = {0};
-    if (key_len > block_len) {
-        mbedtls_md_context_t kctx;
-        mbedtls_md_init(&kctx);
-        mbedtls_md_setup(&kctx, info, 0);
-        mbedtls_md_starts(&kctx);
-        mbedtls_md_update(&kctx, key, key_len);
-        mbedtls_md_finish(&kctx, key_block); // 32 bytes, rest stays zero
-        mbedtls_md_free(&kctx);
-    } else {
-        memcpy(key_block, key, key_len);
-    }
-
-    uint8_t ipad[64], opad[64];
-    for (size_t i = 0; i < block_len; i++) {
-        ipad[i] = key_block[i] ^ 0x36;
-        opad[i] = key_block[i] ^ 0x5c;
-    }
-
-    uint8_t inner[32];
-    mbedtls_md_context_t ctx;
-    mbedtls_md_init(&ctx);
-    mbedtls_md_setup(&ctx, info, 0);
-    mbedtls_md_starts(&ctx);
-    mbedtls_md_update(&ctx, ipad, block_len);
-    mbedtls_md_update(&ctx, msg, msg_len);
-    mbedtls_md_finish(&ctx, inner);
-    mbedtls_md_free(&ctx);
-
-    mbedtls_md_init(&ctx);
-    mbedtls_md_setup(&ctx, info, 0);
-    mbedtls_md_starts(&ctx);
-    mbedtls_md_update(&ctx, opad, block_len);
-    mbedtls_md_update(&ctx, inner, sizeof(inner));
-    mbedtls_md_finish(&ctx, out);
-    mbedtls_md_free(&ctx);
-
-    secure_zero(key_block, sizeof(key_block));
-    secure_zero(ipad, sizeof(ipad));
-    secure_zero(opad, sizeof(opad));
-    secure_zero(inner, sizeof(inner));
-}
-
-// GET /api/ota/challenge
-static esp_err_t challenge_get(httpd_req_t *req)
-{
-    uint8_t nonce[OTA_AUTH_NONCE_LEN];
-    esp_fill_random(nonce, sizeof(nonce));
-    (void)rauth_ring_issue(&s_ring, client_key(req), nonce, now_ms());
-
-    char hex[OTA_AUTH_NONCE_LEN * 2 + 1];
-    hex_encode(nonce, sizeof(nonce), hex);
-
-    char body[64];
-    int n = snprintf(body, sizeof(body), "{\"nonce\":\"%s\"}", hex);
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, body, n);
-}
-
-// Shared X-Ota-Mac authentication sequence -- every mutating recovery-image
-// POST route (POST /api/ota/esp, POST /api/ota/esp/boot_guard_reset,
-// POST /api/sw_reset) must call this before acting, rather than hand-
-// rolling the header/hex/lockout/nonce/password/HMAC sequence again. This
-// used to live inline in ota_esp_post() only -- the other two routes had
-// no auth check at all
-// (docs/audits/web_code_duplication_drift_2026-09-18.md section 2.2's open
-// follow-up, closed here). Factoring it out means a future new mutating
-// route gets this for free by calling it, instead of becoming a ninth
-// hand-copy.
-//
-// `context` is the per-route HMAC context string appended after the nonce
-// ("esp" / "boot-guard-reset" / "sw-reset" / ... -- must match the caller's
-// route exactly, see the file header comment) and `lockout` is the ONE shared
-// ota_auth_lockout_state_t (s_lockout): every route passes the same instance,
-// so failed MACs against any route count toward a single lockout.
-//
-// On success: returns true, sends nothing (caller proceeds).
-// On failure: returns false, having already sent the appropriate error
-// status/body itself via *out_err -- caller must return *out_err
-// immediately without sending anything further.
-//
-// check_recovery_ota_auth_mirror.ps1 diffs this function's body (not
-// ota_esp_post()'s, now just a caller) against ota_http_authenticate_
-// request()/ota_http_hex_decode() in the main app -- see that check's
-// header comment before changing wire strings or ordering here.
-// Longest query string the MAC will cover ("crc=xxxxxxxx&slot=A" is 19 chars, 22 with slot=auto).
-#define AUTH_QUERY_MAX 95u
-
-static bool recovery_authenticate_request(httpd_req_t *req, esp_err_t *out_err,
-                                           const char *context, ota_auth_lockout_state_t *lockout)
-{
-    uint32_t t = now_ms();
-
-    // Header well-formed BEFORE lockout, matching ota_http_authenticate_
-    // request()'s ordering (ota_http.c:935-966): a headerless/malformed
-    // request is a client mistake (400), not a wrong-password guess, and
-    // must not be answered with the same "locked out" status a genuine
-    // failed-MAC attempt gets, nor be allowed to probe lockout state
-    // without ever presenting a candidate MAC.
-    size_t mac_hex_len = httpd_req_get_hdr_value_len(req, "X-Ota-Mac");
-    if (mac_hex_len != 64) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        *out_err = httpd_resp_send(req, "missing or malformed X-Ota-Mac header (want 64 hex chars)",
-                                    HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-    char mac_hex[65];
-    if (httpd_req_get_hdr_value_str(req, "X-Ota-Mac", mac_hex, sizeof(mac_hex)) != ESP_OK) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        *out_err = httpd_resp_send(req, "could not read X-Ota-Mac header", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-    uint8_t claimed_mac[32];
-    if (!hex_decode(mac_hex, claimed_mac, sizeof(claimed_mac))) {
-        httpd_resp_set_status(req, "400 Bad Request");
-        *out_err = httpd_resp_send(req, "X-Ota-Mac must be 64 hex characters", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-
-    if (ota_auth_lockout_is_locked(lockout, t)) {
-        httpd_resp_set_status(req, "429 Too Many Requests");
-        *out_err = httpd_resp_send(req, "locked out, retry later", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-
-    rauth_nonce_slot_t *slot = rauth_ring_find(&s_ring, client_key(req));
-    ota_auth_nonce_check_t check =
-        slot ? ota_auth_nonce_check(&slot->st, t) : OTA_AUTH_NONCE_NOT_ISSUED;
-    if (check != OTA_AUTH_NONCE_OK) {
-        httpd_resp_set_status(req, "403 Forbidden");
-        *out_err = httpd_resp_send(req, "no valid challenge outstanding", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-
-    char ap_password[65];
-    // Stored ap_pass when usable (8..63 chars), else the eFuse-MAC fallback
-    // secret (recovery_auth.h) -- so a board with no ap_pass still has working,
-    // authenticated routes instead of a 500 behind an OPEN AP.
-    if (!recovery_wifi_get_auth_secret(ap_password, sizeof(ap_password), NULL)) {
-        ota_auth_nonce_invalidate(&slot->st);
-        secure_zero(ap_password, sizeof(ap_password));
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        *out_err = httpd_resp_send(req, "no auth secret available", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-
-    uint8_t key[32];
-    hmac_sha256((const uint8_t *)ap_password, strlen(ap_password),
-                (const uint8_t *)"kilnctl-ota-v1", strlen("kilnctl-ota-v1"), key);
-
-    // Sized for the longest of the three known context literals,
-    // "boot-guard-reset" (16 chars, no NUL -- this buffer is never treated
-    // as a C string). The _Static_assert()s below pin all three literals'
-    // lengths so this comment can't silently go stale if one is renamed.
-    // The runtime bounds check right after guards any FUTURE context this
-    // helper is called with that the static asserts don't know about --
-    // belt and suspenders, since `context` is caller-supplied even though
-    // every current caller is a literal in this same file.
-    _Static_assert(sizeof("esp") - 1 <= 16, "context literal exceeds msg[] headroom");
-    _Static_assert(sizeof("boot-guard-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
-    _Static_assert(sizeof("sw-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
-    _Static_assert(sizeof("recovery-exit") - 1 <= 16, "context literal exceeds msg[] headroom");
-    _Static_assert(sizeof("wifi-reset") - 1 <= 16, "context literal exceeds msg[] headroom");
-    _Static_assert(sizeof("pico-upload") - 1 <= 16, "context literal exceeds msg[] headroom");
-    _Static_assert(sizeof("pico-abort") - 1 <= 16, "context literal exceeds msg[] headroom");
-    size_t context_len = strlen(context);
-    // The MAC also covers the request's query string ("?" + query, nothing when
-    // there is none), so a route's parameters (the Pico upload's ?crc=&slot=)
-    // are authenticated, not just the route. The browser's signed() appends the
-    // same "?query" to the context. Static: httpd runs handlers on one task
-    // (like s_ring/s_lockout), and this keeps the extra bytes off its stack.
-    //
-    // The statics `msg` and `q` are shared by every call, which is only safe
-    // because all handlers run on the ONE httpd task: recovery_http_start()
-    // starts exactly one server (asserted there) and nothing here is reached
-    // from another task or from an async httpd work item.
-    //
-    // Every failure from here on has already been handed a valid, unexpired
-    // nonce and a request that passed the header checks, so each one -- the
-    // early 400s below included, not just a MAC mismatch -- consumes the nonce
-    // and counts one lockout failure. Otherwise an oversized or unreadable
-    // query would be a free, lockout-exempt retry against the same nonce.
-    static uint8_t msg[OTA_AUTH_NONCE_LEN + 16 + 1 + AUTH_QUERY_MAX];
-    size_t query_len = httpd_req_get_url_query_len(req);
-    if (query_len > AUTH_QUERY_MAX) {
-        ota_auth_nonce_invalidate(&slot->st);
-        ota_auth_lockout_record_failure(lockout, t);
-        secure_zero(ap_password, sizeof(ap_password));
-        secure_zero(key, sizeof(key));
-        httpd_resp_set_status(req, "400 Bad Request");
-        *out_err = httpd_resp_send(req, "query string too long", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-    if (context_len > 16) {
-        secure_zero(ap_password, sizeof(ap_password));
-        secure_zero(key, sizeof(key));
-        // Cannot happen with today's three call sites (all compile-time
-        // literals covered by the _Static_assert()s above) -- this guards
-        // only against a future caller passing a longer context without
-        // also growing msg[], which would otherwise overflow it.
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        *out_err = httpd_resp_send(req, "internal error: auth context too long",
-                                    HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-    static char q[AUTH_QUERY_MAX + 1];
-    if (query_len > 0 && httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) {
-        ota_auth_nonce_invalidate(&slot->st);
-        ota_auth_lockout_record_failure(lockout, t);
-        secure_zero(ap_password, sizeof(ap_password));
-        secure_zero(key, sizeof(key));
-        httpd_resp_set_status(req, "400 Bad Request");
-        *out_err = httpd_resp_send(req, "could not read query string", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-    size_t msg_len = rauth_build_msg(msg, sizeof(msg), slot->st.nonce, context, q, query_len);
-    if (msg_len == 0) {
-        ota_auth_nonce_invalidate(&slot->st);
-        secure_zero(ap_password, sizeof(ap_password));
-        secure_zero(key, sizeof(key));
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        *out_err = httpd_resp_send(req, "internal error: auth message too long",
-                                    HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-    uint8_t expected_mac[32];
-    hmac_sha256(key, sizeof(key), msg, msg_len, expected_mac);
-    // Key material is no longer needed; wipe before any return path.
-    secure_zero(ap_password, sizeof(ap_password));
-    secure_zero(key, sizeof(key));
-
-    // Invalidate the nonce unconditionally before deciding pass/fail --
-    // UPDATE_PROTOCOL.md section 2 step 4.
-    ota_auth_nonce_invalidate(&slot->st);
-
-    bool mac_ok = ota_auth_constant_time_equal(claimed_mac, expected_mac, sizeof(expected_mac));
-    secure_zero(expected_mac, sizeof(expected_mac));
-    if (!mac_ok) {
-        ota_auth_lockout_record_failure(lockout, t);
-        httpd_resp_set_status(req, "403 Forbidden");
-        *out_err = httpd_resp_send(req, "bad MAC", HTTPD_RESP_USE_STRLEN);
-        return false;
-    }
-    ota_auth_lockout_record_success(lockout);
-    return true;
-}
 
 static const esp_partition_t *find_app_partition(void)
 {
@@ -530,15 +152,11 @@ static void restart_soon(uint32_t delay_ms)
     }
 }
 
-// POST /api/ota/esp -- authenticated, validated, streamed (recovery_upload.c).
+// POST /api/ota/esp -- open, validated, streamed (recovery_upload.c).
 // Nothing is written until the first chunk passes ric_validate_first_chunk();
 // the boot partition is set only after esp_ota_end() verified the whole image.
 static esp_err_t ota_esp_post(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "esp", &s_lockout)) {
-        return auth_err;
-    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -668,16 +286,6 @@ static esp_err_t boot_guard_get(httpd_req_t *req)
     return httpd_resp_send(req, body, n);
 }
 
-// True when the stored ap_pass is usable (not the fallback secret).
-static bool auth_secret_is_stored(void)
-{
-    char secret[65];
-    bool fallback = true;
-    bool ok = recovery_wifi_get_auth_secret(secret, sizeof(secret), &fallback);
-    secure_zero(secret, sizeof(secret));
-    return ok && !fallback;
-}
-
 // printf-style helper: formats into one small static fragment buffer (httpd
 // runs handlers on its single task, so a static costs no stack) and sends it as
 // one HTTP chunk. The status JSON is streamed through this rather than built in
@@ -758,7 +366,7 @@ static const char *tri(int v)
     return v < 0 ? "null" : (v ? "true" : "false");
 }
 
-// GET /api/recovery/status -- unauthenticated, read-only. Streamed in small
+// GET /api/recovery/status -- read-only. Streamed in small
 // chunks (send_frag), never one big buffer.
 static esp_err_t recovery_status_get(httpd_req_t *req)
 {
@@ -775,16 +383,14 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     bool desc_present = app_has_valid_image(app);
     bool valid = desc_present && app_image_verified(app);
     unsigned nvs_failed = recovery_io_nvs_failed_mask();
-    // auth_secret_present: wifi_nvs holds a usable stored ap_pass (8..63 chars).
-    // false means the eFuse-MAC fallback secret is in force (never an OPEN AP).
-    bool auth_present = auth_secret_is_stored();
     int rr = (int)esp_reset_reason();
     unsigned app_size = (unsigned)(app ? app->size : 0);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    esp_err_t e = send_frag(req, "{\"auth_secret_present\":%s,\"auth_fallback\":%s,",
-                             auth_present ? "true" : "false", auth_present ? "false" : "true");
+    // auth_mode: the routes are open; the only gate is the SoftAP passphrase
+    // shown on the LCD (never reported here).
+    esp_err_t e = send_frag(req, "{\"auth_mode\":\"lcd_passphrase\",");
     if (e == ESP_OK) {
         e = send_frag(req, "\"running\":\"%s\",\"uptime_s\":%u,\"reset_reason\":%d,"
                            "\"reset_reason_name\":\"%s\",",
@@ -930,10 +536,6 @@ static bool clear_boot_guard(char *msg, size_t cap)
 // POST /api/ota/esp/boot_guard_reset
 static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "boot-guard-reset", &s_lockout)) {
-        return auth_err;
-    }
     char bg_msg[96];
     if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -947,10 +549,6 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 // itself counted toward recovery, selects `app`, and restarts.
 static esp_err_t recovery_exit_post(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "recovery-exit", &s_lockout)) {
-        return auth_err;
-    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -986,14 +584,9 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
 }
 
 // POST /api/recovery/wifi_reset -- forget the HOME network credentials
-// (WIFI_RESET_KEYS) and restart. The AP name/password are kept: the password
-// is this image's HMAC key.
+// (WIFI_RESET_KEYS) and restart. The AP name is kept.
 static esp_err_t wifi_reset_post(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "wifi-reset", &s_lockout)) {
-        return auth_err;
-    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READWRITE,
                                              &h);
@@ -1038,10 +631,6 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
 // POST /api/sw_reset
 static esp_err_t sw_reset_post(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "sw-reset", &s_lockout)) {
-        return auth_err;
-    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -1124,17 +713,13 @@ static bool parse_pico_query(httpd_req_t *req, uint32_t *crc, int *operator_slot
     return true;
 }
 
-// POST /api/recovery/pico/upload?crc=<hex>[&slot=A|B] -- authenticated. The
+// POST /api/recovery/pico/upload?crc=<hex>[&slot=A|B] -- open. The
 // body (a SaftyFW slot image) is received whole into PSRAM, validated (size,
 // vectors against the target slot, CRC32 recomputed here) and only then handed
 // to the relay task (recovery_pico.c), which does the erase/transfer over the
 // UART while GET /api/recovery/pico/status keeps answering. 202 on start.
 static esp_err_t pico_upload_post(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "pico-upload", &s_lockout)) {
-        return auth_err;
-    }
     uint32_t claimed_crc = 0;
     int operator_slot = RPP_SLOT_UNKNOWN;
     if (!parse_pico_query(req, &claimed_crc, &operator_slot)) {
@@ -1169,7 +754,7 @@ static esp_err_t pico_upload_post(httpd_req_t *req)
     return httpd_resp_send(req, body, n);
 }
 
-// GET /api/recovery/pico/status -- unauthenticated, read-only. Polling it is
+// GET /api/recovery/pico/status -- read-only. Polling it is
 // also the relay's "the browser is still here" signal.
 static esp_err_t pico_status_get(httpd_req_t *req)
 {
@@ -1184,30 +769,25 @@ static esp_err_t pico_status_get(httpd_req_t *req)
     return httpd_resp_send(req, body, n);
 }
 
-// POST /api/recovery/pico/abort -- authenticated. Asks the relay to stop; it
+// POST /api/recovery/pico/abort -- open. Asks the relay to stop; it
 // sends ABORT to the Pico and ends in phase "aborted". Harmless when idle.
 static esp_err_t pico_abort_post(httpd_req_t *req)
 {
-    esp_err_t auth_err = ESP_OK;
-    if (!recovery_authenticate_request(req, &auth_err, "pico-abort", &s_lockout)) {
-        return auth_err;
-    }
     recovery_pico_abort();
     return httpd_resp_sendstr(req, "abort requested");
 }
 
 void recovery_http_start(void)
 {
-    // recovery_authenticate_request()'s static msg/q buffers (and s_ring,
-    // s_lockout) assume every handler runs on this ONE httpd task. Starting a
-    // second server would silently break that, so refuse it outright.
+    // Handlers' static buffers (send_frag's frag, s_verify_*) assume every
+    // handler runs on this ONE httpd task. Starting a second server would
+    // silently break that, so refuse it outright.
     static bool s_started;
     configASSERT(!s_started);
     s_started = true;
-    recovery_lcd_set_auth_fallback(!auth_secret_is_stored());
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    // 13 routes below (3 are the Pico update relay).
+    // 12 routes below (3 are the Pico update relay).
     config.max_uri_handlers = 16;
     config.lru_purge_enable = true;
     httpd_handle_t server = NULL;
@@ -1221,7 +801,6 @@ void recovery_http_start(void)
         {.uri = "/api/recovery/status", .method = HTTP_GET, .handler = recovery_status_get},
         {.uri = "/api/recovery/exit", .method = HTTP_POST, .handler = recovery_exit_post},
         {.uri = "/api/recovery/wifi_reset", .method = HTTP_POST, .handler = wifi_reset_post},
-        {.uri = "/api/ota/challenge", .method = HTTP_GET, .handler = challenge_get},
         {.uri = "/api/ota/esp", .method = HTTP_POST, .handler = ota_esp_post},
         {.uri = "/api/partitions", .method = HTTP_GET, .handler = partitions_get},
         {.uri = "/api/boot_guard", .method = HTTP_GET, .handler = boot_guard_get},

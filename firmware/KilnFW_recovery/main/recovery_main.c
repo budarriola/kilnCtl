@@ -6,11 +6,12 @@
 // SCOPE OF THIS PASS (section 8 step 1 -- build and measure the image; the
 // board is never flashed as part of this pass, see the accompanying commit
 // message and report for the full list of deliberate simplifications):
-//   - Wi-Fi: station using the legacy single-network credential in
-//     `wifi_nvs`, SoftAP fallback. recovery_wifi.c.
-//   - HTTP: the six routes from section 3 item 2. recovery_http.c.
-//   - LCD: one static line, minimal from-scratch SPI/SX1509 driver, no
-//     touch, no LVGL. recovery_lcd.c.
+//   - Wi-Fi: WPA2 SoftAP only, with a random per-boot passphrase shown on the
+//     LCD (owner decision 2026-10-02, no station mode). recovery_wifi.c.
+//   - HTTP: the recovery routes, unauthenticated -- reachable only through
+//     that AP. recovery_http.c.
+//   - LCD: static status screen incl. SSID/passphrase, minimal from-scratch
+//     SPI/SX1509 driver, no touch, no LVGL. recovery_lcd.c.
 // Deliberately excluded, per section 3's "Out" list: touch, config/zones/
 // profiles access, the safety link, the Pico image, the control loop.
 #include "esp_log.h"

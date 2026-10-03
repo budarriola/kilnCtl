@@ -1,7 +1,7 @@
-// recovery_upload.h -- shared streaming-upload helper for authenticated
-// recovery routes. A route handler authenticates itself (recovery_http.c's
-// recovery_authenticate_request(), which must stay in that file), then hands
-// the request to recovery_upload_stream() with a validator and a sink:
+// recovery_upload.h -- shared streaming-upload helper for the recovery
+// routes (unauthenticated since 2026-10-02: the LCD-passphrase SoftAP is the
+// only access control). A route handler hands the request to
+// recovery_upload_stream() with a validator and a sink:
 //   - POST /api/ota/esp  -> validator = recovery_upload_validate_esp, sink =
 //     the `app` OTA partition (recovery_upload_esp_sink_init()).
 //   - a later Pico route -> its own validator and sink, same loop.

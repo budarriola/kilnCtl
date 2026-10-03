@@ -496,13 +496,13 @@ class ClientsUseTheSeamTest(unittest.TestCase):
         # cookie) has no place in that flow (docs/TOTP_PASSWORD_RESET_PLAN.md
         # section 4; totp_http_client.py's route-tier note).
         ("totp_http_client.py", "_post_open"),
-        # firmware/KilnFW_recovery/'s own, untouched AP-password X-Ota-Mac
-        # scheme (recovery_ota_auth_client.py's module docstring) can only
-        # ever be reached while the board is stuck in recovery mode, unable
-        # to answer the main app's admin web session at all -- http_auth's
-        # auto-login-on-401 has no admin session to attach here by design.
-        ("recovery_ota_auth_client.py", "get_challenge"),
-        ("recovery_ota_auth_client.py", "signed_post"),
+        # firmware/KilnFW_recovery/ is unauthenticated (owner decision
+        # 2026-10-02: the LCD-passphrase SoftAP is the only access control)
+        # and only reachable while the board is stuck in recovery mode,
+        # unable to answer the main app's admin web session at all -- there
+        # is no session for http_auth to log in with or attach.
+        ("recovery_http_client.py", "_get_json"),
+        ("recovery_post_client.py", "post"),
     }
 
     @staticmethod

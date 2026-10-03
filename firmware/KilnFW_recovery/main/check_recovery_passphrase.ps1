@@ -1,7 +1,6 @@
-# check_recovery_auth.ps1 -- builds and runs test_recovery_auth.c (host test of
-# the recovery image's pure auth pieces: recovery_auth.c secret selection and
-# fallback derivation format, plus ota_auth.c nonce/lockout behaviour) under
-# MSVC, then runs negative tests: each mutant (a scratch copy of the source
+# check_recovery_passphrase.ps1 -- builds and runs test_recovery_passphrase.c
+# (host test of the recovery SoftAP passphrase formatter, recovery_passphrase.c)
+# under MSVC, then runs negative tests: each mutant (a scratch copy of the source
 # with one rule broken) must make the same test binary FAIL, else the test is
 # vacuous for that rule.
 #
@@ -32,7 +31,7 @@ if (-not $vcvars) {
     exit 3
 }
 
-$work = Join-Path $env:TEMP "recovery_auth_$PID"
+$work = Join-Path $env:TEMP "recovery_passphrase_$PID"
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
 New-Item -ItemType Directory -Path $work | Out-Null
 
@@ -42,10 +41,10 @@ function Build-And-Run {
     $exe = Join-Path $work "t_$Tag.exe"
     $obj = Join-Path $work $Tag
     New-Item -ItemType Directory -Path $obj -Force | Out-Null
-    $test = Join-Path $here "test_recovery_auth.c"
+    $test = Join-Path $here "test_recovery_passphrase.c"
     $srcs = ($Impls | ForEach-Object { "`"$_`"" }) -join " "
     $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" `"$test`" $srcs /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
-    $gate = Enter-KilnBuildGate -Label "recovery_auth"
+    $gate = Enter-KilnBuildGate -Label "recovery_passphrase"
     try {
         $ErrorActionPreference = "Continue"
         $bo = cmd /c $cmd 2>&1
@@ -85,52 +84,36 @@ function Test-Mutant {
 }
 
 try {
-    $auth = Join-Path $here "recovery_auth.c"
-    $otaAuth = Join-Path $here "ota_auth.c"
-    $good = Build-And-Run -Impls @($auth, $otaAuth) -Tag "real"
+    $impl = Join-Path $here "recovery_passphrase.c"
+    $good = Build-And-Run -Impls @($impl) -Tag "real"
     Write-Host $good.Output
-    if ($good.Exit -ne 0) { throw "test_recovery_auth reported failures (exit $($good.Exit))." }
+    if ($good.Exit -ne 0) { throw "test_recovery_passphrase reported failures (exit $($good.Exit))." }
     if ($good.Output -notmatch "RESULT pass=(\d+) fail=0") {
-        throw "test_recovery_auth never printed a passing RESULT line."
+        throw "test_recovery_passphrase never printed a passing RESULT line."
     }
     $passCount = [int]$Matches[1]
-    if ($passCount -lt 60) { throw "only $passCount assertions ran -- test looks gutted." }
+    if ($passCount -lt 300) { throw "only $passCount assertions ran -- test looks gutted." }
 
-    $o = @("ota_auth.c")
-    $r = @("recovery_auth.c")
-    # Short ap_pass (< 8) must not be usable (would start a weak/failing WPA2 AP).
-    Test-Mutant -File "recovery_auth.c" -Needle "n >= RAUTH_AP_PASS_MIN" -Replacement "n >= 1" `
-        -Others $o -Tag "minlen"
-    # Build key must feed the preimage.
-    Test-Mutant -File "recovery_auth.c" -Needle "memcpy(out + plen, build_key, klen);" `
-        -Replacement "(void)build_key;" -Others $o -Tag "key"
-    # Query must be signed.
-    Test-Mutant -File "recovery_auth.c" -Needle "memcpy(out + n, query, query_len);" `
-        -Replacement "(void)query;" -Others $o -Tag "query"
-    # Ring: a client must reuse its own slot.
-    Test-Mutant -File "recovery_auth.c" -Needle "pick = rauth_ring_find(r, client);" `
-        -Replacement "pick = NULL;" -Others $o -Tag "ringown"
-    # Ring: eviction must take the OLDEST nonce.
-    Test-Mutant -File "recovery_auth.c" -Needle "- pick->seq) < 0" `
-        -Replacement "- pick->seq) > 0" -Others $o -Tag "ringold"
-    # Ring: a spent/expired slot must be reclaimed before a live one is evicted.
-    Test-Mutant -File "recovery_auth.c" -Needle "now_ms) != OTA_AUTH_NONCE_OK) {" `
-        -Replacement "now_ms) == 12345) {" -Others $o -Tag "ringspent"
-    # Nonce: single use.
-    Test-Mutant -File "ota_auth.c" -Needle "s->used = true;" -Replacement "s->used = false;" `
-        -Others $r -Tag "reuse"
-    # Nonce: 30 s expiry.
-    Test-Mutant -File "ota_auth.c" -Needle "> OTA_AUTH_NONCE_EXPIRY_MS)" `
-        -Replacement "> OTA_AUTH_NONCE_EXPIRY_MS * 100u)" -Others $r -Tag "expiry"
-    # Lockout: doubling backoff.
-    Test-Mutant -File "ota_auth.c" -Needle "backoff_ms *= 2u;" -Replacement "backoff_ms *= 1u;" `
-        -Others $r -Tag "backoff"
-    # Lockout: 15 min cap.
-    # (both the in-loop clamp and the final clamp name the macro, so replace every use)
-    Test-Mutant -File "ota_auth.c" -Needle "OTA_AUTH_LOCKOUT_MAX_MS" `
-        -Replacement "0x7FFFFFFFu" -Others $r -Tag "cap"
+    # Modulo bias: a % 31 mapping must be caught by the exact-8-hits check.
+    Test-Mutant -File "recovery_passphrase.c" -Needle "rnd[i] & (RPASS_ALPHABET_LEN - 1u)" `
+        -Replacement "rnd[i] % 31u" -Others @() -Tag "bias"
+    # Reduced reach: only 16 symbols reachable.
+    Test-Mutant -File "recovery_passphrase.c" -Needle "rnd[i] & (RPASS_ALPHABET_LEN - 1u)" `
+        -Replacement "rnd[i] & 15u" -Others @() -Tag "reach"
+    # Every position must use its own random byte.
+    Test-Mutant -File "recovery_passphrase.c" -Needle "alphabet[rnd[i]" -Replacement "alphabet[rnd[0]" `
+        -Others @() -Tag "position"
+    # Ambiguous symbols (0, O, 1, I) must stay out of the alphabet actually used.
+    Test-Mutant -File "recovery_passphrase.c" -Needle "static const char alphabet[] = RPASS_ALPHABET;" `
+        -Replacement 'static const char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUV";' -Others @() -Tag "alphabet"
+    # Validator: length must be enforced.
+    Test-Mutant -File "recovery_passphrase.c" -Needle "strlen(p) != RPASS_LEN" -Replacement "strlen(p) < 1" `
+        -Others @() -Tag "vlen"
+    # Validator: symbols must be checked.
+    Test-Mutant -File "recovery_passphrase.c" -Needle "if (!memchr(RPASS_ALPHABET, p[i], RPASS_ALPHABET_LEN)) {" `
+        -Replacement "if (0) {" -Others @() -Tag "vsym"
 
-    Write-Host "check_recovery_auth: PASS ($passCount assertions; negative-test mutants failed as required)"
+    Write-Host "check_recovery_passphrase: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0
 }
 finally {

@@ -76,6 +76,6 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # with PANIC on, a healthy upload could be reset mid-erase. Revisit after W5
 # measures the real erase time and idle-task starvation on the bench.
 
-# Single, small nonce/HMAC-scale HTTP server -- no need for esp-tls's larger
+# Single, small HTTP server -- no need for esp-tls's larger
 # receive buffers or many concurrent sockets.
 CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

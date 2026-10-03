@@ -3,8 +3,9 @@ standalone recovery image (firmware/KilnFW_recovery/main/recovery_http.c):
 GET /api/recovery/status and GET /api/recovery/pico/status.
 
 Plain urllib, deliberately NOT http_auth: the recovery image has no web-auth
-sessions, and these two routes need no MAC. Mutating routes live in
-recovery_ota_auth_client.py (AP-password X-Ota-Mac). Never used against a
+sessions, and the whole image is unauthenticated (owner decision
+2026-10-02; the LCD-passphrase SoftAP is the only access control). Mutating
+routes live in recovery_post_client.py. Never used against a
 board running the normal application (its /api/recovery/* routes do not
 exist there and answer 404, which callers use as evidence that the recovery
 image is gone).

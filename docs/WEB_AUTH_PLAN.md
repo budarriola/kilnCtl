@@ -520,15 +520,14 @@ authorized by the owner and not a violation of "tier changes only tighten".
 `ota_http.c` (`f0643c98`); each caller now logs the client IP for visibility
 via `ota_http_get_client_ip()` directly, with no auth check of its own left
 in this file -- `route_tier_table.h`'s ADMIN tier is the only gate.
-`kilnctrl.recovery_ota_auth_client` names the recovery-image path that still
-signs an X-Ota-Mac header (see `firmware/KilnFW_recovery/`, untouched by this
-retirement).
+(The recovery image's own HMAC was retired separately on 2026-10-02: it is now
+unauthenticated, protected only by an LCD-passphrase SoftAP; see
+`docs/RECOVERY_IMAGE_PLAN.md`.)
 `net/ota_auth.c`/`.h` in the main app is unused by any HTTP route now but was
-kept in place rather than deleted (see
-`firmware/KilnFW_recovery/main/recovery_ota_auth_mirror_drift_check.py`'s
-2026-09-29 update). The **separate, standalone recovery firmware image**
-(`firmware/KilnFW_recovery/`) is unaffected — it keeps its own independent
-AP-password HMAC on its own routes, unchanged. The rest of this item below is
+kept in place rather than deleted. The **separate, standalone recovery
+firmware image** (`firmware/KilnFW_recovery/`) was unaffected on 2026-09-29;
+on 2026-10-02 it dropped its own AP-password HMAC too (no password, no key;
+the LCD-passphrase SoftAP is the only access control). The rest of this item below is
 kept as written for history; it no longer describes the main app's live
 behavior.
 

@@ -20,6 +20,7 @@
 #include "nvs_flash.h"
 
 #include "recovery_io.h"
+#include "recovery_passphrase.h"
 #include "recovery_text.h"
 
 static const char *TAG = "recovery_lcd";
@@ -83,20 +84,26 @@ static const uint8_t k_init_seq[] = {
 #define COL_FAULT RGB565(255, 255, 255)
 #define COL_FAULT_BG RGB565(200, 0, 0)
 
-// Layout (y of each line's top edge). Scale 2 => 12 px/char, 40 chars/line,
-// 14 px glyph height; scale 4 title => 24 px/char, 28 px height.
-#define TITLE_SCALE 4
+// Layout (y of each line's top edge), 480x320, no scrolling. Glyph height is
+// 7*scale px and advance 6*scale px/char: scale 2 = 14 px / 12 px, scale 3 =
+// 21 px / 18 px, scale 6 = 42 px / 36 px (12-char passphrase = 432 px wide).
+#define TITLE_SCALE 3
 #define TEXT_SCALE  2
-#define Y_TITLE   12
-#define Y_SUB     56
-#define Y_BOOT    96
-#define Y_RESET   128
-#define Y_CRASH   160
-#define Y_RELAY   192
-#define Y_AUTH    212
-#define Y_NET     232
-#define Y_IP      264
-#define Y_HELP    292
+#define NET_SCALE   3
+#define PASS_SCALE  6
+#define Y_TITLE   4
+#define Y_SUB     30
+#define Y_BOOT    50
+#define Y_RESET   68
+#define Y_CRASH   86
+#define Y_RELAY   104
+#define Y_JOIN    126 // "Join Wi-Fi network:" / NO NETWORK
+#define Y_SSID    144
+#define Y_PWLBL   172 // "Password:"
+#define Y_PASS    188
+#define Y_IP      238
+#define Y_URL     264
+#define Y_NOTE    290
 
 static spi_device_handle_t s_spi;
 static bool s_ready = false;
@@ -105,14 +112,15 @@ static DMA_ATTR uint8_t s_line[PANEL_W * 2];
 static StaticSemaphore_t s_lock_buf;
 static SemaphoreHandle_t s_lock;
 
-// Network line state, recorded even before the panel is up.
+// Network state, recorded even before the panel is up. s_net_pass is this
+// boot's random SoftAP passphrase: the LCD is its only output (owner decision
+// 2026-10-02), it is RAM only and never logged.
 static bool s_net_set = false;
-static bool s_net_is_ap = false;
 static char s_net_name[33];
+static char s_net_pass[RPASS_LEN + 1];
 static char s_net_ip[16];
 static bool s_net_none = false;      // every Wi-Fi bring-up path failed
 static bool s_drawn_relay_fault = false; // what the last draw_status() showed
-static bool s_auth_fallback = false; // challenge key derived from the fallback secret
 
 // Status facts gathered once at show_message().
 static int s_boot_count = -1; // -1 unreadable, 0.. = persisted count
@@ -333,27 +341,34 @@ static void draw_status(void)
         (void)draw_line(Y_RELAY, TEXT_SCALE, COL_OK, COL_BG, "Heat: OFF");
     }
 
-    if (s_auth_fallback) {
-        (void)draw_line(Y_AUTH, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "AUTH: FALLBACK");
-    } else {
-        (void)draw_line(Y_AUTH, TEXT_SCALE, COL_DIM, COL_BG, "");
-    }
-
     if (s_net_none) {
-        (void)draw_line(Y_NET, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "NO NETWORK");
-        (void)draw_line(Y_IP, TEXT_SCALE, COL_DIM, COL_BG, "Wi-Fi bring-up failed");
-        (void)draw_line(Y_HELP, TEXT_SCALE, COL_DIM, COL_BG, "Power-cycle or use JTAG");
+        (void)draw_line(Y_JOIN, NET_SCALE, COL_FAULT, COL_FAULT_BG, "NO NETWORK");
+        (void)draw_line(Y_SSID, TEXT_SCALE, COL_DIM, COL_BG, "Wi-Fi bring-up failed");
+        (void)draw_line(Y_PWLBL, TEXT_SCALE, COL_DIM, COL_BG, "Power-cycle or use JTAG");
+        (void)draw_line(Y_PASS, PASS_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
     } else if (s_net_set) {
-        snprintf(buf, sizeof(buf), "%s: %s", s_net_is_ap ? "AP" : "WiFi", s_net_name);
-        (void)draw_line(Y_NET, TEXT_SCALE, COL_TEXT, COL_BG, buf);
+        (void)draw_line(Y_JOIN, TEXT_SCALE, COL_DIM, COL_BG, "Join Wi-Fi network:");
+        // A 32-char SSID needs scale 2 (384 px); shorter ones get scale 3.
+        (void)draw_line(Y_SSID, strlen(s_net_name) <= 26 ? NET_SCALE : TEXT_SCALE, COL_TEXT, COL_BG,
+                        s_net_name);
+        (void)draw_line(Y_PWLBL, TEXT_SCALE, COL_DIM, COL_BG, "Password:");
+        (void)draw_line(Y_PASS, PASS_SCALE, COL_TITLE, COL_BG, s_net_pass);
         snprintf(buf, sizeof(buf), "IP: %s", s_net_ip);
-        (void)draw_line(Y_IP, TEXT_SCALE, COL_TEXT, COL_BG, buf);
+        (void)draw_line(Y_IP, NET_SCALE, COL_TEXT, COL_BG, buf);
         snprintf(buf, sizeof(buf), "Open http://%s/ to upload", s_net_ip);
-        (void)draw_line(Y_HELP, TEXT_SCALE, COL_TITLE, COL_BG, buf);
+        (void)draw_line(Y_URL, TEXT_SCALE, COL_TITLE, COL_BG, buf);
+        (void)draw_line(Y_NOTE, TEXT_SCALE, COL_DIM, COL_BG, "New password each boot");
     } else {
-        (void)draw_line(Y_NET, TEXT_SCALE, COL_DIM, COL_BG, "Network: starting...");
-        (void)draw_line(Y_IP, TEXT_SCALE, COL_DIM, COL_BG, "");
-        (void)draw_line(Y_HELP, TEXT_SCALE, COL_DIM, COL_BG, "");
+        (void)draw_line(Y_JOIN, TEXT_SCALE, COL_DIM, COL_BG, "Network: starting...");
+        (void)draw_line(Y_SSID, NET_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_PWLBL, TEXT_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_PASS, PASS_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
     }
 }
 
@@ -443,14 +458,14 @@ void recovery_lcd_show_message(void)
     xSemaphoreGive(s_lock);
 }
 
-void recovery_lcd_set_network(bool is_ap, const char *name, const char *ip)
+void recovery_lcd_set_ap(const char *ssid, const char *passphrase, const char *ip)
 {
     if (!s_lock) {
         s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_net_is_ap = is_ap;
-    snprintf(s_net_name, sizeof(s_net_name), "%s", name ? name : "");
+    snprintf(s_net_name, sizeof(s_net_name), "%s", ssid ? ssid : "");
+    snprintf(s_net_pass, sizeof(s_net_pass), "%s", passphrase ? passphrase : "");
     snprintf(s_net_ip, sizeof(s_net_ip), "%s", ip ? ip : "?");
     s_net_set = true;
     s_net_none = false;
@@ -467,19 +482,6 @@ void recovery_lcd_set_no_network(void)
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_net_none = true;
-    if (s_ready) {
-        draw_status();
-    }
-    xSemaphoreGive(s_lock);
-}
-
-void recovery_lcd_set_auth_fallback(bool fallback)
-{
-    if (!s_lock) {
-        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
-    }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    s_auth_fallback = fallback;
     if (s_ready) {
         draw_status();
     }

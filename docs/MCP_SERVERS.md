@@ -451,20 +451,20 @@ section) is reachable: a later JTAG flash boots `recovery` until `recovery_exit`
 hardware as of this entry (mocked HTTP only).
 
 **Recovery-image tools (2026-10-02):** `recovery_status` (READ-ONLY: `GET /api/recovery/status` plus
-`GET /api/recovery/pico/status`; it also renders the image's diagnostic keys -- `auth_secret_present`, `auth_fallback`, `uptime_s`, `reset_reason`/`reset_reason_name`, `app_ota_state`, `coredump_present`, `otadata_blank`, the Wi-Fi AP counters (`wifi_up`, `ap_*`, `wifi_last_event*`) and the `relay_hold_*` task state -- one group per line, saying "not reported (older recovery image)" for any key the board omits and never inventing a value; it adds a `WARNING:` line for `auth_fallback=true` (the board is on the derived fallback secret, so the configured AP password will not authenticate; the client deliberately does not derive that secret), `ap_stop_count>0`, `relay_hold_fault=true`, a `relay_hold_task` that is not running, `otadata_blank=true` and `coredump_present=true`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`,
+`GET /api/recovery/pico/status`; it also renders the image's diagnostic keys -- `auth_mode` (always `lcd_passphrase`), `uptime_s`, `reset_reason`/`reset_reason_name`, `app_ota_state`, `coredump_present`, `otadata_blank`, the Wi-Fi AP counters (`wifi_up`, `ap_*`, `wifi_last_event*`) and the `relay_hold_*` task state -- one group per line, saying "not reported (older recovery image)" for any key the board omits and never inventing a value; it adds a `WARNING:` line for `ap_stop_count>0`, `relay_hold_fault=true`, a `relay_hold_task` that is not running, `otadata_blank=true` and `coredump_present=true`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`,
 `recovery_pico_upload`, `recovery_pico_abort`, `recovery_sw_reset` and `recovery_push_esp_image`, in `tools/PcTools/src/kilnctrl/mcp_server_recovery.py`. They talk ONLY to
 `firmware/KilnFW_recovery/` and refuse (404 or `running` not `recovery`) against the main app. Every mutator refuses
-unless `confirm is True` exactly, before any network access; reads `KILNCTL_AP_PASSWORD` from the environment
-(reports `[bool]` only, never the value); reads both status routes before acting and refuses while the Pico relay
-is busy or has no PSRAM; and reads status back afterward, failing loud on disagreement. `recovery_pico_upload`
+unless `confirm is True` exactly, before any network access; sign nothing and read no credential (the image is
+unauthenticated, see below); read both status routes before acting and refuses while the Pico relay
+is busy or has no PSRAM; and read status back afterward, failing loud on disagreement. `recovery_pico_upload`
 reports the relay's terminal phase honestly: success only for phase done with bytes_sent equal to total_bytes equal
 to the image length; `outcome_unknown` (the relay stopped after END was sent) is reported as NOT success, as is a
 timeout or lost contact. The wifi-reset credential clear is not readable from status, so that tool verifies only
-the restart. `recovery_pico_abort` (POST `/api/recovery/pico/abort`, context `pico-abort`) sends no POST when the
+the restart. `recovery_pico_abort` (POST `/api/recovery/pico/abort`) sends no POST when the
 relay is not busy, and reports `aborted` as ok, a transfer that finished first as NOT ABORTED, and
-`outcome_unknown`, a lost reply or lost contact as UNKNOWN. `recovery_sw_reset` (POST `/api/sw_reset`, context
-`sw-reset`; the recovery image's route, not the main app's) needs the board to drop off and answer again; a lost
-reply is UNKNOWN. `recovery_push_esp_image` (POST `/api/ota/esp`, context `esp`) refuses a file that is not an
+`outcome_unknown`, a lost reply or lost contact as UNKNOWN. `recovery_sw_reset` (POST `/api/sw_reset`;
+the recovery image's route, not the main app's) needs the board to drop off and answer again; a lost
+reply is UNKNOWN. `recovery_push_esp_image` (POST `/api/ota/esp`) refuses a file that is not an
 absolute path, does not start with the ESP image magic 0xE9, or exceeds the board's reported `max_upload` (the `app`
 partition size), refuses while the Pico relay is busy, and counts success only when the recovery routes then answer
 404 (the application is up); back-as-recovery or never restarted is FAILED, and a lost reply or silent board is
@@ -472,23 +472,30 @@ UNKNOWN/UNVERIFIED. Hardening (2026-10-02): `recovery_pico_abort` reports UNVERI
 `aborted` phase carries the error text "browser stopped polling" (`recovery_pico.c` `should_stop()`: the relay aborted
 itself, not necessarily because of this POST). `recovery_push_esp_image` appends a loud "`app` may be partly erased"
 warning, with a fresh `app_valid` read from the status route, to any board-reported failure other than the
-pre-erase refusals (401/403/409/413/429/503) or a challenge failure (POST never sent), and reports `ok-with-warning` (never plain ok) when the 200 reply does not say
+pre-erase refusals (409/413/503), and reports `ok-with-warning` (never plain ok) when the 200 reply does not say
 "boot_guard cleared and verified". Unit tests use a fake board only
 (`tools/PcTools/tests/test_mcp_server_recovery.py`); never run against hardware.
 
-**Recovery-image signer in PcTools:**
-`tools/PcTools/src/kilnctrl/recovery_ota_auth_client.py` restores exactly the
-narrow capability the above retirement removed, scoped ONLY to
-`firmware/KilnFW_recovery/` -- `derive_mac()`/`get_challenge()`/
-`signed_post()` plus `recovery_push_esp_image()`/`recovery_sw_reset()`/`recovery_exit()`/
-`recovery_wifi_reset()`/`recovery_pico_upload()`/`recovery_pico_abort()`, for a board that has fallen back to the recovery image
-and cannot be reached through the main app's (now-unauthenticated) routes at
-all. The MAC covers nonce16, context and, when present, `?` plus the raw query
-(recovery_http.c signs the query for the Pico upload route: crc and slot). The query is validated
-locally (at most 95 chars, printable, no space) BEFORE a challenge is fetched, since any failure after a
-valid nonce burns it and counts toward the shared lockout. It reads no environment variable itself --
-`mcp_server_recovery.py` reads `KILNCTL_AP_PASSWORD` and passes it through, never logging or
-echoing it. Full rationale: `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` section 2.
+**Recovery image is unauthenticated (owner decision 2026-10-02):** no password, no key, no challenge, no signature
+header, no lockout. The only access control is physical: the recovery image brings up its own WPA2 SoftAP only (no
+station interface; STA is disabled because the routes are open, so only a client that joined the AP may reach them)
+with a fresh random 12-character passphrase per boot, drawn from an unambiguous alphabet, shown on the board's LCD
+together with the SSID and `192.168.4.1`, kept in RAM only (never in HTTP, JSON, logs, serial or NVS; a stored `ap_pass`
+is ignored). `esp_http_server` cannot bind to one interface; with STA never created the AP is the only one.
+`GET /api/recovery/status` reports `auth_mode:"lcd_passphrase"`. The main app's route tiers and web-auth story are
+unchanged.
+
+**Recovery POST client in PcTools:** `tools/PcTools/src/kilnctrl/recovery_post_client.py` (formerly the HMAC signer
+`recovery_ota_auth_client.py`) is plain, unsigned urllib: `recovery_push_esp_image()`, `recovery_sw_reset()`,
+`recovery_exit()`, `recovery_wifi_reset()`, `recovery_boot_guard_reset()`, `recovery_pico_upload()`,
+`recovery_pico_abort()`, for a board that has fallen back to the recovery image and cannot be reached through the
+main app's routes. The Pico upload query (`crc`, `slot`) is validated locally (at most 95 chars, printable, no
+space). `KILNCTL_AP_PASSWORD` is no longer read by any recovery tool. No PcTools tool joins the AP: the PC must
+already be associated with the recovery SoftAP, using the passphrase read off the LCD. Whatever automation joins it
+should read the passphrase from the environment variable `KILNCTL_RECOVERY_AP_PASSPHRASE` (never a tool parameter,
+never echoed or logged; report presence as a bool only). Standing host checks:
+`check_recovery_passphrase.ps1` (generator) and `check_recovery_page_crc.ps1` (the browser page carries the Pico CRC
+and no auth code).
 
 **Data-partition erase during a commission reflash (owner decision
 2026-09-21).** `flash_firmware()` takes `erase_partitions: list[str] = None`

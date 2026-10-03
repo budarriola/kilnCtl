@@ -9,11 +9,14 @@ Mutating:    recovery_exit, recovery_wifi_reset, recovery_boot_guard_reset,
              recovery_pico_upload, recovery_pico_abort, recovery_sw_reset,
              recovery_push_esp_image
 Every mutating tool: refuses unless ``confirm is True`` EXACTLY (before any
-network access), needs the AP password in KILNCTL_AP_PASSWORD (read here,
-never a parameter, never printed -- only a [bool] is ever reported), reads
-status BEFORE acting and AFTER, and fails loud when the read-back disagrees
-with what the board's own reply claimed. Signing is
-recovery_ota_auth_client.py (query-bound MAC, see its derive_mac()).
+network access), reads status BEFORE acting and AFTER, and fails loud when the read-back
+disagrees with what the board's own reply claimed.
+
+The recovery image is UNAUTHENTICATED (owner decision 2026-10-02): no password,
+no key, no signing. Its only access control is physical -- a WPA2 SoftAP with a
+random per-boot passphrase shown on the board's LCD. The PC must already be
+joined to that AP (env KILNCTL_RECOVERY_AP_PASSPHRASE is for whatever joins it;
+no tool here reads or needs it). POSTs are in recovery_post_client.py.
 
 Never run against real hardware from tests: tests/test_mcp_server_recovery.py
 fakes both HTTP layers.
@@ -27,14 +30,12 @@ import zlib
 from typing import Optional
 
 from . import recovery_http_client as rhc
-from . import recovery_ota_auth_client as roac
+from . import recovery_post_client as rpc
 
 from . import mcp_server as _srv
 
-AP_PASSWORD_ENV = "KILNCTL_AP_PASSWORD"
-
 #: recovery_pico_proto.h RPP_SLOT_SIZE (832 KB): recovery_pico_reserve()
-#: answers 413 above this, after the MAC check has already consumed the nonce.
+#: answers 413 above this.
 MAX_PICO_IMAGE_BYTES = 0x000D0000
 
 #: recovery_push_esp_image() socket timeout: the whole image is streamed in one
@@ -59,18 +60,8 @@ def _resolve_host(host: Optional[str]) -> str:
     return _ota_resolve_host(host)
 
 
-def _ap_password() -> Optional[str]:
-    pw = os.environ.get(AP_PASSWORD_ENV, "")
-    return pw or None
-
-
 def _refuse_unconfirmed(what: str) -> str:
     return f"REFUSED: {what} is destructive/disruptive -- pass confirm=True (exactly True) to proceed"
-
-
-def _refuse_no_password() -> str:
-    return (f"REFUSED: {AP_PASSWORD_ENV} set=False -- the recovery image's HMAC key is the AP "
-            f"password, read only from that environment variable (never a parameter)")
 
 
 def _fmt_status(st: dict) -> str:
@@ -84,7 +75,7 @@ def _fmt_status(st: dict) -> str:
 #: (recovery_http.c recovery_status_get), grouped one rendered line per group.
 #: A key the board did not send is rendered as NOT_REPORTED, never a value.
 _DIAG_GROUPS = (
-    ("boot/auth", ("auth_secret_present", "auth_fallback", "uptime_s", "reset_reason",
+    ("boot/auth", ("auth_mode", "uptime_s", "reset_reason",
                    "reset_reason_name", "app_ota_state", "coredump_present", "otadata_blank")),
     ("wifi", ("wifi_up", "ap_start_count", "ap_stop_count", "ap_stations", "ap_connect_total",
               "wifi_last_event", "wifi_last_event_age_s")),
@@ -114,10 +105,6 @@ def _diag_warnings(st: dict) -> "list[str]":
     """Loud WARNING lines for the diagnostic keys. Only a PRESENT key can warn
     (an absent key is unknown, not healthy and not faulty)."""
     w = []
-    if st.get("auth_fallback") is True:
-        # Deliberately no fallback-secret derivation here (owner has not decided on it).
-        w.append("WARNING: auth_fallback=true -- the board is on the derived fallback secret; "
-                 "the configured AP password (KILNCTL_AP_PASSWORD) will NOT authenticate signed POSTs")
     ap_stop = st.get("ap_stop_count")
     if isinstance(ap_stop, int) and not isinstance(ap_stop, bool) and ap_stop > 0:
         w.append(f"WARNING: ap_stop_count={ap_stop} -- the soft-AP has been stopped since boot "
@@ -165,8 +152,8 @@ def _preflight(host: str) -> "tuple[Optional[dict], Optional[dict], Optional[str
     return st, pico, None
 
 
-def _post_error(path: str, exc: "roac.RecoveryOtaAuthError") -> str:
-    # exc text never contains the password; only status/detail from the board.
+def _post_error(path: str, exc: "rpc.RecoveryPostError") -> str:
+    # only status/detail from the board.
     return f"FAILED: POST {path} -- {exc}"
 
 
@@ -180,12 +167,12 @@ RELAY_SELF_ABORT_TEXT = "browser stopped polling"
 BOOT_GUARD_CLEARED_TEXT = "boot_guard cleared and verified"
 
 #: HTTP statuses the board can ONLY answer before the first esp_ota_write()
-#: touches `app`: auth refusal (403/429; 401 kept for safety), Pico busy (409),
+#: touches `app`: Pico busy (409),
 #: recovery_upload_stream()'s length gate / first-chunk RIC_OVERSIZE (413), and
 #: its upload-buffer allocation failure (503). 400/422/500 are each emitted both
 #: before and after the erase starts ("connection lost mid-image", "image failed
 #: verification", "flash write failed"), so they still carry the erase warning.
-_PRE_ERASE_STATUSES = (401, 403, 409, 413, 429, 503)
+_PRE_ERASE_STATUSES = (409, 413, 503)
 
 
 def _boot_guard_outcome(text: str) -> str:
@@ -206,7 +193,7 @@ def _app_may_be_erased_note(host: str) -> str:
     return note + f" (re-read just now: app_valid={st.get('app_valid')!r}, app_present={st.get('app_present')!r})"
 
 
-def _reply_lost(exc: "roac.RecoveryOtaAuthError") -> bool:
+def _reply_lost(exc: "rpc.RecoveryPostError") -> bool:
     """True when the signed POST was sent but no HTTP status came back
     (timeout, reset): the board may have acted, so this is never a plain
     FAILED -- the caller must go on to observe the board."""
@@ -243,14 +230,13 @@ def recovery_status(host: Optional[str] = None) -> str:
     GET /api/recovery/status (running partition, app image presence/size/
     full-image validity, boot_guard record, relay fault, NVS availability,
     heap floor) plus GET /api/recovery/pico/status (Pico relay phase/busy/
-    bytes/outcome). Both routes are unauthenticated on the board. No password
-    is read. Against a board running the normal application this reports a
+    bytes/outcome). Both routes are unauthenticated on the board. Against a board running the normal application this reports a
     404, which is itself the evidence that the recovery image is not running.
 
-    Also renders the diagnostic keys (auth fallback, uptime/reset reason,
+    Also renders the diagnostic keys (auth mode, uptime/reset reason,
     coredump/otadata, Wi-Fi AP counters, relay-hold task) one group per line;
     a key an older recovery image does not send reads "not reported (older
-    recovery image)", never a made-up value. WARNING lines flag auth_fallback,
+    recovery image)", never a made-up value. WARNING lines flag
     ap_stop_count>0, relay_hold_fault, a relay_hold_task not running,
     otadata_blank and coredump_present.
 
@@ -279,12 +265,11 @@ def recovery_status(host: Optional[str] = None) -> str:
 @_srv._tool()
 def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0) -> str:
     """Leave the recovery image and boot the application (POST
-    /api/recovery/exit, AP-password X-Ota-Mac context "recovery-exit"). The
+    /api/recovery/exit). The
     board verifies `app` is a valid image (409 otherwise), clears boot_guard,
     selects `app` and restarts.
 
-    REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
-    (reports presence as a bool only). Reads recovery status first and refuses
+    REFUSES unless ``confirm is True`` exactly. Reads recovery status first and refuses
     if the Pico relay is busy or ``app_valid`` is not true. After the POST it
     polls until the recovery routes answer 404 (the application is up) and
     FAILS LOUDLY if the board instead never restarted or came back as the
@@ -293,9 +278,6 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_exit (reboots the board into the application)")
-    pw = _ap_password()
-    if pw is None:
-        return _refuse_no_password()
     resolved = _resolve_host(host)
     st, pico, err = _preflight(resolved)
     if err:
@@ -305,8 +287,8 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
     if st.get("app_valid") is not True:
         return f"REFUSED: app_valid is {st.get('app_valid')!r} -- no valid application image to boot ({_fmt_status(st)})"
     try:
-        reply = roac.recovery_exit(resolved, pw)
-    except roac.RecoveryOtaAuthError as exc:
+        reply = rpc.recovery_exit(resolved)
+    except rpc.RecoveryPostError as exc:
         if not _reply_lost(exc):
             return _post_error("/api/recovery/exit", exc)
         reply = {"status": None, "text": f"<reply lost: {exc}>"}
@@ -327,10 +309,9 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
 def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0) -> str:
     """Forget the HOME Wi-Fi credentials stored for the recovery image and
     restart (POST /api/recovery/wifi_reset, context "wifi-reset"). The AP
-    name/password are kept (the password is this image's HMAC key).
+    name is kept (the AP passphrase is random per boot anyway).
 
-    REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
-    (bool only). Reads status first, refuses while the Pico relay is busy.
+    REFUSES unless ``confirm is True`` exactly. Reads status first, refuses while the Pico relay is busy.
     Read-back: the board must drop off and answer again as the recovery image
     (a restart actually happened). The status route does not expose Wi-Fi
     credential state, so the clear itself cannot be read back -- the result
@@ -339,9 +320,6 @@ def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_wifi_reset (erases the stored home Wi-Fi credentials and restarts)")
-    pw = _ap_password()
-    if pw is None:
-        return _refuse_no_password()
     resolved = _resolve_host(host)
     st, pico, err = _preflight(resolved)
     if err:
@@ -349,8 +327,8 @@ def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_
     if pico.get("busy"):
         return f"REFUSED: the Pico relay is busy ({_fmt_pico(pico)}); a restart would kill it"
     try:
-        reply = roac.recovery_wifi_reset(resolved, pw)
-    except roac.RecoveryOtaAuthError as exc:
+        reply = rpc.recovery_wifi_reset(resolved)
+    except rpc.RecoveryPostError as exc:
         if not _reply_lost(exc):
             return _post_error("/api/recovery/wifi_reset", exc)
         reply = {"status": None, "text": f"<reply lost: {exc}>"}
@@ -380,8 +358,7 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
     "boot-guard-reset"; not the main app's route of the same path). The board
     erases the record in both locations and reads it back itself.
 
-    REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
-    (bool only). Reads recovery status first (``record_present``/
+    REFUSES unless ``confirm is True`` exactly. Reads recovery status first (``record_present``/
     ``boot_count``), then always POSTs: the status route reports only the
     CURRENT record location, while the board also erases the legacy
     "boot_guard"/"count" record that the main app's boot_guard.c still reads
@@ -393,16 +370,13 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_boot_guard_reset")
-    pw = _ap_password()
-    if pw is None:
-        return _refuse_no_password()
     resolved = _resolve_host(host)
     before, pico, err = _preflight(resolved)
     if err:
         return f"error: {err}"
     try:
-        reply = roac.recovery_boot_guard_reset(resolved, pw)
-    except roac.RecoveryOtaAuthError as exc:
+        reply = rpc.recovery_boot_guard_reset(resolved)
+    except rpc.RecoveryPostError as exc:
         if not _reply_lost(exc):
             return _post_error("/api/ota/esp/boot_guard_reset", exc)
         return (f"UNVERIFIED: POST /api/ota/esp/boot_guard_reset was sent but the reply was lost ({exc}); "
@@ -426,13 +400,13 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
                          host: Optional[str] = None, wait_s: float = 600.0) -> str:
     """Flash a SaftyFW slot image (.bin) onto the RP2040 through the recovery
     image's UART relay (POST /api/recovery/pico/upload?crc=<hex>[&slot=A|B],
-    context "pico-upload", query bound into the MAC -- the CRC32 is computed
+    -- the CRC32 is computed
     here from the file; `slot` is the operator's target-slot assertion, None
     for auto). The board validates size/vectors/CRC (422 on a bad image) and
     answers 202 when the relay starts; the OUTCOME is only in the status poll.
 
     REFUSES unless ``confirm is True`` exactly, the file is an existing
-    absolute path, and KILNCTL_AP_PASSWORD is set (bool only). Reads both
+    absolute path. Reads both
     status routes first and REFUSES unless the relay is idle (``busy`` false,
     psram true). After the 202 it polls /api/recovery/pico/status until a
     terminal phase or `wait_s`, and reports honestly:
@@ -464,9 +438,6 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
             image = fh.read()
     except OSError as exc:
         return f"REFUSED: cannot read image_path: {exc}"
-    pw = _ap_password()
-    if pw is None:
-        return _refuse_no_password()
     crc = zlib.crc32(image) & 0xFFFFFFFF
     resolved = _resolve_host(host)
     st, pico, err = _preflight(resolved)
@@ -478,8 +449,8 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
         return f"REFUSED: the Pico relay is not idle ({_fmt_pico(pico)}); abort or wait first"
     lost_reply = ""
     try:
-        reply = roac.recovery_pico_upload(resolved, image, crc, pw, slot=slot)
-    except roac.RecoveryOtaAuthError as exc:
+        reply = rpc.recovery_pico_upload(resolved, image, crc, slot=slot)
+    except rpc.RecoveryPostError as exc:
         if not _reply_lost(exc):
             return _post_error("/api/recovery/pico/upload", exc)
         # The board may have taken the image and started the relay. Keep
@@ -552,12 +523,11 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
 @_srv._tool()
 def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_s: float = 30.0) -> str:
     """Ask the recovery image's Pico UART relay to stop (POST
-    /api/recovery/pico/abort, AP-password X-Ota-Mac context "pico-abort").
+    /api/recovery/pico/abort).
     The relay sends ABORT to the Pico and ends in phase "aborted"; the POST's
     plain-text reply ("abort requested") is only an acknowledgement.
 
-    REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
-    (bool only). Reads both status routes first; if the relay is not busy
+    REFUSES unless ``confirm is True`` exactly. Reads both status routes first; if the relay is not busy
     there is nothing to abort and NO POST is sent (reported, not an error).
     After the POST it polls /api/recovery/pico/status for a terminal phase:
       aborted         -> "ok", unless the error text says the relay aborted
@@ -572,9 +542,6 @@ def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_pico_abort (stops an in-flight Pico transfer)")
-    pw = _ap_password()
-    if pw is None:
-        return _refuse_no_password()
     resolved = _resolve_host(host)
     st, pico, err = _preflight(resolved)
     if err:
@@ -584,8 +551,8 @@ def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_
                 f"(host={resolved})")
     lost_reply = ""
     try:
-        reply = roac.recovery_pico_abort(resolved, pw)
-    except roac.RecoveryOtaAuthError as exc:
+        reply = rpc.recovery_pico_abort(resolved)
+    except rpc.RecoveryPostError as exc:
         if not _reply_lost(exc):
             return _post_error("/api/recovery/pico/abort", exc)
         lost_reply = str(exc)
@@ -640,8 +607,7 @@ def recovery_sw_reset(confirm: bool = False, host: Optional[str] = None, wait_s:
     app's route of the same path). The board answers "resetting" and calls
     esp_restart().
 
-    REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
-    (bool only). Reads status first, refuses while the Pico relay is busy
+    REFUSES unless ``confirm is True`` exactly. Reads status first, refuses while the Pico relay is busy
     (the board 409s and a restart would kill the transfer). Read-back: the
     board must drop off and answer again. Back as the recovery image -> ok;
     answering as the normal application (recovery routes 404) -> ok with that
@@ -650,9 +616,6 @@ def recovery_sw_reset(confirm: bool = False, host: Optional[str] = None, wait_s:
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_sw_reset (restarts the board)")
-    pw = _ap_password()
-    if pw is None:
-        return _refuse_no_password()
     resolved = _resolve_host(host)
     st, pico, err = _preflight(resolved)
     if err:
@@ -660,8 +623,8 @@ def recovery_sw_reset(confirm: bool = False, host: Optional[str] = None, wait_s:
     if pico.get("busy"):
         return f"REFUSED: the Pico relay is busy ({_fmt_pico(pico)}); a restart would kill it"
     try:
-        reply = roac.recovery_sw_reset(resolved, pw)
-    except roac.RecoveryOtaAuthError as exc:
+        reply = rpc.recovery_sw_reset(resolved)
+    except rpc.RecoveryPostError as exc:
         if not _reply_lost(exc):
             return _post_error("/api/sw_reset", exc)
         reply = {"status": None, "text": f"<reply lost: {exc}>"}
@@ -693,7 +656,7 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     REFUSES unless ``confirm is True`` exactly, the file is an existing
     absolute path whose size is 1..the board's reported ``max_upload`` (the
     `app` partition size, from GET /api/recovery/status) and which starts
-    with the ESP image magic byte 0xE9, and KILNCTL_AP_PASSWORD is set (bool
+    with the ESP image magic byte 0xE9
     only). Reads both status routes first and REFUSES while the Pico relay is
     busy (the board 409s). Verification: after the POST the board must drop
     off and the recovery routes must answer 404 (the application is up) -> ok.
@@ -702,7 +665,7 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     (read recovery_status: app_valid says whether the image landed).
     This does NOT prove the new application is healthy beyond answering HTTP.
     A 200 reply that does not say boot_guard was cleared and verified is
-    reported "ok-with-warning". A board-reported failure past the auth/busy
+    reported "ok-with-warning". A board-reported failure past the busy
     gates (400/422/500...) FAILED message warns that `app` may be partly erased
     and includes a fresh app_valid read.
     """
@@ -720,9 +683,6 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
         return f"REFUSED: cannot read image_path: {exc}"
     if image[0] != ESP_IMAGE_MAGIC:
         return f"REFUSED: image does not start with the ESP image magic 0x{ESP_IMAGE_MAGIC:02x} (got 0x{image[0]:02x})"
-    pw = _ap_password()
-    if pw is None:
-        return _refuse_no_password()
     resolved = _resolve_host(host)
     st, pico, err = _preflight(resolved)
     if err:
@@ -735,8 +695,8 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     if pico.get("busy"):
         return f"REFUSED: the Pico relay is busy ({_fmt_pico(pico)}); the board would 409 and a restart would kill it"
     try:
-        reply = roac.recovery_push_esp_image(resolved, image, pw, timeout=ESP_PUSH_TIMEOUT_S)
-    except roac.RecoveryOtaAuthError as exc:
+        reply = rpc.recovery_push_esp_image(resolved, image, timeout=ESP_PUSH_TIMEOUT_S)
+    except rpc.RecoveryPostError as exc:
         if not _reply_lost(exc):
             msg = _post_error("/api/ota/esp", exc)
             if getattr(exc, "stage", "") != "post" or exc.status in _PRE_ERASE_STATUSES:
