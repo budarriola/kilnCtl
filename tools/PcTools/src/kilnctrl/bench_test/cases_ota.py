@@ -488,8 +488,8 @@ def _case_ote01(ctx: dict) -> CaseResult:
     """OT-E01: a push of a valid ESP image to POST /api/ota/esp on the
     APPLICATION image must be REFUSED -- the single-slot design
     (docs/OTA_SINGLE_SLOT_PLAN.md) runs the app from the only OTA slot, so
-    the "next" partition is the running one. Pass: HTTP 409 within ~5 s
-    (`refusal_form` http_409), or -- because the firmware may close the
+    the "next" partition is the running one. Pass: HTTP 409
+    (`refusal_form` http_409; elapsed is informational: the firmware drains the body first), or -- because the firmware may close the
     socket while the client is still uploading -- a connection reset with
     the board provably alive afterward (`connection_closed`, PASS-with-note).
     uptime_s must not go backwards, /api/crash_report must not change, and
@@ -1024,7 +1024,8 @@ def _case_ote10(ctx: dict) -> CaseResult:
     gate": ok, or HTTP 409 (the handler's own target refusal). A user-tier
     refusal must be a 401/403 -- a 409 there would mean the user session got
     through the tier gate, which is a FAIL. An admin transport error counts
-    as not-accepted."""
+    as not-accepted unless uptime/crash-report readbacks prove the board
+    alive (connection closed mid-upload); a user-tier transport error is FAIL."""
     idle, reason = _is_idle(ctx)
     if not idle:
         return CaseResult(Verdict.SKIP, reason=reason)
@@ -1068,12 +1069,40 @@ def _case_ote10(ctx: dict) -> CaseResult:
         lambda cookie: ota.push_esp_image_with_session(host, image_path, cookie)
     )
 
+    uptime_fn = ctx.get("_esp_uptime_fn") or (lambda: _esp_uptime_s(ctx, host))
+    crash_fn = ctx.get("_crash_report_fn") or (lambda: _dashboard_client(ctx).get_crash_report(host))
+
+    def _read(fn):
+        try:
+            return fn()
+        except Exception:
+            return None
+
+    uptime_before = _read(uptime_fn)
+    crash_before = _read(crash_fn)
+
     admin_ok = None
+    admin_note = None
     try:
         admin_result = push_with_session_fn(admin_cookie)
         admin_ok = bool(getattr(admin_result, "ok", False)) or getattr(admin_result, "status_code", None) == 409
     except Exception as exc:
-        admin_ok = getattr(exc, "status", None) == 409
+        status = getattr(exc, "status", None)
+        if status == 409:
+            admin_ok = True
+        elif status is None:
+            # Mid-upload close: no response readable. Accepted past the auth
+            # gate only if the board is provably alive and unharmed.
+            uptime_after = _read(uptime_fn)
+            crash_after = _read(crash_fn)
+            alive = (uptime_before is not None and uptime_after is not None
+                     and uptime_after >= uptime_before
+                     and crash_before is not None and crash_after == crash_before)
+            admin_ok = alive
+            if alive:
+                admin_note = "admin push: connection closed mid-upload; uptime not reset, crash report unchanged"
+        else:
+            admin_ok = False
 
     user_refused = None
     try:
@@ -1081,9 +1110,12 @@ def _case_ote10(ctx: dict) -> CaseResult:
         user_refused = (not getattr(user_result, "ok", False)
                         and getattr(user_result, "status_code", None) in (401, 403))
     except Exception as exc:
-        user_refused = getattr(exc, "status", None) in (401, 403, None)
+        user_refused = getattr(exc, "status", None) in (401, 403)
 
-    return J.judge_ota_session_auth_tiers(admin_ok, user_refused)
+    result = J.judge_ota_session_auth_tiers(admin_ok, user_refused)
+    if admin_note and isinstance(result.observed, dict):
+        result.observed["note"] = admin_note
+    return result
 
 
 def _case_ote12(ctx: dict) -> CaseResult:

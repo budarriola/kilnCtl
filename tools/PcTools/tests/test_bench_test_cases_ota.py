@@ -651,9 +651,11 @@ class Ote01Test(unittest.TestCase):
         ctx = self._ctx(_crash_report_fn=lambda: next(reports))
         self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
 
-    def test_slow_refusal_fails(self):
-        ctx = self._ctx(_now=_Clock(step=6.0))
-        self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
+    def test_slow_refusal_passes_but_over_ceiling_fails(self):
+        r = C._case_ote01(self._ctx(_now=_Clock(step=30.0)))
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertGreater(r.observed["elapsed_s"], 5.0)
+        self.assertEqual(C._case_ote01(self._ctx(_now=_Clock(step=130.0))).verdict, Verdict.FAIL)
 
     def test_interlock_not_ok_skips_before_pushing(self):
         """Plan doc section 6 rule 1: the interlock is confirmed ok
@@ -695,7 +697,7 @@ class JudgeOtaSelfPushRefusedTest(unittest.TestCase):
 
     def test_each_violation_fails(self):
         for kw in (dict(refusal_form="accepted", status_code=200), dict(refusal_form=None, status_code=None),
-                   dict(status_code=500), dict(elapsed_s=6.0), dict(elapsed_s=None),
+                   dict(status_code=500), dict(elapsed_s=121.0), dict(elapsed_s=None),
                    dict(uptime_after=5.0), dict(uptime_before=None), dict(uptime_after=None),
                    dict(crash_after={"present": True}), dict(crash_before=None),
                    dict(interlock_ok_after=False), dict(interlock_ok_after=None)):
@@ -1115,6 +1117,7 @@ class Ote10Test(unittest.TestCase):
             "web_user_username": "user1", "web_user_password": "user1pw",
             "ota_http_client": _FakeOtaClient(),
             "_login_fn": lambda user, pw: (200, f"sid-{user}"),
+            "_esp_uptime_fn": lambda: 100.0, "_crash_report_fn": lambda: {"present": False},
         }
         ctx.update(overrides)
         return ctx
@@ -1142,6 +1145,39 @@ class Ote10Test(unittest.TestCase):
 
         result = C._case_ote10(self._ctx(_push_with_session_fn=push_with_session))
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def _transport_ctx(self, uptimes, crashes, user_exc=True):
+        def push(cookie):
+            if cookie == "sid-admin" or user_exc:
+                raise _OtaHttpErr(None, "unreachable: reset")
+            return _OtaPushResult(False, 403)
+
+        u, c = iter(uptimes), iter(crashes)
+        return self._ctx(_push_with_session_fn=push, _esp_uptime_fn=lambda: next(u),
+                         _crash_report_fn=lambda: next(c))
+
+    def test_admin_connection_closed_with_live_board_passes_with_note(self):
+        ctx = self._transport_ctx([10.0, 12.0], [{"p": 0}, {"p": 0}], user_exc=False)
+        r = C._case_ote10(ctx)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertIn("note", r.observed)
+
+    def test_admin_connection_closed_with_reboot_fails(self):
+        ctx = self._transport_ctx([10.0, 2.0], [{"p": 0}, {"p": 0}], user_exc=False)
+        self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
+
+    def test_admin_connection_closed_with_new_crash_fails(self):
+        ctx = self._transport_ctx([10.0, 12.0], [{"p": 0}, {"p": 1}], user_exc=False)
+        self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
+
+    def test_admin_connection_closed_unreadable_fails(self):
+        ctx = self._ctx(_push_with_session_fn=lambda cookie: (_ for _ in ()).throw(_OtaHttpErr(None)),
+                        _esp_uptime_fn=lambda: None, _crash_report_fn=lambda: None)
+        self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
+
+    def test_user_transport_error_fails(self):
+        ctx = self._transport_ctx([10.0, 12.0], [{"p": 0}, {"p": 0}], user_exc=True)
+        self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
 
     def test_user_getting_409_fails(self):
         """409 for the user tier means it passed the ADMIN gate."""
