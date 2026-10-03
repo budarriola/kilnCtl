@@ -297,9 +297,24 @@ esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
     // 5. Verify the recovery image, then point the bootloader at it. The
     // verify-then-set helper is shared with the boot_guard threshold path
     // (recovery_switch.h); it refuses a missing/factory-running layout and an
-    // image that does not verify, writing nothing in either case.
+    // image that does not verify, writing nothing in either case. SET_FAILED
+    // is different: esp_ota_set_boot_partition() may already have erased
+    // otadata, so that case restores the running image's boot target.
     char sel_msg[96];
     recovery_switch_result_t sel = recovery_switch_select_boot(sel_msg, sizeof(sel_msg));
+    if (sel == RECOVERY_SWITCH_SET_FAILED) {
+        const bool restored = recovery_switch_restore_running();
+        ESP_LOGE(OTA_HTTP_TAG, "recovery_boot from %s: selecting recovery failed (%s) -- boot target restore %s",
+                 ip, sel_msg, restored ? "succeeded" : "FAILED (the next reset may boot recovery)");
+        ota_http_update_end();
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req,
+                        restored ? "selecting recovery failed part-way; the boot target was restored to the running image, NOT rebooting"
+                                 : "selecting recovery failed part-way and restoring the boot target FAILED; the next reset may boot recovery",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
     if (sel != RECOVERY_SWITCH_OK) {
         ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: refused: %s -- NOT rebooting", ip, sel_msg);
         ota_http_update_end();

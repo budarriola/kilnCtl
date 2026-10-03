@@ -55,6 +55,9 @@ recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
         set_msg(msg, cap, "the recovery partition does not hold a valid image -- not switching");
         return RECOVERY_SWITCH_INVALID;
     }
+    /* esp_ota_set_boot_partition(factory) verifies the image, then ERASES otadata so the bootloader
+     * falls through to factory. A failure part-way can therefore already have changed otadata: the
+     * SET_FAILED caller must call recovery_switch_restore_running(), never assume nothing was written. */
     esp_err_t err = esp_ota_set_boot_partition(recovery);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition(recovery) failed: %s", esp_err_to_name(err));
@@ -65,6 +68,9 @@ recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
     return RECOVERY_SWITCH_OK;
 }
 
+/* Points the boot target back at the running partition. Under
+ * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE this leaves ota_0 in NEW/PENDING_VERIFY, so the
+ * rollback-confirm task decides again on the next boot (it does not stay "valid" by omission). */
 bool recovery_switch_restore_running(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();

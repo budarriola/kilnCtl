@@ -296,10 +296,12 @@ const esp_partition_t *esp_ota_get_running_partition(void) { return NULL; }
 
 // recovery_switch.c is target-only (esp_image_verify); ota_http_recovery.c's
 // recovery_boot handler only calls these two seams. Never reached by a test
-// in this file -- the handler is target-build only.
+// in this file except test_recovery_boot_set_failed_restores_boot_target().
+static recovery_switch_result_t s_fake_select_result = RECOVERY_SWITCH_NOT_PRESENT;
+static int s_fake_restore_calls = 0;
 recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
-{ if (msg && cap) msg[0] = '\0'; return RECOVERY_SWITCH_NOT_PRESENT; }
-bool recovery_switch_restore_running(void) { return false; }
+{ if (msg && cap) msg[0] = '\0'; return s_fake_select_result; }
+bool recovery_switch_restore_running(void) { s_fake_restore_calls++; return true; }
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp_ota_handle_t *out_handle)
 { (void)partition; (void)image_size; if (out_handle) *out_handle = 1; return ESP_OK; }
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
@@ -440,8 +442,9 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c) { (void)zone_index
 // MAX31856_read_all()/kiln_io_read() directly -- stubs renamed to match.
 esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_readings, size_t *out_count)
 { (void)out; (void)max_readings; if (out_count) *out_count = 0; return ESP_FAIL; }
+static esp_err_t s_fake_io_read_result = ESP_FAIL;
 esp_err_t kiln_io_owner_command_read(kiln_io_state_t *out)
-{ if (out) memset(out, 0, sizeof(*out)); return ESP_FAIL; }
+{ if (out) memset(out, 0, sizeof(*out)); return s_fake_io_read_result; }
 
 // ota_pico_relay.h -- never called by ota_http.c's own tests, but review
 // finding D6 adds a direct test of pico_img_stage.c (linked in for real,
@@ -673,6 +676,42 @@ static void test_authenticated_request_does_reach_interlock(void)
     TEST_CHECK(g_probe_interlock_called,
               "the interlock check runs for an ordinary request -- proving reset_post_handler() still "
               "reaches profile_executor_get_status() now that the auth-header step is gone");
+}
+
+static void test_recovery_boot_set_failed_restores_boot_target(void)
+{
+    TEST_SECTION("recovery_boot -- SET_FAILED restores the running boot target and answers 500, not a clean 409");
+    static int dummy_io;
+    kiln_io_t *saved_io = s_io;
+    s_io = (kiln_io_t *)&dummy_io;
+    s_fake_io_read_result = ESP_OK; /* relay_shadow == 0: relays off */
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    stub_headers_reset();
+    s_fake_select_result = RECOVERY_SWITCH_SET_FAILED;
+    s_fake_restore_calls = 0;
+    s_last_resp_status[0] = '\0';
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = ota_recovery_boot_post_handler(&req);
+
+    TEST_CHECK(err == ESP_OK, "ota_recovery_boot_post_handler must always return ESP_OK");
+    TEST_CHECK(s_fake_restore_calls == 1,
+              "SET_FAILED may already have erased otadata -- the handler must call recovery_switch_restore_running()");
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0,
+              "SET_FAILED is a 500, never the 409 that claims nothing was written");
+
+    /* A plain refusal (image invalid) wrote nothing and must NOT restore. */
+    s_fake_select_result = RECOVERY_SWITCH_INVALID;
+    s_fake_restore_calls = 0;
+    s_last_resp_status[0] = '\0';
+    (void)ota_recovery_boot_post_handler(&req);
+    TEST_CHECK(s_fake_restore_calls == 0, "INVALID writes nothing, so no restore");
+    TEST_CHECK(strncmp(s_last_resp_status, "409", 3) == 0, "INVALID stays a 409");
+
+    s_fake_select_result = RECOVERY_SWITCH_NOT_PRESENT;
+    s_fake_io_read_result = ESP_FAIL;
+    s_io = saved_io;
 }
 
 static void test_factory_reset_refused_by_system_mode_gate_during_firing(void)
@@ -2161,6 +2200,7 @@ void run_test_ota_http(void)
 
     test_authenticated_request_does_reach_interlock();
     test_factory_reset_refused_by_system_mode_gate_during_firing();
+    test_recovery_boot_set_failed_restores_boot_target();
     test_factory_reset_execute_refused_by_mode_gate_during_firing();
 
     test_check_interlocks_refuses_during_zone_sweep();

@@ -983,7 +983,7 @@ CEILING_BYTES = {
     # own comment above calls papering over a regression.
     "profile_exec_wdt": 2496,
     "ota_rollback_reboot": 1216,
-    # Measured 2026-10-02 (same shape as ota_rollback_reboot: announce-reboot send + hal_wdt_reboot).
+    # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 1216,
     "ota_pico_rollback": 2736,
     # 2026-09-25 fix-then-push review: the previous 2736 ceiling here was
