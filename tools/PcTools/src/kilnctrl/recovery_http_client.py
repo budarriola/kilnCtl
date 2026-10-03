@@ -26,9 +26,10 @@ PICO_TERMINAL_PHASES = ("done", "failed", "aborted", "outcome_unknown")
 
 
 class RecoveryHttpError(Exception):
-    def __init__(self, message: str, status: Optional[int] = None):
+    def __init__(self, message: str, status: Optional[int] = None, body: str = ""):
         super().__init__(message)
         self.status = status
+        self.body = body
 
 
 def _get_json(host: str, path: str, timeout: float) -> dict:
@@ -37,7 +38,11 @@ def _get_json(host: str, path: str, timeout: float) -> dict:
         with urllib.request.urlopen(urllib.request.Request(url, method="GET"), timeout=timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        raise RecoveryHttpError(f"GET {path} answered HTTP {exc.code}", exc.code) from exc
+        try:
+            err_body = exc.read(512).decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        raise RecoveryHttpError(f"GET {path} answered HTTP {exc.code}", exc.code, err_body) from exc
     except (urllib.error.URLError, OSError) as exc:
         raise RecoveryHttpError(f"GET {path} unreachable: {exc}") from exc
     try:

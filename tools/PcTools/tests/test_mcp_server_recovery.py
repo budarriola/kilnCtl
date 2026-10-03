@@ -86,7 +86,11 @@ def _unreachable():
 
 
 def _not_found():
-    return rhc.RecoveryHttpError("404", 404)
+    return rhc.RecoveryHttpError("404", 404, '{"ok":false,"error":"no such endpoint"}')
+
+
+def _foreign_404():
+    return rhc.RecoveryHttpError("404", 404, "<html>Not Found</html>")
 
 
 class _Base(unittest.TestCase):
@@ -103,7 +107,8 @@ class _Base(unittest.TestCase):
 
         with unittest.mock.patch.object(mr, "_resolve_host", return_value=HOST), \
              unittest.mock.patch.object(mr, "_candidate_hosts", lambda h, a: list(cands)), \
-             unittest.mock.patch.object(mr, "_app_identity", lambda h: ("running partition='app'; boot_guard fake", getattr(board, "fw_build", None))), \
+             unittest.mock.patch.object(mr, "_app_identity", lambda h: ("running partition='app'; boot_guard fake", getattr(board, "fw_build", None),
+                                                                      getattr(board, "running", "app"))), \
              unittest.mock.patch.object(mr, "_sleep", fake_sleep), \
              unittest.mock.patch.object(mr, "_monotonic", lambda: clock["t"]), \
              unittest.mock.patch.object(rhc, "get_status", board.get_status), \
@@ -801,9 +806,6 @@ class PushEspImageTest(_Base):
         self.assertTrue(out.startswith("UNKNOWN"), out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 LAN = "192.0.2.156"
 
@@ -887,3 +889,50 @@ class CandidateHostsTest(unittest.TestCase):
         with unittest.mock.patch.dict(os.environ, {"KILNCTL_HOST": LAN}), \
              unittest.mock.patch("kilnctrl.mcp_server_flash._resolve_verify_hosts", return_value=[LAN, "192.168.4.1"]):
             self.assertEqual(mr._candidate_hosts("192.168.4.1", None), ["192.168.4.1", LAN])
+
+
+class FalseSuccessGuardTest(_Base):
+    candidates = [HOST, LAN]
+
+    def test_lan_404_before_primary_drops_is_not_ok(self):
+        board = HostAwareBoard({HOST: [_status()], LAN: [_not_found()]})
+        out = self.run_tool(mr.recovery_exit, board, confirm=True)
+        self.assertFalse(out.startswith("ok"), out)
+
+    def test_foreign_404_body_is_not_the_application(self):
+        board = HostAwareBoard({HOST: [_status(), _status(), _unreachable()], LAN: [_foreign_404()]})
+        out = self.run_tool(mr.recovery_exit, board, confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
+    def test_exit_readable_recovery_partition_fails(self):
+        board = HostAwareBoard({HOST: [_status(), _status(), _unreachable()], LAN: [_unreachable(), _not_found()]})
+        board.running = "recovery"
+        out = self.run_tool(mr.recovery_exit, board, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("'recovery'", out)
+
+    def test_push_readable_recovery_partition_fails(self):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as fh:
+            fh.write(bytes([0xE9]) + bytes(99))
+        self.addCleanup(os.unlink, fh.name)
+        board = HostAwareBoard({HOST: [_status(max_upload=1000), _status(max_upload=1000), _unreachable()],
+                                LAN: [_unreachable(), _not_found()]}, post_reply={"status": 200, "text": BG_OK_REPLY})
+        board.running = "recovery"
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=fh.name, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+
+class AppIdentityTest(unittest.TestCase):
+    def test_unreadable_routes_are_reported_not_invented(self):
+        boom = RuntimeError("HTTP 401")
+        with unittest.mock.patch("kilnctrl.partition_http_client.get_partitions", side_effect=boom),              unittest.mock.patch("kilnctrl.ota_http_client.get_boot_guard_status", side_effect=boom),              unittest.mock.patch("kilnctrl.capability_preflight.get_board_info", side_effect=boom):
+            text, fw, running = mr._app_identity(LAN)
+        self.assertIsNone(fw)
+        self.assertIsNone(running)
+        self.assertIn("running partition unreadable", text)
+        self.assertIn("boot_guard unreadable", text)
+        self.assertFalse(mr._not_app_partition(running))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -50,6 +50,11 @@ ESP_IMAGE_MAGIC = 0xE9
 #: and bytes_sent under two separate lock holds, so one poll can land between.
 DONE_REREADS = 3
 
+#: The application's own catch-all /api/ 404 body (wifi_provision_http.c). A bare
+#: 404 from some other device on a candidate address (router, NAS) must not
+#: count as the application answering.
+APP_404_MARKER = "no such endpoint"
+
 #: Indirections so tests never sleep.
 _sleep = time.sleep
 _monotonic = time.monotonic
@@ -252,8 +257,11 @@ def _poll_restart_hosts(hosts: "list[str]", wait_s: float, interval_s: float = 1
     """Multi-address _poll_restart. hosts[0] is the address the call used
     (the recovery SoftAP); the rest are where the application may come up.
     Returns (verdict, detail, answering_host). 'app' = some candidate answers
-    GET /api/recovery/status with 404. 'dropped' tracks hosts[0] only: an
-    unreachable LAN candidate is not evidence the recovery image went away."""
+    GET /api/recovery/status with 404 AND the application's own "no such
+    endpoint" body (a bare 404 from a router/NAS is not the board), and a
+    non-primary candidate counts only after hosts[0] has dropped. 'dropped'
+    tracks hosts[0] only: an unreachable LAN candidate is not evidence the
+    recovery image went away."""
     primary = hosts[0]
     deadline = _monotonic() + wait_s
     dropped = False
@@ -263,8 +271,8 @@ def _poll_restart_hosts(hosts: "list[str]", wait_s: float, interval_s: float = 1
             try:
                 st = rhc.get_status(h, timeout=3.0)
             except rhc.RecoveryHttpError as exc:
-                if exc.status == 404:
-                    return "app", "GET /api/recovery/status -> 404", h
+                if exc.status == 404 and APP_404_MARKER in (getattr(exc, "body", "") or "")                         and (h == primary or dropped):
+                    return "app", "GET /api/recovery/status -> 404 (application's 'no such endpoint')", h
                 if exc.status is None and h == primary:
                     dropped = True
             else:
@@ -274,16 +282,18 @@ def _poll_restart_hosts(hosts: "list[str]", wait_s: float, interval_s: float = 1
             return ("silent" if dropped else "never_restarted"), "", None
 
 
-def _app_identity(host: str) -> "tuple[str, Optional[str]]":
+def _app_identity(host: str) -> "tuple[str, Optional[str], Optional[str]]":
     """Best-effort description of the application that answered at `host`:
-    (text, fw_build). GET /api/partitions and /api/boot_guard are admin-tier
+    (text, fw_build, running_partition_label_or_None). GET /api/partitions and /api/boot_guard are admin-tier
     and GET /api/status's fw_build is redacted without admin, so every read
     may fail; a failed read is reported as unreadable, never invented."""
     parts = []
     fw_build: Optional[str] = None
+    running: Optional[str] = None
     try:
         from . import partition_http_client
-        parts.append(f"running partition={partition_http_client.get_partitions(host, timeout=3.0).get('running')!r}")
+        running = partition_http_client.get_partitions(host, timeout=3.0).get("running")
+        parts.append(f"running partition={running!r}")
     except Exception as exc:
         parts.append(f"running partition unreadable ({type(exc).__name__})")
     try:
@@ -300,7 +310,14 @@ def _app_identity(host: str) -> "tuple[str, Optional[str]]":
         parts.append(f"fw_build={fw_build!r}" if fw_build else "fw_build not reported")
     except Exception as exc:
         parts.append(f"fw_build unreadable ({type(exc).__name__})")
-    return "; ".join(parts), fw_build
+    return "; ".join(parts), fw_build, (running if isinstance(running, str) else None)
+
+
+def _not_app_partition(running: Optional[str]) -> bool:
+    """True when the board READABLY reports a running partition other than the
+    application (a RecoveryImageResponse from get_partitions leaves `running`
+    None here, so that case reads as unreadable, not as a label)."""
+    return running is not None and running != "app"
 
 
 def _build_mismatch(image_path: str, fw_build: Optional[str]) -> str:
@@ -402,7 +419,10 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
     hosts = _candidate_hosts(resolved, app_host)
     verdict, detail, answered = _poll_restart_hosts(hosts, wait_s)
     if verdict == "app":
-        ident, _fw = _app_identity(answered)
+        ident, _fw, running = _app_identity(answered)
+        if _not_app_partition(running):
+            return (f"FAILED: board accepted exit ({reply['text']!r}) and answers at {answered} but reports running "
+                    f"partition {running!r}, not 'app' ({ident}) (host={resolved})")
         return (f"ok - board accepted exit ({reply['text']!r}) and the application is answering at {answered} "
                 f"({detail}; {ident}) (host={resolved})")
     if verdict == "recovery_again":
@@ -823,7 +843,10 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     hosts = _candidate_hosts(resolved, app_host)
     verdict, detail, answered = _poll_restart_hosts(hosts, wait_s)
     if verdict == "app":
-        ident, fw_build = _app_identity(answered)
+        ident, fw_build, running = _app_identity(answered)
+        if _not_app_partition(running):
+            return (f"FAILED: board replied {reply['text']!r} and answers at {answered} but reports running "
+                    f"partition {running!r}, not 'app' ({ident}); {len(image)} bytes (host={resolved})")
         detail = f"{detail}; answered at {answered}; {ident}"
         mismatch = _build_mismatch(image_path, fw_build)
         if mismatch:
