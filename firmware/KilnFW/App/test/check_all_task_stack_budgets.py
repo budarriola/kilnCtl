@@ -764,8 +764,12 @@ TASKS = [
          # httpd_worker's 8192 B stack, now runs here on 6144 B -- added in
          # the A4 review so the checker measures that chain instead of
          # silently grading only the two A1/A2 jobs.
+         # crash_report_clear_job (slice A3, 2026-10-02) is the fourth: it
+         # used to run inline on httpd_worker, and the coredump/NVS erase
+         # itself is dispatched to bx_flash_worker, so this job only waits.
          extra_roots=lambda: [("ct_auto_zero_job", "safety_cfg_http.c"),
-                              ("backup_import_job", "backup_import.c")] +
+                              ("backup_import_job", "backup_import.c"),
+                              ("crash_report_clear_job", "diagnostics_http.c")] +
              ([("bench_preset_job", "safety_cfg_http.c")]
               if sdkconfig_bool("CONFIG_KILNCTL_DEV_TOOLS") else [])),
     dict(name="recovery_exit", root="ota_recovery_exit_reboot_task",

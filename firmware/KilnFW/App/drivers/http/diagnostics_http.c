@@ -363,11 +363,6 @@ static void json_escape(const char *src, char *out, size_t out_cap)
     out[o] = '\0';
 }
 
-/* GET /api/crash_report -- the last-crash summary crash_report.c persisted
- * (task/cause/PC/backtrace/reset-reason), for the diagnostics page's "Last
- * crash" section. {"present":false} is a complete, valid response (the
- * common case: no crash on record) -- every other field is only present
- * alongside "present":true. */
 /* True from the moment crash_report_clear_post_handler() admits a job until
  * that job's crash_report_clear() has returned (record erased AND coredump
  * erased, or failed). GET /api/crash_report reports it as "clear_in_progress"
@@ -378,6 +373,11 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * http_async_job). */
 static volatile bool s_crash_clear_in_progress;
 
+/* GET /api/crash_report -- the last-crash summary crash_report.c persisted
+ * (task/cause/PC/backtrace/reset-reason), for the diagnostics page's "Last
+ * crash" section. {"present":false,"clear_in_progress":<bool>} is a
+ * complete, valid response (the common case: no crash on record) -- every
+ * other field is only present alongside "present":true. */
 static esp_err_t crash_report_get_handler(httpd_req_t *req)
 {
     crash_report_record_t rec;
