@@ -173,7 +173,36 @@ class SignedPostTest(unittest.TestCase):
                 rec.recovery_boot_guard_reset("10.0.0.5", "super-secret-password")
 
         self.assertEqual(ctx.exception.status, 403)
+        self.assertEqual(ctx.exception.stage, "post")
         self.assertNotIn("super-secret-password", str(ctx.exception))
+
+    def test_raw_oserror_on_post_is_wrapped_as_lost_reply(self):
+        # urllib raises a response-phase timeout/reset raw (TimeoutError,
+        # http.client.RemoteDisconnected), NOT wrapped in URLError. The
+        # request may already have been acted on, so the caller must be told
+        # this was the POST stage (outcome unknown), not the challenge.
+        import http.client
+        for raw in (TimeoutError("timed out"), http.client.RemoteDisconnected("closed"),
+                    ConnectionResetError("reset")):
+            def fake_urlopen(req, timeout=None, _raw=raw):
+                if "challenge" in req.full_url:
+                    return _fake_response(json.dumps({"nonce": "66" * 16}).encode("utf-8"))
+                raise _raw
+
+            with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                with self.assertRaises(rec.RecoveryOtaAuthError) as ctx:
+                    rec.recovery_boot_guard_reset("10.0.0.5", "super-secret-password")
+            self.assertIsNone(ctx.exception.status, raw)
+            self.assertEqual(ctx.exception.stage, "post", raw)
+            self.assertIn("outcome unknown", str(ctx.exception))
+            self.assertNotIn("super-secret-password", str(ctx.exception))
+
+    def test_raw_oserror_on_challenge_is_challenge_stage(self):
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaises(rec.RecoveryOtaAuthError) as ctx:
+                rec.recovery_boot_guard_reset("10.0.0.5", "pw")
+        self.assertIsNone(ctx.exception.status)
+        self.assertEqual(ctx.exception.stage, "challenge")
 
 
 def _firmware_msg(nonce: bytes, context: str, query: str) -> bytes:

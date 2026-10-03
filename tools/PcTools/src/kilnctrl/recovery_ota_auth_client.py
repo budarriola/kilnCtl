@@ -67,10 +67,17 @@ AUTH_QUERY_MAX = 95
 class RecoveryOtaAuthError(RuntimeError):
     """A challenge fetch or signed POST against the recovery image failed."""
 
-    def __init__(self, message: str, status: Optional[int] = None, detail: str = ""):
+    def __init__(self, message: str, status: Optional[int] = None, detail: str = "",
+                 stage: str = "challenge"):
         super().__init__(message)
         self.status = status
         self.detail = detail
+        #: "challenge" -- failed fetching the nonce, so the signed POST was
+        #: never sent and the board cannot have acted. "post" -- the signed
+        #: POST was attempted; with ``status is None`` (transport failure,
+        #: timeout, connection reset) the board MAY have received and acted
+        #: on it, and the caller must treat the outcome as unknown.
+        self.stage = stage
 
 
 def _check_query(query: str) -> None:
@@ -134,7 +141,9 @@ def get_challenge(host: str, timeout: float = DEFAULT_TIMEOUT_S) -> bytes:
         detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
         raise RecoveryOtaAuthError(
             f"recovery-image challenge request failed: HTTP {exc.code}", exc.code, detail) from exc
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, OSError) as exc:
+        # OSError: a read timeout or reset after the connection was made is
+        # raised raw by urllib (not wrapped in URLError).
         raise RecoveryOtaAuthError(f"recovery-image challenge request unreachable: {exc}") from exc
     try:
         data = json.loads(body.decode("utf-8"))
@@ -199,9 +208,13 @@ def signed_post(host: str, path: str, context: str, ap_password: str, *,
         log.warning("recovery-image signed POST refused: host=%s path=%s status=%s detail=%s",
                     host, path, exc.code, detail)
         raise RecoveryOtaAuthError(
-            f"{path} refused by recovery image: HTTP {exc.code}: {detail}", exc.code, detail) from exc
-    except urllib.error.URLError as exc:
-        raise RecoveryOtaAuthError(f"{path} unreachable on recovery image: {exc}") from exc
+            f"{path} refused by recovery image: HTTP {exc.code}: {detail}", exc.code, detail,
+            stage="post") from exc
+    except (urllib.error.URLError, OSError) as exc:
+        # OSError: urllib raises a response-read timeout or a reset raw, not
+        # as URLError -- by then the board may already have acted.
+        raise RecoveryOtaAuthError(f"{path} transport failure on recovery image (outcome unknown): {exc}",
+                                   stage="post") from exc
     text = body.decode("utf-8", "replace")
     return {"status": status, "text": text}
 
