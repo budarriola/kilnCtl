@@ -90,13 +90,20 @@ def _not_found():
 
 
 class _Base(unittest.TestCase):
+    #: None -> candidate list is just [HOST] (the legacy single-address poll);
+    #: the multi-address tests set this to a list.
+    candidates = None
+
     def run_tool(self, fn, board, **kw):
         clock = {"t": 0.0}
+        cands = self.candidates or [HOST]
 
         def fake_sleep(s):
             clock["t"] += s
 
         with unittest.mock.patch.object(mr, "_resolve_host", return_value=HOST), \
+             unittest.mock.patch.object(mr, "_candidate_hosts", lambda h, a: list(cands)), \
+             unittest.mock.patch.object(mr, "_app_identity", lambda h: ("running partition='app'; boot_guard fake", getattr(board, "fw_build", None))), \
              unittest.mock.patch.object(mr, "_sleep", fake_sleep), \
              unittest.mock.patch.object(mr, "_monotonic", lambda: clock["t"]), \
              unittest.mock.patch.object(rhc, "get_status", board.get_status), \
@@ -796,3 +803,87 @@ class PushEspImageTest(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+LAN = "192.0.2.156"
+
+
+class HostAwareBoard(FakeBoard):
+    """Per-host scripted status GETs: `hosts` maps host -> script."""
+
+    def __init__(self, hosts, **kw):
+        super().__init__(**kw)
+        self.hosts = {h: list(v) for h, v in hosts.items()}
+
+    def get_status(self, host, timeout=None):
+        self.status_gets += 1
+        return self._next(self.hosts.get(host, [_unreachable()]))
+
+
+class LanVerifyTest(_Base):
+    """The application boots onto the LAN and the recovery AP disappears, so
+    verification must also poll the application's LAN address (2026-10-03)."""
+    candidates = [HOST, LAN]
+
+    def _push_board(self):
+        return HostAwareBoard({HOST: [_status(max_upload=1000), _status(max_upload=1000), _unreachable()],
+                               LAN: [_unreachable(), _not_found()]},
+                              post_reply={"status": 200, "text": BG_OK_REPLY})
+
+    def _image(self):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as fh:
+            fh.write(bytes([0xE9]) + b"\0" * 99)
+        self.addCleanup(os.unlink, fh.name)
+        return fh.name
+
+    def test_exit_verified_on_lan_candidate(self):
+        board = HostAwareBoard({HOST: [_status(), _status(), _unreachable()], LAN: [_unreachable(), _not_found()]})
+        out = self.run_tool(mr.recovery_exit, board, confirm=True)
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertIn("answering at " + LAN, out)
+        self.assertIn("running partition='app'", out)
+
+    def test_exit_only_recovery_answers_is_not_ok(self):
+        board = HostAwareBoard({HOST: [_status()], LAN: [_unreachable()]})
+        out = self.run_tool(mr.recovery_exit, board, confirm=True)
+        self.assertFalse(out.startswith("ok"), out)
+        self.assertIn("still answers as the recovery image", out)
+
+    def test_exit_nothing_answers_is_unverified_and_lists_candidates(self):
+        board = HostAwareBoard({HOST: [_status(), _status(), _unreachable()], LAN: [_unreachable()]})
+        out = self.run_tool(mr.recovery_exit, board, confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertIn(HOST, out)
+        self.assertIn(LAN, out)
+
+    def test_push_verified_on_lan_candidate(self):
+        out = self.run_tool(mr.recovery_push_esp_image, self._push_board(), image_path=self._image(), confirm=True)
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertIn("answered at " + LAN, out)
+
+    def test_push_build_mismatch_fails(self):
+        board = self._push_board()
+        board.fw_build = "Jan  1 2020 00:00:00"
+        desc = unittest.mock.Mock(build_timestamp="Oct  3 2026 10:00:00")
+        with unittest.mock.patch("kilnctrl.esp_app_desc.parse_app_desc_file", return_value=desc), \
+             unittest.mock.patch("kilnctrl.esp_app_desc.build_timestamps_match", return_value=False):
+            out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self._image(), confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("different build", out)
+
+    def test_push_nothing_answers_is_unverified_and_lists_candidates(self):
+        board = HostAwareBoard({HOST: [_status(max_upload=1000), _status(max_upload=1000), _unreachable()],
+                                LAN: [_unreachable()]}, post_reply={"status": 200, "text": BG_OK_REPLY})
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self._image(), confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertIn(LAN, out)
+
+
+class CandidateHostsTest(unittest.TestCase):
+    def test_explicit_app_host_is_exactly_host_plus_app_host(self):
+        self.assertEqual(mr._candidate_hosts("192.168.4.1", LAN), ["192.168.4.1", LAN])
+
+    def test_env_host_added_and_deduped(self):
+        with unittest.mock.patch.dict(os.environ, {"KILNCTL_HOST": LAN}), \
+             unittest.mock.patch("kilnctrl.mcp_server_flash._resolve_verify_hosts", return_value=[LAN, "192.168.4.1"]):
+            self.assertEqual(mr._candidate_hosts("192.168.4.1", None), ["192.168.4.1", LAN])

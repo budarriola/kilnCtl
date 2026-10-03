@@ -494,11 +494,7 @@ main app's routes. The Pico upload query (`crc`, `slot`) is validated locally (a
 space). `KILNCTL_AP_PASSWORD` is no longer read by any recovery tool. No PcTools tool joins the AP: the PC must
 already be associated with the recovery SoftAP, using the passphrase read off the LCD. Whatever automation joins it
 should read the passphrase from the environment variable `KILNCTL_RECOVERY_AP_PASSPHRASE` (never a tool parameter,
-never echoed or logged; report presence as a bool only). `recovery_exit(host=192.168.4.1)` reports
-UNVERIFIED even on success: the recovery image is AP-only, and the AP address disappears when the app boots onto
-the LAN. Verify afterwards over the STA address (`recovery_status` answers 404, the running partition is `app`).
-`recovery_push_esp_image` behaves the same way: it only polls the AP address, so it reports UNVERIFIED after a successful push;
-verify the application over its STA address afterward with `get_fw_version`/`boot_guard_get`.
+never echoed or logged; report presence as a bool only). `recovery_exit` and `recovery_push_esp_image` verify over an ordered candidate list, because the AP address disappears when the application boots onto the LAN: the `host` the call used, then the optional `app_host` parameter (when given it is the only extra candidate), else `KILNCTL_HOST`, then `flash_firmware`'s verify candidates (STA IP, remembered last-reachable host, AP fallback). Success is a candidate answering `GET /api/recovery/status` with 404 (application, not recovery); the report names the answering host and, where readable with the current session, the running partition and boot_guard values (those routes are admin-tier, so an unreadable one is said so, never invented). `recovery_push_esp_image` also compares a readable `fw_build` with the pushed image's embedded `esp_app_desc_t` build time (mismatch is FAILED). Nothing answering within `wait_s` stays UNVERIFIED and lists the candidates tried; still answering as recovery is FAILED.
 Standing host checks:
 `check_recovery_passphrase.ps1` (generator) and `check_recovery_page_crc.ps1` (the browser page carries the Pico CRC
 and no auth code).

@@ -213,22 +213,117 @@ def _poll_restart(host: str, wait_s: float, interval_s: float = 1.0) -> "tuple[s
     'recovery_again' -- the board dropped off and came back AS the recovery image
     'never_restarted' -- it never dropped and still answers as recovery
     'silent' -- it dropped and has not answered by the deadline."""
+    verdict, detail, _answered = _poll_restart_hosts([host], wait_s, interval_s)
+    return verdict, detail
+
+
+def _candidate_hosts(host: str, app_host: Optional[str]) -> "list[str]":
+    """Ordered, de-duplicated addresses to poll after a restart out of
+    recovery. The recovery image lives only on its SoftAP (192.168.4.1) while
+    the application boots onto the LAN and the AP disappears, so polling `host`
+    alone reported UNVERIFIED while the application was up (2026-10-03).
+
+    An explicit `app_host` means exactly [host, app_host]. Otherwise: `host`,
+    then KILNCTL_HOST, then flash_firmware's own verify-candidate list
+    (mcp_server_flash._resolve_verify_hosts(None): STA IP from the UART Wi-Fi
+    status, the remembered last-reachable host, the AP fallback), reused rather
+    than duplicated."""
+    out: "list[str]" = []
+
+    def _add(h: Optional[str]) -> None:
+        if isinstance(h, str) and h.strip() and h.strip() not in out:
+            out.append(h.strip())
+
+    _add(host)
+    if app_host:
+        _add(app_host)
+        return out
+    _add(os.environ.get("KILNCTL_HOST"))
+    try:
+        from .mcp_server_flash import _resolve_verify_hosts  # local import: avoids a circular import
+        for h in _resolve_verify_hosts(None):
+            _add(h)
+    except Exception:  # best-effort: the explicit candidates above still stand
+        pass
+    return out
+
+
+def _poll_restart_hosts(hosts: "list[str]", wait_s: float, interval_s: float = 1.0) -> "tuple[str, str, Optional[str]]":
+    """Multi-address _poll_restart. hosts[0] is the address the call used
+    (the recovery SoftAP); the rest are where the application may come up.
+    Returns (verdict, detail, answering_host). 'app' = some candidate answers
+    GET /api/recovery/status with 404. 'dropped' tracks hosts[0] only: an
+    unreachable LAN candidate is not evidence the recovery image went away."""
+    primary = hosts[0]
     deadline = _monotonic() + wait_s
     dropped = False
     while True:
         _sleep(interval_s)
-        try:
-            st = rhc.get_status(host, timeout=3.0)
-        except rhc.RecoveryHttpError as exc:
-            if exc.status == 404:
-                return "app", "GET /api/recovery/status -> 404"
-            if exc.status is None:
-                dropped = True
-        else:
-            if st.get("running") == "recovery" and dropped:
-                return "recovery_again", _fmt_status(st)
+        for h in hosts:
+            try:
+                st = rhc.get_status(h, timeout=3.0)
+            except rhc.RecoveryHttpError as exc:
+                if exc.status == 404:
+                    return "app", "GET /api/recovery/status -> 404", h
+                if exc.status is None and h == primary:
+                    dropped = True
+            else:
+                if st.get("running") == "recovery" and dropped:
+                    return "recovery_again", _fmt_status(st), h
         if _monotonic() >= deadline:
-            return ("silent" if dropped else "never_restarted"), ""
+            return ("silent" if dropped else "never_restarted"), "", None
+
+
+def _app_identity(host: str) -> "tuple[str, Optional[str]]":
+    """Best-effort description of the application that answered at `host`:
+    (text, fw_build). GET /api/partitions and /api/boot_guard are admin-tier
+    and GET /api/status's fw_build is redacted without admin, so every read
+    may fail; a failed read is reported as unreadable, never invented."""
+    parts = []
+    fw_build: Optional[str] = None
+    try:
+        from . import partition_http_client
+        parts.append(f"running partition={partition_http_client.get_partitions(host, timeout=3.0).get('running')!r}")
+    except Exception as exc:
+        parts.append(f"running partition unreadable ({type(exc).__name__})")
+    try:
+        from . import ota_http_client
+        bg = ota_http_client.get_boot_guard_status(host, timeout=3.0)
+        parts.append(f"boot_guard boot_count={bg.get('boot_count')!r} persisted_count={bg.get('persisted_count', 'not reported')!r} "
+                     f"recovery_mode={bg.get('recovery_mode')!r}")
+    except Exception as exc:
+        parts.append(f"boot_guard unreadable ({type(exc).__name__})")
+    try:
+        from . import capability_preflight
+        board = capability_preflight.get_board_info(host, timeout=3.0)
+        fw_build = board.fw_build if board.reachable else None
+        parts.append(f"fw_build={fw_build!r}" if fw_build else "fw_build not reported")
+    except Exception as exc:
+        parts.append(f"fw_build unreadable ({type(exc).__name__})")
+    return "; ".join(parts), fw_build
+
+
+def _build_mismatch(image_path: str, fw_build: Optional[str]) -> str:
+    """Non-empty text when the board's reported fw_build provably differs from
+    the pushed image's esp_app_desc_t build time (same helpers as
+    flash_firmware's verify). Empty when equal or when either side cannot be
+    read (an unreadable build is a cannot-check, not a mismatch)."""
+    if not fw_build:
+        return ""
+    try:
+        from . import esp_app_desc
+        desc = esp_app_desc.parse_app_desc_file(image_path)
+    except Exception:
+        return ""
+    if esp_app_desc.build_timestamps_match(desc, fw_build):
+        return ""
+    return (f"its reported build ({fw_build!r}) does not match the pushed image "
+            f"({desc.build_timestamp!r}) -- the board is running a different build")
+
+
+def _unverified_tail(hosts: "list[str]", wait_s: float) -> str:
+    return (f"nothing answered by {wait_s:g}s on any candidate ({', '.join(hosts)}); "
+            f"pass app_host=<the application's LAN address> if it is elsewhere")
 
 
 @_srv._tool()
@@ -270,7 +365,8 @@ def recovery_status(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
-def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0) -> str:
+def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0,
+                  app_host: Optional[str] = None) -> str:
     """Leave the recovery image and boot the application (POST
     /api/recovery/exit). The
     board verifies `app` is a valid image (409 otherwise), clears boot_guard,
@@ -281,7 +377,11 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
     polls until the recovery routes answer 404 (the application is up) and
     FAILS LOUDLY if the board instead never restarted or came back as the
     recovery image; a board that restarted but has not answered by `wait_s`
-    is reported UNVERIFIED, never ok.
+    is reported UNVERIFIED, never ok. The application boots onto the LAN and
+    the recovery AP disappears, so the poll covers `host` PLUS the
+    application's LAN address: `app_host`, else KILNCTL_HOST, else
+    flash_firmware's verify-candidate list. Reports which address answered
+    and, where readable, the running partition and boot_guard values.
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_exit (reboots the board into the application)")
@@ -299,17 +399,20 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
         if not _reply_lost(exc):
             return _post_error("/api/recovery/exit", exc)
         reply = {"status": None, "text": f"<reply lost: {exc}>"}
-    verdict, detail = _poll_restart(resolved, wait_s)
+    hosts = _candidate_hosts(resolved, app_host)
+    verdict, detail, answered = _poll_restart_hosts(hosts, wait_s)
     if verdict == "app":
-        return f"ok - board accepted exit ({reply['text']!r}) and the application is answering ({detail}) (host={resolved})"
+        ident, _fw = _app_identity(answered)
+        return (f"ok - board accepted exit ({reply['text']!r}) and the application is answering at {answered} "
+                f"({detail}; {ident}) (host={resolved})")
     if verdict == "recovery_again":
         return (f"FAILED: board accepted exit ({reply['text']!r}) but came back as the RECOVERY image "
                 f"({detail}) -- the application did not boot (host={resolved})")
     if verdict == "never_restarted":
         return (f"FAILED: board accepted exit ({reply['text']!r}) but never restarted within {wait_s:g}s and "
                 f"still answers as the recovery image (host={resolved})")
-    return (f"UNVERIFIED: board accepted exit ({reply['text']!r}) and went silent, but nothing answered by "
-            f"{wait_s:g}s -- check by hand, do not assume the application booted (host={resolved})")
+    return (f"UNVERIFIED: board accepted exit ({reply['text']!r}) but {_unverified_tail(hosts, wait_s)} -- "
+            f"check by hand, do not assume the application booted (host={resolved})")
 
 
 @_srv._tool()
@@ -652,7 +755,7 @@ def recovery_sw_reset(confirm: bool = False, host: Optional[str] = None, wait_s:
 
 @_srv._tool()
 def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Optional[str] = None,
-                            wait_s: float = 90.0) -> str:
+                            wait_s: float = 90.0, app_host: Optional[str] = None) -> str:
     """Push a new ESP application image (KilnCtrl.bin) into the `app`
     partition through the recovery image (POST /api/ota/esp on the RECOVERY
     image, context "esp"). The board validates the first chunk (image header,
@@ -669,6 +772,12 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     Back as the recovery image, or never restarted -> FAILED. A reply lost
     mid-upload, or a board silent by `wait_s` -> UNKNOWN/UNVERIFIED, never ok
     (read recovery_status: app_valid says whether the image landed).
+    The poll covers `host` PLUS the application's LAN address (`app_host`,
+    else KILNCTL_HOST, else flash_firmware's verify-candidate list), since the
+    recovery AP disappears when the application boots onto the LAN; the
+    answering address and, where readable, running partition/boot_guard are
+    reported, and a readable fw_build is compared with the pushed image's
+    embedded esp_app_desc_t build time (mismatch -> FAILED).
     This does NOT prove the new application is healthy beyond answering HTTP.
     A 200 reply that does not say boot_guard was cleared and verified is
     reported "ok-with-warning". A board-reported failure past the busy
@@ -711,7 +820,15 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
                 return msg
             return msg + _app_may_be_erased_note(resolved)
         reply = {"status": None, "text": f"<reply lost: {exc}>"}
-    verdict, detail = _poll_restart(resolved, wait_s)
+    hosts = _candidate_hosts(resolved, app_host)
+    verdict, detail, answered = _poll_restart_hosts(hosts, wait_s)
+    if verdict == "app":
+        ident, fw_build = _app_identity(answered)
+        detail = f"{detail}; answered at {answered}; {ident}"
+        mismatch = _build_mismatch(image_path, fw_build)
+        if mismatch:
+            return (f"FAILED: board replied {reply['text']!r} and the application answers at {answered} but {mismatch}; "
+                    f"{len(image)} bytes (host={resolved})")
     prefix = f"{len(image)} bytes (host={resolved})"
     if reply["status"] is None:
         return (f"UNKNOWN: the upload reply was lost ({reply['text']}); afterward the board is "
@@ -729,5 +846,5 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     if verdict == "never_restarted":
         return (f"FAILED: board replied {reply['text']!r} but never restarted within {wait_s:g}s and "
                 f"still answers as the recovery image; {prefix}")
-    return (f"UNVERIFIED: board replied {reply['text']!r} and went silent; nothing answered by "
-            f"{wait_s:g}s -- check by hand; {prefix}")
+    return (f"UNVERIFIED: board replied {reply['text']!r} but {_unverified_tail(hosts, wait_s)} -- "
+            f"check by hand; {prefix}")
