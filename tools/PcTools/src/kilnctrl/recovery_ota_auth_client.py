@@ -280,3 +280,11 @@ def recovery_pico_upload(host: str, image_bytes: bytes, crc32: int, ap_password:
     more; the outcome is only ever in GET /api/recovery/pico/status."""
     return signed_post(host, "/api/recovery/pico/upload", "pico-upload", ap_password,
                         data=image_bytes, query=pico_upload_query(crc32, slot), timeout=timeout)
+
+
+def recovery_pico_abort(host: str, ap_password: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
+    """POST /api/recovery/pico/abort (pico_abort_post()) -- context
+    "pico-abort". Asks the Pico relay to stop; the board answers the plain
+    text "abort requested" (also when the relay is idle) and the real result
+    is only ever in GET /api/recovery/pico/status (phase "aborted")."""
+    return signed_post(host, "/api/recovery/pico/abort", "pico-abort", ap_password, timeout=timeout)

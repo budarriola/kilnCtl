@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 203 tools (198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 206 tools (203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -439,8 +439,8 @@ firmware image (`firmware/KilnFW_recovery/`) is unaffected and still
 implements the AP-password HMAC on its own routes.
 
 **Recovery-image tools (2026-10-02):** `recovery_status` (READ-ONLY: `GET /api/recovery/status` plus
-`GET /api/recovery/pico/status`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset` and
-`recovery_pico_upload`, in `tools/PcTools/src/kilnctrl/mcp_server_recovery.py`. They talk ONLY to
+`GET /api/recovery/pico/status`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`,
+`recovery_pico_upload`, `recovery_pico_abort`, `recovery_sw_reset` and `recovery_push_esp_image`, in `tools/PcTools/src/kilnctrl/mcp_server_recovery.py`. They talk ONLY to
 `firmware/KilnFW_recovery/` and refuse (404 or `running` not `recovery`) against the main app. Every mutator refuses
 unless `confirm is True` exactly, before any network access; reads `KILNCTL_AP_PASSWORD` from the environment
 (reports `[bool]` only, never the value); reads both status routes before acting and refuses while the Pico relay
@@ -448,7 +448,15 @@ is busy or has no PSRAM; and reads status back afterward, failing loud on disagr
 reports the relay's terminal phase honestly: success only for phase done with bytes_sent equal to total_bytes equal
 to the image length; `outcome_unknown` (the relay stopped after END was sent) is reported as NOT success, as is a
 timeout or lost contact. The wifi-reset credential clear is not readable from status, so that tool verifies only
-the restart. No pico-abort, sw-reset or ESP-push tool exists. Unit tests use a fake board only
+the restart. `recovery_pico_abort` (POST `/api/recovery/pico/abort`, context `pico-abort`) sends no POST when the
+relay is not busy, and reports `aborted` as ok, a transfer that finished first as NOT ABORTED, and
+`outcome_unknown`, a lost reply or lost contact as UNKNOWN. `recovery_sw_reset` (POST `/api/sw_reset`, context
+`sw-reset`; the recovery image's route, not the main app's) needs the board to drop off and answer again; a lost
+reply is UNKNOWN. `recovery_push_esp_image` (POST `/api/ota/esp`, context `esp`) refuses a file that is not an
+absolute path, does not start with the ESP image magic 0xE9, or exceeds the board's reported `max_upload` (the `app`
+partition size), refuses while the Pico relay is busy, and counts success only when the recovery routes then answer
+404 (the application is up); back-as-recovery or never restarted is FAILED, and a lost reply or silent board is
+UNKNOWN/UNVERIFIED. Unit tests use a fake board only
 (`tools/PcTools/tests/test_mcp_server_recovery.py`); never run against hardware.
 
 **Recovery-image signer in PcTools:**
@@ -456,7 +464,7 @@ the restart. No pico-abort, sw-reset or ESP-push tool exists. Unit tests use a f
 narrow capability the above retirement removed, scoped ONLY to
 `firmware/KilnFW_recovery/` -- `derive_mac()`/`get_challenge()`/
 `signed_post()` plus `recovery_push_esp_image()`/`recovery_sw_reset()`/`recovery_exit()`/
-`recovery_wifi_reset()`/`recovery_pico_upload()`, for a board that has fallen back to the recovery image
+`recovery_wifi_reset()`/`recovery_pico_upload()`/`recovery_pico_abort()`, for a board that has fallen back to the recovery image
 and cannot be reached through the main app's (now-unauthenticated) routes at
 all. The MAC covers nonce16, context and, when present, `?` plus the raw query
 (recovery_http.c signs the query for the Pico upload route: crc and slot). The query is validated

@@ -138,6 +138,24 @@ class SignedPostTest(unittest.TestCase):
         expected_mac = rec.derive_mac("pw", bytes.fromhex("33" * 16), "sw-reset").hex()
         self.assertEqual(captured["mac"], expected_mac)
 
+    def test_pico_abort_path_and_context(self):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            if "challenge" in req.full_url:
+                return _fake_response(json.dumps({"nonce": "55" * 16}).encode("utf-8"))
+            captured["url"] = req.full_url
+            captured["mac"] = req.get_header("X-ota-mac")
+            return _fake_response(b"abort requested")
+
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = rec.recovery_pico_abort("10.0.0.5", "pw")
+
+        self.assertEqual(result["text"], "abort requested")
+        self.assertTrue(captured["url"].endswith("/api/recovery/pico/abort"))
+        expected_mac = rec.derive_mac("pw", bytes.fromhex("55" * 16), "pico-abort").hex()
+        self.assertEqual(captured["mac"], expected_mac)
+
     def test_push_esp_image_sends_body_and_esp_context(self):
         captured = {}
 

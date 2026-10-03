@@ -157,6 +157,9 @@ class ConfirmGateTest(_Base):
             ("wifi_reset", mr.recovery_wifi_reset, {}),
             ("boot_guard_reset", mr.recovery_boot_guard_reset, {}),
             ("pico_upload", mr.recovery_pico_upload, {"image_path": img.name}),
+            ("pico_abort", mr.recovery_pico_abort, {}),
+            ("sw_reset", mr.recovery_sw_reset, {}),
+            ("push_esp_image", mr.recovery_push_esp_image, {"image_path": img.name}),
         ]
 
     def test_non_true_confirm_refuses_with_no_io(self):
@@ -177,7 +180,8 @@ class ConfirmGateTest(_Base):
 
 class PasswordTest(_Base):
     def test_missing_password_refuses_and_reports_bool_only(self):
-        for fn in (mr.recovery_exit, mr.recovery_wifi_reset, mr.recovery_boot_guard_reset):
+        for fn in (mr.recovery_exit, mr.recovery_wifi_reset, mr.recovery_boot_guard_reset,
+                   mr.recovery_pico_abort, mr.recovery_sw_reset):
             board = FakeBoard()
             out = self.run_tool(fn, board, env=False, confirm=True)
             self.assertTrue(out.startswith("REFUSED"))
@@ -483,6 +487,213 @@ class PicoUploadTest(_Base):
         board = FakeBoard()
         out = self.run_tool(mr.recovery_pico_upload, board, image_path=f.name, confirm=True)
         self.assertTrue(out.startswith("REFUSED"))
+
+
+class PicoAbortTest(_Base):
+    def test_ok_when_relay_reports_aborted(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True), _pico(phase="sending", busy=True),
+                                _pico(phase="aborted", busy=False)],
+                          post_reply={"status": 200, "text": "abort requested"})
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("ok - "), out)
+        self.assertEqual([(p["path"], p["context"], p["query"]) for p in board.posts],
+                         [("/api/recovery/pico/abort", "pico-abort", "")])
+        self.assertTrue(board.posts[0]["password_given"])
+        self.assertNoSecret(out)
+
+    def test_idle_relay_sends_no_post(self):
+        board = FakeBoard()
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertIn("nothing to abort", out)
+        self.assertEqual(board.posts, [])
+
+    def test_done_before_abort_is_not_ok(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True), _pico(phase="done", busy=False)])
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("NOT ABORTED"), out)
+
+    def test_outcome_unknown_is_unknown(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True), _pico(phase="outcome_unknown", busy=False)])
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+    def test_still_running_at_deadline_is_unknown(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True)])
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True, wait_s=5.0)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+    def test_lost_contact_is_unknown(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True), _unreachable()])
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+    def test_lost_reply_with_aborted_is_unknown_not_ok(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True), _pico(phase="aborted")],
+                          post_error=roac.RecoveryOtaAuthError("timed out", None, stage="post"))
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+    def test_post_refusal_is_failed(self):
+        board = FakeBoard(pico=[_pico(phase="sending", busy=True)],
+                          post_error=roac.RecoveryOtaAuthError("HTTP 403", 403, "bad MAC"))
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_refuses_against_main_app(self):
+        board = FakeBoard(status=[_not_found()])
+        out = self.run_tool(mr.recovery_pico_abort, board, confirm=True)
+        self.assertIn("not the recovery image", out)
+        self.assertEqual(board.posts, [])
+
+
+class SwResetTest(_Base):
+    def test_ok_when_restart_observed(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _status()],
+                          post_reply={"status": 200, "text": "resetting"})
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True)
+        self.assertTrue(out.startswith("ok - "), out)
+        self.assertEqual([(p["path"], p["context"]) for p in board.posts], [("/api/sw_reset", "sw-reset")])
+
+    def test_app_answering_after_reset_is_reported(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _not_found()])
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True)
+        self.assertTrue(out.startswith("ok - "), out)
+        self.assertIn("normal application", out)
+
+    def test_fails_when_no_restart(self):
+        board = FakeBoard()
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True, wait_s=4.0)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_silent_is_unverified(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable()])
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True, wait_s=4.0)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
+    def test_lost_reply_is_unknown_never_ok(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _status()],
+                          post_error=roac.RecoveryOtaAuthError("reset", None, stage="post"))
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+    def test_refuses_when_pico_busy(self):
+        board = FakeBoard(pico=[_pico(busy=True, phase="sending")])
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertEqual(board.posts, [])
+
+    def test_refuses_against_main_app(self):
+        board = FakeBoard(status=[_not_found()])
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True)
+        self.assertIn("not the recovery image", out)
+        self.assertEqual(board.posts, [])
+
+    def test_wrong_running_label_refuses(self):
+        board = FakeBoard(status=[_status(running="app")])
+        out = self.run_tool(mr.recovery_sw_reset, board, confirm=True)
+        self.assertIn("not 'recovery'", out)
+        self.assertEqual(board.posts, [])
+
+
+class PushEspImageTest(_Base):
+    def setUp(self):
+        self.path = self._img(b"\xe9" + b"x" * 99)
+
+    def _img(self, data):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+        f.write(data)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def test_ok_when_application_answers(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _not_found()],
+                          post_reply={"status": 200, "text": "ok, rebooting into new application image"})
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("ok - "), out)
+        self.assertEqual(len(board.posts), 1)
+        p = board.posts[0]
+        self.assertEqual((p["path"], p["context"], p["query"]), ("/api/ota/esp", "esp", ""))
+        self.assertEqual(p["data"], b"\xe9" + b"x" * 99)
+        self.assertTrue(p["password_given"])
+        self.assertNoSecret(out)
+
+    def test_image_larger_than_partition_refused_before_post(self):
+        board = FakeBoard(status=[_status(max_upload=50, app_size=50)])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertIn("larger than the app partition", out)
+        self.assertEqual(board.posts, [])
+
+    def test_image_exactly_partition_size_is_allowed(self):
+        board = FakeBoard(status=[_status(max_upload=100), _status(), _not_found()])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertEqual(len(board.posts), 1, out)
+
+    def test_falls_back_to_app_size_and_refuses_when_unknown(self):
+        board = FakeBoard(status=[_status(max_upload=0, app_size=50)])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertIn("larger than the app partition", out)
+        board = FakeBoard(status=[_status(max_upload=0, app_size=0)])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertEqual(board.posts, [])
+
+    def test_refuses_while_pico_busy(self):
+        board = FakeBoard(pico=[_pico(busy=True, phase="sending")])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertEqual(board.posts, [])
+
+    def test_bad_arguments_refuse_with_no_io(self):
+        bad_magic = self._img(b"\x00" + b"x" * 10)
+        empty = self._img(b"")
+        for p in ("relative.bin", os.path.join(tempfile.gettempdir(), "no_such_esp_image_xyz.bin"),
+                  bad_magic, empty):
+            board = FakeBoard()
+            out = self.run_tool(mr.recovery_push_esp_image, board, image_path=p, confirm=True)
+            self.assertTrue(out.startswith("REFUSED"), (p, out))
+            self.assertEqual((board.status_gets, board.posts), (0, []))
+
+    def test_missing_password_refuses_bool_only(self):
+        board = FakeBoard()
+        out = self.run_tool(mr.recovery_push_esp_image, board, env=False, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("REFUSED"))
+        self.assertIn("set=False", out)
+        self.assertEqual((board.status_gets, board.posts), (0, []))
+
+    def test_refuses_against_main_app(self):
+        board = FakeBoard(status=[_not_found()])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertIn("not the recovery image", out)
+        self.assertEqual(board.posts, [])
+
+    def test_board_rejection_is_failed(self):
+        board = FakeBoard(post_error=roac.RecoveryOtaAuthError("HTTP 422: bad image", 422, "bad image"))
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("422", out)
+
+    def test_back_in_recovery_is_failed(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _status()])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_never_restarted_is_failed(self):
+        board = FakeBoard()
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True, wait_s=4.0)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_silent_is_unverified(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable()])
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True, wait_s=4.0)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
+    def test_lost_reply_is_unknown_even_if_app_answers(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _not_found()],
+                          post_error=roac.RecoveryOtaAuthError("reset", None, stage="post"))
+        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
 
 
 if __name__ == "__main__":

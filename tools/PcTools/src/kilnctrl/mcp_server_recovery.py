@@ -6,7 +6,8 @@ first status read (404) and does nothing.
 
 Read-only:   recovery_status                     (GET /api/recovery/status + /pico/status)
 Mutating:    recovery_exit, recovery_wifi_reset, recovery_boot_guard_reset,
-             recovery_pico_upload
+             recovery_pico_upload, recovery_pico_abort, recovery_sw_reset,
+             recovery_push_esp_image
 Every mutating tool: refuses unless ``confirm is True`` EXACTLY (before any
 network access), needs the AP password in KILNCTL_AP_PASSWORD (read here,
 never a parameter, never printed -- only a [bool] is ever reported), reads
@@ -35,6 +36,13 @@ AP_PASSWORD_ENV = "KILNCTL_AP_PASSWORD"
 #: recovery_pico_proto.h RPP_SLOT_SIZE (832 KB): recovery_pico_reserve()
 #: answers 413 above this, after the MAC check has already consumed the nonce.
 MAX_PICO_IMAGE_BYTES = 0x000D0000
+
+#: recovery_push_esp_image() socket timeout: the whole image is streamed in one
+#: POST and the board flash-writes while it receives.
+ESP_PUSH_TIMEOUT_S = 180.0
+
+#: ESP image header magic byte (esp_image_header_t.magic).
+ESP_IMAGE_MAGIC = 0xE9
 
 #: Re-reads of /pico/status when "done" is first seen with bytes_sent not yet
 #: equal to the image length: recovery_pico.c publish_done() sets the phase
@@ -433,3 +441,201 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
     if phase == "aborted":
         return f"ABORTED: {_fmt_pico(last)}; {prefix}"
     return f"FAILED: relay phase=failed: {_fmt_pico(last)}; {prefix}"
+
+
+@_srv._tool()
+def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_s: float = 30.0) -> str:
+    """Ask the recovery image's Pico UART relay to stop (POST
+    /api/recovery/pico/abort, AP-password X-Ota-Mac context "pico-abort").
+    The relay sends ABORT to the Pico and ends in phase "aborted"; the POST's
+    plain-text reply ("abort requested") is only an acknowledgement.
+
+    REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
+    (bool only). Reads both status routes first; if the relay is not busy
+    there is nothing to abort and NO POST is sent (reported, not an error).
+    After the POST it polls /api/recovery/pico/status for a terminal phase:
+      aborted         -> "ok"
+      done            -> NOT aborted: the transfer finished first (reported)
+      failed          -> the relay had already failed (reported)
+      outcome_unknown -> UNKNOWN (END was sent, result lost; check the Pico)
+      still running at `wait_s` / contact lost / reply lost with no terminal
+      phase seen      -> UNKNOWN (never ok)
+    Aborting a transfer can leave the Pico slot partially written; re-run
+    recovery_pico_upload afterward.
+    """
+    if confirm is not True:
+        return _refuse_unconfirmed("recovery_pico_abort (stops an in-flight Pico transfer)")
+    pw = _ap_password()
+    if pw is None:
+        return _refuse_no_password()
+    resolved = _resolve_host(host)
+    st, pico, err = _preflight(resolved)
+    if err:
+        return f"error: {err}"
+    if pico.get("busy") is not True:
+        return (f"nothing to abort: the Pico relay is not busy ({_fmt_pico(pico)}); no POST sent "
+                f"(host={resolved})")
+    lost_reply = ""
+    try:
+        reply = roac.recovery_pico_abort(resolved, pw)
+    except roac.RecoveryOtaAuthError as exc:
+        if not _reply_lost(exc):
+            return _post_error("/api/recovery/pico/abort", exc)
+        lost_reply = str(exc)
+        reply = {"status": None, "text": f"<reply lost: {exc}>"}
+    lost = 0
+    last: dict = {}
+    deadline = _monotonic() + wait_s
+    while True:
+        _sleep(1.0)
+        try:
+            last = rhc.get_pico_status(resolved)
+            lost = 0
+        except rhc.RecoveryHttpError as exc:
+            lost += 1
+            if lost >= 5:
+                return (f"UNKNOWN: lost contact with the board after the abort request ({exc}); last "
+                        f"status: {_fmt_pico(last) or 'none'} -- NOT confirmed aborted")
+            continue
+        phase = last.get("phase")
+        if phase in rhc.PICO_TERMINAL_PHASES:
+            break
+        if phase == "idle" and last.get("busy") is False:
+            return (f"UNKNOWN: relay reports idle after the abort request (board restarted?) -- "
+                    f"NOT confirmed aborted ({_fmt_pico(last)})")
+        if _monotonic() >= deadline:
+            return (f"UNKNOWN: relay still running {wait_s:g}s after the abort request ({_fmt_pico(last)}) "
+                    f"-- NOT confirmed aborted")
+    if phase == "aborted":
+        if lost_reply:
+            return (f"UNKNOWN: the abort reply was lost ({lost_reply}) but the relay now reports "
+                    f"aborted ({_fmt_pico(last)}); likely this abort, not proven (host={resolved})")
+        return f"ok - relay reports aborted after {reply['text']!r}; {_fmt_pico(last)} (host={resolved})"
+    if phase == "outcome_unknown":
+        return (f"UNKNOWN: relay ended OUTCOME UNKNOWN (END already sent, result lost) -- NOT aborted; "
+                f"power-cycle and check the Pico version. {_fmt_pico(last)} (host={resolved})")
+    if phase == "done":
+        return (f"NOT ABORTED: the transfer completed before the abort took effect "
+                f"({_fmt_pico(last)}) (host={resolved})")
+    return (f"NOT ABORTED: relay had already ended in phase=failed ({_fmt_pico(last)}) "
+            f"(host={resolved})")
+
+
+@_srv._tool()
+def recovery_sw_reset(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0) -> str:
+    """Software-reset the board while it runs the recovery image (POST
+    /api/sw_reset on the RECOVERY image, context "sw-reset"; not the main
+    app's route of the same path). The board answers "resetting" and calls
+    esp_restart().
+
+    REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
+    (bool only). Reads status first, refuses while the Pico relay is busy
+    (the board 409s and a restart would kill the transfer). Read-back: the
+    board must drop off and answer again. Back as the recovery image -> ok;
+    answering as the normal application (recovery routes 404) -> ok with that
+    stated (the bootloader chose `app`); a lost reply or a board that went
+    silent -> UNKNOWN/UNVERIFIED, never ok; never dropped -> FAILED.
+    """
+    if confirm is not True:
+        return _refuse_unconfirmed("recovery_sw_reset (restarts the board)")
+    pw = _ap_password()
+    if pw is None:
+        return _refuse_no_password()
+    resolved = _resolve_host(host)
+    st, pico, err = _preflight(resolved)
+    if err:
+        return f"error: {err}"
+    if pico.get("busy"):
+        return f"REFUSED: the Pico relay is busy ({_fmt_pico(pico)}); a restart would kill it"
+    try:
+        reply = roac.recovery_sw_reset(resolved, pw)
+    except roac.RecoveryOtaAuthError as exc:
+        if not _reply_lost(exc):
+            return _post_error("/api/sw_reset", exc)
+        reply = {"status": None, "text": f"<reply lost: {exc}>"}
+    verdict, detail = _poll_restart(resolved, wait_s)
+    lost = reply["status"] is None
+    if verdict in ("recovery_again", "app"):
+        where = (f"back into the recovery image ({detail})" if verdict == "recovery_again"
+                 else f"and the host now answers as the normal application ({detail})")
+        if lost:
+            return (f"UNKNOWN: the sw_reset reply was lost ({reply['text']}) though the board restarted "
+                    f"{where} (host={resolved})")
+        return f"ok - board replied {reply['text']!r} and restarted {where} (host={resolved})"
+    if verdict == "never_restarted":
+        return (f"FAILED: board replied {reply['text']!r} but never restarted within {wait_s:g}s and "
+                f"still answers as the recovery image (host={resolved})")
+    return (f"UNVERIFIED: board replied {reply['text']!r} and went silent; nothing answered at {resolved} "
+            f"by {wait_s:g}s -- check by hand")
+
+
+@_srv._tool()
+def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Optional[str] = None,
+                            wait_s: float = 90.0) -> str:
+    """Push a new ESP application image (KilnCtrl.bin) into the `app`
+    partition through the recovery image (POST /api/ota/esp on the RECOVERY
+    image, context "esp"). The board validates the first chunk (image header,
+    project name, size), streams to flash, verifies the whole image, sets the
+    boot partition, clears boot_guard and restarts into it.
+
+    REFUSES unless ``confirm is True`` exactly, the file is an existing
+    absolute path whose size is 1..the board's reported ``max_upload`` (the
+    `app` partition size, from GET /api/recovery/status) and which starts
+    with the ESP image magic byte 0xE9, and KILNCTL_AP_PASSWORD is set (bool
+    only). Reads both status routes first and REFUSES while the Pico relay is
+    busy (the board 409s). Verification: after the POST the board must drop
+    off and the recovery routes must answer 404 (the application is up) -> ok.
+    Back as the recovery image, or never restarted -> FAILED. A reply lost
+    mid-upload, or a board silent by `wait_s` -> UNKNOWN/UNVERIFIED, never ok
+    (read recovery_status: app_valid says whether the image landed).
+    This does NOT prove the new application is healthy beyond answering HTTP.
+    """
+    if confirm is not True:
+        return _refuse_unconfirmed("recovery_push_esp_image (rewrites the application partition and reboots)")
+    if not isinstance(image_path, str) or not os.path.isabs(image_path):
+        return "REFUSED: image_path must be an absolute path"
+    try:
+        size = os.path.getsize(image_path)
+        if size <= 0:
+            return f"REFUSED: image is {size} bytes"
+        with open(image_path, "rb") as fh:
+            image = fh.read()
+    except OSError as exc:
+        return f"REFUSED: cannot read image_path: {exc}"
+    if image[0] != ESP_IMAGE_MAGIC:
+        return f"REFUSED: image does not start with the ESP image magic 0x{ESP_IMAGE_MAGIC:02x} (got 0x{image[0]:02x})"
+    pw = _ap_password()
+    if pw is None:
+        return _refuse_no_password()
+    resolved = _resolve_host(host)
+    st, pico, err = _preflight(resolved)
+    if err:
+        return f"error: {err}"
+    limit = st.get("max_upload") or st.get("app_size")
+    if not isinstance(limit, int) or limit <= 0:
+        return f"REFUSED: the board reports no usable app partition size ({_fmt_status(st)})"
+    if len(image) > limit:
+        return f"REFUSED: image is {len(image)} bytes, larger than the app partition ({limit} bytes)"
+    if pico.get("busy"):
+        return f"REFUSED: the Pico relay is busy ({_fmt_pico(pico)}); the board would 409 and a restart would kill it"
+    try:
+        reply = roac.recovery_push_esp_image(resolved, image, pw, timeout=ESP_PUSH_TIMEOUT_S)
+    except roac.RecoveryOtaAuthError as exc:
+        if not _reply_lost(exc):
+            return _post_error("/api/ota/esp", exc)
+        reply = {"status": None, "text": f"<reply lost: {exc}>"}
+    verdict, detail = _poll_restart(resolved, wait_s)
+    prefix = f"{len(image)} bytes (host={resolved})"
+    if reply["status"] is None:
+        return (f"UNKNOWN: the upload reply was lost ({reply['text']}); afterward the board is "
+                f"'{verdict}' {detail} -- NOT confirmed; read recovery_status (app_valid) -- {prefix}")
+    if verdict == "app":
+        return f"ok - board replied {reply['text']!r} and the application is answering ({detail}); {prefix}"
+    if verdict == "recovery_again":
+        return (f"FAILED: board replied {reply['text']!r} but came back as the RECOVERY image ({detail}) -- "
+                f"the new application did not boot; {prefix}")
+    if verdict == "never_restarted":
+        return (f"FAILED: board replied {reply['text']!r} but never restarted within {wait_s:g}s and "
+                f"still answers as the recovery image; {prefix}")
+    return (f"UNVERIFIED: board replied {reply['text']!r} and went silent; nothing answered by "
+            f"{wait_s:g}s -- check by hand; {prefix}")
