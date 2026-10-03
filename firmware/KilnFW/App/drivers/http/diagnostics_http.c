@@ -23,6 +23,7 @@
 #include "hal_kv.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_coredump_get_info()/_read() -- coredump_{info,chunk}_get_handler() below */
 #include "nvs.h" /* nvs_entry_find()/nvs_entry_info() -- nvs_keys_get_handler() below */
+#include "http_async_job.h" /* crash_report_clear_post_handler() -- coredump erase off httpd_worker */
 #include "http_form.h"
 #include "kiln_cfg_store.h"
 #include "kiln_io.h"
@@ -367,6 +368,16 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * crash" section. {"present":false} is a complete, valid response (the
  * common case: no crash on record) -- every other field is only present
  * alongside "present":true. */
+/* True from the moment crash_report_clear_post_handler() admits a job until
+ * that job's crash_report_clear() has returned (record erased AND coredump
+ * erased, or failed). GET /api/crash_report reports it as "clear_in_progress"
+ * on its {"present":false} reply so a poller cannot read "record gone" (the
+ * NVS erase lands first) as "clear done" while the coredump erase is still
+ * running. Written by httpd_worker (set) and the job task (clear); a plain
+ * volatile bool is enough, only ever one writer at a time (single-flight
+ * http_async_job). */
+static volatile bool s_crash_clear_in_progress;
+
 static esp_err_t crash_report_get_handler(httpd_req_t *req)
 {
     crash_report_record_t rec;
@@ -377,7 +388,8 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     int n;
 
     if (!present) {
-        n = snprintf(json, sizeof(json), "{\"present\":false}");
+        n = snprintf(json, sizeof(json), "{\"present\":false,\"clear_in_progress\":%s}",
+                     s_crash_clear_in_progress ? "true" : "false");
         o = (n > 0) ? (size_t)n : 0;
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, json, o);
@@ -565,11 +577,17 @@ static esp_err_t coredump_chunk_get_handler(httpd_req_t *req)
     return send_err;
 }
 
-/* POST /api/crash_report/clear -- acknowledge AND erase the coredump image
- * plus this module's own NVS record, freeing the `coredump` partition slot
- * for the next crash. */
-static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
+/* The slow body of POST /api/crash_report/clear -- crash_report_clear() ends
+ * in hal_sysinfo_coredump_erase(), measured on the bench 2026-10-02 at about
+ * 3.4 s, which used to run inline on httpd_worker and starved every other
+ * request meanwhile (concurrent GET /api/status 2067 ms, GET /api/readiness
+ * 1378 ms). Runs on the http_async_job task (docs/HTTP_POST_OWNER_MIGRATION_
+ * PLAN.md slice A3); sends the SAME status/body the old inline handler did, on
+ * the async copy of the request. Must not call http_auth_* or
+ * httpd_req_async_handler_complete() (http_async_job.h). */
+static void crash_report_clear_job(httpd_req_t *async_req, void *ctx)
 {
+    (void)ctx;
     esp_err_t err = crash_report_clear();
     char json[128];
     int n;
@@ -577,10 +595,40 @@ static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
         n = snprintf(json, sizeof(json), "{\"ok\":true}");
     } else {
         n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(err));
-        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_status(async_req, "500 Internal Server Error");
     }
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, (n > 0) ? (size_t)n : 0);
+    /* Clear the flag BEFORE replying: the reply is what a client reads next. */
+    s_crash_clear_in_progress = false;
+    httpd_resp_set_type(async_req, "application/json");
+    httpd_resp_send(async_req, json, (n > 0) ? (size_t)n : 0);
+}
+
+/* POST /api/crash_report/clear -- acknowledge AND erase the coredump image
+ * plus this module's own NVS record, freeing the `coredump` partition slot
+ * for the next crash. Hands the erase to http_async_job (same pattern as
+ * ct_auto_zero/bench_preset): httpd_worker stays free while the job task
+ * works and replies on the async request copy once the erase is done. A
+ * second job already running answers 503 immediately, never blocks. */
+static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
+{
+    if (http_async_job_busy()) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"busy\":true,\"error\":\"another operation is running\"}");
+    }
+    s_crash_clear_in_progress = true;
+    http_async_job_start_result_t r =
+        http_async_job_try_start(req, "http_async_job", 8192, crash_report_clear_job, NULL);
+    if (r == HTTP_ASYNC_JOB_STARTED) {
+        return ESP_OK;
+    }
+    s_crash_clear_in_progress = false;
+    if (r == HTTP_ASYNC_JOB_BUSY) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"busy\":true,\"error\":\"another operation is running\"}");
+    }
+    return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
 }
 
 /* POST /api/estop/verify -- the deliberate operator confirmation

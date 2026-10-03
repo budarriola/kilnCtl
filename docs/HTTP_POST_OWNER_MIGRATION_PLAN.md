@@ -251,7 +251,13 @@ argument to see a call site at all.
   `zones_current_sweep_task.c`, `kiln_cfg_swap.c`'s worker, and the
   `safety_poll` ceiling reconcile.
 
-### A3 -- `crash_report/clear` onto A1's helper. CONDITIONAL, measure first
+### A3 -- `crash_report/clear` onto A1's helper. DONE (2026-10-02)
+
+Bench measured about 3.4 s (concurrent `GET /api/status` 2067 ms, `GET /api/readiness` 1378 ms), so the
+slice was built: `crash_report_clear_job()` on `http_async_job_try_start()`, same wire contract, 503
+when busy, and `clear_in_progress` on `GET /api/crash_report`'s `present:false` reply so a poller
+cannot read the NVS record erase as completion. The client retries 503 and polls the read-back. The
+original conditional text follows for history.
 
 - `crash_report_clear()` erases the whole 1 MiB `coredump` partition
   (`partitions.csv`) through `hal_sysinfo_coredump_erase`
@@ -348,6 +354,5 @@ later.
 
 W1, A1, A2 and A4 are landed (A4 2026-09-28, driven by a live bench
 measurement rather than a speculative one -- see A4's own section above).
-A3 is still conditional and unaddressed. Once A3 is resolved one way or the
-other, tick the TODO.md 10.14 "Web side" box, citing this plan, and rename
+A3 landed 2026-10-02. Tick the TODO.md 10.14 "Web side" box, citing this plan, and rename
 this file without the `_PLAN` suffix.

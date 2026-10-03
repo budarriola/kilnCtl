@@ -892,3 +892,15 @@ if any `always`/untagged task is dead or absent, or any `boot-once` task is
 absent -- unless `allow_missing_tasks=True` is passed. A `config`/
 `on-demand`/`boot-once`-tagged task's by-design gap is reported but never
 blocks.
+
+### `crash_report_clear` and the async job (2026-10-02)
+
+`POST /api/crash_report/clear` no longer erases the `coredump` partition on `httpd_worker` (bench: about 3.4 s,
+during which `GET /api/status` took 2067 ms and `GET /api/readiness` 1378 ms). The handler hands the erase to the
+shared single-flight `http_async_job` task and the job replies on the async request copy, so the wire bodies are the
+same `{"ok":true}` 200 / `{"ok":false,"error":...}` 500 as before; a job already running answers 503 immediately.
+`GET /api/crash_report` adds `clear_in_progress` to its `present:false` reply (true until the erase has returned).
+The MCP tool retries a 503 each second, polls the read-back after a 202 or a POST socket timeout, and gives up
+after a 30 s deadline; a record or image still present, or `clear_in_progress` still true, is reported as FAILED.
+The POST timeout in `crash_report_clear_http_client.py` is 20 s. Host-unit-tested with a fake board only; the
+after-change stall has not been measured on the bench.

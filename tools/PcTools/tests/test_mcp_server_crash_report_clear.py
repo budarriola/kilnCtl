@@ -17,6 +17,7 @@ Run with: python -m pytest tools/PcTools/tests/test_mcp_server_crash_report_clea
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import unittest
@@ -293,6 +294,99 @@ class UnreadableInitialFetchTest(_Base):
         self.assertIn("error", result.lower())
         self.assertIn("coredump/info", result)
         post_mock.assert_not_called()
+
+
+class AsyncClearTest(_Base):
+    """ROADMAP A3: the board erases on an http_async_job task. 202/timeout
+    -> poll the read-back; 503 -> retry; all bounded by _CLEAR_DEADLINE_S."""
+
+    def _run(self, post_effects, gets, images):
+        """gets/images: consumed one per call, the LAST one repeats forever."""
+        gets = list(gets)
+        images = list(images)
+        sleeps = []
+        clock = [0.0]
+
+        def fake_sleep(sec):
+            sleeps.append(sec)
+            clock[0] += sec
+
+        def next_of(seq):
+            return seq.pop(0) if len(seq) > 1 else seq[0]
+
+        P = unittest.mock.patch.object
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self._resolve_host_patch())
+            stack.enter_context(P(msi.dashboard_http_client, "get_crash_report",
+                                  side_effect=lambda host: next_of(gets)))
+            stack.enter_context(P(coredump_fetch, "get_coredump_info",
+                                  side_effect=lambda host, timeout=5.0: next_of(images)))
+            post_mock = stack.enter_context(P(crash_report_clear_http_client, "post_crash_report_clear",
+                                              side_effect=post_effects))
+            stack.enter_context(P(msi, "_clear_sleep", side_effect=fake_sleep))
+            stack.enter_context(P(msi.time, "monotonic", side_effect=lambda: clock[0]))
+            result = msi.crash_report_clear(confirm=True)
+        return result, post_mock, sleeps
+
+    def test_202_then_polls_until_done(self):
+        in_prog = {"present": False, "clear_in_progress": True}
+        done = {"present": False, "clear_in_progress": False}
+        result, post_mock, sleeps = self._run(
+            [{"ok": True, "accepted": True}],
+            gets=[_PRESENT_ACKED, in_prog, in_prog, done],
+            images=[_IMAGE_PRESENT, _IMAGE_PRESENT, _IMAGE_PRESENT, _IMAGE_ABSENT])
+        post_mock.assert_called_once_with("10.0.0.5")
+        self.assertEqual(len(sleeps), 2)
+        self.assertIn("ok - cleared and confirmed", result)
+
+    def test_clear_in_progress_blocks_success_even_when_record_gone(self):
+        """present:false alone must not read as done while the coredump
+        erase is still running on the board."""
+        in_prog = {"present": False, "clear_in_progress": True}
+        done = {"present": False, "clear_in_progress": False}
+        result, _, sleeps = self._run(
+            [{"ok": True}],
+            gets=[_PRESENT_ACKED, in_prog, done],
+            images=[_IMAGE_PRESENT, _IMAGE_ABSENT, _IMAGE_ABSENT])
+        self.assertEqual(len(sleeps), 1)
+        self.assertIn("ok - cleared and confirmed", result)
+
+    def test_busy_then_retried_then_ok(self):
+        busy = crash_report_clear_http_client.CrashReportClearBusy("busy", status=503, detail="{}")
+        result, post_mock, sleeps = self._run(
+            [busy, busy, {"ok": True}],
+            gets=[_PRESENT_ACKED, _NONE_PENDING],
+            images=[_IMAGE_PRESENT, _IMAGE_ABSENT])
+        self.assertEqual(post_mock.call_count, 3)
+        self.assertEqual(len(sleeps), 2)
+        self.assertIn("ok - cleared and confirmed", result)
+
+    def test_busy_forever_gives_up_without_claiming_clear(self):
+        busy = crash_report_clear_http_client.CrashReportClearBusy("busy", status=503, detail="{}")
+        result, post_mock, _ = self._run(
+            busy, gets=[_PRESENT_ACKED], images=[_IMAGE_PRESENT])
+        self.assertIn("stayed busy", result)
+        self.assertIn("nothing was cleared", result)
+        self.assertNotIn("ok - cleared", result)
+        self.assertLessEqual(post_mock.call_count, int(msi._CLEAR_DEADLINE_S / msi._CLEAR_POLL_S) + 2)
+
+    def test_post_timeout_polls_and_times_out_loud_when_never_done(self):
+        to = crash_report_clear_http_client.CrashReportClearTimeout("timed out")
+        in_prog = {"present": False, "clear_in_progress": True}
+        result, _, sleeps = self._run(
+            [to], gets=[_PRESENT_ACKED, in_prog], images=[_IMAGE_PRESENT, _IMAGE_PRESENT])
+        self.assertIn("FAILED", result)
+        self.assertIn("clear_in_progress still true", result)
+        self.assertNotIn("ok - cleared", result)
+        self.assertGreaterEqual(len(sleeps), 1)
+
+    def test_post_timeout_then_done_is_success(self):
+        to = crash_report_clear_http_client.CrashReportClearTimeout("timed out")
+        in_prog = {"present": False, "clear_in_progress": True}
+        result, _, _ = self._run(
+            [to], gets=[_PRESENT_ACKED, in_prog, _NONE_PENDING],
+            images=[_IMAGE_PRESENT, _IMAGE_PRESENT, _IMAGE_ABSENT])
+        self.assertIn("ok - cleared and confirmed", result)
 
 
 if __name__ == "__main__":

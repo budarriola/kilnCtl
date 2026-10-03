@@ -516,6 +516,14 @@ def estop_verify(confirm: bool = False, host: Optional[str] = None) -> str:
             f"(host={resolved}). Do not trust this as recorded.")
 
 
+_CLEAR_DEADLINE_S = 30.0  # bound on busy-retry plus completion polling in crash_report_clear()
+_CLEAR_POLL_S = 1.0
+
+
+def _clear_sleep(seconds: float) -> None:  # patched out in unit tests
+    time.sleep(seconds)
+
+
 @_srv._tool()
 def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False,
                         host: Optional[str] = None) -> str:
@@ -588,6 +596,14 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
     erase, so a POST is only ever sent here when the pre-fetch already
     confirmed the record and/or the image is present.
 
+    2026-10-02 (ROADMAP A3): the board now runs the erase on an
+    http_async_job task (httpd_worker is no longer stalled ~3.4 s by it).
+    A 503 (another async job running) is retried every second; a 202 or a
+    POST socket timeout switches to polling the read-back
+    (GET /api/crash_report's ``clear_in_progress`` plus /api/coredump/info)
+    until both read gone or a 30 s deadline passes. A record or image still
+    present, or clear_in_progress still true, at the end is a FAILURE.
+
     Host is auto-resolved the same way get_heap_status()/crash_report_ack()
     do; pass `host` explicitly for kilnctl.local or a board reachable only
     from a different network than this link's serial port.
@@ -632,25 +648,48 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
             f"(host={resolved})"
         )
 
-    try:
-        crash_report_clear_http_client.post_crash_report_clear(resolved)
-    except crash_report_clear_http_client.CrashReportClearHttpError as exc:
-        if exc.status == 500:
-            return (f"failed: board could not erase the coredump image (500) -- {summary}; "
-                     f"{image_summary} (host={resolved}): {exc}")
-        return f"error clearing crash report over HTTP (host={resolved}): {exc}"
+    # ROADMAP A3: the board runs the erase on the http_async_job task and
+    # answers 503 while another job is running. Retry a busy answer and poll
+    # the read-back after a 202/timeout, all inside one bounded deadline.
+    deadline = time.monotonic() + _CLEAR_DEADLINE_S
+    poll_readback = False
+    while True:
+        try:
+            reply = crash_report_clear_http_client.post_crash_report_clear(resolved)
+            poll_readback = bool(isinstance(reply, dict) and reply.get("accepted"))
+            break
+        except crash_report_clear_http_client.CrashReportClearBusy as exc:
+            if time.monotonic() >= deadline:
+                return (f"error: board stayed busy (503, another async job running) for "
+                        f"{_CLEAR_DEADLINE_S:.0f}s -- nothing was cleared (host={resolved}): {exc}")
+            _clear_sleep(_CLEAR_POLL_S)
+        except crash_report_clear_http_client.CrashReportClearTimeout:
+            poll_readback = True  # the erase may still be running -- poll, do not assume
+            break
+        except crash_report_clear_http_client.CrashReportClearHttpError as exc:
+            if exc.status == 500:
+                return (f"failed: board could not erase the coredump image (500) -- {summary}; "
+                         f"{image_summary} (host={resolved}): {exc}")
+            return f"error clearing crash report over HTTP (host={resolved}): {exc}"
 
-    try:
-        after = dashboard_http_client.get_crash_report(resolved)
-        image_after = coredump_fetch.get_coredump_info(resolved)
-    except (dashboard_http_client.DashboardHttpError, coredump_fetch.CoredumpFetchError) as exc:
-        return (f"error: POST /api/crash_report/clear returned ok, but the confirming re-fetch "
-                f"failed (host={resolved}): {exc} -- clear state UNKNOWN, re-check before "
-                f"trusting this")
+    while True:
+        try:
+            after = dashboard_http_client.get_crash_report(resolved)
+            image_after = coredump_fetch.get_coredump_info(resolved)
+        except (dashboard_http_client.DashboardHttpError, coredump_fetch.CoredumpFetchError) as exc:
+            return (f"error: POST /api/crash_report/clear returned ok, but the confirming re-fetch "
+                    f"failed (host={resolved}): {exc} -- clear state UNKNOWN, re-check before "
+                    f"trusting this")
+        record_gone = not after.get("present")
+        image_gone = not image_after.present
+        in_progress = bool(after.get("clear_in_progress"))
+        if (poll_readback or in_progress) and not (record_gone and image_gone and not in_progress) \
+                and time.monotonic() < deadline:
+            _clear_sleep(_CLEAR_POLL_S)
+            continue
+        break
 
-    record_gone = not after.get("present")
-    image_gone = not image_after.present
-    if record_gone and image_gone:
+    if record_gone and image_gone and not in_progress:
         return (f"ok - cleared and confirmed by read-back: {summary}; {_image_summary(image_after)} "
                  f"(host={resolved})")
     still_present = []
@@ -658,6 +697,8 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
         still_present.append("crash record still present=true")
     if not image_gone:
         still_present.append("coredump image still present=true")
+    if in_progress:
+        still_present.append(f"clear_in_progress still true after {_CLEAR_DEADLINE_S:.0f}s")
     return (f"FAILED: POST /api/crash_report/clear returned ok, but the re-fetch shows "
             f"{'; '.join(still_present)} -- {summary}; {_image_summary(image_after)} "
             f"(host={resolved}). Do not trust this as cleared.")

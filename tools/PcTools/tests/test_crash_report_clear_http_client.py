@@ -76,5 +76,28 @@ class FailureTest(unittest.TestCase):
                 cc.post_crash_report_clear("host")
 
 
+class AsyncPatternTest(unittest.TestCase):
+    def test_202_is_returned_as_accepted(self):
+        with unittest.mock.patch(
+                "urllib.request.urlopen",
+                lambda req, timeout=None: _fake_response(b'{"ok":true}', status=202)):
+            self.assertEqual(cc.post_crash_report_clear("host"), {"ok": True, "accepted": True})
+
+    def test_503_is_busy_not_generic(self):
+        err = urllib.error.HTTPError("u", 503, "Service Unavailable", {},
+                                     io.BytesIO(b'{"ok":false,"busy":true}'))
+        with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=err)):
+            with self.assertRaises(cc.CrashReportClearBusy) as ctx:
+                cc.post_crash_report_clear("host")
+        self.assertEqual(ctx.exception.status, 503)
+
+    def test_socket_timeout_is_timeout_error(self):
+        import socket
+        for exc in (socket.timeout("timed out"), urllib.error.URLError(socket.timeout("timed out"))):
+            with unittest.mock.patch("urllib.request.urlopen", unittest.mock.Mock(side_effect=exc)):
+                with self.assertRaises(cc.CrashReportClearTimeout):
+                    cc.post_crash_report_clear("host")
+
+
 if __name__ == "__main__":
     unittest.main()
