@@ -28,8 +28,11 @@ extern "C" {
 // Starts Wi-Fi: attempts station mode against the stored credential for a
 // bounded time, and falls back to SoftAP (using the stored AP SSID/password,
 // or a fixed default if neither was ever set) if the station connection does
-// not come up. Blocks until one of the two is confirmed up. Always returns
-// -- there is no case in which the board has no network path afterward.
+// not come up. Blocks until one of the two is confirmed up or both failed.
+// Always returns and never aborts: any init failure is logged and degrades
+// (STA, then AP-only, then "NO NETWORK" on the LCD) so HTTP startup does not
+// depend on Wi-Fi. After an established station link drops, reconnects for a
+// bounded window (30 s) and then falls back to the SoftAP.
 void recovery_wifi_start(void);
 
 // True once either the station link is up (has an IP) or the SoftAP is

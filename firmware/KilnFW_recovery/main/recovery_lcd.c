@@ -93,6 +93,7 @@ static const uint8_t k_init_seq[] = {
 #define Y_RESET   128
 #define Y_CRASH   160
 #define Y_RELAY   192
+#define Y_AUTH    212
 #define Y_NET     232
 #define Y_IP      264
 #define Y_HELP    292
@@ -109,6 +110,8 @@ static bool s_net_set = false;
 static bool s_net_is_ap = false;
 static char s_net_name[33];
 static char s_net_ip[16];
+static bool s_net_none = false;      // every Wi-Fi bring-up path failed
+static bool s_auth_fallback = false; // challenge key derived from the fallback secret
 
 // Status facts gathered once at show_message().
 static int s_boot_count = -1; // -1 unreadable, 0.. = persisted count
@@ -328,7 +331,17 @@ static void draw_status(void)
         (void)draw_line(Y_RELAY, TEXT_SCALE, COL_OK, COL_BG, "Heat: OFF");
     }
 
-    if (s_net_set) {
+    if (s_auth_fallback) {
+        (void)draw_line(Y_AUTH, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "AUTH: FALLBACK");
+    } else {
+        (void)draw_line(Y_AUTH, TEXT_SCALE, COL_DIM, COL_BG, "");
+    }
+
+    if (s_net_none) {
+        (void)draw_line(Y_NET, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "NO NETWORK");
+        (void)draw_line(Y_IP, TEXT_SCALE, COL_DIM, COL_BG, "Wi-Fi bring-up failed");
+        (void)draw_line(Y_HELP, TEXT_SCALE, COL_DIM, COL_BG, "Power-cycle or use JTAG");
+    } else if (s_net_set) {
         snprintf(buf, sizeof(buf), "%s: %s", s_net_is_ap ? "AP" : "WiFi", s_net_name);
         (void)draw_line(Y_NET, TEXT_SCALE, COL_TEXT, COL_BG, buf);
         snprintf(buf, sizeof(buf), "IP: %s", s_net_ip);
@@ -438,6 +451,33 @@ void recovery_lcd_set_network(bool is_ap, const char *name, const char *ip)
     snprintf(s_net_name, sizeof(s_net_name), "%s", name ? name : "");
     snprintf(s_net_ip, sizeof(s_net_ip), "%s", ip ? ip : "?");
     s_net_set = true;
+    s_net_none = false;
+    if (s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_set_no_network(void)
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_net_none = true;
+    if (s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_set_auth_fallback(bool fallback)
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_auth_fallback = fallback;
     if (s_ready) {
         draw_status();
     }

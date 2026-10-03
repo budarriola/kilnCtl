@@ -43,6 +43,14 @@ void recovery_lcd_show_message(void);
 // the panel down (no-op).
 void recovery_lcd_set_network(bool is_ap, const char *name, const char *ip);
 
+// Shows "NO NETWORK" in place of the network lines (every Wi-Fi bring-up path
+// failed). A later recovery_lcd_set_network() clears it. Same safety rules.
+void recovery_lcd_set_no_network(void);
+
+// Shows/clears "AUTH: FALLBACK": the challenge key is derived from the
+// eFuse-MAC fallback secret because wifi_nvs holds no usable ap_pass.
+void recovery_lcd_set_auth_fallback(bool fallback);
+
 #ifdef __cplusplus
 }
 #endif
