@@ -137,6 +137,39 @@ secret above from the board's MAC (the PC knows it from the AP BSSID or the stat
 context and query markers of `recovery_authenticate_request()`, none of which changed, so it
 does not require this mirror yet.
 
+**Per-client nonce ring (landed).** `GET /api/ota/challenge` used to keep ONE global nonce, so
+any host that fetched a challenge retired the operator's nonce mid-handshake (a cheap denial of
+service). `main/recovery_auth.c` now holds a ring of `RAUTH_NONCE_SLOTS` (4) nonces keyed by the
+peer IPv4 address (`httpd_req_to_sockfd` + `getpeername`; key 0 when unreadable, which is one
+shared client). A challenge replaces only the SAME client's previous nonce; a full ring reclaims
+a spent or expired slot first and otherwise evicts the oldest live nonce. Single use and the 30 s
+expiry are still `ota_auth.c`'s. The lockout stays ONE shared counter (owner decision above), so
+a client cannot multiply guesses by changing address. Follow-up, not done (F-body): the MAC
+covers nonce, context and query string but not the request BODY, so an on-path attacker who
+has seen one authenticated upload's headers could in principle swap the body; a body digest in
+the MAC needs the PC client and page to change together and is deferred.
+
+**Relay-hold watchdog (landed).** `recovery_io_hold_relays_off()` verified the SX1509 hold once
+at boot only. A 1 s task (`relay_hold`, priority 3, 3072 B stack) now reads RegDir/RegData back,
+re-asserts the hold on any mismatch or unreadable expander, and verifies the write. A mismatch
+LATCHES `relay_hold_fault` until reboot even when the repair succeeds. Decision logic is the
+pure `main/recovery_hold.c`, host-tested by `check_recovery_hold.ps1`. Stack deviation: the
+recovery image has no `stack_margin` API (that lives in KilnFW), so the task reports its own
+`uxTaskGetStackHighWaterMark` as `relay_hold_stack_free`; 3072 B is not yet measured on the
+bench (verify `relay_hold_stack_free` stays well above 512 B). The LCD pin writer now takes the
+same I/O lock as the task, so the two cannot interleave an SX1509 write.
+
+**New `GET /api/recovery/status` fields (PcTools rendering still to do).** `uptime_s`,
+`reset_reason` (raw enum), `reset_reason_name`, `app_ota_state`, `coredump_present`,
+`otadata_blank` (the last two are `true`/`false`/`null` when unknown), `ap_start_count`,
+`ap_stop_count`, `ap_stations`, `ap_connect_total`, `wifi_last_event`, `wifi_last_event_age_s`,
+`relay_hold_task`, `relay_hold_fault`, `relay_hold_fault_s` (null until a fault),
+`relay_hold_last_ok_s` (null until a verified observation), `relay_hold_mismatches`,
+`relay_hold_reassert_fails`, `relay_hold_stack_free`. Host tests added with this batch:
+`check_recovery_upload.ps1` (streaming loop and ESP OTA sink with stubbed `esp_ota_*`/httpd:
+short body, recv timeouts, an `esp_ota_end` failure leaving the boot target alone) and
+`check_recovery_hold.ps1`.
+
 ## Open risks
 
 - The Pico bootloader's recovery frame set may differ from the application's frame set;
