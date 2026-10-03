@@ -109,6 +109,46 @@ static void run_swap_job(const swap_job_t *job)
     (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP);
 }
 
+/* Boot-recovery claim, bounded retry (S7 residual, reviewer advisory on
+ * b8c3e4a8). Recovery re-pushes a full config to the Pico, the same staged
+ * transaction every other safety-config writer drives, and the HTTP server
+ * and safety_poll can already be up while it runs. The writer most likely to
+ * be holding the guard at that instant is a RECONCILE tick (microseconds) or a
+ * synchronous HTTP writer, so a short bounded retry almost always gets a clean
+ * claim. After BOOT_CLAIM_ATTEMPTS the recovery proceeds UNCLAIMED with a
+ * warning -- an interrupted swap left uncommitted is the worse outcome, and
+ * nothing may block boot indefinitely -- and then must NOT release (releasing
+ * an unclaimed guard would be refused by the owner check, but the pairing
+ * stays exact). Runs on this worker task with no module lock held, so the
+ * delay blocks nothing else; the guard itself is never held across the delay. */
+#define BOOT_CLAIM_ATTEMPTS 20
+#define BOOT_CLAIM_RETRY_MS 100
+#ifndef KILN_CFG_SWAP_BOOT_BACKOFF /* host tests substitute a hook for the delay */
+#define KILN_CFG_SWAP_BOOT_BACKOFF() vTaskDelay(pdMS_TO_TICKS(BOOT_CLAIM_RETRY_MS))
+#endif
+
+static void boot_recover_guarded(void)
+{
+    bool boot_claimed = false;
+    for (int attempt = 0; attempt < BOOT_CLAIM_ATTEMPTS; attempt++) {
+        boot_claimed = safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP);
+        if (boot_claimed) {
+            break;
+        }
+        if (attempt + 1 < BOOT_CLAIM_ATTEMPTS) {
+            KILN_CFG_SWAP_BOOT_BACKOFF();
+        }
+    }
+    if (!boot_claimed) {
+        ESP_LOGW(TAG, "boot recovery running UNCLAIMED after %d tries: another safety-config writer is active (owner %d)",
+                 BOOT_CLAIM_ATTEMPTS, (int)safety_cfg_writer_owner());
+    }
+    kiln_cfg_swap_boot_recover();
+    if (boot_claimed) {
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP);
+    }
+}
+
 static void swap_worker_task(void *arg)
 {
     (void)arg;
@@ -139,23 +179,7 @@ static void swap_worker_task(void *arg)
      * link is already published by the time this line executes. A submit()
      * that arrives during recovery simply waits in the depth-1 queue rather
      * than racing it. */
-    /* Recovery re-pushes a full config to the Pico, the same staged
-     * transaction every other safety-config writer drives, and the HTTP
-     * server (so ct_auto_zero and friends) can already be up while it runs.
-     * Take the writer guard around it. A refusal is NOT a reason to skip
-     * recovery -- an interrupted swap left uncommitted is the worse outcome
-     * -- so it proceeds regardless and only releases if it actually claimed
-     * (releasing an unclaimed guard would clear another writer's claim: the
-     * release is owner-checked, but the pairing must still be exact). */
-    bool boot_claimed = safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP);
-    if (!boot_claimed) {
-        ESP_LOGW(TAG, "boot recovery running while another safety-config writer is active (owner %d)",
-                 (int)safety_cfg_writer_owner());
-    }
-    kiln_cfg_swap_boot_recover();
-    if (boot_claimed) {
-        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP);
-    }
+    boot_recover_guarded();
 
     for (;;) {
         swap_job_t job;

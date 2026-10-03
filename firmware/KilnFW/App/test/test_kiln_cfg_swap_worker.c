@@ -21,10 +21,15 @@
 //  3. A failed queue send (the depth-1 queue lost a race) releases the
 //     claim -- no leak that would wedge every later writer.
 //
-// NOT covered here: the worker task's boot-recovery claim (swap_worker_task()
-// runs an infinite loop the host cannot drive); that path is a claim/release
-// pair around one call and is covered by review and the target build only.
+//  4. Boot recovery (boot_recover_guarded(), split out of the worker task's
+//     never-returning loop so the host can drive it) claims SWAP around
+//     kiln_cfg_swap_boot_recover(), RETRIES a bounded number of times while
+//     another writer holds the guard (the delay is a test hook), claims as
+//     soon as the holder lets go, and after the bound runs UNCLAIMED without
+//     ever clearing the other writer's claim.
 //
+// NEGATIVE TEST (S7 residual): replacing the retry loop with a single
+// try_claim() fails the "claims once the holder releases" check.
 // NEGATIVE TEST (2026-10-02): removing the try_claim() in submit() fails
 // checks 1 and 2 below; removing the release() in run_swap_job() fails the
 // "released after success/failure" checks; removing the release() on the
@@ -52,6 +57,12 @@ int g_stub_queue_ring_head = 0;
 int g_stub_queue_send_calls = 0;
 unsigned char g_stub_last_queue_item[256];
 
+// Test hook for boot_recover_guarded()'s retry delay (declared before the
+// include so the .c's #ifndef picks it up).
+static int s_backoff_calls = 0;
+static int s_backoff_release_after = -1; // release the competing holder on this call (-1: never)
+static void test_boot_backoff(void);
+#define KILN_CFG_SWAP_BOOT_BACKOFF() test_boot_backoff()
 #include "../drivers/persist/kiln_cfg_swap_worker.c"
 #include "../drivers/persist/kiln_cfg_swap.h"
 
@@ -85,8 +96,22 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
     return s_apply_result;
 }
 
+static int s_recover_calls = 0;
+static safety_cfg_writer_t s_owner_seen_during_recover = SAFETY_CFG_WRITER_NONE;
+
 void kiln_cfg_swap_boot_recover(void)
 {
+    s_recover_calls++;
+    s_owner_seen_during_recover = safety_cfg_writer_owner();
+}
+
+static safety_cfg_writer_t s_backoff_holder = SAFETY_CFG_WRITER_NONE;
+static void test_boot_backoff(void)
+{
+    s_backoff_calls++;
+    if (s_backoff_release_after >= 0 && s_backoff_calls == s_backoff_release_after) {
+        (void)safety_cfg_writer_release(s_backoff_holder);
+    }
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -100,6 +125,10 @@ static void reset_all(void)
     s_apply_result = true;
     s_apply_diverged = false;
     s_owner_seen_during_apply = SAFETY_CFG_WRITER_NONE;
+    s_recover_calls = 0;
+    s_owner_seen_during_recover = SAFETY_CFG_WRITER_NONE;
+    s_backoff_calls = 0;
+    s_backoff_release_after = -1;
     g_stub_queue_ring_enabled = 1;
     g_stub_queue_ring_count = 0;
     g_stub_queue_ring_head = 0;
@@ -187,6 +216,46 @@ static void test_queue_send_failure_releases_guard(void)
     TEST_CHECK(state_now() == KILN_CFG_SWAP_JOB_DONE_FAILED, "the lost race is published as a failure");
 }
 
+static void test_boot_recovery_claims_when_free(void)
+{
+    TEST_SECTION("boot recovery claims SWAP around kiln_cfg_swap_boot_recover() and releases it");
+    reset_all();
+    boot_recover_guarded();
+    TEST_CHECK(s_recover_calls == 1, "recovery ran once");
+    TEST_CHECK(s_owner_seen_during_recover == SAFETY_CFG_WRITER_SWAP, "the guard was held across recovery");
+    TEST_CHECK(s_backoff_calls == 0, "a free guard needs no retry");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released afterwards");
+}
+
+static void test_boot_recovery_retries_until_holder_releases(void)
+{
+    TEST_SECTION("boot recovery retries a bounded number of times and claims once the holder lets go");
+    reset_all();
+    s_backoff_holder = SAFETY_CFG_WRITER_RECONCILE;
+    TEST_CHECK(safety_cfg_writer_try_claim(s_backoff_holder), "test setup: a reconcile tick holds the guard");
+    s_backoff_release_after = 3;
+    boot_recover_guarded();
+    TEST_CHECK(s_backoff_calls == 3, "retried exactly until the holder released (3 delays)");
+    TEST_CHECK(s_recover_calls == 1, "recovery ran once");
+    TEST_CHECK(s_owner_seen_during_recover == SAFETY_CFG_WRITER_SWAP,
+               "recovery ran CLAIMED once the holder released, not unclaimed");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released afterwards");
+}
+
+static void test_boot_recovery_gives_up_after_bound_and_never_clears_holder(void)
+{
+    TEST_SECTION("boot recovery that never gets the guard runs unclaimed after the bound and leaves the "
+                 "holder's claim alone");
+    reset_all();
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWEEP), "test setup: a sweep holds the guard");
+    boot_recover_guarded();
+    TEST_CHECK(s_backoff_calls == BOOT_CLAIM_ATTEMPTS - 1, "delays are bounded: one between each pair of attempts");
+    TEST_CHECK(s_recover_calls == 1, "recovery still runs (an uncommitted interrupted swap is worse)");
+    TEST_CHECK(s_owner_seen_during_recover == SAFETY_CFG_WRITER_SWEEP, "it ran alongside the holder, unclaimed");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_SWEEP,
+               "an unclaimed recovery must not release the other writer's claim");
+}
+
 int main(void)
 {
     g_stub_queue_ring_enabled = 1;
@@ -197,6 +266,9 @@ int main(void)
     test_accepted_submit_holds_guard_through_apply_and_releases();
     test_failed_and_diverged_apply_release_guard();
     test_queue_send_failure_releases_guard();
+    test_boot_recovery_claims_when_free();
+    test_boot_recovery_retries_until_holder_releases();
+    test_boot_recovery_gives_up_after_bound_and_never_clears_holder();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

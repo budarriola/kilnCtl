@@ -274,22 +274,21 @@ argument to see a call site at all.
     failure, so it starts no backoff window -- the next free tick retries at
     once. The blocking entry (called only from the swap, which already owns
     `SWAP`) deliberately does not claim.
-  - **Residual (still open):** every SYNCHRONOUS HTTP writer that gates on
-    `http_async_job_busy()` -- which now reads the guard's `ASYNC_JOB` owner
-    only -- refuses an in-flight async job but does not claim the guard
-    itself, so it can still overlap a sweep, swap or reconcile mid-flight:
-    the `zones_post_handler` ceiling raise (`zones_http_post.c`), the
-    `safety_cfg_http.c` SET_PARAM/commit writers, the `kiln_cfg_http.c`
-    apply pre-check, and the `backup_import.c` restore pre-check. Closing it
-    means those handlers claim/release the guard (or `busy()` returning
-    `owner() != NONE`, which would also make them refuse spuriously during
-    the microsecond per-tick `RECONCILE` claim). Separately, the swap
-    worker's boot-recovery claim is best-effort: if another writer (most
-    likely a `RECONCILE` tick, since HTTP may already be up) holds the guard
-    at that instant, recovery proceeds UNCLAIMED alongside it; this only
-    matters when an interrupted-swap record exists, and its verify/latch
-    path is fail-safe. It is not host-testable (the worker loop cannot be
-    driven on the host).
+  - **Residual closed (follow-up):** the synchronous writers now claim the
+    guard under a new owner, `HTTP_SYNC`, for their whole write and release it
+    (owner-checked) on every return path: the five `safety_cfg_http.c`
+    SET_PARAM/commit handlers (commissioning, relay_type, ct_cal, ct_trim,
+    rate_guard_auto, via one `cfg_writer_guarded()` wrapper that answers 409
+    plus busy JSON when the claim fails) and `zones_post_handler` (claim after
+    the mode gate and interlock, refusal through
+    `system_mode_gate_http_send_refusal()`; body split into
+    `zones_post_body()`). `kiln_cfg_http.c` apply and `backup_import.c` do not
+    claim `HTTP_SYNC`: their dispatch (swap `submit()`, async `try_start()`)
+    already claims atomically and answers the 409 itself, so an earlier claim
+    would refuse itself. The swap worker's boot-recovery claim now retries
+    (20 attempts, 100 ms apart, on the worker task so boot is not blocked)
+    before falling back to the old unclaimed run, which stays fail-safe. The
+    guard is still a leaf: never held across a producer call or another lock.
   - Tests: new guard/interleaving cases in `test_http_async_job.c`,
     `test_zones_http.c`, `test_safety_ceiling_sync_divergence.c`, and a new
     `test_kiln_cfg_swap_worker.c` executable (67 host executables, was 66).

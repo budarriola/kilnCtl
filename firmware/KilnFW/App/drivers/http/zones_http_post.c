@@ -15,14 +15,16 @@
 
 #include "MAX31856.h"
 #include "http_form.h"
-#include "http_async_job.h" /* http_async_job_busy() -- see the check below */
 #include "ota_http.h" /* ota_http_check_interlocks() -- the shared "not while firing" gate */
 #include "ota_interlock.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
+#include "safety_cfg_writer_guard.h" /* HTTP_SYNC claim around the ceiling-raise body */
 #include "safety_ceiling_sync.h" /* owner request 2026-09-10 -- Pico abs_max_temp_c tracks the zone max */
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
 #include "zone_settings_source_chain.h"
+
+static esp_err_t zones_post_body(httpd_req_t *req);
 
 esp_err_t zones_post_handler(httpd_req_t *req)
 {
@@ -79,21 +81,31 @@ esp_err_t zones_post_handler(httpd_req_t *req)
         return ota_http_send_interlock_refusal(req, gate, interlock_reason);
     }
 
-    /* docs/HTTP_POST_OWNER_MIGRATION.md A2 review fix (Opus, 2026-09-25):
-     * this handler raises the Pico ceiling via safety_ceiling_sync_guard_raise()
-     * below (-> pico_ceiling_writer() -> safety_cfg_write_set_and_confirm_f32()),
-     * staging abs_max_temp_c and sending a COMMIT_CONFIG -- exactly the kind of
-     * safety-config write an in-flight http_async_job (bench_preset's 32-param
-     * stage-then-commit, or ct_auto_zero's measurement) must not race, per the
-     * same reasoning as every other safety_cfg_http.c writer's busy check. Ordered
-     * after the mode gate and after ota_http_check_interlocks() per that review:
-     * both of those answer a different question (is a firing/autotune run active,
-     * is heat commanded) and must still run first. */
-    if (http_async_job_busy()) {
+    /* docs/HTTP_POST_OWNER_MIGRATION.md A2 review fix (Opus, 2026-09-25) and
+     * S7 residual: the rest of this handler raises the Pico ceiling via
+     * safety_ceiling_sync_guard_raise() (-> pico_ceiling_writer() ->
+     * safety_cfg_write_set_and_confirm_f32()), staging abs_max_temp_c and
+     * sending a COMMIT_CONFIG -- the same staged transaction an http_async_job,
+     * a current sweep, a kiln config swap or a reconcile tick drives, so it
+     * claims the single-flight guard (HTTP_SYNC) for the whole body, released
+     * on every path by this wrapper. A refused claim covers an in-flight async
+     * job too (it owns ASYNC_JOB), so the old http_async_job_busy() check is
+     * subsumed. Ordered after the mode gate and ota_http_check_interlocks():
+     * both answer a different question and must still run first. Claimed with
+     * no module lock held; the body takes its own locks beneath the leaf flag. */
+    if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
         ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: another commissioning operation is running");
         return system_mode_gate_http_send_refusal(req, "another commissioning operation is running");
     }
+    esp_err_t err = zones_post_body(req);
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+    return err;
+}
 
+/* Everything after the refusal gates, split out so the caller can pair the
+ * HTTP_SYNC claim with exactly one release however this returns. */
+static esp_err_t zones_post_body(httpd_req_t *req)
+{
     if (req->content_len <= 0 || req->content_len > ZONES_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;

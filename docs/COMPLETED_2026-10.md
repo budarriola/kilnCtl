@@ -18,9 +18,19 @@ a 3.4 s httpd stall; the after-change stall is unmeasured.
 ## S7: single-flight guard for Pico safety-config writers (`beaab290`..`b8c3e4a8`)
 
 One guard serialises every writer of the Pico safety config, wired into the
-async job, the sweep, the swap and the reconcile path. Residual, documented in
-`b8c3e4a8`: the synchronous HTTP writers still only check `ASYNC_JOB`, and the
-boot-recovery path is not covered. The spinlock has not run on hardware.
+async job, the sweep, the swap and the reconcile path. The spinlock has not run
+on hardware.
+
+Residual closed afterwards: the synchronous HTTP writers (the five
+`safety_cfg_http.c` SET_PARAM/commit handlers and `zones_post_handler`) now
+claim the guard under a new `HTTP_SYNC` owner for their whole write, release it
+on every return path, and answer 409 busy when the claim fails. The kiln config
+apply and backup import already claim atomically at admission (swap submit,
+async try_start), so they need no extra claim. The swap worker's boot-recovery
+claim retries up to 20 times, 100 ms apart, before running unclaimed. Host tests
+cover the 409 for every other owner, release on every path and the bounded
+retry; negative-tested by removing the release in both HTTP files, which failed
+`zones_http` and `safety_cfg_http`. Not run on hardware.
 
 ## Recovery entry (`e25d8a30`..`24043ba9`)
 

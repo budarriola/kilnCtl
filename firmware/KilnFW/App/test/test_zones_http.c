@@ -1553,6 +1553,34 @@ static void test_zones_post_refused_by_mode_gate_before_interlock(void)
               "refusal body must carry the PcTools discriminator marker");
 }
 
+// S7 residual: zones_post_handler() claims SAFETY_CFG_WRITER_HTTP_SYNC around
+// its body, so ANY other guard owner (sweep, swap, reconcile, another sync
+// writer) is refused with the 409 busy body before the Pico ceiling write, and
+// a normal run leaves the guard free again.
+static void test_zones_post_http_sync_claim(void)
+{
+    TEST_SECTION("zones_post_handler -- HTTP_SYNC claim: refused while another writer owns the guard, "
+                 "guard released after a normal run");
+    const safety_cfg_writer_t others[] = { SAFETY_CFG_WRITER_SWEEP, SAFETY_CFG_WRITER_SWAP,
+                                           SAFETY_CFG_WRITER_RECONCILE, SAFETY_CFG_WRITER_HTTP_SYNC };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        s_test_profile_status.state = PROFILE_EXEC_IDLE;
+        s_ceiling_writer_calls = 0;
+        TEST_CHECK(safety_cfg_writer_try_claim(others[i]), "test setup: other writer holds the guard");
+        run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+        TEST_CHECK(s_ceiling_writer_calls == 0, "no Pico ceiling write while another writer owns the guard");
+        TEST_CHECK(!s_test_ok_called && !s_test_err_called, "refusal is the mode-gate 409 body, not ok/err");
+        TEST_CHECK(strstr(s_last_resp_body, "another commissioning operation is running") != NULL,
+                   "busy discriminator marker");
+        TEST_CHECK(safety_cfg_writer_owner() == others[i], "the holder claim is untouched");
+        (void)safety_cfg_writer_release(others[i]);
+    }
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after a normal run");
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2X");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after a rejected (400) run");
+}
+
 // Opus fix-then-push review, item 1 (docs/HTTP_POST_OWNER_MIGRATION.md
 // A2): the interleaving audit missed that zones_post_handler() raises the
 // Pico ceiling (safety_ceiling_sync_guard_raise() -> s_ceiling_writer, the
@@ -15709,6 +15737,7 @@ void run_test_zones_http(void)
     // test_commissioning_post_refuses_while_async_job_busy() in
     // test_safety_cfg_http.c -- once admitted here, http_async_job_busy()
     // reads true for the rest of this executable.
+    test_zones_post_http_sync_claim();
     test_zones_post_refused_while_async_job_busy();
 }
 

@@ -31,6 +31,7 @@
                                   * only includes safety_ceiling_policy.h/safety_link.h, never this file. */
 #include "safety_ceiling_policy.h" /* safety_ceiling_refusal_class_t -- 2026-09-10 opus review finding */
 #include "safety_cfg_store.h"
+#include "safety_cfg_writer_guard.h" /* single-flight vs every other Pico safety-config writer */
 #include "safety_trip_words.h" /* safety_fault_source_short_name() -- 2026-09-24 fault-edge instrumentation */
 #include "safety_cfg_write.h" /* safety_cfg_post_pair_t + the stage/commit/confirm-by-
                                * read-back primitive. It moved to drivers/safety/ on
@@ -56,6 +57,28 @@ static const char *TAG = "safety_cfg_http";
 
 static SafetyLinkClass *s_link = NULL;
 static kiln_io_t *s_hw_io = NULL; // CT_COMMISSIONING_PLAN.md step 2 -- ct_auto_zero_post_handler() only
+
+/* Single-flight wrapper for every SYNCHRONOUS SET_PARAM/COMMIT_CONFIG writer
+ * in this file (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 residual). Claims
+ * SAFETY_CFG_WRITER_HTTP_SYNC for the whole handler body and releases it on
+ * the way out, owner-checked, whatever the body returned -- so no early
+ * return inside `fn` can leak the claim. A claim refusal (an async job, sweep,
+ * kiln config swap, reconcile tick or another sync writer owns the guard) is
+ * a 409 with the same busy JSON this file always sent, nothing staged.
+ * The claim is only a flag in a leaf spinlock: it is taken with no module
+ * lock held and `fn` takes its own locks below it, never the reverse. Adds
+ * one pointer-sized frame; no buffer. */
+static esp_err_t cfg_writer_guarded(httpd_req_t *req, esp_err_t (*fn)(httpd_req_t *))
+{
+    if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
+    }
+    esp_err_t err = fn(req);
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+    return err;
+}
 
 /* Small bodies -- up to SAFETY_CFG_PARAM_COUNT id/value pairs plus commit=1,
  * "id=<n>&value=<v>" repeated per field (see parse_set_param_body()'s own
@@ -740,17 +763,15 @@ static bool commissioning_pair_range_problem(const safety_cfg_post_pair_t *pairs
     return false;
 }
 
+static esp_err_t commissioning_post_locked(httpd_req_t *req);
 static esp_err_t commissioning_post_handler(httpd_req_t *req)
 {
-    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
-    // running: it can commit CT-cal/config state this handler also touches,
-    // and letting both proceed concurrently risks one silently clobbering
-    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
-    if (http_async_job_busy()) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
-        return ESP_OK;
-    }
+    return cfg_writer_guarded(req, commissioning_post_locked);
+}
+
+/* Runs holding SAFETY_CFG_WRITER_HTTP_SYNC (see cfg_writer_guarded()). */
+static esp_err_t commissioning_post_locked(httpd_req_t *req)
+{
     /* 2026-09-05 DRAM_PSRAM_PLAN.md: same rationale as commissioning_get_
      * handler's json[] above -- no NVS/flash call in this file, so these
      * scratch buffers are safe to move off internal DRAM. */
@@ -972,17 +993,15 @@ static esp_err_t commissioning_post_handler(httpd_req_t *req)
  * of a generic "nothing happened". */
 #define SAFETY_RELAY_TYPE_BODY_MAX 64
 
+static esp_err_t relay_type_post_locked(httpd_req_t *req);
 static esp_err_t relay_type_post_handler(httpd_req_t *req)
 {
-    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
-    // running: it can commit CT-cal/config state this handler also touches,
-    // and letting both proceed concurrently risks one silently clobbering
-    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
-    if (http_async_job_busy()) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
-        return ESP_OK;
-    }
+    return cfg_writer_guarded(req, relay_type_post_locked);
+}
+
+/* Runs holding SAFETY_CFG_WRITER_HTTP_SYNC (see cfg_writer_guarded()). */
+static esp_err_t relay_type_post_locked(httpd_req_t *req)
+{
     char body[SAFETY_RELAY_TYPE_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
@@ -1048,17 +1067,15 @@ static esp_err_t relay_type_post_handler(httpd_req_t *req)
  * directly with their own source, never through this HTTP surface. */
 #define SAFETY_CT_CAL_BODY_MAX 128
 
+static esp_err_t ct_cal_post_locked(httpd_req_t *req);
 static esp_err_t ct_cal_post_handler(httpd_req_t *req)
 {
-    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
-    // running: it can commit CT-cal/config state this handler also touches,
-    // and letting both proceed concurrently risks one silently clobbering
-    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
-    if (http_async_job_busy()) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
-        return ESP_OK;
-    }
+    return cfg_writer_guarded(req, ct_cal_post_locked);
+}
+
+/* Runs holding SAFETY_CFG_WRITER_HTTP_SYNC (see cfg_writer_guarded()). */
+static esp_err_t ct_cal_post_locked(httpd_req_t *req)
+{
     char body[SAFETY_CT_CAL_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
@@ -1208,17 +1225,15 @@ static esp_err_t ct_cal_post_handler(httpd_req_t *req)
  * with nothing to do here. */
 #define SAFETY_CT_TRIM_BODY_MAX 128
 
+static esp_err_t ct_trim_post_locked(httpd_req_t *req);
 static esp_err_t ct_trim_post_handler(httpd_req_t *req)
 {
-    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
-    // running: it can commit CT-cal/config state this handler also touches,
-    // and letting both proceed concurrently risks one silently clobbering
-    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
-    if (http_async_job_busy()) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
-        return ESP_OK;
-    }
+    return cfg_writer_guarded(req, ct_trim_post_locked);
+}
+
+/* Runs holding SAFETY_CFG_WRITER_HTTP_SYNC (see cfg_writer_guarded()). */
+static esp_err_t ct_trim_post_locked(httpd_req_t *req)
+{
     char body[SAFETY_CT_TRIM_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing or oversized body");
@@ -2275,17 +2290,15 @@ static esp_err_t rate_guard_auto_get_handler(httpd_req_t *req)
  * same "never trust SET_PARAM/COMMIT_CONFIG's own ok" discipline as every
  * other write on this page -- before this handler tags the provenance
  * record or reports success. */
+static esp_err_t rate_guard_auto_post_locked(httpd_req_t *req);
 static esp_err_t rate_guard_auto_post_handler(httpd_req_t *req)
 {
-    // Refuse while an http_async_job (ct_auto_zero's 10-15s measurement) is
-    // running: it can commit CT-cal/config state this handler also touches,
-    // and letting both proceed concurrently risks one silently clobbering
-    // the other's write (2026-09-25 fix-then-push review, A2 pulled forward).
-    if (http_async_job_busy()) {
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"another commissioning operation is running\"}");
-        return ESP_OK;
-    }
+    return cfg_writer_guarded(req, rate_guard_auto_post_locked);
+}
+
+/* Runs holding SAFETY_CFG_WRITER_HTTP_SYNC (see cfg_writer_guarded()). */
+static esp_err_t rate_guard_auto_post_locked(httpd_req_t *req)
+{
     bool confirm = false;
     if (req->content_len > 0) {
         char body[32];

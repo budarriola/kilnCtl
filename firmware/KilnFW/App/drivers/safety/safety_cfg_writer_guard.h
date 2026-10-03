@@ -13,6 +13,13 @@
  *              apply finishes (and on a failed queue send).
  *   RECONCILE  safety_ceiling_sync.c's NON-BLOCKING (safety_poll) reconcile,
  *              held only around its guard_raise() write attempt.
+ *   HTTP_SYNC  the SYNCHRONOUS httpd_worker writers (safety_cfg_http.c's
+ *              SET_PARAM/commit POST handlers, zones_http_post.c's ceiling
+ *              raise) -- claimed after the handler's own cheap refusals and
+ *              released before it returns, on every path. The two synchronous
+ *              handlers that only DISPATCH (kiln_cfg_http.c apply -> SWAP via
+ *              submit, backup_import.c restore -> ASYNC_JOB via try_start) do
+ *              not claim this: their worker claims atomically at admission.
  *
  * Every holder does SET_PARAM/COMMIT_CONFIG round trips against the same
  * Pico staged-config transaction; two of them interleaving can commit each
@@ -51,6 +58,7 @@ typedef enum {
     SAFETY_CFG_WRITER_SWEEP,
     SAFETY_CFG_WRITER_SWAP,
     SAFETY_CFG_WRITER_RECONCILE,
+    SAFETY_CFG_WRITER_HTTP_SYNC,
 } safety_cfg_writer_t;
 
 /* Atomic test-and-set. True and `who` now owns the guard; false if ANY

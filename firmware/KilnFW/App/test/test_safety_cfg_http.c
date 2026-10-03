@@ -130,7 +130,13 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     }
     return ESP_OK;
 }
-esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
+static char s_stub_last_status[32];
+esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
+{
+    (void)r;
+    snprintf(s_stub_last_status, sizeof(s_stub_last_status), "%s", status ? status : "");
+    return ESP_OK;
+}
 /* Controllable request body -- most callers leave content_len==0 (read_body()
  * refuses that outright, so httpd_req_recv() is never reached), but the
  * commissioning_post_handler() tests below need a real body delivered. */
@@ -580,11 +586,14 @@ static bool s_stub_commit_rejected = false;
 static uint16_t s_stub_commit_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
 static uint8_t s_stub_commit_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
 
+static safety_cfg_writer_t s_stub_owner_seen_in_set_param = SAFETY_CFG_WRITER_NONE;
+
 esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, uint8_t type,
                                       kilnlink_param_value_t value)
 {
     (void)link; (void)param_id; (void)type; (void)value;
     s_stub_set_param_calls++;
+    s_stub_owner_seen_in_set_param = safety_cfg_writer_owner();
     return s_stub_set_param_result;
 }
 
@@ -2629,6 +2638,81 @@ static void test_commissioning_post_in_range_gain_is_accepted(void)
     TEST_CHECK(s_stub_set_param_calls == 1, "the trim was staged to the Pico");
 }
 
+/* S7 residual (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2): every synchronous
+ * SET_PARAM/COMMIT writer in this file claims SAFETY_CFG_WRITER_HTTP_SYNC for
+ * its whole body via cfg_writer_guarded(), refuses with a 409 + busy JSON when
+ * ANY other writer (sweep, swap, reconcile, another sync writer) owns the
+ * guard, and releases on every path. */
+typedef esp_err_t (*sync_writer_fn_t)(httpd_req_t *);
+
+static void test_sync_writers_refused_409_while_any_other_writer_holds_guard(void)
+{
+    TEST_SECTION("sync SET_PARAM writers -- 409 busy JSON and nothing staged while sweep/swap/reconcile/"
+                 "another sync writer owns the guard; the holder claim is left alone");
+    const sync_writer_fn_t handlers[] = { commissioning_post_handler, relay_type_post_handler, ct_cal_post_handler,
+                                          ct_trim_post_handler, rate_guard_auto_post_handler };
+    const safety_cfg_writer_t others[] = { SAFETY_CFG_WRITER_SWEEP, SAFETY_CFG_WRITER_SWAP,
+                                           SAFETY_CFG_WRITER_RECONCILE, SAFETY_CFG_WRITER_HTTP_SYNC };
+    for (size_t h = 0; h < sizeof(handlers) / sizeof(handlers[0]); h++) {
+        for (size_t o = 0; o < sizeof(others) / sizeof(others[0]); o++) {
+            reset_all();
+            s_stub_last_status[0] = '\0';
+            TEST_CHECK(safety_cfg_writer_try_claim(others[o]), "test setup: other writer holds the guard");
+            httpd_req_t req = { .content_len = 0 };
+            TEST_CHECK(handlers[h](&req) == ESP_OK, "refusal is a normal handler return");
+            TEST_CHECK(strcmp(s_stub_last_status, "409 Conflict") == 0, "status is 409 Conflict");
+            TEST_CHECK(strstr(s_stub_last_httpd_resp, "\"ok\":false") != NULL &&
+                           strstr(s_stub_last_httpd_resp, "another commissioning operation is running") != NULL,
+                       "busy JSON body");
+            TEST_CHECK(s_stub_set_param_calls == 0 && s_stub_commit_calls == 0, "nothing staged or committed");
+            TEST_CHECK(s_stub_set_safety_relay_type_calls == 0, "no relay-type write either");
+            TEST_CHECK(safety_cfg_writer_owner() == others[o], "the holder claim is untouched");
+            (void)safety_cfg_writer_release(others[o]);
+        }
+    }
+}
+
+static void test_sync_writers_release_guard_on_every_return_path(void)
+{
+    TEST_SECTION("sync SET_PARAM writers -- hold HTTP_SYNC across the write and release it on every return "
+                 "path (early 400s included)");
+    const sync_writer_fn_t handlers[] = { commissioning_post_handler, relay_type_post_handler, ct_cal_post_handler,
+                                          ct_trim_post_handler, rate_guard_auto_post_handler };
+    for (size_t h = 0; h < sizeof(handlers) / sizeof(handlers[0]); h++) {
+        reset_all();
+        s_stub_req_body = "garbage"; // fails every handler own parse -> early return
+        s_stub_req_body_sent = 0;
+        httpd_req_t req = { .content_len = 7 };
+        (void)handlers[h](&req);
+        s_stub_req_body = NULL;
+        TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE,
+                   "guard free after a handler that returned early");
+    }
+
+    // The write itself runs while HTTP_SYNC is held (rate_guard_auto stages one param).
+    reset_all();
+    reset_rate_guard_stubs();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "max_rate_c_per_min";
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 5.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f;
+    set_current_rate_guard(true, 15.0f);
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+    s_stub_owner_seen_in_set_param = SAFETY_CFG_WRITER_NONE;
+    httpd_req_t req = { .content_len = 0 };
+    (void)rate_guard_auto_post_handler(&req);
+    s_link = NULL;
+    TEST_CHECK(s_stub_set_param_calls == 1, "the write ran");
+    TEST_CHECK(s_stub_owner_seen_in_set_param == SAFETY_CFG_WRITER_HTTP_SYNC,
+               "the SET_PARAM went out while HTTP_SYNC owned the guard");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the write");
+}
+
 /* ---- 2026-09-25 fix-then-push re-review, item 2 ---------------------------
  *
  * s_busy (http_async_job.c) is a static in a SEPARATE translation unit from
@@ -2943,6 +3027,9 @@ int main(void)
     test_bench_preset_job_reports_commit_failure();
     test_bench_preset_job_reports_rejected_commit();
     test_bench_preset_post_handler_refuses_without_link();
+
+    test_sync_writers_refused_409_while_any_other_writer_holds_guard();
+    test_sync_writers_release_guard_on_every_return_path();
 
     // 2026-09-25 fix-then-push re-review, item 2 -- MUST STAY LAST: all
     // leave http_async_job.c's static s_busy permanently true in this host
