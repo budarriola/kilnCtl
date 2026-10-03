@@ -149,10 +149,33 @@ def _always_ok_preflight(ctx):
     )()
 
 
-def _base_ctx(srv, **extra):
+class _FakeRampAssist:
+    """Fake /api/ramp_assist transport (ctx http_get_json/http_post_json)."""
+
+    def __init__(self, enabled=False, accept_writes=True, restore_fails=False):
+        self.enabled = enabled
+        self.accept_writes = accept_writes
+        self.restore_fails = restore_fails
+        self.posts = []
+
+    def get(self, path):
+        return 200, {"enabled": self.enabled}
+
+    def post(self, path, fields):
+        value = fields["enabled"] == "1"
+        self.posts.append(value)
+        if not self.accept_writes or (self.restore_fails and value):
+            return 200, {"ok": False}
+        self.enabled = value
+        return 200, {"ok": True}
+
+
+def _base_ctx(srv, ramp=None, **extra):
+    ramp = ramp or _FakeRampAssist()
     ctx = {
         "srv": srv, "host": "10.0.0.5",
         "_now": lambda: 0.0, "_sleep": lambda s: None,
+        "http_get_json": ramp.get, "http_post_json": ramp.post,
     }
     _always_ok_preflight(ctx)
     ctx.update(extra)
@@ -191,6 +214,95 @@ class AT01Test(unittest.TestCase):
         result = CA._case_at01(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("busy", result.reason)
+
+
+def _good_at01_srv():
+    autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), _Status(state_name="done", actual_c=24.0)])
+    return autotune, _FakeSrv(autotune=autotune)
+
+
+class RampAssistHandlingTest(unittest.TestCase):
+    def test_assist_already_off_is_never_written(self):
+        ramp = _FakeRampAssist(enabled=False)
+        autotune, srv = _good_at01_srv()
+        ctx = _base_ctx(srv, ramp=ramp)
+        result = CA._case_at01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ramp.posts, [])
+        self.assertFalse(ctx.get("_tainted"))
+
+    def test_assist_on_is_disabled_for_the_case_then_restored(self):
+        ramp = _FakeRampAssist(enabled=True)
+        seen = {}
+        autotune, srv = _good_at01_srv()
+        orig_start = autotune.start
+
+        def start(*a, **kw):
+            seen["enabled_at_start"] = ramp.enabled
+            return orig_start(*a, **kw)
+        autotune.start = start
+        ctx = _base_ctx(srv, ramp=ramp)
+        result = CA._case_at01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertIs(seen["enabled_at_start"], False)
+        self.assertEqual(ramp.posts, [False, True])
+        self.assertTrue(ramp.enabled)
+        self.assertFalse(ctx.get("_tainted"))
+        self.assertEqual(autotune.accept_calls, [])
+
+    def test_assist_restored_even_when_case_body_raises(self):
+        ramp = _FakeRampAssist(enabled=True)
+        autotune, srv = _good_at01_srv()
+        orig_status = autotune.get_status
+
+        def get_status():
+            if autotune.start_calls:
+                raise RuntimeError("boom")
+            return orig_status()
+        autotune.get_status = get_status
+        ctx = _base_ctx(srv, ramp=ramp)
+        with self.assertRaises(RuntimeError):
+            CA._case_at01(ctx)
+        self.assertTrue(ramp.enabled)
+        self.assertGreaterEqual(autotune.abort_calls, 1)
+
+    def test_restore_failure_marks_run_tainted(self):
+        ramp = _FakeRampAssist(enabled=True, restore_fails=True)
+        autotune, srv = _good_at01_srv()
+        ctx = _base_ctx(srv, ramp=ramp)
+        result = CA._case_at01(ctx)
+        self.assertTrue(ctx["_tainted"])
+        self.assertTrue(any("tainted" in e for e in result.evidence))
+
+    def test_disable_failure_skips_without_starting_and_still_restores(self):
+        ramp = _FakeRampAssist(enabled=True, accept_writes=False)
+        autotune, srv = _good_at01_srv()
+        ctx = _base_ctx(srv, ramp=ramp)
+        result = CA._case_at04(ctx)
+        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(autotune.start_calls, [])
+        self.assertTrue(ramp.enabled)
+
+    def test_at02_and_at04_also_toggle_and_restore(self):
+        for fn, srv in (
+            (CA._case_at02, _FakeSrv(autotune=_FakeAutotuneClient(
+                statuses=[_Status(state_name="idle"), _Status(state_name="idle")]))),
+            (CA._case_at04, _good_at01_srv()[1]),
+        ):
+            ramp = _FakeRampAssist(enabled=True)
+            ctx = _base_ctx(srv, ramp=ramp)
+            fn(ctx)
+            self.assertEqual(ramp.posts, [False, True], fn.__name__)
+            self.assertTrue(ramp.enabled)
+
+    def test_unreadable_route_proceeds_without_writing(self):
+        ramp = _FakeRampAssist(enabled=True)
+        autotune, srv = _good_at01_srv()
+        ctx = _base_ctx(srv, ramp=ramp)
+        ctx["http_get_json"] = lambda path: (500, None)
+        result = CA._case_at01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(ramp.posts, [])
 
 
 class AT02Test(unittest.TestCase):

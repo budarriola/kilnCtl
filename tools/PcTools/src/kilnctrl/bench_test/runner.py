@@ -374,6 +374,7 @@ class BenchTestRunner:
             ended=ended,
             preflight_ok=preflight_ok,
             preflight_reason=preflight_reason,
+            tainted=bool(self.ctx.get("_tainted")),
         )
 
         run_dir = report_mod.run_dir_path(self.logs_root, run_id)

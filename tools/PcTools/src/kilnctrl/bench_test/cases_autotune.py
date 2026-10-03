@@ -6,10 +6,13 @@ per the plan's rest gate (``cases_heat._rest_gate``, reused rather than
 duplicated -- residual heat biases the fitted gain low, memory
 project_autotune_needs_rested_baseline) and MUST leave autotune idle in
 ``finally`` (``_cleanup_autotune``: abort if still running, never raises).
-Ramp assist is checked off before starting (``GET /api/ramp_assist``) per
-AT-01's stated precondition; this module never toggles it -- a case that
-finds it on simply refuses to start, it does not disable-and-restore it
-(out of this case's declared scope).
+Ramp assist must be off for a fit (AT-01's stated precondition). A case that
+finds it on reads the original value (``GET /api/ramp_assist``), disables it
+for the case (``_with_ramp_assist_off``), and restores the original in the
+same case's ``finally`` (plan section 6 rule 2); a restore that cannot be
+confirmed sets ``ctx["_tainted"]`` so the run is marked ``tainted``. A route
+that cannot be read at all is not a hard gate (nothing was changed, nothing to
+restore); an enabled assist that cannot be turned off SKIPs the case.
 
 AT-02 (abort immediacy) and AT-03 (accept-guard-on-an-unsettled-fit) are,
 in the plan's table, described against "AT-01 running" / "an unsettled fit
@@ -38,6 +41,7 @@ from typing import Any, Dict, Optional, Tuple
 from . import judgments as J
 from .cases_heat import _capability_preflight_ok, _rest_gate, _srv, _zone_temps
 from .cases_smoke import _http_get_json
+from .cases_web_rw import _get_json as _authed_get_json, _post_json as _authed_post_json
 from .registry import CaseResult, Verdict, get_case
 
 #: Bench-appropriate step size for AT-01/AT-02 (plan section 3.5: "with the
@@ -57,21 +61,56 @@ AT02_ABORT_AFTER_S = 30.0
 AT02_TIMEOUT_S = 5.0
 
 
-def _ramp_assist_off(ctx: dict) -> Tuple[bool, str]:
-    """AT-01 precondition: ``GET /api/ramp_assist`` reports disabled. A
-    route that cannot be read (no host, non-200, unexpected shape) is not a
-    hard gate here -- it is not this case's job to diagnose a broken
-    ramp_assist route -- so it proceeds and lets the fit itself fail if
-    ramp assist was actually interfering."""
-    host = ctx.get("host")
-    if not host:
-        return True, "no host in ctx -- cannot verify ramp assist, proceeding"
-    status, body = _http_get_json(host, "/api/ramp_assist")
-    if status != 200 or not isinstance(body, dict):
-        return True, f"GET /api/ramp_assist: status={status} -- proceeding (not a hard gate on an unreadable route)"
-    if body.get("enabled"):
-        return False, "ramp assist is enabled -- AT-01 precondition requires it off"
-    return True, ""
+_RAMP_ASSIST_PATH = "/api/ramp_assist"
+
+
+def _ramp_assist_enabled(ctx: dict) -> Tuple[Optional[bool], str]:
+    """Current ``enabled`` flag, or ``(None, why)`` when the route cannot be
+    read (no host, non-200, unexpected shape)."""
+    if not ctx.get("host") and ctx.get("http_get_json") is None:
+        return None, "no host in ctx"
+    status, body = _authed_get_json(ctx, _RAMP_ASSIST_PATH)
+    if status != 200 or not isinstance(body, dict) or "enabled" not in body:
+        return None, f"GET {_RAMP_ASSIST_PATH}: status={status}"
+    return bool(body["enabled"]), ""
+
+
+def _ramp_assist_set(ctx: dict, enabled: bool) -> bool:
+    """POST the value and confirm by read-back; never raises."""
+    try:
+        w_status, w_body = _authed_post_json(ctx, _RAMP_ASSIST_PATH, {"enabled": "1" if enabled else "0"})
+        wrote = w_status == 200 and bool(w_body) and w_body.get("ok") is True
+        now_enabled, _why = _ramp_assist_enabled(ctx)
+    except Exception:
+        return False
+    return wrote and now_enabled is enabled
+
+
+def _with_ramp_assist_off(ctx: dict, body_fn) -> CaseResult:
+    """Run ``body_fn(ctx)`` with ramp assist off. If it was on, disable it
+    first and restore it in ``finally`` (``ctx["_tainted"]`` plus an
+    evidence line if the restore cannot be confirmed). If the route is
+    unreadable, proceed unchanged (the fit itself fails if assist interfered)."""
+    original, why = _ramp_assist_enabled(ctx)
+    changed = False
+    try:
+        if original:
+            changed = True  # restore even if the disable only half-applied
+            if not _ramp_assist_set(ctx, False):
+                return CaseResult(
+                    Verdict.SKIP, reason="ramp assist is enabled and could not be disabled for the case"
+                )
+        result = body_fn(ctx)
+    finally:
+        restored = True
+        if changed:
+            restored = _ramp_assist_set(ctx, True)
+            if not restored:
+                ctx["_tainted"] = True
+    if changed and not restored:
+        note = "ramp assist was enabled before the case and could NOT be restored -- run tainted"
+        result.evidence.append(note)
+    return result
 
 
 def _autotune_idle(ctx: dict) -> Tuple[bool, str]:
@@ -109,13 +148,11 @@ def _relays_off(ctx: dict) -> Optional[bool]:
 
 
 def _at_preflight(ctx: dict) -> Tuple[bool, str]:
-    """AT-01/AT-04 precondition chain: capability_preflight ok, ramp assist
-    off, autotune idle -- in that order, so the reason reported names
-    whichever gate actually failed."""
+    """AT-01/AT-02/AT-04 precondition chain: capability_preflight ok, then
+    autotune idle -- in that order, so the reason reported names whichever
+    gate actually failed. Ramp assist is handled separately
+    (``_with_ramp_assist_off``): it is disabled for the case, not a gate."""
     ok, reason = _capability_preflight_ok(ctx)
-    if not ok:
-        return False, reason
-    ok, reason = _ramp_assist_off(ctx)
     if not ok:
         return False, reason
     ok, reason = _autotune_idle(ctx)
@@ -156,6 +193,10 @@ def _case_at01(ctx: dict) -> CaseResult:
     ok, reason = _at_preflight(ctx)
     if not ok:
         return CaseResult(Verdict.SKIP, reason=reason)
+    return _with_ramp_assist_off(ctx, _at01_body)
+
+
+def _at01_body(ctx: dict) -> CaseResult:
     zone_temps = _zone_temps(ctx)
     if not zone_temps:
         return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as the baseline reference")
@@ -206,6 +247,10 @@ def _case_at02(ctx: dict) -> CaseResult:
     ok, reason = _at_preflight(ctx)
     if not ok:
         return CaseResult(Verdict.SKIP, reason=reason)
+    return _with_ramp_assist_off(ctx, _at02_body)
+
+
+def _at02_body(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     sleep = ctx.get("_sleep", time.sleep)
     now = ctx.get("_now", time.monotonic)
@@ -281,6 +326,10 @@ def _case_at04(ctx: dict) -> CaseResult:
     ok, reason = _at_preflight(ctx)
     if not ok:
         return CaseResult(Verdict.SKIP, reason=reason)
+    return _with_ramp_assist_off(ctx, _at04_body)
+
+
+def _at04_body(ctx: dict) -> CaseResult:
     zone_temps = _zone_temps(ctx)
     if not zone_temps:
         return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as the baseline reference")
