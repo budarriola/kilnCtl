@@ -439,7 +439,7 @@ firmware image (`firmware/KilnFW_recovery/`) is unaffected and still
 implements the AP-password HMAC on its own routes.
 
 **Recovery-image tools (2026-10-02):** `recovery_status` (READ-ONLY: `GET /api/recovery/status` plus
-`GET /api/recovery/pico/status`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`,
+`GET /api/recovery/pico/status`; it also renders the image's diagnostic keys -- `auth_secret_present`, `auth_fallback`, `uptime_s`, `reset_reason`/`reset_reason_name`, `app_ota_state`, `coredump_present`, `otadata_blank`, the Wi-Fi AP counters (`wifi_up`, `ap_*`, `wifi_last_event*`) and the `relay_hold_*` task state -- one group per line, saying "not reported (older recovery image)" for any key the board omits and never inventing a value; it adds a `WARNING:` line for `auth_fallback=true` (the board is on the derived fallback secret, so the configured AP password will not authenticate; the client deliberately does not derive that secret), `ap_stop_count>0`, `relay_hold_fault=true`, a `relay_hold_task` that is not running, `otadata_blank=true` and `coredump_present=true`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`,
 `recovery_pico_upload`, `recovery_pico_abort`, `recovery_sw_reset` and `recovery_push_esp_image`, in `tools/PcTools/src/kilnctrl/mcp_server_recovery.py`. They talk ONLY to
 `firmware/KilnFW_recovery/` and refuse (404 or `running` not `recovery`) against the main app. Every mutator refuses
 unless `confirm is True` exactly, before any network access; reads `KILNCTL_AP_PASSWORD` from the environment

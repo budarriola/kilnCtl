@@ -80,6 +80,65 @@ def _fmt_status(st: dict) -> str:
     return ", ".join(f"{k}={st[k]}" for k in keys if k in st)
 
 
+#: GET /api/recovery/status keys added by the 2026-10 diagnostics change
+#: (recovery_http.c recovery_status_get), grouped one rendered line per group.
+#: A key the board did not send is rendered as NOT_REPORTED, never a value.
+_DIAG_GROUPS = (
+    ("boot/auth", ("auth_secret_present", "auth_fallback", "uptime_s", "reset_reason",
+                   "reset_reason_name", "app_ota_state", "coredump_present", "otadata_blank")),
+    ("wifi", ("wifi_up", "ap_start_count", "ap_stop_count", "ap_stations", "ap_connect_total",
+              "wifi_last_event", "wifi_last_event_age_s")),
+    ("relay hold", ("relay_hold_task", "relay_hold_fault", "relay_hold_fault_s",
+                    "relay_hold_last_ok_s", "relay_hold_mismatches", "relay_hold_reassert_fails",
+                    "relay_hold_stack_free")),
+)
+NOT_REPORTED = "not reported (older recovery image)"
+
+
+def _diag_value(st: dict, key: str) -> str:
+    if key not in st:
+        return NOT_REPORTED
+    v = st[key]
+    if v is None:
+        return "null (board could not read it)"  # JSON null: present but unreadable on the board
+    return repr(v) if isinstance(v, str) else str(v)
+
+
+def _fmt_diag(st: dict) -> str:
+    """One line per group of the new diagnostic keys; every key is listed."""
+    return "\n".join(f"{name}: " + ", ".join(f"{k}={_diag_value(st, k)}" for k in keys)
+                     for name, keys in _DIAG_GROUPS)
+
+
+def _diag_warnings(st: dict) -> "list[str]":
+    """Loud WARNING lines for the diagnostic keys. Only a PRESENT key can warn
+    (an absent key is unknown, not healthy and not faulty)."""
+    w = []
+    if st.get("auth_fallback") is True:
+        # Deliberately no fallback-secret derivation here (owner has not decided on it).
+        w.append("WARNING: auth_fallback=true -- the board is on the derived fallback secret; "
+                 "the configured AP password (KILNCTL_AP_PASSWORD) will NOT authenticate signed POSTs")
+    ap_stop = st.get("ap_stop_count")
+    if isinstance(ap_stop, int) and not isinstance(ap_stop, bool) and ap_stop > 0:
+        w.append(f"WARNING: ap_stop_count={ap_stop} -- the soft-AP has been stopped since boot "
+                 f"(wifi_last_event={st.get('wifi_last_event')!r}, "
+                 f"wifi_last_event_age_s={st.get('wifi_last_event_age_s')})")
+    if st.get("relay_hold_fault") is True:
+        w.append(f"WARNING: relay_hold_fault=true -- the relay-hold task saw a fault "
+                 f"(relay_hold_fault_s={st.get('relay_hold_fault_s')}, "
+                 f"relay_hold_mismatches={st.get('relay_hold_mismatches')}, "
+                 f"relay_hold_reassert_fails={st.get('relay_hold_reassert_fails')})")
+    if st.get("relay_hold_task") is False:
+        w.append("WARNING: relay_hold_task=false -- the relay-hold task is NOT running; "
+                 "nothing is re-asserting the relays off")
+    if st.get("otadata_blank") is True:
+        w.append("WARNING: otadata_blank=true -- otadata is blank, so the bootloader boots the "
+                 "factory (recovery) image, not `app`")
+    if st.get("coredump_present") is True:
+        w.append("WARNING: coredump_present=true -- the coredump partition holds a crash dump")
+    return w
+
+
 def _fmt_pico(p: dict) -> str:
     keys = ("phase", "busy", "psram", "bytes_sent", "total_bytes", "gap_count", "pico_mode",
             "target_slot", "target_source", "power_cycle", "refusal", "error", "message")
@@ -188,6 +247,13 @@ def recovery_status(host: Optional[str] = None) -> str:
     is read. Against a board running the normal application this reports a
     404, which is itself the evidence that the recovery image is not running.
 
+    Also renders the diagnostic keys (auth fallback, uptime/reset reason,
+    coredump/otadata, Wi-Fi AP counters, relay-hold task) one group per line;
+    a key an older recovery image does not send reads "not reported (older
+    recovery image)", never a made-up value. WARNING lines flag auth_fallback,
+    ap_stop_count>0, relay_hold_fault, a relay_hold_task not running,
+    otadata_blank and coredump_present.
+
     Note: while the Pico relay is busy, reading its status keeps the relay's
     'operator still watching' timer alive (the board's own design).
     """
@@ -202,8 +268,12 @@ def recovery_status(host: Optional[str] = None) -> str:
         notes.append("RELAY FAULT / relays not verified off")
     if pico.get("phase") == "outcome_unknown":
         notes.append("last Pico transfer ended OUTCOME UNKNOWN -- power-cycle and check the Pico version")
-    return (f"recovery image (host={resolved}): {_fmt_status(st)}\n"
-            f"pico relay: {_fmt_pico(pico)}" + (("\nWARNING: " + "; ".join(notes)) if notes else ""))
+    out = (f"recovery image (host={resolved}): {_fmt_status(st)}\n"
+           f"pico relay: {_fmt_pico(pico)}" + (("\nWARNING: " + "; ".join(notes)) if notes else ""))
+    out += "\n" + _fmt_diag(st)
+    for line in _diag_warnings(st):
+        out += "\n" + line
+    return out
 
 
 @_srv._tool()

@@ -144,6 +144,82 @@ class StatusTest(_Base):
         self.assertIn("running=recovery", out)
 
 
+def _diag_status(**kw):
+    """A healthy status carrying every new diagnostic key."""
+    d = _status(auth_secret_present=True, auth_fallback=False, uptime_s=123, reset_reason=1,
+                reset_reason_name="poweron", app_ota_state="valid", coredump_present=False,
+                otadata_blank=False, wifi_up=True, ap_start_count=1, ap_stop_count=0,
+                ap_stations=2, ap_connect_total=5, wifi_last_event="ap_staconnected",
+                wifi_last_event_age_s=7, relay_hold_task=True, relay_hold_fault=False,
+                relay_hold_fault_s=None, relay_hold_last_ok_s=120, relay_hold_mismatches=0,
+                relay_hold_reassert_fails=0, relay_hold_stack_free=2048)
+    d.update(kw)
+    return d
+
+
+class StatusDiagnosticsTest(_Base):
+    def _out(self, **kw):
+        return self.run_tool(mr.recovery_status, FakeBoard(status=[_diag_status(**kw)]))
+
+    def test_every_new_key_is_rendered_with_its_value(self):
+        out = self._out()
+        for k in ("auth_secret_present=True", "auth_fallback=False", "uptime_s=123", "reset_reason=1",
+                  "reset_reason_name='poweron'", "app_ota_state='valid'", "coredump_present=False",
+                  "otadata_blank=False", "wifi_up=True", "ap_start_count=1", "ap_stop_count=0",
+                  "ap_stations=2", "ap_connect_total=5", "wifi_last_event='ap_staconnected'",
+                  "wifi_last_event_age_s=7", "relay_hold_task=True", "relay_hold_fault=False",
+                  "relay_hold_fault_s=null (board could not read it)", "relay_hold_last_ok_s=120",
+                  "relay_hold_mismatches=0", "relay_hold_reassert_fails=0", "relay_hold_stack_free=2048"):
+            self.assertIn(k, out)
+        self.assertNotIn("WARNING", out)
+        self.assertNotIn(mr.NOT_REPORTED, out)
+
+    def test_older_image_says_not_reported_and_fabricates_nothing(self):
+        out = self.run_tool(mr.recovery_status, FakeBoard())
+        keys = [k for _, ks in mr._DIAG_GROUPS for k in ks]
+        self.assertEqual(len(keys), 22)
+        for k in keys:
+            self.assertIn(f"{k}={mr.NOT_REPORTED}", out)
+        self.assertNotIn("WARNING", out)
+        # Existing lines are unchanged.
+        self.assertTrue(out.startswith(f"recovery image (host={HOST}): running=recovery, app_present=True"))
+        self.assertIn("pico relay: phase='idle'", out)
+
+    def test_warn_auth_fallback_without_deriving_the_secret(self):
+        out = self._out(auth_fallback=True, auth_secret_present=False)
+        self.assertIn("WARNING: auth_fallback=true", out)
+        self.assertIn("derived fallback secret", out)
+        self.assertIn("will NOT authenticate", out)
+
+    def test_warn_ap_stopped(self):
+        out = self._out(ap_stop_count=2)
+        self.assertIn("WARNING: ap_stop_count=2", out)
+        self.assertNotIn("WARNING: ap_stop_count", self._out(ap_stop_count=0))
+
+    def test_warn_relay_hold_fault(self):
+        self.assertIn("WARNING: relay_hold_fault=true", self._out(relay_hold_fault=True, relay_hold_fault_s=9))
+
+    def test_warn_relay_hold_task_not_running(self):
+        out = self._out(relay_hold_task=False)
+        self.assertIn("WARNING: relay_hold_task=false", out)
+
+    def test_warn_otadata_blank(self):
+        self.assertIn("WARNING: otadata_blank=true", self._out(otadata_blank=True))
+
+    def test_warn_coredump_present(self):
+        self.assertIn("WARNING: coredump_present=true", self._out(coredump_present=True))
+
+    def test_null_tristate_does_not_warn(self):
+        out = self._out(coredump_present=None, otadata_blank=None)
+        self.assertNotIn("WARNING", out)
+        self.assertIn("coredump_present=null (board could not read it)", out)
+
+    def test_existing_warning_line_is_kept_alongside(self):
+        out = self._out(relay_fault=True, otadata_blank=True)
+        self.assertIn("WARNING: RELAY FAULT", out)
+        self.assertIn("WARNING: otadata_blank=true", out)
+
+
 class ConfirmGateTest(_Base):
     """Every mutating tool: anything but the literal True refuses before ANY
     network access (zero GETs, zero POSTs)."""
