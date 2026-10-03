@@ -111,6 +111,7 @@ static bool s_net_is_ap = false;
 static char s_net_name[33];
 static char s_net_ip[16];
 static bool s_net_none = false;      // every Wi-Fi bring-up path failed
+static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 static bool s_auth_fallback = false; // challenge key derived from the fallback secret
 
 // Status facts gathered once at show_message().
@@ -325,7 +326,8 @@ static void draw_status(void)
              s_crash_state > 0 ? "present" : (s_crash_state == 0 ? "none" : "unknown"));
     (void)draw_line(Y_CRASH, TEXT_SCALE, COL_TEXT, COL_BG, buf);
 
-    if (recovery_io_relay_fault()) {
+    s_drawn_relay_fault = recovery_io_relay_fault();
+    if (s_drawn_relay_fault) {
         (void)draw_line(Y_RELAY, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "RELAY CTRL FAULT");
     } else {
         (void)draw_line(Y_RELAY, TEXT_SCALE, COL_OK, COL_BG, "Heat: OFF");
@@ -481,5 +483,18 @@ void recovery_lcd_set_auth_fallback(bool fallback)
     if (s_ready) {
         draw_status();
     }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_poll_relay_fault(void)
+{
+    // The relay-hold task (3 KiB stack) must never draw, and this image has no
+    // LCD task, so the HTTP task calls this (cheap, no-op unless the fault state
+    // changed since the last draw) from the status route.
+    if (!s_lock || !s_ready || recovery_io_relay_fault() == s_drawn_relay_fault) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    draw_status();
     xSemaphoreGive(s_lock);
 }

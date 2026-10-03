@@ -51,6 +51,11 @@ void recovery_lcd_set_no_network(void);
 // eFuse-MAC fallback secret because wifi_nvs holds no usable ap_pass.
 void recovery_lcd_set_auth_fallback(bool fallback);
 
+// Redraws the status screen if the relay-fault state changed since the last
+// draw (a hold-watchdog fault latched after boot). Call from a task that may
+// block on the LCD lock; never from the relay-hold task.
+void recovery_lcd_poll_relay_fault(void);
+
 #ifdef __cplusplus
 }
 #endif

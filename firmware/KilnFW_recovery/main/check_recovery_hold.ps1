@@ -41,7 +41,7 @@ function Build-And-Run {
     $obj = Join-Path $work $Tag
     New-Item -ItemType Directory -Path $obj -Force | Out-Null
     $test = Join-Path $here "test_recovery_hold.c"
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" `"$test`" `"$Impl`" /Fe:`"$exe`" /Fo:`"$obj\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" `"$test`" `"$Impl`" /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
     $gate = Enter-KilnBuildGate -Label "recovery_hold"
     try {
         $ErrorActionPreference = "Continue"
@@ -90,7 +90,7 @@ try {
         throw "test_recovery_hold never printed a passing RESULT line."
     }
     $passCount = [int]$Matches[1]
-    if ($passCount -lt 25) { throw "only $passCount assertions ran -- test looks gutted." }
+    if ($passCount -lt 33) { throw "only $passCount assertions ran -- test looks gutted." }
 
     Test-Mutant -Needle "st->ever_ok = false;" -Replacement "(void)0;" -Tag "initok"
     Test-Mutant -Needle "bool dir_ok = (uint16_t)(dir & out_dir_mask) == 0;" -Replacement "bool dir_ok = true;" -Tag "dirignore"
@@ -107,6 +107,8 @@ try {
         -Replacement "st->fault = !verified;" -Tag "repairclears"
     Test-Mutant -Needle "if (verified) {<NL>        st->ever_ok = true;<NL>        st->last_ok_s = now_s;" `
         -Replacement "if (verified) {<NL>        st->ever_ok = true;" -Tag "lastok"
+    Test-Mutant -Needle "return boot_fault || st->fault;" -Replacement "return boot_fault;" -Tag "effectivefault"
+    Test-Mutant -Needle "return boot_verified && !st->fault;" -Replacement "return boot_verified;" -Tag "effectiveverified"
 
     Write-Host "check_recovery_hold: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0

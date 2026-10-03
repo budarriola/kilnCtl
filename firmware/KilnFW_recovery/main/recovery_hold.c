@@ -36,6 +36,16 @@ rhold_action_t rhold_observe(rhold_state_t *st, bool read_ok, uint16_t dir, uint
     return RHOLD_REASSERT;
 }
 
+bool rhold_effective_fault(bool boot_fault, const rhold_state_t *st)
+{
+    return boot_fault || st->fault;
+}
+
+bool rhold_effective_verified_off(bool boot_verified, const rhold_state_t *st)
+{
+    return boot_verified && !st->fault;
+}
+
 void rhold_reassert_result(rhold_state_t *st, bool verified, uint32_t now_s)
 {
     if (verified) {

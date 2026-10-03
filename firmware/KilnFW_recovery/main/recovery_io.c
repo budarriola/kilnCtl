@@ -185,9 +185,16 @@ void recovery_io_hold_relays_off(void)
     start_hold_task();
 }
 
+static rhold_state_t s_hold;
+static portMUX_TYPE s_hold_mux = portMUX_INITIALIZER_UNLOCKED;
+
 bool recovery_io_relay_fault(void)
 {
-    return s_fault;
+    rhold_state_t snap;
+    portENTER_CRITICAL(&s_hold_mux);
+    snap = s_hold;
+    portEXIT_CRITICAL(&s_hold_mux);
+    return rhold_effective_fault(s_fault, &snap);
 }
 
 // ---- periodic hold watchdog -------------------------------------------------
@@ -195,8 +202,6 @@ bool recovery_io_relay_fault(void)
 // (the LCD task), so a re-assert can never write back a stale LCD-pin value.
 static SemaphoreHandle_t s_io_lock;
 static StaticSemaphore_t s_io_lock_buf;
-static rhold_state_t s_hold;
-static portMUX_TYPE s_hold_mux = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_hold_task;
 
 #define HOLD_TASK_STACK_BYTES 3072
@@ -301,7 +306,11 @@ unsigned recovery_io_nvs_failed_mask(void)
 
 bool recovery_io_relays_verified_off(void)
 {
-    return s_verified;
+    rhold_state_t snap;
+    portENTER_CRITICAL(&s_hold_mux);
+    snap = s_hold;
+    portEXIT_CRITICAL(&s_hold_mux);
+    return rhold_effective_verified_off(s_verified, &snap);
 }
 
 esp_err_t recovery_io_set_lcd_pins(bool dc_high, bool reset_high)

@@ -95,8 +95,25 @@ static void test_reassert(void)
     CHECK(s.mismatch_count == 4, "mismatch count is untouched by re-assert results");
 }
 
+// The accessors behind /api/recovery/status and the LCD must show a hold fault
+// that latched AFTER a clean boot verification.
+static void test_effective(void)
+{
+    rhold_state_t s;
+    rhold_init(&s);
+    CHECK(!rhold_effective_fault(false, &s), "clean boot, no hold fault: no relay fault");
+    CHECK(rhold_effective_verified_off(true, &s), "clean boot, no hold fault: verified off");
+    CHECK(rhold_effective_fault(true, &s), "boot fault alone is a relay fault");
+    CHECK(!rhold_effective_verified_off(false, &s), "boot not verified: not verified off");
+    rhold_observe(&s, true, 0x0008, 0, OUT_MASK, HOLD_MASK, 30);
+    rhold_reassert_result(&s, true, 30);
+    CHECK(rhold_effective_fault(false, &s), "latched hold fault is visible as a relay fault");
+    CHECK(!rhold_effective_verified_off(true, &s), "latched hold fault clears verified-off even after repair");
+}
+
 int main(void)
 {
+    test_effective();
     test_init();
     test_regs_match();
     test_observe();

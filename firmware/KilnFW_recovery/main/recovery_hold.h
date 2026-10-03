@@ -51,6 +51,14 @@ rhold_action_t rhold_observe(rhold_state_t *st, bool read_ok, uint16_t dir, uint
 // succeeded AND a fresh read-back matched. Never clears the latched fault.
 void rhold_reassert_result(rhold_state_t *st, bool verified, uint32_t now_s);
 
+// The relay fault reported to the status route and LCD: the boot-time fault OR a
+// latched hold-watchdog fault.
+bool rhold_effective_fault(bool boot_fault, const rhold_state_t *st);
+
+// Relays count as verified off only if the boot verification succeeded AND no
+// hold fault has latched since.
+bool rhold_effective_verified_off(bool boot_verified, const rhold_state_t *st);
+
 #ifdef __cplusplus
 }
 #endif
