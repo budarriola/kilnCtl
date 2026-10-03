@@ -684,8 +684,8 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
         if BOOT_GUARD_CLEARED_TEXT not in reply["text"]:
             return (f"ok-with-warning - the application is answering ({detail}) but boot_guard was NOT "
                     f"confirmed cleared: {_boot_guard_outcome(reply['text'])!r}; the counter may still "
-                    f"push the next boot toward recovery -- run recovery_boot_guard_reset or read "
-                    f"boot_guard_get; board replied {reply['text']!r}; {prefix}")
+                    f"push the next boot toward recovery -- read boot_guard_get (the recovery routes are "
+                    f"gone now that the application is up, so recovery_boot_guard_reset cannot help); board replied {reply['text']!r}; {prefix}")
         return f"ok - board replied {reply['text']!r} and the application is answering ({detail}); {prefix}"
     if verdict == "recovery_again":
         return (f"FAILED: board replied {reply['text']!r} but came back as the RECOVERY image ({detail}) -- "
