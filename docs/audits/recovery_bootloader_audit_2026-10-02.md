@@ -20,11 +20,16 @@ No high-severity defect found.
    to fail when the arm is removed. Someone should run that negative test.
 2. The 8000 ms bootloader pre-jump window is an estimate. No on-target
    measurement of time from jump to the application's 1000 ms re-arm exists.
-3. `firmware/KilnFW_recovery/main/recovery_wifi.c:242`:
+3. **FIXED in `fb7ddf1d`** (AP bring-up now refused, LCD "WIFI STORAGE FAIL",
+   status JSON `error`; host test `check_recovery_wifi_policy.ps1`; the
+   recovery target build was not run). Original finding:
+   `firmware/KilnFW_recovery/main/recovery_wifi.c:242`:
    `esp_wifi_set_storage(WIFI_STORAGE_RAM)` failure only logs a warning, so a
    failure could let the driver persist the SoftAP passphrase to NVS. Not a
    leak today (the call has no known failure mode) but nothing enforces it.
-4. `firmware/KilnFW_recovery/main/recovery_io.c:321-328`:
+4. **FIXED in `fb7ddf1d`** (the read-modify-write is under `s_io_lock`; not
+   host-testable, target build not run). Original finding:
+   `firmware/KilnFW_recovery/main/recovery_io.c:321-328`:
    `recovery_io_set_lcd_pins` reads `s_data` without the lock the hold task
    uses. Minor race on a value the hold task re-verifies every cycle.
 5. The recovery hold task (`relay_hold`, 3072 B stack,
