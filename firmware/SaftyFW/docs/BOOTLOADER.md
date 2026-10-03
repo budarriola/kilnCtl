@@ -145,6 +145,18 @@ On every reset, in this order:
    just the first after an update — this is what catches flash degradation and a
    partially-erased slot.
 5. Increment `boot_attempts`, write metadata, jump to the application.
+   Immediately before the jump `jump_to_app()` arms an **8000 ms watchdog**
+   (`BOOTLOADER_APP_WATCHDOG_MS`, `bootloader/main.c`; the RP2040 maximum is
+   8388 ms). The application's own `main()` re-arms it at 1000 ms as its
+   "Step 2", so the 8 s only has to cover pico-sdk runtime init, the relay
+   GPIO, console and stdio init, estimated at tens of ms (more than 100x of
+   margin; an estimate, not measured on target). An application that hangs
+   before that point therefore becomes a watchdog reset, the bootloader runs
+   again, and `boot_attempts` has already been incremented, so the hang walks
+   the slot toward `BAD` instead of freezing the board. `main()` also clears
+   any watchdog enable bit left by the previous image right after it drives GPIO6 low, at the start of a
+   bootloader run: recovery mode never feeds the watchdog, so a leftover
+   enabled watchdog would reset the board out of recovery mid-transfer.
 
 If no slot is bootable, enter recovery instead of looping.
 
@@ -173,6 +185,13 @@ context frames or anything else.
 - It emits `UPDATE_STATUS` on a ~1s timer so the ESP can tell "sitting in
   recovery" from "dead", and the GUI can say so.
 - There is no timeout out of recovery. There is nothing safe to time out *into*.
+- Recovery never feeds the watchdog and never arms one (the 8 s watchdog above
+  is armed only just before an application jump); `main()` clears a leftover
+  enable bit at start.
+- `UPDATE_STATUS` ends with a 2-byte trailer `[active_slot][target_slot]`
+  after the gap list (0xFF = unknown, e.g. blank metadata), so the ESP can
+  learn which slot will be written instead of trusting an operator's guess.
+  An older bootloader sends no trailer; the ESP then treats both as unknown.
 
 This is what makes the whole scheme defensible: a failed update lands in a state
 that can be updated again over the same link, without a probe.
@@ -442,7 +461,9 @@ is a bench visit to every board.
       bitmask has every bit already assigned, so this failure mode reuses
       the closest existing bitmask value rather than claiming a nonexistent
       spare bit — a caller distinguishes it from an ordinary CRC failure by
-      `state`, not by `last_error`. The tooling/PcTools codec table for
+      `state`, not by `last_error`. In other words a linkage reject sets the
+      same `UPDATE_STATUS_ERR_CRC_MISMATCH` error bit a real CRC failure does;
+      only `state == 8` (`REJECTED_SLOT_LINKAGE`) says it was linkage. The tooling/PcTools codec table for
       `UPDATE_STATUS` needs a new `state == 8` entry to render this
       distinctly (not yet done here — out of this change's scope, see
       handback).

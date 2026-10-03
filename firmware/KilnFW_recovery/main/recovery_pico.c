@@ -767,8 +767,8 @@ static bool run_transfer(relay_t *r)
     // The Pico's own report wins over the operator's guess: Frame A from the
     // application, or the bootloader's UPDATE_STATUS slot trailer. Only a
     // bootloader too old to send the trailer still needs the operator's choice.
-    rpp_target_t t = rpp_resolve_target(bootloader ? r->boot_active_slot : r->app_active_slot,
-                                        s_operator_slot);
+    rpp_target_t t = rpp_resolve_target_from(bootloader ? r->boot_active_slot : r->app_active_slot,
+                                             bootloader, s_operator_slot);
     lock();
     s_target_slot = t.target_slot;
     s_target_source = (int)t.source;
@@ -988,7 +988,7 @@ const char *recovery_pico_status_json(int *len)
         return no_psram;
     }
     static const char *const modes[] = {"unknown", "application", "bootloader"};
-    static const char *const srcs[] = {"pico-app", "operator", "unresolved"};
+    static const char *const srcs[] = {"pico-app", "operator", "unresolved", "pico-bootloader"};
     size_t pos = 0;
     bool ok;
 
@@ -1015,7 +1015,7 @@ const char *recovery_pico_status_json(int *len)
                   modes[mode >= 0 && mode < 3 ? mode : 0], (unsigned)s_pico_state,
                   (unsigned)s_pico_err,
                   s_target_slot == RPP_SLOT_A ? "A" : s_target_slot == RPP_SLOT_B ? "B" : "unknown",
-                  tsrc >= 0 && tsrc < 3 ? srcs[tsrc] : "unknown", s_power_cycle ? "true" : "false");
+                  tsrc >= 0 && tsrc < 4 ? srcs[tsrc] : "unknown", s_power_cycle ? "true" : "false");
     if (ok) {
         pos = json_str(out, JSON_CAP, pos, s_refusal);
         ok = pos != (size_t)-1 && json_fmt(out, JSON_CAP, &pos, ",\"error\":");

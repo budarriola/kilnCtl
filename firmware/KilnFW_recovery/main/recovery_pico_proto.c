@@ -97,12 +97,13 @@ rpp_image_result_t rpp_check_image(const uint8_t *img, size_t len, uint32_t clai
 
 // --- target-slot resolution ------------------------------------------------
 
-rpp_target_t rpp_resolve_target(int app_active_slot, int operator_slot)
+rpp_target_t rpp_resolve_target_from(int app_active_slot, bool reported_by_bootloader,
+                                     int operator_slot)
 {
     rpp_target_t t;
     if (app_active_slot == RPP_SLOT_A || app_active_slot == RPP_SLOT_B) {
         t.target_slot = (app_active_slot == RPP_SLOT_A) ? RPP_SLOT_B : RPP_SLOT_A;
-        t.source = RPP_TARGET_FROM_APP;
+        t.source = reported_by_bootloader ? RPP_TARGET_FROM_BOOTLOADER : RPP_TARGET_FROM_APP;
     } else if (operator_slot == RPP_SLOT_A || operator_slot == RPP_SLOT_B) {
         t.target_slot = operator_slot;
         t.source = RPP_TARGET_OPERATOR;
@@ -111,6 +112,11 @@ rpp_target_t rpp_resolve_target(int app_active_slot, int operator_slot)
         t.source = RPP_TARGET_UNRESOLVED;
     }
     return t;
+}
+
+rpp_target_t rpp_resolve_target(int app_active_slot, int operator_slot)
+{
+    return rpp_resolve_target_from(app_active_slot, false, operator_slot);
 }
 
 bool rpp_image_matches_target(int image_slot, rpp_target_t t)
@@ -153,8 +159,9 @@ bool rpp_describe_target_refusal(rpp_target_t t, int image_slot, bool bootloader
              "image is linked for slot %c but the Pico will write slot %c (%s): use "
              "SaftyFW_slot%c.bin or choose the other slot",
              slot_ch(image_slot), slot_ch(t.target_slot),
-             t.source == RPP_TARGET_FROM_APP ? "read from the Pico application"
-                                             : "target unverified, chosen by the operator",
+             t.source == RPP_TARGET_FROM_APP         ? "read from the Pico application"
+             : t.source == RPP_TARGET_FROM_BOOTLOADER ? "reported by the Pico bootloader"
+                                                      : "target unverified, chosen by the operator",
              slot_ch(t.target_slot));
     return true;
 }

@@ -166,8 +166,11 @@ rpp_image_result_t rpp_check_image(const uint8_t *img, size_t len, uint32_t clai
 // that will be written. Sources, in order of trust:
 //   1. The Pico application answers GET_STATUS with Frame A V3 whose flags2
 //      carries ACTIVE_SLOT_KNOWN/ACTIVE_SLOT_B: target = the other slot.
-//   2. Otherwise (bootloader, or an application that did not report it) the
-//      active slot cannot be read and the OPERATOR must name the target. That
+//   1b. The bootloader's UPDATE_STATUS carries a 2-byte slot trailer
+//      [active][target] (0xFF = unknown): target = the other slot, sourced
+//      RPP_TARGET_FROM_BOOTLOADER.
+//   2. Otherwise (an older bootloader, or an application that did not report
+//      it) the active slot cannot be read and the OPERATOR must name the target. That
 //      choice is never verifiable, so everything it produces says "target
 //      unverified".
 //   3. With neither, the target is UNRESOLVED and the relay refuses: it never
@@ -176,6 +179,7 @@ typedef enum {
     RPP_TARGET_FROM_APP = 0,   // derived from Frame A's active slot
     RPP_TARGET_OPERATOR = 1,   // operator-asserted, not verifiable
     RPP_TARGET_UNRESOLVED = 2, // nothing known: refuse
+    RPP_TARGET_FROM_BOOTLOADER = 3, // derived from the bootloader's UPDATE_STATUS slot trailer
 } rpp_target_source_t;
 
 typedef struct {
@@ -187,6 +191,12 @@ typedef struct {
 // RPP_SLOT_UNKNOWN. `operator_slot`: RPP_SLOT_A/B when asserted, else UNKNOWN.
 // A Frame A reading always wins over an operator assertion.
 rpp_target_t rpp_resolve_target(int app_active_slot, int operator_slot);
+
+// Same, but `reported_by_bootloader` says the reported active slot came from the
+// bootloader's UPDATE_STATUS trailer rather than the application's Frame A, so
+// the source (and every message built from it) names the right reporter.
+rpp_target_t rpp_resolve_target_from(int reported_active_slot, bool reported_by_bootloader,
+                                     int operator_slot);
 
 // True when `image_slot` (from rpp_check_image) is the slot `t` says will be
 // written. False for an unresolved target, so nothing is erased.

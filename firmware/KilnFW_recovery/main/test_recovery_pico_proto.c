@@ -1795,9 +1795,21 @@ static void test_bootloader_slot_and_end_states(void)
         idle[17] = 0xFF;
         CHECK(rpp_parse_status(idle, 18, &st) && rpp_status_proves_bootloader(&st) && st.active_slot == RPP_SLOT_A,
               "bootloader IDLE reports active A");
-        rpp_target_t t = rpp_resolve_target(st.active_slot, RPP_SLOT_A); // operator wrongly says A
-        CHECK(t.target_slot == RPP_SLOT_B && t.source == RPP_TARGET_FROM_APP,
-              "reported active A makes the target B even when the operator chose A");
+        rpp_target_t t = rpp_resolve_target_from(st.active_slot, true, RPP_SLOT_A); // operator wrongly says A
+        CHECK(t.target_slot == RPP_SLOT_B && t.source == RPP_TARGET_FROM_BOOTLOADER,
+              "reported active A makes the target B even when the operator chose A; source is the bootloader");
+        CHECK(rpp_resolve_target_from(st.active_slot, false, RPP_SLOT_A).source == RPP_TARGET_FROM_APP,
+              "the same report from the application is sourced from the app");
+        {
+            char bw[400];
+            CHECK(rpp_describe_target_refusal(t, RPP_SLOT_A, true, bw, sizeof(bw)) &&
+                      strstr(bw, "reported by the Pico bootloader") && !strstr(bw, "Pico application"),
+                  "wrong-slot refusal names the bootloader, not the application");
+            rpp_target_t ta = rpp_resolve_target_from(st.active_slot, false, RPP_SLOT_A);
+            CHECK(rpp_describe_target_refusal(ta, RPP_SLOT_A, false, bw, sizeof(bw)) &&
+                      strstr(bw, "read from the Pico application"),
+                  "wrong-slot refusal from the application still names the application");
+        }
         CHECK(!rpp_image_matches_target(RPP_SLOT_A, t) && rpp_image_matches_target(RPP_SLOT_B, t),
               "the operator's wrong-slot image is refused, the right one accepted");
 

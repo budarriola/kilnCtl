@@ -46,7 +46,7 @@ function Build-And-Run {
     $test = if ($TestC) { $TestC } else { Join-Path $here "test_recovery_pico_proto.c" }
     $crc = Join-Path $common "src\kilnlink_crc.c"
     $frm = Join-Path $common "src\kilnlink_frame.c"
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$common\include`" `"$test`" `"$ImplC`" `"$crc`" `"$frm`" /Fe:`"$exe`" /Fo:`"$obj\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$common\include`" `"$test`" `"$ImplC`" `"$crc`" `"$frm`" /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
     $gate = Enter-KilnBuildGate -Label "recovery_pico_proto"
     try {
         $ErrorActionPreference = "Continue"
@@ -98,6 +98,8 @@ try {
         @{ Name = "stop_unknown_ignores_end_sent"; Needle = 'return f->end_sent_once && !pico_terminal;'; Repl = 'return !pico_terminal;' },
         @{ Name = "stop_beats_complete"; Needle = 'return fresh->state == RPP_STATE_COMPLETE;'; Repl = 'return 0;' },
         @{ Name = "pace_floor"; Needle = '+ tick_us - 1u'; Repl = '+ 0u' },
+        # A bootloader-reported slot labelled as the application's.
+        @{ Name = "bootloader_labelled_app"; Needle = 'reported_by_bootloader ? RPP_TARGET_FROM_BOOTLOADER : RPP_TARGET_FROM_APP'; Repl = 'RPP_TARGET_FROM_APP' },
         @{ Name = "target_assumed"; Needle = 't.target_slot = RPP_SLOT_UNKNOWN;'; Repl = 't.target_slot = RPP_SLOT_B;' },
         # Bootloader slot trailer ignored (the ESP falls back to the operator's guess).
         @{ Name = "trailer_ignored"; Needle = 'if (p[15] == gap_count) {'; Repl = 'if (0) {' },

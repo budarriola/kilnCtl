@@ -70,10 +70,12 @@ and CRC-checked in PSRAM BEFORE the relay starts (202 returned, then status poll
 streamed live; DATA pace is `RPP_DATA_PACE_MS` (15 ms, bootloader) or `RPP_DATA_PACE_APP_MS` (40 ms, application: 4-deep queue drained per 100 ms wake); a lost COMPLETE after END is reported as outcome unknown (no ABORT); no REBOOT 0x29
 offer (the bootloader ignores it; the page says power-cycle); no CLEAR_TRIP; a missing
 status poll for 90 s aborts the relay. Target slot: Frame A active slot gives the opposite
-slot ("pico-app", read after sending ANNOUNCE_VERSION protocol 16); else the operator's slot
-choice, reported everywhere as "target unverified"; else the transfer is refused. The slot is
-NEVER assumed: the bootloader cannot report which slot it will write, so in bootloader mode
-the operator must choose, and a wrong choice leaves the Pico unbootable until SWD. The
+slot ("pico-app", read after sending ANNOUNCE_VERSION protocol 16); else the bootloader's
+reported slot ("pico-bootloader": the UPDATE_STATUS trailer carries active/target slot,
+0xFF = unknown, and the bootloader rejects a wrong-slot image at END with state 8
+REJECTED_SLOT_LINKAGE); else the operator's slot choice, reported everywhere as "target
+unverified" (only an older bootloader that sends no trailer needs it); else the transfer is
+refused. The slot is NEVER assumed: a wrong operator choice leaves the Pico unbootable until SWD. The
 file's slot comes from its reset vector and a mismatch is refused before BEGIN.
 Review fixes (second commit): the relay sends END itself (both receivers go silent once
 every chunk is in, so waiting for a "no gaps" status never ends: `rpp_fin_step` in

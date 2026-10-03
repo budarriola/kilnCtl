@@ -27,7 +27,7 @@ progress{width:100%}
 <div>Choose SaftyFW_slotA.bin or SaftyFW_slotB.bin. The board buffers the image, checks it, then writes it to the safety processor over its UART (a few minutes).</div>
 <input id="pf" type="file" accept=".bin"><br>
 <label>Target slot <select id="ps"><option value="">auto</option><option value="A">A</option><option value="B">B</option></select></label>
-<div>Auto reads the slot from the running Pico application. If the Pico is in its bootloader the target slot CANNOT be read from it: you must choose A or B (the slot that is not the one the Pico last booted), and the transfer will say "target unverified". A wrong choice leaves the Pico unbootable until it is reprogrammed over SWD.</div>
+<div>Auto reads the slot from the running Pico application. If the Pico is in its bootloader, the target slot is read from the bootloader's status trailer when it sends one. Only an older bootloader that does not report it leaves the target unverified: then you must choose A or B (the slot that is not the one the Pico last booted), and the transfer will say "target unverified". A wrong choice leaves the Pico unbootable until it is reprogrammed over SWD.</div>
 <button id="pup" onclick="picoUpload()">Upload to Pico</button>
 <button id="pab" onclick="picoAbort()">Abort</button>
 <progress id="ppr" value="0" max="100"></progress><div id="ppp"></div>
