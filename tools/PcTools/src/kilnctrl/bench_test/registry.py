@@ -151,7 +151,7 @@ _SK = [
     ("SK-04", "Heap and DRAM floor"),
 ]
 _OT = [
-    ("OT-E01", "Good image into app over Wi-Fi"), ("OT-E02", "Rollback"),
+    ("OT-E01", "Push to running app refused (409)"), ("OT-E02", "Rollback"),
     ("OT-E03", "Corrupt image: bad CRC"), ("OT-E04", "Corrupt image: truncated"),
     ("OT-E05", "Wrong-build image"), ("OT-E06", "Power loss mid-write"),
     ("OT-E07", "Update during a firing is refused"),

@@ -2085,38 +2085,75 @@ def judge_dual_reset_trip(
     return CaseResult(Verdict.PASS, observed=observed)
 
 
-def judge_ota_push_applied(
-    phase: Optional[str],
-    running: Optional[str],
-    expected_running: str,
-    fw_build_matches_image: Optional[bool],
-    fingerprint_identical: Optional[bool],
-    boot_guard_recovery_mode: Optional[bool],
+#: Seconds within which the application image must refuse a push aimed at its
+#: own running single-slot `app` partition (a refusal made before any body
+#: byte is consumed; anything slower means it started writing or draining).
+OTA_SELF_PUSH_REFUSAL_WINDOW_S = 5.0
+
+
+def judge_ota_self_push_refused(
+    refusal_form: Optional[str],
+    status_code: Optional[int],
+    elapsed_s: Optional[float],
+    uptime_before: Optional[float],
+    uptime_after: Optional[float],
+    crash_before: "Optional[dict]",
+    crash_after: "Optional[dict]",
+    interlock_ok_after: Optional[bool],
 ) -> CaseResult:
-    """OT-E01: a good image pushed into app over Wi-Fi must reach phase ==
-    "done", come back up RUNNING the expected partition, report the exact
-    fw_build embedded in the pushed .bin's esp_app_desc_t, leave the
-    zones-config fingerprint identical, and clear boot_guard's
-    recovery_mode."""
+    """OT-E01: the APPLICATION image runs from the only OTA slot, so
+    POST /api/ota/esp must be refused (single-slot design,
+    docs/OTA_SINGLE_SLOT_PLAN.md). `refusal_form` is what the client saw:
+
+      http_409          -- HTTP 409 observed (the normal form); status_code
+                           must be 409 and elapsed_s within the window.
+      connection_closed -- the firmware closed the socket while the client
+                           was still uploading, so no response was readable;
+                           PASS-with-note, but only because the board is
+                           provably alive and unharmed afterward.
+      anything else     -- accepted (200), another status, or an
+                           unreachable board: FAIL.
+
+    Either PASS form additionally requires uptime_s not to have gone
+    backwards (no reboot -- the pre-fix failure mode was a TASK_WDT panic
+    while the body drained), `/api/crash_report` unchanged (no new record)
+    and the OTA interlock still ok. Any value that could not be read is a
+    FAIL, never assumed fine."""
     observed = {
-        "phase": phase, "running": running, "expected_running": expected_running,
-        "fw_build_matches_image": fw_build_matches_image,
-        "fingerprint_identical": fingerprint_identical,
-        "boot_guard_recovery_mode": boot_guard_recovery_mode,
+        "refusal_form": refusal_form, "status_code": status_code, "elapsed_s": elapsed_s,
+        "uptime_before": uptime_before, "uptime_after": uptime_after,
+        "crash_before": crash_before, "crash_after": crash_after,
+        "interlock_ok_after": interlock_ok_after,
     }
-    if phase != "done":
-        return CaseResult(Verdict.FAIL, reason=f"phase={phase!r}, expected 'done'", observed=observed)
-    if running != expected_running:
+    if refusal_form not in ("http_409", "connection_closed"):
         return CaseResult(
-            Verdict.FAIL, reason=f"running={running!r}, expected {expected_running!r}",
-            observed=observed, expected={"running": expected_running},
+            Verdict.FAIL,
+            reason=f"push to the running app was not refused with 409 or a closed connection: form={refusal_form!r} status={status_code!r}",
+            observed=observed, expected={"status": 409},
         )
-    if fw_build_matches_image is not True:
-        return CaseResult(Verdict.FAIL, reason="board's fw_build does not match the .bin's embedded build time", observed=observed)
-    if fingerprint_identical is not True:
-        return CaseResult(Verdict.FAIL, reason="zones-config fingerprint changed across the update", observed=observed)
-    if boot_guard_recovery_mode is not False:
-        return CaseResult(Verdict.FAIL, reason=f"boot_guard recovery_mode={boot_guard_recovery_mode!r}, expected False", observed=observed)
+    if refusal_form == "http_409" and status_code != 409:
+        return CaseResult(Verdict.FAIL, reason=f"refusal_form http_409 but status_code={status_code!r}", observed=observed)
+    if elapsed_s is None or elapsed_s > OTA_SELF_PUSH_REFUSAL_WINDOW_S:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"refusal took {elapsed_s!r} s, expected within {OTA_SELF_PUSH_REFUSAL_WINDOW_S} s",
+            observed=observed,
+        )
+    if uptime_before is None or uptime_after is None:
+        return CaseResult(Verdict.FAIL, reason="uptime_s unreadable before or after the push; cannot rule out a reboot", observed=observed)
+    if uptime_after < uptime_before:
+        return CaseResult(
+            Verdict.FAIL, reason=f"board rebooted: uptime_s {uptime_before!r} -> {uptime_after!r}", observed=observed,
+        )
+    if crash_before is None or crash_after is None:
+        return CaseResult(Verdict.FAIL, reason="/api/crash_report unreadable before or after the push", observed=observed)
+    if crash_after != crash_before:
+        return CaseResult(Verdict.FAIL, reason="/api/crash_report changed across the push (new crash record)", observed=observed)
+    if interlock_ok_after is not True:
+        return CaseResult(Verdict.FAIL, reason=f"OTA interlock not ok after the refusal: {interlock_ok_after!r}", observed=observed)
+    if refusal_form == "connection_closed":
+        observed["note"] = ("firmware closed the connection mid-upload; no 409 body readable, but no reboot, "
+                            "no new crash record, interlock ok")
     return CaseResult(Verdict.PASS, observed=observed)
 
 

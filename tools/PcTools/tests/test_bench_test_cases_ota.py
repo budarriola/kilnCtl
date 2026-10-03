@@ -551,51 +551,115 @@ class _FakeDashboardClient:
         }
 
 
+class _OtaHttpErr(Exception):
+    """Stands in for ota_http_client.OtaHttpError (carries .status)."""
+
+    def __init__(self, status, msg="x"):
+        super().__init__(msg)
+        self.status = status
+
+
+class _RaisingPushClient(_FakeOtaClient):
+    def __init__(self, exc, **kw):
+        super().__init__(**kw)
+        self._exc = exc
+
+    def push_esp_image(self, host, path, timeout=None):
+        self.pushed.append(path)
+        raise self._exc
+
+
+class _Clock:
+    def __init__(self, step=0.5):
+        self.t = 0.0
+        self.step = step
+
+    def __call__(self):
+        self.t += self.step
+        return self.t
+
+
 class Ote01Test(unittest.TestCase):
+    """OT-E01: push to the running app must be refused (409), no reboot."""
+
     def _ctx(self, **overrides):
         ctx = {
-            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
-            "ota_image_path": "/tmp/image.bin", "ota_image_build": "B2",
-            "ota_http_client": _FakeOtaClient(),
-            "partition_http_client": _FakePartitionClient(running="app"),
-            "zones_http_client": _FakeZonesClient(),
-            "dashboard_http_client": _FakeDashboardClient(fw_build="B2"),
-            "_now": lambda: 0.0, "_sleep": lambda s: None,
+            "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5",
+            "ota_image_path": "/tmp/image.bin",
+            "ota_http_client": _RaisingPushClient(_OtaHttpErr(409, "refused: single-slot")),
+            "_now": _Clock(),
+            "_esp_uptime_fn": lambda: 100.0,
+            "_crash_report_fn": lambda: {"present": False},
         }
         ctx.update(overrides)
         return ctx
 
     def test_skips_without_image_path(self):
-        ctx = self._ctx(ota_image_path=None)
-        result = C._case_ote01(ctx)
-        self.assertEqual(result.verdict, Verdict.SKIP)
+        self.assertEqual(C._case_ote01(self._ctx(ota_image_path=None)).verdict, Verdict.SKIP)
 
     def test_skips_when_not_idle(self):
-        ctx = self._ctx(srv=_FakeSrv(state_name="running"))
-        result = C._case_ote01(ctx)
+        result = C._case_ote01(self._ctx(srv=_FakeSrv(state_name="running")))
         self.assertEqual(result.verdict, Verdict.SKIP)
 
-    def test_push_refused_fails(self):
-        ctx = self._ctx(ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(False, 400)))
-        result = C._case_ote01(ctx)
-        self.assertEqual(result.verdict, Verdict.FAIL)
-        self.assertIn("refused", result.reason)
-
-    def test_good_push_passes_and_stashes(self):
+    def test_409_passes_and_does_not_stash_pre_update(self):
         ctx = self._ctx()
         result = C._case_ote01(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
-        self.assertIn("_ote01", ctx)
-        self.assertIn("_ote_pre_update", ctx)
+        self.assertEqual(result.observed["refusal_form"], "http_409")
+        self.assertNotIn("_ote_pre_update", ctx)
+
+    def test_409_as_push_result_passes(self):
+        ctx = self._ctx(ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(False, 409)))
+        self.assertEqual(C._case_ote01(ctx).verdict, Verdict.PASS)
+
+    def test_accepted_push_fails(self):
+        ctx = self._ctx(ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
+        result = C._case_ote01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(result.observed["refusal_form"], "accepted")
+
+    def test_500_fails(self):
+        ctx = self._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(500, "esp_ota_begin failed")))
+        self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
+
+    def test_connection_reset_with_live_board_passes_with_note(self):
+        ctx = self._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(None, "unreachable: reset")))
+        result = C._case_ote01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["refusal_form"], "connection_closed")
+        self.assertIn("note", result.observed)
+
+    def test_connection_reset_with_dead_board_fails(self):
+        uptimes = iter([100.0])
+
+        def uptime():
+            return next(uptimes)  # second read raises StopIteration -> unreadable
+
+        ctx = self._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(None, "unreachable")),
+                        _esp_uptime_fn=uptime)
+        self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
+
+    def test_reboot_after_409_fails(self):
+        uptimes = iter([100.0, 3.0])
+        ctx = self._ctx(_esp_uptime_fn=lambda: next(uptimes))
+        result = C._case_ote01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("rebooted", result.reason)
+
+    def test_new_crash_record_fails(self):
+        reports = iter([{"present": False}, {"present": True, "acknowledged": False}])
+        ctx = self._ctx(_crash_report_fn=lambda: next(reports))
+        self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
+
+    def test_slow_refusal_fails(self):
+        ctx = self._ctx(_now=_Clock(step=6.0))
+        self.assertEqual(C._case_ote01(ctx).verdict, Verdict.FAIL)
 
     def test_interlock_not_ok_skips_before_pushing(self):
-        """Plan doc section 6 rule 1: every OTA action confirms
-        GET /api/ota/interlock ok:true immediately before the call --
-        a not-ok interlock must refuse before push_esp_image is ever
-        attempted."""
+        """Plan doc section 6 rule 1: the interlock is confirmed ok
+        immediately before the push."""
         client = _FakeOtaClient(interlock_ok=False, interlock_reason="kiln is not idle")
-        ctx = self._ctx(ota_http_client=client)
-        result = C._case_ote01(ctx)
+        result = C._case_ote01(self._ctx(ota_http_client=client))
         self.assertEqual(result.verdict, Verdict.SKIP)
         self.assertIn("kiln is not idle", result.reason)
         self.assertEqual(client.pushed, [], "push_esp_image was called despite a not-ok interlock")
@@ -603,10 +667,39 @@ class Ote01Test(unittest.TestCase):
     def test_interlock_read_error_skips(self):
         client = _FakeOtaClient()
         client.get_interlock = lambda host: (_ for _ in ()).throw(RuntimeError("timeout"))
-        ctx = self._ctx(ota_http_client=client)
-        result = C._case_ote01(ctx)
+        result = C._case_ote01(self._ctx(ota_http_client=client))
         self.assertEqual(result.verdict, Verdict.SKIP)
         self.assertIn("could not read /api/ota/interlock", result.reason)
+
+    def test_ote02_not_run_after_ote01(self):
+        ctx = self._ctx()
+        C._case_ote01(ctx)
+        self.assertEqual(C._case_ote02(ctx).verdict, Verdict.NOT_RUN)
+
+
+class JudgeOtaSelfPushRefusedTest(unittest.TestCase):
+    def _judge(self, **kw):
+        args = dict(refusal_form="http_409", status_code=409, elapsed_s=0.5, uptime_before=10.0,
+                    uptime_after=12.0, crash_before={"present": False}, crash_after={"present": False},
+                    interlock_ok_after=True)
+        args.update(kw)
+        return J.judge_ota_self_push_refused(**args)
+
+    def test_409_passes(self):
+        self.assertEqual(self._judge().verdict, Verdict.PASS)
+
+    def test_closed_passes_with_note(self):
+        r = self._judge(refusal_form="connection_closed", status_code=None)
+        self.assertEqual(r.verdict, Verdict.PASS)
+        self.assertIn("note", r.observed)
+
+    def test_each_violation_fails(self):
+        for kw in (dict(refusal_form="accepted", status_code=200), dict(refusal_form=None, status_code=None),
+                   dict(status_code=500), dict(elapsed_s=6.0), dict(elapsed_s=None),
+                   dict(uptime_after=5.0), dict(uptime_before=None), dict(uptime_after=None),
+                   dict(crash_after={"present": True}), dict(crash_before=None),
+                   dict(interlock_ok_after=False), dict(interlock_ok_after=None)):
+            self.assertEqual(self._judge(**kw).verdict, Verdict.FAIL, kw)
 
 
 class Ote02Test(unittest.TestCase):
@@ -1032,16 +1125,28 @@ class Ote10Test(unittest.TestCase):
 
     def test_admin_ok_user_refused_passes(self):
         def push_with_session(cookie):
-            return _OtaPushResult(cookie == "sid-admin")
+            return _OtaPushResult(False, 409) if cookie == "sid-admin" else _OtaPushResult(False, 403)
 
         ctx = self._ctx(_push_with_session_fn=push_with_session)
         result = C._case_ote10(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
     def test_admin_refused_fails(self):
-        ctx = self._ctx(_push_with_session_fn=lambda cookie: _OtaPushResult(False))
+        ctx = self._ctx(_push_with_session_fn=lambda cookie: _OtaPushResult(False, 403))
         result = C._case_ote10(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_admin_ok_push_still_passes_on_recovery_image(self):
+        def push_with_session(cookie):
+            return _OtaPushResult(True, 200) if cookie == "sid-admin" else _OtaPushResult(False, 401)
+
+        result = C._case_ote10(self._ctx(_push_with_session_fn=push_with_session))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_user_getting_409_fails(self):
+        """409 for the user tier means it passed the ADMIN gate."""
+        ctx = self._ctx(_push_with_session_fn=lambda cookie: _OtaPushResult(False, 409))
+        self.assertEqual(C._case_ote10(ctx).verdict, Verdict.FAIL)
 
     def test_user_accepted_fails(self):
         ctx = self._ctx(_push_with_session_fn=lambda cookie: _OtaPushResult(True))

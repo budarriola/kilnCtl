@@ -1,4 +1,4 @@
-"""OT-B01 + SP-04, OT-E01/E02/E03/E12, and (Wave 4) OT-P01..05 -- ESP
+"""OT-B01 + SP-04, OT-E01 (self-push refused)/E02/E03/E12, and (Wave 4) OT-P01..05 -- ESP
 OTA-over-Wi-Fi update/rollback/corrupt-image handling, the dual
 safety-processor reset trip, and Pico OTA relayed over the isolated link
 (plan doc section 3.4/3.9), using `ota_http_client` directly (never the
@@ -485,16 +485,24 @@ def _case_otb01(ctx: dict) -> CaseResult:
 
 
 def _case_ote01(ctx: dict) -> CaseResult:
-    """OT-E01: push a good image into `app` over Wi-Fi, poll to done, then
-    confirm RUNNING/fw_build/fingerprint/boot_guard all landed correctly.
-    Stashes fw_build/zones fingerprint pre-update for OT-E02 and OT-E12."""
+    """OT-E01: a push of a valid ESP image to POST /api/ota/esp on the
+    APPLICATION image must be REFUSED -- the single-slot design
+    (docs/OTA_SINGLE_SLOT_PLAN.md) runs the app from the only OTA slot, so
+    the "next" partition is the running one. Pass: HTTP 409 within ~5 s
+    (`refusal_form` http_409), or -- because the firmware may close the
+    socket while the client is still uploading -- a connection reset with
+    the board provably alive afterward (`connection_closed`, PASS-with-note).
+    uptime_s must not go backwards, /api/crash_report must not change, and
+    the OTA interlock must still read ok. A successful push into the app is
+    no longer a thing this suite exercises; ESP images go in through the
+    recovery image. This case never stashes `_ote_pre_update`, so OT-E02
+    (rollback) reads NOT_RUN: no update happened to roll back."""
     idle, reason = _is_idle(ctx)
     if not idle:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
     image_path = ctx.get("ota_image_path")
-    expected_build = ctx.get("ota_image_build")
     if not image_path:
         return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E01")
 
@@ -503,55 +511,54 @@ def _case_ote01(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
     ota = _ota_client(ctx)
-    zones = _zones_client(ctx)
+    import time as _time
+    now = ctx.get("_now") or _time.monotonic
+    uptime_fn = ctx.get("_esp_uptime_fn") or (lambda: _esp_uptime_s(ctx, host))
+    crash_fn = ctx.get("_crash_report_fn") or (lambda: _dashboard_client(ctx).get_crash_report(host))
 
-    fw_build_before = _fw_build(ctx, host)
-    try:
-        zones_before = zones.get_zones(host)
-    except Exception:
-        zones_before = None
-    ctx["_ote_pre_update"] = {"fw_build": fw_build_before, "zones": zones_before}
+    def _read(fn):
+        try:
+            return fn()
+        except Exception:
+            return None
 
+    uptime_before = _read(uptime_fn)
+    crash_before = _read(crash_fn)
+
+    refusal_form: Optional[str] = None
+    status_code: Optional[int] = None
+    t0 = now()
     try:
         push = ota.push_esp_image(host, image_path)
+        status_code = getattr(push, "status_code", None)
+        if getattr(push, "ok", False):
+            refusal_form = "accepted"
+        else:
+            refusal_form = "http_409" if status_code == 409 else "http_other"
     except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"push_esp_image raised {type(exc).__name__}: {exc}")
-    if not push.ok:
-        return CaseResult(Verdict.FAIL, reason=f"push_esp_image refused: status={push.status_code} body={push.body!r}")
+        status_code = getattr(exc, "status", None)
+        if status_code == 409:
+            refusal_form = "http_409"
+        elif status_code is not None:
+            refusal_form = "http_other"
+        else:
+            # ota_http_client._push_image() turns a mid-upload reset
+            # (ECONNRESET / EPIPE) into OtaHttpError(status=None,
+            # "unreachable"). That is indistinguishable here from a board
+            # that is genuinely down, so it is only "connection_closed"
+            # when the readbacks below prove the board is alive; the judge
+            # FAILs on unreadable uptime_s / crash report.
+            refusal_form = "connection_closed"
+    elapsed_s = now() - t0
 
-    now = ctx.get("_now")
-    sleep = ctx.get("_sleep")
-    import time as _time
-    now = now or _time.monotonic
-    sleep = sleep or _time.sleep
+    uptime_after = _read(uptime_fn)
+    crash_after = _read(crash_fn)
+    interlock_ok_after, _ = _interlock_ok(ctx, host)
 
-    phase = None
-    deadline = now() + 180.0
-    while now() < deadline:
-        try:
-            phase = ota.get_esp_status(host).get("phase")
-        except Exception:
-            phase = None
-        if phase in ("done", "failed"):
-            break
-        sleep(2.0)
-
-    running = _running_partition(ctx, host)
-    fw_build_after = _fw_build(ctx, host)
-    fingerprint_identical = None
-    try:
-        zones_after = zones.get_zones(host)
-        fingerprint_identical = J.pid_gains_match(_pid_gains(zones_before), _pid_gains(zones_after)) if zones_before else None
-    except Exception:
-        pass
-    boot_guard_recovery_mode = _boot_guard_recovery_mode(ctx, host)
-
-    ctx["_ote01"] = {"fw_build_after": fw_build_after, "running_after": running}
-    return J.judge_ota_push_applied(
-        phase, running, "app",
-        fw_build_matches_image=(fw_build_after == expected_build) if expected_build else None,
-        fingerprint_identical=fingerprint_identical,
-        boot_guard_recovery_mode=boot_guard_recovery_mode,
+    ctx["_ote01"] = {"refusal_form": refusal_form}
+    return J.judge_ota_self_push_refused(
+        refusal_form, status_code, elapsed_s, uptime_before, uptime_after,
+        crash_before, crash_after, interlock_ok_after,
     )
 
 
@@ -999,8 +1006,9 @@ def _case_ote09(ctx: dict) -> CaseResult:
 
 def _case_ote10(ctx: dict) -> CaseResult:
     """OT-E10: with web auth on (WEB-SEC-03 turned it on earlier in this
-    run), OT-E01 repeated with an ADMIN session cookie must succeed, and
-    again with a ``user``-tier session must be refused -- ROUTE_TIER_ADMIN is
+    run), the OT-E01 push repeated with an ADMIN session cookie must get
+    PAST the auth tier, and again with a ``user``-tier session must be
+    refused at it -- ROUTE_TIER_ADMIN is
     this route's only gate now that the AP-password HMAC has been retired
     (2026-09-29, WEB_AUTH_PLAN.md item 2b), so this case exercises that tier
     check directly rather than a scheme replacement. Credentials come only
@@ -1009,7 +1017,14 @@ def _case_ote10(ctx: dict) -> CaseResult:
     cases_web_rw.py's WEB-SEC-03: never hardcoded, never logged) -- SKIP
     if either the admin or the user-tier credential pair is missing,
     since there is no separate operator-visible knob for the second,
-    non-admin account this case specifically needs."""
+    non-admin account this case specifically needs.
+
+    On the application image a push to the running app is refused 409 by
+    design (see OT-E01), so "admin accepted" now means "passed the auth
+    gate": ok, or HTTP 409 (the handler's own target refusal). A user-tier
+    refusal must be a 401/403 -- a 409 there would mean the user session got
+    through the tier gate, which is a FAIL. An admin transport error counts
+    as not-accepted."""
     idle, reason = _is_idle(ctx)
     if not idle:
         return CaseResult(Verdict.SKIP, reason=reason)
@@ -1056,16 +1071,17 @@ def _case_ote10(ctx: dict) -> CaseResult:
     admin_ok = None
     try:
         admin_result = push_with_session_fn(admin_cookie)
-        admin_ok = bool(getattr(admin_result, "ok", False))
-    except Exception:
-        admin_ok = False
+        admin_ok = bool(getattr(admin_result, "ok", False)) or getattr(admin_result, "status_code", None) == 409
+    except Exception as exc:
+        admin_ok = getattr(exc, "status", None) == 409
 
     user_refused = None
     try:
         user_result = push_with_session_fn(user_cookie)
-        user_refused = not getattr(user_result, "ok", False)
-    except Exception:
-        user_refused = True
+        user_refused = (not getattr(user_result, "ok", False)
+                        and getattr(user_result, "status_code", None) in (401, 403))
+    except Exception as exc:
+        user_refused = getattr(exc, "status", None) in (401, 403, None)
 
     return J.judge_ota_session_auth_tiers(admin_ok, user_refused)
 
