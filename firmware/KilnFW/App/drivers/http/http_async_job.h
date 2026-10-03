@@ -12,8 +12,14 @@
  * so clients (PcTools, the web pages) see no difference.
  *
  * Only one job may run at a time across every caller of this helper --
- * http_async_job_try_start() refuses (returns false) while a previous job
- * is still running. On refusal the caller must respond synchronously on the
+ * http_async_job_try_start() refuses (returns BUSY) while a previous job
+ * is still running. The single-flight state lives in
+ * safety_cfg_writer_guard.h, shared with the zone current sweep, the kiln
+ * config swap worker and the safety_poll ceiling reconcile: try_start() is
+ * also refused while ANY of those holds the guard, and they in turn refuse
+ * or skip while an async job runs, so an async job and those writers can
+ * never overlap on the Pico's staged-config transaction.
+ * On refusal the caller must respond synchronously on the
  * ORIGINAL req itself (this helper never touches req when it refuses).
  *
  * The job runs on a plain xTaskCreate() task -- an INTERNAL-RAM stack, not
@@ -112,7 +118,9 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
                                                         uint32_t stack_bytes, http_async_job_fn_t fn,
                                                         void *ctx);
 
-/* True while a job started by http_async_job_try_start() is still running.
+/* True while a job started by http_async_job_try_start() is still running
+ * (an ASYNC_JOB owner of the writer guard -- NOT true while a sweep, swap or
+ * reconcile holds it; those make try_start() refuse, but are not "a job").
  * Read-only precondition check for a second POST handler that must refuse
  * while this helper is busy (A2's bench_preset interleaving guard) --
  * never used by http_async_job_try_start() itself beyond its own internal

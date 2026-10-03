@@ -10,6 +10,7 @@
 
 #include "esp_log.h"
 
+#include "safety_cfg_writer_guard.h"
 #include "stack_margin.h"
 
 static const char *TAG = "kiln_cfg_swap_worker";
@@ -57,6 +58,57 @@ static void publish(kiln_cfg_swap_job_state_t state, int32_t target_id, bool div
     xSemaphoreGive(s_lock);
 }
 
+/* Runs ONE dequeued apply and publishes its outcome. Split out of the task
+ * loop so host tests can drive it directly (the host xTaskCreate() stub never
+ * runs the task). The SAFETY_CFG_WRITER_SWAP claim was taken by
+ * kiln_cfg_swap_worker_submit() on the submitting thread, so a competing
+ * writer could never start between the submit's accept and this run; it is
+ * released here as the LAST act, after publish(), on every outcome. */
+static void run_swap_job(const swap_job_t *job)
+{
+    /* Everything below runs with NO module lock held. kiln_cfg_swap_
+     * apply() blocks for minutes on the safety-link UART and takes
+     * kiln_cfg_store's own lock internally; holding s_lock across it
+     * would be exactly the "module lock held across a producer/blocking
+     * call" mistake this repo has already paid for once
+     * (project_screen_idle_brick_real_cause). The only shared state this
+     * task touches is published through publish(), which takes the lock
+     * for the duration of a handful of assignments and nothing else. */
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    ESP_LOGI(TAG, "kiln config swap starting: target_id=%ld", (long)job->target_id);
+    bool ok = kiln_cfg_swap_apply(job->target_id, job->ack_no_safety_processor, reason, sizeof(reason), &diverged);
+    if (ok) {
+        ESP_LOGI(TAG, "kiln config swap succeeded: target_id=%ld", (long)job->target_id);
+        publish(KILN_CFG_SWAP_JOB_DONE_OK, job->target_id, false, NULL);
+    } else {
+        /* ESP_LOGE, not ESP_LOGW, for the diverged case specifically:
+         * that is the outcome where the swap partly landed and the
+         * board is now alarmed, not merely refused with nothing
+         * changed. (Whether heat was also disabled depends on WHICH of
+         * the five out_diverged sites fired -- see the log line's own
+         * comment just below.) */
+        if (diverged) {
+            /* 2026-09-22 fix (docs/audits/kiln_config_self_apply_diverged_2026-09-22.md
+             * sec 4 "Fix the message"): *out_diverged is set at five
+             * sites in kiln_cfg_swap_apply_impl(), and only the
+             * ceiling-latch branch actually disables heat -- the other
+             * four (rollback-failure paths) disable nothing. This
+             * generic line must not claim a heat-off outcome it cannot
+             * know occurred; the ceiling-latch branch's own `reason`
+             * text already carries that claim when it is true. */
+            ESP_LOGE(TAG, "kiln config swap target_id=%ld left the board DIVERGED; see reason: %s",
+                     (long)job->target_id, reason);
+        } else {
+            ESP_LOGW(TAG, "kiln config swap target_id=%ld refused/failed, nothing changed: %s",
+                     (long)job->target_id, reason);
+        }
+        publish(KILN_CFG_SWAP_JOB_DONE_FAILED, job->target_id, diverged, reason);
+    }
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP);
+}
+
 static void swap_worker_task(void *arg)
 {
     (void)arg;
@@ -87,7 +139,23 @@ static void swap_worker_task(void *arg)
      * link is already published by the time this line executes. A submit()
      * that arrives during recovery simply waits in the depth-1 queue rather
      * than racing it. */
+    /* Recovery re-pushes a full config to the Pico, the same staged
+     * transaction every other safety-config writer drives, and the HTTP
+     * server (so ct_auto_zero and friends) can already be up while it runs.
+     * Take the writer guard around it. A refusal is NOT a reason to skip
+     * recovery -- an interrupted swap left uncommitted is the worse outcome
+     * -- so it proceeds regardless and only releases if it actually claimed
+     * (releasing an unclaimed guard would clear another writer's claim: the
+     * release is owner-checked, but the pairing must still be exact). */
+    bool boot_claimed = safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP);
+    if (!boot_claimed) {
+        ESP_LOGW(TAG, "boot recovery running while another safety-config writer is active (owner %d)",
+                 (int)safety_cfg_writer_owner());
+    }
     kiln_cfg_swap_boot_recover();
+    if (boot_claimed) {
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP);
+    }
 
     for (;;) {
         swap_job_t job;
@@ -95,47 +163,7 @@ static void swap_worker_task(void *arg)
             continue;
         }
 
-        /* Everything below runs with NO module lock held. kiln_cfg_swap_
-         * apply() blocks for minutes on the safety-link UART and takes
-         * kiln_cfg_store's own lock internally; holding s_lock across it
-         * would be exactly the "module lock held across a producer/blocking
-         * call" mistake this repo has already paid for once
-         * (project_screen_idle_brick_real_cause). The only shared state this
-         * task touches is published through publish(), which takes the lock
-         * for the duration of a handful of assignments and nothing else. */
-        char reason[KILN_CFG_SWAP_REASON_MAX];
-        reason[0] = '\0';
-        bool diverged = false;
-        ESP_LOGI(TAG, "kiln config swap starting: target_id=%ld", (long)job.target_id);
-        bool ok = kiln_cfg_swap_apply(job.target_id, job.ack_no_safety_processor, reason, sizeof(reason),
-                                      &diverged);
-        if (ok) {
-            ESP_LOGI(TAG, "kiln config swap succeeded: target_id=%ld", (long)job.target_id);
-            publish(KILN_CFG_SWAP_JOB_DONE_OK, job.target_id, false, NULL);
-        } else {
-            /* ESP_LOGE, not ESP_LOGW, for the diverged case specifically:
-             * that is the outcome where the swap partly landed and the
-             * board is now alarmed, not merely refused with nothing
-             * changed. (Whether heat was also disabled depends on WHICH of
-             * the five out_diverged sites fired -- see the log line's own
-             * comment just below.) */
-            if (diverged) {
-                /* 2026-09-22 fix (docs/audits/kiln_config_self_apply_diverged_2026-09-22.md
-                 * sec 4 "Fix the message"): *out_diverged is set at five
-                 * sites in kiln_cfg_swap_apply_impl(), and only the
-                 * ceiling-latch branch actually disables heat -- the other
-                 * four (rollback-failure paths) disable nothing. This
-                 * generic line must not claim a heat-off outcome it cannot
-                 * know occurred; the ceiling-latch branch's own `reason`
-                 * text already carries that claim when it is true. */
-                ESP_LOGE(TAG, "kiln config swap target_id=%ld left the board DIVERGED; see reason: %s",
-                         (long)job.target_id, reason);
-            } else {
-                ESP_LOGW(TAG, "kiln config swap target_id=%ld refused/failed, nothing changed: %s",
-                         (long)job.target_id, reason);
-            }
-            publish(KILN_CFG_SWAP_JOB_DONE_FAILED, job.target_id, diverged, reason);
-        }
+        run_swap_job(&job);
     }
 }
 
@@ -199,6 +227,18 @@ bool kiln_cfg_swap_worker_submit(int32_t target_id, bool ack_no_safety_processor
         return false;
     }
 
+    /* Single-flight against every other safety-config writer (async-job
+     * POSTs, current sweep, non-blocking ceiling reconcile). Claimed HERE on
+     * the submitting thread so the accept is atomic with the claim; the worker
+     * releases it after publish(). Every false return below must release. */
+    if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP)) {
+        if (reason_out && reason_cap > 0) {
+            snprintf(reason_out, reason_cap,
+                     "another commissioning operation is running -- wait for it to finish");
+        }
+        return false;
+    }
+
     swap_job_t job = { .target_id = target_id, .ack_no_safety_processor = ack_no_safety_processor };
     /* Publish RUNNING BEFORE queueing, not after: the worker can dequeue and
      * even finish between xQueueSend() returning and this thread running
@@ -212,6 +252,7 @@ bool kiln_cfg_swap_worker_submit(int32_t target_id, bool ack_no_safety_processor
          * the is_busy() check above and here. */
         const char *msg = "another kiln config is already being applied -- wait for it to finish";
         publish(KILN_CFG_SWAP_JOB_DONE_FAILED, target_id, false, msg);
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP);
         if (reason_out && reason_cap > 0) {
             snprintf(reason_out, reason_cap, "%s", msg);
         }

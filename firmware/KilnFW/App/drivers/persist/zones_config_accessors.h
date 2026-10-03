@@ -1793,6 +1793,13 @@ typedef enum {
      * point as the profile/autotune claim race, in
      * zones_current_sweep_task.c. */
     ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT,
+    /* The sweep pushes ct_channel_map/k_ct/i_normal_a to the Pico with the
+     * same SET_PARAM/COMMIT_CONFIG round trips an http_async_job, a kiln
+     * config swap and the poll-side ceiling reconcile use, so it takes the
+     * shared single-flight safety_cfg_writer_guard for its whole run. Refused
+     * here when another of those already holds it (it would otherwise
+     * interleave staged writes with the sweep's own). */
+    ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY,
 } zone_sweep_refusal_t;
 
 /* Human-readable reason for a zone_sweep_refusal_t -- used by the HTTP

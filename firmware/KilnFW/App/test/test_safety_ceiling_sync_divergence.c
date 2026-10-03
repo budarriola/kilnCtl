@@ -70,6 +70,7 @@ int g_test_count = 0;
 #include "safety_cfg_write.h"
 #include "safety_cfg_store.h"
 #include "safety_ceiling_sync.h"
+#include "safety_cfg_writer_guard.h"
 
 // ---------------------------------------------------------------------
 // Fake: backup_import_restore_in_flight() -- the real backup_import.c is
@@ -295,6 +296,7 @@ bool safety_cfg_store_lookup(uint16_t param_id, uint8_t *out_type, const char **
 // mirrors the write into the same fake Pico-ceiling cache above, exactly
 // the way a real confirmed write would update safety_cfg_store's cache.
 // ---------------------------------------------------------------------
+static int s_pico_write_calls = 0;
 bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value, char *reason_out,
                                           size_t reason_cap, safety_ceiling_refusal_class_t *out_class)
 {
@@ -306,6 +308,7 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
     if (out_class) {
         *out_class = SAFETY_CEILING_REFUSAL_NONE;
     }
+    s_pico_write_calls++;
     fake_pico_ceiling_set(value);
     return true;
 }
@@ -832,6 +835,74 @@ static void test_divergence_during_backup_restore(void)
                "latch clears on the first post-restore tick once the ceilings agree");
 }
 
+// ---------------------------------------------------------------------
+// 3. Single-flight safety-config writer guard
+//    (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap). The poll-side
+//    (non-blocking) reconcile's raise is a stage+commit on the same Pico
+//    transaction an http_async_job / sweep / kiln config swap drives, so it
+//    must skip its WRITE while any of them owns the guard -- but divergence
+//    ENFORCEMENT (cache-only heat-off) must still run, and a skipped tick
+//    must not start a backoff window (the next free tick must write at once).
+//    The blocking entry (kiln_cfg_swap's, which already owns the guard as
+//    SWAP) must NOT refuse itself.
+// ---------------------------------------------------------------------
+static void test_reconcile_nonblocking_skips_write_while_writer_guard_held(void)
+{
+    TEST_SECTION("2026-10-02: non-blocking reconcile skips its Pico write while another writer owns the guard");
+    // The freertos semphr stub's xSemaphoreTake() reports pdFALSE (timeout) by
+    // default, which would make the non-blocking entry bail on s_reconcile_lock
+    // before ever reaching the guard under test; grant the lock for this test.
+    BaseType_t saved_take_default = g_test_stub_semaphore_take_default;
+    g_test_stub_semaphore_take_default = pdTRUE;
+    const safety_cfg_writer_t others[] = { SAFETY_CFG_WRITER_ASYNC_JOB, SAFETY_CFG_WRITER_SWEEP,
+                                           SAFETY_CFG_WRITER_SWAP };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        test_reset_all();
+        safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
+        // Pico NARROWER than the target: guard_raise would write the raise.
+        s_zone_max_temp_c[0] = 80.0f;
+        fake_pico_ceiling_set(60.0f);
+        s_pico_write_calls = 0;
+
+        TEST_CHECK(safety_cfg_writer_try_claim(others[i]), "test setup: other writer owns the guard");
+        safety_ceiling_sync_reconcile_on_link_up_nonblocking(FAKE_LINK);
+        TEST_CHECK(s_pico_write_calls == 0, "no Pico write while another writer owns the guard");
+        TEST_CHECK(safety_cfg_writer_owner() == others[i], "the skipped tick left the other writer's claim alone");
+
+        (void)safety_cfg_writer_release(others[i]);
+        safety_ceiling_sync_reconcile_on_link_up_nonblocking(FAKE_LINK);
+        TEST_CHECK(s_pico_write_calls == 1,
+                   "the very next free tick writes at once: a guard skip must not start a backoff window");
+        TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "reconcile released the guard after its write");
+    }
+
+    // Enforcement is cache-only and runs before the guard claim: a genuinely
+    // diverged tick (Pico WIDER than target, nothing to raise) must still
+    // force heat off while another writer owns the guard.
+    test_reset_all();
+    safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
+    s_zone_max_temp_c[0] = 80.0f;
+    fake_pico_ceiling_set(100.0f);
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB), "test setup: async job owns the guard");
+    safety_ceiling_sync_reconcile_on_link_up_nonblocking(FAKE_LINK);
+    TEST_CHECK(s_relays_off_calls == 1 && s_halt_run_calls == 1,
+               "divergence enforcement still fires while another writer owns the guard");
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
+
+    // Blocking entry while SWAP owns the guard (kiln_cfg_swap's own call):
+    // must still write, never refuse itself.
+    test_reset_all();
+    s_zone_max_temp_c[0] = 80.0f;
+    fake_pico_ceiling_set(60.0f);
+    s_pico_write_calls = 0;
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP), "test setup: swap owns the guard");
+    safety_ceiling_sync_reconcile_on_link_up(FAKE_LINK);
+    TEST_CHECK(s_pico_write_calls == 1, "the blocking (swap-owned) entry must write, not refuse itself");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_SWAP, "the blocking entry must not release the swap's claim");
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP);
+    g_test_stub_semaphore_take_default = saved_take_default;
+}
+
 int main(void)
 {
     // 2026-09-22 advisory (review of 2cf2dcb1's static-mutex fix): no host
@@ -868,6 +939,7 @@ int main(void)
     test_tc_type_revert_divergence_detected();
     test_stale_cache_does_not_hide_a_revert();
     test_divergence_during_backup_restore();
+    test_reconcile_nonblocking_skips_write_while_writer_guard_held();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

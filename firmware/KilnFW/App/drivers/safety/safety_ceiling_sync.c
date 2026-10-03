@@ -45,6 +45,7 @@
                                     * doc comment and profile_executor_run.c's include. */
 #include "safety_cfg_write.h"
 #include "safety_cfg_store.h"
+#include "safety_cfg_writer_guard.h" /* single-flight vs http_async_job/sweep/swap, see reconcile_on_link_up_impl() */
 #include "zones_config_accessors.h"
 
 static const char *TAG = "safety_ceiling_sync";
@@ -839,11 +840,42 @@ static bool reconcile_on_link_up_impl(SafetyLinkClass *link, bool blocking)
         return true;
     }
 
+    /* Single-flight against every other Pico safety-config writer
+     * (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap): the guard_raise() below
+     * can stage abs_max_temp_c and COMMIT_CONFIG, the same staged transaction
+     * an http_async_job (ct_auto_zero/bench_preset/backup_import) or a zone
+     * current sweep drives, so it must not overlap one. Only the POLL-SIDE
+     * (non-blocking) entry claims: the blocking entry is reached only from
+     * kiln_cfg_swap.c's apply/boot-recovery, which already owns the guard as
+     * SAFETY_CFG_WRITER_SWAP (and, at boot recovery, runs before any other
+     * writer can exist) -- claiming again there would refuse itself.
+     *
+     * Placed AFTER the divergence enforcement above and after the backoff
+     * gate on purpose: enforcement is the cheap, cache-only heat-off path and
+     * must run every tick whether or not a writer is busy; a claim refusal
+     * skips only the RE-ATTEMPT of the raise (level-triggered, next tick
+     * retries), and is NOT recorded as a raise failure, so it does not start
+     * a backoff window. Lock order: s_reconcile_lock (held here) is taken
+     * before the guard's own leaf spinlock; the guard takes nothing. */
+    bool claimed_writer = false;
+    if (!blocking) {
+        claimed_writer = safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_RECONCILE);
+        if (!claimed_writer) {
+            if (s_reconcile_lock) {
+                xSemaphoreGive(s_reconcile_lock);
+            }
+            return false; /* another safety-config writer is mid-flight -- skip this tick */
+        }
+    }
+
     safety_ceiling_sync_result_t result = SAFETY_CEILING_SYNC_NONE;
     char reason[128] = { 0 };
     safety_ceiling_refusal_class_t refusal_class = SAFETY_CEILING_REFUSAL_NONE;
     bool ok = safety_ceiling_sync_guard_raise(link, new_max_temp_c, MAX31856_CHANNEL_COUNT, &result, reason,
                                               sizeof(reason), &refusal_class);
+    if (claimed_writer) {
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_RECONCILE);
+    }
     /* 2026-09-10 opus review finding: the backoff decision now runs on the
      * numeric `refusal_class` above, never on `reason`'s prose -- `reason`
      * is kept purely for the human-readable log line below. */

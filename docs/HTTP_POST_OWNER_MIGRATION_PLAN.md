@@ -243,13 +243,51 @@ argument to see a call site at all.
   by hand, forced rebuild confirmed clean again). Full suite:
   145/145 checks pass; DRAM unchanged (99672/101000 B); URI count unchanged
   (no new route).
-- **Other interleaving, checked and found pre-existing, not made worse by
-  A2:** no LCD/UART/non-HTTP path calls `SET_PARAM`/`COMMIT_CONFIG`
-  directly. Three paths could already interleave with an in-flight
-  `http_async_job` before A2 existed and are listed here as a known,
-  pre-existing gap, not fixed in this slice:
-  `zones_current_sweep_task.c`, `kiln_cfg_swap.c`'s worker, and the
-  `safety_poll` ceiling reconcile.
+- **Other interleaving: the known gap is CLOSED 2026-10-02.** No LCD/UART
+  path calls `SET_PARAM`/`COMMIT_CONFIG` directly, but three non-HTTP writers
+  could interleave with an in-flight `http_async_job` (and with each other):
+  `zones_current_sweep_task.c`, `kiln_cfg_swap_worker.c`, and the
+  `safety_poll` ceiling reconcile (`safety_ceiling_sync.c`). All now share one
+  single-flight guard, `safety_cfg_writer_guard` (`drivers/safety/`): a
+  dependency-free leaf spinlock holding one owner slot
+  (`ASYNC_JOB`/`SWEEP`/`SWAP`/`RECONCILE`). `try_claim(who)` is atomic and
+  refuses while anyone owns it; `release(who)` is owner-checked (a non-owner
+  release is refused and logged, never clears the real owner); not reentrant.
+  It takes no other lock, so it is a leaf in the lock order.
+  - `http_async_job`: its private `s_busy` flag is gone; the guard is the
+    flag. `run_job()` clears the task handle and then releases;
+    begin-failure and task-create-failure release too.
+  - zone current sweep: claims `SWEEP` in `zones_current_sweep_start()` after
+    the heat claim and the restore-in-flight check, and holds it for the
+    whole task run. A refusal rolls back `s_sweep.active` and the heat claim
+    and returns `ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY`; the task releases
+    after clearing its own handle, and a failed task create releases.
+  - kiln config swap: `kiln_cfg_swap_worker_submit()` claims `SWAP` on the
+    httpd worker thread, so the refusal is a 409 at submit time; the worker
+    releases after publishing the result (success, failure, diverged) and the
+    queue-send failure path releases. Boot recovery try-claims `SWAP` and
+    proceeds with a warning if it cannot (nothing may block boot).
+  - ceiling reconcile: only the NON-blocking poll-side entry claims
+    `RECONCILE`, around `guard_raise` alone. It runs after divergence
+    enforcement (cache-only heat-off must fire every tick regardless) and
+    after the backoff gate, and a claim refusal is NOT recorded as a raise
+    failure, so it starts no backoff window -- the next free tick retries at
+    once. The blocking entry (called only from the swap, which already owns
+    `SWAP`) deliberately does not claim.
+  - **Residual:** the `zones_post_handler` ceiling raise is covered by its
+    own `http_async_job_busy()` refusal above, which now reads the guard's
+    `ASYNC_JOB` owner only; it does not claim the guard itself, so it can
+    still overlap a sweep, swap or reconcile mid-flight. The swap worker's
+    boot-recovery claim is not host-testable (the worker loop cannot be
+    driven on the host).
+  - Tests: new guard/interleaving cases in `test_http_async_job.c`,
+    `test_zones_http.c`, `test_safety_ceiling_sync_divergence.c`, and a new
+    `test_kiln_cfg_swap_worker.c` executable (67 host executables, was 66).
+    Negative-tested: the four claim sites were forced to always succeed, the
+    forced rebuild failed five executables (main, zones_http,
+    safety_cfg_http, safety_ceiling_sync_divergence, kiln_cfg_swap_worker),
+    restored by hand (byte-identical to the saved copies), and a forced
+    full rebuild passed 67/67.
 
 ### A3 -- `crash_report/clear` onto A1's helper. DONE (2026-10-02)
 

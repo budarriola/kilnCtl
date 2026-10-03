@@ -12831,6 +12831,12 @@ static void reset_sweep_state_for_test(void)
     s_test_heat_sweep_claim_begin_calls = 0;
     s_test_heat_sweep_claim_end_calls = 0;
     s_test_backup_restore_in_flight = false;
+    // The sweep holds the single-flight writer guard for its whole run and the
+    // host never runs the task that releases it -- drop whatever is held.
+    safety_cfg_writer_t held = safety_cfg_writer_owner();
+    if (held != SAFETY_CFG_WRITER_NONE) {
+        (void)safety_cfg_writer_release(held);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -13209,6 +13215,71 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
     TEST_CHECK(s_sweep.active, "a started sweep is marked active");
     TEST_CHECK(s_test_heat_sweep_claim_begin_calls == 1, "the gate is attempted exactly once per "
                                                          "zones_current_sweep_start() call");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+}
+
+// Single-flight safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md
+// A2 gap): zones_current_sweep_start() must refuse while an http_async_job, a
+// kiln config swap, or the ceiling reconcile owns the guard, must roll back
+// EVERYTHING it took before that point (heat claim, s_sweep.active), and must
+// free the guard on every start path that does not leave a live task.
+static void test_zones_current_sweep_start_refused_while_config_writer_busy(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    const safety_cfg_writer_t others[] = { SAFETY_CFG_WRITER_ASYNC_JOB, SAFETY_CFG_WRITER_SWAP,
+                                           SAFETY_CFG_WRITER_RECONCILE };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        reset_sweep_state_for_test();
+        zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+        s_zones_config_valid = true;
+        s_zones.cfg.thermo_count = 1;
+        TEST_CHECK(safety_cfg_writer_try_claim(others[i]), "test setup: other writer holds the guard");
+        TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY,
+                   "a sweep start must be refused while another safety-config writer holds the guard");
+        TEST_CHECK(!s_sweep.active, "a refused start must roll s_sweep.active back");
+        TEST_CHECK(s_sweep.task == NULL, "a refused start must never spawn the sweep task");
+        TEST_CHECK(s_test_heat_sweep_claim_begin_calls == s_test_heat_sweep_claim_end_calls,
+                   "the heat claim taken before the guard must be given back on a guard refusal");
+        TEST_CHECK(safety_cfg_writer_owner() == others[i], "the refusal must not disturb the other writer's claim");
+        TEST_CHECK(*zone_sweep_refusal_str(ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY) != '\0',
+                   "the new refusal must carry an operator-readable message");
+        (void)safety_cfg_writer_release(others[i]);
+    }
+
+    // Free guard: the sweep claims it and a second claimant (e.g. an async
+    // job) is then refused for as long as the sweep is active.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK, "free guard: sweep starts");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_SWEEP, "a running sweep owns the guard");
+    TEST_CHECK(!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB),
+               "an async job must be refused while the sweep runs");
+
+    // Task-create failure frees the guard (no live task will ever release it).
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    g_test_stub_xtaskcreate_result = 0;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_NO_HW,
+               "a failed task create reports NO_HW");
+    TEST_CHECK(!s_sweep.active, "a failed task create must not leave the sweep active");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE,
+               "a failed sweep task create must free the writer guard");
+    g_test_stub_xtaskcreate_result = 1;
 
     reset_sweep_state_for_test();
     zones_http_set_hw(NULL, NULL, NULL);
@@ -15613,6 +15684,7 @@ void run_test_zones_http(void)
 
     test_zones_current_sweep_start_wired_refusals();
     test_zones_current_sweep_start_atomic_gate_closes_the_race();
+    test_zones_current_sweep_start_refused_while_config_writer_busy();
     test_zones_current_sweep_start_restore_in_flight_refused();
     test_zones_current_sweep_start_restore_in_flight_refused_early();
     test_zones_current_sweep_start_restore_in_flight_refused_during_refetch();

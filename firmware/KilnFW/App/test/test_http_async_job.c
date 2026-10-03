@@ -9,6 +9,7 @@
 #include "esp_http_server.h"
 
 #include "../drivers/http/http_async_job.c"
+#include "../drivers/safety/safety_cfg_writer_guard.h"
 
 // ---------------------------------------------------------------------------
 // Fakes shared across this file's tests
@@ -47,7 +48,12 @@ static void reset_stubs(void)
     g_test_stub_async_begin_should_fail = 0;
     g_test_stub_async_complete_calls = 0;
     g_test_stub_xtaskcreate_result = 1; // pdPASS
-    s_busy = false;
+    // Drop whatever a previous test left holding the single-flight guard.
+    // (release() is owner-checked, so name the current owner.)
+    safety_cfg_writer_t leftover = safety_cfg_writer_owner();
+    if (leftover != SAFETY_CFG_WRITER_NONE) {
+        (void)safety_cfg_writer_release(leftover);
+    }
     s_task_handle = NULL;
     s_stub_sockfd_result = 7;
     g_test_stub_sess_trigger_close_calls = 0;
@@ -169,7 +175,8 @@ static void test_run_job_calls_fn_then_completes_exactly_once_and_clears_busy(vo
     httpd_req_t req = {0};
     httpd_req_t *async_req = NULL;
     TEST_CHECK(httpd_req_async_handler_begin(&req, &async_req) == ESP_OK, "test setup: begin must succeed");
-    s_busy = true; // matches the state http_async_job_try_start() would have left it in
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB),
+               "test setup: claim as http_async_job_try_start() would have");
 
     http_async_job_run_ctx_t rc = { .fn = fake_job_fn, .ctx = NULL, .async_req = async_req };
     run_job(&rc);
@@ -178,7 +185,8 @@ static void test_run_job_calls_fn_then_completes_exactly_once_and_clears_busy(vo
     TEST_CHECK(s_fn_last_req == async_req, "fn must receive the async copy, not the original req");
     TEST_CHECK(g_test_stub_async_complete_calls == 1,
                "run_job() must call complete() exactly once after fn returns, on every path");
-    TEST_CHECK(!s_busy, "run_job() must clear busy once fn and complete() are done");
+    TEST_CHECK(!http_async_job_busy() && safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE,
+               "run_job() must release the guard once fn and complete() are done");
 }
 
 // 2026-09-25 fix-then-push review: run_job() used to clear s_busy in one
@@ -195,7 +203,7 @@ static void test_run_job_clears_task_handle_atomically_with_busy(void)
     httpd_req_t req = {0};
     httpd_req_t *async_req = NULL;
     TEST_CHECK(httpd_req_async_handler_begin(&req, &async_req) == ESP_OK, "test setup: begin must succeed");
-    s_busy = true;
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB), "test setup: claim");
     s_task_handle = (TaskHandle_t)0x1; // any non-NULL sentinel -- run_job() must clear it
 
     http_async_job_run_ctx_t rc = { .fn = fake_job_fn, .ctx = NULL, .async_req = async_req };
@@ -203,11 +211,93 @@ static void test_run_job_clears_task_handle_atomically_with_busy(void)
 
     TEST_CHECK(s_task_handle == NULL, "run_job() must clear s_task_handle itself, "
                                        "not leave it for a separate trampoline step");
-    TEST_CHECK(!s_busy, "run_job() must clear busy in the same pass as the handle");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE,
+               "run_job() must release the guard in the same pass as the handle");
+}
+
+// ---------------------------------------------------------------------------
+// Single-flight guard shared with the sweep / kiln-config swap / ceiling
+// reconcile writers (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 follow-up).
+// Those writers' own modules are covered where they are linked; here the
+// guard itself and the async-job side of the contract are proven.
+// ---------------------------------------------------------------------------
+
+static void test_guard_basic_claim_release_semantics(void)
+{
+    reset_stubs();
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard starts free");
+    TEST_CHECK(!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_NONE), "NONE is not claimable");
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWEEP), "free guard claimable");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_SWEEP, "owner recorded");
+    TEST_CHECK(!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWEEP), "same class cannot re-claim (not reentrant)");
+    TEST_CHECK(!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP), "other class refused while held");
+    TEST_CHECK(!safety_cfg_writer_release(SAFETY_CFG_WRITER_SWAP),
+               "a non-owner release must be refused and must not clear the real owner's claim");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_SWEEP, "non-owner release left owner intact");
+    TEST_CHECK(safety_cfg_writer_release(SAFETY_CFG_WRITER_SWEEP), "owner release succeeds");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard free again");
+    TEST_CHECK(!safety_cfg_writer_release(SAFETY_CFG_WRITER_SWEEP), "releasing a free guard reports false");
+}
+
+static void test_async_job_refused_while_each_other_writer_holds_guard(void)
+{
+    const safety_cfg_writer_t others[] = { SAFETY_CFG_WRITER_SWEEP, SAFETY_CFG_WRITER_SWAP,
+                                           SAFETY_CFG_WRITER_RECONCILE };
+    for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+        reset_stubs();
+        httpd_req_t req = {0};
+        TEST_CHECK(safety_cfg_writer_try_claim(others[i]), "test setup: other writer claims");
+        int begin_free = g_test_stub_async_complete_calls;
+        http_async_job_start_result_t r = http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+        TEST_CHECK(r == HTTP_ASYNC_JOB_BUSY,
+                   "an async job must be refused with BUSY while a non-HTTP writer holds the guard");
+        TEST_CHECK(g_test_stub_async_complete_calls == begin_free, "a refused job must not touch the request");
+        TEST_CHECK(!http_async_job_busy(), "busy() reports async-job ownership only");
+        TEST_CHECK(safety_cfg_writer_owner() == others[i],
+                   "the refused job must not disturb the other writer's claim");
+    }
+}
+
+static void test_other_writers_refused_while_async_job_runs(void)
+{
+    reset_stubs();
+    httpd_req_t req = {0};
+    TEST_CHECK(http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL) == HTTP_ASYNC_JOB_STARTED,
+               "test setup: job admitted");
+    TEST_CHECK(!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWEEP), "sweep refused while an async job runs");
+    TEST_CHECK(!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP), "swap refused while an async job runs");
+    TEST_CHECK(!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_RECONCILE),
+               "reconcile refused while an async job runs");
+    TEST_CHECK(http_async_job_busy(), "job still owns the guard");
+
+    // Job finishes: every writer is admitted again (the guard is not leaked).
+    httpd_req_t *async_copy = NULL;
+    TEST_CHECK(httpd_req_async_handler_begin(&req, &async_copy) == ESP_OK, "test setup: begin must succeed");
+    http_async_job_run_ctx_t rc = { .fn = fake_job_fn, .ctx = NULL, .async_req = async_copy }; // complete() frees it
+    run_job(&rc);
+    TEST_CHECK(safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWAP), "swap admitted after the job releases");
+}
+
+static void test_failed_start_paths_release_guard_for_other_writers(void)
+{
+    reset_stubs();
+    g_test_stub_async_begin_should_fail = 1;
+    httpd_req_t req = {0};
+    (void)http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "begin() failure must free the guard");
+
+    reset_stubs();
+    g_test_stub_xtaskcreate_result = 0;
+    (void)http_async_job_try_start(&req, "http_async_job", 4096, fake_job_fn, NULL);
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "xTaskCreate() failure must free the guard");
 }
 
 void run_test_http_async_job(void)
 {
+    test_guard_basic_claim_release_semantics();
+    test_async_job_refused_while_each_other_writer_holds_guard();
+    test_other_writers_refused_while_async_job_runs();
+    test_failed_start_paths_release_guard_for_other_writers();
     test_admits_when_idle();
     test_second_call_refused_while_busy();
     test_begin_failure_refuses_and_clears_busy();

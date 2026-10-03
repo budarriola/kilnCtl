@@ -707,6 +707,8 @@ const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
         return "CT topology has not been fetched from the safety processor yet -- retry once the link has synced";
     case ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT:
         return "a backup restore is in progress; wait for it to finish before starting";
+    case ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY:
+        return "another commissioning operation is running; wait for it to finish before starting";
     default: return "unknown refusal";
     }
 }

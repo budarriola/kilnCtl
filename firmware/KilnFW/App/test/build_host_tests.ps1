@@ -361,7 +361,11 @@ try {
         # itself is faked in test_backup_import.c, same convention as its
         # other profile_executor/autotune_engine fakes.
         (Join-Path $driversDir "safety/system_mode_gate.c"),
-        (Join-Path $driversDir "http/system_mode_gate_http.c")
+        (Join-Path $driversDir "http/system_mode_gate_http.c"),
+        # single-flight safety-config writer guard: http_async_job.c (#included
+        # by test_http_async_job.c) claims it; test_http_async_job.c also drives
+        # the guard directly as the sweep/swap/reconcile stand-ins.
+        (Join-Path $driversDir "safety/safety_cfg_writer_guard.c")
     )
 
     # hal_time migration (HW_ABSTRACTION.md item 5) pushed the "main"
@@ -608,7 +612,10 @@ try {
             # stack_margin.c is already linked above for zone_sweep's own
             # registration call, so http_async_job.c's stack_margin_
             # register() call needs no additional link.
-            "`"$(Join-Path $driversDir 'http/http_async_job.c')`""
+            "`"$(Join-Path $driversDir 'http/http_async_job.c')`" " +
+            # zones_current_sweep_task.c and safety_ceiling_sync.c (linked
+            # above) and http_async_job.c all claim the shared writer guard.
+            "`"$(Join-Path $driversDir 'safety/safety_cfg_writer_guard.c')`""
     # fake_kv.c/hal_status.c/hal_esp_common.c added HW_ABSTRACTION.md Phase 3
     # item 3 (nvs.h -> hal_kv.h migration): zones_http.c/zones_config_store.c now
     # call hal_kv_*()/hal_status_to_esp_err() instead of nvs_*() directly, and
@@ -676,6 +683,7 @@ try {
             # stack_margin_register(), not otherwise linked into this
             # executable.
             "`"$(Join-Path $driversDir 'http/http_async_job.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/safety_cfg_writer_guard.c')`" " +
             "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
             "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`""
 
@@ -2070,6 +2078,7 @@ try {
             "`"$(Join-Path $driversDir 'safety/safety_ceiling_sync.c')`" " +
             "`"$(Join-Path $driversDir 'safety/safety_ceiling_policy.c')`" " +
             "`"$(Join-Path $driversDir 'safety/config_divergence.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/safety_cfg_writer_guard.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
 
     Invoke-HostTestExe -Name "safety_ceiling_sync_divergence" -ExePath $exe40 -BuildCmd $cmd40
@@ -2333,6 +2342,22 @@ try {
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "wifi_prov" -ExePath $exe51 -BuildCmd $cmd51
+
+    # ---- test_kiln_cfg_swap_worker.c: its own separate executable ----------
+    # 2026-10-02 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap): the kiln
+    # config swap worker now takes the single-flight safety-config writer
+    # guard shared with http_async_job/the zone sweep/the ceiling reconcile.
+    # #includes kiln_cfg_swap_worker.c directly (static run_swap_job()), fakes
+    # kiln_cfg_swap_apply()/_boot_recover()/stack_margin_register() itself, and
+    # links the real guard. Own object dir so /Fo collisions cannot be silent.
+    $exeKcsw = Join-Path $outDir "kilnctl_host_tests_kiln_cfg_swap_worker.exe"
+    $kcswObjDir = Join-Path $outDir "kcsw"
+    New-Item -ItemType Directory -Force -Path $kcswObjDir | Out-Null
+    $cmdKcsw = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$kcswObjDir\\`" /Fe:`"$exeKcsw`" `"$(Join-Path $testDir 'test_kiln_cfg_swap_worker.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/safety_cfg_writer_guard.c')`""
+
+    Invoke-HostTestExe -Name "kiln_cfg_swap_worker" -ExePath $exeKcsw -BuildCmd $cmdKcsw
 
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
@@ -2870,7 +2895,10 @@ try {
     # http_auth_policy_web_enabled()/http_auth_any_session_active() fakes
     # collide at link time with "main"'s real copies of those two functions;
     # see exe51's own block comment.
-    $totalExpected = 66
+    # 66 -> 67 (2026-10-02): added test_kiln_cfg_swap_worker.c's own
+    # Invoke-HostTestExe call -- the swap worker's single-flight
+    # safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2).
+    $totalExpected = 67
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

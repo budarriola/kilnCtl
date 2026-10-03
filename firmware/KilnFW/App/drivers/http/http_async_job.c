@@ -8,18 +8,20 @@
 #include "freertos/portmacro.h"
 #include "freertos/task.h"
 
+#include "safety_cfg_writer_guard.h"
 #include "stack_margin.h"
 
 static const char *TAG = "http_async_job";
 
 // Single in-flight job across every caller of this helper (see this module's
-// header doc comment) -- protected by a short critical section, not a
-// mutex: every window s_mux guards here is a handful of instructions, never
-// a blocking wait, so a spinlock-style critical section is enough and never
-// itself blocks a second caller for longer than the first spends flipping
-// the flag.
+// header doc comment). "In flight" is owned by safety_cfg_writer_guard.c
+// (SAFETY_CFG_WRITER_ASYNC_JOB), NOT a flag local to this file: an async job
+// must also exclude zones_current_sweep_task.c, kiln_cfg_swap_worker.c and
+// the safety_poll ceiling reconcile, which all write the Pico's safety
+// config the same way, and a flag here plus a second flag there could never
+// be tested-and-set together (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap).
+// s_mux below now only guards s_task_handle.
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
-static bool s_busy = false;
 
 // stack_margin_register() target -- file-scope, not call-scoped, same
 // convention as ota_http_esp.c's s_ota_rollback_reboot_task: the task is
@@ -35,17 +37,14 @@ typedef struct {
     httpd_req_t *async_req;
 } http_async_job_run_ctx_t;
 
-// Only one job runs at a time (s_busy above enforces that before this is
+// Only one job runs at a time (the writer guard enforces that before this is
 // ever written), so one file-scope slot is enough -- no allocation needed
 // for the run context itself.
 static http_async_job_run_ctx_t s_run_ctx;
 
 bool http_async_job_busy(void)
 {
-    portENTER_CRITICAL(&s_mux);
-    bool busy = s_busy;
-    portEXIT_CRITICAL(&s_mux);
-    return busy;
+    return safety_cfg_writer_owner() == SAFETY_CFG_WRITER_ASYNC_JOB;
 }
 
 // The actual job body -- separated from the FreeRTOS task trampoline
@@ -60,25 +59,27 @@ static void run_job(http_async_job_run_ctx_t *rc)
     rc->fn(rc->async_req, rc->ctx);
     httpd_req_async_handler_complete(rc->async_req);
 
-    // s_task_handle is cleared in the SAME critical section as s_busy --
-    // 2026-09-25 fix-then-push review found that clearing them separately
-    // (this task nulling the handle only after run_job() already dropped
-    // s_busy) let a newly-admitted job's xTaskCreate() write s_task_handle
-    // before this trailing cleanup ran, and this cleanup would then null out
-    // the NEW job's handle instead of its own -- "reset one side of a pair"
-    // (CLAUDE.md). Atomic together, this task never touches s_task_handle
-    // again after this point.
+    // s_task_handle is cleared BEFORE the writer guard is released, never
+    // after -- 2026-09-25 fix-then-push review found that clearing the handle
+    // only after the busy flag dropped let a newly-admitted job's
+    // xTaskCreate() write s_task_handle before this trailing cleanup ran, and
+    // this cleanup would then null out the NEW job's handle instead of its
+    // own -- "reset one side of a pair" (CLAUDE.md). A new job can only be
+    // admitted once the guard is released, so nulling first guarantees this
+    // task never touches s_task_handle again after the release. (The guard
+    // replaced a local s_busy flag cleared in the same critical section as
+    // the handle; ordering gives the same guarantee across the two locks.)
     portENTER_CRITICAL(&s_mux);
     s_task_handle = NULL;
-    s_busy = false;
     portEXIT_CRITICAL(&s_mux);
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
 }
 
 static void http_async_job_task(void *arg)
 {
     run_job((http_async_job_run_ctx_t *)arg);
     // s_task_handle is cleared inside run_job()'s own critical section above,
-    // atomically with s_busy -- no separate write here (see run_job()'s
+    // before the guard release -- no separate write here (see run_job()'s
     // comment). A FreeRTOS task function must still not simply return
     // (CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=y panics on that).
     vTaskDelete(NULL);
@@ -88,23 +89,22 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
                                                         uint32_t stack_bytes, http_async_job_fn_t fn,
                                                         void *ctx)
 {
-    portENTER_CRITICAL(&s_mux);
-    if (s_busy) {
-        portEXIT_CRITICAL(&s_mux);
-        ESP_LOGW(TAG, "%s: refused, another async job is already running", task_name ? task_name : "?");
+    // Refused while ANY safety-config writer holds the guard -- another async
+    // job, a zone current sweep, a kiln config swap, or the poll-side ceiling
+    // reconcile mid-write -- not just another async job. The caller replies
+    // its ordinary "another operation is running" busy answer either way.
+    if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_ASYNC_JOB)) {
+        ESP_LOGW(TAG, "%s: refused, another safety-config writer is running (owner %d)",
+                 task_name ? task_name : "?", (int)safety_cfg_writer_owner());
         return HTTP_ASYNC_JOB_BUSY;
     }
-    s_busy = true;
-    portEXIT_CRITICAL(&s_mux);
 
     httpd_req_t *async_req = NULL;
     esp_err_t begin_err = httpd_req_async_handler_begin(req, &async_req);
     if (begin_err != ESP_OK) {
         ESP_LOGE(TAG, "%s: httpd_req_async_handler_begin failed: %s", task_name ? task_name : "?",
                  esp_err_to_name(begin_err));
-        portENTER_CRITICAL(&s_mux);
-        s_busy = false;
-        portEXIT_CRITICAL(&s_mux);
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
         return HTTP_ASYNC_JOB_RESOURCE_FAILURE;
     }
 
@@ -141,9 +141,7 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
                           "a keep-alive client may now desync on this connection's unread body",
                      task_name ? task_name : "?");
         }
-        portENTER_CRITICAL(&s_mux);
-        s_busy = false;
-        portEXIT_CRITICAL(&s_mux);
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_ASYNC_JOB);
         return HTTP_ASYNC_JOB_RESOURCE_FAILURE;
     }
 
@@ -156,7 +154,7 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
      * it's the same value, not a separate literal to keep in sync.
      *
      * Registered under a fixed literal name, "http_async_job", NOT the
-     * caller-supplied task_name: this helper is single-flight (s_busy admits
+     * caller-supplied task_name: this helper is single-flight (the writer guard admits
      * only one job at a time, sharing this one s_task_handle slot across
      * every caller present and future), so one tracked entry covers all of
      * them -- and check_stack_margin_registration.ps1's static scan requires

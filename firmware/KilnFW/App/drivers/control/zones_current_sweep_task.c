@@ -19,6 +19,7 @@
 #include "safety_trip_words.h"
 #include "relay_authority.h"
 #include "safety_cfg_store.h"
+#include "safety_cfg_writer_guard.h" /* single-flight vs http_async_job/kiln_cfg_swap/ceiling reconcile */
 #include "uart_task_ids.h" /* SAFETY_FLAG_* for zones_get_safety_wiring() */
 #include <time.h>
 #include "ct_verify_store.h"
@@ -1960,6 +1961,14 @@ static void zone_sweep_task(void *arg)
      * A reader that fetched the handle just before this line is benign:
      * the task is still alive until vTaskDelete() below. */
     s_sweep.task = NULL;
+    /* Release the safety-config writer guard taken in
+     * zones_current_sweep_start(): this task's last Pico write (the pushes
+     * above) is finished, and releasing BEFORE s_sweep.active drops keeps the
+     * same "free the instant it stops being reachable" ordering the heat
+     * claim below uses -- a new sweep start (which needs both) can only pass
+     * once both are free, so neither release can land under a new run's
+     * claim. */
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWEEP);
     /* Release the heat claim taken in zones_current_sweep_start() -- must
      * happen before s_sweep.active goes false, not after: the moment
      * s_sweep.active reads false, a waiting profile/autotune start can
@@ -2410,6 +2419,26 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
         return ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT;
     }
 
+    /* Single-flight against every other Pico safety-config writer
+     * (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap): an http_async_job
+     * (ct_auto_zero/bench_preset/backup_import), a kiln config swap, or the
+     * poll-side ceiling reconcile mid-write. The sweep's pushes
+     * (ct_channel_map, k_ct, i_normal_a) are SET_PARAM/COMMIT_CONFIG round
+     * trips on the same staged transaction, so interleaving with any of
+     * those can commit one writer's half-staged values under the other. Taken
+     * for the sweep's WHOLE run rather than just around its pushes so a
+     * refusal lands here, at start, instead of after minutes of measurement
+     * -- and so an async job started mid-sweep is itself refused. Last gate
+     * (after the heat claim and the restore check), so every refusal above
+     * returns before anything needs undoing; released by zone_sweep_task()'s
+     * final act, and below on every failed-start path. Never held across
+     * anything blocking by a MODULE lock: this is a leaf spinlock claim. */
+    if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_SWEEP)) {
+        s_sweep.active = false;
+        relay_authority_heat_sweep_claim_end();
+        return ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY;
+    }
+
     s_sweep.abort_requested = false;
     s_sweep.state = ZONE_SWEEP_RUNNING;
     s_sweep.zone_index = 0;
@@ -2441,6 +2470,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     stack_margin_register("zone_sweep", &s_sweep.task, 4096);
     if (created != pdPASS) {
         relay_authority_heat_sweep_claim_end(); /* task never started -- give the claim back */
+        (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWEEP); /* ... and the writer guard */
         s_sweep.active = false;
         s_sweep.state = ZONE_SWEEP_FAILED;
         snprintf((char *)s_sweep.reason, sizeof(s_sweep.reason), "failed to start sweep task");
