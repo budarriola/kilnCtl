@@ -687,6 +687,7 @@ static void test_recovery_boot_set_failed_restores_boot_target(void)
     s_fake_io_read_result = ESP_OK; /* relay_shadow == 0: relays off */
     g_stub_profile_state = PROFILE_EXEC_IDLE;
     stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1"); /* no safety link in this fixture */
     s_fake_select_result = RECOVERY_SWITCH_SET_FAILED;
     s_fake_restore_calls = 0;
     s_last_resp_status[0] = '\0';
