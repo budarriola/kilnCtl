@@ -494,7 +494,10 @@ main app's routes. The Pico upload query (`crc`, `slot`) is validated locally (a
 space). `KILNCTL_AP_PASSWORD` is no longer read by any recovery tool. No PcTools tool joins the AP: the PC must
 already be associated with the recovery SoftAP, using the passphrase read off the LCD. Whatever automation joins it
 should read the passphrase from the environment variable `KILNCTL_RECOVERY_AP_PASSPHRASE` (never a tool parameter,
-never echoed or logged; report presence as a bool only). Standing host checks:
+never echoed or logged; report presence as a bool only). `recovery_exit(host=192.168.4.1)` reports
+UNVERIFIED even on success: the recovery image is AP-only, and the AP address disappears when the app boots onto
+the LAN. Verify afterwards over the STA address (`recovery_status` answers 404, the running partition is `app`).
+Standing host checks:
 `check_recovery_passphrase.ps1` (generator) and `check_recovery_page_crc.ps1` (the browser page carries the Pico CRC
 and no auth code).
 

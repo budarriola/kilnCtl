@@ -2,9 +2,11 @@
 
 Closeout notes relocated out of `ROADMAP.md` per its maintenance rule. All items
 below landed on `origin/main` on 2026-10-02 and are host-tested and target-built
-only; **none has been verified on hardware yet** (the open bench items live in
-the ROADMAP index rows for the recovery image, the OTA matrix and the bench test
-system).
+only unless a section below says otherwise. **Verified on hardware 2026-10-03**
+(`docs/BENCH_TEST_LOG.md`): the S7 guard's 409, recovery entry and exit, and the
+unauthenticated LCD-passphrase recovery AP. Everything else here is still
+unverified on hardware (the open bench items live in the ROADMAP index rows for
+the recovery image, the OTA matrix and the bench test system).
 
 ## A3: `crash_report/clear` on `http_async_job` (`32fe5cee`, `689f0f24`)
 
@@ -30,7 +32,11 @@ async try_start), so they need no extra claim. The swap worker's boot-recovery
 claim retries up to 20 times, 100 ms apart, before running unclaimed. Host tests
 cover the 409 for every other owner, release on every path and the bounded
 retry; negative-tested by removing the release in both HTTP files, which failed
-`zones_http` and `safety_cfg_http`. Not run on hardware. Landed as `f42ca1c8`;
+`zones_http` and `safety_cfg_http`. Hardware 2026-10-03: with a zone current
+sweep holding the guard, a commissioning POST answered 409 "another
+commissioning operation is running" in 0.34 s and the config CRC did not change.
+Two HTTP_SYNC callers racing each other were not observable (httpd serialises
+them). Landed as `f42ca1c8`;
 Opus review `a0d59984` raised `check_all_task_stack_budgets.py`'s
 `http_async_job` ceiling to 4576 B (the 48 B `safety_cfg_writer_release()`
 call on that task's path had already pushed it past the old 4528 B on main).
@@ -45,7 +51,10 @@ on busy instead of returning `ok:false`, and the relay-type page no longer shows
 `POST /api/ota/esp/recovery_boot` is the deliberate way from the application
 into the recovery image; the boot_guard threshold now switches into recovery
 the same way, and the `recovery_enter` MCP tool wraps the route (facade count
-206 to 207). The boot target is restored on SET_FAILED.
+206 to 207). The boot target is restored on SET_FAILED. Hardware 2026-10-03:
+`recovery_enter(confirm=True)` answered 200 and the board booted the recovery
+image; `recovery_exit` returned it to `app` with boot_guard cleared and verified.
+The boot_guard threshold switch itself was not exercised.
 
 ## Pico bootloader hardening (`79264f5f`..`d7d6e9fc`)
 
@@ -61,8 +70,8 @@ Wi-Fi degrades instead of rebooting in a loop, honest `sw_reset`/`recovery_exit`
 otadata, AP event counts), a per-client nonce ring, relays and LCD pins held
 under a 1 s verifying watchdog, a latched hold fault reported in `relay_fault`
 and on the LCD, `sw_reset` no longer writes otadata, and host tests for the
-upload path and relay-hold logic. The hold-watchdog task stack margin is not
-yet measured.
+upload path and relay-hold logic. Hold-watchdog task stack margin, measured on
+the bench 2026-10-03: `relay_hold_stack_free` 1952 B of 3072 B, no hold fault.
 
 ## Recovery image unauthenticated, LCD-only passphrase (`00e99237`, `581278ba`)
 
@@ -71,6 +80,13 @@ SoftAP uses a random per-boot passphrase drawn from the RNG entropy source and
 shown only on the LCD. `KILNCTL_RECOVERY_AP_PASSPHRASE` is a documented
 convention for a human or joiner automation to supply the LCD passphrase; no code
 reads or prints it, by design (never a call parameter, never echoed).
+
+Hardware 2026-10-03: the LCD showed the SSID, a 12-character passphrase and the
+AP IP on one 480x320 page without scrolling; the SSID `kilnctl-recovery` appeared
+in a Wi-Fi scan as WPA2-Personal; a PC joined with the LCD passphrase and read
+`GET /api/recovery/status` (200, `auth_mode` "lcd_passphrase"); the passphrase is
+absent from the status JSON. Not exercised: the "wifi_storage_fail" path, ESP and
+Pico uploads, `wifi_reset`.
 
 ## `recovery_status` rendering (`c7bd87d9`)
 

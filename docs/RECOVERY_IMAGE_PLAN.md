@@ -102,9 +102,11 @@ choice. Original requirements below.
 - No PSRAM: refuse the Pico upload with a clear message (ESP upload still works with small
   internal buffers).
 
-**W5 bench verification.** Flash the recovery image to the bench board, force recovery,
-exercise ESP upload, Pico upload, exit, LCD page, relays low, and a no-PSRAM boot (if the
-fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
+**W5 bench verification.** Done 2026-10-03 (`docs/BENCH_TEST_LOG.md`): recovery flashed with
+`flash_recovery`, forced with `recovery_enter`, LCD page, AP join with the LCD passphrase, status
+route, relays verified off, `recovery_exit`. Remaining: ESP upload, Pico upload (blocked, the
+debug probe is disconnected), `wifi_reset`, the boot_guard threshold switch, the "wifi_storage_fail"
+path and a no-PSRAM boot (if the fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
 PSRAM and the no-PSRAM boot. Measure the `app` erase time and idle-task starvation, then
 decide on `CONFIG_ESP_TASK_WDT_PANIC`.
 
@@ -140,8 +142,8 @@ re-asserts the hold on any mismatch or unreadable expander, and verifies the wri
 LATCHES `relay_hold_fault` until reboot even when the repair succeeds. Decision logic is the
 pure `main/recovery_hold.c`, host-tested by `check_recovery_hold.ps1`. Stack deviation: the
 recovery image has no `stack_margin` API (that lives in KilnFW), so the task reports its own
-`uxTaskGetStackHighWaterMark` as `relay_hold_stack_free`; 3072 B is not yet measured on the
-bench (verify `relay_hold_stack_free` stays well above 512 B). The LCD pin writer now takes the
+`uxTaskGetStackHighWaterMark` as `relay_hold_stack_free`; 3072 B measured on the
+bench 2026-10-03 at `relay_hold_stack_free` 1952 B (idle; recheck during an upload). The LCD pin writer now takes the
 same I/O lock as the task, so the two cannot interleave an SX1509 write. `relay_fault` and
 `relays_verified_off` in status (and the LCD "Heat: OFF"/"RELAY CTRL FAULT" line) include the
 latched hold fault, so a post-boot loss is never reported as healthy. The hold task never draws;
@@ -171,6 +173,7 @@ short body, recv timeouts, an `esp_ota_end` failure leaving the boot target alon
 - A partially working PSRAM chip with an unknown MR2 density asserts at esp_psram.c:219,
   which would put the factory image in a reboot loop (IGNORE_NOTFOUND does not cover it).
 - After PSRAM not-found the MSPI stays in low-speed mode (flash about 20 MHz for that boot).
-- The recovery image has never been bench-verified end to end.
+- The recovery image is bench-verified for entry, LCD page, AP join, status and exit only (2026-10-03); the
+  upload paths have never run on a board.
 - `flash_firmware()` does not write `otadata` (see CLAUDE.md): a blank `otadata` boots
   `recovery`, not `app`, so a from-scratch board lands in recovery after a JTAG flash.
