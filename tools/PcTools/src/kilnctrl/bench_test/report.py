@@ -108,6 +108,9 @@ def write_run(run_dir: str, summary: Dict[str, Any], transcript_lines: "list[str
         f.write(f"# bench_test transcript -- {summary['run_id']}\n\n")
         f.write(_redact("\n".join(transcript_lines)))
         footer_lines = ["", "", "## Verdicts", ""]
+        if summary.get("tainted"):
+            footer_lines.insert(2, "**TAINTED**: a case could not restore board state; check the board before trusting it.")
+            footer_lines.insert(3, "")
         for cid, case in summary["cases"].items():
             footer_lines.append(f"- **{cid}**: {case['verdict']} -- {case['reason']}")
         f.write(_redact("\n".join(footer_lines)) + "\n")

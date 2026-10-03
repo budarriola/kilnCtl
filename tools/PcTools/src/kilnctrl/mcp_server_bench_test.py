@@ -114,6 +114,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
             continue
         reason = f" -- {result.reason}" if result.reason else ""
         lines.append(f"  {cid}: {result.verdict}{reason}")
+    if outcome.tainted:
+        lines.append("TAINTED: a case could not restore board state; check the board before trusting it")
     lines.append(f"run dir: {outcome.run_dir}")
     return bt_report._redact("\n".join(lines))
 

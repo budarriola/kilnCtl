@@ -152,7 +152,8 @@ def _always_ok_preflight(ctx):
 class _FakeRampAssist:
     """Fake /api/ramp_assist transport (ctx http_get_json/http_post_json)."""
 
-    def __init__(self, enabled=False, accept_writes=True, restore_fails=False):
+    def __init__(self, enabled=False, accept_writes=True, restore_fails=False, events=None):
+        self.events = events if events is not None else []
         self.enabled = enabled
         self.accept_writes = accept_writes
         self.restore_fails = restore_fails
@@ -164,6 +165,7 @@ class _FakeRampAssist:
     def post(self, path, fields):
         value = fields["enabled"] == "1"
         self.posts.append(value)
+        self.events.append(f"post:{int(value)}")
         if not self.accept_writes or (self.restore_fails and value):
             return 200, {"ok": False}
         self.enabled = value
@@ -251,8 +253,15 @@ class RampAssistHandlingTest(unittest.TestCase):
         self.assertEqual(autotune.accept_calls, [])
 
     def test_assist_restored_even_when_case_body_raises(self):
-        ramp = _FakeRampAssist(enabled=True)
+        events = []
+        ramp = _FakeRampAssist(enabled=True, events=events)
         autotune, srv = _good_at01_srv()
+        orig_abort = autotune.abort
+
+        def abort():
+            events.append("abort")
+            return orig_abort()
+        autotune.abort = abort
         orig_status = autotune.get_status
 
         def get_status():
@@ -265,6 +274,7 @@ class RampAssistHandlingTest(unittest.TestCase):
             CA._case_at01(ctx)
         self.assertTrue(ramp.enabled)
         self.assertGreaterEqual(autotune.abort_calls, 1)
+        self.assertEqual(events, ["post:0", "abort", "post:1"])
 
     def test_restore_failure_marks_run_tainted(self):
         ramp = _FakeRampAssist(enabled=True, restore_fails=True)
@@ -272,6 +282,8 @@ class RampAssistHandlingTest(unittest.TestCase):
         ctx = _base_ctx(srv, ramp=ramp)
         result = CA._case_at01(ctx)
         self.assertTrue(ctx["_tainted"])
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("could NOT be restored", result.reason)
         self.assertTrue(any("tainted" in e for e in result.evidence))
 
     def test_disable_failure_skips_without_starting_and_still_restores(self):
@@ -282,6 +294,7 @@ class RampAssistHandlingTest(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.SKIP)
         self.assertEqual(autotune.start_calls, [])
         self.assertTrue(ramp.enabled)
+        self.assertFalse(ctx.get("_tainted"))
 
     def test_at02_and_at04_also_toggle_and_restore(self):
         for fn, srv in (

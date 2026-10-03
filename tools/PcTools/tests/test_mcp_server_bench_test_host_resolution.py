@@ -51,6 +51,7 @@ class _FakeOutcome:
         self.requested = []
         self.results = {}
         self.run_dir = "logs/bench_test/fake-run"
+        self.tainted = False
 
 
 class _FakeRunner:

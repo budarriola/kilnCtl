@@ -55,7 +55,8 @@ class RunOutcome:
         from a run that attempted cases and something inside it failed:
 
           0 -- preflight passed and every executed case PASSed
-          1 -- preflight passed but at least one case FAILed
+          1 -- preflight passed but at least one case FAILed, or the run
+               is tainted (a case could not restore board state)
           2 -- preflight itself refused the run (no case was attempted)
           3 -- preflight passed, nothing FAILed, but something was
                SKIP/INCONCLUSIVE/NOT_RUN (plan §6 rule 11's bucket --
@@ -65,7 +66,7 @@ class RunOutcome:
         if not self.preflight_ok:
             return 2
         verdicts = [r.verdict for r in self.results.values()]
-        if any(v == Verdict.FAIL for v in verdicts):
+        if any(v == Verdict.FAIL for v in verdicts) or self.tainted:
             return 1
         if any(v in (Verdict.SKIP, Verdict.INCONCLUSIVE, Verdict.NOT_RUN) for v in verdicts):
             return 3
@@ -228,6 +229,8 @@ class BenchTestRunner:
                 )
             requested = [c for c in requested if c in cases]
 
+        # A reused ctx must never inherit a previous run's taint.
+        self.ctx.pop("_tainted", None)
         run_id = report_mod.make_run_id(suite, tag)
         started = time.time()
         # Made available to case judge functions via ctx["run_dir"] *before*

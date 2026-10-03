@@ -76,20 +76,25 @@ def _ramp_assist_enabled(ctx: dict) -> Tuple[Optional[bool], str]:
 
 
 def _ramp_assist_set(ctx: dict, enabled: bool) -> bool:
-    """POST the value and confirm by read-back; never raises."""
+    """POST the value and confirm by read-back; never raises. The read-back
+    alone decides success: a failed POST that leaves the board already at
+    the wanted value (state never changed) is not a failure."""
     try:
-        w_status, w_body = _authed_post_json(ctx, _RAMP_ASSIST_PATH, {"enabled": "1" if enabled else "0"})
-        wrote = w_status == 200 and bool(w_body) and w_body.get("ok") is True
+        _authed_post_json(ctx, _RAMP_ASSIST_PATH, {"enabled": "1" if enabled else "0"})
+    except Exception:
+        pass
+    try:
         now_enabled, _why = _ramp_assist_enabled(ctx)
     except Exception:
         return False
-    return wrote and now_enabled is enabled
+    return now_enabled is enabled
 
 
 def _with_ramp_assist_off(ctx: dict, body_fn) -> CaseResult:
     """Run ``body_fn(ctx)`` with ramp assist off. If it was on, disable it
-    first and restore it in ``finally`` (``ctx["_tainted"]`` plus an
-    evidence line if the restore cannot be confirmed). If the route is
+    first and restore it in ``finally`` (if the restore cannot be confirmed:
+    ``ctx["_tainted"]``, and the verdict becomes FAIL with the note in the
+    reason, as ``cases_heat`` does for HP-03/HP-07). If the route is
     unreadable, proceed unchanged (the fit itself fails if assist interfered)."""
     original, why = _ramp_assist_enabled(ctx)
     changed = False
@@ -109,7 +114,11 @@ def _with_ramp_assist_off(ctx: dict, body_fn) -> CaseResult:
                 ctx["_tainted"] = True
     if changed and not restored:
         note = "ramp assist was enabled before the case and could NOT be restored -- run tainted"
-        result.evidence.append(note)
+        combined = f"{result.reason}; {note}" if result.reason else note
+        return CaseResult(
+            Verdict.FAIL, reason=combined, observed=result.observed,
+            expected=result.expected, evidence=list(result.evidence) + [note],
+        )
     return result
 
 

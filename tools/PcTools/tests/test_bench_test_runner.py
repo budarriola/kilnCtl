@@ -320,6 +320,31 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(run_dir, "summary.json")))
         self.assertTrue(os.path.isfile(os.path.join(run_dir, "transcript.md")))
 
+    def test_tainted_ctx_flag_reaches_outcome_summary_and_exit_code(self):
+        import json
+
+        def judge(ctx):
+            ctx["_tainted"] = True
+            return R.CaseResult(R.Verdict.PASS)
+        self._patch_judge("ST-05", judge)
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        outcome = runner.run(suite="smoke", cases=["ST-05"])
+        self.assertTrue(outcome.tainted)
+        self.assertEqual(outcome.exit_code, 1)
+        run_dir = os.path.join(self.tmpdir, outcome.run_id)
+        with open(os.path.join(run_dir, "summary.json"), encoding="utf-8") as f:
+            self.assertIs(json.load(f)["tainted"], True)
+        with open(os.path.join(run_dir, "transcript.md"), encoding="utf-8") as f:
+            self.assertIn("TAINTED", f.read())
+
+    def test_stale_taint_in_a_reused_ctx_is_cleared(self):
+        self._patch_judge("ST-05", lambda ctx: R.CaseResult(R.Verdict.PASS))
+        self.ctx["_tainted"] = True
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        outcome = runner.run(suite="smoke", cases=["ST-05"])
+        self.assertFalse(outcome.tainted)
+        self.assertEqual(outcome.exit_code, 0)
+
     def test_teardown_stops_a_stuck_profile_run(self):
         self.fake_srv.exec_status = _FakeExecStatus("running")
         # Bypass preflight (which would refuse) to exercise teardown alone.
