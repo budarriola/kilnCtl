@@ -808,6 +808,15 @@ powershell -ExecutionPolicy Bypass -File tools\commit_guard.ps1 -Path CLAUDE.md 
     # exceed the declared budget, regardless of -Confirm
 ```
 
+## Confirm-gate flags are never coerced (2026-10-02)
+
+The facade coerces stringly-typed arguments (`"yes"`/`"1"`/`"true"` to a bool), which on 2026-10-02
+let `kiln_call(name="recovery_exit", args={"confirm":"yes"})` pass every per-tool `confirm is True`
+gate. `mcpkit.registry.ToolRegistry.invoke` now refuses, before the tool runs, any boolean-typed
+parameter named `confirm`, `force` or `allow_*` whose value is not a real JSON boolean, with an error naming
+the type received. `kiln_batch` shares `invoke`, so it is covered; `*_describe` never dispatches. Other bool
+parameters are still coerced. `tools/mykicadMcp/mcpkit_registry.py` is a vendored copy and needs re-vendoring.
+
 ## Adding a tool
 
 For `kilnctrl`, write it in the server module with the existing

@@ -186,6 +186,61 @@ class ArgumentCoercionTests(unittest.TestCase):
         self.assertEqual(result["meta"], {"a": 1})
 
 
+class ConfirmGateTests(unittest.TestCase):
+    """A safety-gate flag (confirm / force / allow_*) must reach the tool only
+    as a real JSON boolean. The facade's stringly-typed bool coercion once
+    turned confirm="yes" into True and bypassed every `confirm is True` gate
+    (recovery_exit executed on the bench, 2026-10-02)."""
+
+    def _server(self):
+        mcp = MCPServer("gate")
+        calls = []
+
+        @mcp.tool()
+        def risky(confirm: bool = False, allow_heat: bool = False,
+                  force: bool = False, active: bool = False) -> str:
+            """Do a risky thing."""
+            calls.append((confirm, allow_heat, force, active))
+            return "ran"
+
+        registry = collapse(mcp, prefix="g_", label="gate", title="Gate")
+        return registry, calls
+
+    def test_non_bool_confirm_refused_without_running(self):
+        registry, calls = self._server()
+        for bad in ("yes", "True", 1, "true", None, 1.0, "1"):
+            result = registry.invoke("risky", {"confirm": bad})
+            self.assertTrue(result.startswith("error:"), (bad, result))
+            self.assertIn("confirm", result)
+            self.assertIn(type(bad).__name__, result)
+        self.assertEqual(calls, [])
+
+    def test_allow_and_force_flags_refused_too(self):
+        registry, calls = self._server()
+        for key in ("allow_heat", "force"):
+            result = registry.invoke("risky", {key: "yes"})
+            self.assertTrue(result.startswith("error:"), result)
+            self.assertIn(key, result)
+        self.assertEqual(calls, [])
+
+    def test_real_true_proceeds(self):
+        registry, calls = self._server()
+        self.assertEqual(registry.invoke("risky", {"confirm": True}), "ran")
+        self.assertEqual(calls, [(True, False, False, False)])
+
+    def test_non_gate_bool_still_coerced(self):
+        registry, calls = self._server()
+        self.assertEqual(registry.invoke("risky", {"active": "yes"}), "ran")
+        self.assertEqual(calls, [(False, False, False, True)])
+
+    def test_batch_shares_the_refusal(self):
+        registry, calls = self._server()
+        from mcpkit.registry import facade_batch
+        out = facade_batch(registry, calls=[{"name": "risky", "args": {"confirm": "yes"}}])
+        self.assertIn("ERR risky", out)
+        self.assertEqual(calls, [])
+
+
 class ErrorPathTests(unittest.TestCase):
     """invoke() must never raise -- every failure comes back as a string
     starting with "error:" that carries what the caller needs to retry."""
