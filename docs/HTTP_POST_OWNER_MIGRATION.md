@@ -1,6 +1,6 @@
 # HTTP POST handlers off the httpd worker -- plan
 
-**Status: PLANNED, 2026-09-25. Owner approved the migration the same day.**
+**Status: DONE, 2026-10-02 (W1 bench verification still pending, see W1). Owner approved the migration 2026-09-25.**
 Covers `firmware/KilnFW/TODO.md` section 10.14's open "Web side" item
 ("action-taking POST handlers should post commands instead of running inline
 on `esp_http_server`'s one shared worker task"). Phase 5
@@ -378,7 +378,8 @@ later.
   runs before the inner handler, so the gate has already passed when the
   job starts. `route_tier_table.h` gets no edits. This plan adds no routes.
 - **URI cap unaffected.** There are no new routes, so
-  `check_uri_handler_cap.ps1` stays at 160/170.
+  `check_uri_handler_cap.ps1` was unchanged by this plan (163/170 at
+  `cf5cbbde`; the earlier 160/170 figure predates other work).
 - **Never hold a module lock across producer calls.** A job calls the same
   public accessors the handler calls today, in the same order.
 - **PSRAM-stacked tasks must not write NVS.** Every task in this plan has an
@@ -402,5 +403,7 @@ later.
 
 W1, A1, A2 and A4 are landed (A4 2026-09-28, driven by a live bench
 measurement rather than a speculative one -- see A4's own section above).
-A3 landed 2026-10-02. Tick the TODO.md 10.14 "Web side" box, citing this plan, and rename
-this file without the `_PLAN` suffix.
+A3 landed 2026-10-02 (`32fe5cee`, review fixes `689f0f24`). The TODO.md 10.14
+"Web side" box is ticked and this file was renamed without the `_PLAN` suffix
+(2026-10-02). Source comments that still cite the old `_PLAN` name are
+comment-only and were left untouched.

@@ -422,6 +422,17 @@ Additive to `LINK_PROTOCOL.md`. All are ESP→Pico except the responses.
 `UART_PROTO_MAX_PAYLOAD` is 253, so 248 bytes of image per frame after the
 4-byte offset.
 
+`UPDATE_STATUS` state values: 0 IDLE, 1 REFUSED, 2 ERASING, 3 RECEIVING,
+4 VERIFYING, 5 COMPLETE, 6 ABORTED, 7 FAILED, 8 REJECTED_SLOT_LINKAGE (a
+CRC-good image whose initial SP or reset vector does not belong to the target
+slot; it reuses the CRC_MISMATCH error bit, so only `state == 8` tells it apart),
+9 REFUSED_RUNNING_IMAGE_OVERLAP (application receiver only). The Pico
+bootloader's recovery receiver (`firmware/SaftyFW/bootloader/recovery_update.c`)
+also appends a 2-byte slot trailer `[active_slot][target_slot]` after the gap
+list (0/1 = slot A/B, 0xFF = unknown). A parser that reads only the header plus
+`gap_count * 2` bytes ignores it, so no protocol version bump; an older
+bootloader sends none and the ESP then treats both slots as unknown.
+
 ### Throughput, honestly
 
 **HISTORY: the link ran at 9600, not 115200, for as long as the TCMT1109

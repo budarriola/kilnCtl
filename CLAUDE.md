@@ -687,8 +687,8 @@ script fails to load, and the Bash tool still reports exit 0 for the wrapper
 host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
-As of 2026-09-23 it discovers 141 checks (`-ListOnly -AllowFewerChecks`,
-recounted at this commit; the count drifts upward as checks are added, so
+As of 2026-10-02 it discovers 151 checks (`-ListOnly -AllowFewerChecks`,
+recounted at `cf5cbbde`; the count drifts upward as checks are added, so
 re-verify with a fresh `-ListOnly` run rather than trusting this number).
 `a42ac369` added `check_lint_pages.ps1` so `lint_pages.js` -- previously only
 reachable through `tools/verify.ps1`'s manual "lint" stage -- is now enforced
@@ -842,8 +842,10 @@ with no session gets the pre-`b09294fb` behavior plus one line in the result
 noting the reset was skipped for lack of credentials. Pass
 `reset_boot_guard=False` to opt out unconditionally. No credential is ever
 logged or echoed. (The separate, standalone recovery firmware image,
-`firmware/KilnFW_recovery/`, is unaffected and still requires its own
-independent AP-password HMAC on its own routes.)
+`firmware/KilnFW_recovery/`, had its own AP-password HMAC too, but dropped it
+2026-10-02, `00e99237`/`581278ba`: it is now unauthenticated -- no password,
+no key -- reachable only over its own WPA2 SoftAP, whose random per-boot
+passphrase is shown only on the LCD. See `docs/RECOVERY_IMAGE_PLAN.md`.)
 `flash_firmware()`'s result reports the counter's before value, the clear result, and the
 verified-or-not after value, never a silent clear. A `GET /api/boot_guard` diagnostics route
 also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauthenticated so
@@ -883,9 +885,9 @@ a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
 **The URI handler cap has essentially no headroom left.** `check_uri_handler_cap.ps1`
-(as of 2026-09-23, recounted after the iter_tune step-7-review commit) reports 160 `httpd_uri_t` routes
+(as of 2026-10-02, recounted at `cf5cbbde`) reports 163 `httpd_uri_t` routes
 registered under `firmware/KilnFW/App/drivers/*.c` against
-`wifi_provision_http.c`'s `config.max_uri_handlers = 170` — 10 spare slots.
+`wifi_provision_http.c`'s `config.max_uri_handlers = 170` — 7 spare slots.
 The next route added
 anywhere under `drivers/` will need that cap bumped in the same change, or
 the check fails; see the check script's own header comment for why this is a

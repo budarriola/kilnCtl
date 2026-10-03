@@ -463,10 +463,10 @@ is a bench visit to every board.
       spare bit — a caller distinguishes it from an ordinary CRC failure by
       `state`, not by `last_error`. In other words a linkage reject sets the
       same `UPDATE_STATUS_ERR_CRC_MISMATCH` error bit a real CRC failure does;
-      only `state == 8` (`REJECTED_SLOT_LINKAGE`) says it was linkage. The tooling/PcTools codec table for
-      `UPDATE_STATUS` needs a new `state == 8` entry to render this
-      distinctly (not yet done here — out of this change's scope, see
-      handback).
+      only `state == 8` (`REJECTED_SLOT_LINKAGE`) says it was linkage. The
+      bootloader's recovery receiver (`bootloader/recovery_update.c`) reports
+      the same state 8, and the PcTools capture decoder
+      (`kilnlink_capture.py`) renders it distinctly.
 - [x] Whole-slot CRC verified by reading **back from flash** —
       `update_task_process_end()` (item 10.7): `bootloader_crc32()` over the
       XIP-mapped target slot's `[0, length)`, compared against the BEGIN

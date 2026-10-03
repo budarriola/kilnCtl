@@ -1958,7 +1958,7 @@ query reply) were found and fixed while bringing Phase 2 up on a real bench
 suspected to be related to this work, was root-caused separately (also in
 `docs/BRINGUP_HAZARDS.md`) and was not caused by anything in this section.
 
-- [ ] **Web side**: `dashboard_http.c`/`zones_http.c`/`profiles_http.c`/
+- [x] **Web side**: `dashboard_http.c`/`zones_http.c`/`profiles_http.c`/
       `rules_http.c`/`ota_http.c`/`wifi_provision_http.c` action-taking POST
       handlers should post commands instead of running inline on
       `esp_http_server`'s one shared worker task. `ota_http.c`'s transfer
@@ -1966,8 +1966,8 @@ suspected to be related to this work, was root-caused separately (also in
       (longest/most blocking). OTA's transfer handlers are explicitly
       out-of-scope for migration — they legitimately need to hold a
       streaming HTTP body open across the whole transfer.
-      **Planned 2026-09-25** (owner approved): slices W1/A1-A4 in
-      `docs/HTTP_POST_OWNER_MIGRATION_PLAN.md`; `rules_http.c` no longer
+      **Done 2026-10-02** (planned 2026-09-25, owner approved): slices W1/A1-A4 in
+      `docs/HTTP_POST_OWNER_MIGRATION.md`; `rules_http.c` no longer
       exists, and most dashboard/zones/profiles POSTs are short writes, not worth moving.
 - [x] **Debug/PC-link UART side** (explicit user request): closed
       2026-09-24 -- TOUCH and UI_TEST (`LIST_TAP_TARGETS`/`CLICK_BY_NAME`)

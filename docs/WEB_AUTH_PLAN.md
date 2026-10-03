@@ -240,10 +240,11 @@ cheaper to gate the shell than to audit every widget inside it.
 app entirely along with the whole AP-password HMAC scheme it served (owner
 decision "Retire; open when login off") — the nine routes below are ordinary
 ROUTE_TIER_ADMIN routes now, gated only by web-auth login, with no second
-in-handler check. The route still exists, unchanged, in the recovery image
-(`firmware/KilnFW_recovery/`), which is unaffected by this decision — see
-`UPDATE_PROTOCOL.md`/`MCP_SERVERS.md` for the recovery-image-only signer kept
-in PcTools for it.
+in-handler check. The recovery image (`firmware/KilnFW_recovery/`) kept the
+route that day, but dropped it and the whole HMAC scheme on 2026-10-02: it is
+now unauthenticated, reachable only over its own LCD-passphrase SoftAP (see
+`docs/RECOVERY_IMAGE_PLAN.md`). The PcTools signer is gone;
+`recovery_post_client.py` posts unsigned.
 
 **`GET /api/ota/esp/status` — FIXED in `9c2b1c1b`.** The payload was trimmed
 to remove the commit-and-dirty-flag fingerprint and the other identity/
@@ -1374,7 +1375,8 @@ code with real callers, plus the field-upgrade negative test:
   `security_http_core.c`'s `vt->set_policy(&req->policy)`.
 - `web_enabled`/`lcd_enabled` are the literal first checks in
   `http_auth_check()` (`http_auth_enforce.c`), ALLOW before session lookup.
-- The nine OTA-family routes fall back to AP-password/HMAC challenge with
+- (Superseded 2026-09-29: the AP-password/HMAC fallback was retired, see item 2b.)
+  The nine OTA-family routes fell back to AP-password/HMAC challenge with
   auth off (`ota_http.c`), never becoming open; confirmed both by reading
   and by collateral RED in `test_ota_http.c` during the negative test below.
 - Negative test performed: flipped `WEB_AUTH_LOAD_ABSENT` to `true` in

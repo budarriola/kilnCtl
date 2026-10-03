@@ -435,8 +435,9 @@ exception" text in `docs/WEB_AUTH_PLAN.md` item 2b** ("with web auth off,
 these nine routes keep the legacy AP-password-only gate"): with web auth
 off, these nine routes are now exactly as open as every other ADMIN route,
 same as the rest of the auth-off collapse. The separate, standalone recovery
-firmware image (`firmware/KilnFW_recovery/`) is unaffected and still
-implements the AP-password HMAC on its own routes.
+firmware image (`firmware/KilnFW_recovery/`) was unaffected that day but
+dropped its own AP-password HMAC on 2026-10-02: it is now unauthenticated
+(see "Recovery image is unauthenticated" below).
 
 **`recovery_enter` (2026-10-02):** wraps `POST /api/ota/esp/recovery_boot` (`ROUTE_TIER_ADMIN`), the deliberate way from the
 application into the recovery image once `ota_rollback_esp()` has nothing to roll back to
