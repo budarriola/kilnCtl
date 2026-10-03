@@ -28,14 +28,24 @@ async def _call(tool_name: str, arguments: dict, port: int) -> str:
     from mcp.client.streamable_http import streamable_http_client
 
     url = f"http://127.0.0.1:{port}/mcp"
-    async with streamable_http_client(url) as (read, write, _get_session_id):
+    async with streamable_http_client(url) as streams:
+        # mcp 1.x yields (read, write, get_session_id); 2.x yields (read, write).
+        read, write = streams[0], streams[1]
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments=arguments)
-            if result.isError:
+            if getattr(result, "is_error", None) or getattr(result, "isError", False):
                 text = "\n".join(getattr(c, "text", str(c)) for c in result.content)
                 raise RuntimeError(text or "tool call reported an error")
             return "\n".join(getattr(c, "text", str(c)) for c in result.content)
+
+
+def _print_leaves(exc: BaseException) -> None:
+    for sub in getattr(exc, "exceptions", ()):
+        if hasattr(sub, "exceptions"):
+            _print_leaves(sub)
+        else:
+            print(f"  cause: {type(sub).__name__}: {sub}", file=sys.stderr)
 
 
 def main() -> int:
@@ -55,6 +65,7 @@ def main() -> int:
         text = asyncio.run(_call(args.tool_name, arguments, args.port))
     except Exception as exc:  # noqa: BLE001 - report cleanly, this is a CLI entry point
         print(f"error: {exc}", file=sys.stderr)
+        _print_leaves(exc)
         return 1
 
     print(text)
