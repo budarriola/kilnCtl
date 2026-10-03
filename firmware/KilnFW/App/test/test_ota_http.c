@@ -2070,11 +2070,26 @@ static void test_client_ip_finalize_terminates_with_undersized_buffer(void)
 static void test_esp_target_usable_refuses_running_partition(void)
 {
     TEST_SECTION("ota_http_esp_target_usable -- the running partition and NULL are refused, a distinct slot is allowed");
-    static const int slot_a = 0, slot_b = 0; // distinct addresses stand in for two esp_partition_t
+    // Distinct, non-const objects stand in for two esp_partition_t: const ints with
+    // identical values can be folded to one address by /Gw + /OPT:ICF.
+    static int slot_a = 1, slot_b = 2;
     TEST_CHECK(!ota_http_esp_target_usable(&slot_a, &slot_a), "target == running is refused (single-slot self-push)");
     TEST_CHECK(!ota_http_esp_target_usable(NULL, &slot_a), "a NULL target is refused");
     TEST_CHECK(!ota_http_esp_target_usable(NULL, NULL), "NULL target with NULL running is still refused");
     TEST_CHECK(ota_http_esp_target_usable(&slot_a, &slot_b), "a target distinct from the running partition is allowed");
+}
+
+// Bounded drain after an early refusal: DONE only on a 0 read, FAIL on a
+// negative read or an exhausted cap, CONTINUE otherwise.
+static void test_refusal_drain_verdict(void)
+{
+    TEST_SECTION("ota_http_drain_verdict -- done on 0, fail on error or cap, otherwise continue");
+    TEST_CHECK(ota_http_drain_verdict(0, 0, 30000u) == OTA_DRAIN_DONE, "0 bytes left is DONE");
+    TEST_CHECK(ota_http_drain_verdict(0, 99999u, 30000u) == OTA_DRAIN_DONE, "a complete drain is DONE even past the cap");
+    TEST_CHECK(ota_http_drain_verdict(4096, 100u, 30000u) == OTA_DRAIN_CONTINUE, "data read, time left is CONTINUE");
+    TEST_CHECK(ota_http_drain_verdict(1, 29999u, 30000u) == OTA_DRAIN_CONTINUE, "one ms under the cap is CONTINUE");
+    TEST_CHECK(ota_http_drain_verdict(4096, 30000u, 30000u) == OTA_DRAIN_FAIL, "cap reached is FAIL");
+    TEST_CHECK(ota_http_drain_verdict(-1, 0, 30000u) == OTA_DRAIN_FAIL, "a read error is FAIL");
 }
 
 // ---------------------------------------------------------------------------
@@ -2280,6 +2295,7 @@ void run_test_ota_http(void)
     test_client_ip_finalize_defined_on_null_formatted_addr();
     test_client_ip_finalize_terminates_with_undersized_buffer();
     test_esp_target_usable_refuses_running_partition();
+    test_refusal_drain_verdict();
 
     test_pico_img_stage_offset_and_crc_bookkeeping();
     test_pico_img_stage_write_chunk_refuses_overrun();

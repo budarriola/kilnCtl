@@ -271,6 +271,16 @@ static bool is_page_shell_get(const kiln_http_route_ctx_t *ctx) {
     return http_auth_is_page_shell_get(ctx->uri, ctx->method);
 }
 
+// Return value for a refusal already sent by the pre-handler. A small unread
+// body is left for httpd to purge (ESP_OK, connection kept, client sees the
+// status cleanly). A body above HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES is not
+// purged at 32 B per read on the CPU0 httpd task: ESP_FAIL makes httpd close
+// the socket instead (httpd_uri.c ~line 367, httpd_sess.c ~lines 428-431),
+// at the cost of a possible RST for that client.
+static esp_err_t refusal_result(const httpd_req_t *req) {
+    return http_auth_refusal_should_close(req->content_len) ? ESP_FAIL : ESP_OK;
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever
@@ -375,7 +385,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             }
             httpd_resp_set_status(req, "401 Unauthorized");
             httpd_resp_send(req, "authentication required", HTTPD_RESP_USE_STRLEN);
-            return ESP_OK;
+            return refusal_result(req);
         case HTTP_AUTH_DECISION_DENY_INSUFFICIENT:
             // Same reasoning: a signed-in session with the wrong role
             // hitting an ADMIN-tier page by a bookmark or typed URL now
@@ -403,7 +413,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             httpd_resp_set_status(req, "403 Forbidden");
             httpd_resp_set_hdr(req, "X-Kiln-Auth-Reason", "insufficient_role");
             httpd_resp_send(req, "insufficient role for this route", HTTPD_RESP_USE_STRLEN);
-            return ESP_OK;
+            return refusal_result(req);
         default:
             // Unreachable given http_auth_check()'s own three-value enum,
             // but a switch with no default here would leave a future added
@@ -412,7 +422,7 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
             ESP_LOGE(AUTH_HTTP_TAG, "unrecognised auth decision %d for %s -- denying", (int)decision,
                      ctx->uri);
             httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "auth decision unrecognised");
-            return ESP_OK;
+            return refusal_result(req);
     }
 }
 

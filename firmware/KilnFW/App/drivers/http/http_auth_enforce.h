@@ -39,6 +39,7 @@
 #define KILNCTL_HTTP_AUTH_ENFORCE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "route_tier_table.h" // route_tier_t, kRouteTierTable, httpd_method_t
 
@@ -202,6 +203,21 @@ bool http_auth_decision_counts_as_activity(route_tier_t tier, http_auth_decision
 // "/api/..." uri, any non-GET method, any unlisted or untabled uri -- keeps
 // the ordinary 401/403. Pure, host-tested in test_http_auth_enforce.c.
 bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method);
+
+// Largest unread request body (Content-Length) a refused request may leave
+// for esp_http_server to purge. The purge runs at CONFIG_HTTPD_PURGE_BUF_LEN
+// (32 B) per read on the single CPU0 httpd task, so a multi-MB unauthenticated
+// POST (an OTA image) would hog it and trip TASK_WDT on IDLE0 (bench finding
+// 2026-10-03). 4 KB = 128 purge reads at most.
+#define HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES 4096u
+
+// True when a refusal sent for a request with `content_len` unread body bytes
+// should return ESP_FAIL (httpd closes the socket without purging) instead of
+// ESP_OK (httpd purges the body, then keeps the connection). Above the
+// threshold only. Trade-off: closing with unread RX data makes lwIP send a
+// RST, so a client uploading a large body may see a reset rather than the
+// 401/403. Pure, host-tested in test_http_auth_enforce.c.
+bool http_auth_refusal_should_close(size_t content_len);
 
 #ifdef __cplusplus
 }

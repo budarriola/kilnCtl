@@ -583,6 +583,14 @@ static void test_wifi_setup_tier_provisioned_gating(void) {
                "POST /ip_config stays ordinary ROUTE_TIER_ADMIN, not WIFI_SETUP");
 }
 
+static void test_refusal_close_threshold(void) {
+    TEST_SECTION("http_auth_refusal_should_close -- only a body above the purge threshold closes");
+    TEST_CHECK(!http_auth_refusal_should_close(0), "no body: keep the connection");
+    TEST_CHECK(!http_auth_refusal_should_close(HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES), "exactly the threshold: keep");
+    TEST_CHECK(http_auth_refusal_should_close(HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES + 1), "one byte over: close");
+    TEST_CHECK(http_auth_refusal_should_close(2500000u), "a multi-MB OTA image body: close");
+}
+
 void run_test_http_auth_enforce(void) {
     test_page_shell_allowlist();
     test_lookup_tier_real_routes();
@@ -602,4 +610,5 @@ void run_test_http_auth_enforce(void) {
     test_every_real_route_allows_with_auth_off();
     test_decision_counts_as_activity();
     test_wifi_setup_tier_provisioned_gating();
+    test_refusal_close_threshold();
 }

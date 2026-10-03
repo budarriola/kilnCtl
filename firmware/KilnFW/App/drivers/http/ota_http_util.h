@@ -87,6 +87,20 @@ bool ota_http_client_ip_finalize(char *out, size_t out_len, const char *formatte
  * (docs/OTA_SINGLE_SLOT_PLAN.md); the application refuses up front with 409. */
 bool ota_http_esp_target_usable(const void *target, const void *running);
 
+/* Verdict for one step of the bounded drain that follows an early refusal
+ * (ota_http_refusal_drain() in ota_http.c). `recv_ret` is the last
+ * httpd_req_recv() result, `elapsed_ms` the time spent draining so far,
+ * `cap_ms` the total allowed. DONE (recv_ret == 0, body fully consumed) wins
+ * over the time cap; a negative recv_ret or an exhausted cap is FAIL (caller
+ * returns ESP_FAIL so httpd closes the socket); otherwise CONTINUE. */
+typedef enum {
+    OTA_DRAIN_CONTINUE = 0,
+    OTA_DRAIN_DONE,
+    OTA_DRAIN_FAIL,
+} ota_http_drain_verdict_t;
+
+ota_http_drain_verdict_t ota_http_drain_verdict(int recv_ret, uint32_t elapsed_ms, uint32_t cap_ms);
+
 #ifdef __cplusplus
 }
 #endif

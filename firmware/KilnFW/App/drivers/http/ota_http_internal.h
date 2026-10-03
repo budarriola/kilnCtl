@@ -106,6 +106,17 @@ esp_err_t ota_http_send_json_clamped(httpd_req_t *req, const char *buf, int n, s
 // truncation rationale. Used by both the ESP and Pico transfer paths.
 void ota_http_set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...);
 
+// Bounded drain of the unread request body after a refusal response has been
+// sent. Returns ESP_OK only after the whole body was consumed (httpd then has
+// nothing left to purge at 32 B per read on the CPU0 httpd task, and the
+// close carries no unread RX data, so lwIP sends FIN not RST and the client
+// sees the status). Returns ESP_FAIL on a read error/timeout or after
+// OTA_REFUSAL_DRAIN_CAP_MS, so httpd closes the socket instead. `buf` must be
+// a static buffer (never a stack buffer: the httpd task stack is 8 KB);
+// httpd is a single task, so the OTA chunk buffers are race-free here.
+#define OTA_REFUSAL_DRAIN_CAP_MS 30000u
+esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap);
+
 // --- Single cross-processor safety-link pointer ----------------------------
 // Read-only after ota_http_start() (App/drivers/http/ota_http.c), same
 // NULL-tolerant meaning as before the split. Needed outside ota_http.c: the

@@ -102,9 +102,9 @@ static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 // exactly once regardless of which path got there.
 //
 // Returns true when the transfer FAILED (a response has already been sent and
-// the request body may be partly or wholly unread), so the caller returns
-// ESP_FAIL and httpd closes the connection instead of draining the body. See
-// the comment at that return in ota_esp_post_handler().
+// the request body may be partly or wholly unread), so the caller runs
+// ota_http_refusal_drain() on the remainder. See the comment at the interlock
+// refusal in ota_esp_post_handler().
 static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
 {
     bool ok = false;
@@ -430,25 +430,21 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
                                                             sizeof(reason));
     if (gate != OTA_INTERLOCK_OK) {
         ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: refused by interlock: %s", ip, reason);
-// Why this returns ESP_FAIL after an early refusal instead of ESP_OK (bench
-// finding 2026-10-03: a refused 2.5 MB push left the httpd task draining the
-// whole unread body and tripped TASK_WDT on IDLE0): with ESP_OK,
-// httpd_sess_process() (esp_http_server/src/httpd_sess.c, ~line 434) calls
-// httpd_req_delete() (httpd_parse.c ~lines 850-859), which loops
-// httpd_req_recv() in CONFIG_HTTPD_PURGE_BUF_LEN (32 B) pieces until
-// remaining_len is 0 -- on the httpd task, pinned to CPU0, each read
-// round-tripping to the tcpip task. A handler return other than ESP_OK is
-// turned into ESP_FAIL by httpd_uri() (httpd_uri.c ~line 367), which
-// httpd_req_new() (httpd_parse.c ~line 840) propagates, and
-// httpd_sess_process() then returns BEFORE it reaches httpd_req_delete()
-// (httpd_sess.c ~lines 428-431); the caller (httpd_main.c ~line 264) deletes
-// the session and closes the socket. httpd_sess_trigger_close() is NOT a
-// substitute: it only queues a close (httpd_sess.c ~line 478) and
-// httpd_req_delete() would still run first and drain. The response was
-// already written synchronously by httpd_resp_send*(), so the client still
-// gets its status/body; the connection just closes after it.
+        // Early refusal: send the status, then drain the unread body ourselves
+        // (bench finding 2026-10-03: returning ESP_OK with the body unread let
+        // httpd_req_delete() purge it at CONFIG_HTTPD_PURGE_BUF_LEN = 32 B per
+        // read on the CPU0 httpd task and trip TASK_WDT on IDLE0; see
+        // esp_http_server httpd_sess.c ~line 434, httpd_parse.c ~lines
+        // 850-859). Returning ESP_FAIL instead skips that purge (httpd_uri.c
+        // ~line 367, httpd_sess.c ~lines 428-431) but closes the socket with
+        // unread RX data, which makes lwIP send a RST and the client can lose
+        // the status. ota_http_refusal_drain() reads the rest in 4 KB chunks
+        // with vTaskDelay(1) between reads (30 s cap) and returns ESP_OK only
+        // after a complete drain, ESP_FAIL (close) on error or cap.
+        // httpd_sess_trigger_close() is NOT a substitute: it only queues a
+        // close and httpd_req_delete() would still purge first.
         (void)ota_http_send_interlock_refusal(req, gate, reason);
-        return ESP_FAIL;
+        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk));
     }
 
     // 4. Single update mutex -- claimed before any body byte is read, so a
@@ -459,15 +455,18 @@ esp_err_t ota_esp_post_handler(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_set_type(req, "text/plain");
         httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL; // close, don't drain the unread body -- see the comment above
+        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk)); // see the comment above
     }
 
     // From here, the mutex is held and ota_esp_do_transfer() owns releasing
     // it exactly once, on every exit path -- see that function's own doc
     // comment.
-    // Failure -> ESP_FAIL (response already sent) so httpd closes rather than
-    // drains; success -> ESP_OK.
-    return ota_esp_do_transfer(req, ip) ? ESP_FAIL : ESP_OK;
+    // Failure (response already sent, body possibly partly unread) -> bounded
+    // drain, ESP_FAIL only if the drain itself fails; success -> ESP_OK.
+    if (ota_esp_do_transfer(req, ip)) {
+        return ota_http_refusal_drain(req, s_ota_esp_chunk, sizeof(s_ota_esp_chunk));
+    }
+    return ESP_OK;
 }
 
 // --- POST /api/ota/pico, GET /api/ota/pico/status (TODO.md 9.5) -----------

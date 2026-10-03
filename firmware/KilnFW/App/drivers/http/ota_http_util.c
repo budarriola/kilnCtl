@@ -103,3 +103,14 @@ bool ota_http_esp_target_usable(const void *target, const void *running)
 {
     return target != NULL && target != running;
 }
+
+ota_http_drain_verdict_t ota_http_drain_verdict(int recv_ret, uint32_t elapsed_ms, uint32_t cap_ms)
+{
+    if (recv_ret == 0) {
+        return OTA_DRAIN_DONE;
+    }
+    if (recv_ret < 0 || elapsed_ms >= cap_ms) {
+        return OTA_DRAIN_FAIL;
+    }
+    return OTA_DRAIN_CONTINUE;
+}

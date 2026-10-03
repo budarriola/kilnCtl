@@ -621,6 +621,24 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 // --- POST /api/ota/esp (TODO.md 9.5, ota_http.h's doc comment) ------------
 
 
+esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap)
+{
+    uint32_t start = now_ms();
+    for (;;) {
+        // httpd_req_recv() returns 0 once remaining_len is 0, negative on a
+        // socket error or receive timeout.
+        int ret = httpd_req_recv(req, (char *)buf, cap);
+        ota_http_drain_verdict_t v = ota_http_drain_verdict(ret, now_ms() - start, OTA_REFUSAL_DRAIN_CAP_MS);
+        if (v == OTA_DRAIN_DONE) {
+            return ESP_OK;
+        }
+        if (v == OTA_DRAIN_FAIL) {
+            return ESP_FAIL;
+        }
+        vTaskDelay(1); // yield so IDLE0 can feed the task watchdog during a long drain
+    }
+}
+
 // Formats into a comfortably large scratch buffer, then copies (truncating
 // if needed, never overflowing) into the caller's smaller `dst`. Used for
 // every fail_reason assignment below instead of snprintf() directly into

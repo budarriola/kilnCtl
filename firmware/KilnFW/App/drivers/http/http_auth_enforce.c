@@ -169,3 +169,7 @@ bool http_auth_is_page_shell_get(const char *uri, httpd_method_t method) {
     // as a shell.
     return listed && http_auth_lookup_tier(uri, HTTP_GET, NULL);
 }
+
+bool http_auth_refusal_should_close(size_t content_len) {
+    return content_len > HTTP_AUTH_REFUSAL_DRAIN_MAX_BYTES;
+}

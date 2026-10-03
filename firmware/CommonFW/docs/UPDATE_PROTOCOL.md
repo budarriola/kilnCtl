@@ -929,12 +929,17 @@ partition itself -- the single-slot table has no spare slot, so an ESP image is
 pushed through the recovery image's route instead (`recovery_enter`;
 `docs/OTA_SINGLE_SLOT_PLAN.md`). Every early refusal on both `POST /api/ota/esp`
 and `POST /api/ota/pico` (interlock 409/428, update-in-progress 409, size/magic/
-chip checks, staging failures) now returns `ESP_FAIL` from the handler after
-sending its response, so esp_http_server closes the connection instead of
-draining the unread body 32 bytes at a time on the CPU0 httpd task (that drain
-starved IDLE0 into a TASK_WDT panic on the bench). Status codes and bodies are
-unchanged; a client still mid-upload may see the connection reset right after
-the response.
+chip checks, staging failures, a failed transfer) now sends its response and
+then drains the unread body itself (`ota_http_refusal_drain()`: 4 KB reads into
+the static chunk buffer, `vTaskDelay(1)` between reads, 30 s cap), returning
+`ESP_OK` only after a complete drain and `ESP_FAIL` (httpd closes the socket)
+on a read error or the cap. Left to httpd, the unread body is purged 32 bytes
+per read on the CPU0 httpd task, which starved IDLE0 into a TASK_WDT panic on
+the bench; closing at once instead makes lwIP RST because of unread receive
+data and the client can lose the status. Status codes and bodies are
+unchanged. The auth pre-handler's 401/403 refusals return `ESP_FAIL` (close)
+only when `Content-Length` exceeds 4 KB, so a client uploading a large body
+unauthenticated may see a connection reset instead of the 401.
 
 **Version compatibility** (`LINK_PROTOCOL.md`, `ANNOUNCE_VERSION`)
 - [x] `ANNOUNCE_VERSION` = `0x0F` implemented: the ESP announces itself, unprompted
