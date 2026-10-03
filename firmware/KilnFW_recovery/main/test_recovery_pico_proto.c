@@ -401,7 +401,7 @@ static void test_image_and_slots(void)
     rpp_target_t un = rpp_resolve_target(RPP_SLOT_UNKNOWN, RPP_SLOT_UNKNOWN);
     CHECK(rpp_describe_target_refusal(un, RPP_SLOT_B, true, why, sizeof(why)) &&
               strstr(why, "target unverified") && strstr(why, "bootloader") &&
-              strstr(why, "cannot report") && strstr(why, "unbootable") && strstr(why, "SWD"),
+              strstr(why, "did not report") && strstr(why, "unbootable") && strstr(why, "SWD"),
           "bootloader unresolved text: unverified, cannot read, unbootable until SWD");
     CHECK(rpp_describe_target_refusal(un, RPP_SLOT_B, false, why, sizeof(why)) &&
               strstr(why, "target unverified") && strstr(why, "application did not report") &&
@@ -1744,6 +1744,140 @@ static void test_pace(void)
     free(r);
 }
 
+// Bootloader slot trailer, phase-machine end states and the refusal-to-power-
+// cycle mapping (the bootloader now reports its own active slot after the gap
+// list; before, the ESP could only trust an operator guess).
+static void test_bootloader_slot_and_end_states(void)
+{
+    uint8_t p[16 + 2 * 3 + 2];
+    rpp_status_t st;
+    memset(p, 0, sizeof(p));
+    p[0] = RPP_CMD_UPDATE_STATUS;
+    p[1] = RPP_STATE_RECEIVING;
+    p[15] = 3;
+
+    // Trailer parsing.
+    p[22] = 0;
+    p[23] = 1;
+    CHECK(rpp_parse_status(p, 24, &st) && st.active_slot == RPP_SLOT_A && st.target_slot == RPP_SLOT_B,
+          "trailer after the gap list: active A, target B");
+    p[22] = 1;
+    p[23] = 0xFF;
+    CHECK(rpp_parse_status(p, 24, &st) && st.active_slot == RPP_SLOT_B && st.target_slot == RPP_SLOT_UNKNOWN,
+          "trailer 0xFF = unknown, never coerced to a slot");
+    p[22] = 7;
+    CHECK(rpp_parse_status(p, 24, &st) && st.active_slot == RPP_SLOT_UNKNOWN, "out-of-range slot byte = unknown");
+    CHECK(rpp_parse_status(p, 22, &st) && st.active_slot == RPP_SLOT_UNKNOWN && st.target_slot == RPP_SLOT_UNKNOWN,
+          "older bootloader / application status (no trailer) = unknown");
+    CHECK(rpp_parse_status(p, 23, &st) && st.active_slot == RPP_SLOT_UNKNOWN,
+          "half a trailer is no trailer");
+
+    // A clamped gap count means the bytes after the 32nd gap are more gaps, not a trailer.
+    {
+        uint8_t big[16 + 2 * 40 + 2];
+        memset(big, 0, sizeof(big));
+        big[0] = RPP_CMD_UPDATE_STATUS;
+        big[15] = 40;
+        big[16 + 2 * 32] = 0;
+        big[16 + 2 * 32 + 1] = 1;
+        CHECK(rpp_parse_status(big, sizeof(big), &st) && st.gap_count == RPP_STATUS_MAX_GAPS &&
+                  st.active_slot == RPP_SLOT_UNKNOWN && st.target_slot == RPP_SLOT_UNKNOWN,
+              "clamped gap count: bytes after the clamp are not read as a trailer");
+    }
+
+    // Bootloader idle status with an active slot: the reported slot wins over a wrong operator slot.
+    {
+        uint8_t idle[18];
+        memset(idle, 0, sizeof(idle));
+        idle[0] = RPP_CMD_UPDATE_STATUS;
+        idle[1] = RPP_STATE_IDLE;
+        idle[16] = 0; // active A
+        idle[17] = 0xFF;
+        CHECK(rpp_parse_status(idle, 18, &st) && rpp_status_proves_bootloader(&st) && st.active_slot == RPP_SLOT_A,
+              "bootloader IDLE reports active A");
+        rpp_target_t t = rpp_resolve_target(st.active_slot, RPP_SLOT_A); // operator wrongly says A
+        CHECK(t.target_slot == RPP_SLOT_B && t.source == RPP_TARGET_FROM_APP,
+              "reported active A makes the target B even when the operator chose A");
+        CHECK(!rpp_image_matches_target(RPP_SLOT_A, t) && rpp_image_matches_target(RPP_SLOT_B, t),
+              "the operator's wrong-slot image is refused, the right one accepted");
+
+        // Same idle status from a bootloader that cannot say (no trailer): the
+        // operator's choice stands, labelled unverified, and a mismatch is refused.
+        CHECK(rpp_parse_status(idle, 16, &st) && st.active_slot == RPP_SLOT_UNKNOWN,
+              "idle status with no trailer: active slot unknown");
+        t = rpp_resolve_target(st.active_slot, RPP_SLOT_A);
+        CHECK(t.target_slot == RPP_SLOT_A && t.source == RPP_TARGET_OPERATOR,
+              "no reported slot: operator choice used, source operator");
+        char why[400];
+        CHECK(rpp_describe_target_refusal(t, RPP_SLOT_B, true, why, sizeof(why)) && strstr(why, "target unverified"),
+              "operator slot A with a B-linked image is refused as unverified");
+        t = rpp_resolve_target(st.active_slot, RPP_SLOT_UNKNOWN);
+        CHECK(t.source == RPP_TARGET_UNRESOLVED && !rpp_image_matches_target(RPP_SLOT_A, t) &&
+                  !rpp_image_matches_target(RPP_SLOT_B, t),
+              "no reported slot and no operator choice: refused for both images");
+    }
+
+    // End states after VERIFYING.
+    {
+        rpp_fin_t f;
+        rpp_status_t v;
+        memset(&v, 0, sizeof(v));
+        rpp_fin_start(&f);
+        rpp_fin_end_sent(&f);
+        v.state = RPP_STATE_VERIFYING;
+        CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &v, 100) == RPP_FIN_WAIT && f.verifying_seen, "VERIFYING seen");
+        v.state = RPP_STATE_FAILED;
+        v.err = RPP_ERR_CRC_MISMATCH;
+        CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &v, 200) == RPP_FIN_FAIL && f.why != NULL,
+              "FAILED after VERIFYING is a failure, not unknown, not done");
+        CHECK(!rpp_fin_stop_is_unknown(&f, true), "a Pico-reported FAILED is a real answer");
+
+        rpp_fin_start(&f);
+        rpp_fin_end_sent(&f);
+        v.state = RPP_STATE_VERIFYING;
+        v.err = 0;
+        (void)rpp_fin_step(&f, RPP_EV_STATUS, &v, 100);
+        v.state = RPP_STATE_REJECTED_SLOT_LINKAGE;
+        v.err = RPP_ERR_CRC_MISMATCH;
+        CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &v, 200) == RPP_FIN_FAIL,
+              "REJECTED_SLOT_LINKAGE after VERIFYING fails the transfer");
+
+        // Lost COMPLETE: VERIFYING seen, then nothing, repeatedly -> UNKNOWN.
+        rpp_fin_start(&f);
+        rpp_fin_end_sent(&f);
+        v.state = RPP_STATE_VERIFYING;
+        v.err = 0;
+        (void)rpp_fin_step(&f, RPP_EV_STATUS, &v, 100);
+        rpp_fin_action_t a = RPP_FIN_WAIT;
+        for (int i = 0; i < 8 && a != RPP_FIN_UNKNOWN && a != RPP_FIN_DONE && a != RPP_FIN_FAIL; i++) {
+            a = rpp_fin_step(&f, RPP_EV_QUIET, NULL, RPP_END_REPLY_TIMEOUT_MS);
+            if (a == RPP_FIN_SEND_END) {
+                rpp_fin_end_sent(&f);
+            }
+        }
+        CHECK(a == RPP_FIN_UNKNOWN, "lost COMPLETE after END is UNKNOWN, never DONE or FAIL");
+    }
+
+    // TRIP_PENDING maps to the power-cycle flag, only on refusal-class states.
+    {
+        rpp_status_t r;
+        memset(&r, 0, sizeof(r));
+        r.state = RPP_STATE_REFUSED;
+        r.err = RPP_ERR_TRIP_PENDING;
+        CHECK(rpp_status_needs_power_cycle(&r), "REFUSED + TRIP_PENDING -> power_cycle");
+        r.err = RPP_ERR_TRIP_PENDING | RPP_ERR_TOO_HOT;
+        CHECK(rpp_status_needs_power_cycle(&r), "TRIP_PENDING among other bits -> power_cycle");
+        r.err = RPP_ERR_TOO_HOT;
+        CHECK(!rpp_status_needs_power_cycle(&r), "REFUSED without TRIP_PENDING -> no power_cycle");
+        r.state = RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP;
+        r.err = RPP_ERR_TRIP_PENDING;
+        CHECK(rpp_status_needs_power_cycle(&r), "overlap refusal + TRIP_PENDING -> power_cycle");
+        r.state = RPP_STATE_RECEIVING;
+        CHECK(!rpp_status_needs_power_cycle(&r), "a non-refusal state never sets power_cycle from err bits");
+        CHECK(!rpp_status_needs_power_cycle(NULL), "NULL status -> false");
+    }
+}
+
 int main(void)
 {
     test_crc32();
@@ -1760,6 +1894,7 @@ int main(void)
     test_fin_unit();
     test_pace();
     test_discover_classify();
+    test_bootloader_slot_and_end_states();
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail;
 }

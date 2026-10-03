@@ -137,8 +137,9 @@ bool rpp_describe_target_refusal(rpp_target_t t, int image_slot, bool bootloader
     if (t.source == RPP_TARGET_UNRESOLVED) {
         if (bootloader) {
             snprintf(out, cap,
-                     "target unverified: the Pico is in its bootloader, which cannot report "
-                     "which slot it will write. Choose the target slot (A or B) on the page. A "
+                     "target unverified: the Pico is in its bootloader, which did not report "
+                     "which slot it will write (older bootloader, or no valid slot metadata). "
+                     "Choose the target slot (A or B) on the page. A "
                      "wrong choice leaves the Pico unbootable until it is reprogrammed over SWD.");
         } else {
             snprintf(out, cap,
@@ -367,6 +368,21 @@ bool rpp_parse_status(const uint8_t *p, size_t len, rpp_status_t *out)
         }
     }
     return true;
+}
+
+bool rpp_status_needs_power_cycle(const rpp_status_t *st)
+{
+    if (!st) {
+        return false;
+    }
+    switch (st->state) {
+    case RPP_STATE_REFUSED:
+    case RPP_STATE_REJECTED_SLOT_LINKAGE:
+    case RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP:
+        return (st->err & RPP_ERR_TRIP_PENDING) != 0u;
+    default:
+        return false;
+    }
 }
 
 int rpp_parse_frame_a_active_slot(const uint8_t *p, size_t len)

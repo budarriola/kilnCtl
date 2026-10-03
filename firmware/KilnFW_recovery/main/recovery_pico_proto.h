@@ -261,6 +261,12 @@ bool rpp_parse_status(const uint8_t *payload, size_t len, rpp_status_t *out);
 // that is not a Frame A or is too short to carry flags2).
 int rpp_parse_frame_a_active_slot(const uint8_t *payload, size_t len);
 
+// True when this status is a refusal-class end state (REFUSED, REJECTED_SLOT_
+// LINKAGE, REFUSED_RUNNING_IMAGE_OVERLAP) carrying TRIP_PENDING: recovery has
+// no CLEAR_TRIP path, so the operator must power-cycle (the relay publishes
+// power_cycle=true). Any other state/err combination is false.
+bool rpp_status_needs_power_cycle(const rpp_status_t *st);
+
 // Comma-joined human text for UPDATE_STATUS err bits ("none" for 0).
 void rpp_format_err_bits(uint8_t err, char *out, size_t cap);
 

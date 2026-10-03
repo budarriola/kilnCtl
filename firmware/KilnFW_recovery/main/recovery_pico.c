@@ -306,7 +306,7 @@ static void handle_frame(relay_t *r, const kilnlink_frame_t *f)
         rpp_describe_state(st.state, st.err, t, sizeof(t));
         set_text(s_refusal, sizeof(s_refusal), t);
         set_text(s_error, sizeof(s_error), t);
-        if (st.err & RPP_ERR_TRIP_PENDING) {
+        if (rpp_status_needs_power_cycle(&st)) {
             // Recovery never sends CLEAR_TRIP; a power-cycle re-arms the
             // application or boots the Pico's bootloader.
             lock();

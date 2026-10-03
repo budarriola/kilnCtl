@@ -98,7 +98,21 @@ try {
         @{ Name = "stop_unknown_ignores_end_sent"; Needle = 'return f->end_sent_once && !pico_terminal;'; Repl = 'return !pico_terminal;' },
         @{ Name = "stop_beats_complete"; Needle = 'return fresh->state == RPP_STATE_COMPLETE;'; Repl = 'return 0;' },
         @{ Name = "pace_floor"; Needle = '+ tick_us - 1u'; Repl = '+ 0u' },
-        @{ Name = "target_assumed"; Needle = 't.target_slot = RPP_SLOT_UNKNOWN;'; Repl = 't.target_slot = RPP_SLOT_B;' }
+        @{ Name = "target_assumed"; Needle = 't.target_slot = RPP_SLOT_UNKNOWN;'; Repl = 't.target_slot = RPP_SLOT_B;' },
+        # Bootloader slot trailer ignored (the ESP falls back to the operator's guess).
+        @{ Name = "trailer_ignored"; Needle = 'if (p[15] == gap_count) {'; Repl = 'if (0) {' },
+        # Trailer read even after a gap-count clamp (gap bytes mistaken for slots).
+        @{ Name = "trailer_after_clamp"; Needle = 'if (p[15] == gap_count) {'; Repl = 'if (1) {' },
+        # A slot byte outside 0/1 coerced into a slot.
+        @{ Name = "trailer_coerces_slot"; Needle = 'out->active_slot = (p[trailer] == 0u || p[trailer] == 1u) ? (int)p[trailer]'; Repl = 'out->active_slot = (p[trailer] != 0u) ? 1' },
+        # Operator slot beats the Pico-reported active slot.
+        @{ Name = "operator_beats_reported"; Needle = 'if (app_active_slot == RPP_SLOT_A || app_active_slot == RPP_SLOT_B) {'; Repl = 'if (operator_slot == RPP_SLOT_UNKNOWN && (app_active_slot == RPP_SLOT_A || app_active_slot == RPP_SLOT_B)) {' },
+        # FAILED after END no longer ends the transfer as a failure.
+        @{ Name = "failed_not_fatal"; Needle = 'return fin_fail(f, "Pico ended the update");'; Repl = 'return RPP_FIN_WAIT;' },
+        # TRIP_PENDING no longer maps to power_cycle.
+        @{ Name = "trip_no_power_cycle"; Needle = 'return (st->err & RPP_ERR_TRIP_PENDING) != 0u;'; Repl = 'return 0;' },
+        # power_cycle raised for any refusal.
+        @{ Name = "power_cycle_any_refusal"; Needle = 'return (st->err & RPP_ERR_TRIP_PENDING) != 0u;'; Repl = 'return 1;' }
     )
     foreach ($m in $mutants) {
         $mutant = $src.Replace($m.Needle, $m.Repl)
