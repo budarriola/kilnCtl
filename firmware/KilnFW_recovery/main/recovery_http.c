@@ -778,6 +778,20 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                       ota_state_name(app), tri(coredump_present()), tri(otadata_blank()));
     }
     if (e == ESP_OK) {
+        recovery_wifi_stats_t ws;
+        recovery_wifi_get_stats(&ws);
+        e = send_frag(req, "\"wifi_up\":%s,\"ap_start_count\":%u,\"ap_stop_count\":%u,"
+                           "\"ap_stations\":%u,",
+                      recovery_wifi_is_up() ? "true" : "false", (unsigned)ws.ap_start_count,
+                      (unsigned)ws.ap_stop_count, (unsigned)ws.ap_sta_now);
+        if (e == ESP_OK) {
+            e = send_frag(req, "\"ap_connect_total\":%u,\"wifi_last_event\":\"%s\","
+                               "\"wifi_last_event_age_s\":%u,",
+                          (unsigned)ws.ap_sta_connect_total, ws.last_event_name,
+                          (unsigned)ws.last_event_age_s);
+        }
+    }
+    if (e == ESP_OK) {
         e = send_frag(req, "%s,", bgs);
     }
     if (e == ESP_OK) {

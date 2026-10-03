@@ -165,10 +165,85 @@ static void sta_fallback_task(void *arg)
     vTaskDelete(NULL);
 }
 
+// AP observability (counters only ever written from the event-loop task).
+static volatile uint32_t s_ap_start_count;
+static volatile uint32_t s_ap_stop_count;
+static volatile uint32_t s_ap_sta_connect_total;
+static volatile uint32_t s_ap_sta_disconnect_total;
+static volatile uint32_t s_ap_sta_now;
+static volatile int64_t s_last_event_us;
+static const char *volatile s_last_event_name = "none";
+
+static void note_event(const char *name)
+{
+    s_last_event_name = name;
+    s_last_event_us = esp_timer_get_time();
+}
+
+void recovery_wifi_get_stats(recovery_wifi_stats_t *out)
+{
+    out->ap_start_count = s_ap_start_count;
+    out->ap_stop_count = s_ap_stop_count;
+    out->ap_sta_connect_total = s_ap_sta_connect_total;
+    out->ap_sta_disconnect_total = s_ap_sta_disconnect_total;
+    out->ap_sta_now = s_ap_sta_now;
+    out->last_event_name = s_last_event_name;
+    int64_t t = s_last_event_us;
+    out->last_event_age_s = t ? (uint32_t)((esp_timer_get_time() - t) / 1000000) : 0;
+    out->last_event_seen = t != 0;
+}
+
+static void on_ap_event(int32_t id, void *data)
+{
+    switch (id) {
+    case WIFI_EVENT_AP_START:
+        s_ap_start_count++;
+        note_event("ap_start");
+        ESP_LOGI(TAG, "AP_START (count %u)", (unsigned)s_ap_start_count);
+        break;
+    case WIFI_EVENT_AP_STOP:
+        s_ap_stop_count++;
+        note_event("ap_stop");
+        ESP_LOGW(TAG, "AP_STOP (count %u, s_up=%d) -- the SoftAP stopped", (unsigned)s_ap_stop_count,
+                 (int)s_up);
+        break;
+    case WIFI_EVENT_AP_STACONNECTED: {
+        const wifi_event_ap_staconnected_t *ev = (const wifi_event_ap_staconnected_t *)data;
+        s_ap_sta_connect_total++;
+        s_ap_sta_now++;
+        note_event("ap_sta_connected");
+        if (ev) {
+            ESP_LOGI(TAG, "AP station joined: " MACSTR " aid=%d", MAC2STR(ev->mac), ev->aid);
+        }
+        break;
+    }
+    case WIFI_EVENT_AP_STADISCONNECTED: {
+        const wifi_event_ap_stadisconnected_t *ev = (const wifi_event_ap_stadisconnected_t *)data;
+        s_ap_sta_disconnect_total++;
+        if (s_ap_sta_now > 0) {
+            s_ap_sta_now--;
+        }
+        note_event("ap_sta_disconnected");
+        if (ev) {
+            ESP_LOGI(TAG, "AP station left: " MACSTR " aid=%d reason=%d", MAC2STR(ev->mac), ev->aid,
+                     ev->reason);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
-    (void)data;
+    if (base == WIFI_EVENT && (id == WIFI_EVENT_AP_START || id == WIFI_EVENT_AP_STOP ||
+                               id == WIFI_EVENT_AP_STACONNECTED ||
+                               id == WIFI_EVENT_AP_STADISCONNECTED)) {
+        on_ap_event(id, data);
+        return;
+    }
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {

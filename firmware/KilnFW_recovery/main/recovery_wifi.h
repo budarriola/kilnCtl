@@ -20,6 +20,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,22 @@ bool recovery_wifi_is_up(void);
 // than falling back to an empty-string key, since an empty key would make
 // every board's recovery image share the same derived HMAC key.
 bool recovery_wifi_get_ap_password(char *out, size_t out_len);
+
+// Counters from the Wi-Fi event handler, for /api/recovery/status: tells a real
+// SoftAP stop apart from a PC-side scan artifact. `last_event_name` is a static
+// string; last_event_age_s is meaningful only when last_event_seen.
+typedef struct {
+    uint32_t ap_start_count;
+    uint32_t ap_stop_count;
+    uint32_t ap_sta_connect_total;
+    uint32_t ap_sta_disconnect_total;
+    uint32_t ap_sta_now;
+    const char *last_event_name;
+    uint32_t last_event_age_s;
+    bool last_event_seen;
+} recovery_wifi_stats_t;
+
+void recovery_wifi_get_stats(recovery_wifi_stats_t *out);
 
 // The secret the AP passphrase and the HTTP auth key are derived from: the
 // stored ap_pass when it is 8..63 chars, otherwise the eFuse-MAC fallback
