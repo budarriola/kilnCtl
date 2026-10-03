@@ -447,8 +447,126 @@ static void test_wrong_linkage(void)
     }
 }
 
+// --- pre-jump watchdog: source-text guards -----------------------------------
+// bootloader/main.c and src/main.c need the real pico-sdk, so (like
+// test_boot_checkin_coverage.c) these scan comment-stripped source. They pin
+// the three properties docs/audits/recovery_bootloader_audit_2026-10-02.md
+// verified by reading: the 8 s watchdog is armed only inside jump_to_app(),
+// before the branch; main() clears any leftover enable bit before the first
+// enter_recovery(); recovery mode (this file's recovery_update.c, including the
+// state-8 slot-linkage rejection) never touches the watchdog; and the
+// application re-arms it once, before the scheduler, with a shorter timeout.
+
+static void wdsrc_strip_comments(char *s)
+{
+    char *out = s;
+    while (*s) {
+        if (s[0] == '/' && s[1] == '/') {
+            while (*s && *s != '\n') {
+                s++;
+            }
+        } else if (s[0] == '/' && s[1] == '*') {
+            s += 2;
+            while (*s && !(s[0] == '*' && s[1] == '/')) {
+                s++;
+            }
+            if (*s) {
+                s += 2;
+            }
+        } else {
+            *out++ = *s++;
+        }
+    }
+    *out = '\0';
+}
+
+static char *wdsrc_load(const char *anchor_rel, const char *alt1, const char *alt2)
+{
+    const char *cands[3] = {anchor_rel, alt1, alt2};
+    char *t = test_read_source_anchored(__FILE__, anchor_rel, cands, 3);
+    if (t) {
+        wdsrc_strip_comments(t);
+    }
+    return t;
+}
+
+static long wdsrc_define_value(const char *text, const char *name)
+{
+    char needle[96];
+    snprintf(needle, sizeof(needle), "#define %s", name);
+    const char *p = strstr(text, needle);
+    if (!p) {
+        return -1;
+    }
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    return strtol(p, NULL, 10);
+}
+
+static void test_prejump_watchdog_sources(void)
+{
+    TEST_SECTION("bootloader pre-jump watchdog: armed only before the jump, never in recovery");
+
+    char *boot = wdsrc_load("../bootloader/main.c", "bootloader/main.c",
+                            "firmware/SaftyFW/bootloader/main.c");
+    char *app = wdsrc_load("../src/main.c", "src/main.c", "firmware/SaftyFW/src/main.c");
+    char *rec = wdsrc_load("../bootloader/recovery_update.c", "bootloader/recovery_update.c",
+                           "firmware/SaftyFW/bootloader/recovery_update.c");
+    if (!boot || !app || !rec) {
+        TEST_CHECK(false, "could not locate bootloader/main.c, src/main.c or "
+                          "bootloader/recovery_update.c from the host test's working directory");
+        free(boot);
+        free(app);
+        free(rec);
+        return;
+    }
+
+    const char *wd = strstr(boot, "watchdog_enable(");
+    const char *bx = strstr(boot, "\"bx");
+    const char *main_fn = strstr(boot, "int main(void)");
+    TEST_CHECK(wd && bx && main_fn, "bootloader/main.c: watchdog_enable, the bx branch and main() all found");
+    if (wd && bx && main_fn) {
+        TEST_CHECK(strstr(wd + 1, "watchdog_enable(") == NULL,
+                   "bootloader/main.c: watchdog_enable() is called exactly once");
+        TEST_CHECK(strstr(boot, "watchdog_enable(BOOTLOADER_APP_WATCHDOG_MS") == wd,
+                   "bootloader/main.c: that one call uses BOOTLOADER_APP_WATCHDOG_MS");
+        TEST_CHECK(wd < bx, "bootloader/main.c: the watchdog is armed BEFORE the bx jump");
+        TEST_CHECK(bx < main_fn, "bootloader/main.c: the arm+jump lives in jump_to_app(), ahead of main()");
+
+        const char *clr = strstr(main_fn, "hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS)");
+        const char *first_rec = strstr(main_fn, "enter_recovery();");
+        TEST_CHECK(clr && first_rec && clr < first_rec,
+                   "bootloader/main.c: main() clears a leftover watchdog enable bit before the first enter_recovery()");
+    }
+
+    long boot_ms = wdsrc_define_value(boot, "BOOTLOADER_APP_WATCHDOG_MS");
+    long app_ms = wdsrc_define_value(app, "SAFTYFW_WATCHDOG_TIMEOUT_MS");
+    TEST_CHECK(boot_ms > 0 && boot_ms <= 8388, "BOOTLOADER_APP_WATCHDOG_MS fits the RP2040 hardware maximum (8388 ms)");
+    TEST_CHECK(app_ms > 0 && boot_ms > app_ms,
+               "the bootloader's pre-jump timeout is longer than the application's own, so re-arming only shortens it");
+
+    const char *app_wd = strstr(app, "watchdog_enable(SAFTYFW_WATCHDOG_TIMEOUT_MS");
+    const char *sched = strstr(app, "vTaskStartScheduler();");
+    TEST_CHECK(app_wd && sched && app_wd < sched,
+               "src/main.c: the application re-arms the watchdog before the scheduler starts");
+    TEST_CHECK(app_wd && strstr(app_wd + 1, "watchdog_enable(") == NULL,
+               "src/main.c: watchdog_enable() is called exactly once (shared by SaftyFW, slotA and slotB)");
+    TEST_CHECK(strstr(app, "watchdog_disable") == NULL && strstr(app, "WATCHDOG_CTRL_ENABLE_BITS") == NULL,
+               "src/main.c never disables the watchdog");
+
+    TEST_CHECK(strstr(rec, "watchdog") == NULL,
+               "bootloader/recovery_update.c never arms, feeds or disables a watchdog (state 8 included)");
+
+    free(boot);
+    free(app);
+    free(rec);
+}
+
 void run_test_bootloader_recovery_update(void)
 {
+    test_prejump_watchdog_sources();
     test_happy_path();
     test_idle_status_slots();
     test_crc_mismatch();

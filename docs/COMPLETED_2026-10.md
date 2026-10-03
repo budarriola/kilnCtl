@@ -51,7 +51,8 @@ yet measured.
 Owner decision 2026-10-02: the recovery image has no route authentication; its
 SoftAP uses a random per-boot passphrase drawn from the RNG entropy source and
 shown only on the LCD. `KILNCTL_RECOVERY_AP_PASSPHRASE` is a documented
-convention for joiner automation that nothing reads yet.
+convention for a human or joiner automation to supply the LCD passphrase; no code
+reads or prints it, by design (never a call parameter, never echoed).
 
 ## `recovery_status` rendering (`c7bd87d9`)
 
