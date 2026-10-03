@@ -579,7 +579,7 @@ i.e. `recovery`, so the post-write reset would boot the brand-new image).
 or `unreachable`); the write itself is read-back-verified over JTAG. The reset
 may latch S6a: before `safety_clear_trip()` the status must show trip_reason 6
 (`SAFETY_TRIP_MAIN_FAULT`) with trip_mask 0x0020 only; anything else (e.g. reason
-7 LINK_DEAD, mask 0x0040) needs investigating, not clearing. Provenance goes to
+7, `SAFETY_TRIP_LINK_DEAD`, S6b) needs investigating, not clearing. Provenance goes to
 `firmware/KilnFW/recovery_flash_provenance.json`; a `recovery.elf` beside the
 image is archived to `firmware/KilnFW/recovery_elf_archive/` only when its
 embedded app descriptor's build timestamp and version match the image's (else a
