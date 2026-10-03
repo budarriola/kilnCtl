@@ -39,6 +39,7 @@
 #include "hardware/structs/scb.h"
 #include "hardware/sync.h"
 #include "hardware/uart.h"
+#include "hardware/watchdog.h"
 
 #include "board_pins.h"
 #include "crc32.h"
@@ -152,6 +153,26 @@ static void enter_recovery(void)
 // Standard RP2040 vector-table relocation. `slot_offset` is the chosen
 // slot's flash-relative offset (BOOTLOADER_SLOT_A_FLASH_OFFSET or _B); the
 // application's own vector table lives at the very start of its slot.
+//
+// Watchdog: armed just before the jump. A CRC-good image that hangs before it
+// arms its own watchdog (crt0, runtime init, console/stdio init) would
+// otherwise never reset, and metadata.c's 3-attempt boot_attempts fallback
+// only advances on a reset -- i.e. only on a power cycle. With this armed, a
+// hang becomes a watchdog reset, the bootloader runs again, boot_attempts has
+// already been persisted for this attempt, and after the cap the fallback /
+// recovery path is taken without a human at the board.
+//
+// 8000 ms is just under the RP2040 hardware maximum (watchdog_enable()
+// asserts delay_ms * 2000 <= 0xFFFFFF, i.e. 8388 ms). The application's own
+// main() calls watchdog_enable(1000 ms) as its "Step 2" (src/main.c), which
+// reloads the counter and replaces this timeout; the only work ahead of that
+// is pico-sdk runtime init, the relay GPIO, console_uart_init() and
+// stdio_init_all(), estimated at tens of ms. That is more than 100x inside
+// the 8 s budget (an estimate: no on-target measurement was available).
+// pause_on_debug = true, same as the application, so an attached probe that
+// halts the core does not reset the board mid-session.
+#define BOOTLOADER_APP_WATCHDOG_MS 8000u
+
 static void jump_to_app(uint32_t slot_offset) __attribute__((noreturn));
 
 static void jump_to_app(uint32_t slot_offset)
@@ -167,6 +188,8 @@ static void jump_to_app(uint32_t slot_offset)
     // word 1 is its reset handler (the standard Cortex-M layout).
     uint32_t app_sp = ((uint32_t *)app_vtor)[0];
     uint32_t app_entry = ((uint32_t *)app_vtor)[1];
+
+    watchdog_enable(BOOTLOADER_APP_WATCHDOG_MS, true);
 
     // Never coming back -- no ISR of this bootloader's may fire mid-jump,
     // and there is nothing here to restore state to.
@@ -189,6 +212,13 @@ int main(void)
     gpio_init(SAFTYFW_PIN_RELAY);
     gpio_set_dir(SAFTYFW_PIN_RELAY, GPIO_OUT);
     gpio_put(SAFTYFW_PIN_RELAY, 0);
+
+    // Defensive: a watchdog left enabled by the previous image (the
+    // application's 1 s one, or the 8 s one armed in jump_to_app()) must never
+    // count down underneath recovery mode, which has no timeout and never
+    // feeds it. jump_to_app() re-arms right before handing over. GPIO6 is
+    // already low and untouched by this.
+    hw_clear_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_ENABLE_BITS);
 
     // Step 2. If the physical chip is definitely smaller than the frozen
     // layout assumes, nothing below is trustworthy -- reading metadata or

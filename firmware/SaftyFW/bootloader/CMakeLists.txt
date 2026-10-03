@@ -90,6 +90,7 @@ target_link_libraries(saftyfw_bootloader PRIVATE
     hardware_flash
     hardware_sync
     hardware_uart
+    hardware_watchdog
     kilnlink
 )
 
