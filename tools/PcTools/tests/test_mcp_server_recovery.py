@@ -232,6 +232,16 @@ class ExitTest(_Base):
         self.assertIn("403", out)
         self.assertNoSecret(out)
 
+    def test_lost_reply_still_observes_the_restart(self):
+        lost = roac.RecoveryOtaAuthError("timed out", None, stage="post")
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _not_found()], post_error=lost)
+        out = self.run_tool(mr.recovery_exit, board, confirm=True)
+        self.assertTrue(out.startswith("ok - "), out)
+        self.assertIn("reply lost", out)
+        board = FakeBoard(status=[_status(), _status(), _unreachable()], post_error=lost)
+        out = self.run_tool(mr.recovery_exit, board, confirm=True, wait_s=5.0)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
     def test_not_recovery_image_does_nothing(self):
         board = FakeBoard(status=[_not_found()])
         out = self.run_tool(mr.recovery_exit, board, confirm=True)
@@ -259,6 +269,12 @@ class WifiResetTest(_Base):
         self.assertTrue(out.startswith("UNVERIFIED"), out)
         self.assertIn("192.168.4.1", out)
 
+    def test_lost_reply_with_restart_is_unverified(self):
+        board = FakeBoard(status=[_status(), _status(), _unreachable(), _status()],
+                          post_error=roac.RecoveryOtaAuthError("reset", None, stage="post"))
+        out = self.run_tool(mr.recovery_wifi_reset, board, confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
     def test_refuses_when_pico_busy(self):
         board = FakeBoard(pico=[_pico(busy=True, phase="erasing")])
         out = self.run_tool(mr.recovery_wifi_reset, board, confirm=True)
@@ -285,11 +301,26 @@ class BootGuardResetTest(_Base):
         out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
         self.assertTrue(out.startswith("UNVERIFIED"), out)
 
-    def test_nothing_to_clear_skips_post(self):
-        board = FakeBoard(status=[_status(record_present=False)])
+    def test_absent_current_record_still_posts(self):
+        # recovery_status's record_present covers only the CURRENT location;
+        # the board's clear_boot_guard() also erases the legacy
+        # "boot_guard"/"count" record the main app still reads as a
+        # fallback, so the tool must not skip the POST on record_present=False.
+        board = FakeBoard(status=[_status(record_present=False, record_len=0)],
+                          post_reply={"status": 200, "text": "boot_guard cleared and verified"})
         out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
-        self.assertIn("nothing to clear", out)
-        self.assertEqual(board.posts, [])
+        self.assertTrue(out.startswith("ok - "), out)
+        self.assertEqual([p["context"] for p in board.posts], ["boot-guard-reset"])
+
+    def test_lost_reply_is_unverified(self):
+        board = FakeBoard(post_error=roac.RecoveryOtaAuthError("timed out", None, stage="post"))
+        out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
+    def test_challenge_failure_is_failed(self):
+        board = FakeBoard(post_error=roac.RecoveryOtaAuthError("challenge unreachable", None))
+        out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
 
 
 class PicoUploadTest(_Base):
@@ -366,6 +397,52 @@ class PicoUploadTest(_Base):
         board = self._board(_pico(phase="done", busy=False, bytes_sent=n, total_bytes=n))
         out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True)
         self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_torn_done_read_is_reread_not_failed(self):
+        # publish_done(): set_phase(DONE) and s_bytes_sent = s_len are two
+        # separate lock holds; a poll between them sees done + short bytes.
+        n = len(self.IMAGE)
+        torn = _pico(phase="done", busy=True, bytes_sent=n - 64, total_bytes=n)
+        board = FakeBoard(pico=[_pico(), torn, self._done()], post_reply=self.started)
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("ok - "), out)
+
+    def test_idle_after_start_is_unknown(self):
+        board = self._board(_pico())  # relay back to idle: the board restarted
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+    def test_lost_reply_keeps_polling_and_is_never_ok(self):
+        lost = roac.RecoveryOtaAuthError("timed out", None, stage="post")
+        board = self._board(self._done(), post_error=lost)
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertNotIn("ok -", out)
+        self.assertGreaterEqual(board.pico_gets, 3)
+
+    def test_lost_reply_and_idle_relay_is_not_started(self):
+        lost = roac.RecoveryOtaAuthError("reset", None, stage="post")
+        board = FakeBoard(pico=[_pico()], post_error=lost)
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("did not start", out)
+
+    def test_challenge_failure_does_not_poll(self):
+        board = FakeBoard(post_error=roac.RecoveryOtaAuthError("challenge unreachable", None))
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertEqual(board.pico_gets, 1)  # the preflight read only
+
+    def test_image_larger_than_a_slot_refused_locally(self):
+        f = tempfile.NamedTemporaryFile(delete=False, suffix=".bin")
+        f.write(b"\0" * (mr.MAX_PICO_IMAGE_BYTES + 1))
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        self.assertEqual(mr.MAX_PICO_IMAGE_BYTES, 0x000D0000)  # recovery_pico_proto.h RPP_SLOT_SIZE
+        board = FakeBoard(post_reply=self.started)
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=f.name, confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertEqual(board.posts, [])
 
     def test_timeout_while_running_is_unknown(self):
         mid = _pico(phase="sending", busy=True, bytes_sent=1, total_bytes=len(self.IMAGE))

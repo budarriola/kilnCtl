@@ -32,9 +32,14 @@ from . import mcp_server as _srv
 
 AP_PASSWORD_ENV = "KILNCTL_AP_PASSWORD"
 
-#: Image sanity cap for the Pico upload (a SaftyFW slot image is well under
-#: this; the board enforces its own, tighter limits and CRC/vector checks).
-MAX_PICO_IMAGE_BYTES = 4 * 1024 * 1024
+#: recovery_pico_proto.h RPP_SLOT_SIZE (832 KB): recovery_pico_reserve()
+#: answers 413 above this, after the MAC check has already consumed the nonce.
+MAX_PICO_IMAGE_BYTES = 0x000D0000
+
+#: Re-reads of /pico/status when "done" is first seen with bytes_sent not yet
+#: equal to the image length: recovery_pico.c publish_done() sets the phase
+#: and bytes_sent under two separate lock holds, so one poll can land between.
+DONE_REREADS = 3
 
 #: Indirections so tests never sleep.
 _sleep = time.sleep
@@ -96,6 +101,13 @@ def _preflight(host: str) -> "tuple[Optional[dict], Optional[dict], Optional[str
 def _post_error(path: str, exc: "roac.RecoveryOtaAuthError") -> str:
     # exc text never contains the password; only status/detail from the board.
     return f"FAILED: POST {path} -- {exc}"
+
+
+def _reply_lost(exc: "roac.RecoveryOtaAuthError") -> bool:
+    """True when the signed POST was sent but no HTTP status came back
+    (timeout, reset): the board may have acted, so this is never a plain
+    FAILED -- the caller must go on to observe the board."""
+    return exc.status is None and getattr(exc, "stage", "") == "post"
 
 
 def _poll_restart(host: str, wait_s: float, interval_s: float = 1.0) -> "tuple[str, str]":
@@ -181,7 +193,9 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
     try:
         reply = roac.recovery_exit(resolved, pw)
     except roac.RecoveryOtaAuthError as exc:
-        return _post_error("/api/recovery/exit", exc)
+        if not _reply_lost(exc):
+            return _post_error("/api/recovery/exit", exc)
+        reply = {"status": None, "text": f"<reply lost: {exc}>"}
     verdict, detail = _poll_restart(resolved, wait_s)
     if verdict == "app":
         return f"ok - board accepted exit ({reply['text']!r}) and the application is answering ({detail}) (host={resolved})"
@@ -223,8 +237,14 @@ def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_
     try:
         reply = roac.recovery_wifi_reset(resolved, pw)
     except roac.RecoveryOtaAuthError as exc:
-        return _post_error("/api/recovery/wifi_reset", exc)
+        if not _reply_lost(exc):
+            return _post_error("/api/recovery/wifi_reset", exc)
+        reply = {"status": None, "text": f"<reply lost: {exc}>"}
     verdict, detail = _poll_restart(resolved, wait_s)
+    if verdict == "recovery_again" and reply["status"] is None:
+        return (f"UNVERIFIED: the wifi_reset reply was lost ({reply['text']}) though the board restarted "
+                f"back into the recovery image ({detail}); whether the credentials were cleared is "
+                f"unknown (host={resolved})")
     if verdict == "recovery_again":
         return (f"ok - board replied {reply['text']!r} and restarted back into the recovery image ({detail}) "
                 f"(host={resolved}). The credential clear itself is not readable from the status route; "
@@ -248,9 +268,14 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
 
     REFUSES unless ``confirm is True`` exactly; needs KILNCTL_AP_PASSWORD
     (bool only). Reads recovery status first (``record_present``/
-    ``boot_count``) and does nothing if no record exists. Re-reads status
-    afterward and FAILS LOUDLY if ``record_present`` is still not false -- a
-    200 reply is not trusted alone.
+    ``boot_count``), then always POSTs: the status route reports only the
+    CURRENT record location, while the board also erases the legacy
+    "boot_guard"/"count" record that the main app's boot_guard.c still reads
+    as a fallback, so an absent current record does not mean nothing is left.
+    The board answers 200 only after reading BOTH locations back absent.
+    Re-reads status afterward and FAILS LOUDLY if ``record_present`` is still
+    not false -- a 200 reply is not trusted alone, and a lost reply is
+    UNVERIFIED.
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_boot_guard_reset")
@@ -261,19 +286,21 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
     before, pico, err = _preflight(resolved)
     if err:
         return f"error: {err}"
-    if before.get("record_present") is False:
-        return f"nothing to clear -- boot_guard record_present=False before ({_fmt_status(before)}) (host={resolved})"
     try:
         reply = roac.recovery_boot_guard_reset(resolved, pw)
     except roac.RecoveryOtaAuthError as exc:
-        return _post_error("/api/ota/esp/boot_guard_reset", exc)
+        if not _reply_lost(exc):
+            return _post_error("/api/ota/esp/boot_guard_reset", exc)
+        return (f"UNVERIFIED: POST /api/ota/esp/boot_guard_reset was sent but the reply was lost ({exc}); "
+                f"the board may or may not have cleared it -- read recovery_status (host={resolved})")
     try:
         after = rhc.get_status(resolved)
     except rhc.RecoveryHttpError as exc:
         return (f"UNVERIFIED: board replied {reply['text']!r} but the confirming status read failed "
                 f"(host={resolved}): {exc}")
     if after.get("record_present") is False:
-        return (f"ok - boot_guard cleared and confirmed by read-back: before boot_count="
+        return (f"ok - board replied {reply['text']!r} (it erases and reads back both record locations) and "
+                f"status confirms: before record_present={before.get('record_present')!r} boot_count="
                 f"{before.get('boot_count', 'n/a')}, after record_present=False (host={resolved})")
     return (f"FAILED: board replied {reply['text']!r} but status still shows record_present="
             f"{after.get('record_present')!r} boot_count={after.get('boot_count', 'n/a')} -- "
@@ -302,6 +329,12 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
                          and the result lost; power-cycle and check the Pico
                          version, do not retry blindly
       still running at `wait_s` / contact lost -> UNKNOWN (never ok)
+      idle after the 202 (board restarted)     -> UNKNOWN (never ok)
+      upload reply lost (timeout/reset)        -> keeps polling so the relay
+                         is not abandoned, then UNKNOWN (or FAILED if the
+                         relay is idle, i.e. it never started)
+    "done" with bytes_sent short of the image is re-read up to DONE_REREADS
+    times first (publish_done() updates the two fields non-atomically).
     """
     if confirm is not True:
         return _refuse_unconfirmed("recovery_pico_upload (reflashes the safety processor)")
@@ -329,16 +362,23 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
         return f"REFUSED: the board reports no PSRAM for the relay ({_fmt_pico(pico)})"
     if pico.get("busy") is not False:
         return f"REFUSED: the Pico relay is not idle ({_fmt_pico(pico)}); abort or wait first"
+    lost_reply = ""
     try:
         reply = roac.recovery_pico_upload(resolved, image, crc, pw, slot=slot)
     except roac.RecoveryOtaAuthError as exc:
-        return _post_error("/api/recovery/pico/upload", exc)
-    try:
-        started = reply["status"] == 202 and json.loads(reply["text"]).get("started") is True
-    except ValueError:
-        started = False
-    if not started:
-        return f"FAILED: upload POST did not report a started relay (HTTP {reply['status']}: {reply['text'][:120]!r})"
+        if not _reply_lost(exc):
+            return _post_error("/api/recovery/pico/upload", exc)
+        # The board may have taken the image and started the relay. Keep
+        # polling (the relay aborts when nobody polls for RPP_CLIENT_GONE_MS)
+        # and report whatever is seen as UNKNOWN, never ok.
+        lost_reply = str(exc)
+    if not lost_reply:
+        try:
+            started = reply["status"] == 202 and json.loads(reply["text"]).get("started") is True
+        except ValueError:
+            started = False
+        if not started:
+            return f"FAILED: upload POST did not report a started relay (HTTP {reply['status']}: {reply['text'][:120]!r})"
 
     lost = 0
     last: dict = {}
@@ -355,13 +395,34 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
                         f"last status: {_fmt_pico(last) or 'none'} -- NOT success, re-check by hand")
             continue
         phase = last.get("phase")
+        if phase == "idle" and last.get("busy") is False:
+            # After a 202 the relay is never idle again unless the board
+            # restarted; after a lost reply it means the upload never started.
+            if lost_reply:
+                return (f"FAILED: the upload reply was lost ({lost_reply}) and the relay is idle -- the "
+                        f"upload did not start ({_fmt_pico(last)})")
+            return (f"UNKNOWN: relay reports idle after it had started -- the board probably restarted "
+                    f"mid-transfer; NOT success, check the Pico by hand ({_fmt_pico(last)})")
         if phase in rhc.PICO_TERMINAL_PHASES:
             break
         if _monotonic() >= deadline:
             return (f"UNKNOWN: relay still running after {wait_s:g}s ({_fmt_pico(last)}) -- NOT success; "
                     f"poll recovery_status")
     prefix = f"crc32={crc:08x} slot={slot or 'auto'} (host={resolved})"
+    if lost_reply:
+        return (f"UNKNOWN: the upload reply was lost ({lost_reply}); the relay then reported phase={phase!r}, "
+                f"which may be this upload's outcome or an earlier one -- NOT success, check the Pico "
+                f"version by hand. {_fmt_pico(last)}; {prefix}")
     if phase == "done":
+        rereads = 0
+        while (rereads < DONE_REREADS and last.get("phase") == "done"
+               and not last.get("bytes_sent") == last.get("total_bytes") == len(image)):
+            rereads += 1
+            _sleep(0.5)
+            try:
+                last = rhc.get_pico_status(resolved)
+            except rhc.RecoveryHttpError:
+                continue
         if last.get("total_bytes") and last.get("bytes_sent") == last.get("total_bytes") == len(image):
             return f"ok - relay reports done, {last['bytes_sent']}/{last['total_bytes']} bytes sent; {_fmt_pico(last)}; {prefix}"
         return (f"FAILED: relay reports done but bytes_sent/total_bytes disagree with the {len(image)}-byte "
