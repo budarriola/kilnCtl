@@ -816,12 +816,34 @@ def _case_web_sec04(ctx: dict) -> CaseResult:
     return result
 
 
+def _case_web_zone14(ctx: dict) -> CaseResult:
+    """WEB-ZONE-14: read-only. GET /api/zones (ADMIN tier, authed seam) and
+    judge the zone-graphic inputs well-formed and self-consistent. A second
+    GET must report the same ``generation`` or the config moved mid-read and
+    the verdict would describe two different configs, so that is
+    INCONCLUSIVE."""
+    status, body = _get_json(ctx, "/api/zones")
+    result = J.judge_web_zone_graphic(status, body)
+    if result.verdict == Verdict.PASS:
+        status2, body2 = _get_json(ctx, "/api/zones")
+        g1 = body.get("generation") if isinstance(body, dict) else None
+        g2 = body2.get("generation") if status2 == 200 and isinstance(body2, dict) else None
+        if g1 != g2:
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=f"zones config generation moved between reads ({g1!r} -> {g2!r}); not judged",
+                observed=result.observed,
+            )
+    return result
+
+
 #: Wire this wave's judge functions into the shared REGISTRY (same
 #: convention as cases_web.py's own tail).
 _CASE_FUNCS = {
     "WEB-DASH-13": _case_dash13,
     "WEB-DIAG-07": _case_diag07,
     "WEB-DIAG-08": _case_diag08,
+    "WEB-ZONE-14": _case_web_zone14,
     "WEB-SEC-04": _case_web_sec04,
     "WEB-SEC-03": _case_web_sec03,
 }

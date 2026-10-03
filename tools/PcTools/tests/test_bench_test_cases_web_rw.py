@@ -791,6 +791,96 @@ class WebSec03Test(unittest.TestCase):
         self.assertIn("restore", result.reason)
 
 
+def _zones_body(**over):
+    """A healthy 3-zone /api/zones response, trimmed to what the zone graphic
+    reads (docs/ZONE_GRAPHIC_PLAN.md section 4). Relay 4 is unowned."""
+    body = {
+        "generation": 7,
+        "thermo_count": 3,
+        "relay_zone_owned_mask": 0b0111,
+        "relay_names": ["Heat1", "Heat2", "Heat3", "Vent"],
+        "relay_types": [0, 0, 0, 4],
+        "zones": [
+            {"relay_mask": 1, "thermo_mask": 1, "ct_mask": 1, "zone_type": 0},
+            {"relay_mask": 2, "thermo_mask": 2, "ct_mask": 2, "zone_type": 0},
+            {"relay_mask": 4, "thermo_mask": 4, "ct_mask": 4, "zone_type": 1},
+        ],
+    }
+    body.update(over)
+    return body
+
+
+class WebZone14Test(unittest.TestCase):
+    def _run(self, first, second=None):
+        fake = FakeHttp(
+            get_queues={"/api/zones": [(200, first), (200, second if second is not None else first)]},
+            post_responses={},
+        )
+        ctx = {"http_get_json": fake.get, "http_post_json": fake.post}
+        return C._case_web_zone14(ctx), fake
+
+    def test_healthy_config_passes_and_never_posts(self):
+        result, fake = self._run(_zones_body())
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(fake.post_calls, [])
+        self.assertEqual(result.observed["unset_unowned_relays"], [])
+
+    def test_unset_type_on_unowned_relay_is_reported_not_failed(self):
+        result, _ = self._run(_zones_body(relay_types=[0, 0, 0, 0]))
+        self.assertEqual(result.verdict, Verdict.PASS)
+        self.assertEqual(result.observed["unset_unowned_relays"], [4])
+
+    def test_owned_mask_disagreeing_with_zones_fails(self):
+        result, _ = self._run(_zones_body(relay_zone_owned_mask=0b1111))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("relay_zone_owned_mask", result.reason)
+
+    def test_thermo_count_out_of_range_fails(self):
+        for bad in (0, 4, "3", None):
+            result, _ = self._run(_zones_body(thermo_count=bad))
+            self.assertEqual(result.verdict, Verdict.FAIL, bad)
+
+    def test_fewer_zones_than_thermo_count_fails(self):
+        body = _zones_body()
+        body["zones"] = body["zones"][:2]
+        result, _ = self._run(body)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_bad_zone_field_fails_naming_it(self):
+        body = _zones_body()
+        body["zones"][1]["zone_type"] = 2
+        result, _ = self._run(body)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("zones[1].zone_type", result.reason)
+
+    def test_relay_type_out_of_range_or_wrong_length_fails(self):
+        for bad in ([0, 0, 0, 7], [0, 0, 0], [0, 0, 0, True], "0000"):
+            result, _ = self._run(_zones_body(relay_types=bad))
+            self.assertEqual(result.verdict, Verdict.FAIL, bad)
+
+    def test_missing_relay_names_fails(self):
+        body = _zones_body()
+        del body["relay_names"]
+        result, _ = self._run(body)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_http_failure_fails(self):
+        fake = FakeHttp(get_queues={"/api/zones": [(401, None)]}, post_responses={})
+        result = C._case_web_zone14({"http_get_json": fake.get, "http_post_json": fake.post})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_generation_change_between_reads_is_inconclusive(self):
+        result, _ = self._run(_zones_body(), _zones_body(generation=8))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_registered_and_in_full_suite_only(self):
+        from kilnctrl.bench_test.registry import SUITES
+
+        self.assertIsNotNone(REGISTRY["WEB-ZONE-14"].judge)
+        self.assertFalse(REGISTRY["WEB-ZONE-14"].heat)
+        self.assertIn("WEB-ZONE-14", SUITES["full"])
+
+
 # ---------------------------------------------------------------------------
 # Registry wiring
 # ---------------------------------------------------------------------------

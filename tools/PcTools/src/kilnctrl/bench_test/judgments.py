@@ -12,7 +12,7 @@ confirms it reports FAIL/INCONCLUSIVE rather than PASS.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, List, Optional
 
 from .registry import CaseResult, Verdict
 
@@ -3230,4 +3230,82 @@ def judge_lcd_keep_discard(origin_is_builtin: "bool | None", page_names: "set | 
     if not heap_ok:
         return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
                           reason="could not read heap_internal min_free after using the decide page")
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
+def judge_web_zone_graphic(status: Optional[int], body: Any) -> CaseResult:
+    """WEB-ZONE-14: the inputs ``zones_page.html``'s zone graphic is drawn
+    from (docs/ZONE_GRAPHIC_PLAN.md section 4) are well-formed and agree with
+    each other. The graphic is generated in the browser from ``GET
+    /api/zones`` alone, so this judges that one response.
+
+    Fail-closed in the plan's own spirit: every missing, non-integer or
+    out-of-range field is a FAIL naming it, never skipped. An UNSET (0)
+    relay device type on a relay no zone owns is a legal, honest state (the
+    graphic renders the unknown glyph), so it is reported in ``observed`` and
+    never fails."""
+    if status != 200 or not isinstance(body, dict):
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"GET /api/zones failed or did not return a JSON object (status={status})",
+            observed={"status": status},
+        )
+
+    def _int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    problems: List[str] = []
+    tc = body.get("thermo_count")
+    if not _int(tc) or not 1 <= tc <= 3:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=f"thermo_count {tc!r} is not an integer in 1..3 (ring count)",
+            observed={"thermo_count": tc},
+        )
+    zones = body.get("zones")
+    if not isinstance(zones, list) or len(zones) < tc:
+        return CaseResult(
+            Verdict.FAIL,
+            reason=(f"zones[] has {len(zones) if isinstance(zones, list) else repr(zones)} entries, "
+                    f"fewer than thermo_count {tc}"),
+            observed={"thermo_count": tc},
+        )
+    owned = 0
+    zsummary = []
+    for i in range(tc):
+        z = zones[i]
+        if not isinstance(z, dict):
+            problems.append(f"zones[{i}] is not an object")
+            continue
+        for key, lo, hi in (("relay_mask", 0, 15), ("thermo_mask", 1, 7),
+                            ("ct_mask", 0, 7), ("zone_type", 0, 1)):
+            v = z.get(key)
+            if not _int(v) or not lo <= v <= hi:
+                problems.append(f"zones[{i}].{key} {v!r} not an integer in {lo}..{hi}")
+        if _int(z.get("relay_mask")):
+            owned |= z["relay_mask"] & 0xF
+        zsummary.append({k: z.get(k) for k in ("relay_mask", "thermo_mask", "ct_mask", "zone_type")})
+    declared = body.get("relay_zone_owned_mask")
+    if not _int(declared):
+        problems.append(f"relay_zone_owned_mask {declared!r} is not an integer")
+    elif declared != owned:
+        problems.append(
+            f"relay_zone_owned_mask {declared} != union of zones' relay_mask {owned} "
+            "(extra-relay derivation disagrees between server and zones[])"
+        )
+    names = body.get("relay_names")
+    types = body.get("relay_types")
+    if not isinstance(names, list) or len(names) != 4 or not all(isinstance(n, str) for n in names):
+        problems.append(f"relay_names {names!r} is not a list of 4 strings")
+    if not isinstance(types, list) or len(types) != 4 or not all(_int(t) and 0 <= t <= 6 for t in types):
+        problems.append(f"relay_types {types!r} is not a list of 4 integers in 0..6")
+    observed = {
+        "thermo_count": tc, "zones": zsummary, "relay_zone_owned_mask": declared,
+        "relay_types": types,
+    }
+    if problems:
+        return CaseResult(Verdict.FAIL, reason="; ".join(problems), observed=observed)
+    observed["unset_unowned_relays"] = [
+        r + 1 for r in range(4) if not (owned >> r) & 1 and types[r] == 0
+    ]
     return CaseResult(Verdict.PASS, observed=observed)
