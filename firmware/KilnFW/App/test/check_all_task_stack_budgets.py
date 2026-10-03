@@ -1022,7 +1022,11 @@ CEILING_BYTES = {
     # stack left only ~270 B, too tight given this is still an INDETERMINATE
     # lower bound (unresolved indirect calls in backup_import_apply()'s own
     # chain), not a proven worst case.
-    "http_async_job": 4528,
+    # 2026-10-02 S7 follow-up: the writer-guard wiring (6bf98270) put
+    # safety_cfg_writer_release() (48 B) on the trampoline's own walk, so the
+    # measured total is 80 B own + 4496 B backup_import_job = 4576 B, still
+    # about 2.3 KB under the 8192 B stack after the ESP_LOG overhead above.
+    "http_async_job": 4576,
     "recovery_exit": 80,
     "backlight_pwm": 112,
     "i2c_owner_ns2009": 144,
