@@ -30,7 +30,15 @@ async try_start), so they need no extra claim. The swap worker's boot-recovery
 claim retries up to 20 times, 100 ms apart, before running unclaimed. Host tests
 cover the 409 for every other owner, release on every path and the bounded
 retry; negative-tested by removing the release in both HTTP files, which failed
-`zones_http` and `safety_cfg_http`. Not run on hardware.
+`zones_http` and `safety_cfg_http`. Not run on hardware. Landed as `f42ca1c8`;
+Opus review `a0d59984` raised `check_all_task_stack_budgets.py`'s
+`http_async_job` ceiling to 4576 B (the 48 B `safety_cfg_writer_release()`
+call on that task's path had already pushed it past the old 4528 B on main).
+Behaviour change to note: the five `safety_cfg_http.c` handlers used to answer
+busy with HTTP 200 and `ok:false`; they now answer 409 with the same JSON body,
+so `safety_cfg_http_client.post_commissioning()` raises `SafetyCfgHttpError`
+on busy instead of returning `ok:false`, and the relay-type page no longer shows
+"Saved." on a refused write.
 
 ## Recovery entry (`e25d8a30`..`24043ba9`)
 
