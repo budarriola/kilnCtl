@@ -48,6 +48,11 @@ void recovery_lcd_set_ap(const char *ssid, const char *passphrase, const char *i
 // failed). A later recovery_lcd_set_ap() clears it. Same safety rules.
 void recovery_lcd_set_no_network(void);
 
+// Shows "WIFI STORAGE FAIL" in place of the network lines: the Wi-Fi driver
+// could not be kept RAM-only, so no SoftAP (and no passphrase) exists. Same
+// safety rules as recovery_lcd_set_no_network().
+void recovery_lcd_set_wifi_storage_fail(void);
+
 // Redraws the status screen if the relay-fault state changed since the last
 // draw (a hold-watchdog fault latched after boot). Call from a task that may
 // block on the LCD lock; never from the relay-hold task.

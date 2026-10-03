@@ -120,6 +120,7 @@ static char s_net_name[33];
 static char s_net_pass[RPASS_LEN + 1];
 static char s_net_ip[16];
 static bool s_net_none = false;      // every Wi-Fi bring-up path failed
+static bool s_net_storage_fail = false; // driver not RAM-only: AP refused
 static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 
 // Status facts gathered once at show_message().
@@ -341,10 +342,12 @@ static void draw_status(void)
         (void)draw_line(Y_RELAY, TEXT_SCALE, COL_OK, COL_BG, "Heat: OFF");
     }
 
-    if (s_net_none) {
+    if (s_net_none || s_net_storage_fail) {
         // TEXT_SCALE: a NET_SCALE band (21 px from Y_JOIN) would overlap Y_SSID.
-        (void)draw_line(Y_JOIN, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "NO NETWORK");
-        (void)draw_line(Y_SSID, TEXT_SCALE, COL_DIM, COL_BG, "Wi-Fi bring-up failed");
+        (void)draw_line(Y_JOIN, TEXT_SCALE, COL_FAULT, COL_FAULT_BG,
+                        s_net_storage_fail ? "WIFI STORAGE FAIL" : "NO NETWORK");
+        (void)draw_line(Y_SSID, TEXT_SCALE, COL_DIM, COL_BG,
+                        s_net_storage_fail ? "AP not started" : "Wi-Fi bring-up failed");
         (void)draw_line(Y_PWLBL, TEXT_SCALE, COL_DIM, COL_BG, "Power-cycle or use JTAG");
         (void)draw_line(Y_PASS, PASS_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
@@ -470,6 +473,7 @@ void recovery_lcd_set_ap(const char *ssid, const char *passphrase, const char *i
     snprintf(s_net_ip, sizeof(s_net_ip), "%s", ip ? ip : "?");
     s_net_set = true;
     s_net_none = false;
+    s_net_storage_fail = false;
     if (s_ready) {
         draw_status();
     }
@@ -483,6 +487,19 @@ void recovery_lcd_set_no_network(void)
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_net_none = true;
+    if (s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_set_wifi_storage_fail(void)
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_net_storage_fail = true;
     if (s_ready) {
         draw_status();
     }

@@ -27,6 +27,12 @@ void recovery_wifi_start(void);
 // True once the SoftAP is active and accepting associations.
 bool recovery_wifi_is_up(void);
 
+// NULL while Wi-Fi bring-up has had no fatal error; otherwise a static string:
+// "wifi_storage_fail" = esp_wifi_set_storage(RAM) failed, so the AP was NOT
+// started (the passphrase would not be RAM-only). Shown on the LCD as
+// "WIFI STORAGE FAIL" and in /api/recovery/status as "wifi_error".
+const char *recovery_wifi_error(void);
+
 // Counters from the Wi-Fi event handler, for /api/recovery/status: tells a real
 // SoftAP stop apart from a PC-side scan artifact. `last_event_name` is a static
 // string; last_event_age_s is meaningful only when last_event_seen.

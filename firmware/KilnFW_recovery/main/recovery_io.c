@@ -318,6 +318,12 @@ esp_err_t recovery_io_set_lcd_pins(bool dc_high, bool reset_high)
     if (!s_i2c_ready) {
         return ESP_ERR_INVALID_STATE;
     }
+    // The whole read-modify-write of s_data is under s_io_lock, the same lock
+    // hold_task() takes, so neither side can act on a stale s_data. This is a
+    // leaf: no other lock is taken while it is held.
+    // s_data's relay bits are always 0 (SAFE_DATA), so a single 16-bit write
+    // can never raise a relay.
+    xSemaphoreTake(s_io_lock, portMAX_DELAY);
     uint16_t next = (uint16_t)(s_data & ~LCD_MASK);
     if (dc_high) {
         next |= LCD_DC_BIT;
@@ -325,15 +331,12 @@ esp_err_t recovery_io_set_lcd_pins(bool dc_high, bool reset_high)
     if (reset_high) {
         next |= LCD_RST_BIT;
     }
-    if (next == s_data) {
-        return ESP_OK;
-    }
-    // s_data's relay bits are always 0 (SAFE_DATA), so a single 16-bit write
-    // can never raise a relay.
-    xSemaphoreTake(s_io_lock, portMAX_DELAY);
-    esp_err_t err = write16(SX1509_REG_DATA_B, next);
-    if (err == ESP_OK) {
-        s_data = next;
+    esp_err_t err = ESP_OK;
+    if (next != s_data) {
+        err = write16(SX1509_REG_DATA_B, next);
+        if (err == ESP_OK) {
+            s_data = next;
+        }
     }
     xSemaphoreGive(s_io_lock);
     return err;

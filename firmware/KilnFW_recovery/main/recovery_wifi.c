@@ -18,8 +18,13 @@
 #include "recovery_io.h"
 #include "recovery_lcd.h"
 #include "recovery_passphrase.h"
+#include "recovery_wifi_policy.h"
 
 static const char *TAG = "recovery_wifi";
+
+// Static string naming a fatal bring-up error, NULL while none (see
+// recovery_wifi_error()).
+static const char *volatile s_error = NULL;
 
 #define WIFI_NVS_PARTITION "wifi_nvs"
 #define NVS_NAMESPACE      "wifi_cfg"
@@ -240,9 +245,16 @@ void recovery_wifi_start(void)
      * passphrase is never persisted by the driver either, and the default
      * `nvs` partition's nvs.net80211 namespace stays untouched. */
     esp_err_t store_err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    if (store_err != ESP_OK) {
-        ESP_LOGW(TAG, "esp_wifi_set_storage(RAM) failed: %s -- driver may keep its own config "
-                 "copy in the default NVS partition", esp_err_to_name(store_err));
+    if (!rwifi_may_configure_ap((int)store_err)) {
+        // Fatal for AP bring-up: with non-RAM storage the driver could persist
+        // the passphrase to NVS. The passphrase is never handed to the driver.
+        ESP_LOGE(TAG, "esp_wifi_set_storage(RAM) failed: %s -- AP NOT started (passphrase would "
+                 "not be RAM-only)", esp_err_to_name(store_err));
+        secure_zero(pass, sizeof(pass));
+        s_error = "wifi_storage_fail";
+        (void)esp_wifi_deinit();
+        recovery_lcd_set_wifi_storage_fail();
+        return;
     }
     // A missing handler only costs the AP statistics, so this is logged, not fatal.
     err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL);
@@ -259,4 +271,9 @@ void recovery_wifi_start(void)
 bool recovery_wifi_is_up(void)
 {
     return s_up;
+}
+
+const char *recovery_wifi_error(void)
+{
+    return s_error;
 }

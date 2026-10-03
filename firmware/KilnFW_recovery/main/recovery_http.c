@@ -424,6 +424,12 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
         }
     }
     if (e == ESP_OK) {
+        // "error": null, or the static string from recovery_wifi_error()
+        // ("wifi_storage_fail": the SoftAP was refused, see recovery_wifi.c).
+        const char *werr = recovery_wifi_error();
+        e = werr ? send_frag(req, "\"error\":\"%s\",", werr) : send_frag(req, "\"error\":null,");
+    }
+    if (e == ESP_OK) {
         e = send_frag(req, "%s,", bgs);
     }
     if (e == ESP_OK) {
