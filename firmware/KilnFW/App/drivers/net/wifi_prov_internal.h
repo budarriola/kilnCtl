@@ -184,7 +184,7 @@ typedef struct {
     size_t scan_count;
 } wifi_result_t;
 
-/* W1 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md): a command used to carry a
+/* W1 (docs/HTTP_POST_OWNER_MIGRATION.md): a command used to carry a
  * pointer straight into the PRODUCER's own stack frame (result) plus a
  * stack-resident semaphore handle (done) -- correct only as long as the
  * producer is still waiting when the owner gets around to answering. A

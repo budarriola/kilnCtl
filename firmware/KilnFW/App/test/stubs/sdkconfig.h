@@ -82,7 +82,7 @@
 #define CONFIG_KILNCTL_UART_RX_IO 44
 
 /* Forced on for test_safety_cfg_http.c's host coverage of bench_preset_job()/
- * bench_preset_post_handler() (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice
+ * bench_preset_post_handler() (docs/HTTP_POST_OWNER_MIGRATION.md slice
  * A2), which safety_cfg_http.c compiles only under `#if CONFIG_KILNCTL_DEV_TOOLS`.
  * Same convention as CONFIG_KILNCTL_ENABLE_GPIO_PROBE above: the real bench
  * board's sdkconfig has this OFF (CLAUDE.md), so this is a host-test-only

@@ -2934,7 +2934,7 @@ int main(void)
     test_commissioning_post_gain_out_of_range_is_refused();
     test_commissioning_post_in_range_gain_is_accepted();
 
-    // A2 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md) -- bench_preset_job()/
+    // A2 (docs/HTTP_POST_OWNER_MIGRATION.md) -- bench_preset_job()/
     // bench_preset_post_handler()'s own non-busy paths. Must run before the
     // MUST-STAY-LAST busy block below (same s_busy constraint as everything
     // else in that block).

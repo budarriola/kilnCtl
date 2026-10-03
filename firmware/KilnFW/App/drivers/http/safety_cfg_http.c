@@ -18,7 +18,7 @@
 
 #include "hal_time.h" /* hal_time_now_us() -- HAL_INCLUDE_BOUNDARY: this file must not include esp_timer.h
                         * directly, same convention safety_ceiling_sync.c's own include documents */
-#include "http_async_job.h" /* docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1 -- ct_auto_zero_post_handler()
+#include "http_async_job.h" /* docs/HTTP_POST_OWNER_MIGRATION.md slice A1 -- ct_auto_zero_post_handler()
                               * hands the ~10-15s measurement+commit off to http_async_job_try_start()
                               * instead of blocking httpd_worker inline. */
 #include "http_form.h"
@@ -1323,7 +1323,7 @@ static esp_err_t ct_trim_post_handler(httpd_req_t *req)
  * entry the operator typed on purpose is not "the sweep clobbering it
  * silently").
  *
- * docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1 (2026-09-25): the
+ * docs/HTTP_POST_OWNER_MIGRATION.md slice A1 (2026-09-25): the
  * measurement (~10-12s at CURRENT_TASK_CT_AUTO_ZERO_TARGET_SAMPLES/
  * SAFTYFW_PERIOD_CURRENT_TASK_MS, current_task.c) and the commit that
  * follows it used to block the ENTIRE esp_http_server task inline -- a

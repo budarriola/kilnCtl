@@ -1553,7 +1553,7 @@ static void test_zones_post_refused_by_mode_gate_before_interlock(void)
               "refusal body must carry the PcTools discriminator marker");
 }
 
-// Opus fix-then-push review, item 1 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md
+// Opus fix-then-push review, item 1 (docs/HTTP_POST_OWNER_MIGRATION.md
 // A2): the interleaving audit missed that zones_post_handler() raises the
 // Pico ceiling (safety_ceiling_sync_guard_raise() -> s_ceiling_writer, the
 // fake safety_cfg_write_set_and_confirm_f32() above) with no
@@ -13222,7 +13222,7 @@ static void test_zones_current_sweep_start_atomic_gate_closes_the_race(void)
     s_zones_config_valid = false;
 }
 
-// Single-flight safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md
+// Single-flight safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION.md
 // A2 gap): zones_current_sweep_start() must refuse while an http_async_job, a
 // kiln config swap, or the ceiling reconcile owns the guard, must roll back
 // EVERYTHING it took before that point (heat claim, s_sweep.active), and must
@@ -15699,7 +15699,7 @@ void run_test_zones_http(void)
     test_canonical_flushes_negative_zero_to_positive_zero();
     test_canonical_max_size_is_a_safe_upper_bound();
 
-    // Opus fix-then-push review, item 1 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md
+    // Opus fix-then-push review, item 1 (docs/HTTP_POST_OWNER_MIGRATION.md
     // A2): zones_post_handler() raises the Pico ceiling via
     // safety_ceiling_sync_guard_raise() -> s_ceiling_writer (the fake
     // safety_cfg_write_set_and_confirm_f32() above), so it must refuse while

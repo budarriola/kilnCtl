@@ -476,7 +476,7 @@ static void test_wifi_prov_start_sets_ram_storage(void)
                "the last esp_wifi_set_storage() call requested WIFI_STORAGE_RAM, not the flash-backed default");
 }
 
-// ---- W1 reply-slot-pool tests (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md) ----
+// ---- W1 reply-slot-pool tests (docs/HTTP_POST_OWNER_MIGRATION.md) ----
 // claim_reply_slot()/free_reply_slot()/abandon_or_free_reply_slot()/owner_reply() are
 // static in wifi_prov.c and reached here the same way do_*() is: this file
 // #includes wifi_prov.c directly. These exercise the pure claim/free/abandon/

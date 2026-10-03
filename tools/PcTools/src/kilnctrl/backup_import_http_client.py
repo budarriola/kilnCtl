@@ -10,7 +10,7 @@ response round trip (backup_import_apply(), a two-pass validate-then-commit
 parser); the response IS the outcome. ``post_import()`` below reports
 whichever of these it gets back:
 
-2026-09-28 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A4): the slow tail
+2026-09-28 (docs/HTTP_POST_OWNER_MIGRATION.md slice A4): the slow tail
 (reading the body and running backup_import_apply()) now runs on its own
 task via http_async_job.c, off esp_http_server's single shared httpd_worker
 -- so a long import no longer starves every OTHER request (dashboard polls,

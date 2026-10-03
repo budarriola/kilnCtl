@@ -725,7 +725,7 @@ TASKS = [
          stack=lambda: extract_int_literal("drivers/http/ota_http_pico.c",
              r'xTaskCreate\(ota_pico_rollback_task,\s*"ota_pico_rollback",\s*(\d+)')),
     dict(name="http_async_job", root="http_async_job_task",
-         # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1: the shared
+         # docs/HTTP_POST_OWNER_MIGRATION.md slice A1: the shared
          # single-flight async-job helper (http_async_job.c). The stack size
          # is a parameter, not a literal in http_async_job.c's own
          # xTaskCreate() call, so the source-derived regex reads it out of
@@ -748,7 +748,7 @@ TASKS = [
          # (a 1024 B frame) -> uart_protocol_send_broadcast ->
          # frame_and_send is 3280 B; adding it here makes the checker
          # measure and grade the real number instead of the trampoline's.
-         # bench_preset_job (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A2)
+         # bench_preset_job (docs/HTTP_POST_OWNER_MIGRATION.md slice A2)
          # is this helper's second registered fn, added the same way -- only
          # one job runs at a time, so the loop above takes the DEEPER of the
          # two rather than summing them (see that loop's own comment). It is
@@ -1351,7 +1351,7 @@ def main():
         extra_label = None
         extra_errors = []
         # extra_roots may be a plain list or a zero-arg callable -- the
-        # callable form (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A2,
+        # callable form (docs/HTTP_POST_OWNER_MIGRATION.md slice A2,
         # http_async_job's own row) lets a row's set of registered fns depend
         # on the ELF's OWN sdkconfig (bench_preset_job only exists when
         # CONFIG_KILNCTL_DEV_TOOLS=y, safety_cfg_http.c's #if around its

@@ -2420,7 +2420,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     }
 
     /* Single-flight against every other Pico safety-config writer
-     * (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap): an http_async_job
+     * (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap): an http_async_job
      * (ct_auto_zero/bench_preset/backup_import), a kiln config swap, or the
      * poll-side ceiling reconcile mid-write. The sweep's pushes
      * (ct_channel_map, k_ct, i_normal_a) are SET_PARAM/COMMIT_CONFIG round

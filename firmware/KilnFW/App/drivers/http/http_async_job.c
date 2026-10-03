@@ -19,7 +19,7 @@ static const char *TAG = "http_async_job";
 // must also exclude zones_current_sweep_task.c, kiln_cfg_swap_worker.c and
 // the safety_poll ceiling reconcile, which all write the Pico's safety
 // config the same way, and a flag here plus a second flag there could never
-// be tested-and-set together (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap).
+// be tested-and-set together (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap).
 // s_mux below now only guards s_task_handle.
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 

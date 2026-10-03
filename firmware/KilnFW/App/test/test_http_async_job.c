@@ -1,5 +1,5 @@
 // Host tests for App/drivers/http/http_async_job.c -- the shared one-at-a-time
-// async-job helper (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1).
+// async-job helper (docs/HTTP_POST_OWNER_MIGRATION.md slice A1).
 // #includes http_async_job.c directly to reach its static run_job() (needed
 // because the host xTaskCreate() stub never actually invokes the function it
 // is given -- see stubs/freertos/task.h's own comment), same convention as
@@ -217,7 +217,7 @@ static void test_run_job_clears_task_handle_atomically_with_busy(void)
 
 // ---------------------------------------------------------------------------
 // Single-flight guard shared with the sweep / kiln-config swap / ceiling
-// reconcile writers (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 follow-up).
+// reconcile writers (docs/HTTP_POST_OWNER_MIGRATION.md A2 follow-up).
 // Those writers' own modules are covered where they are linked; here the
 // guard itself and the async-job side of the contract are proven.
 // ---------------------------------------------------------------------------

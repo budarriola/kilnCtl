@@ -79,7 +79,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
         return ota_http_send_interlock_refusal(req, gate, interlock_reason);
     }
 
-    /* docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 review fix (Opus, 2026-09-25):
+    /* docs/HTTP_POST_OWNER_MIGRATION.md A2 review fix (Opus, 2026-09-25):
      * this handler raises the Pico ceiling via safety_ceiling_sync_guard_raise()
      * below (-> pico_ceiling_writer() -> safety_cfg_write_set_and_confirm_f32()),
      * staging abs_max_temp_c and sending a COMMIT_CONFIG -- exactly the kind of

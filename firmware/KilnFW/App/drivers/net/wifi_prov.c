@@ -122,7 +122,7 @@ struct wifi_prov_state s_wifi;
 
 QueueHandle_t s_wifi_cmd_queue;
 
-/* ---- Reply slot pool (2026-09-25, W1: docs/HTTP_POST_OWNER_MIGRATION_PLAN.md;
+/* ---- Reply slot pool (2026-09-25, W1: docs/HTTP_POST_OWNER_MIGRATION.md;
  * revised 2026-09-25 review fixes -- see the plan doc's W1 section) ----
  *
  * Fixes the write-into-a-dead-stack-frame hazard wifi_cmd_t's doc comment

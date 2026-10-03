@@ -1,5 +1,5 @@
 // Host tests for kiln_cfg_swap_worker.c's single-flight safety-config writer
-// guard (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap, closed 2026-10-02):
+// guard (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap, closed 2026-10-02):
 // the kiln config swap drives the same Pico SET_PARAM/COMMIT_CONFIG staged
 // transaction an http_async_job, the zone current sweep and the poll-side
 // ceiling reconcile do, so it must not overlap any of them.

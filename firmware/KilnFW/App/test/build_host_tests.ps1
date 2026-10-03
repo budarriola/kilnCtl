@@ -148,7 +148,7 @@ try {
         (Join-Path $testDir "test_httpd_socket_budget.c"),
         (Join-Path $testDir "test_stack_margin.c"),
         (Join-Path $testDir "test_stack_margin_registry.c"),
-        # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1: http_async_job.c's
+        # docs/HTTP_POST_OWNER_MIGRATION.md slice A1: http_async_job.c's
         # own host tests. No ESP-IDF dependency beyond the stub
         # esp_http_server.h/freertos headers already used across this
         # executable, and no static-symbol conflict with anything else
@@ -605,7 +605,7 @@ try {
             # own dedicated executable for the module's unit tests.
             "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`" " +
-            # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 review fix (Opus,
+            # docs/HTTP_POST_OWNER_MIGRATION.md A2 review fix (Opus,
             # 2026-09-25): zones_post_handler() (zones_http_post.c, #included
             # above) now calls http_async_job_busy() -- link the real object
             # in, same convention as test_safety_cfg_http.c's own link of it.
@@ -676,7 +676,7 @@ try {
             # not otherwise linked into this executable (its own
             # safety_cfg_store fake is separate and does not touch hal_kv).
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
-            # docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1: safety_cfg_
+            # docs/HTTP_POST_OWNER_MIGRATION.md slice A1: safety_cfg_
             # http.c (#included above) now calls http_async_job_try_start()
             # (ct_auto_zero_post_handler()'s handoff), so http_async_job.c
             # must link for real here too -- it in turn calls
@@ -2344,7 +2344,7 @@ try {
     Invoke-HostTestExe -Name "wifi_prov" -ExePath $exe51 -BuildCmd $cmd51
 
     # ---- test_kiln_cfg_swap_worker.c: its own separate executable ----------
-    # 2026-10-02 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap): the kiln
+    # 2026-10-02 (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap): the kiln
     # config swap worker now takes the single-flight safety-config writer
     # guard shared with http_async_job/the zone sweep/the ceiling reconcile.
     # #includes kiln_cfg_swap_worker.c directly (static run_swap_job()), fakes
@@ -2897,7 +2897,7 @@ try {
     # see exe51's own block comment.
     # 66 -> 67 (2026-10-02): added test_kiln_cfg_swap_worker.c's own
     # Invoke-HostTestExe call -- the swap worker's single-flight
-    # safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2).
+    # safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION.md A2).
     $totalExpected = 67
     Write-Host ""
     if ($script:simCredibilityGateLine) {

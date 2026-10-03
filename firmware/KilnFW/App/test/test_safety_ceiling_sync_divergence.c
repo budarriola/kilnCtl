@@ -837,7 +837,7 @@ static void test_divergence_during_backup_restore(void)
 
 // ---------------------------------------------------------------------
 // 3. Single-flight safety-config writer guard
-//    (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap). The poll-side
+//    (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap). The poll-side
 //    (non-blocking) reconcile's raise is a stage+commit on the same Pico
 //    transaction an http_async_job / sweep / kiln config swap drives, so it
 //    must skip its WRITE while any of them owns the guard -- but divergence

@@ -2,7 +2,7 @@
  * longer than httpd_worker (esp_http_server's single shared worker task,
  * 8192 B internal stack) can be blocked for without stalling every other
  * HTTP request (dashboard poll, Stop button, another commissioning action).
- * docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A1.
+ * docs/HTTP_POST_OWNER_MIGRATION.md slice A1.
  *
  * Shape: the HTTP handler validates the request, checks auth and
  * preconditions, and decides whether to hand the request itself to a job

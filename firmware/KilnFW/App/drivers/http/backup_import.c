@@ -3179,7 +3179,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
         }
     }
 
-    /* Task 4 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A4): hand the body
+    /* Task 4 (docs/HTTP_POST_OWNER_MIGRATION.md slice A4): hand the body
      * read plus the two-pass validate-then-commit off to backup_import_job()
      * on its own task -- up to 100 profile/zone/kiln_config slots through
      * the stores' public save functions, measured on the bench (2026-09-28,

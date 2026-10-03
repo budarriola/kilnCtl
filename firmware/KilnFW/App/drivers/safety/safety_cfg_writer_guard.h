@@ -1,5 +1,5 @@
 /* Single-flight guard over "who is currently writing the Pico's safety
- * config" -- docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2's open interleaving
+ * config" -- docs/HTTP_POST_OWNER_MIGRATION.md A2's open interleaving
  * gap. Exactly ONE of these may own the guard at a time:
  *
  *   ASYNC_JOB  http_async_job.c's job task (ct_auto_zero, bench_preset,

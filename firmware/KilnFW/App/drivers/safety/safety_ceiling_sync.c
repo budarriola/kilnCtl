@@ -841,7 +841,7 @@ static bool reconcile_on_link_up_impl(SafetyLinkClass *link, bool blocking)
     }
 
     /* Single-flight against every other Pico safety-config writer
-     * (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md A2 gap): the guard_raise() below
+     * (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap): the guard_raise() below
      * can stage abs_max_temp_c and COMMIT_CONFIG, the same staged transaction
      * an http_async_job (ct_auto_zero/bench_preset/backup_import) or a zone
      * current sweep drives, so it must not overlap one. Only the POLL-SIDE

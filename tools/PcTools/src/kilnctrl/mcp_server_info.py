@@ -1049,7 +1049,7 @@ def backup_import(
     docstring/result says so rather than implying a poll that does not
     exist for this route.
 
-    2026-09-28 (docs/HTTP_POST_OWNER_MIGRATION_PLAN.md slice A4): the slow
+    2026-09-28 (docs/HTTP_POST_OWNER_MIGRATION.md slice A4): the slow
     tail now runs off esp_http_server's shared httpd_worker task via
     http_async_job.c, so a long restore no longer stalls every OTHER
     request while it runs -- but the wire contract above (one POST, one
