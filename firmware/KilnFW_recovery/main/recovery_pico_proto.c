@@ -352,6 +352,20 @@ bool rpp_parse_status(const uint8_t *p, size_t len, rpp_status_t *out)
     for (uint8_t i = 0; i < gap_count; i++) {
         out->gaps[i] = (uint16_t)(p[16 + 2u * i] | (p[17 + 2u * i] << 8));
     }
+    out->active_slot = RPP_SLOT_UNKNOWN;
+    out->target_slot = RPP_SLOT_UNKNOWN;
+    size_t trailer = (size_t)RPP_STATUS_HEADER_LEN + (size_t)gap_count * 2u;
+    if (len >= trailer + 2u) {
+        // Only read the trailer when the sender's own gap_count was not clamped:
+        // after a clamp the bytes at `trailer` are more gap entries, not slots.
+        if (p[15] == gap_count) {
+            out->active_slot = (p[trailer] == 0u || p[trailer] == 1u) ? (int)p[trailer]
+                                                                       : RPP_SLOT_UNKNOWN;
+            out->target_slot = (p[trailer + 1u] == 0u || p[trailer + 1u] == 1u)
+                                   ? (int)p[trailer + 1u]
+                                   : RPP_SLOT_UNKNOWN;
+        }
+    }
     return true;
 }
 

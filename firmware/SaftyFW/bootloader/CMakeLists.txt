@@ -72,6 +72,7 @@ add_executable(saftyfw_bootloader
     ../src/update/image_header.c
     ../src/update/received_ranges.c
     ../src/update/update_receiver.c
+    ../src/tasks/update_task_slot_linkage.c
 )
 
 target_include_directories(saftyfw_bootloader PRIVATE
@@ -79,6 +80,7 @@ target_include_directories(saftyfw_bootloader PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../src
     ${CMAKE_CURRENT_LIST_DIR}/../src/board
     ${CMAKE_CURRENT_LIST_DIR}/../src/update
+    ${CMAKE_CURRENT_LIST_DIR}/../src/tasks
 )
 
 target_compile_options(saftyfw_bootloader PRIVATE -Wall -Wextra -Werror)

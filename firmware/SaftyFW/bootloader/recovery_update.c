@@ -19,6 +19,8 @@
 #include "received_ranges.h" // src/update/
 #include "update_receiver.h" // src/update/
 
+#include "update_task_slot_linkage.h" // src/tasks/ -- pure, no RTOS/SDK dependency
+
 #include "kilnlink/kilnlink_frame.h"
 
 // --- Wire command ids (src/tasks/link_frame.h's values -- redefined here,
@@ -54,6 +56,21 @@ static bool s_rx_collecting = false;
 // see this file's header comment item 6) ---
 #define STATUS_HEADER_LEN 16u
 #define STATUS_MAX_GAPS   32u
+// Two-byte slot trailer appended AFTER the gap list: [active_slot][target_slot],
+// each 0/1 = slot A/B, STATUS_SLOT_UNKNOWN when not known. Both existing
+// parsers (KilnFW safety_apply_update_status, KilnFW_recovery rpp_parse_status)
+// require only header + gap_count*2 bytes and ignore anything after, so the
+// trailer is backward compatible. active_slot is the bootloader's own metadata
+// view (the slot main.c would boot), and the ESP prefers it over an operator
+// guess. target_slot is the slot the transfer in progress is writing.
+#define STATUS_SLOT_TRAILER_LEN 2u
+#define STATUS_SLOT_UNKNOWN     0xFFu
+
+// RP2040 architectural constants for the slot-linkage check, same values as
+// update_task.c's UPDATE_TASK_SLOT_LINKAGE_* (fixed for every RP2040).
+#define RECOVERY_LINKAGE_SRAM_BASE 0x20000000u
+#define RECOVERY_LINKAGE_SRAM_END  0x20042000u
+#define RECOVERY_LINKAGE_XIP_BASE  0x10000000u
 
 typedef enum {
     R_STATE_IDLE = 0,
@@ -64,6 +81,9 @@ typedef enum {
     R_STATE_COMPLETE = 5,
     R_STATE_ABORTED = 6,
     R_STATE_FAILED = 7,
+    // Same value update_task.c / UPDATE_PROTOCOL.md use for a CRC-good image
+    // whose vector table does not belong to the target slot.
+    R_STATE_REJECTED_SLOT_LINKAGE = 8,
 } recovery_wire_state_t;
 
 #define STATUS_ERR_RELAY_CLOSED         (1u << 0) // never set in recovery -- see header comment
@@ -223,7 +243,7 @@ static void recovery_pack_and_send_status(uint8_t state, uint8_t err, const uint
         gap_count = STATUS_MAX_GAPS;
     }
 
-    uint8_t buf[STATUS_HEADER_LEN + STATUS_MAX_GAPS * 2u];
+    uint8_t buf[STATUS_HEADER_LEN + STATUS_MAX_GAPS * 2u + STATUS_SLOT_TRAILER_LEN];
     size_t len = 0;
 
     buf[len++] = (uint8_t)RECOVERY_CMD_UPDATE_STATUS;
@@ -245,6 +265,15 @@ static void recovery_pack_and_send_status(uint8_t state, uint8_t err, const uint
         put_u16_le(&buf[len], (uint16_t)gaps[i]);
         len += 2;
     }
+
+    // Slot trailer. active_slot comes from the same metadata read main.c's
+    // boot path does; target_slot only while a transfer is live.
+    bootloader_metadata_t meta;
+    size_t latest = recovery_read_latest_metadata_or_default(&meta);
+    buf[len++] = (latest != BOOTLOADER_METADATA_NO_SLOT && meta.active_slot <= BOOTLOADER_SLOT_B)
+                     ? (uint8_t)meta.active_slot
+                     : (uint8_t)STATUS_SLOT_UNKNOWN;
+    buf[len++] = s_transfer_active ? (uint8_t)s_target_slot : (uint8_t)STATUS_SLOT_UNKNOWN;
 
     recovery_send_frame(buf, (uint8_t)len);
 }
@@ -392,6 +421,23 @@ static void recovery_process_end(const uint8_t *payload, uint8_t length)
 
     if (actual_crc != s_header.crc32) {
         recovery_send_status_now(R_STATE_FAILED, STATUS_ERR_CRC_MISMATCH);
+        recovery_revert_target_slot();
+        return;
+    }
+
+    // Slot-linkage check, AFTER the CRC (a CRC-good image written for the
+    // other slot is exactly what the CRC cannot catch: the bytes received are
+    // the bytes sent) and BEFORE the slot is marked PENDING_VERIFY and made
+    // active -- main.c jumps into it unconditionally, so a wrong-slot image
+    // would otherwise fault at boot. The ESP-side check
+    // (rpp_check_image) is a courtesy; this is the one that cannot be bypassed.
+    if (s_header.length < 8u ||
+        !update_task_slot_linkage_check(((const uint32_t *)slot_data)[0],
+                                        ((const uint32_t *)slot_data)[1], s_header.length,
+                                        s_slot_flash_offset, BOOTLOADER_SLOT_FLASH_SIZE,
+                                        RECOVERY_LINKAGE_SRAM_BASE, RECOVERY_LINKAGE_SRAM_END,
+                                        RECOVERY_LINKAGE_XIP_BASE)) {
+        recovery_send_status_now(R_STATE_REJECTED_SLOT_LINKAGE, STATUS_ERR_CRC_MISMATCH);
         recovery_revert_target_slot();
         return;
     }

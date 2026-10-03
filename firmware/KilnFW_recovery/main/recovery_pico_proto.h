@@ -243,6 +243,12 @@ typedef struct {
     uint32_t received_chunks;
     uint8_t gap_count;
     uint16_t gaps[RPP_STATUS_MAX_GAPS];
+    // Optional two-byte trailer after the gap list (bootloader only today): the
+    // bootloader's own metadata active slot and the slot a live transfer is
+    // writing. RPP_SLOT_A/B, or RPP_SLOT_UNKNOWN when absent (older image, the
+    // application's status) or reported unknown (0xFF on the wire).
+    int active_slot;
+    int target_slot;
 } rpp_status_t;
 
 // Payload includes the command byte at [0]. False on a short/wrong payload.

@@ -248,6 +248,7 @@ typedef struct {
     bool app_seen;
     bool boot_seen;
     int app_active_slot;
+    int boot_active_slot; // bootloader-reported active slot (UPDATE_STATUS trailer)
     int64_t app_first_ms; // when the application first answered (-1 = not yet)
     bool armed;      // BEGIN has been sent: terminal states are now ours
     bool fatal;      // a terminal Pico state arrived; text already published
@@ -280,6 +281,9 @@ static void handle_frame(relay_t *r, const kilnlink_frame_t *f)
     }
     r->st = st;
     r->st_seq++;
+    if (st.active_slot != RPP_SLOT_UNKNOWN) {
+        r->boot_active_slot = st.active_slot;
+    }
     // Only an idle report proves a bootloader: a busy application with a
     // stale transfer can also answer GET_STATUS with UPDATE_STATUS.
     if (!r->app_seen && rpp_status_proves_bootloader(&st)) {
@@ -759,9 +763,11 @@ static bool run_transfer(relay_t *r)
     unlock();
 
     // Target-slot resolution, before anything is erased (see the proto header).
-    // Never assumed: the bootloader cannot report its slot, so it always needs
-    // the operator's choice.
-    rpp_target_t t = rpp_resolve_target(bootloader ? RPP_SLOT_UNKNOWN : r->app_active_slot,
+    // Never assumed.
+    // The Pico's own report wins over the operator's guess: Frame A from the
+    // application, or the bootloader's UPDATE_STATUS slot trailer. Only a
+    // bootloader too old to send the trailer still needs the operator's choice.
+    rpp_target_t t = rpp_resolve_target(bootloader ? r->boot_active_slot : r->app_active_slot,
                                         s_operator_slot);
     lock();
     s_target_slot = t.target_slot;
@@ -873,6 +879,7 @@ bool recovery_pico_start(size_t len, uint32_t crc32, int image_slot, int operato
     }
     rpp_rx_init(&r->rx);
     r->app_active_slot = RPP_SLOT_UNKNOWN;
+    r->boot_active_slot = RPP_SLOT_UNKNOWN;
     r->app_first_ms = -1;
     if (!internal_ram_ok()) {
         heap_caps_free(r);
