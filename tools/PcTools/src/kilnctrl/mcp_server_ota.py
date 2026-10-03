@@ -220,6 +220,46 @@ def ota_rollback_esp(host: Optional[str] = None) -> str:
 
 
 @_srv._tool()
+def recovery_enter(host: Optional[str] = None, confirm: bool = False) -> str:
+    """Deliberately reboot the ESP32-S3 into its RECOVERY image -- POST
+    /api/ota/esp/recovery_boot (docs/OTA_SINGLE_SLOT_PLAN.md section 4). With
+    one OTA slot, ota_rollback_esp() has nothing to roll back to; this is the
+    way to reach the image that can take a fresh push (see the recovery_*
+    tools, which only work once the board is running that image).
+
+    Refuses unless `confirm is True` exactly. The board itself refuses (409)
+    while a profile or autotune is running, while any relay is on or
+    unreadable, on an unmet OTA interlock, when another update holds the
+    mutex, on a partition table where the running image IS the factory
+    partition, and when the recovery partition does not verify as a bootable
+    image; none of those refusals changes anything on the board.
+    ROUTE_TIER_ADMIN (the admin web session) is the only auth; no credential
+    is printed.
+
+    Selecting recovery erases otadata (stock IDF), so the board stays in
+    recovery until recovery_exit sets it back to the application. The call
+    returns when the board answers; it does not wait for the reboot.
+
+    NOT VERIFIED AGAINST REAL HARDWARE -- request/response handling is
+    unit-tested with mocked HTTP only.
+    """
+    if confirm is not True:
+        return ("error: refused -- this reboots the board into the recovery image and leaves it there "
+                "until recovery_exit; pass confirm=True (exactly True) to proceed")
+    resolved = _ota_resolve_host(host)
+    try:
+        body = ota_http.recovery_boot_esp(resolved)
+    except ota_http.OtaHttpError as exc:
+        status_bit = f" (HTTP {exc.status})" if exc.status else ""
+        return f"error: {exc}{status_bit} (host={resolved})"
+    if not body.get("ok"):
+        return f"error: board reported failure: {body} (host={resolved})"
+    return (f"ok - recovery boot accepted, was running version={body.get('version_before')!r} "
+            f"(host={resolved}) -- board is rebooting into the recovery image now; use recovery_status "
+            f"once it is back up")
+
+
+@_srv._tool()
 def ota_recovery_exit_esp(host: Optional[str] = None) -> str:
     """Ask the ESP32-S3 to reboot right now to exit boot_guard.h's recovery
     mode -- POST /api/ota/esp/recovery_exit.

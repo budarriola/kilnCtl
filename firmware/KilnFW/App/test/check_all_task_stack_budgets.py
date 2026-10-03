@@ -718,6 +718,9 @@ TASKS = [
     dict(name="ota_rollback_reboot", root="ota_rollback_reboot_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_esp.c",
              r'xTaskCreate\(ota_rollback_reboot_task,\s*"ota_rollback_reboot",\s*(\d+)')),
+    dict(name="recovery_boot", root="ota_recovery_boot_reboot_task",
+         stack=lambda: extract_int_literal("drivers/http/ota_http_recovery.c",
+             r'xTaskCreate\(ota_recovery_boot_reboot_task,\s*"recovery_boot",\s*(\d+)')),
     dict(name="ota_pico_rollback", root="ota_pico_rollback_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_pico.c",
              r'xTaskCreate\(ota_pico_rollback_task,\s*"ota_pico_rollback",\s*(\d+)')),
@@ -980,6 +983,8 @@ CEILING_BYTES = {
     # own comment above calls papering over a regression.
     "profile_exec_wdt": 2496,
     "ota_rollback_reboot": 1216,
+    # Measured 2026-10-02 (same shape as ota_rollback_reboot: announce-reboot send + hal_wdt_reboot).
+    "recovery_boot": 1216,
     "ota_pico_rollback": 2736,
     # 2026-09-25 fix-then-push review: the previous 2736 ceiling here was
     # WRONG -- it was borrowed from ota_pico_rollback on the assumption the

@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 206 tools (203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 207 tools (206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -437,6 +437,18 @@ off, these nine routes are now exactly as open as every other ADMIN route,
 same as the rest of the auth-off collapse. The separate, standalone recovery
 firmware image (`firmware/KilnFW_recovery/`) is unaffected and still
 implements the AP-password HMAC on its own routes.
+
+**`recovery_enter` (2026-10-02):** wraps `POST /api/ota/esp/recovery_boot` (`ROUTE_TIER_ADMIN`), the deliberate way from the
+application into the recovery image once `ota_rollback_esp()` has nothing to roll back to
+(`docs/OTA_SINGLE_SLOT_PLAN.md` section 4). Lives in `mcp_server_ota.py` (it talks to the APPLICATION, unlike the
+`recovery_*` tools below). Refuses unless `confirm is True` exactly, before any network access, and prints no
+credential. The board refuses 409 while a firing/autotune runs or any relay is on/unreadable, on an unmet OTA
+interlock, with another update in flight, on the old single-image layout, and when the recovery partition does not
+verify; if selecting recovery fails part-way it restores the running boot target and answers 500 (reporting the
+restore result), since `esp_ota_set_boot_partition` may already have erased `otadata`. Selecting recovery leaves
+`otadata` pointing at factory with no OTA history, so the known `flash_firmware()` `otadata` gap (CLAUDE.md flash
+section) is reachable: a later JTAG flash boots `recovery` until `recovery_exit` runs. Never run against real
+hardware as of this entry (mocked HTTP only).
 
 **Recovery-image tools (2026-10-02):** `recovery_status` (READ-ONLY: `GET /api/recovery/status` plus
 `GET /api/recovery/pico/status`; it also renders the image's diagnostic keys -- `auth_secret_present`, `auth_fallback`, `uptime_s`, `reset_reason`/`reset_reason_name`, `app_ota_state`, `coredump_present`, `otadata_blank`, the Wi-Fi AP counters (`wifi_up`, `ap_*`, `wifi_last_event*`) and the `relay_hold_*` task state -- one group per line, saying "not reported (older recovery image)" for any key the board omits and never inventing a value; it adds a `WARNING:` line for `auth_fallback=true` (the board is on the derived fallback secret, so the configured AP password will not authenticate; the client deliberately does not derive that secret), `ap_stop_count>0`, `relay_hold_fault=true`, a `relay_hold_task` that is not running, `otadata_blank=true` and `coredump_present=true`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`,

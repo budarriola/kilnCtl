@@ -796,8 +796,39 @@ static void test_get_persisted_count_legacy_open_error_fails_not_fabricated_zero
     TEST_CHECK(out == 0xdeadbeefu, "a failed call must not touch *out_count");
 }
 
+static void test_recovery_route_decision(void)
+{
+    TEST_SECTION("boot_guard_decide_recovery_route -- threshold + valid recovery => switch partitions; threshold + invalid/absent/old layout => degraded in-app mode; below threshold => normal, whatever the image state");
+    /* below threshold: never anything but NORMAL, even with a valid image */
+    TEST_CHECK(boot_guard_decide_recovery_route(false, false, true) == BOOT_RECOVERY_ROUTE_NORMAL,
+               "below threshold, valid image -> normal");
+    TEST_CHECK(boot_guard_decide_recovery_route(false, false, false) == BOOT_RECOVERY_ROUTE_NORMAL,
+               "below threshold, invalid image -> normal");
+    TEST_CHECK(boot_guard_decide_recovery_route(false, true, false) == BOOT_RECOVERY_ROUTE_NORMAL,
+               "below threshold, old layout -> normal");
+    /* at threshold */
+    TEST_CHECK(boot_guard_decide_recovery_route(true, false, true) == BOOT_RECOVERY_ROUTE_SWITCH_PARTITION,
+               "threshold + valid recovery image -> switch partitions");
+    TEST_CHECK(boot_guard_decide_recovery_route(true, false, false) == BOOT_RECOVERY_ROUTE_DEGRADED,
+               "threshold + recovery image invalid -> degraded in-app mode, never a switch");
+    TEST_CHECK(boot_guard_decide_recovery_route(true, true, true) == BOOT_RECOVERY_ROUTE_DEGRADED,
+               "threshold while ALREADY running the factory partition -> degraded (cannot switch to itself)");
+    TEST_CHECK(boot_guard_decide_recovery_route(true, true, false) == BOOT_RECOVERY_ROUTE_DEGRADED,
+               "threshold + old layout + invalid -> degraded");
+
+    /* tie to the real counter: the threshold input is exactly next_boot_count()'s verdict */
+    bool rm = false;
+    (void)next_boot_count(RECOVERY_MODE_BOOT_THRESHOLD - 1u, &rm);
+    TEST_CHECK(boot_guard_decide_recovery_route(rm, false, true) == BOOT_RECOVERY_ROUTE_NORMAL,
+               "one boot short of the real threshold -> normal");
+    (void)next_boot_count(RECOVERY_MODE_BOOT_THRESHOLD, &rm);
+    TEST_CHECK(boot_guard_decide_recovery_route(rm, false, true) == BOOT_RECOVERY_ROUTE_SWITCH_PARTITION,
+               "at the real threshold with a valid image -> switch");
+}
+
 void run_test_boot_guard(void)
 {
+    test_recovery_route_decision();
     test_crc32_reference_vector();
     test_record_crc_detects_corruption();
     test_next_boot_count_threshold();

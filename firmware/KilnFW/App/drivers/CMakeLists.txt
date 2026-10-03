@@ -344,6 +344,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "net/ota_interlock.c"
                        "control/heat_interlock.c"
                        "persist/ota_record.c"
+                       "persist/recovery_switch.c"
                        "http/ota_http.c"
                        "http/system_mode_gate_http.c"
                        "http/ota_http_esp.c"
@@ -673,7 +674,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
                                 esp_hw_support esp_hal_wdt
                                 espcoredump hwabstraction_esp
-                       PRIV_REQUIRES spi_flash spiffs joltwallet__littlefs)
+                       PRIV_REQUIRES spi_flash bootloader_support spiffs joltwallet__littlefs)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it

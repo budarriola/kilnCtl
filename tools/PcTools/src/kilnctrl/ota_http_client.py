@@ -471,6 +471,57 @@ def rollback_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     return body
 
 
+def recovery_boot_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+    """POST /api/ota/esp/recovery_boot -- deliberately reboot the board into its
+    RECOVERY image (App/drivers/http/ota_http_recovery.c's
+    ota_recovery_boot_post_handler(); docs/OTA_SINGLE_SLOT_PLAN.md section 4).
+    With one OTA slot, ota_rollback_esp() has nothing to roll back to; this is
+    the way to reach the image that can take a fresh push.
+
+    ROUTE_TIER_ADMIN is the only gate. The board refuses with 409 while a
+    firing/autotune runs, while any relay is on or its state is unreadable,
+    on an unmet OTA interlock, while another update holds the mutex, when the
+    running image is itself the factory partition, or when the recovery
+    partition does not verify as a bootable image (nothing is written in any
+    refusal). On success (200) the boot target is already set and a short
+    task is about to reboot; this call does NOT wait for the reboot. Returns
+    {"ok": true, "status": "rebooting", "target": "recovery",
+    "version_before": "<version>"}. Empty body, no credential in the request.
+    """
+    req = urllib.request.Request(
+        _url(host, "/api/ota/esp/recovery_boot"),
+        data=b"",
+        method="POST",
+        headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "0",
+        },
+    )
+    log.info("recovery boot requested: host=%s", host)
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        status_code, detail = _http_error_detail(exc)
+        log.warning("recovery boot refused: host=%s status=%s detail=%s", host, status_code, detail)
+        raise OtaHttpError(f"/api/ota/esp/recovery_boot refused: HTTP {status_code}: {detail}",
+                            status_code, detail) from exc
+    except urllib.error.URLError as exc:
+        _, detail = _http_error_detail(exc)
+        log.warning("recovery boot failed (unreachable): host=%s detail=%s", host, detail)
+        raise OtaHttpError(f"/api/ota/esp/recovery_boot unreachable: {detail}") from exc
+
+    try:
+        body = json.loads(body_text)
+    except Exception as exc:
+        raise OtaHttpError(f"/api/ota/esp/recovery_boot response was not valid JSON: {body_text!r}") from exc
+    if body.get("ok"):
+        log.info("recovery boot accepted: host=%s body=%s", host, body)
+    else:
+        log.warning("recovery boot reported failure: host=%s body=%s", host, body)
+    return body
+
+
 def recovery_exit_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/recovery_exit -- ask the board to reboot right now
     to exit boot_guard.h's recovery mode, rather than waiting for it to

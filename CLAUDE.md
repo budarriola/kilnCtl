@@ -22,8 +22,8 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (206 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-10-02: the three further `recovery_*` tools (`recovery_pico_abort`, `recovery_sw_reset`, `recovery_push_esp_image`, all confirm-gated, AP password from `KILNCTL_AP_PASSWORD`, recovery image only, see docs/MCP_SERVERS.md) took the count from 203 to 206; earlier the five `recovery_*` tools (`recovery_status` read-only; `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`, `recovery_pico_upload` confirm-gated, AP password from `KILNCTL_AP_PASSWORD`; recovery image only, see docs/MCP_SERVERS.md) took the count from 198 to 203; `flash_recovery` (JTAG write of the `recovery` partition only; see docs/MCP_SERVERS.md) took the count from 197 to 198; on 2026-10-01 the two `network_get_ip_config`/`network_set_ip_config` tools added that day took the count from 195 to 197, after 2026-09-29, when the AP-password HMAC
+the rest behind a search facade (207 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-10-02: `recovery_enter` (confirm-gated `POST /api/ota/esp/recovery_boot`, the deliberate way from the application into the recovery image; see docs/MCP_SERVERS.md) took the count from 206 to 207; the three further `recovery_*` tools (`recovery_pico_abort`, `recovery_sw_reset`, `recovery_push_esp_image`, all confirm-gated, AP password from `KILNCTL_AP_PASSWORD`, recovery image only, see docs/MCP_SERVERS.md) took the count from 203 to 206; earlier the five `recovery_*` tools (`recovery_status` read-only; `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`, `recovery_pico_upload` confirm-gated, AP password from `KILNCTL_AP_PASSWORD`; recovery image only, see docs/MCP_SERVERS.md) took the count from 198 to 203; `flash_recovery` (JTAG write of the `recovery` partition only; see docs/MCP_SERVERS.md) took the count from 197 to 198; on 2026-10-01 the two `network_get_ip_config`/`network_set_ip_config` tools added that day took the count from 195 to 197, after 2026-09-29, when the AP-password HMAC
 retirement (below) deleted the `ota_get_challenge` tool along with
 `GET /api/ota/challenge` itself, dropping the count from 196 to 195. The one
 added before that removal was `control_set_zone_coupling`, 2026-09-28 -- a narrow writer for ONE coupling-matrix cell,
@@ -315,6 +315,12 @@ pre-flight size check now also refuses, naming both byte counts, if
 partition-table write offset from `CONFIG_PARTITION_TABLE_OFFSET` in
 `<kiln_fw_root>/sdkconfig` rather than a hardcoded 0x8000 (`fixture_flash()`
 uses the same resolver). Full detail: `docs/MCP_SERVERS.md`'s flash section.
+
+**That gap is now reachable from ordinary firmware (2026-10-02):** the boot_guard
+threshold switch and `recovery_enter` both end in `esp_ota_set_boot_partition(factory)`,
+which erases `otadata` and leaves it pointing at factory with no OTA history. A later
+JTAG `flash_firmware()` onto such a board therefore boots `recovery`, not `app`, until
+`recovery_exit` runs (post-flash verification fails loud, as below).
 
 It still does not touch `otadata`, and this is a known, deliberate gap, not
 a fixed one: on this table, a blank/erased `otadata` makes the bootloader

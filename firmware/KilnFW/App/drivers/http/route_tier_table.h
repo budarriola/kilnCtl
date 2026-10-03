@@ -355,6 +355,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/api/ota/esp", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/ota/esp/rollback", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/ota/esp/recovery_exit", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/esp/recovery_boot", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/ota/esp/boot_guard_reset", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/ota/pico", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/ota/pico/rollback", HTTP_POST, ROUTE_TIER_ADMIN),

@@ -141,6 +141,25 @@ esp_err_t boot_guard_init(void);
  * NEXT boot). */
 bool boot_guard_is_recovery_mode(void);
 
+/* What to do about the recovery-mode THRESHOLD this boot (docs/
+ * OTA_SINGLE_SLOT_PLAN.md section 4). Pure decision, no I/O -- the acting
+ * side is recovery_switch_at_boot_threshold() (recovery_switch.h).
+ *   - below threshold                              -> NORMAL
+ *   - at threshold, recovery image verifies, and
+ *     the running image is not itself the factory
+ *     partition                                    -> SWITCH_PARTITION
+ *   - at threshold otherwise (image invalid/absent,
+ *     or old single-image layout)                  -> DEGRADED (today's in-app
+ *                                                    recovery mode, logged loudly) */
+typedef enum {
+    BOOT_RECOVERY_ROUTE_NORMAL = 0,
+    BOOT_RECOVERY_ROUTE_SWITCH_PARTITION,
+    BOOT_RECOVERY_ROUTE_DEGRADED
+} boot_recovery_route_t;
+
+boot_recovery_route_t boot_guard_decide_recovery_route(bool threshold_reached, bool running_is_factory,
+                                                       bool recovery_image_valid);
+
 /* Clears the persisted counter to 0 -- the board is confirmed to have
  * booted successfully enough that continuing to reset-loop is no longer a
  * live risk. Does NOT retroactively change boot_guard_is_recovery_mode()'s

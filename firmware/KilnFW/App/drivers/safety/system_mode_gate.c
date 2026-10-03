@@ -114,6 +114,31 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
         }
         return false;
 
+    case SYS_ACTION_RECOVERY_BOOT:
+        // docs/OTA_SINGLE_SLOT_PLAN.md section 4: the app reboots into the
+        // recovery image, where no relay driver exists at all -- so the
+        // relays must already be off before we go, and no firing/autotune
+        // may be cut off mid-run. Same two run facts as Q3 above, plus the
+        // relay fact. The run check comes first so a firing reports the
+        // run, not the relay it is holding on. Texts are JSON-safe.
+        if (snap->profile_running || snap->autotune_running) {
+            if (reason != NULL && reason_cap > 0) {
+                snprintf(reason, reason_cap,
+                         "refused -- a firing or autotune run is active; stop it before entering "
+                         "recovery");
+            }
+            return true;
+        }
+        if (snap->relays_energized) {
+            if (reason != NULL && reason_cap > 0) {
+                snprintf(reason, reason_cap,
+                         "refused -- a relay is on or its state is unreadable; relays must be off "
+                         "before recovery");
+            }
+            return true;
+        }
+        return false;
+
     case SYS_ACTION_START_PROFILE:
     case SYS_ACTION_START_AUTOTUNE:
         // Slice 2: recovery mode only -- every other start refusal (safety

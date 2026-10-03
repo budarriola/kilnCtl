@@ -293,6 +293,13 @@ esp_err_t esp_partition_read(const esp_partition_t *partition, size_t src_offset
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *start_from)
 { (void)start_from; return NULL; }
 const esp_partition_t *esp_ota_get_running_partition(void) { return NULL; }
+
+// recovery_switch.c is target-only (esp_image_verify); ota_http_recovery.c's
+// recovery_boot handler only calls these two seams. Never reached by a test
+// in this file -- the handler is target-build only.
+recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
+{ if (msg && cap) msg[0] = '\0'; return RECOVERY_SWITCH_NOT_PRESENT; }
+bool recovery_switch_restore_running(void) { return false; }
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp_ota_handle_t *out_handle)
 { (void)partition; (void)image_size; if (out_handle) *out_handle = 1; return ESP_OK; }
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)

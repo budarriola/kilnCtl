@@ -561,6 +561,18 @@ esp_err_t boot_guard_init(void)
     return ESP_OK;
 }
 
+boot_recovery_route_t boot_guard_decide_recovery_route(bool threshold_reached, bool running_is_factory,
+                                                       bool recovery_image_valid)
+{
+    if (!threshold_reached) {
+        return BOOT_RECOVERY_ROUTE_NORMAL;
+    }
+    if (running_is_factory || !recovery_image_valid) {
+        return BOOT_RECOVERY_ROUTE_DEGRADED;
+    }
+    return BOOT_RECOVERY_ROUTE_SWITCH_PARTITION;
+}
+
 bool boot_guard_is_recovery_mode(void)
 {
     return s_bg.recovery_mode;

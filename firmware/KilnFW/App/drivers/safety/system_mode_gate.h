@@ -108,6 +108,10 @@ typedef enum {
     SYS_ACTION_FACTORY_RESET,        // wired: factory_reset.c's reset_post_handler() and
                                       // uart_bridge_system.c's factory_reset_execute()
     SYS_ACTION_CFGFS_FORMAT,         // wired: cfg_fs_format_http.c's format_confirm_post_handler()
+    SYS_ACTION_RECOVERY_BOOT,        // wired: ota_http_recovery.c's ota_recovery_boot_post_handler()
+                                      // (POST /api/ota/esp/recovery_boot, docs/OTA_SINGLE_SLOT_PLAN.md
+                                      // section 4 "Deliberate entry into recovery") -- refused while a
+                                      // firing/autotune is active OR any relay is (or may be) energized
     SYS_ACTION_OTA_START,            // not gated here -- ota_interlock.c stays the owner (plan section 4)
 } sys_action_t;
 
@@ -136,6 +140,9 @@ typedef struct {
                                 // were the two heat paths this flag did not yet reach. Unused by every
                                 // other rule. Never consulted for a relay-OFF -- this module is never
                                 // called on that path.
+    bool relays_energized;     // any relay shadow bit set, OR the relay state could not be read (an
+                                // unreadable relay is never assumed off) -- consulted only by
+                                // SYS_ACTION_RECOVERY_BOOT, unused by every other rule
     bool safety_tripped;       // ARMED-latch trip state -- reserved, unused by this pass's rules
     bool readiness_gate_ready; // !readiness_gate_refuses_start() -- reserved, unused by this pass's rules
 } sys_mode_snapshot_t;

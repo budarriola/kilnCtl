@@ -36,6 +36,12 @@
 #include "ota_auth.h"
 #include "ota_pico_relay.h"
 #include "ota_record.h"
+#include "hal_sysinfo.h" /* hal_sysinfo_get_build_info() */
+#include "hal_time.h" /* hal_time_now_us() */
+#include "recovery_switch.h" /* recovery_switch_select_boot()/_restore_running() */
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
+#include "system_mode_gate.h" /* SYS_ACTION_RECOVERY_BOOT */
+#include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
 #include "stack_margin.h"
@@ -175,6 +181,170 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+
+// --- POST /api/ota/esp/recovery_boot -- deliberate entry into the recovery
+// image (docs/OTA_SINGLE_SLOT_PLAN.md section 4, "Deliberate entry into
+// recovery"; section 7's ota_rollback_esp() -> ota_recovery_boot_esp() row).
+// With one OTA slot, POST /api/ota/esp/rollback has nothing to roll back to
+// (esp_ota_check_rollback_is_possible() is false); this is the replacement
+// way to reach the image that can take a fresh push.
+//
+// Mechanism is stock IDF and nothing else: esp_ota_set_boot_partition() on
+// the `factory` (recovery) partition. IDF first runs a FULL image verify on
+// that partition (checksum + hash) and returns ESP_ERR_OTA_VALIDATE_FAILED
+// without writing anything if it is not a bootable image; only then does it
+// erase the two otadata sectors, so the bootloader falls through to factory.
+// No otadata blob is hand-written. Failure modes: a power cut during that
+// erase leaves either both sectors blank (bootloader picks factory) or one
+// still-valid sector (bootloader picks the app again) -- both bootable.
+//
+// Done synchronously in the handler, BEFORE the 200 is sent, so "rebooting
+// into recovery" is only ever claimed once the boot target is actually set
+// and verified. The reboot itself runs on a short task, same pattern as
+// ota_rollback_reboot_task(), so the response can leave first.
+//
+// Refusals, in order: (1) ADMIN tier (route_tier_table.h) -- auth is the
+// table's, nothing in here. (2) system_mode_gate SYS_ACTION_RECOVERY_BOOT:
+// 409 while a firing/autotune runs (PAUSED included) or while any relay is
+// energized/unreadable. (3) ota_http_check_interlocks(): the same
+// idle/cool/link gate every OTA-family route uses (428 for the
+// no-safety-processor acknowledgement). (4) the single update mutex, taken
+// BEFORE the authoritative relay read below -- while the claim is held,
+// heat_interlock refuses every heat path (profile start, autotune start,
+// manual relay-on), so "relays off" cannot go false again between that
+// read and the reboot. (5) the running partition must not itself be the
+// factory partition (on a pre-migration table `factory` IS the full
+// application, and booting "recovery" would just re-boot the same image).
+// The claim is intentionally left held across the reboot, as the rollback
+// route does; a fresh boot starts with it released.
+//
+// If the reboot task cannot be started after the boot target was set, the
+// target is put back on the running partition so the board does not
+// silently land in recovery on its next unrelated reset.
+
+// File-scope (not handler-local) so the task below can null it before
+// deleting. stack_margin_register() target.
+static TaskHandle_t s_recovery_boot_reboot_task;
+
+static void ota_recovery_boot_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    // Best-effort, same as ota_rollback_reboot_task(): a failed send only
+    // means SaftyFW's S6b may nuisance-trip, which is the expected outcome
+    // of leaving the application anyway.
+    esp_err_t announce_err = safety_link_send_announce_reboot(ota_http_safety);
+    if (announce_err != ESP_OK) {
+        ESP_LOGW(OTA_HTTP_TAG, "recovery_boot: safety_link_send_announce_reboot failed (%s) -- rebooting anyway",
+                 esp_err_to_name(announce_err));
+    }
+    ESP_LOGW(OTA_HTTP_TAG, "recovery_boot: rebooting into the recovery image now");
+    /* Internal-RAM stack required: esp_restart() disables the flash cache --
+     * see ota_recovery_exit_reboot_task() above. */
+    hal_wdt_reboot();
+    s_recovery_boot_reboot_task = NULL; /* see ota_recovery_exit_reboot_task() on why null-then-delete */
+    vTaskDelete(NULL);
+}
+
+esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
+{
+    char ip[46];
+    ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate */
+
+    // 2. system_mode_gate first (same order as every other wired HTTP call
+    // site: this gate, then ota_http_check_interlocks()).
+    {
+        sys_mode_snapshot_t mode_snap = { 0 };
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        mode_snap.relays_energized = ota_http_any_relay_energized();
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_RECOVERY_BOOT, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: refused by system mode gate: %s", ip, mode_reason);
+            return system_mode_gate_http_send_refusal(req, mode_reason);
+        }
+    }
+
+    // 3. Same interlock as every OTA-family route.
+    char reason[OTA_INTERLOCK_REASON_MAX];
+    ota_interlock_result_t gate = ota_http_check_interlocks(ota_http_req_ack_no_safety(req), reason,
+                                                            sizeof(reason));
+    if (gate != OTA_INTERLOCK_OK) {
+        ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: refused by interlock: %s", ip, reason);
+        return ota_http_send_interlock_refusal(req, gate, reason);
+    }
+
+    // 4. Single update mutex (claimed as ESP, like the rollback route).
+    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)) {
+        ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: refused, an update is already in progress", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "an update is already in progress", HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // Authoritative relay read, now that the claim blocks every heat path.
+    if (ota_http_any_relay_energized()) {
+        ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: refused, a relay is on or unreadable", ip);
+        ota_http_update_end();
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, "a relay is on or its state is unreadable; relays must be off before recovery",
+                        HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    // 5. Verify the recovery image, then point the bootloader at it. The
+    // verify-then-set helper is shared with the boot_guard threshold path
+    // (recovery_switch.h); it refuses a missing/factory-running layout and an
+    // image that does not verify, writing nothing in either case.
+    char sel_msg[96];
+    recovery_switch_result_t sel = recovery_switch_select_boot(sel_msg, sizeof(sel_msg));
+    if (sel != RECOVERY_SWITCH_OK) {
+        ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: refused: %s -- NOT rebooting", ip, sel_msg);
+        ota_http_update_end();
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, sel_msg, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
+    hal_sysinfo_build_info_t running_build;
+    hal_sysinfo_get_build_info(&running_build);
+    const char *version_before = (running_build.valid && running_build.version[0]) ? running_build.version : "";
+    {
+        ota_record_t rec;
+        ota_record_fill(&rec, (uint32_t)(hal_time_now_us() / 1000000), "esp", version_before, "", true,
+                        "recovery boot requested", NULL);
+        ota_record_append(&rec); // best-effort, logs its own failure
+    }
+
+    // Create the task BEFORE sending the response so a failure can still be
+    // reported honestly and the boot target reverted.
+    if (xTaskCreate(ota_recovery_boot_reboot_task, "recovery_boot", 3072, NULL, tskIDLE_PRIORITY + 1,
+                    &s_recovery_boot_reboot_task) != pdPASS) {
+        ESP_LOGE(OTA_HTTP_TAG, "recovery_boot from %s: failed to start the reboot task -- restoring the "
+                      "boot target to the running image", ip);
+        if (!recovery_switch_restore_running()) {
+            ESP_LOGE(OTA_HTTP_TAG, "recovery_boot: restoring the boot target failed -- the NEXT reset "
+                          "will boot recovery");
+        }
+        ota_http_update_end();
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not start the reboot task");
+        return ESP_OK;
+    }
+    stack_margin_register("recovery_boot", &s_recovery_boot_reboot_task, 3072); /* 3072 matches xTaskCreate above */
+
+    ESP_LOGW(OTA_HTTP_TAG, "recovery_boot from %s: accepted, was running '%s' -- rebooting into recovery", ip,
+             version_before[0] ? version_before : "(unknown version)");
+    char body[112];
+    int n = snprintf(body, sizeof(body),
+                     "{\"ok\":true,\"status\":\"rebooting\",\"target\":\"recovery\",\"version_before\":\"%s\"}",
+                     version_before);
+    httpd_resp_set_type(req, "application/json");
+    ota_http_send_json_clamped(req, body, n, sizeof(body));
+    return ESP_OK;
+}
 
 // --- POST /api/ota/esp/boot_guard_reset --
 // docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md's "not

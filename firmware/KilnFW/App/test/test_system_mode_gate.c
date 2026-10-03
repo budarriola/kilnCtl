@@ -307,6 +307,57 @@ static void test_relay_write_refused_while_restore_in_flight(void)
                "restore_in_flight=false: manual relay-ON allowed");
 }
 
+static void test_recovery_boot_gate(void)
+{
+    TEST_SECTION("SYS_ACTION_RECOVERY_BOOT -- refused while running or while any relay is energized");
+
+    static const struct {
+        bool profile_running;
+        bool autotune_running;
+        bool relays_energized;
+        bool expect_refused;
+        const char *label;
+    } cases[] = {
+        { false, false, false, false, "idle, relays off: allowed" },
+        { true,  false, false, true,  "profile running: refused" },
+        { false, true,  false, true,  "autotune running: refused" },
+        { true,  true,  false, true,  "both running: refused" },
+        { false, false, true,  true,  "relay energized/unreadable: refused" },
+        { true,  false, true,  true,  "running and relay on: refused" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        sys_mode_snapshot_t snap = good_snapshot();
+        snap.profile_running = cases[i].profile_running;
+        snap.autotune_running = cases[i].autotune_running;
+        snap.relays_energized = cases[i].relays_energized;
+        char reason[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+        bool refused = system_mode_gate_check(SYS_ACTION_RECOVERY_BOOT, &snap, reason, sizeof(reason));
+        TEST_CHECK(refused == cases[i].expect_refused, cases[i].label);
+        if (cases[i].expect_refused) {
+            TEST_CHECK(reason[0] != '\0', "a refusal writes a reason");
+            TEST_CHECK(strchr(reason, '"') == NULL && strchr(reason, '\\') == NULL, "reason is JSON-safe");
+            TEST_CHECK(strlen(reason) < SYSTEM_MODE_GATE_REASON_MAX - 1, "reason is not truncated");
+        } else {
+            TEST_CHECK(reason[0] == '\0', "an allowed case leaves reason untouched");
+        }
+    }
+
+    // A run reports the run, not the relay it holds on.
+    sys_mode_snapshot_t snap = good_snapshot();
+    snap.profile_running = true;
+    snap.relays_energized = true;
+    char reason[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+    system_mode_gate_check(SYS_ACTION_RECOVERY_BOOT, &snap, reason, sizeof(reason));
+    TEST_CHECK(strstr(reason, "firing or autotune run is active") != NULL, "run refusal wins over relay refusal");
+
+    // relays_energized is inert for every other action.
+    snap = good_snapshot();
+    snap.relays_energized = true;
+    TEST_CHECK(!system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &snap, NULL, 0), "relays_energized ignored by FACTORY_RESET");
+    TEST_CHECK(!system_mode_gate_check(SYS_ACTION_RAW_RELAY_DEBUG_WRITE, &snap, NULL, 0), "relays_energized ignored by relay write");
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_RECOVERY_BOOT, NULL, NULL, 0), "NULL snapshot refuses");
+}
+
 static void test_reason_truncation_is_safe(void)
 {
     TEST_SECTION("system_mode_gate_check -- a too-small reason buffer truncates, never overflows");
@@ -331,6 +382,7 @@ int main(void)
     test_zones_config_write_refused_cross_product();
     test_factory_reset_and_cfgfs_format_refused_cross_product();
     test_relay_write_refused_while_restore_in_flight();
+    test_recovery_boot_gate();
     test_reason_truncation_is_safe();
 
     printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);

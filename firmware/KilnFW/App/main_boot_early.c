@@ -29,6 +29,7 @@
 #include "hal_sysinfo.h" /* hal_sysinfo_reset_reason() */
 #include "board_temps.h"
 #include "boot_guard.h"
+#include "recovery_switch.h"
 #include "cfg_fs_mount.h"
 #include "watchdog_cfg.h"
 #include "crash_report.h"
@@ -411,6 +412,10 @@ void main_boot_early(main_boot_ctx_t *ctx)
     //     independent-of-the-scheduler last resort -- see rtc_watchdog.h.
     //     Fed from monitor_task.c's existing heartbeat cadence.
     boot_guard_init();
+    // Threshold reached and the recovery image verifies: switch partitions and
+    // reboot into it (does not return). Otherwise falls through to today's
+    // degraded in-app recovery mode. See recovery_switch.h.
+    recovery_switch_at_boot_threshold();
     ctx->recovery_mode = boot_guard_is_recovery_mode();
     rtc_watchdog_start();
 

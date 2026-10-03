@@ -540,6 +540,21 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     return ota_interlock_check(&snap, zones, thermo_count, reason_out, reason_cap);
 }
 
+// True when ANY relay (all four, not just the ones a configured zone owns)
+// is commanded on, or when the relay state cannot be read -- an unreadable
+// relay is never assumed off, same "no valid data -> refuse" rule the
+// per-zone heater_commanded read above follows. Used by POST
+// /api/ota/esp/recovery_boot, whose target image has no relay driver at all.
+bool ota_http_any_relay_energized(void)
+{
+    kiln_io_state_t io_state;
+    memset(&io_state, 0, sizeof(io_state));
+    if (!s_io || kiln_io_owner_command_read(&io_state) != ESP_OK) {
+        return true;
+    }
+    return (io_state.relay_shadow & 0x0F) != 0;
+}
+
 // See ota_http.h's doc comment above this function. The mirror-image glue
 // to ota_http_check_interlocks() above: same s_update_claim mutex, opposite
 // direction ("may heat proceed" instead of "may an update start").
@@ -731,6 +746,18 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
     err = kiln_http_register(server, &esp_rollback_uri);
     if (err != ESP_OK) {
         ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/rollback) failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Deliberate entry into the recovery image -- ota_http_recovery.c's
+    // ota_recovery_boot_post_handler() doc comment has the contract
+    // (docs/OTA_SINGLE_SLOT_PLAN.md section 4).
+    static const httpd_uri_t recovery_boot_uri = {
+        .uri = "/api/ota/esp/recovery_boot", .method = HTTP_POST, .handler = ota_recovery_boot_post_handler
+    };
+    err = kiln_http_register(server, &recovery_boot_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(OTA_HTTP_TAG, "httpd_register_uri_handler(/api/ota/esp/recovery_boot) failed: %s", esp_err_to_name(err));
         return err;
     }
 
