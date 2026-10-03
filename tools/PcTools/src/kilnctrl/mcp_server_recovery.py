@@ -68,7 +68,14 @@ def _fmt_status(st: dict) -> str:
     keys = ("running", "app_present", "app_size", "app_desc_present", "app_valid", "record_present",
             "boot_count", "relay_fault", "relays_verified_off", "nvs_unavailable", "nvs_failed_mask",
             "heap_internal_min_free")
-    return ", ".join(f"{k}={st[k]}" for k in keys if k in st)
+    out = ", ".join(f"{k}={st[k]}" for k in keys if k in st)
+    # app_size is the app PARTITION size; app_image_size is the verified image's bytes
+    # (null when the image is not verified, absent on an older recovery image).
+    if "app_image_size" in st:
+        img = st["app_image_size"]
+        out += (f", app image {img} bytes of {st.get('app_size')} partition" if img is not None
+                else f", app image size unknown (not verified) of {st.get('app_size')} partition")
+    return out
 
 
 #: GET /api/recovery/status keys added by the 2026-10 diagnostics change

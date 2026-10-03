@@ -156,7 +156,9 @@ but does not call `esp_ota_set_boot_partition()`: for the factory partition that
 otadata, creating the blank-otadata state that makes a later bare JTAG flash of `app` boot
 recovery instead; the bootloader already falls back to factory for an invalid app image.
 
-**New `GET /api/recovery/status` fields (PcTools rendering still to do).** `uptime_s`,
+**`GET /api/recovery/status` size fields.** `app_size` (and `max_upload`) is the `app` PARTITION size, not the image; `app_image_size` is the byte length (`esp_image_metadata_t.image_len`) of the image `esp_image_verify()` accepted, `null` when it is not verified (same cache as `app_valid`). PcTools renders it as "app image N bytes of M partition".
+
+**New `GET /api/recovery/status` fields.** `uptime_s`,
 `reset_reason` (raw enum), `reset_reason_name`, `app_ota_state`, `coredump_present`,
 `otadata_blank` (the last two are `true`/`false`/`null` when unknown), `ap_start_count`,
 `ap_stop_count`, `ap_stations`, `ap_connect_total`, `wifi_last_event`, `wifi_last_event_age_s`,

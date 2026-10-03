@@ -126,6 +126,21 @@ class StatusTest(_Base):
         board = FakeBoard(pico=[_pico(phase="outcome_unknown")])
         self.assertIn("OUTCOME UNKNOWN", self.run_tool(mr.recovery_status, board))
 
+    def test_renders_app_image_size_against_partition(self):
+        board = FakeBoard(status=[_status(app_size=8388608, app_image_size=2569344)])
+        out = self.run_tool(mr.recovery_status, board)
+        self.assertIn("app image 2569344 bytes of 8388608 partition", out)
+
+    def test_null_app_image_size_is_unknown_not_zero(self):
+        board = FakeBoard(status=[_status(app_size=8388608, app_image_size=None)])
+        out = self.run_tool(mr.recovery_status, board)
+        self.assertIn("app image size unknown (not verified) of 8388608 partition", out)
+        self.assertNotIn("app image 0 bytes", out)
+
+    def test_older_image_without_app_image_size_renders_no_image_line(self):
+        out = self.run_tool(mr.recovery_status, FakeBoard())
+        self.assertNotIn("app image", out)
+
     def test_needs_no_credential_environment(self):
         # The recovery image is unauthenticated (owner decision 2026-10-02).
         board = FakeBoard()

@@ -112,6 +112,7 @@ static bool app_has_valid_image(const esp_partition_t *part)
 // it lazily. httpd is effectively single-task here, so no lock is needed.
 static bool s_verify_known;
 static bool s_verify_valid;
+static uint32_t s_verify_image_len; // meta.image_len of the last successful verify, else 0
 
 static void app_verify_invalidate(void)
 {
@@ -127,9 +128,18 @@ static bool app_image_verified(const esp_partition_t *part)
         const esp_partition_pos_t pos = {.offset = part->address, .size = part->size};
         esp_image_metadata_t meta;
         s_verify_valid = esp_image_verify(ESP_IMAGE_VERIFY_SILENT, &pos, &meta) == ESP_OK;
+        s_verify_image_len = s_verify_valid ? meta.image_len : 0;
         s_verify_known = true;
     }
     return s_verify_valid;
+}
+
+// Bytes of the image esp_image_verify() accepted (header + segments + padding +
+// checksum/digest), or 0 when the image is not verified. Call after
+// app_image_verified(), which fills the cache.
+static uint32_t app_image_len(void)
+{
+    return s_verify_valid ? s_verify_image_len : 0;
 }
 
 static bool clear_boot_guard(char *msg, size_t cap);
@@ -384,7 +394,10 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     bool valid = desc_present && app_image_verified(app);
     unsigned nvs_failed = recovery_io_nvs_failed_mask();
     int rr = (int)esp_reset_reason();
+    // app_size is the PARTITION size (kept for existing consumers); the real
+    // image size is app_image_size, null unless the image verified.
     unsigned app_size = (unsigned)(app ? app->size : 0);
+    unsigned img_len = valid ? (unsigned)app_image_len() : 0;
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -403,6 +416,10 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                            "\"app_valid\":%s,\"max_upload\":%u,",
                       app ? "true" : "false", app_size, desc_present ? "true" : "false",
                       valid ? "true" : "false", app_size);
+    }
+    if (e == ESP_OK) {
+        e = img_len ? send_frag(req, "\"app_image_size\":%u,", img_len)
+                    : send_frag(req, "\"app_image_size\":null,");
     }
     if (e == ESP_OK) {
         e = send_frag(req, "\"app_ota_state\":\"%s\",\"coredump_present\":%s,"
