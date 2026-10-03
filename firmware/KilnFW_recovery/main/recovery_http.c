@@ -782,6 +782,14 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "no valid application image in app", HTTPD_RESP_USE_STRLEN);
     }
+    // Clear the counter BEFORE touching the boot target: an unverified clear
+    // fails the exit (500) with nothing changed, instead of booting the app
+    // into a counter that walks the board straight back into recovery.
+    char bg_msg[96];
+    if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
+    }
     esp_err_t serr = esp_ota_set_boot_partition(app);
     if (serr == ESP_ERR_OTA_VALIDATE_FAILED) {
         app_verify_invalidate();
@@ -792,9 +800,6 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
     }
-    // Exit still proceeds if the clear fails, but the response says so.
-    char bg_msg[96];
-    clear_boot_guard(bg_msg, sizeof(bg_msg));
     char body[160];
     snprintf(body, sizeof(body), "ok, rebooting into the application; %s", bg_msg);
     esp_err_t sent = httpd_resp_sendstr(req, body);
@@ -819,14 +824,30 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
         return httpd_resp_send(req, "could not open the Wi-Fi settings store",
                                 HTTPD_RESP_USE_STRLEN);
     }
+    // Try every key (so as much as possible is cleared), but any erase error
+    // makes the route fail: reporting "cleared" while a credential survived
+    // would send the operator back to a network they believe is forgotten.
+    size_t erase_failed = 0;
+    const char *first_failed = NULL;
     for (size_t i = 0; i < sizeof(WIFI_RESET_KEYS) / sizeof(WIFI_RESET_KEYS[0]); i++) {
         esp_err_t e = nvs_erase_key(h, WIFI_RESET_KEYS[i]);
         if (e != ESP_OK && e != ESP_ERR_NVS_NOT_FOUND) {
             ESP_LOGW(TAG, "wifi_reset: erase %s failed: %s", WIFI_RESET_KEYS[i], esp_err_to_name(e));
+            if (!first_failed) {
+                first_failed = WIFI_RESET_KEYS[i];
+            }
+            erase_failed++;
         }
     }
     err = nvs_commit(h);
     nvs_close(h);
+    if (erase_failed > 0) {
+        char fmsg[96];
+        snprintf(fmsg, sizeof(fmsg), "Wi-Fi settings erase failed for %u key(s), first: %s",
+                 (unsigned)erase_failed, first_failed);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, fmsg, HTTPD_RESP_USE_STRLEN);
+    }
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "Wi-Fi settings commit failed", HTTPD_RESP_USE_STRLEN);
@@ -848,7 +869,26 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
     }
 
-    httpd_resp_sendstr(req, "resetting");
+    // A reset must not boot an app that recovery_exit would refuse: unless
+    // `app` fully verifies, point the boot target at the factory (recovery)
+    // partition first. If that cannot be done, do not reset at all.
+    const esp_partition_t *app = find_app_partition();
+    bool app_ok = app_has_valid_image(app) && app_image_verified(app);
+    const char *note = "resetting";
+    if (!app_ok) {
+        const esp_partition_t *factory = esp_partition_find_first(
+            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
+        if (!factory || esp_ota_set_boot_partition(factory) != ESP_OK) {
+            httpd_resp_set_status(req, "500 Internal Server Error");
+            return httpd_resp_send(req,
+                                   "no valid application image and could not select recovery as the "
+                                   "boot target; not resetting",
+                                   HTTPD_RESP_USE_STRLEN);
+        }
+        note = "resetting (no valid application image: staying in recovery)";
+    }
+
+    httpd_resp_sendstr(req, note);
     vTaskDelay(pdMS_TO_TICKS(200));
     esp_restart();
     return ESP_OK;
