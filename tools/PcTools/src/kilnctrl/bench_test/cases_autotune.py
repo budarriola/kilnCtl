@@ -35,6 +35,7 @@ edits ``RULE_TABLE``/schedule tables, never flashes, never writes
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -428,6 +429,18 @@ def _at04_body(ctx: dict) -> CaseResult:
         except Exception:
             pass
         exp_kwargs, exp_obs = _expected_model_kwargs(ctx)
+        relay_amplitude_c = st.relay.amplitude_c if st.relay is not None else None
+        abort_reason = getattr(st, "abort_reason", "") or ""
+        if not relay_amplitude_c:
+            # The firmware's relay result carries no amplitude when the run
+            # was aborted (reads None or 0.0); its own abort_reason names the
+            # measured swing ("... only 1.37C swing in 5.0min ...").
+            m = re.search(r"([0-9.]+)C swing", abort_reason)
+            if m:
+                try:
+                    relay_amplitude_c = float(m.group(1))
+                except ValueError:
+                    pass
         result = J.judge_autotune_fit(
             method="relay",
             model_valid=st.model_valid,
@@ -438,10 +451,13 @@ def _at04_body(ctx: dict) -> CaseResult:
             max_temp_c=max_temp,
             tripped=tripped,
             relay_valid=st.relay_valid,
-            relay_amplitude_c=st.relay.amplitude_c if st.relay is not None else None,
+            relay_amplitude_c=relay_amplitude_c,
             **exp_kwargs,
         )
-        return _with_extra_observed(result, {"final_c": st.actual_c if st.actual_valid else None, **exp_obs})
+        extra = {"final_c": st.actual_c if st.actual_valid else None, **exp_obs}
+        if abort_reason:
+            extra["abort_reason"] = abort_reason
+        return _with_extra_observed(result, extra)
     finally:
         _cleanup_autotune(ctx)
 
@@ -455,8 +471,7 @@ def _case_at05(ctx: dict) -> CaseResult:
     status, body = _http_get_json(host, "/api/autotune/matrix")
     if status != 200:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/autotune/matrix: status={status}", observed={"body": body})
-    matrix = body.get("matrix") if isinstance(body, dict) else body
-    return J.judge_autotune_matrix(matrix, zone_row=0)
+    return J.judge_autotune_matrix_body(body, zone_row=0)
 
 
 _CASE_FUNCS = {

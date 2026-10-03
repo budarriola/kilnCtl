@@ -52,7 +52,7 @@ class _Relay:
 class _Status:
     def __init__(
         self, state_name="idle", model_valid=True, actual_c=24.0, actual_valid=True,
-        duty=0.0, model=None, relay_valid=True, relay=None,
+        duty=0.0, model=None, relay_valid=True, relay=None, abort_reason="",
     ):
         self.state_name = state_name
         self.model_valid = model_valid
@@ -62,6 +62,7 @@ class _Status:
         self.model = model or _Model()
         self.relay_valid = relay_valid
         self.relay = relay or _Relay()
+        self.abort_reason = abort_reason
 
 
 class _FakeAutotuneClient:
@@ -376,6 +377,28 @@ class AT04Test(unittest.TestCase):
         result = CA._case_at04(ctx)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
 
+    def _run_invalid_relay(self, amplitude_c, abort_reason):
+        autotune = _FakeAutotuneClient(statuses=[
+            _Status(state_name="idle"),
+            _Status(state_name="done", relay_valid=False, relay=_Relay(amplitude_c=amplitude_c), abort_reason=abort_reason),
+        ])
+        return CA._case_at04(_base_ctx(_FakeSrv(autotune=autotune)))
+
+    def test_amplitude_falls_back_to_abort_reason_swing(self):
+        reason = "guard tripped: relay cycling but only 1.37C swing in 5.0min (need >=2.00C) -- element may be d"
+        result = self._run_invalid_relay(0.0, reason)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("1.37C", result.reason)
+        self.assertAlmostEqual(result.observed["relay_amplitude_c"], 1.37)
+        self.assertEqual(result.observed["abort_reason"], reason)
+
+    def test_amplitude_unchanged_without_abort_reason(self):
+        result = self._run_invalid_relay(0.0, "")
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("0.00C", result.reason)
+        self.assertEqual(result.observed["relay_amplitude_c"], 0.0)
+        self.assertNotIn("abort_reason", result.observed)
+
 
 class AT05Test(unittest.TestCase):
     def test_passes_on_a_well_formed_matrix(self):
@@ -388,6 +411,43 @@ class AT05Test(unittest.TestCase):
             result = CA._case_at05(ctx)
         finally:
             CA._http_get_json = orig
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def _run_at05(self, body):
+        ctx = _base_ctx(_FakeSrv())
+        orig = CA._http_get_json
+        CA._http_get_json = lambda host, path, **kw: (200, body)
+        try:
+            return CA._case_at05(ctx)
+        finally:
+            CA._http_get_json = orig
+
+    def test_passes_on_real_cells_body(self):
+        body = {"zone_count": 3, "cells": [
+            {"i": 0, "j": 0, "valid": True, "k": 48.860, "tau_s": 297.3, "dead_time_s": 34.9},
+            {"i": 0, "j": 1, "valid": True, "k": 20.025, "tau_s": 297.3, "dead_time_s": 34.9},
+            {"i": 0, "j": 2, "valid": True, "k": 10.942, "tau_s": 297.3, "dead_time_s": 34.9},
+            {"i": 1, "j": 0, "valid": False}, {"i": 1, "j": 1, "valid": False}, {"i": 1, "j": 2, "valid": False},
+            {"i": 2, "j": 0, "valid": False}, {"i": 2, "j": 1, "valid": False}, {"i": 2, "j": 2, "valid": False},
+        ], "rga": {"available": False, "code": 2, "reason": "x"}}
+        result = self._run_at05(body)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["row"], [48.860, 20.025, 10.942])
+        self.assertEqual(result.observed["body"], body)
+
+    def test_fails_when_row0_cell_invalid(self):
+        cells = [{"i": i, "j": j, "valid": True, "k": 1.0} for i in range(3) for j in range(3)]
+        cells[1] = {"i": 0, "j": 1, "valid": False}
+        result = self._run_at05({"zone_count": 3, "cells": cells})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_fails_when_cells_missing(self):
+        result = self._run_at05({"zone_count": 3})
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("malformed", result.reason)
+
+    def test_legacy_matrix_list_still_accepted(self):
+        result = self._run_at05({"matrix": [[0, 0.1, 0.05], [0.1, 0, 0.1], [0.05, 0.1, 0]]})
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
 
     def test_inconclusive_with_no_host(self):

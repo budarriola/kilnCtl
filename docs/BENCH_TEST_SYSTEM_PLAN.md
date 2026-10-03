@@ -142,7 +142,7 @@ Note (firmware 9faed0e5, 409 self-push refusal): the application now refuses any
 | AT-02 | Abort is immediate | AT-01 running (first 3 min) | `autotune_abort()` | status `aborted` (or `idle`) within 5 s; all zone duties 0 within one control tick; `io_read()` shows heater relays off | 30 s | uses AT-01 |
 | AT-03 | Accept is guarded | an unsettled fit (AT-01 aborted early) | `autotune_accept()` without `ack_unsettled` | refused; `control_get_zones` gains unchanged | 5 s | no |
 | AT-04 | Relay-feedback test (Åström–Hägglund) | rested, 25 min after AT-01; ramp assist disabled and restored as in AT-01; autotune not running as in AT-01 | `autotune_start(zone=0, method=relay)` | reaches a proposal; same bounds and baseline/K sources as AT-01; `INCONCLUSIVE` if the fixture cannot sustain the oscillation amplitude (record the amplitude) | 20 min | **yes** |
-| AT-05 | Coupling matrix visible | AT-01 done | `GET /api/autotune/matrix` | well-formed 3×3 with zone 0's row populated | 2 s | no |
+| AT-05 | Coupling matrix visible | AT-01 done | `GET /api/autotune/matrix` | well-formed 3×3 with zone 0's row populated (wire shape `{"zone_count":3,"cells":[{"i","j","valid","k",...}]}`; each cell becomes `k` when `valid`, else unmeasured; a legacy top-level `matrix` list is also accepted) | 2 s | no |
 
 What "pass" means at 4 W: the algorithm converges and the fit lands in the band of previously measured fixture parameters; the *quality* of the gains for a real kiln is not judged here and never can be on this fixture (memory `project_bench_identification_limits`).
 

@@ -2814,6 +2814,54 @@ def judge_autotune_matrix(matrix: Any, zone_row: int = 0) -> CaseResult:
     return CaseResult(Verdict.PASS, observed={"matrix": matrix, "row": row})
 
 
+def autotune_matrix_from_cells(body: Any) -> "tuple[Optional[list], Optional[str]]":
+    """Convert ``GET /api/autotune/matrix``'s wire shape
+    (``{"zone_count":3,"cells":[{"i","j","valid","k",...}, ...]}``,
+    ``autotune_matrix_get_handler`` in dashboard_autotune_http.c) into a
+    zone_count x zone_count list: the ``k`` value where ``valid`` is true,
+    else ``None``. Returns ``(matrix, None)`` or ``(None, error)``. A legacy
+    top-level ``matrix`` list is passed through unchanged."""
+    if not isinstance(body, dict):
+        return None, f"body is not a JSON object: {body!r}"
+    if isinstance(body.get("matrix"), list):
+        return body["matrix"], None
+    n = body.get("zone_count")
+    if isinstance(n, bool) or n != 3:
+        return None, f"zone_count is {n!r}, expected 3"
+    cells = body.get("cells")
+    if not isinstance(cells, list):
+        return None, "cells is missing or not a list"
+    if len(cells) != n * n:
+        return None, f"cells has {len(cells)} entries, expected {n * n}"
+    matrix: list = [[None] * n for _ in range(n)]
+    seen = set()
+    for c in cells:
+        if not isinstance(c, dict):
+            return None, f"cell is not an object: {c!r}"
+        i, j = c.get("i"), c.get("j")
+        if any(isinstance(v, bool) or not isinstance(v, int) or not 0 <= v < n for v in (i, j)):
+            return None, f"cell index out of range: i={i!r} j={j!r}"
+        if (i, j) in seen:
+            return None, f"duplicate cell ({i}, {j})"
+        seen.add((i, j))
+        if c.get("valid") is True:
+            matrix[i][j] = c.get("k")
+    return matrix, None
+
+
+def judge_autotune_matrix_body(body: Any, zone_row: int = 0) -> CaseResult:
+    """AT-05 on the raw response body: convert the wire shape, then apply
+    :func:`judge_autotune_matrix`. A malformed body is a FAIL, not
+    INCONCLUSIVE. The full body is always recorded in ``observed``."""
+    matrix, err = autotune_matrix_from_cells(body)
+    if err is not None:
+        return CaseResult(Verdict.FAIL, reason=f"autotune matrix body malformed: {err}", observed={"body": body})
+    result = judge_autotune_matrix(matrix, zone_row=zone_row)
+    observed = dict(result.observed) if isinstance(result.observed, dict) else {}
+    observed["body"] = body
+    return CaseResult(result.verdict, reason=result.reason, observed=observed)
+
+
 # ---------------------------------------------------------------------------
 # HP-03 / HP-07 -- on/off zone cycling and a provoked software fault
 # (plan doc section 3.6, Wave 3 part A)

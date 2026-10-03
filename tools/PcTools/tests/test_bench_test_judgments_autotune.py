@@ -247,3 +247,26 @@ class JudgeFaultedRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JudgeAutotuneMatrixBodyTest(unittest.TestCase):
+    @staticmethod
+    def _cells(n=3):
+        return [{"i": i, "j": j, "valid": True, "k": 1.5} for i in range(n) for j in range(n)]
+
+    def test_converts_cells_to_matrix(self):
+        cells = self._cells()
+        cells[4] = {"i": 1, "j": 1, "valid": False}
+        m, err = J.autotune_matrix_from_cells({"zone_count": 3, "cells": cells})
+        self.assertIsNone(err)
+        self.assertEqual(m, [[1.5, 1.5, 1.5], [1.5, None, 1.5], [1.5, 1.5, 1.5]])
+
+    def test_rejects_bad_bodies(self):
+        dup = self._cells(); dup[1] = {"i": 0, "j": 0, "valid": True, "k": 1.0}
+        oor = self._cells(); oor[8] = {"i": 3, "j": 0, "valid": True, "k": 1.0}
+        for body in (None, {"zone_count": 3}, {"zone_count": 2, "cells": self._cells(2)},
+                     {"zone_count": 3, "cells": self._cells()[:8]}, {"zone_count": 3, "cells": dup},
+                     {"zone_count": 3, "cells": oor}):
+            result = J.judge_autotune_matrix_body(body)
+            self.assertEqual(result.verdict, Verdict.FAIL, body)
+
