@@ -107,7 +107,7 @@ choice. Original requirements below.
 route, relays verified off, `recovery_exit`. ESP upload through the recovery AP also verified
 2026-10-03 (`docs/BENCH_TEST_LOG.md`, "ESP upload through the recovery image (W5)"). Remaining: the
 boot_guard threshold switch (attempted 2026-10-03 with JTAG resets, not provoked: the healthy mark clears the counter within ~6 s of boot, see `docs/BENCH_TEST_LOG.md`), Pico upload (blocked, the SaftyFW debug probe is disconnected),
-`wifi_reset` (route verified 2026-10-03: clears and restarts with a new passphrase; the app-side AP fallback after it is still to be observed, see `docs/BENCH_TEST_LOG.md`), the "wifi_storage_fail" path and a no-PSRAM boot (if the fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
+`wifi_reset` (route verified 2026-10-03: clears and restarts with a new passphrase; the board was then exited and re-provisioned over UART the same day, but the credential erase itself was not proven, the saved-network list was not read before re-provisioning, see `docs/BENCH_TEST_LOG.md`), the "wifi_storage_fail" path and a no-PSRAM boot (if the fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
 PSRAM and the no-PSRAM boot. Measure the `app` erase time and idle-task starvation, then
 decide on `CONFIG_ESP_TASK_WDT_PANIC`.
 
