@@ -762,6 +762,7 @@ static const char *tri(int v)
 // chunks (send_frag), never one big buffer.
 static esp_err_t recovery_status_get(httpd_req_t *req)
 {
+    recovery_lcd_poll_relay_fault();
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *app = find_app_partition();
     boot_guard_info_t bg;
@@ -1046,23 +1047,17 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
     }
 
-    // A reset must not boot an app that recovery_exit would refuse: unless
-    // `app` fully verifies, point the boot target at the factory (recovery)
-    // partition first. If that cannot be done, do not reset at all.
+    // Information only. sw_reset deliberately never writes otadata (not even
+    // esp_ota_set_boot_partition(factory), which erases it): the bootloader
+    // already falls back to the factory (recovery) partition for an invalid
+    // app image, and a blank otadata is a hazard for a later JTAG flash.
     const esp_partition_t *app = find_app_partition();
     bool app_ok = app_has_valid_image(app) && app_image_verified(app);
-    const char *note = "resetting";
+    const char *note = app_ok ? "resetting"
+                              : "resetting (no valid application image: the bootloader will "
+                                "fall back to recovery)";
     if (!app_ok) {
-        const esp_partition_t *factory = esp_partition_find_first(
-            ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
-        if (!factory || esp_ota_set_boot_partition(factory) != ESP_OK) {
-            httpd_resp_set_status(req, "500 Internal Server Error");
-            return httpd_resp_send(req,
-                                   "no valid application image and could not select recovery as the "
-                                   "boot target; not resetting",
-                                   HTTPD_RESP_USE_STRLEN);
-        }
-        note = "resetting (no valid application image: staying in recovery)";
+        ESP_LOGW(TAG, "sw_reset: app image does not verify; boot target left unchanged");
     }
 
     httpd_resp_sendstr(req, note);

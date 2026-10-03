@@ -157,7 +157,16 @@ pure `main/recovery_hold.c`, host-tested by `check_recovery_hold.ps1`. Stack dev
 recovery image has no `stack_margin` API (that lives in KilnFW), so the task reports its own
 `uxTaskGetStackHighWaterMark` as `relay_hold_stack_free`; 3072 B is not yet measured on the
 bench (verify `relay_hold_stack_free` stays well above 512 B). The LCD pin writer now takes the
-same I/O lock as the task, so the two cannot interleave an SX1509 write.
+same I/O lock as the task, so the two cannot interleave an SX1509 write. `relay_fault` and
+`relays_verified_off` in status (and the LCD "Heat: OFF"/"RELAY CTRL FAULT" line) include the
+latched hold fault, so a post-boot loss is never reported as healthy. The hold task never draws;
+this image has no LCD task, so the status route calls `recovery_lcd_poll_relay_fault()`, which
+redraws only when the fault state changed since the last draw.
+
+**`sw_reset` never writes otadata.** It reports whether `app` verifies (response text and log)
+but does not call `esp_ota_set_boot_partition()`: for the factory partition that call erases
+otadata, creating the blank-otadata state that makes a later bare JTAG flash of `app` boot
+recovery instead; the bootloader already falls back to factory for an invalid app image.
 
 **New `GET /api/recovery/status` fields (PcTools rendering still to do).** `uptime_s`,
 `reset_reason` (raw enum), `reset_reason_name`, `app_ota_state`, `coredump_present`,
