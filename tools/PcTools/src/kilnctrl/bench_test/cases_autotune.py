@@ -40,6 +40,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from . import judgments as J
 from .cases_heat import _capability_preflight_ok, _rest_gate, _srv, _zone_temps
+from .. import zones_http_client
 from .cases_smoke import _http_get_json
 from .cases_web_rw import _get_json as _authed_get_json, _post_json as _authed_post_json
 from .registry import CaseResult, Verdict, get_case
@@ -122,15 +123,64 @@ def _with_ramp_assist_off(ctx: dict, body_fn) -> CaseResult:
     return result
 
 
-def _autotune_idle(ctx: dict) -> Tuple[bool, str]:
+#: Engine states in which a new run may start. Firmware's autotune engine
+#: stays in ``done``/``aborted`` after a run until the next start, and
+#: ``autotune_engine_abort()`` is a no-op unless a run is in progress, so
+#: ``idle`` alone is not reachable after the first run.
+_NOT_RUNNING_STATES = ("idle", "done", "aborted")
+
+
+def _autotune_not_running(ctx: dict) -> Tuple[bool, str]:
     srv = _srv(ctx)
     try:
         st = srv._autotune.get_status()
     except Exception as exc:
         return False, f"autotune_get_status raised {type(exc).__name__}: {exc}"
-    if st.state_name != "idle":
-        return False, f"autotune is not idle (state={st.state_name})"
+    if st.state_name not in _NOT_RUNNING_STATES:
+        return False, f"autotune is running (state={st.state_name})"
     return True, ""
+
+
+def _committed_plant_model(ctx: dict) -> Tuple[Optional[float], Optional[float]]:
+    """Zone 0's committed plant-model ``k``/``tau`` from the live zones config
+    (``GET /api/zones``, read only), each None when unavailable or not > 0."""
+    host = ctx.get("host")
+    if not host:
+        return None, None
+    get_zones = ctx.get("_get_zones_config", zones_http_client.get_zones)
+    try:
+        snapshot = get_zones(host)
+    except Exception:
+        return None, None
+
+    def _pos(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+            return None
+        return float(v)
+
+    for zone in (snapshot.get("zones") if isinstance(snapshot, dict) else None) or []:
+        if zone.get("index") == 0:
+            return _pos(zone.get("k")), _pos(zone.get("tau"))
+    return None, None
+
+
+def _expected_model_kwargs(ctx: dict) -> Tuple[dict, dict]:
+    """(kwargs for ``judge_autotune_fit``, extra observed fields)."""
+    k, tau = _committed_plant_model(ctx)
+    kwargs: dict = {}
+    if k is not None:
+        kwargs["k_expected_c_per_duty"] = k
+    if tau is not None:
+        kwargs["tau_expected_s"] = tau
+    return kwargs, {
+        "k_expected_source": "zones_config" if k is not None else "default",
+        "tau_expected_source": "zones_config" if tau is not None else "default",
+    }
+
+
+def _with_extra_observed(result: CaseResult, extra: dict) -> CaseResult:
+    result.observed = {**(result.observed or {}), **extra}
+    return result
 
 
 def _cleanup_autotune(ctx: dict) -> None:
@@ -158,13 +208,13 @@ def _relays_off(ctx: dict) -> Optional[bool]:
 
 def _at_preflight(ctx: dict) -> Tuple[bool, str]:
     """AT-01/AT-02/AT-04 precondition chain: capability_preflight ok, then
-    autotune idle -- in that order, so the reason reported names whichever
+    autotune not running -- in that order, so the reason reported names whichever
     gate actually failed. Ramp assist is handled separately
     (``_with_ramp_assist_off``): it is disabled for the case, not a gate."""
     ok, reason = _capability_preflight_ok(ctx)
     if not ok:
         return False, reason
-    ok, reason = _autotune_idle(ctx)
+    ok, reason = _autotune_not_running(ctx)
     if not ok:
         return False, reason
     return True, ""
@@ -210,6 +260,9 @@ def _at01_body(ctx: dict) -> CaseResult:
     if not zone_temps:
         return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as the baseline reference")
     ambient_ref = min(zone_temps.values())
+    # The harness's own pre-start reading is the baseline: the UART status
+    # carries no baseline field and ``actual_c`` is the CURRENT temperature.
+    baseline_c = zone_temps.get(0)
     srv = _srv(ctx)
     try:
         ok_start, err = srv._autotune.start(zone=0, method=0, step_duty_or_setpoint_c=AT_STEP_DUTY)
@@ -232,23 +285,26 @@ def _at01_body(ctx: dict) -> CaseResult:
             tripped = bool(getattr(diag, "trip_reason", 0))
         except Exception:
             pass
-        return J.judge_autotune_fit(
+        exp_kwargs, exp_obs = _expected_model_kwargs(ctx)
+        result = J.judge_autotune_fit(
             method="step",
             model_valid=st.model_valid,
-            baseline_c=st.actual_c if st.actual_valid else None,
+            baseline_c=baseline_c,
             ambient_ref=ambient_ref,
             k_gain_c_per_duty=st.model.k_gain_c_per_duty,
             tau_s=st.model.tau_s,
             max_temp_c=max_temp,
             tripped=tripped,
+            **exp_kwargs,
         )
+        return _with_extra_observed(result, {"final_c": st.actual_c if st.actual_valid else None, **exp_obs})
     finally:
         _cleanup_autotune(ctx)
 
 
 def _case_at02(ctx: dict) -> CaseResult:
     """Starts its own short step run (see module docstring) and aborts it
-    ~30s in, then confirms the abort was immediate: idle within 5s, every
+    ~30s in, then confirms the abort was immediate: not running (aborted) within 5s, every
     zone duty 0, heater relays off per ``io_read()``."""
     rested, rest_reason = _rest_gate(ctx)
     if not rested:
@@ -278,7 +334,7 @@ def _at02_body(ctx: dict) -> CaseResult:
             )
         t0 = now()
         st = srv._autotune.get_status()
-        while st.state_name != "idle" and now() - t0 < AT02_TIMEOUT_S:
+        while st.state_name not in _NOT_RUNNING_STATES and now() - t0 < AT02_TIMEOUT_S:
             sleep(0.2)
             st = srv._autotune.get_status()
         elapsed = now() - t0
@@ -343,6 +399,7 @@ def _at04_body(ctx: dict) -> CaseResult:
     if not zone_temps:
         return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as the baseline reference")
     ambient_ref = min(zone_temps.values())
+    baseline_c = zone_temps.get(0)
     setpoint_c = ambient_ref + AT_RELAY_SETPOINT_OFFSET_C
     srv = _srv(ctx)
     try:
@@ -368,10 +425,11 @@ def _at04_body(ctx: dict) -> CaseResult:
             tripped = bool(getattr(diag, "trip_reason", 0))
         except Exception:
             pass
-        return J.judge_autotune_fit(
+        exp_kwargs, exp_obs = _expected_model_kwargs(ctx)
+        result = J.judge_autotune_fit(
             method="relay",
             model_valid=st.model_valid,
-            baseline_c=st.actual_c if st.actual_valid else None,
+            baseline_c=baseline_c,
             ambient_ref=ambient_ref,
             k_gain_c_per_duty=st.model.k_gain_c_per_duty,
             tau_s=st.model.tau_s,
@@ -379,7 +437,9 @@ def _at04_body(ctx: dict) -> CaseResult:
             tripped=tripped,
             relay_valid=st.relay_valid,
             relay_amplitude_c=st.relay.amplitude_c if st.relay is not None else None,
+            **exp_kwargs,
         )
+        return _with_extra_observed(result, {"final_c": st.actual_c if st.actual_valid else None, **exp_obs})
     finally:
         _cleanup_autotune(ctx)
 

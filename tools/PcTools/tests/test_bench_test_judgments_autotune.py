@@ -80,6 +80,12 @@ class JudgeAutotuneAbortImmediateTest(unittest.TestCase):
         )
         self.assertEqual(result.verdict, Verdict.PASS)
 
+    def test_passes_on_aborted_terminal_state(self):
+        result = J.judge_autotune_abort_immediate(
+            state_name="aborted", duties=[0.0], relays_off=True, elapsed_since_abort_s=1.0,
+        )
+        self.assertEqual(result.verdict, Verdict.PASS)
+
     def test_fails_on_timeout(self):
         result = J.judge_autotune_abort_immediate(
             state_name="idle", duties=[0.0], relays_off=True, elapsed_since_abort_s=10.0, timeout_s=5.0,

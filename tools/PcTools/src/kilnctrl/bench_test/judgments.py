@@ -2665,7 +2665,8 @@ def judge_autotune_abort_immediate(
     state_name: str, duties: "list[float]", relays_off: Optional[bool], elapsed_since_abort_s: float,
     timeout_s: float = 5.0,
 ) -> CaseResult:
-    """AT-02: status goes idle within 5s of ``autotune_abort()``, every zone
+    """AT-02: status leaves the running states (firmware reports ``aborted``;
+    ``idle`` also accepted) within 5s of ``autotune_abort()``, every zone
     duty reads 0 within one control tick, and ``io_read()`` shows the
     heater relays off. ``relays_off=None`` (the read failed / no host) is
     reported INCONCLUSIVE for that half of the check rather than a silent
@@ -2675,11 +2676,13 @@ def judge_autotune_abort_immediate(
     if elapsed_since_abort_s > timeout_s:
         return CaseResult(
             Verdict.FAIL,
-            reason=f"status did not go idle within {timeout_s:.0f}s of autotune_abort() (took {elapsed_since_abort_s:.1f}s)",
+            reason=f"status did not leave the running states within {timeout_s:.0f}s of autotune_abort() (took {elapsed_since_abort_s:.1f}s)",
             observed=observed,
         )
-    if state_name != "idle":
-        return CaseResult(Verdict.FAIL, reason=f"state is {state_name!r}, expected 'idle' after abort", observed=observed)
+    if state_name not in ("aborted", "idle"):
+        return CaseResult(
+            Verdict.FAIL, reason=f"state is {state_name!r}, expected 'aborted' (or 'idle') after abort", observed=observed
+        )
     nonzero = [d for d in duties if d]
     if nonzero:
         return CaseResult(Verdict.FAIL, reason=f"{len(nonzero)} zone(s) had nonzero duty after abort", observed=observed)

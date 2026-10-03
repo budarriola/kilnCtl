@@ -180,6 +180,10 @@ def _base_ctx(srv, ramp=None, **extra):
         "http_get_json": ramp.get, "http_post_json": ramp.post,
     }
     _always_ok_preflight(ctx)
+    # Never reach the network for the zones-config read; default: unavailable.
+    def _no_zones(host):
+        raise RuntimeError("zones config unavailable in unit test")
+    ctx["_get_zones_config"] = _no_zones
     ctx.update(extra)
     return ctx
 
@@ -392,6 +396,101 @@ class AT05Test(unittest.TestCase):
         del ctx["host"]
         result = CA._case_at05(ctx)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+
+def _zones_snapshot(k=48.0, tau=287.0):
+    return {"zones": [{"index": 0, "k": k, "tau": tau}, {"index": 1, "k": 1.0, "tau": 1.0}]}
+
+
+class AutotuneHarnessRegressionTest(unittest.TestCase):
+    """First real-hardware run (20261003T191941Z_autotune) defects."""
+
+    def test_precondition_accepts_done_and_aborted_not_running(self):
+        for name in ("idle", "done", "aborted"):
+            srv = _FakeSrv(autotune=_FakeAutotuneClient(statuses=[_Status(state_name=name)]))
+            ok, reason = CA._autotune_not_running(_base_ctx(srv))
+            self.assertTrue(ok, (name, reason))
+        for name in ("settling", "stepping", "relay_approach", "relay_cycling"):
+            srv = _FakeSrv(autotune=_FakeAutotuneClient(statuses=[_Status(state_name=name)]))
+            ok, reason = CA._autotune_not_running(_base_ctx(srv))
+            self.assertFalse(ok, name)
+            self.assertIn(f"autotune is running (state={name})", reason)
+
+    def test_at01_runs_when_previous_run_left_state_done(self):
+        autotune = _FakeAutotuneClient(statuses=[
+            _Status(state_name="done", actual_c=55.0), _Status(state_name="done", actual_c=24.0)])
+        srv = _FakeSrv(autotune=autotune)
+        result = CA._case_at01(_base_ctx(srv))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_at02_runs_from_done_and_accepts_aborted_terminal_state(self):
+        autotune = _FakeAutotuneClient(statuses=[
+            _Status(state_name="done"), _Status(state_name="stepping"), _Status(state_name="aborted")])
+        srv = _FakeSrv(autotune=autotune, io=_FakeIoClient(relays=0))
+        result = CA._case_at02(_base_ctx(srv))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_at04_runs_when_previous_run_left_state_aborted(self):
+        autotune = _FakeAutotuneClient(statuses=[_Status(state_name="aborted"), _Status(state_name="done")])
+        srv = _FakeSrv(autotune=autotune)
+        result = CA._case_at04(_base_ctx(srv))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_baseline_is_the_pre_start_reading_not_final_actual_c(self):
+        # Heated to 55 C by a 0.5-duty step: actual_c is the CURRENT temp.
+        for fn in (CA._case_at01, CA._case_at04):
+            autotune = _FakeAutotuneClient(statuses=[
+                _Status(state_name="idle"), _Status(state_name="done", actual_c=55.1)])
+            srv = _FakeSrv(autotune=autotune)
+            result = fn(_base_ctx(srv))
+            self.assertEqual(result.verdict, Verdict.PASS, (fn.__name__, result.reason))
+            self.assertEqual(result.observed["baseline_c"], 24.0)
+            self.assertEqual(result.observed["final_c"], 55.1)
+
+    def test_baseline_far_from_rested_reference_still_fails(self):
+        # Zone 0 is 3 C above the coldest zone before the start: genuinely not rested.
+        srv = _FakeSrv(
+            readings=[_Reading(0, 25.9), _Reading(1, 24.0), _Reading(2, 24.5)],
+            autotune=_FakeAutotuneClient(statuses=[_Status(state_name="idle"), _Status(state_name="done")]))
+        srv_ctx = _base_ctx(srv)
+        result = CA._at01_body(srv_ctx)
+        self.assertEqual(result.verdict, Verdict.PASS)  # 1.9 C is inside the 2 C band
+        srv = _FakeSrv(
+            readings=[_Reading(0, 26.5), _Reading(1, 24.0), _Reading(2, 24.5)],
+            autotune=_FakeAutotuneClient(statuses=[_Status(state_name="idle"), _Status(state_name="done")]))
+        result = CA._at01_body(_base_ctx(srv))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("rested reference", result.reason)
+
+    def test_k_and_tau_expectation_come_from_zones_config(self):
+        status = _Status(state_name="done", model=_Model(k_gain_c_per_duty=48.45, tau_s=286.9))
+        autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), status])
+        srv = _FakeSrv(autotune=autotune)
+        ctx = _base_ctx(srv, _get_zones_config=lambda host: _zones_snapshot(k=48.0, tau=287.0))
+        result = CA._case_at01(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertEqual(result.observed["k_expected_source"], "zones_config")
+        self.assertEqual(result.observed["tau_expected_source"], "zones_config")
+
+    def test_k_outside_committed_tolerance_fails(self):
+        status = _Status(state_name="done", model=_Model(k_gain_c_per_duty=38.0, tau_s=287.0))
+        autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), status])
+        srv = _FakeSrv(autotune=autotune)
+        ctx = _base_ctx(srv, _get_zones_config=lambda host: _zones_snapshot(k=48.0, tau=287.0))
+        result = CA._case_at01(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("fitted K", result.reason)
+
+    def test_falls_back_to_defaults_when_zones_config_unavailable_or_nonpositive(self):
+        for getter in (None, lambda host: _zones_snapshot(k=0.0, tau=0.0),
+                       lambda host: {"zones": []}, lambda host: {"zones": [{"index": 0}]}):
+            autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), _Status(state_name="done")])
+            srv = _FakeSrv(autotune=autotune)
+            ctx = _base_ctx(srv) if getter is None else _base_ctx(srv, _get_zones_config=getter)
+            result = CA._case_at01(ctx)
+            self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+            self.assertEqual(result.observed["k_expected_source"], "default")
+            self.assertEqual(result.observed["tau_expected_source"], "default")
 
 
 if __name__ == "__main__":
