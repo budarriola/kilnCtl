@@ -106,7 +106,7 @@ choice. Original requirements below.
 `flash_recovery`, forced with `recovery_enter`, LCD page, AP join with the LCD passphrase, status
 route, relays verified off, `recovery_exit`. ESP upload through the recovery AP also verified
 2026-10-03 (`docs/BENCH_TEST_LOG.md`, "ESP upload through the recovery image (W5)"). Remaining: the
-boot_guard threshold switch, Pico upload (blocked, the SaftyFW debug probe is disconnected),
+boot_guard threshold switch (attempted 2026-10-03 with JTAG resets, not provoked: the healthy mark clears the counter within ~6 s of boot, see `docs/BENCH_TEST_LOG.md`), Pico upload (blocked, the SaftyFW debug probe is disconnected),
 `wifi_reset`, the "wifi_storage_fail" path and a no-PSRAM boot (if the fixture can simulate it). Measure internal heap floor >= 8192 B during an upload on BOTH the
 PSRAM and the no-PSRAM boot. Measure the `app` erase time and idle-task starvation, then
 decide on `CONFIG_ESP_TASK_WDT_PANIC`.
