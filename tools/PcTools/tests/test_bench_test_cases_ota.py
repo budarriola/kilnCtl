@@ -1004,13 +1004,42 @@ class RefusalDrainSettleTest(unittest.TestCase):
         self.assertGreater(r.observed["uptime_elapsed_s"], r.observed["elapsed_s"])
 
     def test_ote01_continuity_counts_settle_wait(self):
-        """uptime 100 -> 101 although 50 s of real time passed during the
-        settle wait: a reboot hidden by the drain must still FAIL."""
-        ctx = Ote01Test()._ctx(_esp_uptime_fn=self._uptime_seq([100.0, None, None, 101.0]),
-                               _now=_Clock(10.0))
+        """uptime 100 -> 101 passes on the push's own ~1 s alone, but ~10 s
+        of settle wait passed before it was readable: a reboot hidden by the
+        drain must FAIL once that wait counts."""
+        seq = [100.0] + [None] * 10 + [101.0]
+        ctx = Ote01Test()._ctx(_esp_uptime_fn=self._uptime_seq(seq), _now=_Clock(1.0))
         r = C._case_ote01(ctx)
         self.assertEqual(r.verdict, Verdict.FAIL)
         self.assertIn("rebooted", r.reason)
+        self.assertLess(r.observed["elapsed_s"], 3.0)
+        self.assertGreater(r.observed["uptime_elapsed_s"], 10.0)
+
+    def test_settled_read_attempt_cap_with_frozen_clock(self):
+        calls = {"n": 0}
+
+        def fn():
+            calls["n"] += 1
+            raise TimeoutError("x")
+
+        ctx = {"_now": lambda: 0.0, "_sleep_fn": lambda s: None}
+        self.assertEqual(C._settled_read(ctx, fn), (None, None))
+        self.assertLessEqual(calls["n"], 42)
+
+    def test_settled_read_stamps_attempt_start(self):
+        ticks = iter(range(100, 200))
+        vals = iter([None, None, "ok"])
+
+        def fn():
+            v = next(vals)
+            if v is None:
+                raise TimeoutError("x")
+            return v
+
+        value, at = C._settled_read({"_now": lambda: next(ticks), "_sleep_fn": lambda s: None}, fn)
+        self.assertEqual(value, "ok")
+        # tick 100 = deadline, 101 = start of attempt 2 (fails), 102 = deadline check, 103 = start of success
+        self.assertEqual(at, 103)
 
     def test_ote01_all_uptime_reads_raise_fails_unreadable(self):
         sleeps = []
@@ -1019,7 +1048,7 @@ class RefusalDrainSettleTest(unittest.TestCase):
         r = C._case_ote01(ctx)
         self.assertEqual(r.verdict, Verdict.FAIL)
         self.assertIn("unreadable", r.reason)
-        self.assertGreaterEqual(len(sleeps), 30)
+        self.assertGreaterEqual(len(sleeps), 15)
 
     def _retry_case(self, fn, cls):
         part, pstate = _partitions_after_first({2, 3, 4})
@@ -1248,6 +1277,31 @@ class Ote07Ote08Test(unittest.TestCase):
         ctx = self._ctx("stepping", "_autotune_state_fn", ota_http_client=_FakeOtaClient(push_result=_OtaPushResult(True, 200)))
         result = C._case_ote08(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+
+    def test_ote07_state_after_retries_through_drain_window(self):
+        seq = iter(["running", None, None, "running"])
+
+        def state_fn():
+            v = next(seq)
+            if v is None:
+                raise TimeoutError("draining")
+            return v
+
+        sleeps = []
+        ctx = self._ctx("running", "_exec_state_fn", _exec_state_fn=state_fn,
+                        _now=_Clock(1.0), _sleep_fn=sleeps.append)
+        r = C._case_ote07(ctx)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertEqual(len(sleeps), 2)
+
+    def test_ote07_ote08_non_http_push_error_fails_early(self):
+        for fn, key, st in ((C._case_ote07, "_exec_state_fn", "running"),
+                            (C._case_ote08, "_autotune_state_fn", "stepping")):
+            for exc in (FileNotFoundError("x"), _reset_err()):
+                ctx = self._ctx(st, key, ota_http_client=_RaisingPushClient(exc))
+                r = fn(ctx)
+                self.assertEqual(r.verdict, Verdict.FAIL, (fn.__name__, exc))
+                self.assertIn("error:", r.reason)
 
     def test_ote07_state_disturbed_by_refused_push_fails(self):
         calls = {"n": 0}

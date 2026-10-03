@@ -587,5 +587,22 @@ class OtaSessionAuthTiersTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
 
 
+class JudgeOtaSelfPushUptimeElapsedTest(unittest.TestCase):
+    def _judge(self, **kw):
+        args = dict(refusal_form="http_409", status_code=409, elapsed_s=1.0, uptime_before=100.0,
+                    uptime_after=101.0, crash_before={"present": False}, crash_after={"present": False},
+                    interlock_ok_after=True)
+        args.update(kw)
+        return J.judge_ota_self_push_refused(**args)
+
+    def test_push_time_alone_passes(self):
+        self.assertEqual(self._judge().verdict, Verdict.PASS)
+
+    def test_settle_wait_counts_toward_continuity(self):
+        r = self._judge(uptime_elapsed_s=30.0)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("rebooted", r.reason)
+
+
 if __name__ == "__main__":
     unittest.main()

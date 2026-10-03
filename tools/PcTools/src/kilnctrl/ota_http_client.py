@@ -161,12 +161,18 @@ def _establish_admin_session(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> 
     refusal whose unread body exceeds 4096 B instead of draining it, so a
     multi-MB POST made with no session never yields a readable 401: urllib
     sees ConnectionResetError and http_auth's login-and-retry never fires.
-    Best effort only: any failure here is swallowed (logged), and the real POST
-    then reports whatever the board actually does."""
+    Best effort for transport errors/timeouts (swallowed and logged; the real
+    POST then reports whatever the board does). A 401/403 answer to this probe
+    is NOT swallowed: it means login failed or the role is not ADMIN, so it is
+    re-raised as OtaHttpError(status) before any upload starts."""
     req = urllib.request.Request(_url(host, "/api/ota/interlock"), method="GET")
     try:
         with http_auth.urlopen(req, timeout=timeout) as resp:
             resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):
+            raise OtaHttpError(f"/api/ota/interlock session probe refused: HTTP {exc.code}", exc.code) from exc
+        log.warning("OTA pre-push session probe failed: host=%s: HTTP %s", host, exc.code)
     except Exception as exc:  # noqa: BLE001 -- see docstring
         log.warning("OTA pre-push session probe failed: host=%s: %s: %s",
                     host, type(exc).__name__, exc)

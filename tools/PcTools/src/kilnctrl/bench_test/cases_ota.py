@@ -231,25 +231,35 @@ def _settled_read(ctx: dict, fn, window_s: Optional[float] = None) -> "tuple[Any
     ``window_s`` (default OTA_REFUSAL_DRAIN_SETTLE_S) elapses, polling about
     every OTA_REFUSAL_DRAIN_POLL_S. Returns ``(value, settled_at)``: ``value``
     is None only if nothing came back inside the window; ``settled_at`` is the
-    ``ctx["_now"]`` clock reading when a RETRIED read finally succeeded (so a
-    caller can include the settle wait in elapsed-time maths) and None when the
-    first attempt already succeeded. Hooks: ``ctx["_now"]``,
-    ``ctx["_sleep_fn"]``. The clock is only read after a first failure."""
+    ``ctx["_now"]`` clock reading at the START of the retried attempt that
+    finally succeeded (so a caller can include the settle wait in elapsed-time
+    maths without counting the read's own latency) and None when the first
+    attempt already succeeded. Hooks: ``ctx["_now"]``, ``ctx["_sleep_fn"]``.
+    The clock is only read after a first failure. A hard attempt cap of
+    ceil(window/poll)+2 bounds the loop even if an injected clock never
+    advances."""
+    import math
     import time as _time
     now = ctx.get("_now") or _time.monotonic
     sleep = ctx.get("_sleep_fn") or _time.sleep
     window = OTA_REFUSAL_DRAIN_SETTLE_S if window_s is None else window_s
+    max_attempts = math.ceil(window / OTA_REFUSAL_DRAIN_POLL_S) + 2
     deadline = None
+    attempts = 0
     while True:
+        started = None if deadline is None else now()
         try:
             value = fn()
         except Exception:
             value = None
         if value is not None:
-            return value, (None if deadline is None else now())
+            return value, started
+        attempts += 1
         if deadline is None:
             deadline = now() + window
         elif now() >= deadline:
+            return None, None
+        if attempts >= max_attempts:
             return None, None
         sleep(OTA_REFUSAL_DRAIN_POLL_S)
 
@@ -980,7 +990,9 @@ def _case_update_refused_during_state(
                 return CaseResult(Verdict.FAIL, reason=f"push did not get an HTTP answer from the board: {push_error}",
                                   observed={"push_error": push_error})
 
-        state_after = get_exec_state_fn()
+        # The refused push leaves the firmware draining the body, during which
+        # it answers nothing else: retry the state read through that window.
+        state_after, _ = _settled_read(ctx, get_exec_state_fn)
 
         return J.judge_ota_update_refused_during_state(
             interlock_ok, push_refused, state_before, state_after, expected_state,

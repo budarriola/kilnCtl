@@ -112,6 +112,20 @@ class PushImageTest(unittest.TestCase):
             self.assertTrue(ota.push_esp_image("kiln.local", self.tmp.name).ok)
         self.assertEqual(calls, ["GET", "POST"])
 
+    def test_probe_401_403_aborts_before_upload(self):
+        for code in (401, 403):
+            calls = []
+
+            def wrapper(req, timeout=None, _c=calls, _code=code):
+                _c.append(req.get_method())
+                raise urllib.error.HTTPError(req.full_url, _code, "no", hdrs=None, fp=io.BytesIO(b"denied"))
+
+            with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+                with self.assertRaises(ota.OtaHttpError) as cm:
+                    ota.push_esp_image("kiln.local", self.tmp.name)
+            self.assertEqual(cm.exception.status, code)
+            self.assertEqual(calls, ["GET"])
+
     def test_missing_file_makes_no_request(self):
         with unittest.mock.patch.object(ota.http_auth, "urlopen") as m:
             with self.assertRaises(ota.OtaHttpError):
