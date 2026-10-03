@@ -399,7 +399,7 @@ class AT05Test(unittest.TestCase):
 
 
 def _zones_snapshot(k=48.0, tau=287.0):
-    return {"zones": [{"index": 0, "k": k, "tau": tau}, {"index": 1, "k": 1.0, "tau": 1.0}]}
+    return {"zones": [{"index": 0, "model_k_dc": k, "model_tau_s": tau}, {"index": 1, "model_k_dc": 1.0, "model_tau_s": 1.0}]}
 
 
 class AutotuneHarnessRegressionTest(unittest.TestCase):
@@ -480,6 +480,23 @@ class AutotuneHarnessRegressionTest(unittest.TestCase):
         result = CA._case_at01(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("fitted K", result.reason)
+
+    def test_post_form_key_names_are_not_read(self):
+        # GET /api/zones sends model_k_dc/model_tau_s; k/tau are POST form names.
+        post_spelling = lambda host: {"zones": [{"index": 0, "k": 48.0, "tau": 287.0}]}
+        autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), _Status(state_name="done")])
+        ctx = _base_ctx(_FakeSrv(autotune=autotune), _get_zones_config=post_spelling)
+        result = CA._case_at01(ctx)
+        self.assertEqual(result.observed["k_expected_source"], "default")
+        self.assertEqual(result.observed["k_expected_c_per_duty"], 38.0)
+
+    def test_expected_values_are_recorded(self):
+        status = _Status(state_name="done", model=_Model(k_gain_c_per_duty=48.45, tau_s=286.9))
+        autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), status])
+        ctx = _base_ctx(_FakeSrv(autotune=autotune), _get_zones_config=lambda host: _zones_snapshot(48.0, 287.0))
+        result = CA._case_at01(ctx)
+        self.assertEqual(result.observed["k_expected_c_per_duty"], 48.0)
+        self.assertEqual(result.observed["tau_expected_s"], 287.0)
 
     def test_falls_back_to_defaults_when_zones_config_unavailable_or_nonpositive(self):
         for getter in (None, lambda host: _zones_snapshot(k=0.0, tau=0.0),

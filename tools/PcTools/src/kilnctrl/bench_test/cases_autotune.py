@@ -143,7 +143,7 @@ def _autotune_not_running(ctx: dict) -> Tuple[bool, str]:
 
 def _committed_plant_model(ctx: dict) -> Tuple[Optional[float], Optional[float]]:
     """Zone 0's committed plant-model ``k``/``tau`` from the live zones config
-    (``GET /api/zones``, read only), each None when unavailable or not > 0."""
+    (``GET /api/zones`` per-zone ``model_k_dc``/``model_tau_s``, read only), each None when unavailable or not > 0."""
     host = ctx.get("host")
     if not host:
         return None, None
@@ -160,7 +160,7 @@ def _committed_plant_model(ctx: dict) -> Tuple[Optional[float], Optional[float]]
 
     for zone in (snapshot.get("zones") if isinstance(snapshot, dict) else None) or []:
         if zone.get("index") == 0:
-            return _pos(zone.get("k")), _pos(zone.get("tau"))
+            return _pos(zone.get("model_k_dc")), _pos(zone.get("model_tau_s"))
     return None, None
 
 
@@ -173,6 +173,8 @@ def _expected_model_kwargs(ctx: dict) -> Tuple[dict, dict]:
     if tau is not None:
         kwargs["tau_expected_s"] = tau
     return kwargs, {
+        "k_expected_c_per_duty": kwargs.get("k_expected_c_per_duty", 38.0),
+        "tau_expected_s": kwargs.get("tau_expected_s", 265.0),
         "k_expected_source": "zones_config" if k is not None else "default",
         "tau_expected_source": "zones_config" if tau is not None else "default",
     }
