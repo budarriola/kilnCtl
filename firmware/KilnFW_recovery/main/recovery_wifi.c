@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bootloader_random.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
@@ -134,29 +135,24 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 }
 
-// Generates this boot's random WPA2 passphrase, brings the SoftAP up with it
-// and hands it to the LCD. The passphrase exists only in this stack frame and
-// the LCD module's RAM copy: it is never logged, never stored in NVS and never
-// returned by any HTTP route (owner decision 2026-10-02: physical sight of the
-// screen is the only access control).
-static bool start_softap(void)
+// Brings the SoftAP up with this boot's random WPA2 passphrase `pass` (from
+// generate_passphrase()) and hands it to the LCD, then wipes `pass` on every
+// path. The passphrase exists only in recovery_wifi_start()'s stack frame, the
+// Wi-Fi driver's RAM config and the LCD module's RAM copy: it is never logged,
+// never stored in NVS and never returned by any HTTP route (owner decision
+// 2026-10-02: physical sight of the screen is the only access control).
+static bool start_softap(char pass[RPASS_LEN + 1])
 {
     char ap_ssid[33] = {0};
     if (!nvs_read_str(NVS_NAMESPACE, NVS_KEY_AP_SSID, ap_ssid, sizeof(ap_ssid)) || !ap_ssid[0]) {
         strncpy(ap_ssid, RECOVERY_AP_SSID_DEFAULT, sizeof(ap_ssid) - 1);
     }
 
-    uint8_t rnd[RPASS_LEN];
-    char pass[RPASS_LEN + 1];
-    esp_fill_random(rnd, sizeof(rnd));
-    rpass_format(rnd, pass);
-    secure_zero(rnd, sizeof(rnd));
-
     if (!s_ap_netif) {
         s_ap_netif = esp_netif_create_default_wifi_ap();
         if (!s_ap_netif) {
             ESP_LOGE(TAG, "esp_netif_create_default_wifi_ap failed");
-            secure_zero(pass, sizeof(pass));
+            secure_zero(pass, RPASS_LEN + 1);
             return false;
         }
     }
@@ -179,7 +175,7 @@ static bool start_softap(void)
     secure_zero(&cfg, sizeof(cfg));
     if (e3 != ESP_OK) {
         ESP_LOGE(TAG, "SoftAP bring-up failed: %s", esp_err_to_name(e3));
-        secure_zero(pass, sizeof(pass));
+        secure_zero(pass, RPASS_LEN + 1);
         return false;
     }
     ESP_LOGI(TAG, "SoftAP up: ssid=%s (WPA2, passphrase on the LCD only)", ap_ssid);
@@ -191,8 +187,23 @@ static bool start_softap(void)
         snprintf(ip, sizeof(ip), IPSTR, IP2STR(&info.ip));
     }
     recovery_lcd_set_ap(ap_ssid, pass, ip);
-    secure_zero(pass, sizeof(pass));
+    secure_zero(pass, RPASS_LEN + 1);
     return true;
+}
+
+// The hardware RNG is only a true RNG while the RF subsystem or the SAR-ADC
+// entropy source is on (ESP-IDF "Random Number Generation"); before
+// esp_wifi_start() neither is, so the entropy source is enabled explicitly for
+// the draw. Must run before esp_wifi_init(): bootloader_random_enable() is not
+// safe while Wi-Fi or the ADC is in use (this image uses no ADC).
+static void generate_passphrase(char pass[RPASS_LEN + 1])
+{
+    uint8_t rnd[RPASS_LEN];
+    bootloader_random_enable();
+    esp_fill_random(rnd, sizeof(rnd));
+    bootloader_random_disable();
+    rpass_format(rnd, pass);
+    secure_zero(rnd, sizeof(rnd));
 }
 
 void recovery_wifi_start(void)
@@ -210,6 +221,9 @@ void recovery_wifi_start(void)
         return;
     }
 
+    char pass[RPASS_LEN + 1];
+    generate_passphrase(pass); // before esp_wifi_init(), see its comment
+
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_DEFAULT) {
         init_cfg.nvs_enable = 0; // default nvs unusable (and never erased): driver runs RAM-only
@@ -217,6 +231,7 @@ void recovery_wifi_start(void)
     err = esp_wifi_init(&init_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init failed: %s -- no network", esp_err_to_name(err));
+        secure_zero(pass, sizeof(pass));
         recovery_lcd_set_no_network();
         return;
     }
@@ -235,7 +250,7 @@ void recovery_wifi_start(void)
         ESP_LOGE(TAG, "wifi event handler register failed: %s", esp_err_to_name(err));
     }
 
-    if (!start_softap()) {
+    if (!start_softap(pass)) { // wipes pass on every path
         ESP_LOGE(TAG, "SoftAP failed -- NO NETWORK (HTTP still started)");
         recovery_lcd_set_no_network();
     }

@@ -342,7 +342,8 @@ static void draw_status(void)
     }
 
     if (s_net_none) {
-        (void)draw_line(Y_JOIN, NET_SCALE, COL_FAULT, COL_FAULT_BG, "NO NETWORK");
+        // TEXT_SCALE: a NET_SCALE band (21 px from Y_JOIN) would overlap Y_SSID.
+        (void)draw_line(Y_JOIN, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "NO NETWORK");
         (void)draw_line(Y_SSID, TEXT_SCALE, COL_DIM, COL_BG, "Wi-Fi bring-up failed");
         (void)draw_line(Y_PWLBL, TEXT_SCALE, COL_DIM, COL_BG, "Power-cycle or use JTAG");
         (void)draw_line(Y_PASS, PASS_SCALE, COL_BG, COL_BG, "");

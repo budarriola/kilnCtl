@@ -23,7 +23,6 @@ idf_component_register(
         bootloader_support
         esp_http_server
         app_update
-        mbedtls
         driver
         esp_driver_gpio
         esp_driver_i2c

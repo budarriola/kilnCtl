@@ -194,7 +194,7 @@ def _app_may_be_erased_note(host: str) -> str:
 
 
 def _reply_lost(exc: "rpc.RecoveryPostError") -> bool:
-    """True when the signed POST was sent but no HTTP status came back
+    """True when the POST was sent but no HTTP status came back
     (timeout, reset): the board may have acted, so this is never a plain
     FAILED -- the caller must go on to observe the board."""
     return exc.status is None and getattr(exc, "stage", "") == "post"
@@ -308,7 +308,7 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
 @_srv._tool()
 def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0) -> str:
     """Forget the HOME Wi-Fi credentials stored for the recovery image and
-    restart (POST /api/recovery/wifi_reset, context "wifi-reset"). The AP
+    restart (POST /api/recovery/wifi_reset). The AP
     name is kept (the AP passphrase is random per boot anyway).
 
     REFUSES unless ``confirm is True`` exactly. Reads status first, refuses while the Pico relay is busy.
@@ -354,8 +354,7 @@ def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_
 @_srv._tool()
 def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None) -> str:
     """Clear the boot_guard counter from the recovery image (POST
-    /api/ota/esp/boot_guard_reset on the RECOVERY image, context
-    "boot-guard-reset"; not the main app's route of the same path). The board
+    /api/ota/esp/boot_guard_reset on the RECOVERY image; not the main app's route of the same path). The board
     erases the record in both locations and reads it back itself.
 
     REFUSES unless ``confirm is True`` exactly. Reads recovery status first (``record_present``/
@@ -656,8 +655,8 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     REFUSES unless ``confirm is True`` exactly, the file is an existing
     absolute path whose size is 1..the board's reported ``max_upload`` (the
     `app` partition size, from GET /api/recovery/status) and which starts
-    with the ESP image magic byte 0xE9
-    only). Reads both status routes first and REFUSES while the Pico relay is
+    with the ESP image magic byte 0xE9.
+    Reads both status routes first and REFUSES while the Pico relay is
     busy (the board 409s). Verification: after the POST the board must drop
     off and the recovery routes must answer 404 (the application is up) -> ok.
     Back as the recovery image, or never restarted -> FAILED. A reply lost
