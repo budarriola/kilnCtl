@@ -847,8 +847,10 @@ static bool reconcile_on_link_up_impl(SafetyLinkClass *link, bool blocking)
      * current sweep drives, so it must not overlap one. Only the POLL-SIDE
      * (non-blocking) entry claims: the blocking entry is reached only from
      * kiln_cfg_swap.c's apply/boot-recovery, which already owns the guard as
-     * SAFETY_CFG_WRITER_SWAP (and, at boot recovery, runs before any other
-     * writer can exist) -- claiming again there would refuse itself.
+     * SAFETY_CFG_WRITER_SWAP -- claiming again there would refuse itself.
+     * (Boot recovery's SWAP claim is best-effort: HTTP and this poll may
+     * already be up, and if the claim is refused recovery proceeds unclaimed
+     * with a warning -- see kiln_cfg_swap_worker.c.)
      *
      * Placed AFTER the divergence enforcement above and after the backoff
      * gate on purpose: enforcement is the cheap, cache-only heat-off path and
