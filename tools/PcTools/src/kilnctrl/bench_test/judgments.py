@@ -2117,6 +2117,7 @@ def judge_ota_self_push_refused(
     crash_before: "Optional[dict]",
     crash_after: "Optional[dict]",
     interlock_ok_after: Optional[bool],
+    uptime_elapsed_s: Optional[float] = None,
 ) -> CaseResult:
     """OT-E01: the APPLICATION image runs from the only OTA slot, so
     POST /api/ota/esp must be refused (single-slot design,
@@ -2135,9 +2136,18 @@ def judge_ota_self_push_refused(
     backwards (no reboot -- the pre-fix failure mode was a TASK_WDT panic
     while the body drained), `/api/crash_report` unchanged (no new record)
     and the OTA interlock still ok. Any value that could not be read is a
-    FAIL, never assumed fine."""
+    FAIL, never assumed fine.
+
+    ``elapsed_s`` is the push call's own duration (the 120 s ceiling).
+    ``uptime_elapsed_s`` is the real time from the push start to the moment
+    ``uptime_after`` was finally read, INCLUDING any wait for the firmware's
+    post-refusal body drain to finish (the board answers nothing else until
+    then); it defaults to ``elapsed_s`` and is what the continuity math uses."""
+    if uptime_elapsed_s is None:
+        uptime_elapsed_s = elapsed_s
     observed = {
         "refusal_form": refusal_form, "status_code": status_code, "elapsed_s": elapsed_s,
+        "uptime_elapsed_s": uptime_elapsed_s,
         "uptime_before": uptime_before, "uptime_after": uptime_after,
         "crash_before": crash_before, "crash_after": crash_after,
         "interlock_ok_after": interlock_ok_after,
@@ -2158,11 +2168,11 @@ def judge_ota_self_push_refused(
         )
     if uptime_before is None or uptime_after is None:
         return CaseResult(Verdict.FAIL, reason="uptime_s unreadable before or after the push; cannot rule out a reboot", observed=observed)
-    if not uptime_continuous(uptime_before, uptime_after, elapsed_s):
+    if not uptime_continuous(uptime_before, uptime_after, uptime_elapsed_s):
         return CaseResult(
             Verdict.FAIL,
             reason=(f"board rebooted or uptime_s did not advance with the push: uptime_s {uptime_before!r} -> "
-                    f"{uptime_after!r} over {elapsed_s!r} s"),
+                    f"{uptime_after!r} over {uptime_elapsed_s!r} s"),
             observed=observed,
         )
     if crash_before is None or crash_after is None:
@@ -2183,18 +2193,35 @@ def judge_ota_push_refused(
     running_after: Optional[str],
     fw_build_before: Optional[str],
     fw_build_after: Optional[str],
+    push_error: Optional[str] = None,
 ) -> CaseResult:
     """OT-E03: a corrupt image must be refused (4xx, or phase:failed short
     of a reboot) -- fw_build and RUNNING must be exactly unchanged. A
     'refused' flag alone is not trusted: a refusal that nonetheless changed
     RUNNING or fw_build is still FAIL, meaning the board rebooted into the
-    bad image before catching the problem."""
+    bad image before catching the problem.
+
+    ``push_error`` ("error:<ExcName>") means the push raised something that was
+    not an HTTP answer from the board (a local file error, a transport reset
+    where one is not expected): FAIL, never a refusal. A readback that is None
+    (nothing came back inside the caller's settle window) is reported as
+    "unreadable", never judged as a change."""
     observed = {
         "refused": refused, "running_before": running_before, "running_after": running_after,
         "fw_build_before": fw_build_before, "fw_build_after": fw_build_after,
+        "push_error": push_error,
     }
+    if push_error:
+        return CaseResult(Verdict.FAIL, reason=f"push did not get an HTTP answer from the board: {push_error}",
+                          observed=observed)
     if not refused:
         return CaseResult(Verdict.FAIL, reason="push was accepted; expected a refusal before reboot", observed=observed)
+    unreadable = [name for name, v in (("running_before", running_before), ("running_after", running_after),
+                                       ("fw_build_before", fw_build_before), ("fw_build_after", fw_build_after))
+                  if v is None]
+    if unreadable:
+        return CaseResult(Verdict.FAIL, reason=f"unreadable readback(s): {', '.join(unreadable)}; cannot tell whether the "
+                                               f"board changed", observed=observed)
     if running_after != running_before:
         return CaseResult(
             Verdict.FAIL, reason=f"RUNNING partition changed ({running_before!r} -> {running_after!r}) despite refusal",

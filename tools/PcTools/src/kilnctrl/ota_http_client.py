@@ -151,6 +151,27 @@ class OtaPushResult:
     body: dict = field(default_factory=dict)
 
 
+def _establish_admin_session(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> None:
+    """One cheap ADMIN-tier GET through http_auth.urlopen() before a large
+    body POST, so a 401 is seen and handled (login + retry) on a tiny request.
+    GET /api/ota/interlock is ROUTE_TIER_ADMIN (route_tier_table.h, bench
+    confirmed 2026-10-03: an OPEN-tier GET such as /api/ota/esp/status does NOT
+    establish a session) and a small, side-effect-free read.
+    Firmware's http_auth_refusal_should_close() closes an UNAUTHENTICATED
+    refusal whose unread body exceeds 4096 B instead of draining it, so a
+    multi-MB POST made with no session never yields a readable 401: urllib
+    sees ConnectionResetError and http_auth's login-and-retry never fires.
+    Best effort only: any failure here is swallowed (logged), and the real POST
+    then reports whatever the board actually does."""
+    req = urllib.request.Request(_url(host, "/api/ota/interlock"), method="GET")
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+    except Exception as exc:  # noqa: BLE001 -- see docstring
+        log.warning("OTA pre-push session probe failed: host=%s: %s: %s",
+                    host, type(exc).__name__, exc)
+
+
 def _push_image(host: str, path: str, endpoint: str,
                  timeout: float, extra_headers: Optional[dict] = None) -> OtaPushResult:
     """Shared body of push_esp_image()/push_pico_image(): validate the local
@@ -168,6 +189,8 @@ def _push_image(host: str, path: str, endpoint: str,
     size = os.path.getsize(path)
     if size == 0:
         raise OtaHttpError(f"image file is empty: {path}")
+
+    _establish_admin_session(host)
 
     with open(path, "rb") as f:
         data = f.read()

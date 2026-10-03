@@ -77,11 +77,52 @@ class PushImageTest(unittest.TestCase):
         self.assertIsNone(req.headers.get("X-ota-mac") or req.headers.get("X-Ota-mac"))
         self.assertIsNone(req.headers.get("X-ota-nonce") or req.headers.get("X-Ota-nonce"))
 
+    def test_push_establishes_admin_session_before_big_post(self):
+        """A bodyless ADMIN-tier GET (/api/ota/interlock) goes through
+        http_auth.urlopen() BEFORE the large POST, for the esp and pico
+        routes alike, so an unauthenticated 401 is handled on a tiny request
+        (http_auth_refusal_should_close() would otherwise reset the upload)."""
+        ok_body = json.dumps({"ok": True}).encode()
+        for push, endpoint in ((ota.push_esp_image, "/api/ota/esp"), (ota.push_pico_image, "/api/ota/pico")):
+            seen = []
+
+            def wrapper(req, timeout=None, _seen=seen):
+                _seen.append((req.get_method(), req.full_url, req.data))
+                return _fake_response(ok_body)
+
+            with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+                push("kiln.local", self.tmp.name)
+            self.assertEqual([(m, u) for m, u, _ in seen],
+                             [("GET", "http://kiln.local/api/ota/interlock"),
+                              ("POST", "http://kiln.local" + endpoint)])
+            self.assertIsNone(seen[0][2])
+            self.assertTrue(seen[1][2])
+
+    def test_failed_session_probe_does_not_block_the_push(self):
+        ok_body = json.dumps({"ok": True}).encode()
+        calls = []
+
+        def wrapper(req, timeout=None):
+            calls.append(req.get_method())
+            if req.get_method() == "GET":
+                raise urllib.error.URLError("probe down")
+            return _fake_response(ok_body)
+
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            self.assertTrue(ota.push_esp_image("kiln.local", self.tmp.name).ok)
+        self.assertEqual(calls, ["GET", "POST"])
+
+    def test_missing_file_makes_no_request(self):
+        with unittest.mock.patch.object(ota.http_auth, "urlopen") as m:
+            with self.assertRaises(ota.OtaHttpError):
+                ota.push_esp_image("kiln.local", "/no/such/file.bin")
+        m.assert_not_called()
+
     def test_push_pico_image_reports_202_relay_started(self):
         accepted_body = json.dumps({"ok": True, "status": "relay_started", "bytes": 17,
                                      "crc32": "0xdeadbeef"}).encode()
         with unittest.mock.patch.object(ota.http_auth, "urlopen",
-                                         return_value=_fake_response(accepted_body, status=202)):
+                                         side_effect=lambda *a, **k: _fake_response(accepted_body, status=202)):
             result = ota.push_pico_image("kiln.local", self.tmp.name)
         self.assertTrue(result.ok)
         self.assertEqual(result.status_code, 202)
@@ -440,7 +481,7 @@ class PushImageLoggingTest(unittest.TestCase):
         ok_body = json.dumps({"ok": True, "bytes": 29, "partition": "ota_0",
                                "version": "1.2.3"}).encode()
         with unittest.mock.patch.object(ota.http_auth, "urlopen",
-                                         return_value=_fake_response(ok_body)):
+                                         side_effect=lambda *a, **k: _fake_response(ok_body)):
             with self.assertLogs(ota.log, level="INFO") as cm:
                 ota.push_esp_image("kiln.local", self.tmp.name)
         all_output = "\n".join(cm.output)

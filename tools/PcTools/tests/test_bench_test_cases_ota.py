@@ -600,7 +600,7 @@ class Ote01Test(unittest.TestCase):
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5",
             "ota_image_path": "/tmp/image.bin", "_isfile_fn": lambda p: True,
             "ota_http_client": _RaisingPushClient(_OtaHttpErr(409, "refused: single-slot")),
-            "_now": _Clock(),
+            "_now": _Clock(), "_sleep_fn": lambda s: None,
             "_esp_uptime_fn": lambda: 100.0,
             "_crash_report_fn": lambda: {"present": False},
         }
@@ -809,6 +809,7 @@ class Ote03Test(unittest.TestCase):
         ctx = {
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
             "ota_corrupt_image_path": "/tmp/bad.bin",
+            "_isfile_fn": lambda p: True, "_now": _Clock(1.0), "_sleep_fn": lambda s: None,
             "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 400)),
             "partition_http_client": _FakePartitionClient(running="app"),
             "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
@@ -869,6 +870,7 @@ class Ote04Test(unittest.TestCase):
         ctx = {
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
             "ota_truncated_image_path": "/tmp/truncated.bin",
+            "_isfile_fn": lambda p: True, "_now": _Clock(1.0), "_sleep_fn": lambda s: None,
             "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 400)),
             "partition_http_client": _FakePartitionClient(running="app"),
             "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
@@ -902,6 +904,7 @@ class Ote05Test(unittest.TestCase):
         ctx = {
             "srv": _FakeSrv(state_name="idle"), "host": "10.0.0.5", "ap_password": "secret",
             "ota_wrong_build_image_path": "/tmp/recovery.bin",
+            "_isfile_fn": lambda p: True, "_now": _Clock(1.0), "_sleep_fn": lambda s: None,
             "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 400)),
             "partition_http_client": _FakePartitionClient(running="app"),
             "dashboard_http_client": _FakeDashboardClient(fw_build="B1"),
@@ -928,6 +931,201 @@ class Ote05Test(unittest.TestCase):
         result = C._case_ote05(ctx)
         self.assertEqual(result.verdict, Verdict.SKIP)
         self.assertEqual(client.pushed, [])
+
+
+
+class _FailThenOk:
+    """Callable: raises TimeoutError for its first ``fails`` calls, then
+    returns ``value`` (the board still draining a refused body, then serving)."""
+
+    def __init__(self, fails, value):
+        self.fails = fails
+        self.value = value
+        self.calls = 0
+
+    def __call__(self, *a, **k):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise TimeoutError("timed out")
+        return self.value
+
+
+def _partitions_after_first(fail_calls, always_fail_after_first=False):
+    """Partition client: first call answers; calls in ``fail_calls`` (1-based)
+    raise; with ``always_fail_after_first`` every later call raises."""
+    state = {"n": 0}
+
+    class _P:
+        def get_partitions(self, host):
+            state["n"] += 1
+            if state["n"] > 1 and (always_fail_after_first or state["n"] in fail_calls):
+                raise TimeoutError("draining")
+            return {"running": "app"}
+
+    return _P(), state
+
+
+def _dashboard_after_first(fail_calls, always_fail_after_first=False):
+    state = {"n": 0}
+
+    class _D:
+        def get_status(self, host):
+            state["n"] += 1
+            if state["n"] > 1 and (always_fail_after_first or state["n"] in fail_calls):
+                raise TimeoutError("draining")
+            return {"fw_build": "B1"}
+
+    return _D(), state
+
+
+class RefusalDrainSettleTest(unittest.TestCase):
+    """Post-refusal readbacks retry through the firmware's body-drain window."""
+
+    def _uptime_seq(self, seq):
+        it = iter(seq)
+
+        def fn():
+            try:
+                v = next(it)
+            except StopIteration:
+                raise TimeoutError("draining")
+            if v is None:
+                raise TimeoutError("draining")
+            return v
+        return fn
+
+    def test_ote01_uptime_unreadable_then_ok_passes(self):
+        sleeps = []
+        ctx = Ote01Test()._ctx(_esp_uptime_fn=self._uptime_seq([100.0, None, None, None, 104.0]),
+                               _sleep_fn=sleeps.append, _now=_Clock(1.0))
+        r = C._case_ote01(ctx)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertEqual(len(sleeps), 3)
+        self.assertGreater(r.observed["uptime_elapsed_s"], r.observed["elapsed_s"])
+
+    def test_ote01_continuity_counts_settle_wait(self):
+        """uptime 100 -> 101 although 50 s of real time passed during the
+        settle wait: a reboot hidden by the drain must still FAIL."""
+        ctx = Ote01Test()._ctx(_esp_uptime_fn=self._uptime_seq([100.0, None, None, 101.0]),
+                               _now=_Clock(10.0))
+        r = C._case_ote01(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("rebooted", r.reason)
+
+    def test_ote01_all_uptime_reads_raise_fails_unreadable(self):
+        sleeps = []
+        ctx = Ote01Test()._ctx(_esp_uptime_fn=self._uptime_seq([100.0]), _sleep_fn=sleeps.append,
+                               _now=_Clock(1.0))
+        r = C._case_ote01(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("unreadable", r.reason)
+        self.assertGreaterEqual(len(sleeps), 30)
+
+    def _retry_case(self, fn, cls):
+        part, pstate = _partitions_after_first({2, 3, 4})
+        dash, dstate = _dashboard_after_first({2, 3})
+        r = fn(cls()._ctx(partition_http_client=part, dashboard_http_client=dash))
+        self.assertEqual(r.verdict, Verdict.PASS, (fn.__name__, r.reason))
+        self.assertGreaterEqual(pstate["n"], 5)
+        self.assertGreaterEqual(dstate["n"], 4)
+
+    def test_ote03_retries_then_passes(self):
+        self._retry_case(C._case_ote03, Ote03Test)
+
+    def test_ote04_retries_then_passes(self):
+        self._retry_case(C._case_ote04, Ote04Test)
+
+    def test_ote05_retries_then_passes(self):
+        self._retry_case(C._case_ote05, Ote05Test)
+
+    def test_all_after_reads_raise_fails_unreadable(self):
+        for fn, cls in ((C._case_ote03, Ote03Test), (C._case_ote04, Ote04Test), (C._case_ote05, Ote05Test)):
+            part, _ = _partitions_after_first(set(), always_fail_after_first=True)
+            r = fn(cls()._ctx(partition_http_client=part))
+            self.assertEqual(r.verdict, Verdict.FAIL, fn.__name__)
+            self.assertIn("unreadable", r.reason)
+            self.assertIn("running_after", r.reason)
+
+    def test_ote09_retries_then_passes(self):
+        part, _ = _partitions_after_first({2, 3})
+        r = C._case_ote09(Ote09Test()._ctx(partition_http_client=part))
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+
+    def test_ote12_retries_running_read(self):
+        ctx = {"_ote01": {}, "host": "h", "_now": _Clock(1.0), "_sleep_fn": lambda s: None,
+               "partition_http_client": unittest.mock.Mock(get_partitions=_FailThenOk(3, {"running": "app"}))}
+        self.assertEqual(C._case_ote12(ctx).verdict, Verdict.PASS)
+
+
+class RefusedImagePushLocalErrorTest(unittest.TestCase):
+    """OT-E03/E04/E05 (and E09): a missing file SKIPs; a non-HTTP push
+    exception FAILs as error:<ExcName> and is never a refusal."""
+
+    CASES = (
+        (C._case_ote03, Ote03Test),
+        (C._case_ote04, Ote04Test),
+        (C._case_ote05, Ote05Test),
+    )
+
+    def test_missing_file_skips_without_pushing(self):
+        for fn, cls in self.CASES:
+            client = _FakeOtaClient(push_result=_OtaPushResult(False, 400))
+            r = fn(cls()._ctx(_isfile_fn=lambda p: False, ota_http_client=client))
+            self.assertEqual(r.verdict, Verdict.SKIP, fn.__name__)
+            self.assertIn("not a file", r.reason)
+            self.assertEqual(client.pushed, [])
+
+    def test_missing_file_skips_ote09(self):
+        client = _FakeOtaClient()
+        r = C._case_ote09(Ote09Test()._ctx(_isfile_fn=lambda p: False, ota_http_client=client))
+        self.assertEqual(r.verdict, Verdict.SKIP)
+        self.assertEqual(client.pushed, [])
+
+    def test_local_exception_fails_not_refused(self):
+        for exc in (FileNotFoundError("nope"), TypeError("bad"), _OtaHttpErr(None, "no such file: x")):
+            for fn, cls in self.CASES:
+                r = fn(cls()._ctx(ota_http_client=_RaisingPushClient(exc)))
+                self.assertEqual(r.verdict, Verdict.FAIL, (fn.__name__, exc))
+                self.assertIn("error:" + type(exc).__name__, r.reason)
+
+    def test_transport_reset_is_error_for_authenticated_cases(self):
+        for fn, cls in self.CASES:
+            r = fn(cls()._ctx(ota_http_client=_RaisingPushClient(_reset_err())))
+            self.assertEqual(r.verdict, Verdict.FAIL, fn.__name__)
+            self.assertIn("error:ConnectionResetError", r.reason)
+
+    def test_http_status_exception_is_a_refusal(self):
+        for fn, cls in self.CASES:
+            r = fn(cls()._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(400, "bad image"))))
+            self.assertEqual(r.verdict, Verdict.PASS, (fn.__name__, r.reason))
+
+    def test_ote09_reset_is_refusal_but_local_error_fails(self):
+        def raiser(e):
+            return lambda: (_ for _ in ()).throw(e)
+
+        r = C._case_ote09(Ote09Test()._ctx(_push_no_credential_fn=raiser(_reset_err())))
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        r = C._case_ote09(Ote09Test()._ctx(_push_no_credential_fn=raiser(FileNotFoundError("x"))))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("error:FileNotFoundError", r.reason)
+
+
+class JudgeOtaPushRefusedUnreadableTest(unittest.TestCase):
+    def test_none_readback_is_unreadable(self):
+        r = J.judge_ota_push_refused(True, "app", None, "B1", "B1")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("unreadable", r.reason)
+        self.assertIn("running_after", r.reason)
+
+    def test_real_change_still_fails(self):
+        r = J.judge_ota_push_refused(True, "app", "recovery", "B1", "B1")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertNotIn("unreadable", r.reason)
+
+    def test_push_error_fails(self):
+        r = J.judge_ota_push_refused(False, "app", "app", "B1", "B1", push_error="error:TypeError")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("error:TypeError", r.reason)
 
 
 class Ote06Test(unittest.TestCase):
@@ -1114,6 +1312,7 @@ class Ote09Test(unittest.TestCase):
             # fake probe to "on" so the existing behavior-under-test tests
             # below don't need to know about this gate.
             "_web_auth_enabled_fn": lambda: True,
+            "_isfile_fn": lambda p: True, "_now": _Clock(1.0), "_sleep_fn": lambda s: None,
         }
         ctx.update(overrides)
         return ctx
@@ -1159,6 +1358,7 @@ class Ote10Test(unittest.TestCase):
             "ota_http_client": _FakeOtaClient(),
             "_login_fn": lambda user, pw: (200, f"sid-{user}"),
             "_esp_uptime_fn": lambda: 100.0, "_crash_report_fn": lambda: {"present": False},
+            "_now": _Clock(1.0), "_sleep_fn": lambda s: None,
         }
         ctx.update(overrides)
         return ctx

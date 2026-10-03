@@ -204,9 +204,113 @@ def _is_transport_reset(exc: BaseException, _depth: int = 0) -> bool:
            (_is_transport_reset(exc.__context__, _depth + 1) if exc.__context__ is not None else False)
 
 
+#: How long a post-refusal readback keeps retrying before it is reported
+#: unreadable. The firmware answers a refused POST /api/ota/esp with the status
+#: line first and then drains the unread request body inside the handler
+#: (`ota_http_refusal_drain()`, capped at 30 s). esp_http_server is
+#: single-threaded, so for those seconds every other request (GET /api/status,
+#: GET /api/partitions, ...) times out even though the board is fine: 30 s cap
+#: plus slack.
+OTA_REFUSAL_DRAIN_SETTLE_S = 40.0
+
+#: Seconds between attempts inside the settle window.
+OTA_REFUSAL_DRAIN_POLL_S = 1.0
+
+#: Per-request timeout for the real HTTP readbacks inside the settle window, so
+#: one slow read (the board is still draining) does not stall the poll loop.
+OTA_REFUSAL_READ_TIMEOUT_S = 3.0
+
+
+def _read_kw(ctx: dict, client_key: str) -> dict:
+    """``timeout`` kwarg for the real client modules; injected fakes take none."""
+    return {"timeout": OTA_REFUSAL_READ_TIMEOUT_S} if ctx.get(client_key) is None else {}
+
+
+def _settled_read(ctx: dict, fn, window_s: Optional[float] = None) -> "tuple[Any, Optional[float]]":
+    """Call ``fn`` until it returns a non-None value without raising, or
+    ``window_s`` (default OTA_REFUSAL_DRAIN_SETTLE_S) elapses, polling about
+    every OTA_REFUSAL_DRAIN_POLL_S. Returns ``(value, settled_at)``: ``value``
+    is None only if nothing came back inside the window; ``settled_at`` is the
+    ``ctx["_now"]`` clock reading when a RETRIED read finally succeeded (so a
+    caller can include the settle wait in elapsed-time maths) and None when the
+    first attempt already succeeded. Hooks: ``ctx["_now"]``,
+    ``ctx["_sleep_fn"]``. The clock is only read after a first failure."""
+    import time as _time
+    now = ctx.get("_now") or _time.monotonic
+    sleep = ctx.get("_sleep_fn") or _time.sleep
+    window = OTA_REFUSAL_DRAIN_SETTLE_S if window_s is None else window_s
+    deadline = None
+    while True:
+        try:
+            value = fn()
+        except Exception:
+            value = None
+        if value is not None:
+            return value, (None if deadline is None else now())
+        if deadline is None:
+            deadline = now() + window
+        elif now() >= deadline:
+            return None, None
+        sleep(OTA_REFUSAL_DRAIN_POLL_S)
+
+
+def _settled_interlock_ok(ctx: dict, host) -> Optional[bool]:
+    """``_interlock_ok`` with the drain-settle retry. None when the interlock
+    could not be read at all inside the window; False only for a real
+    "not ok" answer from the board."""
+    def _read():
+        ok, reason = _interlock_ok(ctx, host)
+        if not ok and reason.startswith("could not read /api/ota/interlock"):
+            raise RuntimeError(reason)
+        return ok
+    value, _ = _settled_read(ctx, _read)
+    return value
+
+
+def _settled_running(ctx: dict, host) -> Optional[str]:
+    value, _ = _settled_read(ctx, lambda: _partition_client(ctx).get_partitions(host, **_read_kw(ctx, "partition_http_client")).get("running"))
+    return value
+
+
+def _settled_fw_build(ctx: dict, host) -> Optional[str]:
+    value, _ = _settled_read(ctx, lambda: _dashboard_client(ctx).get_status(host, **_read_kw(ctx, "dashboard_http_client")).get("fw_build"))
+    return value
+
+
+def _root_error_name(exc: BaseException, _depth: int = 0) -> str:
+    """Name of the socket error under a wrapped transport failure
+    (ConnectionResetError rather than OtaHttpError), else the exception's own
+    type name."""
+    import http.client
+    import urllib.error
+    if _depth <= 6 and exc is not None:
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected)):
+            return type(exc).__name__
+        reason = exc.reason if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, BaseException) else None
+        for inner in (reason, exc.__cause__, exc.__context__):
+            if inner is not None and _is_transport_reset(inner):
+                return _root_error_name(inner, _depth + 1)
+    return type(exc).__name__
+
+
+def _push_refusal_outcome(exc: BaseException, *, reset_is_refusal: bool = False) -> "tuple[bool, Optional[str]]":
+    """Classify an exception from a refusal-expected push into
+    ``(refused, push_error)``. An HTTP response from the board (``.status``
+    set) is a refusal. A transport reset is a refusal only where the caller
+    says so (OT-E09, the deliberately unauthenticated push, where the firmware
+    closes a large unauthenticated refusal); anywhere else it, and every local
+    error (missing file, TypeError, ...), is ``push_error="error:<ExcName>"``
+    and is never treated as a refusal."""
+    if getattr(exc, "status", None) is not None:
+        return True, None
+    if reset_is_refusal and _is_transport_reset(exc):
+        return True, None
+    return False, f"error:{_root_error_name(exc)}"
+
+
 def _esp_uptime_s(ctx: dict, host) -> Optional[float]:
     """ESP ``uptime_s`` from GET /api/status (None when the field is absent)."""
-    return _dashboard_client(ctx).get_status(host).get("uptime_s")
+    return _dashboard_client(ctx).get_status(host, **_read_kw(ctx, "dashboard_http_client")).get("uptime_s")
 
 
 def _pico_boot_id_known(srv) -> Optional[int]:
@@ -538,7 +642,7 @@ def _case_ote01(ctx: dict) -> CaseResult:
     import time as _time
     now = ctx.get("_now") or _time.monotonic
     uptime_fn = ctx.get("_esp_uptime_fn") or (lambda: _esp_uptime_s(ctx, host))
-    crash_fn = ctx.get("_crash_report_fn") or (lambda: _dashboard_client(ctx).get_crash_report(host))
+    crash_fn = ctx.get("_crash_report_fn") or (lambda: _dashboard_client(ctx).get_crash_report(host, **_read_kw(ctx, "dashboard_http_client")))
 
     def _read(fn):
         try:
@@ -576,14 +680,19 @@ def _case_ote01(ctx: dict) -> CaseResult:
             refusal_form = f"error:{type(exc).__name__}"
     elapsed_s = now() - t0
 
-    uptime_after = _read(uptime_fn)
-    crash_after = _read(crash_fn)
-    interlock_ok_after, _ = _interlock_ok(ctx, host)
+    # The firmware drains the refused body before serving anything else, so
+    # these readbacks retry through the settle window (see _settled_read).
+    uptime_after, settled_at = _settled_read(ctx, uptime_fn)
+    crash_after, _ = _settled_read(ctx, crash_fn)
+    interlock_ok_after = _settled_interlock_ok(ctx, host)
+    # Continuity compares uptime against REAL elapsed time, settle wait included.
+    uptime_elapsed_s = elapsed_s if settled_at is None else settled_at - t0
 
     ctx["_ote01"] = {"refusal_form": refusal_form}
     return J.judge_ota_self_push_refused(
         refusal_form, status_code, elapsed_s, uptime_before, uptime_after,
         crash_before, crash_after, interlock_ok_after,
+        uptime_elapsed_s=uptime_elapsed_s,
     )
 
 
@@ -650,71 +759,58 @@ def _case_ote02(ctx: dict) -> CaseResult:
     )
 
 
-def _case_ote03(ctx: dict) -> CaseResult:
-    """OT-E03: push the ST-04 image with the last 4 KB flipped -- must be
-    refused before reboot, RUNNING/fw_build unchanged."""
+def _case_refused_image_push(ctx: dict, label: str, image_key: str) -> CaseResult:
+    """Shared body of OT-E03/E04/E05: push a bad image and require a refusal
+    with RUNNING/fw_build unchanged. SKIPs when the configured path is not a
+    file. A push exception that is not an HTTP answer from the board is a FAIL
+    (``error:<ExcName>``), never a refusal; the post-push readbacks retry
+    through the firmware's refusal-drain window (``_settled_read``) and an
+    unreadable one is reported as such, never judged as a change."""
     idle, reason = _is_idle(ctx)
     if not idle:
         return CaseResult(Verdict.SKIP, reason=reason)
 
     host = ctx.get("host")
-    image_path = ctx.get("ota_corrupt_image_path")
+    image_path = ctx.get(image_key)
     if not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_corrupt_image_path not provided for OT-E03")
+        return CaseResult(Verdict.SKIP, reason=f"{image_key} not provided for {label}")
+    if not (ctx.get("_isfile_fn") or os.path.isfile)(image_path):
+        return CaseResult(Verdict.SKIP, reason=f"{image_key} is not a file: {image_path!r}")
 
     ok, ireason = _interlock_ok(ctx, host)
     if not ok:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
     ota = _ota_client(ctx)
-    running_before = _running_partition(ctx, host)
-    fw_build_before = _fw_build(ctx, host)
+    running_before = _settled_running(ctx, host)
+    fw_build_before = _settled_fw_build(ctx, host)
 
     refused = None
+    push_error = None
     try:
         push = ota.push_esp_image(host, image_path)
         refused = not push.ok
-    except Exception:
-        refused = True  # a raised transport error is also a refusal
+    except Exception as exc:
+        refused, push_error = _push_refusal_outcome(exc)
 
-    running_after = _running_partition(ctx, host)
-    fw_build_after = _fw_build(ctx, host)
+    running_after = _settled_running(ctx, host)
+    fw_build_after = _settled_fw_build(ctx, host)
 
-    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after,
+                                    push_error=push_error)
+
+
+def _case_ote03(ctx: dict) -> CaseResult:
+    """OT-E03: push the ST-04 image with the last 4 KB flipped -- must be
+    refused before reboot, RUNNING/fw_build unchanged."""
+    return _case_refused_image_push(ctx, "OT-E03", "ota_corrupt_image_path")
 
 
 def _case_ote04(ctx: dict) -> CaseResult:
     """OT-E04: push the first 60% of the ST-04 image (a truncated file) --
     same refusal contract as OT-E03 (judge_ota_push_refused): refused
     before reboot, RUNNING/fw_build unchanged."""
-    idle, reason = _is_idle(ctx)
-    if not idle:
-        return CaseResult(Verdict.SKIP, reason=reason)
-
-    host = ctx.get("host")
-    image_path = ctx.get("ota_truncated_image_path")
-    if not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_truncated_image_path not provided for OT-E04")
-
-    ok, ireason = _interlock_ok(ctx, host)
-    if not ok:
-        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
-
-    ota = _ota_client(ctx)
-    running_before = _running_partition(ctx, host)
-    fw_build_before = _fw_build(ctx, host)
-
-    refused = None
-    try:
-        push = ota.push_esp_image(host, image_path)
-        refused = not push.ok
-    except Exception:
-        refused = True  # a raised transport error is also a refusal
-
-    running_after = _running_partition(ctx, host)
-    fw_build_after = _fw_build(ctx, host)
-
-    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+    return _case_refused_image_push(ctx, "OT-E04", "ota_truncated_image_path")
 
 
 def _case_ote05(ctx: dict) -> CaseResult:
@@ -723,35 +819,9 @@ def _case_ote05(ctx: dict) -> CaseResult:
     verify without ever changing RUNNING. Same unchanged-state contract as
     OT-E03/E04 (judge_ota_push_refused); this module never inspects the
     board's refusal text for a specific substring, only that RUNNING/
-    fw_build never moved."""
-    idle, reason = _is_idle(ctx)
-    if not idle:
-        return CaseResult(Verdict.SKIP, reason=reason)
-
-    host = ctx.get("host")
-    image_path = ctx.get("ota_wrong_build_image_path")
-    if not image_path:
-        return CaseResult(Verdict.SKIP, reason="ota_wrong_build_image_path not provided for OT-E05")
-
-    ok, ireason = _interlock_ok(ctx, host)
-    if not ok:
-        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
-
-    ota = _ota_client(ctx)
-    running_before = _running_partition(ctx, host)
-    fw_build_before = _fw_build(ctx, host)
-
-    refused = None
-    try:
-        push = ota.push_esp_image(host, image_path)
-        refused = not push.ok
-    except Exception:
-        refused = True
-
-    running_after = _running_partition(ctx, host)
-    fw_build_after = _fw_build(ctx, host)
-
-    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+    fw_build never moved. A missing image file SKIPs: a local file error must
+    never read as a refusal."""
+    return _case_refused_image_push(ctx, "OT-E05", "ota_wrong_build_image_path")
 
 
 def _case_ote06(ctx: dict) -> CaseResult:
@@ -904,8 +974,11 @@ def _case_update_refused_during_state(
         try:
             push = push_fn()
             push_refused = not getattr(push, "ok", False)
-        except Exception:
-            push_refused = True
+        except Exception as exc:
+            push_refused, push_error = _push_refusal_outcome(exc)
+            if push_error:
+                return CaseResult(Verdict.FAIL, reason=f"push did not get an HTTP answer from the board: {push_error}",
+                                  observed={"push_error": push_error})
 
         state_after = get_exec_state_fn()
 
@@ -993,6 +1066,8 @@ def _case_ote09(ctx: dict) -> CaseResult:
     image_path = ctx.get("ota_image_path")
     if not image_path:
         return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E09")
+    if not (ctx.get("_isfile_fn") or os.path.isfile)(image_path):
+        return CaseResult(Verdict.SKIP, reason=f"ota_image_path is not a file: {image_path!r}")
 
     web_enabled_fn = ctx.get("_web_auth_enabled_fn")
     if web_enabled_fn is None:
@@ -1012,21 +1087,26 @@ def _case_ote09(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to push: {ireason}")
 
     ota = _ota_client(ctx)
-    running_before = _running_partition(ctx, host)
-    fw_build_before = _fw_build(ctx, host)
+    running_before = _settled_running(ctx, host)
+    fw_build_before = _settled_fw_build(ctx, host)
 
     push_fn = ctx.get("_push_no_credential_fn") or (lambda: ota.push_esp_image_unauthenticated(host, image_path))
     refused = None
+    push_error = None
     try:
         push = push_fn()
         refused = not push.ok
-    except Exception:
-        refused = True
+    except Exception as exc:
+        # Deliberately unauthenticated: the firmware closes a large
+        # unauthenticated refusal (http_auth_refusal_should_close()), so a
+        # transport reset IS this case's expected refusal. Local errors are not.
+        refused, push_error = _push_refusal_outcome(exc, reset_is_refusal=True)
 
-    running_after = _running_partition(ctx, host)
-    fw_build_after = _fw_build(ctx, host)
+    running_after = _settled_running(ctx, host)
+    fw_build_after = _settled_fw_build(ctx, host)
 
-    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after)
+    return J.judge_ota_push_refused(refused, running_before, running_after, fw_build_before, fw_build_after,
+                                    push_error=push_error)
 
 
 def _case_ote10(ctx: dict) -> CaseResult:
@@ -1095,7 +1175,7 @@ def _case_ote10(ctx: dict) -> CaseResult:
     )
 
     uptime_fn = ctx.get("_esp_uptime_fn") or (lambda: _esp_uptime_s(ctx, host))
-    crash_fn = ctx.get("_crash_report_fn") or (lambda: _dashboard_client(ctx).get_crash_report(host))
+    crash_fn = ctx.get("_crash_report_fn") or (lambda: _dashboard_client(ctx).get_crash_report(host, **_read_kw(ctx, "dashboard_http_client")))
 
     def _read(fn):
         try:
@@ -1122,8 +1202,10 @@ def _case_ote10(ctx: dict) -> CaseResult:
             # Mid-upload close: no response readable. Accepted past the auth
             # gate only if the board is provably alive and unharmed.
             elapsed_s = now() - t0
-            uptime_after = _read(uptime_fn)
-            crash_after = _read(crash_fn)
+            uptime_after, settled_at = _settled_read(ctx, uptime_fn)
+            crash_after, _ = _settled_read(ctx, crash_fn)
+            if settled_at is not None:
+                elapsed_s = settled_at - t0
             alive = (J.uptime_continuous(uptime_before, uptime_after, elapsed_s)
                      and crash_before is not None and crash_after == crash_before)
             admin_ok = alive
@@ -1152,7 +1234,7 @@ def _case_ote12(ctx: dict) -> CaseResult:
     host = ctx.get("host")
     if not any(k in ctx for k in ("_ote01", "_ote_pre_update")):
         return CaseResult(Verdict.NOT_RUN, reason="no OT-E case ran in this session")
-    running = _running_partition(ctx, host)
+    running = _settled_running(ctx, host)
     # OT-E01/OT-E02 both expect the board to be running `app` afterward;
     # OT-E03's refusal case leaves it wherever it already was (checked by
     # OT-E03's own judge), so this observer's job is the app-expectation.
