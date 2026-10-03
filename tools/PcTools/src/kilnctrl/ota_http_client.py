@@ -151,6 +151,13 @@ class OtaPushResult:
     body: dict = field(default_factory=dict)
 
 
+class OtaSessionProbeError(OtaHttpError):
+    """The pre-push ADMIN session probe was answered 401/403: login failed or
+    the role is not ADMIN. Nothing was uploaded, so this is NOT a board
+    refusal of the image; callers judging "was the push refused" must not
+    count it as one. ``status`` still carries the HTTP code."""
+
+
 def _establish_admin_session(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> None:
     """One cheap ADMIN-tier GET through http_auth.urlopen() before a large
     body POST, so a 401 is seen and handled (login + retry) on a tiny request.
@@ -171,7 +178,8 @@ def _establish_admin_session(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> 
             resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            raise OtaHttpError(f"/api/ota/interlock session probe refused: HTTP {exc.code}", exc.code) from exc
+            raise OtaSessionProbeError(
+                f"/api/ota/interlock session probe refused: HTTP {exc.code}", exc.code) from exc
         log.warning("OTA pre-push session probe failed: host=%s: HTTP %s", host, exc.code)
     except Exception as exc:  # noqa: BLE001 -- see docstring
         log.warning("OTA pre-push session probe failed: host=%s: %s: %s",

@@ -1123,6 +1123,24 @@ class RefusedImagePushLocalErrorTest(unittest.TestCase):
             self.assertEqual(r.verdict, Verdict.FAIL, fn.__name__)
             self.assertIn("error:ConnectionResetError", r.reason)
 
+    def test_session_probe_refusal_is_error_not_refusal(self):
+        from kilnctrl.ota_http_client import OtaSessionProbeError
+        for code in (401, 403):
+            self.assertEqual(C._push_refusal_outcome(OtaSessionProbeError("probe", code)),
+                             (False, f"error:session_probe_{code}"))
+            for fn, cls in self.CASES:
+                r = fn(cls()._ctx(ota_http_client=_RaisingPushClient(OtaSessionProbeError("probe", code))))
+                self.assertEqual(r.verdict, Verdict.FAIL, (fn.__name__, code))
+                self.assertIn(f"error:session_probe_{code}", r.reason)
+
+    def test_session_probe_refusal_fails_ote07_ote08(self):
+        from kilnctrl.ota_http_client import OtaSessionProbeError
+        helper = Ote07Ote08Test()
+        for fn, key, st in ((C._case_ote07, "_exec_state_fn", "running"),
+                            (C._case_ote08, "_autotune_state_fn", "stepping")):
+            ctx = helper._ctx(st, key, ota_http_client=_RaisingPushClient(OtaSessionProbeError("probe", 401), interlock_ok=False, interlock_reason="not idle"))
+            self.assertEqual(fn(ctx).verdict, Verdict.FAIL, fn.__name__)
+
     def test_http_status_exception_is_a_refusal(self):
         for fn, cls in self.CASES:
             r = fn(cls()._ctx(ota_http_client=_RaisingPushClient(_OtaHttpErr(400, "bad image"))))

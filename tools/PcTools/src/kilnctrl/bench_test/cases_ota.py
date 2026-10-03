@@ -311,7 +311,12 @@ def _push_refusal_outcome(exc: BaseException, *, reset_is_refusal: bool = False)
     closes a large unauthenticated refusal); anywhere else it, and every local
     error (missing file, TypeError, ...), is ``push_error="error:<ExcName>"``
     and is never treated as a refusal."""
-    if getattr(exc, "status", None) is not None:
+    status = getattr(exc, "status", None)
+    if any(k.__name__ == "OtaSessionProbeError" for k in type(exc).__mro__):
+        # The pre-push session probe was refused (bad/missing/non-admin
+        # credentials): nothing was uploaded, so this is not an image refusal.
+        return False, f"error:session_probe_{status}"
+    if status is not None:
         return True, None
     if reset_is_refusal and _is_transport_reset(exc):
         return True, None
