@@ -53,6 +53,7 @@
 // recovery_upload_stream() with its own validator and sink.
 #include "recovery_http.h"
 
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -79,6 +80,7 @@
 #include "recovery_lcd.h"
 #include "recovery_pico.h"
 #include "recovery_pico_proto.h"
+#include "recovery_text.h"
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
 
@@ -438,8 +440,22 @@ static const esp_partition_t *find_app_partition(void)
 // full verification -- the bootloader still verifies on boot.
 static bool app_has_valid_image(const esp_partition_t *part)
 {
+    if (!part) {
+        return false;
+    }
     esp_app_desc_t desc;
-    return part && esp_ota_get_partition_description(part, &desc) == ESP_OK;
+    if (esp_ota_get_partition_description(part, &desc) != ESP_OK) {
+        return false;
+    }
+    // Same identity the upload validator enforces: chip id (u16 at 0x0C of
+    // esp_image_header_t) and project name, not just the descriptor magic.
+    uint8_t hdr[16];
+    if (esp_partition_read(part, 0, hdr, sizeof(hdr)) != ESP_OK) {
+        return false;
+    }
+    uint16_t chip = (uint16_t)(hdr[12] | (hdr[13] << 8));
+    return chip == RIC_CHIP_ID_ESP32S3 &&
+           strncmp(desc.project_name, RIC_EXPECTED_PROJECT, sizeof(desc.project_name)) == 0;
 }
 
 // --- full-image verification (cached) ------------------------------------
@@ -637,7 +653,88 @@ static bool auth_secret_is_stored(void)
     return ok && !fallback;
 }
 
-// GET /api/recovery/status -- unauthenticated, read-only.
+// printf-style helper: formats into one small static fragment buffer (httpd
+// runs handlers on its single task, so a static costs no stack) and sends it as
+// one HTTP chunk. The status JSON is streamed through this rather than built in
+// one large buffer.
+static esp_err_t send_frag(httpd_req_t *req, const char *fmt, ...)
+{
+    static char frag[200];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(frag, sizeof(frag), fmt, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= sizeof(frag)) {
+        return ESP_FAIL;
+    }
+    return httpd_resp_send_chunk(req, frag, (ssize_t)n);
+}
+
+static const char *ota_state_name(const esp_partition_t *part)
+{
+    if (!part) {
+        return "unknown";
+    }
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(part, &st) != ESP_OK) {
+        return "unknown"; // no otadata record for this slot (or unsupported)
+    }
+    switch (st) {
+    case ESP_OTA_IMG_NEW: return "new";
+    case ESP_OTA_IMG_PENDING_VERIFY: return "pending_verify";
+    case ESP_OTA_IMG_VALID: return "valid";
+    case ESP_OTA_IMG_INVALID: return "invalid";
+    case ESP_OTA_IMG_ABORTED: return "aborted";
+    case ESP_OTA_IMG_UNDEFINED: return "undefined";
+    default: return "unknown";
+    }
+}
+
+// 1 = coredump partition holds a dump (first word not erased), 0 = erased,
+// -1 = unreadable / no coredump partition.
+static int coredump_present(void)
+{
+    const esp_partition_t *cd = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                         ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    uint32_t w = 0;
+    if (!cd || esp_partition_read(cd, 0, &w, sizeof(w)) != ESP_OK) {
+        return -1;
+    }
+    return w != 0xFFFFFFFFu;
+}
+
+// 1 = both otadata sectors fully erased (a blank otadata boots the factory
+// image, not `app`), 0 = at least one programmed byte, -1 = unreadable.
+static int otadata_blank(void)
+{
+    const esp_partition_t *od = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                         ESP_PARTITION_SUBTYPE_DATA_OTA, NULL);
+    if (!od || od->size < 2 * 4096u) {
+        return -1;
+    }
+    uint8_t buf[64];
+    for (size_t sector = 0; sector < 2; sector++) {
+        for (size_t off = 0; off < 4096u; off += sizeof(buf)) {
+            if (esp_partition_read(od, sector * 4096u + off, buf, sizeof(buf)) != ESP_OK) {
+                return -1;
+            }
+            for (size_t i = 0; i < sizeof(buf); i++) {
+                if (buf[i] != 0xFF) {
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+static const char *tri(int v)
+{
+    return v < 0 ? "null" : (v ? "true" : "false");
+}
+
+// GET /api/recovery/status -- unauthenticated, read-only. Streamed in small
+// chunks (send_frag), never one big buffer.
 static esp_err_t recovery_status_get(httpd_req_t *req)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -647,42 +744,58 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     char bgs[128];
     fmt_boot_guard(bgs, sizeof(bgs), &bg);
 
-    bool relay_fault = recovery_io_relay_fault();
-    bool relays_off = recovery_io_relays_verified_off();
-
-    // app_desc_present: cheap descriptor/magic check. app_valid: full
+    // app_desc_present: cheap descriptor/chip/project check. app_valid: full
     // esp_image_verify(), cached (see app_image_verified()).
     bool desc_present = app_has_valid_image(app);
     bool valid = desc_present && app_image_verified(app);
-    // Static body: the httpd stack is 8 KB and only the single httpd task
-    // runs this handler, so a static buffer costs no stack.
-    static char body[704];
     unsigned nvs_failed = recovery_io_nvs_failed_mask();
     // auth_secret_present: wifi_nvs holds a usable stored ap_pass (8..63 chars).
     // false means the eFuse-MAC fallback secret is in force (never an OPEN AP).
     bool auth_present = auth_secret_is_stored();
-    int n = snprintf(body, sizeof(body),
-                      "{\"auth_secret_present\":%s,\"auth_fallback\":%s,"
-                      "\"running\":\"%s\",\"app_present\":%s,\"app_size\":%u,"
-                      "\"app_desc_present\":%s,\"app_valid\":%s,\"max_upload\":%u,%s,"
-                      "\"relay_fault\":%s,\"relays_verified_off\":%s,"
-                      "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
-                      "\"heap_internal_min_free\":%u,\"free_heap\":%u}",
-                      auth_present ? "true" : "false", auth_present ? "false" : "true",
-                      running ? running->label : "?", app ? "true" : "false",
-                      (unsigned)(app ? app->size : 0), desc_present ? "true" : "false",
-                      valid ? "true" : "false",
-                      (unsigned)(app ? app->size : 0), bgs, relay_fault ? "true" : "false",
-                      relays_off ? "true" : "false",
+    int rr = (int)esp_reset_reason();
+    unsigned app_size = (unsigned)(app ? app->size : 0);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t e = send_frag(req, "{\"auth_secret_present\":%s,\"auth_fallback\":%s,",
+                             auth_present ? "true" : "false", auth_present ? "false" : "true");
+    if (e == ESP_OK) {
+        e = send_frag(req, "\"running\":\"%s\",\"uptime_s\":%u,\"reset_reason\":%d,"
+                           "\"reset_reason_name\":\"%s\",",
+                      running ? running->label : "?",
+                      (unsigned)(esp_timer_get_time() / 1000000), rr,
+                      recovery_reset_reason_name(rr));
+    }
+    if (e == ESP_OK) {
+        e = send_frag(req, "\"app_present\":%s,\"app_size\":%u,\"app_desc_present\":%s,"
+                           "\"app_valid\":%s,\"max_upload\":%u,",
+                      app ? "true" : "false", app_size, desc_present ? "true" : "false",
+                      valid ? "true" : "false", app_size);
+    }
+    if (e == ESP_OK) {
+        e = send_frag(req, "\"app_ota_state\":\"%s\",\"coredump_present\":%s,"
+                           "\"otadata_blank\":%s,",
+                      ota_state_name(app), tri(coredump_present()), tri(otadata_blank()));
+    }
+    if (e == ESP_OK) {
+        e = send_frag(req, "%s,", bgs);
+    }
+    if (e == ESP_OK) {
+        e = send_frag(req, "\"relay_fault\":%s,\"relays_verified_off\":%s,",
+                      recovery_io_relay_fault() ? "true" : "false",
+                      recovery_io_relays_verified_off() ? "true" : "false");
+    }
+    if (e == ESP_OK) {
+        e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
+                           "\"heap_internal_min_free\":%u,\"free_heap\":%u}",
                       nvs_failed ? "true" : "false", nvs_failed,
                       (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
                       (unsigned)esp_get_free_heap_size());
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    if (n < 0 || (size_t)n >= sizeof(body)) {
-        return httpd_resp_send_500(req);
     }
-    return httpd_resp_send(req, body, n);
+    if (e != ESP_OK) {
+        return ESP_FAIL; // truncated stream: close the connection
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 // Erase one key; ESP_ERR_NVS_NOT_FOUND (key or namespace) counts as success.
