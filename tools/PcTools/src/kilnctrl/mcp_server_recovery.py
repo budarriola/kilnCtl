@@ -120,10 +120,13 @@ RELAY_SELF_ABORT_TEXT = "browser stopped polling"
 #: image; boot_guard <cleared and verified | boot_guard clear failed (...)>".
 BOOT_GUARD_CLEARED_TEXT = "boot_guard cleared and verified"
 
-#: HTTP statuses the board answers BEFORE ota_esp_post() invalidates/erases
-#: `app` (auth refusal, Pico busy). Any other board-reported failure may have
-#: left `app` partly erased.
-_PRE_ERASE_STATUSES = (401, 403, 409, 429)
+#: HTTP statuses the board can ONLY answer before the first esp_ota_write()
+#: touches `app`: auth refusal (403/429; 401 kept for safety), Pico busy (409),
+#: recovery_upload_stream()'s length gate / first-chunk RIC_OVERSIZE (413), and
+#: its upload-buffer allocation failure (503). 400/422/500 are each emitted both
+#: before and after the erase starts ("connection lost mid-image", "image failed
+#: verification", "flash write failed"), so they still carry the erase warning.
+_PRE_ERASE_STATUSES = (401, 403, 409, 413, 429, 503)
 
 
 def _boot_guard_outcome(text: str) -> str:
@@ -666,8 +669,10 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
     except roac.RecoveryOtaAuthError as exc:
         if not _reply_lost(exc):
             msg = _post_error("/api/ota/esp", exc)
-            if exc.status in _PRE_ERASE_STATUSES:
-                return msg  # refused before the board touched `app`
+            if getattr(exc, "stage", "") != "post" or exc.status in _PRE_ERASE_STATUSES:
+                # Challenge failure (POST never sent) or refused before the
+                # board touched `app`.
+                return msg
             return msg + _app_may_be_erased_note(resolved)
         reply = {"status": None, "text": f"<reply lost: {exc}>"}
     verdict, detail = _poll_restart(resolved, wait_s)

@@ -712,7 +712,7 @@ class PushEspImageTest(_Base):
     def test_mid_stream_rejection_warns_app_may_be_erased_with_app_valid(self):
         for code in (400, 422, 500):
             board = FakeBoard(status=[_status(), _status(app_valid=False, app_present=False)],
-                              post_error=roac.RecoveryOtaAuthError(f"HTTP {code}", code, "x"))
+                              post_error=roac.RecoveryOtaAuthError(f"HTTP {code}", code, "x", stage="post"))
             out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
             self.assertTrue(out.startswith("FAILED"), out)
             self.assertIn("partition", out)
@@ -721,17 +721,31 @@ class PushEspImageTest(_Base):
 
     def test_mid_stream_rejection_status_reread_failure_still_warns(self):
         board = FakeBoard(status=[_status(), _unreachable()],
-                          post_error=roac.RecoveryOtaAuthError("HTTP 400", 400, "lost"))
+                          post_error=roac.RecoveryOtaAuthError("HTTP 400", 400, "lost", stage="post"))
         out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
         self.assertIn("do NOT trust a reboot", out)
         self.assertIn("could not re-read status", out)
 
     def test_pre_erase_refusal_has_no_erase_warning(self):
-        board = FakeBoard(post_error=roac.RecoveryOtaAuthError("HTTP 403", 403, "bad MAC"))
-        out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
-        self.assertTrue(out.startswith("FAILED"), out)
-        self.assertNotIn("erased", out)
-        self.assertEqual(board.status_gets, 1)  # preflight only, no re-read
+        # recovery_http.c/recovery_upload.c answer these only before the first
+        # esp_ota_write(): auth, Pico busy, length/oversize gate, no buffer.
+        for code in (403, 409, 413, 429, 503):
+            board = FakeBoard(post_error=roac.RecoveryOtaAuthError(f"HTTP {code}", code, "x", stage="post"))
+            out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+            self.assertTrue(out.startswith("FAILED"), out)
+            self.assertNotIn("erased", out)
+            self.assertEqual(board.status_gets, 1)  # preflight only, no re-read
+
+    def test_challenge_failure_has_no_erase_warning(self):
+        # stage="challenge": the signed POST was never sent, `app` untouched,
+        # even when the challenge GET itself carried a 500.
+        for exc in (roac.RecoveryOtaAuthError("challenge unreachable", None),
+                    roac.RecoveryOtaAuthError("challenge failed: HTTP 500", 500, "x")):
+            board = FakeBoard(post_error=exc)
+            out = self.run_tool(mr.recovery_push_esp_image, board, image_path=self.path, confirm=True)
+            self.assertTrue(out.startswith("FAILED"), out)
+            self.assertNotIn("erased", out)
+            self.assertEqual(board.status_gets, 1)
 
     def test_back_in_recovery_is_failed(self):
         board = FakeBoard(status=[_status(), _status(), _unreachable(), _status()])

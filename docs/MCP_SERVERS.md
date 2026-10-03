@@ -460,7 +460,7 @@ UNKNOWN/UNVERIFIED. Hardening (2026-10-02): `recovery_pico_abort` reports UNVERI
 `aborted` phase carries the error text "browser stopped polling" (`recovery_pico.c` `should_stop()`: the relay aborted
 itself, not necessarily because of this POST). `recovery_push_esp_image` appends a loud "`app` may be partly erased"
 warning, with a fresh `app_valid` read from the status route, to any board-reported failure other than the
-pre-erase refusals (401/403/409/429), and reports `ok-with-warning` (never plain ok) when the 200 reply does not say
+pre-erase refusals (401/403/409/413/429/503) or a challenge failure (POST never sent), and reports `ok-with-warning` (never plain ok) when the 200 reply does not say
 "boot_guard cleared and verified". Unit tests use a fake board only
 (`tools/PcTools/tests/test_mcp_server_recovery.py`); never run against hardware.
 
