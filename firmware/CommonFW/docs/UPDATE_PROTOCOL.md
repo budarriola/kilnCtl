@@ -1241,9 +1241,13 @@ unauthenticated may see a connection reset instead of the 401.
       magic, wrong target, and truncated/hostile headers, all refused before
       any erase. ESP — `ota_http_esp.c` refuses on bad `esp_image_header_t`
       magic/chip_id before `esp_ota_begin()` (see the "Image identification"
-      items above); this specific path has no host test (the handler isn't
-      host-compilable), so this box is ticked on code-inspection + the
-      Pico-side host tests, not full test coverage of the ESP side.
+      items above). **2026-10-04:** the check is now the pure
+      `ota_esp_image_header_check()` (`App/drivers/http/ota_esp_image_header.c`,
+      no ESP-IDF calls), host-tested by `test_ota_esp_image_header.c` (valid,
+      bad magic, wrong chip_id, short/NULL buffer, 24-byte boundary,
+      chip_id byte order/offset; negative-tested by disabling the chip check).
+      The handler still owns the HTTP 400 messages; `ota_http_esp.c`
+      static-asserts the header size/offsets on target.
 - [ ] An image that boots but fails to come up properly is rolled back
       automatically. **Partially verified, not fully**: the ESP half is
       hardware-verified 2026-09-03 per this file's own "ESP OTA" section

@@ -1,6 +1,7 @@
 #include "ota_http.h"
 #include "ota_http_internal.h"
 #include "ota_http_util.h"
+#include "ota_esp_image_header.h"
 
 #include <stdarg.h>
 #include <string.h>
@@ -52,6 +53,14 @@
 #include "sim_backend.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
+
+#ifdef ESP_PLATFORM
+#include <stddef.h>
+/* ota_esp_image_header_check() reads raw bytes at these offsets. */
+_Static_assert(sizeof(esp_image_header_t) == OTA_ESP_IMAGE_HEADER_LEN, "esp_image_header_t size drift");
+_Static_assert(offsetof(esp_image_header_t, chip_id) == OTA_ESP_IMAGE_HEADER_CHIP_ID_OFFSET, "chip_id offset drift");
+_Static_assert(offsetof(esp_image_header_t, magic) == 0, "magic offset drift");
+#endif
 #include "zones_config_accessors.h"
 
 // --- POST /api/ota/esp progress (ota_http.h's ota_http_get_esp_progress()) -
@@ -211,17 +220,28 @@ static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
             hdr_received += (size_t)ret;
         }
 
-        if (hdr.magic != ESP_IMAGE_HEADER_MAGIC) {
+        switch (ota_esp_image_header_check((const uint8_t *)&hdr, sizeof(hdr), ESP_IMAGE_HEADER_MAGIC,
+                                           (uint16_t)ESP_CHIP_ID_ESP32S3)) {
+        case OTA_ESP_IMAGE_HEADER_OK:
+            break;
+        case OTA_ESP_IMAGE_HEADER_BAD_MAGIC:
             ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "not an ESP-IDF image (bad magic 0x%02X)", hdr.magic);
             ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not a valid ESP-IDF image (bad magic)");
             goto cleanup;
-        }
-        if (hdr.chip_id != ESP_CHIP_ID_ESP32S3) {
+        case OTA_ESP_IMAGE_HEADER_WRONG_CHIP:
             ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "image is for chip id %u, this board is ESP32-S3 (%u)",
                      (unsigned)hdr.chip_id, (unsigned)ESP_CHIP_ID_ESP32S3);
             ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "image is built for a different chip");
+            goto cleanup;
+        case OTA_ESP_IMAGE_HEADER_TOO_SHORT:
+        default:
+            /* Unreachable (the loop above filled all sizeof(hdr) bytes); same
+             * outcome as a short body if it ever is reached. */
+            ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "image header too short");
+            ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed while reading image header");
             goto cleanup;
         }
 

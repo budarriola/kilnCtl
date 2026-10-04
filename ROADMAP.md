@@ -984,6 +984,8 @@ path. Two facts set the shape of this milestone:
       `peer_version_compatible`) — frozen and implemented; not verified
       end-to-end against a live mismatch
 - [x] Image header validated before the first erase (2026-08-17)
+      -- ESP side now host-tested (2026-10-04): `ota_esp_image_header_check()`,
+      `test_ota_esp_image_header.c`
 - [x] Challenge–response on the AP password, never crosses the wire, 3-failure
       lockout (2026-08-17)
 - [x] Both update paths refused unless idle and cool, with the specific

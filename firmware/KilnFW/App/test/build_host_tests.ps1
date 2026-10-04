@@ -64,6 +64,7 @@ try {
         (Join-Path $testDir "test_ota_auth.c"),
         (Join-Path $testDir "test_login_backoff.c"),
         (Join-Path $testDir "test_ota_image_crc.c"),
+        (Join-Path $testDir "test_ota_esp_image_header.c"),
         (Join-Path $testDir "test_auth_reset_gesture.c"),
         # docs/WEB_AUTH_PLAN.md section 7/8 (LCD half only) -- the LCD's
         # own two-PIN keypad and inactivity lock. #includes lcd_auth_state.c
@@ -219,6 +220,7 @@ try {
         (Join-Path $driversDir "control/pid_fuzzy_confidence.c"),
         (Join-Path $driversDir "net/ota_auth.c"),
         (Join-Path $driversDir "http/ota_image_crc.c"),
+        (Join-Path $driversDir "http/ota_esp_image_header.c"),
         (Join-Path $driversDir "net/auth_reset_gesture.c"),
         # 2026-09-28: lcd_auth_state.c's lockout now shares login_backoff.c's
         # ladder with web_auth_login_http.c's login lockout -- see that
@@ -1048,6 +1050,7 @@ try {
             # backing store.
             "`"$(Join-Path $driversDir 'persist/pico_image_manifest.c')`" " +
             "`"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
+            "`"$(Join-Path $driversDir 'http/ota_esp_image_header.c')`" " +
             # Owner decision 2026-09-20: ota_http_pico.c's ota_pico_do_stage()
             # now calls pico_img_stage_begin/write_chunk/finish() (shared with
             # net/pico_auto_update_boot.c's embedded-image writer) instead of
