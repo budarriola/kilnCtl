@@ -177,7 +177,7 @@ Shared files (`App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route
 **M1: stage partition + upload over normal Wi-Fi + recovery apply, no TLS (one-click phone/PC update)**
 - WP0 shared-file owner: `App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route_tier_table.h`, URI cap bump.
 - WP2 partition split: both `partitions.csv`, size gate in build checks, grep sweep for 0x800000, `docs/OTA_SINGLE_SLOT_PLAN.md`; then the one-time JTAG flash.
-- WP3 pure logic and host tests: `update_policy`, `stage_header`, version compare (`App/drivers/update/*.[ch]`, `App/test/test_update_*.c`).
+- WP3 pure logic and host tests: `update_policy`, `stage_header`, version compare (`App/drivers/update/*.[ch]`, `App/test/test_update_*.c`). DONE 2026-10-04 (`update_semver`, `stage_header`, `update_policy`; registered in the drivers CMakeLists and `build_host_tests.ps1`).
 - WP4 stager: `stage_upload` handler and task, sha256 stream, interlock and mutex, `stage_clear`, status (`update_stage.c`, `update_http.c`).
 - WP5 recovery apply: `firmware/KilnFW_recovery/main/recovery_http.c`, `recovery_apply_staged.c`, `check_recovery_image_size.ps1` coverage, power-cut and pending-verify bench cases.
 - WP6 UI and MCP: `ota_page.html` section, `update_http_client.py`, `mcp_server_update.py`, `cases_ota.py` OT-G*, `docs/MCP_SERVERS.md`, CLAUDE.md count.

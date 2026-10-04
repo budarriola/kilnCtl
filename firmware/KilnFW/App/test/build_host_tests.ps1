@@ -63,6 +63,10 @@ try {
         (Join-Path $testDir "test_sim_plant_three_node.c"),
         (Join-Path $testDir "test_ota_auth.c"),
         (Join-Path $testDir "test_login_backoff.c"),
+        # --- GITHUB_RELEASE_UPDATE_PLAN.md update/* tests (WP3); later WPs append their update_* entries here ---
+        (Join-Path $testDir "test_update_semver.c"),
+        (Join-Path $testDir "test_update_stage_header.c"),
+        (Join-Path $testDir "test_update_policy.c"),
         (Join-Path $testDir "test_ota_image_crc.c"),
         (Join-Path $testDir "test_ota_esp_image_header.c"),
         (Join-Path $testDir "test_auth_reset_gesture.c"),
@@ -226,6 +230,10 @@ try {
         # ladder with web_auth_login_http.c's login lockout -- see that
         # file's link line (exe45) below, which also needs this same object.
         (Join-Path $driversDir "net/login_backoff.c"),
+        # --- GITHUB_RELEASE_UPDATE_PLAN.md update/* drivers (WP3); later WPs append here ---
+        (Join-Path $driversDir "update/update_semver.c"),
+        (Join-Path $driversDir "update/stage_header.c"),
+        (Join-Path $driversDir "update/update_policy.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/web_auth_session.c"),
         (Join-Path $driversDir "net/web_auth_login.c"),

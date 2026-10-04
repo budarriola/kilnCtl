@@ -331,6 +331,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # backup_http.c split 2026-09-04 (ROADMAP.md M15's
                        # 1500-line item) -- see backup_http_internal.h's own
                        # doc comment for the file map.
+                       # docs/GITHUB_RELEASE_UPDATE_PLAN.md update/* (WP3 pure
+                       # logic; later WPs append their update_*.c here).
+                       "update/update_semver.c"
+                       "update/stage_header.c"
+                       "update/update_policy.c"
                        "net/ota_auth.c"
                        # 2026-09-28: shared login-lockout ladder, used by both
                        # web_auth_login_http.c and lcd_auth_state.c -- see
@@ -670,7 +675,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "common/stack_margin.c"
                        "common/startup_faults.c"
                        ${SIM_SRCS}
-                       INCLUDE_DIRS "." "bridge" "common" "control" "http" "hw" "net" "owners" "persist" "safety" "sim" "ui" "../../../hwAbstraction/interface"
+                       INCLUDE_DIRS "." "bridge" "common" "control" "http" "hw" "net" "owners" "persist" "safety" "sim" "ui" "update" "../../../hwAbstraction/interface"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"
                        EMBED_TXTFILES ${KILNCTL_GZIP_ASSET_FILES} "${kilnctl_tuning_rec_out}"
                        EMBED_FILES "${KILNCTL_SAFTYFW_SLOTA_BIN}" "${KILNCTL_SAFTYFW_SLOTB_BIN}"
