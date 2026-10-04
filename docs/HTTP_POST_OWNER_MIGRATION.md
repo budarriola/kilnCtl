@@ -1,6 +1,6 @@
 # HTTP POST handlers off the httpd worker -- plan
 
-**Status: DONE, 2026-10-02 (W1 bench verification still pending, see W1). Owner approved the migration 2026-09-25.**
+**Status: DONE, 2026-10-02; W1 bench-verified 2026-10-04 (see W1). Owner approved the migration 2026-09-25.**
 Covers `firmware/KilnFW/TODO.md` section 10.14's open "Web side" item
 ("action-taking POST handlers should post commands instead of running inline
 on `esp_http_server`'s one shared worker task"). Phase 5
@@ -67,7 +67,7 @@ uses 202 and poll, and it stays that way.
 Each slice is one reviewable commit. Everything in "Constraints" below
 applies to every slice.
 
-### W1 -- Wi-Fi: reply before the scan-and-join (shape A). HIGHEST value -- IMPLEMENTED, pending bench verification
+### W1 -- Wi-Fi: reply before the scan-and-join (shape A). HIGHEST value -- IMPLEMENTED and bench-verified 2026-10-04
 
 **Status (2026-09-25):** landed; bench verification pending. Review-fixed same
 day (Opus review of `8f9ae877`). `owner_task()` replies via a reply-slot pool
@@ -89,9 +89,12 @@ the slot struct, to keep `.dram0.bss` under budget -- measured
 is called once, synchronously, from `wifi_prov_start()` before the queue/task
 exist, removing a cross-core lazy-init race.
 
-**Pending:** bench verification (not done from this worktree, per task
-scope) -- provision over the AP, a `mode=home` round-trip, and confirming
-`GET /api/status` stays responsive and reports `CONNECTING` during the join.
+**Bench-verified 2026-10-04 on `7e31cafd`:** re-adding the saved home SSID
+over `POST /provision` answered `ok` in 0.37 s; `GET /status` polled every
+0.3-0.6 s for 23.4 s stayed responsive (51 polls, none failed, max 0.66 s)
+and reported `connecting` from +0.45 s until `connected` at +23.4 s. The
+AP-side provisioning path and the negative test (join moved back inline)
+were not exercised. Entry in `docs/BENCH_TEST_LOG.md`.
 
 - **Handlers:** `provision_post_handler()` for station credentials and for
   `mode=home` (`wifi_provision_http.c:655`). The same fix also frees
@@ -124,7 +127,9 @@ scope) -- provision over the AP, a `mode=home` round-trip, and confirming
   the owner checks against an "abandoned" slot before it writes.
 - **Side benefit:** when a phone submits credentials over the fallback AP,
   it now gets `"ok"` before the radio changes mode or channel.
-- **Host test:** none today (`wifi_prov*` links only into the target build).
+- **Host test:** `test_wifi_prov.c`'s W1 section (reply-slot pool and the
+  deferred join: `do_add_network`/`do_set_mode` set CONNECTING and leave
+  `join_after_reply` set); the owner_task ordering itself is target-only.
   Verify with a target build plus bench checks: provision over the AP, a
   `mode=home` round-trip, and `GET /api/status` staying responsive during
   the join.
