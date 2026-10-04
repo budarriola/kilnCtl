@@ -109,6 +109,9 @@ static inline BaseType_t ota_http_test_xSemaphoreTake(SemaphoreHandle_t sem, Tic
 // redefine it. Same wifi_prov.c split precedent as test_wifi_prov.c's own
 // header comment on its four #includes.
 #include "../drivers/http/ota_http_esp.c"
+// boot_partition_verify.c: the set-and-read-back helper ota_http_esp.c and
+// recovery_switch.c share; its own tag is a plain static, so no rename needed.
+#include "../drivers/persist/boot_partition_verify.c"
 #include "../drivers/http/ota_http_pico.c"
 #include "../drivers/http/ota_http_recovery.c"
 
@@ -308,7 +311,20 @@ esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
 { (void)handle; (void)data; (void)size; return ESP_OK; }
 esp_err_t esp_ota_end(esp_ota_handle_t handle) { (void)handle; return ESP_OK; }
 esp_err_t esp_ota_abort(esp_ota_handle_t handle) { (void)handle; return ESP_OK; }
-esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition) { (void)partition; return ESP_OK; }
+// Fakes for boot_partition_verify.c: s_fake_boot_part is what the "otadata"
+// reads back as; esp_ota_set_boot_partition() copies the request into it
+// unless a test sets s_fake_set_ignored (a write that reports OK but does not
+// take effect) or s_fake_set_rc (a set that fails outright).
+static const esp_partition_t *s_fake_boot_part = NULL;
+static bool s_fake_set_ignored = false;
+static esp_err_t s_fake_set_rc = ESP_OK;
+const esp_partition_t *esp_ota_get_boot_partition(void) { return s_fake_boot_part; }
+esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition)
+{
+    if (s_fake_set_rc != ESP_OK) return s_fake_set_rc;
+    if (!s_fake_set_ignored) s_fake_boot_part = partition;
+    return ESP_OK;
+}
 esp_err_t esp_ota_get_partition_description(const esp_partition_t *partition, esp_app_desc_t *out)
 { (void)partition; (void)out; return ESP_FAIL; }
 bool esp_ota_check_rollback_is_possible(void) { return false; }
@@ -2079,6 +2095,37 @@ static void test_esp_target_usable_refuses_running_partition(void)
     TEST_CHECK(ota_http_esp_target_usable(&slot_a, &slot_b), "a target distinct from the running partition is allowed");
 }
 
+// esp_ota_set_boot_partition() reporting OK is not proof: the helper reads the
+// boot partition back and compares address and subtype.
+static void test_boot_partition_set_and_verify(void)
+{
+    TEST_SECTION("boot_partition_set_and_verify -- read-back match passes, mismatch/NULL/set failure never report success");
+    esp_partition_t want = { .address = 0x110000, .subtype = 0x10, .label = "app" };
+    esp_partition_t other = { .address = 0x10000, .subtype = 0x00, .label = "recovery" };
+    esp_partition_t same_addr_other_subtype = { .address = 0x110000, .subtype = 0x11, .label = "app" };
+
+    TEST_CHECK(boot_partition_matches(&want, &want), "identical partition matches");
+    TEST_CHECK(!boot_partition_matches(&want, &other), "different address does not match");
+    TEST_CHECK(!boot_partition_matches(&want, &same_addr_other_subtype), "same address, different subtype does not match");
+    TEST_CHECK(!boot_partition_matches(NULL, &want) && !boot_partition_matches(&want, NULL), "NULL on either side does not match");
+
+    s_fake_boot_part = NULL; s_fake_set_ignored = false; s_fake_set_rc = ESP_OK;
+    TEST_CHECK(boot_partition_set_and_verify(&want) == ESP_OK, "set that takes effect verifies OK");
+
+    s_fake_boot_part = &other; s_fake_set_ignored = true;
+    TEST_CHECK(boot_partition_set_and_verify(&want) == ESP_ERR_INVALID_STATE,
+               "set reporting OK while the boot partition reads back as another one is an error");
+    s_fake_boot_part = NULL;
+    TEST_CHECK(boot_partition_set_and_verify(&want) == ESP_ERR_INVALID_STATE, "a NULL read-back is an error");
+    s_fake_boot_part = &same_addr_other_subtype;
+    TEST_CHECK(boot_partition_set_and_verify(&want) == ESP_ERR_INVALID_STATE, "a subtype-only mismatch is an error");
+
+    s_fake_set_ignored = false; s_fake_set_rc = ESP_FAIL;
+    TEST_CHECK(boot_partition_set_and_verify(&want) == ESP_FAIL, "a failed set propagates its own error");
+    s_fake_set_rc = ESP_OK;
+    TEST_CHECK(boot_partition_set_and_verify(NULL) == ESP_ERR_INVALID_ARG, "a NULL request is refused");
+}
+
 // Bounded drain after an early refusal: DONE only on a 0 read, FAIL on a
 // negative read or an exhausted cap, CONTINUE otherwise.
 static void test_refusal_drain_verdict(void)
@@ -2295,6 +2342,7 @@ void run_test_ota_http(void)
     test_client_ip_finalize_defined_on_null_formatted_addr();
     test_client_ip_finalize_terminates_with_undersized_buffer();
     test_esp_target_usable_refuses_running_partition();
+    test_boot_partition_set_and_verify();
     test_refusal_drain_verdict();
 
     test_pico_img_stage_offset_and_crc_bookkeeping();

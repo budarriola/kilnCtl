@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "boot_guard.h"
+#include "boot_partition_verify.h"
 #include "esp_app_format.h"
 #include "esp_image_format.h"
 #include "esp_log.h"
@@ -58,9 +59,9 @@ recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
     /* esp_ota_set_boot_partition(factory) verifies the image, then ERASES otadata so the bootloader
      * falls through to factory. A failure part-way can therefore already have changed otadata: the
      * SET_FAILED caller must call recovery_switch_restore_running(), never assume nothing was written. */
-    esp_err_t err = esp_ota_set_boot_partition(recovery);
+    esp_err_t err = boot_partition_set_and_verify(recovery);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_set_boot_partition(recovery) failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "boot_partition_set_and_verify(recovery) failed: %s", esp_err_to_name(err));
         set_msg(msg, cap, "recovery image verified but could not be selected as the boot target");
         return RECOVERY_SWITCH_SET_FAILED;
     }
@@ -77,7 +78,7 @@ bool recovery_switch_restore_running(void)
     if (!running) {
         return false;
     }
-    esp_err_t err = esp_ota_set_boot_partition(running);
+    esp_err_t err = boot_partition_set_and_verify(running);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "restoring boot target to the running partition failed: %s", esp_err_to_name(err));
         return false;

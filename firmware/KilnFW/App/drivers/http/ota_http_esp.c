@@ -23,6 +23,7 @@
                                       * http_auth_caller_is_admin() alone */
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "boot_partition_verify.h"
 #include "esp_partition.h"
 #include "esp_rom_crc.h" /* esp_rom_crc32_le() -- section 4's Pico-image running CRC32, see ota_pico_do_stage() */
 #include "hal_time.h" /* hal_time_now_us() -- ota_record_fill()'s uptime-seconds timestamp below, was esp_timer_get_time() */
@@ -320,9 +321,9 @@ static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
             goto cleanup;
         }
 
-        rc = esp_ota_set_boot_partition(target);
+        rc = boot_partition_set_and_verify(target);
         if (rc != ESP_OK) {
-            ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "esp_ota_set_boot_partition failed: %s", esp_err_to_name(rc));
+            ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "boot partition set/verify failed: %s", esp_err_to_name(rc));
             ESP_LOGE(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set boot partition -- "
                                                                        "old image is still active");
