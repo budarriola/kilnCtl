@@ -160,8 +160,12 @@ conditional on ESP config.
   `tools/check_relay_authority_paths.py` must pass with no allowlist entry).
   Use the GLOBAL check for aux (there is no zone index; do not index
   `relay_authority_zone_blocked()` with an aux target). Per-zone latched
-  blocks (thermal guard on zone A) must NOT stop an aux vent -- confirm and
-  test: a zone-A guard trip leaves the aux device on its rule.
+  blocks must NOT stop an aux vent. WP-0 CORRECTION: this holds ONLY for the
+  per-zone guard classes with `continue_on_zone_trip=true`. A GLOBAL-class
+  trip (RUNAWAY, MAX_TEMP, MIN_TEMP, SENSOR_INVALID) faults the whole run and
+  asserts the safety-link fault source, and the default
+  `continue_on_zone_trip=false` faults every active zone on any trip, so aux
+  goes OFF in both (section 15 item a/b/e). Test the three cases separately.
 - Run end/abort/FAULTED/halt/DONE: fail-safe state = OFF for all aux, bypassing
   both hold layers (same as zones, `bypass_hold`).
 - Fail-safe ON unsupported (Q3): the hardware cannot honour it behind K4 and
@@ -223,8 +227,9 @@ Executor (`control/profile_executor.c`, `profile_executor_relay_io.c`):
 5. Aux does not make a run "alive": the "every active HEATER zone faulted ->
    FAULTED" rule is unchanged; a profile with `zone_mask` containing no heater
    is still refused as today. Aux is not in `zone_mask`.
-6. Stack: the executor task is 4096 B and has had four stack-smash panics.
-   No new large locals; aux state lives in `s_exec`; measure and register per
+6. Stack: the executor task is 6144 B (raised from 4096 on 2026-09-24,
+   `profile_executor_start.c:100`; WP-0 section 15 item c) and has had four
+   stack-smash panics. No new large locals; aux state lives in `s_exec`; measure and register per
    `check_stack_margin_registration.ps1` (no new task is expected).
 7. Manual relay override: an aux relay with an active run is owned
    `RELAY_OWNER_PROFILE` -> manual refused, same as zones. With no run, aux
@@ -234,6 +239,13 @@ Executor (`control/profile_executor.c`, `profile_executor_relay_io.c`):
    while a profile is running). It rides the existing manual relay route if
    WP-0/WP-2 confirm that route is ADMIN tier and mode-gated for aux relays;
    otherwise WP-2 adds the minimum change and the URI cap rule above applies.
+   WP-0 finding (section 15 item f): no new gate is needed. The toggle hooks
+   `dashboard_set_relay()` -> `kiln_io_owner_command_set_relay()`, whose
+   `relay_on_blocked()` (`kiln_io_owner.c:238-306`) already applies
+   `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` and refuses relay-ON during a firing or
+   autotune with the "409 Conflict" from `system_mode_gate_http_send_refusal`.
+   Danger Zone and the LCD Temperature page are the only callers today; the
+   LCD must learn aux ownership, and the idle evaluator needs a manual hold.
 
 ## 7. HTTP surface, web UI, LCD
 
@@ -244,7 +256,10 @@ ZERO new routes:
   (GET echo; POST fields `aux{N}_enabled/_tc_zone/_hystc/_minons/_minoffs`,
   N = relay 1..4), parsed in `zones_http_post_parse.c`, composed in
   `zones_http_get.c`. Alternative if the zones GET json_cap (7360 B, 895 B
-  headroom at last count) cannot hold ~4x50 B: put it on
+  headroom at last count) cannot hold ~4x50 B. WP-0 CORRECTION: the 895 B
+  figure predates ZONES_CFG_VERSION 22->26, the +24 B `relay_types` array and
+  the `%.4f`->`%.9g` precision change, so it is stale and unmeasured at HEAD
+  (section 15 item d); WP-4 must re-measure first: put it on
   `GET/POST /api/relay_names` family or `/api/settings`; decide in WP-4 by
   measuring cap headroom first (the httpd stack-blob rule applies: stream
   or measure, never grow a task-stack buffer blindly). Do not add a route
@@ -467,3 +482,156 @@ build). Negative-test each new check.
 9. **Convert existing ON_OFF zones to aux:** offer the confirm-gated one-shot (sec 10), never automatic (default accepted).
 10. **Bench relay 4 free of other duty:** default accepted; a profile's RELAY_IO segment targeting a relay bound to an enabled aux is refused at save.
 - **tc_zone encoding:** `tc_zone_plus1`, 0 = none.
+
+## 15. WP-0 findings (read-only premise check, 2026-10-04, origin/main 78dc15b2)
+
+No board access, no code changes. Evidence is file:line at 78dc15b2; paths are under
+`firmware/` unless stated.
+
+### a. K4 and Pico CT assumptions
+
+- Sec 4 holds: no SaftyFW guard faults on "ESP relay commanded while no heat
+  owner". `HEAT_OWNER_ACTIVE` (`KilnFW/App/drivers/safety/safety_link_frames.c:524`,
+  `heat_owner_active_decide`) and `HEAT_REQUESTED` (`:502`, `:533`) are zone-derived;
+  an aux relay feeds neither. K4 stays Pico-owned, so an aux load behind K4 is
+  unpowered with no heat owner (wiring fact, sec 2 unchanged).
+- BUT the relay masks sent to the Pico are the whole shadow, not zone-derived:
+  `relay_now_mask`/`relay_recent_mask` come from `kiln_io_get_relay_shadow()`
+  (`safety_link_frames.c:391-415`). Consequences the plan did not list:
+  1. S3 (`SaftyFW/src/safety_guards.c:862-885`, trips on
+     `any_current_present && !relay_commanded_recently`) is suppressed for
+     `correlation_window_s` after any aux relay energizes
+     (`SaftyFW/src/tasks/safety_core.c:1030`, `relay_recent_mask != 0`). A welded
+     heater contactor with real stuck-on current goes undetected while an aux relay
+     is cycling. Detection degrades; no new false trip. Needs a SAFETY_CASE row and
+     a host test of the aux relay-cycle case.
+  2. S4 (warn only, `safety_guards.c:887-891`) fires when an aux relay is on
+     continuously (`SaftyFW/src/tasks/link_task.c:1359`, `relay_now_mask != 0`) and
+     the aux load is not on a fitted CT channel. Warn, never a trip. Expect a
+     spurious S4 warn on a vent; whether to mask it is a Pico change and an owner call.
+  3. No false trip from aux current on a CT: S3 sees `relay_recent` true; S14/S15 are
+     keyed to commanded heater relays via `ct_channel_map` (`safety_core.c` ~729,
+     ~1193, masked to fitted channels). With `ct_topology=summed`, aux current adds to
+     the total and can mask a dead heater element (S15 under-current). The wiring rule
+     stands: aux loads must not pass through a heater CT. Not a Pico change.
+  4. S9 (`TRIP_INEFFECTIVE`, `safety_guards.c:345-430`) is evaluated only after a
+     trip: not affected by an aux relay.
+- "H9 CT alarm" (owner decision 2026-10-04: current seen while every relay is
+  commanded off): NOT implemented anywhere. Searched origin/main and, read-only,
+  `C:\wt\safedec_yldzsu` and `C:\wt\safedec_ht1`: no source, test or doc hit beyond
+  unrelated SAFETY_CASE "H9" rows. S3 is the nearest existing guard. Design
+  requirement for whoever builds it: define "commanded off" from the full relay
+  shadow (`relay_now_mask`/`relay_recent_mask`), not zone relays, or exclude channels
+  an aux load can reach. Keyed on zone relays only, an energized aux load on a fitted
+  CT would false-alarm; keyed on the full mask it cannot. Cross-reference this into
+  the H9 task before it lands.
+
+### b. Writers of `relay_mask` and zone relay ownership (exhaustive at HEAD)
+
+Persistent zone `relay_mask` (the field the sec 3 conflict check guards):
+1. `KilnFW/App/drivers/http/zones_http_post_parse.c:158` (POST /api/zones; also what
+   PcTools `load_config_preset()` and the narrow `control_set_zone_*` writers hit via
+   GET-merge-POST).
+2. `http/backup_import.c:1211` (parse) and `:2241` (commit via
+   `zones_config_set_relay_mask_no_save()`, `persist/zones_config_accessors.c:311`).
+   `zones_config_set_relay_mask()` (`:325`) has no non-test caller.
+3. Whole-blob paths: `persist/kiln_cfg_store.c:925,1594`, `persist/kiln_cfg_swap.c:382,666`,
+   `persist/zones_config_store.c` load/restore (including cfg_fs restore), and
+   `persist/zones_config_migrate.c:700` / `zones_config_convert.c` (version copies, no
+   new values). Defaults are all-zero.
+4. Validation hook point: `persist/zones_config_json.c:316`.
+
+Runtime caches, not authorities (must stay in step; reset-one-side class):
+`control/profile_executor_run.c:816-823` (run start, also seeds `claimed_relay_mask`),
+`control/profile_executor_config_reload.c:51` (mid-run mask edit; forces the old mask
+off), `control/profile_executor_relay_io.c:42,572,639,935` (`claimed_relay_mask`).
+
+Ownership predicate: `persist/zones_config_store.c:1571` `zone_owned_relay_mask`, recomputed
+by `profile_relay_is_zone_owned` (`http/profiles_http.c` ~1173-1260) and by the LCD
+(`ui/ui_page_temperature.c:206`). All three must learn aux, or a RELAY_IO segment and the
+LCD toggle can claim an aux relay. Readers that infer "heater commanded" from zone masks
+only and would therefore not see aux: `http/ota_http.c:532` (interlock `heater_commanded`;
+its separate any-relay-energized fact does include aux), `bridge/uart_bridge_ext_control.c:55`.
+
+Live relay writers (all through `kiln_io_owner`, MANUAL or AUTHORIZED):
+`control/profile_executor_relay_io.c` lines 97, 575, 624, 938, 1037 (AUTHORIZED);
+`control/zones_current_sweep_engine.c:1114` (mask write) and `:869` (all-off);
+`bridge/uart_bridge_io.c:201` (SET_RELAY), `:287` (SET_RELAY_MASK), `:392` (all-off);
+`http/dashboard_http.c:721` `dashboard_set_relay()`, called by `http/diagnostics_http.c:1265`
+(Danger Zone) and `ui/ui_page_temperature.c:358` (LCD); `safety/danger_mode.c:284,332` and
+`safety/safety_ceiling_sync.c` (all-off); `main_control_bringup.c:46,154` (boot all-off).
+`kiln_io_set_relay*` is called only inside `owners/`. `/api/relay` was removed
+(`dashboard_http.c:774`).
+
+### c. Executor stack margin
+
+- Allocated 6144 B, not 4096: raised 2026-09-24 after a measured 468 B free of 4096
+  mid-firing (`control/profile_executor_start.c:87-100`, registered `:115`). Sec 6 item 6
+  corrected above.
+- Latest data (fw `eb83c1ac`, 2026-10-01, `docs/stack_margin_baseline/`): minimum free
+  (`hwm_bytes`) idle 4820 B, web-UI-open 4820 B, mid-firing 3428 B of 6144 (55.8 percent,
+  level OK). The mid-firing capture was taken ramping 51 s in: not dwelling and not during
+  a guard trip, so it excludes the deepest paths.
+- Headroom for the aux tick: about 3.4 KB measured. Keep aux state in `s_exec` and the tick
+  free of large locals; re-capture a mid_firing baseline with an aux rule active before WP-3
+  closes. No new task, so no new `stack_margin_register()`.
+
+### d. GET /api/zones json_cap headroom
+
+- `http/zones_http_get.c:95` `json_cap = 7360` (PSRAM heap buffer, not stack). The 895 B
+  headroom (6465 B worst case) is documented as of ZONES_CFG_VERSION 22 and is NOT
+  verifiable as current: `ZONES_CFG_VERSION` is 26 (`persist/zones_config_json.h:63`),
+  `relay_types` added 24 B (`1baa828c`), and `04fb2afe` widened gains/model/coupling from
+  `%.4f` to `%.9g`. Real headroom at HEAD is unknown and likely smaller than 895 B.
+- The authoritative measurement is `test_zones_get_handler_max_width_response_fits_json_cap()`
+  (`App/test/test_zones_http.c:6548`), which prints the measured headroom. I did not run the
+  host build (heavy MSVC build; WP-4 owns the measurement). Do not trust 895 B.
+- For WP-4: a compact per-relay array like `relay_types` (about 6 B per relay) is cheaper
+  than 4 x 50 B objects.
+
+### e. RELAY_IO and Danger Zone interactions
+
+- `validate_io_segment` / `profile_relay_is_zone_owned` (`http/profiles_http.c` ~1173-1260)
+  reject RELAY_IO on zone-owned relays only. An aux-enabled relay must be added to that
+  refusal (matches the sec 10 proposed rule).
+- `apply_relay` (`control/profile_executor_relay_io.c:22-120`) has no K4 gate, matching sec 4.
+- Danger Zone (`http/diagnostics_http.c:1214-1300`) calls `dashboard_set_relay()` after a
+  `danger_mode_active()` check and returns 409 on `ERR_RUNNING` and `ERR_OWNED`; an aux relay
+  owned by a running profile already gets the OWNED 409.
+- Terminal-state off paths iterate ACTIVE ZONES only (`force_all_relays_off`,
+  `exec_enter_terminal_state` comment, `profile_executor_relay_io.c` ~700-760). Aux relays
+  are in no zone, so aux OFF on FAULTED/DONE/halt needs an explicit aux force-off; it will
+  not happen by inheritance. `release_profile_relay_claim()` must also release aux ownership.
+
+### f. Manual aux toggle outside a firing (owner: YES)
+
+- Machinery: `App/drivers/owners/kiln_io_owner.c` `relay_on_blocked()` (lines 238-306) is the
+  single choke point for manual relay-ON, used by `handle_set_relay` and
+  `handle_set_relay_mask`. Order: `relay_authority_on_blocked` (safety/global), OTA in
+  progress, unacknowledged crash, then `system_mode_gate_blocks_relay()` which applies
+  `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` (`safety/system_mode_gate.c:54-77`): refuse while a
+  profile or autotune runs or a backup restore is in flight. Relay-OFF is never gated.
+  HTTP maps the refusal to "409 Conflict" through `http/system_mode_gate_http.c`
+  (`system_mode_gate_http_send_refusal`).
+- So a manual aux toggle outside a firing needs NO new gate: route it through
+  `dashboard_set_relay()` -> `kiln_io_owner_command_set_relay()`. During a firing it is
+  already refused by the mode gate (409) and by `relay_authority_manual_blocked_by_owner()`
+  (`owners/relay_authority.c:93`; owners PROFILE/RULE/AUTOTUNE).
+- Callers today: only Danger Zone (`/api/diagnostics/danger/relay`, ROUTE_TIER_ADMIN,
+  `http/route_tier_table.h:338`) and the LCD Temperature page, which already toggles any
+  NON-zone relay (`ui/ui_page_temperature.c:206,358`). An aux relay has no zone, so today the
+  LCD would let an operator toggle an aux relay and the aux rule would then re-command it
+  (two owners fighting, the case the 2026-08-27 owner note forbids). The LCD ownership test
+  must treat an enabled aux relay as aux-owned, unless the manual toggle is deliberately
+  routed through the aux module.
+- Recommended hook for the admin-only toggle: a handler on an existing admin route family
+  (no new URI; 7 spare under the cap) that calls the same `dashboard_set_relay()` path and
+  reuses `system_mode_gate_http_send_refusal`. The manual command must also set a "manual
+  hold" that the idle aux evaluator honors, or the evaluator will fight it.
+
+### Blocks WP-1
+
+Nothing hard. Decisions to make in WP-1, not blockers: (1) the idle (no run) aux evaluator
+versus the manual toggle needs a defined winner; (2) the S3 blind spot and S4 warn while aux
+is energized need a SAFETY_CASE row and an owner call on the S4 warn. The 895 B cap claim must
+not be relied on until re-measured (WP-4).
