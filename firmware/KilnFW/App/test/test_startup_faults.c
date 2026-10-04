@@ -94,4 +94,20 @@ void run_test_startup_faults(void)
     TEST_CHECK(strstr(big, "...") == NULL, "no marker when nothing was cut");
 
     startup_fault_reset_for_test();
+
+    /* Owner decision 2026-10-04: only guard 9's startup failure gates a
+     * firing; the PC-link watchdog's stays advisory (startup item only). */
+    TEST_SECTION("startup_guard9 gates; PC link watchdog stays advisory");
+    startup_fault_reset_for_test();
+    TEST_CHECK(readiness_startup_guard9_status(startup_fault_is_set(STARTUP_FAULT_EXEC_WATCHDOG)) == READY_OK,
+               "clean boot: the guard-9 item reads ok");
+    startup_fault_note(STARTUP_FAULT_PC_LINK_WATCHDOG);
+    TEST_CHECK(readiness_startup_status(startup_fault_count()) == READY_NOT_DONE,
+               "PC link watchdog failure is a visible warning in the startup item");
+    TEST_CHECK(readiness_startup_guard9_status(startup_fault_is_set(STARTUP_FAULT_EXEC_WATCHDOG)) == READY_OK,
+               "but never trips the blocking guard-9 item");
+    startup_fault_note(STARTUP_FAULT_EXEC_WATCHDOG);
+    TEST_CHECK(readiness_startup_guard9_status(startup_fault_is_set(STARTUP_FAULT_EXEC_WATCHDOG)) == READY_NOT_DONE,
+               "guard 9 failure trips the blocking item");
+    startup_fault_reset_for_test();
 }

@@ -21,6 +21,7 @@
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault() -- M13 fix */
 #include "live_profile.h" /* live_profile_load_record()/live_profile_generation() -- "Keep?" button */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
+#include "ct_leak_alarm.h" /* H9 CT alarm -- trip-strip branch */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
  * items A/B/C and HIGH 1): the deferred Pico-half recapture poll and its
@@ -241,6 +242,13 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             snprintf(trip_buf, sizeof(trip_buf), "SAFETY TRIP -- %s",
                      safety_trip_words_short(ds.diag_trip_reason));
             lv_label_set_text(s_ui_home_trip_strip, trip_buf);
+            lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+        } else if (ct_leak_alarm_is_active()) {
+            /* H9 CT alarm (owner decision 2026-10-04): CT current with every
+             * relay commanded off. Ranked just below a live safety trip and
+             * above everything informational. Short: 96-char strip, 480x320,
+             * no scrolling; the channel and peak are on the web dashboard. */
+            lv_label_set_text(s_ui_home_trip_strip, "CT CURRENT WITH ALL RELAYS OFF -- see dashboard");
             lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
         } else if (auth_reset_gesture_is_armed_and_live(auth_reset_gesture_singleton(),
                                                           (uint32_t)(hal_time_now_us() / 1000))) {

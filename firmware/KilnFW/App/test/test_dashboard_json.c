@@ -869,6 +869,7 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
      * was not enlarged instead. "false" is the wider of the two boolean
      * renderings, so it is the worst case. */
     STATUS_APPEND(",\"safety_diverged\":%s", "false");
+    STATUS_APPEND(",\"ct_leak\":%s", "false");
 
     STATUS_APPEND(",\"nvs_sections\":[");
     for (size_t i = 0; i < 4; i++) {

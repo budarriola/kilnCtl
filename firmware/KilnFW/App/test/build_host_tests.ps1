@@ -100,6 +100,7 @@ try {
         (Join-Path $testDir "test_dashboard_safety_ready.c"),
         (Join-Path $testDir "test_readiness_commissioning.c"),
         (Join-Path $testDir "test_startup_faults.c"),
+        (Join-Path $testDir "test_ct_leak_alarm.c"),
         (Join-Path $testDir "test_kiln_cfg_store.c"),
         (Join-Path $testDir "test_iter_tune_store.c"),
         (Join-Path $testDir "test_firing_shadow.c"),
@@ -271,6 +272,7 @@ try {
         (Join-Path $hwAbsDir "esp/common/hal_esp_common.c"),
         (Join-Path $driversDir "common/stack_margin.c"),
         (Join-Path $driversDir "common/startup_faults.c"),
+        (Join-Path $driversDir "safety/ct_leak_alarm.c"),
         (Join-Path $driversDir "net/time_sync_tz.c"),
         (Join-Path $driversDir "persist/log_store.c"),
         (Join-Path $driversDir "persist/cfg_fs.c"),
@@ -1192,6 +1194,7 @@ try {
             "/Fo:`"$dashStatusObjDir\\`" /Fe:`"$exe9`" " +
             "`"$(Join-Path $testDir 'test_dashboard_status_http.c')`" " +
             "`"$(Join-Path $driversDir 'http/dashboard_json.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/ct_leak_alarm.c')`" " +
             # touch_dev.c linked for REAL (not stubbed): /api/status's
             # touch_cal_supported value is produced by the production
             # touch_cal_support_name(), so the exact strings on the wire --

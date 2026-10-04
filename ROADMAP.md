@@ -1251,10 +1251,7 @@ counts and relay types overwritten by the stale v1 copy each boot; fixed in
 `0c39f72f` (migrate only when the kiln partition has no `relay_cyc` blob,
 fail closed on an unreadable one, old copy kept as `zones_config_store.c`
 does; the bench board's default partition holds no legacy copy, so it was
-never exposed). Owner decision
-2026-10-04: a guard-9 startup failure BLOCKS a firing; a PC-link-watchdog startup
-failure is advisory (readiness warning only); implementation pending (the
-`READINESS_GATE_KEY_*` set is unchanged until it lands).
+never exposed). Owner decision 2026-10-04, implemented: a guard-9 startup failure now BLOCKS a firing (new `startup_guard9` readiness item and `READINESS_GATE_KEY_STARTUP_GUARD9`, refusal text names the failure and says reboot, reflash if it repeats; refused in `readiness_gate_evaluate()` so every start path, including autotune, is covered); a PC-link-watchdog startup failure stays ADVISORY, shown only in the `startup` item.
 
 **The clearing semantics, recorded here because they were only discoverable by
 reading `safety_guards.c`:** an S6a trip LATCHES. It does not clear on its own,

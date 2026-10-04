@@ -65,6 +65,11 @@ PAIRS = {
     # safety_ceiling_match was on 2026-09-14.
     "pico_update": "readiness_pico_update_status",
     "ct_attribution": "readiness_ct_attribution_status",
+    # Owner decision 2026-10-04 (M13 third-sweep follow-up): a guard-9 startup
+    # failure blocks firing; the PC-link watchdog's stays advisory (inside the
+    # "startup" item, not gated).
+    "startup_guard9": "readiness_startup_guard9_status",
+    "ct_leak_alarm": "readiness_ct_leak_alarm_status",
 }
 
 REPO_TEST_DIR = Path(__file__).resolve().parent

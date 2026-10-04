@@ -28,6 +28,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "heat_enable.h"
+#include "ct_leak_alarm_service.h" /* H9 CT alarm, one 2 Hz pass per loop below */
 #include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "settings.h"
@@ -572,6 +573,8 @@ void safety_poll_task(void *arg)
          * the same way boot_clear_pending is deferred off safety_apply_diag's.
          * No-op whenever nothing is pending; safe with no module lock held. */
         heat_enable_service_pending_release();
+        /* H9 CT alarm: current with every relay off. Self-throttled, no lock held, no task of its own. */
+        ct_leak_alarm_service(link);
         safety_poll_service_pico_half_recapture();
         safety_link_service_log_relay(link);
         /* SAFETY_FAULT_MIN_HOLD_MS's own comment (safety_link.h) -- finishes a

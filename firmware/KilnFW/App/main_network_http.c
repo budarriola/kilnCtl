@@ -67,6 +67,7 @@
 #include "uart_protocol.h"
 #include "kiln_cfg_http.h"
 #include "safety_cfg_http.h"
+#include "ct_leak_alarm_service.h"
 #include "safety_stack_margin_http.h"
 #include "safety_cfg_store.h"
 #include "kiln_cfg_store.h"
@@ -832,6 +833,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(safety_cfg_store_err));
         startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
+    ct_leak_alarm_service_bind(ctx->io_ready ? &ctx->kio : NULL); /* H9 CT alarm: full relay shadow */
     esp_err_t safety_cfg_http_err =
         safety_cfg_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL,
                                ctx->io_ready ? &ctx->kio : NULL);

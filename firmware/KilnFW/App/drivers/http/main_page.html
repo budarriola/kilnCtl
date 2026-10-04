@@ -366,6 +366,7 @@
 <div id="cfgFsFormatPendingBanner"></div>
 <div id="safetyTcReconfigGaveUpBanner"></div>
 <div id="safetyGuardDisabledByZeroBanner"></div>
+<div id="ctLeakBanner"></div>
 <div id="safetyTripBanner"></div>
 <div id="lastRunBanner"></div>
 
@@ -2209,6 +2210,21 @@ function renderSafetyGuardDisabledByZero(data) {
     'never been set to a nonzero value. Never trips while disabled.</span></div>' +
     '<div class="row"><span>To arm</span><span>Set the corresponding threshold (abs_max_temp_c ' +
     'for S1, max_rate_c_per_min for S8) via the safety config panel.</span></div>' +
+    '</div>';
+}
+
+// H9 CT alarm (owner decision 2026-10-04): /api/status ct_leak is the latched
+// "CT current while every relay is commanded off" alarm. The ESP cannot cut
+// the current -- the detail is on /api/readiness (ct_leak_alarm item).
+function renderCtLeakAlarm(data) {
+  var el = document.getElementById('ctLeakBanner');
+  if (!el) return;
+  if (!data.ct_leak) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="banner safety-trip">' +
+    '<h3>CT CURRENT WITH ALL RELAYS OFF</h3>' +
+    '<div class="row"><span>Current is flowing through the CT while every relay is commanded off. ' +
+    'A contactor or SSR may be welded or bypassed. This board cannot interrupt it: ' +
+    'open the kiln disconnect. New firings are refused while this is active.</span></div>' +
     '</div>';
 }
 
@@ -4319,6 +4335,7 @@ function poll() {
       renderSafetyTcReconfigGaveUp(data);
       renderSafetyGuardDisabledByZero(data);
       renderSafetyTrip(data);
+      renderCtLeakAlarm(data);
       // Client-side multi-zone autotune trace sampling (see
       // sampleAutotuneZoneTemps's own header comment) -- a no-op whenever no
       // autotune is actively running.

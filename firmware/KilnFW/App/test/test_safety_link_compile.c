@@ -214,6 +214,8 @@ void heat_enable_service_pending_release(void) { /* not exercised by this file's
 // needs to prove safety_link_frames.c calls it the right NUMBER of times.
 static int s_stub_relay_cycles_safety_edge_calls = 0;
 void relay_cycles_note_safety_edge(void) { s_stub_relay_cycles_safety_edge_calls++; }
+/* H9 CT alarm service (safety_poll_task calls it each pass); not exercised here. */
+void ct_leak_alarm_service(SafetyLinkClass *link) { (void)link; }
 
 esp_err_t uart_owner_init(uart_owner_t *owner, uart_port_t port, int tx_io, int rx_io,
                            int baud_rate, unsigned queue_len, unsigned task_priority,

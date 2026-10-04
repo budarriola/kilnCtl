@@ -108,6 +108,14 @@ typedef enum {
      * verdict needs the safety link to have supplied the configuration it was
      * taken against, so the link-independent conditions come first. */
     READINESS_GATE_BLOCK_CT_ATTRIBUTION,
+    /* Owner decision 2026-10-04 (ROADMAP M13 third-sweep follow-up): a
+     * guard-9 startup failure (the profile-executor stall watchdog task did
+     * not start) blocks a firing. The PC-link watchdog's startup failure
+     * stays advisory and has no gate item. Ordered last: it is a boot-time
+     * fact, independent of the safety link. */
+    READINESS_GATE_BLOCK_STARTUP_GUARD9,
+    /* H9 CT alarm (owner decision 2026-10-04): current with every relay off. */
+    READINESS_GATE_BLOCK_CT_LEAK_ALARM,
 } readiness_gate_block_t;
 
 /* The `key` strings /api/readiness uses for these same items. The
@@ -121,6 +129,8 @@ typedef enum {
 #define READINESS_GATE_KEY_CEILING_MATCH "safety_ceiling_match"
 #define READINESS_GATE_KEY_PICO_UPDATE   "pico_update"
 #define READINESS_GATE_KEY_CT_ATTRIBUTION "ct_attribution"
+#define READINESS_GATE_KEY_STARTUP_GUARD9 "startup_guard9"
+#define READINESS_GATE_KEY_CT_LEAK_ALARM "ct_leak_alarm"
 
 /* The /api/readiness item key a refusal corresponds to, or NULL for
  * READINESS_GATE_OK. Exists so a refusal can hand the operator's browser the
@@ -139,6 +149,8 @@ static inline const char *readiness_gate_item_key(readiness_gate_block_t which)
     case READINESS_GATE_BLOCK_CEILING_MISMATCH: return READINESS_GATE_KEY_CEILING_MATCH;
     case READINESS_GATE_BLOCK_PICO_UPDATE: return READINESS_GATE_KEY_PICO_UPDATE;
     case READINESS_GATE_BLOCK_CT_ATTRIBUTION: return READINESS_GATE_KEY_CT_ATTRIBUTION;
+    case READINESS_GATE_BLOCK_STARTUP_GUARD9: return READINESS_GATE_KEY_STARTUP_GUARD9;
+    case READINESS_GATE_BLOCK_CT_LEAK_ALARM: return READINESS_GATE_KEY_CT_LEAK_ALARM;
     case READINESS_GATE_OK:
     default:
         return NULL;
@@ -166,6 +178,11 @@ typedef struct {
                                     * zones_current_sweep_task.c) -- never the raw stored enum, so a
                                     * verdict that outlived its configuration can never reach this gate
                                     * as the verdict it once was */
+    bool     guard9_startup_failed; /* startup_fault_is_set(STARTUP_FAULT_EXEC_WATCHDOG) -- the guard-9
+                                    * stall watchdog task did not start this boot. Zero (false) is the
+                                    * non-blocking default for fake-fact initialisers. */
+    bool     ct_leak_alarm_active;  /* ct_leak_alarm_is_active() -- CT current with every relay off (H9).
+                                    * Zero (false) is the non-blocking default. */
 } readiness_gate_facts_t;
 
 /* Reads the eight facts above off the live board. Target-only
@@ -235,6 +252,14 @@ static inline readiness_gate_block_t readiness_gate_evaluate(const readiness_gat
         which = READINESS_GATE_BLOCK_CT_ATTRIBUTION;
         text = "refused -- CT ATTRIBUTION failed: a current clamp is not on the conductor the config "
                "names. Re-run the CT mapping step in Setup and move the clamp.";
+    } else if (readiness_startup_guard9_status(f->guard9_startup_failed) == READY_NOT_DONE) {
+        which = READINESS_GATE_BLOCK_STARTUP_GUARD9;
+        text = "refused -- GUARD 9 (the executor stall watchdog) did not start this boot, so a firing "
+               "would run without it. Reboot the board; reflash if it repeats.";
+    } else if (readiness_ct_leak_alarm_status(f->ct_leak_alarm_active) == READY_NOT_DONE) {
+        which = READINESS_GATE_BLOCK_CT_LEAK_ALARM;
+        text = "refused -- CT ALARM: current flows with every relay off, so something downstream of the "
+               "relays is conducting. Isolate mains and inspect the contactor and SSRs; clears after 30 s of quiet.";
     }
 
     if (which != READINESS_GATE_OK && msg != NULL && cap > 0 && text != NULL) {

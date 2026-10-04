@@ -26,6 +26,7 @@
 #include "safety_cfg_store.h"
 #include "safety_ceiling_sync.h"
 #include "startup_faults.h"
+#include "ct_leak_alarm.h"
 #include "web_encoding.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
@@ -102,7 +103,7 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * free. */
 /* Body buffer size. Heap-allocated in api_readiness_get_handler() -- see the
  * long comment there for why it must never become a stack array again. */
-#define READINESS_JSON_CAP 4608u
+#define READINESS_JSON_CAP 5120u
 
 #define READINESS_DETAIL_MAX 192
 
@@ -986,6 +987,48 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_context", "Safety link command delivery", st, detail,
                         "/safety", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 15c. H9 CT alarm -- current with every relay off. BLOCKS a firing (same
+     * predicate readiness_gate.h calls). The detail carries the live channel
+     * and peak; ct_leak_alarm_describe() never emits a quote or backslash. */
+    {
+        bool leak = ct_leak_alarm_is_active();
+        readiness_status_t st = readiness_ct_leak_alarm_status(leak);
+        char leak_detail[160];
+        if (leak) {
+            char what[96];
+            ct_leak_alarm_describe(what, sizeof(what));
+            snprintf(leak_detail, sizeof(leak_detail),
+                     "%s; firing BLOCKED. Isolate mains, inspect contactor and SSRs", what);
+        } else {
+            snprintf(leak_detail, sizeof(leak_detail), "no CT current with every relay off");
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "ct_leak_alarm", "No current with relays off", st, leak_detail,
+                        "/safety", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 15a. Guard-9 startup failure -- BLOCKS a firing (owner decision
+     * 2026-10-04; readiness_gate.h). Same predicate the gate calls. The PC-link
+     * watchdog's startup failure is NOT here: it stays an advisory line in
+     * item 15b below. */
+    {
+        bool g9_failed = startup_fault_is_set(STARTUP_FAULT_EXEC_WATCHDOG);
+        readiness_status_t st = readiness_startup_guard9_status(g9_failed);
+        const char *detail = g9_failed
+            ? "guard 9 (executor stall watchdog) did not start this boot; firing is BLOCKED. "
+              "Reboot the board; reflash if it repeats"
+            : "guard 9 (executor stall watchdog) started this boot";
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "startup_guard9", "Guard 9 watchdog running", st, detail,
+                        "/readiness", &dropped);
         if (o != before_o) {
             first = false;
         }

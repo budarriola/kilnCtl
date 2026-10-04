@@ -33,6 +33,7 @@
 #include "relay_cycles.h"
 #include "run_state.h"
 #include "safety_cfg_store.h" /* CT_COMMISSIONING_PLAN.md step 4 -- ct_topology (0x031F) */
+#include "ct_leak_alarm.h"
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_rework_c1d2c526_2026-09-15.md,
                                    * HIGH 2) -- safety_ceiling_sync_is_standing_diverged() */
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
@@ -709,6 +710,12 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         bool standing_diverged = safety_ceiling_sync_is_standing_diverged(NULL, 0);
         APPEND(",\"safety_diverged\":%s", standing_diverged ? "true" : "false");
     }
+    /* H9 CT alarm (owner decision 2026-10-04): current with every relay off.
+     * A bare boolean on purpose -- the buffer is not enlarged (see the sizing
+     * note above); the channel/peak text is in GET /api/readiness's
+     * "ct_leak_alarm" item and on the LCD. main_page.html banners it. Mirrored
+     * in test_dashboard_json.c's render_worst_case_status_json(). */
+    APPEND(",\"ct_leak\":%s", ct_leak_alarm_is_active() ? "true" : "false");
 
     APPEND(",\"diag_ever_received\":%s", ds->diag_ever_received ? "true" : "false");
     if (ds->diag_ever_received) {

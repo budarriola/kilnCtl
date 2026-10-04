@@ -97,6 +97,10 @@ static void set_fully_ready(void)
      * test_ct_attribution_non_fail_verdicts_do_not_block() below is the half
      * of the owner's rule that a FAIL-only test would miss. */
     s_fake_facts.ct_attribution = READINESS_CT_ATTR_PASS;
+    /* Guard 9's watchdog task started this boot. */
+    s_fake_facts.guard9_startup_failed = false;
+    /* No H9 CT alarm standing. */
+    s_fake_facts.ct_leak_alarm_active = false;
 }
 
 /* ---- 2. the allowed case ------------------------------------------------- */
@@ -219,6 +223,37 @@ static void test_ct_attribution_fail_alone_refuses(void)
     s_fake_facts.ct_attribution = READINESS_CT_ATTR_FAIL;
     check_one_blocking_item("a failed CT attribution refuses the start",
                             READINESS_GATE_BLOCK_CT_ATTRIBUTION, "CT ATTRIBUTION");
+}
+
+static void test_guard9_startup_failure_alone_refuses(void)
+{
+    /* Owner decision 2026-10-04 (M13 third-sweep follow-up): a guard-9
+     * startup failure blocks a firing, and the refusal says what was detected
+     * (guard 9 did not start) and what to do (reboot; reflash if it repeats). */
+    TEST_SECTION("a guard-9 startup failure alone refuses a start (owner decision 2026-10-04)");
+    set_fully_ready();
+    s_fake_facts.guard9_startup_failed = true;
+    check_one_blocking_item("a guard-9 startup failure refuses the start", READINESS_GATE_BLOCK_STARTUP_GUARD9,
+                            "GUARD 9");
+    char msg[192];
+    readiness_gate_refuses_start(msg, sizeof(msg), NULL);
+    TEST_CHECK(strstr(msg, "did not start") != NULL, "the message says what was detected");
+    TEST_CHECK(strstr(msg, "Reboot") != NULL, "the message says what to do");
+    TEST_CHECK(readiness_startup_guard9_status(true) == READY_NOT_DONE, "the displayed item reads NOT_DONE");
+    TEST_CHECK(readiness_startup_guard9_status(false) == READY_OK, "and OK when guard 9 started");
+}
+
+static void test_ct_leak_alarm_alone_refuses(void)
+{
+    /* Owner decision 2026-10-04 (H9 CT alarm): CT current with every relay
+     * off refuses a NEW firing. It cannot cut power; it must not let a firing
+     * start on top of a conducting fault. */
+    TEST_SECTION("an active H9 CT alarm alone refuses a start (owner decision 2026-10-04)");
+    set_fully_ready();
+    s_fake_facts.ct_leak_alarm_active = true;
+    check_one_blocking_item("an active CT alarm refuses the start", READINESS_GATE_BLOCK_CT_LEAK_ALARM, "CT ALARM");
+    TEST_CHECK(readiness_ct_leak_alarm_status(true) == READY_NOT_DONE, "the displayed item reads NOT_DONE");
+    TEST_CHECK(readiness_ct_leak_alarm_status(false) == READY_OK, "and OK when clear");
 }
 
 /* ---- the cases that must NOT block --------------------------------------- */
@@ -348,6 +383,12 @@ static readiness_gate_block_t first_not_done_item(const readiness_gate_facts_t *
     if (readiness_ct_attribution_status(f->ct_attribution) == READY_NOT_DONE) {
         return READINESS_GATE_BLOCK_CT_ATTRIBUTION;
     }
+    if (readiness_startup_guard9_status(f->guard9_startup_failed) == READY_NOT_DONE) {
+        return READINESS_GATE_BLOCK_STARTUP_GUARD9;
+    }
+    if (readiness_ct_leak_alarm_status(f->ct_leak_alarm_active) == READY_NOT_DONE) {
+        return READINESS_GATE_BLOCK_CT_LEAK_ALARM;
+    }
     return READINESS_GATE_OK;
 }
 
@@ -357,11 +398,11 @@ static void test_gate_and_display_agree_over_the_cross_product(void)
      * which is an enum, not a bool -- a cross product that only walked its
      * false/true would never exercise STALE or INCONCLUSIVE, the two values
      * the owner's asymmetry actually turns on. */
-    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 1536 combinations)");
+    TEST_SECTION("gate blocks item X <=> item X's DISPLAYED status is NOT_DONE (all 6144 combinations)");
     int mismatches = 0;
     int blocked = 0;
     int allowed = 0;
-    for (unsigned bits = 0; bits < 256u; bits++) {
+    for (unsigned bits = 0; bits < 1024u; bits++) {
         readiness_gate_facts_t f;
         memset(&f, 0, sizeof(f));
         f.recovery_mode = (bits & 1u) != 0u;
@@ -372,6 +413,8 @@ static void test_gate_and_display_agree_over_the_cross_product(void)
         f.estop_verified = (bits & 32u) != 0u;
         f.ceiling_diverged = (bits & 64u) != 0u;
         f.pico_update_blocked = (bits & 128u) != 0u;
+        f.guard9_startup_failed = (bits & 256u) != 0u;
+        f.ct_leak_alarm_active = (bits & 512u) != 0u;
 
         for (unsigned ct = 0; ct <= (unsigned)READINESS_CT_ATTR_FAIL; ct++) {
             f.ct_attribution = (readiness_ct_attribution_fact_t)ct;
@@ -388,7 +431,7 @@ static void test_gate_and_display_agree_over_the_cross_product(void)
             }
         }
     }
-    TEST_CHECK(blocked + allowed == 256 * 6,
+    TEST_CHECK(blocked + allowed == 1024 * 6,
                "every combination was walked, CT attribution's six values included");
     TEST_CHECK(mismatches == 0, "gate blocks <=> some displayed item is NOT_DONE, and names the same item");
     /* Both arms must actually be exercised, or "0 mismatches" is vacuous --
@@ -410,6 +453,8 @@ static void test_gate_keys_match_the_api_item_keys(void)
     TEST_CHECK(strcmp(READINESS_GATE_KEY_CEILING_MATCH, "safety_ceiling_match") == 0, "safety_ceiling_match key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_PICO_UPDATE, "pico_update") == 0, "pico_update key");
     TEST_CHECK(strcmp(READINESS_GATE_KEY_CT_ATTRIBUTION, "ct_attribution") == 0, "ct_attribution key");
+    TEST_CHECK(strcmp(READINESS_GATE_KEY_STARTUP_GUARD9, "startup_guard9") == 0, "startup_guard9 key");
+    TEST_CHECK(strcmp(READINESS_GATE_KEY_CT_LEAK_ALARM, "ct_leak_alarm") == 0, "ct_leak_alarm key");
 }
 
 /* dashboard_exec_http.c embeds these messages verbatim into a JSON body,
@@ -432,6 +477,8 @@ static void test_messages_are_json_safe(void)
         READINESS_GATE_BLOCK_CEILING_MISMATCH,
         READINESS_GATE_BLOCK_PICO_UPDATE,
         READINESS_GATE_BLOCK_CT_ATTRIBUTION,
+        READINESS_GATE_BLOCK_STARTUP_GUARD9,
+        READINESS_GATE_BLOCK_CT_LEAK_ALARM,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
         set_fully_ready();
@@ -442,6 +489,8 @@ static void test_messages_are_json_safe(void)
         case READINESS_GATE_BLOCK_CEILING_MISMATCH: s_fake_facts.ceiling_diverged = true; break;
         case READINESS_GATE_BLOCK_PICO_UPDATE: s_fake_facts.pico_update_blocked = true; break;
         case READINESS_GATE_BLOCK_CT_ATTRIBUTION: s_fake_facts.ct_attribution = READINESS_CT_ATTR_FAIL; break;
+        case READINESS_GATE_BLOCK_STARTUP_GUARD9: s_fake_facts.guard9_startup_failed = true; break;
+        case READINESS_GATE_BLOCK_CT_LEAK_ALARM: s_fake_facts.ct_leak_alarm_active = true; break;
         default: s_fake_facts.estop_verified = false; break;
         }
         char msg[192];
@@ -469,6 +518,8 @@ int main(void)
     test_estop_unverified_alone_refuses();
     test_ceiling_divergence_alone_refuses();
     test_pico_update_blocked_alone_refuses();
+    test_guard9_startup_failure_alone_refuses();
+    test_ct_leak_alarm_alone_refuses();
     test_acknowledged_crash_does_not_block();
     test_link_down_is_not_this_gates_refusal();
     test_null_facts_are_not_a_green_light();

@@ -250,7 +250,9 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * by an unsafe amount or actively blocking anything. A future re-derivation
  * should be sized from a per-zone, heat-enabled capture spanning the actual
  * idle-sample-to-onset gap, not from a same-window std alone. */
-#define ZONE_SWEEP_NORMAL_NOISE_FLOOR_A 0.045f
+/* ZONE_SWEEP_NORMAL_NOISE_FLOOR_A (0.045f) now lives in ct_noise_floor.h so
+ * ct_leak_alarm.c uses the SAME number rather than a mirrored copy. */
+#include "ct_noise_floor.h"
 /* The k_ct_v_per_a this floor was DERIVED against (see the comment above --
  * "k_ct=1.0 V/A, the CT probe's own owner-stated spec"). 2026-09-10 fix
  * (opus review round 2, finding C): the floor above is a fixed AMPS
@@ -271,7 +273,7 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * this rescaling corrects for k_ct drift only, not a hypothetical future
  * gain change -- see current_sense commissioning docs for that value's own
  * provenance. */
-#define ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT 1.0f
+/* ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT (1.0f): see ct_noise_floor.h. */
 
 /* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md)
  *

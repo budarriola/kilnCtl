@@ -496,6 +496,29 @@ static inline readiness_status_t readiness_startup_status(unsigned fault_count)
     return fault_count == 0u ? READY_OK : READY_NOT_DONE;
 }
 
+/* Pure decision for the "startup_guard9" item (owner decision 2026-10-04, the
+ * M13 third-sweep follow-up): `failed` is startup_fault_is_set(
+ * STARTUP_FAULT_EXEC_WATCHDOG) -- the guard-9 profile-executor stall watchdog
+ * task did not start this boot. UNLIKE the advisory "startup" item above this
+ * one BLOCKS a firing (readiness_gate.h): a firing without guard 9 has no
+ * independent catch for a stalled executor holding relays on. The PC-link
+ * watchdog's startup failure deliberately has no such item; it stays an
+ * advisory line inside "startup". */
+static inline readiness_status_t readiness_startup_guard9_status(bool failed)
+{
+    return failed ? READY_NOT_DONE : READY_OK;
+}
+
+/* Pure decision for the "ct_leak_alarm" item (H9 CT alarm, owner decision
+ * 2026-10-04): `active` is ct_leak_alarm_is_active() -- current above the CT
+ * noise floor, sustained, while every relay is commanded off. It cannot cut
+ * power; it BLOCKS a new firing and is loud everywhere else (SAFETY_CASE.md
+ * H9). */
+static inline readiness_status_t readiness_ct_leak_alarm_status(bool active)
+{
+    return active ? READY_NOT_DONE : READY_OK;
+}
+
 /* Pure decision for the "E-stop interlock verified" item, 2026-09-08's
  * follow-on to 3b5ced00: that pass made the FIRMWARE side of E-stop
  * test-locked (relay_owner de-energises on TRIP, negative-tested), but the

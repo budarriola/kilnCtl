@@ -44,6 +44,8 @@
 #include "estop_verification.h"
 #include "pico_auto_update_state.h"
 #include "safety_ceiling_sync.h"
+#include "startup_faults.h"
+#include "ct_leak_alarm.h"
 
 void readiness_gate_collect(readiness_gate_facts_t *out)
 {
@@ -88,4 +90,10 @@ void readiness_gate_collect(readiness_gate_facts_t *out)
      * wizard step -- never a start, per the owner's rule that only a FAIL
      * blocks firing. */
     out->ct_attribution = (readiness_ct_attribution_fact_t)ct_verify_current_fact();
+
+    /* Owner decision 2026-10-04: a guard-9 startup failure blocks a firing.
+     * The SAME latch the "startup_guard9" readiness item reads. */
+    out->guard9_startup_failed = startup_fault_is_set(STARTUP_FAULT_EXEC_WATCHDOG);
+    /* H9 CT alarm: the SAME published latch the "ct_leak_alarm" readiness item reads. */
+    out->ct_leak_alarm_active = ct_leak_alarm_is_active();
 }
