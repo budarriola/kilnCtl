@@ -450,9 +450,13 @@ static void tap_walk_add(tap_walk_ctx_t *ctx, const char *name, int cx, int cy, 
  * never see hidden widgets: several bench cases treat every listed name as
  * present, so adding hidden entries to the list would change what they
  * judge. click_by_name needs them only to answer "hidden" rather than
- * "not_found". Written on the UI-test bridge task, read on lvgl_port_task
- * during the dispatched walk; both commands run serially on that one bridge
- * task, and the handoff itself orders the write before the read. */
+ * "not_found". Written on the calling task, read on lvgl_port_task during the
+ * dispatched walk; the dispatch handoff orders the write before the read. The
+ * flag is NOT serialised against other walks: a log dump (touch bridge's
+ * LOG_TAP_TARGETS, kiln_ui_show()'s auto dump) can run on lvgl_port_task
+ * inside a click's collect window. log_all_tap_targets() therefore honours the
+ * flag only for a collecting walk (ctx->out set, do_log false), never a log
+ * dump, so such a dump never prints the hidden pass. */
 static volatile bool s_collect_hidden;
 
 void kiln_ui_set_collect_hidden(bool enable)
@@ -604,9 +608,10 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
                      * explicit kiln_ui_log_tap_targets() call (and this
                      * function under it) always logs at INFO. */
                     if (ctx->do_log) {
-                        ESP_LOGI(TAG, "  tap target%*s key[%u] (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"",
+                        ESP_LOGI(TAG, "  tap target%*s key[%u] (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"%s",
                                  depth * 2, "", (unsigned)k, x1, y1, x2, y2,
-                                 (x1 + x2) / 2, (y1 + y2) / 2, key_text);
+                                 (x1 + x2) / 2, (y1 + y2) / 2, key_text,
+                                 key_hidden ? " (hidden)" : "");
                     }
                     /* The whole widget being hidden was filtered above; only a
                      * per-key HIDDEN ctrl flag can set key_hidden. */
@@ -839,7 +844,7 @@ static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
      * a full array/wire reply never loses a visible target to one. */
     ctx->actionable_filter = TAP_WALK_ACTIONABLE_ALL;
     ctx->root_filter = TAP_WALK_ROOT_ALL;
-    if (!s_collect_hidden) {
+    if (!s_collect_hidden || !ctx->out || ctx->do_log) {
         return;
     }
     ctx->hidden_pass = true;
