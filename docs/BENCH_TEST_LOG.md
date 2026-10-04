@@ -2893,7 +2893,7 @@ Reported by the coordinator; raw logs are not cited here.
 - `safety_poll` stack: 5424 of 8192 B free. `check_task_liveness`: ok.
 - Readiness: 20 ok, 1 not_done (`safety_commissioned`, 3 of 68 unset), 3 other. `ct_leak_alarm` ok, `startup_guard9` ok, `/api/status` `ct_leak` false.
 - `backup_import` round trip (`82ac2ad0`): ok. Zones, profiles and timing byte-identical after re-export; PID and coupling unchanged.
-- OPEN follow-up: `kiln_configs` entries changed across the import: Pico param flags went 0 to 1, the active config ESP blob changed at bytes 440 and 688, and its package hash changed. Under investigation.
+- Follow-up: `kiln_configs` entries changed across the import: Pico param flags went 0 to 1, the active config ESP blob changed at bytes 440 and 688, and its package hash changed. Diagnosed: `zones_config_set_tuning_quality_no_save()` bumps `tuning_seq` unconditionally on import (`zones_config_accessors.c:2200`, called from `backup_import.c:2490`); `tuning_seq` is in `pkg_hash`, so each import duplicates the active slot. Fix in progress.
 - LCD: unverified; the panel was dark in the captures (likely backlight idle).
 
 ## 2026-10-03 Pending-bench-work pass (host 192.168.1.156, COM14) -- all four items (gear gate INCONCLUSIVE)
