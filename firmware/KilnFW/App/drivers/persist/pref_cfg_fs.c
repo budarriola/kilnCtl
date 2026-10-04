@@ -6,6 +6,8 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "kiln_cfg_store_cfg_fs.h"
+#include "zones_config_cfg_fs.h"
 
 static const char *PREF_FS_TAG = "pref_cfg_fs";
 
@@ -204,4 +206,20 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
         }
     }
     return true;
+}
+
+int pref_cfg_fs_delete_kiln_scope_files(void)
+{
+    static const char *const kPaths[] = { ZONES_CFG_FILE_PATH, RELAY_NAMES_FILE_PATH, ZONE_NORMALS_FILE_PATH,
+                                          KILN_CFG_STORE_FILE_PATH };
+    int deleted = 0;
+    for (size_t i = 0; i < sizeof(kPaths) / sizeof(kPaths[0]); i++) {
+        esp_err_t err = cfg_fs_delete(kPaths[i]);
+        if (err == ESP_OK) {
+            deleted++;
+        } else if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(PREF_FS_TAG, "kiln reset: could not delete cfg file %s: %s", kPaths[i], esp_err_to_name(err));
+        }
+    }
+    return deleted;
 }

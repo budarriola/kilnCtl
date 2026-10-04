@@ -1117,7 +1117,10 @@ esp_err_t relay_names_save(void)
  * thermal record. Also not safety-critical -- nothing on the guard/control
  * path reads it, only Task 2's WARNING predicate above -- so it has no
  * business sharing a version/CRC/load transaction with data that is. */
-/* 1 -> 2 (M12): the sweep now also derives which CT channel watches which
+/* History of ZONE_NORMALS_CFG_VERSION and NVS_KEY_ZONE_NORMALS, both now defined in
+ * zones_http_internal.h (moved there so the host tests can see them):
+ *
+ * 1 -> 2 (M12): the sweep now also derives which CT channel watches which
  * zone (ct_map_*, see zone_sweep_derive_ct_channel() below) and that record
  * has to outlive the sweep task -- the commissioning page reads it on a
  * later page load to decide whether ct_channel_map[0..2] renders as DERIVED
@@ -1125,14 +1128,16 @@ esp_err_t relay_names_save(void)
  * below rather than migrated: the whole blob is re-measured by one button
  * press, and the alternative (reading a short struct and zero-filling the
  * tail) is a migration path worth writing only for data that cannot simply
- * be measured again. */
-/* 2 -> 3 (M12b): the sweep now also derives k_ct_v_per_a[0..2] from the
+ * be measured again.
+ *
+ * 2 -> 3 (M12b): the sweep now also derives k_ct_v_per_a[0..2] from the
  * nameplate power the operator already answered (COMMISSIONING_UX.md Q3/Q4)
  * and this run's own measured current, and the commissioning page has to be
  * able to say DERIVED on a later page load for that field too. A v2 blob is
  * discarded rather than migrated, for exactly the reason v1 was: one button
- * press re-measures the whole thing. */
-/* RENAMED 2026-09-06 from "zone_normals_cfg" (16 chars) -- confirmed against
+ * press re-measures the whole thing.
+ *
+ * RENAMED 2026-09-06 from "zone_normals_cfg" (16 chars) -- confirmed against
  * the installed ESP-IDF (nvs.h: `#define NVS_KEY_NAME_MAX_SIZE 16` "including
  * null terminator"; nvs_page.cpp's Item::MAX_KEY_LENGTH = sizeof(key)-1 = 15,
  * checked as `if (keySize > Item::MAX_KEY_LENGTH) return ESP_ERR_NVS_KEY_TOO_LONG;`)
@@ -1153,7 +1158,7 @@ esp_err_t relay_names_save(void)
  * currents and derived CT-channel/k_ct_v_per_a maps have never actually
  * persisted across a reboot on this board. Because nothing was ever
  * written under the old name, there is no on-flash data to migrate: the
- * rename below is a plain one-time swap, not a migration. See
+ * rename is a plain one-time swap, not a migration. See
  * fake_kv.h's FAKE_KV_MAX_KEY_LEN (also 15 usable chars, deliberately kept
  * equal to NVS's real limit rather than raised) -- it is what caught this
  * during the nvs.h -> hal_kv.h migration's host-test pass. */
@@ -1170,10 +1175,9 @@ NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
 /* docs/CONFIG_FILESYSTEM.md item 2: zone normals dual-write to the `cfg`
  * LittleFS partition through the generic pref_cfg_fs.h bridge, exactly as
  * relay names do (fixed-size struct, no migration chain: a version mismatch
- * is discarded, see ZONE_NORMALS_CFG_VERSION above). The dual-write rev
+ * is discarded, see ZONE_NORMALS_CFG_VERSION in zones_http_internal.h). The dual-write rev
  * counter lives in its own tiny NVS key for the same reason NVS_KEY_ZONES_REV
  * and NVS_KEY_RELAY_NAMES_REV do -- it is not part of the measured data. */
-
 
 static struct {
     zone_normals_cfg_t cfg;

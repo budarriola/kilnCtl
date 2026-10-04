@@ -63,6 +63,19 @@ extern "C" {
 // (ESP_ERR_INVALID_SIZE) rather than silently truncate.
 #define PREF_CFG_FS_MAX_ITEM 128
 
+/* Paths of the pref_cfg_fs-bridged kiln-category files (shared so the
+ * kiln-scope factory reset can name them without the heavy zones headers). */
+#define RELAY_NAMES_FILE_PATH "relay_names.dat"
+#define ZONE_NORMALS_FILE_PATH "zone_normals.dat"
+
+/* Kiln-scope factory reset: best-effort cfg_fs_delete() of every kiln-category
+ * cfg file (zones.json, relay_names.dat, zone_normals.dat, kiln_configs.json).
+ * Erasing kiln_nvs alone leaves these, and a higher-rev (or NVS-empty) file
+ * would win on the next boot and resurrect the stale data. Failures are
+ * logged and otherwise ignored; absent files and an unmounted cfg_fs are
+ * normal. Returns the number of files actually deleted. */
+int pref_cfg_fs_delete_kiln_scope_files(void);
+
 // Matches cfg_fs_write_atomic()'s signature (cfg_fs.h) and
 // cfg_fs_write_atomic_device()'s (cfg_fs_mount.h) -- same seam
 // zones_config_cfg_fs.h uses: host tests exercise the real cfg_fs_write_atomic()

@@ -14,6 +14,7 @@
 
 #include "cfg_fs_mount.h" /* cfg_fs_confirm_format_device() -- "all" scope formats the `cfg`
                             * LittleFS partition too, see reset_scope_t's format_cfg_fs field */
+#include "pref_cfg_fs.h" /* pref_cfg_fs_delete_kiln_scope_files() -- "kiln" scope cfg cleanup */
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_wdt.h"
@@ -333,6 +334,16 @@ static void execute_scope_job(void *arg)
         } else {
             ESP_LOGW(TAG, "cfg LittleFS partition formatted as part of factory reset");
         }
+    }
+
+    /* "kiln" scope: kiln_nvs is erased above but the dual-written kiln-category
+     * cfg files (zones, relay names, zone normals, kiln_configs) survive, and a
+     * file would win the next boot's resolve with stale data. Delete them
+     * best-effort here on the flash worker. Scope is matched by name so the
+     * kScopes table (shared with the profiles scope) is not touched. */
+    if (strcmp(scope->name, "kiln") == 0) {
+        int n = pref_cfg_fs_delete_kiln_scope_files();
+        ESP_LOGW(TAG, "kiln factory reset: %d cfg file(s) deleted", n);
     }
 
     ctx->err = first_err;

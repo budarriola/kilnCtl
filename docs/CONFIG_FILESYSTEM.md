@@ -205,7 +205,7 @@ Of 24 inventoried runtime-changeable items:
 | # | Item | Status | Commit |
 |---|---|---|---|
 | 1 | Zones config (PID/FOPDT/coupling/guards/wiring/tc_type) | dual-write | `19f74959` |
-| 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`) | `42569d2b` |
+| 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`) | `d15b5199` |
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`) | `288dc91c` |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |

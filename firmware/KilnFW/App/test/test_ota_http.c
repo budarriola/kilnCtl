@@ -260,6 +260,11 @@ void firing_stats_cache_invalidate_all(void) {}
 // (it needs esp_littlefs.h/esp_partition.h, ESP-IDF only).
 esp_err_t cfg_fs_confirm_format_device(void) { return ESP_OK; }
 
+// factory_reset.c's "kiln" scope deletes the kiln-category cfg files via
+// pref_cfg_fs.c (not linked into this executable); the real behavior is covered
+// by test_zone_normals_cfg_fs.c.
+int pref_cfg_fs_delete_kiln_scope_files(void) { return 0; }
+
 // ---------------------------------------------------------------------------
 // uart_bridge.h/flash_worker.h (2026-09-07) -- execute_scope() now dispatches
 // its NVS erase through uart_bridge_ext_run_on_flash_worker() (see

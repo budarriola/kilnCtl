@@ -132,11 +132,64 @@ static void test_both_present_higher_rev_wins(void)
     TEST_CHECK(ok && rev == 2 && raw.normal_current_a[0] == 2.0f, "file resynced to rev 2");
 }
 
+static void test_future_version_file_rejected(void)
+{
+    TEST_SECTION("zone normals cfg_fs: file with valid rev+CRC but version=2 is rejected by the validator");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    zone_normals_load();
+    zone_normals_cfg_t bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.version = 2;
+    bad.normal_current_a[0] = 9.0f;
+    bad.measured_mask = 1;
+    TEST_CHECK(pref_cfg_fs_save(ZONE_NORMALS_FILE_PATH, &bad, sizeof(bad), 5) == ESP_OK,
+               "setup: wrote a version-2 file at rev 5 (framing and CRC valid)");
+    zone_normals_load();
+    float a = 0;
+    TEST_CHECK(!normal_of(0, &a), "zone 0 stays unmeasured: stale-version file not adopted, NVS empty");
+}
+
+static void test_nvs_failure_does_not_advance_rev(void)
+{
+    TEST_SECTION("zone normals cfg_fs: NVS write failure leaves the RAM rev unadvanced");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    zone_normals_load();
+    TEST_CHECK(zone_normals_set(0, 1.0f), "rev 1 saved");
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(!zone_normals_set(0, 2.0f), "save reports failure when NVS write fails");
+    TEST_CHECK(zone_normals_set(0, 3.0f), "next save succeeds");
+    zone_normals_cfg_t raw;
+    uint32_t rev = 0;
+    bool ok = false;
+    pref_cfg_fs_load_raw(ZONE_NORMALS_FILE_PATH, sizeof(raw), NULL, &raw, &rev, &ok);
+    TEST_CHECK(ok && rev == 2, "RAM rev did not advance on the failed save: next save is rev 2, not 3");
+}
+
+static void test_kiln_reset_leaves_blank(void)
+{
+    TEST_SECTION("zone normals cfg_fs: kiln-scope reset deletes the cfg files, so load comes back blank");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    zone_normals_load();
+    TEST_CHECK(zone_normals_set(1, 6.0f), "save dual-writes");
+    fake_kv_reset_all(); /* what erasing kiln_nvs does */
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(pref_cfg_fs_delete_kiln_scope_files() >= 1, "helper deleted at least the normals file");
+    zone_normals_load();
+    float a = 0;
+    TEST_CHECK(!normal_of(1, &a), "no stale normal resurrected from the file");
+}
+
 void run_test_zone_normals_cfg_fs(void)
 {
     test_unmounted_uses_nvs_only();
     test_save_writes_both();
     test_nvs_empty_file_present_resolves_from_file();
     test_both_present_higher_rev_wins();
+    test_future_version_file_rejected();
+    test_nvs_failure_does_not_advance_rev();
+    test_kiln_reset_leaves_blank();
     reset_all();
 }
