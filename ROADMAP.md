@@ -1191,19 +1191,42 @@ day, `9d600ac8`: `thermo_task_reconfig_gave_up()` is now wired into
 This remains a
 standing rule, not a milestone that closes.
 
-**Third sweep, in review 2026-10-03** (worktree `C:\wt\m13sweep_tvha92`, not yet
-on `origin/main`): a per-boot startup-fault latch,
+**Third sweep, landed 2026-10-03 (`db2bd5d9`, `73debf63`) and flashed to the bench
+2026-10-04:** a per-boot startup-fault latch,
 `firmware/KilnFW/App/drivers/common/startup_faults.{h,c}`, with
 `startup_fault_note()` placed on 13 boot-path failure branches that previously
 only logged (`main_boot_early.c`, `main_bridges_bringup.c`,
 `main_control_bringup.c`, `main_network_http.c`, `profile_executor_start.c`),
 surfaced as a new advisory `startup` item in `GET /api/readiness` naming each
-latched fault and its impact. RAM-only, no NVS, no new task or route. Rows
-14-20 of the sweep table (boot_guard NVS, the danger_mode task, the UART bridge
-tasks, dns_hijack, `*_http_start` failures, persist writes, low-impact tasks)
-remain for a next sweep. Owner decision pending: whether a guard-9 or
-PC-link-watchdog startup failure should gate firing (the
-`READINESS_GATE_KEY_*` set is unchanged for now, so the item is advisory).
+latched fault and its impact. RAM-only, no NVS, no new task or route. The bench
+board reads `ok startup: every required task and subsystem started this boot`.
+
+**Fourth sweep, landed 2026-10-04 (`8ebed650`, `a548dfc6`), not yet flashed:**
+twelve more ids (13 to 25): boot_guard mutex/NVS/persist failures, the
+danger_mode task, the nine PC-link bridge tasks and the flash worker,
+dns_hijack socket/bind/task, the 23 `*_http_start` failures under one
+`HTTP_ROUTES` id (the per-group log line still names the group), the web-auth
+route groups, the six settings stores (`unit_pref`, `ramp_assist_cfg`,
+`profiles_builtin`, `profiles_favorites`, `kiln_cfg_store`,
+`safety_cfg_store`), `pico_auto_update` (inside the non-recovery branch),
+the heartbeat monitor, time sync, touch (noted only when the controller
+answered the probe and then failed, never when absent) and the screen-idle
+and backlight tasks. The review found three notes that could never fire
+because the start functions always returned `ESP_OK`; `a548dfc6` makes
+`time_sync_start()`, `unit_pref_start()` and `ramp_assist_cfg_start()` return
+the real error on partition-init or unrecovered open/read failure (callers
+only log and note, stored defaults unchanged). The impact strings are held to
+100 characters by the host test so the readiness `detail[192]` budget holds
+(17 + 63 + 4 + 99 + NUL = 184). Skipped as debug-only or cosmetic: the log,
+touch, ui_test and gpio_probe bridges, `board_temps_start`, `mdns_init`;
+skipped as already surfaced: i2c/SX1509/kiln_io/spi/thermo bring-up,
+`safety_link_start`, the UART owner/protocol init. Open: row 19 (boot-time
+persist writes beyond the settings stores) was not exhaustively audited;
+`FT6336U_start()` maps an identity mismatch to `ESP_ERR_NOT_FOUND`, so that
+one real fault is un-noted until it returns a distinct error. Owner decision
+pending: whether a guard-9 or PC-link-watchdog startup failure should gate
+firing (the `READINESS_GATE_KEY_*` set is unchanged for now, so the item is
+advisory).
 
 **The clearing semantics, recorded here because they were only discoverable by
 reading `safety_guards.c`:** an S6a trip LATCHES. It does not clear on its own,
