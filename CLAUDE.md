@@ -737,6 +737,10 @@ three checks above test it and, only for the one SKIP reason that is a
 direct consequence of the phase-1 build `-Fast` itself skipped (a missing
 `recovery.bin`, missing SaftyFW slot bins, or a missing KilnFW build-output
 directory), print `SKIP-FAST: ...` instead of `SKIP: ...`.
+Two more checks do the same (2026-10-04), for a missing SaftyFW build artifact
+only: `check_no_sim_plant_guard_disable.ps1` (no `build/saftyfw_build_info.h`) and
+`check_saftyfw_task_stack_budgets.ps1` (no `build/SaftyFW.elf`; a missing
+`arm-none-eabi-objdump` stays a plain SKIP).
 `run_all_checks.ps1` files that into its own bucket, reports it separately
 in the summary ("N skipped due to -Fast"), and never fails the run over it —
 without needing `-AllowSkips`, and without weakening the fact that a SKIP

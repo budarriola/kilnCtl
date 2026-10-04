@@ -40,7 +40,12 @@ function Fail([string]$msg) {
 }
 
 if (-not (Test-Path $header)) {
-    Write-Host "SKIP: $header does not exist -- no SaftyFW target build has run yet on this machine (check_00_saftyfw_target_build.ps1 produces it)" -ForegroundColor Yellow
+    # SKIP-FAST: -Fast skips check_00_saftyfw_target_build.ps1, the sole producer
+    # of this header, so its absence under -Fast is an expected consequence, not
+    # a defect. Only this one reason is relabeled, and only when
+    # run_all_checks.ps1 set KILNCTL_CHECKS_FAST.
+    $skipLabel = if ($env:KILNCTL_CHECKS_FAST) { "SKIP-FAST" } else { "SKIP" }
+    Write-Host "${skipLabel}: $header does not exist -- no SaftyFW target build has run yet on this machine (check_00_saftyfw_target_build.ps1 produces it)" -ForegroundColor Yellow
     exit 3
 }
 

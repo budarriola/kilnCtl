@@ -40,5 +40,17 @@ if ($ElfPath) { $argv += @("--elf", $ElfPath) }
 if ($DumpCeilings) { $argv += @("--dump-ceilings") }
 foreach ($fc in $ForceCeiling) { $argv += @("--force-ceiling", $fc) }
 
-& python @argv
-exit $LASTEXITCODE
+# SKIP-FAST: -Fast skips check_00_saftyfw_target_build.ps1, the producer of
+# build/SaftyFW.elf, so the .py's "SKIP: no ELF at" is an expected consequence
+# of -Fast. Relabeled only for that exact message, only when
+# KILNCTL_CHECKS_FAST is set and no explicit -ElfPath was given. Any other
+# SKIP (e.g. arm-none-eabi-objdump not found) stays a plain SKIP.
+$output = & python @argv
+$code = $LASTEXITCODE
+if ($code -eq 3 -and $env:KILNCTL_CHECKS_FAST -and -not $ElfPath -and
+        ($output -join "`n") -match 'SKIP: no ELF at') {
+    $output | ForEach-Object { Write-Host ($_ -replace 'SKIP: no ELF at', 'SKIP-FAST: no ELF at') }
+    exit 3
+}
+$output | Write-Host
+exit $code
