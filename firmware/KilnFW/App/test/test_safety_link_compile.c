@@ -82,6 +82,7 @@ esp_err_t MAX31856_get_config(MAX31856Class *ch, MAX31856Config *out_cfg)
 esp_err_t MAX31856_read_all(MAX31856BusClass *bus, MAX31856Reading *out, size_t max_readings, size_t *out_count)
 { (void)bus; (void)out; (void)max_readings; (void)out_count; return ESP_FAIL; }
 uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io) { (void)io; return 0; }
+uint8_t aux_outputs_cfg_enabled_mask(void) { return 0; } /* WP-9: safety_pico_relay_mask() */
 void profile_executor_get_status(profile_exec_status_t *out)
 {
     if (out) {

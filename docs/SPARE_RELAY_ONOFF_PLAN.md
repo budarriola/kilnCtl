@@ -467,7 +467,7 @@ earlier one merges.
   `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` governed-store row, `ROADMAP.md` row
   (mark D1 overturned, link here), supersede note on the two 2026-09-14
   audits, bench session sec 12. Owns those docs.
-- **WP-9 ESP strips aux relay bits from the masks sent to the Pico (S, ESP only).**
+- **WP-9 ESP strips aux relay bits from the masks sent to the Pico (S, ESP only). DONE 2026-10-04.**
   Owner decision 2026-10-04 (sec 14 item 11, refined same day): the ESP removes
   aux-bound relay bits from the relay masks it sends the Pico. No new kilnlink field,
   no protocol bump, no Pico change, no Pico flash. Today `safety_link_frames.c:391-415`
@@ -485,6 +485,12 @@ earlier one merges.
   SaftyFW consumer of `relay_now_mask`/`relay_recent_mask` (`safety_core.c:1030`,
   `link_task.c:1359`, relay-feedback checks) to confirm none needs aux bits. Owns:
   `safety_link_frames.c` mask build and its host test only. Needs WP-1's accessor.
+  DONE 2026-10-04: single helper `safety/safety_pico_relay_mask.h` (`safety_pico_relay_mask()`, live read of
+  `aux_outputs_cfg_enabled_mask()` every PUSH_CONTEXT, never cached), the only mask-construction site
+  (`safety_build_and_send_context()`); host tests in `test_aux_outputs_store.c`. Pico side checked: no relay
+  feedback input exists; S3/S4/S14/S15 and CT map read only these masks, so an aux relay is invisible to them
+  (an aux load on the CT is a nuisance S3 trip, by design). Residual: PUSH_CONTEXT per-zone fields still derive
+  from zone relay_mask only.
   Rejected alternative: a new trailing `aux_relay_mask` byte on PUSH_CONTEXT so the Pico
   masks aux itself. It needs a protocol-version decision, a decoder accepting both
   lengths, a SaftyFW change and a Pico flash, and the Pico flash path is currently

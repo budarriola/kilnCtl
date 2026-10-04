@@ -35,6 +35,7 @@
 #include "cfg_fs.h"
 
 #include "../drivers/persist/aux_outputs_cfg.c"
+#include "../drivers/safety/safety_pico_relay_mask.h"
 
 static const char *AO_SCRATCH_BASE = "cfg_fs_test_aux_outputs";
 
@@ -350,6 +351,72 @@ static void test_dual_write_and_file_tiebreak(void)
     pref_cfg_fs_reset_write_fn_for_test();
 }
 
+/* WP-9: the helper the ESP uses to strip aux-bound relays from every mask it sends the Pico. */
+static void test_pico_mask_strips_aux(void)
+{
+    TEST_SECTION("safety_pico_relay_mask: aux bits stripped, non-aux bits untouched, tracks live config");
+    fresh_board();
+    aux_outputs_cfg_start(0x03); /* zones own relays 1,2 */
+
+    TEST_CHECK(safety_pico_relay_mask(0x0F) == 0x0F, "no aux enabled: mask passes through unchanged");
+
+    aux_output_entry_t e = on_entry();
+    TEST_CHECK(aux_outputs_cfg_set(4, &e, 0x03) == ESP_OK, "enable aux on relay 4");
+    TEST_CHECK(safety_pico_relay_mask(0x0F) == 0x07, "aux relay 4 stripped, heater relays 1-3 kept");
+    TEST_CHECK(safety_pico_relay_mask(0x08) == 0x00, "aux-only shadow reads as nothing commanded");
+    TEST_CHECK(safety_pico_relay_mask(0x03) == 0x03, "non-aux bits unchanged when aux is off");
+
+    /* Live tracking: a second aux, then disabling the first, no restart in between. */
+    TEST_CHECK(aux_outputs_cfg_set(3, &e, 0x03) == ESP_OK, "enable aux on relay 3 as well");
+    TEST_CHECK(safety_pico_relay_mask(0x0F) == 0x03, "relays 3 and 4 both stripped after the change");
+    e.enabled = 0;
+    TEST_CHECK(aux_outputs_cfg_set(4, &e, 0x03) == ESP_OK, "disable aux on relay 4");
+    TEST_CHECK(safety_pico_relay_mask(0x0F) == 0x0B, "relay 4 reported again at once; relay 3 still stripped");
+
+    /* Bound-but-disabled is not stripped; a conflict-forced-off aux is not stripped either. */
+    TEST_CHECK(safety_pico_relay_mask(0x08) == 0x08, "disabled aux relay 4 is reported to the Pico");
+    simulate_reboot();
+    aux_outputs_cfg_start(0x04); /* a zone now claims relay 3 -> aux 3 forced off in RAM */
+    TEST_CHECK(safety_pico_relay_mask(0x04) == 0x04, "conflict-forced-off aux never hides a zone's relay");
+
+    TEST_CHECK(safety_pico_relay_mask_strip(0xFF, 0x0A) == 0xF5, "pure core: only the named bits are removed");
+}
+
+/* The call site cannot be linked on the host (FreeRTOS), so pin its shape in source:
+ * the strip must feed relay_now_mask BEFORE the recent-mask bookkeeping. */
+static void test_pico_mask_call_site_shape(void)
+{
+    TEST_SECTION("safety_link_frames.c routes the Pico relay mask through safety_pico_relay_mask() first");
+    char path[600];
+    snprintf(path, sizeof(path), "%s", __FILE__);
+    char *slash = strrchr(path, '/');
+    char *bslash = strrchr(path, '\\');
+    if (bslash && (!slash || bslash > slash)) {
+        slash = bslash;
+    }
+    if (!slash) {
+        TEST_CHECK(false, "cannot derive the test directory from __FILE__");
+        return;
+    }
+    snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "%s", "../drivers/safety/safety_link_frames.c");
+    FILE *f = fopen(path, "rb");
+    TEST_CHECK(f != NULL, "safety_link_frames.c readable from the test directory");
+    if (!f) {
+        return;
+    }
+    static char src[400000];
+    size_t n = fread(src, 1, sizeof(src) - 1, f);
+    fclose(f);
+    src[n] = 0;
+    const char *strip = strstr(src, "relay_now_mask = io ? safety_pico_relay_mask(kiln_io_get_relay_shadow(io))");
+    const char *recent = strstr(src, "relay_recent_mask = safety_context_update_relay_recent(link, relay_now_mask)");
+    TEST_CHECK(strip != NULL, "relay_now_mask is built through safety_pico_relay_mask()");
+    TEST_CHECK(recent != NULL, "relay_recent_mask is derived from that same relay_now_mask");
+    TEST_CHECK(strip && recent && strip < recent, "strip happens before the recent-mask update");
+    TEST_CHECK(strstr(src, "= kiln_io_get_relay_shadow(") == NULL,
+               "no raw relay shadow assignment bypasses the helper in this file");
+}
+
 void run_test_aux_outputs_store(void)
 {
     test_predicate();
@@ -363,6 +430,8 @@ void run_test_aux_outputs_store(void)
     test_checksum_known_answer();
     test_corrupt_blob_defaults();
     test_dual_write_and_file_tiebreak();
+    test_pico_mask_strips_aux();
+    test_pico_mask_call_site_shape();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

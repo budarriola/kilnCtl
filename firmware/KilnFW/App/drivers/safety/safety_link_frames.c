@@ -28,6 +28,7 @@
 #include "safety_link_frame.h"
 #include "safety_link_internal.h"
 #include "safety_trip_decision.h"
+#include "safety_pico_relay_mask.h"
 
 #include <inttypes.h>
 #include <math.h>
@@ -388,7 +389,10 @@ void safety_build_and_send_context(SafetyLinkClass *link)
     kiln_io_t *io = (kiln_io_t *)link->context_io;
     MAX31856BusClass *thermo_bus = (MAX31856BusClass *)link->context_thermo_bus;
 
-    uint8_t relay_now_mask = io ? kiln_io_get_relay_shadow(io) : 0u;
+    /* WP-9: aux-bound relays are stripped here, once, before BOTH masks are derived
+     * (the recent-mask bookkeeping below must never see an aux transition). Live
+     * read of the aux config every tick -- never a boot snapshot. */
+    uint8_t relay_now_mask = io ? safety_pico_relay_mask(kiln_io_get_relay_shadow(io)) : 0u;
     uint8_t relay_recent_mask = safety_context_update_relay_recent(link, relay_now_mask);
 
     /* Runs on safety_poll_task every poll iteration (safety_link_poll.c),
