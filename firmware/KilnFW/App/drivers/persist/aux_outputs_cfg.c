@@ -7,6 +7,7 @@
 #include "MAX31856.h"
 #include "cfg_fs_status.h"
 #include "esp_log.h"
+#include "ota_image_crc.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "kiln_io.h"
@@ -46,21 +47,10 @@ static uint8_t s_conflict_mask = 0;
 static bool s_quarantined = false;
 static uint32_t s_rev = 0;
 
-static uint32_t crc32_ieee(const uint8_t *p, size_t n)
-{
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < n; i++) {
-        crc ^= p[i];
-        for (int b = 0; b < 8; b++) {
-            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
-        }
-    }
-    return ~crc;
-}
-
 static uint32_t blob_crc(const aux_outputs_blob_t *b)
 {
-    return crc32_ieee((const uint8_t *)b, offsetof(aux_outputs_blob_t, crc32));
+    /* CRC32/IEEE (zlib): same parameters the local copy used, so the on-flash blobs stay valid. */
+    return ota_image_crc32((const uint8_t *)b, offsetof(aux_outputs_blob_t, crc32));
 }
 
 static bool entry_valid(const aux_output_entry_t *e)
