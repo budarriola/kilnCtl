@@ -341,9 +341,9 @@ Moved verbatim out of `ROADMAP.md` M18 once every item in it had landed; the ope
   reads OK; `20260930T212155Z_lcd` (`allow_heat=True`, `lcd_stop_heat=True`)
   **PASS, exit 0** -- `stop_gated=true`, settle reads now contain
   `Stop`/`Pause`/`Edit`, Stop click `ok`, `bench_cleanup` verified idle and
-  relays de-energized, no reboot/crash/trip. Known remaining gap:
-  `lv_keyboard` is still reported as one rectangle rather than per key
-  (pre-existing). LCD-19 is now closed/passing. Full detail:
+  relays de-energized, no reboot/crash/trip. (Correction 2026-10-03:
+  `lv_keyboard`/`lv_buttonmatrix` was already reported per key by `log_tap_targets()`; the walk now also skips HIDDEN/DISABLED keys. A keyboard's ~33 keys still compete with the 32-entry array and 253 B reply caps.)
+  LCD-19 is now closed/passing. Full detail:
   `docs/BENCH_TEST_LOG.md`'s 2026-09-30 "LCD-19 root-caused and fixed"
   section.
 - [x] LCD-09/LCD-16 regression from the `e388752c` LCD-19 fix, found in run

@@ -1,7 +1,6 @@
 # Release Hardening Plan — what has to be true before this controls a real kiln
 
-> **Status:** plan · **Opened:** 2026-09-16. Sections 8 (first-firing checklist) and 9 (shared-state review) are DONE; the rest is
-> not implemented. No
+> **Status:** plan · **Opened:** 2026-09-16. §1 closed by owner decision, §8/§9 done, §2 items 1-2 done; the rest not implemented. No
 > board was flashed, no heating run was performed, and no `.kicad_*` file was
 > touched while writing it.
 >
