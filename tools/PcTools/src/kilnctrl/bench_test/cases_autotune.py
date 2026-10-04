@@ -431,16 +431,23 @@ def _at04_body(ctx: dict) -> CaseResult:
         exp_kwargs, exp_obs = _expected_model_kwargs(ctx)
         relay_amplitude_c = st.relay.amplitude_c if st.relay is not None else None
         abort_reason = getattr(st, "abort_reason", "") or ""
-        if not relay_amplitude_c:
-            # The firmware's relay result carries no amplitude when the run
-            # was aborted (reads None or 0.0); its own abort_reason names the
-            # measured swing ("... only 1.37C swing in 5.0min ...").
+        swing_pp_c = None
+        if not st.relay_valid and not relay_amplitude_c:
+            # Firmware reports amplitude 0.0 on EVERY aborted relay run, so a
+            # zero is "unknown", never a measurement. The thermal guard's own
+            # abort_reason names the measured PEAK-TO-PEAK swing ("... only
+            # 1.37C swing in 5.0min ..."); the amplitude is half of that.
+            # With no such swing the amplitude stays None (-> FAIL), so a
+            # thermo fault/timeout/operator abort is not read as "fixture
+            # could not sustain the oscillation".
             m = re.search(r"([0-9.]+)C swing", abort_reason)
+            relay_amplitude_c = None
             if m:
                 try:
-                    relay_amplitude_c = float(m.group(1))
+                    swing_pp_c = float(m.group(1))
+                    relay_amplitude_c = swing_pp_c / 2.0
                 except ValueError:
-                    pass
+                    swing_pp_c = None
         result = J.judge_autotune_fit(
             method="relay",
             model_valid=st.model_valid,
@@ -452,6 +459,7 @@ def _at04_body(ctx: dict) -> CaseResult:
             tripped=tripped,
             relay_valid=st.relay_valid,
             relay_amplitude_c=relay_amplitude_c,
+            swing_pp_c=swing_pp_c,
             **exp_kwargs,
         )
         extra = {"final_c": st.actual_c if st.actual_valid else None, **exp_obs}

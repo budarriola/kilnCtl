@@ -245,10 +245,6 @@ class JudgeFaultedRunTest(unittest.TestCase):
         self.assertIn("still", result.reason)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class JudgeAutotuneMatrixBodyTest(unittest.TestCase):
     @staticmethod
     def _cells(n=3):
@@ -270,3 +266,26 @@ class JudgeAutotuneMatrixBodyTest(unittest.TestCase):
             result = J.judge_autotune_matrix_body(body)
             self.assertEqual(result.verdict, Verdict.FAIL, body)
 
+    def test_valid_cell_with_bad_k_fails_in_any_row(self):
+        for bad in (None, "x", True, float("nan"), float("inf")):
+            cells = self._cells()
+            cells[8] = {"i": 2, "j": 2, "valid": True, "k": bad}
+            result = J.judge_autotune_matrix_body({"zone_count": 3, "cells": cells})
+            self.assertEqual(result.verdict, Verdict.FAIL, bad)
+        cells = self._cells()
+        del cells[8]["k"]
+        self.assertEqual(J.judge_autotune_matrix_body({"zone_count": 3, "cells": cells}).verdict, Verdict.FAIL)
+
+    def test_judge_matrix_rejects_nan_inf(self):
+        for bad in (float("nan"), float("inf")):
+            r = J.judge_autotune_matrix([[1, bad, 1], [1, 1, 1], [1, 1, 1]], zone_row=0)
+            self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_zone_count_reason_names_precondition(self):
+        r = J.judge_autotune_matrix_body({"zone_count": 1, "cells": []})
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("zone_count=1, expected 3", r.reason)
+
+
+if __name__ == "__main__":
+    unittest.main()

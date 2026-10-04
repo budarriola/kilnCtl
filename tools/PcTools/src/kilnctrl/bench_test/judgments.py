@@ -11,6 +11,7 @@ confirms it reports FAIL/INCONCLUSIVE rather than PASS.
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Iterable, List, Optional
 
@@ -2676,6 +2677,7 @@ def judge_autotune_fit(
     tripped: bool,
     relay_valid: bool = True,
     relay_amplitude_c: Optional[float] = None,
+    swing_pp_c: Optional[float] = None,
     min_relay_amplitude_c: float = 2.0,
     rest_band_c: float = 2.0,
     k_expected_c_per_duty: float = 38.0,
@@ -2708,13 +2710,17 @@ def judge_autotune_fit(
         )
     if method == "relay" and not relay_valid:
         if relay_amplitude_c is not None and relay_amplitude_c < min_relay_amplitude_c:
+            if swing_pp_c is not None:
+                why = (
+                    f"relay swing {swing_pp_c:.2f}C peak-to-peak (amplitude {relay_amplitude_c:.2f}C) "
+                    f"< {min_relay_amplitude_c:.2f}C"
+                )
+            else:
+                why = f"({relay_amplitude_c:.2f}C < {min_relay_amplitude_c:.2f}C)"
             return CaseResult(
                 Verdict.INCONCLUSIVE,
-                reason=(
-                    f"fixture could not sustain the oscillation amplitude "
-                    f"({relay_amplitude_c:.2f}C < {min_relay_amplitude_c:.2f}C)"
-                ),
-                observed={**observed, "relay_amplitude_c": relay_amplitude_c},
+                reason=f"fixture could not sustain the oscillation amplitude: {why}",
+                observed={**observed, "relay_amplitude_c": relay_amplitude_c, "swing_pp_c": swing_pp_c},
             )
         return CaseResult(
             Verdict.FAIL, reason="relay result invalid for a reason other than insufficient amplitude",
@@ -2805,7 +2811,7 @@ def judge_autotune_matrix(matrix: Any, zone_row: int = 0) -> CaseResult:
     if not isinstance(matrix, list) or len(matrix) != 3 or any(not isinstance(row, list) or len(row) != 3 for row in matrix):
         return CaseResult(Verdict.FAIL, reason="matrix is not well-formed 3x3", observed={"matrix": matrix})
     row = matrix[zone_row]
-    bad = [v for v in row if isinstance(v, bool) or not isinstance(v, (int, float))]
+    bad = [v for v in row if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)]
     if bad:
         return CaseResult(
             Verdict.FAIL, reason=f"zone {zone_row}'s row is not fully populated with numbers: {row!r}",
@@ -2827,7 +2833,7 @@ def autotune_matrix_from_cells(body: Any) -> "tuple[Optional[list], Optional[str
         return body["matrix"], None
     n = body.get("zone_count")
     if isinstance(n, bool) or n != 3:
-        return None, f"zone_count is {n!r}, expected 3"
+        return None, f"zone_count={n!r}, expected 3 (bench precondition: three thermocouples enabled)"
     cells = body.get("cells")
     if not isinstance(cells, list):
         return None, "cells is missing or not a list"
@@ -2845,7 +2851,10 @@ def autotune_matrix_from_cells(body: Any) -> "tuple[Optional[list], Optional[str
             return None, f"duplicate cell ({i}, {j})"
         seen.add((i, j))
         if c.get("valid") is True:
-            matrix[i][j] = c.get("k")
+            k = c.get("k")
+            if isinstance(k, bool) or not isinstance(k, (int, float)) or not math.isfinite(k):
+                return None, f"cell ({i}, {j}) is valid but k={k!r} is not a finite number"
+            matrix[i][j] = k
     return matrix, None
 
 

@@ -389,15 +389,30 @@ class AT04Test(unittest.TestCase):
         result = self._run_invalid_relay(0.0, reason)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
         self.assertIn("1.37C", result.reason)
-        self.assertAlmostEqual(result.observed["relay_amplitude_c"], 1.37)
+        self.assertIn("peak-to-peak (amplitude 0.69C)", result.reason)
+        self.assertAlmostEqual(result.observed["swing_pp_c"], 1.37)
+        self.assertAlmostEqual(result.observed["relay_amplitude_c"], 0.685)
         self.assertEqual(result.observed["abort_reason"], reason)
 
-    def test_amplitude_unchanged_without_abort_reason(self):
-        result = self._run_invalid_relay(0.0, "")
+    def test_amplitude_none_with_swing_in_reason(self):
+        result = self._run_invalid_relay(None, "guard tripped: relay cycling but only 1.37C swing in 5.0min")
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
-        self.assertIn("0.00C", result.reason)
-        self.assertEqual(result.observed["relay_amplitude_c"], 0.0)
-        self.assertNotIn("abort_reason", result.observed)
+        self.assertAlmostEqual(result.observed["relay_amplitude_c"], 0.685)
+
+    def test_sufficient_swing_is_not_inconclusive_for_amplitude(self):
+        result = self._run_invalid_relay(0.0, "guard tripped: only 5.00C swing in 5.0min")
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("other than insufficient amplitude", result.reason)
+        self.assertAlmostEqual(result.observed["relay_amplitude_c"], 2.5)
+
+    def test_zero_amplitude_without_swing_is_a_fail_not_inconclusive(self):
+        for reason in ("", "thermo fault on zone 0"):
+            result = self._run_invalid_relay(0.0, reason)
+            self.assertEqual(result.verdict, Verdict.FAIL, reason)
+            if reason:
+                self.assertEqual(result.observed["abort_reason"], reason)
+            else:
+                self.assertNotIn("abort_reason", result.observed)
 
 
 class AT05Test(unittest.TestCase):
