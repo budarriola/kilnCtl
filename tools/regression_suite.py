@@ -68,6 +68,7 @@ from typing import Callable, Optional, Sequence
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "PcTools", "src"))
 from mcpkit.buildgate import kiln_build_gate  # noqa: E402
+from mcpkit.pytest_verdict import PER_TEST_TIMEOUT_S, pytest_output_problems  # noqa: E402
 
 
 def repo_root() -> str:
@@ -156,6 +157,10 @@ class Gate:
     # target builds count against the same slots as everything else (opus
     # review finding #3 -- this suite ran its heavy builds ungated).
     heavy: bool = False
+    # Optional extra verdict on the captured output, applied even when the
+    # exit code is 0; returns reasons to FAIL (empty = clean). Used for the
+    # PcTools pytest gate so a lost xdist worker can't read as a pass.
+    output_check: Optional[Callable[[str], "list[str]"]] = None
 
 
 def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
@@ -217,6 +222,12 @@ def _run_gate(gate: Gate) -> GateResult:
     detail = "\n".join(shown) if shown else "(no output)"
 
     status = "PASS" if rc == 0 else "FAIL"
+    if rc == 0 and gate.output_check is not None:
+        problems = gate.output_check(output)
+        if problems:
+            status = "FAIL"
+            detail = "exit 0 but output check failed:\n" + "\n".join(
+                f"OUTPUT CHECK FAILED: {p}" for p in problems) + f"\n--\n{detail}"
     if rc != 0:
         detail = f"exit {rc}\n{detail}"
         note = _contention_note(output)
@@ -266,8 +277,10 @@ def _gate_pctools_pytest() -> Gate:
     tests_dir = os.path.join(ROOT, "tools", "PcTools", "tests")
     return Gate(
         "pctools_pytest (~1089 tests; live-bench tests self-skip, no KILNCTRL_BENCH_HOST set)",
-        2, lambda: ([_pctools_python(), "-m", "pytest", tests_dir, "-q"], ROOT), timeout=600,
-        prereq=_pytest_prereq)
+        # No -q: the "collected N items" header feeds pytest_output_problems.
+        2, lambda: ([_pctools_python(), "-m", "pytest", tests_dir,
+                     f"--timeout={PER_TEST_TIMEOUT_S}"], ROOT), timeout=600,
+        prereq=_pytest_prereq, output_check=pytest_output_problems)
 
 
 def _mykicadmcp_python() -> str:

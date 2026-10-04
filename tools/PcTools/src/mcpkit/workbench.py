@@ -43,6 +43,7 @@ from typing import Any, Callable, Optional, Sequence
 
 from mcpkit.buildgate import GateWaitResult, kiln_build_gate
 from mcpkit.buildlock import BuildLockTimeout, build_lock
+from mcpkit.pytest_verdict import PER_TEST_TIMEOUT_S, pytest_output_problems
 
 #: Lines worth surfacing even when they are not near the end of the log.
 _INTERESTING = re.compile(
@@ -80,7 +81,8 @@ def _log_path(tag: str) -> str:
 
 
 def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
-               elapsed: float) -> str:
+               elapsed: float,
+               output_check: "Optional[Callable[[str], list[str]]]" = None) -> str:
     """Exit status, the lines that explain it, and where the rest lives."""
     path = _log_path(tag)
     try:
@@ -98,6 +100,12 @@ def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
     shown = keep + tail
 
     status = "OK" if rc == 0 else ("TIMEOUT" if rc is None else f"FAILED (exit {rc})")
+    problems = output_check(output) if (output_check is not None and rc is not None) else []
+    if problems:
+        # A clean exit code is not trusted: e.g. a lost xdist worker still
+        # exits 0 with "0 failed" (see mcpkit/pytest_verdict.py).
+        status = f"FAILED (exit {rc}, but output check failed)"
+        shown = [f"OUTPUT CHECK FAILED: {p}" for p in problems] + shown
     head = f"{tag}: {status} in {elapsed:.1f}s ({len(lines)} log lines)"
     body = "\n".join(shown) if shown else "(no output)"
     result = f"{head}\nfull log: {where}\n--\n{body}"
@@ -152,7 +160,8 @@ def _contention_note(output: str) -> "Optional[str]":
 
 
 def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
-         timeout: int = 900, env: "Optional[dict[str, str]]" = None) -> str:
+         timeout: int = 900, env: "Optional[dict[str, str]]" = None,
+         output_check: "Optional[Callable[[str], list[str]]]" = None) -> str:
     argv = list(argv)
     started = time.monotonic()
     if env is None:
@@ -178,7 +187,8 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
             partial = partial.decode("utf-8", "replace")
         return _summarize(tag, argv, None, partial, time.monotonic() - started)
     output = (completed.stdout or "") + (completed.stderr or "")
-    return _summarize(tag, argv, completed.returncode, output, time.monotonic() - started)
+    return _summarize(tag, argv, completed.returncode, output, time.monotonic() - started,
+                      output_check=output_check)
 
 
 def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
@@ -614,10 +624,15 @@ def run_pctools_tests(pattern: Optional[str] = None) -> str:
     """
     root = repo_root()
     tests_dir = os.path.join(root, "tools", "PcTools", "tests")
-    argv = [sys.executable, "-m", "pytest", tests_dir, "-q"]
+    # No -q: the "collected N items" header is what pytest_output_problems
+    # compares against the summary line. --timeout makes a stuck test fail loud
+    # instead of losing an xdist node.
+    argv = [sys.executable, "-m", "pytest", tests_dir,
+            f"--timeout={PER_TEST_TIMEOUT_S}"]
     if pattern:
         argv += ["-k", pattern]
-    return _run_locked("pctools-tests", tests_dir, argv, timeout=600)
+    return _run_locked("pctools-tests", tests_dir, argv, timeout=600,
+                       output_check=pytest_output_problems)
 
 
 def run_repo_checks(list_only: bool = False) -> str:
