@@ -144,17 +144,19 @@ function Test-KilnCfgStoreMigrationStep {
     }
     $current = [int]$verMatch.Groups[1].Value
     $expectedFrom = $current - 1
-    $stepPattern = "(?m)^\s*static\s+[\w\*\s]+\bmigrate_store_v${expectedFrom}_to_v${current}\s*\("
-    if ($SourceText -notmatch $stepPattern) {
+    # Comments stripped so a commented-out step cannot count. A definition is
+    # the name followed by a parameter list and an opening brace, so a
+    # forward declaration (prototype ending in ';') is not a definition.
+    $clean = Remove-CComments -Text $SourceText
+    $stepPattern = "(?m)^\s*static\s+[\w\*\s]+\bmigrate_store_v${expectedFrom}_to_v${current}\s*\([^;{]*\)\s*\{"
+    if ($clean -notmatch $stepPattern) {
         $failures.Add("kiln-config slot store: KILN_CFG_STORE_VERSION is $current but no " +
             "migrate_store_v${expectedFrom}_to_v${current}(...) step function exists in kiln_cfg_store.c")
     }
 
     # Chain integrity (plan sec 5.1 deferred rule): one step per version
     # bump, no skipped version, the version constant matching the LAST step.
-    # Comments stripped so a commented-out step cannot count.
-    $clean = Remove-CComments -Text $SourceText
-    $defs = [regex]::Matches($clean, '(?m)^\s*static\s+[\w\*\s]+\bmigrate_store_v(\d+)_to_v(\d+)\s*\(')
+    $defs = [regex]::Matches($clean, '(?m)^\s*static\s+[\w\*\s]+\bmigrate_store_v(\d+)_to_v(\d+)\s*\([^;{]*\)\s*\{')
     $seenTo = @{}
     $fromTo = @{}
     foreach ($m in $defs) {
@@ -168,6 +170,9 @@ function Test-KilnCfgStoreMigrationStep {
         }
         $seenTo[$b] = $true
         $fromTo[$a] = $b
+    }
+    if ($fromTo.Count -eq 0 -and $current -gt 1) {
+        $failures.Add("kiln-config slot store: KILN_CFG_STORE_VERSION is $current but no migrate_store_* step function is defined at all")
     }
     if ($fromTo.Count -gt 0) {
         $maxTo = ($fromTo.Values | Measure-Object -Maximum).Maximum
@@ -308,13 +313,9 @@ function Test-SaftyConfigStoreMigrationStep {
     if ($VersionHeaderText -notmatch $macroPattern) {
         $failures.Add("RP2040 safety config store: CONFIG_STORE_FORMAT_VERSION is $current but no " +
             "$macroName macro naming the immediately preceding format is defined in config_store.h")
-    } else {
-        $branchPattern = "==\s*${macroName}\b"
-        if ($SourceText -notmatch $branchPattern) {
-            $failures.Add("RP2040 safety config store: $macroName is defined but config_store.c has no " +
-                "'== $macroName' branch actually handling it -- an orphaned macro")
-        }
     }
+    # The branch-handling check for every version (including the immediately
+    # preceding one) runs below against comment-stripped source.
 
     # Chain integrity (plan sec 5.1 deferred rule): every format version
     # 1..CURRENT-1 has its macro (value == N, no skipped version) AND an
@@ -335,7 +336,7 @@ function Test-SaftyConfigStoreMigrationStep {
     for ($v = 1; $v -lt $current; $v++) {
         if (-not $defined.ContainsKey($v)) {
             $failures.Add("RP2040 safety config store: no CONFIG_STORE_FORMAT_VERSION_V$v macro -- version v$v was skipped (CONFIG_STORE_FORMAT_VERSION is $current)")
-        } elseif ($v -ne $expectedFrom -and $cleanSrc -notmatch "==\s*CONFIG_STORE_FORMAT_VERSION_V$v\b") {
+        } elseif ($cleanSrc -notmatch "==\s*CONFIG_STORE_FORMAT_VERSION_V$v\b") {
             $failures.Add("RP2040 safety config store: CONFIG_STORE_FORMAT_VERSION_V$v is defined but config_store.c has no '== CONFIG_STORE_FORMAT_VERSION_V$v' branch actually handling it -- an orphaned macro")
         }
     }
@@ -570,5 +571,5 @@ if ($allFailures.Count -gt 0) {
 }
 
 Write-Host ("check_config_migration_steps: PASS -- zones (full D1/D2 rule set, still within the tail), " +
-    "kiln-config slots, fire profiles, and RP2040 safety config (existence-of-current-step rule) all satisfied")
+    "kiln-config slots, fire profiles, and RP2040 safety config (existence-of-current-step plus chain-integrity rules) all satisfied")
 exit 0

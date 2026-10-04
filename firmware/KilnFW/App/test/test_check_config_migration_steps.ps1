@@ -457,8 +457,9 @@ if ($r22.Ok) {
 }
 
 # ---------------------------------------------------------------------
-# Assertions 23-29: chain-integrity rules (plan sec 5.1, 2026-10-03):
-# one step per bump, no skipped version, version constant == last step.
+# Assertions 23-40: chain-integrity rules (plan sec 5.1, 2026-10-03):
+# one step per bump, no skipped version, version constant == last step,
+# duplicates, forward declarations, and commented-out steps/branches.
 # ---------------------------------------------------------------------
 function Test-ChainCase {
     param([int]$N, $Result, [bool]$ExpectOk, [string]$Pattern, [string]$What)
@@ -501,6 +502,16 @@ Test-ChainCase 30 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText ($safty
 Test-ChainCase 31 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText $saftyHdr3 -SourceText "if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`n") $false "CONFIG_STORE_FORMAT_VERSION_V1 is defined but.*orphaned macro" "RP2040: an older macro with no branch is caught as orphaned."
 Test-ChainCase 32 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText ($saftyHdr3 + "#define CONFIG_STORE_FORMAT_VERSION_V3 3u`n") -SourceText ($saftySrc + "if (version == CONFIG_STORE_FORMAT_VERSION_V3) { }`n")) $false "V3 is defined but CONFIG_STORE_FORMAT_VERSION is only 3" "RP2040: a macro at or above the current version is caught."
 
+Test-ChainCase 33 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText ($kStep12 + $kStep23 + "static void migrate_store_v3_to_v4(const c *s, d *d) { }`n")) $false "last migrate_store_\* step ends at v4" "kiln-config: a last step ending past KILN_CFG_STORE_VERSION is caught."
+Test-ChainCase 34 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText ($kStep12 + $kStep23 + $kStep23)) $false "migrate_store_v2_to_v3 is defined more than once" "kiln-config: a duplicate step definition is caught."
+Test-ChainCase 35 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText ("static void migrate_store_v2_to_v3(const b *s, c *d);`n" + $kStep12 + $kStep23)) $true "" "kiln-config: a forward declaration plus its definition is not a false duplicate."
+$kCommented23 = "// static void migrate_store_v2_to_v3(const b *s, c *d) { }`n"
+Test-ChainCase 36 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText ($kStep12 + $kCommented23)) $false "no migrate_store_v2_to_v3" "kiln-config: a commented-out current step does not satisfy the existence rule."
+Test-ChainCase 37 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText ("/* static void migrate_store_v1_to_v2(const a *s, b *d) { } */`n" + $kCommented23)) $false "no migrate_store_\* step function is defined at all" "kiln-config: only commented-out steps at version 3 fail instead of passing vacuously."
+Test-ChainCase 38 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText ($saftyHdr3 -replace "VERSION_V2 2u", "VERSION_V2 5u") -SourceText $saftySrc) $false "CONFIG_STORE_FORMAT_VERSION_V2 has value 5, expected 2" "RP2040: a macro whose value differs from its N is caught."
+Test-ChainCase 39 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText $saftyHdr3 -SourceText "// if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`nif (version == CONFIG_STORE_FORMAT_VERSION_V1) { }`n") $false "CONFIG_STORE_FORMAT_VERSION_V2 is defined but.*orphaned macro" "RP2040: a commented-out branch for the immediately preceding version does not satisfy the rule."
+Test-ChainCase 40 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText $saftyHdr3 -SourceText "if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`n/* if (version == CONFIG_STORE_FORMAT_VERSION_V1) { } */`n") $false "CONFIG_STORE_FORMAT_VERSION_V1 is defined but.*orphaned macro" "RP2040: a commented-out branch for an older version does not satisfy the rule."
+
 if ($failures.Count -gt 0) {
     Write-Host ""
     Write-Host "test_check_config_migration_steps: $($failures.Count) assertion(s) FAILED:" -ForegroundColor Red
@@ -509,5 +520,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 32 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 40 assertions passed." -ForegroundColor Green
 exit 0
