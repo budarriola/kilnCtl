@@ -434,8 +434,9 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
 /* dns/dns2 (2026-10-03): optional; NULL or "" means unset. A set value must be
  * a dotted-quad other than 0.0.0.0, else ESP_ERR_INVALID_ARG; dns2 without dns
  * is also refused. Applied via esp_netif_set_dns_info() (MAIN = dns, or the
- * gateway when dns is unset; BACKUP = dns2, or the same address as MAIN when dns2 is unset). Each call overwrites
- * both, so omitting them clears a previously stored value. */
+ * gateway when dns is unset; BACKUP = dns2, or the same address as MAIN when
+ * dns2 is unset). Each call overwrites both, so omitting them clears a
+ * previously stored value. */
 
 /* True when `ip` parses as IPv4 and falls inside 192.168.4.0/24, the fallback
  * AP's own subnet -- an address there is never a legitimate static-IP choice

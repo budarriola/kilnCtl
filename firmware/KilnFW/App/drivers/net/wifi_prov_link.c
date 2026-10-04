@@ -118,6 +118,26 @@ bool wifi_prov_ip_in_ap_subnet(const char *ip)
     return octets[0] == 192 && octets[1] == 168 && octets[2] == 4;
 }
 
+static esp_err_t clear_backup_dns_cb(void *ctx)
+{
+    (void)ctx;
+    ip_addr_t any;
+    ip_addr_set_zero(&any);
+    dns_setserver(ESP_NETIF_DNS_BACKUP, &any); /* lwIP slot 1 == ESP_NETIF_DNS_BACKUP */
+    return ESP_OK;
+}
+
+/* Empties the lwIP BACKUP resolver. esp_netif_set_dns_info() cannot (it refuses
+ * 0.0.0.0), and a DHCP lease only overwrites servers its offer includes, so after
+ * static -> DHCP a statically configured dns2 would otherwise linger. */
+void wifi_prov_clear_backup_dns(void)
+{
+    esp_err_t err = esp_netif_tcpip_exec(clear_backup_dns_cb, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "clearing the backup DNS server failed: %s", esp_err_to_name(err));
+    }
+}
+
 /* Configures the STA driver for whatever is currently in s_wifi.active_ssid/
  * active_password -- callers are responsible for having set those first (see
  * select_and_apply_join_candidate() and the direct nets[0] assignment in
@@ -152,26 +172,6 @@ bool wifi_prov_ip_in_ap_subnet(const char *ip)
  * needed" instead of the old "reports connected, actually stranded until a
  * saved network rejoins or someone power-cycles it." A GOOD static config
  * still ends up STA-only, just one HTTP round-trip later than before. */
-static esp_err_t clear_backup_dns_cb(void *ctx)
-{
-    (void)ctx;
-    ip_addr_t any;
-    ip_addr_set_zero(&any);
-    dns_setserver(ESP_NETIF_DNS_BACKUP, &any); /* lwIP slot 1 == ESP_NETIF_DNS_BACKUP */
-    return ESP_OK;
-}
-
-/* Empties the lwIP BACKUP resolver. esp_netif_set_dns_info() cannot (it refuses
- * 0.0.0.0), and a DHCP lease only overwrites servers its offer includes, so after
- * static -> DHCP a statically configured dns2 would otherwise linger. */
-void wifi_prov_clear_backup_dns(void)
-{
-    esp_err_t err = esp_netif_tcpip_exec(clear_backup_dns_cb, NULL);
-    if (err != ESP_OK) {
-        ESP_LOGW(WIFI_PROV_TAG, "clearing the backup DNS server failed: %s", esp_err_to_name(err));
-    }
-}
-
 void apply_sta_config(void)
 {
     wifi_config_t sta_cfg = { 0 };

@@ -1,6 +1,9 @@
 #include "cfg_fs.h"
 #include "persist_scratch.h"
 
+#include "esp_log.h"
+
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -498,7 +501,12 @@ esp_err_t cfg_fs_delete(const char *rel_path)
         return ESP_ERR_INVALID_ARG;
     }
     if (remove(path) != 0) {
-        return ESP_ERR_NOT_FOUND;
+        int e = errno;
+        if (e == ENOENT) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        ESP_LOGW("cfg_fs", "remove('%s') failed: errno %d", rel_path, e);
+        return ESP_FAIL;
     }
     return ESP_OK;
 }

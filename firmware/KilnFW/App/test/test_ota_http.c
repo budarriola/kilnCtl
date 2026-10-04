@@ -234,7 +234,12 @@ void hal_wdt_reboot(void) {}
 // the "profiles"/"all" scopes that hit this stub.
 // ---------------------------------------------------------------------------
 esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
-esp_err_t profiles_builtin_discard_file(void) { return ESP_OK; }
+static int g_stub_profiles_discard_calls = 0;
+esp_err_t profiles_builtin_discard_file(void)
+{
+    g_stub_profiles_discard_calls++;
+    return ESP_OK;
+}
 // ---------------------------------------------------------------------------
 // profile_executor.h -- factory_reset.c's execute_scope_job() drops the
 // last-run-started RAM cache after erasing profiles_nvs (that erase destroys
@@ -1291,8 +1296,11 @@ static void test_credential_survives_factory_reset_profiles_scope(void)
     fake_kv_reset_all();
     TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
     seed_webauth12b_credential();
+    g_stub_profiles_discard_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
               "factory_reset_execute(PROFILES) must succeed");
+    TEST_CHECK(g_stub_profiles_discard_calls == 1,
+              "PROFILES scope must call profiles_builtin_discard_file() exactly once");
     assert_webauth12b_credential_survived(
         "the administrator password must still verify after a PROFILES-scope factory reset");
 }
@@ -1306,8 +1314,11 @@ static void test_credential_survives_factory_reset_all_scope(void)
     TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs");
     TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
     seed_webauth12b_credential();
+    g_stub_profiles_discard_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_ALL) == ESP_OK,
               "factory_reset_execute(ALL) must succeed");
+    TEST_CHECK(g_stub_profiles_discard_calls == 1,
+              "ALL scope must call profiles_builtin_discard_file() exactly once");
     assert_webauth12b_credential_survived(
         "the administrator password must still verify after an ALL-scope (factory-default) reset");
 }

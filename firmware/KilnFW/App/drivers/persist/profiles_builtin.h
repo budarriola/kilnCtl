@@ -135,7 +135,10 @@ esp_err_t profiles_builtin_restore_all(void);
 /* Deletes /cfg/profiles/hidden.json (best-effort; ESP_OK/NOT_FOUND/INVALID_STATE
  * are all "nothing left to resolve"). For the profiles factory-reset scope,
  * which erases profiles_nvs: without this a stale file has no NVS rival and
- * wins the next boot. Does not touch the RAM mask. */
+ * wins the next boot. Does not touch the RAM mask. Must run on an
+ * internal-SRAM stack (cfg_fs flash access from a PSRAM-stacked task is a
+ * hazard); the current caller is factory_reset.c's execute_scope_job() on
+ * bx_flash_worker. */
 esp_err_t profiles_builtin_discard_file(void);
 
 /* Read-only dual-write status for GET /api/cfgfs's "profiles_hidden" row --

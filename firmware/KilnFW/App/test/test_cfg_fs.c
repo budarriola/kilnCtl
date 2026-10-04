@@ -108,6 +108,23 @@ static void test_mount_and_round_trip(void)
     TEST_CHECK(cfg_fs_delete("prefs.json") == ESP_OK, "delete succeeds");
     TEST_CHECK(cfg_fs_exists("prefs.json", &exists) == ESP_OK && !exists, "file gone after delete");
     TEST_CHECK(cfg_fs_delete("prefs.json") == ESP_ERR_NOT_FOUND, "deleting again reports not-found, not success");
+
+    // A real I/O failure (remove() of a non-empty directory: ENOTEMPTY on
+    // POSIX, EACCES on Windows) must be ESP_FAIL, never NOT_FOUND.
+    char blocker[600];
+    snprintf(blocker, sizeof(blocker), "%s/blocker", base);
+    TCF_RMDIR(blocker);
+    TEST_CHECK(TCF_MKDIR(blocker) == 0, "test setup: a directory exists at the delete target");
+    char inner[640];
+    snprintf(inner, sizeof(inner), "%s/inner.txt", blocker);
+    FILE *f = fopen(inner, "wb");
+    TEST_CHECK(f != NULL, "test setup: the directory is non-empty");
+    if (f) {
+        fclose(f);
+    }
+    TEST_CHECK(cfg_fs_delete("blocker") == ESP_FAIL, "a remove() failure other than ENOENT reports ESP_FAIL");
+    remove(inner);
+    TCF_RMDIR(blocker);
 }
 
 // ---------------------------------------------------------------------
