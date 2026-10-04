@@ -43,6 +43,12 @@ replacing crashed worker gw2
 =========== 1100 passed, 0 failed in 80.00s ============
 """
 
+NODE_DOWN_EXACT = """\
+4 workers [10 items]
+node down: Not properly terminated
+== 8 passed, 2 failed in 1.00s ==
+"""
+
 SHORTFALL = """\
 collected 1200 items
 ............................................................ [100%]
@@ -82,6 +88,11 @@ class VerdictTests(unittest.TestCase):
         problems = pv.pytest_output_problems(NODE_DOWN)
         self.assertTrue(any("worker lost" in p for p in problems), problems)
 
+    def test_node_down_with_exact_counts_still_fails(self):
+        problems = pv.pytest_output_problems(NODE_DOWN_EXACT)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("worker lost", problems[0])
+
     def test_shortfall_names_both_numbers(self):
         problems = pv.pytest_output_problems(SHORTFALL)
         self.assertEqual(len(problems), 1)
@@ -117,7 +128,8 @@ class SummarizeWiringTests(unittest.TestCase):
             workbench.run_pctools_tests("foo")
         argv = m.call_args.args[2]
         self.assertIn(f"--timeout={pv.PER_TEST_TIMEOUT_S}", argv)
-        self.assertGreaterEqual(pv.PER_TEST_TIMEOUT_S, 600)
+        self.assertGreaterEqual(pv.PER_TEST_TIMEOUT_S, 120)
+        self.assertLess(pv.PER_TEST_TIMEOUT_S, 600)
         self.assertNotIn("-q", argv)
         self.assertIs(m.call_args.kwargs["output_check"], pv.pytest_output_problems)
 

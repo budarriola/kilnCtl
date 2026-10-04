@@ -20,9 +20,10 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
-#: Per-test timeout (seconds) for PcTools runs. The ramp-assist cone-scale sim
-#: tests take up to ~100 s each under load; do not go below 600.
-PER_TEST_TIMEOUT_S = 900
+#: Per-test timeout (seconds) for PcTools runs. Must stay below both runners'
+#: whole-run timeout (600 s) or it can never fire. The slowest known test,
+#: test_ramp_assist_cone_scale.py, takes 20 to 100 s under load.
+PER_TEST_TIMEOUT_S = 300
 
 _WORKER_LOSS = re.compile(
     r"node down"

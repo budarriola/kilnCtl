@@ -266,7 +266,7 @@ def _pctools_python() -> str:
 
 def _pytest_prereq() -> Optional[str]:
     python = _pctools_python()
-    check = subprocess.run([python, "-c", "import pytest"], capture_output=True)
+    check = subprocess.run([python, "-c", "import pytest, pytest_timeout"], capture_output=True)
     if check.returncode != 0:
         return (f"pytest not importable under {python} -- run "
                 f"`pip install -r tools/PcTools/requirements*.txt` in that venv first")
@@ -276,7 +276,7 @@ def _pytest_prereq() -> Optional[str]:
 def _gate_pctools_pytest() -> Gate:
     tests_dir = os.path.join(ROOT, "tools", "PcTools", "tests")
     return Gate(
-        "pctools_pytest (~1089 tests; live-bench tests self-skip, no KILNCTRL_BENCH_HOST set)",
+        "pctools_pytest (full PcTools suite; live-bench tests self-skip, no KILNCTRL_BENCH_HOST set)",
         # No -q: the "collected N items" header feeds pytest_output_problems.
         2, lambda: ([_pctools_python(), "-m", "pytest", tests_dir,
                      f"--timeout={PER_TEST_TIMEOUT_S}"], ROOT), timeout=600,

@@ -100,7 +100,7 @@ def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
     shown = keep + tail
 
     status = "OK" if rc == 0 else ("TIMEOUT" if rc is None else f"FAILED (exit {rc})")
-    problems = output_check(output) if (output_check is not None and rc is not None) else []
+    problems = output_check(output) if (output_check is not None and rc == 0) else []
     if problems:
         # A clean exit code is not trusted: e.g. a lost xdist worker still
         # exits 0 with "0 failed" (see mcpkit/pytest_verdict.py).
