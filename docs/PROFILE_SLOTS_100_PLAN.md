@@ -201,6 +201,11 @@ wrong verdict in this repo):
   actually re-reads the new value rather than a cached number.
 - Make `profile_nvs_key()` emit a 16-char key and confirm `check_nvs_key_length.ps1` fails.
 
+**Run 2026-10-04 (first three; the 16-char key one was not re-run), each with a forced full rebuild and a hand restore:**
+- Bitmap narrowed (`profiles_slot_bitmap_t.words` `uint32_t` -> `uint8_t`; the type is now a struct, so a literal `uint8_t used_bitmap` no longer compiles): RED. `test_profiles_http.c:2730` "id must read back set immediately after set", `:2745` "only id 31 lives in word[0]", `:2780` "every one of the 100 slots must read back used after the fill", `:1561` "all 8 user-slot entries must be present in the listing"; `test_profiles_live_http.c:858` also red. Restored, fresh rebuild 67/67 pass.
+- `cfg` partition size set to the old 0x80000 in `partitions.csv` (the capacity gate is `tools/check_profiles_capacity.py`, not a host-test `.c`): RED, "cfg: worst case 1048842 B of 524288 B -- 200% full", "OVERFLOW by 524554 B", exit 1. Restored, PASS.
+- `profiles_list_get_handler()` given a `PROFILES_MAX_COUNT * 190 + 112` local (unchunked-equivalent), target build via `check_00_kilnfw_target_build.ps1`: `check_httpd_task_stack_budget` RED, "profiles_list_get_handler reaches 21552 B, exceeding the 4832 B ceiling" (the checker re-reads the live constant: baseline path 3760 B). Restored, rebuilt, OK.
+
 On-bench, after migration: save 100 profiles over HTTP, reboot, confirm all 100 reload;
 export and re-import a full backup; run one short firing and confirm the stats record
 lands for that id only.
