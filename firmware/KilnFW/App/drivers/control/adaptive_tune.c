@@ -1430,9 +1430,10 @@ bool adaptive_tune_kibase_migration_worker_wait_deferred(void)
 // boot-time load, this does NOT call pref_cfg_fs_resolve() (no resync
 // write) -- same "a status GET must never heal or mask a divergence"
 // discipline every sibling *_get_dualwrite_status() follows. `diverged`
-// uses cfg_fs_status_item_diverged() (a real memcmp of the whole
+// uses cfg_fs_status_item_diverged() (a real field-by-field compare of
 // adaptive_tune_kibase_blob_t -- mask AND every zone's baseline value, not
-// just the mask), not a rev-only guess. All five output pointers accept
+// just the mask; padding after `mask` is not data and is never compared),
+// not a rev-only guess. All five output pointers accept
 // NULL.
 void adaptive_tune_get_kibase_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
                                                 uint32_t *nvs_rev, bool *diverged)

@@ -182,7 +182,10 @@ Either outcome never blocks boot, never touches any partition other than
   2026-10-04: `relay_cycles` read `diverged: true` at `file_rev == nvs_rev`
   because `relay_cycles_init()` built an un-zeroed candidate (stack garbage in
   the padding) and the status accessor compared the whole struct. Fixed by
-  zeroing the candidate and comparing field by field.
+  zeroing the candidate and comparing field by field. A `relay_cycles` file
+  written by the old init resync still carries garbage padding, so the first
+  boot of the fixed firmware logs one more "DIVERGED, adopting NVS" at equal
+  revs and rewrites the file with zero padding, after which it stays in sync.
 - `"nvs_only"` — items that have not moved to file backing yet. **As of
   `2e88e90a` (2026-09-08) this array is empty** — every item this doc's
   migration table (below) tracks as MOVE (1-9) now has a real cfg-filesystem

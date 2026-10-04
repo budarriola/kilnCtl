@@ -250,9 +250,10 @@ esp_err_t relay_cycles_flush(void);
  * other function capable of a resync write, matching every sibling
  * *_get_dualwrite_status() (unit_pref.c etc.) -- a status GET must never
  * itself heal or mask a divergence. `diverged` uses
- * cfg_fs_status_item_diverged() (real content compare via memcmp of the
- * whole relay_cycles_blob_t, not a rev-only guess), same discipline every
- * other accessor here follows. All five output pointers accept NULL. */
+ * cfg_fs_status_item_diverged() (real content compare, field by field:
+ * version, counts, types, rated_overrides -- never a memcmp of the whole
+ * relay_cycles_blob_t, whose padding is not data -- and not a rev-only
+ * guess), same discipline every other accessor here follows. All five output pointers accept NULL. */
 void relay_cycles_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
                                         bool *diverged);
 

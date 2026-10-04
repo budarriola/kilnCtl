@@ -20,6 +20,7 @@
 // header comment for why /std:c11 is required. g_test_failures/g_test_count
 // are shared with test_run_state.c's translation unit via extern (test_common.h),
 // defined once in test_run_state.c; main() lives there too.
+#include <stddef.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -1141,8 +1142,6 @@ static void test_get_dualwrite_status_reports_real_divergence(void)
  * "differs" at EQUAL revs, logged DIVERGED and rewrote the file, and
  * relay_cycles_get_dualwrite_status()'s whole-struct memcmp then flagged the
  * file-vs-NVS padding difference on every boot. Padding is not data. */
-#include <stddef.h>
-
 #if defined(_MSC_VER)
 __declspec(noinline)
 #else
@@ -1220,9 +1219,29 @@ static void test_padding_is_not_data_status_and_init(void)
     rc_fill_padding(&fb, 0x00);
     TEST_CHECK(pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &fb, sizeof(fb), 1) == ESP_OK, "file zero-padded, rev 1");
     rc_scribble_stack();
-    esp_log_test_capture_reset();
     TEST_CHECK(relay_cycles_init() == ESP_OK, "init with padding-differing NVS");
-    TEST_CHECK(!esp_log_test_capture_contains("DIVERGED"), "init does not log a file/NVS DIVERGED resolve");
+    /* pref_cfg_fs.c is its own translation unit, so its DIVERGED log never reaches this file's log capture;
+     * observe the effect instead. A divergent resolve adopts the NVS candidate and REWRITES the file from it,
+     * so a garbage-padded candidate would leave 0xA5 padding in the file. A clean resolve leaves it zero. */
+    {
+        relay_cycles_blob_t after;
+        memset(&after, 0xEE, sizeof(after));
+        uint32_t arev = 0;
+        bool avalid = false;
+        pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(after), relay_cycles_file_validate, &after, &arev,
+                             &avalid);
+        const unsigned char *ar = (const unsigned char *)&after;
+        bool pad_zero = true;
+        for (size_t i = offsetof(relay_cycles_blob_t, version) + 1; i < offsetof(relay_cycles_blob_t, counts); i++) {
+            pad_zero = pad_zero && ar[i] == 0;
+        }
+        for (size_t i = offsetof(relay_cycles_blob_t, types) + RELAY_CYCLES_COUNT;
+             i < offsetof(relay_cycles_blob_t, rated_overrides); i++) {
+            pad_zero = pad_zero && ar[i] == 0;
+        }
+        TEST_CHECK(avalid && pad_zero, "init did not resolve/rewrite the file from a garbage-padded candidate "
+                                       "(file padding still zero)");
+    }
     TEST_CHECK(s_rc.counts[0] == 10 && s_rc.counts[1] == 20 && s_rc.rev == 1, "counts and rev loaded unchanged");
     relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
     TEST_CHECK(!diverged, "still in sync after init");
