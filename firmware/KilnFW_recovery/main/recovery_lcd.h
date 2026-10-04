@@ -31,12 +31,17 @@ extern "C" {
 #endif
 
 // Read-only panel health for GET /api/recovery/status. The passphrase is
-// shown only on the LCD, so a panel that is not ready means nobody can see it.
+// shown only on the LCD, so a panel that is not ready means nobody can see it
+// (but ready does not mean it is visible, see below).
 typedef struct {
-    bool ready;                     // panel up and the last full draw succeeded
+    // "Driver path OK": init and the last full draw returned ESP_OK for every
+    // SPI/expander transaction. The panel is write-only (miso_io_num = -1), so
+    // a dead or disconnected panel is undetectable: this does NOT prove the
+    // passphrase is visible.
+    bool ready;
     uint32_t init_attempts;         // cumulative init attempts (boot + retries)
     uint32_t draw_failures;         // draw passes that dropped at least one line
-    const char *boot_guard_record;  // "none" | "valid" | "invalid" | "unreadable"
+    uint32_t task_stack_free_bytes; // lcd_retry task stack high-water mark (0 if not running)
 } recovery_lcd_status_t;
 void recovery_lcd_get_status(recovery_lcd_status_t *out);
 

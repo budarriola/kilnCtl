@@ -14,12 +14,18 @@
 // Init attempts per burst (boot, and each later retry pass).
 #define RLCD_BURST_ATTEMPTS 3
 
-// Attempt index is 0-based. Attempts after the first re-reset the SX1509 first
-// (LCD D/C and ~RESET share it with the relay hold, so an expander fault hits
-// both); the first attempt of a burst does not.
-static inline bool rlcd_reset_expander_before(int attempt_index)
+// Total SX1509 hard re-resets allowed per boot, across every burst. A re-reset
+// pulses ~RESET and floats the relay gates for ~10 ms, and the relay-hold
+// watchdog cannot see it, so it is rare and bounded.
+#define RLCD_MAX_RERESETS 3
+
+// Re-reset the SX1509 before another attempt only when the previous attempt
+// failed on an EXPANDER I2C error (D/C or ~RESET write), never on an SPI
+// bus/device init or transmit error (a re-reset cannot fix those), and only
+// while fewer than RLCD_MAX_RERESETS have been done this boot.
+static inline bool rlcd_rereset_allowed(bool expander_err, int rereset_done)
 {
-    return attempt_index > 0;
+    return expander_err && rereset_done < RLCD_MAX_RERESETS;
 }
 
 // After `attempts_done` attempts of this burst, the last of which succeeded

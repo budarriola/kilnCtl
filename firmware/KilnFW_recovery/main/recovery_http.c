@@ -250,7 +250,8 @@ typedef struct {
     size_t len;
     bool count_valid;
     uint32_t count;
-    rlcd_bg_state_t state; // none / valid / invalid / unreadable
+    rlcd_bg_state_t state; // none / valid / invalid / unreadable (re-read live per request; the
+                           // LCD shows the boot-time snapshot from gather_status())
 } boot_guard_info_t;
 
 static void read_boot_guard(boot_guard_info_t *info)
@@ -499,9 +500,13 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     if (e == ESP_OK) {
         recovery_lcd_status_t ls;
         recovery_lcd_get_status(&ls);
-        e = send_frag(req, "\"lcd_ready\":%s,\"lcd_init_attempts\":%u,\"lcd_draw_failures\":%u,",
+        // lcd_ready = driver path OK only: the panel is write-only (no MISO), so a
+        // dead panel is undetectable and this does not prove the passphrase is
+        // visible.
+        e = send_frag(req, "\"lcd_ready\":%s,\"lcd_init_attempts\":%u,\"lcd_draw_failures\":%u,"
+                           "\"lcd_task_stack_free_bytes\":%u,",
                       ls.ready ? "true" : "false", (unsigned)ls.init_attempts,
-                      (unsigned)ls.draw_failures);
+                      (unsigned)ls.draw_failures, (unsigned)ls.task_stack_free_bytes);
     }
     if (e == ESP_OK) {
         e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"

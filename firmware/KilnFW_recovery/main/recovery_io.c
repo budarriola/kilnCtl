@@ -349,6 +349,17 @@ bool recovery_io_expander_rehold(void)
     }
     xSemaphoreTake(s_io_lock, portMAX_DELAY);
     bool ok = hold_once(false);
+    uint32_t now = uptime_s();
+    // Feed the outcome to the watchdog state before releasing the I/O lock: a
+    // failed re-hold latches the fault (as an unreadable/mismatched observation
+    // would), a verified one refreshes last_ok. The cap on callers bounds the
+    // log lines hold_once() prints.
+    portENTER_CRITICAL(&s_hold_mux);
+    if (!ok) {
+        (void)rhold_observe(&s_hold, false, 0, 0, OUT_DIR_MASK, HOLD_MASK, now);
+    }
+    rhold_reassert_result(&s_hold, ok, now);
+    portEXIT_CRITICAL(&s_hold_mux);
     xSemaphoreGive(s_io_lock);
     return ok;
 }

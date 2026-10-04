@@ -129,7 +129,10 @@ static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 static bool s_bus_up = false;   // SPI bus + device already added (never re-added)
 static volatile uint32_t s_init_attempts = 0;
 static volatile uint32_t s_draw_failures = 0;
-static int s_pass_failed = 0;   // failed draw_line() calls in the current draw pass
+static volatile bool s_expander_err = false; // last attempt failed on an expander I2C write
+static int s_rereset_count = 0;              // hard re-resets done this boot (capped)
+static TaskHandle_t s_lcd_task;
+static int s_line_errs = 0;   // failed draw_line() calls in the current draw pass
 
 // Status facts gathered once at show_message().
 static int s_boot_count = -1; // -1 unless the record decoded, 0.. = persisted count
@@ -152,12 +155,24 @@ static esp_err_t spi_tx(const uint8_t *buf, size_t len)
     return spi_device_transmit(s_spi, &t);
 }
 
+// Every expander write for the LCD goes through here so an I2C failure is
+// distinguishable from an SPI one (only the former justifies re-resetting the
+// expander).
+static esp_err_t lcd_pins(bool dc_high, bool reset_high)
+{
+    esp_err_t err = recovery_io_set_lcd_pins(dc_high, reset_high);
+    if (err != ESP_OK) {
+        s_expander_err = true;
+    }
+    return err;
+}
+
 static esp_err_t set_dc(bool data)
 {
     if (data == s_dc_data) {
         return ESP_OK;
     }
-    esp_err_t err = recovery_io_set_lcd_pins(data, true);
+    esp_err_t err = lcd_pins(data, true);
     if (err == ESP_OK) {
         s_dc_data = data;
     }
@@ -242,14 +257,14 @@ static esp_err_t spi_init(void)
 static esp_err_t panel_init(void)
 {
     // Hardware reset through expander IO14 (~RESET), D/C parked high.
-    esp_err_t err = recovery_io_set_lcd_pins(true, true);
+    esp_err_t err = lcd_pins(true, true);
     if (err != ESP_OK) {
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(10));
-    (void)recovery_io_set_lcd_pins(true, false);
+    (void)lcd_pins(true, false);
     vTaskDelay(pdMS_TO_TICKS(20));
-    err = recovery_io_set_lcd_pins(true, true);
+    err = lcd_pins(true, true);
     if (err != ESP_OK) {
         return err;
     }
@@ -308,13 +323,13 @@ static esp_err_t draw_line_raw(int y, int scale, uint16_t fg, uint16_t bg, const
     return ESP_OK;
 }
 
-// Every draw_line() result is aggregated into s_pass_failed; draw_status()
+// Every draw_line() result is aggregated into s_line_errs; draw_status()
 // turns any failure into s_ready=false so the retry task redraws.
 static esp_err_t draw_line(int y, int scale, uint16_t fg, uint16_t bg, const char *text)
 {
     esp_err_t err = draw_line_raw(y, scale, fg, bg, text);
     if (err != ESP_OK) {
-        s_pass_failed++;
+        s_line_errs++;
     }
     return err;
 }
@@ -339,7 +354,7 @@ static void draw_status(void)
 {
     char buf[64];
 
-    s_pass_failed = 0;
+    s_line_errs = 0;
     (void)draw_line(Y_TITLE, TITLE_SCALE, COL_TITLE, COL_BG, "RECOVERY MODE");
     (void)draw_line(Y_SUB, TEXT_SCALE, COL_DIM, COL_BG, "KilnFW recovery image");
 
@@ -407,12 +422,12 @@ static void draw_status(void)
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
     }
 
-    if (!rlcd_draw_ok(s_pass_failed)) {
+    if (!rlcd_draw_ok(s_line_errs)) {
         // A dropped line may be the passphrase: not ready, so the 1 Hz task
         // re-inits and redraws the whole screen.
         s_draw_failures++;
         s_ready = false;
-        ESP_LOGE(TAG, "status draw failed on %d line(s)", s_pass_failed);
+        ESP_LOGE(TAG, "status draw failed on %d line(s)", s_line_errs);
     }
 }
 
@@ -478,6 +493,7 @@ static void gather_status(void)
 // only if the whole screen drew (draw_status() clears s_ready on any failure).
 static bool lcd_init_once(void)
 {
+    s_expander_err = false;
     esp_err_t err = spi_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "panel SPI bus init failed: %s", esp_err_to_name(err));
@@ -499,13 +515,15 @@ static bool lcd_init_once(void)
     return s_ready;
 }
 
-// A burst of up to RLCD_BURST_ATTEMPTS attempts, re-resetting the SX1509
-// between them (caller holds s_lock).
+// A burst of up to RLCD_BURST_ATTEMPTS attempts (caller holds s_lock). The
+// SX1509 is re-reset between attempts only after an expander I2C failure and
+// only up to RLCD_MAX_RERESETS times per boot; SPI failures retry panel-only.
 static bool lcd_bring_up_burst(void)
 {
     for (int a = 0;; a++) {
         s_init_attempts++;
-        if (rlcd_reset_expander_before(a)) {
+        if (a > 0 && rlcd_rereset_allowed(s_expander_err, s_rereset_count)) {
+            s_rereset_count++;
             if (!recovery_io_expander_rehold()) {
                 ESP_LOGW(TAG, "expander re-reset before LCD attempt %d did not verify", a + 1);
             }
@@ -541,7 +559,8 @@ void recovery_lcd_get_status(recovery_lcd_status_t *out)
     out->ready = s_ready;
     out->init_attempts = s_init_attempts;
     out->draw_failures = s_draw_failures;
-    out->boot_guard_record = rlcd_bg_state_name(s_bg_state);
+    out->task_stack_free_bytes =
+        s_lcd_task ? (uint32_t)uxTaskGetStackHighWaterMark(s_lcd_task) : 0;
 }
 
 // --- public API ------------------------------------------------------------
@@ -569,7 +588,8 @@ void recovery_lcd_show_message(void)
 
     // Keep re-attempting while the panel is not ready: the passphrase is shown
     // nowhere else. Failure to start the task is logged; never fatal.
-    if (xTaskCreate(lcd_task, "lcd_retry", LCD_TASK_STACK_BYTES, NULL, 2, NULL) != pdPASS) {
+    if (xTaskCreate(lcd_task, "lcd_retry", LCD_TASK_STACK_BYTES, NULL, 2, &s_lcd_task) != pdPASS) {
+        s_lcd_task = NULL;
         ESP_LOGE(TAG, "could not start the LCD retry task");
     }
 }
@@ -620,8 +640,8 @@ void recovery_lcd_set_wifi_storage_fail(void)
 
 void recovery_lcd_poll_relay_fault(void)
 {
-    // The relay-hold task (3 KiB stack) must never draw, and this image has no
-    // LCD task, so the HTTP task calls this (cheap, no-op unless the fault state
+    // The relay-hold task (3 KiB stack) must never draw. The lcd_retry task only
+    // acts while the panel is not ready, so the HTTP task calls this (cheap, no-op unless the fault state
     // changed since the last draw) from the status route.
     if (!s_lock || !s_ready || recovery_io_relay_fault() == s_drawn_relay_fault) {
         return;

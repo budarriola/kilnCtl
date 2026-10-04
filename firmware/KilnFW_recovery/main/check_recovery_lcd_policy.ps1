@@ -65,7 +65,9 @@ function Build-And-Run {
         throw "cl failed building the $Tag variant (exit $bx)."
     }
     $ErrorActionPreference = "Continue"
-    $ro = cmd /c "`"$exe`" `"$LcdSrc`" `"$HttpSrc`" 2>&1"
+    # Every other recovery source is scanned too (no log/printf may carry the passphrase).
+    $extra = (Get-ChildItem $here -Filter "recovery_*.c" | Where-Object { $_.Name -ne "recovery_lcd.c" -and $_.Name -ne "recovery_http.c" } | ForEach-Object { "`"" + $_.FullName + "`"" }) -join " "
+    $ro = cmd /c "`"$exe`" `"$LcdSrc`" `"$HttpSrc`" $extra 2>&1"
     $rx = $LASTEXITCODE
     $ErrorActionPreference = "Stop"
     return @{ Exit = $rx; Output = ($ro -join "`n") }
@@ -104,7 +106,9 @@ try {
     if ($passCount -lt 60) { throw "only $passCount assertions ran -- test looks gutted." }
 
     # Policy rules.
-    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return attempt_index > 0;" -Replacement "return false;" -Tag "noreset"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return expander_err && rereset_done < RLCD_MAX_RERESETS;" -Replacement "return expander_err;" -Tag "uncapped"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return expander_err && rereset_done < RLCD_MAX_RERESETS;" -Replacement "return rereset_done < RLCD_MAX_RERESETS;" -Tag "spi_rereset"
+    Test-Mutant -File "recovery_lcd_policy.h" -Needle "return expander_err && rereset_done < RLCD_MAX_RERESETS;" -Replacement "return false;" -Tag "neverrereset"
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "return !ok && attempts_done < RLCD_BURST_ATTEMPTS;" -Replacement "return !ok && attempts_done < 1;" -Tag "oneattempt"
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "return ready ? RLCD_TICK_NONE : RLCD_TICK_WARN_AND_RETRY;" -Replacement "return RLCD_TICK_NONE;" -Tag "noretry"
     Test-Mutant -File "recovery_lcd_policy.h" -Needle "case RLCD_GET_BAD_LENGTH: return RLCD_BG_INVALID;" -Replacement "case RLCD_GET_BAD_LENGTH: return RLCD_BG_NONE;" -Tag "badlen_none"
@@ -113,6 +117,8 @@ try {
     # Source wiring.
     Test-Mutant -File "recovery_lcd.c" -Needle "        s_ready = false;`n        ESP_LOGE(TAG, `"status draw failed" -Replacement "        ESP_LOGE(TAG, `"status draw failed" -Tag "draw_keeps_ready"
     Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "(void)0;" -Tag "nowarn"
+    Test-Mutant -File "recovery_lcd.c" -Needle "ESP_LOGE(TAG, RLCD_NOT_READY_MSG);" -Replacement "ESP_LOGE(TAG, RLCD_NOT_READY_MSG); ESP_LOGI(TAG, `"pw %s`", s_net_pass);" -Tag "passleak"
+    Test-Mutant -File "recovery_lcd.c" -Needle "if (a > 0 && rlcd_rereset_allowed(s_expander_err, s_rereset_count)) {" -Replacement "if (a > 0) {" -Tag "burst_ungated"
     Test-Mutant -File "recovery_lcd.c" -Needle "s_bg_state = rlcd_classify_boot_guard(rc, decoded);" -Replacement "s_bg_state = RLCD_BG_NONE;" -Tag "noclassify"
     Test-Mutant -File "recovery_http.c" -Needle "\`"lcd_ready\`"" -Replacement "\`"lcd_rdy\`"" -Tag "nolcdready"
 
