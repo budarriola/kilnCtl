@@ -198,18 +198,18 @@ Of 24 inventoried runtime-changeable items:
 |---|---|---|---|
 | 1 | Zones config (PID/FOPDT/coupling/guards/wiring/tc_type) | dual-write | `19f74959` |
 | 2 | Zone normals | still NVS-only | — |
-| 3 | Relay names | still NVS-only (grouped with zones, deliberately deferred) | — |
+| 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`) | `288dc91c` |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
 | 6 | Hidden-builtin profile mask | still NVS-only | — |
 | 7 | Firing stats / history | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
-| 8 | Named kiln config slots | still NVS-only | — |
+| 8 | Named kiln config slots | dual-write (`kiln_configs.json`, `kiln_cfg_store_cfg_fs.c`) | `9bd29cff` |
 | 9 | Adaptive-tune Ki baseline (opt-in mask lives in zone config, off this table) | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 10 | Ramp-assist enable | dual-write | `34927a77` |
 | 11 | Unit preference (C/F) | dual-write | `34927a77` |
 | 12 | Display power / backlight policy | dual-write | `34927a77` |
 | 13 | Touch calibration | deliberately staying in NVS (pre-mount boot read) | — |
-| 14 | Time-sync TZ | still NVS-only (no host stub for the owning module yet) | — |
+| 14 | Time-sync TZ | dual-write (`tz.dat` via `pref_cfg_fs`; host-tested by `test_time_sync.c` through an `esp_netif_sntp.h` stub) | `288dc91c` |
 | 15 | Wi-Fi credentials | deliberately staying in NVS (recovery channel) | — |
 | 16 | Run-state resume breadcrumb | deliberately staying in NVS (boot-phase read) | — |
 | 17 | Boot-guard unconfirmed-boot counter | deliberately staying in NVS (pre-mount) | — |
@@ -233,9 +233,9 @@ Supporting infrastructure, not tied to one inventory item:
 | Equal-rev tie-break defect found and fixed (zones + profiles) | `2c7bd240` |
 | Boot-time mount call, auto-format-or-ask gate, `/api/cfgfs/format_pending`+`format_confirm`, factory-reset "all" scope format | *(this pass, 2026-09-07)* |
 
-11 items moved to dual-write, 11 stay in NVS deliberately, 2 (relay names,
-TZ) are still NVS-only pending a follow-up pass, matching the plan's own
-count.
+11 items are dual-written (1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 14), 10 stay in NVS
+deliberately (13, 15-22, 24), 1 (23) is on the separate `logs` track, and 2
+(zone normals, item 2; hidden-builtin mask, item 6) are still NVS-only.
 
 ## Open items (2026-09-07)
 
