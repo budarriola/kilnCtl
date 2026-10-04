@@ -687,7 +687,7 @@ script fails to load, and the Bash tool still reports exit 0 for the wrapper
 host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
-As of 2026-10-04 it discovers 157 checks (`-ListOnly -AllowFewerChecks`,
+As of 2026-10-04 it discovers 161 checks (`-ListOnly -AllowFewerChecks`,
 recounted after `check_kiln_scope_cfg_mirrors.ps1` was added; the count drifts
 upward as checks are added, so re-verify with a fresh `-ListOnly` run rather
 than trusting this number).
@@ -733,10 +733,17 @@ the same class of expected `-Fast` SKIP as `check_recovery_image_size.ps1`
 and `check_web_gzip_parity.ps1`.
 **`-Fast` SKIPs are non-fatal (2026-09-23), and this is no longer a caveat
 to work around.** `-Fast` sets `KILNCTL_CHECKS_FAST` in the environment; the
-three checks above test it and, only for the one SKIP reason that is a
+checks that print it (`check_embedded_pico_image_fresh.ps1`, `check_recovery_image_size.ps1`, `check_web_gzip_parity.ps1`, the two `compile_*_backends.ps1`, and the build-artifact checks listed below) test it and, only for the one SKIP reason that is a
 direct consequence of the phase-1 build `-Fast` itself skipped (a missing
 `recovery.bin`, missing SaftyFW slot bins, or a missing KilnFW build-output
 directory), print `SKIP-FAST: ...` instead of `SKIP: ...`.
+`run_all_checks.ps1` files that into its own bucket, reports it separately
+in the summary ("N skipped due to -Fast"), and never fails the run over it —
+without needing `-AllowSkips`, and without weakening the fact that a SKIP
+for any other reason (a genuinely missing toolchain, a 0-byte/in-flight ELF,
+etc.) **still fails the overall run by default**; `-AllowSkips` still opts
+into treating those as non-fatal on a machine that genuinely and permanently
+lacks a prerequisite.
 Two more checks do the same (2026-10-04), for a missing SaftyFW build artifact
 only: `check_no_sim_plant_guard_disable.ps1` (no `build/saftyfw_build_info.h`) and
 `check_saftyfw_task_stack_budgets.ps1` (no `build/SaftyFW.elf`; a missing
@@ -747,13 +754,9 @@ The same holds for the KilnFW build-artifact class (2026-10-04): the seven
 exact `SKIP: no ELF at` message, never with an explicit `-ElfPath`) and
 `tools/check_duplicate_symbols.ps1` (no `firmware/KilnFW/build/`). Every other
 skip reason (missing objdump/nm toolchain, 0-byte ELF, ...) stays a plain SKIP.
-`run_all_checks.ps1` files that into its own bucket, reports it separately
-in the summary ("N skipped due to -Fast"), and never fails the run over it —
-without needing `-AllowSkips`, and without weakening the fact that a SKIP
-for any other reason (a genuinely missing toolchain, a 0-byte/in-flight ELF,
-etc.) **still fails the overall run by default**; `-AllowSkips` still opts
-into treating those as non-fatal on a machine that genuinely and permanently
-lacks a prerequisite.
+A green `-Fast` run in a fresh worktree therefore says nothing about stack or
+DRAM headroom: those checks measure a `build/` ELF and are SKIP-FAST unless one
+is present.
 
 A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
 five hours unnoticed before `get_heap_status` was fixed to surface it (see
