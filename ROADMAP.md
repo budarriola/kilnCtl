@@ -1,6 +1,6 @@
 # kilnCtl Roadmap — both processors
 
-> **Status:** planning · **Last reviewed:** 2026-10-03. The dated status log
+> **Status:** planning · **Last reviewed:** 2026-10-04. The dated status log
 > that used to fill this block (2026-08 through 2026-09-28, about 2300 lines) was
 > moved verbatim to `docs/ROADMAP_STATUS_LOG_2026-09.md`, together with every
 > index row this pass removed or replaced; nothing was deleted. Landed since
@@ -62,14 +62,10 @@ open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| **M** | ~~CTs — deferred, 2026-09-05~~ — superseded: a summed CT was fitted on GPIO28, 2026-09-05. **CT commissioning, 2026-09-06** — owner wants user-entered probe rating (any rating; real probes 10-100 A, bench probe 1 A), user-entered or auto-measured idle offset, real-amps readout, and a `ct_topology` (per_zone / summed) so S14 works on the one summed CT. Plan with steps 0-6: `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`. **Steps 1-5 done** (`51c084f`, `7175078`, `9374e8a`, `8a124c4`, `b8f0f47`, `8239b87`: editable calibration fields, auto idle-offset over the wire, `ct_topology`/S15/summed sweep on both Pico and ESP, real-amps display on web/LCD/PcTools, docs). **Step 0 done, corrected 2026-09-18: this row was stale.** The noise-floor capture was actually taken and recorded 2026-09-06 (`firmware/SaftyFW/docs/CURRENT_SENSE.md`'s "Measured noise floor — RUN 2026-09-06" section: 262 samples/60.1 s via `safety_capture_ct_counts()`, fitted channel std ≈ 4.678 counts ≈ 3.8 mA), and that doc's own completion checklist already marked step 0 closed — this row alone had not been updated to match. ~~**Step 6** (bench run with the owner to actually arm S14/S15)~~ — **CLOSED by owner decision, 2026-09-19: "software walkthrough only."** The CT-lead-pickup investigation (`8ae0ca6c`) found the fitted channel's idle noise (std 9.329 counts vs. 0.180/0.223 on the two unfitted channels) traces to CT-lead pickup, not sampling rate, and would need a bench oscilloscope to chase further — moot now that the owner has decided not to attach a real load to this fixture. The software walkthrough ran end to end on the live board 2026-09-19: commissioning read back (`ct_installed=1`, `ct_topology=1` summed, channel 2 calibrated `k_ct_v_per_a=1`/`zero_counts=63`/`gain=0.715`, `i_normal_a` unmeasured on all channels), live status confirmed S14/S15 both DORMANT from the board's own description, and the current sweep (`zone_current_sweep_start`) ran all three zones and returned its expected **INCONCLUSIVE** verdict (`summed_unmeasured_mask=7`, no `i_normal_a` pushed) because this fixture's ~23 mA/zone sits below the firmware's 45 mA noise floor. A post-sweep re-read confirmed nothing changed (commissioning byte-identical, no trip latched, relays off). Full detail: `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`'s "Step 6 CLOSED" section. **This closes the whole CT commissioning step list (0-6).** A real load (or a different bench fixture) is the only thing that can ever let S14/S15 arm — that remains a hardware-gated, one-line follow-up, not further code. | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`; `docs/CONTACTOR_FEEDBACK_OPTIONS.md`; `docs/audits/ct_sampling_mains_aliasing_review_2026-09-18.md`; M5 |
-| — | ~~LittleFS for flash writes, 2026-09-06~~ — assessed **not adopted** for log retention, then **superseded 2026-09-07**: endurance review confirmed no wear problem exists either, but the owner directed the migration anyway for architectural reasons (structured, inspectable, backup-able user data). In progress — zones config, profiles, and prefs dual-write to a new `cfg` partition; see `docs/CONFIG_FILESYSTEM.md` for state and open items, `docs/LITTLEFS_ASSESSMENT.md`/`docs/FILESYSTEM_USER_DATA_PLAN.md` for the history. **RP2040 `config_store` A/B sectors (flash_endurance_review_2026-09-07.md R2): implemented AND FLASHED, `b7af9ebe` 2026-09-08** (bench-verified: commissioning config read back byte-for-byte across the migration, CRC unchanged) — this row previously read "NOT YET FLASHED" and was stale by a day. **The separate in-RAM-cache defect found 2026-09-09** (`s_cached_record` read with no synchronisation across cores, `safety_config_version` observed changing mid-read during a live heating run), fixed by a seqlock (`b202fe56`, barrier fix `5671ee03`, then a writer-owned-fallback correction `cb1ba325` after review found the first fix's own fallback snapshot could itself race two readers, 169+ host tests including a torn-read reproduction: 20,945/190k writes without the fix, 0 with it) — **IS now flashed** (`ae23aba4` 2026-09-09, `b88ea6ba` 2026-09-10; corrected 2026-09-14 roadmap truth-up — live `safety_get_fw_version` reads Pico build `d957d5fd`, far newer than either landing commit, commissioned). This row previously said "none of the three seqlock commits have been flashed" and was stale. See `docs/CONFIG_FILESYSTEM.md` for detail. | `docs/CONFIG_FILESYSTEM.md` |
-| **XL** | **Whole-kiln setup wizard — NEW, owner request 2026-09-08.** One web page, `/setup`, guiding a new owner from a blank board to a kiln `/api/readiness` reports ready: network/time/units, zones + thermocouples + types, zone type (HEATER vs ON_OFF_DEVICE), relays and names, zone commissioning limits, the safety processor's own commissioning, current sensing + CT verification under load, autotune and the coupling matrix. Modelled on `safety_commissioning_page.html`'s guided flow (stepper, consequence-bearing radio cards, read-back-verified commit) and backed by the existing `/api/readiness` checklist rather than a new model. **DONE (2026-09-09).** All 13 wizard steps and all 11 implementation steps shipped; progress persisted in NVS (not `cfg`) so a filesystem problem cannot lose it. Two steps apply heat (CT sweep, autotune) and five need the owner present. **Follow-up (2026-09-19) resolved (2026-09-21):** the coupling-matrix-step-removal rewrite (`3e9ee5f5`) landed and merged into `origin/main`, and `c339ad16` dropped the temporary `check_no_bench_text_in_ui.ps1` whole-file allowlist for `setup_wizard_page.html` in the same rebase; no allowlist entry for that file remains today. | `docs/SETUP_WIZARD.md` |
+| — | **LittleFS `cfg` partition** (owner-directed migration, 2026-09-07): mounted and populated on the bench board (7 files via `GET /api/cfgfs`, 2026-09-21), NVS still authoritative; the RP2040 `config_store` A/B sectors and their seqlock fix are flashed. Only residual: the profile-slot reformat, see the "100 user profile slots" row below. History: `docs/COMPLETED_2026-10.md`, `docs/CONFIG_FILESYSTEM.md`. | `docs/CONFIG_FILESYSTEM.md` |
 | — | **On/off device zones — owner request 2026-09-07, decisions settled 2026-09-14.** A zone may drive a non-heater on/off device (vent, damper, fan, water feed) instead of a heating element, switched by per-segment rules on ramp phase / direction / temperature / time, with a stalled ramp counting as a dwell. **Not "design only" — steps 1-8 of the 9-step plan are shipped and host-tested** (`d58492c9`, `3d740f78`, `dd1d6ada`, `172e3081`/`b46c120c`, `bf1db47f`, `83c8b28b`/`e8e32c7a`, `be27d461`); this row previously understated remaining work by ~8 steps. Safety core: guards 1/2/3/4/9 disabled for such a zone, per zone (`docs/ON_OFF_ZONE_PLAN.md` sec 1's guard table) — guard 1 (HEATING_FAILED) would otherwise false-trip on a *correctly working* vent, since "duty high, temperature flat" is both its trip condition and the device's normal signature. **2026-09-14: owner asked to decouple an on/off device from the 3-slot heating-zone array so it binds a spare relay instead — investigated and found genuinely large** (the zone array is hard-sized at `MAX31856_CHANNEL_COUNT` = 3 everywhere: guards, coupling matrix, firing records, persisted `zone_cfg_t`, HTTP surface; widening it needs a `ZONES_CFG_VERSION` schema bump, a frozen prior struct, a converter and a CRC check — `docs/audits/on_off_spare_relay_binding_2026-09-14.md`); **not implemented**, per D1 of `docs/audits/on_off_zone_decisions_2026-09-14.md`, which the owner has not yet reconsidered against this new request. Two engineering gaps from that decisions doc closed 2026-09-14: `adaptive_tune`/`firing_score`'s firing-stats snapshot now skip on/off zones as training data (`adaptive_tune.c`, `profile_executor_firing_stats.c`), and `docs/SAFETY_CASE.md` now carries the guard-3 coverage gap and the `max_temp_c == 0` relaxation. **Remaining open item: step 9, a supervised bench session with dry contacts — no on/off zone has ever actuated a physical relay.** **2026-09-20: step 5b added** — `profiles_page.html` previously had no editor for a profile's on/off rules at all (it only echoed `on_off_rules` back unchanged on save); an "On/off devices" section now lets an operator add/edit/remove per-segment rules from the browser, wired into save/load/preview, plus a real fixed gap (`rule%u_temp_source` was never sent, so any saved temperature condition was silently inert). **Follow-up 2026-09-20:** fixed a silent rule-destruction defect in that same editor -- a stale/absent zone used to serialize as an empty value and get silently dropped on save; it now round-trips via a flagged orphan option and save is refused client-side while any row is stale, plus a widened JSON byte budget and a new `check_page_js_tests.ps1` standing check; `4fe0a38d` then closed the Opus review nits on that pass (bounded temp_c import, stderr-safe check wrapper). | `docs/ON_OFF_ZONE_PLAN.md` |
 | S | S8 sanity rate — tool added `c49bb0e9`: `safety_set_rate_guard()`/`safety_get_rate_guard()` now expose config_store 0x0204/0x0205 over `POST`/`GET /api/safety/commissioning` (mirrors `safety_set_ct_cal`'s confirm-gated, read-back-verified pattern; refuses off `confirm`, a running firing/autotune, or an ARMED relay). **Corrected 2026-09-14 roadmap truth-up: this row said the guard "remains DORMANT (0)" — live `safety_get_rate_guard()` reads `max_rate_c_per_min=20 (ARMED)`, `rate_window_s=60`, i.e. already armed at a hand-set bench value, not the docs' 33.3 C/min (2x-fastest-rule) default.** **Open owner question, not resolved here: 20 C/min is tighter than the documented 2x-fastest rule and could nuisance-trip a 900 C/hr zone** — whether to raise it to 33.3 C/min (or the auto-derived value once the coupling matrix is re-identified, see the ninth/tenth-sweep notes above) is an owner decision, left open. | M3 |
-| — | High-temperature validation firing — closed 2026-09-05, `94b1a2a` confirms ff_hold infeasible above 62 °C on hardware. | `PID_EXPANSION_PLAN.md` §3.6i |
 | **S** | **Display items needing the owner's own hands/eyes, 2026-09-04.** Three separate (touch corner accuracy CLOSED `f028e2f` — see M1): (1) a residual blue tint on the ST7796 panel with every firmware cause eliminated by measurement — needs the owner's eye, or a colorimeter, or a second unit; (2) wake-on-touch, first-touch-swallow and error-dismissal behaviour on display power, which need a finger on the actual glass; (3) the STOP-block 5V I2C hazard measurement at meter-module pins 10/12, still not taken. | `DISPLAY_ST7796_PLAN.md` §4 |
-| **M** | ~~Field-update hardware exercise~~ — **ESP half done 2026-09-05**: OTA into `ota_0` + rollback both verified on the bench (PID gains byte-identical before/after, no heat, no firing). **Pico half attempted 2026-09-06**: a raw `.bin` (`arm-none-eabi-objcopy -O binary` on `SaftyFW_slotA.elf`, no header-packaging step needed — the ESP builds `UPDATE_BEGIN`'s header itself) staged and the relay started, but the Pico refused `UPDATE_BEGIN` ("a safety trip is pending") before any flash write — a real Pico-side interlock the ESP's own cached status did not show. The actual over-the-wire transfer is still unexercised. **Updated 2026-09-18: the bootloader/metadata gap is closed** — the bench Pico now boots through its two-slot bootloader (slot A active, `KLN1` metadata present) — **and a fresh attempt got further and failed differently**: the RP2040 hardware-watchdog-reset while erasing the destination slot, so the ESP failed the relay at its 15000 ms erase timeout. The failure was safe (relays off throughout, no trip latched, configuration unchanged). See the M8 item below and `docs/audits/pico_ota_erase_watchdog_reset_2026-09-18.md`, plus `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` "Hardware exercise 2026-09-05". **2026-09-20, in source (not yet exercised on the wire):** the SaftyFW build now emits per-slot raw images `SaftyFW_slotA.bin`/`SaftyFW_slotB.bin` (position-dependent, slot A 0x00011000 / B 0x000E1000), and the Pico's `update_task` rejects an image whose reset vector does not point inside the destination slot (`update_task_slot_linkage_check()`, state `UPDATE_TASK_STATE_REJECTED_SLOT_LINKAGE = 8`, no protocol bump) — `5310dd78`, `7fb0b15f`, `6d3d0ada`. The ESP-side mirror of state 8 and the embedded-image boot path are in flight under the M-row below. | M8 |
 | XL | **Two accepted risks in `docs/SAFETY_CASE.md`, new 2026-09-04: nothing currently mitigates either.** (1) Whether the two processors' independently-"healthy" verdicts are actually *correct* rather than merely self-consistent — e.g. both could be reading a shared, physically-faulted thermocouple wire. (2) Whatever sits downstream of both relays (a mechanical failure past K4) has no mitigation beyond K4 itself. Not a code gap — no reproducer exists and none is proposed; owner decision on whether/how to mitigate | `docs/SAFETY_CASE.md` H5, H9 |
 | — | **Guard evidence is mostly host-tested, not hardware-verified.** Of ~20 tracked guard-level claims, 19 are host-tested and only **3** are hardware-verified (**corrected 2026-09-15 roadmap claim audit** — the three rows are S5's *hardware fit*, S5's *masking-before-fit* finding, and KilnFW thermal_guard guard 6. The E-stop polarity fix was named here as the third and is **not** one: `SAFETY_CASE.md` §4 classes S7 as host-tested and negative-tested. The count was right, the attribution was wrong, and it credited the E-stop path with evidence it does not have) — everything else, including all of S1–S4/S6–S14's trip logic and KilnFW guards 1/2/3/4/5/7/9, has never been provoked on real silicon | `docs/SAFETY_CASE.md` §4 rollup; `GUARD_TEST_MATRIX.md` §3 |
 
@@ -78,8 +74,6 @@ open is short:
 | Item | Blocks | Where |
 |---|---|---|
 | Bench webcam re-aim + LCD colour verification (numeric pixel sampling, not eyeball) | Display power / colour items above | `CLAUDE.md` "Camera aim (2026-09-06)"; `DISPLAY_ST7796_PLAN.md` §4 |
-| ~~`iter_tune.c` wire-vs-delete decision~~ — **decided 2026-09-08: keep it, redesign it.** Three open questions for the owner in `ITER_TUNE_REDESIGN_PLAN.md` §9 are settled by that section itself (auto-snapshot anchor, 6-trial budget, bench-fixture-only scope). **Steps 1, 2 and 5 landed 2026-09-09** (`8f80a4de`, three latent defects found in review fixed same day, `249ce287`): `control/firing_score.c`/`firing_compare.c` plus a rewritten `iter_tune.c` decision core (old whole-firing IAE path deleted, not left dual), validated by a Monte-Carlo sim harness (`sim_iter_tune.c`) — 24/24 converged, 660 null comparisons 0% false-accept, 660 mismatched-plant runs 13 better/0 worse/0 cage violations. **Corrected 2026-09-14 roadmap truth-up: step 3 (the G1-G4 sim-harness gaps, `e0d2e006`) and step 4 (the §6.5 credibility gate, `225d4b91`) also landed 2026-09-09, and step 7's write-surface guard (`check_iter_tune_write_surface.ps1`, `f3fcd597`) too** — `docs/ITER_TUNE_REDESIGN_PLAN.md` itself was corrected 2026-09-10 to say so; this row never followed. **Still open: the credibility gate FAILS against a real recorded firing for a currently-unknown reason** (two explanations investigated and retired — see the 2026-09-11 sweep note above, do not re-propose either), plus the noise-floor artifact and step 9's first hardware trial (owner present). Step 7 (persistence/HTTP surface) landed (`7e754997`, opus-review fixes `bb6d3947`); acceptance is now MET as of the 2026-09-23 schema-migration follow-up pass (`f3925704`, `5cc04518`) -- see docs/ITER_TUNE_REDESIGN_PLAN.md row 7 for detail. It bumped `wifi_provision_http.c`'s `max_uri_handlers` 165 -> 170 for headroom in the same commit, per `check_uri_handler_cap.ps1`. **CLOSED 2026-09-23**: `restore_commissioned`'s check-then-apply race against a concurrent autotune start is fixed by a per-zone external-write reservation (`f82ca846`), the same reservation now also gates `autotune_engine_accept()`'s own write path and is test-covered end to end (`0f6dd8f9`, `50769ef0`) -- `adaptive_tune_model.c`'s SIMC-refine write and `uart_bridge_ext_control.c`'s `CONTROL_CMD_SET_ZONE_PID` are deliberately left ungated (different lock domain / no autotune awareness). **Shadow mode (step 8): wired, awaiting five firings** (`control/firing_shadow.c/.h`, pure module hooked into `profile_executor_firing_stats.c`'s existing per-tick/per-firing calls, never calls `iter_tune_*`, no gain-write API, own `shadow_tune`/`sdwblob` NVS namespace, summary surfaced read-only on `GET /api/iter_tune/status`) — see `docs/ITER_TUNE_REDESIGN_PLAN.md` row 8 for detail. | `docs/ITER_TUNE_REDESIGN_PLAN.md` §8/§9 |
-~~CT commissioning steps 0 and 6 (noise-floor capture, bench run with the owner)~~ — **both closed.** Step 0 was closed 2026-09-18; step 6 closed 2026-09-19 by owner decision as a software walkthrough only (see the M-size CT commissioning row above). S3/S4/S9/S14/S15 stay DORMANT (`i_normal_a not measured`) — that is now expected to stay true on this bench permanently, not pending further work; only a real load can change it. | `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`; M5 |
 | `abs_max_temp_c` must be raised **Pico-first, then ESP**, before a real (non-bench) firing — and the Pico's ceiling must never end up tighter than the ESP's | Real-kiln firing readiness | `docs/SETUP_WIZARD.md`; `docs/ON_OFF_ZONE_PLAN.md` |
 | S8 is ARMED at a hand-set 20 C/min bench value, not the docs' 33.3 °C/min default (corrected 2026-09-14, see M3 row above) — whether 20 is right for a real kiln, or should move to 33.3 or an auto-derived value, is an open owner decision | S8 (rate-of-rise) real-world accuracy | M3 row above; `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` |
 
@@ -87,11 +81,9 @@ open is short:
 
 | Size | Item | Where |
 |---|---|---|
-| M | **KilnFW web POST handlers off the shared httpd worker** (owner approved 2026-09-25; KilnFW TODO.md 10.14 "Web side"). A1 landed 2026-09-25: `http_async_job` single-flight helper (`httpd_req_async_handler_begin`/`_complete`), first used by `ct_auto_zero_post_handler()` (about 10-15 s today), host-tested and negative-tested. **2026-09-25 fix-then-push review**: every existing body and status is unchanged, plus one new synchronous refusal for a concurrent second POST; corrected the stack ceiling to a real measured 3312 B (was a wrong hand-borrowed 2736 B, stack raised 4096 -> 6144 B); serialized `commissioning`/`relay_type`/`ct_cal`/`ct_trim`/`rate_guard_auto` POST handlers and `backup_import` against A1's async window; fixed a `s_task_handle`/`s_busy` clear-order race. W1 (`wifi_prov_owner` replying before its blocking scan and join) landed, pending bench verification. A2 (`bench_preset` onto A1's helper) landed 2026-09-25: same `http_async_job` pattern, byte-identical response bodies, stack unchanged (6144 B declared / 3312 B measured lower bound), `.dram0.bss` 99672/101000 B unchanged (the feature is `#if CONFIG_KILNCTL_DEV_TOOLS`, off on the real board), host-tested (271/271 checks, previously uncompiled/untested by the host suite -- reached via a `CONFIG_KILNCTL_DEV_TOOLS` host-stub override) and negative-tested. A4 (`backup/import` onto the same helper) landed 2026-09-28, driven by a real bench A4 finding (all three restore attempts timed out client-side, board unresponsive to other requests for several polls after each): mode-gate/interlock/busy checks and header reads stay on `httpd_worker`, the body read plus `backup_import_apply()`'s two-pass validate-then-commit move to `backup_import_job()` on the same `http_async_job` helper (6144 B), byte-identical response bodies/status codes (`classify_refusal()` needed no changes), `.dram0.bss` unchanged (99720/101000 B, ctx is heap-allocated), URI route count unchanged (163/170, no new route -- this is A1/A2's same-connection-reply shape, not a job-id/poll shape). Fixes the "other requests starve" symptom, not the restore's own duration, so `backup_import_http_client.py`'s client-side timeout was separately raised 30s -> 90s; neither the client nor the MCP tool retries a timed-out import (the bench's first attempt had, in fact, already committed despite the client timeout -- a caller must read the config back, never re-POST blindly). **Bench responsiveness check done 2026-09-28** (was the plan's own open item): ESP flashed `c021ad96` (verified); two no-op `backup_import` merge round-trips (~61 s each, "ok - restored") ran concurrently with a `GET /api/readiness` poller at 1 Hz for 90 s -- 66/66 OK, max 715.8 ms, avg 359.5 ms; zones/readiness/crash/trip state unchanged. The ~61 s is the ~48 per-setter `nvs_save()` calls in the commit loops plus the Pico round trips (safety ceiling guard, `i_normal_a` stage/COMMIT_CONFIG/read-back), not a symptom of the A4 move. **Batching those saves landed 2026-09-28** (`7b107411`, with stack/check follow-ups in `b4bad2c7`/`c021ad96`/`5d0a2756`/`c22ff081`): `backup_import_apply()`'s zone/timing-profile commit loop now uses the `_no_save` setter variants and a single `zones_config_save_now()` call at the end instead of one `nvs_save()` per field, with `zones_config_get_full_copy()`/`zones_config_restore_snapshot_no_save()` giving an atomic RAM rollback on a mid-batch failure; the async job also moved off `httpd_worker`'s stack onto `http_async_job`'s own task (8192 B declared after a stack-budget-checker fix). Host-tested (single-save-on-success, full-snapshot-restore-on-mid-batch-failure, round-trip save count) and negative-tested by hand. Bench re-measured 2026-10-04 on `a1232077`: a no-op restore of a full export now takes about 1.25 s (was about 61 s), zones and readiness bit-identical afterward; the first re-measure (2026-10-04, pre-fix firmware) found heap_internal min_free dipping to 2595 B, below the 8192 B floor, which `a1232077` fixed by moving the import/export, hash and cfg_fs scratch buffers to PSRAM (`persist_scratch_alloc()`, guarded by `tools/check_persist_scratch_malloc_caps.ps1`); on the fixed firmware the same two imports leave min_free at 12335 B from a 17699 B boot low-water. Safety-link `link_reply_us` timeouts (15) accumulated during the window with no trip -- benign, not an open finding: that counter counts status-push gaps, not failed replies (redefined 2026-09-10, `docs/audits/safety_link_get_status_timeout_counter_2026-09-10.md`), and the import's `safety_exchange` calls contend for `xact_lock`, so a few gaps are expected under this load. One of the earlier restore attempts that timed out client-side had zeroed the bench's cross-zone coupling matrix (`fee835fa`/`b4bad2c7`); it is now restored via the new narrow `control_set_zone_coupling` writer to z0=[0,25.42,24.52], z1=[12.44,0,28.69], z2=[8.08,10.81,0]. A3 `crash_report/clear` landed 2026-10-02 (`32fe5cee`, review fixes `689f0f24`; bench measurement: the synchronous coredump erase stalled httpd about 3.4 s, concurrent `GET /api/status` 2067 ms and `GET /api/readiness` 1378 ms; after-change stall unmeasured on bench, expected near zero since the erase now runs on the `http_async_job` task). Same one-POST/one-response wire contract, new 503 busy reply, `GET /api/crash_report` gains `clear_in_progress` on its `present:false` reply; no new route. All slices of this line are done. No route, API or auth-tier changes beyond that. | [`docs/HTTP_POST_OWNER_MIGRATION.md`](docs/HTTP_POST_OWNER_MIGRATION.md) |
 | L | **Every fault says what was detected and what to do** — a standing rule, not a closing milestone, so it never fully closes: applies to every fault surface added from here on. All of S6a's own checklist items landed 2026-08-28 | M13 |
 | L | **CT clamp attribution — built and verified under both topologies (individual per-zone CTs and shared/summed), re-confirmed 2026-09-19** (host suite 2499/2499, `run_all_checks.ps1` 113/0/0). Nothing software-only remains. Pending, and hardware-gated only: any real PASS or FAIL verdict, and the true envelope settling behaviour at real current — both require a real kiln; this ~4 W bench can only ever produce INCONCLUSIVE, by design. See `docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md`'s status line. | `docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md`; `docs/CT_CHANNEL_MASK.md`; `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` |
-| XL | **Source layering + hardware abstraction** — `drivers/` reorg applied in `9f18ca5` (2026-09-05); HAL Phases 0-4 all done (every interface has a real backend + host fake, every named consumer migrated, include-boundary enforcement is strict, `esp_random.h` classified 2026-09-06). **Closed 2026-09-16: the hardware timing re-check.** All three named measurements (safety-link reply, display frame time, thermo read latency) now have hardware numbers — safety-link reply against the pre-existing 345 ms budget (max 340 ms observed, thin margin, see the 2026-09-14 composition correction on what that counter actually measures); display/thermo have no prior figure to compare against and are recorded as fresh baselines against the ESP32-S3's 300 ms interrupt-watchdog ceiling (max 81 ms / 57 ms observed, comfortably under). No measurable cost from the HAL indirection against any of these bars. Full detail: `docs/HW_ABSTRACTION.md` | M16; `docs/HW_ABSTRACTION.md` |
-| **L** | **`iter_tune` redesign — see the M-row above (this table, "iter_tune.c wire-vs-delete decision") for current step status; consolidated here 2026-09-14 roadmap truth-up to remove a duplicate that had drifted (this row still said "steps 3-4 and 6-9 remain design-only" after both plan doc and code had moved past it).** Design background kept: owner decision 2026-09-08 to keep and redesign rather than wire `control/iter_tune.c` as-is (`3bf773af` superseded); score measures matched profile segments (ramp lag in seconds, dwell-entry overshoot, steady dwell RMS) against the target profile rather than whole-firing IAE, validated first in simulation by extending `firmware/KilnFW/App/test/sim_plant.c` with the four gaps (PWM window, actuation lag, MAX31856 quantisation, real measured plant/coupling constants) — *not* the deleted `SimFW`/`kilnsim`. 10 ordered steps (0-9), no kiln time before step 8. See `docs/audits/consumer_without_producer_2026-09-06.md` for how the module got here | `docs/ITER_TUNE_REDESIGN_PLAN.md`; `PID_EXPANSION_PLAN.md` |
+| **L** | **`iter_tune` redesign -- the one open question.** Owner decision 2026-09-08: keep and redesign rather than wire `control/iter_tune.c` as-is. Steps 1-8 landed and are host-tested (per-step status in `docs/ITER_TUNE_REDESIGN_PLAN.md`; shadow mode is wired and awaiting five firings). **Still open: the credibility gate (plan section 6.5) FAILS against a real recorded firing for a currently-unknown reason** -- two explanations were investigated and retired (see the 2026-09-11 sweep note; do not re-propose either); next is an offline replay of the recorded firing through the gate. Also open: the noise-floor artifact and step 9's first hardware trial (owner present). | `docs/ITER_TUNE_REDESIGN_PLAN.md` sections 8/9; `PID_EXPANSION_PLAN.md` |
 | L | **ESP32-S3 OTA: single 8 MiB `app` slot plus a ~1.9 MB non-firing `recovery` image.** Steps 1-3 landed (recovery project builds, `partitions.csv` carries `app` and `recovery`, `flash_firmware()` targets `app`, `flash_recovery` writes `recovery`); the bench board already boots from this table. The plan records no result for the migration-flash verification (step 4). Pending: step 5 (exercise recovery deliberately; this is recovery W5), step 6 (the esptool last-resort path, never run on this board), step 7 (delete in-app RECOVERY MODE and retarget the `boot_guard` counter to boot recovery, which must not precede 5 and 6), step 8 (documentation cutover). | M8; `docs/OTA_SINGLE_SLOT_PLAN.md` |
 | M | **Recovery image rework -- owner decisions 2026-10-02.** W1-W4 landed (build trims and optional PSRAM, relays held low and LCD status page, validated streaming ESP upload with status/exit/wifi_reset routes, Pico relay from a PSRAM copy, all host-tested and target-built only), and the recovery-image MCP tools landed in `40c04dfd` (plus `flash_recovery`, `e7e8724f`). Also landed 2026-10-02 (detail in `docs/COMPLETED_2026-10.md`): the deliberate entry route `POST /api/ota/esp/recovery_boot`, the boot_guard threshold switch and the `recovery_enter` tool (`e25d8a30`..`24043ba9`); recovery hardening A-G plus the 1 s relay/LCD hold watchdog (`7a3331a8`..`d4eac0f6`); the recovery image made unauthenticated with a random per-boot LCD-only SoftAP passphrase, owner decision 2026-10-02 (`00e99237`, `581278ba`); `recovery_status` rendering of the new keys (`c7bd87d9`). **Pending: W5**, bench verification (no owner needed, test fixture): `flash_recovery` dry run, real write, a proven recovery boot, then the Pico relay DATA pace and target-slot guard. **Bench-verified 2026-10-03 (`docs/BENCH_TEST_LOG.md`):** `flash_recovery` real write with read-back, `recovery_enter` into the image, the LCD page (fits 480x320, SSID, 12-character passphrase, IP), the WPA2 SoftAP joined with the LCD passphrase, `GET /api/recovery/status` (passphrase absent from the JSON, relays verified off, `relay_hold_stack_free` 1952 B of 3072 B), `recovery_push_esp_image` of a clean `4a4b7594` build over the recovery AP (board rebooted into `app`, boot_guard cleared and verified), and `recovery_exit` back to `app` with boot_guard cleared. **Recovery reliability audit 2026-10-04** (read-only review of the image at `e77e8895`) found that an LCD init failure hid the passphrase with no retry and no `lcd_ready` in status, a wrong-length boot_guard blob showed as "none", and draw failures were dropped silently; fixed in `39816057`/`a78fe73c` (init retried with at most 3 capped SX1509 re-resets per boot and only after an expander I2C failure, `lcd_ready`, `lcd_init_attempts`, `lcd_draw_failures`, `lcd_task_stack_free_bytes` and `boot_guard_record` in `/api/recovery/status`, a passphrase log scan over every recovery source file). The wall-clock cap on the Pico VERIFYING state (30 s, expiry reported as `outcome_unknown` with `power_cycle` on `/api/recovery/pico/status`) and the I2C bring-up retry (3 attempts, `relay_io_init_error` in status) landed in `cdfdf944`. The httpd/Wi-Fi come-up stream landed in `9a17648a` (`recovery_http_start()` returns an error and the image retries 3 times, then shows the failure on the LCD; the SoftAP is re-raised after an unexpected AP_STOP; both restart paths are capped at 3 per power cycle by RTC_NOINIT counters in `recovery_health.c`, after which the image stays up with the error shown so JTAG and the LCD stay stable; `http_start_attempts`/`http_last_error` in `/api/recovery/status`; `check_recovery_health.ps1`, 110 assertions, 27 mutants). The bench board's `recovery` partition was refreshed to the `f3a25207` image (`recovery.bin` 771,040 B, built in a clean worktree) via `flash_recovery` on 2026-10-04 with JTAG read-back verification; the board came back running `app` with the safety link up and no trip. The audit's remaining item (boot-partition read-back after every `esp_ota_set_boot_partition`, stalled: the implementer's own patch broke `recovery_http.c` in `C:\\wt\\recboot_csdr53` and the repair was classifier-denied, owner item) are not yet landed. **Still pending on the bench:** the boot_guard threshold switch (JTAG reset attempts 2026-10-03 did not provoke it; the healthy mark clears the counter within ~6 s of boot) and the Pico upload through recovery (blocked, the SaftyFW debug probe is disconnected as of 2026-10-03, owner action), proof that `wifi_reset` erased the home credentials (the route was verified 2026-10-03 and the board was exited and re-provisioned over UART the same day, but `wifi_get_networks` was not read between exit and re-provisioning, so the erase is consistent with what was seen, not proven), the "wifi_storage_fail" path, and the no-PSRAM boot. `KILNCTL_RECOVERY_AP_PASSPHRASE` is a documented convention for a human or joiner automation to supply the LCD passphrase; no code reads or prints it, by design (never a call parameter, never echoed). | `docs/RECOVERY_IMAGE_PLAN.md`; `docs/OTA_SINGLE_SLOT_PLAN.md` |
 | **M** | **ESP application auto-updates the Pico's firmware on boot -- owner requirement 2026-09-16.** In source and flashed: both `SaftyFW` slot images embedded in the ESP build, boot-time identity comparison, persisted 3-attempt budget (exhaustion is a `/readiness` warning, only NO_IMAGE and CHAIN_GAP refuse firing), the Pico's reported active slot wins slot selection (2026-10-02), `check_embedded_pico_image_fresh.ps1`, identity scoped to the SaftyFW source paths. The erase-watchdog and CRC defects that blocked the relay are fixed. Pending: a real ESP-driven Pico OTA on hardware end to end (the bench Pico runs a flat image; installing the two-slot bootloader there is NO-GO until the three items in plan section 11 resolve), so the auto-update path is inert on this bench unit and the wire-driven slot selection is bench-unverified. | `docs/PICO_AUTO_UPDATE_PLAN.md`; M8 |
@@ -100,7 +92,7 @@ open is short:
 | **L** | **LCD dashboard and profiles rework -- owner request 2026-09-19.** All seven items are in source and flashed. Bench-verified by webcam 2026-09-20: items 5, 6, 7; 2026-10-04 on `a1232077`: items 1 (home name button opens the picker) and 4 (relay-life reset gone), and item 2's list and New-button presence. Still open: item 2's New tap (not tested that it opens `profile_builder_zones`), item 3's ON state (needs heat enable; the off state reads correctly), and item 1's greyed-while-firing behaviour. Detail: `firmware/KilnFW/docs/UI_PLAN.md` section 6. | `firmware/KilnFW/docs/UI_PLAN.md` |
 | **L** | **Thorough OTA testing of both processors -- owner request 2026-09-19.** Case bodies for suite OT (OT-E01..12, OT-P01..05) and the `ota_matrix_run` MCP tool (hard `confirm is True` gate, `dry_run`, fail-closed run-level gate) are implemented; the matrix is unit-tested with a fake board. Real hardware so far: only OT-B01, PASS on 2026-10-01 (run `20261001T072647Z_ota`, `outcome=no_trip`) and again 2026-10-03 (run `20261003T155642Z_ota_ota_b01_4a4b7594`, Pico boot_id 42 to 87, no S6a), so `sw_reset` of both processors does not latch S6a. OT-P* cases are blocked: the SaftyFW debug probe (serial E66540F0A36C6E21) is not enumerated as of 2026-10-03 (owner action: reconnect it) and `pico_update` is deliberately off. Every image-dependent case SKIPs without an `ota_*` image parameter. **OT-E01 found a firmware defect 2026-10-03:** pushing an ESP image to the running `app` partition (single-slot design) returned HTTP 500 and the board reset with a TASK_WDT panic (`logs/bench_test/20261003T195937Z_ota_ot_4a4b7594/`, `docs/BENCH_TEST_LOG.md`). Fixed in two commits in `C:\wt\otafix_r2i1yr` (`eefbbd6c` 409 refusal when the target is the running partition; `4c64bfc8` refusal body drain plus the 401/403 close rule and `tools/check_ota_esp_refuses_running_target.ps1`), reviewed SHIP, flashed to the bench board and re-verified 2026-10-03 (OT-E01 409 with body and continuous uptime, OT-E09 401, OT-E10, OT-E12 all PASS; OT-E02 NOT_RUN under the single-slot design). Both firmware commits are on origin/main as `9faed0e5` and `652eb695`. **Matrix run with images 2026-10-03** (`20261003T223938Z_ota_ot_410c346c_rerun`, server at `410c346c`): OT-E01, E03, E04, E05, E09, E12 all PASS on the fixed firmware; three harness defects found by the first run (readback inside the ~6.6 s refusal drain window, a vacuous E05 on a missing image file, unsessioned pushes closed by the 4096 B rule) are fixed in `f08e554a`/`cf9dd550`/`410c346c`. Still pending: OT-E10 (needs a user-tier account in `KILNCTL_WEB_USER_USERNAME`/`KILNCTL_WEB_USER_PASSWORD`, owner item), OT-E07/E08 (`allow_heat=True`), OT-E11 (recovery W5). OT-E11 waits on recovery W5. **Landed 2026-10-02, bench verification pending (venv repair):** the Pico bootloader slot-linkage check before PENDING_VERIFY, the slot trailer in `UPDATE_STATUS` and the 8 s pre-jump watchdog (`79264f5f`..`d7d6e9fc`); S7 single-flight guard for every Pico safety-config writer (`beaab290`..`b8c3e4a8`; the synchronous HTTP writers now claim it as `HTTP_SYNC` and boot recovery retries, see `docs/COMPLETED_2026-10.md`; the 409 against a running sweep was verified on hardware 2026-10-03; two racing HTTP_SYNC callers cannot be observed because httpd serialises them). Also unmeasured on the bench: A3's after-change coredump-erase stall. | M8; `docs/BENCH_TEST_SYSTEM_PLAN.md`; `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`; `docs/OTA_SINGLE_SLOT_PLAN.md` |
 | **L** | **Standardized bench test system -- owner request 2026-09-19.** Waves 0-4 are implemented (`tools/PcTools/src/kilnctrl/bench_test/`, `bench_test_run`/`bench_test_list`/`bench_test_last`, `tools/bench_test.ps1`, case bodies for suites ST/FL/SK/OT/AT/HP/WEB/LCD/SP). Real-hardware record so far: heat suite HP-01..08 fixed and passing after harness fixes, LCD-08/09/14/16/19/21 and LCD-22..25 PASS, stack suite SK-01..04 PASS on `eb83c1ac` with idle, `web_ui_open` and `mid_firing` baselines committed, web suite render-only rows clean. No firmware defect found by any FAIL so far. Recovery entry/exit ran on hardware 2026-10-03 (`docs/BENCH_TEST_LOG.md`); the HP-07 trip-clear window fix `2570f751` was exercised live 2026-10-03 (PASS, clear in 0.92 s); one earlier HP-07 run that day saw relay on but no heater current, tracked as a possible fixture connection issue. Pending: OT-E11 and LCD-20 (wait on the rest of recovery W5), suite OT against real hardware; AT ran again 2026-10-03 on the running firmware (`20261003T224803Z_autotune_at_410c346c`): AT-01/02/03 PASS, AT-04 INCONCLUSIVE as a fixture limit (relay guard saw a 1.37 C peak-to-peak swing, needs 2.00 C; the case now records `swing_pp_c` and `abort_reason` on every path, including the early returns, `a33fafdf` and `e77e8895`, both on origin/main), AT-05 a harness false FAIL on the `/api/autotune/matrix` wire shape, fixed in `b7decf35`/`cdf0b7cc`; a full re-run through the runner waits on the main-tree fast-forward so the server carries that code. OT-E07/OT-E08 harness fix landed 2026-10-04 (`f2aafa2f`..`0ae62a1a`, four review rounds): with `allow_heat=True` the cases start and stop their own firing/autotune, run verified teardown on every start failure, SKIP on a tainted run, a busy executor or active autotune, a refused start, or a missing image path, all before any ramp-assist write; the hardware run is still pending. Stack suite re-run 2026-10-04 on `a1232077`: SK-03/04 PASS, SK-01/02 INCONCLUSIVE until the owner captures baselines; the full web suite was not run (launch blocked by the permission classifier, suite is classified mutating; owner to run or allow). Per-run detail lives in `docs/BENCH_TEST_LOG.md`. The PcTools pytest runners (`run_pctools_tests`, the `pctools_pytest` regression gate) no longer report green when an xdist worker dies or tests go missing: `f17acdbd`/`e4cfbe2b` (2026-10-04) fail a run on a "node down" line or a collected-versus-reported shortfall even when pytest exits 0, and pass a 300 s per-test timeout. HP cases now record heater current from the UART safety-status cache during the heat and the preflight confirms the firmware version against the ELF (`e958e7d9`..`48bb8eaf`, landed 2026-10-04 after four review rounds; the CT topology-fallback marker is one constant in `devices_safety.py` shared by the status renderer, the parser and the tests); a hardware run of these HP changes waits on the main-tree fast-forward, since the running MCP server imports the main tree. **Addressed in software 2026-10-03, bench-unverified (board was in the recovery image):** the B3 stall after taking `logs/bench_test/.board_lock` is now diagnosable and bounded (`7090b0c5`: run directory and a redacted `runner.log` are created right after the lock, preflight and teardown run on bounded threads, 120 s and 60 s, a stalled preflight fails the run naming its last step and skips teardown); AT-01/02/04 now disable ramp assist for the case and restore it afterward, a failed restore marks the run TAINTED (`21195261`); B7 `ZONE_GRAPHIC` now has the read-only case WEB-ZONE-14 (`cceabd17`, full suite only; its judge PASSED by hand against the live `GET /api/zones` on 2026-10-03, the full-suite run is still pending). The other two still need a run on hardware. | `docs/BENCH_TEST_SYSTEM_PLAN.md`; `docs/BENCH_TEST_LOG.md` |
-| **M** | **Edit the running profile mid-firing, from the web UI -- owner request 2026-09-18. DELIVERED 2026-09-19**: `live_profile_page.html`, five ADMIN routes in `profiles_live_http.c`, fork-on-edit, HARD-mode validation, executor pickup, end-of-firing prompt, shared duplicate-name refusal. The LCD Edit-firing page and the LCD end-of-run Discard/Save as/Overwrite page also landed, bench PASS 2026-10-01 (LCD-22..25: live edit adopted by a running firing, decide page, heap floor). Pending bench items: delete the stray test profile "LiveEditTest" in slot 0 of the bench board, and decide which of the stored `kiln_auth` record and the bench env-var credentials is authoritative (the 2026-09-21 clean login returned 401). Plan: `docs/LIVE_PROFILE_EDIT_PLAN.md` section 10. | `docs/LIVE_PROFILE_EDIT_PLAN.md` |
+| **M** | **Edit the running profile mid-firing, from the web UI -- delivered 2026-09-19** (detail in `docs/COMPLETED_2026-10.md`; bench PASS 2026-09-29 and 2026-10-01). Pending bench leftovers only: delete the stray test profile "LiveEditTest" in slot 0 of the bench board, and decide which of the stored `kiln_auth` record and the bench env-var credentials is authoritative (the 2026-09-21 clean login returned 401). | `docs/LIVE_PROFILE_EDIT_PLAN.md` |
 | **L** | **100 user profile slots plus a live-edit slot -- owner request 2026-09-19.** Done: all 12 plan tasks, including the 2026-09-20 bench migration (new partition table, `cfg` grown to 0x250000, `profiles_http.c` fallback moved out of internal DRAM, guarded by `check_kilnfw_dram_bss_budget.ps1`). Pending: the `cfg` LittleFS volume still has its old 512 KiB geometry on the 2.3 MiB partition until reformatted via `cfgfs_format` / `POST /api/cfgfs/format_confirm`, which is plain admin-login gated since the 2026-09-29 HMAC retirement; no run is recorded. NVS stays authoritative, so this costs unused space, not data. | `docs/PROFILE_SLOTS_100_PLAN.md` |
 
 ### Blocked on hardware that does not exist yet
@@ -109,12 +101,10 @@ open is short:
 |---|---|---|
 | S | Time the firing abort (30 s) with a stopwatch during a real running firing — the 1.5 s staleness ceiling was bench-verified 2026-09-06 (`LINK_PROTOCOL.md` §8) with no firing needed | M6 |
 | M | S9's welded-contactor escalation — by definition needs a welded contactor. **Checked 2026-09-03: SimFW cannot do this — SimFW itself no longer exists** (removed `8553244`, 2026-08-28; `firmware/UnitTestFw` took its place and is unrelated ESP32-S3 bench-instrument firmware — DAC/AD9833/OLED/PCF8575 — with no path to the safety processor's current-sense input at all). Even when SimFW existed, its own removal commit records that `ct_calibration` "needs the fixture to physically drive current into the CT" — S9 (`firmware/SaftyFW/src/safety_guards.c:363-389`) latches only on real `any_current_present`, gated by `in->context_valid`, `in->current_sensing_commissioned` and NOT `in->current_sensing_disabled`; that flag comes from the CT's analog current-transformer signal through `current_sense.c`, not a GPIO a simulator MCU could assert. What would actually be required: a fixture that injects genuine AC current through the CT sense loop while the K4 drive line is confirmed de-energized — i.e. a hardware jig, not firmware simulation — plus a CT actually fitted and commissioned (`ct_installed=yes`; this was `ct_installed=no` on the bare bench as of the checked date above). **Corrected 2026-09-18, then superseded the same day by the CT-summed-topology fix:** the board reads `ct_installed=1` (channel 2's summed CT fitted and calibrated, per the CT-commissioning bench check at the top of this file); `s_current_sensing_commissioned` used to require all three `k_ct_v_per_a` entries greater than zero regardless of topology — a deliberate decision at the time, but one that permanently blocked any SUMMED-topology board (only one CT, wired to channel 2) from ever reporting commissioned. It now instead requires `k_ct_v_per_a > 0` only on channels that are actually fitted for the board's topology (`config_store_current_sensing_commissioned()`, `firmware/SaftyFW/src/config_store.h`), landed together with masking `any_current_present` to fitted channels only (channels 0/1's idle ADC noise must not count) so the unclearable S9 latch cannot arm off noise. **S9's `TRIP_INEFFECTIVE` is now armable on this board for the first time** — this is a live change to the bench's safety posture, not only to source, once flashed: a welded-contactor exercise here can now actually latch S9, independent of the fixture-availability question above. | M4 |
-| M | AP-fallback verified end to end (the 2026-10-02 attempt came back INCONCLUSIVE; needs a router with correct *and* deliberately-wrong static config; the second AP itself is no longer the gap — `docs/BENCH_HOTSPOT.md`'s bench hotspot, 2026-09-24, provides one — the test has not been run yet) | M6 |
-| M | Per-channel CT-to-jack commissioning and the ADC noise-floor measurement — see the M-size CT commissioning row far above (M5's table), `CT_COMMISSIONING_PLAN.md` steps 0 and 6 | M5 |
+| M | AP-fallback: verified end to end 2026-09-29 (`docs/BENCH_TEST_LOG.md` Test B). Remaining scenario: a router with deliberately-wrong static config (`docs/BENCH_HOTSPOT.md`'s bench hotspot provides the second AP); not run yet | M6 |
 | M | **HW changes:** relay status LEDs for K1–K4/S9, distinct connector types for the thermocouple daughterboards, I2C broken out on an expansion connector. (LCD backlight control's flying wire is fitted and confirmed — see M1, closed 2026-09-04.) | M1 |
 | S | **Blocking, before the MSP4031 touches J2 at all**: meter module pins 10/12 (CTP_SCL/CTP_SDA) at 5V — confirms or clears a hazard that can back-feed the SX1509/ESP32-S3 through the shared I2C bus. `DISPLAY_ST7796_PLAN.md` §4 | M1 |
 | M | DEBUG header and GP16/GP17 access before A1 is soldered down | M0 |
-| L | Field updates exercised against real hardware — see the M-size "Field-update hardware exercise" row above (consolidated 2026-09-14 roadmap truth-up, was a duplicate): ESP half done; the Pico half's 2026-09-06 interlock refusal is superseded by the 2026-09-18 attempt, which reached the erase phase and failed there on an RP2040 watchdog reset | M8 |
 | L | `GUARD_TEST_MATRIX.md` §3 — every enabled guard's real trip, safe-state power-on, sensor open-circuit, current-mapping commissioning | M4 |
 
 ---
@@ -402,7 +392,7 @@ Owned by [`tools/PcTools/TODO.md`](tools/PcTools/TODO.md). Worth doing early pre
 because it is what turns later hardware questions into a script instead of a
 soldering session.
 
-- [~] **Known-good config presets, so a test always starts from the same
+- [x] **Known-good config presets, so a test always starts from the same
       board** (owner request, 2026-08-28): factory-default then load a named
       config as one step, so a run is reproducible instead of depending on
       whatever the last session left behind. Presets live as DATA under
@@ -425,7 +415,7 @@ soldering session.
       applies only on an explicit `use_ct_map_backup=True`. Readiness still
       reports "Safety processor commissioned" as not-done, correctly, until
       the CTs are fitted and the zone current-sweep derives the real map
-- [~] **Live-bench regression suite built on that preset** (2026-08-28):
+- [x] **Live-bench regression suite built on that preset** (2026-08-28):
       `tools/PcTools/tests/bench_fixture_session.py` +
       `tests/conftest.py` turn "start from `bench_fixture.json`, confirmed
       loaded" into a pytest fixture, and
@@ -570,7 +560,7 @@ soldering session.
       comes from the operator's brightness setting. Not yet confirmed by
       meter/eye that the panel actually dims — that's the next check, not a
       firmware gap. Full buildup history in `docs/COMPLETED_2026-09.md`.
-- [~] **Second LCD panel (ST7796/MSP4031), auto-detection, display SPI
+- [x] **Second LCD panel (ST7796/MSP4031), auto-detection, display SPI
       async/DMA.** `firmware/KilnFW/docs/DISPLAY_ST7796_PLAN.md`, sequenced
       Phase 0 (bench facts/hazard measurement) through Phase 7 (UI). Phases 1
       (single-owner cleanup, bounded SPI-owner timeout — also closes
@@ -611,7 +601,7 @@ soldering session.
       independently (`KILNCTL_TOUCH_FT6336U`). ST7796 RDDID reads `0x00 0x00
       0x00` like the ILI9488 — MISO undriven — so `id_matches` stays NULL
       permanently on both and Phase 4 is inert by design, not by omission.
-      **Still open:** a residual blue bias, with every firmware cause
+      **Moved to the owner table (display items, 2026-09-04 row):** a residual blue bias, with every firmware cause
       eliminated by measurement (camera response refuted by a neutral
       off-screen bezel sample; RGB565 field boundaries unit-tested against
       known values; LVGL double-swap ruled out; blit paths compiled out; SPI
@@ -620,7 +610,7 @@ soldering session.
       characteristic needing the owner's eye, a colorimeter or a second unit,
       not more firmware. Touch corner accuracy CLOSED 2026-09-04 (`f028e2f`
       — Y was mirrored, `KILNCTL_TOUCH_CAP_INVERT_Y` now defaults on).
-      Still open: the 5V I2C hazard measurement. Rendering can now be
+      The 5V I2C hazard measurement is likewise in the owner table. Rendering can now be
       checked without a person at the bench
       via `tools/PcTools/scripts/capture_lcd.ps1` (`5fd9761`) — sample pixels
       numerically, never by eye, and always include an off-screen reference.
@@ -703,12 +693,12 @@ link, so it can run in parallel with M1 and M2 once M0 is out of the way.
       off". An absent TC on those channels would fault. The two sets of
       thermocouples are easy to conflate from this line alone, and doing so
       leads to "correcting" a true statement
-- [~] MAX31856 driver + config plumbing (tc_type via flash-backed
+- [x] MAX31856 driver + config plumbing (tc_type via flash-backed
       `config_store`, commissioned over `SAFETY_CMD_SET_CONFIG`) built and
       wired end-to-end in code (2026-08-19). ~~The part itself is not
       physically populated~~ — **fitted 2026-08-24 and reading correctly.**
-      **Still open**: there is no LCD/web commissioning surface yet, and the
-      four no-default section-1 fields remain unset, which is what keeps
+      The LCD/web commissioning surface landed in M12 (CLOSED 2026-08-28). The
+      four no-default section-1 fields are per-board commissioning values, not code; until set they keep
       `commissioned: false` and leaves S1's ceiling disabled
 - [x] 13 of 13 guards (`SAFETY_MODEL.md` §4) implemented as pure functions and
       host-tested against synthetic inputs. **S8 (rate-of-rise), the last
@@ -856,7 +846,7 @@ Owned by [`firmware/SaftyFW/TODO.md`](firmware/SaftyFW/TODO.md) phases 6–8, co
       **Hardware-verified 2026-08-24**: the Pico is on the bench, the link is
       up, and `context_valid` is computed from frames that actually arrive.
       The "no Pico on this bench" caveat this bullet used to carry is retired
-- [~] Pico → ESP telemetry (status, diagnostics, firmware version, trip events,
+- [x] Pico → ESP telemetry (status, diagnostics, firmware version, trip events,
       power) — all five frame types have working codecs, send paths, and
       `KilnFW`-side decode/dispatch, plus PC-facing `GET_DIAG`/`GET_TRIP_EVENT`
       subcommands (2026-08-18–19). **Now hardware-verified (2026-08-23/24)**:
@@ -901,15 +891,13 @@ because it changes what a bare main board will do.
       half is still unverified**: nobody has held the link down with a
       stopwatch to confirm the 1.5 s ceiling and the 30 s firing abort fire
       when they should. That is a bench procedure, not a code gap
-- [~] GUI (web + LCD) surfaces safety temperature, enclosure temperature, and
+- [x] GUI (web + LCD) surfaces safety temperature, enclosure temperature, and
       power — built and wired to the same status cache the wire frames land
-      in. **The reason for the blanks changed on 2026-08-24 and the
-      distinction matters**: frames now arrive every 500 ms, so this is no
-      longer "no Pico has ever sent them". Safety temperature reads null
-      because the safety MAX31856 is genuinely not populated (M3), and the
-      three current channels read 0.00 A because no CT is fitted. Both are
-      honest reporting of absent hardware, not a code gap and no longer an
-      M0 consequence
+      in. Frames arrive every 500 ms. The safety MAX31856 was fitted
+      2026-08-24 and reads live (M3), so safety temperature is a real value; the
+      current channels report the CT hardware actually fitted (one summed CT
+      on channel 2 since 2026-09-05) and read 0.00 A where none is, which is
+      honest reporting of absent hardware, not a code gap
 - [x] **AP-fallback end to end, PASSED 2026-09-29** (`docs/BENCH_TEST_LOG.md`
       Test B): home network made unreachable (forget + forced mode-cycle —
       `wifi_forget` on the associated SSID does not itself force a
@@ -991,11 +979,10 @@ path. Two facts set the shape of this milestone:
       lockout (2026-08-17)
 - [x] Both update paths refused unless idle and cool, with the specific
       blocker named (2026-08-17)
-- [ ] Link-loss heating block **not** bypassed during a Pico update — now
-      **2026-09-21 SKIP note:** hardware-exercise attempt checked the premise first -- the bench Pico runs a flat image (two-slot bootloader install is owner-gated NO-GO per `docs/PICO_AUTO_UPDATE_PLAN.md` section 1), and the board's own `ota_status()` history shows the last Pico relay attempt already refused structurally (`REFUSED_RUNNING_IMAGE_OVERLAP`) before reaching the data phase, so no update -- and therefore no link-loss window -- can be pushed on this fixture today. No board state changed. Full record: `docs/COMMISSIONING_TEST_MATRIX.md` "Link-loss heating block during a Pico update -- 2026-09-21 hardware exercise (SKIP)".
+- [ ] Link-loss heating block **not** bypassed during a Pico update —
       pinned in CI on both sides (2026-09-04), still OPEN as a
       hardware-exercise item (a test suite is not a substitute for running a
-      real update on a real board):
+      real update on a real board; hardware-gated):
       - KilnFW side: `firmware/KilnFW/App/test/test_safety_link_compile.c`
         now links the REAL `relay_authority_on_blocked()` (App/drivers/
         relay_authority.c — previously stubbed everywhere else in the host
@@ -1026,6 +1013,7 @@ path. Two facts set the shape of this milestone:
         — so `SAFETY_TRIP_LINK_DEAD` latches, polling the relays throughout)
         and the slot image is built. The only missing thing is that the
         update cannot reach the data phase at all.
+      - **2026-09-21 SKIP note:** hardware-exercise attempt checked the premise first -- the bench Pico runs a flat image (two-slot bootloader install is owner-gated NO-GO per `docs/PICO_AUTO_UPDATE_PLAN.md` section 1), and the board's own `ota_status()` history shows the last Pico relay attempt already refused structurally (`REFUSED_RUNNING_IMAGE_OVERLAP`) before reaching the data phase, so no update -- and therefore no link-loss window -- can be pushed on this fixture today. No board state changed. Full record: `docs/COMMISSIONING_TEST_MATRIX.md` "Link-loss heating block during a Pico update -- 2026-09-21 hardware exercise (SKIP)".
 - [x] **An ESP-driven Pico OTA cannot reach the data phase — observed on real
       hardware 2026-09-18, FIXED the same day by `e59b0328`; only the hardware
       exercise remains.** The fix erases the Pico's destination slot in 4K
@@ -1214,7 +1202,7 @@ fired (incident of that day, `docs/BENCH_TEST_LOG.md`, cause still unproven).
 counters in `safety_link.c`, reported on the existing `GET /api/safety/commissioning`
 route (`fault_source_edges`, `fault_source_counts`, no new URI) and rendered by
 `safety_get_commissioning`; read it before clearing any S6a that did not follow a
-dual reflash. Not yet flashed to the bench board.
+dual reflash. ~~Not yet flashed to the bench board.~~ Flashed since (ancestor of `eb83c1ac`, the build the bench ran 2026-10-01).
 
 ## M14 — Verification you can trust · *opened and CLOSED 2026-08-28*
 
@@ -1278,7 +1266,7 @@ Full detail, numbers and bars: [`docs/HW_ABSTRACTION.md`](docs/HW_ABSTRACTION.md
 
 ---
 
-## M17 — The zone graphic: configuration you can look at · *opened 2026-09-18; stages 1 and 3–5 landed*
+## M17 — The zone graphic: configuration you can look at · *opened 2026-09-18; all five stages landed, Stage 2 not hardware-verified*
 
 An owner request, and a specific kind of instrument rather than decoration. At
 the top of the **web** zones page sits a cartoon of a stacked kiln — octagonal
@@ -1601,8 +1589,7 @@ Owner instruction, 2026-09-21.
   wait, bounded, for that request to complete
   (`Network.requestWillBeSent`/`loadingFinished`) before screenshotting and
   teardown, with a bounded network-quiet wait for rows declaring none.
-  Unit-tested only — **W30 needs a live re-run to confirm the write now
-  lands.** No board defect
+  Unit-tested only at this point; no live re-run of W30 is recorded in this file (check `docs/BENCH_TEST_LOG.md` before relying on the write landing). No board defect
   found; uptime rose monotonically with no trip/reboot/firing throughout.
   Full detail, per-row evidence, and defect writeups:
   `docs/BENCH_TEST_LOG.md`'s "M18 web-interface class, first LIVE run"
@@ -1690,7 +1677,7 @@ Owner instruction, 2026-09-21.
   create/delete/favorite) wired into `web_commission_row.py`
   (`23434e2d`, `f5a793ce` -- the latter fixing a W9 cleanup gap where a
   failed-looking create can still land on the board). `ROWS` now covers
-  30 of 51 runbook rows. W8/W9/W10/W50 are wired but not yet run live.
+  30 of 51 runbook rows. W8/W9/W10/W50 are wired; W8 and W50 later PASSED live 2026-09-22 (entries below), W9/W10 are still waiting on the owner's go-ahead after a classifier refusal.
   W42 stays FAIL, pending the `kiln_cfg_swap` stack-overflow fix
   (`76b78802`, in review) -- see the kiln_cfg_swap entry below.
 - **kiln_cfg_swap stack overflow, found live 2026-09-22**: a live W42
@@ -1794,9 +1781,6 @@ Owner instruction, 2026-09-21.
   `502e69a5`; `KILNCTL_HOST=192.168.1.156` is now set in User scope.
   `0956c0d1`/`06ac13cd` add a device-side log line when the login endpoint
   refuses with 429.
-- `KILNCTL_AP_PASSWORD` is still unset, so `flash_firmware()` cannot clear
-  `boot_guard` (count sits at 2).
-- **2026-09-22 correction:** `KILNCTL_AP_PASSWORD` is set in User scope (verified via `[bool][Environment]::GetEnvironmentVariable(...)`); the "still unset" line above is stale. Log evidence: the `7dcde0dd` reflash this same day reported `boot_guard_reset` verified (see the kiln_cfg_swap entry above), so the counter has cleared at least once; whether it is clear as of the latest reflash (to `63a48ab3`, which did not report a boot_guard result) is not yet observed.
 
 **Owner decisions open, 2026-09-21:**
 
@@ -1814,496 +1798,21 @@ Owner instruction, 2026-09-21.
    `zones_cfg`/config-schema rollback hazards documented in CLAUDE.md. Still
    open.
 
-**2026-09-23 pending, all blocking the bench reflash + commission pass:**
+**M18 items still open** (the rest of the 2026-09-21..2026-10-04 narrative, all landed, is in
+`docs/COMPLETED_2026-10.md`, "M18 commissioning narrative"):
 
-- [x] Pin the bench's hand-set `sdkconfig` values in `sdkconfig.defaults`
-  (Wi-Fi static RX buffers 10, BA window 6, lwIP OOSEQ pbufs 4;
-  `GPIO_PROBE` pinned unconditionally, no `DEV_AFFORDANCES`-style symbol
-  exists to gate it on) — done, 2026-09-23 (`a513aa75`, watched-key coverage
-  `0a8db924`).
-- [x] Stale published `build/`/`sdkconfig` sibling guard in the stack-budget
-  checkers, plus a `build_kilnfw()` refresh — done, 2026-09-23
-  (`91477e4c` fix, `b9f574d3` wired the regression test into
-  `run_all_checks.ps1`, `5a72eb50` skips the refresh when ninja did not
-  relink).
-- [x] `check_00_kilnfw_target_build.ps1` publishes `bootloader.bin`/
-  `partition-table.bin`, not just `KilnCtrl.elf`/`.bin` — done, 2026-09-23
-  (`d23d4eae`, freshness-gate fixes `51ae1ce0`/`ad2ee170`) — closes the
-  second bench-commission gap noted in the twenty-ninth sweep above.
-- [x] OTA transient task handles: `vTaskDelete` on the ESP rollback task,
-  idempotent `stack_margin_register` — done, 2026-09-23 (`95be3327`,
-  opus-review fixes `22fcc257`/`24e59726` comment-only follow-up).
-- [x] Bench ESP reflash — done, 2026-09-23: `9c26dd91`, `nvs` erased, web
-  auth re-bootstrapped, readiness 16 ok / 2 not_done / 3 other. See the
-  top-of-file entry above for findings (D2-D5).
-- [x] Bench Pico reflash — done, 2026-09-24: `6bb41fe1` (SaftyFW build
-  `d6309f4a`) via `debug_program(peer="pico")` after the owner reseated the
-  CMSIS-DAP probe.
-- [x] `estop_verified` closed end to end, 2026-09-24 — S7 latched, verified,
-  cleared, and recorded via the new `estop_verify` MCP tool (`fc16c186`,
-  `055703af`). Class C heat/firing commissioning rows are now unblocked —
-  not yet run.
-- [x] First real-hardware bench_test heat/LCD/stack/web suite runs, 2026-09-24
-  — see the top-of-file entry above and `docs/BENCH_TEST_LOG.md`. Every FAIL
-  traced to the runner, not firmware; fixes landed same day.
-- [x] Fix LCD-01/08/09/14/16 judge/navigation defects — done, 2026-09-24
-  (`0df96d5d`). Further review-fix chain landed 2026-09-25: `d4e7ff29`/
-  `f40e8d37` (harness, `cases_lcd.py`) and `0ef18917`/`466b29b2` (firmware,
-  PIN keypad key-height regression and an LVGL-off-task call fix -- **not
-  yet flashed to the bench**, ESP still `111b1b6f`). **Rerun done
-  2026-10-01** (`20261001T155811Z_lcd`, ESP `eb83c1ac`, defaults, no heat): LCD-08/09/14/16/21
-  PASS, LCD-01 and LCD-19 INCONCLUSIVE (camera exposure/cast; LCD-19 stop_gated
-  not exercisable without `allow_heat`), the rest NOT_RUN (not_implemented or
-  precondition absent); no FAIL. **Full rerun with heat opt-ins, 2026-10-01** (`20261001T183355Z_lcd_lcdsuite3`,
-  `90fc6658`+`e52f256d`): LCD-08/09/14/16/19/21/22 PASS (LCD-16 rewind fix confirmed,
-  7/7 pages; LCD-19 stop_gated and LCD-22 exercised), LCD-01 INCONCLUSIVE (camera cast), no FAIL.
-- [x] Fix the SK-01/02 noise-tolerance/fw_commit-gate issue — done,
-  2026-09-24 (`866003ea`; plan-note follow-up `9d905ab9`). Stack suite re-run 2026-10-04 on `a1232077`
-  (`20261004T021004Z_stack`): SK-03 and SK-04 PASS, SK-01 and SK-02 INCONCLUSIVE
-  (no baseline records yet). **Owner step pending:** capture baselines with
-  `tools/PcTools/scripts/capture_stack_margin_baseline.py` (writes tracked files).
 - [ ] Open, 2026-10-01: after a double ESP reset the first reset left the board
   unreachable over UART and HTTP for minutes, then an S6b (reason 7) trip latched
   (cleared once with owner authorization, stayed clear). Likely a stale host
   serial session; not established. Reproduce with a live-log capture before
-  changing firmware. `info_uart_bridge`'s 176 B free-margin drop on
-  `eb83c1ac` is not a code change (static review 2026-10-03): `111b1b6f..eb83c1ac`
-  touched `uart_bridge_info.c` only for the 3584 -> 4096 stack literal and
-  comments, and no callee on the task's path (`uart_protocol_*`, `uart_log_bridge.c`,
-  `stack_margin.c`) changed. Same-build high-water spread (1624 fresh vs 1496 B
-  later; used 2480 vs 2544 B idle, 2608 vs 2608 B mid_firing across the two
-  baselines) is runtime path depth (ESP_LOGW under log-queue pressure), already
-  absorbed by SK-01's 384 B tolerance; the static ceiling is
-  `check_all_task_stack_budgets.py`'s `info_uart_bridge` row (2208 B).
-- [x] Capture the `idle`-load stack-margin baseline at the currently running
-  commit — done, 2026-09-24 (`5c44ae95`,
-  `docs/stack_margin_baseline/stack_margin_idle_111b1b6f_20260924T175921Z.json`).
-- [x] Capture the `mid_firing` and `web_ui_open` stack-margin baselines at the
-  currently running commit (`111b1b6f`/`6bb41fe1`) — done, 2026-09-24
-  (`e18c645d`; `web_ui_open` had never been committed before, so this is its
-  first baseline, not a recapture). Only `kiln_io_owner` shrank more than
-  256 B against the `75a5e459` mid_firing baseline (2708 to 2100 B free, still
-  OK). Both files record `profile_executor` at CRITICAL (468 B of 4096 B
-  worst-since-boot) during the firing; a stack raise is dispatched. **Raised
-  2026-09-24 (`b1f6c127`):** `profile_executor`'s declared
-  stack 4096 -> 6144 B (`profile_executor_start.c`, INTERNAL DRAM -- this task
-  writes NVS on its tick path and cannot use a PSRAM stack). `info_uart_bridge`
-  (976 B/3584 B, 27.2%) and `lvgl` (1968 B/8192 B, 24.0%) also read LOW in the
-  same two captures but both sit above the 15% CRITICAL threshold, so neither
-  was raised. `check_executor_task_stack_budget.py`'s own static-path model
-  moved from 940 B/22.9% (LOW) to 3148 B/51.2% (OK) at the same measured
-  deepest path (1776 B, unchanged); DRAM impact is +2048 B of internal-heap
-  task-stack allocation at runtime, not a `.dram0.bss` change (the stack is
-  allocated dynamically by `xTaskCreatePinnedToCore`, not a static array) --
-  `check_kilnfw_dram_bss_budget.ps1` still passes at the same static `.bss`
-  figure (97256 B of a 101000 B ceiling).
-- [x] Raise the `info_uart_bridge`/`lvgl` LOW margins noted just above --
-  done, 2026-10-01 (`eb83c1ac`, Opus-reviewed): `lvgl` 8192 -> 10240 B
-  (internal DRAM; its UI pages write NVS), `info_uart_bridge` 3584 ->
-  4096 B (PSRAM). `adaptive_tune_zones[]` (2700 B) moved to PSRAM via
-  `EXT_RAM_BSS_ATTR` to fund the internal-DRAM half; net `.dram0.bss`
-  99672 -> 99016 B against the 101000 B ceiling (1984 B headroom). Flashed
-  and bench-verified same day: `get_stack_margin` now reads `lvgl`
-  4640/10240 B free (45.3%) and `info_uart_bridge` 1624/4096 B (39.6%),
-  both clear of the 15% CRITICAL threshold. Full detail:
-  `docs/BENCH_TEST_LOG.md`'s "lvgl/info_uart_bridge stack raise" entry.
-- [x] LCD-19 FAIL on run `20260924T180332Z_full` ("Start tap after the LCD
-  timeout did not raise the PIN keypad", `keypad_raised=false`) root-caused
-  2026-09-24 as a runner defect, not firmware: `_wait_for_overlay_names(present=True)`
-  in `cases_lcd.py` exits on any non-empty tap-target set, and the home
-  page's own buttons satisfy it before LVGL processes the click (the case ran
-  0.92 s against a 2.0 s timeout). Firmware force-lock-on-enable
-  (`ui_lcd_lock.c`, `security_backend_web_auth.c`) is correct. Fix (a
-  baseline-then-changed wait) has landed: `_wait_for_overlay_names()` in
-  `cases_lcd.py` takes a `baseline` and waits for the set to change (on main at
-  59c9306a). **Bench rerun 2026-09-30** (`20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`):
-  still INCONCLUSIVE -- "could not exercise: wrong_pin_refused, right_pin_started,
-  stop_gated" even with `KILNCTL_LCD_PIN` set, so the original NOT_RUN/missing-PIN
-  case is ruled out but the case still can't complete; under investigation, not
-  chased further in that run. Same rerun also surfaced a new LCD-16 FAIL
-  (`click_by_name('settings')` -> `not_found`), unrelated to any fix under test
-  here; also under investigation. **Reran again 2026-09-30** against harness
-  `7550fdf6` (LCD-19 follow-up fixes `1ae70883`/`fab4f456`/`7550fdf6`) on the
-  bench board at ESP `50edd830` (`KilnCtrl-6c9152cebb9d`), Pico `405d3c54`:
-  `20260930T073410Z_lcd_lcd_rerun_0930_7550fdf6` and a same-day
-  `20260930T073503Z_lcd_lcd_rerun_0930_7550fdf6_r2` -- LCD-16 now PASS (7
-  pages, no retries; the prior `settings` not-found FAIL did not recur) and
-  LCD-14 PASS, but **LCD-19 FAILed both runs with a new failure shape**: every
-  PIN digit tap returned `ok` for both the wrong PIN and the correct PIN,
-  `wrong_pin_refused=true` (correctly refused), `start_click_result=ok`, but
-  `right_pin_started=false` -- the firing never actually started after the
-  correct PIN was accepted. No `page_before`/`navigate_home` evidence was
-  recorded either run. This is a different failure shape from both the prior
-  `keypad_raised=false` FAIL and the `59c9306a` INCONCLUSIVE -- root cause not
-  yet found; board was left idle both runs, no trip, no crash. **Harness
-  fixes landed 2026-09-30** (`46d9726d` waits for a stable, digit-bearing
-  keypad read before typing a PIN; `b2cf2f89` adds `enter_pin_verified()` to
-  `ui_test_client.py`, verifying each PIN digit was actually applied before
-  typing the next, and only reports `wrong_pin_refused=True` when the
-  OK+Cancel dialog is present and its dots are cleared) -- pushed to
-  `origin/main`. **Bench reran against `b2cf2f89`** (firmware build "Sep 30
-  2026 01:50:10"), three runs: `20260930T103536Z_lcd` FAILed with "keypad not
-  raised" after the LCD's own idle timeout, suspected a harness race
-  (`_wait_for_overlay_names` has no raised-then-closed detection), fix in
-  progress; `20260930T103634Z_lcd` INCONCLUSIVE with only `stop_gated`
-  missing -- wrong PIN refused, right PIN accepted, all 6 digits verified,
-  but the case never presses the Confirm Start dialog, so the executor stayed
-  idle throughout; `20260930T103752Z_lcd` INCONCLUSIVE on
-  `keypad_closed_before_entry`. Board stayed healthy across all three (armed,
-  no trip, no reboot, no crash). Three gaps remain: (1) `stop_gated` is
-  structurally unreachable today -- `pin_cfg`'s `firing_active_with_lock`
-  condition is never set because LCD-19 never presses Confirm Start, so no
-  firing is ever active to test stopping; needs an owner decision on whether
-  the case should press Confirm Start or on another way to arm that
-  precondition. (2) The raise-detection race in `_wait_for_overlay_names`
-  (harness fix in progress). (3) The keypad's own self-close cause is
-  unknown -- candidates in `ui_lcd_lock.c`'s `tick_timer_cb` (inactivity
-  expiry, policy disabled, an unlocked->locked edge, or
-  `ui_lcd_lock_force_lock`) -- needs a serial log capture on COM14 during a
-  rerun to narrow down. **Harness fix landed 2026-09-30** (`4754e91f`): the
-  keypad-raise poll now uses a tail-based FAIL judgment (FAIL only when the
-  last 2 reads after the last empty/truncated read are identical, real,
-  non-truncated and not the keypad), fixing gap (2) above; a keypad that
-  raised then closed now reads INCONCLUSIVE with `keypad_raised_then_closed`
-  recorded instead of a false FAIL. Reruns on `4754e91f`, firmware `9b77e2b2`
-  (built 2026-09-30 08:49:24Z), `allow_heat=False`: `20260930T185935Z_lcd`
-  INCONCLUSIVE with only `stop_gated` unexercised (keypad raised, wrong PIN
-  refused, right PIN started); `20260930T190017Z_lcd` INCONCLUSIVE with
-  `keypad_raised_then_closed=true`, reproducing gap (3) on hardware -- the
-  keypad raised ~1 s after the Start tap then the home screen returned, with
-  no `ui_lcd_lock` line in the serial log during that window. Board healthy
-  both runs. **Keypad self-close root-caused and fixed 2026-09-30**
-  (`7a71229b`): `ui_lcd_lock.c`'s `tick_timer_cb` force-locked every tick and
-  set `s_was_locked=false` while the lock policy was disabled, so the first
-  tick after the policy was re-enabled saw a spurious unlocked->locked
-  (relock) edge and closed the keypad the tap had just raised as its own PIN
-  gate -- the relock edge now excludes a keypad it raised itself; prompts and
-  confirm dialogs still close on relock (owner 2026-09-28 decision,
-  unchanged), and every lock-driven close now logs its reason. Flashed to the
-  bench from a clean worktree, verified, ELF archived
-  `KilnCtrl-95f9e0e194e1.elf`, boot_guard persisted 0/0, no trip.
-  `stop_gated`'s opt-in firing landed the same day (`aaae0a23`): a new
-  `lcd_stop_heat` mode (runner/MCP param, `bench_test.ps1 -LcdStopHeat`) lets
-  the case start a short API-started BENCH_HP firing so `firing_active_with_lock`
-  is actually set; teardown verifies idle and relays off, and reasons are no
-  longer clobbered. Harness commit `4ecadec6` also fixed
-  `_wait_for_home_settled` to judge on target-present/Cancel-absent over
-  consecutive reads (min 2.5 s) instead of full name identity, since the
-  Elapsed label changes every second; it accepts a truncated read containing
-  the target and logs every read. Three bench runs followed: `20260930T200715Z_lcd`
-  (old firmware, harness `aaae0a23`) INCONCLUSIVE -- the post-heat home page
-  never settled, cleanup verified; `20260930T203132Z_lcd` (firmware
-  `7a71229b`, harness `4ecadec6`, `allow_heat=False`) INCONCLUSIVE by design
-  (`stop_gated` needs heat) but confirmed the wrong PIN is refused, the right
-  PIN starts, and the keypad no longer self-closes; `20260930T203243Z_lcd`
-  (`allow_heat=True`, `lcd_stop_heat=True`) INCONCLUSIVE -- PIN flow correct,
-  firing started, relock correctly closed only the open confirm dialog (device
-  log: "LCD relock edge: closed open confirm dialog"), but all 20 post-relock
-  home reads showed `Plan` rather than a `Stop` target, so Stop was never
-  tapped; the ~13.7 s firing ended clean, teardown verified idle/relays off,
-  no trip, no reboot. Full detail: `docs/BENCH_TEST_LOG.md`'s 2026-09-30
-  section. Still open: why the post-heat home page shows `Plan` instead of
-  `Stop`, diagnosis in progress. **Root-caused and fixed 2026-09-30**
-  (`e388752c`, Opus-reviewed): `UI_TEST LIST_TAP_TARGETS`'s ~253-byte reply
-  truncated all 20 `allow_heat_settle_reads` polls before reaching the home
-  page's merged Start/Stop button -- the walk order put the WiFi label,
-  temperature readings, and the chart legend (`Plan`, not a button) first.
-  The confirm dialog the relock closed was a stale Confirm Start from the
-  earlier right-PIN sub-check (intended relock behavior, not a bug). Fix:
-  `log_all_tap_targets` (`kiln_ui.c`) now walks each group twice, actionable
-  targets (`lv_button` and its subclasses, including list rows and msgbox
-  footer/header buttons) before non-actionable ones, overlay-first group
-  order unchanged; the harness also dismisses a stale Confirm Start via
-  Cancel before the API-started firing (`allow_heat_pre_start_dismiss`).
-  Flashed to the bench from a clean worktree at `e388752c` (an earlier
-  worktree's `build/` lacked `build_info.h` and was correctly refused as
-  stale; rebuilding and reflashing verified OK), ELF
-  `KilnCtrl-5384de5815b4.elf`, boot_guard persisted 0/0, no trip. Bench runs:
-  `20260930T212112Z_lcd` (`allow_heat=False`) INCONCLUSIVE by design
-  (`stop_gated` needs heat), wrong PIN refused, right PIN started, settle
-  reads OK; `20260930T212155Z_lcd` (`allow_heat=True`, `lcd_stop_heat=True`)
-  **PASS, exit 0** -- `stop_gated=true`, settle reads now contain
-  `Stop`/`Pause`/`Edit`, Stop click `ok`, `bench_cleanup` verified idle and
-  relays de-energized, no reboot/crash/trip. (Correction 2026-10-03: `lv_keyboard`/`lv_buttonmatrix` was already reported
-  per key by `log_tap_targets()`; the walk now also skips HIDDEN/DISABLED keys.
-  A keyboard's ~33 keys still compete with the 32-entry array and 253 B reply
-  caps.) LCD-19 is now closed/passing. Full detail:
-  `docs/BENCH_TEST_LOG.md`'s 2026-09-30 "LCD-19 root-caused and fixed"
-  section.
-- [x] LCD-09/LCD-16 regression from the `e388752c` LCD-19 fix, found in run
-  `20260930T215921Z_lcd` -- resolved 2026-09-30/10-01. Root cause was not
-  `e388752c`'s tap-target reordering: `kiln_ui_click_by_name()`/
-  `list_tap_targets` dispatch the tap-target walk to `lvgl_port_task` with a
-  300 ms wait (`UI_WALK_WAIT_TIMEOUT_MS`), and a timeout on a busy UI task
-  returned `n=0`/truncated, which the PC side reported as `not_found` rather
-  than "walk didn't run yet" -- the same symptom reproduced pre-`e388752c`
-  (run `20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`, firmware `8ed37d8d`),
-  ruling out that fix as the cause. Fixed in two steps: `82de0234` first made
-  the PC harness retry a `not_found` (2x, 0.15 s pause, counted separately as
-  `not_found_retries`) as a stopgap -- rerun
-  `20260930T234916Z_lcd_harness_retry_verify` got LCD-16 to PASS but left
-  LCD-09 INCONCLUSIVE (a busy `list_tap_targets` read against the topbar
-  anchor, `profiles_count 29` vs `row_count 0`). `232e668f` + `c471101c` then
-  fixed it at the source: firmware gained `KILN_UI_CLICK_WALK_BUSY`/
-  `UI_TEST_CLICK_WALK_BUSY=0x08` (no UART protocol version bump needed, same
-  precedent as OFFSCREEN `0ef18917`), and the PC side gained busy derivation
-  for `list_tap_targets` (count==0 and truncated) via
-  `_list_tap_targets_resolving_busy()`, used by LCD-09/14/16, plus a
-  `walk_busy_retries` counter and host-test source-pattern pins. Flashed
-  `c471101c` 2026-10-01 (ELF `KilnCtrl-39bdbebe1651.elf`, running `app`,
-  boot_guard persisted 0/0, no trip). Verification: run
-  `20261001T011155Z_lcd_walk_busy_verify` -- LCD-08/09/14/16/21 all PASS
-  (LCD-01 INCONCLUSIVE on camera color, LCD-19 INCONCLUSIVE by design, no
-  heat requested; LCD-14/LCD-16 each needed one `walk_busy_retries`); run
-  `20261001T011311Z_lcd_walk_busy_lcd19` -- LCD-19 PASS. Full detail:
-  `docs/BENCH_TEST_LOG.md`'s 2026-09-30/10-01 entries for this regression and
-  its resolution. **2026-10-01 follow-up:** run `20261001T172420Z_lcd_lcd22run` --
-  LCD-19 PASS with `lcd_stop_heat=True` (real firing, Stop PIN-gated); first
-  LCD-22 board run FAILed (`click_by_name('Edit')` -> `not_found` while running);
-  rerun after `e52f256d` PASSed (`20261001T183045Z_lcd_lcd22rerun`). **2026-10-02:**
-  new LCD-23/LCD-24 first run `20261002T013957Z_lcd_lcdedit23_24` -- LCD-23 FAIL,
-  LCD-24 INCONCLUSIVE (harness assumed the Edit page opens on segment 0 and the
-  executor warm start skipped segment 0); rerun `20261002T021747Z_lcd_lcdedit23_24_r2`
-  after `8200e7b1`/`010239ef`/`b7eb48c9` -- both PASS; see
-  `docs/BENCH_TEST_LOG.md`.
-- [x] Profile/autotune same-zone start race fix (atomic per-zone claim,
-  `relay_authority_zone_claim_begin()`/`_end()` reusing `s_heat_claim_mux`) --
-  landed 2026-09-24 (`540b2d72`, host tests in `test_profile_executor_prestart.c`,
-  `test_autotune_engine_prestart.c`, `test_link_watchdog.c`). Confirmed flashed
-  to the bench and reran clean 2026-09-30 (`20260930T043239Z_heat_heat_rerun_0929_773ec669_540b2d72`,
-  HP-01..08 all PASS) -- see the top-of-file entry above.
-- [x] Root-cause and fix the `profile_executor` dwell-fault panic hit by heat
-  run `20260924T085059Z_heat` — done, 2026-09-24 (`3ce065ca` audit, `773ec669`
-  fix, `adc7f65c` comment correction; see the top-of-file entry above).
-  **Rerun done 2026-09-30, PASS:** heat suite `20260930T043239Z_heat_heat_rerun_0929_773ec669_540b2d72`
-  ran HP-01 through HP-08 all PASS, no panic/reboot/trip during the run --
-  first clean 8/8 heat-suite PASS recorded for this fix pair.
-- [x] Add a bench board lock so concurrent heat/mutating runs cannot share one
-  board — done, 2026-09-24 (`d5bfac19`, `759660c2`; see the top-of-file entry
-  above).
-- [x] Stop rebooting on an `exec_mode_state_check()` violation -- done,
-  2026-09-24 (`002e71bd`, review fixes `118beb79`): target builds now latch
-  FAULTED and log instead of asserting; host/debug builds keep the hard
-  assert. See the top-of-file entry above.
-- [x] Narrow `exec_enter_terminal_state()`'s zone-active clear to the IDLE
-  transition only -- done, 2026-09-24 (`4012f8c7` then `fe938ef3`); FAULTED/DONE
-  readers (`force_all_relays_off()`, firing-stats finalize, status JSON, fault
-  clear) all depend on `active` staying set past those transitions. See the
-  top-of-file entry above.
-- [x] Harden the bench board lock -- done, 2026-09-24 (`8e696d78`): serialize
-  reclaimers on an O_EXCL mutex file, publish-then-check ordering on both
-  reader and mutating sides. See the top-of-file entry above.
-- [x] Fix the LCD bench runner click-then-read race and per-frame capture
-  naming -- done, 2026-09-24 (`93355ee9`). **Reran 2026-09-30**
-  (`20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a`): LCD-08/09/14/21 PASS,
-  LCD-01 INCONCLUSIVE on camera exposure/cast (pre-existing limitation, not
-  a firmware defect); no recurrence of the click-then-read FAIL shape this
-  fix targeted.
-- [x] Replace the email forgot-password design with TOTP -- done, 2026-09-24
-  (`84fa2e7b`, owner change); WT-C and WT-D landed; **WT-B landed**
-  (`62f8bd4e`, gesture follow-up `cafc80f3`); WT-A (firmware routes) landed
-  `f5f06dee`..`9708015f`. See the top-of-file entry above.
-- [x] `check_flash_worker_lint.ps1` red over `totp_config.c` -- green on main
-  at `9708015f` (re-run 2026-09-24).
-- [x] **S6a boot-clear one-shot fixed, 2026-09-28 (review find):**
-  `safety_link_frames.c`'s stale-S6a boot-clear latched permanently on the
-  first successful CLEAR_TRIP *send*, not on Pico *acceptance* -- CLEAR_TRIP
-  has no on-wire ACK, and the Pico's `safety_guards_try_clear()` refuses
-  while its own S6a release debounce (200 ms) hasn't yet elapsed, made more
-  likely by `SAFETY_FAULT_MIN_HOLD_MS`'s >=300 ms fault-line hold. A refusal
-  inside that window used to burn the one-shot with a releasable trip still
-  latched. Replaced with a small bounded, spaced retry (3 attempts, 2 s
-  apart, still inside the existing 30 s boot window, anchored to the ESP's
-  own boot rather than the Pico's boot_id/link-up); "confirmed acceptance"
-  is the next DIAG frame simply no longer reading TRIPPED/MAIN_FAULT --
-  the existing gate condition, no new signal needed. All prior guards
-  (S6a-only, `fault_sources==0`, the 30 s window) unchanged. Host-tested
-  (refused-then-retried-succeeds, persistent-refusal-gives-up-after-bound,
-  non-S6a-never-cleared) and negative-tested. Review fix: once a clear has
-  gone out, a DIAG showing the trip gone or any new own-fault-source rising
-  edge closes the window.
-- [x] **Full-precision numeric printing, 2026-09-28 (`04fb2afe`):**
-  `GET /api/zones` and backup export used to print PID gains, `model_k_dc`,
-  `coupling_diag_k_dc` and `coupling_c%u` at `%.4f`, silently rounding a
-  small `Ki` (or other small-magnitude value) to zero on read-back. Both now
-  print at `%.9g`. The narrow MCP writers (`control_set_zone_limits`,
-  `control_set_zone_type`, `control_set_zone_coupling`) no longer zero a
-  small `Ki` on their GET-merge-POST round trip, and OTA-bench PID
-  comparisons are now tolerance-based (`judgments.pid_gains_match`) instead
-  of exact-string.
-- [x] **`tuning_valid` invalidation tolerance, landed (`49b32a24`):** the
-  compare in `zones_http_post_parse.c` that decides whether a re-posted
-  value counts as "changed enough to invalidate `tuning_valid`" used an
-  absolute `0.0001` tolerance, so a small-`Ki` edit (now printed and
-  re-posted at full `%.9g` precision rather than being rounded to zero)
-  could fail to clear `tuning_valid` even though the value genuinely
-  changed. Now a relative tolerance; also carries a magnitude-sweep test and
-  a comment fix from review.
-- [x] **`backup_import` batched NVS save, landed (`c22ff081`, `5d0a2756`,
-  `7b107411`).** The ~61 s import used to issue one NVS save per field as it
-  restored each store; it now uses `_no_save` setter variants for the hot
-  paths with one trailing save per store, a RAM rollback if a mid-batch
-  setter fails partway through, and tracks the Pico's `abs_max_temp_c`
-  ceiling down after import/rollback. **Bench-measured 2026-09-30:** a
-  fresh-export/import round trip (`backup_export()` -> `backup_import()`)
-  completed in 0.80 s (synchronous route), down from the ~61 s pre-fix
-  measurement; readiness unchanged before/after.
-- [x] **Web dashboard: drop the "Previous firing ended" card after a normal
-  or deliberate stop, landed (`fd792793`).** The card now shows only for an
-  *unexpected* end (fault/trip/crash) — a normal Stop or a profile reaching
-  its own end clears it instead of leaving it displayed.
-- [x] **Divergence-triggered stop recorded as FAULTED, landed (`c26df2ce`,
-  `057ca631`).** Was recorded as HALTED with an empty reason; now records
-  FAULTED with a reason. `057ca631`'s review fix keeps a DONE run DONE
-  instead of overwriting it if a divergence appears after completion.
-- [x] **Owner requests, 2026-09-28:**
-  - (a) **Landed (`d484e51a`, `f017b285`):** an "Edit firing" button next to
-    Start/Stop on the web UI opens `/live_profile`, prompting for login
-    first if not already signed in (backend: `profiles_live_http.c`,
-    `docs/LIVE_PROFILE_EDIT_PLAN.md`'s five routes, the `profile_live_*` MCP
-    quartet). **LCD counterpart landed 2026-09-28** (`ebbbd34f`, review fixes
-    `1a40133a`, `e35e1aff`): a live-edit-current-firing LCD page (guarded
-    apply, refresh, heap state; `e35e1aff` clears a stale status line when
-    the idle poll picks up a new firing after the page was opened).
-  - **LCD relock on web credential change, landed 2026-09-28** (`33ecc6d5`,
-    review fix `7783066c`): `ui_lcd_lock_force_lock()` made safe to call from
-    the httpd task, firing a relock edge and gating a pending LCD request
-    when the web password changes underneath an unlocked panel.
-  - **Bootstrap-password gate redirect, landed 2026-09-28** (`da0accac`,
-    review fix `8e3762e0`): fixed bootstrap_password being unreachable on a
-    gated page (regression from `d25d5ccf`'s dashboards-only gate); review
-    fix covers a first-load race and a lost `return=` param.
-  - **`full_board_backup.py` now goes through web auth, landed 2026-09-28**
-    (`91ed5818`): fails the run on any 401 instead of silently continuing,
-    and reports a partial cfgfs restore rather than reporting success.
-  - **Backup-restore false ceiling-divergence trip, fixed 2026-09-28**
-    (`c35e2e8a`, review fix `8f777f1b`): a restore in flight now skips
-    ceiling-divergence enforcement only for the latch, not for heat-off
-    enforcement, which stays active throughout the restore.
-  - (b) A confirm dialog before stopping a running profile, on both the web
-    UI and the LCD — this already existed on both UIs before this round of
-    requests (a prior status line here mistakenly listed it as still
-    pending in `1037c4ff`; corrected). **Landed:** Stop itself now requires
-    login on both UIs, per (c) below. The physical E-stop stays immediate,
-    always available without login, and bypasses both the confirm dialog
-    and the login requirement entirely.
-  - (c) **Owner decision, supersedes the earlier "show login only when an
-    action needs it" request. Landed on both UIs (`48962395`, `d25d5ccf`,
-    `5901b09d`, `89fbe6d6`, `e4c5d7da`):** without login, the web and LCD
-    show only the dashboards. Every other page and action — including
-    Stop — requires login (`/api/profile_exec/stop` moved to USER tier,
-    `/api/board_temps`/`/api/firing_history` to ADMIN; a `59e84b57`
-    follow-up also moved `current_sweep/abort`, `autotune/abort` and
-    `diagnostics/danger/stop` from SAFETY_REDUCE to ADMIN, so those three
-    now need login too — the physical E-stop is the unauthenticated
-    backstop for all of them). The LCD's PIN gate
-    follows the same rules as the web password: the shared
-    `login_backoff` module's lockout/backoff ladder (5/10/30/60/300 s) and
-    the same idle-timeout semantics; the keypad's lockout text now states
-    the actual wait ("Wrong PIN -- try again in Ns"). Setup/AP
-    provisioning, the bootstrap-password flow, TOTP reset, and the LCD
-    reset touch sequence stay reachable without login, since they exist to
-    recover access in the first place. `/wifi`/`/networks`/`/scan` are a
-    separate, narrower case: open only while the board is unprovisioned
-    (`59e84b57`, `f3991c09`), ADMIN once provisioned, matching the
-    captive-portal first-time-setup requirement.
-  - **Wi-Fi AP fallback with auto-reconnect, landed 2026-09-28** (`8746e02d`,
-    fixes `f4675a7e`/`ddebcf8c`, review fix `be7bcad4`): falls back to AP mode
-    on home-network loss, reconnects when no web user is logged in. Owner
-    decisions: keep the 30 s probe cadence while a user is logged in; with
-    auth off, the AP stays up while any station is connected to it, not just
-    while a user is logged in. `59e84b57`/`f3991c09`'s `/wifi` setup-tier gate
-    (open only while unprovisioned) landed the same day and is unaffected.
-  - **Fix, 2026-09-29:** `ap_teardown_should_defer()` deferred AP teardown for
-    ANY active admin session, including a LAN-only one (e.g. the PC's own MCP
-    tools reaching the board over the home LAN) -- so it stayed up with zero
-    AP clients connected. Fixed by tagging each web session slot with
-    `via_ap` (set at login; re-set on every successful touch, though in
-    practice the login IP binding means a real session's tag never actually
-    changes after login -- see `web_auth_session.h`'s field comment) and
-    checking a new AP-scoped signal, `http_auth_any_ap_session_active()`,
-    instead of "any session anywhere". A LAN/STA session now never defers
-    teardown by itself. Owner-accepted judgment call: with auth on, a
-    station physically associated to the AP but not yet authenticated
-    (mid-login) still defers teardown, so a connecting operator is never
-    stranded. **Review-fix round 2, same day:** `wifi_prov_request_arrived_on_ap()`
-    always returned false on hardware (`CONFIG_LWIP_IPV6=y` means the httpd
-    socket is PF_INET6, so `getsockname()` hands back an IPv4-mapped
-    AF_INET6 address, not a plain AF_INET one) -- fixed to handle both
-    shapes, which also fixes the `/status` `ap_password` field that gates on
-    the same detector. Also: an AP-tagged session under a
-    `WEB_AUTH_TIMEOUT_NEVER_S` policy now defers teardown only while an AP
-    station is also actually associated, so one AP login under a never-expire
-    policy can't pin the AP up forever.
-  - **Live-edit feature bench-verified end to end, 2026-09-29 PASS** — see
-    M18 item 3 above and `docs/BENCH_TEST_LOG.md` Test A.
-  - **AP fallback/restore cycle bench-verified, 2026-09-29 PASS**
-    (`docs/BENCH_TEST_LOG.md` Test B: home lost, board's own SoftAP came up,
-    home restored, saved-network list matched baseline, no reboot). Still
-    open: AP-fallback radio timing and the LCD's "[AP kept up]" render were
-    not confirmed this run (LCD capture came back unreadable/black).
-  - **Pending bench work (not yet done):** hardware-verify the LCD edit-firing
-    page, the login gates, AP-fallback radio timing and the LCD's "[AP kept
-    up]" render; measure `crash_report/clear` latency. (`wifi_prov_owner`
-    stack margin under AP-fallback probing: measured 2026-10-01 on `eb83c1ac`,
-    min 1344 B free of 4096 B (32.8%, OK) vs. 1536 B idle baseline -- done,
-    see `docs/BENCH_TEST_LOG.md`.)
-  - **`d3c4c826` AP-teardown fix, bench-verified PASS, 2026-09-30:** a
-    decoy network was saved, the real one forgotten, mode cycled ap then
-    home, and the board reached `state=reconnecting` with the LAN down.
-    Restoring the real credentials rejoined within 26 s at `.156` with
-    `ap_pending_teardown=False` on the first read after rejoin. A `GET
-    /status` from the LAN admin session showed `ap_password` empty and
-    `ap_password_known=false`, confirming the AP tears down after rejoin
-    even with a LAN admin session active, and that a LAN client never sees
-    the AP password. The companion AP-client case (a station associated to
-    the SoftAP seeing `ap_password` in `/status`) was SKIPPED -- the bench
-    PC has no free Wi-Fi adapter to join the SoftAP with.
-  - **AP-password HMAC retired on the nine main-app admin routes, landed
-    2026-09-30** (`a7b3e436`, review fixes `1822ab02`, build-failure fix
-    `cae52ae9`, pytest fixes `429033f8`/`fd8fc308`, zero-caller allowlist
-    `7cdb9539`): those nine routes (OTA/reset/boot_guard admin actions) now
-    require only an admin web session and are reachable unauthenticated
-    when web auth itself is off, matching every other admin route -- the
-    AP-password HMAC challenge–response these routes used is gone. The
-    recovery image's own HMAC (a separate, unrelated mechanism) is
-    unchanged. `flash_firmware()`'s post-flash `boot_guard_reset` call now
-    signs with the admin session instead of `KILNCTL_AP_PASSWORD`.
-    **Bench-verified 2026-09-30:** an unauthenticated
-    `POST /api/ota/esp/boot_guard_reset` returned 401; the same call under
-    an admin session, issued right after a flash, succeeded.
-  - **Static-IP reachability fix landed, through `50edd830`** (`03654117`
-    fixes the shared `get_local_ipv4_string` helper's handling of an
-    IPv4-mapped IPv6 address; `a829f71d`/`93a8716f` add the AP-subnet
-    guard so the static-IP setter, the HTTP handler (a distinct 400) and
-    the confirm-side check all refuse `192.168.4.0/24`; `dc1a8072`/
-    `50edd830` render the provisioning page's errors via `textContent`
-    with corrected no-response wording). Flashed to the bench; **bench-verified end to end, 2026-10-01 PASS** (`eb83c1ac`): static .156/24 gw .1 set,
-    HTTP + reboot stayed at the static address, then DHCP revert, HTTP + reboot, same address.
-    Remaining gap: the static-IP API has no DNS field and nothing reads the live DHCP
-    netmask/gateway; see `docs/BENCH_TEST_LOG.md`.
-  - **`persisted_count` fix landed on `origin/main`, 2026-09-30**
-    (`9fc8b589`, `ee6a3809`, `9b77e2b2`, Opus-reviewed across three
-    rounds): `GET /api/boot_guard` and `POST /api/ota/esp/boot_guard_reset`
-    now report a separate `persisted_count`, the NVS-persisted counter,
-    read by a strict reader that omits the field on any read or CRC
-    failure rather than fabricating 0 -- `boot_count` stays this boot's
-    fixed value. `flash_firmware()`'s result labels now distinguish
-    "unknown (GET failed)" from "not reported (older firmware or read
-    failure)". Flashed to the bench board at `9b77e2b2` (clean worktree,
-    `flash_firmware()` verify OK: bootloader + partition table + app);
-    afterward `boot_guard_get` showed `boot_count=1`, `persisted_count=0`,
-    `recovery_mode=False`, and the reset line read "persisted before=0,
-    after=0"; safety link up/armed/no trip, no unacknowledged crash.
-    **Limitation:** the persisted count was already 0 before this reset,
-    so the flash did not demonstrate a nonzero count dropping to 0 -- 0
-    still merges "cleared" with "never written".
-  - **Bench board flashed twice, 2026-09-30, both from clean worktrees via
-    `flash_firmware()`:** first to `d5d6d64a` (`KilnCtrl-1ba4582e3e35`),
-    then to `50edd830` (`KilnCtrl-6c9152cebb9d`); the Pico was untouched
-    (`405d3c54`). Neither flash tripped or crashed the board. Readiness
-    after: 17 ok / 1 not_done (`safety_commissioned`) / 3 other; task
-    liveness OK.
+  changing firmware. Also open: `info_uart_bridge` lost 176 B free on
+  `eb83c1ac` with no known cause.
+- **Owner step pending:** capture the SK-01/SK-02 stack-margin baselines with
+  `tools/PcTools/scripts/capture_stack_margin_baseline.py` (writes tracked files); the stack
+  suite re-run 2026-10-04 on `a1232077` (`20261004T021004Z_stack`) read SK-03/SK-04 PASS and
+  SK-01/SK-02 INCONCLUSIVE until then.
+- **Pending bench work:** hardware-verify the login gates, AP-fallback radio timing and the
+  LCD's "[AP kept up]" render; measure `crash_report/clear` latency.
 
 ---
 
