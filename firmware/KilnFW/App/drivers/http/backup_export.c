@@ -529,9 +529,9 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
                                     tq.settled ? 1u : 0u,
                                     tq.extrapolation_converged ? 1u : 0u,
                                     tq.tau_consistent ? 1u : 0u);
-                backup_stream_printf(&s, "\"tuning_baseline_c\":%.3f,\"tuning_step_ambient_c\":%.3f,",
+                backup_stream_printf(&s, "\"tuning_baseline_c\":" BACKUP_TUNING_FLOAT_FMT ",\"tuning_step_ambient_c\":" BACKUP_TUNING_FLOAT_FMT ",",
                                     (double)tq.baseline_c, (double)tq.step_ambient_c);
-                backup_stream_printf(&s, "\"tuning_raw_rise_c\":%.3f,\"tuning_rise_inf_c\":%.3f",
+                backup_stream_printf(&s, "\"tuning_raw_rise_c\":" BACKUP_TUNING_FLOAT_FMT ",\"tuning_rise_inf_c\":" BACKUP_TUNING_FLOAT_FMT,
                                     (double)tq.raw_rise_c, (double)tq.rise_inf_c);
             }
             /* CT normals -- the owner's own literal example ("ct normals

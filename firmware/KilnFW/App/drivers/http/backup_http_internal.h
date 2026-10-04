@@ -111,4 +111,11 @@ esp_err_t backup_page_get_handler(httpd_req_t *req);      // backup_export.c
 esp_err_t backup_export_get_handler(httpd_req_t *req);    // backup_export.c
 esp_err_t backup_import_post_handler(httpd_req_t *req);   // backup_import.c
 
+// printf precision of the four tuning-quality floats (baseline/step_ambient/
+// raw_rise/rise_inf) in the backup JSON. Shared so export's printing and
+// import's "is the file value the same as the live one" comparison can never
+// drift apart: the file only carries this many decimals, so equality has to
+// be judged at this precision, not on the raw floats.
+#define BACKUP_TUNING_FLOAT_FMT "%.3f"
+
 #endif // BACKUP_HTTP_INTERNAL_H

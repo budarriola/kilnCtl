@@ -437,8 +437,19 @@ typedef struct {
  * imported), so re-committing an identical record would change the active
  * kiln_config's hash on every restore of an unchanged backup and break
  * identity matching (a re-import would then create a duplicate slot instead
- * of the "Case 1" no-op). Exact float compare is intended: the live record
- * holds the very floats an export printed and this import re-parsed. */
+ * of the "Case 1" no-op). The export prints the four floats with
+ * BACKUP_TUNING_FLOAT_FMT, so the file only carries that precision and a raw
+ * float compare would miss on real values (24.53719 vs 24.537). Equality is
+ * therefore judged on the text each side prints with that same format. */
+static bool backup_tuning_float_matches(float live, float file)
+{
+    char a[32];
+    char b[32];
+    snprintf(a, sizeof(a), BACKUP_TUNING_FLOAT_FMT, (double)live);
+    snprintf(b, sizeof(b), BACKUP_TUNING_FLOAT_FMT, (double)file);
+    return strcmp(a, b) == 0;
+}
+
 static bool backup_tuning_quality_matches_live(uint8_t zone_index, const zone_tuning_quality_t *q)
 {
     zone_tuning_quality_t live;
@@ -447,9 +458,11 @@ static bool backup_tuning_quality_matches_live(uint8_t zone_index, const zone_tu
     }
     return live.method == q->method && live.rule == q->rule && live.settled == q->settled &&
            live.extrapolation_converged == q->extrapolation_converged &&
-           live.tau_consistent == q->tau_consistent && live.baseline_c == q->baseline_c &&
-           live.step_ambient_c == q->step_ambient_c && live.raw_rise_c == q->raw_rise_c &&
-           live.rise_inf_c == q->rise_inf_c;
+           live.tau_consistent == q->tau_consistent &&
+           backup_tuning_float_matches(live.baseline_c, q->baseline_c) &&
+           backup_tuning_float_matches(live.step_ambient_c, q->step_ambient_c) &&
+           backup_tuning_float_matches(live.raw_rise_c, q->raw_rise_c) &&
+           backup_tuning_float_matches(live.rise_inf_c, q->rise_inf_c);
 }
 
 // Suffix a colliding name until BOTH the live store (via

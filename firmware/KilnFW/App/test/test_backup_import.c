@@ -4539,7 +4539,7 @@ static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
     tq.rule = 2;
     tq.settled = true;
     tq.tau_consistent = true;
-    tq.baseline_c = 24.5f;
+    tq.baseline_c = 24.53719f; /* a real autotune-style value: NOT representable in the export's 3 decimals */
     tq.step_ambient_c = 23.1f;
     tq.raw_rise_c = 88.0f;
     tq.rise_inf_c = 95.5f;
@@ -4555,6 +4555,8 @@ static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
               "importing the unchanged export must succeed");
     TEST_CHECK(s_writes[1].tuning_seq == 1,
               "identical record: tuning_seq unchanged (pkg_hash would be unchanged)");
+    TEST_CHECK(s_writes[1].tuning_quality.baseline_c == 24.53719f,
+              "identical record: live baseline_c not rounded to the export precision");
 
     /* Again, to prove it is stable across repeated restores, not just one. */
     TEST_CHECK(test_backup_import_apply(s_export_body, import_err, sizeof(import_err)),
@@ -4569,7 +4571,7 @@ static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
     TEST_CHECK(test_backup_import_apply(s_export_body, import_err, sizeof(import_err)),
               "importing over a differing live record must succeed");
     TEST_CHECK(s_writes[1].tuning_seq == 3, "differing record: import commits and bumps the seq");
-    TEST_CHECK_NEAR(s_writes[1].tuning_quality.baseline_c, 24.5, 1e-3,
+    TEST_CHECK_NEAR(s_writes[1].tuning_quality.baseline_c, 24.537, 1e-3,
                     "differing record: the file's value was restored");
 }
 
