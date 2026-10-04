@@ -1329,4 +1329,55 @@ void run_test_thermal_guard(void)
             }
         }
     }
+
+    /* SAFETY_CASE.md H5 (owner decision 2026-10-04: no ESP-vs-Pico TC
+     * cross-check; thermal_guard guard 1 is the heat-rise check). Case 1:
+     * thermocouple pulled OUT of the chamber -- it reads ambient, flat, while
+     * the element is commanded at full duty toward a real setpoint. Every
+     * threshold left at its default (a zone nobody tuned). Must trip
+     * HEATING_FAILED, and within one default progress window plus slack. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 600.0f;
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        int trip_tick = -1;
+        for (int i = 0; i < 100 && !tripped; i++) {
+            /* dithered so guard 8 (frozen) cannot be the one that fires */
+            in.measurement_c = (i % 2) ? 20.1f : 20.0f;
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+            if (tripped) {
+                trip_tick = i;
+            }
+        }
+        TEST_CHECK(tripped, "H5: TC out of the chamber (flat ambient) at full duty trips guard 1");
+        TEST_CHECK(!tripped || s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
+                   "H5: and it is HEATING_FAILED, not another guard");
+        TEST_CHECK(trip_tick >= 0 && (float)(trip_tick + 1) * in.dt_s <= 330.0f,
+                   "H5: within the default 300 s progress window plus one tick of slack");
+    }
+
+    /* H5 case 2, the DOCUMENTED RESIDUAL: a thermocouple that reads low but
+     * still TRACKS the real rise (sheath partly out, thermally lagged mount)
+     * climbs at a healthy rate, so guard 1 -- which asks only "is it rising
+     * at least sanity_rate" -- correctly stays quiet. Guard 1 cannot see an
+     * absolute reading error; this test pins that limit so SAFETY_CASE H5
+     * cannot silently claim more than the code does. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 600.0f;
+        in.commanded_duty = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 100 && !tripped; i++) {
+            in.measurement_c = 20.0f + (float)i * 2.0f; /* 12 C/min, reads low but moves */
+            tripped = thermal_guard_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!tripped, "H5 residual: a low-reading TC that still tracks the rise is NOT caught by guard 1");
+    }
 }
