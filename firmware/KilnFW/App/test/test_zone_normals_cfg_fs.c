@@ -196,7 +196,7 @@ static void test_kiln_scope_deletes_every_listed_file(void)
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     size_t n = 0;
     const char *const *paths = kiln_scope_cfg_files_list(&n);
-    TEST_CHECK(n >= 11, "the list covers every kiln_nvs mirror (11 today)");
+    TEST_CHECK(n >= 11, "the list covers every kiln_nvs mirror (11 today; tools/check_kiln_scope_cfg_mirrors.ps1 enforces completeness)");
     const uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
     for (size_t i = 0; i < n; i++) {
         TEST_CHECK(cfg_fs_write_atomic(paths[i], payload, sizeof(payload)) == ESP_OK, "setup: write listed file");
