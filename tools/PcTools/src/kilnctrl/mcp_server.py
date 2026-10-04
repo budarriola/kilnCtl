@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import functools
 import glob
 import json
 import math

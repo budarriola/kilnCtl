@@ -113,7 +113,11 @@ function Start-One($entry) {
                 throw "No venv at $($entry.Venv)\.venv -- run tools/setup.ps1 first."
             }
             $exe = $python
-            $arguments = @("-m", $entry.Module) + $arguments
+            # Not `-m`: that runs the module as __main__ AND imports it again as
+            # kilnctrl.mcp_server (submodules import it back), building the server twice.
+            # The embedded quotes keep Start-Process from splitting the -c program.
+            $code = "`"from $($entry.Module) import main; raise SystemExit(main())`""
+            $arguments = @("-c", $code) + $arguments
         }
     }
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

@@ -72,7 +72,7 @@ FUNC_DEF_RE = re.compile(r"^def ([A-Za-z][A-Za-z0-9_]*)\s*\(")
 # table entry (registered by reference, never called by textual name
 # elsewhere). Mirrors the C sweep's "genuinely indirect-dispatch" carve-out
 # for zones_http.c's sweep_status_get_handler. Decorator-registered MCP
-# tools (mcp_server_*.py's `@_srv._tool()`) are the concrete case in this
+# tools (mcp_server_*.py's `@_core._tool()`) are the concrete case in this
 # tree today.
 DECORATOR_WIRING_MARKERS = ("_tool(", ".tool(", ".route(", "app.get(", "app.post(")
 

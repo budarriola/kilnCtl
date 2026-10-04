@@ -5,9 +5,9 @@
 # WHY THIS EXISTS. Two agents counted kilnctrl's tools differently on the same
 # day: docs/MCP_SERVERS.md (145, commit f588d3d) came from summing kiln_help()'s
 # per-group counts; CLAUDE.md (146, commit 6fc578e) came from
-# `grep -c '@_srv._tool()' tools/PcTools/src/kilnctrl/mcp_server*.py`. The grep
+# `grep -c '@_core._tool()' tools/PcTools/src/kilnctrl/mcp_server*.py`. The grep
 # count was wrong by one: mcp_server_actions.py:71 has the literal text
-# "@_srv._tool()" inside a `#` COMMENT (explaining the decorator pattern to a
+# "@_core._tool()" inside a `#` COMMENT (explaining the decorator pattern to a
 # reader), which a bare grep -c cannot distinguish from a real decorator line.
 # 145 is correct. This check recomputes the real count the same way and
 # compares it against both docs so this specific drift can't silently recur,
@@ -34,7 +34,7 @@
 # (build_kilnfw, build_saftyfw, build_saftyfw_host_tests, run_pctools_tests,
 # run_repo_checks) by calling `tool()(fn)` from `workbench.attach(_tool,
 # ("dut", "common"))` in mcp_server.py -- a plain function call, not a
-# `@_srv._tool()` decorator line, so the line-anchored regex above could never
+# `@_core._tool()` decorator line, so the line-anchored regex above could never
 # see them (this mechanism predates both wrong doc counts, per
 # `29ce9970`). The fix below adds those 5 by reading workbench.py's `BUNDLES`
 # table and the bundle names actually passed to `attach(...)` in
@@ -73,7 +73,7 @@ foreach ($f in $serverFiles) {
 }
 
 # Tools attached dynamically via workbench.attach(_tool, (bundle, ...)) --
-# `tool()(fn)` calls, not `@_srv._tool()` decorator lines, so the scan above
+# `tool()(fn)` calls, not `@_core._tool()` decorator lines, so the scan above
 # never sees them. Read which bundle names mcp_server.py actually attaches,
 # then count the entries in those bundles from workbench.py's BUNDLES table.
 $mcpServerPyPath = Join-Path $repoRoot "tools\PcTools\src\kilnctrl\mcp_server.py"
@@ -112,7 +112,7 @@ $realCount += $attachedCount
 
 $failed = $false
 
-# A duplicate tool name (two @_srv._tool()-decorated defs, or a decorated
+# A duplicate tool name (two @_core._tool()-decorated defs, or a decorated
 # name reused by a workbench bundle entry) registers once in the real MCP
 # server -- the second registration silently overwrites the first -- while
 # every line/entry-counting pass above still counts it twice. That makes the

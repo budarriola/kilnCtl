@@ -12,7 +12,7 @@ tools (three `coupled_ident_*`, one `plant_sim_*`) whose naming prefix wasn't
 in GROUP_PREFIXES at all, so `derive_group` silently fell through to a naive
 `name.split("_", 1)[0]` guess instead of a deliberate group -- and one
 registered "tool" (`_reject_kiln_fw_build_path`) that turned out to be an
-internal helper accidentally decorated with `@_srv._tool()`, which this check
+internal helper accidentally decorated with `@_core._tool()`, which this check
 would otherwise have demanded a taxonomy entry for forever.
 
 WHAT "COVERED" MEANS. A registered tool is covered if any of the following is
@@ -26,7 +26,7 @@ search taxonomy, as opposed to riding on whatever `derive_group`'s fallback
 guesses from the name alone.
 
 WHAT THIS CATCHES, PER SERVER.
-  - kilnctrl: tool names are `@_srv._tool()`-decorated functions across
+  - kilnctrl: tool names are `@_core._tool()`-decorated functions across
     tools/PcTools/src/kilnctrl/mcp_server*.py, PLUS the tools attached
     through mcpkit.workbench.BUNDLES (build_kilnfw, build_saftyfw,
     build_saftyfw_host_tests, run_pctools_tests, run_repo_checks) -- these
@@ -108,7 +108,7 @@ def _kilnctrl_registered_names(kilnctrl_dir: Path) -> "set[str]":
                 names.add(m.group(1))
 
     # mcpkit.workbench.BUNDLES tools attached via workbench.attach(_tool, (...))
-    # in mcp_server.py, not the @_srv._tool() decorator -- read which bundles
+    # in mcp_server.py, not the @_core._tool() decorator -- read which bundles
     # kilnctrl actually attaches, then union those BUNDLES keys in.
     server_py = kilnctrl_dir / "mcp_server.py"
     server_src = server_py.read_text(encoding="utf-8")
