@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 from . import wifi_prov_http_client as wph
 
 
@@ -76,7 +76,7 @@ def _diagnose(before: dict, old_host: str) -> str:
     return f"board is at {uart_ip} now ({_describe_status(st)}); previously {old_host}"
 
 
-@_srv._tool()
+@_core._tool()
 def network_get_ip_config(host: Optional[str] = None) -> str:
     """READ-ONLY. Report the board's STA IP configuration from GET /status:
     ``ip_mode`` (dhcp/static), the configured static ip/netmask/gateway, the
@@ -102,7 +102,7 @@ def network_get_ip_config(host: Optional[str] = None) -> str:
     return f"{_describe_status(st)} (host={resolved}){note}"
 
 
-@_srv._tool()
+@_core._tool()
 def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional[str] = None,
                           gateway: Optional[str] = None, confirm: bool = False,
                           host: Optional[str] = None, verify_timeout_s: float = 90.0) -> str:
@@ -225,3 +225,8 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
     requested = f"requested: {mode}" + (f" ip={ip} netmask={netmask} gateway={gateway}" if mode == "static" else "")
     return (f"FAILED verification: ip configuration NOT confirmed -- {why}\n{requested}\n{where}\n"
             f"{post_line}\n{before_line}")
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

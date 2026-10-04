@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +74,7 @@ from . import mcp_server as _srv
 # this layer only surfaces the refusal reason, it does not re-implement the
 # policy.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def gpio_probe_set_mode(gpio_num: int, mode: str) -> str:
     """Configure an ESP32-S3 GPIO as input / input_pullup / input_pulldown / output.
 
@@ -105,7 +105,7 @@ def gpio_probe_set_mode(gpio_num: int, mode: str) -> str:
     return f"ok - gpio{gpio_num} set to {mode}"
 
 
-@_srv._tool()
+@_core._tool()
 def gpio_probe_write(gpio_num: int, level: bool) -> str:
     """Drive an ESP32-S3 GPIO high or low.
 
@@ -122,7 +122,7 @@ def gpio_probe_write(gpio_num: int, level: bool) -> str:
     return f"ok - gpio{gpio_num} = {'high' if level else 'low'}"
 
 
-@_srv._tool()
+@_core._tool()
 def gpio_probe_read(gpio_num: int) -> str:
     """Read an ESP32-S3 GPIO's current level.
 
@@ -138,7 +138,7 @@ def gpio_probe_read(gpio_num: int) -> str:
     return f"gpio{gpio_num} = {'high' if level else 'low'}"
 
 
-@_srv._tool()
+@_core._tool()
 def gpio_probe_read_all() -> str:
     """Read every GPIO this connection has configured via gpio_probe_set_mode.
 
@@ -156,4 +156,7 @@ def gpio_probe_read_all() -> str:
         return "no pins configured yet (call gpio_probe_set_mode first)"
     return "\n".join(f"gpio{p.gpio_num}: {p.mode_name} = {'high' if p.level else 'low'}" for p in pins)
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

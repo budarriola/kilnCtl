@@ -60,7 +60,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def _codec_parse_device(name: str) -> "Optional[int]":
         return None
 
 
-@_srv._tool()
+@_core._tool()
 def codec_encode_frame(
     msg_type: str, msg_index: int, src_device: str, src_task: int,
     dst_device: str, dst_task: int, payload_hex: str = "",
@@ -124,7 +124,7 @@ def codec_encode_frame(
     return frame.to_wire().hex()
 
 
-@_srv._tool()
+@_core._tool()
 def codec_decode_frame(wire_hex: str) -> str:
     """Parse one on-wire ``uart_protocol`` frame (hex, delimiters optional --
     unstuffing accepts the body with or without its surrounding 0x7E bytes)
@@ -210,7 +210,7 @@ def _control_zones_dict() -> dict:
     }
 
 
-@_srv._tool()
+@_core._tool()
 def get_board_state() -> str:
     """One-call snapshot: firmware version, pin config, every thermocouple
     reading, IO/relay state, safety status + link stats, Wi-Fi status,
@@ -245,4 +245,7 @@ def get_board_state() -> str:
     state = redact_secret_fields(state)
     return json.dumps(_sanitize_nan(state), default=_json_default, indent=2)
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

@@ -31,7 +31,7 @@ from typing import Optional
 from . import ramp_assist_http_client as ra_http
 from .wifi_uart import WifiUartQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 def _ramp_assist_resolve_host(host: Optional[str]) -> str:
@@ -50,7 +50,7 @@ def _ramp_assist_resolve_host(host: Optional[str]) -> str:
     return ra_http.RAMP_ASSIST_AP_DEFAULT_HOST
 
 
-@_srv._tool()
+@_core._tool()
 def ramp_assist_get_enabled(host: Optional[str] = None) -> str:
     """GET /api/ramp_assist -- the board's ACTUAL current state of the
     kiln-wide ramp-assist flag (never an assumed default). Read-only, safe
@@ -75,7 +75,7 @@ def ramp_assist_get_enabled(host: Optional[str] = None) -> str:
     return f"ramp_assist enabled={enabled} (host={resolved})"
 
 
-@_srv._tool()
+@_core._tool()
 def ramp_assist_set_enabled(enabled: bool, confirm: bool = False, host: Optional[str] = None) -> str:
     """POST /api/ramp_assist -- set the kiln-wide ramp-assist flag. WRITES
     BOARD CONFIG that changes whether the executor may stretch a ramp or
@@ -119,3 +119,8 @@ def ramp_assist_set_enabled(enabled: bool, confirm: bool = False, host: Optional
         return f"error: board reported failure: {result} (host={resolved})"
     state = "enabled" if enabled else "disabled"
     return f"ok - ramp assist {state}, confirmed by the board (host={resolved})"
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

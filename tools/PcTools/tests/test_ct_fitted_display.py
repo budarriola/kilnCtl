@@ -40,11 +40,9 @@ import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-# Import the aggregate first. Every mcp_server_* submodule does `from . import
-# mcp_server as _srv`, and mcp_server star-re-exports each submodule. Importing
-# a submodule first re-enters mcp_server while that submodule is only partly
-# initialised, so its `import *` copies nothing and the aggregate is left
-# permanently missing that submodule's tools for the rest of the process.
+# Belt and braces: import the aggregate first. The real fix for submodule-first
+# import order is mcp_server_core.py (see tests/test_mcp_server_import_order.py);
+# this line is harmless and no longer load-bearing.
 from kilnctrl import mcp_server  # noqa: E402,F401
 from kilnctrl import mcp_server_safety as mss  # noqa: E402
 from kilnctrl import mcp_server_ota  # noqa: E402

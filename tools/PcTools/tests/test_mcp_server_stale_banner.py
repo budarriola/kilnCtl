@@ -103,7 +103,7 @@ class StaleBannerTests(unittest.TestCase):
         self.assertIn("5 file", banner)
 
     def test_tool_wrapper_appends_banner_only_when_stale(self):
-        """End-to-end through the real @_srv._tool() decorator (the one
+        """End-to-end through the real @_core._tool() decorator (the one
         choke point every published tool goes through), not just the helper
         in isolation -- proves the banner is actually wired in."""
         @ms._tool()

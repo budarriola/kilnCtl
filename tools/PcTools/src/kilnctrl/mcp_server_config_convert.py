@@ -14,10 +14,10 @@ from __future__ import annotations
 import json
 
 from . import config_convert
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
-@_srv._tool()
+@_core._tool()
 def convert_config(document_json: str, to_version: int) -> str:
     """Best-effort convert a kilnCtl config document to another version of
     its own store, without ever touching a board.
@@ -47,3 +47,8 @@ def convert_config(document_json: str, to_version: int) -> str:
     doc = json.loads(document_json)
     out_doc, report = config_convert.convert_document(doc, to_version)
     return json.dumps(out_doc, indent=2) + "\n\n" + report.render()
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ from . import mcp_server as _srv
 # rationale (only PID/model are written; relay_mask/max_temp_c/control_mode
 # are read-only over this link today, hook documented there).
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def list_config_presets() -> str:
     """List every known-good config preset (name + description).
 
@@ -83,7 +83,7 @@ def list_config_presets() -> str:
     return "\n".join(f"{p['name']}: {p['description']}" for p in presets)
 
 
-@_srv._tool()
+@_core._tool()
 def load_config_preset(name: str, host: Optional[str] = None,
                         safety_host: Optional[str] = None,
                         use_ct_map_backup: bool = False) -> str:
@@ -148,4 +148,7 @@ def load_config_preset(name: str, host: Optional[str] = None,
         return f"error writing safety config over HTTP (host={resolved_safety}): {exc}"
     return result.describe()
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

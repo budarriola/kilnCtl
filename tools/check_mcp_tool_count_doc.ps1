@@ -55,7 +55,7 @@ $decoratedNames = New-Object System.Collections.Generic.List[string]
 foreach ($f in $serverFiles) {
     $lines = Get-Content -LiteralPath $f.FullName
     for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i].TrimStart() -match '^@_srv\._tool\(\)\s*$') {
+        if ($lines[$i].TrimStart() -match '^@_(core|srv)\._tool\(\)\s*$') {
             $realCount++
             # Line counting alone is blind to a name collision: two decorated
             # functions sharing a name still count as 2 here but register as

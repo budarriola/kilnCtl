@@ -12,14 +12,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 from .bench_test import board_lock as bt_board_lock
 from .bench_test import registry as bt_registry
 from .bench_test import report as bt_report
 from .bench_test.runner import BenchTestRunner
 
 
-@_srv._tool()
+@_core._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
                     allow_heat: bool = True, lcd_stop_heat: bool = False,
                     lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
@@ -126,7 +126,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     return bt_report._redact("\n".join(lines))
 
 
-@_srv._tool()
+@_core._tool()
 def bench_test_list(suite: Optional[str] = None) -> str:
     """Catalogue of bench-test cases from the case registry
     (docs/BENCH_TEST_SYSTEM_PLAN.md §3). With `suite`, lists only that
@@ -151,7 +151,7 @@ def bench_test_list(suite: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def bench_test_last(n: int = 1) -> str:
     """Summaries of the `n` most recent bench-test runs (most recent
     first), read back from `logs/bench_test/<run>/summary.json`."""
@@ -168,3 +168,8 @@ def bench_test_last(n: int = 1) -> str:
             reason = f" -- {case['reason']}" if case.get("reason") else ""
             lines.append(f"  {cid}: {case['verdict']}{reason}")
     return "\n".join(lines)
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

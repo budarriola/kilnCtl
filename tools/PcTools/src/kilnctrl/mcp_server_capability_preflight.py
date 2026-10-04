@@ -14,7 +14,7 @@ from typing import Optional
 
 from . import capability_preflight, config_presets
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 def _preflight_resolve_host(host: Optional[str]) -> str:
@@ -72,7 +72,7 @@ def _preflight_task_liveness():
     return task_liveness.check_task_liveness(entries, expected, tags=tags)
 
 
-@_srv._tool()
+@_core._tool()
 def capability_preflight_check(name: str, host: Optional[str] = None,
                                 zones_host: Optional[str] = None,
                                 safety_host: Optional[str] = None,
@@ -136,3 +136,8 @@ def capability_preflight_check(name: str, host: Optional[str] = None,
         allow_missing_tasks=allow_missing_tasks,
     )
     return report.describe()
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

@@ -75,11 +75,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 from .devices_io import IO_RELAY_COUNT
 from .devices_safety import SafetyFlag
-from . import mcp_server_coordinated_gpio_test as _gpio_tool
-from . import mcp_server_ota as _ota_tool
 from .bench_test import board_lock as bt_board_lock
 from .bench_test import registry as bt_registry
 from .bench_test import report as bt_report
@@ -332,7 +330,7 @@ def _run_ota_matrix(ctx: dict, cases: Optional[str], tag: Optional[str],
     return bt_report._redact("\n".join(lines))
 
 
-@_srv._tool()
+@_core._tool()
 def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional[str] = None,
                     host: Optional[str] = None,
                     tag: Optional[str] = None, allow_heat: bool = False,
@@ -439,3 +437,12 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
         "ota_pico_corrupt_image_path": ota_pico_corrupt_image_path,
     }
     return _run_ota_matrix(ctx, cases=cases, tag=tag, allow_heat=allow_heat)
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402
+# Sibling tool modules, bound last for the same reason: each of them binds the
+# aggregate at its own end, which would star-import this module half-initialised.
+from . import mcp_server_coordinated_gpio_test as _gpio_tool
+from . import mcp_server_ota as _ota_tool

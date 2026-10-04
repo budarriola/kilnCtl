@@ -96,7 +96,7 @@ def _kilnctrl_registered_names(kilnctrl_dir: Path) -> "set[str]":
     for f in sorted(kilnctrl_dir.glob("mcp_server*.py")):
         lines = f.read_text(encoding="utf-8").splitlines()
         for i, line in enumerate(lines):
-            if line.strip() != "@_srv._tool()":
+            if line.strip() not in ("@_core._tool()", "@_srv._tool()"):
                 continue
             j = i + 1
             while j < len(lines) and not lines[j].strip().startswith("def "):

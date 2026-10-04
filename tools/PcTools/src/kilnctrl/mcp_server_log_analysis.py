@@ -9,10 +9,10 @@ plumbing the rest of this module needs.
 from __future__ import annotations
 
 from . import log_analysis
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
-@_srv._tool()
+@_core._tool()
 def log_analyze(
     kind: str,
     path: str,
@@ -90,3 +90,8 @@ def log_analyze(
             if json_output else log_analysis.format_compare_report_text(report)
         )
     return f"error: unknown kind {kind!r}, expected 'firing', 'autotune', or 'compare'"
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ from . import mcp_server as _srv
 # NS2009 press, resetting the auto-blank idle timer and waking the panel if
 # it's currently blanked. touch_get_state is the query that shows the effect.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def touch_get_state() -> str:
     """Whether the panel is on right now, and how long it's been idle.
 
@@ -84,7 +84,7 @@ def touch_get_state() -> str:
     return state.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def touch_inject(x: int, y: int, pressed: bool = True) -> str:
     """Send a synthetic touch at (x, y), as if the physical panel were pressed.
 
@@ -114,7 +114,7 @@ def touch_inject(x: int, y: int, pressed: bool = True) -> str:
                             lambda: _srv._touch.inject(x, y, pressed))
 
 
-@_srv._tool()
+@_core._tool()
 def touch_set_tap_dump(enable: bool) -> str:
     """Turn the firmware's AUTOMATIC per-page-switch tap-target dump on/off.
 
@@ -133,7 +133,7 @@ def touch_set_tap_dump(enable: bool) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def touch_log_tap_targets() -> str:
     """Request an immediate tap-target dump for whatever screen is loaded now.
 
@@ -150,4 +150,7 @@ def touch_log_tap_targets() -> str:
 
     return _touch_mutating("tap-target dump requested", lambda: _srv._touch.log_tap_targets())
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

@@ -70,7 +70,7 @@ from typing import Optional
 from . import capability_preflight
 from . import zones_current_sweep_http_client as sweep_http
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 def _zone_sweep_resolve_host(host: Optional[str]) -> str:
@@ -82,7 +82,7 @@ def _zone_sweep_resolve_host(host: Optional[str]) -> str:
     return _ota_resolve_host(host)
 
 
-@_srv._tool()
+@_core._tool()
 def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) -> str:
     """Start the per-zone current-measurement sweep. THIS ENERGIZES HEATER
     RELAYS, one zone at a time, for roughly 14 seconds per zone (10 s settle
@@ -165,7 +165,7 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
     )
 
 
-@_srv._tool()
+@_core._tool()
 def zone_current_sweep_status(host: Optional[str] = None) -> str:
     """Read the current-measurement sweep's live status. Read-only, safe to
     call at any time including while a sweep is running -- does not touch
@@ -210,7 +210,7 @@ def zone_current_sweep_status(host: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def zone_current_sweep_abort(host: Optional[str] = None) -> str:
     """Abort the current-measurement sweep, immediately de-energizing
     whatever zone it currently has on. Safe to call at any time, including
@@ -228,3 +228,8 @@ def zone_current_sweep_abort(host: Optional[str] = None) -> str:
     if not result.get("ok"):
         return f"error: board reported failure: {result} (host={resolved})"
     return f"ok - current sweep aborted, relays de-energized (host={resolved})"
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

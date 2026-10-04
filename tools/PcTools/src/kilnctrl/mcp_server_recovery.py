@@ -32,7 +32,7 @@ from typing import Optional
 from . import recovery_http_client as rhc
 from . import recovery_post_client as rpc
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 #: recovery_pico_proto.h RPP_SLOT_SIZE (832 KB): recovery_pico_reserve()
 #: answers 413 above this.
@@ -343,7 +343,7 @@ def _unverified_tail(hosts: "list[str]", wait_s: float) -> str:
             f"pass app_host=<the application's LAN address> if it is elsewhere")
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_status(host: Optional[str] = None) -> str:
     """READ-ONLY: the standalone recovery image's own status --
     GET /api/recovery/status (running partition, app image presence/size/
@@ -381,7 +381,7 @@ def recovery_status(host: Optional[str] = None) -> str:
     return out
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0,
                   app_host: Optional[str] = None) -> str:
     """Leave the recovery image and boot the application (POST
@@ -435,7 +435,7 @@ def recovery_exit(confirm: bool = False, host: Optional[str] = None, wait_s: flo
             f"check by hand, do not assume the application booted (host={resolved})")
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0) -> str:
     """Forget the HOME Wi-Fi credentials stored for the recovery image and
     restart (POST /api/recovery/wifi_reset). The AP
@@ -481,7 +481,7 @@ def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_
             f"{wait_s:g}s (without home Wi-Fi it may only be reachable on its AP, 192.168.4.1)")
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None) -> str:
     """Clear the boot_guard counter from the recovery image (POST
     /api/ota/esp/boot_guard_reset on the RECOVERY image; not the main app's route of the same path). The board
@@ -524,7 +524,7 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
             f"not cleared (host={resolved})")
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[str] = None,
                          host: Optional[str] = None, wait_s: float = 600.0) -> str:
     """Flash a SaftyFW slot image (.bin) onto the RP2040 through the recovery
@@ -649,7 +649,7 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
     return f"FAILED: relay phase=failed: {_fmt_pico(last)}; {prefix}"
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_s: float = 30.0) -> str:
     """Ask the recovery image's Pico UART relay to stop (POST
     /api/recovery/pico/abort).
@@ -729,7 +729,7 @@ def recovery_pico_abort(confirm: bool = False, host: Optional[str] = None, wait_
             f"(host={resolved})")
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_sw_reset(confirm: bool = False, host: Optional[str] = None, wait_s: float = 60.0) -> str:
     """Software-reset the board while it runs the recovery image (POST
     /api/sw_reset on the RECOVERY image, context "sw-reset"; not the main
@@ -773,7 +773,7 @@ def recovery_sw_reset(confirm: bool = False, host: Optional[str] = None, wait_s:
             f"by {wait_s:g}s -- check by hand")
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Optional[str] = None,
                             wait_s: float = 90.0, app_host: Optional[str] = None) -> str:
     """Push a new ESP application image (KilnCtrl.bin) into the `app`
@@ -871,3 +871,8 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
                 f"still answers as the recovery image; {prefix}")
     return (f"UNVERIFIED: board replied {reply['text']!r} but {_unverified_tail(hosts, wait_s)} -- "
             f"check by hand; {prefix}")
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

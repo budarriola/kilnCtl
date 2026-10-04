@@ -59,13 +59,13 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
 # AUTOTUNE (task 10) -- PID autotune, mirrors dashboard_http.c's /api/autotune*
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def autotune_get_status() -> str:
     """Read the autotune run's current state, model fit and proposed gains."""
     try:
@@ -91,7 +91,7 @@ def autotune_get_status() -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def autotune_start(
     zone: int,
     method: str,
@@ -163,7 +163,7 @@ def autotune_start(
     return "ok - autotune started" if ok else f"refused: {err}"
 
 
-@_srv._tool()
+@_core._tool()
 def autotune_abort() -> str:
     """Abort the running autotune."""
     try:
@@ -176,7 +176,7 @@ def autotune_abort() -> str:
     return f"refused - nothing running to abort{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def autotune_accept(ack_unsettled: bool = False) -> str:
     """Accept the finished autotune's proposed gains, writing them into the zone's PID config.
 
@@ -198,4 +198,7 @@ def autotune_accept(ack_unsettled: bool = False) -> str:
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - nothing to accept, or the fit never settled (see model_settled) and needs ack_unsettled=True{detail}"
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

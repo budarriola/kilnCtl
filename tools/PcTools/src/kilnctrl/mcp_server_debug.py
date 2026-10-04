@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # Cap on how much raw OpenOCD output gets written to the session log per
@@ -134,7 +134,7 @@ def _openocd_error_message(action_desc: str, output: str) -> str:
 # about (session logging, the ESP-halt-during-profile guard, the
 # write-requires-confirm gate).
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def set_openocd_path(path: str) -> str:
     """Sets a persisted override for openocd.exe, for machines where
     autodetection (settings.json override -> OPENOCD_EXE env var ->
@@ -149,7 +149,7 @@ def set_openocd_path(path: str) -> str:
     return f"openocd path set to {path} (persisted in settings.json)"
 
 
-@_srv._tool()
+@_core._tool()
 def get_openocd_status() -> str:
     """Reports the openocd.exe path that will actually be used, where it came
     from (explicit override / OPENOCD_EXE env var / autodetection / not
@@ -225,7 +225,7 @@ def _archive_flashed_safty_elf(elf_path: str, explicit_elf_path: Optional[str] =
         return f"\n\nWARNING: elf archiving FAILED (flash itself succeeded): {exc}"
 
 
-@_srv._tool()
+@_core._tool()
 def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False) -> str:
     """Flashes an ELF to `peer` ("esp" or "pico") over OpenOCD and resets it.
     Writes flash on a live board -- refused unless `confirm=True` is passed
@@ -296,7 +296,7 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     return _openocd_error_message(f"program failed for {peer}", output)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_reset(
     peer: str,
     mode: str = "run",
@@ -409,7 +409,7 @@ def _probe_esp_after_reset(window_s: float) -> "reset_probe.ProbeResult":
     )
 
 
-@_srv._tool()
+@_core._tool()
 def debug_halt(peer: str) -> str:
     """Halts `peer`'s core.
 
@@ -439,7 +439,7 @@ def debug_halt(peer: str) -> str:
     return _openocd_error_message(f"halt failed for {peer}", output)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_resume(peer: str) -> str:
     """Resumes `peer`'s core from a halt."""
     ok, output = debug_probe.resume(peer)
@@ -449,7 +449,7 @@ def debug_resume(peer: str) -> str:
     return _openocd_error_message(f"resume failed for {peer}", output)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_step(peer: str) -> str:
     """Single-steps `peer`'s core one instruction. If it was running, this
     halts it first (it does not resume running after the step -- it stays
@@ -461,7 +461,7 @@ def debug_step(peer: str) -> str:
     return _openocd_error_message(f"step failed for {peer}", output)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
                       leave_halted: bool = False,
                       target: str | None = None) -> str:
@@ -488,7 +488,7 @@ def debug_read_memory(peer: str, address: int, count: int = 1, width: int = 32,
     return _openocd_error_message(f"read_memory failed for {peer}", output)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width: int = 32,
                       elf_path: Optional[str] = None, leave_halted: bool = False) -> str:
     """Reads a named symbol from `peer`'s memory ("esp" or "pico"). Same as
@@ -519,7 +519,7 @@ def debug_read_symbol(peer: str, symbol: str, count: Optional[int] = None, width
     return _openocd_error_message(f"read_symbol failed for {peer}", output)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_list_symbols(peer: str, pattern: str, elf_path: Optional[str] = None, limit: int = 40) -> str:
     """Lists symbols in `peer`'s build ELF whose name contains `pattern`
     (case-insensitive substring, not a regex), with address and recorded size.
@@ -548,7 +548,7 @@ def debug_list_symbols(peer: str, pattern: str, elf_path: Optional[str] = None, 
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_write_memory(peer: str, address: int, value: int, width: int = 32, confirm: bool = False) -> str:
     """Writes one `width`-bit (8/16/32) `value` at `address` in `peer`'s
     memory. Live RAM/flash-mapped memory write on a running board -- refused
@@ -585,7 +585,7 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
     return _openocd_error_message(f"write_memory failed for {peer}", output)
 
 
-@_srv._tool()
+@_core._tool()
 def debug_read_registers(peer: str, target: str | None = None,
                          leave_halted: bool = False) -> str:
     """Reads the core registers for `peer`. Needs the core halted to read
@@ -605,4 +605,7 @@ def debug_read_registers(peer: str, target: str | None = None,
         return output.strip()
     return _openocd_error_message(f"read_registers failed for {peer}", output)
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

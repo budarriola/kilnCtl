@@ -60,7 +60,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ from . import mcp_server as _srv
 #: since logic_capture pulls in the optional `saleae` automation package
 #: that the rest of this module deliberately imports lazily, function-local.
 _DEFAULT_SALEAE_OUT_DIR = str(pathlib.Path(__file__).resolve().parents[2] / "logs" / "saleae")
-@_srv._tool()
+@_core._tool()
 def saleae_list_devices() -> str:
     """List Saleae devices Logic 2's automation server can see.
 
@@ -116,7 +116,7 @@ def saleae_list_devices() -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def saleae_capture(
     channels: str = "0,1", duration_seconds: float = 1.0,
     sample_rate: int = 25_000_000,
@@ -150,7 +150,7 @@ def saleae_capture(
     return f"ok - saved {path}"
 
 
-@_srv._tool()
+@_core._tool()
 def saleae_decode_kilnlink(path: str, csv: bool = True) -> str:
     """Decode a captured kilnlink UART link (ESP32-S3 <-> RP2040) into a
     readable frame timeline: framing, msg type, device/task, sequence
@@ -174,4 +174,7 @@ def saleae_decode_kilnlink(path: str, csv: bool = True) -> str:
     records = kilnlink_capture.decode_capture(data)
     return kilnlink_capture.format_timeline(records)
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

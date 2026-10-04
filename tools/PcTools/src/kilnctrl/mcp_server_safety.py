@@ -60,7 +60,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ from . import mcp_server as _srv
 # The RP2040 firmware does not exist in this repository yet: link_up = 0 with
 # "never received" is the expected steady state today.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def safety_get_status() -> str:
     """Read the cached safety status from the safety processor.
 
@@ -177,7 +177,7 @@ def safety_get_status() -> str:
     return text
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_link_stats() -> str:
     """Read the ESP's own counters for the isolated UART.
 
@@ -191,7 +191,7 @@ def safety_get_link_stats() -> str:
     return stats.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_diag() -> str:
     """Read the ESP's cache of the Pico's last DIAG (Frame B) push --
     guard state, warn/trip masks, PUSH_CONTEXT liveness, and (the reason
@@ -213,7 +213,7 @@ def safety_get_diag() -> str:
     return diag.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_fw_version() -> str:
     """Read the ESP's cache of the Pico's own build identity (FW_VERSION /
     Frame C): commit, build datetime, dirty bit, boot_id, and the active
@@ -233,7 +233,7 @@ def safety_get_fw_version() -> str:
     return version.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def safety_request_enable(enable: bool) -> str:
     """Ask the safety processor to permit (or drop) heating.
 
@@ -252,13 +252,13 @@ def safety_request_enable(enable: bool) -> str:
     return f"refused - could not request enable={enable}{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def safety_ping() -> str:
     """Force an immediate poll of the safety processor."""
     return _srv._send(UART_TASK_ID_SAFETY, devices.safety_ping())
 
 
-@_srv._tool()
+@_core._tool()
 def safety_set_poll_period(period_ms: int) -> str:
     """Set how often the ESP polls the safety processor, in ms (0 stops polling)."""
     try:
@@ -271,7 +271,7 @@ def safety_set_poll_period(period_ms: int) -> str:
     return f"refused - could not set poll period{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def safety_set_fault_out(assert_fault: bool) -> str:
     """Drive the isolated Fault line to the safety processor.
 
@@ -293,7 +293,7 @@ def safety_set_fault_out(assert_fault: bool) -> str:
     return f"refused - could not set fault out{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def safety_clear_trip() -> str:
     """Clear a latched safety trip on the safety processor.
 
@@ -315,7 +315,7 @@ def safety_clear_trip() -> str:
     return _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
 
 
-@_srv._tool()
+@_core._tool()
 def safety_set_log_level(level: int, peer: Optional[str] = None, host: Optional[str] = None) -> str:
     """Set the safety processor's runtime UART log verbosity: 0=ERROR,
     1=WARN, 2=INFO, 3=DEBUG, 4=VERBOSE.
@@ -358,7 +358,7 @@ def safety_set_log_level(level: int, peer: Optional[str] = None, host: Optional[
     return f"refused - board reported: {response} (host={resolved})"
 
 
-@_srv._tool()
+@_core._tool()
 def safety_set_tc_type(tc_type_name: str, host: Optional[str] = None) -> str:
     """Commission the safety processor's thermocouple type (config_store.h's
     ``tc_type`` field, config_params.c id ``0x0105``).
@@ -448,7 +448,7 @@ def safety_set_tc_type(tc_type_name: str, host: Optional[str] = None) -> str:
             f"tc_type={value} | board reports commissioned: {result.commissioned_after}")
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_ct_cal() -> str:
     """Read the safety processor's three CT channels' stored end-to-end amps
     CORRECTION (config_store.h's legacy `ct_cal` gain/offset record --
@@ -495,7 +495,7 @@ def safety_get_ct_cal() -> str:
     return "; ".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_param(param_id: int) -> str:
     """READ-ONLY: ask the safety processor for one CONFIG_REFERENCE.md field
     by its opaque u16 wire id (SAFETY_CMD_GET_PARAM / 0x23), and report
@@ -539,7 +539,7 @@ def safety_get_param(param_id: int) -> str:
     return f"param_id={param_id}: found, type={result.type}, value={result.value!r}"
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_ct_cal_raw(host: Optional[str] = None) -> str:
     """READ-ONLY: the REAL, LIVE per-channel CT commissioning record, raw and
     unrounded, as a JSON object -- ``k_ct_v_per_a[0..2]``, ``zero_counts[0..2]``,
@@ -608,7 +608,7 @@ def safety_get_ct_cal_raw(host: Optional[str] = None) -> str:
     return json.dumps({"ok": True, "host": resolved, **raw})
 
 
-@_srv._tool()
+@_core._tool()
 def safety_capture_ct_counts(seconds: float = 60.0, out_dir: Optional[str] = None,
                               host: Optional[str] = None) -> str:
     """Capture raw CT ADC counts over GET /api/status for `seconds`, as fast
@@ -925,7 +925,7 @@ def _describe_commissioning(data: dict) -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_commissioning(host: Optional[str] = None) -> str:
     """READ-ONLY: fetch and render the safety processor's commissioned guard
     thresholds from GET /api/safety/commissioning (safety_cfg_http.c's
@@ -968,7 +968,7 @@ def safety_get_commissioning(host: Optional[str] = None) -> str:
     return _describe_commissioning(data)
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_unset_commissioning_params(host: Optional[str] = None) -> str:
     """READ-ONLY: name the specific safety_cfg_store params that make up
     readiness's "safety_commissioned" count (GET /api/readiness's "N of M
@@ -1030,7 +1030,7 @@ def safety_get_unset_commissioning_params(host: Optional[str] = None) -> str:
     return prefix + "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def safety_set_commissioning_fields(fields: "dict[str, Any]", host: Optional[str] = None) -> str:
     """Commission ARBITRARY named fields on the safety processor's config
     record over GET/POST /api/safety/commissioning -- the MCP-facade
@@ -1149,7 +1149,7 @@ def _profile_or_autotune_running() -> Optional[str]:
     return None
 
 
-@_srv._tool()
+@_core._tool()
 def safety_get_rate_guard(host: Optional[str] = None) -> str:
     """READ-ONLY: report S8's stored guard/window (config_store ids 0x0204
     ``max_rate_c_per_min`` / 0x0205 ``rate_window_s``) and whether the guard
@@ -1200,7 +1200,7 @@ def safety_get_rate_guard(host: Optional[str] = None) -> str:
     return " | ".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def safety_set_rate_guard(max_rate_c_per_min: float, rate_window_s: float = 60.0,
                            confirm: bool = False, host: Optional[str] = None) -> str:
     """Commission S8, the safety processor's temperature rate-of-rise guard
@@ -1280,7 +1280,7 @@ def safety_set_rate_guard(max_rate_c_per_min: float, rate_window_s: float = 60.0
     )
 
 
-@_srv._tool()
+@_core._tool()
 def ota_rollback_pico() -> str:
     """Explicitly revert the safety processor (RP2040/SaftyFW) to its
     PREVIOUS bootloader slot, right now.
@@ -1336,4 +1336,7 @@ def ota_rollback_pico() -> str:
     """
     return _srv._send(UART_TASK_ID_SAFETY, devices.safety_request_rollback())
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

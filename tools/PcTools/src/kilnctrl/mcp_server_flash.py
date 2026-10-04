@@ -62,7 +62,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +427,7 @@ def _run_openocd(openocd_exe: str, board_cfg_relpath: str, tcl_commands: str, cw
     return openocd_util.run_openocd(openocd_exe, [board_cfg_relpath], tcl_commands, cwd, timeout_s)
 
 
-@_srv._tool()
+@_core._tool()
 def kill_openocd_sessions() -> str:
     """Force-kills any running openocd.exe processes on this PC.
 
@@ -943,7 +943,7 @@ def _pico_image_provenance_note(app_bin_path: str) -> str:
     return f"pico image: embedded SaftyFW identities disagree across records: {distinct}"
 
 
-@_srv._tool()
+@_core._tool()
 def flash_firmware(
     board_cfg: str = "board/esp32s3-builtin.cfg",
     retry_once: bool = True,
@@ -1574,7 +1574,7 @@ def _observe_boot_after_recovery_flash(host: Optional[str], pre_flash_host: Opti
             f"{_VERIFY_POLL_ATTEMPTS} attempts ({last}); what booted is UNKNOWN")
 
 
-@_srv._tool()
+@_core._tool()
 def flash_recovery(
     recovery_bin: Optional[str] = None,
     kiln_fw_root: Optional[str] = None,
@@ -1967,7 +1967,7 @@ def fixture_flash(
 # tested against synthetic blobs, no board required) and
 # partition_http_client.py for the HTTP client.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def debug_check_partition_table(host: Optional[str] = None, csv_path: Optional[str] = None) -> str:
     """Reads the RUNNING firmware's live partition table over
     GET /api/partitions and diffs it entry-by-entry against `csv_path`
@@ -2004,7 +2004,7 @@ def debug_check_partition_table(host: Optional[str] = None, csv_path: Optional[s
     return f"host={resolved}\n{diff.report()}"
 
 
-@_srv._tool()
+@_core._tool()
 def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -> str:
     """Finds the ELF that matches the ESP's CURRENTLY RUNNING firmware, so a
     coredump/panic backtrace can be symbolized against the right file instead
@@ -2054,7 +2054,7 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     return message
 
 
-@_srv._tool()
+@_core._tool()
 def find_crash_elf_for_coredump(coredump_path: str) -> str:
     """Finds the ELF that actually produced a STORED coredump file (one
     already fetched via `read_esp_coredump()`, or a durable archive copy
@@ -2102,7 +2102,7 @@ def find_crash_elf_for_coredump(coredump_path: str) -> str:
     return f"elf={elf_path}\n{symbolized}"
 
 
-@_srv._tool()
+@_core._tool()
 def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None,
                        elf_path: Optional[str] = None, symbolize: bool = True) -> str:
     """Reads the ESP's coredump partition over HTTP (diagnostics_http.c's
@@ -2215,7 +2215,7 @@ def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None
     return f"{result}\nelf={elf_path}\n{symbolized}"
 
 
-@_srv._tool()
+@_core._tool()
 def find_safty_crash_elf(commit: str, build_date: Optional[str] = None, build_time: Optional[str] = None) -> str:
     """SaftyFW/Pico counterpart to find_crash_elf() -- looks up the archived
     ELF matching a given SAFTYFW_GIT_COMMIT (plus optional build date/time to
@@ -2233,3 +2233,8 @@ def find_safty_crash_elf(commit: str, build_date: Optional[str] = None, build_ti
     if path is None:
         return f"error: {message}"
     return message
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

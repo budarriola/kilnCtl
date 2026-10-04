@@ -59,13 +59,13 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
 # link management
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def list_serial_ports() -> str:
     """List serial ports with a suitability score for the board's UART bridge.
 
@@ -86,7 +86,7 @@ def list_serial_ports() -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def connect(port: Optional[str] = None) -> str:
     """Open the serial link. Omit `port` to autodiscover the recommended one."""
     if _srv._link.is_connected:
@@ -140,7 +140,7 @@ def _check_peer_version() -> str:
     return f"protocol v{version.protocol_version} matches - {version.describe()}"
 
 
-@_srv._tool()
+@_core._tool()
 def disconnect() -> str:
     """Close the serial link."""
     was_connected = _srv._link.is_connected
@@ -154,7 +154,7 @@ def disconnect() -> str:
     return f"disconnected from {port}"
 
 
-@_srv._tool()
+@_core._tool()
 def link_status() -> str:
     """Report connection state, port, baud rate and protocol settings."""
     status = _srv._link.status()
@@ -163,7 +163,7 @@ def link_status() -> str:
     return "\n".join(f"{k}: {v}" for k, v in status.items())
 
 
-@_srv._tool()
+@_core._tool()
 def get_device_log(n: int = 50) -> str:
     """Return the last ``n`` lines of firmware console output (ESP_LOGx).
 
@@ -182,7 +182,7 @@ def get_device_log(n: int = 50) -> str:
     return "\n".join(f"{line.letter} {line.text}" for _ts, line in entries)
 
 
-@_srv._tool()
+@_core._tool()
 def get_device_log_json(n: int = 50, min_level: str = "info") -> str:
     """Structured form of get_device_log: JSON array of
     {"pc_time": unix seconds, "level": name, "text": ...}, oldest first.
@@ -208,7 +208,7 @@ def get_device_log_json(n: int = 50, min_level: str = "info") -> str:
     return json.dumps(records, indent=2)
 
 
-@_srv._tool()
+@_core._tool()
 def close_server() -> str:
     """Gracefully shut down this MCP server process.
 
@@ -241,7 +241,7 @@ def close_server() -> str:
     return "shutting down"
 
 
-@_srv._tool()
+@_core._tool()
 def restart_uart() -> str:
     """On-demand recovery lever for a stuck/desynced UART link.
 
@@ -253,7 +253,7 @@ def restart_uart() -> str:
     return _srv._send(UART_TASK_ID_SYSTEM, devices.system_restart_uart())
 
 
-@_srv._tool()
+@_core._tool()
 def get_watchdog_panic_disabled() -> str:
     """Query whether the ESP task-watchdog's PANIC half is disabled.
 
@@ -286,7 +286,7 @@ def get_watchdog_panic_disabled() -> str:
     return f"watchdog panic disabled: {disabled}"
 
 
-@_srv._tool()
+@_core._tool()
 def set_watchdog_panic_disabled(disabled: bool) -> str:
     """Enable/disable the ESP task-watchdog's PANIC half.
 
@@ -303,4 +303,7 @@ def set_watchdog_panic_disabled(disabled: bool) -> str:
     """
     return _srv._send(UART_TASK_ID_SYSTEM, devices.system_set_watchdog_panic_disabled(disabled))
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

@@ -7,10 +7,10 @@ access, no serial link, no firmware source touched at runtime.
 from __future__ import annotations
 
 from . import coupled_ident
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
-@_srv._tool()
+@_core._tool()
 def coupled_ident_report(paths: list[str], json_output: bool = False) -> str:
     """Fit + score + nonlinearity + self-check the coupling matrix against
     one or more ``/api/profile_exec`` poll captures (JSONL, ``HH:MM:SS
@@ -54,7 +54,7 @@ def coupled_ident_report(paths: list[str], json_output: bool = False) -> str:
     return coupled_ident.format_report_text(report)
 
 
-@_srv._tool()
+@_core._tool()
 def coupled_ident_single_zone(
     zone0_paths: list[str] = [],
     zone1_paths: list[str] = [],
@@ -107,7 +107,7 @@ def coupled_ident_single_zone(
     return coupled_ident.format_single_zone_report_text(matrix, coverage, scores)
 
 
-@_srv._tool()
+@_core._tool()
 def coupled_ident_settle_audit(paths: list[str], json_output: bool = False) -> str:
     """Check whether the firmware's own dwell-settle criterion
     (180 s / 0.003 C/s on actual_c, no duty check at all -- see
@@ -135,3 +135,8 @@ def coupled_ident_settle_audit(paths: list[str], json_output: bool = False) -> s
         import json, dataclasses
         return json.dumps([dataclasses.asdict(e) for e in entries], indent=2)
     return coupled_ident.format_settle_audit_text(entries)
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

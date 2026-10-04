@@ -58,7 +58,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ def _ota_resolve_host(host: Optional[str]) -> str:
     return _ota_resolve_host_with_source(host)[0]
 
 
-@_srv._tool()
+@_core._tool()
 def ota_update_esp(image_path: str, host: Optional[str] = None) -> str:
     """Push a new ESP32-S3 firmware image over Wi-Fi -- POST /api/ota/esp.
 
@@ -161,7 +161,7 @@ def ota_update_esp(image_path: str, host: Optional[str] = None) -> str:
             f"reboot required for the new image to run")
 
 
-@_srv._tool()
+@_core._tool()
 def ota_rollback_esp(host: Optional[str] = None) -> str:
     """Explicitly revert the ESP32-S3 to its PREVIOUS firmware image, right
     now -- POST /api/ota/esp/rollback.
@@ -219,7 +219,7 @@ def ota_rollback_esp(host: Optional[str] = None) -> str:
             f"re-check the version once it comes back up")
 
 
-@_srv._tool()
+@_core._tool()
 def recovery_enter(host: Optional[str] = None, confirm: bool = False) -> str:
     """Deliberately reboot the ESP32-S3 into its RECOVERY image -- POST
     /api/ota/esp/recovery_boot (docs/OTA_SINGLE_SLOT_PLAN.md section 4). With
@@ -259,7 +259,7 @@ def recovery_enter(host: Optional[str] = None, confirm: bool = False) -> str:
             f"once it is back up")
 
 
-@_srv._tool()
+@_core._tool()
 def ota_recovery_exit_esp(host: Optional[str] = None) -> str:
     """Ask the ESP32-S3 to reboot right now to exit boot_guard.h's recovery
     mode -- POST /api/ota/esp/recovery_exit.
@@ -298,7 +298,7 @@ def ota_recovery_exit_esp(host: Optional[str] = None) -> str:
             f"board is rebooting now")
 
 
-@_srv._tool()
+@_core._tool()
 def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
     """Reboot BOTH processors right now -- this ESP32-S3, and (since
     8b0e799a) the RP2040 safety processor IN PLACE, same firmware slot --
@@ -371,7 +371,7 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
             f"once trip_mask is confirmed to be exactly 0x0020")
 
 
-@_srv._tool()
+@_core._tool()
 def ota_update_pico(image_path: str, host: Optional[str] = None,
                      force_version: bool = False) -> str:
     """Push a new RP2040 safety-processor firmware image -- POST
@@ -438,7 +438,7 @@ def ota_update_pico(image_path: str, host: Optional[str] = None,
             f"actual relay outcome")
 
 
-@_srv._tool()
+@_core._tool()
 def ota_status(host: Optional[str] = None) -> str:
     """Poll OTA update progress -- both GET /api/ota/pico/status and
     GET /api/ota/esp/status.
@@ -518,4 +518,7 @@ def ota_status(host: Optional[str] = None) -> str:
 
     return f"pico relay: {pico_str} (host={resolved}) | esp self-update: {esp_str} (host={resolved})"
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

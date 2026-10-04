@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ from . import mcp_server as _srv
 # Every tool below repeats that mapping rather than assuming the caller
 # remembers it.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def io_read() -> str:
     """Read the expander: relays, digital I/O levels/directions, DRDY, raw regs.
 
@@ -85,7 +85,7 @@ def io_read() -> str:
     return state.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def io_set_relay(relay: int, on: bool) -> str:
     """Switch one relay on or off.
 
@@ -121,7 +121,7 @@ def io_set_relay(relay: int, on: bool) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def io_set_relay_mask(mask: int, value: int) -> str:
     """Switch several relays in one atomic register write.
 
@@ -168,7 +168,7 @@ def _io_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
     return f"refused - {label}{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def io_all_relays_off() -> str:
     """De-energize all four relays unconditionally.
 
@@ -177,7 +177,7 @@ def io_all_relays_off() -> str:
     return _io_mutating("all relays off", lambda: _srv._io.all_relays_off())
 
 
-@_srv._tool()
+@_core._tool()
 def io_set_output(io: int, level: bool) -> str:
     """Drive digital I/O 1-7 high or low (only meaningful when it is an output).
 
@@ -187,7 +187,7 @@ def io_set_output(io: int, level: bool) -> str:
     return _io_mutating(f"IO{io} set {'high' if level else 'low'}", lambda: _srv._io.set_io(io, level))
 
 
-@_srv._tool()
+@_core._tool()
 def io_set_direction(io: int, is_input: bool, pullup: bool = False) -> str:
     """Set digital I/O 1-7 as an input (with optional pull-up) or an output."""
     return _io_mutating(
@@ -195,7 +195,7 @@ def io_set_direction(io: int, is_input: bool, pullup: bool = False) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def io_set_auto_report(period_ms: int = 500) -> str:
     """Have the firmware push expander state every period_ms (0 = off).
 
@@ -207,7 +207,7 @@ def io_set_auto_report(period_ms: int = 500) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def io_get_reports(n: int = 10) -> str:
     """Return the last `n` expander auto-report pushes.
 
@@ -222,7 +222,7 @@ def io_get_reports(n: int = 10) -> str:
     return "\n".join(s.describe() for s in states)
 
 
-@_srv._tool()
+@_core._tool()
 def io_scan() -> str:
     """Probe 0x3E/0x3F/0x70/0x71 for an SX1509; report which addresses answered.
 
@@ -238,7 +238,7 @@ def io_scan() -> str:
     return ", ".join(f"0x{a:02X}" for a in found)
 
 
-@_srv._tool()
+@_core._tool()
 def expander_read_reg(reg: int, length: int = 1) -> str:
     """Raw SX1509 register read (debug), 1-16 bytes."""
     try:
@@ -248,31 +248,31 @@ def expander_read_reg(reg: int, length: int = 1) -> str:
     return registers.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def expander_write_reg(reg: int, value: int) -> str:
     """Raw SX1509 register write (debug)."""
     return _io_mutating(f"reg 0x{reg:02X} <- 0x{value:02X}", lambda: _srv._io.sx_write_reg(reg, value))
 
 
-@_srv._tool()
+@_core._tool()
 def expander_set_dir(mask: int) -> str:
     """Write RegDir: u16, bit N = 1 makes expander pin N an input."""
     return _io_mutating(f"RegDir <- 0x{mask:04X}", lambda: _srv._io.sx_set_dir(mask))
 
 
-@_srv._tool()
+@_core._tool()
 def expander_set_pullup(mask: int) -> str:
     """Write RegPullUp: u16, bit N = 1 enables pin N's pull-up."""
     return _io_mutating(f"RegPullUp <- 0x{mask:04X}", lambda: _srv._io.sx_set_pullup(mask))
 
 
-@_srv._tool()
+@_core._tool()
 def expander_set_opendrain(mask: int) -> str:
     """Write RegOpenDrain: u16, bit N = 1 makes pin N open-drain."""
     return _io_mutating(f"RegOpenDrain <- 0x{mask:04X}", lambda: _srv._io.sx_set_opendrain(mask))
 
 
-@_srv._tool()
+@_core._tool()
 def expander_set_debounce(enable_mask: int, config: int = 0) -> str:
     """Enable debounce on the masked pins; `config` 0-7 selects 0.5ms << config."""
     return _io_mutating(
@@ -281,7 +281,7 @@ def expander_set_debounce(enable_mask: int, config: int = 0) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def expander_set_int_mask(mask: int, sense: int = 0) -> str:
     """Write RegInterruptMask (bit N = 1 DISABLES pin N's interrupt) and RegSense.
 
@@ -293,7 +293,7 @@ def expander_set_int_mask(mask: int, sense: int = 0) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def expander_led_driver(pin: int, enable: bool, intensity: int = 0) -> str:
     """Enable the SX1509's LED driver on one pin (0-15).
 
@@ -305,7 +305,7 @@ def expander_led_driver(pin: int, enable: bool, intensity: int = 0) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def expander_reset(hard: bool = False) -> str:
     """Reset the SX1509: software reset via RegReset, or pulse ~RESET (GPIO10)."""
     return _io_mutating(f"SX1509 {'hard' if hard else 'soft'} reset", lambda: _srv._io.sx_reset(hard))
@@ -333,4 +333,7 @@ def _touch_mutating(label: str, call: "Callable[[], devices.OkReason]") -> str:
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - {label}{detail}"
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

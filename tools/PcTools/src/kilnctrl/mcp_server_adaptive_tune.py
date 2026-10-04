@@ -42,7 +42,7 @@ from typing import Optional
 from . import adaptive_tune_http_client as at_http
 from .wifi_uart import WifiUartQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 def _adaptive_tune_resolve_host(host: Optional[str]) -> str:
@@ -94,7 +94,7 @@ def _format_zone_status(z: "at_http.AdaptiveTuneZoneStatus") -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def adaptive_tune_get_status(host: Optional[str] = None) -> str:
     """GET /api/adaptive_tune -- every zone's Phase 7d continuous/adaptive
     PID-tuning status: per-zone opt-in (enabled), how many settled-dwell
@@ -122,7 +122,7 @@ def adaptive_tune_get_status(host: Optional[str] = None) -> str:
     return f"host={resolved}\n" + "\n".join(_format_zone_status(z) for z in zones)
 
 
-@_srv._tool()
+@_core._tool()
 def adaptive_tune_set_enabled(zone: int, enabled: bool, confirm: bool = False,
                                host: Optional[str] = None) -> str:
     """POST /api/adaptive_tune/enable -- opt a zone in or out of Phase 7d's
@@ -172,7 +172,7 @@ def adaptive_tune_set_enabled(zone: int, enabled: bool, confirm: bool = False,
     return f"ok - zone {zone} adaptive tuning {state}, confirmed by the board (host={resolved})"
 
 
-@_srv._tool()
+@_core._tool()
 def adaptive_tune_revert(zone: int, confirm: bool = False, host: Optional[str] = None) -> str:
     """POST /api/adaptive_tune/revert -- U1's one-click revert: undoes this
     zone's last APPLIED adaptive-tune refinement (the change
@@ -207,3 +207,8 @@ def adaptive_tune_revert(zone: int, confirm: bool = False, host: Optional[str] =
     if not result.get("ok"):
         return f"error: board reported failure: {result.get('reason', result)} (host={resolved})"
     return f"ok - zone {zone} adaptive-tune refinement reverted (host={resolved})"
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

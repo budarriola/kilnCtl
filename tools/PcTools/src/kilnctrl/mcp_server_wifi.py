@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +71,7 @@ from . import mcp_server as _srv
 # browser pointed at its AP. The GUI has driven this since it was added
 # (gui.py); these tools close the matching MCP-side gap.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def wifi_get_status(host: Optional[str] = None) -> str:
     """Report Wi-Fi mode (home/ap), connection state, SSID(s), IP and RSSI.
 
@@ -124,7 +124,7 @@ def wifi_get_status(host: Optional[str] = None) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def wifi_scan() -> str:
     """Scan for nearby APs. Slower than the other WIFI tools (~seconds);
     capped at 6 entries by the firmware, with a truncated flag if more were seen."""
@@ -140,7 +140,7 @@ def wifi_scan() -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None) -> str:
     """Save a network and immediately attempt to join it -- this is the
     one-step way to connect the board to a specific scanned network; no
@@ -172,7 +172,7 @@ def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None)
     return f"refused - could not save {ssid!r}{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def wifi_set_mode(mode: str) -> str:
     """Switch between "home" (join a saved network) and "ap" (host the
     provisioning access point) mode."""
@@ -190,7 +190,7 @@ def wifi_set_mode(mode: str) -> str:
     return f"refused - could not set mode to {mode}{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def wifi_set_ap_identity(ap_ssid: Optional[str] = None, ap_password: Optional[str] = None) -> str:
     """Rename the board's own provisioning AP and/or change its password.
     Leave either argument unset (None) to keep it unchanged."""
@@ -204,7 +204,7 @@ def wifi_set_ap_identity(ap_ssid: Optional[str] = None, ap_password: Optional[st
     return f"refused - could not update AP identity{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def wifi_get_networks() -> str:
     """List saved networks, each with in-range/rssi/secure/connected if seen
     in the last scan. Capped at 5 entries by the firmware."""
@@ -224,7 +224,7 @@ def wifi_get_networks() -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def wifi_forget(ssid: str) -> str:
     """Delete a saved network."""
     try:
@@ -236,4 +236,7 @@ def wifi_forget(ssid: str) -> str:
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - no such saved network {ssid!r}{detail}"
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

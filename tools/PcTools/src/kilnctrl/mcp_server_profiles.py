@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ from . import mcp_server as _srv
 # rule once M6 lands) -- this is not a second, weaker control path, it is the
 # same one the GUI and the HTTP dashboard already use.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def profiles_list() -> str:
     """List every profile on the board: id, name, zone_mask, segment count.
 
@@ -104,7 +104,7 @@ def profiles_list() -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_get(profile_id: int) -> str:
     """Read one profile's full segment list (target_c, ramp_c_per_hr, dwell_min per segment).
 
@@ -129,7 +129,7 @@ def profiles_get(profile_id: int) -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str) -> str:
     """Create (profile_id=-1) or overwrite a user profile (slots 0-7).
 
@@ -166,7 +166,7 @@ def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str
     return f"ok - saved as #{result.id}{suffix}"
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_delete(profile_id: int) -> str:
     """Delete a saved user profile (slots 0-7). Refused if it is the one currently running.
 
@@ -189,7 +189,7 @@ def profiles_delete(profile_id: int) -> str:
     return f"refused - could not delete #{profile_id}{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_get_exec_status() -> str:
     """Read the current (or last) run's state: which profile, which segment,
     dwell/ramp state, per-zone actuals and any fault."""
@@ -214,7 +214,7 @@ def profiles_get_exec_status() -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_start(profile_id: int) -> str:
     """Start firing a profile. This is the tool that turns on heat --
     same interlocks as the GUI/HTTP start button, nothing weaker.
@@ -232,7 +232,7 @@ def profiles_start(profile_id: int) -> str:
     return f"ok - firing #{profile_id}"
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_stop() -> str:
     """Stop the current firing. Relays off."""
     try:
@@ -245,7 +245,7 @@ def profiles_stop() -> str:
     return f"refused - nothing running to stop{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_pause() -> str:
     """Pause the current firing (holds state; does not turn off heat outright)."""
     try:
@@ -258,7 +258,7 @@ def profiles_pause() -> str:
     return f"refused - nothing running to pause{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_resume() -> str:
     """Resume a paused firing."""
     try:
@@ -271,7 +271,7 @@ def profiles_resume() -> str:
     return f"refused - nothing paused to resume{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def profiles_ack_last_run() -> str:
     """Acknowledge the last completed/faulted run, clearing it so a new one can start."""
     try:
@@ -283,4 +283,7 @@ def profiles_ack_last_run() -> str:
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - nothing to acknowledge{detail}"
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

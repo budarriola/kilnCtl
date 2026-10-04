@@ -3,7 +3,7 @@ WT-C tranche, wrapping the two OPEN-tier reset routes plus a read of
 enrollment status, over :mod:`totp_http_client`. Registered the way the
 most recent tools in this package were (``estop_verify``, ``boot_guard_get``
 -- see ``mcp_server_info.py``): a small, self-contained module, imported for
-its ``@_srv._tool()`` side effects by ``mcp_server.py``.
+its ``@_core._tool()`` side effects by ``mcp_server.py``.
 
 WT-A (the firmware routes themselves) does not exist yet -- see
 ``totp_http_client.py``'s module docstring for the request/response
@@ -47,7 +47,7 @@ import os
 from typing import Optional
 
 from . import http_auth
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 from . import totp_http_client as thc
 
 #: Per this module's docstring -- deliberately not KILNCTL_TOTP-prefixed
@@ -64,7 +64,7 @@ NEW_PASSWORD_ENV = "KILNCTL_WEB_PASSWORD_NEW"
 _USERNAME_ENV = http_auth.USERNAME_ENV
 
 
-@_srv._tool()
+@_core._tool()
 def totp_enroll_status(host: Optional[str] = None) -> str:
     """READ-ONLY: report whether TOTP is enrolled for the board's
     administrator account (GET /api/auth/totp_status, ROUTE_TIER_ADMIN --
@@ -113,7 +113,7 @@ def totp_enroll_status(host: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def totp_reset_password(confirm: bool = False, host: Optional[str] = None) -> str:
     """Run the TOTP-based "forgot password" flow end to end: POST
     /api/auth/forgot (verifies a TOTP code, issues a short-lived reset
@@ -249,3 +249,8 @@ def totp_reset_password(confirm: bool = False, host: Optional[str] = None) -> st
     return (f"FAILED: POST /api/auth/reset reported success (HTTP 200), but a login attempt "
             f"with the new credential did not succeed -- do not trust the reset as complete "
             f"(host={resolved})")
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

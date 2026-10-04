@@ -67,12 +67,6 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-try:
-    # mcp >= 2.0 renamed FastMCP to MCPServer (same decorator/run API).
-    from mcp.server.mcpserver import MCPServer as _McpServer
-except ImportError:  # pragma: no cover - mcp 1.x
-    from mcp.server.fastmcp import FastMCP as _McpServer
-
 from mcpkit import workbench
 from mcpkit.registry import check_staleness, collapse
 from mcpkit.serve import serve
@@ -118,7 +112,9 @@ from .thermo import ThermoClient, ThermoQueryError
 
 log = logging.getLogger(__name__)
 
-mcp = _McpServer("kilnctrl")
+# `mcp` and `_tool` live in mcp_server_core.py (re-exported here, same objects) so the
+# mcp_server_* submodules can register tools without importing this module.
+from .mcp_server_core import _tool, mcp  # noqa: E402,F401
 
 #: Shared with any other pc_tools process (the GUI, another MCP server)
 #: already running -- see link_hub.py. Whichever process asks first owns the
@@ -353,67 +349,6 @@ def _stale_banner() -> str:
     _freshness_cache["checked_at"] = now
     _freshness_cache["banner"] = banner
     return banner
-
-
-def _tool():
-    """The ``mcp.tool()`` registration plus a blanket "never raise" guard.
-
-    Every tool below builds its payload by calling a ``devices.py`` builder in
-    its own argument list -- ``_send(TASK, devices.display_fill_rect(...))`` --
-    so the builder's validation runs *before* ``_send`` is entered and its
-    ValueError propagates straight out of the tool function. The tool contract
-    here is that a bad argument comes back as an ``error: ...`` string the
-    caller can read and correct, not as an exception the transport has to
-    render; a model passing a negative width should be told what was wrong
-    with it, not handed a traceback.
-
-    The guard also catches the four query clients' errors and anything else
-    unexpected, so a malformed reply or a link fault can never surface as a
-    raised exception either.
-    """
-    register = mcp.tool()
-
-    def decorate(fn):
-        @functools.wraps(fn)  # keeps the signature/docstring FastMCP builds the schema from
-        def wrapper(*args, **kwargs):
-            try:
-                result = fn(*args, **kwargs)
-            except (
-                ThermoQueryError,
-                IoQueryError,
-                DisplayQueryError,
-                TouchQueryError,
-                SafetyQueryError,
-                InfoQueryError,
-                SystemQueryError,
-                BlitError,
-            ) as exc:
-                result = f"error: {exc}"
-            except (ValueError, TypeError, OSError) as exc:
-                _session_log.error("%s: rejected: %s", fn.__name__, exc)
-                result = f"error: {exc}"
-            except Exception as exc:  # noqa: BLE001 - a tool must always answer
-                log.exception("unexpected error in tool %s", fn.__name__)
-                result = f"error: unexpected {type(exc).__name__}: {exc}"
-            # Applies to every tool through this one shared wrapper -- see
-            # _stale_banner()'s docstring for why that is deliberate rather
-            # than picked per-tool: every tool's result is produced by this
-            # server's own Python (formatting/validation/error-handling
-            # alone, even for tools that are mostly a passthrough), so any
-            # of them can be affected by code that changed since this
-            # process started. A cheap, cached, silent-when-fresh check at
-            # the one choke point every tool already passes through beats
-            # auditing which specific tools "depend on server code" (most
-            # of them do, and that classification would itself go stale).
-            if isinstance(result, str):
-                banner = _stale_banner()
-                if banner:
-                    result = result + banner
-            return result
-
-        return register(wrapper)
-
-    return decorate
 
 
 def _send(dst_task: int, payload: bytes) -> str:

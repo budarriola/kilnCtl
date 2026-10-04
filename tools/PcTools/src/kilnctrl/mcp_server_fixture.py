@@ -16,7 +16,7 @@ import threading
 from typing import Optional
 
 from .fixture import DEFAULT_RELAY_MAP, FixtureClient, FixtureError
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 _fixture_lock = threading.Lock()
 _fixture: Optional[FixtureClient] = None
@@ -42,7 +42,7 @@ def _close_fixture() -> None:
             _fixture = None
 
 
-@_srv._tool()
+@_core._tool()
 def fixture_list_relays() -> str:
     """List every relay name the fixture control surface knows about.
 
@@ -53,7 +53,7 @@ def fixture_list_relays() -> str:
     return ", ".join(sorted(DEFAULT_RELAY_MAP))
 
 
-@_srv._tool()
+@_core._tool()
 def fixture_set_relay(name: str, on: bool) -> str:
     """Energize (``on=True``) or de-energize one fixture relay by name.
 
@@ -70,7 +70,7 @@ def fixture_set_relay(name: str, on: bool) -> str:
     return f"ok - {name} {'energized' if on else 'de-energized'}"
 
 
-@_srv._tool()
+@_core._tool()
 def fixture_get_relays() -> str:
     """Read back every mapped relay's live pin state from the fixture.
 
@@ -87,7 +87,7 @@ def fixture_get_relays() -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def fixture_all_off() -> str:
     """De-energize every fixture relay. Safe to call whether or not anything
     is currently energized; also runs automatically on connect/disconnect."""
@@ -97,3 +97,8 @@ def fixture_all_off() -> str:
     except FixtureError as exc:
         return f"error: {exc}"
     return "ok - all fixture relays de-energized"
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

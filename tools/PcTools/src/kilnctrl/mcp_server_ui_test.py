@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ from . import mcp_server as _srv
 # under tools/PcTools/ui_scripts/*.json, same "never compiled into firmware"
 # reasoning as config_presets.py.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def ui_list_scripts() -> str:
     """List every UI regression-test script (name + description + backend).
 
@@ -80,7 +80,7 @@ def ui_list_scripts() -> str:
     return "\n".join(f"{s['name']} ({s['backend']}): {s['description']}" for s in scripts)
 
 
-@_srv._tool()
+@_core._tool()
 def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: bool = True) -> str:
     """Run one UI regression-test script end to end and report a compact
     pass/fail per step.
@@ -110,7 +110,7 @@ def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: boo
     return json.dumps(result)
 
 
-@_srv._tool()
+@_core._tool()
 def ui_step(backend: str, action: str, target: str, timeout_ms: int = 3000,
             contains: Optional[str] = None, value: Optional[str] = None) -> str:
     """Run a single UI step directly -- the debug entry point for trying one
@@ -137,7 +137,7 @@ def ui_step(backend: str, action: str, target: str, timeout_ms: int = 3000,
 FACTORY_RESET_REBOOT_TIMEOUT_S = 20.0
 
 
-@_srv._tool()
+@_core._tool()
 def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN,
                                       host: Optional[str] = None,
                                       safety_host: Optional[str] = None,
@@ -241,4 +241,7 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
                 f"(host={resolved_safety}): {exc}")
     return f"factory reset ok (scope={scope})\n" + result.describe()
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

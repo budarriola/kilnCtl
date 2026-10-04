@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ from . import mcp_server as _srv
 # debug_write_memory() already documents for peer="pico"). GPIO6's hard deny
 # is what stands in for that guard rail today.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
     """Configure a Pico (RP2040) GPIO as input / input_pullup / input_pulldown
     / output, over SWD -- no SaftyFW build flag needed, this works against
@@ -104,7 +104,7 @@ def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
     return f"ok - pico gpio{gpio_num} set to {mode_val}"
 
 
-@_srv._tool()
+@_core._tool()
 def pico_gpio_write(gpio_num: int, level: bool) -> str:
     """Drive a Pico (RP2040) GPIO high or low, over SWD.
 
@@ -121,7 +121,7 @@ def pico_gpio_write(gpio_num: int, level: bool) -> str:
     return f"ok - pico gpio{gpio_num} = {'high' if level else 'low'}"
 
 
-@_srv._tool()
+@_core._tool()
 def pico_gpio_read(gpio_num: int) -> str:
     """Read a Pico (RP2040) GPIO's current input level, over SWD.
 
@@ -136,7 +136,7 @@ def pico_gpio_read(gpio_num: int) -> str:
     return f"pico gpio{gpio_num} = {'high' if level else 'low'}"
 
 
-@_srv._tool()
+@_core._tool()
 def pico_gpio_read_all() -> str:
     """Read every Pico GPIO this connection has configured via
     pico_gpio_set_mode, in this process. There is no firmware-side tracking
@@ -150,4 +150,7 @@ def pico_gpio_read_all() -> str:
         return "no pins configured yet (call pico_gpio_set_mode first)"
     return "\n".join(f"gpio{n}: {mode} = {'high' if level else 'low'}" for n, mode, level in pins)
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

@@ -62,7 +62,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +362,7 @@ def _describe_model_fields(zones_json: dict, diag_error: Optional[str] = None) -
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def control_get_zones(host: Optional[str] = None) -> str:
     """Read every zone's current PID config, calibration offset and
     temperature limits, plus the thermocouple and relay counts, over the
@@ -439,7 +439,7 @@ def control_get_zones(host: Optional[str] = None) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float) -> str:
     """Set a zone's PID gains."""
     try:
@@ -452,7 +452,7 @@ def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float) -> str:
     return f"refused - could not set zone {zone} PID{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: float) -> str:
     """Set a zone's feedforward thermal model (steady-state gain, time
     constant, dead time), used for model feedforward and autotune seeding."""
@@ -615,7 +615,7 @@ def _zone_collateral_diff(
     return diffs
 
 
-@_srv._tool()
+@_core._tool()
 def control_set_zone_limits(
     zone: int,
     max_temp_c: Optional[float] = None,
@@ -838,7 +838,7 @@ _ZONE_TYPE_CONSEQUENCE = {
 }
 
 
-@_srv._tool()
+@_core._tool()
 def control_set_zone_type(
     zone: int,
     zone_type: int,
@@ -1075,7 +1075,7 @@ _ZONE_COUPLING_READBACK_TOLERANCE = 0.0005  # generous vs. GET's %.9g coupling_c
                                              # float32 rounding noise
 
 
-@_srv._tool()
+@_core._tool()
 def control_set_zone_coupling(
     zone: int,
     from_zone: int,
@@ -1230,3 +1230,8 @@ def control_set_zone_coupling(
 
     return (f"ok - zone {zone}: {field_name}={got:g} (zone {from_zone}'s effect on zone {zone}) "
             f"(confirmed by read-back; host={resolved})")
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

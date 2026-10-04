@@ -19,7 +19,7 @@ import os
 from typing import Optional
 
 from . import http_auth
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 from . import web_auth_setup_http_client as wac
 from .http_auth import PASSWORD_ENV, USERNAME_ENV
 
@@ -77,7 +77,7 @@ def _resolve_timeout(label: str, default: int, raw, override: Optional[int]):
     return raw, None
 
 
-@_srv._tool()
+@_core._tool()
 def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
                     enable_web_auth: bool = True,
                     web_timeout_min: Optional[int] = None,
@@ -390,7 +390,7 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     return f"ok: administrator credential configured{' and web auth enabled' if enable_web_auth else ' (web auth left as-is)'}\n{state_line}\n{after_line}"
 
 
-@_srv._tool()
+@_core._tool()
 def web_auth_logout(host: Optional[str] = None) -> bool:
     """End this process's own remembered admin web session at ``host``, if
     any, via POST /api/auth/logout (web_auth_login_http.c's logout handler,
@@ -425,3 +425,8 @@ def web_auth_logout(host: Optional[str] = None) -> bool:
     resolved = _ota_resolve_host(host)
     origin = f"http://{resolved}"
     return http_auth.logout(origin)
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

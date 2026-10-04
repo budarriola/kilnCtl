@@ -12,10 +12,10 @@ from __future__ import annotations
 from mcpkit import workbench
 
 from . import repo_search
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
-@_srv._tool()
+@_core._tool()
 def repo_grep(pattern: str, path: str = ".", glob: str = "", ignore_case: bool = False,
               mode: str = "files", context: int = 0,
               timeout_s: float = repo_search.DEFAULT_TIMEOUT_S,
@@ -61,3 +61,8 @@ def repo_grep(pattern: str, path: str = ".", glob: str = "", ignore_case: bool =
         cwd=workbench.repo_root(),
     )
     return repo_search.format_result(result, notes)
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

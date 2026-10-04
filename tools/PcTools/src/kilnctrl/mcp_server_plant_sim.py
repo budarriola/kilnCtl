@@ -6,10 +6,10 @@ board access, no serial link, no firmware source touched at runtime.
 from __future__ import annotations
 
 from . import plant_sim
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
-@_srv._tool()
+@_core._tool()
 def plant_sim_compare(
     path: str,
     run_idx: int = 0,
@@ -54,3 +54,8 @@ def plant_sim_compare(
 def plant_sim_report_to_json(report: dict) -> str:
     import json
     return json.dumps(report, indent=2)
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

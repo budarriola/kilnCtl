@@ -26,7 +26,7 @@ from .devices_safety import SafetyFlag
 from .link_hub import get_shared_link
 from .wifi_uart import WifiUartQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 def _gpio_test_resolve_host(host: Optional[str]) -> str:
@@ -89,7 +89,7 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def coordinated_gpio_test(confirm: bool = False, host: Optional[str] = None) -> str:
     """Run the coordinated two-board GPIO test -- `firmware/SaftyFW/docs/
     HARDWARE.md` section 1, Steps A and B -- proving the isolated safety-link
@@ -150,3 +150,8 @@ def coordinated_gpio_test(confirm: bool = False, host: Optional[str] = None) -> 
     build = lambda: build_real_clients(link, debug_probe, probe, get_preflight=preflight_fn)
     result = run_coordinated_gpio_test_lazy(preflight_fn, build, confirm=confirm)
     return result.describe()
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

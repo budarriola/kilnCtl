@@ -15,7 +15,7 @@ from typing import Optional
 from . import page_structure
 from .wifi_uart import WifiUartQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 def _page_resolve_host(host: Optional[str]) -> str:
@@ -32,7 +32,7 @@ def _page_resolve_host(host: Optional[str]) -> str:
     return page_structure.PAGE_AP_DEFAULT_HOST
 
 
-@_srv._tool()
+@_core._tool()
 def board_page_structure(path: str = page_structure.DEFAULT_PAGE_PATH,
                          host: Optional[str] = None,
                          timeout_s: float = page_structure.DEFAULT_TIMEOUT_S,
@@ -79,3 +79,8 @@ def board_page_structure(path: str = page_structure.DEFAULT_PAGE_PATH,
     except page_structure.PageStructureError as exc:
         return f"error: {exc}"
     return page_structure.format_structure(page, max_ids=max_ids)
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

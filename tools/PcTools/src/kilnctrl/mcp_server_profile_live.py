@@ -15,7 +15,7 @@ from typing import Optional
 from . import profile_live_http_client as profile_live_http
 from .wifi_uart import WifiUartQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 def _profile_live_resolve_host(host: Optional[str]) -> str:
@@ -33,7 +33,7 @@ def _profile_live_resolve_host(host: Optional[str]) -> str:
     return "192.168.4.1"
 
 
-@_srv._tool()
+@_core._tool()
 def profile_live_get(content: bool = False, host: Optional[str] = None) -> str:
     """GET /api/profile/live -- the live-edit status object, or (with
     content=True) GET /api/profile/live?content=1 -- the working copy's
@@ -61,7 +61,7 @@ def profile_live_get(content: bool = False, host: Optional[str] = None) -> str:
     return f"ok - {obj} (host={resolved})"
 
 
-@_srv._tool()
+@_core._tool()
 def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
     """POST /api/profile/live/fork -- forks whatever profile is currently
     running into a new working copy that can then be edited in place
@@ -88,7 +88,7 @@ def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
     return f"ok - {obj} (host={resolved})"
 
 
-@_srv._tool()
+@_core._tool()
 def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool = False,
                        host: Optional[str] = None) -> str:
     """POST /api/profile/live -- saves a candidate profile body into the
@@ -137,7 +137,7 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
     return f"ok - {obj} (host={resolved})"
 
 
-@_srv._tool()
+@_core._tool()
 def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool = False,
                          host: Optional[str] = None) -> str:
     """POST /api/profile/live/decide -- resolves a pending working copy.
@@ -180,3 +180,8 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
     return f"ok - {obj} (host={resolved})"
+
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

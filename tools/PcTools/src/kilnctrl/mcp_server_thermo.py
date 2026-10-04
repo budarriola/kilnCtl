@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ from . import mcp_server as _srv
 # ESP32 -- they go to the SX1509, so "is a conversion ready" is reported by
 # io_read(), not here.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def thermo_read(channel: int = THERMO_CHANNEL_ALL) -> str:
     """Read thermocouple temperature, cold junction and decoded faults.
 
@@ -87,7 +87,7 @@ def thermo_read(channel: int = THERMO_CHANNEL_ALL) -> str:
     return "\n".join(r.describe() for r in readings)
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_read_faults(channel: int = THERMO_CHANNEL_ALL) -> str:
     """Read the fault status (SR) and MASK registers, decoded to text.
 
@@ -103,7 +103,7 @@ def thermo_read_faults(channel: int = THERMO_CHANNEL_ALL) -> str:
     return "\n".join(f.describe() for f in faults)
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_config_channel(
     channel: int,
     tc_type: int = 3,
@@ -129,7 +129,7 @@ def thermo_config_channel(
     return f"refused - could not configure channel {channel}{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_set_thresholds(
     channel: int, tc_high: float, tc_low: float, cj_high: int, cj_low: int
 ) -> str:
@@ -144,7 +144,7 @@ def thermo_set_thresholds(
     return f"refused - could not set channel {channel} thresholds{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_set_cj_offset(channel: int, offset_c: float) -> str:
     """Set one channel's cold-junction offset in degC (-8..+8)."""
     try:
@@ -157,7 +157,7 @@ def thermo_set_cj_offset(channel: int, offset_c: float) -> str:
     return f"refused - could not set channel {channel} CJ offset{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_one_shot(channel: int) -> str:
     """Trigger a single conversion on one channel (poll with thermo_read after)."""
     try:
@@ -170,7 +170,7 @@ def thermo_one_shot(channel: int) -> str:
     return f"refused - could not trigger one-shot on channel {channel}{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_clear_faults(channel: int) -> str:
     """Pulse CR0.FAULTCLR on one channel.
 
@@ -187,7 +187,7 @@ def thermo_clear_faults(channel: int) -> str:
     return f"refused - could not clear channel {channel} faults{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_set_auto_report(channel_mask: int = 0x07, period_ms: int = 1000) -> str:
     """Have the firmware push readings for the masked channels every period_ms.
 
@@ -204,7 +204,7 @@ def thermo_set_auto_report(channel_mask: int = 0x07, period_ms: int = 1000) -> s
     return f"refused - could not set auto-report{detail}"
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_get_reports(n: int = 10) -> str:
     """Return the last `n` auto-report pushes received since reporting was on.
 
@@ -221,7 +221,7 @@ def thermo_get_reports(n: int = 10) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_read_reg(channel: int, reg: int, length: int = 1) -> str:
     """Raw MAX31856 register read on one channel (debug), 1-16 bytes."""
     try:
@@ -231,7 +231,7 @@ def thermo_read_reg(channel: int, reg: int, length: int = 1) -> str:
     return registers.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def thermo_write_reg(channel: int, reg: int, value: int) -> str:
     """Raw MAX31856 register write on one channel (debug)."""
     try:
@@ -243,4 +243,7 @@ def thermo_write_reg(channel: int, reg: int, value: int) -> str:
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not write channel {channel} reg 0x{reg:02X}{detail}"
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

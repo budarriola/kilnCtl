@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -68,9 +68,9 @@ from . import mcp_server as _srv
 # Every tool above is also reachable through here by name -- this exists so
 # an agent doesn't need a bespoke tool per GUI button/menu-item, and so a
 # future GUI button automatically gets MCP coverage the moment it's added to
-# actions.py, without a matching @_srv._tool() having to be hand-written too.
+# actions.py, without a matching @_core._tool() having to be hand-written too.
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def list_buttons() -> str:
     """List every button/action press_button can invoke, with its parameters.
 
@@ -116,7 +116,7 @@ def _validate_param(param_name: str, action_name: str, value: Any, declared: typ
     return None
 
 
-@_srv._tool()
+@_core._tool()
 def press_button(name: str, params: Optional[dict[str, Any]] = None) -> str:
     """Press any GUI button/menu-item by name -- call list_buttons() first.
 
@@ -158,4 +158,7 @@ def press_button(name: str, params: Optional[dict[str, Any]] = None) -> str:
         _srv.log.exception("unexpected error in action %r", name)
         return f"error: unexpected {type(exc).__name__} in {name!r}: {exc}"
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402

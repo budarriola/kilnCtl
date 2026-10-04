@@ -59,7 +59,7 @@ from .serial_link import list_ports, recommend_port
 from .session_log import SessionLogger
 from .thermo import ThermoClient, ThermoQueryError
 
-from . import mcp_server as _srv
+from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ from . import mcp_server as _srv
 # channel, so the ACK only confirms delivery and the answer arrives in a
 # separate DATA frame (see info.py).
 # ---------------------------------------------------------------------------
-@_srv._tool()
+@_core._tool()
 def get_pin_config() -> str:
     """Report which GPIOs the running firmware has wired up, and to what.
 
@@ -87,7 +87,7 @@ def get_pin_config() -> str:
     return "\n".join(f"GPIO{e.gpio}: {e.label} [{e.abbrev}]" for e in entries)
 
 
-@_srv._tool()
+@_core._tool()
 def get_stack_margin() -> str:
     """Report every instrumented task's stack high-water mark, live.
 
@@ -122,7 +122,7 @@ def get_stack_margin() -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def check_task_liveness() -> str:
     """READ-ONLY: cross-check the board's live GET_STACK_MARGIN reading
     against the required-task list `tools/check_stack_margin_registration.ps1`
@@ -177,7 +177,7 @@ def check_task_liveness() -> str:
     return report.describe()
 
 
-@_srv._tool()
+@_core._tool()
 def get_heap_status(host: Optional[str] = None) -> str:
     """Report internal-DRAM, PSRAM, and DMA-capable-internal-memory heap
     figures, live, over HTTP GET /api/status.
@@ -299,7 +299,7 @@ def _describe_crash_report(rec: dict) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
     """Acknowledge the board's last-crash record (POST
     /api/crash_report/ack, diagnostics_http.c's crash_report_ack_post_
@@ -404,7 +404,7 @@ def _readiness_item(data: dict, key: str) -> Optional[dict]:
     return None
 
 
-@_srv._tool()
+@_core._tool()
 def estop_verify(confirm: bool = False, host: Optional[str] = None) -> str:
     """Record that a HUMAN has physically verified the E-stop interlock
     (POST /api/estop/verify, diagnostics_http.c's estop_verify_post_
@@ -524,7 +524,7 @@ def _clear_sleep(seconds: float) -> None:  # patched out in unit tests
     time.sleep(seconds)
 
 
-@_srv._tool()
+@_core._tool()
 def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False,
                         host: Optional[str] = None) -> str:
     """Acknowledge AND erase the board's last-crash record AND/OR a stale
@@ -704,7 +704,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
             f"(host={resolved}). Do not trust this as cleared.")
 
 
-@_srv._tool()
+@_core._tool()
 def kiln_configs_quarantine_clear(confirm: bool = False, host: Optional[str] = None) -> str:
     """Clear a quarantined kiln_configs store (POST
     /api/kiln_configs/quarantine_clear, kiln_cfg_http.c's quarantine_clear_
@@ -781,7 +781,7 @@ def kiln_configs_quarantine_clear(confirm: bool = False, host: Optional[str] = N
             f"not trust this as cleared.")
 
 
-@_srv._tool()
+@_core._tool()
 def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool = False,
                        host: Optional[str] = None) -> str:
     """Apply a saved kiln config by id (POST /api/kiln_configs/apply,
@@ -893,7 +893,7 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
             f"hand (host={resolved})")
 
 
-@_srv._tool()
+@_core._tool()
 def get_readiness(host: Optional[str] = None) -> str:
     """READ-ONLY: fetch and render the commissioning checklist from GET
     /api/readiness (readiness_http.c's api_readiness_get_handler(), the
@@ -956,7 +956,7 @@ _BACKUP_EXPORT_DEFAULT_DIR = os.path.join(
         os.path.abspath(__file__)))))), "logs", "backup_export")
 
 
-@_srv._tool()
+@_core._tool()
 def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) -> str:
     """READ-ONLY: fetch the board's settings/profile backup (GET
     /api/backup/export, backup_export.c's backup_export_get_handler(),
@@ -1024,7 +1024,7 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def backup_import(
     path: str,
     confirm: bool = False,
@@ -1179,7 +1179,7 @@ def backup_import(
     )
 
 
-@_srv._tool()
+@_core._tool()
 def boot_guard_get(host: Optional[str] = None) -> str:
     """READ-ONLY: fetch boot_guard's recovery-mode counter (GET
     /api/boot_guard, App/drivers/http/ota_http_recovery.c's
@@ -1235,7 +1235,7 @@ def boot_guard_get(host: Optional[str] = None) -> str:
     )
 
 
-@_srv._tool()
+@_core._tool()
 def nvs_list_keys(partition: str, namespace: str, host: Optional[str] = None) -> str:
     """READ-ONLY: list the key NAMES AND TYPES (never values, never blobs)
     in one NVS namespace, over GET /api/nvs/keys?partition=<partition>&
@@ -1278,7 +1278,7 @@ def nvs_list_keys(partition: str, namespace: str, host: Optional[str] = None) ->
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
     """Fetch and decode the board's on-flash binary event log, over HTTP
     GET /api/logs/{firing,autotune}.
@@ -1324,7 +1324,7 @@ def fetch_event_log(kind: str, host: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def get_cfgfs_status(host: Optional[str] = None) -> str:
     """Report the `cfg` LittleFS partition's live state, over HTTP GET
     /api/cfgfs (diagnostics_http.c: cfgfs_status_get_handler()).
@@ -1392,7 +1392,7 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     return "\n".join(lines)
 
 
-@_srv._tool()
+@_core._tool()
 def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
     """Confirm-and-format the `cfg` LittleFS partition -- POST
     /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
@@ -1475,7 +1475,7 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
             f"after file_count={after_count}; board detail: {result.get('detail')!r}")
 
 
-@_srv._tool()
+@_core._tool()
 def get_fw_version() -> str:
     """Report the running firmware's git commit, dirty flag, build time, and
     whether its UART protocol version matches this copy of pc_tools.
@@ -1559,4 +1559,7 @@ def _read_last_flash_warning() -> Optional[str]:
         prov = flash_provenance.read_provenance_json(legacy_path) if os.path.isfile(legacy_path) else None
     return flash_provenance.format_last_flash_warning(prov)
 
-
+# Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
+# aggregate any earlier would let it star-import this module half-initialised
+# when this module is imported first (see mcp_server_core.py).
+from . import mcp_server as _srv  # noqa: E402
