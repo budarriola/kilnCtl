@@ -665,6 +665,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "control/autotune_engine_coupling.c"
                        "bridge/gpio_probe.c"
                        "common/stack_margin.c"
+                       "common/startup_faults.c"
                        ${SIM_SRCS}
                        INCLUDE_DIRS "." "bridge" "common" "control" "http" "hw" "net" "owners" "persist" "safety" "sim" "ui" "../../../hwAbstraction/interface"
                        PRIV_INCLUDE_DIRS "${CMAKE_CURRENT_BINARY_DIR}"

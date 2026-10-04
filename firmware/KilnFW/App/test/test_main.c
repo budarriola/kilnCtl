@@ -44,6 +44,7 @@ void run_test_safety_watchdog(void);
 void run_test_safety_link(void);
 void run_test_dashboard_safety_ready(void);
 void run_test_readiness_commissioning(void);
+void run_test_startup_faults(void);
 void run_test_readiness_ct_applicability(void);
 void run_test_readiness_ct_topology_applicability(void);
 void run_test_readiness_ct_installed_zero_reads_ok(void);
@@ -162,6 +163,7 @@ int main(void)
     run_test_safety_link();
     run_test_dashboard_safety_ready();
     run_test_readiness_commissioning();
+    run_test_startup_faults();
     run_test_readiness_ct_applicability();
     run_test_readiness_ct_topology_applicability();
     run_test_readiness_ct_installed_zero_reads_ok();

@@ -34,6 +34,7 @@
 #include "uart_bridge.h"
 
 #include "main_internal.h"
+#include "startup_faults.h"
 
 /* safety_ceiling_sync_set_disable_heat_hooks() wants a void(void) action --
  * kiln_io_owner_command_all_relays_off() returns esp_err_t, so this adapts
@@ -229,6 +230,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
                           "kiln_io_owner will be reachable this boot (direct fail-safe paths are "
                           "unaffected)",
                      esp_err_to_name(owner_err));
+            startup_fault_note(STARTUP_FAULT_KILN_IO_OWNER);
         }
     }
 
@@ -333,6 +335,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     if (cycles_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "relay_cycles_init failed: %s -- contact-cycle history not kept this boot",
                  esp_err_to_name(cycles_err));
+        startup_fault_note(STARTUP_FAULT_RELAY_CYCLES);
     }
 
     main_heap_stage("safety+io_owner");
@@ -360,6 +363,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
         if (ctx->exec_err != ESP_OK) {
             ESP_LOGW(MAIN_TAG, "profile_executor_start failed: %s -- no profile execution this boot",
                      esp_err_to_name(ctx->exec_err));
+            startup_fault_note(STARTUP_FAULT_PROFILE_EXECUTOR);
         }
     } else {
         ESP_LOGW(MAIN_TAG, "RECOVERY MODE: profile_executor_start() skipped -- no profile execution this boot");
@@ -395,6 +399,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
                                                    safety_err == ESP_OK ? &ctx->safety : NULL);
         if (ctx->autotune_err != ESP_OK) {
             ESP_LOGW(MAIN_TAG, "autotune_engine_start failed: %s -- no autotune this boot", esp_err_to_name(ctx->autotune_err));
+            startup_fault_note(STARTUP_FAULT_AUTOTUNE_ENGINE);
         }
     } else {
         ESP_LOGW(MAIN_TAG, "RECOVERY MODE: autotune_engine_start() skipped -- no autotune this boot");

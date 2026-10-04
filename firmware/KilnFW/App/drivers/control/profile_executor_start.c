@@ -16,6 +16,7 @@
 #include "relay_cycles.h"
 #include "run_state.h"
 #include "stack_margin.h"
+#include "startup_faults.h"
 #include "zones_config_accessors.h"
 
 esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,
@@ -198,6 +199,7 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
                                  &s_exec.watchdog_task, tskNO_AFFINITY);
     if (ok != pdPASS) {
         ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
+        startup_fault_note(STARTUP_FAULT_EXEC_WATCHDOG);
     }
     /* Registered unconditionally, ok==pdPASS or not -- stack_margin_register()
      * reads *task_handle_slot fresh at report time (stack_margin.h's own

@@ -28,6 +28,7 @@
 #include "uart_log_bridge.h"
 
 #include "main_internal.h"
+#include "startup_faults.h"
 
 void main_bridges_bringup(main_boot_ctx_t *ctx)
 {
@@ -107,6 +108,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                lvgl_port_start(&ctx->display, ctx->touch_ready ? &ctx->touch_dev : NULL,
                                ctx->screen_idle_ready ? &ctx->screen_idle : NULL) != ESP_OK) {
         ESP_LOGE(MAIN_TAG, "Failed to start LVGL display task");
+        startup_fault_note(STARTUP_FAULT_LCD_UI);
     }
     if (ctx->pc_link_ready) {
         if (ctx->screen_idle_ready && uart_bridge_start_touch_task(&ctx->uart_proto, &ctx->screen_idle) != ESP_OK) {
@@ -181,6 +183,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         if (log_store_mount() != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "log_store_mount failed -- firing/autotune logs will NOT be persisted "
                           "to flash this boot (live debug-UART telemetry is unaffected)");
+            startup_fault_note(STARTUP_FAULT_LOG_STORE);
         }
         // telemetry_log.c: firing/autotune telemetry over the same debug
         // UART every ESP_LOGx call already rides (uart_log_bridge.c), PLUS
@@ -193,6 +196,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         // flash persistence path has no such gate.
         if (telemetry_log_start() != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start telemetry_log task -- no firing/autotune UART telemetry this boot");
+            startup_fault_note(STARTUP_FAULT_TELEMETRY_LOG);
         }
         // ESP_ERR_NOT_SUPPORTED here just means CONFIG_KILNCTL_ENABLE_GPIO_PROBE
         // is off (the default) -- not a failure worth an ESP_LOGE. See
@@ -221,6 +225,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         // has gone away will stay exactly as hot as it was.
         ESP_LOGE(MAIN_TAG, "PC link watchdog did not start (%s) -- RELAYS WILL NOT DROP ON LINK LOSS",
                  esp_err_to_name(wd_err));
+        startup_fault_note(STARTUP_FAULT_PC_LINK_WATCHDOG);
         main_kiln_enter_safe_state(ctx->io_ready ? &ctx->kio : NULL, &ctx->safety, ctx->safety_err == ESP_OK,
                               SAFETY_FAULT_SRC_APP,
                               "no link watchdog, so relays cannot be guaranteed to drop");

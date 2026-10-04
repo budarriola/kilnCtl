@@ -60,6 +60,7 @@
 #include "settings.h"
 
 #include "main_internal.h"
+#include "startup_faults.h"
 
 /* The three MAX31856 ~DRDY lines land on the SX1509 (IO8/IO9/IO10), not on
  * ESP32 GPIOs, so the thermocouple driver cannot see them without owning an
@@ -658,6 +659,7 @@ void main_boot_early(main_boot_ctx_t *ctx)
         ESP_LOGE(MAIN_TAG, "thermo_owner_start failed: %s -- no thermocouple commands routed through "
                       "thermo_owner will be reachable this boot",
                  esp_err_to_name(thermo_owner_err));
+        startup_fault_note(STARTUP_FAULT_THERMO_OWNER);
     }
 
     main_heap_stage("i2c+spi+thermo");

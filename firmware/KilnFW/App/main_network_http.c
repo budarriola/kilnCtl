@@ -75,6 +75,7 @@
 #include "zones_http.h"
 
 #include "main_internal.h"
+#include "startup_faults.h"
 
 /* --- OTA rollback confirmation (UPDATE_PROTOCOL.md sec 3, TODO.md 9.2) ----
  *
@@ -661,6 +662,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (ota_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "ota_http_start failed: %s -- OTA/factory-reset/sw-reset routes not registered this boot",
                  esp_err_to_name(ota_http_err));
+        startup_fault_note(STARTUP_FAULT_OTA_ROUTES);
     }
 
     // TODO.md 9.2 / UPDATE_PROTOCOL.md sec 3: kick off OTA rollback
@@ -693,12 +695,14 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                 ESP_LOGE(MAIN_TAG, "Failed to start OTA rollback confirmation task -- this image "
                               "will stay PENDING_VERIFY for the rest of this boot, and boot_guard's "
                               "counter will not be cleared this boot either");
+                startup_fault_note(STARTUP_FAULT_OTA_CONFIRM);
                 free(ota_ctx);
             }
         } else {
             ESP_LOGE(MAIN_TAG, "OTA rollback confirmation context alloc failed -- this image "
                           "will stay PENDING_VERIFY for the rest of this boot, and boot_guard's "
                           "counter will not be cleared this boot either");
+            startup_fault_note(STARTUP_FAULT_OTA_CONFIRM);
         }
     }
 
@@ -754,6 +758,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         ESP_LOGW(MAIN_TAG, "kiln_cfg_swap_worker_start failed: %s -- applying a saved kiln config is "
                       "unavailable this boot (reading, saving and exporting still work)",
                  esp_err_to_name(kiln_cfg_swap_worker_err));
+        startup_fault_note(STARTUP_FAULT_KILN_CFG_SWAP);
     }
 
     esp_err_t kiln_cfg_http_err = kiln_cfg_http_start();

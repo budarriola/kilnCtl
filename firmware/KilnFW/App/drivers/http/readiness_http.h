@@ -485,6 +485,17 @@ static inline readiness_status_t readiness_safety_context_status(bool link_up, b
     return (diag_context_age_100ms >= READINESS_CONTEXT_STALE_100MS) ? READY_NOT_DONE : READY_OK;
 }
 
+/* Pure decision for the "startup" item (ROADMAP.md M13 sweep, 2026-10-03):
+ * `fault_count` is startup_fault_count() -- how many tasks/init steps an
+ * operator depends on failed to start this boot (startup_faults.h). Any is
+ * READY_NOT_DONE: the failure is real and its remedy is the operator's
+ * (reboot / reflash). Informational only, like every item outside the four
+ * gated ones -- see the header comment above. */
+static inline readiness_status_t readiness_startup_status(unsigned fault_count)
+{
+    return fault_count == 0u ? READY_OK : READY_NOT_DONE;
+}
+
 /* Pure decision for the "E-stop interlock verified" item, 2026-09-08's
  * follow-on to 3b5ced00: that pass made the FIRMWARE side of E-stop
  * test-locked (relay_owner de-energises on TRIP, negative-tested), but the

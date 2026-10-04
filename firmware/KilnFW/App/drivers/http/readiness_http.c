@@ -25,6 +25,7 @@
 #include "readiness_gate.h"
 #include "safety_cfg_store.h"
 #include "safety_ceiling_sync.h"
+#include "startup_faults.h"
 #include "web_encoding.h"
 #include "wifi_prov.h"
 #include "wifi_provision_http.h"
@@ -101,7 +102,7 @@ static void json_escape(const char *src, char *out, size_t out_cap)
  * free. */
 /* Body buffer size. Heap-allocated in api_readiness_get_handler() -- see the
  * long comment there for why it must never become a stack array again. */
-#define READINESS_JSON_CAP 4096u
+#define READINESS_JSON_CAP 4608u
 
 #define READINESS_DETAIL_MAX 192
 
@@ -985,6 +986,38 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "safety_context", "Safety link command delivery", st, detail,
                         "/safety", &dropped);
+        if (o != before_o) {
+            first = false;
+        }
+    }
+
+    /* 15b. Startup faults (ROADMAP.md M13 sweep, 2026-10-03). A task or init
+     * step the operator depends on that failed to start used to leave only an
+     * ESP_LOGE on the debug UART -- see startup_faults.h. The detail names the
+     * failed subsystems; the first one's consequence and remedy follow, since
+     * several at once is rare and the full list is in the names. 4096 -> 4608
+     * for READINESS_JSON_CAP above paid for this item (heap, not stack). */
+    {
+        unsigned nfault = startup_fault_count();
+        readiness_status_t st = readiness_startup_status(nfault);
+        char detail[READINESS_DETAIL_MAX];
+        if (nfault == 0u) {
+            snprintf(detail, sizeof(detail), "every required task and subsystem started this boot");
+        } else {
+            char names[64];
+            (void)startup_fault_summarize(names, sizeof(names));
+            const char *impact = "reboot the board";
+            for (unsigned i = 0; i < (unsigned)STARTUP_FAULT_COUNT; i++) {
+                if (startup_fault_is_set((startup_fault_t)i)) {
+                    impact = startup_fault_impact((startup_fault_t)i);
+                    break;
+                }
+            }
+            snprintf(detail, sizeof(detail), "failed to start: %s -- %s", names, impact);
+        }
+        size_t before_o = o;
+        o = append_item(json, item_cap, o, first, "startup", "Required tasks started", st, detail,
+                        "/diagnostics", &dropped);
         if (o != before_o) {
             first = false;
         }

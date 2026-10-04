@@ -94,6 +94,7 @@ try {
         (Join-Path $testDir "test_safety_link.c"),
         (Join-Path $testDir "test_dashboard_safety_ready.c"),
         (Join-Path $testDir "test_readiness_commissioning.c"),
+        (Join-Path $testDir "test_startup_faults.c"),
         (Join-Path $testDir "test_kiln_cfg_store.c"),
         (Join-Path $testDir "test_iter_tune_store.c"),
         (Join-Path $testDir "test_firing_shadow.c"),
@@ -259,6 +260,7 @@ try {
         (Join-Path $hwAbsDir "common/hal_status.c"),
         (Join-Path $hwAbsDir "esp/common/hal_esp_common.c"),
         (Join-Path $driversDir "common/stack_margin.c"),
+        (Join-Path $driversDir "common/startup_faults.c"),
         (Join-Path $driversDir "net/time_sync_tz.c"),
         (Join-Path $driversDir "persist/log_store.c"),
         (Join-Path $driversDir "persist/cfg_fs.c"),
@@ -743,7 +745,7 @@ try {
             "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'control/pid_fuzzy.c')`" " +
             "`"$(Join-Path $driversDir 'control/pid_fuzzy_confidence.c')`" " +
-            "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
+            "`"$(Join-Path $driversDir 'common/stack_margin.c')`" `"$(Join-Path $driversDir 'common/startup_faults.c')`" `"$(Join-Path $driversDir 'control/zone_coupling_solve.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/adaptive_tune_model.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/cone_table.c')`" `"$(Join-Path $driversDir 'control/on_off_trigger_decide.c')`" " +
