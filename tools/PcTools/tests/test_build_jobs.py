@@ -96,3 +96,46 @@ def test_build_kilnfw_start_wraps_build_kilnfw(monkeypatch):
 def test_tools_registered_in_dut_bundle():
     assert "build_kilnfw_start" in workbench.BUNDLES["dut"]
     assert "build_job_status" in workbench.BUNDLES["dut"]
+
+
+def test_invalid_job_id_rejected_no_path_traversal(tmp_path):
+    for bad in ("../../etc/passwd", "../x", "ABCDEF12", "abc", "", "0123456789"):
+        assert "invalid job id" in build_jobs.job_status(bad)
+    with pytest.raises(ValueError):
+        build_jobs._job_file("../evil")
+
+
+def test_persist_failure_still_publishes_state(monkeypatch):
+    def boom(job_id, record):
+        raise TypeError("not serializable")
+
+    monkeypatch.setattr(build_jobs, "_write_result", boom)
+    job_id = build_jobs.start_job("kilnfw-build", lambda: "kilnfw-build: OK in 1s", {})
+    assert "OK after" in build_jobs.job_status(job_id, wait_s=5)
+
+
+def test_result_write_is_atomic_and_leaves_no_tmp(tmp_path):
+    job_id = build_jobs.start_job("kilnfw-build", lambda: "kilnfw-build: OK in 1s", {})
+    build_jobs.job_status(job_id, wait_s=5)
+    names = [p.name for p in tmp_path.iterdir()]
+    assert names == [f"job-{job_id}.json"]
+
+
+def test_old_job_files_pruned(tmp_path, monkeypatch):
+    monkeypatch.setattr(build_jobs, "MAX_JOB_FILES", 3)
+    for i in range(6):
+        (tmp_path / f"job-{i:08x}.json").write_text("{}")
+    build_jobs._prune_job_files()
+    assert len(list(tmp_path.glob("job-*.json"))) == 3
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), "x", None])
+def test_nonfinite_wait_s_clamped(bad):
+    release = threading.Event()
+    job_id = build_jobs.start_job("kilnfw-build", lambda: (release.wait(0.3), "kilnfw-build: OK in 1s")[1], {})
+    if bad == float("inf"):
+        out = build_jobs.job_status(job_id, wait_s=bad)  # clamps to MAX_WAIT_S; job ends in 0.3s
+        assert "OK after" in out
+    else:
+        assert "RUNNING" in build_jobs.job_status(job_id, wait_s=bad)
+    build_jobs.job_status(job_id, wait_s=5)

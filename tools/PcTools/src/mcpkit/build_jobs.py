@@ -19,6 +19,7 @@ server died has no file and reports as unknown -- check the build directory.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import tempfile
@@ -38,6 +39,11 @@ MAX_WAIT_S = 120.0
 
 _STATUS_LINE = re.compile(r"^[\w.-]+: (OK|FAILED|TIMEOUT|ABORTED|error)\b")
 
+#: Job files kept in the temp directory; older ones are pruned on each write.
+MAX_JOB_FILES = 50
+
+_JOB_ID = re.compile(r"^[0-9a-f]{8}$")
+
 _lock = threading.Lock()
 _jobs: "dict[str, dict[str, Any]]" = {}
 
@@ -49,7 +55,41 @@ def _job_dir() -> str:
 
 
 def _job_file(job_id: str) -> str:
+    if not _JOB_ID.match(job_id):
+        raise ValueError(f"invalid job id {job_id!r}")
     return os.path.join(_job_dir(), f"job-{job_id}.json")
+
+
+def _write_result(job_id: str, record: "dict[str, Any]") -> None:
+    """Atomic write (temp file + os.replace), then prune old job files."""
+    path = _job_file(job_id)
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(record, handle)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    _prune_job_files()
+
+
+def _prune_job_files() -> None:
+    directory = _job_dir()
+    try:
+        files = [os.path.join(directory, n) for n in os.listdir(directory)
+                 if n.startswith("job-") and n.endswith(".json")]
+        files.sort(key=os.path.getmtime, reverse=True)
+    except OSError:
+        return
+    for stale in files[MAX_JOB_FILES:]:
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
 
 
 def classify_report(report: str) -> str:
@@ -85,17 +125,18 @@ def start_job(tool: str, runner: "Callable[[], str]", params: "dict[str, Any]",
             report = f"{tool}: FAILED (job thread raised)\n{traceback.format_exc()}"
             state = "failed"
         finished_at = time.time()
-        # Persist BEFORE publishing the state, so a caller that sees a finished
-        # state can always also find the result file.
         try:
-            record = {k: v for k, v in job.items() if k != "done"}
-            record.update(report=report, state=state, finished=finished_at)
-            with open(_job_file(job_id), "w", encoding="utf-8") as handle:
-                json.dump(record, handle)
-        except OSError:
-            pass
-        job["report"], job["finished"], job["state"] = report, finished_at, state
-        job["done"].set()
+            # Persist BEFORE publishing the state, so a caller that sees a
+            # finished state can always also find the result file.
+            try:
+                record = {k: v for k, v in job.items() if k != "done"}
+                record.update(report=report, state=state, finished=finished_at)
+                _write_result(job_id, record)
+            except Exception:  # noqa: BLE001 - persistence is best-effort
+                pass
+        finally:
+            job["report"], job["finished"], job["state"] = report, finished_at, state
+            job["done"].set()
 
     with _lock:
         _jobs[job_id] = job
@@ -122,6 +163,14 @@ def _artifact_lines(paths: "list[str]") -> "list[str]":
 
 def job_status(job_id: str, wait_s: float = 0.0) -> str:
     """Report a job; optionally block up to ``wait_s`` (capped) for it to finish."""
+    try:
+        wait_s = float(wait_s)
+    except (TypeError, ValueError):
+        wait_s = 0.0
+    if not math.isfinite(wait_s) or wait_s < 0:
+        wait_s = MAX_WAIT_S if wait_s == math.inf else 0.0
+    if not _JOB_ID.match(str(job_id)):
+        return f"build-job {job_id!r}: invalid job id (expected 8 hex characters)"
     with _lock:
         job = _jobs.get(job_id)
     if job is None:
@@ -133,7 +182,7 @@ def job_status(job_id: str, wait_s: float = 0.0) -> str:
                     f"result file (the server may have restarted mid-build; check the "
                     f"build directory)")
     elif wait_s > 0 and job["state"] == "running":
-        job["done"].wait(min(float(wait_s), MAX_WAIT_S))
+        job["done"].wait(min(wait_s, MAX_WAIT_S))
     state = job["state"]
     end = job["finished"] or time.time()
     head = f"build-job {job['id']} ({job['tool']}): {state.upper()} after {end - job['started']:.1f}s"
