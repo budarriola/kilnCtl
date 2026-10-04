@@ -130,6 +130,7 @@ def safety_get_status() -> str:
 
     ct_fitted: "tuple[bool, bool, bool] | None" = None
     ct_summed_attrib_zone: "int | None" = None
+    ct_mask_from_fallback = False
     raw_fitted = http_status.get("ct_fitted") if isinstance(http_status, dict) else None
     if isinstance(raw_fitted, list) and len(raw_fitted) == 3:
         ct_fitted = (bool(raw_fitted[0]), bool(raw_fitted[1]), bool(raw_fitted[2]))
@@ -149,8 +150,13 @@ def safety_get_status() -> str:
             if ct_topology_p and ct_topology_p.get("set"):
                 summed = bool(ct_topology_p.get("value"))
                 ct_fitted = (False, False, True) if summed else (True, True, True)
+                ct_mask_from_fallback = True
 
     text = status.describe(ct_fitted=ct_fitted, ct_summed_attrib_zone=ct_summed_attrib_zone)
+    if ct_mask_from_fallback:
+        # The fallback mask ignores ct_installed; flag it so a bench recorder
+        # does not trust it as a fitted mask (judgments.CURRENTS_MASK_FALLBACK_MARKER).
+        text += " | ct mask: topology fallback"
     if isinstance(http_status, dict) and http_status.get("safety_tc_is_separate_sensor") is False:
         text += " | safety TC: borrowed from a zone probe (same probe, not a second sensor)"
     if isinstance(http_status, dict):

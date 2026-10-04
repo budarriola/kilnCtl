@@ -422,6 +422,7 @@ class PreflightFirmwareVersionTest(unittest.TestCase):
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
         ok, reason, _before = runner.preflight()
         self.assertFalse(ok)
+        self.assertIn("protocol", reason)
 
 
 class PreflightFirmwareSkipVisibleTest(unittest.TestCase):

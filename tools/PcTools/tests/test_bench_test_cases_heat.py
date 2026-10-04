@@ -9,6 +9,7 @@ Run with: python -m pytest tools/PcTools/tests/test_bench_test_cases_heat.py -q
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 import unittest
@@ -385,17 +386,29 @@ class _GatedFwSrv(_FakeSrv):
         self.fw_confirmed = False
         self.fw_calls = 0
         self.current_a = (3.10, 0.0, 1.50)
+        #: optional list of 3-tuples served one per UART poll (last repeats)
+        self.current_seq = None
+        self._seq_i = 0
         self.status_calls = 0
+        self.uart_timeouts = []
         self.status_text = status_text or (
             "no flags set | 24.00 C (CJ 24.00 C) | currents 3.10 A, not fitted, 1.50 A "
             "| ct zone: - | 10 ms old | tx_dropped 0")
         self._safety = type("S", (), {
             "get_link_stats": lambda self_: type("L", (), {"crc_errors": 0, "timeouts": 0, "broadcast_dropped": 0})(),
-            "get_status": lambda self_: type("St", (), {
-                "link_up": True, "never_received": False, "current_a": self.current_a})(),
+            "get_status": lambda self_, **kw: self._uart_status(**kw),
             "get_diag": lambda self_: type("D", (), {"ever_received": True, "trip_reason": 0})(),
         })()
         self._autotune = type("A", (), {"get_status": lambda self_: type("As", (), {"state_name": "idle"})()})()
+
+    def _uart_status(self, **kw):
+        self.uart_timeouts.append(kw.get("timeout"))
+        if self.current_seq:
+            amps = self.current_seq[min(self._seq_i, len(self.current_seq) - 1)]
+            self._seq_i += 1
+        else:
+            amps = self.current_a
+        return type("St", (), {"link_up": True, "never_received": False, "current_a": amps})()
 
     def _stale_banner(self):
         return ""
@@ -454,6 +467,9 @@ class HP07FirmwareGateAndCurrentsTest(unittest.TestCase):
         result = C._case_hp07(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertEqual(srv.fw_calls, 0)
+        # failed for the right reason: the refused clear left reason 6 latched
+        self.assertIn("did not clear", result.reason)
+        self.assertEqual(result.observed.get("trip_reason_after_clear"), 6)
 
     def test_hp07_passes_after_runner_preflight_confirms_firmware(self):
         from kilnctrl.bench_test.runner import BenchTestRunner
@@ -510,11 +526,138 @@ class HP07FirmwareGateAndCurrentsTest(unittest.TestCase):
         srv.fw_confirmed = True
         srv._safety = type("S", (), {
             "get_link_stats": lambda self_: type("L", (), {"crc_errors": 0, "timeouts": 0, "broadcast_dropped": 0})(),
-            "get_status": lambda self_: type("St", (), {"link_up": True, "never_received": True, "current_a": (0.0, 0.0, 0.0)})(),
+            "get_status": lambda self_, **kw: type("St", (), {"link_up": True, "never_received": True, "current_a": (0.0, 0.0, 0.0)})(),
         })()
         result = C._case_hp07(ctx)
         self.assertGreater(result.observed["heater_current_unreadable_samples"], 0)
         self.assertEqual(result.observed["heater_current_a"]["ch0"]["status"], "no_samples")
+
+    def test_hp07_uart_poll_uses_short_timeout_and_nan_sample_is_unreadable(self):
+        ctx, srv = self._ctx()
+        srv.fw_confirmed = True
+        nan = float("nan")
+        srv.current_seq = [(1.0, 0.0, 2.0), (nan, 0.0, 3.0), (0.5, 0.0, 1.0)]
+        result = C._case_hp07(ctx)
+        self.assertTrue(srv.uart_timeouts)
+        self.assertTrue(all(t == 0.5 for t in srv.uart_timeouts), srv.uart_timeouts)
+        cur = result.observed["heater_current_a"]
+        self.assertEqual((cur["ch0"]["min"], cur["ch0"]["max"]), (0.5, 1.0))
+        self.assertEqual((cur["ch2"]["min"], cur["ch2"]["max"]), (1.0, 3.0))
+        self.assertGreaterEqual(result.observed["heater_current_unreadable_samples"], 1)
+
+    def test_topology_fallback_mask_is_not_trusted(self):
+        from kilnctrl.bench_test import judgments as J
+        ctx, srv = self._ctx(status_text=(
+            "no flags | currents 0.00 A, 0.00 A, 0.00 A | ct zone: - | 10 ms old "
+            + J.CURRENTS_MASK_FALLBACK_MARKER))
+        srv.fw_confirmed = True
+        result = C._case_hp07(ctx)
+        self.assertGreater(result.observed["heater_current_topology_unknown_samples"], 0)
+        self.assertEqual(result.observed["heater_current_a"]["ch0"]["status"], "no_samples")
+
+    def test_recorder_built_before_profile_start(self):
+        ctx, srv = self._ctx()
+        srv.fw_confirmed = True
+        order = []
+        real_start = srv._profiles.start
+        srv._profiles.start = lambda *a, **kw: (order.append(("start", srv.status_calls)), real_start(*a, **kw))[1]
+        C._case_hp07(ctx)
+        self.assertEqual(order[0], ("start", 1))
+
+
+class CurrentAggregationTest(unittest.TestCase):
+    """Varying (and NaN) current samples through the HP-01/02 `_hp_run` path
+    (HP-02 FAIL branch included) and the HP-03 loop."""
+
+    def setUp(self):
+        self.fake_zhc = _FakeZonesHttpClient()
+        self._saved = _install_fake_zones_http_client(self.fake_zhc)
+        self.fake_pehc = _FakeProfileEditHttpClient()
+        self._saved_pehc = _install_fake_profile_edit_http_client(self.fake_pehc)
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+        _restore_profile_edit_http_client(self._saved_pehc)
+
+    def _ctx(self, profiles, seq):
+        srv = _GatedFwSrv(
+            readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
+            profiles=profiles)
+        srv.fw_confirmed = True
+        srv.current_seq = seq
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
+            "_http_get_json": lambda host, path: (200, {}),
+            "_get_zones_config": lambda host: {"zones": [
+                {"index": i, "zone_type": 0, "max_temp_c": 300.0} for i in range(3)]},
+        }
+        _always_ok_preflight(ctx)
+        return ctx
+
+    @staticmethod
+    def _stepped(final):
+        calls = {"n": 0}
+        ambient = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)]
+
+        def read():
+            calls["n"] += 1
+            return ambient if calls["n"] <= 2 else final
+        return read
+
+    def _statuses(self):
+        return [_ExecStatus("running", []), _ExecStatus("running", []), _ExecStatus("done", [])]
+
+    def test_hp02_pass_path_aggregates_min_max_and_nan(self):
+        nan = float("nan")
+        seq = [(1.0, 0.0, 4.0), (3.0, 0.0, nan), (2.0, 0.0, 2.0)]
+        ctx = self._ctx(_FakeProfilesClientHP(exec_statuses=self._statuses()), seq)
+        ctx["srv"]._thermo.read = self._stepped([_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 30.0)])
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        cur = result.observed["heater_current_a"]
+        self.assertEqual((cur["ch0"]["min"], cur["ch0"]["max"], cur["ch0"]["last"]), (1.0, 3.0, 2.0))
+        self.assertEqual((cur["ch2"]["min"], cur["ch2"]["max"], cur["ch2"]["last"]), (2.0, 4.0, 2.0))
+        self.assertEqual(cur["ch2"]["samples"], 2)
+        self.assertEqual(cur["ch1"]["status"], "not_fitted")
+        self.assertEqual(result.observed["heater_current_unreadable_samples"], 1)
+
+    def test_hp02_fail_branch_still_carries_currents(self):
+        nan = float("nan")
+        seq = [(1.0, 0.0, 4.0), (nan, 0.0, 2.0), (2.5, 0.0, 3.0)]
+        ctx = self._ctx(_FakeProfilesClientHP(exec_statuses=self._statuses()), seq)
+        ctx["srv"]._thermo.read = self._stepped([_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 25.9)])
+        result = C._case_hp02(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        cur = result.observed["heater_current_a"]
+        self.assertEqual((cur["ch0"]["min"], cur["ch0"]["max"]), (1.0, 2.5))
+        self.assertEqual(result.observed["heater_current_unreadable_samples"], 1)
+
+    def test_hp03_aggregates_min_max_and_nan(self):
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+            _ExecStatus("running", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=False)]),
+            _ExecStatus("done", [_ZoneExecStatusHP(zone=0), _ZoneExecStatusHP(zone=1), _ZoneExecStatusHP(zone=2, relay_commanded_on=True)]),
+        ]
+        nan = float("nan")
+        seq = [(1.0, 0.0, 4.0), (nan, 0.0, 6.0), (2.0, 0.0, 5.0)]
+        ctx = self._ctx(_FakeProfilesClientHP(exec_statuses=statuses), seq)
+        calls = {"n": 0}
+        rested = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)]
+        hot = [_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 34.0)]
+
+        def read():
+            calls["n"] += 1
+            return rested if calls["n"] <= 2 else hot
+        ctx["srv"]._thermo.read = read
+        result = C._case_hp03(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        cur = result.observed["heater_current_a"]
+        self.assertEqual((cur["ch0"]["min"], cur["ch0"]["max"]), (1.0, 2.0))
+        self.assertEqual((cur["ch2"]["min"], cur["ch2"]["max"], cur["ch2"]["last"]), (4.0, 6.0, 5.0))
+        self.assertEqual(result.observed["heater_current_unreadable_samples"], 1)
 
 
 class ParseSafetyCurrentsTest(unittest.TestCase):
@@ -523,6 +666,20 @@ class ParseSafetyCurrentsTest(unittest.TestCase):
         self.assertEqual(
             J.parse_safety_currents("x | currents 1.00 A, not fitted, 0.00 A | ct zone: - | 5 ms old"),
             [1.0, None, 0.0])
+
+    def test_nan_on_fitted_channel_is_nan_not_not_fitted(self):
+        from kilnctrl.bench_test import judgments as J
+        out = J.parse_safety_currents("x | currents nan A, not fitted, 1.00 A | ct zone: - | 5 ms old")
+        self.assertTrue(math.isnan(out[0]))
+        self.assertIsNone(out[1])
+        self.assertEqual(out[2], 1.0)
+
+    def test_topology_fallback_marker_is_topology_unknown(self):
+        from kilnctrl.bench_test import judgments as J
+        self.assertEqual(
+            J.parse_safety_currents("x | currents 0.00 A, 0.00 A, 0.00 A | ct zone: - | 5 ms old "
+                                    + J.CURRENTS_MASK_FALLBACK_MARKER),
+            J.CURRENTS_TOPOLOGY_UNKNOWN)
 
     def test_no_ct_zone_suffix_is_topology_unknown(self):
         from kilnctrl.bench_test import judgments as J

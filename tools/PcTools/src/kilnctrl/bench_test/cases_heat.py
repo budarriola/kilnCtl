@@ -464,9 +464,15 @@ def _zone_diag_snapshot(ctx: dict) -> Dict[str, Any]:
 class _CurrentRecorder:
     """Heater-current observations for the HP cases (2026-10-04). The CT
     fitted mask is read ONCE per case (one `srv.safety_get_status()` call,
-    which costs HTTP round trips) in `__init__`; each per-poll `sample()` then
-    reads only `srv._safety.get_status()` (the UART cache, no HTTP) alongside
-    the temperature sample. Aggregates only (min/max/last/count). A channel
+    which costs HTTP round trips) in `__init__` -- construct the recorder
+    BEFORE the profile starts so that cost is not paid with the relay live.
+    Each per-poll `sample()` then calls `srv._safety.get_status(timeout=0.5)`:
+    a live PC-to-ESP UART GET_STATUS query (no ESP-to-Pico or HTTP traffic)
+    that can block up to the 0.5 s timeout per poll and bypasses
+    `_send`'s firmware-compat gate; a timeout returns a non-status object and
+    is counted as unreadable. The mask is trusted only when it came from
+    `/api/status` `ct_fitted`; the ct_topology fallback is treated as topology
+    unknown. Aggregates only (min/max/last/count). A channel
     the mask calls "not fitted" is recorded as "not_fitted", never as 0 A. If
     the fitted mask cannot be established (topology unknown: raw amps would be
     indistinguishable from fitted readings) samples are counted in
@@ -502,7 +508,7 @@ class _CurrentRecorder:
             self.unreadable_samples += 1
             return
         try:
-            st = _srv(self._ctx)._safety.get_status()
+            st = _srv(self._ctx)._safety.get_status(timeout=0.5)
             if getattr(st, "never_received", False):
                 raise ValueError("safety status never received")
             amps = list(st.current_a)
@@ -1008,6 +1014,7 @@ def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: floa
     ceiling_ok, ceiling_reason = _check_zone_ceilings(ctx, 1 << target_zone, rule.temp_threshold_c)
     if not ceiling_ok:
         return CaseResult(Verdict.FAIL, reason=ceiling_reason)
+    currents = _CurrentRecorder(ctx)  # before start: its HTTP reads must not run with the relay live
     ok, reason, _ambient = _start_bench_profile(
         ctx, zone_mask=1 << target_zone, target_offset_c=10.0,
         on_off_rules=[rule],
@@ -1020,7 +1027,6 @@ def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: floa
     deadline = now() + 360.0
     relay_states: List[bool] = []
     temps_c: List[Optional[float]] = []
-    currents = _CurrentRecorder(ctx)
     state = "running"
     while now() < deadline:
         st = srv._profiles.get_exec_status()
@@ -1262,6 +1268,7 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
     # enough real time to actually cross `limit_c` on this ~4W bench fixture
     # before the profile's own dwell segment ends and it reaches DONE on its
     # own -- advisory fix, 2026-09-25 review.
+    currents = _CurrentRecorder(ctx)  # before start: its HTTP reads must not run with the relay live
     ok, reason, ambient_at_start = _start_bench_profile(
         ctx, zone_mask=1 << target_zone, target_c=limit_c, on_off_rules=[rule],
         dwell_min=_HP07_DWELL_MIN,
@@ -1284,7 +1291,6 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
     #: from the case's own `observed` output rather than needing a live
     #: rerun. Does not change the pass criterion.
     actual_c_samples: List[Optional[float]] = []
-    currents = _CurrentRecorder(ctx)
     while now() < deadline:
         st = srv._profiles.get_exec_status()
         state = st.state_name
