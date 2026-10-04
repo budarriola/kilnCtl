@@ -325,8 +325,9 @@ static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
         if (rc != ESP_OK) {
             ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "boot partition set/verify failed: %s", esp_err_to_name(rc));
             ESP_LOGE(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set boot partition -- "
-                                                                       "old image is still active");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "boot partition set/read-back failed; the "
+                                                                       "current image keeps running this boot, verify "
+                                                                       "/api/partitions before rebooting");
             goto cleanup;
         }
     }

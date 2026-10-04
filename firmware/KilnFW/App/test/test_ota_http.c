@@ -2124,6 +2124,7 @@ static void test_boot_partition_set_and_verify(void)
     TEST_CHECK(boot_partition_set_and_verify(&want) == ESP_FAIL, "a failed set propagates its own error");
     s_fake_set_rc = ESP_OK;
     TEST_CHECK(boot_partition_set_and_verify(NULL) == ESP_ERR_INVALID_ARG, "a NULL request is refused");
+    s_fake_boot_part = NULL; // never leave it dangling at this function's stack locals
 }
 
 // Bounded drain after an early refusal: DONE only on a 0 read, FAIL on a

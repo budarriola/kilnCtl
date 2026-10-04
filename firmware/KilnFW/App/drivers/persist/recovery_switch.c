@@ -57,8 +57,10 @@ recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
         return RECOVERY_SWITCH_INVALID;
     }
     /* esp_ota_set_boot_partition(factory) verifies the image, then ERASES otadata so the bootloader
-     * falls through to factory. A failure part-way can therefore already have changed otadata: the
-     * SET_FAILED caller must call recovery_switch_restore_running(), never assume nothing was written. */
+     * falls through to factory. A failure part-way (or a read-back mismatch) can therefore already have changed otadata, so never
+     * assume nothing was written. recovery_switch_restore_running() is called on SET_FAILED by the
+     * recovery_boot handler (ota_http_recovery.c:306 and :343); recovery_switch_at_boot_threshold()
+     * does not call it and just stays in degraded in-app recovery mode. */
     esp_err_t err = boot_partition_set_and_verify(recovery);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "boot_partition_set_and_verify(recovery) failed: %s", esp_err_to_name(err));
