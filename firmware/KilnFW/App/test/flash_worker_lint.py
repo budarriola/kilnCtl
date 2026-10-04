@@ -511,6 +511,33 @@ CFG_FS_ALLOWLIST = {
     # itself only reached through profiles_http.c's nvs_erase_slot() -- same
     # caller-guarded shape as profiles_cfg_fs.c's own delete path above.
     "firing_stats_cfg_fs.c",
+    # Factory-reset scope mirror sweeps (kiln_scope_cfg_files_delete(),
+    # profiles_scope_cfg_files_delete(), profiles_builtin_discard_file()).
+    # Pattern 1, by transitivity: each is called ONLY from factory_reset.c's
+    # execute_scope_job() (the three call sites at its delete_kiln_cfg_files/
+    # delete_profiles_cfg_files/restore_builtin_profiles branches), and that
+    # job runs ON the flash worker -- execute_scope() either calls it inline
+    # after uart_bridge_ext_is_on_flash_worker() or dispatches it via
+    # uart_bridge_ext_run_on_flash_worker(), whichever of its two callers
+    # (the httpd reset handler, the UART SYSTEM bridge task) reaches it. The
+    # worker has an internal-SRAM stack and the re-entrancy guard is at the
+    # dispatcher, so these helpers neither dispatch nor run on a caller's
+    # (possibly PSRAM) stack. The same job already calls
+    # cfg_fs_confirm_format_device() the same way. These helpers are public
+    # (exported through their headers) but must not gain another caller
+    # without its own review.
+    "kiln_scope_cfg_files.c",
+    "profiles_scope_cfg_files.c",
+    # profiles_builtin.c is already justified for the hal_kv_* surface (see
+    # ALLOWLIST: httpd/LVGL internal-SRAM callers); its cfg_fs_delete() is the
+    # one bare cfg_fs call in the file, profiles_builtin_discard_file(), whose
+    # only caller is factory_reset.c's execute_scope_job() on the flash worker
+    # (same reasoning as the two entries above). Its other file writes go
+    # through pref_cfg_fs_save(), not a bare cfg_fs_* call. NOTE: this
+    # allowlist is per FILE, so this entry also exempts any FUTURE bare
+    # cfg_fs_* write added anywhere in profiles_builtin.c; such an addition
+    # needs its own justification here.
+    "profiles_builtin.c",
 }
 
 WRITE_CALL_RE = re.compile(
