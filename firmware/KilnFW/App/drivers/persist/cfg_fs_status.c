@@ -88,6 +88,14 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
                                     const cfg_fs_format_progress_t *fmt, char *buf, size_t buf_cap,
                                     size_t *out_len)
 {
+    return cfg_fs_status_build_json_ex(base_dir_for_sizes, cap, items, item_count, fmt, NULL, buf, buf_cap, out_len);
+}
+
+esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
+                                       const cfg_fs_dualwrite_item_t *items, size_t item_count,
+                                       const cfg_fs_format_progress_t *fmt, const dualwrite_window_status_t *win,
+                                       char *buf, size_t buf_cap, size_t *out_len)
+{
     if (!buf || !out_len || buf_cap == 0) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -235,6 +243,21 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
           "\"ota_record\",\"crash_report\",\"touch_cal\",\"run_state_breadcrumb\",\"safety_mirror_esp\","
           "\"rp2040_config_store\",\"logs\",\"coredump\"]");
     APPEND("}");
+
+    /* "dual_write_window" -- progress toward closing the dual-write window
+     * (dualwrite_window.h), supplied by the caller from the read-only
+     * dualwrite_window_get_status(); `known:false` when not supplied, same
+     * "unknown is not zero" discipline as capacity/format. */
+    if (win) {
+        APPEND(",\"dual_write_window\":{\"known\":true,\"consecutive_clean_boots\":%lu,"
+              "\"clean_boots_target\":%lu,\"firing_complete\":%s,\"restore_verified\":%s,"
+              "\"window_may_close\":%s}",
+              (unsigned long)win->consecutive_clean_boots, (unsigned long)win->clean_boots_target,
+              win->firing_complete ? "true" : "false", win->restore_verified ? "true" : "false",
+              win->window_may_close ? "true" : "false");
+    } else {
+        APPEND(",\"dual_write_window\":{\"known\":false}");
+    }
 
     /* "format" -- observability for the deferred background auto-format
      * (docs/audits/boot_hang_2026-09-08.md follow-up): distinguishes a slow

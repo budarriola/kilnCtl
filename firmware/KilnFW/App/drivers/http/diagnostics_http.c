@@ -30,6 +30,7 @@
 #include "lvgl_port.h"
 #include "adaptive_tune.h" /* adaptive_tune_get_kibase_dualwrite_status() -- /api/cfgfs row */
 #include "profile_executor.h" /* firing_stats_get_dualwrite_status() -- /api/cfgfs row */
+#include "dualwrite_window.h" /* dualwrite_window_get_status() -- /api/cfgfs dual_write_window */
 #include "profiles_builtin.h" /* profiles_builtin_get_dualwrite_status() */
 #include "profiles_http.h" /* profiles_http_get_dualwrite_status() -- /api/cfgfs per-slot rows */
 #include "profiles_types.h" /* PROFILES_MAX_COUNT */
@@ -1427,6 +1428,7 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * list (or a future item count) ever pushes past it. */
 typedef struct {
     zones_cfg_t raw;
+    dualwrite_window_status_t window; /* heap, not httpd stack -- see the budget note above */
     char json[3072];
 } cfgfs_status_scratch_t;
 
@@ -1626,8 +1628,11 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
     }
 
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json(mounted ? "/cfg" : NULL, &cap, items, n_items, &fmt, s->json,
-                                              sizeof(s->json), &len);
+    /* Read-only: dualwrite_window_get_status() never writes NVS and returns
+     * true for any non-NULL out (a corrupt/missing record reads as zeros). */
+    bool window_known = dualwrite_window_get_status(&s->window);
+    esp_err_t err = cfg_fs_status_build_json_ex(mounted ? "/cfg" : NULL, &cap, items, n_items, &fmt,
+                                                 window_known ? &s->window : NULL, s->json, sizeof(s->json), &len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cfg_fs_status_build_json() failed: %s (buffer too small?)", esp_err_to_name(err));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status build failed");

@@ -206,7 +206,7 @@ Of 24 inventoried runtime-changeable items:
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`) | `288dc91c` |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
-| 6 | Hidden-builtin profile mask | still NVS-only | — |
+| 6 | Hidden-builtin profile mask | dual-write, `/cfg/profiles/hidden.json` (NVS key `prof_bihid` + rev `prof_bihid_rev`; `/api/cfgfs` row `profiles_hidden`) | `39b92987` |
 | 7 | Firing stats / history | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 8 | Named kiln config slots | dual-write (`kiln_configs.json`, `kiln_cfg_store_cfg_fs.c`) | `9bd29cff` |
 | 9 | Adaptive-tune Ki baseline (opt-in mask lives in zone config, off this table) | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
@@ -414,8 +414,8 @@ note) and records the two one-time achievements (a file-backed firing
 completed; a restore round trip verified) in plain NVS — deliberately not
 on `cfg` itself, so a `cfg` bug cannot corrupt the evidence being used to
 judge `cfg`. Read progress at `GET /api/dualwrite_window`; a
-`dual_write_window` field on `/api/cfgfs` has been requested from that
-endpoint's owner as a follow-up, not yet added. The reported
+`dual_write_window` object is also on `/api/cfgfs` (same five fields, or
+`{"known":false}` if unreadable; emitted by `cfg_fs_status_build_json_ex()`). The reported
 `window_may_close` is a **report only** — closing the window (removing the
 NVS writers) stays a deliberate, reviewed, owner-visible step performed by
 hand once all three conditions read true; nothing in this codebase acts on

@@ -230,6 +230,30 @@ static void test_mounted_with_files(void)
                "an intentionally-NVS-forever item (wifi creds) is reported in nvs_permanent, "
                "never in nvs_only -- an operator must not read it as a pending migration");
 
+    /* dual_write_window: not supplied -> known:false; supplied -> every field echoed. */
+    TEST_CHECK(json_has(json, "\"dual_write_window\":{\"known\":false}"),
+               "no window supplied: reported as unknown, not as zeros");
+    {
+        dualwrite_window_status_t win = { .consecutive_clean_boots = 7, .clean_boots_target = 20,
+                                           .firing_complete = true, .restore_verified = false,
+                                           .window_may_close = false };
+        char wjson[2048];
+        size_t wlen = 0;
+        TEST_CHECK(cfg_fs_status_build_json_ex(base, &cap, items, 2, NULL, &win, wjson, sizeof(wjson), &wlen) == ESP_OK,
+                   "build_json_ex succeeds with a window");
+        TEST_CHECK(json_has(wjson, "\"dual_write_window\":{\"known\":true,\"consecutive_clean_boots\":7,"
+                                   "\"clean_boots_target\":20,\"firing_complete\":true,"
+                                   "\"restore_verified\":false,\"window_may_close\":false}"),
+                   "window fields rendered faithfully");
+        win.window_may_close = true;
+        win.restore_verified = true;
+        TEST_CHECK(cfg_fs_status_build_json_ex(base, &cap, items, 2, NULL, &win, wjson, sizeof(wjson), &wlen) == ESP_OK &&
+                       json_has(wjson, "\"restore_verified\":true,\"window_may_close\":true}"),
+                   "flipped flags are rendered independently");
+        TEST_CHECK(json_has(wjson, "\"dual_write\":{\"items\":[") && json_has(wjson, "\"format\":{"),
+                   "window section sits between dual_write and format without disturbing either");
+    }
+
     /* Now the divergence case: caller (a real bridge's own accessor, on
      * device) reports diverged when both sides are valid and disagree --
      * this test only checks that whatever the caller passes for `diverged`

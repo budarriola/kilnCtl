@@ -27,6 +27,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "dualwrite_window.h" /* dualwrite_window_status_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -151,6 +152,20 @@ esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_
                                     const cfg_fs_dualwrite_item_t *items, size_t item_count,
                                     const cfg_fs_format_progress_t *fmt, char *buf, size_t buf_cap,
                                     size_t *out_len);
+
+/* Same as cfg_fs_status_build_json(), plus the dual-write window's progress
+ * (dualwrite_window.h's read-only dualwrite_window_get_status() result, filled
+ * in by the caller -- this module stays pure and never touches NVS) rendered as
+ * a top-level "dual_write_window" object between "dual_write" and "format":
+ * {"known":true,"consecutive_clean_boots":N,"clean_boots_target":N,
+ *  "firing_complete":b,"restore_verified":b,"window_may_close":b}.
+ * `win` NULL renders {"known":false} -- unknown, never defaulted to zeros.
+ * window_may_close is REPORT ONLY (dualwrite_window.h); nothing acts on it.
+ * cfg_fs_status_build_json() is this function with win == NULL. */
+esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
+                                       const cfg_fs_dualwrite_item_t *items, size_t item_count,
+                                       const cfg_fs_format_progress_t *fmt, const dualwrite_window_status_t *win,
+                                       char *buf, size_t buf_cap, size_t *out_len);
 
 #ifdef __cplusplus
 }
