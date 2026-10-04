@@ -58,8 +58,13 @@
 #      parameters are ignored; any other unresolved word FAILs, as does any
 #      call that does not parse (call count vs parsed count per owner file).
 #      The default "nvs" is dropped when a named partition is also present in
-#      the same owner set (legacy migrate-from-default-partition reads, as in
-#      relay_cycles.c); alone it is a real partition and stands.
+#      the same owner set, but only if EVERY NULL open is
+#      HAL_KV_MODE_READ_ONLY (legacy migrate-from-default probe, as in
+#      relay_cycles.c); a NULL open in any other mode is a real default-nvs
+#      write, which a kiln reset never erases, and stays in the set (FAIL as
+#      mixed). Alone, "nvs" is a real partition and stands. The call-count
+#      check is deliberately fail-closed: it also counts a string literal such
+#      as "hal_kv_open (read) failed" (ota_record.c) as a call.
 #   7. SANITY FLOOR. Fewer than 8 macros found means the pattern went blind: FAIL.
 #
 # Exit codes: 0 PASS, 1 FAIL (including any internal error). Never SKIPs: the
@@ -137,18 +142,20 @@ try {
         }
         $parts = New-Object System.Collections.Generic.HashSet[string]
         $why = @()
+        $nvsWrite = $false
         foreach ($o in $owners) {
             $defs = $null
             $callCount = [regex]::Matches($src[$o.FullName], '\bhal_kv_open\s*\(').Count
-            $matched = [regex]::Matches($src[$o.FullName], '\bhal_kv_open\s*\(\s*[^,]+,[^,]+,[^,]+,\s*(\w+|"[^"]*")\s*\)')
+            $matched = [regex]::Matches($src[$o.FullName], '\bhal_kv_open\s*\(\s*[^,]+,[^,]+,\s*([^,]+?)\s*,\s*(\w+|"[^"]*")\s*\)')
             if ($callCount -ne $matched.Count) {
                 $problems.Add("${name}: $($o.Name) has $callCount hal_kv_open( call(s) but only $($matched.Count) parse as 4 args with a word/literal partition -- the rest cannot be attributed")
             }
             foreach ($m in $matched) {
-                $arg = $m.Groups[1].Value
+                $mode = $m.Groups[1].Value
+                $arg = $m.Groups[2].Value
                 $p = $null
                 if ($arg.StartsWith('"')) { $p = $arg.Trim('"') }
-                elseif ($arg -ceq 'NULL') { $p = 'nvs' }   # hal_kv.h: NULL = default partition
+                elseif ($arg -ceq 'NULL') { $p = 'nvs'; if ($mode -cne 'HAL_KV_MODE_READ_ONLY') { $nvsWrite = $true } }   # hal_kv.h: NULL = default partition
                 elseif ($arg -cmatch '^[a-z_][a-z0-9_]*$') { continue }   # pass-through parameter, ignored (same rule as step 5)
                 else {
                     if ($null -eq $defs) { $defs = Get-Defines $o.FullName @{} }
@@ -161,7 +168,7 @@ try {
         # Legacy-migration probes read the pre-split default partition ("nvs",
         # hal_kv_open(..., NULL)) next to the real one (relay_cycles.c). Drop
         # the default only when a named partition is also present.
-        if ($parts.Count -gt 1 -and $parts.Contains('nvs')) { [void]$parts.Remove('nvs') }
+        if ($parts.Count -gt 1 -and $parts.Contains('nvs') -and -not $nvsWrite) { [void]$parts.Remove('nvs') }
         $ownerNames = (($owners | ForEach-Object { $_.Name }) -join ',')
         $part = '<unresolved>'
         if ($parts.Count -eq 1) { $part = @($parts)[0] }
@@ -196,13 +203,13 @@ try {
     foreach ($sf in $scopeFiles) {
         $x = $sf.Name -replace '_scope_cfg_files\.c$', ''
         $listPart = "${x}_nvs"
-        $checkedParts += $listPart
         $m = [regex]::Match($src[$sf.FullName], '(?s)\b(k\w*Files)\s*\[\s*\]\s*=\s*\{(.*?)\};')
         if (-not $m.Success) {
             if ($sf.Name -eq 'kiln_scope_cfg_files.c') { $problems.Add("$($sf.Name): could not locate the k...Files[] initializer"); continue }
             Write-Host "Info: $($sf.Name) has no k...Files[] array: directory-swept scope list, not policed here."
             continue
         }
+        $checkedParts += $listPart
         $entries = @($m.Groups[2].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         foreach ($e in $entries) {
             if (-not $macros.ContainsKey($e)) { $problems.Add("$($sf.Name): list entry '$e' is not a known *_FILE_PATH macro (literal or unknown)"); continue }
