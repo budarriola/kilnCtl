@@ -123,6 +123,44 @@ class GenerateTests(Base):
         with self.assertRaises(rm.ReleaseError):
             self.gen()
 
+    def test_each_compat_version_required(self):
+        for rel in (rm.ZONES_HEADER, rm.KILNLINK_HEADER, rm.UART_HEADER):
+            with self.subTest(rel=rel):
+                path = os.path.join(self.root, rel)
+                with open(path, "r") as f:
+                    orig = f.read()
+                try:
+                    with open(path, "w", newline="\n") as f:
+                        f.write("/* nothing */\n")
+                    with self.assertRaises(rm.ReleaseError):
+                        self.gen()
+                finally:
+                    with open(path, "w", newline="\n") as f:
+                        f.write(orig)
+
+    def test_zero_version_refused(self):
+        path = os.path.join(self.root, rm.UART_HEADER)
+        with open(path, "w", newline="\n") as f:
+            f.write("#define UART_PROTOCOL_VERSION ((uint16_t)0)\n")
+        with self.assertRaises(rm.ReleaseError):
+            self.gen()
+
+    def test_validate_requires_all_versions(self):
+        self.gen()
+        mp = os.path.join(self.out, "release.json")
+        with open(mp) as f:
+            m = json.load(f)
+        for k in ("zones_cfg_version", "kilnlink_version", "uart_version"):
+            bad = json.loads(json.dumps(m))
+            del bad["compat"][k]
+            with open(mp, "w") as f:
+                json.dump(bad, f)
+            self.assertTrue(any(k in e for e in rm.validate(self.out)), k)
+            bad["compat"][k] = 0
+            with open(mp, "w") as f:
+                json.dump(bad, f)
+            self.assertTrue(any(k in e for e in rm.validate(self.out)), k)
+
     def test_no_build_date_refused(self):
         with open(self.app, "wb") as f:
             f.write(b"\0" * 400)

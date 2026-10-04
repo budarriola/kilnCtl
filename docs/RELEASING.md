@@ -30,7 +30,7 @@ Written to `logs/release/<tag>/` and uploaded:
 - `SHA256SUMS`
 
 `zones_cfg_version`, `kilnlink_version` and `uart_version` are parsed from
-`zones_config_json.h`, `kilnlink_version.h` and `uart_task_ids.h` at release time, never
+`zones_config_json.h`, `kilnlink_version.h` and `uart_task_ids.h` at release time (all three are mandatory and must be positive: the generator refuses if one cannot be read, since the update policy treats zero as malformed), never
 typed by hand. A release is refused if `KilnCtrl.bin` exceeds 0x400000 (4 MB). That
 gate is deliberately the planned post-split app size (docs/GITHUB_RELEASE_UPDATE_PLAN.md
 WP2), stricter than today's `partitions.csv`, where `app` is 0x800000.

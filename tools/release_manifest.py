@@ -82,16 +82,18 @@ def _read(root, rel):
 
 
 def read_compat(root):
-    zones = parse_define_int(_read(root, ZONES_HEADER), "ZONES_CFG_VERSION")
-    if zones is None:
-        raise ReleaseError("ZONES_CFG_VERSION not found in " + ZONES_HEADER)
-    compat = {"zones_cfg_version": zones}
-    link = parse_define_int(_read(root, KILNLINK_HEADER), "KILNLINK_PROTOCOL_VERSION")
-    if link is not None:
-        compat["kilnlink_version"] = link
-    uart = parse_define_int(_read(root, UART_HEADER), "UART_PROTOCOL_VERSION")
-    if uart is not None:
-        compat["uart_version"] = uart
+    # All three are mandatory: the on-board update policy treats a zero/absent
+    # kilnlink_version or uart_version as MALFORMED, so never emit a partial compat.
+    compat = {}
+    for key, rel, name in (("zones_cfg_version", ZONES_HEADER, "ZONES_CFG_VERSION"),
+                           ("kilnlink_version", KILNLINK_HEADER, "KILNLINK_PROTOCOL_VERSION"),
+                           ("uart_version", UART_HEADER, "UART_PROTOCOL_VERSION")):
+        val = parse_define_int(_read(root, rel), name)
+        if val is None:
+            raise ReleaseError("%s not found in %s" % (name, rel))
+        if val <= 0:
+            raise ReleaseError("%s is %d in %s; must be a positive integer" % (name, val, rel))
+        compat[key] = val
     # sha256 of the CSV exactly as committed, with CRLF normalised so a
     # Windows autocrlf checkout and a Linux checkout agree.
     with open(os.path.join(root, PARTITIONS_CSV), "rb") as f:
@@ -255,8 +257,10 @@ def validate(directory, max_app_size=DEFAULT_MAX_APP_SIZE):
     if not isinstance(compat, dict):
         errs.append("compat missing")
     else:
-        if not isinstance(compat.get("zones_cfg_version"), int):
-            errs.append("compat.zones_cfg_version missing or not an int")
+        for k in ("zones_cfg_version", "kilnlink_version", "uart_version"):
+            v = compat.get(k)
+            if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+                errs.append("compat.%s missing or not a positive int" % k)
         if not re.match(r"^[0-9a-f]{64}$", str(compat.get("partitions_sha256", ""))):
             errs.append("compat.partitions_sha256 missing or malformed")
     images = m.get("images")
