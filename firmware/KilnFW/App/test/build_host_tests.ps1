@@ -557,6 +557,9 @@ try {
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/kiln_scope_cfg_files.c')`" `"$(Join-Path $driversDir 'persist/profiles_scope_cfg_files.c')`" " +
+            # 2026-10-04: zones_config_store.c's zone_normals_get_dualwrite_status()
+            # calls cfg_fs_status_item_diverged() for the /api/cfgfs zone_normals row.
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             # docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md: the CT attribution
             # verdict store. Linked as a plain .c (not #included) because it
             # depends only on hal_kv -- fake_kv.c below supplies that -- and

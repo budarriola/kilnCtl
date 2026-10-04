@@ -319,6 +319,42 @@ static void test_profiles_scope_unmounted_is_not_an_error(void)
     TEST_CHECK(profiles_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == 0, "unmounted: ESP_OK, nothing deleted");
 }
 
+static void test_dualwrite_status_row(void)
+{
+    TEST_SECTION("zone normals cfg_fs: zone_normals_get_dualwrite_status() reports file/NVS presence, revs, divergence");
+    reset_all();
+    bool fv = true, nv = true, dv = true;
+    uint32_t fr = 99, nr = 99;
+    zone_normals_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(!fv && !nv && !dv && fr == 0 && nr == 0, "nothing saved, cfg unmounted: both absent, rev 0, not diverged");
+
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    zone_normals_load();
+    TEST_CHECK(zone_normals_set(0, 1.0f) && zone_normals_set(0, 2.0f) && zone_normals_set(1, 3.0f), "three saves");
+    zone_normals_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && fr == 3 && nr == 3 && !dv, "both sides valid at rev 3, same content, not diverged");
+
+    /* NVS ahead with different content: file write fails on save 4. */
+    pref_cfg_fs_set_write_fn(failing_write_fn);
+    TEST_CHECK(zone_normals_set(2, 9.0f), "rev 4 lands in NVS only");
+    pref_cfg_fs_reset_write_fn_for_test();
+    zone_normals_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && fr == 3 && nr == 4 && dv, "file rev 3 vs NVS rev 4 with differing content: diverged");
+
+    /* The accessor must not have healed it (a status GET never writes). */
+    zone_normals_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fr == 3 && nr == 4 && dv, "a second read still diverged: the accessor performed no resync write");
+
+    fake_kv_reset_all(); /* NVS wiped, file survives */
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    zone_normals_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && !nv && fr == 3 && nr == 0 && !dv, "file only: file valid, NVS absent, not diverged");
+
+    /* NULL out-params are tolerated. */
+    zone_normals_get_dualwrite_status(NULL, NULL, NULL, NULL, NULL);
+    TEST_CHECK(true, "NULL out-params do not crash");
+}
+
 void run_test_zone_normals_cfg_fs(void)
 {
     test_unmounted_uses_nvs_only();
@@ -331,5 +367,6 @@ void run_test_zone_normals_cfg_fs(void)
     test_kiln_scope_deletes_every_listed_file();
     test_profiles_scope_deletes_slot_and_stats_files();
     test_profiles_scope_unmounted_is_not_an_error();
+    test_dualwrite_status_row();
     reset_all();
 }

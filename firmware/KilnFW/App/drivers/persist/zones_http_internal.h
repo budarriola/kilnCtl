@@ -275,6 +275,12 @@ void zone_normals_load(void);
 bool zone_normals_set(uint8_t zone_index, float amps);
 bool zone_normals_invalidate_mask(uint8_t zone_mask);
 
+/* Read-only dual-write status for GET /api/cfgfs's "zone_normals" row -- same
+ * contract as profiles_builtin_get_dualwrite_status() (fresh re-read of both
+ * sides, never a resync write, safe to poll). */
+void zone_normals_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                       bool *diverged);
+
 void zone_ct_map_clear(void);
 bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index);
 void zone_k_ct_clear(void);

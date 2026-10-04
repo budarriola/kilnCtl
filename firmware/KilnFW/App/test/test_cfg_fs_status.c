@@ -406,6 +406,43 @@ static void test_buffer_too_small(void)
     cfg_fs_deinit();
 }
 
+/* Worst-case sizing for the real GET /api/cfgfs row set (2026-10-04, when the
+ * zone_normals row made it 12): every row name diagnostics_http.c registers,
+ * every rev at UINT32_MAX, diverged and migration_deferred set, rendered into
+ * exactly the 3072 B the handler's cfgfs_status_scratch_t.json holds, with a
+ * dual-write window and a long files[] list. Fails (ESP_ERR_INVALID_SIZE)
+ * if a future row pushes the worst case past that buffer. */
+static void test_worst_case_fits_handler_buffer(void)
+{
+    TEST_SECTION("cfg_fs_status: all 12 real /api/cfgfs row names at UINT32_MAX revs fit the handler's 3072 B buffer");
+    cfg_fs_deinit();
+    const char *base = "cfg_fs_status_test_worstcase";
+    reset_scratch(base);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(cfg_fs_write_atomic("zones.json", "x", 1) == ESP_OK, "write a file");
+    TEST_CHECK(cfg_fs_write_atomic("zone_normals.dat", "x", 1) == ESP_OK, "write another file");
+
+    static const char *const names[12] = { "zones",         "kiln_cfg_store", "unit_pref",     "profiles_hidden",
+                                           "zone_normals",  "ramp_assist",    "display_power", "tz",
+                                           "profiles",      "relay_cycles",   "adaptive_tune", "firing_stats" };
+    cfg_fs_dualwrite_item_t items[12];
+    for (size_t i = 0; i < 12; i++) {
+        items[i] = (cfg_fs_dualwrite_item_t){ .name = names[i], .file_valid = true, .file_rev = UINT32_MAX,
+                                              .nvs_valid = true, .nvs_rev = UINT32_MAX, .diverged = true,
+                                              .migration_deferred = true };
+    }
+    char json[3072];
+    size_t len = 0;
+    esp_err_t err = cfg_fs_status_build_json(base, NULL, items, 12, NULL, json, sizeof(json), &len);
+    TEST_CHECK(err == ESP_OK, "worst-case 12-row render fits 3072 B");
+    TEST_CHECK(err == ESP_OK && json_has(json, "\"name\":\"zone_normals\""), "zone_normals row is rendered");
+    TEST_CHECK(err == ESP_OK && json_has(json, "\"name\":\"zone_normals\",\"file_backed\":true,\"file_rev\":4294967295,"
+                                               "\"nvs_backed\":true,\"nvs_rev\":4294967295,\"diverged\":true"),
+               "zone_normals row carries the same fields as its siblings");
+    TEST_CHECK(err != ESP_OK || len < sizeof(json) - 400, "at least ~400 B of margin remains before the 3072 B cap");
+    cfg_fs_deinit();
+}
+
 void run_test_cfg_fs_status(void)
 {
     test_unmounted();
@@ -416,6 +453,7 @@ void run_test_cfg_fs_status(void)
     test_format_progress();
     test_format_stalled_ceiling();
     test_buffer_too_small();
+    test_worst_case_fits_handler_buffer();
     test_item_diverged_rule();
     cfg_fs_deinit();
 }

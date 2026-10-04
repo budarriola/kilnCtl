@@ -28,6 +28,7 @@
 #include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5:
                             * read-through/dual-write bridge to the `cfg` LittleFS
                             * partition -- see that header for the full design. */
+#include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- zone_normals_get_dualwrite_status() */
 #include "pref_cfg_fs.h" /* item 3 (relay names), section 5 step 5 close-out: relay
                             * names is a small fixed-size struct (69 bytes) with no
                             * migration chain of its own -- unlike the zones blob it
@@ -1298,6 +1299,62 @@ static esp_err_t zone_normals_save(void)
         s_zone_normals_rev = new_rev;
     }
     return hal_status_to_esp_err(err);
+}
+
+/* Read-only dual-write status for GET /api/cfgfs's "zone_normals" row -- same
+ * contract as profiles_builtin_get_dualwrite_status()/unit_pref_get_
+ * dualwrite_status(): a fresh re-read of BOTH sides, never a resync write
+ * (zone_normals_load() performs those; a status GET must not), safe to
+ * poll. The rev is the dual-write rev counter (znorm_rev / the file's rev
+ * prefix), not anything in the measured data. Takes no lock: nothing in the
+ * zone-normals store is guarded by one (s_zone_normals is read bare by
+ * zones_config_get_normal_current() too), and this reads NVS and the file
+ * directly instead of s_zone_normals, so there is no shared RAM to guard
+ * and no lock to hold across the cfg_fs read. */
+void zone_normals_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                       bool *diverged)
+{
+    zone_normals_cfg_t f_cfg;
+    memset(&f_cfg, 0, sizeof(f_cfg));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(ZONE_NORMALS_FILE_PATH, sizeof(f_cfg), zone_normals_validate, &f_cfg, &f_rev, &f_valid);
+
+    zone_normals_cfg_t n_cfg;
+    memset(&n_cfg, 0, sizeof(n_cfg));
+    bool n_valid = false;
+    uint32_t n_rev = 0;
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+        uint8_t raw[sizeof(zone_normals_cfg_t)];
+        size_t len = sizeof(raw);
+        if (hal_kv_get_blob(&h, NVS_KEY_ZONE_NORMALS, raw, &len) == HAL_OK && zone_normals_validate(raw, len)) {
+            memcpy(&n_cfg, raw, sizeof(n_cfg));
+            n_valid = true;
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, NVS_KEY_ZONE_NORMALS_REV, &rev) == HAL_OK) {
+                n_rev = rev;
+            }
+        }
+        hal_kv_close(&h);
+    }
+
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid,
+                                                f_valid && n_valid && memcmp(&f_cfg, &n_cfg, sizeof(f_cfg)) == 0);
+    }
 }
 
 bool zones_config_get_normal_current(uint8_t zone_index, float *out_amps, bool *out_measured)

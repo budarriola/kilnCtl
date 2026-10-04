@@ -165,6 +165,12 @@ Either outcome never blocks boot, never touches any partition other than
   check — the newer revision won and resynced the loser, so this should
   self-clear; a `diverged` flag that stays true across repeated reads
   means something is repeatedly re-diverging, not resolving.
+  Rows today (12): `zones`, `kiln_cfg_store`, `unit_pref`, `profiles_hidden`,
+  `zone_normals`, `ramp_assist`, `display_power`, `tz`, one aggregate
+  `profiles` row, `relay_cycles`, `adaptive_tune`, `firing_stats`. The
+  `zone_normals` row comes from `zone_normals_get_dualwrite_status()`
+  (`zones_config_store.c`): a fresh read of `zone_normals.dat` and of NVS key
+  `zone_norm_cfg` with rev key `znorm_rev`, never a resync write.
 - `"nvs_only"` — items that have not moved to file backing yet. **As of
   `2e88e90a` (2026-09-08) this array is empty** — every item this doc's
   migration table (below) tracks as MOVE (1-9) now has a real cfg-filesystem
@@ -173,9 +179,8 @@ Either outcome never blocks boot, never touches any partition other than
   build the moment a new `persist/*_cfg_fs.c` bridge lands without a matching
   `dual_write.items[]` row, so this array should not go stale silently a
   third time (see `2e88e90a`'s commit message for the second time it did).
-  The one item still genuinely NVS-only is zone normals (table item 2, in
-  flight as of 2026-10-03); it has no bridge yet, so `"nvs_only":[]` is
-  accurate only for the items that have one.
+  Zone normals (table item 2) now has its bridge and its own row
+  (`zone_normals`, below), so nothing is NVS-only any more.
 
 ## If the filesystem fails to mount
 
@@ -211,7 +216,7 @@ Of 24 inventoried runtime-changeable items:
 | # | Item | Status | Commit |
 |---|---|---|---|
 | 1 | Zones config (PID/FOPDT/coupling/guards/wiring/tc_type) | dual-write | `19f74959` |
-| 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`) | `208de3d4` |
+| 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`; `/api/cfgfs` row `zone_normals`) | `208de3d4` |
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`) | `288dc91c` |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
