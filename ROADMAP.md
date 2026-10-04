@@ -1240,8 +1240,11 @@ so no standing fault). Found by that audit's review, open: `relay_cycles.c`
 never checks whether the kiln partition already holds `NVS_KEY_CYCLES`,
 contrary to its own comment), so a board that predates the partition split
 and still carries the old default-partition copy would have its live wear
-counts and relay types overwritten by the stale v1 copy each boot; fix in
-flight. Owner decision
+counts and relay types overwritten by the stale v1 copy each boot; fixed in
+`0c39f72f` (migrate only when the kiln partition has no `relay_cyc` blob,
+fail closed on an unreadable one, old copy kept as `zones_config_store.c`
+does; the bench board's default partition holds no legacy copy, so it was
+never exposed). Owner decision
 pending: whether a guard-9 or PC-link-watchdog startup failure should gate
 firing (the `READINESS_GATE_KEY_*` set is unchanged for now, so the item is
 advisory).
