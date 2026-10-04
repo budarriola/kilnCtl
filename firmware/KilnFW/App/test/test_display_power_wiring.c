@@ -1519,9 +1519,26 @@ static void run_section12_inject_failed_wired(void)
                        "otherwise a log dump (do_log) runs the hidden pass and floods the log "
                        "with hidden=true targets (fec20423).");
             // The only place the hidden pass is armed is behind that guard.
-            const char *first = strstr(ui_stripped_hp, "ctx->hidden_pass = true;");
-            const char *second = first ? strstr(first + 1, "ctx->hidden_pass = true;") : NULL;
-            TEST_CHECK(first != NULL && second == NULL && first >= body && first < body + len,
+            // Count EVERY arming spelling: `hidden_pass` + optional spaces + `=` +
+            // optional spaces + `true`/`1` (member store, designated initialiser,
+            // `ctx.hidden_pass=true`, `= 1`, ...).
+            int arm_count = 0;
+            const char *arm_at = NULL;
+            for (const char *s = strstr(ui_stripped_hp, "hidden_pass"); s;
+                 s = strstr(s + 1, "hidden_pass")) {
+                const char *q = s + strlen("hidden_pass");
+                while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+                if (*q != '=' || q[1] == '=') continue;
+                q++;
+                while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
+                size_t vl = strncmp(q, "true", 4) == 0 ? 4 : (*q == '1' ? 1 : 0);
+                if (vl == 0) continue;
+                char c = q[vl];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') continue;
+                arm_count++;
+                if (!arm_at) arm_at = s;
+            }
+            TEST_CHECK(arm_count == 1 && arm_at >= body && arm_at < body + len,
                        "`hidden_pass = true` must be armed exactly once in kiln_ui.c, inside "
                        "log_all_tap_targets() behind the guard -- a second arming site would "
                        "bypass it.");
