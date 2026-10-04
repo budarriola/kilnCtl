@@ -2884,6 +2884,21 @@ Same session, two side findings: (1) the bench env-var credentials (`KILNCTL_WEB
 FW fw_build for running app 97a2ee29 (web auth on). Pending record was already acknowledged (PANIC, profile_executo, IllegalInstruction, dump_id 861174328); coredump image present, data_len 0xd5780 of 0x100000. Baseline 10 x GET /api/readiness: 114-349 ms. 1 Hz poller (readiness + /api/status, 60 s) with `crash_report_clear(confirm=True)` ~5 s in: 0 timeouts/errors; readiness max 1378 ms (avg 298), /api/status max 2067 ms (avg 148). Stall window ~t=5.1 s to ~8.5 s (~3.4 s with the httpd serialized: one status 2067 ms, one readiness 1378 ms; everything else <= 624 ms). POST itself was not separately wall-clocked (MCP tool does not report it); the whole tool call, including read-back, fit inside ~10 s, and the observed concurrent stall implies the POST blocked the server ~3.4 s. Verdict: A3 NEEDED (concurrent request > 1.5 s). After: record and coredump gone ("nothing pending"), uptime 1041 s -> 1154 s (no reboot), heap_internal min_free 17719 B, safety armed, trip 0.
 - `20261003T032244Z_lcd_login_gate_check` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Oct  1 2026 23:16:20 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261003T032244Z_lcd_login_gate_check/`
 
+## 2026-10-04 -- WP2 one-time JTAG flash of the new partition table, `12d193aa` (host 192.168.1.156)
+
+Reported by the coordinator; raw logs are not cited here.
+
+- `flash_firmware` with default verify, from a clean worktree at `12d193aa`: bootloader, partition table and app written. Board runs `app`; build matched. ELF archived as `KilnCtrl-b618ce27dea5.elf`.
+- `KilnCtrl.bin` 2,585,776 B; `check_app_image_size` passes against 4,194,304 B.
+- `debug_check_partition_table`: MATCH against the new csv; `app` 0x210000/0x400000 and `stage` 0x610000/0x400000 on chip.
+- `heap_internal` min_free 13687 B before, 17687 B after (uptime 102 s). No crash.
+- `GET /api/cfgfs`: 9 files before and after, identical (`display_power`, `ki_base`, `kiln_configs.json`, `ramp_assist`, `relay_cycles`, `relay_names`, `unit_pref`, `zone_normals`, `zones.json`). The plan's "7 files" expectation was stale; 9 is the real baseline.
+- `control_get_zones` (PID, plant, coupling) identical before and after.
+- boot_guard persisted count 0 to 0, reset verified.
+- Safety: link up, ARMED, no trip, nothing cleared. No `recovery_exit` was needed; the otadata gap did not trigger.
+- Backup saved first: `logs/backup_export/kilnctl_backup_20261004T215837Z.json`.
+- Notes: `build_kilnfw` hit the 300 s MCP client timeout but completed (`build_kilnfw_start`/`build_job_status` landed in `37b47c5c`/`96ae6df5`). The flash note "no embedded SaftyFW identity record found in app binary" is pre-existing (also seen 2026-10-03) and under investigation.
+
 ## 2026-10-04 -- Bench pass of origin/main 14d23a1d (host 192.168.1.156)
 
 Reported by the coordinator; raw logs are not cited here.
