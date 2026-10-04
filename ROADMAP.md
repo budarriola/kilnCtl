@@ -1866,8 +1866,15 @@ Owner instruction, 2026-09-21.
   unreachable over UART and HTTP for minutes, then an S6b (reason 7) trip latched
   (cleared once with owner authorization, stayed clear). Likely a stale host
   serial session; not established. Reproduce with a live-log capture before
-  changing firmware. Also open: `info_uart_bridge` lost 176 B free on
-  `eb83c1ac` with no known cause.
+  changing firmware. `info_uart_bridge`'s 176 B free-margin drop on
+  `eb83c1ac` is not a code change (static review 2026-10-03): `111b1b6f..eb83c1ac`
+  touched `uart_bridge_info.c` only for the 3584 -> 4096 stack literal and
+  comments, and no callee on the task's path (`uart_protocol_*`, `uart_log_bridge.c`,
+  `stack_margin.c`) changed. Same-build high-water spread (1624 fresh vs 1496 B
+  later; used 2480 vs 2544 B idle, 2608 vs 2608 B mid_firing across the two
+  baselines) is runtime path depth (ESP_LOGW under log-queue pressure), already
+  absorbed by SK-01's 384 B tolerance; the static ceiling is
+  `check_all_task_stack_budgets.py`'s `info_uart_bridge` row (2208 B).
 - [x] Capture the `idle`-load stack-margin baseline at the currently running
   commit — done, 2026-09-24 (`5c44ae95`,
   `docs/stack_margin_baseline/stack_margin_idle_111b1b6f_20260924T175921Z.json`).
