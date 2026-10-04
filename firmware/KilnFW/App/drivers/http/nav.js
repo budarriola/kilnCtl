@@ -101,14 +101,13 @@
         // docs/LIVE_PROFILE_EDIT_PLAN.md -- edit the profile actually firing
         // right now, sits right beside the profile catalogue it forks from.
         { href: '/live_profile', label: 'Edit running firing' },
-        { href: '/readiness', label: 'Ready to fire? (checklist)' },
-        { href: '/diagnostics', label: 'Diagnostics' },
       ],
     },
     {
       label: 'Kiln setup',
       children: [
         { href: '/setup', label: 'Setup wizard' },
+        { href: '/readiness', label: 'Ready to fire? (checklist)' },
         { href: '/settings/zones', label: 'Thermocouples & zones' },
         // Kiln-config selector + management (save/clone/rename/delete/export/
         // import/apply), split out of main_page.html's own dashboard
@@ -129,6 +128,7 @@
     {
       label: 'System',
       children: [
+        { href: '/diagnostics', label: 'Diagnostics' },
         { href: '/wifi', label: 'Network settings' },
         { href: '/ota', label: 'Firmware update' },
         { href: '/settings/backup', label: 'Backup & restore' },

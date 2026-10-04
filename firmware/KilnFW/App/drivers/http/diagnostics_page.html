@@ -311,7 +311,9 @@ arrived, not a bug in this page.</p>
   <div class="row"><span class="label">PSRAM &mdash; free now</span><span class="value" id="heapSpiFree">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; largest free block</span><span class="value" id="heapSpiLargest">--</span></div>
   <div class="row"><span class="label">PSRAM &mdash; worst-case free</span><span class="value" id="heapSpiMin">--</span></div>
-  <div class="row"><span class="label">Flash &mdash; used (running image)</span><span class="value" id="flashUsed">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; chip size</span><span class="value" id="flashChip">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; allocated (partition table)</span><span class="value" id="flashAlloc">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; running image used / its partition</span><span class="value" id="flashUsed">--</span></div>
 </div>
 <p class="note">"Largest free block" (not "free bytes") is the number that
 matters on this board: internal DRAM is its tight resource, not total heap.
@@ -611,6 +613,8 @@ here:</p>
   var lastGoodAt = null;
   var failCount = 0;
   var lastStatus = null, lastBoardTemps = null;
+  var partAllocBytes = null;  // sum of /api/partitions sizes
+
 
   // set()'s third arg marks the value kc-live-value. fw_version/fw_build are
   // exactly the "build-time constants like firmware version" the live-
@@ -635,7 +639,16 @@ here:</p>
     set('heapSpiLargest', fmtKBOfTotal(hs.largest_free_block, hs.total), true);
     set('heapSpiMin', fmtKBOfTotal(hs.min_free, hs.total), true);
 
-    set('flashUsed', fmtMBOfTotal(st.flash_used, st.flash_size), true);
+    // Running image bytes out of the RUNNING partition's allocated size (read at
+    // runtime from the status JSON, never hardcoded -- the app partition size
+    // changes); chip size and partition-table total come from flash_size and
+    // the /api/partitions sum (partAllocBytes, set by renderPartitions).
+    var fp = st.flash_partition_size;
+    var fpct = (st.flash_used != null && fp) ? ' (' + Math.round(st.flash_used * 100 / fp) + '%)' : '';
+    set('flashUsed', fmtMB(st.flash_used) + ' of ' + (fp ? fmtMB(fp) : 'n/a') + fpct, true);
+    set('flashChip', fmtMB(st.flash_size));
+    set('flashAlloc', partAllocBytes == null ? 'n/a' : fmtMB(partAllocBytes) +
+        (st.flash_size ? ' of ' + fmtMB(st.flash_size) + ' (' + Math.round(partAllocBytes * 100 / st.flash_size) + '%)' : ''));
 
     set('ioReady', st.io_ready ? 'ready' : 'not attached', true);
     set('thermoReady', st.thermo_ready ? 'ready' : 'not attached', true);
@@ -1043,6 +1056,10 @@ here:</p>
     // that page most wants seen) plus an explicit RUNNING badge on its
     // name row, since "which slot is live" has no other natural home in a
     // label/value pair.
+    var allocSum = 0;
+    for (var k = 0; k < parts.length; k++) allocSum += (parts[k].size || 0);
+    partAllocBytes = allocSum;
+    if (lastStatus) renderStatus(lastStatus);
     var html = '<div class="card">';
     for (var i = 0; i < parts.length; i++) {
       var p = parts[i];
