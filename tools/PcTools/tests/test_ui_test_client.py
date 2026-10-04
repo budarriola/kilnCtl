@@ -121,6 +121,22 @@ class ListTapTargetsTest(unittest.TestCase):
         # truncated, never truncated alone.
         self.assertFalse(result["busy"])
 
+    def test_decodes_per_key_keyboard_targets(self):
+        # An lv_keyboard is reported one target per key (single-character
+        # names, distinct centres), not as one rectangle.
+        keys = "qwertyuiop"
+        body = bytearray()
+        body += struct.pack("<BBB", UI_TEST_CMD_LIST_TAP_TARGETS, len(keys), 0)
+        for i, k in enumerate(keys):
+            body += struct.pack("<B", 1) + k.encode() + struct.pack("<hhB", 20 + 30 * i, 300, 0)
+        self.link.push_reply(UART_TASK_ID_UI_TEST, bytes(body))
+
+        result = self.client.list_tap_targets(timeout=1.0)
+        self.assertEqual([t["name"] for t in result["targets"]], list(keys))
+        self.assertEqual([t["cx"] for t in result["targets"]], [20 + 30 * i for i in range(len(keys))])
+        self.assertFalse(result["truncated"])
+        self.assertFalse(result["busy"])
+
     def test_empty_list_not_truncated(self):
         body = struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS) + struct.pack("<B", 0) + struct.pack("<B", 0)
         self.link.push_reply(UART_TASK_ID_UI_TEST, body)

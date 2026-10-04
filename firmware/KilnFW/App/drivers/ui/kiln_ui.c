@@ -514,6 +514,15 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
                          * test harness would ever want to tap. */
                         continue;
                     }
+                    /* A HIDDEN key keeps its slot in the layout but is not
+                     * drawn or hittable, and a DISABLED key ignores taps, so
+                     * neither is a target a harness can usefully aim at.
+                     * (Not skipped before 2026-10-03: lv_keyboard's
+                     * mode-switch layouts mark unused cells HIDDEN.) */
+                    if (lv_buttonmatrix_has_button_ctrl(child, k, LV_BUTTONMATRIX_CTRL_HIDDEN) ||
+                        lv_buttonmatrix_has_button_ctrl(child, k, LV_BUTTONMATRIX_CTRL_DISABLED)) {
+                        continue;
+                    }
 
                     const lv_area_t *ka = &bm->button_areas[k];
                     int x1 = (int)bm_area.x1 + (int)ka->x1;
