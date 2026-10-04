@@ -628,7 +628,9 @@ Two facts hold for every item and are not repeated per item:
   `sdkconfig.defaults` and renders ~14px per line. montserrat_12 is **not**
   enabled — do not use it without enabling it and re-checking flash size.
 
-### 6.1 Dashboard: selected profile name left of Start, tapping it opens a picker — implemented 2026-09-19, awaiting bench verification
+### 6.1 Dashboard: selected profile name left of Start, tapping it opens a picker — implemented 2026-09-19, tap bench-verified 2026-10-04
+
+**Bench verification 2026-10-04 (webcam, firmware `a1232077`, navigation taps only).** The home name bar showed "--" (no profile selected); tapping it opened `profile_picker` "Select Profile 1/8" with rows M18C_TEST, Cone 03 Fast Fire, Low Temperature Drop-and-Hold, Plainsman Electric Bisque. The panel was asleep and the first tap was swallowed as the wake tap (expected). Not covered: the greyed-while-firing behaviour.
 
 Host tests unchanged (55/55, no new pure module here -- Start/Pause's fixed
 96px width is set by overriding `ui_home_build_button()`'s default
@@ -733,6 +735,8 @@ proving a card-backed control is present where empty background used to be,
 against the script's own bezel reference.
 
 ### 6.2 LCD Profiles page becomes that list, with New and per-profile delete
+
+**Bench verification 2026-10-04 (webcam, `a1232077`): presence verified.** Settings > Profiles shows "Profiles 1/8" with the same rows, a red Delete button on the M18C_TEST row only, and a New (document) glyph at the top bar's far right (tap position (454,21)). The picker from home has no New or Delete. Still open: that tapping New opens `profile_builder_zones`.
 
 **Files.** `ui_page_profiles.c` (rewritten — the four `build_nav_item()` cells
 "My Profiles", "Built-ins (28)", "Restore hidden", "New Profile" and their
@@ -920,6 +924,8 @@ de-energized and again energized; the ON state uses the existing
 — no new colour. Require a measured channel difference, with a bezel reference
 sampled in the same run.
 
+**Bench verification 2026-10-04 (partial, off state again, `a1232077`).** The Relays card reads "Safety (K4): off"; the "off" word sampled mean RGB (145.9, 210.6, 226.1) against a (0,0,0) bezel, so it is not ACCENT_4 green `0x5cc06e`. The ON state still needs heat enable and remains owed.
+
 **Bench verification 2026-09-19 (partial — off state only).** Board flashed
 from a clean worktree at `73c1da94` and photographed with
 `capture_lcd.ps1`; regions sampled numerically (ffmpeg `rawvideo`/`rgb24`),
@@ -936,6 +942,8 @@ the bench lamp, which inflates all three channels and rules out an absolute
 match against `0x9aa0ae`; only the channel *ordering* above is load-bearing.
 
 ### 6.4 The LCD loses the ability to reset relay life — done 2026-09-19, commit dcfadd79
+
+Re-verified 2026-10-04 on `a1232077`: Diagnostics "Relay Life 7 of 8" shows five rows (Relay 1-4, Safety (K4)) and no Reset tap target; luminance below the rows 148.5 mean, max 174, bezel 2.2.
 
 Bench-verified 2026-09-19 on firmware built from `73c1da94`: Diagnostics page
 7 of 8 ("Relay Life") shows five display-only rows (Relay 1-4, Safety (K4))
