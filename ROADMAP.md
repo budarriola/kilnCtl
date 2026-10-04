@@ -1214,7 +1214,13 @@ and backlight tasks. The review found three notes that could never fire
 because the start functions always returned `ESP_OK`; `a548dfc6` makes
 `time_sync_start()`, `unit_pref_start()` and `ramp_assist_cfg_start()` return
 the real error on partition-init or unrecovered open/read failure (callers
-only log and note, stored defaults unchanged). The impact strings are held to
+only log and note, stored defaults unchanged); `9e5b8005` adds host tests for
+those returns (partition-init failure, scripted open error, corrupted read,
+and the cfg_fs file fallback still returning `ESP_OK` with the file value;
+sntp init failure propagated, TZ still applied), negative-tested at
+`test_unit_pref.c:328`. `time_sync_start()` still swallows a partition-init
+failure, acceptable because `unit_pref_start()` opens the same partition
+later in the same boot and notes it. The impact strings are held to
 100 characters by the host test so the readiness `detail[192]` budget holds
 (17 + 63 + 4 + 99 + NUL = 184). Skipped as debug-only or cosmetic: the log,
 touch, ui_test and gpio_probe bridges, `board_temps_start`, `mdns_init`;
