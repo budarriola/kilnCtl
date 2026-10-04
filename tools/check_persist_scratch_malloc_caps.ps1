@@ -38,10 +38,14 @@
 # count must match exactly, so a duplicated call or a removed one fails the
 # check, and an entry that matches nothing fails as stale; the list cannot rot.
 #
-# NOT YET COVERED. kiln_cfg_store_cfg_fs.c, zones_config_cfg_fs.c and
-# firing_stats_cfg_fs.c hold the same scratch class (malloc(*_FILE_BUF_MAX)).
-# They are deliberately not in $files yet: adding them is a planned follow-up
-# once those sites move to persist_scratch_alloc().
+# NOT YET COVERED. kiln_cfg_store_cfg_fs.c and zones_config_cfg_fs.c hold the
+# same scratch class (malloc(*_FILE_BUF_MAX)) but still use plain malloc, so
+# they are deliberately not in $files yet: adding them is a planned follow-up
+# once those sites move to persist_scratch_alloc(). Also not matched by design:
+# heap_caps_malloc(), so firing_stats_cfg_fs_save()'s deliberate
+# MALLOC_CAP_INTERNAL buffer (it is a flash-write source kept internal by choice,
+# not by necessity) and the other explicit-caps sites in the newer files never need an
+# allowlist entry; this check only catches a regression back to plain malloc.
 param(
     [string]$RepoRoot
 )
@@ -52,7 +56,12 @@ $files = @(
     "firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c",
     "firmware/KilnFW/App/drivers/persist/kiln_package.c",
     "firmware/KilnFW/App/drivers/persist/cfg_fs.c",
-    "firmware/KilnFW/App/drivers/http/backup_import.c"
+    "firmware/KilnFW/App/drivers/http/backup_import.c",
+    "firmware/KilnFW/App/drivers/http/diagnostics_http.c",
+    "firmware/KilnFW/App/drivers/http/profiles_http.c",
+    "firmware/KilnFW/App/drivers/persist/cfg_fs_status.c",
+    "firmware/KilnFW/App/drivers/persist/firing_stats_cfg_fs.c",
+    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c"
 )
 
 # file | normalized call text | expected count | reason
@@ -68,7 +77,9 @@ $allow = @(
     ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
       "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
     ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(backup_import_job_ctx_t))", 1,
-      "24-byte job context handed to the async task, not scratch"))
+      "24-byte job context handed to the async task, not scratch")
+    ,@("firmware/KilnFW/App/drivers/http/diagnostics_http.c", "malloc((size_t)len_ul)", 1,
+      "GET /api/coredump chunk buffer (clamped to COREDUMP_HTTP_CHUNK_MAX 4096 B): a deliberate crash-forensics read, not the /api/cfgfs status path; left plain"))
 
 $scalarSizeof = 'sizeof\s*\(\s*(?:const\s+|unsigned\s+|signed\s+)*(?:char|uint8_t|int8_t|uint16_t|int16_t|uint32_t|int32_t|uint64_t|int64_t|int|short|long|float|double|size_t|bool)\b[^\[\)]*\)'
 $intLiteral = '(?<![\w.])(0[xX][0-9a-fA-F]+|\d+)[uU]?[lL]{0,2}(?![\w.])'

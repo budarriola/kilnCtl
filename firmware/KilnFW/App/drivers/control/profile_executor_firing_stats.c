@@ -656,19 +656,18 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
 
     /* 2026-10-04: now PSRAM first via persist_scratch_alloc(): this read-only
      * path held 2 x 1364 B of internal RAM across the 100-slot loop on every
-     * GET /api/cfgfs. Original 2026-09-08 note:
-     * Heap-allocated, internal DRAM (2026-09-08, httpd_worker stack-budget
-     * pass): this was two profile_firing_history_blob_t (1364 B each) as
-     * stack locals inside the loop -- the same "four copies of a 1364 B
+     * GET /api/cfgfs. History: 2026-09-08 (httpd_worker stack-budget pass)
+     * moved these off the stack onto the heap; this was two
+     * profile_firing_history_blob_t (1364 B each) as stack locals inside the
+     * loop -- the same "four copies of a 1364 B
      * blob" class eb92592c already fixed for the firing-history handler
      * itself, here as two copies in this dualwrite-status helper, which
      * `/api/cfgfs` (diagnostics_http.c's cfgfs_status_get_handler) and the
      * setup wizard's poll both reach. Read-only comparison, no flash write
-     * in this function, so internal vs. PSRAM is not safety-critical here --
-     * internal DRAM is used anyway to match every sibling *_get_dualwrite_
-     * status blob-compare helper in this pass, keeping the choice
-     * mechanical rather than re-litigated per file. One allocation reused
-     * across every loop iteration, freed once after the loop (this
+     * in this function, so internal vs. PSRAM is not safety-critical here
+     * (the 2026-09-08 pass used internal DRAM to match its siblings; that
+     * choice is superseded by the PSRAM-first allocation above). One
+     * allocation reused across every loop iteration, freed once after the loop (this
      * function's only exit path). An allocation failure degrades to
      * reporting the honest "nothing valid, nothing diverged" defaults
      * already set above, rather than a stack overflow. */
