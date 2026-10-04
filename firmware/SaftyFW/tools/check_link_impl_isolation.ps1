@@ -198,6 +198,9 @@ $allowlistPaths = @(
     # this module's host tests build standalone off-target -- nothing to do
     # with the link's CRC16-CCITT-FALSE.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\web_auth_store.c"),
+    # docs/SPARE_RELAY_ONOFF_PLAN.md WP-1: aux_outputs_cfg.c checksums its own 56 B kiln_nvs blob
+    # (CRC32/IEEE), a local copy so its host test builds standalone -- not the link CRC.
+    (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\aux_outputs_cfg.c"),
     # docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2: totp_config.c's
     # crc32_compute()/secret_blob_crc() are the SAME class as web_auth_
     # store.c's entry just above -- a standalone table-less CRC32 (IEEE
