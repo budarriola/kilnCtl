@@ -366,5 +366,63 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertTrue(self.fake_srv.profiles_stop_called)
 
 
+class _FwSrv(_FakeSrv):
+    """_FakeSrv plus the MCP get_fw_version tool, counting calls."""
+
+    fw_text = ("uart_protocol_version: 13\ncompatible: yes\ncommit: abc1234def\n"
+               "tree: clean\nbuilt: 2026-10-04")
+
+    def __init__(self):
+        super().__init__()
+        self.fw_calls = 0
+
+    def get_fw_version(self):
+        self.fw_calls += 1
+        return self.fw_text
+
+
+class PreflightFirmwareVersionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="bench_test_runner_fw_")
+        self.srv = _FwSrv()
+        self.ctx = {
+            "srv": self.srv, "host": None,
+            "capability_preflight_run": lambda preset, host, **kw: _FakeCapabilityPreflightReport(ok=True),
+            "bench_test_log_doc_path": os.path.join(self.tmpdir, "BENCH_TEST_LOG.md"),
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_preflight_calls_get_fw_version_exactly_once_and_records_commit(self):
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        ok, reason, before = runner.preflight()
+        self.assertTrue(ok, reason)
+        self.assertEqual(self.srv.fw_calls, 1)
+        self.assertEqual(before["fw_commit"], "abc1234def")
+
+    def test_summary_carries_the_firmware_commit(self):
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        outcome = runner.run(suite="smoke", dry_run=True)
+        import json
+        with open(os.path.join(outcome.run_dir, "summary.json"), encoding="utf-8") as f:
+            summary = json.load(f)
+        self.assertEqual(summary["board_before"]["fw_commit"], "abc1234def")
+        self.assertEqual(self.srv.fw_calls, 1)
+
+    def test_failed_fw_version_refuses_the_run(self):
+        self.srv.fw_text = "error: no INFO reply"
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        ok, reason, before = runner.preflight()
+        self.assertFalse(ok)
+        self.assertIn("get_fw_version", reason)
+
+    def test_incompatible_protocol_refuses_the_run(self):
+        self.srv.fw_text = "uart_protocol_version: 1\ncompatible: NO - device speaks v1\ncommit: x"
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        ok, reason, _before = runner.preflight()
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main()

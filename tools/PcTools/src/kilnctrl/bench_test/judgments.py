@@ -2989,6 +2989,31 @@ def parse_trip_reason(diag_text: str) -> "int | None":
     return int(m.group(1)) if m else None
 
 
+def parse_safety_currents(status_text: str) -> "list[float | None] | None":
+    """Per-channel heater current from `srv.safety_get_status()`'s text
+    ("... | currents 1.20 A, not fitted, 0.00 A | ct zone: - | ..."). Returns
+    three entries, each a float (amps) or None for a channel the text says is
+    "not fitted" -- never a fabricated 0.0 for an unfitted CT. Returns None
+    when no parseable `currents` field is present at all."""
+    m = re.search(r"currents\s+(.+?)(?:\s+\|\s+|$)", status_text or "")
+    if not m:
+        return None
+    parts = [p.strip() for p in m.group(1).split(",")]
+    if len(parts) != 3:
+        return None
+    out: "list[float | None]" = []
+    for part in parts:
+        if part.lower() == "not fitted":
+            out.append(None)
+            continue
+        mm = re.fullmatch(r"(-?\d+(?:\.\d+)?|nan)\s*A", part, re.IGNORECASE)
+        if not mm:
+            return None
+        v = float(mm.group(1))
+        out.append(None if v != v else v)
+    return out
+
+
 def parse_trip_mask(diag_text: str) -> "int | None":
     m = re.search(r"trip_mask\s*[:=]?\s*(0x[0-9a-fA-F]+|\d+)", diag_text)
     if not m:

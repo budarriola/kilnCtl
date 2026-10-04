@@ -461,6 +461,63 @@ def _zone_diag_snapshot(ctx: dict) -> Dict[str, Any]:
     return snapshot
 
 
+class _CurrentRecorder:
+    """Heater-current observations for the HP cases (2026-10-04): one
+    `sample()` per poll, alongside the temperature sample, reading the cached
+    `safety_get_status()` text's per-channel currents. Aggregates only
+    (min/max/last/count) so a long run stays small. A channel the status
+    text calls "not fitted" is recorded as "not_fitted", never as 0 A, and a
+    sample that cannot be read at all is counted, not guessed. OBSERVATION
+    ONLY: no verdict depends on anything recorded here (the bench CT is not
+    fitted on two channels). Channel index is the CT channel, not a zone
+    number: the channel-to-zone mapping is commissioning-dependent."""
+
+    def __init__(self, ctx: dict):
+        self._ctx = ctx
+        self._ch: List[Dict[str, Any]] = [
+            {"min": None, "max": None, "last": None, "samples": 0, "not_fitted_samples": 0}
+            for _ in range(3)
+        ]
+        self.unreadable_samples = 0
+
+    def sample(self) -> None:
+        try:
+            text = _srv(self._ctx).safety_get_status()
+            amps = J.parse_safety_currents(text if isinstance(text, str) else str(text))
+        except Exception:  # noqa: BLE001 - an observation must never break a case
+            amps = None
+        if amps is None:
+            self.unreadable_samples += 1
+            return
+        for slot, a in zip(self._ch, amps):
+            if a is None:
+                slot["not_fitted_samples"] += 1
+                continue
+            slot["samples"] += 1
+            slot["last"] = a
+            slot["min"] = a if slot["min"] is None else min(slot["min"], a)
+            slot["max"] = a if slot["max"] is None else max(slot["max"], a)
+
+    def observed(self) -> Dict[str, Any]:
+        chans: Dict[str, Any] = {}
+        for i, slot in enumerate(self._ch):
+            if slot["samples"] == 0 and slot["not_fitted_samples"] > 0:
+                chans[f"ch{i}"] = {"status": "not_fitted", "not_fitted_samples": slot["not_fitted_samples"]}
+            elif slot["samples"] == 0:
+                chans[f"ch{i}"] = {"status": "no_samples"}
+            else:
+                chans[f"ch{i}"] = dict(slot, status="fitted")
+        return {"heater_current_a": chans, "heater_current_unreadable_samples": self.unreadable_samples}
+
+
+def _with_currents(result: CaseResult, rec: "_CurrentRecorder") -> CaseResult:
+    """Merge the recorder's observations into `result.observed` (in place)."""
+    merged = dict(result.observed or {})
+    merged.update(rec.observed())
+    result.observed = merged
+    return result
+
+
 def _hp_run(ctx: dict, zone_mask: int, timeout_s: float = 480.0, poll_s: float = 2.0) -> Dict[str, Any]:
     """Common HP flow: rest gate, start, poll to DONE, collect start/end
     zone temps, K4-energized samples, per-zone diagnostic snapshots and
@@ -473,6 +530,8 @@ def _hp_run(ctx: dict, zone_mask: int, timeout_s: float = 480.0, poll_s: float =
         "energized_samples": [], "zone_diag_samples": [],
         "link_stats_before": {}, "link_stats_after": {},
     }
+    currents = _CurrentRecorder(ctx)
+    result["currents"] = currents
     rested, rest_reason = _rest_gate(ctx)
     if not rested:
         result["reason"] = f"rest gate: {rest_reason}"
@@ -497,6 +556,7 @@ def _hp_run(ctx: dict, zone_mask: int, timeout_s: float = 480.0, poll_s: float =
             state = st.state_name
             result["energized_samples"].append((state, _read_energized(ctx)))
             result["zone_diag_samples"].append(_zone_diag_snapshot(ctx))
+            currents.sample()
             if state in ("done", "faulted"):
                 break
             sleep(poll_s)
@@ -537,11 +597,11 @@ def _case_hp01(ctx: dict) -> CaseResult:
     run = _hp_run(ctx, zone_mask=0b001)
     ctx["_hp01"] = run
     if not run["ok"]:
-        return CaseResult(Verdict.FAIL, reason=run["reason"], observed={"start": run["start_zones"], "end": run["end_zones"]})
+        return _with_currents(CaseResult(Verdict.FAIL, reason=run["reason"], observed={"start": run["start_zones"], "end": run["end_zones"]}), run["currents"])
     result = J.judge_zone_rise_ordering(_rises(run["start_zones"], run["end_zones"]), primary_zone=0, min_rise=5.0)
     if result.verdict != Verdict.PASS:
-        return result
-    return J.judge_relay_energized(run["energized_samples"])
+        return _with_currents(result, run["currents"])
+    return _with_currents(J.judge_relay_energized(run["energized_samples"]), run["currents"])
 
 
 def _blocked_while_energized_zones(zone_diag_samples: List[Dict[str, Any]]) -> List[int]:
@@ -643,13 +703,14 @@ def _case_hp02(ctx: dict) -> CaseResult:
     run = _hp_run(ctx, zone_mask=zone_mask)
     ctx["_hp02"] = run
     if not run["ok"]:
-        return CaseResult(Verdict.FAIL, reason=run["reason"], observed={"start": run["start_zones"], "end": run["end_zones"]})
+        return _with_currents(CaseResult(Verdict.FAIL, reason=run["reason"], observed={"start": run["start_zones"], "end": run["end_zones"]}), run["currents"])
     result = J.judge_all_zones_rise(_rises(run["start_zones"], run["end_zones"]), zone_mask=zone_mask, min_rise=5.0)
     if result.verdict != Verdict.PASS:
         blocked = _blocked_while_energized_zones(run["zone_diag_samples"])
         starved = _starved_zones(run["zone_diag_samples"])
         observed = dict(result.observed or {})
         observed["zone_diag_samples"] = run["zone_diag_samples"]
+        observed.update(run["currents"].observed())
         notes = []
         if blocked:
             notes.append(f"zone(s) {blocked} had duty>0 while heat_blocked")
@@ -664,7 +725,7 @@ def _case_hp02(ctx: dict) -> CaseResult:
                 expected=result.expected,
             )
         return CaseResult(Verdict.FAIL, reason=result.reason, observed=observed, expected=result.expected)
-    return result
+    return _with_currents(result, run["currents"])
 
 
 def _case_hp04(ctx: dict) -> CaseResult:
@@ -927,6 +988,7 @@ def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: floa
     deadline = now() + 360.0
     relay_states: List[bool] = []
     temps_c: List[Optional[float]] = []
+    currents = _CurrentRecorder(ctx)
     state = "running"
     while now() < deadline:
         st = srv._profiles.get_exec_status()
@@ -936,10 +998,12 @@ def _run_hp03_profile(ctx: dict, target_zone: int, target_c: float, hyst_c: floa
             relay_states.append(bool(zs.relay_commanded_on))
         zone_temps = _zone_temps(ctx)
         temps_c.append(zone_temps.get(target_zone))
+        currents.sample()
         if state in ("done", "faulted"):
             break
         sleep(2)
-    return J.judge_on_off_zone_cycling(relay_states, temps_c, target_c=target_c, hyst_c=hyst_c)
+    return _with_currents(
+        J.judge_on_off_zone_cycling(relay_states, temps_c, target_c=target_c, hyst_c=hyst_c), currents)
 
 
 #: Margin above ambient the lowered `max_temp_c` limit is set to (HP-07).
@@ -1188,15 +1252,18 @@ def _run_hp07_profile(ctx: dict, target_zone: int, limit_c: float) -> CaseResult
     #: from the case's own `observed` output rather than needing a live
     #: rerun. Does not change the pass criterion.
     actual_c_samples: List[Optional[float]] = []
+    currents = _CurrentRecorder(ctx)
     while now() < deadline:
         st = srv._profiles.get_exec_status()
         state = st.state_name
         zs = _zone_status(st, target_zone)
         actual_c_samples.append(getattr(zs, "actual_c", None) if zs is not None else None)
+        currents.sample()
         if state in ("faulted", "done"):
             break
         sleep(2)
     observed = {"limit_c": limit_c, "ambient_at_start": ambient_at_start, "actual_c_samples": actual_c_samples}
+    observed.update(currents.observed())
     if st is not None and state == "done":
         # Distinct from the generic timeout below: the profile ran to
         # completion on its own without ever tripping the guard -- e.g.

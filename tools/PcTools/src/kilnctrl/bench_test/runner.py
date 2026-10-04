@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import threading
 import time
 import traceback
@@ -228,6 +229,27 @@ class BenchTestRunner:
                 ctx["srv"] = srv
             except Exception as exc:  # noqa: BLE001
                 return False, f"could not import kilnctrl.mcp_server: {exc}", board_before
+
+        # Firmware-version confirmation (2026-10-04, HP-07): the server refuses
+        # every non-INFO send -- safety_clear_trip() included -- until
+        # get_fw_version has succeeded once in this server session (it sets
+        # `_srv._info.compatible`). Call the SAME MCP tool function, exactly
+        # once, before any case so a case that clears a trip works on a fresh
+        # server; the gate itself is untouched. The reported commit is
+        # recorded for provenance. A srv without the tool (unit-test fakes)
+        # is skipped, not failed.
+        self._mark("preflight: get_fw_version")
+        fw_tool = getattr(srv, "get_fw_version", None)
+        if fw_tool is not None:
+            ok, fw_text = _safe_call(fw_tool)
+            fw_text = str(fw_text)
+            m = re.search(r"^commit:\s*(\S+)", fw_text, re.MULTILINE)
+            board_before["fw_commit"] = m.group(1) if m else None
+            board_before["fw_version"] = fw_text if ok else f"error: {fw_text}"
+            if not ok or fw_text.lstrip().startswith("error:"):
+                reasons.append(f"get_fw_version failed (device commands would be refused): {fw_text.strip()[:200]}")
+            elif re.search(r"^compatible:\s*NO", fw_text, re.MULTILINE):
+                reasons.append("firmware UART protocol version does not match pc_tools (device commands would be refused)")
 
         self._mark("preflight: stale banner")
         ok, banner = _safe_call(srv._stale_banner)

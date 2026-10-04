@@ -374,6 +374,135 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
 
 
+
+class _GatedFwSrv(_FakeSrv):
+    """Models the real server gate: safety_clear_trip() is refused (a no-op
+    returning the refusal text) until get_fw_version() has been called once.
+    Also carries what BenchTestRunner.preflight() reads."""
+
+    def __init__(self, *a, status_text=None, **kw):
+        super().__init__(*a, **kw)
+        self.fw_confirmed = False
+        self.fw_calls = 0
+        self.status_text = status_text or (
+            "no flags set | 24.00 C (CJ 24.00 C) | currents 3.10 A, not fitted, 1.50 A "
+            "| ct zone: - | 10 ms old | tx_dropped 0")
+        self._safety = type("S", (), {
+            "get_link_stats": lambda self_: type("L", (), {"crc_errors": 0, "timeouts": 0, "broadcast_dropped": 0})(),
+            "get_status": lambda self_: type("St", (), {"link_up": True})(),
+            "get_diag": lambda self_: type("D", (), {"ever_received": True, "trip_reason": 0})(),
+        })()
+        self._autotune = type("A", (), {"get_status": lambda self_: type("As", (), {"state_name": "idle"})()})()
+
+    def _stale_banner(self):
+        return ""
+
+    def get_heap_status(self, host=None):
+        return "ok"
+
+    def get_fw_version(self):
+        self.fw_calls += 1
+        self.fw_confirmed = True
+        return "uart_protocol_version: 13\ncompatible: yes\ncommit: feedbeef01\ntree: clean\nbuilt: x"
+
+    def safety_get_status(self):
+        return self.status_text
+
+    def safety_clear_trip(self):
+        if not self.fw_confirmed:
+            return "error: refused - firmware version not yet confirmed (call get_fw_version first)"
+        return super().safety_clear_trip()
+
+
+class HP07FirmwareGateAndCurrentsTest(unittest.TestCase):
+    def setUp(self):
+        self.fake_zhc = _FakeZonesHttpClient()
+        self._saved = _install_fake_zones_http_client(self.fake_zhc)
+        self.fake_pehc = _FakeProfileEditHttpClient()
+        self._saved_pehc = _install_fake_profile_edit_http_client(self.fake_pehc)
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+        _restore_profile_edit_http_client(self._saved_pehc)
+
+    def _ctx(self, **srv_kw):
+        statuses = [
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("running", [_ZoneExecStatusHP()]),
+            _ExecStatus("faulted", [_ZoneExecStatusHP(faulted=True, fault_guard=5)]),
+            _ExecStatus("idle", [_ZoneExecStatusHP()]),
+        ]
+        profiles = _FakeProfilesClientHP(exec_statuses=statuses)
+        srv = _GatedFwSrv(
+            readings=[_Reading(0, 24.0), _Reading(1, 24.0), _Reading(2, 24.0)],
+            profiles=profiles, diag_sequence=[_diag_text(trip_reason=6)], **srv_kw)
+        clock = {"t": 0.0}
+        ctx = {
+            "srv": srv, "host": "10.0.0.5",
+            "_now": lambda: clock["t"],
+            "_sleep": lambda s: clock.__setitem__("t", clock["t"] + s),
+        }
+        _always_ok_preflight(ctx)
+        return ctx, srv
+
+    def test_hp07_fails_on_fresh_server_without_firmware_confirmation(self):
+        ctx, srv = self._ctx()
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertEqual(srv.fw_calls, 0)
+
+    def test_hp07_passes_after_runner_preflight_confirms_firmware(self):
+        from kilnctrl.bench_test.runner import BenchTestRunner
+        ctx, srv = self._ctx()
+        rpt = type("R", (), {"ok": True, "board": type("B", (), {})(), "describe": lambda self_: "ok"})()
+        ctx["capability_preflight_run"] = lambda preset, host, **kw: rpt
+        real_profiles = srv._profiles
+        srv._profiles = type("P", (), {"get_exec_status": lambda self_: _ExecStatus("idle")})()
+        try:
+            ok, reason, before = BenchTestRunner(ctx).preflight()
+        finally:
+            srv._profiles = real_profiles
+        self.assertTrue(ok, reason)
+        self.assertEqual(srv.fw_calls, 1)
+        self.assertEqual(before["fw_commit"], "feedbeef01")
+        result = C._case_hp07(ctx)
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+
+    def test_currents_recorded_with_not_fitted_channel(self):
+        ctx, srv = self._ctx()
+        srv.fw_confirmed = True
+        result = C._case_hp07(ctx)
+        cur = result.observed["heater_current_a"]
+        self.assertEqual(cur["ch0"]["status"], "fitted")
+        self.assertEqual((cur["ch0"]["min"], cur["ch0"]["max"], cur["ch0"]["last"]), (3.10, 3.10, 3.10))
+        self.assertEqual(cur["ch1"]["status"], "not_fitted")
+        self.assertNotIn("last", cur["ch1"])
+        self.assertEqual(cur["ch2"]["last"], 1.50)
+        self.assertEqual(result.observed["heater_current_unreadable_samples"], 0)
+
+    def test_unreadable_status_is_counted_not_guessed(self):
+        ctx, srv = self._ctx(status_text="error: link down")
+        srv.fw_confirmed = True
+        result = C._case_hp07(ctx)
+        self.assertGreater(result.observed["heater_current_unreadable_samples"], 0)
+        self.assertEqual(result.observed["heater_current_a"]["ch0"]["status"], "no_samples")
+
+
+class ParseSafetyCurrentsTest(unittest.TestCase):
+    def test_parses_fitted_and_not_fitted(self):
+        from kilnctrl.bench_test import judgments as J
+        self.assertEqual(
+            J.parse_safety_currents("x | currents 1.00 A, not fitted, 0.00 A | ct zone: - | 5 ms old"),
+            [1.0, None, 0.0])
+
+    def test_no_ct_zone_suffix(self):
+        from kilnctrl.bench_test import judgments as J
+        self.assertEqual(J.parse_safety_currents("a | currents 1.00 A, 2.00 A, 3.00 A | 5 ms old"), [1.0, 2.0, 3.0])
+
+    def test_unparseable_is_none(self):
+        from kilnctrl.bench_test import judgments as J
+        self.assertIsNone(J.parse_safety_currents("error: x"))
+
 if __name__ == "__main__":
     unittest.main()
 
