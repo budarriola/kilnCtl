@@ -103,7 +103,7 @@ static void test_start_rejects_wrong_identity(void)
     FT6336UClass t;
     memset(&t, 0, sizeof(t));
     esp_err_t err = FT6336U_start(&t, &bus);
-    TEST_CHECK(err == ESP_ERR_NOT_FOUND,
+    TEST_CHECK(err == ESP_ERR_INVALID_RESPONSE,
                "FT6336U_start refuses a device whose FOCALTECH_ID doesn't match");
     TEST_CHECK(t.dev_attached == false,
                "dev_attached is cleared on the identity-mismatch failure path");
@@ -127,7 +127,7 @@ static void test_deinit_after_failed_identity_frees_the_slot(void)
 
     FT6336UClass t;
     memset(&t, 0, sizeof(t));
-    TEST_CHECK(FT6336U_start(&t, &bus) == ESP_ERR_NOT_FOUND,
+    TEST_CHECK(FT6336U_start(&t, &bus) == ESP_ERR_INVALID_RESPONSE,
                "FT6336U_start fails identity check (setup)");
     TEST_CHECK(!fake_i2c_device_is_live(&t.dev), "device slot freed after the failed start");
 

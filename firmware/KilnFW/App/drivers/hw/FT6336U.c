@@ -219,7 +219,9 @@ esp_err_t FT6336U_start(FT6336UClass *t, hal_i2c_bus_t *bus)
             ESP_LOGE(TAG, "FT6336U identity check failed at 0x%02X: %s", FT6336U_ADDR,
                      esp_err_to_name(err));
             FT6336U_deinit(t);
-            return ESP_ERR_NOT_FOUND;
+            /* Distinct from the probe-miss NOT_FOUND below: main_boot_early.c
+             * notes STARTUP_FAULT_TOUCH for any code except NOT_FOUND. */
+            return ESP_ERR_INVALID_RESPONSE;
         }
         return ESP_OK;
     }
