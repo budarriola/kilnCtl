@@ -845,6 +845,11 @@ try {
                  "`"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
                  "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
                  "`"$(Join-Path $driversDir 'control/profile_feasibility.c')`" ")
+    # Guard: $cmdSl is a chain of string Replace()s over $cmd4. If a future edit to $cmd4
+    # stops matching a Replace, it would silently build a renamed copy of the prestart test.
+    if ($cmdSl -eq $cmd4 -or -not $cmdSl.Contains('test_profile_executor_store_link.c')) {
+        throw "profile_executor_store_link: `$cmdSl derivation from `$cmd4 failed (Replace() no longer matches); refusing to build a renamed copy of the prestart test"
+    }
     Invoke-HostTestExe -Name "profile_executor_store_link" -ExePath $exeSl -BuildCmd $cmdSl
 
     # ---- test_autotune_engine_prestart.c: its own FIFTH, separate executable --

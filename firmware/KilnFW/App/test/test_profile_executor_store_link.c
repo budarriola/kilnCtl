@@ -7,13 +7,19 @@
 // NVS blob layout, nvs_load_all_from(), profiles_http_get()) and what the
 // executor consumes can never fail there. This executable links the REAL
 // profiles_http.c (as its own object, over the real host hal_kv backend
-// fake_kv.c and the real cfg_fs.c/profiles_cfg_fs.c bridge) and reuses the
+// fake_kv.c; profiles_cfg_fs.c is linked too, but cfg_fs_init() is never
+// called here, so only the NVS path is exercised, NOT the cfg_fs file
+// mirror) and reuses the
 // prestart test's fakes for everything else by #including that file with its
 // main() renamed and its two profiles_http fakes compiled out
 // (PEX_STORE_LINK_TEST). Own executable for the usual reason: the prestart
 // fakes would multiply-define against other host tests.
 //
-// Flow under test: profiles_http_save(id, ...) -> NVS blob + cfg_fs file ->
+// Fields compared (saved vs. held by the executor): profile.segment_count,
+// zone_mask, name, and per segment seg_kind, target_c, ramp_c_per_hr,
+// dwell_min. Other profile_t fields are not compared.
+//
+// Flow under test: profiles_http_save(id, ...) -> NVS blob (cfg_fs not inited) ->
 // in-memory state wiped -> profiles_http_start() reloads from NVS ->
 // profile_executor_run(id) reads it through the real profiles_http_get() ->
 // s_exec.profile (what the executor actually holds) must equal what was saved.
