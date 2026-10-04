@@ -33,5 +33,5 @@ $argv = @($script)
 if ($ElfPath) { $argv += @("--elf", $ElfPath) }
 if ($CeilingBytes -gt 0) { $argv += @("--ceiling-bytes", "$CeilingBytes") }
 
-& python @argv
-exit $LASTEXITCODE
+. (Join-Path $PSScriptRoot "lib_skip_fast.ps1")
+exit (Invoke-CheckPythonWithSkipFast -PyArgs $argv -ExplicitElf ([bool]$ElfPath))

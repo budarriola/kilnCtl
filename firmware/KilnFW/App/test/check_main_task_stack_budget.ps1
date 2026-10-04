@@ -49,5 +49,5 @@ if ($ElfPath) { $argv += @("--elf", $ElfPath) }
 if ($StackBytes -gt 0) { $argv += @("--stack-bytes", "$StackBytes") }
 if ($SdkconfigPath) { $argv += @("--sdkconfig", $SdkconfigPath) }
 
-& python @argv
-exit $LASTEXITCODE
+. (Join-Path $PSScriptRoot "lib_skip_fast.ps1")
+exit (Invoke-CheckPythonWithSkipFast -PyArgs $argv -ExplicitElf ([bool]$ElfPath))

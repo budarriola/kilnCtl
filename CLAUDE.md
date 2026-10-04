@@ -741,6 +741,12 @@ Two more checks do the same (2026-10-04), for a missing SaftyFW build artifact
 only: `check_no_sim_plant_guard_disable.ps1` (no `build/saftyfw_build_info.h`) and
 `check_saftyfw_task_stack_budgets.ps1` (no `build/SaftyFW.elf`; a missing
 `arm-none-eabi-objdump` stays a plain SKIP).
+The same holds for the KilnFW build-artifact class (2026-10-04): the seven
+`check_*stack_budget*`/`check_kilnfw_dram_bss_budget` wrappers under
+`firmware/KilnFW/App/test/` (shared helper `lib_skip_fast.ps1`, relabels only the
+exact `SKIP: no ELF at` message, never with an explicit `-ElfPath`) and
+`tools/check_duplicate_symbols.ps1` (no `firmware/KilnFW/build/`). Every other
+skip reason (missing objdump/nm toolchain, 0-byte ELF, ...) stays a plain SKIP.
 `run_all_checks.ps1` files that into its own bucket, reports it separately
 in the summary ("N skipped due to -Fast"), and never fails the run over it —
 without needing `-AllowSkips`, and without weakening the fact that a SKIP

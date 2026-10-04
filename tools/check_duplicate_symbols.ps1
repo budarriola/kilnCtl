@@ -113,7 +113,9 @@ $componentDirs = @(
 )
 
 if (-not (Test-Path $buildDir)) {
-    Write-Host "SKIP: no firmware/KilnFW/build/ found -- run the build_kilnfw tool (or 'idf.py build' in firmware/KilnFW) first." -ForegroundColor Yellow
+    # SKIP-FAST: -Fast skips the KilnFW target build that produces build/; only this reason is relabeled.
+    $skipLabel = if ($env:KILNCTL_CHECKS_FAST) { "SKIP-FAST" } else { "SKIP" }
+    Write-Host "${skipLabel}: no firmware/KilnFW/build/ found -- run the build_kilnfw tool (or 'idf.py build' in firmware/KilnFW) first." -ForegroundColor Yellow
     Write-Host "      This check inspects real build output; it has nothing to check on a clean checkout."
     exit 3
 }

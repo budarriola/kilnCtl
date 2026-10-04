@@ -47,5 +47,5 @@ if ($ElfPath) { $argv += @("--elf", $ElfPath) }
 if ($DumpCeilings) { $argv += @("--dump-ceilings") }
 foreach ($fc in $ForceCeiling) { $argv += @("--force-ceiling", $fc) }
 
-& python @argv
-exit $LASTEXITCODE
+. (Join-Path $PSScriptRoot "lib_skip_fast.ps1")
+exit (Invoke-CheckPythonWithSkipFast -PyArgs $argv -ExplicitElf ([bool]$ElfPath))
