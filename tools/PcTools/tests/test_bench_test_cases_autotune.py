@@ -377,7 +377,19 @@ class AT04Test(unittest.TestCase):
         result = CA._case_at04(ctx)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
         self.assertAlmostEqual(result.observed["relay_amplitude_c"], 0.2)
-        self.assertIsNone(result.observed.get("swing_pp_c"))
+        self.assertIn("swing_pp_c", result.observed)
+        self.assertIsNone(result.observed["swing_pp_c"])
+        self.assertIn("abort_reason", result.observed)
+        self.assertIsNone(result.observed["abort_reason"])
+
+    def test_early_return_records_swing_and_abort_reason_keys(self):
+        srv = _FakeSrv(readings=[], autotune=_FakeAutotuneClient())
+        result = CA._at04_body(_base_ctx(srv))
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertIn("swing_pp_c", result.observed)
+        self.assertIsNone(result.observed["swing_pp_c"])
+        self.assertIn("abort_reason", result.observed)
+        self.assertIsNone(result.observed["abort_reason"])
 
     def _run_invalid_relay(self, amplitude_c, abort_reason):
         autotune = _FakeAutotuneClient(statuses=[

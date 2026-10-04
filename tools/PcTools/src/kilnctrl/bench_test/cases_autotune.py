@@ -400,7 +400,8 @@ def _case_at04(ctx: dict) -> CaseResult:
 def _at04_body(ctx: dict) -> CaseResult:
     zone_temps = _zone_temps(ctx)
     if not zone_temps:
-        return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as the baseline reference")
+        return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as the baseline reference",
+                          observed={"swing_pp_c": None, "abort_reason": None})
     ambient_ref = min(zone_temps.values())
     baseline_c = zone_temps.get(0)
     setpoint_c = ambient_ref + AT_RELAY_SETPOINT_OFFSET_C
@@ -411,16 +412,23 @@ def _at04_body(ctx: dict) -> CaseResult:
             relay_d=AT_RELAY_DUTY_AMPLITUDE, relay_h_c=AT_RELAY_HYSTERESIS_C,
         )
     except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"autotune.start raised {type(exc).__name__}: {exc}")
+        return CaseResult(Verdict.FAIL, reason=f"autotune.start raised {type(exc).__name__}: {exc}",
+                          observed={"swing_pp_c": None, "abort_reason": None})
     if not ok_start:
-        return CaseResult(Verdict.FAIL, reason=f"autotune.start refused: {err}")
+        return CaseResult(Verdict.FAIL, reason=f"autotune.start refused: {err}",
+                          observed={"swing_pp_c": None, "abort_reason": None})
     try:
         st, max_temp, timeout_reason = _poll_autotune(ctx, timeout_s=1200.0)
         if st is None:
-            return CaseResult(Verdict.FAIL, reason="autotune_get_status never returned a result")
+            return CaseResult(Verdict.FAIL, reason="autotune_get_status never returned a result",
+                          observed={"swing_pp_c": None, "abort_reason": None})
         if timeout_reason:
             return CaseResult(
-                Verdict.FAIL, reason=timeout_reason, observed={"state": st.state_name, "max_temp_c": max_temp}
+                Verdict.FAIL, reason=timeout_reason,
+                observed={
+                    "state": st.state_name, "max_temp_c": max_temp, "swing_pp_c": None,
+                    "abort_reason": getattr(st, "abort_reason", "") or None,
+                },
             )
         tripped = False
         try:
