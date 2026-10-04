@@ -39,6 +39,29 @@ from bench_fixture_session import (  # noqa: E402
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live_bench: needs the real bench board (set KILNCTRL_BENCH_HOST)")
+    config.addinivalue_line(
+        "markers", "slow: minutes-long simulation test; skipped unless KILNCTL_SLOW_TESTS=1")
+
+
+SLOW_TESTS_ENV = "KILNCTL_SLOW_TESTS"
+SLOW_SKIP_REASON = (
+    f"slow test: set {SLOW_TESTS_ENV}=1 to run it (run_pctools_tests and "
+    "tools/regression_suite.py set it; the default developer run does not)")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``@pytest.mark.slow`` tests unless KILNCTL_SLOW_TESTS=1.
+
+    The standing runners (run_pctools_tests, regression_suite.py) export the
+    variable and fail the run if this reason string shows up in the output
+    (mcpkit.pytest_verdict), so the gate cannot go vacuous.
+    """
+    if os.environ.get(SLOW_TESTS_ENV) == "1":
+        return
+    skip = pytest.mark.skip(reason=SLOW_SKIP_REASON)
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)

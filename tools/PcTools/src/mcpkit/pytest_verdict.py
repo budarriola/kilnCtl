@@ -20,6 +20,10 @@ from __future__ import annotations
 import re
 from typing import List, Optional
 
+#: Substring of the skip reason conftest.py gives ``@pytest.mark.slow`` tests
+#: when KILNCTL_SLOW_TESTS is not 1. Runners need ``-rs`` so skip reasons show.
+SLOW_SKIP_MARKER = "KILNCTL_SLOW_TESTS"
+
 #: Per-test timeout (seconds) for PcTools runs. Must stay below both runners'
 #: whole-run timeout (600 s) or it can never fire. The slowest known test,
 #: test_ramp_assist_cone_scale.py, takes 20 to 100 s under load.
@@ -94,6 +98,11 @@ def pytest_output_problems(output: str) -> List[str]:
     if lost:
         problems.append(
             "xdist worker lost (tests it owned did not run): " + " | ".join(lost[:3]))
+
+    if SLOW_SKIP_MARKER in output:
+        problems.append(
+            f"slow tests were skipped ({SLOW_SKIP_MARKER}=1 was not in effect): "
+            "the standing run must execute them")
 
     collected = collected_count(output)
     total = summary_outcome_total(output)

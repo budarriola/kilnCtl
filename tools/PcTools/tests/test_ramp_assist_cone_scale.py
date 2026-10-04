@@ -195,6 +195,8 @@ import os
 import sys
 import unittest
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import ramp_assist as ra  # noqa: E402
@@ -317,6 +319,7 @@ class ShippedBandNowFiresAtLightLoadTests(unittest.TestCase):
         self.assertGreater(pz['credit_s'], 0.0,
                             "cone 6 at 1x load must earn real credit under the corrected gate")
 
+    @pytest.mark.slow  # includes a 2x-load leg: 71 s alone
     def test_cone10_earns_real_credit_at_1x_and_2x_load(self):
         target_c, rate, dwell_min, masses = CONE10
         for mass_mult in (1.0, 2.0):
@@ -327,6 +330,7 @@ class ShippedBandNowFiresAtLightLoadTests(unittest.TestCase):
                                 f"cone 10 at {mass_mult}x load must earn real credit")
 
 
+@pytest.mark.slow
 class CreditCollapsesAtHeavierLoadTests(unittest.TestCase):
     """UPDATED for PID_EXPANSION_PLAN.md sec 7.6 ("bounded in-dwell dwell
     credit", 2026-09-03). This class used to pin heavier-load credit at
@@ -398,6 +402,7 @@ class CreditCollapsesAtHeavierLoadTests(unittest.TestCase):
                               "cone10 4x must still respect Bound 1's cap")
 
 
+@pytest.mark.slow
 class CreditAuditHoldsAtConeScaleTests(unittest.TestCase):
     """``credit_audit_pct`` (the two-writer accrual/spend consistency
     check, see ``ramp_assist.dwell_credit_parity``'s docstring) at cone
@@ -422,6 +427,7 @@ class CreditAuditHoldsAtConeScaleTests(unittest.TestCase):
                          f"credit_audit_pct should be ~0 at cone scale too, got {pz['credit_audit_pct']:.4f}%")
 
 
+@pytest.mark.slow
 class RealisticMultiSegmentLightLoadTests(unittest.TestCase):
     """Light-load (1x, and cone 10's slower rate also at 2x) credit on the
     REALISTIC multi-segment ``BISQUE_MULTI``/``CONE6_MULTI``/``CONE10_MULTI``
@@ -466,6 +472,7 @@ class RealisticMultiSegmentLightLoadTests(unittest.TestCase):
                                 f"cone 10 multi-segment at {mass_mult}x load must earn real credit")
 
 
+@pytest.mark.slow
 class RealisticMultiSegmentHeavyLoadNowSpendsBoundedCreditTests(unittest.TestCase):
     """The loaded-kiln verdict on the REALISTIC multi-segment schedules,
     UPDATED for PID_EXPANSION_PLAN.md sec 7.6 ("bounded in-dwell dwell
@@ -586,6 +593,7 @@ class BisqueLightLoadCapBindsTests(unittest.TestCase):
                           "larger banked amount")
 
 
+@pytest.mark.slow
 class RealisticMultiSegmentCreditAuditHoldsTests(unittest.TestCase):
     """``credit_audit_pct`` consistency check (see
     ``CreditAuditHoldsAtConeScaleTests`` above) re-run on a REALISTIC

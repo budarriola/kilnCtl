@@ -134,5 +134,18 @@ class SummarizeWiringTests(unittest.TestCase):
         self.assertIs(m.call_args.kwargs["output_check"], pv.pytest_output_problems)
 
 
+class SlowSkipTests(unittest.TestCase):
+    SKIPPED = CLEAN.replace(
+        "=========== 1190",
+        "SKIPPED [11] tests/x.py: slow test: set KILNCTL_SLOW_TESTS=1 to run it\n=========== 1190")
+
+    def test_skipped_slow_tests_fail_the_run(self):
+        problems = pv.pytest_output_problems(self.SKIPPED)
+        self.assertTrue(any("KILNCTL_SLOW_TESTS" in p for p in problems), problems)
+
+    def test_clean_output_has_no_slow_problem(self):
+        self.assertEqual(pv.pytest_output_problems(CLEAN), [])
+
+
 if __name__ == "__main__":
     unittest.main()

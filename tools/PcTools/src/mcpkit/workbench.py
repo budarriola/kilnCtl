@@ -627,12 +627,16 @@ def run_pctools_tests(pattern: Optional[str] = None) -> str:
     # No -q: the "collected N items" header is what pytest_output_problems
     # compares against the summary line. --timeout makes a stuck test fail loud
     # instead of losing an xdist node.
-    argv = [sys.executable, "-m", "pytest", tests_dir,
+    # -rs lists skip reasons so pytest_output_problems can refuse a run that
+    # skipped @pytest.mark.slow tests; KILNCTL_SLOW_TESTS=1 makes them run.
+    argv = [sys.executable, "-m", "pytest", tests_dir, "-rs",
             f"--timeout={PER_TEST_TIMEOUT_S}"]
     if pattern:
         argv += ["-k", pattern]
+    env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+    env["KILNCTL_SLOW_TESTS"] = "1"
     return _run_locked("pctools-tests", tests_dir, argv, timeout=600,
-                       output_check=pytest_output_problems)
+                       output_check=pytest_output_problems, env=env)
 
 
 def run_repo_checks(list_only: bool = False) -> str:

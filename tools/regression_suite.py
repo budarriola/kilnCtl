@@ -161,6 +161,8 @@ class Gate:
     # exit code is 0; returns reasons to FAIL (empty = clean). Used for the
     # PcTools pytest gate so a lost xdist worker can't read as a pass.
     output_check: Optional[Callable[[str], "list[str]"]] = None
+    # Extra environment variables for the subprocess (e.g. KILNCTL_SLOW_TESTS).
+    extra_env: Optional["dict[str, str]"] = None
 
 
 def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
@@ -182,6 +184,7 @@ def _run_gate(gate: Gate) -> GateResult:
     argv, cwd = gate.build()
     started = time.monotonic()
     env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+    env.update(gate.extra_env or {})
     try:
         with kiln_build_gate(gate.name) if gate.heavy else contextlib.nullcontext():
             completed = subprocess.run(
@@ -278,9 +281,12 @@ def _gate_pctools_pytest() -> Gate:
     return Gate(
         "pctools_pytest (full PcTools suite; live-bench tests self-skip, no KILNCTRL_BENCH_HOST set)",
         # No -q: the "collected N items" header feeds pytest_output_problems.
-        2, lambda: ([_pctools_python(), "-m", "pytest", tests_dir,
+        # -rs lists skip reasons; pytest_output_problems fails the gate if any
+        # @pytest.mark.slow test was skipped despite KILNCTL_SLOW_TESTS=1.
+        2, lambda: ([_pctools_python(), "-m", "pytest", tests_dir, "-rs",
                      f"--timeout={PER_TEST_TIMEOUT_S}"], ROOT), timeout=600,
-        prereq=_pytest_prereq, output_check=pytest_output_problems)
+        prereq=_pytest_prereq, output_check=pytest_output_problems,
+        extra_env={"KILNCTL_SLOW_TESTS": "1"})
 
 
 def _mykicadmcp_python() -> str:
