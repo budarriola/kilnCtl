@@ -1,4 +1,5 @@
 #include "kiln_package.h"
+#include "persist_scratch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -126,7 +127,7 @@ bool kiln_package_compute_hash(uint16_t pkg_schema, const uint8_t *esp_blob, uin
         return false; /* defensive -- unreachable with today's ceilings; never hash a truncated buffer */
     }
 
-    uint8_t *buf = (uint8_t *)malloc(KILN_PKG_HASH_SCRATCH_CAP);
+    uint8_t *buf = (uint8_t *)persist_scratch_alloc(KILN_PKG_HASH_SCRATCH_CAP);
     if (!buf) {
         return false;
     }
@@ -218,7 +219,7 @@ bool kiln_package_export_json(const char *name, uint16_t pkg_schema, const uint8
     /* Hex scratch for the ESP blob -- heap, sized exactly, never a fixed
      * stack buffer (this function is reachable from an httpd export
      * handler). */
-    char *esp_hex = (char *)malloc((size_t)esp_blob_len * 2 + 1);
+    char *esp_hex = (char *)persist_scratch_alloc((size_t)esp_blob_len * 2 + 1);
     if (!esp_hex) {
         return false;
     }

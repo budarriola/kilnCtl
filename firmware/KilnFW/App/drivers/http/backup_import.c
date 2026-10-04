@@ -2881,7 +2881,7 @@ typedef struct {
  * backup_import_post_handler(), re-run on the job task just before
  * backup_import_apply() -- see the call site's comment. noinline so the two
  * reason buffers' frame is gone before backup_import_apply()'s deep commit
- * chain runs on this task's 6144 B stack. Returns true if a refusal was
+ * chain runs on this task's 8192 B stack. Returns true if a refusal was
  * sent. */
 static BACKUP_IMPORT_NOINLINE bool backup_import_job_recheck_refused(httpd_req_t *async_req, bool ack_no_safety)
 {

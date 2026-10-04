@@ -32,6 +32,7 @@
                                 * validity check, section 5.2 rule 5. */
 
 #include "kiln_cfg_store_internal.h"
+#include "persist_scratch.h"
 #include "kiln_cfg_store_cfg_fs.h"
 #include "kiln_package.h" /* kiln_package_capture_pico_half()/_compute_hash() -- explicit even
                             * though kiln_cfg_store_internal.h already drags this in transitively,
@@ -1164,8 +1165,8 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
      * path), same convention already used elsewhere in this file (e.g. the
      * `kiln_cfg_import_scratch_t` heap bundle above) -- never enlarging any
      * buffer, just relocating it. */
-    uint8_t *scratch = malloc(ZONES_CONFIG_BLOB_MAX_SIZE);
-    zones_cfg_t *scratch_cfg = malloc(sizeof(*scratch_cfg));
+    uint8_t *scratch = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    zones_cfg_t *scratch_cfg = persist_scratch_alloc(sizeof(*scratch_cfg));
     if (!scratch || !scratch_cfg) {
         free(scratch);
         free(scratch_cfg);
@@ -1544,7 +1545,7 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, bool ack_har
             conv.bits = live_bits;
             float live_abs_max_temp_c = conv.f;
 
-            zones_cfg_t *cand = (zones_cfg_t *)malloc(sizeof(*cand));
+            zones_cfg_t *cand = (zones_cfg_t *)persist_scratch_alloc(sizeof(*cand));
             if (!cand) {
                 return set_reason(reason_out, reason_cap, "out of memory");
             }
@@ -1932,7 +1933,7 @@ bool kiln_cfg_store_export_package_json(int32_t id, char *out, size_t out_cap, s
      * (backup_export.c), both running on the shared 8192 B httpd_worker
      * stack. Plain malloc, freed on every return path -- same convention
      * kiln_cfg_import_scratch_t above uses in this file. */
-    uint8_t *blob = malloc(ZONES_CONFIG_BLOB_MAX_SIZE);
+    uint8_t *blob = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
     if (!blob) {
         return set_reason(reason_out, reason_cap, "internal error: out of memory");
     }
@@ -2287,7 +2288,7 @@ bool kiln_cfg_store_validate_package_json(const char *json, char *name_out, size
     if (!name_out || name_cap == 0 || !out_pkg_schema || !out_pkg_hash) {
         return set_reason(reason_out, reason_cap, "internal error: NULL output buffer");
     }
-    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)malloc(sizeof(*s));
+    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)persist_scratch_alloc(sizeof(*s));
     if (!s) {
         return set_reason(reason_out, reason_cap, "out of memory");
     }
@@ -2311,7 +2312,7 @@ bool kiln_cfg_store_import_package_json_as(const char *json, const char *name_ov
         return false;
     }
 
-    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)malloc(sizeof(*s));
+    kiln_cfg_import_scratch_t *s = (kiln_cfg_import_scratch_t *)persist_scratch_alloc(sizeof(*s));
     if (!s) {
         return set_reason(reason_out, reason_cap, "out of memory");
     }

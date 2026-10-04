@@ -1,4 +1,5 @@
 #include "cfg_fs.h"
+#include "persist_scratch.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -403,7 +404,7 @@ esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len
 
     /* See cfg_fs_write_scratch_t's comment: every path buffer this function
      * needs lives in one heap block, not in this frame. */
-    cfg_fs_write_scratch_t *sc = malloc(sizeof(*sc));
+    cfg_fs_write_scratch_t *sc = persist_scratch_alloc(sizeof(*sc));
     if (!sc) {
         return ESP_ERR_NO_MEM;
     }
@@ -526,7 +527,7 @@ esp_err_t cfg_fs_list(const char *rel_dir, cfg_fs_entry_t *out, size_t max_out, 
         return ESP_ERR_INVALID_STATE;
     }
 
-    cfg_fs_list_scratch_t *sc = malloc(sizeof(*sc));
+    cfg_fs_list_scratch_t *sc = persist_scratch_alloc(sizeof(*sc));
     if (!sc) {
         return ESP_ERR_NO_MEM;
     }
