@@ -1870,9 +1870,16 @@ Owner instruction, 2026-09-21.
 
 - [ ] Open, 2026-10-01: after a double ESP reset the first reset left the board
   unreachable over UART and HTTP for minutes, then an S6b (reason 7) trip latched
-  (cleared once with owner authorization, stayed clear). Likely a stale host
-  serial session; not established. Reproduce with a live-log capture before
-  changing firmware. `info_uart_bridge`'s 176 B free-margin drop on `eb83c1ac` is not a code change (static review 2026-10-03):
+  (cleared once with owner authorization, stayed clear). Reproduced 2026-10-04 on a SINGLE
+  `debug_reset(peer="esp")` (board dark about 69 min, no UART boot banner, black LCD;
+  recovered by one `debug_reset(..., allow_dark_rereset=True)`; see
+  `docs/BENCH_TEST_LOG.md`, 2026-10-04 dark-board section). The stale-serial-session
+  theory is ruled out; the cause is on the OpenOCD/`debug_reset` side (core left
+  halted after a software core reset), not firmware, and the S6b that results is
+  expected after more than 120 s of silence. Open steps: (a) the owner clears the
+  S6b now latched on the bench (reason 7, mask 0x0040; relays off, link up); (b)
+  fix or harden `debug_reset` so a run-mode reset verifies the target actually
+  resumed (PC-side fix in progress: curstate check and fallback resume in `debug_reset`, per-peer register list and catch-then-resume in `debug_read_registers`; root cause is `debug_read_registers` leaving the ESP halted via its Cortex-M0+ register list failing on Xtensa, plus `debug_reset` never checking the target resumed). `info_uart_bridge`'s 176 B free-margin drop on `eb83c1ac` is not a code change (static review 2026-10-03):
   `111b1b6f..eb83c1ac` touched `uart_bridge_info.c` only for the 3584 -> 4096 stack literal and comments, and no callee on the task's path
   (`uart_protocol_*`, `uart_log_bridge.c`, `stack_margin.c`) changed. Same-build high-water spread (1624 fresh vs 1496 B later; used 2480 vs 2544 B idle,
   2608 vs 2608 B mid_firing across the two baselines) is runtime path depth (ESP_LOGW under log-queue pressure), already absorbed by SK-01's 384 B tolerance;
