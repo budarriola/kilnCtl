@@ -930,7 +930,7 @@ static void relay_names_upgrade_v1(const relay_names_cfg_v1_t *old, relay_names_
  * the pre-existing "unrecognised blob is discarded, names go blank" behaviour
  * exactly as it was for a genuinely corrupt or genuinely newer blob. Only the
  * specific, recognised v1 shape is rescued. */
-static bool relay_names_decode_any(const void *bytes, size_t len, relay_names_cfg_t *out)
+static bool relay_names_decode_any_impl(const void *bytes, size_t len, relay_names_cfg_t *out, bool quiet)
 {
     if (relay_names_validate(bytes, len)) {
         memcpy(out, bytes, sizeof(*out));
@@ -940,12 +940,20 @@ static bool relay_names_decode_any(const void *bytes, size_t len, relay_names_cf
         relay_names_cfg_v1_t old;
         memcpy(&old, bytes, sizeof(old));
         relay_names_upgrade_v1(&old, out);
-        ESP_LOGW(ZONES_HTTP_TAG,
-                 "relay_names blob is v1 -- migrating to v%u, names preserved, every device type defaults to unset",
-                 (unsigned)RELAY_NAMES_CFG_VERSION);
+        if (!quiet) {
+            ESP_LOGW(ZONES_HTTP_TAG,
+                     "relay_names blob is v1 -- migrating to v%u, names preserved, every device type defaults to "
+                     "unset",
+                     (unsigned)RELAY_NAMES_CFG_VERSION);
+        }
         return true;
     }
     return false;
+}
+
+static bool relay_names_decode_any(const void *bytes, size_t len, relay_names_cfg_t *out)
+{
+    return relay_names_decode_any_impl(bytes, len, out, false);
 }
 
 /* Loads s_relay_names.cfg from NVS_KEY_RELAY_NAMES (same namespace/partition
@@ -1081,7 +1089,8 @@ void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool
     memset(&f_cfg, 0, sizeof(f_cfg));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(RELAY_NAMES_FILE_PATH, sizeof(f_cfg), relay_names_validate, &f_cfg, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw_quiet(RELAY_NAMES_FILE_PATH, sizeof(f_cfg), relay_names_validate, &f_cfg, &f_rev,
+                               &f_valid);
 
     relay_names_cfg_t n_cfg;
     memset(&n_cfg, 0, sizeof(n_cfg));
@@ -1092,7 +1101,7 @@ void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool
         uint8_t raw[sizeof(relay_names_cfg_t)];
         size_t len = sizeof(raw);
         if (hal_kv_get_blob(&h, NVS_KEY_RELAY_NAMES, raw, &len) == HAL_OK &&
-            relay_names_decode_any(raw, len, &n_cfg)) {
+            relay_names_decode_any_impl(raw, len, &n_cfg, true)) {
             n_valid = true;
             uint32_t rev = 0;
             if (hal_kv_get_u32(&h, NVS_KEY_RELAY_NAMES_REV, &rev) == HAL_OK) {
@@ -1371,7 +1380,8 @@ void zone_normals_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
     memset(&f_cfg, 0, sizeof(f_cfg));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(ZONE_NORMALS_FILE_PATH, sizeof(f_cfg), zone_normals_validate, &f_cfg, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw_quiet(ZONE_NORMALS_FILE_PATH, sizeof(f_cfg), zone_normals_validate, &f_cfg, &f_rev,
+                               &f_valid);
 
     zone_normals_cfg_t n_cfg;
     memset(&n_cfg, 0, sizeof(n_cfg));

@@ -397,6 +397,26 @@ static void test_v1_file_is_migrated_not_ignored(void)
     TEST_CHECK(strcmp(raw.names[0], "FileOnlyName") == 0, "the rewritten v2 file carries the migrated names");
 }
 
+/* Overwrites the NVS relay-names blob with a production-shaped v1 blob (one
+ * name in relay 1, valid v1 CRC) at the given rev, leaving the file alone. */
+static void put_v1_nvs_blob(const char *name1, uint32_t rev)
+{
+    relay_names_cfg_v1_t v1;
+    memset(&v1, 0, sizeof(v1));
+    v1.version = 1;
+    strncpy(v1.names[0], name1, RELAY_NAME_MAX_LEN);
+    relay_names_cfg_v1_t crc_tmp = v1;
+    crc_tmp.crc32 = 0;
+    v1.crc32 = esp_crc32_le(0, (const uint8_t *)&crc_tmp, sizeof(crc_tmp));
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "test setup: open NVS read-write");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_RELAY_NAMES, &v1, sizeof(v1)) == HAL_OK, "test setup: v1 blob");
+    TEST_CHECK(hal_kv_set_u32(&h, NVS_KEY_RELAY_NAMES_REV, rev) == HAL_OK, "test setup: rev");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "test setup: NVS commit");
+    hal_kv_close(&h);
+}
+
 // ---------------------------------------------------------------------
 // 9. GET /api/cfgfs "relay_names" row accessor.
 // ---------------------------------------------------------------------
@@ -430,6 +450,24 @@ static void test_dualwrite_status_row(void)
     cfg_fs_deinit();
     relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
     TEST_CHECK(!fv && nv && nr == 2 && !dv, "unmounted: file side absent, NVS valid, not diverged");
+
+    /* v1 NVS blob (a board that never re-saved since the v2 bump) against a
+     * v2 file. The status read decodes the v1 blob in memory (and stays
+     * silent about it) so a migrated-equivalent file reads in sync, and a
+     * different one reads diverged. */
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts (v1 NVS cases)");
+    prime_rev_to_zero();
+    set_name(1, "SameName");
+    TEST_CHECK(relay_names_save() == ESP_OK, "v2 file (and v2 NVS) saved at rev 1");
+    put_v1_nvs_blob("SameName", 1);
+    relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && fr == 1 && nr == 1 && !dv, "v1 NVS blob vs migrated-equivalent v2 file: valid, in sync");
+
+    put_v1_nvs_blob("OtherName", 1);
+    relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && dv, "v1 NVS blob with different names vs v2 file: diverged");
+    cfg_fs_deinit();
 }
 
 void run_test_relay_names_cfg_fs(void)

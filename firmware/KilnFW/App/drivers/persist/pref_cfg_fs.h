@@ -104,6 +104,12 @@ typedef bool (*pref_cfg_fs_validate_fn_t)(const void *bytes, size_t len);
 void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                            void *out_bytes, uint32_t *out_rev, bool *out_valid);
 
+// Identical to pref_cfg_fs_load_raw() in every result, but logs nothing for a
+// wrong-size or validator-rejected file. For read-only status polls (GET
+// /api/cfgfs) that must not repeat a boot-time warning on every request.
+void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                                void *out_bytes, uint32_t *out_rev, bool *out_valid);
+
 // Core of the read-through policy. `nvs_bytes`/`nvs_valid`/`nvs_rev` are
 // whatever the caller's existing NVS load already produced this boot --
 // never read or written by this function, a pure decision given these

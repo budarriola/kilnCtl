@@ -39,8 +39,8 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
-                           void *out_bytes, uint32_t *out_rev, bool *out_valid)
+static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                          void *out_bytes, uint32_t *out_rev, bool *out_valid, bool quiet)
 {
     if (out_bytes) {
         memset(out_bytes, 0, item_size);
@@ -70,22 +70,38 @@ void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_va
         return;
     }
     if (len != 4 + item_size) {
-        ESP_LOGW(PREF_FS_TAG, "%s is %u bytes, expected %u (4-byte rev + %u-byte item) -- ignoring", rel_path,
-                 (unsigned)len, (unsigned)(4 + item_size), (unsigned)item_size);
+        if (!quiet) {
+            ESP_LOGW(PREF_FS_TAG, "%s is %u bytes, expected %u (4-byte rev + %u-byte item) -- ignoring", rel_path,
+                     (unsigned)len, (unsigned)(4 + item_size), (unsigned)item_size);
+        }
         return;
     }
 
     uint32_t rev = get_u32_le(raw);
     const void *item_bytes = raw + 4;
     if (validate && !validate(item_bytes, item_size)) {
-        ESP_LOGW(PREF_FS_TAG, "%s (rev %lu) REJECTED by validator -- ignoring file, NVS candidate decides", rel_path,
-                 (unsigned long)rev);
+        if (!quiet) {
+            ESP_LOGW(PREF_FS_TAG, "%s (rev %lu) REJECTED by validator -- ignoring file, NVS candidate decides",
+                     rel_path, (unsigned long)rev);
+        }
         return;
     }
 
     memcpy(out_bytes, item_bytes, item_size);
     *out_rev = rev;
     *out_valid = true;
+}
+
+void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                           void *out_bytes, uint32_t *out_rev, bool *out_valid)
+{
+    load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false);
+}
+
+void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                                void *out_bytes, uint32_t *out_rev, bool *out_valid)
+{
+    load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, true);
 }
 
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev)
