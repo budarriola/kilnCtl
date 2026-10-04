@@ -31,8 +31,9 @@ Written to `logs/release/<tag>/` and uploaded:
 
 `zones_cfg_version`, `kilnlink_version` and `uart_version` are parsed from
 `zones_config_json.h`, `kilnlink_version.h` and `uart_task_ids.h` at release time, never
-typed by hand. A release is refused if `KilnCtrl.bin` exceeds 4 MB (0x400000, the `app`
-partition; staging lives in its own `stage` partition).
+typed by hand. A release is refused if `KilnCtrl.bin` exceeds 0x400000 (4 MB). That
+gate is deliberately the planned post-split app size (docs/GITHUB_RELEASE_UPDATE_PLAN.md
+WP2), stricter than today's `partitions.csv`, where `app` is 0x800000.
 
 ## Cutting a release
 
@@ -49,7 +50,8 @@ partition; staging lives in its own `stage` partition).
    `check_00_kilnfw_recovery_target_build.ps1`, which build in isolated `C:\wt\checkbuild_*`
    trees under the repo's build gate), zips the ELF, writes and validates the manifest, and
    prints what `-Publish` would send. Nothing leaves the machine.
-   `-SkipBuild [-BuildDir <dir>] [-RecoveryBin <file>]` reuses existing artifacts;
+   `-SkipBuild [-BuildDir <dir>] [-RecoveryBin <file>]` reuses existing artifacts (dry run
+   only: see the provenance rule under step 5);
    `-DevDryRun` downgrades the git gates to warnings (refused with `-Publish`) for
    exercising the packaging path from a scratch worktree.
 4. Review `logs/release/<tag>/release.json` (commit, compat, sizes).
@@ -57,8 +59,20 @@ partition; staging lives in its own `stage` partition).
    asset to uploads.github.com, re-download each asset and compare sha256, then PATCH
    `draft=false`. A mismatch leaves the draft unpublished (delete it on GitHub, fix, retry
    with a fresh `logs/release/<tag>` directory). `-WhatIf` prints the REST plan and calls
-   nothing. The re-download hop (API asset URL with the token, then the signed blob URL
-   without it) is UNVERIFIED against live GitHub; the first real release is its test.
+   nothing.
+   Provenance rule: `-Publish` is refused together with `-SkipBuild`, `-BuildDir` or
+   `-RecoveryBin`. The manifest and release are stamped with HEAD's commit, so the shipped
+   binaries must be the ones this script just built from it. (Chosen over verifying the
+   `esp_app_desc_t` in `KilnCtrl.bin`: its version string is `git describe`-derived and
+   only proves a build time, not that the binary came from HEAD, and the recovery image
+   has no such check at all.)
+   The re-download hop is `Get-AssetToFile`, written with `System.Net.Http.HttpClient`
+   (`AllowAutoRedirect=false`): the token goes only on the first api.github.com request,
+   the `Location` is followed without it, and the body is streamed to a file. It is tested
+   by `tools/check_release_manifest.ps1` against a local 127.0.0.1 redirect server (token
+   present on hop 1, absent on hop 2, bytes match, a 404 on hop 2 throws). It is still
+   UNVERIFIED against live GitHub (signed blob URLs, real 302 headers); the first real
+   release is that test.
 6. Record the release in ROADMAP.md and the bench log.
 
 ## Stable gates (all required)
@@ -75,7 +89,7 @@ partition; staging lives in its own `stage` partition).
 6. `ota_matrix_run` passes on the image (ESP via recovery, Pico auto-update, rollback).
 7. Readiness all ok on the bench board after flashing the release image (hardware-gated
    items listed in the notes).
-8. `KilnCtrl.bin` <= 4 MB and `.dram0.bss` <= 101000 B.
+8. `KilnCtrl.bin` <= 0x400000 and `.dram0.bss` <= 101000 B.
 9. Release notes list schema versions and any rollback hazard versus the previous release.
 
 `make_release.ps1` enforces only what it can prove mechanically (clean tree, origin/main,
@@ -101,6 +115,6 @@ logged, or passed on a command line.
 
 - "tag already exists": a tag cannot be reused; bump the version.
 - "HEAD is not origin/main": merge/push first, then mint a fresh worktree.
-- Size gate refusal: the image no longer fits the 4 MB `app` partition; that is a
+- Size gate refusal: the image exceeds the 0x400000 planned post-split app size; that is a
   partition-table decision, not something to bypass.
 - Build SKIP (exit 3): the ESP-IDF toolchain is missing; a release needs real binaries.

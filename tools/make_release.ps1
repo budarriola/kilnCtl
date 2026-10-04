@@ -7,11 +7,14 @@
 # unless -Publish is given.
 #
 # Gates (each a hard refusal; none is skipped by -Publish):
+#   * -Publish is refused with -SkipBuild / -BuildDir / -RecoveryBin (provenance: the
+#     binaries shipped must be the ones this script just built from the stamped commit)
 #   * tag matches ^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$
 #   * working tree is clean (git status --porcelain, logs/release excluded)
 #   * HEAD equals origin/main (after a read-only `git fetch origin main`)
 #   * the tag exists neither locally nor on origin (git ls-remote)
-#   * KilnCtrl.bin <= 0x400000 (the 4 MB `app` partition; staging has its own partition)
+#   * KilnCtrl.bin <= 0x400000: deliberately the planned post-split app size (see
+#     docs/GITHUB_RELEASE_UPDATE_PLAN.md WP2), stricter than today's 0x800000 app slot
 # -DevDryRun downgrades the git gates to warnings so the packaging path can be
 # exercised from a scratch worktree; it is refused together with -Publish.
 #
@@ -51,30 +54,55 @@ function Fail([string]$msg) {
 }
 
 # ---------------------------------------------------------------- publish helpers
-# Kept as functions that call Invoke-RestMethod / Invoke-WebRequest by plain name so a
-# test can shadow both (tools/check_release_manifest.ps1 does exactly that).
+# Invoke-ReleasePublish calls Invoke-RestMethod and Get-AssetToFile by plain name so a
+# test can shadow them (tools/check_release_manifest.ps1 does; it also exercises the real
+# Get-AssetToFile against a local redirect server).
 
 function Get-ReleaseApiHeaders([string]$Token, [string]$Accept = "application/vnd.github+json") {
     return @{ Authorization = "Bearer $Token"; Accept = $Accept; "X-GitHub-Api-Version" = "2022-11-28" }
 }
 
 function Get-AssetToFile([string]$Token, [string]$AssetApiUrl, [string]$OutFile) {
-    # The API asset URL 302s to a signed blob URL; do not forward the token there.
-    $hdr = Get-ReleaseApiHeaders $Token "application/octet-stream"
-    $resp = $null
+    # Two hops, done by hand with HttpClient (AllowAutoRedirect off) so the behavior does
+    # not depend on how Windows PowerShell 5.1 surfaces a 302 as an exception:
+    #   1. GET the API asset URL with the token + Accept: application/octet-stream
+    #      -> 3xx with a Location (signed blob URL).
+    #   2. GET Location WITHOUT the token, streamed to $OutFile.
+    # A direct 200 on hop 1 (no redirect) is streamed too. Anything else throws, which
+    # leaves the draft release unpublished.
+    Add-Type -AssemblyName System.Net.Http
+    $handler = New-Object System.Net.Http.HttpClientHandler
+    $handler.AllowAutoRedirect = $false
+    $client = New-Object System.Net.Http.HttpClient($handler)
+    $client.Timeout = [TimeSpan]::FromMinutes(10)
+    $resp = $null; $resp2 = $null
     try {
-        $resp = Invoke-WebRequest -Uri $AssetApiUrl -Headers $hdr -MaximumRedirection 0 -UseBasicParsing
-    } catch {
-        $r = $_.Exception.Response
-        if ($r -and ([int]$r.StatusCode -in 301, 302, 303, 307, 308)) {
-            $loc = [string]$r.Headers["Location"]
-            if (-not $loc) { $loc = [string]$r.Headers.Location }
-            Invoke-WebRequest -Uri $loc -OutFile $OutFile -UseBasicParsing | Out-Null
-            return
+        $req = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $AssetApiUrl)
+        $req.Headers.TryAddWithoutValidation("Authorization", "Bearer $Token") | Out-Null
+        $req.Headers.TryAddWithoutValidation("Accept", "application/octet-stream") | Out-Null
+        $req.Headers.TryAddWithoutValidation("X-GitHub-Api-Version", "2022-11-28") | Out-Null
+        $req.Headers.TryAddWithoutValidation("User-Agent", "kilnctl-make-release") | Out-Null
+        $resp = $client.SendAsync($req, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+        $code = [int]$resp.StatusCode
+        $final = $resp
+        if ($code -in 301, 302, 303, 307, 308) {
+            $loc = $resp.Headers.Location
+            if (-not $loc) { throw "asset download: HTTP $code without a Location header" }
+            if (-not $loc.IsAbsoluteUri) { $loc = New-Object System.Uri((New-Object System.Uri($AssetApiUrl)), $loc) }
+            $req2 = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $loc)
+            $req2.Headers.TryAddWithoutValidation("User-Agent", "kilnctl-make-release") | Out-Null
+            $resp2 = $client.SendAsync($req2, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+            $final = $resp2
         }
-        throw
+        if (-not $final.IsSuccessStatusCode) { throw "asset download: HTTP $([int]$final.StatusCode)" }
+        $inS = $final.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $outS = [System.IO.File]::Create($OutFile)
+        try { $inS.CopyTo($outS) } finally { $outS.Dispose(); $inS.Dispose() }
+    } finally {
+        if ($resp2) { $resp2.Dispose() }
+        if ($resp) { $resp.Dispose() }
+        $client.Dispose()
     }
-    [System.IO.File]::WriteAllBytes($OutFile, [byte[]]$resp.Content)
 }
 
 function Invoke-ReleasePublish {
@@ -132,6 +160,9 @@ if ($LoadFunctionsOnly) { return }
 
 # ---------------------------------------------------------------- gates
 if (-not $Tag -or $Tag -cnotmatch $SemverRe) { Fail "tag '$Tag' is not semver (vMAJOR.MINOR.PATCH[-pre])." }
+if ($Publish -and ($SkipBuild -or $BuildDir -or $RecoveryBin)) {
+    Fail "-Publish cannot be combined with -SkipBuild/-BuildDir/-RecoveryBin: the release is stamped with HEAD's commit, so the shipped binaries must be built here, from that commit."
+}
 if ($Publish -and $DevDryRun) { Fail "-DevDryRun and -Publish are mutually exclusive." }
 if ($Repo -notmatch '^[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$') { Fail "repo '$Repo' is not owner/name." }
 
@@ -171,7 +202,7 @@ foreach ($p in @($appBin, $elf, $RecoveryBin)) {
     if (-not (Test-Path -LiteralPath $p)) { Fail "missing build artifact: $p" }
 }
 $appSize = (Get-Item -LiteralPath $appBin).Length
-if ($appSize -gt $MaxAppSize) { Fail "KilnCtrl.bin is $appSize bytes, over the $MaxAppSize (0x400000) gate." }
+if ($appSize -gt $MaxAppSize) { Fail "KilnCtrl.bin is $appSize bytes, over the $MaxAppSize (0x400000) gate (planned post-split app size, GITHUB_RELEASE_UPDATE_PLAN.md WP2)." }
 
 $outDir = Join-Path $repoRoot "logs\release\$Tag"
 if (Test-Path -LiteralPath $outDir) { Fail "$outDir already exists; remove it (or pick a new tag) so no stale asset is published." }

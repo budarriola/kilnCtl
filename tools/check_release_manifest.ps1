@@ -3,10 +3,13 @@
 # sections 6-8). Nothing here touches a board, the network, or GitHub.
 #
 #   1. tools/PcTools/tests/test_release_manifest.py: parsers, semver gate, dirty-tree
-#      refusal, 4 MB size gate, generate+validate round trip on synthetic files (also
+#      refusal, 0x400000 size gate, generate+validate round trip on synthetic files (also
 #      end to end through the CLI against a throwaway git repo), tamper detection.
 #   2. make_release.ps1 refuses a non-semver tag.
-#   3. The -Publish REST flow, with Invoke-RestMethod / Invoke-WebRequest shadowed by
+#   2b. -Publish is refused with -SkipBuild/-BuildDir/-RecoveryBin (provenance).
+#   2c. The real Get-AssetToFile (HttpClient, manual redirect) against a local 127.0.0.1
+#      server: token required on hop 1, forbidden on hop 2, bytes match; a 404 on hop 2 throws.
+#   3. The -Publish REST flow, with Invoke-RestMethod / Get-AssetToFile shadowed by
 #      recording functions: order is create-draft, upload each asset, verify each, and
 #      only then PATCH draft=false; a corrupted re-download must raise and must NOT
 #      PATCH; the token must never appear in output; -WhatIf must call nothing.
@@ -43,6 +46,69 @@ else { Write-Host "ok: $($Matches[0])" }
 if ($LASTEXITCODE -ne 1) { Note-Fail "make_release.ps1 -Tag 1.0 exited $LASTEXITCODE, expected 1 (refusal)" }
 else { Write-Host "ok: non-semver tag refused" }
 
+# 2b. provenance refusal ------------------------------------------------------------
+foreach ($extra in @(@("-SkipBuild"), @("-BuildDir", "C:\nonexistent"), @("-RecoveryBin", "C:\nonexistent.bin"))) {
+    $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "v1.0.0" -Publish @extra 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 1 -or $o -notmatch "cannot be combined") { Note-Fail "make_release.ps1 -Publish $($extra -join ' ') was not refused for provenance (exit $LASTEXITCODE)" }
+    else { Write-Host "ok: -Publish refused with $($extra[0])" }
+}
+
+# 2c. real Get-AssetToFile against a local redirect server ------------------------
+. (Join-Path $PSScriptRoot "make_release.ps1") -LoadFunctionsOnly
+$srvPy = Join-Path ([System.IO.Path]::GetTempPath()) ("relsrv_" + [guid]::NewGuid().ToString("N") + ".py")
+$srvOut = $srvPy + ".out"
+@'
+import http.server
+PAYLOAD = bytes(range(256)) * 4096
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        auth = self.headers.get("Authorization")
+        port = self.server.server_address[1]
+        if self.path in ("/asset", "/asset404"):
+            if auth != "Bearer TESTTOKEN" or self.headers.get("Accept") != "application/octet-stream":
+                self.send_response(401); self.send_header("Content-Length", "0"); self.end_headers(); return
+            self.send_response(302)
+            self.send_header("Location", "http://127.0.0.1:%d/%s" % (port, "blob" if self.path == "/asset" else "missing"))
+            self.send_header("Content-Length", "0"); self.end_headers(); return
+        if self.path == "/blob":
+            if auth is not None:
+                self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers(); return
+            self.send_response(200); self.send_header("Content-Length", str(len(PAYLOAD))); self.end_headers()
+            self.wfile.write(PAYLOAD); return
+        self.send_response(404); self.send_header("Content-Length", "0"); self.end_headers()
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+print(srv.server_address[1], flush=True)
+srv.serve_forever()
+'@ | Set-Content -LiteralPath $srvPy -Encoding ascii
+$srv = Start-Process -FilePath $python -ArgumentList @($srvPy) -RedirectStandardOutput $srvOut -PassThru -WindowStyle Hidden
+try {
+    $port = $null
+    for ($i = 0; $i -lt 100 -and -not $port; $i++) {
+        Start-Sleep -Milliseconds 100
+        if (Test-Path $srvOut) { $line = (Get-Content -LiteralPath $srvOut -ErrorAction SilentlyContinue | Select-Object -First 1); if ($line -match '^\d+$') { $port = $line } }
+    }
+    if (-not $port) { Note-Fail "local redirect server did not start" }
+    else {
+        $dl = Join-Path ([System.IO.Path]::GetTempPath()) ("reldl_" + [guid]::NewGuid().ToString("N"))
+        try {
+            Get-AssetToFile "TESTTOKEN" "http://127.0.0.1:$port/asset" $dl
+            $gotLen = (Get-Item -LiteralPath $dl).Length
+            if ($gotLen -ne 256 * 4096) { Note-Fail "redirect download wrote $gotLen bytes, expected $(256 * 4096)" }
+            else { Write-Host "ok: Get-AssetToFile follows 302 with token only on hop 1, streams the body" }
+        } catch { Note-Fail "Get-AssetToFile against local redirect server threw: $($_.Exception.Message)" }
+        finally { Remove-Item -LiteralPath $dl -Force -ErrorAction SilentlyContinue }
+        $dl404 = Join-Path ([System.IO.Path]::GetTempPath()) ("reldl404_" + [guid]::NewGuid().ToString("N"))
+        $threw = $false
+        try { Get-AssetToFile "TESTTOKEN" "http://127.0.0.1:$port/asset404" $dl404 } catch { $threw = $true }
+        if (-not $threw) { Note-Fail "a 404 on the redirect target did not throw" } else { Write-Host "ok: failing redirect target throws" }
+        Remove-Item -LiteralPath $dl404 -Force -ErrorAction SilentlyContinue
+    }
+} finally {
+    if ($srv -and -not $srv.HasExited) { Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $srvPy, $srvOut -Force -ErrorAction SilentlyContinue
+}
+
 # 3. publish flow with mocked REST -----------------------------------------------
 . (Join-Path $PSScriptRoot "make_release.ps1") -LoadFunctionsOnly
 
@@ -70,13 +136,12 @@ try {
             return $null
         }
     }
-    function Invoke-WebRequest {
-        param($Uri, $Headers, $OutFile, $MaximumRedirection, [switch]$UseBasicParsing)
-        $script:calls.Add("GETASSET $Uri")
-        $name = $Uri -replace '.*/asset/', ''
+    function Get-AssetToFile([string]$Token, [string]$AssetApiUrl, [string]$OutFile) {
+        $script:calls.Add("GETASSET $AssetApiUrl")
+        $name = $AssetApiUrl -replace '.*/asset/', ''
         $bytes = [System.IO.File]::ReadAllBytes((Join-Path $work $name))
         if ($script:corrupt -and $name -eq "b.bin") { $bytes[0] = 255 }
-        return [pscustomobject]@{ Content = $bytes }
+        [System.IO.File]::WriteAllBytes($OutFile, $bytes)
     }
 
     $args1 = @{ Token = $secret; Repo = "o/r"; Tag = "v1.0.0"; Commit = ("c" * 40); Dir = $work }

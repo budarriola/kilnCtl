@@ -10,7 +10,8 @@ generate  Copy the images into --out as KilnCtrl-<tag>.bin /
           KilnRecovery-<tag>.bin, then write release.json (schema 1) and
           SHA256SUMS next to them.  Refuses a dirty git tree, a non-semver
           tag, and an application image larger than --max-app-size
-          (default 0x400000, the 4 MB `app` partition).
+          (default 0x400000: deliberately the planned post-split app size,
+          docs/GITHUB_RELEASE_UPDATE_PLAN.md WP2, stricter than today's table).
 validate  Check release.json + SHA256SUMS against the files in a directory:
           schema, tag shape, commit shape, dirty=false, every image present
           with matching size and sha256, size gate, SHA256SUMS agreement.
@@ -31,7 +32,7 @@ SCHEMA = 1
 SEMVER_RE = re.compile(r"^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$")
-DEFAULT_MAX_APP_SIZE = 0x400000  # 4 MB `app` partition (plan: stage is separate)
+DEFAULT_MAX_APP_SIZE = 0x400000  # planned post-split app size (GITHUB_RELEASE_UPDATE_PLAN.md WP2); stricter than today's 0x800000 app slot
 
 ZONES_HEADER = os.path.join("firmware", "KilnFW", "App", "drivers", "persist",
                             "zones_config_json.h")
