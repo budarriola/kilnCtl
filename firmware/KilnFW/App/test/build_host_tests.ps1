@@ -821,6 +821,32 @@ try {
 
     Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $cmd4
 
+    # ---- test_profile_executor_store_link.c: store-plus-consumer link test ----
+    # docs/RELEASE_HARDENING_PLAN.md: test_profile_executor_prestart.c feeds the
+    # real profile_executor_run() from a hand-built profiles_http_get() fake, so a
+    # store-layout/executor-consumption mismatch could never fail there. This
+    # executable #includes that file (its main() renamed, its profiles_http_get()/
+    # profiles_validate_candidate() fakes compiled out via PEX_STORE_LINK_TEST) and
+    # links the REAL profiles_http.c as its own object, over the real host hal_kv
+    # backend (fake_kv.c, already linked for the executor's own persistence) and
+    # the real cfg_fs.c/profiles_cfg_fs.c bridge. Own executable: the prestart
+    # fakes multiply-define against every other host test.
+    $exeSl = Join-Path $outDir "kilnctl_host_tests_profile_executor_store_link.exe"
+    $slObjDir = Join-Path $outDir "pe_store_link"
+    New-Item -ItemType Directory -Force -Path $slObjDir | Out-Null
+    # profiles_catalog_http.c is compiled through stubs/profiles_catalog_http_host_wrap.c (it embeds its
+    # page with GCC's asm("_binary_...") extension, which MSVC cannot parse).
+    $cmdSl = $cmd4.Replace("`"$peObjDir\\`"", "`"$slObjDir\\`"").Replace("`"$exe4`"", "`"$exeSl`"").Replace(
+                 "`"$(Join-Path $testDir 'test_profile_executor_prestart.c')`" ",
+                 "`"$(Join-Path $testDir 'test_profile_executor_store_link.c')`" " +
+                 "`"$(Join-Path $driversDir 'http/profiles_http.c')`" " +
+                 "`"$(Join-Path $testDir 'stubs/profiles_catalog_http_host_wrap.c')`" " +
+                 "`"$(Join-Path $driversDir 'http/profiles_edit_http.c')`" " +
+                 "`"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
+                 "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
+                 "`"$(Join-Path $driversDir 'control/profile_feasibility.c')`" ")
+    Invoke-HostTestExe -Name "profile_executor_store_link" -ExePath $exeSl -BuildCmd $cmdSl
+
     # ---- test_autotune_engine_prestart.c: its own FIFTH, separate executable --
     # Same reasoning as test_profile_executor_prestart.c immediately above, for
     # autotune_engine.c's identical pre-start guard (begin_run_locked()'s
@@ -2924,7 +2950,9 @@ try {
     # 66 -> 67 (2026-10-02): added test_kiln_cfg_swap_worker.c's own
     # Invoke-HostTestExe call -- the swap worker's single-flight
     # safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION.md A2).
-    $totalExpected = 67
+    # 67 -> 68: added test_profile_executor_store_link.c's own Invoke-HostTestExe
+    # call (real profiles_http.c store feeding the real profile_executor_run()).
+    $totalExpected = 68
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the

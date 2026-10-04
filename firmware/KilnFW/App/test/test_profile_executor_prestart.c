@@ -277,6 +277,7 @@ bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 // matching the old hardcoded behavior exactly.
 static bool s_test_profiles_http_get_ok = false;
 static profile_t s_test_profiles_http_get_out;
+#ifndef PEX_STORE_LINK_TEST /* test_profile_executor_store_link.c links the REAL profiles_http.c instead */
 bool profiles_http_get(uint8_t id, profile_t *out)
 {
     (void)id;
@@ -287,6 +288,7 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     if (out) *out = s_test_profiles_http_get_out;
     return true;
 }
+#endif
 
 // Settable for the M13 fault-source-decode negative test below -- see
 // s_test_profiles_http_get_ok's comment for the pattern. Default false
@@ -680,6 +682,7 @@ static void arm_live_edit_pickup(const profile_t *candidate)
     s_test_live_edit_window_violated = false;
 }
 
+#ifndef PEX_STORE_LINK_TEST /* real one lives in profiles_edit_http.c via profiles_http.c */
 bool profiles_validate_candidate(const profile_t *candidate, int mode, char *warnings_json, size_t warnings_json_cap,
                                   char *err_msg, size_t err_cap)
 {
@@ -690,6 +693,7 @@ bool profiles_validate_candidate(const profile_t *candidate, int mode, char *war
     if (err_msg && err_cap) err_msg[0] = '\0';
     return true;
 }
+#endif
 
 bool zones_config_get_continue_on_zone_trip(void)
 {
@@ -1249,9 +1253,12 @@ bool zones_config_get_temp_limits(uint8_t zone_index, float *out_max_temp_c, flo
     return false;
 }
 
+/* Settable (default 0, every pre-existing test unchanged) -- test_profile_executor_store_link.c needs a
+ * configured zone so the REAL profiles_http_save() accepts a zone_mask. */
+static uint8_t g_stub_thermo_count = 0;
 uint8_t zones_config_get_thermo_count(void)
 {
-    return 0;
+    return g_stub_thermo_count;
 }
 
 /* Settable per zone (defaults to 0/false, matching every pre-existing test

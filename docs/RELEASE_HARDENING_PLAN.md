@@ -1034,10 +1034,9 @@ confirmed to turn the
 `zones_http` host-test executable red, restored by hand with an empty
 `git diff` and a matching `git hash-object`, then the build directory was
 deleted and a full rebuild confirmed green again. This does not reach
-`profile_executor_run()` itself (that consumer still only compiles against a
-hand-built fake in its own executable) — a real store+consumer link test is
-still open, non-trivial because `test_profile_executor_prestart.c` is a
-separate executable specifically to dodge multiply-defined fakes.
+`profile_executor_run()` itself; that gap is closed (2026-10-04) by
+`firmware/KilnFW/App/test/test_profile_executor_store_link.c`, which saves through the real
+`profiles_http.c` store and runs the executor from it (slot 3, and slot 99 with 12 segments).
 
 Owner/hardware boundary (cannot be closed without the board): cut power
 mid-flash-write on the Pico repeatedly with intact read-back each time
