@@ -1344,6 +1344,8 @@ static void test_credential_survives_factory_reset_profiles_scope(void)
     seed_webauth12b_credential();
     g_stub_profiles_discard_calls = 0;
     g_kiln_scope_cfg_delete_calls = 0;
+    g_profiles_scope_cfg_delete_calls = 0;
+    g_profiles_scope_cfg_delete_result = ESP_OK;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
               "factory_reset_execute(PROFILES) must succeed");
     TEST_CHECK(g_stub_profiles_discard_calls == 1,

@@ -37,9 +37,40 @@
 
 static const char *SCRATCH_BASE = "cfg_fs_test_zone_normals";
 
+/* Ids the profiles-scope test writes for both owners; reset_all() removes them
+ * (and the decoys) so an aborted earlier run cannot leave files or
+ * subdirectories behind. */
+static const uint8_t kProfilesTestIds[] = { 0, 7, PROFILES_MAX_COUNT - 1, 150, 255 };
+static const char *const kProfilesTestDecoys[] = {
+    "profiles/hidden.json", "profiles/other.json", "stats/readme.dat", "profiles/prof07.json", "zones.json",
+};
+
+static void remove_profiles_test_files(void)
+{
+    char path[700];
+    char rel[64];
+    for (size_t i = 0; i < sizeof(kProfilesTestIds); i++) {
+        snprintf(rel, sizeof(rel), PROFILES_CFG_FS_PATH_FMT, (unsigned)kProfilesTestIds[i]);
+        snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, rel);
+        remove(path);
+        snprintf(rel, sizeof(rel), FIRING_STATS_CFG_FS_PATH_FMT, (unsigned)kProfilesTestIds[i]);
+        snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, rel);
+        remove(path);
+    }
+    for (size_t i = 0; i < sizeof(kProfilesTestDecoys) / sizeof(kProfilesTestDecoys[0]); i++) {
+        snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, kProfilesTestDecoys[i]);
+        remove(path);
+    }
+    snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, PROFILES_CFG_FS_DIR);
+    TZNCF_RMDIR(path);
+    snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, FIRING_STATS_CFG_FS_DIR);
+    TZNCF_RMDIR(path);
+}
+
 static void reset_all(void)
 {
     char path[600];
+    remove_profiles_test_files();
     snprintf(path, sizeof(path), "%s/.tmp/%s", SCRATCH_BASE, ZONE_NORMALS_FILE_PATH);
     remove(path);
     snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, ZONE_NORMALS_FILE_PATH);
@@ -243,9 +274,10 @@ static void test_profiles_scope_deletes_slot_and_stats_files(void)
 
     /* Paths come from the OWNERS' own format macros, so a format change in
      * either owner is followed (or fails here), never silently missed. */
-    const uint8_t ids[] = { 0, 7, PROFILES_MAX_COUNT - 1, 150, 255 };
+    const uint8_t *ids = kProfilesTestIds;
+    const size_t nids = sizeof(kProfilesTestIds);
     char path[64];
-    for (size_t i = 0; i < sizeof(ids); i++) {
+    for (size_t i = 0; i < nids; i++) {
         snprintf(path, sizeof(path), PROFILES_CFG_FS_PATH_FMT, (unsigned)ids[i]);
         write_file(path);
         snprintf(path, sizeof(path), FIRING_STATS_CFG_FS_PATH_FMT, (unsigned)ids[i]);
@@ -258,9 +290,9 @@ static void test_profiles_scope_deletes_slot_and_stats_files(void)
     write_file("zones.json");
 
     int deleted = 0;
-    TEST_CHECK(profiles_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == (int)(2 * sizeof(ids)),
+    TEST_CHECK(profiles_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == (int)(2 * nids),
                "every slot and history file deleted (2 per id)");
-    for (size_t i = 0; i < sizeof(ids); i++) {
+    for (size_t i = 0; i < nids; i++) {
         snprintf(path, sizeof(path), PROFILES_CFG_FS_PATH_FMT, (unsigned)ids[i]);
         TEST_CHECK(!file_exists(path), "slot file is gone");
         snprintf(path, sizeof(path), FIRING_STATS_CFG_FS_PATH_FMT, (unsigned)ids[i]);

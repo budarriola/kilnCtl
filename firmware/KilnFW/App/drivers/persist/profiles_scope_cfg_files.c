@@ -108,9 +108,18 @@ esp_err_t profiles_scope_cfg_files_delete(int *out_deleted)
                 }
             }
             /* A full listing may have hidden more files behind the clamp; go
-             * again only if this pass made progress. */
+             * again only if this pass made progress. Running out of passes
+             * with the listing still full means files may remain: fail the
+             * reset loudly rather than leave a stale mirror behind. */
             if (n < PSCF_LIST_MAX || removed_this_pass == 0) {
                 break;
+            }
+            if (pass == PSCF_MAX_PASSES - 1) {
+                ESP_LOGE(PSCF_TAG, "profiles reset: cfg dir %s still full after %d passes; files may remain",
+                         fam->dir, PSCF_MAX_PASSES);
+                if (first_err == ESP_OK) {
+                    first_err = ESP_ERR_INVALID_SIZE;
+                }
             }
         }
     }
