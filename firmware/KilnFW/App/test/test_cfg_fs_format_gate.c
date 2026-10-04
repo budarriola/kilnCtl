@@ -216,9 +216,11 @@ static void test_bare_magic_bytes_with_no_real_structure_still_formats(void)
 }
 
 /* /api/status (dashboard_status_http.c) prints cfg_fs_mount.c's pending
- * reason into JSON with a bare %s: this pins the assumption that every
- * reason cfg_fs_format_gate_describe() can author is plain printable ASCII
- * with no quote, backslash or control character. */
+ * reason into JSON with a bare %s: this pins the assumption only for the
+ * strings cfg_fs_format_gate_describe() authors (plain printable ASCII, no
+ * quote, backslash or control character). The fixed/esp_err_to_name strings
+ * cfg_fs_mount.c builds itself (~:409/:420) are not covered here; the
+ * handler's own runtime check degrades an unsafe reason instead. */
 static bool reason_is_json_safe(const char *s)
 {
     if (s[0] == '\0') {

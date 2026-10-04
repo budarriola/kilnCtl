@@ -532,6 +532,57 @@ static void test_status_cfg_fs_format_pending_field(void)
     TEST_CHECK(strstr(s_last_resp_body, "\"cfg_fs_format_reason\":\"reason unavailable\"") != NULL,
               "unsafe reason degrades to a fixed string, JSON stays valid");
     TEST_CHECK(strstr(s_last_resp_body, "bad") == NULL, "unsafe reason text is not echoed");
+
+    /* Web auth ON: the flag is dashboard-visible to everyone, the reason text
+     * only to an admin session (same gate as the build identity). */
+    web_auth_policy_t on = { .web_enabled = true, .lcd_enabled = false,
+                              .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(web_auth_store_set_policy(&on) == HAL_OK, "setup: auth-on policy persisted");
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_status.cfg_fs_format_pending = true;
+    s_fake_status.cfg_fs_format_reason = "LittleFS superblock found (corrupt)";
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (auth on, no session)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"cfg_fs_format_pending\":true") != NULL,
+              "auth on, no session -- cfg_fs_format_pending:true still emitted (dashboard banner)");
+    TEST_CHECK(strstr(s_last_resp_body, "cfg_fs_format_reason") == NULL &&
+              strstr(s_last_resp_body, "superblock") == NULL,
+              "auth on, no session -- reason text withheld");
+    TEST_CHECK(s_last_resp_body[strlen(s_last_resp_body) - 1] == '}', "auth on, no session -- document still closes");
+
+    reset_fake_status_with_known_build_identity();
+    {
+        const char *token = status_test_make_session(WEB_AUTH_SESSION_ROLE_USER, "user-token-status-cfgfs");
+        stub_headers_reset();
+        char cookie[64];
+        snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s", token);
+        stub_header_set("Cookie", cookie);
+    }
+    s_fake_status.cfg_fs_format_pending = true;
+    s_fake_status.cfg_fs_format_reason = "LittleFS superblock found (corrupt)";
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (auth on, USER)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"cfg_fs_format_pending\":true") != NULL &&
+              strstr(s_last_resp_body, "cfg_fs_format_reason") == NULL,
+              "auth on, USER session -- flag yes, reason withheld");
+
+    reset_fake_status_with_known_build_identity();
+    {
+        const char *token = status_test_make_session(WEB_AUTH_SESSION_ROLE_ADMIN, "admin-token-status-cfgfs");
+        stub_headers_reset();
+        char cookie[64];
+        snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s", token);
+        stub_header_set("Cookie", cookie);
+    }
+    s_fake_status.cfg_fs_format_pending = true;
+    s_fake_status.cfg_fs_format_reason = "LittleFS superblock found (corrupt)";
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (auth on, ADMIN)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"cfg_fs_format_pending\":true") != NULL &&
+              strstr(s_last_resp_body, "\"cfg_fs_format_reason\":\"LittleFS superblock found (corrupt)\"") != NULL,
+              "auth on, ADMIN session -- flag and reason both present");
 }
 
 static void run_test_dashboard_status_http(void)

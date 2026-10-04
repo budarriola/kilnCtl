@@ -127,8 +127,9 @@ regardless of how much of it there is:
   → refuses to format either way. Logged at ERROR with a loud boot-log
   banner, and surfaced three other ways: `GET /api/cfgfs/format_pending`
   (`{"pending":true,"reason":"..."}`); `/api/status` fields
-  `cfg_fs_format_pending`/`cfg_fs_format_reason` (emitted only while pending),
-  which drive an informational banner on the web dashboard and a lowest-priority
+  `cfg_fs_format_pending`/`cfg_fs_format_reason` (emitted only while pending;
+  the reason only to an admin session or with web auth off; host-tested only,
+  not bench-verified), which drive an informational banner on the web dashboard and a lowest-priority
   strip on the LCD home page (no action from the LCD; clears once the format
   completes); and a banner on the Settings page
   with an explicit confirm button, which POSTs to
@@ -178,9 +179,9 @@ Either outcome never blocks boot, never touches any partition other than
 Nothing to do at the board — every item falls back to its NVS copy and the
 board runs on firmware defaults for anything genuinely file-only (nothing
 is file-only yet; see above). A persistent mount failure (as opposed to
-"not yet formatted") is reported via `/api/cfgfs`'s `status` field and is
-and, when the ask-first gate is what refused to format, by the LCD/web
-dashboard banner described above (`/api/status`). No safety decision
+"not yet formatted") is reported via `/api/cfgfs`'s `status` field; when the failure is the ask-first gate refusing to format,
+the LCD/web dashboard banner described above (`/api/status`) shows it too.
+No safety decision
 is allowed to depend on a file successfully mounting — guard thresholds
 still resolve from NVS whenever the file side is unavailable.
 
@@ -274,7 +275,7 @@ deliberately (13, 15-22, 24), 1 (23) is on the separate `logs` track, and 2
   board (`8ab3b81a`) now has `cfg` mounted with 7 files present, per
   `GET /api/cfgfs`. The ask-first refusal path now also shows on the LCD
   home strip and in `/api/status`/the web dashboard (not just the boot log
-  and Settings page). **Stale as of 2026-09-30:** the file count had
+  and Settings page); host-tested only, not bench-verified. **Stale as of 2026-09-30:** the file count had
   grown to 9 and was then reset to 0 by an owner-approved backup/reformat
   (`backup_export` + `cfgfs_format(confirm=True)`); see the note above and
   `docs/BENCH_TEST_LOG.md`.

@@ -1024,14 +1024,20 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * an unsafe string degrades to a fixed one instead of invalid JSON. No
      * stack buffer (json_escape needs one; this handler's stack is tight). */
     if (ds->cfg_fs_format_pending) {
-        const char *why = ds->cfg_fs_format_reason ? ds->cfg_fs_format_reason : "";
-        for (const char *p = why; *p; p++) {
-            if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e) {
-                why = "reason unavailable";
-                break;
+        APPEND(",\"cfg_fs_format_pending\":true");
+        /* The flag is dashboard-visible; the reason text (a diagnostic about
+         * what is on the partition) goes out only under the same condition
+         * that gates the build identity above (may_see_build_identity). */
+        if (may_see_build_identity) {
+            const char *why = ds->cfg_fs_format_reason ? ds->cfg_fs_format_reason : "";
+            for (const char *p = why; *p; p++) {
+                if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e) {
+                    why = "reason unavailable";
+                    break;
+                }
             }
+            APPEND(",\"cfg_fs_format_reason\":\"%s\"", why);
         }
-        APPEND(",\"cfg_fs_format_pending\":true,\"cfg_fs_format_reason\":\"%s\"", why);
     }
 
     APPEND("}");

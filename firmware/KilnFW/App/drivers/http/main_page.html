@@ -2139,6 +2139,8 @@ function renderCfgFsFormatPending(data) {
   var el = document.getElementById('cfgFsFormatPendingBanner');
   if (!el) return;
   if (!data.cfg_fs_format_pending) { el.innerHTML = ''; return; }
+  // The reason text is sent only to an admin session (or with web auth off);
+  // everyone else gets the generic wording below.
   var reason = data.cfg_fs_format_reason || '';
   el.innerHTML = '<div class="banner interrupted">' +
     '<h3>CONFIG FILESYSTEM NEEDS FORMAT CONFIRMATION</h3>' +
