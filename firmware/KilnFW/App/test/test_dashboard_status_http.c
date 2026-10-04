@@ -490,8 +490,53 @@ static void test_status_touch_cal_supported_reports_each_state(void)
     s_fake_touch_cal_support = TOUCH_CAL_SUPPORT_SUPPORTED;
 }
 
+/* cfg_fs ask-first format refusal on /api/status: the pair of fields is
+ * emitted ONLY while pending (the buffer's headroom is ~200 B), the reason
+ * is passed through when it is JSON-safe, and an unsafe reason degrades to a
+ * fixed string rather than corrupting the document. */
+static void test_status_cfg_fs_format_pending_field(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- cfg_fs_format_pending/_reason appear only while "
+                 "the cfg partition's ask-first format refusal is pending");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    httpd_req_t req;
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (not pending)");
+    TEST_CHECK(strstr(s_last_resp_body, "cfg_fs_format") == NULL,
+              "not pending -- neither cfg_fs_format_ field is emitted");
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_status.cfg_fs_format_pending = true;
+    s_fake_status.cfg_fs_format_reason = "LittleFS superblock found (corrupt)";
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (pending)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"cfg_fs_format_pending\":true") != NULL,
+              "pending -- cfg_fs_format_pending:true present");
+    TEST_CHECK(strstr(s_last_resp_body, "\"cfg_fs_format_reason\":\"LittleFS superblock found (corrupt)\"") != NULL,
+              "pending -- reason string passed through");
+    TEST_CHECK(s_last_resp_body[strlen(s_last_resp_body) - 1] == '}', "pending -- document still closes");
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_status.cfg_fs_format_pending = true;
+    s_fake_status.cfg_fs_format_reason = "bad \"quote\"";
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (unsafe reason)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"cfg_fs_format_reason\":\"reason unavailable\"") != NULL,
+              "unsafe reason degrades to a fixed string, JSON stays valid");
+    TEST_CHECK(strstr(s_last_resp_body, "bad") == NULL, "unsafe reason text is not echoed");
+}
+
 static void run_test_dashboard_status_http(void)
 {
+    test_status_cfg_fs_format_pending_field();
     test_status_touch_cal_supported_reports_each_state();
     test_status_web_auth_off_shows_build_identity();
     test_status_unauthenticated_redacts_build_identity();

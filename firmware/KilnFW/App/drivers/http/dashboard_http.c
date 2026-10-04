@@ -16,6 +16,7 @@
 #include "hal_time.h" /* hal_time_now_us() -- uptime_s below, was esp_timer_get_time() */
 
 #include "autotune_engine.h"
+#include "cfg_fs_mount.h" /* cfg_fs_mount_format_confirmation_pending() -- cfg_fs_format_pending below */
 #include "lvgl_port.h" /* lvgl_port_touch_is_calibrated() -- see the "touch_calibrated" /api/status field below */
 #include "danger_mode.h" /* danger_mode_active() -- profile_exec_start_post_handler()'s mutual-exclusion refusal */
 #include "dashboard_json.h" /* json_escape()/append_zone_status_json() -- split out for host-testability, see that header */
@@ -578,6 +579,11 @@ void dashboard_get_status(dashboard_status_t *out)
     out->time_synced = ts.ever_synced;
     out->time_now_epoch = ts.now_epoch;
     out->time_last_sync_epoch = ts.last_sync_epoch;
+
+    /* cfg_fs ask-first format refusal -- see dashboard_http.h. Reads the
+     * existing cfg_fs_mount.c state; nothing is cached here. */
+    out->cfg_fs_format_pending = cfg_fs_mount_format_confirmation_pending();
+    out->cfg_fs_format_reason = out->cfg_fs_format_pending ? cfg_fs_mount_format_pending_reason() : "";
     strncpy(out->time_tz, ts.tz, sizeof(out->time_tz) - 1);
     out->time_tz[sizeof(out->time_tz) - 1] = '\0';
 }

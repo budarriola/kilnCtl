@@ -363,6 +363,7 @@
 <div id="zonesConfigLoadFaultBanner"></div>
 <div id="zonesConfigMigrationPersistFaultBanner"></div>
 <div id="kilnCfgSwapBootFaultBanner"></div>
+<div id="cfgFsFormatPendingBanner"></div>
 <div id="safetyTcReconfigGaveUpBanner"></div>
 <div id="safetyGuardDisabledByZeroBanner"></div>
 <div id="safetyTripBanner"></div>
@@ -2128,6 +2129,23 @@ function renderKilnCfgSwapBootFault(data) {
   el.innerHTML = '<div class="banner interrupted">' +
     '<h3>KILN CONFIG SWAP INTERRUPTED -- NOT RECOVERED</h3>' +
     '<div class="row"><span>' + window.kcEscapeHtml(reason) + '</span></div>' +
+    '</div>';
+}
+
+// cfg_fs ask-first format refusal (docs/CONFIG_FILESYSTEM.md): /api/status
+// carries cfg_fs_format_pending/_reason ONLY while pending. Informational --
+// the confirm button lives on /settings (admin-gated), this just points there.
+function renderCfgFsFormatPending(data) {
+  var el = document.getElementById('cfgFsFormatPendingBanner');
+  if (!el) return;
+  if (!data.cfg_fs_format_pending) { el.innerHTML = ''; return; }
+  var reason = data.cfg_fs_format_reason || '';
+  el.innerHTML = '<div class="banner interrupted">' +
+    '<h3>CONFIG FILESYSTEM NEEDS FORMAT CONFIRMATION</h3>' +
+    '<div class="row"><span>The config filesystem did not mount and was not auto-formatted because it ' +
+    'may contain data' + (reason ? ' (' + window.kcEscapeHtml(reason) + ')' : '') + '. Settings fall back ' +
+    'to the values stored in NVS.</span></div>' +
+    '<div class="row"><span>To clear</span><span>Review and confirm on the Settings page.</span></div>' +
     '</div>';
 }
 
@@ -4295,6 +4313,7 @@ function poll() {
       renderZonesConfigLoadFault(data);
       renderZonesConfigMigrationPersistFault(data);
       renderKilnCfgSwapBootFault(data);
+      renderCfgFsFormatPending(data);
       renderSafetyTcReconfigGaveUp(data);
       renderSafetyGuardDisabledByZero(data);
       renderSafetyTrip(data);

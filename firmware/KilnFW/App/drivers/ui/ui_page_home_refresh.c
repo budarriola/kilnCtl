@@ -314,6 +314,17 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                              (unsigned)mfault.on_disk_version, (unsigned)mfault.fw_version);
                     lv_label_set_text(s_ui_home_trip_strip, mfault_buf);
                     lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
+                } else if (ds.cfg_fs_format_pending) {
+                    /* cfg_fs ask-first format refusal (docs/CONFIG_FILESYSTEM.md):
+                     * lowest priority, informational only -- the board runs on
+                     * NVS/defaults either way. No action from the LCD (the
+                     * confirm is the web UI's, admin-gated); the reason text
+                     * is on the web dashboard/Settings page. Same strip, same
+                     * 96-char/no-scroll constraint. Hides itself once the
+                     * format completes (the flag clears). */
+                    lv_label_set_text(s_ui_home_trip_strip,
+                                       "CONFIG FS NEEDS FORMAT CONFIRM -- see web Settings");
+                    lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
                 } else {
                     lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
                 }

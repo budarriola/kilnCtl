@@ -1015,6 +1015,25 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     APPEND(",\"touch_cal_supported\":\"%s\"",
            touch_cal_support_name(lvgl_port_touch_cal_support()));
 
+    /* cfg_fs ask-first format refusal (docs/CONFIG_FILESYSTEM.md). Emitted
+     * ONLY while pending: this buffer's worst-case headroom is ~200 B
+     * (dashboard_json.h), and the common case is "not pending". The
+     * reason is authored by cfg_fs_format_gate_describe()/cfg_fs_mount.c
+     * (plain ASCII, no quote/backslash/control -- pinned by
+     * test_cfg_fs_format_gate.c), but is re-checked here rather than trusted:
+     * an unsafe string degrades to a fixed one instead of invalid JSON. No
+     * stack buffer (json_escape needs one; this handler's stack is tight). */
+    if (ds->cfg_fs_format_pending) {
+        const char *why = ds->cfg_fs_format_reason ? ds->cfg_fs_format_reason : "";
+        for (const char *p = why; *p; p++) {
+            if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20 || (unsigned char)*p > 0x7e) {
+                why = "reason unavailable";
+                break;
+            }
+        }
+        APPEND(",\"cfg_fs_format_pending\":true,\"cfg_fs_format_reason\":\"%s\"", why);
+    }
+
     APPEND("}");
 
 #undef APPEND

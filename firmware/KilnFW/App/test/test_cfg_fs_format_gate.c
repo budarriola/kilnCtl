@@ -215,6 +215,24 @@ static void test_bare_magic_bytes_with_no_real_structure_still_formats(void)
                "and must be auto-formatted");
 }
 
+/* /api/status (dashboard_status_http.c) prints cfg_fs_mount.c's pending
+ * reason into JSON with a bare %s: this pins the assumption that every
+ * reason cfg_fs_format_gate_describe() can author is plain printable ASCII
+ * with no quote, backslash or control character. */
+static bool reason_is_json_safe(const char *s)
+{
+    if (s[0] == '\0') {
+        return false; /* a pending banner with no reason text is itself a bug */
+    }
+    for (; *s; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\' || c < 0x20 || c > 0x7e) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void test_valid_superblock_refuses_and_is_never_formatted(void)
 {
     cfg_fs_format_gate_t gate;
@@ -240,6 +258,7 @@ static void test_valid_superblock_refuses_and_is_never_formatted(void)
     char reason[128];
     cfg_fs_format_gate_describe(&gate, verdict, reason, sizeof(reason));
     TEST_CHECK(strstr(reason, "validates") != NULL, "the reason names the superblock as structurally valid");
+    TEST_CHECK(reason_is_json_safe(reason), "valid-superblock reason is JSON-safe plain ASCII (/api/status prints it raw)");
 }
 
 static void test_corrupt_superblock_refuses_and_sets_pending(void)
@@ -272,6 +291,7 @@ static void test_corrupt_superblock_refuses_and_sets_pending(void)
     cfg_fs_format_gate_describe(&gate, verdict, reason, sizeof(reason));
     TEST_CHECK(strstr(reason, "CRC") != NULL || strstr(reason, "corrupt") != NULL,
                "the reason names the CRC/corruption failure, distinct from a fully-valid superblock");
+    TEST_CHECK(reason_is_json_safe(reason), "corrupt-superblock reason is JSON-safe plain ASCII (/api/status prints it raw)");
 }
 
 static void test_magic_split_across_feed_calls_is_still_found(void)
@@ -307,6 +327,9 @@ static void test_nothing_scanned_refuses_rather_than_guesses_blank(void)
     /* No feed() calls at all -- e.g. the partition could not be read back. */
     TEST_CHECK(cfg_fs_format_gate_conclude(&gate) == CFG_FS_FORMAT_GATE_HAS_CONTENT,
                "zero bytes scanned refuses to format rather than defaulting to safe-to-format");
+    char reason[128];
+    cfg_fs_format_gate_describe(&gate, CFG_FS_FORMAT_GATE_HAS_CONTENT, reason, sizeof(reason));
+    TEST_CHECK(reason_is_json_safe(reason), "nothing-scanned reason is JSON-safe plain ASCII (/api/status prints it raw)");
 }
 
 static void test_too_short_to_hold_two_blocks_refuses(void)

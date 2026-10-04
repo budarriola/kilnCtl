@@ -530,6 +530,18 @@ typedef struct {
     time_t time_now_epoch;
     time_t time_last_sync_epoch;
     char   time_tz[TIME_SYNC_TZ_MAX_LEN + 1];
+
+    /* The `cfg` LittleFS partition failed to mount and cfg_fs_mount.c's
+     * ask-first gate refused to auto-format it (docs/CONFIG_FILESYSTEM.md);
+     * an operator must confirm via POST /api/cfgfs/format_confirm. Sourced
+     * from cfg_fs_mount_format_confirmation_pending() -- no second copy of
+     * that state. cfg_fs_format_reason is that module's static reason string
+     * (a pointer, not a copy: this struct lives on small task stacks), ""
+     * when not pending, never NULL. Informational only: /api/status emits
+     * both only while pending, and the LCD home strip shows a fixed short
+     * notice. Clears once the format completes. */
+    bool        cfg_fs_format_pending;
+    const char *cfg_fs_format_reason;
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);
