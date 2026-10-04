@@ -261,7 +261,9 @@ uint8_t kiln_io_get_relay_shadow(const kiln_io_t *io);
  * commanding it, so this alone is NOT sufficient to prove "nothing is
  * running" -- callers (e.g. the CT auto-zero precondition gate in
  * safety_cfg_http.c) must separately refuse when a profile or autotune is
- * active rather than inferring it from this value. */
+ * active rather than inferring it from this value.
+ * UINT32_MAX means ONLY "a relay is on / unknown"; a genuine off-time saturates
+ * at UINT32_MAX - 1 (about 49.7 days) so it never reads as relay-on. */
 uint32_t kiln_io_relays_off_ms(const kiln_io_t *io);
 
 #ifdef __cplusplus

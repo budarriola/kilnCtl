@@ -58,8 +58,15 @@ bool ct_leak_alarm_tick(ct_leak_alarm_state_t *s, const ct_leak_alarm_input_t *i
             continue;
         }
         float a = in->current_a[ch];
-        if (!isfinite(a)) {
-            continue;
+        if (isnan(a)) {
+            continue; /* no number at all: unknown, not evidence of current */
+        }
+        if (isinf(a)) {
+            /* A saturated/overflowed CT channel with every relay off is a
+             * fault worth a human's attention, never a quiet reading: treat it
+             * as above the floor. Cap the magnitude so the published peak and
+             * the describe() text stay printable. */
+            a = 1000.0f;
         }
         if (a > ct_noise_floor_a(in->k_ct_v_per_a[ch])) {
             mask |= (uint8_t)(1u << ch);

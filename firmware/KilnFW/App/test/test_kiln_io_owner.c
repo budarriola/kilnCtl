@@ -63,6 +63,7 @@ int g_stub_queue_ring_head = 0;
 int g_stub_queue_send_calls = 0;
 unsigned char g_stub_last_queue_item[256];
 
+#include "fake_time.h"
 #include "../drivers/owners/kiln_io_owner.c"
 
 // ---- link-time stub bodies -------------------------------------------------
@@ -572,6 +573,26 @@ static void test_relay_off_writes_pass_through_while_running(void)
     s_stub_restore_in_flight = false;
 }
 
+static void test_relays_off_ms_saturates_below_the_relay_on_sentinel(void)
+{
+    /* H9 CT alarm: UINT32_MAX means "relay on". A stretch of every relay off
+     * longer than 49.7 days must not collide with it. */
+    kiln_io_t io;
+    memset(&io, 0, sizeof(io));
+    fake_time_reset_all();
+    io.relays_all_off_since_us = 0;
+    TEST_CHECK(kiln_io_relays_off_ms(&io) == 0u, "relays off since t=0 reads 0 ms at t=0");
+    fake_time_advance_ms(60000u);
+    TEST_CHECK(kiln_io_relays_off_ms(&io) == 60000u, "off-time reads the real elapsed ms");
+    fake_time_advance_us((uint64_t)UINT32_MAX * 1000ull); /* > 49.7 days on top */
+    TEST_CHECK(kiln_io_relays_off_ms(&io) != UINT32_MAX,
+               "off-time past 49.7 days never equals the relay-on sentinel");
+    TEST_CHECK(kiln_io_relays_off_ms(&io) == UINT32_MAX - 1u, "off-time saturates at UINT32_MAX - 1");
+    io.relays_all_off_since_us = -1;
+    TEST_CHECK(kiln_io_relays_off_ms(&io) == UINT32_MAX, "a relay on still reads the sentinel");
+    TEST_CHECK(kiln_io_relays_off_ms(NULL) == UINT32_MAX, "NULL io reads the sentinel");
+}
+
 int main(void)
 {
     TEST_SECTION("kiln_io_owner relay-pin gates");
@@ -590,6 +611,7 @@ int main(void)
     test_relay_on_blocked_crash_unack_precedes_running();
     test_relay_on_blocked_danger_mode_does_not_bypass_mode_gate();
     test_relay_off_writes_pass_through_while_running();
+    test_relays_off_ms_saturates_below_the_relay_on_sentinel();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

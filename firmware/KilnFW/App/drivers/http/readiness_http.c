@@ -992,7 +992,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 15c. H9 CT alarm -- current with every relay off. BLOCKS a firing (same
+    /* 15a. H9 CT alarm -- current with every relay off. BLOCKS a firing (same
      * predicate readiness_gate.h calls). The detail carries the live channel
      * and peak; ct_leak_alarm_describe() never emits a quote or backslash. */
     {
@@ -1015,10 +1015,10 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 15a. Guard-9 startup failure -- BLOCKS a firing (owner decision
+    /* 15b. Guard-9 startup failure -- BLOCKS a firing (owner decision
      * 2026-10-04; readiness_gate.h). Same predicate the gate calls. The PC-link
      * watchdog's startup failure is NOT here: it stays an advisory line in
-     * item 15b below. */
+     * item 15c below. */
     {
         bool g9_failed = startup_fault_is_set(STARTUP_FAULT_EXEC_WATCHDOG);
         readiness_status_t st = readiness_startup_guard9_status(g9_failed);
@@ -1034,7 +1034,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 15b. Startup faults (ROADMAP.md M13 sweep, 2026-10-03). A task or init
+    /* 15c. Startup faults (ROADMAP.md M13 sweep, 2026-10-03). A task or init
      * step the operator depends on that failed to start used to leave only an
      * ESP_LOGE on the debug UART -- see startup_faults.h. The detail names the
      * failed subsystems; the first one's consequence and remedy follow, since

@@ -258,8 +258,8 @@ static inline readiness_gate_block_t readiness_gate_evaluate(const readiness_gat
                "would run without it. Reboot the board; reflash if it repeats.";
     } else if (readiness_ct_leak_alarm_status(f->ct_leak_alarm_active) == READY_NOT_DONE) {
         which = READINESS_GATE_BLOCK_CT_LEAK_ALARM;
-        text = "refused -- CT ALARM: current flows with every relay off, so something downstream of the "
-               "relays is conducting. Isolate mains and inspect the contactor and SSRs; clears after 30 s of quiet.";
+        text = "refused -- CT ALARM: current flows with every relay off. "
+               "Isolate mains and inspect the contactor and SSRs; clears after 30 s of quiet.";
     }
 
     if (which != READINESS_GATE_OK && msg != NULL && cap > 0 && text != NULL) {

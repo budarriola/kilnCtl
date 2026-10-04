@@ -179,13 +179,31 @@ void run_test_ct_leak_alarm(void)
     in.current_a[0] = 0.10f;
     TEST_CHECK(drive(&s, &in, &t, 20000), "above the rescaled floor raises");
 
-    /* Non-finite readings are ignored. */
+    /* A very long relays-off stretch (kiln_io saturates at UINT32_MAX - 1) still evaluates. */
+    ct_leak_alarm_reset(&s);
+    in = base_in(0);
+    in.relays_off_ms = UINT32_MAX - 1u;
+    in.current_a[1] = 0.2f;
+    t = 0;
+    TEST_CHECK(drive(&s, &in, &t, 20000), "a saturated (49.7 day) off-time still evaluates and raises");
+
+    /* NaN is unknown and ignored; +/-inf with every relay off is alarm-worthy. */
     ct_leak_alarm_reset(&s);
     in = base_in(0);
     in.current_a[0] = NAN;
+    t = 0;
+    TEST_CHECK(!drive(&s, &in, &t, 60000), "NaN ignored");
+    ct_leak_alarm_reset(&s);
+    in = base_in(0);
     in.current_a[1] = INFINITY;
     t = 0;
-    TEST_CHECK(!drive(&s, &in, &t, 60000), "NaN/inf ignored");
+    TEST_CHECK(drive(&s, &in, &t, 20000), "an infinite reading with every relay off raises");
+    TEST_CHECK(isfinite(s.peak_a) && s.peak_a > 0.0f, "the published peak stays finite");
+    ct_leak_alarm_reset(&s);
+    in = base_in(0);
+    in.current_a[1] = -INFINITY;
+    t = 0;
+    TEST_CHECK(drive(&s, &in, &t, 20000), "a negative-infinite reading raises too");
 
     /* A dip below the floor restarts the debounce. */
     ct_leak_alarm_reset(&s);

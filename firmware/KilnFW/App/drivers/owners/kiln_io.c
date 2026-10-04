@@ -512,8 +512,12 @@ uint32_t kiln_io_relays_off_ms(const kiln_io_t *io)
         elapsed_us = 0; /* clock anomaly -- never report a negative duration */
     }
     int64_t elapsed_ms = elapsed_us / 1000;
-    if (elapsed_ms > (int64_t)UINT32_MAX) {
-        return UINT32_MAX;
+    /* UINT32_MAX is reserved for "a relay is ON" (callers compare against it).
+     * A relays-off stretch longer than 49.7 days must saturate one below it,
+     * never collide with that sentinel: the H9 CT alarm stops evaluating on
+     * UINT32_MAX, so a wrap to the sentinel would silently disarm it. */
+    if (elapsed_ms >= (int64_t)UINT32_MAX) {
+        return UINT32_MAX - 1u;
     }
     return (uint32_t)elapsed_ms;
 }
