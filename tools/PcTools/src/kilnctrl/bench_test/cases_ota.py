@@ -1259,6 +1259,9 @@ def _case_ote08(ctx: dict) -> CaseResult:
     if _heat_opted_in(ctx)[0] and ctx.get("_start_state_fn") is None and get_state_fn() != expected_state:
         if ctx.get("_tainted"):
             return CaseResult(Verdict.SKIP, reason=OTA_HEAT_SKIP_TAINTED)
+        # No image: the body would SKIP anyway; do not touch ramp assist for it.
+        if not ctx.get("ota_image_path"):
+            return CaseResult(Verdict.SKIP, reason="ota_image_path not provided")
         # Precheck BEFORE the ramp-assist wrap: never flip ramp assist on a
         # firing/autotune this case did not start.
         try:

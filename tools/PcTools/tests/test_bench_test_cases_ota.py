@@ -1354,6 +1354,15 @@ class Ote07Ote08DefaultHeatTest(unittest.TestCase):
         self.assertEqual(self.state["stops"], 0)
         self.assertEqual(writes, [])
 
+    def test_ote08_missing_image_path_skips_without_touching_ramp_assist(self):
+        writes = []
+        with unittest.mock.patch.object(self.A, "_ramp_assist_enabled", lambda ctx: (True, "")),                 unittest.mock.patch.object(self.A, "_ramp_assist_set", lambda ctx, en: writes.append(en) or True):
+            r = C._case_ote08(self._ctx("e08", ota_image_path=None))
+        self.assertEqual(r.verdict, Verdict.SKIP)
+        self.assertIn("ota_image_path", r.reason)
+        self.assertEqual(writes, [])
+        self.assertEqual((self.state["starts"], self.state["stops"]), (0, 0))
+
     def test_ote07_skips_when_autotune_active_without_teardown(self):
         self.state.update(exec="idle", at="stepping", starts=0, stops=0)
         r = C._case_ote07(self._ctx("e07"))
