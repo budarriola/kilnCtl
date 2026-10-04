@@ -417,8 +417,11 @@ def _at04_body(ctx: dict) -> CaseResult:
     if not ok_start:
         return CaseResult(Verdict.FAIL, reason=f"autotune.start refused: {err}",
                           observed={"swing_pp_c": None, "abort_reason": None})
+    now = ctx.get("_now", time.monotonic)
+    t_start = now()
     try:
         st, max_temp, timeout_reason = _poll_autotune(ctx, timeout_s=1200.0)
+        elapsed_s = now() - t_start
         if st is None:
             return CaseResult(Verdict.FAIL, reason="autotune_get_status never returned a result",
                           observed={"swing_pp_c": None, "abort_reason": None})
@@ -476,6 +479,21 @@ def _at04_body(ctx: dict) -> CaseResult:
             "abort_reason": abort_reason or None,
             **exp_obs,
         }
+        if (result.verdict == Verdict.INCONCLUSIVE and max_temp is not None
+                and (result.reason or "").startswith(J.FIXTURE_AMPLITUDE_REASON)):
+            # Only the judge's fixture-ceiling INCONCLUSIVE (reason starts with
+            # J.FIXTURE_AMPLITUDE_REASON) is annotated; any other INCONCLUSIVE
+            # is left alone. No verdict changes.
+            extra.update({"fixture_peak_c": max_temp, "relay_setpoint_c": setpoint_c, "elapsed_s": elapsed_s})
+            result.reason = (
+                f"{result.reason}; fixture reached {max_temp:.1f} C after {elapsed_s:.0f} s; "
+                f"case needs {setpoint_c:.1f} C (ambient {ambient_ref:.1f} C + "
+                f"{AT_RELAY_SETPOINT_OFFSET_C:.0f} C) to sustain the oscillation; "
+                f"4 W fixture cannot reach it"
+                if max_temp < setpoint_c else
+                f"{result.reason}; fixture peaked at {max_temp:.1f} C after {elapsed_s:.0f} s "
+                f"(setpoint {setpoint_c:.1f} C) but could not sustain the oscillation; 4 W fixture limit"
+            )
         return _with_extra_observed(result, extra)
     finally:
         _cleanup_autotune(ctx)

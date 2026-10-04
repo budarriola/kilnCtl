@@ -2666,6 +2666,11 @@ def judge_ota_pico_refused_with_trip_pending(
 # AT-* -- autotune on the 4W fixture (plan doc section 3.5, Wave 3 part A)
 # ---------------------------------------------------------------------------
 
+#: Stable prefix of AT-04's fixture-ceiling INCONCLUSIVE reason; the case keys its
+#: ceiling-vs-setpoint annotation on it.
+FIXTURE_AMPLITUDE_REASON = "fixture could not sustain the oscillation amplitude"
+
+
 def judge_autotune_fit(
     method: str,
     model_valid: bool,
@@ -2719,7 +2724,7 @@ def judge_autotune_fit(
                 why = f"({relay_amplitude_c:.2f}C < {min_relay_amplitude_c:.2f}C)"
             return CaseResult(
                 Verdict.INCONCLUSIVE,
-                reason=f"fixture could not sustain the oscillation amplitude: {why}",
+                reason=f"{FIXTURE_AMPLITUDE_REASON}: {why}",
                 observed={**observed, "relay_amplitude_c": relay_amplitude_c, "swing_pp_c": swing_pp_c},
             )
         return CaseResult(

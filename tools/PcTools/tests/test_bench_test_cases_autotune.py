@@ -382,6 +382,64 @@ class AT04Test(unittest.TestCase):
         self.assertIn("abort_reason", result.observed)
         self.assertIsNone(result.observed["abort_reason"])
 
+    def test_fixture_ceiling_reason_names_peak_vs_required(self):
+        ticks = iter(range(0, 100000, 30))
+        autotune = _FakeAutotuneClient(statuses=[
+            _Status(state_name="idle"),
+            _Status(state_name="running"),
+            _Status(state_name="done", relay_valid=False, relay=_Relay(amplitude_c=0.2)),
+        ])
+        ctx = _base_ctx(_FakeSrv(autotune=autotune), _now=lambda: float(next(ticks)))
+        result = CA._case_at04(ctx)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("fixture reached 24.2 C after", result.reason)
+        self.assertIn("case needs 38.9 C", result.reason)
+        self.assertIn("4 W fixture cannot reach it", result.reason)
+        self.assertAlmostEqual(result.observed["fixture_peak_c"], 24.2)
+        self.assertAlmostEqual(result.observed["relay_setpoint_c"], 38.9)
+        self.assertGreater(result.observed["elapsed_s"], 0)
+
+    def test_target_reached_keeps_pass_and_has_no_ceiling_note(self):
+        autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), _Status(state_name="done", relay_valid=True)])
+        result = CA._case_at04(_base_ctx(_FakeSrv(autotune=autotune)))
+        self.assertEqual(result.verdict, Verdict.PASS, result.reason)
+        self.assertNotIn("fixture_peak_c", result.observed)
+
+    def test_target_reached_but_swing_small_is_inconclusive_peaked(self):
+        autotune = _FakeAutotuneClient(statuses=[
+            _Status(state_name="idle"),
+            _Status(state_name="done", relay_valid=False, relay=_Relay(amplitude_c=0.2)),
+        ])
+        srv = _FakeSrv(autotune=autotune)
+        real_start = autotune.start
+
+        def start_then_heat(*a, **kw):
+            srv._thermo._readings = [_Reading(0, 40.0), _Reading(1, 24.2), _Reading(2, 23.9)]
+            return real_start(*a, **kw)
+
+        autotune.start = start_then_heat
+        result = CA._case_at04(_base_ctx(srv))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("fixture peaked at 40.0 C", result.reason)
+        self.assertNotIn("cannot reach it", result.reason)
+
+    def test_unrelated_inconclusive_gets_no_fixture_suffix(self):
+        autotune = _FakeAutotuneClient(statuses=[_Status(state_name="idle"), _Status(state_name="done", relay_valid=True)])
+        orig = CA.J.judge_autotune_fit
+        CA.J.judge_autotune_fit = lambda **kw: CA.CaseResult(Verdict.INCONCLUSIVE, reason="something else", observed={})
+        try:
+            result = CA._case_at04(_base_ctx(_FakeSrv(autotune=autotune)))
+        finally:
+            CA.J.judge_autotune_fit = orig
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(result.reason, "something else")
+        self.assertNotIn("fixture_peak_c", result.observed)
+
+    def test_non_ceiling_failure_is_not_annotated_or_softened(self):
+        result = self._run_invalid_relay(0.0, "thermo fault on zone 0")
+        self.assertEqual(result.verdict, Verdict.FAIL)
+        self.assertNotIn("fixture reached", result.reason)
+
     def test_early_return_records_swing_and_abort_reason_keys(self):
         srv = _FakeSrv(readings=[], autotune=_FakeAutotuneClient())
         result = CA._at04_body(_base_ctx(srv))
