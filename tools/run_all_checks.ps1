@@ -659,6 +659,7 @@ function Start-CheckAsync {
 
     return [pscustomobject]@{
         Rel     = $rel
+        Started = [DateTime]::UtcNow
         Proc    = $proc
         OutFile = $outFile
         ErrFile = $errFile
@@ -710,7 +711,10 @@ function Complete-CheckResult {
 }
 
 function Invoke-ChecksParallel {
-    param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode)
+    # PerCheckTimeoutSec > 0: a check still running after that many seconds is
+    # killed (whole process tree, bounded) and filed as a FAIL, so one hung
+    # child can never stall the run. 0 = no cap (phases 1 and 2).
+    param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode, [int]$PerCheckTimeoutSec = 0)
 
     $pending = New-Object System.Collections.Generic.Queue[object]
     foreach ($c in $ChecksToRun) { $pending.Enqueue($c) }
@@ -727,6 +731,18 @@ function Invoke-ChecksParallel {
         foreach ($r in $running) {
             if ($r.Proc.HasExited) {
                 $results += Complete-CheckResult -Running $r -SkipExitCode $SkipExitCode
+            } elseif ($PerCheckTimeoutSec -gt 0 -and ([DateTime]::UtcNow - $r.Started).TotalSeconds -gt $PerCheckTimeoutSec) {
+                try {
+                    $tk = Start-Process -FilePath taskkill -ArgumentList @('/PID', "$($r.Proc.Id)", '/T', '/F') -NoNewWindow -PassThru
+                    if (-not $tk.WaitForExit(15000)) { try { $tk.Kill() } catch {} }
+                } catch { }
+                $partial = ""
+                foreach ($f in @($r.OutFile, $r.ErrFile)) {
+                    if (Test-Path $f) { $partial += (Get-Content -Raw -ErrorAction SilentlyContinue $f) }
+                }
+                Remove-Item -ErrorAction SilentlyContinue $r.OutFile, $r.ErrFile
+                Write-Host "  FAIL  $($r.Rel) (killed: exceeded ${PerCheckTimeoutSec}s wall-clock cap)" -ForegroundColor Red
+                $results += [pscustomobject]@{ Bucket = "fail"; Path = $r.Rel; Code = "timeout"; Output = ("TIMEOUT: exceeded ${PerCheckTimeoutSec}s per-check wall-clock cap; process tree killed.`n" + $partial) }
             } else {
                 $stillRunning += $r
             }
@@ -838,7 +854,10 @@ if ($restChecks.Count -gt 0) {
 }
 if ($uiSweepChecks.Count -gt 0) {
     Write-Host "Phase 3/3: serial-only checks ($($uiSweepChecks.Count))" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $uiSweepChecks -MaxParallel 1 `
+    # 480s per check: above the checks' own wrapper caps (420s sweep, 180s
+    # driver test) so their own, clearer FAIL messages normally win; this is
+    # the backstop for a wrapper that itself hangs.
+    $results += Invoke-ChecksParallel -ChecksToRun $uiSweepChecks -MaxParallel 1 -PerCheckTimeoutSec 480 `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 

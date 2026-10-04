@@ -49,7 +49,7 @@
 //
 // Exit code 0 iff every page passes every assertion at every width.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
@@ -57,6 +57,35 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+
+// Bounded-wait helpers (2026-10-04 hang fix): a bare fetch() or a websocket
+// whose 'open'/'error' never fires has no timeout of its own, so ONE wedged
+// Chrome could stall this process until an outer wrapper killed it.
+const FETCH_TIMEOUT_MS = 10000;
+const WS_OPEN_TIMEOUT_MS = 10000;
+function fetchT(url, opts = {}) {
+  return fetch(url, { ...opts, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+function openWs(url) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const t = setTimeout(() => {
+      try { ws.close(); } catch { /* best-effort */ }
+      reject(new Error(`CDP call WebSocket open timed out after ${WS_OPEN_TIMEOUT_MS}ms (Chrome unresponsive)`));
+    }, WS_OPEN_TIMEOUT_MS);
+    ws.addEventListener('open', () => { clearTimeout(t); resolve(ws); }, { once: true });
+    ws.addEventListener('error', () => { clearTimeout(t); reject(new Error(`WebSocket connection to ${url} failed`)); }, { once: true });
+  });
+}
+// Synchronous, bounded tree kill: usable from a watchdog timer that is about
+// to process.exit(), where an async cleanup would never get to run.
+function killTreeSync(pid) {
+  if (!pid) return;
+  try {
+    if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+    else process.kill(pid, 'SIGKILL');
+  } catch { /* already gone */ }
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -198,7 +227,7 @@ async function waitForPort(port, timeoutMs, chrome) {
       throw new Error(`Chrome DevTools port ${port} never came up: Chrome process exited early (code ${chrome.exitCode}). stderr tail:\n${(chrome.stderrTail || []).join('')}`);
     }
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/json/version`);
+      const r = await fetchT(`http://127.0.0.1:${port}/json/version`);
       if (r.ok) return;
     } catch (e) {
       lastErr = e;
@@ -708,12 +737,12 @@ return `
 }
 
 async function newTab(port) {
-  const r = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
+  const r = await fetchT(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' });
   return r.json();
 }
 
 async function closeTab(port, id) {
-  try { await fetch(`http://127.0.0.1:${port}/json/close/${id}`); } catch { /* best-effort */ }
+  try { await fetchT(`http://127.0.0.1:${port}/json/close/${id}`); } catch { /* best-effort */ }
 }
 
 // Owner report 2026-09-18 (phone screenshot, dark mode): settings_page.html's
@@ -735,11 +764,7 @@ async function closeTab(port, id) {
 // even if a hardcoded one were desired at all.
 async function measureUaButtonDefaultBg(port) {
   const tab = await newTab(port);
-  const ws = new WebSocket(tab.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve);
-    ws.addEventListener('error', reject);
-  });
+  const ws = await openWs(tab.webSocketDebuggerUrl);
   const cdp = new CdpSession(ws);
   try {
     await cdp.send('Page.enable');
@@ -760,11 +785,7 @@ async function measureUaButtonDefaultBg(port) {
 
 async function sweepOnePage(port, fileUrl, width, fixtureScript, uaDefaultButtonBg) {
   const tab = await newTab(port);
-  const ws = new WebSocket(tab.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve);
-    ws.addEventListener('error', reject);
-  });
+  const ws = await openWs(tab.webSocketDebuggerUrl);
   const cdp = new CdpSession(ws);
   try {
     await cdp.send('Page.enable');
@@ -973,6 +994,7 @@ export function isTransientHarnessError(e) {
       || /^CDP call .* timed out/i.test(msg)
       || /^timed out waiting for /i.test(msg)
       || /^CDP connection closed:/i.test(msg)
+      || /aborted due to timeout|TimeoutError/i.test(msg)
       || /^WebSocket (was closed before the connection was established|is already in CLOSING or CLOSED state)/i.test(msg)
       || /^WebSocket connection to .* failed/i.test(msg);
 }
@@ -983,6 +1005,8 @@ export function isTransientHarnessError(e) {
 // unbounded (this loop still runs inside check_ui_responsive_sweep.ps1's own
 // 420s wall-clock cap either way).
 const HARNESS_ERROR_MAX_ATTEMPTS = 3;
+// Hard cap on the whole sweep; the .ps1 wrapper's own cap sits just above it.
+const OVERALL_DEADLINE_MS = 390000;
 
 function formatFailures(page, width, r) {
   const lines = [];
@@ -1052,6 +1076,17 @@ async function main() {
     `--user-data-dir=${userDataDir}`,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
   chrome.stderrTail = [];
+  // Overall wall-clock watchdog: every individual wait above/below is bounded,
+  // but a pathological accumulation (96 rows x 3 retries x 20s CDP calls)
+  // still must not run forever. On expiry: kill Chrome's whole tree, say so
+  // loudly, exit 4 (check_ui_responsive_sweep.ps1 maps this to a FAIL).
+  const overallMs = parseInt(process.env.KC_SWEEP_DEADLINE_MS || '', 10) || OVERALL_DEADLINE_MS;
+  const watchdog = setTimeout(() => {
+    console.log(`ui_responsive_sweep: OVERALL TIMEOUT -- sweep exceeded ${overallMs}ms; killing Chrome tree and aborting.`);
+    killTreeSync(chrome.pid);
+    process.exit(4);
+  }, overallMs);
+  watchdog.unref();
   chrome.stderr.on('data', (chunk) => {
     chrome.stderrTail.push(chunk.toString());
     // Keep only the last ~4000 chars -- enough for a startup failure

@@ -121,7 +121,7 @@
 //                   behaviour when --steps is absent, and the JSON result
 //                   shape gains no new top-level key for it.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
 import { writeFile, mkdtemp, rm, readFile } from 'node:fs/promises';
@@ -129,6 +129,37 @@ import path from 'node:path';
 import os from 'node:os';
 
 const CDP_CALL_TIMEOUT_MS = 20000;
+
+// Bounded-wait helpers (2026-10-04 hang fix): a bare fetch() or a websocket
+// whose 'open'/'error' never fires has no timeout of its own, so ONE wedged
+// Chrome could stall this process until an outer wrapper killed it.
+const FETCH_TIMEOUT_MS = 10000;
+const WS_OPEN_TIMEOUT_MS = 10000;
+function fetchT(url, opts = {}) {
+  return fetch(url, { ...opts, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+}
+function openWs(url) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const t = setTimeout(() => {
+      try { ws.close(); } catch { /* best-effort */ }
+      reject(new Error(`CDP call WebSocket open timed out after ${WS_OPEN_TIMEOUT_MS}ms (Chrome unresponsive)`));
+    }, WS_OPEN_TIMEOUT_MS);
+    ws.addEventListener('open', () => { clearTimeout(t); resolve(ws); }, { once: true });
+    ws.addEventListener('error', () => { clearTimeout(t); reject(new Error(`WebSocket connection to ${url} failed`)); }, { once: true });
+  });
+}
+// Synchronous, bounded tree kill: usable from a watchdog timer that is about
+// to process.exit(), where an async cleanup would never get to run.
+function killTreeSync(pid) {
+  if (!pid) return;
+  try {
+    if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', timeout: 10000 });
+    else process.kill(pid, 'SIGKILL');
+  } catch { /* already gone */ }
+}
+// Overall wall-clock cap for one driver run (override: KC_CDP_DEADLINE_MS).
+const OVERALL_DEADLINE_MS = 120000;
 // Bounded post-click waits (see CdpSession.waitForPost/waitForQuiet).
 const POST_WAIT_TIMEOUT_MS = 10000;
 const QUIET_TIMEOUT_MS = 5000;
@@ -282,7 +313,7 @@ async function waitForPort(port, timeoutMs, chrome) {
       throw new Error(`Chrome exited early (code ${chrome.exitCode})`);
     }
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/json/version`);
+      const r = await fetchT(`http://127.0.0.1:${port}/json/version`);
       if (r.ok) return;
     } catch (e) {
       lastErr = e;
@@ -721,17 +752,20 @@ async function main() {
     '--hide-scrollbars',
     `--user-data-dir=${userDataDir}`,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const overallMs = parseInt(process.env.KC_CDP_DEADLINE_MS || '', 10) || OVERALL_DEADLINE_MS;
+  const watchdog = setTimeout(() => {
+    console.error(`_web_commission_cdp: OVERALL TIMEOUT after ${overallMs}ms; killing Chrome tree.`);
+    killTreeSync(chrome.pid);
+    process.exit(1);
+  }, overallMs);
+  watchdog.unref();
 
   try {
     if (!args.port) args.port = await readDevToolsActivePort(userDataDir, 30000, chrome);
     await waitForPort(args.port, 30000, chrome);
-    const tabResp = await fetch(`http://127.0.0.1:${args.port}/json/new?about:blank`, { method: 'PUT' });
+    const tabResp = await fetchT(`http://127.0.0.1:${args.port}/json/new?about:blank`, { method: 'PUT' });
     const tab = await tabResp.json();
-    const ws = new WebSocket(tab.webSocketDebuggerUrl);
-    await new Promise((resolve, reject) => {
-      ws.addEventListener('open', resolve, { once: true });
-      ws.addEventListener('error', reject, { once: true });
-    });
+    const ws = await openWs(tab.webSocketDebuggerUrl);
     const cdp = new CdpSession(ws, args.acceptDialogs);
     await cdp.send('Page.enable');
     await cdp.send('Network.enable');
@@ -803,12 +837,20 @@ async function main() {
       ...(networkDropped > 0 ? { network_truncated: true, network_dropped: networkDropped } : {}),
     }));
   } finally {
-    try { chrome.kill(); } catch { /* already gone */ }
-    try { await rm(userDataDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    // Whole tree, not just chrome.pid: orphaned renderer/GPU children hold
+    // the profile dir open, and rm() on a held/AV-scanned dir can block
+    // indefinitely -- so it also gets an explicit outer deadline.
+    killTreeSync(chrome.pid);
+    try {
+      await Promise.race([
+        rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    } catch { /* best effort */ }
   }
 }
 
-main().catch((err) => {
+main().then(() => process.exit(0), (err) => {
   console.error(String(err && err.stack || err));
   process.exit(1);
 });

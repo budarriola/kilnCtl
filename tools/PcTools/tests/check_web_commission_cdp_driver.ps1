@@ -46,6 +46,18 @@ if (-not $node) {
     exit 3
 }
 
+# Bounded taskkill of a whole process tree (never blocks the check on a
+# wedged taskkill/handle).
+function Stop-ProcessTreeBounded {
+    param([int]$ProcessId)
+    try {
+        $tk = Start-Process -FilePath taskkill -ArgumentList @('/PID', "$ProcessId", '/T', '/F') -NoNewWindow -PassThru -ErrorAction Stop
+        if (-not $tk.WaitForExit(15000)) { try { $tk.Kill() } catch {} }
+    } catch {
+        # best-effort
+    }
+}
+
 $stdoutFile = Join-Path $env:TEMP "kc-web-commission-cdp-stdout-$PID.txt"
 $stderrFile = Join-Path $env:TEMP "kc-web-commission-cdp-stderr-$PID.txt"
 # Start-Process (not `&`, not Start-Job) so a timeout can taskkill /T the
@@ -62,10 +74,12 @@ $proc = Start-Process -FilePath $node.Source -ArgumentList @($testScript) `
 # hang holds up run_all_checks.ps1 for long.
 $finished = $proc.WaitForExit(180000)
 if (-not $finished) {
-    & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
-    Write-Host "check_web_commission_cdp_driver.ps1: SKIP -- test did not finish within 180s (node/Chrome startup stalled). Environment condition, not evidence of a driver regression -- re-run when the machine is less loaded." -ForegroundColor Yellow
+    Stop-ProcessTreeBounded -ProcessId $proc.Id
+    $partial = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }
     Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
-    exit 3
+    if ($partial) { Write-Host $partial }
+    # A hang is a FAIL, not a SKIP (2026-10-04); see check_ui_responsive_sweep.ps1.
+    throw "check_web_commission_cdp_driver.ps1: FAIL -- test did not finish within 180s; node/Chrome process tree killed. The harness hung."
 }
 
 $stdout = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }

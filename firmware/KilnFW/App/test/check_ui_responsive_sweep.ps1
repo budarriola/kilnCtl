@@ -60,13 +60,35 @@ if (-not $node) {
 # force every pickPort() fallback; after, so this run's own Chrome (already
 # reaped by taskkill /T on a timeout, or by the script's own finally{} on a
 # normal exit) never lingers past this check either.
+# Bounded taskkill of a whole process tree (never blocks the check on a
+# wedged taskkill/handle).
+function Stop-ProcessTreeBounded {
+    param([int]$ProcessId)
+    try {
+        $tk = Start-Process -FilePath taskkill -ArgumentList @('/PID', "$ProcessId", '/T', '/F') -NoNewWindow -PassThru -ErrorAction Stop
+        if (-not $tk.WaitForExit(15000)) { try { $tk.Kill() } catch {} }
+    } catch {
+        # best-effort
+    }
+}
 function Remove-OrphanedSweepChrome {
     try {
-        $procs = Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and $_.CommandLine -like '*kc-ui-sweep-profile-*' }
-        foreach ($p in $procs) {
-            Write-Host "check_ui_responsive_sweep.ps1: reaping orphaned sweep Chrome PID $($p.ProcessId)" -ForegroundColor Yellow
-            & taskkill /PID $p.ProcessId /T /F 2>&1 | Out-Null
+        # Get-CimInstance (WMI) can block indefinitely under load, and this
+        # runs BEFORE the wall-clock cap below starts, so it runs in a job
+        # that is abandoned after 20s rather than awaited unbounded.
+        $job = Start-Job -ScriptBlock {
+            Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and $_.CommandLine -like '*kc-ui-sweep-profile-*' } |
+                ForEach-Object { $_.ProcessId }
+        }
+        $done = Wait-Job -Job $job -Timeout 20
+        $pids = @()
+        if ($done) { $pids = @(Receive-Job -Job $job -ErrorAction SilentlyContinue) }
+        else { Write-Host "check_ui_responsive_sweep.ps1: orphan-Chrome scan timed out after 20s (WMI stalled); continuing." -ForegroundColor Yellow }
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        foreach ($procId in $pids) {
+            Write-Host "check_ui_responsive_sweep.ps1: reaping orphaned sweep Chrome PID $procId" -ForegroundColor Yellow
+            Stop-ProcessTreeBounded -ProcessId ([int]$procId)
         }
     } catch {
         # Best-effort only -- Get-CimInstance can fail under WMI load; never
@@ -93,11 +115,16 @@ $proc = Start-Process -FilePath $node.Source -ArgumentList @($sweepScript) `
 # work now, not mask a still-unbounded wait.
 $finished = $proc.WaitForExit(420000)
 if (-not $finished) {
-    & taskkill /PID $proc.Id /T /F 2>&1 | Out-Null
-    Write-Host "check_ui_responsive_sweep.ps1: SKIP -- sweep did not finish within 420s (node/Chrome startup stalled). Environment condition, not evidence of a UI regression -- re-run when the machine is less loaded." -ForegroundColor Yellow
-    Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    Stop-ProcessTreeBounded -ProcessId $proc.Id
     Remove-OrphanedSweepChrome
-    exit 3
+    $partial = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }
+    Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
+    if ($partial) { Write-Host $partial }
+    # A whole-sweep hang is a FAIL, not a SKIP (2026-10-04): per-call hangs
+    # are already classified as transient HARNESS_ERROR/SKIP inside the
+    # script, so reaching this cap means the harness itself is wedged and
+    # the check must be visible, not silently skipped.
+    throw "check_ui_responsive_sweep.ps1: FAIL -- sweep did not finish within 420s; node/Chrome process tree killed. The harness hung."
 }
 
 $stdout = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }
@@ -107,6 +134,9 @@ if ($stdout) { Write-Host $stdout }
 if ($stderrText) { Write-Host $stderrText }
 $text = "$stdout`n$stderrText"
 
+if ($text -match 'ui_responsive_sweep: OVERALL TIMEOUT') {
+    throw "check_ui_responsive_sweep.ps1: FAIL -- sweep hit its own overall deadline (see output above); Chrome tree killed."
+}
 if ($text -match 'ui_responsive_sweep: SKIPPED') {
     Write-Host "check_ui_responsive_sweep.ps1: SKIP -- sweep SKIPPED internally (see reason above)."
     exit 3
