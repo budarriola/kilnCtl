@@ -1201,7 +1201,7 @@ surfaced as a new advisory `startup` item in `GET /api/readiness` naming each
 latched fault and its impact. RAM-only, no NVS, no new task or route. The bench
 board reads `ok startup: every required task and subsystem started this boot`.
 
-**Fourth sweep, landed 2026-10-04 (`8ebed650`, `a548dfc6`), not yet flashed:**
+**Fourth sweep, landed 2026-10-04 (`8ebed650`, `a548dfc6`) and flashed to the bench the same day (`7e31cafd` content, `startup` item ok, 25 ids armed):**
 twelve more ids (13 to 25): boot_guard mutex/NVS/persist failures, the
 danger_mode task, the nine PC-link bridge tasks and the flash worker,
 dns_hijack socket/bind/task, the 23 `*_http_start` failures under one
