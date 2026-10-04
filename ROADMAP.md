@@ -80,7 +80,7 @@ open is short:
 | `iter_tune` replay inputs live in gitignored logs the session cannot read, so the A8 failure and the section 6.5 credibility gate cannot be replayed without the owner | `iter_tune` redesign row below | `docs/ITER_TUNE_REDESIGN_PLAN.md` |
 | T20 and T26 are untouched; T26 needs `firmware/KilnFW/TODO.md`, which the session is not permitted to read | Those two tasks | M1 |
 | The SaftyFW debug probe (CMSIS-DAP, serial E66540F0A36C6E21) has not enumerated since 2026-10-03; every Pico flash and OT-P* case waits on reconnecting it | Pico flashing, OT-P01..05, the Pico relay through recovery | M8 |
-| `C:\wt\recboot_csdr53`: the recovery image's own boot-partition read-back patch left `recovery_http.c` broken and the repair was classifier-denied; owner to repair or discard | Recovery-image copy of the `75098657` read-back | `docs/RECOVERY_IMAGE_PLAN.md` |
+| `C:\wt\recboot_csdr53`: the recovery image's own boot-partition read-back patch left `recovery_http.c` broken and the repair was classifier-denied. **Decided 2026-10-04: discard it; a fresh agent re-implements the read-back from origin/main (in progress)** | Recovery-image copy of the `75098657` read-back | `docs/RECOVERY_IMAGE_PLAN.md` |
 
 ### Software, doable now — no hardware, no decisions
 

@@ -12,6 +12,9 @@ Decided by the owner:
 - Phone/PC upload over the normal Wi-Fi into a stage area: YES. Recovery-AP upload stays as the fallback.
 - D3: semver tags `vMAJOR.MINOR.PATCH`; first release `v1.0.0` once the project is stable (section 8).
 - D8: downgrade refused by default; ADMIN override with a typed confirm.
+- D4 (2026-10-04): unsigned default-repo releases are allowed in v1, shown with an UNSIGNED banner; signing is enforced in M3.
+- D5 (2026-10-04): a non-default repo is allowed freely (ADMIN only, no typed-name confirm); its releases are always shown UNSIGNED.
+- D6 (2026-10-04): the recovery image is updated by JTAG only.
 
 Everything else marked "default" is a recommendation, not yet owner-confirmed.
 
@@ -85,8 +88,8 @@ Current `app` is 0x210000 size 0x800000, `recovery` at 0xA10000. New layout; eve
   currently staged.** The AP passphrase shown only on the LCD is the sole barrier. Staging itself is ADMIN-only on the application. A staged
   image is therefore one step from installation: clear `stage` on cancel and on a timeout, and keep `recovery_enter` as the only way in.
 - A changeable repo (M2) lets any ADMIN point the board at any repo. Admin can already flash any image by hand, so this adds convenience, not
-  privilege; the UI says so. Mitigations: ADMIN plus confirm; show repo, tag, commit and sha256 prefix, and require typing the repo name when it
-  differs from the compiled-in default; M3 adds an optional Ed25519 signature over `release.json` with a compiled-in key, enforced for the default
+  privilege; the UI says so. Mitigations: ADMIN plus confirm; show repo, tag, commit and sha256 prefix (D5: no typed-name confirm for a non-default
+  repo); M3 adds an optional Ed25519 signature over `release.json` with a compiled-in key, enforced for the default
   repo only, other repos shown as UNSIGNED. The manifest carries a `signature` slot from the start so M3 is not a format change.
 - Refuse an image whose `esp_app_desc` project name or commit differs from the manifest, or whose `partitions_sha256` differs.
 
@@ -137,8 +140,8 @@ NVS key `ota_repo` (<= 15 chars, `NVS_KEY_LEN_CHECK`), value `owner/repo`; `ota_
 `budarriola/kilnCtl` compiled in; missing means default. Mirrored to the `cfg` dual-write like other prefs (NVS authoritative). Validated
 server-side, never trusting the page: `^[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$`, no `..`, owner not starting or ending with `-`. Only owner/repo
 is stored (not a URL), so no SSRF to arbitrary hosts; redirects are accepted only to https `*.githubusercontent.com` or `github.com`. Included in
-backup export/import (`backup_export.c`, `backup_import.c`, with a host test; import re-validates). Set by POST body only, refused mid-run, typed
-confirm when it differs from the default. Route `GET/POST /api/update/settings`, ADMIN.
+backup export/import (`backup_export.c`, `backup_import.c`, with a host test; import re-validates). Set by POST body only, refused mid-run; a
+non-default value needs no extra confirm (D5). Route `GET/POST /api/update/settings`, ADMIN.
 
 ## 10. Routes, UI, MCP
 
@@ -188,12 +191,13 @@ Shared files (`App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route
 **M3: signing**
 - WP11 Ed25519 verify, key list, `tools/sign_release.py`.
 
-## 13. Owner decisions still open (all default, not yet owner-confirmed)
+## 13. Owner decisions
+
+Decided 2026-10-04 (also listed in section 0): D4 (unsigned default-repo releases allowed in v1 with an UNSIGNED banner; signing enforced in M3), D5 (non-default repo allowed freely, ADMIN only, no typed-name confirm), D6 (recovery image updated by JTAG only).
+
+Still open, all at their defaults, not yet owner-confirmed:
 
 - D2 stage partition split (section 3): default yes; no alternative without relocating data.
-- D4 signing: default manifest slot now, enforcement in M3; unsigned default-repo releases allowed in v1 with a banner.
-- D5 non-default repo: default allowed, typed-name confirm, always shown UNSIGNED, ADMIN only.
-- D6 recovery image updates: default JTAG-only (self-overwrite is a brick risk).
 - D7 prerelease channel: default off.
 - D9 mbedTLS to PSRAM globally: default yes, behind the two gates in section 11.
 - D10 publish token: default fine-grained PAT in `KILNCTL_GITHUB_TOKEN`.
