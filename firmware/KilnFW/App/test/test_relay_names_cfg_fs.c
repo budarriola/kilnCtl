@@ -397,6 +397,41 @@ static void test_v1_file_is_migrated_not_ignored(void)
     TEST_CHECK(strcmp(raw.names[0], "FileOnlyName") == 0, "the rewritten v2 file carries the migrated names");
 }
 
+// ---------------------------------------------------------------------
+// 9. GET /api/cfgfs "relay_names" row accessor.
+// ---------------------------------------------------------------------
+static void test_dualwrite_status_row(void)
+{
+    TEST_SECTION("relay names cfg_fs: relay_names_get_dualwrite_status() reports presence, revs, divergence");
+    bool fv = true, nv = true, dv = true;
+    uint32_t fr = 99, nr = 99;
+
+    reset_all();
+    relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(!fv && !nv && fr == 0 && nr == 0 && !dv, "nothing saved: both sides absent, not diverged");
+
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+    set_name(1, "A");
+    TEST_CHECK(relay_names_save() == ESP_OK, "save 1");
+    relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && fr == 1 && nr == 1 && !dv, "after one dual-write: both valid at rev 1, not diverged");
+
+    pref_cfg_fs_set_write_fn(failing_write_fn);
+    set_name(1, "B");
+    TEST_CHECK(relay_names_save() == ESP_OK, "save 2 (file write fails, NVS advances)");
+    pref_cfg_fs_reset_write_fn_for_test();
+    relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && fr == 1 && nr == 2 && dv, "file stuck at rev 1, NVS at rev 2: diverged");
+
+    relay_names_get_dualwrite_status(NULL, NULL, NULL, NULL, NULL);
+    TEST_CHECK(true, "NULL out-params do not crash");
+
+    cfg_fs_deinit();
+    relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(!fv && nv && nr == 2 && !dv, "unmounted: file side absent, NVS valid, not diverged");
+}
+
 void run_test_relay_names_cfg_fs(void)
 {
     test_v1_file_is_migrated_not_ignored();
@@ -407,6 +442,7 @@ void run_test_relay_names_cfg_fs(void)
     test_equal_rev_divergence_adopts_nvs_not_the_stale_file();
     test_interrupted_file_write_leaves_old_or_new();
     test_mount_failed_falls_through_to_nvs_only();
+    test_dualwrite_status_row();
 
     reset_all();
 }

@@ -1027,7 +1027,7 @@ consumer side was only ever exercised against a hand-built fault struct
 real `nvs_load_from()`/`zones_config_json_decode_blob()`, reads back the real
 `zones_config_get_load_fault()`). Both negative-tested: each latch call was
 independently removed/altered in `zones_config_store.c` (that file's current blob,
-blob:firmware/KilnFW/App/drivers/persist/zones_config_store.c`63efeb24fde86546fab2a30964c331c77ce6fd36`),
+blob:firmware/KilnFW/App/drivers/persist/zones_config_store.c`b1eb358154c1f61372a3b65ecf3ef59d879e05ce`),
 confirmed to turn the
 `zones_http` host-test executable red, restored by hand with an empty
 `git diff` and a matching `git hash-object`, then the build directory was

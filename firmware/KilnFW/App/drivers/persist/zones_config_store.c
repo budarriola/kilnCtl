@@ -1067,6 +1067,59 @@ void relay_names_load(void)
              (unsigned long)s_relay_names_rev);
 }
 
+/* Read-only dual-write status for GET /api/cfgfs's "relay_names" row -- same
+ * contract and no-lock rationale as zone_normals_get_dualwrite_status(): a
+ * fresh re-read of both sides, never a resync write, safe to poll. The NVS
+ * side goes through relay_names_decode_any() so a still-v1 blob reads as
+ * valid (upgraded in memory) exactly as relay_names_load() sees it; the file
+ * side is v2 only because a v1 file is upgraded in place by the load path
+ * and the bridge cannot see one. */
+void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                      bool *diverged)
+{
+    relay_names_cfg_t f_cfg;
+    memset(&f_cfg, 0, sizeof(f_cfg));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(RELAY_NAMES_FILE_PATH, sizeof(f_cfg), relay_names_validate, &f_cfg, &f_rev, &f_valid);
+
+    relay_names_cfg_t n_cfg;
+    memset(&n_cfg, 0, sizeof(n_cfg));
+    bool n_valid = false;
+    uint32_t n_rev = 0;
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+        uint8_t raw[sizeof(relay_names_cfg_t)];
+        size_t len = sizeof(raw);
+        if (hal_kv_get_blob(&h, NVS_KEY_RELAY_NAMES, raw, &len) == HAL_OK &&
+            relay_names_decode_any(raw, len, &n_cfg)) {
+            n_valid = true;
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, NVS_KEY_RELAY_NAMES_REV, &rev) == HAL_OK) {
+                n_rev = rev;
+            }
+        }
+        hal_kv_close(&h);
+    }
+
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid,
+                                                f_valid && n_valid && memcmp(&f_cfg, &n_cfg, sizeof(f_cfg)) == 0);
+    }
+}
+
 esp_err_t relay_names_save(void)
 {
     s_relay_names.cfg.version = RELAY_NAMES_CFG_VERSION;

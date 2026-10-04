@@ -1410,22 +1410,24 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6, collapsed the
  * PROFILES_MAX_COUNT profile-slot rows -- 8 of them at the time -- into ONE
  * aggregate "profiles" row so raising that constant to 100 doesn't also
- * mean 100 rows here; 2026-10-04 added the zone_normals row, making it 12
- * rows: zones, kiln_cfg_store, unit_pref, profiles_hidden, zone_normals,
- * ramp_assist, display_power, tz, one aggregate profiles row, relay_cycles,
- * adaptive_tune, firing_stats).
+ * mean 100 rows here; 2026-10-04 added the zone_normals and relay_names
+ * rows, making it 13 rows: zones, kiln_cfg_store, unit_pref,
+ * profiles_hidden, zone_normals, ramp_assist, display_power, tz, one
+ * aggregate profiles row, relay_cycles, adaptive_tune, firing_stats,
+ * relay_names).
  *
  * 2026-10-04 re-measurement (the earlier ~120 B/row estimate was too low):
  * a row with both revs at UINT32_MAX and migration_deferred is ~134 B plus
- * its name, ~145 B on average, so 12 rows are ~1730 B. On top of that: the
+ * its name, ~145 B on average, so 13 rows are ~1880 B. On top of that: the
  * header/capacity (known)/format (completed and failed, with the longest
  * esp_err name)/dual_write_window (filled)/nvs_only/nvs_permanent sections
  * ~770 B, and the 11 real root files (zones.json, kiln_configs.json,
  * unit_pref.dat, ki_base.dat, ramp_assist.dat, tz.dat, display_power.dat,
  * iter_tune.bin, relay_cycles.dat, relay_names.dat, zone_normals.dat) with
- * multi-digit sizes ~470 B. Measured total: 3008 B, which would leave only
- * ~64 B in the old 3072 B buffer, so the buffer is now 4096 B (about 1090 B
- * spare). test_cfg_fs_status.c's test_worst_case_fits_handler_buffer renders
+ * multi-digit sizes ~470 B. Measured total: 3153 B (3123 B rendered plus 30 B
+ * for the longest esp_err name), which would leave only ~0 B in the old 3072 B
+ * buffer, so the buffer is 4096 B (CFG_FS_STATUS_HANDLER_JSON_BUF, about
+ * 940 B spare). test_cfg_fs_status.c's test_worst_case_fits_handler_buffer renders
  * exactly this worst case through cfg_fs_status_build_json_ex(), the same
  * entry point this handler uses, and requires >= 400 B of margin in 4096 B,
  * so a future row or file that eats that margin fails the host test rather
@@ -1439,7 +1441,7 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
 typedef struct {
     zones_cfg_t raw;
     dualwrite_window_status_t window; /* heap, not httpd stack -- see the budget note above */
-    char json[4096];
+    char json[CFG_FS_STATUS_HANDLER_JSON_BUF];
 } cfgfs_status_scratch_t;
 
 /* Fills one row of the /api/cfgfs dual-write item list and advances *n. A
@@ -1627,6 +1629,12 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         uint32_t file_rev = 0, nvs_rev = 0;
         firing_stats_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, "firing_stats", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        relay_names_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "relay_names", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
 
     /* Deferred auto-format progress (cfg_fs_mount.c) -- ESP-IDF-only getters,

@@ -407,21 +407,21 @@ static void test_buffer_too_small(void)
 }
 
 /* Worst-case sizing for the real GET /api/cfgfs response (2026-10-04, when the
- * zone_normals row made it 12 rows). Renders through cfg_fs_status_build_json_ex(),
+ * zone_normals and relay_names rows made it 13 rows). Renders through cfg_fs_status_build_json_ex(),
  * the same entry point diagnostics_http.c's handler calls, with every section
- * populated the way the handler populates it: all 12 real row names at
+ * populated the way the handler populates it: all 13 real row names at
  * UINT32_MAX revs with diverged and migration_deferred set, capacity known at
  * SIZE_MAX-ish sizes, a completed-and-failed format object, a filled
  * dual-write window, and the 11 real root files with multi-digit sizes. The
- * host esp_err_to_name() stub returns "ERR", so the longest real error name
+ * host esp_err_to_name() stub returns "ESP_FAIL", so the longest real error name
  * (ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED, 38 chars) is added to the measured
  * length by hand. The result must fit the handler's cfgfs_status_scratch_t.json
- * (4096 B) with at least 400 B to spare. */
-#define WORST_CASE_HANDLER_BUF 4096u
+ * (CFG_FS_STATUS_HANDLER_JSON_BUF, 4096 B) with at least 400 B to spare. */
+#define WORST_CASE_HANDLER_BUF CFG_FS_STATUS_HANDLER_JSON_BUF
 static void test_worst_case_fits_handler_buffer(void)
 {
-    TEST_SECTION("cfg_fs_status: worst-case /api/cfgfs (12 rows at UINT32_MAX, known capacity, failed format, "
-                 "filled window, 11 root files) via the handler's _ex path fits its 4096 B buffer with 400 B spare");
+    TEST_SECTION("cfg_fs_status: worst-case /api/cfgfs (13 rows at UINT32_MAX, known capacity, failed format, "
+                 "filled window, 11 root files) via the handler's _ex path fits the handler buffer with 400 B spare");
     cfg_fs_deinit();
     const char *base = "cfg_fs_status_test_worstcase";
     reset_scratch(base);
@@ -431,17 +431,18 @@ static void test_worst_case_fits_handler_buffer(void)
                                            "ki_base.dat",   "ramp_assist.dat",   "tz.dat",
                                            "display_power.dat", "iter_tune.bin", "relay_cycles.dat",
                                            "relay_names.dat", "zone_normals.dat" };
-    static char payload[123456];
+    static char payload[100000];
     memset(payload, 'x', sizeof(payload));
     for (size_t i = 0; i < 11; i++) {
         TEST_CHECK(cfg_fs_write_atomic(files[i], payload, sizeof(payload)) == ESP_OK, "write a real root file");
     }
 
-    static const char *const names[12] = { "zones",         "kiln_cfg_store", "unit_pref",     "profiles_hidden",
+    static const char *const names[13] = { "zones",         "kiln_cfg_store", "unit_pref",     "profiles_hidden",
                                            "zone_normals",  "ramp_assist",    "display_power", "tz",
-                                           "profiles",      "relay_cycles",   "adaptive_tune", "firing_stats" };
-    cfg_fs_dualwrite_item_t items[12];
-    for (size_t i = 0; i < 12; i++) {
+                                           "profiles",      "relay_cycles",   "adaptive_tune", "firing_stats",
+                                           "relay_names" };
+    cfg_fs_dualwrite_item_t items[13];
+    for (size_t i = 0; i < 13; i++) {
         items[i] = (cfg_fs_dualwrite_item_t){ .name = names[i], .file_valid = true, .file_rev = UINT32_MAX,
                                               .nvs_valid = true, .nvs_rev = UINT32_MAX, .diverged = true,
                                               .migration_deferred = true };
@@ -454,7 +455,7 @@ static void test_worst_case_fits_handler_buffer(void)
 
     static char json[WORST_CASE_HANDLER_BUF];
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json_ex(base, &cap, items, 12, &fmt, &win, json, sizeof(json), &len);
+    esp_err_t err = cfg_fs_status_build_json_ex(base, &cap, items, 13, &fmt, &win, json, sizeof(json), &len);
     TEST_CHECK(err == ESP_OK, "worst-case render fits the handler's buffer");
     if (err == ESP_OK) {
         size_t real_len = len + (strlen("ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED") - strlen(esp_err_to_name(ESP_FAIL)));

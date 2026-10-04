@@ -72,13 +72,20 @@ typedef struct {
  * ramp assist, display power, TZ) + PROFILES_MAX_COUNT (8) + 3 (2026-09-08:
  * relay_cycles, adaptive_tune ki-baseline, firing_stats -- the last three
  * items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked, all landed in
- * 762bb29e) = 17 today, with headroom for one more bridge before this needs
- * to grow again. Extra items past this cap are silently dropped by the
+ * 762bb29e) = 17 as a ceiling; the live handler (diagnostics_http.c)
+ * collapses the profiles into one aggregate row and emits 13 rows today, so
+ * the real headroom is 5 more bridges before this needs to grow again. Extra items past this cap are silently dropped by the
  * JSON builder rather than overflowing -- see cfg_fs_status_build_json()'s
  * own comment on why that is the right failure mode here (unlike
  * CFG_FS_STATUS_MAX_FILES, this list is built by firmware code, not by
  * whatever a user has dropped on the filesystem). */
 #define CFG_FS_STATUS_MAX_ITEMS 18
+
+/* Size in bytes of the heap json[] buffer GET /api/cfgfs renders into
+ * (diagnostics_http.c's cfgfs_status_scratch_t). Shared so the worst-case
+ * host test in test_cfg_fs_status.c sizes its buffer from the same constant
+ * the handler uses, rather than a second literal that could drift. */
+#define CFG_FS_STATUS_HANDLER_JSON_BUF 4096u
 
 /* THE single definition of "this item's file and NVS copies disagree",
  * shared by every caller so a future bridge cannot invent a second one.
