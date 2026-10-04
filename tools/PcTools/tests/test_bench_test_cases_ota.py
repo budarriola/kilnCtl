@@ -1323,6 +1323,37 @@ class Ote07Ote08DefaultHeatTest(unittest.TestCase):
                 C._case_ote07(self._ctx("e07", _sleep_fn=sleep))
         self.assertEqual(self.state["stops"], 1)
 
+    def test_tainted_run_skips_both_cases_without_starting_or_touching_ramp_assist(self):
+        writes = []
+        with unittest.mock.patch.object(self.A, "_ramp_assist_set", lambda ctx, en: writes.append(en) or True):
+            for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):
+                r = fn(self._ctx(kind, _tainted=True))
+                self.assertEqual(r.verdict, Verdict.SKIP, kind)
+                self.assertIn("tainted", r.reason)
+        self.assertEqual((self.state["starts"], self.state["stops"]), (0, 0))
+        self.assertEqual(writes, [])
+
+    def test_busy_executor_skips_without_teardown(self):
+        for busy in ("paused", "faulted"):
+            self.state.update(exec=busy, at="idle", starts=0, stops=0)
+            r = C._case_ote07(self._ctx("e07", _exec_state_fn=lambda: "idle_not_expected"))
+            self.assertEqual(r.verdict, Verdict.SKIP, busy)
+            self.assertIn(repr(busy), r.reason)
+            r = C._case_ote08(self._ctx("e08"))
+            self.assertEqual(r.verdict, Verdict.SKIP, busy)
+            self.assertIn(repr(busy), r.reason)
+            self.assertEqual((self.state["starts"], self.state["stops"]), (0, 0), busy)
+        self.state.update(exec="idle", at="stepping", starts=0, stops=0)
+        r = C._case_ote08(self._ctx("e08", _autotune_state_fn=lambda: "idle"))
+        self.assertEqual(r.verdict, Verdict.SKIP)
+        self.assertEqual(self.state["stops"], 0)
+
+    def test_refused_start_does_no_case_level_teardown(self):
+        with unittest.mock.patch.object(self.H, "_start_bench_profile", lambda c, zone_mask, **kw: (False, "preflight no", None)):
+            r = C._case_ote07(self._ctx("e07"))
+        self.assertEqual(r.verdict, Verdict.SKIP)
+        self.assertEqual(self.state["stops"], 0)
+
     def test_failed_stop_fails_and_taints(self):
         for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):
             self.state.update(stop_works=False, exec="idle", at="idle")
