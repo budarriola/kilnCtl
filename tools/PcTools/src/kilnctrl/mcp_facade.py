@@ -317,6 +317,8 @@ KEYWORDS = {
     "ota_update_esp": ("over", "air", "upload", "firmware", "http"),
     "codec_decode_frame": ("wire", "bytes", "protocol", "parse", "hex"),
     "build_kilnfw": ("esp32", "idf", "compile", "ninja"),
+    "build_kilnfw_start": ("background", "async", "timeout", "idle", "long build", "job"),
+    "build_job_status": ("background", "poll", "job", "build result", "running", "wait"),
     "build_saftyfw_host_tests": ("unit", "msvc", "offtarget", "pytest"),
     "run_pctools_tests": ("pytest", "unit", "python", "regression"),
     "run_repo_checks": ("lint", "guard", "invariant", "ci", "grep", "audit"),

@@ -41,6 +41,7 @@ import tempfile
 import time
 from typing import Any, Callable, Optional, Sequence
 
+from mcpkit import build_jobs
 from mcpkit.buildgate import GateWaitResult, kiln_build_gate
 from mcpkit.buildlock import BuildLockTimeout, build_lock
 from mcpkit.pytest_verdict import PER_TEST_TIMEOUT_S, pytest_output_problems
@@ -496,6 +497,50 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     return kilnfw_report
 
 
+def build_kilnfw_start(target: str = "build", jobs: int = 0, skip_saftyfw: bool = False,
+                       kiln_fw_root: Optional[str] = None) -> str:
+    """Start ``build_kilnfw`` in the background and return a job id at once.
+
+    Same arguments and same gating/locking as ``build_kilnfw``. A full build
+    (SaftyFW first) can outlast an MCP client's 300 s idle watchdog, which
+    drops the result; this returns immediately instead. Poll with
+    ``build_job_status(job_id)``. Argument errors (relative path, missing
+    CMakeLists) surface through the job's report like any other result.
+    """
+    if kiln_fw_root and os.path.isabs(kiln_fw_root):
+        kiln_dir = os.path.normpath(kiln_fw_root)
+    else:
+        kiln_dir = os.path.join(repo_root(), "firmware", "KilnFW")
+    artifacts = [os.path.join(kiln_dir, "build", "KilnCtrl.bin"),
+                 os.path.join(kiln_dir, "build", "KilnCtrl.elf")]
+    if not skip_saftyfw:
+        saftyfw_build = os.path.join(os.path.dirname(kiln_dir), "SaftyFW", "build")
+        artifacts += [os.path.join(saftyfw_build, "SaftyFW_slotA.bin"),
+                      os.path.join(saftyfw_build, "SaftyFW_slotB.bin")]
+    job_id = build_jobs.start_job(
+        f"kilnfw-{target}",
+        lambda: build_kilnfw(target=target, jobs=jobs, skip_saftyfw=skip_saftyfw,
+                             kiln_fw_root=kiln_fw_root),
+        {"target": target, "jobs": jobs, "skip_saftyfw": skip_saftyfw,
+         "kiln_fw_root": kiln_fw_root},
+        artifacts)
+    return (f"build-job {job_id}: STARTED (kilnfw-{target}). Poll "
+            f"build_job_status(job_id=\"{job_id}\", wait_s=100); the build keeps "
+            f"running if you stop polling.")
+
+
+def build_job_status(job_id: str, wait_s: float = 0.0) -> str:
+    """Report a background build started by ``build_kilnfw_start``.
+
+    Returns RUNNING / OK / FAILED, artifact sizes and ages, and (once
+    finished) the full build report. ``wait_s`` blocks up to that many seconds
+    (capped at 120, under the client idle watchdog) for completion. Results
+    survive a server restart via a file under the temp ``kilnctl-builds``
+    directory; a job that was still running at restart reports unknown.
+    """
+    return build_jobs.job_status(job_id, wait_s)
+
+
 def _stat_snapshot(path: str) -> Optional[tuple]:
     """(mtime_ns, size) for ``path``, or ``None`` if it does not exist yet.
 
@@ -679,6 +724,8 @@ BUNDLES: "dict[str, dict[str, Callable[..., str]]]" = {
         "build_saftyfw_host_tests": build_saftyfw_host_tests,
         "build_saftyfw": build_saftyfw,
         "build_kilnfw": build_kilnfw,
+        "build_kilnfw_start": build_kilnfw_start,
+        "build_job_status": build_job_status,
     },
     "common": {
         "run_pctools_tests": run_pctools_tests,

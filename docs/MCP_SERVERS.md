@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 207 tools (206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 209 tools (207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -239,6 +239,8 @@ KiCad server has no equivalent -- there is nothing to compile there:
 | tool | server | notes |
 |------|--------|-------|
 | `build_kilnfw(target, jobs, skip_saftyfw)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N`. **2026-09-20:** for a `build`/`reconfigure` target it now builds SaftyFW first (via `build_saftyfw()`) and aborts before starting the KilnFW build if that fails, reporting both build reports -- the KilnFW application build `EMBED_FILES`s both SaftyFW slot images (`docs/PICO_AUTO_UPDATE_PLAN.md`) and needs a fresh pair present in `firmware/SaftyFW/build/`. Pass `skip_saftyfw=True` to opt out (e.g. a caller that just ran `build_saftyfw()` itself); `fullclean` and other non-build targets never trigger it. |
+| `build_kilnfw_start(target, jobs, skip_saftyfw, kiln_fw_root)` | kilnctrl | **2026-10-04:** runs `build_kilnfw` on a background thread (`mcpkit/build_jobs.py`) and returns a job id immediately. A full build (SaftyFW first) can exceed the client's 300 s idle watchdog, which dropped the result while the build finished unseen. Same gate/lock as `build_kilnfw`; the synchronous tool is unchanged. |
+| `build_job_status(job_id, wait_s)` | kilnctrl | RUNNING/OK/FAILED, artifact sizes and ages (`KilnCtrl.bin/.elf`, SaftyFW slot bins) and the full report once finished. `wait_s` blocks up to 120 s. Results persist to `<tmp>/kilnctl-builds/job-<id>.json` so they survive a registry eviction or server restart; a job running at restart reports unknown. |
 | `build_saftyfw(jobs, saftyfw_root)` | kilnctrl | ninja in `firmware/SaftyFW/build` (or `<saftyfw_root>/build`); auto-configures from scratch via `mcpkit.pico_sdk.resolve_pico_sdk_path()` if no `CMakeCache.txt` exists yet -- see "Building from a clean worktree" below |
 | `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
 | `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
