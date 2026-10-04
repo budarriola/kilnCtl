@@ -90,6 +90,11 @@ typedef esp_err_t (*profiles_cfg_fs_delete_fn_t)(const char *rel_path);
 void profiles_cfg_fs_set_delete_fn(profiles_cfg_fs_delete_fn_t fn);
 void profiles_cfg_fs_reset_delete_fn_for_test(void);
 
+/* cfg_fs directory and per-id path format (one place; profiles_scope_cfg_files.c
+ * reads these to sweep every slot file on a profiles-scope factory reset). */
+#define PROFILES_CFG_FS_DIR "profiles"
+#define PROFILES_CFG_FS_PATH_FMT "profiles/prof%u.json"
+
 /* Builds "profiles/prof<id>.json" into `out` (capacity `out_cap`). Exposed
  * for tests/diagnostics; internal callers in this module use it too. */
 void profiles_cfg_fs_path(uint8_t id, char *out, size_t out_cap);

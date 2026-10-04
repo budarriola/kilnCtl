@@ -44,7 +44,7 @@ void profiles_cfg_fs_reset_delete_fn_for_test(void)
 
 void profiles_cfg_fs_path(uint8_t id, char *out, size_t out_cap)
 {
-    snprintf(out, out_cap, "profiles/prof%u.json", (unsigned)id);
+    snprintf(out, out_cap, PROFILES_CFG_FS_PATH_FMT, (unsigned)id);
 }
 
 /* rev(4 bytes LE) + the on-flash versioned profile blob. PROFILE_BLOB_MAX_SIZE

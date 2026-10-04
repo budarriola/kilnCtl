@@ -30,6 +30,9 @@
 #include "cfg_fs.h"
 #include "kiln_scope_cfg_files.h"
 #include "pref_cfg_fs.h"
+#include "firing_stats_cfg_fs.h"
+#include "profiles_cfg_fs.h"
+#include "profiles_scope_cfg_files.h"
 #include "zones_http_internal.h"
 
 static const char *SCRATCH_BASE = "cfg_fs_test_zone_normals";
@@ -214,6 +217,76 @@ static void test_kiln_scope_deletes_every_listed_file(void)
     cfg_fs_delete("decoy_other.dat");
 }
 
+static void write_file(const char *rel)
+{
+    const uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    TEST_CHECK(cfg_fs_write_atomic(rel, payload, sizeof(payload)) == ESP_OK, "setup: write file");
+}
+
+static bool file_exists(const char *rel)
+{
+    uint8_t buf[16];
+    size_t len = 0;
+    return cfg_fs_read(rel, buf, sizeof(buf), &len) == ESP_OK;
+}
+
+static void test_profiles_scope_deletes_slot_and_stats_files(void)
+{
+    TEST_SECTION("profiles scope cfg files: slot + firing-history mirrors deleted, foreign files survive");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    size_t ndirs = 0;
+    const char *const *dirs = profiles_scope_cfg_files_dirs(&ndirs);
+    TEST_CHECK(ndirs == 2 && strcmp(dirs[0], PROFILES_CFG_FS_DIR) == 0 &&
+                   strcmp(dirs[1], FIRING_STATS_CFG_FS_DIR) == 0,
+               "coverage: exactly the profile-slot and firing-stats directories (add new profiles_nvs mirrors here)");
+
+    /* Paths come from the OWNERS' own format macros, so a format change in
+     * either owner is followed (or fails here), never silently missed. */
+    const uint8_t ids[] = { 0, 7, PROFILES_MAX_COUNT - 1, 150, 255 };
+    char path[64];
+    for (size_t i = 0; i < sizeof(ids); i++) {
+        snprintf(path, sizeof(path), PROFILES_CFG_FS_PATH_FMT, (unsigned)ids[i]);
+        write_file(path);
+        snprintf(path, sizeof(path), FIRING_STATS_CFG_FS_PATH_FMT, (unsigned)ids[i]);
+        write_file(path);
+    }
+    write_file("profiles/hidden.json");   /* deleted by profiles_builtin_discard_file(), not this module */
+    write_file("profiles/other.json");    /* foreign names survive */
+    write_file("stats/readme.dat");
+    write_file("profiles/prof07.json");   /* non-canonical id spelling is not an owner path */
+    write_file("zones.json");
+
+    int deleted = 0;
+    TEST_CHECK(profiles_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == (int)(2 * sizeof(ids)),
+               "every slot and history file deleted (2 per id)");
+    for (size_t i = 0; i < sizeof(ids); i++) {
+        snprintf(path, sizeof(path), PROFILES_CFG_FS_PATH_FMT, (unsigned)ids[i]);
+        TEST_CHECK(!file_exists(path), "slot file is gone");
+        snprintf(path, sizeof(path), FIRING_STATS_CFG_FS_PATH_FMT, (unsigned)ids[i]);
+        TEST_CHECK(!file_exists(path), "firing-history file is gone");
+    }
+    TEST_CHECK(file_exists("profiles/hidden.json"), "hidden.json is not this module's file (no double delete)");
+    TEST_CHECK(file_exists("profiles/other.json") && file_exists("stats/readme.dat") &&
+                   file_exists("profiles/prof07.json") && file_exists("zones.json"),
+               "files outside the owners' path formats are untouched");
+    TEST_CHECK(profiles_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == 0,
+               "second pass: nothing left, not an error");
+    cfg_fs_delete("profiles/hidden.json");
+    cfg_fs_delete("profiles/other.json");
+    cfg_fs_delete("stats/readme.dat");
+    cfg_fs_delete("profiles/prof07.json");
+    cfg_fs_delete("zones.json");
+}
+
+static void test_profiles_scope_unmounted_is_not_an_error(void)
+{
+    TEST_SECTION("profiles scope cfg files: unmounted cfg_fs is not an error");
+    reset_all();
+    int deleted = -1;
+    TEST_CHECK(profiles_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == 0, "unmounted: ESP_OK, nothing deleted");
+}
+
 void run_test_zone_normals_cfg_fs(void)
 {
     test_unmounted_uses_nvs_only();
@@ -224,5 +297,7 @@ void run_test_zone_normals_cfg_fs(void)
     test_nvs_failure_does_not_advance_rev();
     test_kiln_reset_leaves_blank();
     test_kiln_scope_deletes_every_listed_file();
+    test_profiles_scope_deletes_slot_and_stats_files();
+    test_profiles_scope_unmounted_is_not_an_error();
     reset_all();
 }

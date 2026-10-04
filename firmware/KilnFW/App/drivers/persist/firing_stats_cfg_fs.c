@@ -46,7 +46,7 @@ firing_stats_cfg_fs_write_fn_t firing_stats_cfg_fs_get_write_fn(void)
 
 void firing_stats_cfg_fs_path(uint8_t id, char *out, size_t out_cap)
 {
-    snprintf(out, out_cap, "stats/fs%u.dat", (unsigned)id);
+    snprintf(out, out_cap, FIRING_STATS_CFG_FS_PATH_FMT, (unsigned)id);
 }
 
 #define FSCF_FILE_BUF_MAX (4 + sizeof(profile_firing_history_blob_t))

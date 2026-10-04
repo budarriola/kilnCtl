@@ -198,7 +198,10 @@ calls for, so this path never goes through the ask-first flow above.
 holds a mix of kiln-config-shaped and profile-shaped data. Each narrower
 scope deletes only its own mirror files: "kiln config only" deletes the
 mirrors whose NVS side lives in `kiln_nvs` (`kiln_scope_cfg_files.c`),
-"profiles only" deletes `hidden.json`, "Wi-Fi only" has none. Leaving a
+"profiles only" deletes `hidden.json` plus every profile-slot
+(`profiles/prof<N>.json`) and firing-history (`stats/fs<N>.dat`) file
+(`profiles_scope_cfg_files.c`, which lists those two directories), "Wi-Fi
+only" has none. Leaving a
 mirror behind would let the file win the next boot and undo the reset.
 
 ## State of the migration, 2026-09-07

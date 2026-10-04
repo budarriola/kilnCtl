@@ -276,6 +276,20 @@ esp_err_t kiln_scope_cfg_files_delete(int *out_deleted)
     return g_kiln_scope_cfg_delete_result;
 }
 
+// Same for the "profiles" scope's slot/firing-history cfg mirrors
+// (profiles_scope_cfg_files.c, covered for real by test_zone_normals_cfg_fs.c):
+// profiles exactly once, wifi/kiln/all never ("all" formats cfg instead).
+static int g_profiles_scope_cfg_delete_calls = 0;
+static esp_err_t g_profiles_scope_cfg_delete_result = ESP_OK;
+esp_err_t profiles_scope_cfg_files_delete(int *out_deleted)
+{
+    g_profiles_scope_cfg_delete_calls++;
+    if (out_deleted) {
+        *out_deleted = 0;
+    }
+    return g_profiles_scope_cfg_delete_result;
+}
+
 // ---------------------------------------------------------------------------
 // uart_bridge.h/flash_worker.h (2026-09-07) -- execute_scope() now dispatches
 // its NVS erase through uart_bridge_ext_run_on_flash_worker() (see
@@ -1289,9 +1303,11 @@ static void test_credential_survives_factory_reset_wifi_scope(void)
     TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "setup: init wifi_nvs");
     seed_webauth12b_credential();
     g_kiln_scope_cfg_delete_calls = 0;
+    g_profiles_scope_cfg_delete_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK,
               "factory_reset_execute(WIFI) must succeed");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the wifi scope never deletes the kiln_nvs cfg mirrors");
+    TEST_CHECK(g_profiles_scope_cfg_delete_calls == 0, "the wifi scope never deletes the profiles_nvs cfg mirrors");
     assert_webauth12b_credential_survived(
         "the administrator password must still verify after a WIFI-scope factory reset");
 }
@@ -1303,9 +1319,11 @@ static void test_credential_survives_factory_reset_kiln_scope(void)
     TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs");
     seed_webauth12b_credential();
     g_kiln_scope_cfg_delete_calls = 0;
+    g_profiles_scope_cfg_delete_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_OK,
               "factory_reset_execute(KILN) must succeed");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 1, "the kiln scope deletes its cfg mirrors exactly once");
+    TEST_CHECK(g_profiles_scope_cfg_delete_calls == 0, "the kiln scope never deletes the profiles_nvs cfg mirrors");
     g_kiln_scope_cfg_delete_result = ESP_FAIL;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_FAIL,
               "a cfg mirror that cannot be deleted fails the kiln reset (a stale file would undo it)");
@@ -1331,6 +1349,12 @@ static void test_credential_survives_factory_reset_profiles_scope(void)
     TEST_CHECK(g_stub_profiles_discard_calls == 1,
               "PROFILES scope must call profiles_builtin_discard_file() exactly once");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the profiles scope never deletes the kiln_nvs cfg mirrors");
+    TEST_CHECK(g_profiles_scope_cfg_delete_calls == 1,
+              "the profiles scope deletes its slot/history cfg mirrors exactly once");
+    g_profiles_scope_cfg_delete_result = ESP_FAIL;
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_FAIL,
+              "a profiles cfg mirror that cannot be deleted fails the profiles reset (a stale file would undo it)");
+    g_profiles_scope_cfg_delete_result = ESP_OK;
     assert_webauth12b_credential_survived(
         "the administrator password must still verify after a PROFILES-scope factory reset");
 }
@@ -1345,8 +1369,12 @@ static void test_credential_survives_factory_reset_all_scope(void)
     TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
     seed_webauth12b_credential();
     g_stub_profiles_discard_calls = 0;
+    g_kiln_scope_cfg_delete_calls = 0;
+    g_profiles_scope_cfg_delete_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_ALL) == ESP_OK,
               "factory_reset_execute(ALL) must succeed");
+    TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0 && g_profiles_scope_cfg_delete_calls == 0,
+              "ALL formats cfg instead of deleting per-scope mirrors");
     TEST_CHECK(g_stub_profiles_discard_calls == 1,
               "ALL scope must call profiles_builtin_discard_file() exactly once");
     assert_webauth12b_credential_survived(

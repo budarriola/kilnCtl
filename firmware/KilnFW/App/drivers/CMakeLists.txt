@@ -507,6 +507,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # never a curated field list -- see kiln_package.h).
                        "persist/kiln_cfg_store_cfg_fs.c"
                        "persist/kiln_scope_cfg_files.c"
+                       "persist/profiles_scope_cfg_files.c"
                        "persist/iter_tune_store.c"
                        # iter_tune redesign plan step 7 persistence
                        # (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7): own

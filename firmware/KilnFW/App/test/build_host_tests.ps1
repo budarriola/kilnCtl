@@ -556,7 +556,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/zones_config_cfg_fs.c')`" " +
-            "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/kiln_scope_cfg_files.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/kiln_scope_cfg_files.c')`" `"$(Join-Path $driversDir 'persist/profiles_scope_cfg_files.c')`" " +
             # docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md: the CT attribution
             # verdict store. Linked as a plain .c (not #included) because it
             # depends only on hal_kv -- fake_kv.c below supplies that -- and

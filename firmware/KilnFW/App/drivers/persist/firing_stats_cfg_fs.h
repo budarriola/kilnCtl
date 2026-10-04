@@ -71,6 +71,11 @@ void firing_stats_cfg_fs_set_write_fn(firing_stats_cfg_fs_write_fn_t fn);
 void firing_stats_cfg_fs_reset_write_fn_for_test(void);
 firing_stats_cfg_fs_write_fn_t firing_stats_cfg_fs_get_write_fn(void);
 
+/* cfg_fs directory and per-id path format (one place; profiles_scope_cfg_files.c
+ * reads these to sweep every history file on a profiles-scope factory reset). */
+#define FIRING_STATS_CFG_FS_DIR "stats"
+#define FIRING_STATS_CFG_FS_PATH_FMT "stats/fs%u.dat"
+
 /* Builds "stats/fs<id>.dat" into `out` (capacity `out_cap`). */
 void firing_stats_cfg_fs_path(uint8_t id, char *out, size_t out_cap);
 

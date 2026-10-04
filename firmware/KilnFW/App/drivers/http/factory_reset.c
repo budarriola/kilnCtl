@@ -15,6 +15,7 @@
 #include "cfg_fs_mount.h" /* cfg_fs_confirm_format_device() -- "all" scope formats the `cfg`
                             * LittleFS partition too, see reset_scope_t's format_cfg_fs field */
 #include "kiln_scope_cfg_files.h" /* kiln_scope_cfg_files_delete() -- "kiln" scope cfg cleanup */
+#include "profiles_scope_cfg_files.h" /* profiles_scope_cfg_files_delete() -- "profiles" scope cfg cleanup */
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_wdt.h"
@@ -110,6 +111,12 @@ typedef struct {
      * scope deletes ONLY its own mirror files, never formats. Without it a
      * surviving file wins the next boot's resolve and undoes the reset. */
     bool delete_kiln_cfg_files;
+
+    /* "profiles" only: delete the cfg_fs mirrors whose NVS side lives in
+     * profiles_nvs -- profile slot files and firing-history files
+     * (profiles_scope_cfg_files.h). hidden.json is handled by the
+     * restore_builtin_profiles branch. */
+    bool delete_profiles_cfg_files;
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -118,10 +125,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly, false, false, false },
-    { "kiln", kKilnOnly, false, false, true },
-    { "profiles", kProfilesOnly, true, false, false },
-    { "all", kAll, true, true, false },
+    { "wifi", kWifiOnly, false, false, false, false },
+    { "kiln", kKilnOnly, false, false, true, false },
+    { "profiles", kProfilesOnly, true, false, false, true },
+    { "all", kAll, true, true, false, false },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -353,6 +360,17 @@ static void execute_scope_job(void *arg)
         ESP_LOGW(TAG, "kiln factory reset: %d cfg file(s) deleted", n);
         if (kerr != ESP_OK && first_err == ESP_OK) {
             first_err = kerr;
+        }
+    }
+
+    /* delete_profiles_cfg_files: same reasoning as above for profiles_nvs --
+     * stale slot/history files would win the next boot's resolve. */
+    if (scope->delete_profiles_cfg_files) {
+        int n = 0;
+        esp_err_t perr = profiles_scope_cfg_files_delete(&n);
+        ESP_LOGW(TAG, "profiles factory reset: %d cfg file(s) deleted", n);
+        if (perr != ESP_OK && first_err == ESP_OK) {
+            first_err = perr;
         }
     }
 
