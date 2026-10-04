@@ -680,6 +680,32 @@ class DnsTest(unittest.TestCase):
         self.assertIn("static_dns='1.1.1.1'", d)
         self.assertIn("static_dns2=''", d)
 
+    def test_omitted_dns_not_sent(self):
+        # Firmware (wifi_provision_http.c, http_form_find_field(body, "dns"/"dns2")):
+        # absent == unset, so an omitted dns must not appear in the body at all
+        # (not as "dns=" and not as "0.0.0.0").
+        body = wph.build_ip_config_body("static", **GOOD)
+        self.assertEqual(body, b"mode=static&ip=192.168.1.50&netmask=255.255.255.0&gateway=192.168.1.1")
+        self.assertNotIn(b"dns", body)
+        self.assertNotIn(b"0.0.0.0", body)
+        self.assertNotIn(b"dns2", wph.build_ip_config_body("static", dns="1.1.1.1", **GOOD))
+        with unittest.mock.patch.object(wph.http_auth, "urlopen", return_value=_Resp("ok")) as m:
+            wph.post_ip_config("10.0.0.5", "static", **GOOD)
+        self.assertNotIn(b"dns", m.call_args[0][0].data)
+
+    def test_field_names_and_dns2_alone_refused_client_side(self):
+        # Field names match the C parser's "dns" / "dns2" keys; dns2 without dns is
+        # refused client-side (firmware re-validates the same rule).
+        body = wph.build_ip_config_body("static", dns="1.1.1.1", dns2="8.8.8.8", **GOOD)
+        fields = dict(kv.split(b"=", 1) for kv in body.split(b"&"))
+        self.assertEqual(fields[b"dns"], b"1.1.1.1")
+        self.assertEqual(fields[b"dns2"], b"8.8.8.8")
+        with unittest.mock.patch.object(wph.http_auth, "urlopen") as m:
+            r = mn.network_set_ip_config("static", confirm=True, dns2="8.8.8.8", **GOOD)
+        self.assertTrue(r.startswith("refused:"), r)
+        self.assertIn("dns2 requires dns", r)
+        m.assert_not_called()
+
 
 class DnsToolTest(_Base):
     def test_dns_flows_to_post_and_verify(self):
