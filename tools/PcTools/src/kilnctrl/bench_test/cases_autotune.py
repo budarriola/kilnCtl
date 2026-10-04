@@ -462,9 +462,12 @@ def _at04_body(ctx: dict) -> CaseResult:
             swing_pp_c=swing_pp_c,
             **exp_kwargs,
         )
-        extra = {"final_c": st.actual_c if st.actual_valid else None, **exp_obs}
-        if abort_reason:
-            extra["abort_reason"] = abort_reason
+        extra = {
+            "final_c": st.actual_c if st.actual_valid else None,
+            "swing_pp_c": swing_pp_c,
+            "abort_reason": abort_reason or None,
+            **exp_obs,
+        }
         return _with_extra_observed(result, extra)
     finally:
         _cleanup_autotune(ctx)

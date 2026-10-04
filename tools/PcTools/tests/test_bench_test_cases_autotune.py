@@ -376,6 +376,8 @@ class AT04Test(unittest.TestCase):
         ctx = _base_ctx(srv)
         result = CA._case_at04(ctx)
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertAlmostEqual(result.observed["relay_amplitude_c"], 0.2)
+        self.assertIsNone(result.observed.get("swing_pp_c"))
 
     def _run_invalid_relay(self, amplitude_c, abort_reason):
         autotune = _FakeAutotuneClient(statuses=[
@@ -409,10 +411,8 @@ class AT04Test(unittest.TestCase):
         for reason in ("", "thermo fault on zone 0"):
             result = self._run_invalid_relay(0.0, reason)
             self.assertEqual(result.verdict, Verdict.FAIL, reason)
-            if reason:
-                self.assertEqual(result.observed["abort_reason"], reason)
-            else:
-                self.assertNotIn("abort_reason", result.observed)
+            self.assertEqual(result.observed["abort_reason"], reason or None)
+            self.assertIsNone(result.observed["swing_pp_c"])
 
 
 class AT05Test(unittest.TestCase):
