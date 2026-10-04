@@ -414,12 +414,69 @@ def reset(peer: str, mode: str = "run") -> "tuple[bool, str]":
     # first call's code path) was no longer needed to reconcile mismatched
     # core states. Single-core peers (the ESP) have a one-element target
     # list, so this is a no-op there.
+    # ESP + `reset run` only: OpenOCD exit 0 does not mean the core resumed
+    # (bench 2026-10-04 and 2026-10-01: board stayed dark ~69 min after a
+    # "successful" reset run), so check each target's `curstate` in the same
+    # session and issue a fallback `resume` if one is still halted.
+    post = _POST_RESET_STATE_TCL if (peer == PEER_ESP and mode == "run") else ""
     tcl = (
         f"{_adapter_prefix(peer_cfg)}init; "
         f"foreach _kctl_t [target names] {{targets $_kctl_t; halt}}; "
-        f"targets [lindex [target names] 0]; reset {mode}; exit"
+        f"targets [lindex [target names] 0]; reset {mode}; {post}exit"
     )
-    return _run(peer, tcl)
+    ok, output = _run(peer, tcl)
+    if ok and post:
+        stuck = parse_post_reset(output)["still_halted"]
+        if stuck:
+            ok = False
+            output += (
+                "\nERROR: after `reset run` (and a fallback resume) target(s) "
+                f"{', '.join(stuck)} still report halted -- the core is NOT running."
+            )
+    return ok, output
+
+
+# Tcl appended after `reset run` for the ESP: poll every target's curstate for
+# up to ~2 s (20 x `sleep 100`), print KCTL_STATE, and if a target is still
+# halted resume it (KCTL_RESUMED) and print its final state (KCTL_FINAL).
+_POST_RESET_STATE_TCL = (
+    "foreach _kctl_t [target names] { "
+    "set _kctl_s unknown; "
+    "for {set _kctl_i 0} {$_kctl_i < 20} {incr _kctl_i} { "
+    "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
+    'if {$_kctl_s eq "running"} break; sleep 100 }; '
+    'puts "KCTL_STATE $_kctl_t $_kctl_s"; '
+    'if {$_kctl_s eq "halted"} { '
+    "catch {targets $_kctl_t; resume} _kctl_err; "
+    'puts "KCTL_RESUMED $_kctl_t"; sleep 200; '
+    "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
+    'puts "KCTL_FINAL $_kctl_t $_kctl_s" } }; '
+    "targets [lindex [target names] 0]; "
+)
+
+
+def parse_post_reset(output: str) -> dict:
+    """Parses KCTL_STATE / KCTL_RESUMED / KCTL_FINAL lines from a reset run.
+
+    Returns ``states`` (target -> state seen after the poll window),
+    ``resumed`` (targets the fallback resume was issued for), ``final``
+    (target -> state after the fallback) and ``still_halted`` (targets whose
+    last known state is halted)."""
+    states: dict = {}
+    resumed: list = []
+    final: dict = {}
+    for line in (output or "").splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[0] == "KCTL_STATE":
+            states[parts[1]] = parts[2]
+        elif len(parts) == 2 and parts[0] == "KCTL_RESUMED":
+            resumed.append(parts[1])
+        elif len(parts) == 3 and parts[0] == "KCTL_FINAL":
+            final[parts[1]] = parts[2]
+    last = dict(states)
+    last.update(final)
+    still = sorted(t for t, st in last.items() if st == "halted")
+    return {"states": states, "resumed": resumed, "final": final, "still_halted": still}
 
 
 def halt(peer: str) -> "tuple[bool, str]":
@@ -430,8 +487,55 @@ def halt(peer: str) -> "tuple[bool, str]":
 
 def resume(peer: str) -> "tuple[bool, str]":
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_adapter_prefix(peer_cfg)}init; resume; exit"
-    return _run(peer, tcl)
+    # Report per target instead of halting first: read curstate, and only if
+    # something is halted run the group-safe halt-all-then-resume tail.
+    tcl = (
+        f"{_adapter_prefix(peer_cfg)}init; "
+        "set _kctl_any 0; "
+        "foreach _kctl_t [target names] { "
+        "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
+        'puts "KCTL_BEFORE $_kctl_t $_kctl_s"; '
+        'if {$_kctl_s eq "halted"} {set _kctl_any 1} }; '
+        f"if {{$_kctl_any}} {{ if {{[catch {{{_RESUME_TCL}}} _kctl_err]}} "
+        '{puts "KCTL_ERR $_kctl_err"} }; '
+        "sleep 100; "
+        "foreach _kctl_t [target names] { "
+        "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
+        'puts "KCTL_AFTER $_kctl_t $_kctl_s" }; exit'
+    )
+    ok, output = _run(peer, tcl)
+    if not ok:
+        return ok, output
+    return _format_resume_report(output)
+
+
+def _format_resume_report(output: str) -> "tuple[bool, str]":
+    before: dict = {}
+    after: dict = {}
+    errs: list = []
+    for line in (output or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0] == "KCTL_BEFORE":
+            before[parts[1]] = parts[2].strip()
+        elif len(parts) == 3 and parts[0] == "KCTL_AFTER":
+            after[parts[1]] = parts[2].strip()
+        elif parts and parts[0] == "KCTL_ERR":
+            errs.append(line.strip()[len("KCTL_ERR"):].strip())
+    if not before:
+        return False, "resume: no per-target state reported (curstate output missing)\n" + (output or "")
+    ok = not errs
+    lines = []
+    for t, b in before.items():
+        a = after.get(t, "unknown")
+        if b == "halted":
+            lines.append(f"{t}: halted -> {a}")
+            if a == "halted":
+                ok = False
+        else:
+            lines.append(f"{t}: {b} (no resume needed)" + ("" if a == b else f" -> now {a}"))
+    for e in errs:
+        lines.append(f"resume error: {e}")
+    return ok, "\n".join(lines)
 
 
 def step(peer: str) -> "tuple[bool, str]":
@@ -586,6 +690,25 @@ _RESUME_TCL = (
 )
 
 
+def _guarded_resume(dump: str, leave_halted: bool) -> str:
+    """``catch``-wraps ``dump`` so a mid-batch error (unknown register, bad
+    address) is printed as ``KCTL_ERR <text>`` and the resume tail STILL runs
+    -- an uncaught Tcl error would abort the rest of the -c string and leave
+    the core halted (looks exactly like a firmware freeze)."""
+    guarded = f'if {{[catch {{{dump}}} _kctl_err]}} {{puts "KCTL_ERR $_kctl_err"}};'
+    if leave_halted:
+        return guarded
+    return f"{guarded} catch {{{_RESUME_TCL}}} _kctl_err2;"
+
+
+def _surface_kctl_err(ok: bool, output: str) -> "tuple[bool, str]":
+    errs = [ln.strip() for ln in (output or "").splitlines() if ln.strip().startswith("KCTL_ERR")]
+    if ok and errs:
+        return False, output + "\nERROR (core resumed unless leave_halted): " + "; ".join(
+            e[len("KCTL_ERR"):].strip() for e in errs)
+    return ok, output
+
+
 def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
                 leave_halted: bool = False,
                 target: "str | None" = None) -> "tuple[bool, str]":
@@ -626,10 +749,9 @@ def read_memory(peer: str, address: int, count: int = 1, width: int = 32,
         f'{{puts [format "MEMRD 0x%08x 0x%0{step * 2}x" '
         f"[expr {{0x{address:x} + $_kctl_i * {step}}}] $_kctl_arr($_kctl_i)]}}"
     )
-    tail = "" if leave_halted else f" {_RESUME_TCL}"
     select = f"targets {target}; " if target else ""
-    tcl = f"{_adapter_prefix(peer_cfg)}init; {select}halt; {dump};{tail} exit"
-    return _run(peer, tcl)
+    tcl = f"{_adapter_prefix(peer_cfg)}init; {select}halt; {_guarded_resume(dump, leave_halted)} exit"
+    return _surface_kctl_err(*_run(peer, tcl))
 
 
 def read_symbol(peer: str, symbol: str, count: Optional[int] = None, width: int = 32,
@@ -701,12 +823,19 @@ def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple
 #
 # Cortex-M0+ only: `basepri` and `faultmask` do not exist on ARMv6-M and asking
 # OpenOCD for them fails the whole `get_reg` call, so they are deliberately
-# absent rather than forgotten. Anything added here must exist on EVERY peer
-# this function is called for.
+# absent rather than forgotten. Each list below only has to exist on the
+# targets of ITS OWN peer (the lists differ by architecture).
 _CORE_REGS = (
     "r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc xpsr msp psp "
     "primask control"
 )
+# ESP32-S3 is Xtensa LX7: OpenOCD names the core registers pc, ps, a0..a15
+# (no r0/xpsr -- asking for those fails `get_reg` outright, found 2026-10-04).
+_CORE_REGS_ESP = "pc ps " + " ".join(f"a{i}" for i in range(16))
+
+
+def _core_regs_for(peer: str) -> str:
+    return _CORE_REGS_ESP if peer == PEER_ESP else _CORE_REGS
 
 
 def read_registers(peer: str, target: "str | None" = None,
@@ -742,9 +871,8 @@ def read_registers(peer: str, target: "str | None" = None,
     peer_cfg = resolve_peer(peer)
     select = f"targets {target}; " if target else ""
     dump = (
-        f"foreach {{_kctl_n _kctl_v}} [get_reg {{{_CORE_REGS}}}] "
+        f"foreach {{_kctl_n _kctl_v}} [get_reg {{{_core_regs_for(peer)}}}] "
         '{puts [format "REG %-5s %s" $_kctl_n $_kctl_v]}'
     )
-    tail = "" if leave_halted else f" {_RESUME_TCL}"
-    tcl = f"{_adapter_prefix(peer_cfg)}init; {select}halt; {dump};{tail} exit"
-    return _run(peer, tcl)
+    tcl = f"{_adapter_prefix(peer_cfg)}init; {select}halt; {_guarded_resume(dump, leave_halted)} exit"
+    return _surface_kctl_err(*_run(peer, tcl))

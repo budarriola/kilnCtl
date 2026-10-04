@@ -366,6 +366,12 @@ def debug_reset(
         raise
     record["openocd_ok"] = ok
     _log_openocd_result(f"debug_reset(peer={peer}, mode={mode})", ok, output)
+    post_state = None
+    if peer == debug_probe.PEER_ESP and mode == "run":
+        post_state = debug_probe.parse_post_reset(output)
+        record["post_reset_states"] = {**post_state["states"], **{
+            t: f"{post_state['states'].get(t, '?')}->{st}" for t, st in post_state["final"].items()}}
+        record["resumed_targets"] = post_state["resumed"]
     probe_res = None
     probe_error = None
     esp_run = peer == debug_probe.PEER_ESP and mode == "run"
@@ -382,8 +388,21 @@ def debug_reset(
     if not ok:
         record["openocd_decisive_line"] = _decisive_openocd_line(output)
     _append()
+    if post_state is not None and post_state["still_halted"]:
+        return (
+            f"error: reset {peer} (run) FAILED -- target(s) {', '.join(post_state['still_halted'])} "
+            "still report HALTED after `reset run` and a fallback resume; the core is NOT running "
+            "(board will be dark). Do not stack resets blindly; inspect with debug_read_registers.\n"
+            + output.strip()
+        )
     if ok:
         msg = f"reset {peer} ({mode}) OK"
+        if post_state is not None and post_state["states"]:
+            msg += "\npost-reset target states: " + ", ".join(
+                f"{t}={st}" for t, st in post_state["states"].items())
+            if post_state["resumed"]:
+                msg += (f"\nNOTE: fallback resume issued for {', '.join(post_state['resumed'])} "
+                        "(core was still halted after `reset run`)")
         if probe_res is not None:
             msg += "\n" + reset_probe.format_report(peer, mode, probe_res)
         elif probe_error is not None:
@@ -441,11 +460,12 @@ def debug_halt(peer: str) -> str:
 
 @_core._tool()
 def debug_resume(peer: str) -> str:
-    """Resumes `peer`'s core from a halt."""
+    """Resumes `peer`'s core if halted. Reports per target (state before/after);
+    a target that is already running is reported "no resume needed", not an error."""
     ok, output = debug_probe.resume(peer)
     _log_openocd_result(f"debug_resume(peer={peer})", ok, output)
     if ok:
-        return f"resumed {peer}"
+        return f"resume {peer}:\n{output}"
     return _openocd_error_message(f"resume failed for {peer}", output)
 
 

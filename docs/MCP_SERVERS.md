@@ -273,6 +273,8 @@ recovery mode. It only reports, never resumes or resets. Every `debug_reset`
 call appends a JSON line to `logs/debug_reset/history.jsonl` (gitignored, not
 rotated; `kilnctrl/reset_probe.py`).
 
+**Post-reset state check (2026-10-04).** OpenOCD exit 0 does not mean the core resumed (bench: board dark ~69 min after a `reset run`). For `peer="esp"`, `mode="run"`, the same OpenOCD session now polls each target's `curstate` for up to ~2 s, prints `KCTL_STATE <target> <state>`, and if a target is still `halted` issues `resume` (`KCTL_RESUMED`) and re-reads it (`KCTL_FINAL`). The result text lists the states and notes any fallback resume; the history line gains `post_reset_states` and `resumed_targets`. A target still halted after the fallback makes the tool fail loudly with `openocd_ok: false`. `halt`/`init` modes never resume. `debug_resume` now reports per target (`cpu0: running (no resume needed)` is informational, not an error), and `debug_read_registers`/`debug_read_memory`/`debug_read_symbol` `catch` a mid-dump error (surfaced as the failure text) so the resume tail always runs. Register lists are per peer: Cortex-M0+ names for the Pico, Xtensa `pc ps a0..a15` for the ESP (the Cortex-M list made `get_reg` fail on the ESP and left it halted).
+
 **Dark-rereset guard.** `debug_reset(peer="esp")` (any mode) REFUSES, before
 touching OpenOCD, if the previous ESP reset in that history was a run-mode
 reset whose probe never got an HTTP answer and it is less than 120 s old
