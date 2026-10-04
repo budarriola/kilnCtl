@@ -541,6 +541,8 @@ concurrently and was not cross-referenced here at the time of writing), the
 107-vs-108 discovered-count discrepancy, and full Python-side coverage for
 the zero-production-caller sweep.
 
+*Reconciled:* both items closed by the tenth pass below (count drift explained there as expected; Python sweep run, no unwired production function). The suite is now 157 checks at `a1bcfb0f`.
+
 **Status, 2026-09-17 (tenth pass, host-only, no board touched).** Closed the
 two items this section's own text left open above.
 

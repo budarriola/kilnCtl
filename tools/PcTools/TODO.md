@@ -332,7 +332,7 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 
 **Logging and consoles**
 - [x] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP — landed 2026-09-20 (see "Logging and consoles" above)
-- [ ] RTT-over-SWD console as the fallback path — firmware side pending
+- [ ] RTT-over-SWD console as the fallback path — open, see "Logging and consoles" above
 - [x] Pico USB CDC **not** offered as a transport; reported as absent unless built in
 - [x] Transport marked per line (relayed / probe-UART / RTT) — for the transports that exist today
 - [x] Per-peer level filter — landed 2026-09-20 (see "Logging and consoles" above)
@@ -351,7 +351,7 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
       version-negotiation enforcement (`peer.protocol >= self.min_compatible`
       on both sides) is firmware work, tracked in `UPDATE_PROTOCOL.md`, not
       here
-- [ ] Live-hardware verification (no board exercised yet)
+- [ ] Live-hardware verification — open, see "Firmware updates from here" above
 
 **Integrity**
 - [x] Python codec checked against `firmware/CommonFW/test/vectors/` --

@@ -1095,7 +1095,9 @@ matched this section exactly as it read at the time — its RUNNING/PAUSED
 branch called `ui_home_show_stop_confirm()` directly with no PIN gate, and
 only its Start branch went through `ui_lcd_lock_run_gated()`. This was
 enforced mechanically by `tools/check_stop_path_never_gated.ps1` and its
-negative test `firmware/KilnFW/App/test/test_check_stop_path_never_gated.ps1`.
+negative test `firmware/KilnFW/App/test/test_check_stop_path_never_gated.ps1` (since renamed to
+`tools/check_stop_path_requires_pin.ps1` and `firmware/KilnFW/App/test/test_check_stop_path_requires_pin.ps1`
+in `dcca2386`).
 
 **Addendum, 2026-09-28 — LCD side reversed.** Owner decision: "stop needs
 login. there is an estop button." Both branches of `ui_home_fire_btn_cb()`
