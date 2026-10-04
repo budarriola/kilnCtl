@@ -17,6 +17,7 @@
 #include "freertos/portmacro.h" /* portMUX_TYPE -- last-run cache guard below */
 
 #include "esp_heap_caps.h"
+#include "persist_scratch.h"
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -653,7 +654,10 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
     bool any_file_valid = false, any_nvs_valid = false, any_diverged = false;
     uint32_t max_file_rev = 0, max_nvs_rev = 0;
 
-    /* Heap-allocated, internal DRAM (2026-09-08, httpd_worker stack-budget
+    /* 2026-10-04: now PSRAM first via persist_scratch_alloc(): this read-only
+     * path held 2 x 1364 B of internal RAM across the 100-slot loop on every
+     * GET /api/cfgfs. Original 2026-09-08 note:
+     * Heap-allocated, internal DRAM (2026-09-08, httpd_worker stack-budget
      * pass): this was two profile_firing_history_blob_t (1364 B each) as
      * stack locals inside the loop -- the same "four copies of a 1364 B
      * blob" class eb92592c already fixed for the firing-history handler
@@ -668,8 +672,8 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
      * function's only exit path). An allocation failure degrades to
      * reporting the honest "nothing valid, nothing diverged" defaults
      * already set above, rather than a stack overflow. */
-    profile_firing_history_blob_t *f_blob = heap_caps_malloc(sizeof(*f_blob), MALLOC_CAP_8BIT);
-    profile_firing_history_blob_t *n_blob = heap_caps_malloc(sizeof(*n_blob), MALLOC_CAP_8BIT);
+    profile_firing_history_blob_t *f_blob = persist_scratch_alloc(sizeof(*f_blob));
+    profile_firing_history_blob_t *n_blob = persist_scratch_alloc(sizeof(*n_blob));
     if (!f_blob || !n_blob) {
         free(f_blob);
         free(n_blob);

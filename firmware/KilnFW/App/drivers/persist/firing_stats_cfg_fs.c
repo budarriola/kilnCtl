@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "persist_scratch.h"
 #include "esp_log.h"
 
 #include "cfg_fs.h"
@@ -107,8 +108,12 @@ void firing_stats_cfg_fs_load_raw(uint8_t id, profile_firing_history_blob_t *out
      * stack_overflow_2026-09-08.md): this 1368 B buffer sat on the
      * httpd_worker stack, four frames below GET /api/firing_history, behind
      * three more copies of the same 1364 B blob. Out of memory is reported
-     * the same way an absent file is -- the NVS candidate then decides. */
-    uint8_t *raw = heap_caps_malloc(FSCF_FILE_BUF_MAX, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+     * the same way an absent file is -- the NVS candidate then decides.
+     * 2026-10-04: PSRAM first. Read-only path (cfg_fs_read into raw, memcpy
+     * out; nothing is written to flash/NVS from this buffer), reached 100x
+     * per GET /api/cfgfs. firing_stats_cfg_fs_save() below keeps
+     * MALLOC_CAP_INTERNAL: it writes flash from its buffer. */
+    uint8_t *raw = persist_scratch_alloc(FSCF_FILE_BUF_MAX);
     if (raw == NULL) {
         ESP_LOGE(FSCF_TAG, "fs%u file read: malloc(%u) failed -- ignoring file, NVS candidate decides", id,
                  (unsigned)FSCF_FILE_BUF_MAX);

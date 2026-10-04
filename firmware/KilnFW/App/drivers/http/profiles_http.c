@@ -24,6 +24,7 @@
 #include "http_form.h"
 #include "kiln_io.h"
 #include "live_profile.h" /* live_edit_name_collides() -- profiles_http_save() dup-name refusal */
+#include "persist_scratch.h"
 #include "profile_feasibility.h"
 #include "profiles_builtin.h"
 #include "profiles_favorites.h" /* profiles_favorites_set() -- see profiles_http_delete()'s doc
@@ -1803,7 +1804,9 @@ void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *
         profile_t decoded;
         uint32_t revs[PROFILES_MAX_COUNT];
     };
-    struct dualwrite_scratch *s = malloc(sizeof(*s));
+    /* 2026-10-04: PSRAM first (read-only status scratch; plain malloc <= 8 KB
+     * is internal RAM and this runs per slot under GET /api/cfgfs). */
+    struct dualwrite_scratch *s = persist_scratch_alloc(sizeof(*s));
     if (!s) {
         ESP_LOGE(PROFILES_TAG, "profiles_http_get_dualwrite_status: malloc failed -- reporting unknown");
         return;

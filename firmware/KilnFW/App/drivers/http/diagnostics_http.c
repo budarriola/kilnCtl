@@ -33,6 +33,7 @@
 #include "dualwrite_window.h" /* dualwrite_window_get_status() -- /api/cfgfs dual_write_window */
 #include "profiles_builtin.h" /* profiles_builtin_get_dualwrite_status() */
 #include "profiles_http.h" /* profiles_http_get_dualwrite_status() -- /api/cfgfs per-slot rows */
+#include "persist_scratch.h" /* persist_scratch_alloc() -- cfgfs_status_get_handler() scratch */
 #include "profiles_types.h" /* PROFILES_MAX_COUNT */
 #include "ramp_assist_cfg.h"
 #include "relay_cycles.h" /* relay_cycles_reset_post_handler() below needs RELAY_CYCLES_COUNT;
@@ -1482,7 +1483,11 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         }
     }
 
-    cfgfs_status_scratch_t *s = malloc(sizeof(*s));
+    /* PSRAM first (2026-10-04 bench: one GET /api/cfgfs dropped heap_internal
+     * min_free 16455 -> 9627 B and heap_dma 8667 -> 1839 B; plain malloc <= 8 KB
+     * lands in internal RAM under SPIRAM_MALLOC_ALWAYSINTERNAL=8192). Read-only
+     * CPU-side scratch, never DMA, never written to flash/NVS from here. */
+    cfgfs_status_scratch_t *s = persist_scratch_alloc(sizeof(*s));
     if (!s) {
         ESP_LOGE(TAG, "cfgfs_status_get_handler: malloc(%u) failed", (unsigned)sizeof(*s));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");

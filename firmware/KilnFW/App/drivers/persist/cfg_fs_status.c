@@ -18,6 +18,7 @@
 
 #include "cfg_fs.h"
 #include "esp_log.h"
+#include "persist_scratch.h"
 
 #define CFG_FS_STATUS_MAX_FILES 32
 #define CFG_FS_STATUS_PATH_MAX 600
@@ -111,9 +112,10 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
      * docs/audits/filesystem_migration_review_2026-09-07.md finding #1).
      * Heap-allocated instead so this function's frame stays small
      * regardless of CFG_FS_STATUS_MAX_FILES; every path below frees both
-     * before returning (see the `cleanup` label). */
-    cfg_fs_entry_t *files = malloc(sizeof(cfg_fs_entry_t) * CFG_FS_STATUS_MAX_FILES);
-    cfg_fs_entry_t *tmp_files = malloc(sizeof(cfg_fs_entry_t) * CFG_FS_STATUS_MAX_FILES);
+     * before returning (see the `cleanup` label). PSRAM first via
+     * persist_scratch_alloc() (2026-10-04: plain malloc <= 8 KB is internal RAM). */
+    cfg_fs_entry_t *files = persist_scratch_alloc(sizeof(cfg_fs_entry_t) * CFG_FS_STATUS_MAX_FILES);
+    cfg_fs_entry_t *tmp_files = persist_scratch_alloc(sizeof(cfg_fs_entry_t) * CFG_FS_STATUS_MAX_FILES);
     if (!files || !tmp_files) {
         free(files);
         free(tmp_files);
