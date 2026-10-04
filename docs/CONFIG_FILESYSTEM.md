@@ -186,6 +186,12 @@ Either outcome never blocks boot, never touches any partition other than
   written by the old init resync still carries garbage padding, so the first
   boot of the fixed firmware logs one more "DIVERGED, adopting NVS" at equal
   revs and rewrites the file with zero padding, after which it stays in sync.
+  The status accessors read NVS with the quiet variants
+  (`pref_cfg_fs_load_raw_quiet()`, `relay_names_decode_any_impl(quiet)`;
+  `ca44e060`), so a `GET /api/cfgfs` poll never logs wrong-size/REJECTED
+  warnings. The standing suite's `check_flash_worker_lint.ps1` allowlists the
+  three factory-reset scope-sweep `cfg_fs_delete` sites in
+  `flash_worker_lint.py`'s `CFG_FS_ALLOWLIST` (`7570ac19`).
 - `"nvs_only"` — items that have not moved to file backing yet. **As of
   `2e88e90a` (2026-09-08) this array is empty** — every item this doc's
   migration table (below) tracks as MOVE (1-9) now has a real cfg-filesystem
