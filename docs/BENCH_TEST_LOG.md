@@ -2884,6 +2884,18 @@ Same session, two side findings: (1) the bench env-var credentials (`KILNCTL_WEB
 FW fw_build for running app 97a2ee29 (web auth on). Pending record was already acknowledged (PANIC, profile_executo, IllegalInstruction, dump_id 861174328); coredump image present, data_len 0xd5780 of 0x100000. Baseline 10 x GET /api/readiness: 114-349 ms. 1 Hz poller (readiness + /api/status, 60 s) with `crash_report_clear(confirm=True)` ~5 s in: 0 timeouts/errors; readiness max 1378 ms (avg 298), /api/status max 2067 ms (avg 148). Stall window ~t=5.1 s to ~8.5 s (~3.4 s with the httpd serialized: one status 2067 ms, one readiness 1378 ms; everything else <= 624 ms). POST itself was not separately wall-clocked (MCP tool does not report it); the whole tool call, including read-back, fit inside ~10 s, and the observed concurrent stall implies the POST blocked the server ~3.4 s. Verdict: A3 NEEDED (concurrent request > 1.5 s). After: record and coredump gone ("nothing pending"), uptime 1041 s -> 1154 s (no reboot), heap_internal min_free 17719 B, safety armed, trip 0.
 - `20261003T032244Z_lcd_login_gate_check` suite=`lcd` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Oct  1 2026 23:16:20 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261003T032244Z_lcd_login_gate_check/`
 
+## 2026-10-04 -- Bench pass of origin/main 14d23a1d (host 192.168.1.156)
+
+Reported by the coordinator; raw logs are not cited here.
+
+- `flash_firmware`: verified, board running `app`; boot_guard persisted counter 0 to 0. No trip after the flash.
+- `heap_internal` min_free: 17595 B after the flash, 13687 B after the backup import (floor 8192 B).
+- `safety_poll` stack: 5424 of 8192 B free. `check_task_liveness`: ok.
+- Readiness: 20 ok, 1 not_done (`safety_commissioned`, 3 of 68 unset), 3 other. `ct_leak_alarm` ok, `startup_guard9` ok, `/api/status` `ct_leak` false.
+- `backup_import` round trip (`82ac2ad0`): ok. Zones, profiles and timing byte-identical after re-export; PID and coupling unchanged.
+- OPEN follow-up: `kiln_configs` entries changed across the import: Pico param flags went 0 to 1, the active config ESP blob changed at bytes 440 and 688, and its package hash changed. Under investigation.
+- LCD: unverified; the panel was dark in the captures (likely backlight idle).
+
 ## 2026-10-03 Pending-bench-work pass (host 192.168.1.156, COM14) -- all four items (gear gate INCONCLUSIVE)
 
 Item 1 (login gates), web, no session: GET `/`, `/api/status`, `/api/readiness` = 200; GET `/api/zones`, `/api/profiles`, `/api/profiles/builtin`, `/api/settings/display_power` = 401; POST `/api/profile_exec/stop`, `/api/profile/favorite`, `/api/settings/tz`, `/api/profile/live/fork` = 401. GET `/settings` = 200 by design (static page shell in `kPageShellUris`, route_tier_table.h; its data routes are tier-gated). PASS. LCD: LCD-19 (`20261003T032244Z_lcd_login_gate_check`, allow_heat=False): keypad raised on Start tap, wrong PIN refused, right PIN reached Confirm Start (cancelled), policy restored (readback_matches true); stop_gated INCONCLUSIVE by design without heat. The topbar-gear gate was NOT exercised: lcd_enabled is false at rest (gear opened the config hub with no prompt) and enabling it needs a set_policy write that the permission classifier denied. Gear gate: INCONCLUSIVE (the by-hand policy write was classifier-denied and, per coordinator, not retried).
