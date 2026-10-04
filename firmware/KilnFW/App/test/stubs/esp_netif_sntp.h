@@ -52,10 +52,20 @@ typedef struct {
 #define ESP_NETIF_SNTP_DEFAULT_CONFIG(host) \
     { .start = true, .wait_for_sync = true, .sync_cb = NULL, .server = (host) }
 
+// Test-only fault injection: the value esp_netif_sntp_init() returns. Defaults
+// to ESP_OK; a host test sets it non-OK to drive time_sync_start()'s
+// sntp-init-failure return, then restores ESP_OK. Per-TU (static), which is
+// enough because test_time_sync.c #includes time_sync.c into its own TU.
+static inline esp_err_t *esp_netif_sntp_stub_init_result(void)
+{
+    static esp_err_t result = ESP_OK;
+    return &result;
+}
+
 static inline esp_err_t esp_netif_sntp_init(const esp_sntp_config_t *config)
 {
     (void)config;
-    return ESP_OK; // host tests never actually run the SNTP state machine
+    return *esp_netif_sntp_stub_init_result(); // host tests never actually run the SNTP state machine
 }
 
 static inline esp_err_t esp_netif_sntp_start(void)

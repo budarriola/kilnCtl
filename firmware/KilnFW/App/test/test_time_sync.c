@@ -227,6 +227,54 @@ static void test_ts_mount_failed_falls_through_to_nvs_only(void)
     cfg_fs_deinit();
 }
 
+// ---------------------------------------------------------------------
+// Startup-fault return coverage (a548dfc6): time_sync_start() now returns the
+// esp_netif_sntp_init() error instead of ESP_OK so main_boot_early.c can latch
+// a startup fault. The stored-TZ load runs BEFORE the sntp init, so a failure
+// there must still leave the persisted timezone applied.
+// ---------------------------------------------------------------------
+
+static void test_ts_sntp_init_failure_returns_error_and_tz_still_applied(void)
+{
+    TEST_SECTION("time_sync_start: esp_netif_sntp_init failure returns the error; stored TZ still applied");
+    ts_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    time_sync_start();
+    TEST_CHECK(time_sync_set_tz("EST5EDT,M3.2.0,M11.1.0") == ESP_OK, "precondition: a TZ is persisted");
+
+    *esp_netif_sntp_stub_init_result() = ESP_FAIL;
+    esp_err_t err = time_sync_start(); // simulated reboot against a failing sntp init
+    *esp_netif_sntp_stub_init_result() = ESP_OK;
+
+    TEST_CHECK(err == ESP_FAIL, "sntp init failure is returned verbatim (not swallowed as ESP_OK)");
+    time_sync_status_t st;
+    time_sync_get_status(&st);
+    TEST_CHECK(strcmp(st.tz, "EST5EDT,M3.2.0,M11.1.0") == 0,
+               "sntp init failure: the stored timezone is still applied");
+    TEST_CHECK(!s_sntp_init_ok, "sntp init failure: the module does not claim SNTP is initialised");
+
+    TEST_CHECK(time_sync_start() == ESP_OK, "recovery: with sntp init healthy again start() returns ESP_OK");
+    TEST_CHECK(s_sntp_init_ok, "recovery: SNTP is then marked initialised");
+}
+
+static void test_ts_sntp_init_failure_on_empty_nvs_defaults_to_utc(void)
+{
+    TEST_SECTION("time_sync_start: sntp init failure on empty NVS -- non-OK, UTC default applied");
+    ts_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+
+    *esp_netif_sntp_stub_init_result() = ESP_ERR_NO_MEM;
+    esp_err_t err = time_sync_start();
+    *esp_netif_sntp_stub_init_result() = ESP_OK;
+
+    TEST_CHECK(err == ESP_ERR_NO_MEM, "the exact sntp error code is propagated");
+    time_sync_status_t st;
+    time_sync_get_status(&st);
+    TEST_CHECK(strcmp(st.tz, TIME_SYNC_TZ_DEFAULT) == 0, "UTC default is applied despite the sntp failure");
+}
+
 static void run_test_time_sync(void)
 {
     TEST_SECTION("time_sync (TZ validation + degrade-to-UTC)");
@@ -369,6 +417,8 @@ static void run_test_time_sync(void)
     test_ts_nvs_fallback_then_migrates();
     test_ts_divergence_tie_break_higher_rev_wins();
     test_ts_mount_failed_falls_through_to_nvs_only();
+    test_ts_sntp_init_failure_returns_error_and_tz_still_applied();
+    test_ts_sntp_init_failure_on_empty_nvs_defaults_to_utc();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

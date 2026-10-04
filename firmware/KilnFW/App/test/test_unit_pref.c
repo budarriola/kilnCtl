@@ -295,6 +295,94 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     cfg_fs_deinit();
 }
 
+// ---------------------------------------------------------------------
+// Startup-fault return coverage (a548dfc6): unit_pref_start() now returns an
+// error on a partition-init failure or an unrecovered hal_kv open/read error
+// so main_network_http.c can latch a startup fault. Each case also proves the
+// safe default is still applied (simulate_reboot() first poisons the RAM
+// value, so a start() that bailed without resetting would show).
+// ---------------------------------------------------------------------
+
+/* Occupy every fake_kv partition slot with unrelated names so
+ * hal_kv_init_partition(KILN_NVS_PARTITION) genuinely fails with HAL_NO_MEM --
+ * a real hal_kv_init_partition failure, no injection knob needed. */
+static void up_exhaust_partition_slots(void)
+{
+    static const char *const filler[] = { "fill_a", "fill_b", "fill_c", "fill_d" };
+    for (unsigned i = 0; i < sizeof(filler) / sizeof(filler[0]); i++) {
+        hal_kv_init_partition(filler[i]);
+    }
+}
+
+static void test_start_partition_init_failure_returns_error_and_defaults(void)
+{
+    TEST_SECTION("unit_pref_start: NVS partition init failure returns non-OK, Celsius default still applied");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    up_exhaust_partition_slots();
+    TEST_CHECK(hal_kv_init_partition(KILN_NVS_PARTITION) != HAL_OK,
+               "precondition: the NVS partition genuinely cannot be initialised");
+    simulate_reboot();
+
+    esp_err_t err = unit_pref_start();
+    TEST_CHECK(err != ESP_OK, "partition-init failure is reported (not swallowed as ESP_OK)");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "partition-init failure: the Celsius default is still applied");
+}
+
+static void test_start_open_error_without_file_returns_error(void)
+{
+    TEST_SECTION("unit_pref_start: hal_kv_open error with no file fallback returns non-OK, default applied");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+
+    TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "precondition: open failure armed");
+    esp_err_t err = unit_pref_start();
+    TEST_CHECK(err != ESP_OK, "open error with nothing recoverable is reported");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "open error: the Celsius default is still applied");
+}
+
+static void test_start_read_error_without_file_returns_error(void)
+{
+    TEST_SECTION("unit_pref_start: hal_kv read error (corrupt committed key) with no file fallback returns non-OK");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "precondition: Fahrenheit persisted to NVS");
+    TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_UNIT_PREF),
+               "precondition: the committed value is corrupted (reads return HAL_IO)");
+
+    simulate_reboot();
+    esp_err_t err = unit_pref_start();
+    TEST_CHECK(err != ESP_OK, "read error with nothing recoverable is reported");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "read error: the Celsius default is still applied");
+}
+
+static void test_start_nvs_error_but_file_fallback_returns_ok_with_file_value(void)
+{
+    TEST_SECTION("unit_pref_start: hal_kv open error but a valid cfg file supplies the value -- ESP_OK, file value applied");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    uint8_t fahrenheit = (uint8_t)UNIT_PREF_FAHRENHEIT;
+    TEST_CHECK(pref_cfg_fs_save(UNIT_PREF_FILE_PATH, &fahrenheit, sizeof(fahrenheit), 2) == ESP_OK,
+               "precondition: the file holds Fahrenheit at rev 2");
+    simulate_reboot();
+    s_unit_pref = UNIT_PREF_CELSIUS; // opposite of the expected result so the check below is not vacuous
+
+    TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "precondition: open failure armed");
+    esp_err_t err = unit_pref_start();
+    TEST_CHECK(err == ESP_OK, "file fallback recovered a value: start() reports success despite the NVS error");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "the file value (Fahrenheit) is applied");
+    TEST_CHECK(s_unit_pref_rev == 2, "the file's rev is adopted");
+
+    cfg_fs_deinit();
+}
+
 void run_test_unit_pref(void)
 {
     TEST_SECTION("unit_pref");
@@ -307,6 +395,11 @@ void run_test_unit_pref(void)
     test_divergence_tie_break_higher_rev_wins();
     test_dualwrite_status_reports_divergence();
     test_mount_failed_falls_through_to_nvs_only();
+
+    test_start_partition_init_failure_returns_error_and_defaults();
+    test_start_open_error_without_file_returns_error();
+    test_start_read_error_without_file_returns_error();
+    test_start_nvs_error_but_file_fallback_returns_ok_with_file_value();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

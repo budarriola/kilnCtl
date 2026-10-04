@@ -418,6 +418,94 @@ static void test_interrupted_write_leaves_old_file_intact(void)
     cfg_fs_deinit();
 }
 
+// ---------------------------------------------------------------------
+// Startup-fault return coverage (a548dfc6): ramp_assist_cfg_start() now returns an
+// error on a partition-init failure or an unrecovered hal_kv open/read error
+// so main_network_http.c can latch a startup fault. Each case also proves the
+// safe default is still applied (simulate_reboot() first poisons the RAM
+// value, so a start() that bailed without resetting would show).
+// ---------------------------------------------------------------------
+
+/* Occupy every fake_kv partition slot with unrelated names so
+ * hal_kv_init_partition(KILN_NVS_PARTITION) genuinely fails with HAL_NO_MEM --
+ * a real hal_kv_init_partition failure, no injection knob needed. */
+static void ra_exhaust_partition_slots(void)
+{
+    static const char *const filler[] = { "fill_a", "fill_b", "fill_c", "fill_d" };
+    for (unsigned i = 0; i < sizeof(filler) / sizeof(filler[0]); i++) {
+        hal_kv_init_partition(filler[i]);
+    }
+}
+
+static void test_ra_start_partition_init_failure_returns_error_and_defaults(void)
+{
+    TEST_SECTION("ramp_assist_cfg_start: NVS partition init failure returns non-OK, disabled default still applied");
+    ra_cfg_fs_reset();
+    fake_kv_reset_all();
+    ra_exhaust_partition_slots();
+    TEST_CHECK(hal_kv_init_partition(KILN_NVS_PARTITION) != HAL_OK,
+               "precondition: the NVS partition genuinely cannot be initialised");
+    simulate_reboot();
+
+    esp_err_t err = ramp_assist_cfg_start();
+    TEST_CHECK(err != ESP_OK, "partition-init failure is reported (not swallowed as ESP_OK)");
+    TEST_CHECK(ramp_assist_cfg_enabled() == false, "partition-init failure: the disabled default is still applied");
+}
+
+static void test_ra_start_open_error_without_file_returns_error(void)
+{
+    TEST_SECTION("ramp_assist_cfg_start: hal_kv_open error with no file fallback returns non-OK, default applied");
+    ra_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+
+    TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "precondition: open failure armed");
+    esp_err_t err = ramp_assist_cfg_start();
+    TEST_CHECK(err != ESP_OK, "open error with nothing recoverable is reported");
+    TEST_CHECK(ramp_assist_cfg_enabled() == false, "open error: the disabled default is still applied");
+}
+
+static void test_ra_start_read_error_without_file_returns_error(void)
+{
+    TEST_SECTION("ramp_assist_cfg_start: hal_kv read error (corrupt committed key) with no file fallback returns non-OK");
+    ra_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(ramp_assist_cfg_set_enabled(true) == ESP_OK, "precondition: enabled persisted to NVS");
+    TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_RAMP_ASSIST),
+               "precondition: the committed value is corrupted (reads return HAL_IO)");
+
+    simulate_reboot();
+    esp_err_t err = ramp_assist_cfg_start();
+    TEST_CHECK(err != ESP_OK, "read error with nothing recoverable is reported");
+    TEST_CHECK(ramp_assist_cfg_enabled() == false, "read error: the disabled default is still applied");
+}
+
+static void test_ra_start_nvs_error_but_file_fallback_returns_ok_with_file_value(void)
+{
+    TEST_SECTION("ramp_assist_cfg_start: hal_kv open error but a valid cfg file supplies the value -- ESP_OK, file value applied");
+    ra_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    uint8_t enabled_raw = 1;
+    TEST_CHECK(pref_cfg_fs_save(RAMP_ASSIST_FILE_PATH, &enabled_raw, sizeof(enabled_raw), 2) == ESP_OK,
+               "precondition: the file holds enabled at rev 2");
+    simulate_reboot();
+    s_ramp_assist_enabled = false; // opposite of the expected result so the check below is not vacuous
+
+    TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "precondition: open failure armed");
+    esp_err_t err = ramp_assist_cfg_start();
+    TEST_CHECK(err == ESP_OK, "file fallback recovered a value: start() reports success despite the NVS error");
+    TEST_CHECK(ramp_assist_cfg_enabled() == true, "the file value (enabled) is applied");
+    TEST_CHECK(s_ramp_assist_rev == 2, "the file's rev is adopted");
+
+    cfg_fs_deinit();
+}
+
 void run_test_ramp_assist_cfg(void)
 {
     test_default_is_disabled_on_empty_nvs();
@@ -430,6 +518,10 @@ void run_test_ramp_assist_cfg(void)
     test_equal_rev_divergence_adopts_nvs_not_the_stale_file();
     test_mount_failed_falls_through_to_nvs_only();
     test_interrupted_write_leaves_old_file_intact();
+    test_ra_start_partition_init_failure_returns_error_and_defaults();
+    test_ra_start_open_error_without_file_returns_error();
+    test_ra_start_read_error_without_file_returns_error();
+    test_ra_start_nvs_error_but_file_fallback_returns_ok_with_file_value();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
