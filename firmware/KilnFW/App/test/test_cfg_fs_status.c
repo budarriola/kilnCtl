@@ -406,21 +406,36 @@ static void test_buffer_too_small(void)
     cfg_fs_deinit();
 }
 
-/* Worst-case sizing for the real GET /api/cfgfs row set (2026-10-04, when the
- * zone_normals row made it 12): every row name diagnostics_http.c registers,
- * every rev at UINT32_MAX, diverged and migration_deferred set, rendered into
- * exactly the 3072 B the handler's cfgfs_status_scratch_t.json holds, with a
- * dual-write window and a long files[] list. Fails (ESP_ERR_INVALID_SIZE)
- * if a future row pushes the worst case past that buffer. */
+/* Worst-case sizing for the real GET /api/cfgfs response (2026-10-04, when the
+ * zone_normals row made it 12 rows). Renders through cfg_fs_status_build_json_ex(),
+ * the same entry point diagnostics_http.c's handler calls, with every section
+ * populated the way the handler populates it: all 12 real row names at
+ * UINT32_MAX revs with diverged and migration_deferred set, capacity known at
+ * SIZE_MAX-ish sizes, a completed-and-failed format object, a filled
+ * dual-write window, and the 11 real root files with multi-digit sizes. The
+ * host esp_err_to_name() stub returns "ERR", so the longest real error name
+ * (ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED, 38 chars) is added to the measured
+ * length by hand. The result must fit the handler's cfgfs_status_scratch_t.json
+ * (4096 B) with at least 400 B to spare. */
+#define WORST_CASE_HANDLER_BUF 4096u
 static void test_worst_case_fits_handler_buffer(void)
 {
-    TEST_SECTION("cfg_fs_status: all 12 real /api/cfgfs row names at UINT32_MAX revs fit the handler's 3072 B buffer");
+    TEST_SECTION("cfg_fs_status: worst-case /api/cfgfs (12 rows at UINT32_MAX, known capacity, failed format, "
+                 "filled window, 11 root files) via the handler's _ex path fits its 4096 B buffer with 400 B spare");
     cfg_fs_deinit();
     const char *base = "cfg_fs_status_test_worstcase";
     reset_scratch(base);
     TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
-    TEST_CHECK(cfg_fs_write_atomic("zones.json", "x", 1) == ESP_OK, "write a file");
-    TEST_CHECK(cfg_fs_write_atomic("zone_normals.dat", "x", 1) == ESP_OK, "write another file");
+
+    static const char *const files[11] = { "zones.json",    "kiln_configs.json", "unit_pref.dat",
+                                           "ki_base.dat",   "ramp_assist.dat",   "tz.dat",
+                                           "display_power.dat", "iter_tune.bin", "relay_cycles.dat",
+                                           "relay_names.dat", "zone_normals.dat" };
+    static char payload[123456];
+    memset(payload, 'x', sizeof(payload));
+    for (size_t i = 0; i < 11; i++) {
+        TEST_CHECK(cfg_fs_write_atomic(files[i], payload, sizeof(payload)) == ESP_OK, "write a real root file");
+    }
 
     static const char *const names[12] = { "zones",         "kiln_cfg_store", "unit_pref",     "profiles_hidden",
                                            "zone_normals",  "ramp_assist",    "display_power", "tz",
@@ -431,15 +446,27 @@ static void test_worst_case_fits_handler_buffer(void)
                                               .nvs_valid = true, .nvs_rev = UINT32_MAX, .diverged = true,
                                               .migration_deferred = true };
     }
-    char json[3072];
+    cfg_fs_capacity_info_t cap = { .known = true, .total_bytes = 4294967295u, .used_bytes = 4294967295u };
+    cfg_fs_format_progress_t fmt = { .known = true, .in_progress = false, .completed = true, .succeeded = false,
+                                     .elapsed_ms = UINT32_MAX, .result = ESP_FAIL };
+    dualwrite_window_status_t win = { .consecutive_clean_boots = UINT32_MAX, .clean_boots_target = UINT32_MAX,
+                                      .firing_complete = true, .restore_verified = true, .window_may_close = true };
+
+    static char json[WORST_CASE_HANDLER_BUF];
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json(base, NULL, items, 12, NULL, json, sizeof(json), &len);
-    TEST_CHECK(err == ESP_OK, "worst-case 12-row render fits 3072 B");
-    TEST_CHECK(err == ESP_OK && json_has(json, "\"name\":\"zone_normals\""), "zone_normals row is rendered");
-    TEST_CHECK(err == ESP_OK && json_has(json, "\"name\":\"zone_normals\",\"file_backed\":true,\"file_rev\":4294967295,"
-                                               "\"nvs_backed\":true,\"nvs_rev\":4294967295,\"diverged\":true"),
-               "zone_normals row carries the same fields as its siblings");
-    TEST_CHECK(err != ESP_OK || len < sizeof(json) - 400, "at least ~400 B of margin remains before the 3072 B cap");
+    esp_err_t err = cfg_fs_status_build_json_ex(base, &cap, items, 12, &fmt, &win, json, sizeof(json), &len);
+    TEST_CHECK(err == ESP_OK, "worst-case render fits the handler's buffer");
+    if (err == ESP_OK) {
+        size_t real_len = len + (strlen("ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED") - strlen(esp_err_to_name(ESP_FAIL)));
+        printf("  worst-case /api/cfgfs length: %lu B rendered, %lu B with longest esp_err name, buffer %u B\n",
+               (unsigned long)len, (unsigned long)real_len, WORST_CASE_HANDLER_BUF);
+        TEST_CHECK(json_has(json, "\"name\":\"zone_normals\",\"file_backed\":true,\"file_rev\":4294967295,"
+                                   "\"nvs_backed\":true,\"nvs_rev\":4294967295,\"diverged\":true"),
+                   "zone_normals row carries the same fields as its siblings");
+        TEST_CHECK(json_has(json, "\"name\":\"zone_normals.dat\""), "the files[] list is populated (sizes rendered)");
+        TEST_CHECK(json_has(json, "\"error\":"), "the format error string is rendered");
+        TEST_CHECK(real_len + 400 <= WORST_CASE_HANDLER_BUF, "at least 400 B of margin remains before the cap");
+    }
     cfg_fs_deinit();
 }
 

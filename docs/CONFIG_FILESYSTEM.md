@@ -171,6 +171,8 @@ Either outcome never blocks boot, never touches any partition other than
   `zone_normals` row comes from `zone_normals_get_dualwrite_status()`
   (`zones_config_store.c`): a fresh read of `zone_normals.dat` and of NVS key
   `zone_norm_cfg` with rev key `znorm_rev`, never a resync write.
+  Not every dual-written item has a row yet: `relay_names` (table item 3,
+  `relay_names.dat`) is dual-written but still has no `/api/cfgfs` row.
 - `"nvs_only"` — items that have not moved to file backing yet. **As of
   `2e88e90a` (2026-09-08) this array is empty** — every item this doc's
   migration table (below) tracks as MOVE (1-9) now has a real cfg-filesystem
@@ -180,7 +182,7 @@ Either outcome never blocks boot, never touches any partition other than
   `dual_write.items[]` row, so this array should not go stale silently a
   third time (see `2e88e90a`'s commit message for the second time it did).
   Zone normals (table item 2) now has its bridge and its own row
-  (`zone_normals`, below), so nothing is NVS-only any more.
+  (`zone_normals`, above), so nothing is NVS-only any more.
 
 ## If the filesystem fails to mount
 

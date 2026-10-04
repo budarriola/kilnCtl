@@ -1410,29 +1410,36 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6, collapsed the
  * PROFILES_MAX_COUNT profile-slot rows -- 8 of them at the time -- into ONE
  * aggregate "profiles" row so raising that constant to 100 doesn't also
- * mean 100 rows here; 2026-10-04 added the zone_normals row): worst case is now 12 item rows (zones,
- * kiln_cfg_store, 4 pref-backed items, profiles_hidden, zone_normals, one aggregate
- * profiles row, relay_cycles, adaptive_tune, firing_stats; plus ~190 B
- * for the top-level dual_write_window object) at up to ~120 bytes each
- * (longest name "display_power" and "firing_stats" -- both under the same
- * 120 B/row estimate, both revs at UINT32_MAX) = 12 * 120 = 1440 bytes for
- * the items array alone (was 2040 B for 17 items), plus the pre-existing
- * sections (header/capacity/format
- * ~300 B typical, nvs_only/nvs_permanent name lists ~300 B fixed now that
- * nvs_only is an empty array instead of three names, files[] typically a
- * handful of entries in real use though pathologically up to
- * CFG_FS_STATUS_MAX_FILES=32 max-length names could itself exceed any
- * reasonable buffer -- that pre-existing limit is unchanged by this pass).
- * 1440 + 190 + 300 + 300 = ~2230 B worst case, well under 3072 (previously ~2640 B
- * worst case for 17 items) -- NOT raised this pass, and this collapse only
- * grows the headroom. test_cfg_fs_status.c's worst-case sizing test renders
- * all 12 real row names at UINT32_MAX revs into exactly this 3072 B buffer. cfg_fs_status_build_json() still fails loudly with
+ * mean 100 rows here; 2026-10-04 added the zone_normals row, making it 12
+ * rows: zones, kiln_cfg_store, unit_pref, profiles_hidden, zone_normals,
+ * ramp_assist, display_power, tz, one aggregate profiles row, relay_cycles,
+ * adaptive_tune, firing_stats).
+ *
+ * 2026-10-04 re-measurement (the earlier ~120 B/row estimate was too low):
+ * a row with both revs at UINT32_MAX and migration_deferred is ~134 B plus
+ * its name, ~145 B on average, so 12 rows are ~1730 B. On top of that: the
+ * header/capacity (known)/format (completed and failed, with the longest
+ * esp_err name)/dual_write_window (filled)/nvs_only/nvs_permanent sections
+ * ~770 B, and the 11 real root files (zones.json, kiln_configs.json,
+ * unit_pref.dat, ki_base.dat, ramp_assist.dat, tz.dat, display_power.dat,
+ * iter_tune.bin, relay_cycles.dat, relay_names.dat, zone_normals.dat) with
+ * multi-digit sizes ~470 B. Measured total: 3008 B, which would leave only
+ * ~64 B in the old 3072 B buffer, so the buffer is now 4096 B (about 1090 B
+ * spare). test_cfg_fs_status.c's test_worst_case_fits_handler_buffer renders
+ * exactly this worst case through cfg_fs_status_build_json_ex(), the same
+ * entry point this handler uses, and requires >= 400 B of margin in 4096 B,
+ * so a future row or file that eats that margin fails the host test rather
+ * than the board. The buffer is part of this heap scratch, never an httpd
+ * stack buffer, so growing it costs no task-stack margin. A pathological
+ * files[] list (up to CFG_FS_STATUS_MAX_FILES=32 max-length names) could
+ * still exceed any reasonable buffer -- that pre-existing limit is
+ * unchanged. cfg_fs_status_build_json_ex() fails loudly with
  * ESP_ERR_INVALID_SIZE rather than truncating if a pathological files[]
  * list (or a future item count) ever pushes past it. */
 typedef struct {
     zones_cfg_t raw;
     dualwrite_window_status_t window; /* heap, not httpd stack -- see the budget note above */
-    char json[3072];
+    char json[4096];
 } cfgfs_status_scratch_t;
 
 /* Fills one row of the /api/cfgfs dual-write item list and advances *n. A
