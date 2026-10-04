@@ -235,6 +235,39 @@ void migrate_from_default_partition(void);
 void relay_names_load(void);
 esp_err_t relay_names_save(void);
 
+
+/* Zone normals (docs/CONFIG_FILESYSTEM.md item 2) -- shared with the host tests. See
+ * zones_config_store.c for the version history and the NVS-key rename story. */
+#define ZONE_NORMALS_CFG_VERSION 3
+#define NVS_KEY_ZONE_NORMALS "zone_norm_cfg"
+NVS_KEY_LEN_CHECK(NVS_KEY_ZONE_NORMALS);
+/* dual-write rev counter, its own key like NVS_KEY_RELAY_NAMES_REV */
+#define NVS_KEY_ZONE_NORMALS_REV "znorm_rev"
+NVS_KEY_LEN_CHECK(NVS_KEY_ZONE_NORMALS_REV);
+/* the `cfg` LittleFS file, via the generic pref_cfg_fs.h bridge */
+#define ZONE_NORMALS_FILE_PATH "zone_normals.dat"
+
+typedef struct {
+    uint8_t  version;
+    uint8_t  measured_mask; /* bit i = zone i has a measured normal current */
+    float    normal_current_a[MAX31856_CHANNEL_COUNT];
+    /* v2: the derived CT-channel -> zone mapping. bit c of
+     * ct_map_derived_mask set means ct_map_zone[c] is a zone index the sweep
+     * derived UNAMBIGUOUSLY (COMMISSIONING_UX.md sec 1.2's condition); a
+     * clear bit means "never derived", and ct_map_zone[c] is meaningless. */
+    uint8_t  ct_map_derived_mask;
+    uint8_t  ct_map_zone[ZONE_CT_CHANNEL_COUNT];
+    /* v3: the derived CT volts-per-amp scale. bit c of k_ct_derived_mask set
+     * means k_ct_v_per_a[c] is a value this board CALIBRATED from a complete
+     * sweep and confirmed written to the safety processor; a clear bit means
+     * "never derived here" and k_ct_v_per_a[c] is meaningless -- it says
+     * nothing about whether the Pico's own k_ct_v_per_a[c] is set, which an
+     * operator may always have entered by hand. */
+    uint8_t  k_ct_derived_mask;
+    float    k_ct_v_per_a[ZONE_CT_CHANNEL_COUNT];
+    uint32_t crc32;
+} zone_normals_cfg_t;
+
 void zone_normals_load(void);
 bool zone_normals_set(uint8_t zone_index, float amps);
 bool zone_normals_invalidate_mask(uint8_t zone_mask);

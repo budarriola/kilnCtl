@@ -534,6 +534,7 @@ try {
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +
+            "`"$(Join-Path $testDir 'test_zone_normals_cfg_fs.c')`" " +
             # 2026-09-24: zones_current_sweep_engine.c (#included via
             # test_zones_http.c) now reads through the shared thermo_channels_
             # read() helper (thermo_channel_read.c) instead of duplicating the

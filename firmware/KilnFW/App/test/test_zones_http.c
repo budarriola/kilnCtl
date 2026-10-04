@@ -15750,6 +15750,9 @@ extern void run_test_zones_config_cfg_fs(void);
  * bridge tests. */
 extern void run_test_relay_names_cfg_fs(void);
 
+/* test_zone_normals_cfg_fs.c -- item 2. */
+extern void run_test_zone_normals_cfg_fs(void);
+
 /* test_zones_blob_golden.c -- same convention; config_convert.py's zones_blob golden. */
 extern void run_test_zones_blob_golden(void);
 
@@ -15758,6 +15761,7 @@ int main(void)
     run_test_zones_http();
     run_test_zones_config_cfg_fs();
     run_test_relay_names_cfg_fs();
+    run_test_zone_normals_cfg_fs();
     run_test_zones_blob_golden();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -205,7 +205,7 @@ Of 24 inventoried runtime-changeable items:
 | # | Item | Status | Commit |
 |---|---|---|---|
 | 1 | Zones config (PID/FOPDT/coupling/guards/wiring/tc_type) | dual-write | `19f74959` |
-| 2 | Zone normals | still NVS-only | — |
+| 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`) | `42569d2b` |
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`) | `288dc91c` |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
@@ -241,9 +241,8 @@ Supporting infrastructure, not tied to one inventory item:
 | Equal-rev tie-break defect found and fixed (zones + profiles) | `2c7bd240` |
 | Boot-time mount call, auto-format-or-ask gate, `/api/cfgfs/format_pending`+`format_confirm`, factory-reset "all" scope format | *(this pass, 2026-09-07)* |
 
-12 items are dual-written (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14), 10 stay in NVS
-deliberately (13, 15-22, 24), 1 (23) is on the separate `logs` track, and 1
-(zone normals, item 2 -- in flight) is still NVS-only.
+13 items are dual-written (1-12, 14), 10 stay in NVS deliberately (13, 15-22, 24),
+and 1 (23) is on the separate `logs` track.
 
 ## Open items (2026-09-07)
 

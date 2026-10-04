@@ -1132,7 +1132,6 @@ esp_err_t relay_names_save(void)
  * able to say DERIVED on a later page load for that field too. A v2 blob is
  * discarded rather than migrated, for exactly the reason v1 was: one button
  * press re-measures the whole thing. */
-#define ZONE_NORMALS_CFG_VERSION 3
 /* RENAMED 2026-09-06 from "zone_normals_cfg" (16 chars) -- confirmed against
  * the installed ESP-IDF (nvs.h: `#define NVS_KEY_NAME_MAX_SIZE 16` "including
  * null terminator"; nvs_page.cpp's Item::MAX_KEY_LENGTH = sizeof(key)-1 = 15,
@@ -1158,7 +1157,6 @@ esp_err_t relay_names_save(void)
  * fake_kv.h's FAKE_KV_MAX_KEY_LEN (also 15 usable chars, deliberately kept
  * equal to NVS's real limit rather than raised) -- it is what caught this
  * during the nvs.h -> hal_kv.h migration's host-test pass. */
-#define NVS_KEY_ZONE_NORMALS "zone_norm_cfg"
 
 /* Compile-time guard so this class of bug (a >15-char NVS key that silently
  * never persists on real hardware) cannot recur in this file: every
@@ -1168,38 +1166,40 @@ esp_err_t relay_names_save(void)
  * gets the identical check. */
 NVS_KEY_LEN_CHECK(NVS_KEY_ZONES);
 NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
-NVS_KEY_LEN_CHECK(NVS_KEY_ZONE_NORMALS);
 
-typedef struct {
-    uint8_t  version;
-    uint8_t  measured_mask; /* bit i = zone i has a measured normal current */
-    float    normal_current_a[MAX31856_CHANNEL_COUNT];
-    /* v2: the derived CT-channel -> zone mapping. bit c of
-     * ct_map_derived_mask set means ct_map_zone[c] is a zone index the sweep
-     * derived UNAMBIGUOUSLY (COMMISSIONING_UX.md sec 1.2's condition); a
-     * clear bit means "never derived", and ct_map_zone[c] is meaningless. */
-    uint8_t  ct_map_derived_mask;
-    uint8_t  ct_map_zone[ZONE_CT_CHANNEL_COUNT];
-    /* v3: the derived CT volts-per-amp scale. bit c of k_ct_derived_mask set
-     * means k_ct_v_per_a[c] is a value this board CALIBRATED from a complete
-     * sweep and confirmed written to the safety processor; a clear bit means
-     * "never derived here" and k_ct_v_per_a[c] is meaningless -- it says
-     * nothing about whether the Pico's own k_ct_v_per_a[c] is set, which an
-     * operator may always have entered by hand. */
-    uint8_t  k_ct_derived_mask;
-    float    k_ct_v_per_a[ZONE_CT_CHANNEL_COUNT];
-    uint32_t crc32;
-} zone_normals_cfg_t;
+/* docs/CONFIG_FILESYSTEM.md item 2: zone normals dual-write to the `cfg`
+ * LittleFS partition through the generic pref_cfg_fs.h bridge, exactly as
+ * relay names do (fixed-size struct, no migration chain: a version mismatch
+ * is discarded, see ZONE_NORMALS_CFG_VERSION above). The dual-write rev
+ * counter lives in its own tiny NVS key for the same reason NVS_KEY_ZONES_REV
+ * and NVS_KEY_RELAY_NAMES_REV do -- it is not part of the measured data. */
+
 
 static struct {
     zone_normals_cfg_t cfg;
 } s_zone_normals;
+static uint32_t s_zone_normals_rev = 0;
 
 static uint32_t compute_zone_normals_crc(const zone_normals_cfg_t *cfg)
 {
     zone_normals_cfg_t tmp = *cfg;
     tmp.crc32 = 0;
     return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+}
+
+/* pref_cfg_fs_validate_fn_t for the zone-normals file: the exact length +
+ * version + CRC acceptance zone_normals_load()'s NVS path applies. */
+static bool zone_normals_validate(const void *bytes, size_t len)
+{
+    if (len != sizeof(zone_normals_cfg_t)) {
+        return false;
+    }
+    zone_normals_cfg_t cand;
+    memcpy(&cand, bytes, sizeof(cand));
+    if (cand.version != ZONE_NORMALS_CFG_VERSION) {
+        return false;
+    }
+    return compute_zone_normals_crc(&cand) == cand.crc32;
 }
 
 /* Same "reset to blank, log, move on" convention as relay_names_load() --
@@ -1209,43 +1209,69 @@ static uint32_t compute_zone_normals_crc(const zone_normals_cfg_t *cfg)
 void zone_normals_load(void)
 {
     memset(&s_zone_normals.cfg, 0, sizeof(s_zone_normals.cfg));
+    s_zone_normals_rev = 0;
+
+    zone_normals_cfg_t nvs_cand;
+    memset(&nvs_cand, 0, sizeof(nvs_cand));
+    bool nvs_valid = false;
+    uint32_t nvs_rev = 0;
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return;
+    if (err == HAL_OK) {
+        uint8_t raw[sizeof(zone_normals_cfg_t)];
+        size_t len = sizeof(raw);
+        if (hal_kv_get_blob(&h, NVS_KEY_ZONE_NORMALS, raw, &len) == HAL_OK) {
+            if (len != sizeof(zone_normals_cfg_t)) {
+                ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob is %u bytes, expected %u -- discarding",
+                         (unsigned)len, (unsigned)sizeof(zone_normals_cfg_t));
+            } else if (!zone_normals_validate(raw, len)) {
+                ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob failed version/CRC validation -- discarding");
+            } else {
+                memcpy(&nvs_cand, raw, sizeof(nvs_cand));
+                nvs_valid = true;
+            }
+        } /* never saved, or a read error -- blank NVS candidate is safe either way */
+        if (nvs_valid) {
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, NVS_KEY_ZONE_NORMALS_REV, &rev) == HAL_OK) {
+                nvs_rev = rev;
+            }
+        }
+        hal_kv_close(&h);
     }
-    uint8_t raw[sizeof(zone_normals_cfg_t)];
-    size_t len = sizeof(raw);
-    err = hal_kv_get_blob(&h, NVS_KEY_ZONE_NORMALS, raw, &len);
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        return; /* never saved, or a read error -- blank is safe either way */
+
+    /* File-vs-NVS read-through/tie-break via the generic bridge
+     * (pref_cfg_fs.h). With no `cfg` mount it is a pass-through returning
+     * exactly the NVS candidate. */
+    zone_normals_cfg_t resolved;
+    memset(&resolved, 0, sizeof(resolved));
+    uint32_t resolved_rev = 0;
+    bool used_file = false;
+    if (!pref_cfg_fs_resolve(ZONE_NORMALS_FILE_PATH, &nvs_cand, sizeof(zone_normals_cfg_t), nvs_valid, nvs_rev,
+                             zone_normals_validate, &resolved, &resolved_rev, &used_file)) {
+        return; /* neither side trustworthy -- every zone reads back as "never measured" */
     }
-    if (len != sizeof(zone_normals_cfg_t)) {
-        ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob is %u bytes, expected %u -- discarding",
-                 (unsigned)len, (unsigned)sizeof(zone_normals_cfg_t));
-        return;
-    }
-    zone_normals_cfg_t cand;
-    memcpy(&cand, raw, sizeof(cand));
-    if (cand.version != ZONE_NORMALS_CFG_VERSION) {
-        ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob version %u is not %u -- discarding", cand.version,
-                 ZONE_NORMALS_CFG_VERSION);
-        return;
-    }
-    uint32_t computed = compute_zone_normals_crc(&cand);
-    if (computed != cand.crc32) {
-        ESP_LOGE(ZONES_HTTP_TAG, "zone_normals blob CRC mismatch -- discarding");
-        return;
-    }
-    s_zone_normals.cfg = cand;
+    s_zone_normals.cfg = resolved;
+    s_zone_normals_rev = resolved_rev;
+    ESP_LOGI(ZONES_HTTP_TAG, "zone normals loaded (source=%s, rev=%lu)", used_file ? "file" : "NVS",
+             (unsigned long)s_zone_normals_rev);
 }
 
 static esp_err_t zone_normals_save(void)
 {
     s_zone_normals.cfg.version = ZONE_NORMALS_CFG_VERSION;
     s_zone_normals.cfg.crc32 = compute_zone_normals_crc(&s_zone_normals.cfg);
+    uint32_t new_rev = s_zone_normals_rev + 1;
+
+    /* File first, best-effort (same policy as relay_names_save()); NVS below
+     * stays authoritative and its failure is what the caller sees. */
+    esp_err_t file_err =
+        pref_cfg_fs_save(ZONE_NORMALS_FILE_PATH, &s_zone_normals.cfg, sizeof(s_zone_normals.cfg), new_rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(ZONES_HTTP_TAG, "zone normals file write failed: %s -- NVS remains the source of truth this boot",
+                 esp_err_to_name(file_err));
+    }
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
@@ -1254,6 +1280,9 @@ static esp_err_t zone_normals_save(void)
     }
     err = hal_kv_set_blob(&h, NVS_KEY_ZONE_NORMALS, &s_zone_normals.cfg, sizeof(s_zone_normals.cfg));
     if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_ZONE_NORMALS_REV, new_rev);
+    }
+    if (err == HAL_OK) {
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
@@ -1261,6 +1290,8 @@ static esp_err_t zone_normals_save(void)
         ESP_LOGW(ZONES_HTTP_TAG, "zone_normals_save failed: %s -- measured normals/CT map/k_ct will not "
                                   "survive a reboot",
                  hal_status_to_name(err));
+    } else {
+        s_zone_normals_rev = new_rev;
     }
     return hal_status_to_esp_err(err);
 }
