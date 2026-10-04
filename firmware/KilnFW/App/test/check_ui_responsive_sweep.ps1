@@ -76,10 +76,20 @@ function Remove-OrphanedSweepChrome {
         # Get-CimInstance (WMI) can block indefinitely under load, and this
         # runs BEFORE the wall-clock cap below starts, so it runs in a job
         # that is abandoned after 20s rather than awaited unbounded.
+        # Only TOP-LEVEL sweep Chromes whose parent is NOT a live node.exe are
+        # reaped: all sessions share %TEMP%, so a concurrent run's live Chrome
+        # (running node parent) must be spared. Renderer/GPU children (parent is
+        # a profile-matching chrome) are left to the taskkill /T of their root.
         $job = Start-Job -ScriptBlock {
-            Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -and $_.CommandLine -like '*kc-ui-sweep-profile-*' } |
-                ForEach-Object { $_.ProcessId }
+            $all = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and $_.CommandLine -like '*kc-ui-sweep-profile-*' })
+            $ids = @($all | ForEach-Object { [int]$_.ProcessId })
+            foreach ($c in $all) {
+                if ($ids -contains [int]$c.ParentProcessId) { continue }
+                $par = Get-Process -Id ([int]$c.ParentProcessId) -ErrorAction SilentlyContinue
+                if ($par -and $par.ProcessName -ieq 'node') { continue }
+                [int]$c.ProcessId
+            }
         }
         $done = Wait-Job -Job $job -Timeout 20
         $pids = @()
