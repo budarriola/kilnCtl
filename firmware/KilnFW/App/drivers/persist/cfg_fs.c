@@ -105,24 +105,39 @@ static void ensure_dir(const char *path)
     CFG_FS_MKDIR(path);
 }
 
+/* Path buffers for sweep_tmp(). They live on the heap, not in the caller's
+ * frame: cfg_fs_init() is reachable from system_bridge_task (factory_reset ->
+ * cfg_fs_confirm_format_device -> cfg_fs_init), a plain internal-DRAM 3072 B
+ * stack already measured low on hardware (892 B free, 2026-09-08), and three
+ * CFG_FS_PATH_MAX buffers (~1.2 KB) in this frame pushed the deepest static
+ * path past check_system_uart_bridge_stack_budget.ps1's ceiling. Same
+ * convention as cfg_fs_write_scratch_t / cfg_fs_list_scratch_t below. */
+typedef struct {
+    char tmp_dir[CFG_FS_PATH_MAX];
+    char victim[CFG_FS_PATH_MAX];
+#ifdef _WIN32
+    char glob[CFG_FS_PATH_MAX];
+#endif
+} cfg_fs_sweep_scratch_t;
+
 /* Deletes every regular file directly inside `<base>/.tmp/` (never
  * recurses, never touches the directory itself). Called once from
  * cfg_fs_init() so a write interrupted by a crash/power-loss in a PRIOR
  * boot never leaves stale partial data lying around -- the corresponding
  * final file (old or already-renamed-new) is untouched by this sweep,
  * since sweeping only ever removes files under .tmp/. */
-static size_t sweep_tmp(const char *base_dir)
+static size_t sweep_tmp_scratch(cfg_fs_sweep_scratch_t *sc, const char *base_dir)
 {
-    char tmp_dir[CFG_FS_PATH_MAX];
-    if (!path_join_ok(tmp_dir, sizeof(tmp_dir), base_dir, ".tmp")) {
+    char *tmp_dir = sc->tmp_dir;
+    if (!path_join_ok(tmp_dir, sizeof(sc->tmp_dir), base_dir, ".tmp")) {
         return 0;
     }
     ensure_dir(tmp_dir);
 
     size_t reaped = 0;
 #ifdef _WIN32
-    char glob[CFG_FS_PATH_MAX];
-    if (!path_join_ok(glob, sizeof(glob), tmp_dir, "*")) {
+    char *glob = sc->glob;
+    if (!path_join_ok(glob, sizeof(sc->glob), tmp_dir, "*")) {
         return 0;
     }
     struct _finddata_t fd;
@@ -134,8 +149,8 @@ static size_t sweep_tmp(const char *base_dir)
         if (fd.attrib & _A_SUBDIR) {
             continue;
         }
-        char victim[CFG_FS_PATH_MAX];
-        if (path_join_ok(victim, sizeof(victim), tmp_dir, fd.name) && remove(victim) == 0) {
+        char *victim = sc->victim;
+        if (path_join_ok(victim, sizeof(sc->victim), tmp_dir, fd.name) && remove(victim) == 0) {
             reaped++;
         }
     } while (_findnext(h, &fd) == 0);
@@ -150,8 +165,8 @@ static size_t sweep_tmp(const char *base_dir)
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
             continue;
         }
-        char victim[CFG_FS_PATH_MAX];
-        if (!path_join_ok(victim, sizeof(victim), tmp_dir, ent->d_name)) {
+        char *victim = sc->victim;
+        if (!path_join_ok(victim, sizeof(sc->victim), tmp_dir, ent->d_name)) {
             continue;
         }
         if (is_directory(victim)) {
@@ -163,6 +178,23 @@ static size_t sweep_tmp(const char *base_dir)
     }
     closedir(d);
 #endif
+    return reaped;
+}
+
+static size_t sweep_tmp(const char *base_dir)
+{
+    cfg_fs_sweep_scratch_t *sc = persist_scratch_alloc(sizeof(*sc));
+    if (!sc) {
+        /* Fail closed: reap nothing rather than fall back to stack buffers. */
+        static bool s_logged;
+        if (!s_logged) {
+            s_logged = true;
+            ESP_LOGW("cfg_fs", "sweep_tmp: scratch allocation failed, .tmp not swept");
+        }
+        return 0;
+    }
+    size_t reaped = sweep_tmp_scratch(sc, base_dir);
+    free(sc);
     return reaped;
 }
 
