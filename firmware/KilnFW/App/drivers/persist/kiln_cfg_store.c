@@ -2002,7 +2002,8 @@ typedef struct {
  * compatibility rules. */
 static bool validate_package_json_common(const char *json, kiln_cfg_import_scratch_t *s, char *name_out,
                                          size_t name_cap, uint16_t *pkg_schema_out, uint16_t *esp_blob_len_out,
-                                         uint32_t *pkg_hash_out, char *reason_out, size_t reason_cap)
+                                         uint32_t *pkg_hash_out, char *reason_out, size_t reason_cap,
+                                         bool allow_unset_ceiling)
 {
     char name[KILN_CFG_NAME_MAX_LEN + 1];
     uint16_t pkg_schema = 0;
@@ -2189,7 +2190,18 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
      * package whose Pico half never sets abs_max_temp_c at all cannot be
      * safety-checked against this rule and is refused rather than assumed
      * safe (0.0f as a checked value would look "tighter than everything",
-     * masking the real defect: no ceiling packaged at all). */
+     * masking the real defect: no ceiling packaged at all).
+     *
+     * Exception, `allow_unset_ceiling` (backup RESTORE only, 2026-10-04 bench
+     * bug): kiln_cfg_store_save_current() legitimately stores a slot whose
+     * Pico half has no abs_max_temp_c SET (the board's safety cache was never
+     * commissioned when it was saved), and backup export serializes exactly
+     * that, so refusing it here made the board's own backup unrestorable.
+     * "Not yet commissioned" is not "unsafe" -- the same convention the
+     * apply-time re-check follows -- so restore skips only the MISSING-ceiling
+     * refusal. A ceiling that IS set is still checked (tighter than the zones,
+     * or above the sanity ceiling, still refused), and no ceiling value is
+     * invented. A hand-uploaded package keeps the strict rule. */
     {
         float max_zone_temp_c = 0.0f;
         for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
@@ -2211,12 +2223,12 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
             }
         }
         if (max_zone_temp_c > 0.0f) {
-            if (!have_abs_max) {
+            if (!have_abs_max && !allow_unset_ceiling) {
                 IMPORT_REFUSE("package's safety-processor section has no abs_max_temp_c ceiling set, "
                               "so it cannot be checked against the package's own configured zone "
                               "temperatures -- refused rather than assumed safe");
             }
-            if (pico_abs_max_temp_c < max_zone_temp_c) {
+            if (have_abs_max && pico_abs_max_temp_c < max_zone_temp_c) {
                 /* Pass the FLOAT expressions directly, not cast to (double):
                  * varargs promotes float to double either way, but an
                  * explicit (double) cast changes the expression's STATIC
@@ -2294,7 +2306,8 @@ bool kiln_cfg_store_validate_package_json(const char *json, char *name_out, size
     }
     uint16_t esp_blob_len = 0;
     bool ok = validate_package_json_common(json, s, name_out, name_cap, out_pkg_schema, &esp_blob_len,
-                                           out_pkg_hash, reason_out, reason_cap);
+                                           out_pkg_hash, reason_out, reason_cap,
+                                           /*allow_unset_ceiling=*/true); /* backup restore dry-run only */
     free(s);
     return ok;
 }
@@ -2328,7 +2341,8 @@ bool kiln_cfg_store_import_package_json_as(const char *json, const char *name_ov
     } while (0)
 
     if (!validate_package_json_common(json, s, normalized, sizeof(normalized), &pkg_schema, &esp_blob_len,
-                                      &recomputed, reason_out, reason_cap)) {
+                                      &recomputed, reason_out, reason_cap,
+                                      /*allow_unset_ceiling=*/name_override != NULL)) {
         goto done; /* reason already filled */
     }
 

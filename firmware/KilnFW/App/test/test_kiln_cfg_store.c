@@ -2611,6 +2611,87 @@ static void test_import_refuses_missing_abs_max_temp_c_when_zone_configured(void
     free(json);
 }
 
+static char *build_ceiling_test_json(const char *name, float zone_max_c, bool ceiling_set, float ceiling_c)
+{
+    zones_cfg_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cand.zones[0].thermo_mask = 0x01;
+    cand.zones[0].max_temp_c = zone_max_c;
+    s_stub_blob_size = sizeof(cand);
+
+    kiln_pkg_safety_t pico;
+    memset(&pico, 0, sizeof(pico));
+    if (ceiling_set) {
+        union { uint32_t bits; float f; } conv;
+        conv.f = ceiling_c;
+        pico.count = 1;
+        pico.entries[0].param_id = 0x0104u;
+        pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+        pico.entries[0].flags = KILN_PKG_PARAM_FLAG_SET;
+        pico.entries[0].value_bits = conv.bits;
+    } else {
+        // What kiln_cfg_store_save_current() captures when the safety cache was never commissioned: the
+        // entry is PRESENT but flags == 0 (unset), exactly as in the 2026-10-04 bench backup.
+        pico.count = 1;
+        pico.entries[0].param_id = 0x0104u;
+        pico.entries[0].type = KILNLINK_PARAM_TYPE_F32;
+        pico.entries[0].flags = 0;
+        pico.entries[0].value_bits = 0;
+    }
+    uint32_t hash = 0;
+    TEST_CHECK(kiln_package_compute_hash(1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, &hash),
+               "test setup: hash computation");
+    char *json = (char *)malloc(KILN_PKG_JSON_MAX_LEN);
+    TEST_CHECK(json != NULL, "test scratch alloc");
+    size_t len = 0;
+    TEST_CHECK(kiln_package_export_json(name, 1, (const uint8_t *)&cand, (uint16_t)sizeof(cand), &pico, hash,
+                                        0x11223344u, json, KILN_PKG_JSON_MAX_LEN, &len),
+               "test setup: package JSON built");
+    return json;
+}
+
+static void test_restore_path_accepts_unset_ceiling_but_still_checks_a_set_one(void)
+{
+    TEST_SECTION("backup-restore path (validate_package_json / import_package_json_as with a name override): "
+                 "a package whose Pico abs_max_temp_c is UNSET -- what the board's own export emits for a "
+                 "never-commissioned slot -- restores; a SET but too-tight ceiling is still refused; the "
+                 "hand-upload path (no name override) keeps its strict refusal");
+    reset_state();
+    test_stub_zones_set_thermo_count(1);
+
+    char name_out[KILN_CFG_NAME_MAX_LEN + 1];
+    uint16_t schema = 0;
+    uint32_t hash_out = 0;
+    char reason[200] = {0};
+
+    char *unset = build_ceiling_test_json("Unset", 1200.0f, false, 0.0f);
+    TEST_CHECK(kiln_cfg_store_validate_package_json(unset, name_out, sizeof(name_out), &schema, &hash_out, reason,
+                                                    sizeof(reason)),
+               "restore dry-run accepts an unset ceiling");
+    int32_t new_id = -1;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_import_package_json_as(unset, "Unset", &new_id, reason, sizeof(reason)),
+               "restore create (name override) accepts an unset ceiling");
+    TEST_CHECK(new_id > 0, "a real slot was allocated");
+    reason[0] = '\0';
+    new_id = -1;
+    TEST_CHECK(!kiln_cfg_store_import_package_json(unset, &new_id, reason, sizeof(reason)),
+               "hand-upload path still refuses an unset ceiling");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "reason names the field");
+    free(unset);
+
+    char *tight = build_ceiling_test_json("Tight", 1200.0f, true, 900.0f);
+    reason[0] = '\0';
+    TEST_CHECK(!kiln_cfg_store_validate_package_json(tight, name_out, sizeof(name_out), &schema, &hash_out, reason,
+                                                     sizeof(reason)),
+               "restore dry-run still refuses a SET ceiling tighter than the zones");
+    TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "reason names the field");
+    reason[0] = '\0';
+    TEST_CHECK(!kiln_cfg_store_import_package_json_as(tight, "Tight", &new_id, reason, sizeof(reason)),
+               "restore create still refuses a SET ceiling tighter than the zones");
+    free(tight);
+}
+
 static void test_import_accepts_abs_max_temp_c_at_or_above_zone_max(void)
 {
     TEST_SECTION("kiln_cfg_store_import_package_json -- section 5.3 table row 1: a Pico ceiling AT OR ABOVE "
@@ -3788,6 +3869,7 @@ void run_test_kiln_cfg_store(void)
     test_import_refuses_abs_max_temp_c_above_firmware_ceiling();
     test_import_refuses_missing_abs_max_temp_c_when_zone_configured();
     test_import_accepts_abs_max_temp_c_at_or_above_zone_max();
+    test_restore_path_accepts_unset_ceiling_but_still_checks_a_set_one();
     test_import_cross_board_forces_calibration_reset();
     test_import_matching_board_preserves_calibration();
     test_import_absent_source_board_id_forces_calibration_reset();
