@@ -688,3 +688,17 @@ Nothing hard. Both former WP-1 questions are now decided (owner 2026-10-04): the
 toggle applies only while idle and the rule wins from firing start (sec 15f), and the S3
 blind spot is closed by "aux outside CT" wiring plus WP-9 (sec 15a). The 895 B cap claim
 must not be relied on until re-measured (WP-4).
+
+### g. WP-1 review corrections (2026-10-04)
+
+- Sec 3 item 2's premise ("every caller inherits it via validate") is FALSE for two paths.
+  `POST /api/zones` assigns `s_zones.cfg = tmp` (`zones_http_post.c:~499`) without calling
+  `zones_config_json_validate()`, and `backup_import.c` commits through
+  `zones_config_set_relay_mask_no_save()` / `zones_config_restore_snapshot_no_save()`, neither
+  of which validates. Only `zones_config_json_decode_blob` and `kiln_cfg_store.c` call validate.
+  WP-2 must call the aux conflict check explicitly on both paths, then delete the
+  `PENDING-WP2` markers in `tools/check_aux_relay_conflict_sites.ps1` (it WARNs while they exist).
+- Boot order: `aux_outputs_cfg_start()` and the zones provider registration must run AFTER
+  `kiln_cfg_store_init()`, not next to `relay_names_load()` (zones union is 0 there, and the
+  package re-import can still change `relay_mask`; a provider registered earlier would fail
+  that import and clear the active package id).

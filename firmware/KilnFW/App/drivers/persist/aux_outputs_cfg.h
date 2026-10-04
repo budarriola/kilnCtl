@@ -13,8 +13,13 @@
 // relay_mask or an ENABLED aux entry. Writers of the zones side call
 // zones_config_json_validate(), which consults the provider registered with
 // zones_config_json_set_aux_enabled_provider(aux_outputs_cfg_enabled_mask) --
-// WP-2 does that registration right after aux_outputs_cfg_start() at boot
-// (this module deliberately does not link zones_config_json.c). This module's
+// WP-2 does that registration at boot (this module deliberately does not link
+// zones_config_json.c). BOOT ORDER: both aux_outputs_cfg_start() and the provider
+// registration must run AFTER kiln_cfg_store_init(). relay_names_load() runs
+// before nvs_load() in zones_http_start(), so the zones union is still 0 there,
+// and kiln_cfg_store_init() re-imports the active package later (main_network_http.c),
+// which can change relay_mask; with the provider registered before that import, a
+// conflict would fail the import and clear and persist the active package id. This module's
 // own setter checks the other side against the zones union its caller passes in. At start(), if the
 // persisted pair conflicts (corrupt, or a writer was missed), the aux entry is
 // forced disabled IN RAM ONLY, a sticky aux_conflict flag is reported, and the
@@ -77,8 +82,9 @@ extern "C" {
 /* Loads the persisted store (all-disabled if nothing valid), reconciles it
  * against `zones_relay_union` (the OR of every configured zone's relay_mask,
  * zone_owned_relay_mask()). Non-fatal: always ESP_OK. Idempotent. WP-2 calls this
- * next to relay_names_load() at boot, then registers aux_outputs_cfg_enabled_mask
- * as the zones-validate provider. */
+ * AFTER kiln_cfg_store_init() (NOT next to relay_names_load(): the zones union
+ * is 0 there and the package re-import can still change it), then registers
+ * aux_outputs_cfg_enabled_mask as the zones-validate provider. */
 esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union);
 
 /* relay is 1-based (1..AUX_OUTPUTS_COUNT). false if out of range. */

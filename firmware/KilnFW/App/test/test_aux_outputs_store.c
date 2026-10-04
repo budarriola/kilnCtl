@@ -241,6 +241,31 @@ static void test_newer_version_quarantined(void)
     hal_kv_close(&h);
 }
 
+static void test_oversize_blob_quarantined(void)
+{
+    TEST_SECTION("start(): a blob larger than 256 B (wider newer schema) is quarantined, never defaulted over");
+    fresh_board();
+    aux_outputs_cfg_start(0);
+    uint8_t huge[400];
+    memset(huge, 0xCD, sizeof(huge));
+    huge[0] = AUX_OUTPUTS_CFG_VERSION + 1;
+    stash_blob(huge, sizeof(huge), 9);
+
+    simulate_reboot();
+    aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_quarantined(), "oversize blob quarantines");
+    aux_output_entry_t e = on_entry();
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) == ESP_ERR_INVALID_STATE, "set refuses to overwrite the oversize blob");
+    hal_kv_handle_t h;
+    uint8_t back[400];
+    size_t len = sizeof(back);
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK, "open");
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, back, &len) == HAL_OK && len == sizeof(huge) &&
+                   memcmp(back, huge, len) == 0,
+               "oversize blob intact");
+    hal_kv_close(&h);
+}
+
 static void test_corrupt_blob_defaults(void)
 {
     TEST_SECTION("start(): corrupt blob (bad CRC / wrong size) -> all-disabled defaults, may be rewritten");
@@ -318,6 +343,7 @@ void run_test_aux_outputs_store(void)
     test_set_refuses_zone_claimed_relay();
     test_boot_conflict_forces_aux_off_in_ram_only();
     test_newer_version_quarantined();
+    test_oversize_blob_quarantined();
     test_corrupt_blob_defaults();
     test_dual_write_and_file_tiebreak();
 

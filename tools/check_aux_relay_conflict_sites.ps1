@@ -11,7 +11,10 @@
 # comment-stripped text calls zones_config_set_relay_mask[_no_save](),
 # zones_config_import_blob(), zones_config_restore_snapshot_no_save(), or
 # assigns a `.relay_mask =` / `->relay_mask =` field, and FAILS if the file is
-# not on the allowlist below. A new entry needs a reviewed reason that the
+# not on the allowlist below. An allowlist reason starting with PENDING-WP2: marks
+# a path that is NOT yet covered (zones_config_json_validate is not called on it);
+# the check prints a WARN for each and WP-2 must add the explicit conflict check
+# there and delete the marker. A new entry needs a reviewed reason that the
 # path is covered by zones_config_json_validate()'s aux hook (or is not a
 # persistent authority).
 #
@@ -25,8 +28,8 @@ $AppDir = (Resolve-Path $AppDir).Path
 
 $allow = @{
     'zones_config_accessors.c'            = 'defines the setters/import/restore; validated by zones_config_json_validate on commit'
-    'zones_http_post_parse.c'             = 'POST /api/zones parse; result goes through validate before commit'
-    'backup_import.c'                     = 'backup import; stages via no_save setters, commits through validated store, snapshot restore on failure'
+    'zones_http_post_parse.c'             = 'PENDING-WP2: NOT yet covered: WP-2 must add an explicit aux-conflict check; validate is not called on this path (POST /api/zones assigns s_zones.cfg = tmp without zones_config_json_validate)'
+    'backup_import.c'                     = 'PENDING-WP2: NOT yet covered: WP-2 must add an explicit aux-conflict check; validate is not called on this path (zones_config_set_relay_mask_no_save / restore_snapshot_no_save do not validate)'
     'kiln_cfg_store.c'                    = 'kiln package apply; whole-blob commit via zones_config_import_blob (validated)'
     'kiln_cfg_swap.c'                     = 'kiln package swap; whole-blob commit via zones_config_import_blob (validated)'
     'zones_config_convert.c'              = 'version-to-version struct copies, not a commit authority'
@@ -59,5 +62,8 @@ if ($bad.Count -gt 0) {
     Write-Host "Review against the aux conflict invariant, then add to the allowlist with a reason."
     exit 1
 }
+$pend = @($hit.Keys | Where-Object { $allow[$_] -like 'PENDING-WP2:*' } | Sort-Object)
+foreach ($p in $pend) { Write-Host "WARN: $p is allowlisted as PENDING-WP2 -- aux conflict NOT enforced on this path yet" }
+if ($pend.Count -gt 0) { Write-Host "PASS-WITH-WARNINGS: $($hit.Count) writer file(s) allowlisted, $($pend.Count) uncovered pending WP-2"; exit 0 }
 Write-Host "PASS: $($hit.Count) writer file(s), all allowlisted"
 exit 0

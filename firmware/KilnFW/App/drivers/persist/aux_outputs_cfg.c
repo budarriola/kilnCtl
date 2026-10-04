@@ -141,7 +141,12 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
             size_t len = 0;
             /* Probe the size first: a get_blob into a too-small buffer fails
              * (HAL_INVALID_SIZE) and would hide a wider, newer-version blob. */
-            if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, NULL, &len) == HAL_OK && len > 0 && len <= sizeof(raw)) {
+            if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, NULL, &len) == HAL_OK && len > sizeof(raw)) {
+                /* Wider than any layout this build could have written: a newer
+                 * schema. Quarantine rather than default, so set() can never
+                 * overwrite it. */
+                nvs_newer = true;
+            } else if (len > 0 && len <= sizeof(raw)) {
                 size_t rl = len;
                 if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, raw, &rl) == HAL_OK && rl > 0) {
                     if (rl == sizeof(nvs_blob) && aux_validate(raw, rl)) {
