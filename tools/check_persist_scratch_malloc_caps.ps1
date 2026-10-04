@@ -12,17 +12,27 @@
 # persist/persist_scratch.h's persist_scratch_alloc() (PSRAM first, internal
 # fallback) -- the same shape backup_import.c already used.
 #
-# WHAT IT FLAGS. In the four files below, after stripping comments, any
-# malloc( / calloc( call whose size argument is (a) a sizeof() of anything
-# other than a plain scalar type, or (b) a numeric literal >= 1024, or (c) an
-# ALL_CAPS macro/constant (size unknown here, assumed large). Fix by using
-# persist_scratch_alloc(), or heap_caps_malloc(..., MALLOC_CAP_SPIRAM |
-# MALLOC_CAP_8BIT) with a plain-malloc fallback. Calls that are themselves a
-# fallback directly after a heap_caps_malloc() are allowed.
+# HOW IT PARSES. Each file listed in $files has its C comments stripped from
+# the whole text (string/char literals are left alone), then every
+# malloc( / calloc( call is found and its argument text is extracted with
+# balanced parentheses, so a call whose arguments wrap across lines is seen
+# exactly like a one-line call. heap_caps_malloc() is not matched.
 #
-# Remaining plain sites must be listed in $allow below with a reason; an
-# allowlist entry that no longer matches anything is itself an error, so the
-# list cannot rot.
+# WHAT IT FLAGS. From a call's argument text, integer literals below 1024
+# (suffixes u/l/ul/ull etc. allowed) and sizeof() of a plain scalar type (no
+# '[' inside) are dropped. The call is flagged if what remains contains a
+# non-scalar sizeof, an integer literal of 1024 or more, or ANY identifier
+# (a runtime-sized or macro-sized allocation can be large). Fix a flagged
+# site by using persist_scratch_alloc(), or heap_caps_malloc(...,
+# MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) with a plain-malloc fallback.
+#
+# ALLOWLIST. A flagged call that is deliberately plain is listed in $allow,
+# keyed by repo-relative file path plus the whitespace-normalized call text
+# (e.g. "malloc(sizeof(*v2))"), with the exact number of occurrences expected
+# and a one-line reason. Nothing is detected automatically: a fallback after a
+# heap_caps_malloc() attempt must be allowlisted like any other site. The
+# count must match exactly, so a duplicated call or a removed one fails the
+# check, and an entry that matches nothing fails as stale; the list cannot rot.
 param(
     [string]$RepoRoot
 )
@@ -36,73 +46,123 @@ $files = @(
     "firmware/KilnFW/App/drivers/http/backup_import.c"
 )
 
-# file-basename | exact trimmed code line | reason
+# file | normalized call text | expected count | reason
 $allow = @(
-    @("kiln_cfg_store.c", "kiln_cfg_store_blob_v1_t *v1 = malloc(sizeof(*v1));",
-      "once-per-board v1->v3 migration at boot (nvs_load_store), never on the import path; reads straight from NVS"),
-    @("kiln_cfg_store.c", "kiln_cfg_store_blob_v2_t *v2 = malloc(sizeof(*v2));",
-      "once-per-board v1/v2->v3 migration at boot (two sites), never on the import path"),
-    @("backup_import.c", "scratch = malloc(sizeof(*scratch));",
-      "internal fallback directly after a heap_caps_malloc(SPIRAM) attempt"),
-    @("backup_import.c", "zone_candidates = malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);",
-      "internal fallback directly after a heap_caps_malloc(SPIRAM) attempt"),
-    @("backup_import.c", "timing_profile_candidates = malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);",
-      "internal fallback directly after a heap_caps_malloc(SPIRAM) attempt"),
-    @("backup_import.c", "backup_import_job_ctx_t *ctx = malloc(sizeof(backup_import_job_ctx_t));",
+    @("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v1))", 1,
+      "v1 migration buffer: bounded legacy schema struct, once-per-board migration at boot, never on the import path"),
+    @("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v2))", 2,
+      "v2 migration buffer (two sites): bounded legacy schema struct, once-per-board migration at boot, never on the import path"),
+    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(*scratch))", 1,
+      "internal fallback after a heap_caps_malloc(SPIRAM) attempt"),
+    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
+      "internal fallback after a heap_caps_malloc(SPIRAM) attempt"),
+    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
+      "internal fallback after a heap_caps_malloc(SPIRAM) attempt"),
+    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(backup_import_job_ctx_t))", 1,
       "24-byte job context handed to the async task, not scratch")
 )
 
-function Get-CodeLines {
+$scalarSizeof = 'sizeof\s*\(\s*(?:const\s+|unsigned\s+|signed\s+)*(?:char|uint8_t|int8_t|uint16_t|int16_t|uint32_t|int32_t|uint64_t|int64_t|int|short|long|float|double|size_t|bool)\b[^\[\)]*\)'
+$intLiteral = '(?<![\w.])(0[xX][0-9a-fA-F]+|\d+)[uU]?[lL]{0,2}(?![\w.])'
+
+# Replace comments with spaces (newlines preserved, so line numbers survive);
+# string and char literals are matched first so "//" inside them survives.
+function Get-CodeText {
     param([string]$Path)
     $text = [System.IO.File]::ReadAllText($Path)
-    # Strip block comments but keep newlines so line numbers survive.
-    $text = [regex]::Replace($text, '/\*.*?\*/', { param($m) ([regex]::Replace($m.Value, '[^\r\n]', ' ')) }, 'Singleline')
-    $text = [regex]::Replace($text, '//[^\r\n]*', '')
-    return ,($text -split "`r?`n")
+    $pat = '"(?:\\.|[^"\\\r\n])*"|''(?:\\.|[^''\\\r\n])*''|/\*.*?\*/|//[^\r\n]*'
+    return [regex]::Replace($text, $pat, {
+        param($m)
+        if ($m.Value.StartsWith('/')) { [regex]::Replace($m.Value, '[^\r\n]', ' ') } else { $m.Value }
+    }, 'Singleline')
 }
 
-$scalar = '^(char|uint8_t|int8_t|uint16_t|int16_t|uint32_t|int32_t|uint64_t|int64_t|int|unsigned|float|double|size_t|bool)\b'
+# Returns the argument text between the '(' at $open and its matching ')',
+# or $null if unbalanced.
+function Get-BalancedArgs {
+    param([string]$Text, [int]$Open)
+    $depth = 0
+    for ($k = $Open; $k -lt $Text.Length; $k++) {
+        $c = $Text[$k]
+        if ($c -eq '"' -or $c -eq "'") {
+            $q = $c
+            $k++
+            while ($k -lt $Text.Length -and $Text[$k] -ne $q) {
+                if ($Text[$k] -eq '\') { $k++ }
+                $k++
+            }
+            continue
+        }
+        if ($c -eq '(') { $depth++ }
+        elseif ($c -eq ')') {
+            $depth--
+            if ($depth -eq 0) { return $Text.Substring($Open + 1, $k - $Open - 1) }
+        }
+    }
+    return $null
+}
+
+function Test-Flagged {
+    param([string]$ArgText)
+    $rest = [regex]::Replace($ArgText, $scalarSizeof, ' ')
+    foreach ($n in [regex]::Matches($rest, $intLiteral)) {
+        $v = $n.Groups[1].Value
+        $num = if ($v -match '^0[xX]') { [Convert]::ToInt64($v.Substring(2), 16) } else { [int64]$v }
+        if ($num -ge 1024) { return $true }
+    }
+    $rest = [regex]::Replace($rest, $intLiteral, ' ')
+    # Anything identifier-shaped left (non-scalar sizeof, macro, variable) is flagged.
+    return ($rest -match '[A-Za-z_]\w*')
+}
+
 $fail = @()
-$used = @{}
+$found = @{}      # "rel|call" -> count
+$where = @{}      # "rel|call" -> list of line numbers
 foreach ($rel in $files) {
     $path = Join-Path $RepoRoot $rel
     if (-not (Test-Path $path)) { throw "check_persist_scratch_malloc_caps.ps1: $rel not found -- moved/renamed? update this script" }
-    $base = Split-Path $rel -Leaf
-    $lines = Get-CodeLines $path
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $ln = $lines[$i]
-        foreach ($m in [regex]::Matches($ln, '(?<![\w])(malloc|calloc)\s*\(([^;]*)\)')) {
-            $arg = $m.Groups[2].Value
-            $big = $false
-            foreach ($s in [regex]::Matches($arg, 'sizeof\s*\(\s*([^)]*?)\s*\)')) {
-                if ($s.Groups[1].Value -notmatch $scalar) { $big = $true }
-            }
-            foreach ($n in [regex]::Matches($arg, '(?<![\w.])(0x[0-9a-fA-F]+|\d+)u?(?![\w.])')) {
-                $v = $n.Groups[1].Value
-                $num = if ($v -like '0x*') { [Convert]::ToInt64($v.Substring(2), 16) } else { [int64]$v }
-                if ($num -ge 1024) { $big = $true }
-            }
-            if ($arg -match '(?<![\w])[A-Z][A-Z0-9_]{3,}(?![\w])') { $big = $true }
-            if (-not $big) { continue }
-            $trim = $ln.Trim()
-            $ok = $false
-            foreach ($a in $allow) {
-                if ($a[0] -eq $base -and $trim -eq $a[1]) { $ok = $true; $used["$($a[0])|$($a[1])"] = $true }
-            }
-            if (-not $ok) {
-                $fail += "${rel}:$($i + 1): plain $($m.Groups[1].Value)($($arg.Trim())) -- use persist_scratch_alloc() (PSRAM first) or add a reasoned `$allow entry"
-            }
+    $text = Get-CodeText $path
+    foreach ($m in [regex]::Matches($text, '(?<![\w])(malloc|calloc)\s*\(')) {
+        $open = $m.Index + $m.Length - 1
+        $argText = Get-BalancedArgs $text $open
+        $line = ($text.Substring(0, $m.Index) -split "`n").Count
+        if ($null -eq $argText) {
+            $fail += "${rel}:${line}: unbalanced parentheses in $($m.Groups[1].Value)( call -- cannot analyse"
+            continue
         }
+        if (-not (Test-Flagged $argText)) { continue }
+        $norm = ($m.Groups[1].Value + "(" + $argText + ")") -replace '\s+', ' '
+        $norm = $norm -replace '\(\s+', '(' -replace '\s+\)', ')'
+        $key = "$rel|$norm"
+        $found[$key] = 1 + [int]$found[$key]
+        if (-not $where.ContainsKey($key)) { $where[$key] = @() }
+        $where[$key] += $line
+    }
+}
+
+$allowKeys = @{}
+foreach ($a in $allow) { $allowKeys["$($a[0])|$($a[1])"] = $a }
+
+foreach ($key in ($found.Keys | Sort-Object)) {
+    if (-not $allowKeys.ContainsKey($key)) {
+        $rel, $call = $key -split '\|', 2
+        $fail += "${rel}:$($where[$key] -join ','): plain $call -- use persist_scratch_alloc() (PSRAM first) or add a reasoned `$allow entry"
     }
 }
 foreach ($a in $allow) {
-    if (-not $used["$($a[0])|$($a[1])"]) {
+    $key = "$($a[0])|$($a[1])"
+    $n = [int]$found[$key]
+    if ($n -eq 0) {
         $fail += "stale allowlist entry (no matching site): $($a[0]) :: $($a[1])"
+    } elseif ($n -ne $a[2]) {
+        $fail += "allowlist count mismatch: $($a[0]) :: $($a[1]) expected $($a[2]) found $n (lines $($where[$key] -join ','))"
     }
 }
 if ($fail.Count -gt 0) {
     $fail | ForEach-Object { Write-Host "FAIL: $_" }
     exit 1
 }
-Write-Host "OK: no unallowlisted large plain malloc/calloc in persist scratch files ($($allow.Count) allowlisted sites)"
+$total = 0
+foreach ($a in $allow) { $total += $a[2] }
+Write-Host "OK: no unallowlisted large plain malloc/calloc in persist scratch files ($($allow.Count) allowlist entries, $total allowlisted sites)"
 exit 0
