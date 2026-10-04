@@ -18,8 +18,12 @@
 #include "esp_ota_ops.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_attr.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
 
+#include "recovery_health.h"
+#include "recovery_health_policy.h"
 #include "recovery_http.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
@@ -77,11 +81,56 @@ void app_main(void)
         esp_ota_mark_app_valid_cancel_rollback();
     }
 
+    recovery_health_boot_init(); // restart counters (RTC_NOINIT), see recovery_health.c
+
     recovery_lcd_show_message();
     recovery_wifi_start();
-    recovery_http_start();
 
-    ESP_LOGI(TAG, "recovery image up: wifi=%s", recovery_wifi_is_up() ? "up" : "down");
+    // A failed start stops its own server, so it can be retried; if every
+    // bounded attempt fails the image restarts (it is stateless) after leaving
+    // "HTTP FAILED" on the LCD long enough to read.
+    bool http_ok = false;
+    for (int attempt = 1; attempt <= RHEALTH_HTTP_START_ATTEMPTS; attempt++) {
+        esp_err_t herr = recovery_http_start();
+        if (herr == ESP_OK) {
+            http_ok = true;
+            break;
+        }
+        ESP_LOGE(TAG, "recovery_http_start attempt %d/%d failed: %s", attempt,
+                 RHEALTH_HTTP_START_ATTEMPTS, esp_err_to_name(herr));
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    if (!http_ok) {
+        // Only this final failure shows the banner (per-attempt banners would
+        // linger after a later successful retry).
+        if (rhealth_http_restart_allowed(recovery_health_http_restarts())) {
+            recovery_lcd_set_error("HTTP FAILED", "restarting");
+            ESP_LOGE(TAG, "HTTP FAILED after %d attempts -- restarting (%u of %u)",
+                     RHEALTH_HTTP_START_ATTEMPTS, (unsigned)(recovery_health_http_restarts() + 1),
+                     (unsigned)RHEALTH_HTTP_MAX_RESTARTS);
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            recovery_health_restart_for_http(); // counted, count kept across the restart
+        }
+        recovery_lcd_set_error("HTTP FAILED", "restart limit hit");
+        ESP_LOGE(TAG, "HTTP FAILED after %d attempts and %u restarts -- staying up, LCD shows the "
+                 "error (power-cycle to retry)", RHEALTH_HTTP_START_ATTEMPTS,
+                 (unsigned)recovery_health_http_restarts());
+        // The image stays up for good: a later recovery session starts fresh.
+        recovery_health_clear_http();
+    } else {
+        // Success (possibly on a retry): nothing earlier may linger.
+        recovery_lcd_clear_error();
+        recovery_health_clear_http();
+    }
+
+    // wifi/lcd are snapshots (the LCD retry task may be mid re-init).
+    if (rhealth_all_up(recovery_wifi_is_up(), recovery_lcd_is_ok(), http_ok)) {
+        ESP_LOGI(TAG, "recovery image up: wifi=up lcd=ok http=ok");
+    } else {
+        ESP_LOGE(TAG, "recovery image DEGRADED (snapshot): wifi=%s lcd=%s http=%s (error=%s)",
+                 recovery_wifi_is_up() ? "up" : "DOWN", recovery_lcd_is_ok() ? "ok" : "DOWN",
+                 http_ok ? "ok" : "DOWN", recovery_wifi_error() ? recovery_wifi_error() : "none");
+    }
     // WARN level so it survives a trimmed log level: measured app_main stack
     // headroom, in bytes (uxTaskGetStackHighWaterMark is words * 1 on ESP-IDF).
     ESP_LOGW(TAG, "stack hwm: app_main min free = %u bytes",

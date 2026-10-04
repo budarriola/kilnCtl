@@ -24,10 +24,13 @@ extern "C" {
 // "NO NETWORK" on the LCD so HTTP startup does not depend on Wi-Fi.
 void recovery_wifi_start(void);
 
-// True once the SoftAP is active and accepting associations.
+// True once the SoftAP is active: set by WIFI_EVENT_AP_START, cleared by
+// WIFI_EVENT_AP_STOP (the image restarts after RHEALTH_AP_STOP_RESTART_LIMIT stops).
 bool recovery_wifi_is_up(void);
 
-// NULL while Wi-Fi bring-up has had no fatal error; otherwise a static string:
+// NULL while Wi-Fi bring-up has had no error; otherwise a static string:
+// "netif_init_fail", "event_loop_fail", "wifi_init_fail", "softap_fail" (also
+// no AP_START event), "event_register_fail" (non-fatal) or
 // "wifi_storage_fail" = esp_wifi_set_storage(RAM) failed, so the AP was NOT
 // started (the passphrase would not be RAM-only). Shown on the LCD as
 // "WIFI STORAGE FAIL" and in /api/recovery/status as "error" (null while none).

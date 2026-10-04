@@ -43,6 +43,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "recovery_health_policy.h"
 #include "recovery_image_check.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
@@ -396,6 +397,12 @@ static const char *tri(int v)
 
 // GET /api/recovery/status -- read-only. Streamed in small
 // chunks (send_frag), never one big buffer.
+// Per-boot count of failed recovery_http_start() attempts and the last failure
+// name. Deliberately NOT reset by a later success: a server that came up only
+// on a retry stays visible as "http_start_attempts" > 0 in the status JSON.
+static volatile uint32_t s_http_failed_attempts = 0;
+static const char *volatile s_http_last_error = NULL;
+
 static esp_err_t recovery_status_get(httpd_req_t *req)
 {
     recovery_lcd_poll_relay_fault();
@@ -463,6 +470,13 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
         // ("wifi_storage_fail": the SoftAP was refused, see recovery_wifi.c).
         const char *werr = recovery_wifi_error();
         e = werr ? send_frag(req, "\"error\":\"%s\",", werr) : send_frag(req, "\"error\":null,");
+        if (e == ESP_OK) {
+            const char *he = s_http_last_error;
+            e = send_frag(req, "\"http_start_attempts\":%u,\"http_last_error\":", (unsigned)s_http_failed_attempts);
+            if (e == ESP_OK) {
+                e = he ? send_frag(req, "\"%s\",", he) : send_frag(req, "null,");
+            }
+        }
     }
     if (e == ESP_OK) {
         e = send_frag(req, "%s,", bgs);
@@ -836,24 +850,21 @@ static esp_err_t pico_abort_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, "abort requested");
 }
 
-void recovery_http_start(void)
+esp_err_t recovery_http_start(void)
 {
     // Handlers' static buffers (send_frag's frag, s_verify_*) assume every
     // handler runs on this ONE httpd task. Starting a second server would
-    // silently break that, so refuse it outright.
+    // silently break that, so refuse it outright. Set only once a start
+    // succeeds, so a failed attempt (which stops its server) can be retried.
     static bool s_started;
     configASSERT(!s_started);
-    s_started = true;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
     // 12 routes below (3 are the Pico update relay).
     config.max_uri_handlers = 16;
     config.lru_purge_enable = true;
     httpd_handle_t server = NULL;
-    if (httpd_start(&server, &config) != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_start failed");
-        return;
-    }
+    esp_err_t start_rc = httpd_start(&server, &config);
 
     static const httpd_uri_t routes[] = {
         {.uri = "/", .method = HTTP_GET, .handler = root_get},
@@ -870,9 +881,31 @@ void recovery_http_start(void)
         {.uri = "/api/recovery/pico/status", .method = HTTP_GET, .handler = pico_status_get},
         {.uri = "/api/recovery/pico/abort", .method = HTTP_POST, .handler = pico_abort_post},
     };
+    const unsigned expected = (unsigned)(sizeof(routes) / sizeof(routes[0]));
     _Static_assert(sizeof(routes) / sizeof(routes[0]) <= 16, "routes exceed max_uri_handlers");
-    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
-        httpd_register_uri_handler(server, &routes[i]);
+    unsigned registered = 0;
+    if (start_rc == ESP_OK) {
+        for (size_t i = 0; i < expected; i++) {
+            esp_err_t rr = httpd_register_uri_handler(server, &routes[i]);
+            if (rr == ESP_OK) {
+                registered++;
+            } else {
+                ESP_LOGE(TAG, "register %s failed: %s", routes[i].uri, esp_err_to_name(rr));
+            }
+        }
     }
-    ESP_LOGI(TAG, "recovery httpd up, %u routes", (unsigned)(sizeof(routes) / sizeof(routes[0])));
+    if (!rhealth_http_ok((int)start_rc, registered, expected)) {
+        s_http_failed_attempts++;
+        s_http_last_error = start_rc != ESP_OK ? "http_start_fail" : "route_register_fail";
+        ESP_LOGE(TAG, "HTTP FAILED: httpd_start=%s, %u/%u routes registered (%s)",
+                 esp_err_to_name(start_rc), registered, expected, s_http_last_error);
+        if (start_rc == ESP_OK) {
+            (void)httpd_stop(server);
+        }
+        // No LCD banner here: the caller retries, and only a FINAL failure may show one.
+        return start_rc != ESP_OK ? start_rc : ESP_FAIL;
+    }
+    s_started = true;
+    ESP_LOGI(TAG, "recovery httpd up, %u routes", expected);
+    return ESP_OK;
 }

@@ -3,6 +3,8 @@
 #ifndef RECOVERY_HTTP_H
 #define RECOVERY_HTTP_H
 
+#include "esp_err.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,7 +21,14 @@ extern "C" {
 //   GET  /api/boot_guard
 //   POST /api/ota/esp/boot_guard_reset
 //   POST /api/sw_reset
-void recovery_http_start(void);
+//
+// Returns ESP_OK only if httpd_start succeeded AND every route registered. On
+// any failure the server is stopped again and the error is logged; the LCD
+// banner is the caller's job after its last attempt. A per-boot failed-attempt
+// count and the last error ("http_start_fail" or "route_register_fail") are
+// reported as http_start_attempts / http_last_error in /api/recovery/status;
+// an error is returned so the caller can retry.
+esp_err_t recovery_http_start(void);
 
 #ifdef __cplusplus
 }

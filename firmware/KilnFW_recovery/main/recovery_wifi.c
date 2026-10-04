@@ -18,11 +18,16 @@
 #include "recovery_io.h"
 #include "recovery_lcd.h"
 #include "recovery_passphrase.h"
+#include "recovery_health.h"
+#include "recovery_health_policy.h"
 #include "recovery_wifi_policy.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "recovery_wifi";
 
-// Static string naming a fatal bring-up error, NULL while none (see
+// Static string naming a bring-up error, NULL while none (see
 // recovery_wifi_error()).
 static const char *volatile s_error = NULL;
 
@@ -36,7 +41,27 @@ static const char *volatile s_error = NULL;
 // tell "recovery is up" from "the main app never got provisioned".
 #define RECOVERY_AP_SSID_DEFAULT "kilnctl-recovery"
 
+// True only between WIFI_EVENT_AP_START and WIFI_EVENT_AP_STOP (never merely
+// because esp_wifi_start() returned).
 static volatile bool s_up = false;
+// False when the wifi event handler could not be registered: s_up then cannot
+// follow the driver, so start_softap() falls back to esp_wifi_start()'s result.
+static bool s_events_ok = false;
+// Set once the chip is shutting down (esp_restart() runs shutdown handlers,
+// and esp_wifi_init() registers esp_wifi_stop as one, so EVERY restart stops
+// the AP): AP_STOP events seen from then on are not faults.
+static volatile bool s_shutting_down = false;
+
+static void on_shutdown(void)
+{
+    s_shutting_down = true;
+}
+
+static void restart_image_for_wifi(void)
+{
+    s_shutting_down = true;
+    recovery_health_restart_for_wifi(); // counted in RTC_NOINIT, capped by the policy
+}
 static esp_netif_t *s_ap_netif = NULL;
 
 static bool nvs_read_str(const char *ns, const char *key, char *out, size_t out_len)
@@ -88,19 +113,90 @@ void recovery_wifi_get_stats(recovery_wifi_stats_t *out)
     out->last_event_seen = t != 0;
 }
 
+// A SoftAP that stays up this long without a single AP_STOP has proven itself:
+// the Wi-Fi restart count from earlier failures is then forgotten. (Clearing on
+// the first AP_START alone would let a boot that comes up and then fails again
+// reset the cap on every restart and loop forever.)
+#define WIFI_STABLE_MS 60000
+static esp_timer_handle_t s_stable_timer;
+static uint32_t s_stops_at_arm;
+
+static void stable_cb(void *arg)
+{
+    (void)arg;
+    if (s_up && s_ap_stop_count == s_stops_at_arm) {
+        recovery_health_clear_wifi();
+    }
+}
+
+static void arm_stable_timer(void)
+{
+    if (recovery_health_wifi_restarts() == 0) {
+        return;
+    }
+    s_stops_at_arm = s_ap_stop_count;
+    if (!s_stable_timer) {
+        const esp_timer_create_args_t a = {.callback = stable_cb, .name = "ap_stable"};
+        if (esp_timer_create(&a, &s_stable_timer) != ESP_OK) {
+            s_stable_timer = NULL;
+            return;
+        }
+    }
+    (void)esp_timer_stop(s_stable_timer);
+    (void)esp_timer_start_once(s_stable_timer, (uint64_t)WIFI_STABLE_MS * 1000u);
+}
+
 static void on_ap_event(int32_t id, void *data)
 {
     switch (id) {
     case WIFI_EVENT_AP_START:
         s_ap_start_count++;
+        s_up = true;
+        recovery_lcd_set_ap_state(RLCD_AP_UP);
+        arm_stable_timer();
         note_event("ap_start");
         ESP_LOGI(TAG, "AP_START (count %u)", (unsigned)s_ap_start_count);
         break;
     case WIFI_EVENT_AP_STOP:
         s_ap_stop_count++;
+        s_up = false;
         note_event("ap_stop");
         ESP_LOGW(TAG, "AP_STOP (count %u, s_up=%d) -- the SoftAP stopped", (unsigned)s_ap_stop_count,
                  (int)s_up);
+        if (s_shutting_down) {
+            break; // our own (or any) restart stopped the AP: not a fault
+        }
+        {
+            rhealth_ap_action_t act = rhealth_ap_stop_action(s_ap_stop_count,
+                                                             recovery_health_wifi_restarts());
+            if (act == RHEALTH_AP_RESTART_IMAGE) {
+                ESP_LOGE(TAG, "SoftAP stopped %u times -- restarting (stateless image)",
+                         (unsigned)s_ap_stop_count);
+                restart_image_for_wifi();
+            } else if (act == RHEALTH_AP_STAY_DOWN) {
+                ESP_LOGE(TAG, "SoftAP stopped %u times and the restart cap is used up -- staying "
+                         "up, LCD shows AP DOWN", (unsigned)s_ap_stop_count);
+                recovery_lcd_set_ap_state(RLCD_AP_FAILED);
+                recovery_health_clear_wifi(); // staying up for good; after the decision
+            } else {
+                // An AP_STOP not caused by a shutdown: nothing else will raise
+                // the AP again, so show it and re-raise it (the SSID/passphrase
+                // live in the driver config and survive esp_wifi_start).
+                recovery_lcd_set_ap_state(RLCD_AP_RESTARTING);
+                esp_err_t se = esp_wifi_start();
+                if (se != ESP_OK) {
+                    // No further event will follow: feed the capped restart path.
+                    ESP_LOGE(TAG, "esp_wifi_start after AP_STOP failed: %s", esp_err_to_name(se));
+                    s_error = "softap_fail";
+                    if (rhealth_ap_reraise_failed_action(recovery_health_wifi_restarts()) ==
+                        RHEALTH_AP_RESTART_IMAGE) {
+                        restart_image_for_wifi();
+                    }
+                    recovery_lcd_set_ap_state(RLCD_AP_FAILED);
+                    recovery_health_clear_wifi(); // staying up for good; after the decision
+                }
+            }
+        }
         break;
     case WIFI_EVENT_AP_STACONNECTED: {
         const wifi_event_ap_staconnected_t *ev = (const wifi_event_ap_staconnected_t *)data;
@@ -157,6 +253,7 @@ static bool start_softap(char pass[RPASS_LEN + 1])
         s_ap_netif = esp_netif_create_default_wifi_ap();
         if (!s_ap_netif) {
             ESP_LOGE(TAG, "esp_netif_create_default_wifi_ap failed");
+            s_error = "softap_fail";
             secure_zero(pass, RPASS_LEN + 1);
             return false;
         }
@@ -180,11 +277,27 @@ static bool start_softap(char pass[RPASS_LEN + 1])
     secure_zero(&cfg, sizeof(cfg));
     if (e3 != ESP_OK) {
         ESP_LOGE(TAG, "SoftAP bring-up failed: %s", esp_err_to_name(e3));
+        s_error = "softap_fail";
+        secure_zero(pass, RPASS_LEN + 1);
+        return false;
+    }
+    if (!s_events_ok) {
+        // No AP_START event will ever arrive; trust esp_wifi_start() (error
+        // "event_register_fail" is already recorded).
+        s_up = true;
+    }
+    // s_up is set by the AP_START handler: wait (bounded) for it so the LCD
+    // never shows a passphrase for an AP that did not come up.
+    for (int waited_ms = 0; !s_up && waited_ms < 5000; waited_ms += 50) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!s_up) {
+        ESP_LOGE(TAG, "no WIFI_EVENT_AP_START within 5 s of esp_wifi_start()");
+        s_error = "softap_fail";
         secure_zero(pass, RPASS_LEN + 1);
         return false;
     }
     ESP_LOGI(TAG, "SoftAP up: ssid=%s (WPA2, passphrase on the LCD only)", ap_ssid);
-    s_up = true;
 
     char ip[16] = "192.168.4.1";
     esp_netif_ip_info_t info;
@@ -216,12 +329,14 @@ void recovery_wifi_start(void)
     esp_err_t err = esp_netif_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_netif_init failed: %s -- no network", esp_err_to_name(err));
+        s_error = "netif_init_fail";
         recovery_lcd_set_no_network();
         return;
     }
     err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) { // INVALID_STATE: loop already exists
         ESP_LOGE(TAG, "esp_event_loop_create_default failed: %s -- no network", esp_err_to_name(err));
+        s_error = "event_loop_fail";
         recovery_lcd_set_no_network();
         return;
     }
@@ -236,6 +351,7 @@ void recovery_wifi_start(void)
     err = esp_wifi_init(&init_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init failed: %s -- no network", esp_err_to_name(err));
+        s_error = "wifi_init_fail";
         secure_zero(pass, sizeof(pass));
         recovery_lcd_set_no_network();
         return;
@@ -256,14 +372,25 @@ void recovery_wifi_start(void)
         recovery_lcd_set_wifi_storage_fail();
         return;
     }
-    // A missing handler only costs the AP statistics, so this is logged, not fatal.
+    // After esp_wifi_init() so this runs before esp_wifi_stop's own shutdown
+    // handler (handlers run newest first).
+    (void)esp_register_shutdown_handler(on_shutdown);
+    // A missing handler costs the AP statistics and the AP_STOP watchdog, so it
+    // is recorded (non-fatal: start_softap() then trusts esp_wifi_start()).
     err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_wifi_event, NULL);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "wifi event handler register failed: %s", esp_err_to_name(err));
+        s_error = "event_register_fail";
+    } else {
+        s_events_ok = true;
     }
 
     if (!start_softap(pass)) { // wipes pass on every path
-        ESP_LOGE(TAG, "SoftAP failed -- NO NETWORK (HTTP still started)");
+        ESP_LOGE(TAG, "SoftAP failed (%s) -- NO NETWORK (HTTP still started)",
+                 s_error ? s_error : "softap_fail");
+        if (!s_error || strcmp((const char *)s_error, "event_register_fail") == 0) {
+            s_error = "softap_fail";
+        }
         recovery_lcd_set_no_network();
     }
 }

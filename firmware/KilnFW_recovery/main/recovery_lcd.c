@@ -123,6 +123,9 @@ static char s_net_pass[RPASS_LEN + 1];
 static char s_net_ip[16];
 static bool s_net_none = false;      // every Wi-Fi bring-up path failed
 static bool s_net_storage_fail = false; // driver not RAM-only: AP refused
+static int s_ap_down = 0;       // SoftAP stopped: do not show its credentials
+static char s_err_head[24];   // generic fatal error (e.g. "HTTP FAILED"), "" = none
+static char s_err_detail[28];
 static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 
 // Panel health, reported read-only through GET /api/recovery/status.
@@ -389,7 +392,18 @@ static void draw_status(void)
         (void)draw_line(Y_RELAY, TEXT_SCALE, COL_OK, COL_BG, "Heat: OFF");
     }
 
-    if (s_net_none || s_net_storage_fail) {
+    if (s_err_head[0] || s_ap_down) {
+        // Overrides every network state: never show a passphrase for a server
+        // that is not there.
+        (void)draw_line(Y_JOIN, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, s_err_head[0] ? s_err_head : "AP DOWN");
+        (void)draw_line(Y_SSID, TEXT_SCALE, COL_DIM, COL_BG, s_err_head[0] ? s_err_detail
+                                                        : (s_ap_down == 2 ? "AP could not restart" : "restarting the SoftAP"));
+        (void)draw_line(Y_PWLBL, TEXT_SCALE, COL_DIM, COL_BG, "Use JTAG if it persists");
+        (void)draw_line(Y_PASS, PASS_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
+        (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
+    } else if (s_net_none || s_net_storage_fail) {
         // TEXT_SCALE: a NET_SCALE band (21 px from Y_JOIN) would overlap Y_SSID.
         (void)draw_line(Y_JOIN, TEXT_SCALE, COL_FAULT, COL_FAULT_BG,
                         s_net_storage_fail ? "WIFI STORAGE FAIL" : "NO NETWORK");
@@ -636,6 +650,60 @@ void recovery_lcd_set_wifi_storage_fail(void)
         draw_status();
     }
     xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_set_error(const char *headline, const char *detail)
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    snprintf(s_err_head, sizeof(s_err_head), "%s", headline && headline[0] ? headline : "ERROR");
+    snprintf(s_err_detail, sizeof(s_err_detail), "%s", detail ? detail : "");
+    if (s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_clear_error(void)
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool had = s_err_head[0] != 0;
+    s_err_head[0] = 0;
+    s_err_detail[0] = 0;
+    if (had && s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_set_ap_state(int state)
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool changed = s_ap_down != state;
+    s_ap_down = state;
+    if (changed && s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+bool recovery_lcd_is_ok(void)
+{
+    if (!s_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    bool ok = s_ready;
+    xSemaphoreGive(s_lock);
+    return ok;
 }
 
 void recovery_lcd_poll_relay_fault(void)

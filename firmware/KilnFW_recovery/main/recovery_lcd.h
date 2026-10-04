@@ -69,6 +69,27 @@ void recovery_lcd_set_no_network(void);
 // safety rules as recovery_lcd_set_no_network().
 void recovery_lcd_set_wifi_storage_fail(void);
 
+// Shows a fatal error banner (e.g. "HTTP FAILED") plus a short detail line in
+// place of every network line (the passphrase is not drawn while it is shown;
+// the RAM copy is kept so recovery_lcd_clear_error() can restore it). Use only
+// for a FINAL failure. Same safety rules.
+void recovery_lcd_set_error(const char *headline, const char *detail);
+
+// Removes the banner set by recovery_lcd_set_error() and redraws.
+void recovery_lcd_clear_error(void);
+
+// SoftAP state for the LCD: RLCD_AP_UP, RLCD_AP_RESTARTING (shows "AP DOWN /
+// restarting the SoftAP") or RLCD_AP_FAILED ("AP DOWN / AP could not restart").
+// While not up the LCD hides the SSID/passphrase/IP of a dead AP. Safe from any task.
+#define RLCD_AP_UP         0
+#define RLCD_AP_RESTARTING 1
+#define RLCD_AP_FAILED     2
+void recovery_lcd_set_ap_state(int state);
+
+// True once the panel was brought up and the status screen drawn. Takes the LCD
+// lock, so it is a snapshot (briefly false while the retry task re-inits).
+bool recovery_lcd_is_ok(void);
+
 // Redraws the status screen if the relay-fault state changed since the last
 // draw (a hold-watchdog fault latched after boot). Call from a task that may
 // block on the LCD lock; never from the relay-hold task.

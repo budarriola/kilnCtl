@@ -12,6 +12,7 @@ idf_component_register(
         "recovery_text.c"
         "recovery_passphrase.c"
         "recovery_hold.c"
+        "recovery_health.c"
     INCLUDE_DIRS "."
     EMBED_FILES "recovery_page.html"
     REQUIRES
