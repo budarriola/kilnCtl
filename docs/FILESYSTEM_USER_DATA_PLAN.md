@@ -340,7 +340,7 @@ behavior for free).
   hand; `git diff -- firmware/KilnFW/App/drivers/persist/zones_config_store.c`
   confirmed clean of the break afterward. Full suite green again
   (29/29 executables, `tools/run_all_checks.ps1`).
-- **Not done in this pass** (as of that pass; zone normals (2) and relay names (3) have since landed, `d15b5199` and `288dc91c`):
+- **Not done in this pass** (as of that pass; zone normals (2) and relay names (3) have since landed, `208de3d4` and `288dc91c`):
   kiln config slots (8); adaptive tune
   (9); the pre-fire interlock; the JSON-text file format upgrade noted
   above; no board has this flashed. Correction: the bench board's `cfg`
