@@ -490,8 +490,19 @@ try {
             return
         }
         $script:builtExes += $Name
-        & $ExePath
-        if ($LASTEXITCODE -ne 0) {
+        # Run with CWD = a scratch dir under $outDir: host tests build cfg_fs_test_*/
+        # log_store_test_*/ scratch dirs relative to CWD, which used to litter the repo
+        # root. $outDir is gitignored or a temp dir, so nothing reaches the tree.
+        $scratchCwd = Join-Path $outDir "host_test_scratch"
+        New-Item -ItemType Directory -Force -Path $scratchCwd | Out-Null
+        Push-Location $scratchCwd
+        try {
+            & $ExePath
+            $exeExit = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        if ($exeExit -ne 0) {
             $script:failedExes += $Name
         }
     }
