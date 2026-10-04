@@ -1157,6 +1157,137 @@ class RefusedImagePushLocalErrorTest(unittest.TestCase):
         self.assertIn("error:FileNotFoundError", r.reason)
 
 
+class Ote07Ote08DefaultHeatTest(unittest.TestCase):
+    """allow_heat=True and no injected starter: the cases start their own
+    heat via cases_heat/cases_autotune helpers and always tear it down."""
+
+    def setUp(self):
+        from kilnctrl.bench_test import cases_heat as H
+        from kilnctrl.bench_test import cases_autotune as A
+        self.H, self.A = H, A
+        self.state = {"exec": "idle", "at": "idle", "stops": 0, "starts": 0, "relays_off": True, "stop_works": True}
+        st = self.state
+
+        class _Prof:
+            def get_exec_status(_self):
+                return type("S", (), {"state_name": st["exec"]})()
+
+        class _At:
+            def get_status(_self):
+                return type("S", (), {"state_name": st["at"]})()
+
+            def start(_self, zone, method, step_duty_or_setpoint_c):
+                st["starts"] += 1
+                st["at"] = "stepping"
+                return True, ""
+
+        self.srv = type("Srv", (), {"_profiles": _Prof(), "_autotune": _At()})()
+        clock = {"t": 0.0}
+
+        def now():
+            clock["t"] += 1.0
+            return clock["t"]
+
+        def start_profile(ctx, zone_mask, **kw):
+            st["starts"] += 1
+            st["exec"] = "running"
+            return True, "", 20.0
+
+        def cleanup_profile(ctx):
+            st["stops"] += 1
+            if st["stop_works"]:
+                st["exec"] = "idle"
+
+        def cleanup_at(ctx):
+            st["stops"] += 1
+            if st["stop_works"]:
+                st["at"] = "aborted"
+
+        patches = [
+            unittest.mock.patch.object(H, "_start_bench_profile", start_profile),
+            unittest.mock.patch.object(H, "_cleanup_bench_profile", cleanup_profile),
+            unittest.mock.patch.object(A, "_cleanup_autotune", cleanup_at),
+            unittest.mock.patch.object(A, "_relays_off", lambda ctx: st["relays_off"]),
+            unittest.mock.patch.object(A, "_at_preflight", lambda ctx: (True, "")),
+            unittest.mock.patch.object(A, "_ramp_assist_enabled", lambda ctx: (False, "")),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.now = now
+
+    def _ctx(self, kind, **overrides):
+        st = self.state
+        key, getter = (("_exec_state_fn", lambda: st["exec"]) if kind == "e07"
+                       else ("_autotune_state_fn", lambda: st["at"]))
+        ctx = {
+            "host": "10.0.0.5", "ota_image_path": "/tmp/image.bin", "srv": self.srv, "allow_heat": True,
+            "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 409), interlock_ok=False,
+                                              interlock_reason="not idle"),
+            key: getter, "_now": self.now, "_sleep_fn": lambda s: None,
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_ote07_default_starter_and_stopper_pass(self):
+        ctx = self._ctx("e07")
+        r = C._case_ote07(ctx)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertEqual((self.state["starts"], self.state["stops"]), (1, 1))
+        self.assertNotIn("_tainted", ctx)
+
+    def test_ote08_default_starter_and_stopper_pass(self):
+        ctx = self._ctx("e08")
+        r = C._case_ote08(ctx)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertEqual((self.state["starts"], self.state["stops"]), (1, 1))
+
+    def test_stopper_runs_in_finally_when_push_raises(self):
+        class Boom(BaseException):
+            pass
+
+        def push():
+            raise Boom()
+
+        for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):
+            self.state.update(stops=0, exec="idle", at="idle")
+            with self.assertRaises(Boom):
+                fn(self._ctx(kind, _push_fn=push))
+            self.assertEqual(self.state["stops"], 1, kind)
+
+    def test_allow_heat_false_skips_with_operator_hint(self):
+        for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):
+            r = fn(self._ctx(kind, allow_heat=False))
+            self.assertEqual(r.verdict, Verdict.SKIP)
+            self.assertIn("allow_heat not set; OT-E07/E08 start their own heat", r.reason)
+            self.assertEqual(self.state["starts"], 0)
+
+    def test_failed_stop_fails_and_taints(self):
+        for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):
+            self.state.update(stop_works=False, exec="idle", at="idle")
+            ctx = self._ctx(kind)
+            r = fn(ctx)
+            self.assertEqual(r.verdict, Verdict.FAIL, kind)
+            self.assertIn("could NOT be confirmed stopped", r.reason)
+            self.assertTrue(ctx.get("_tainted"))
+
+    def test_relays_still_on_after_stop_fails(self):
+        self.state["relays_off"] = False
+        ctx = self._ctx("e07")
+        r = C._case_ote07(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertTrue(ctx.get("_tainted"))
+
+    def test_injected_start_fn_takes_precedence(self):
+        calls = []
+        ctx = self._ctx("e07", _start_state_fn=lambda: (calls.append("s"), self.state.__setitem__("exec", "running")),
+                        _stop_state_fn=lambda: calls.append("x"))
+        r = C._case_ote07(ctx)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertEqual(calls, ["s", "x"])
+        self.assertEqual(self.state["starts"], 0)
+
+
 class JudgeOtaPushRefusedUnreadableTest(unittest.TestCase):
     def test_none_readback_is_unreadable(self):
         r = J.judge_ota_push_refused(True, "app", None, "B1", "B1")
