@@ -49,6 +49,7 @@
 #include "recovery_lcd.h"
 #include "recovery_lcd_policy.h"
 #include "recovery_pico.h"
+#include "recovery_boot_verify.h"
 #include "recovery_pico_proto.h"
 #include "recovery_text.h"
 #include "recovery_upload.h"
@@ -200,11 +201,11 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return recovery_upload_send_error(req, http_status, msg);
     }
 
-    esp_err_t err = esp_ota_set_boot_partition(target);
+    esp_err_t err = recovery_boot_partition_set_and_verify(target);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_hdr(req, "Connection", "close");
-        httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
+        httpd_resp_send(req, "boot partition set/read-back failed", HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
 
@@ -639,7 +640,7 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
-    esp_err_t serr = esp_ota_set_boot_partition(app);
+    esp_err_t serr = recovery_boot_partition_set_and_verify(app);
     if (serr == ESP_ERR_OTA_VALIDATE_FAILED) {
         app_verify_invalidate();
         httpd_resp_set_status(req, "409 Conflict");
@@ -647,7 +648,8 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
     }
     if (serr != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
-        return httpd_resp_send(req, "esp_ota_set_boot_partition failed", HTTPD_RESP_USE_STRLEN);
+        return httpd_resp_send(req, "boot partition set/read-back failed; check /api/recovery/status before rebooting",
+                               HTTPD_RESP_USE_STRLEN);
     }
     char body[160];
     snprintf(body, sizeof(body), "ok, rebooting into the application; %s", bg_msg);

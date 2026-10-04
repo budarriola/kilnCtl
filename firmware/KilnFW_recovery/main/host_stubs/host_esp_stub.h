@@ -13,6 +13,8 @@
 typedef int esp_err_t;
 #define ESP_OK 0
 #define ESP_FAIL (-1)
+#define ESP_ERR_INVALID_ARG 0x102
+#define ESP_ERR_INVALID_STATE 0x103
 
 // ---- esp_http_server ----
 typedef struct {
@@ -28,6 +30,9 @@ esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, int len);
 // ---- esp_partition / esp_ota_ops ----
 typedef struct {
     int id;
+    uint32_t address;
+    int subtype;
+    char label[17];
 } esp_partition_t;
 typedef int esp_ota_handle_t;
 #define OTA_WITH_SEQUENTIAL_WRITES 0xFFFFFFFFu
@@ -36,6 +41,7 @@ esp_err_t esp_ota_write(esp_ota_handle_t h, const void *data, size_t size);
 esp_err_t esp_ota_end(esp_ota_handle_t h);
 esp_err_t esp_ota_abort(esp_ota_handle_t h);
 esp_err_t esp_ota_set_boot_partition(const esp_partition_t *p);
+const esp_partition_t *esp_ota_get_boot_partition(void);
 
 // ---- esp_heap_caps ----
 #define MALLOC_CAP_SPIRAM 1u
@@ -46,6 +52,7 @@ size_t heap_caps_get_free_size(uint32_t caps);
 
 // ---- esp_log / esp_task_wdt ----
 #define ESP_LOGW(tag, ...) ((void)(tag))
+#define ESP_LOGE(tag, ...) ((void)(tag))
 esp_err_t esp_task_wdt_reset(void);
 
 // ---- scripted behaviour (defined in test_recovery_upload.c) ----

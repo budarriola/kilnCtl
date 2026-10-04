@@ -3,6 +3,7 @@ idf_component_register(
         "recovery_main.c"
         "recovery_wifi.c"
         "recovery_http.c"
+        "recovery_boot_verify.c"
         "recovery_image_check.c"
         "recovery_upload.c"
         "recovery_pico_proto.c"
