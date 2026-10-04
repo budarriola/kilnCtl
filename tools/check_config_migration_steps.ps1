@@ -39,6 +39,10 @@
 #     config_store_unpack_ex(). Enforced: a CONFIG_STORE_FORMAT_VERSION_V
 #     <CURRENT-1> macro must be defined and actually branched on.
 #
+# 2026-10-03: each of those three stores also enforces chain integrity (one
+# step per bump, no skipped version, version constant == last step); see plan
+# section 5.1.
+#
 # What is deliberately NOT enforced for kiln-config slots and RP2040 safety
 # config specifically -- D1's "exactly one NEW step per bump" defect-catching
 # rule, the frozen-input _Static_assert/crc32-last-field discipline, the
@@ -145,6 +149,37 @@ function Test-KilnCfgStoreMigrationStep {
         $failures.Add("kiln-config slot store: KILN_CFG_STORE_VERSION is $current but no " +
             "migrate_store_v${expectedFrom}_to_v${current}(...) step function exists in kiln_cfg_store.c")
     }
+
+    # Chain integrity (plan sec 5.1 deferred rule): one step per version
+    # bump, no skipped version, the version constant matching the LAST step.
+    # Comments stripped so a commented-out step cannot count.
+    $clean = Remove-CComments -Text $SourceText
+    $defs = [regex]::Matches($clean, '(?m)^\s*static\s+[\w\*\s]+\bmigrate_store_v(\d+)_to_v(\d+)\s*\(')
+    $seenTo = @{}
+    $fromTo = @{}
+    foreach ($m in $defs) {
+        $a = [int]$m.Groups[1].Value
+        $b = [int]$m.Groups[2].Value
+        if ($b -ne $a + 1) {
+            $failures.Add("kiln-config slot store: migrate_store_v${a}_to_v${b} is not a single-version step (one step per bump)")
+        }
+        if ($seenTo.ContainsKey($b)) {
+            $failures.Add("kiln-config slot store: migrate_store_v${a}_to_v${b} is defined more than once")
+        }
+        $seenTo[$b] = $true
+        $fromTo[$a] = $b
+    }
+    if ($fromTo.Count -gt 0) {
+        $maxTo = ($fromTo.Values | Measure-Object -Maximum).Maximum
+        if ($maxTo -ne $current) {
+            $failures.Add("kiln-config slot store: KILN_CFG_STORE_VERSION is $current but the last migrate_store_* step ends at v$maxTo")
+        }
+        for ($v = 1; $v -lt $maxTo; $v++) {
+            if (-not $fromTo.ContainsKey($v)) {
+                $failures.Add("kiln-config slot store: no migrate_store_v${v}_to_v$($v + 1) step -- version v$v was skipped in the chain")
+            }
+        }
+    }
     return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
 }
 
@@ -220,6 +255,25 @@ function Test-ProfilesMigrationStep {
         }
     }
 
+
+    # Coverage rule (plan sec 5.1 deferred rule): a converter exists for
+    # EVERY historical version 1..CURRENT-1 (no skipped version), and none
+    # for a version >= CURRENT (the version constant must match the newest
+    # converter, i.e. CURRENT-1).
+    $convNums = @([regex]::Matches($cleanSource,
+        '(?m)^\s*static\s+[\w\*\s]+\bconvert_profile_v(\d+)\s*\(') |
+        ForEach-Object { [int]$_.Groups[1].Value })
+    for ($v = 1; $v -lt $current; $v++) {
+        if ($convNums -notcontains $v) {
+            $failures.Add("fire profiles store: PROFILE_VERSION is $current but no convert_profile_v${v}(...) converter exists -- version v$v was skipped")
+        }
+    }
+    foreach ($n in $convNums) {
+        if ($n -ge $current) {
+            $failures.Add("fire profiles store: convert_profile_v$n exists but PROFILE_VERSION is only $current -- the version constant does not match the newest converter")
+        }
+    }
+
     return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
 }
 
@@ -259,6 +313,30 @@ function Test-SaftyConfigStoreMigrationStep {
         if ($SourceText -notmatch $branchPattern) {
             $failures.Add("RP2040 safety config store: $macroName is defined but config_store.c has no " +
                 "'== $macroName' branch actually handling it -- an orphaned macro")
+        }
+    }
+
+    # Chain integrity (plan sec 5.1 deferred rule): every format version
+    # 1..CURRENT-1 has its macro (value == N, no skipped version) AND an
+    # actual branch; no macro names a version >= CURRENT.
+    $cleanHeader = Remove-CComments -Text $VersionHeaderText
+    $cleanSrc = Remove-CComments -Text $SourceText
+    $defined = @{}
+    foreach ($m in [regex]::Matches($cleanHeader, '#define\s+CONFIG_STORE_FORMAT_VERSION_V(\d+)\s+(\d+)u?')) {
+        $n = [int]$m.Groups[1].Value
+        $defined[$n] = $true
+        if ([int]$m.Groups[2].Value -ne $n) {
+            $failures.Add("RP2040 safety config store: CONFIG_STORE_FORMAT_VERSION_V$n has value $($m.Groups[2].Value), expected $n")
+        }
+        if ($n -ge $current) {
+            $failures.Add("RP2040 safety config store: CONFIG_STORE_FORMAT_VERSION_V$n is defined but CONFIG_STORE_FORMAT_VERSION is only $current -- the version constant does not match the newest format")
+        }
+    }
+    for ($v = 1; $v -lt $current; $v++) {
+        if (-not $defined.ContainsKey($v)) {
+            $failures.Add("RP2040 safety config store: no CONFIG_STORE_FORMAT_VERSION_V$v macro -- version v$v was skipped (CONFIG_STORE_FORMAT_VERSION is $current)")
+        } elseif ($v -ne $expectedFrom -and $cleanSrc -notmatch "==\s*CONFIG_STORE_FORMAT_VERSION_V$v\b") {
+            $failures.Add("RP2040 safety config store: CONFIG_STORE_FORMAT_VERSION_V$v is defined but config_store.c has no '== CONFIG_STORE_FORMAT_VERSION_V$v' branch actually handling it -- an orphaned macro")
         }
     }
     return @{ Ok = ($failures.Count -eq 0); Failures = $failures }

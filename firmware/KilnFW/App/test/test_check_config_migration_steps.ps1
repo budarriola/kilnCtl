@@ -456,6 +456,51 @@ if ($r22.Ok) {
     Write-Host "Assertion 22 OK: a trailing comment mentioning crc32 after the true (non-crc32) last member does not satisfy the rule."
 }
 
+# ---------------------------------------------------------------------
+# Assertions 23-29: chain-integrity rules (plan sec 5.1, 2026-10-03):
+# one step per bump, no skipped version, version constant == last step.
+# ---------------------------------------------------------------------
+function Test-ChainCase {
+    param([int]$N, $Result, [bool]$ExpectOk, [string]$Pattern, [string]$What)
+    if ($ExpectOk) {
+        if (-not $Result.Ok) { $script:failures += "Assertion ${N} FAILED: expected PASS ($What), got: $($Result.Failures -join '; ')" }
+        else { Write-Host "Assertion $N OK: $What" }
+    } elseif ($Result.Ok) {
+        $script:failures += "Assertion ${N} FAILED: expected FAIL ($What), got PASS."
+    } elseif (($Result.Failures -join " ") -notmatch $Pattern) {
+        $script:failures += "Assertion ${N} FAILED: failure did not match /$Pattern/: $($Result.Failures -join '; ')"
+    } else { Write-Host "Assertion $N OK: $What" }
+}
+
+$kilnHdr3 = "#define KILN_CFG_STORE_VERSION 3`n"
+$kStep12 = "static void migrate_store_v1_to_v2(const a *s, b *d) { }`n"
+$kStep23 = "static void migrate_store_v2_to_v3(const b *s, c *d) { }`n"
+Test-ChainCase 23 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText ($kStep12 + $kStep23)) $true "" "kiln-config: contiguous v1->v2->v3 chain at version 3 passes."
+Test-ChainCase 24 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText $kStep23) $false "kiln-config slot store.*v1_to_v2.*skipped" "kiln-config: a missing v1_to_v2 step (skipped version) is caught."
+Test-ChainCase 25 (Test-KilnCfgStoreMigrationStep -VersionHeaderText $kilnHdr3 -SourceText ($kStep12 + $kStep23 + "static void migrate_store_v3_to_v5(const c *s, d *d) { }`n")) $false "migrate_store_v3_to_v5 is not a single-version step" "kiln-config: a step spanning two versions is caught."
+
+$profHdr4 = "#define PROFILE_VERSION 4`n"
+$profBase = "static void convert_profile_v1(const a *s, profile_t *o) { }`nstatic void convert_profile_v2(const b *s, profile_t *o) { }`n"
+$profV3 = @"
+typedef struct {
+    uint8_t version;
+    uint32_t crc32;
+} profile_persisted_v3_t;
+_Static_assert(sizeof(profile_persisted_v3_t) == 8, "pin");
+static void convert_profile_v3(const profile_persisted_v3_t *s, profile_t *o) { }
+
+"@
+Test-ChainCase 26 (Test-ProfilesMigrationStep -VersionHeaderText $profHdr4 -SourceText ($profHdr4 + $profBase + $profV3)) $true "" "fire profiles: converters v1..v3 all present at version 4 passes."
+Test-ChainCase 27 (Test-ProfilesMigrationStep -VersionHeaderText $profHdr4 -SourceText ($profHdr4 + "static void convert_profile_v1(const a *s, profile_t *o) { }`n" + $profV3)) $false "fire profiles store.*convert_profile_v2.*skipped" "fire profiles: a missing convert_profile_v2 (skipped version) is caught."
+Test-ChainCase 28 (Test-ProfilesMigrationStep -VersionHeaderText $profHdr4 -SourceText ($profHdr4 + $profBase + $profV3 + "static void convert_profile_v4(const x *s, profile_t *o) { }`n")) $false "convert_profile_v4 exists but PROFILE_VERSION is only 4" "fire profiles: a converter at or above PROFILE_VERSION is caught."
+
+$saftyHdr3 = "#define CONFIG_STORE_FORMAT_VERSION 3u`n#define CONFIG_STORE_FORMAT_VERSION_V1 1u`n#define CONFIG_STORE_FORMAT_VERSION_V2 2u`n"
+$saftySrc = "if (version == CONFIG_STORE_FORMAT_VERSION_V2) { } if (version == CONFIG_STORE_FORMAT_VERSION_V1) { }`n"
+Test-ChainCase 29 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText $saftyHdr3 -SourceText $saftySrc) $true "" "RP2040: macros and branches for v1 and v2 at version 3 passes."
+Test-ChainCase 30 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText ($saftyHdr3 -replace "#define CONFIG_STORE_FORMAT_VERSION_V1 1u`n", "") -SourceText $saftySrc) $false "no CONFIG_STORE_FORMAT_VERSION_V1 macro.*skipped" "RP2040: a missing V1 macro (skipped version) is caught."
+Test-ChainCase 31 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText $saftyHdr3 -SourceText "if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`n") $false "CONFIG_STORE_FORMAT_VERSION_V1 is defined but.*orphaned macro" "RP2040: an older macro with no branch is caught as orphaned."
+Test-ChainCase 32 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText ($saftyHdr3 + "#define CONFIG_STORE_FORMAT_VERSION_V3 3u`n") -SourceText ($saftySrc + "if (version == CONFIG_STORE_FORMAT_VERSION_V3) { }`n")) $false "V3 is defined but CONFIG_STORE_FORMAT_VERSION is only 3" "RP2040: a macro at or above the current version is caught."
+
 if ($failures.Count -gt 0) {
     Write-Host ""
     Write-Host "test_check_config_migration_steps: $($failures.Count) assertion(s) FAILED:" -ForegroundColor Red
@@ -464,5 +509,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 22 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 32 assertions passed." -ForegroundColor Green
 exit 0

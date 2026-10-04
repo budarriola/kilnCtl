@@ -561,16 +561,30 @@ negative-tested by assertions 19-22 (missing `sizeof` assert; `crc32` not
 the last field; a commented-out `sizeof` assert; a trailing comment naming
 `crc32` after the true last member), 22 assertions total as of 2026-09-19.
 
-**Still explicitly follow-up, not assumed done:** D1's "exactly one NEW step
-per bump" defect-catching rule and the fixture-must-be-referenced rule, for
-all three of these stores; D2's expiry floor, for all three; and the
-frozen-input assert/`crc32`-last-field discipline for kiln-config slots and
-RP2040 safety config specifically (fire profiles' copy of that one rule
-landed 2026-09-19, above — the "check taught its existing scaffolding" case
-this paragraph used to name as still open). Kiln-config slots and RP2040
-safety config would need new scaffolding that does not exist in their
-current design to go further; that is not silently assumed covered by this
-pass.
+**Landed 2026-10-03 (chain integrity, all three stores).** Each store's
+check now also enforces "one step per bump, no skipped version, the version
+constant matching the last step", in the shape that store actually has:
+
+- **Kiln-config slots:** every `migrate_store_v<A>_to_v<B>` definition must
+  have `B == A + 1`, none may repeat, v1 through the current version must be
+  covered with no gap, and the last step must end at `KILN_CFG_STORE_VERSION`.
+- **Fire profiles:** a `convert_profile_v<N>` exists for every N in
+  1..`PROFILE_VERSION`-1, and none for N >= `PROFILE_VERSION`.
+- **RP2040 safety config:** a `CONFIG_STORE_FORMAT_VERSION_V<N>` macro with
+  value N exists for every N in 1..current-1, each is branched on in
+  `config_store.c` (orphan check extended from V<current-1> to all), and none
+  names a version >= current.
+
+All use comment-stripped text. Negative-tested by assertions 23-32 of
+`test_check_config_migration_steps.ps1` (32 total) and by hand against the
+real sources (each break named the store and version, then restored).
+
+**Still follow-up:** D1's "exactly one NEW step per bump" defect-catching rule
+(needs a baseline to diff against), the fixture-must-be-referenced rule, and
+D2's expiry floor, for all three stores; and the frozen-input
+assert/`crc32`-last-field discipline for kiln-config slots and RP2040 safety
+config, which would need scaffolding their designs do not have (length-based
+detection; raw byte-offset inputs).
 
 ## 6. Decisions — all settled
 
