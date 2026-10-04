@@ -688,8 +688,8 @@ host-test builds need a short worktree path (e.g. `C:\wt\...`); the default
 `.claude/worktrees/...` path overflows the MSVC command line.
 
 As of 2026-10-04 it discovers 157 checks (`-ListOnly -AllowFewerChecks`,
-recounted after `check_kiln_scope_cfg_mirrors.ps1` was added; the count drifts upward as checks are added, so
-re-verify with a fresh `-ListOnly` run rather than trusting this number).
+recounted after `check_kiln_scope_cfg_mirrors.ps1` was added; the count drifts
+upward as checks are added, so re-verify with a fresh `-ListOnly` run rather than trusting this number).
 `a42ac369` added `check_lint_pages.ps1` so `lint_pages.js` -- previously only
 reachable through `tools/verify.ps1`'s manual "lint" stage -- is now enforced
 by the standing suite too;

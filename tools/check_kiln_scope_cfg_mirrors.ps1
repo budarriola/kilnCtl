@@ -39,17 +39,27 @@
 #      cfg_fs_delete calls whose first argument is a string literal or an
 #      ALL_CAPS identifier that is not a known macro. (Lower-case pass-through
 #      parameters, e.g. diagnostics_http.c's generic route, are ignored.)
-#   6. SCOPE LISTS. Each App/**/<x>_scope_cfg_files.c is a scope list; its
-#      partition is "<x>_nvs" (kiln_scope_cfg_files.c -> kiln_nvs; a future
-#      profiles_scope_cfg_files.c -> profiles_nvs). The array is the
-#      `k...Files[]` initializer. Every entry must be a known macro (else
-#      FAIL). Assert: every macro whose partition == the list's partition is
-#      in the list, and no listed macro resolves to a different partition.
-#      A partition with no *_scope_cfg_files.c is reported informationally
-#      (profiles_nvs today has none) and is not a failure: this check only
-#      polices lists that exist. A profiles list that names per-id files
-#      dynamically (not by *_FILE_PATH macro) would need the entry rule in
-#      this step relaxed when it lands.
+#   6. SCOPE LISTS. kiln_scope_cfg_files.c (partition kiln_nvs) must contain
+#      a `k...Files[]` initializer (FAIL if missing). Every entry must be a
+#      known macro (else FAIL). Assert: every macro whose partition is
+#      kiln_nvs is in the list, and no listed macro resolves to another
+#      partition. Any other <x>_scope_cfg_files.c that HAS such an array is
+#      policed the same way against partition "<x>_nvs"; one WITHOUT it
+#      (e.g. profiles_scope_cfg_files.c, which sweeps directories because
+#      per-id files cannot be listed by macro) is reported as info,
+#      "directory-swept scope list, not policed here". Mirrors in a
+#      partition with no list are info too; macros deleted by other means
+#      (PROFILES_HIDDEN_FILE_PATH) are not this check's concern.
+#   LIMITS. Writers called through lowercase variables or function pointers
+#      (s_write_fn in zones_config_cfg_fs.c / kiln_cfg_store_cfg_fs.c) are
+#      not inspected, so a mirror whose macro does not end in _FILE_PATH, or
+#      whose path is built at runtime, is invisible to this check.
+#      hal_kv_open partition args: NULL = default partition "nvs"; lowercase
+#      parameters are ignored; any other unresolved word FAILs, as does any
+#      call that does not parse (call count vs parsed count per owner file).
+#      The default "nvs" is dropped when a named partition is also present in
+#      the same owner set (legacy migrate-from-default-partition reads, as in
+#      relay_cycles.c); alone it is a real partition and stands.
 #   7. SANITY FLOOR. Fewer than 8 macros found means the pattern went blind: FAIL.
 #
 # Exit codes: 0 PASS, 1 FAIL (including any internal error). Never SKIPs: the
@@ -122,24 +132,36 @@ try {
         $viaFamily = $false
         if ($hasKv.Count -eq 0) {
             $stem = [IO.Path]::GetFileNameWithoutExtension($def) -replace '(_cfg_fs|_internal|_cfg)$', ''
-            $owners = @($cFiles | Where-Object { $_.Name.StartsWith($stem) })
+            $owners = @($cFiles | Where-Object { $_.Name.StartsWith($stem + '_') -or $_.Name.StartsWith($stem + '.') })
             $viaFamily = $true
         }
         $parts = New-Object System.Collections.Generic.HashSet[string]
         $why = @()
         foreach ($o in $owners) {
             $defs = $null
-            foreach ($m in [regex]::Matches($src[$o.FullName], 'hal_kv_open\s*\(\s*[^,]+,[^,]+,[^,]+,\s*(\w+|"[^"]*")\s*\)')) {
+            $callCount = [regex]::Matches($src[$o.FullName], '\bhal_kv_open\s*\(').Count
+            $matched = [regex]::Matches($src[$o.FullName], '\bhal_kv_open\s*\(\s*[^,]+,[^,]+,[^,]+,\s*(\w+|"[^"]*")\s*\)')
+            if ($callCount -ne $matched.Count) {
+                $problems.Add("${name}: $($o.Name) has $callCount hal_kv_open( call(s) but only $($matched.Count) parse as 4 args with a word/literal partition -- the rest cannot be attributed")
+            }
+            foreach ($m in $matched) {
                 $arg = $m.Groups[1].Value
                 $p = $null
                 if ($arg.StartsWith('"')) { $p = $arg.Trim('"') }
+                elseif ($arg -ceq 'NULL') { $p = 'nvs' }   # hal_kv.h: NULL = default partition
+                elseif ($arg -cmatch '^[a-z_][a-z0-9_]*$') { continue }   # pass-through parameter, ignored (same rule as step 5)
                 else {
                     if ($null -eq $defs) { $defs = Get-Defines $o.FullName @{} }
-                    if ($defs.ContainsKey($arg)) { $p = $defs[$arg] } else { $why += "$($o.Name): '$arg' not resolvable to a string" }
+                    if ($defs.ContainsKey($arg)) { $p = $defs[$arg] }
+                    else { $problems.Add("${name}: $($o.Name): hal_kv_open partition argument '$arg' is not resolvable to a string"); continue }
                 }
-                if ($p) { [void]$parts.Add($p) }
+                [void]$parts.Add($p)
             }
         }
+        # Legacy-migration probes read the pre-split default partition ("nvs",
+        # hal_kv_open(..., NULL)) next to the real one (relay_cycles.c). Drop
+        # the default only when a named partition is also present.
+        if ($parts.Count -gt 1 -and $parts.Contains('nvs')) { [void]$parts.Remove('nvs') }
         $ownerNames = (($owners | ForEach-Object { $_.Name }) -join ',')
         $part = '<unresolved>'
         if ($parts.Count -eq 1) { $part = @($parts)[0] }
@@ -150,6 +172,7 @@ try {
         else { $problems.Add("${name}: no hal_kv_open partition resolved from owner TU(s) [$ownerNames] $($why -join '; ')") }
         $rows += [pscustomobject]@{ Macro = $name; File = $macros[$name].Value; Partition = $part; Owners = $ownerNames + $(if ($viaFamily) { ' (family)' } else { '' }) }
     }
+    foreach ($r in $rows) { if ($r.Owners -like '*(family)') { Write-Host "Info: $($r.Macro) -> $($r.Partition) resolved via family owners: $($r.Owners)" } }
 
     # 5. writer sites
     foreach ($f in $cFiles) {
@@ -175,7 +198,11 @@ try {
         $listPart = "${x}_nvs"
         $checkedParts += $listPart
         $m = [regex]::Match($src[$sf.FullName], '(?s)\b(k\w*Files)\s*\[\s*\]\s*=\s*\{(.*?)\};')
-        if (-not $m.Success) { $problems.Add("$($sf.Name): could not locate the k...Files[] initializer"); continue }
+        if (-not $m.Success) {
+            if ($sf.Name -eq 'kiln_scope_cfg_files.c') { $problems.Add("$($sf.Name): could not locate the k...Files[] initializer"); continue }
+            Write-Host "Info: $($sf.Name) has no k...Files[] array: directory-swept scope list, not policed here."
+            continue
+        }
         $entries = @($m.Groups[2].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         foreach ($e in $entries) {
             if (-not $macros.ContainsKey($e)) { $problems.Add("$($sf.Name): list entry '$e' is not a known *_FILE_PATH macro (literal or unknown)"); continue }
