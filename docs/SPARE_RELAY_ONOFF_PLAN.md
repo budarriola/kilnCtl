@@ -29,7 +29,7 @@ parallel store of "aux outputs" and let the existing pure evaluator drive it.
 2. **Entry fields** (all-zero = disabled, today's behaviour):
    `enabled u8`, `tc_zone u8` (0..2 = zone whose TC feeds temperature rules,
    `0xFF` = none; note 0 is a valid zone, so the zero-init default must be
-   normalised on read, or store `tc_zone_plus1` with 0 = none -- recommended),
+   normalised on read, or store `tc_zone_plus1` with 0 = none -- DECIDED 2026-10-04: plus1),
    `hyst_c f32` (0 -> 2.0 at read), `min_on_s u16`, `min_off_s u16` (0 -> 30),
    `reserved[]`. Fail-safe state is fixed OFF (no field; see Q3). Relay label and
    relay_type stay in the existing `relay_names` store; do not duplicate them.
@@ -228,8 +228,12 @@ Executor (`control/profile_executor.c`, `profile_executor_relay_io.c`):
    `check_stack_margin_registration.ps1` (no new task is expected).
 7. Manual relay override: an aux relay with an active run is owned
    `RELAY_OWNER_PROFILE` -> manual refused, same as zones. With no run, aux
-   relays are manual-reachable like any unowned relay (Q5 decides whether
-   the dashboard exposes a manual aux toggle).
+   relays are manual-reachable like any unowned relay. Q5 decided 2026-10-04:
+   v1 also ships an admin-only manual on/off toggle for an aux relay outside
+   a firing, gated by the same `system_mode_gate` as other relay writes (409
+   while a profile is running). It rides the existing manual relay route if
+   WP-0/WP-2 confirm that route is ADMIN tier and mode-gated for aux relays;
+   otherwise WP-2 adds the minimum change and the URI cap rule above applies.
 
 ## 7. HTTP surface, web UI, LCD
 
@@ -268,7 +272,7 @@ ZERO new routes:
   `capture_lcd.ps1` and numeric sampling (CLAUDE.md), not by eye. The profile
   builder UI (`ui_page_profile_builder_*`) is out of scope for v1 (Q6).
 
-## 8. MCP tools (kilnctrl facade; count 207 -> 208/209)
+## 8. MCP tools (kilnctrl facade; count 207 -> 210)
 
 - `control_get_zones` also prints the aux block (read-only).
 - `control_set_aux_output(relay, enabled, tc_zone, hyst_c, min_on_s, min_off_s,
@@ -277,6 +281,11 @@ ZERO new routes:
   zone-relay conflict, reads back and fails loud if anything else in
   `/api/zones` changed (same discipline as `control_set_zone_coupling`).
   Never use `load_config_preset()` for this.
+- `control_set_aux_manual(relay, on, confirm=False)` (Q5, decided 2026-10-04):
+  admin-only manual on/off of an aux relay outside a firing; refuses unless
+  `confirm is True`, refuses mid-run (`system_mode_gate` 409) and refuses a
+  relay that is not an enabled aux; reads the relay state back and fails loud
+  if it did not change.
 - Profile tools that author rules (`profile_live_*`, profile import) accept
   `aux_relay=N` and translate to the wire byte through the shared helper.
 - Update the CLAUDE.md tool count/narrative and `docs/MCP_SERVERS.md`.
@@ -406,7 +415,7 @@ earlier one merges.
   `test_aux_outputs_store.c`, check `check_aux_relay_conflict_sites.ps1`.
   Owns: those new files, `persist/zones_config_json.c` (validate hook only),
   `diagnostics_http.c` cfgfs item list, `check_*` script.
-- **WP-2 HTTP + zones write paths (M).** `zones_http_post_parse.c`,
+- **WP-2 HTTP + zones write paths (M).** Also the manual aux toggle's route/mode-gate check (Q5). `zones_http_post_parse.c`,
   `zones_http_get.c`, `zones_http_internal.h`, conflict hooks in
   `backup_import.c`, `kiln_cfg_swap.c`, `load_config_preset` path; json_cap
   measurement; route cap decision. Owns: those files + `test_zones_http.c`.
@@ -421,7 +430,7 @@ earlier one merges.
   `profiles_edit_http.c`, `profiles_catalog_http.c`, `profiles_export_http.c`,
   shared target helper (new small header in `persist/`), `test_profiles_http.c`,
   `test_profile_export_import.c`. Owns those. Needs WP-1's accessor only.
-- **WP-5 Web UI (M).** `zones_page.html`, `profiles_page.html`, page JS + JS
+- **WP-5 Web UI (M).** Also the dashboard manual aux on/off toggle (Q5, refused 409 mid-run). `zones_page.html`, `profiles_page.html`, page JS + JS
   tests, lint/responsive checks. Owns the pages. Needs WP-2 and WP-4 wire
   formats frozen.
 - **WP-6 LCD + status (S).** `ui_page_home_rail.c`/`ui_page_home_refresh.c`,
@@ -430,7 +439,7 @@ earlier one merges.
   `capture_lcd.ps1`.
 - **WP-7 Backup, MCP, tools, convert flow (M).** `backup_export.c`,
   `backup_json.c`, `tools/PcTools/src/kilnctrl/zones_http_client.py` + MCP
-  server module, `control_set_aux_output`, `control_convert_onoff_zone_to_aux`,
+  server module, `control_set_aux_output`, `control_set_aux_manual`, `control_convert_onoff_zone_to_aux`,
   CLAUDE.md/MCP_SERVERS.md count. Owns those. Backup edits after WP-2's
   `backup_import.c` hooks merge.
 - **WP-8 Docs + bench (S).** `docs/SAFETY_CASE.md` rows (aux relay: no welded
@@ -445,32 +454,16 @@ Every WP: run the full `tools/run_all_checks.ps1 -ExecutionPolicy Bypass -Fast`
 `check_00_kilnfw_target_build.ps1` target build (host tests are not a target
 build). Negative-test each new check.
 
-## 14. Open questions for the owner (each with a recommended default)
+## 14. Owner decisions (2026-10-04)
 
-1. **Which supply feeds the aux devices: ahead of K4 or behind it?**
-   Recommend: ahead of K4 (own feed) for vent/fan/damper, so they run with heat
-   off; firmware is built K4-independent either way (sec 4). If behind K4, the
-   device simply cannot run when K4 is open and the UI says so.
-2. **How many aux outputs?** Recommend: one per relay, max 4, only relays no
-   zone uses (so a 3-zone kiln gets exactly 1, relay 4).
-3. **Fail-safe ON for an aux device (open damper on a runaway)?** Recommend: not
-   supported, fixed OFF; revisit only for a device on its own supply ahead of K4
-   (same as D2).
-4. **Aux behaviour on PAUSE?** Recommend: hold last state (matches zones);
-   per-entry `failsafe_on_pause` deferred.
-5. **Manual aux toggle outside a run (dashboard)?** Recommend: no in v1;
-   existing Danger Zone relay control can already drive an unowned relay.
-6. **LCD profile builder rule editing for aux?** Recommend: web + MCP only in
-   v1, consistent with ON_OFF rules today.
-7. **Firing-record on-time/switch counts for aux?** Recommend: skip in v1;
-   live `/api/status` fields suffice.
-8. **Include aux in saved kiln packages?** Recommend: no (avoids a
-   `KILN_CFG_STORE_VERSION` bump); a package never changes aux but is refused
-   on conflict.
-9. **Convert existing ON_OFF zones to aux?** Recommend: offer the confirm-gated
-   one-shot (sec 10); do not auto-migrate.
-10. **Is the bench's fourth relay free of other duty?** Recommend: confirm no
-    one uses relay 4 as a spare for RELAY_IO profile segments
-    (`PROFILE_SEG_KIND_RELAY_IO` can already target relay 1..4, and the
-    executor would arbitrate by ownership). Proposed rule: a profile's RELAY_IO
-    segment targeting a relay bound to an enabled aux is refused at save.
+1. **Aux supply vs K4:** varies per install; document both wirings. Ahead of K4 the load is always live; behind K4 it has no power while K4 is open. Firmware stays K4-independent (sec 4).
+2. **Aux outputs:** one per relay, max 4, only relays no zone uses (recommended default accepted).
+3. **Fail-safe:** fixed OFF, no fail-safe ON (default accepted).
+4. **PAUSE:** hold last state.
+5. **Manual aux toggle outside a run:** YES in v1 (overturns the earlier default). Admin-only, gated by the same mode gate as other relay writes, so refused with 409 while a profile is running. In scope for WP-2, WP-5 and WP-7; MCP tool `control_set_aux_manual` (sec 8).
+6. **LCD profile builder rule editing for aux:** web and MCP only in v1 (default accepted).
+7. **Firing-record on-time/switch counts for aux:** skipped in v1 (default accepted).
+8. **Aux in saved kiln packages:** no (default accepted).
+9. **Convert existing ON_OFF zones to aux:** offer the confirm-gated one-shot (sec 10), never automatic (default accepted).
+10. **Bench relay 4 free of other duty:** default accepted; a profile's RELAY_IO segment targeting a relay bound to an enabled aux is refused at save.
+- **tc_zone encoding:** `tc_zone_plus1`, 0 = none.
