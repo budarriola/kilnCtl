@@ -4145,7 +4145,8 @@ def _case_lcd22(ctx: dict) -> CaseResult:
         # Edit click returned 'not_found' 2.69 s in. The Edit button is built
         # hidden and only un-hidden by the home page's periodic refresh
         # (ui_page_home_refresh.c) once it sees RUNNING/PAUSED, and
-        # list_tap_targets/click_by_name skip hidden widgets -- so a click
+        # list_tap_targets skips hidden widgets (click_by_name reports them
+        # as "hidden" since 65108980's follow-up, not "not_found") -- so a click
         # right after the start can precede that refresh. Wait (bounded) for
         # a visible "Edit" with no keypad/popup open, the same settle LCD-19
         # uses before its Start/Stop click, BEFORE the single click below.

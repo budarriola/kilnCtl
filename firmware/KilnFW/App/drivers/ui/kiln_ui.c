@@ -400,6 +400,18 @@ typedef struct {
      * from the emitted names, even though the button existed and was
      * reachable by tree walk, just past the truncation point. */
     uint8_t actionable_filter;
+    /* Final pass only (log_all_tap_targets()): walks the WHOLE tree, descends
+     * into HIDDEN subtrees and reports ONLY widgets that are hidden or sit
+     * under a hidden ancestor, with hidden=true, so click_by_name can answer
+     * "hidden" instead of "not_found" for them. Always run AFTER every
+     * visible pass, so a full output array or wire reply drops hidden entries
+     * before any visible one, and a drop here never sets `truncated`
+     * (hidden entries are best-effort, a visible-only page must still read
+     * as untruncated). The normal passes keep skipping hidden subtrees. */
+    bool hidden_pass;
+    /* Number of HIDDEN ancestors of the widget being visited (hidden_pass
+     * only). */
+    uint8_t hidden_anc;
 } tap_walk_ctx_t;
 
 #define TAP_WALK_ROOT_ALL 0u
@@ -421,7 +433,9 @@ static void tap_walk_add(tap_walk_ctx_t *ctx, const char *name, int cx, int cy, 
         return;
     }
     if (ctx->count >= ctx->max) {
-        ctx->truncated = true;
+        if (!ctx->hidden_pass) {
+            ctx->truncated = true;
+        }
         return;
     }
     kiln_ui_tap_target_t *t = &ctx->out[ctx->count++];
@@ -429,6 +443,37 @@ static void tap_walk_add(tap_walk_ctx_t *ctx, const char *name, int cx, int cy, 
     t->cx = (int16_t)cx;
     t->cy = (int16_t)cy;
     t->hidden = hidden;
+}
+
+/* Opt-in for the hidden pass, set only around kiln_ui_click_by_name()'s own
+ * walk (kiln_ui_set_collect_hidden()). LIST_TAP_TARGETS and the log dump
+ * never see hidden widgets: several bench cases treat every listed name as
+ * present, so adding hidden entries to the list would change what they
+ * judge. click_by_name needs them only to answer "hidden" rather than
+ * "not_found". Written on the UI-test bridge task, read on lvgl_port_task
+ * during the dispatched walk; both commands run serially on that one bridge
+ * task, and the handoff itself orders the write before the read. */
+static volatile bool s_collect_hidden;
+
+void kiln_ui_set_collect_hidden(bool enable)
+{
+    s_collect_hidden = enable;
+}
+
+static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx);
+
+/* Recurse into `child`, counting it as a hidden ancestor for the duration
+ * when it is itself HIDDEN (only reachable in the hidden pass). */
+static void log_tap_targets_descend(lv_obj_t *child, int depth, bool child_hidden,
+                                    tap_walk_ctx_t *ctx)
+{
+    if (child_hidden) {
+        ctx->hidden_anc++;
+    }
+    log_tap_targets(child, depth + 1, ctx);
+    if (child_hidden) {
+        ctx->hidden_anc--;
+    }
 }
 
 /* Recursive half of the tap-target dump called at the end of kiln_ui_show()
@@ -454,16 +499,22 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
             continue;
         }
 
-        /* Skip hidden subtrees entirely. A hidden widget still reports valid
-         * coordinates, so without this the dump advertises targets that
-         * cannot be tapped -- ui_page_config.c's paged hub keeps two of its
-         * three pages hidden at all times, and listing all three made the
-         * dump report three different widgets at the same centre point. The
-         * dump's whole purpose is to say where a tap will actually land, so
-         * anything not currently hittable has no business in it. */
-        if (lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN)) {
+        /* Normal passes skip hidden subtrees entirely. A hidden widget still
+         * reports valid coordinates, so listing it among the visible targets
+         * advertises targets that cannot be tapped -- ui_page_config.c's
+         * paged hub keeps two of its three pages hidden at all times, and
+         * listing all three made the dump report three different widgets at
+         * the same centre point. They are reported separately, last, by the
+         * hidden_pass with hidden=true, so click_by_name can still answer
+         * "hidden" for them rather than "not_found". */
+        bool child_hidden = lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN);
+        if (child_hidden && !ctx->hidden_pass) {
             continue;
         }
+        /* In the hidden pass a widget is reported only if it, or an ancestor,
+         * is hidden; visible widgets were already reported by the earlier
+         * passes, so they are only descended through. */
+        bool emit_hidden_only = ctx->hidden_pass && !child_hidden && ctx->hidden_anc == 0;
 
         if (depth == 0 && ctx->root_filter != TAP_WALK_ROOT_ALL) {
             bool floating = lv_obj_has_flag(child, LV_OBJ_FLAG_FLOATING);
@@ -487,7 +538,7 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
              * Recursion is irrelevant here regardless (a buttonmatrix has no
              * lv_obj_t children, see the `continue` below), so skipping the
              * whole branch loses nothing a later pass would have reached. */
-            if (ctx->actionable_filter == TAP_WALK_NON_ACTIONABLE_ONLY) {
+            if (ctx->actionable_filter == TAP_WALK_NON_ACTIONABLE_ONLY || emit_hidden_only) {
                 continue;
             }
             lv_buttonmatrix_t *bm = (lv_buttonmatrix_t *)child;
@@ -524,6 +575,7 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
                      * false). The vendored lv_keyboard sets neither flag
                      * today. */
                     bool key_hidden =
+                        ctx->hidden_pass ||
                         lv_buttonmatrix_has_button_ctrl(child, k, LV_BUTTONMATRIX_CTRL_HIDDEN);
 
                     const lv_area_t *ka = &bm->button_areas[k];
@@ -603,9 +655,10 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
             bool is_button = lv_obj_has_class(child, &lv_button_class) ||
                               lv_obj_check_type(child, &lv_msgbox_footer_button_class) ||
                               lv_obj_check_type(child, &lv_msgbox_header_button_class);
-            if ((ctx->actionable_filter == TAP_WALK_ACTIONABLE_ONLY && !is_button) ||
+            if (emit_hidden_only ||
+                (ctx->actionable_filter == TAP_WALK_ACTIONABLE_ONLY && !is_button) ||
                 (ctx->actionable_filter == TAP_WALK_NON_ACTIONABLE_ONLY && is_button)) {
-                log_tap_targets(child, depth + 1, ctx);
+                log_tap_targets_descend(child, depth, child_hidden, ctx);
                 continue;
             }
 
@@ -667,7 +720,7 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
              * container's own. The home page's body container borrowing the
              * hidden safety-trip strip's text read as a live safety trip on a
              * board whose diag_state was ARMED. */
-            bool hidden = lv_obj_has_flag(child, LV_OBJ_FLAG_HIDDEN);
+            bool hidden = child_hidden || ctx->hidden_anc > 0;
             bool borrowed = (text[0] != '\0') && !lv_obj_check_type(child, &lv_button_class);
             if (ctx->do_log) {
                 ESP_LOGI(TAG, "  tap target%*s (%d,%d)-(%d,%d) centre=(%d,%d) \"%s\"%s%s", depth * 2, "",
@@ -679,7 +732,7 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
                          (int)((area.y1 + area.y2) / 2), hidden);
         }
 
-        log_tap_targets(child, depth + 1, ctx);
+        log_tap_targets_descend(child, depth, child_hidden, ctx);
     }
 }
 
@@ -780,7 +833,27 @@ static void log_all_tap_targets(lv_obj_t *screen, tap_walk_ctx_t *ctx)
 
         ctx->root_filter = TAP_WALK_ROOT_ALL;
     }
+
+    /* Final pass (click_by_name walks only): hidden widgets (and everything under a hidden widget),
+     * reported with hidden=true -- see tap_walk_ctx_t::hidden_pass. Last, so
+     * a full array/wire reply never loses a visible target to one. */
     ctx->actionable_filter = TAP_WALK_ACTIONABLE_ALL;
+    ctx->root_filter = TAP_WALK_ROOT_ALL;
+    if (!s_collect_hidden) {
+        return;
+    }
+    ctx->hidden_pass = true;
+    ctx->hidden_anc = 0;
+    if (top && lv_obj_get_child_count(top) > 0) {
+        log_tap_targets(top, 0, ctx);
+    }
+    if (sys && lv_obj_get_child_count(sys) > 0) {
+        log_tap_targets(sys, 0, ctx);
+    }
+    if (screen) {
+        log_tap_targets(screen, 0, ctx);
+    }
+    ctx->hidden_pass = false;
 }
 
 esp_err_t kiln_ui_show(const char *name)
@@ -942,8 +1015,10 @@ kiln_ui_click_result_t kiln_ui_click_by_name(const char *name, int16_t *out_cx, 
     kiln_ui_tap_target_t targets[32];
     int32_t disp_w = 0, disp_h = 0;
     bool truncated = false;
+    kiln_ui_set_collect_hidden(true);
     size_t n = lvgl_port_collect_tap_targets(targets, sizeof(targets) / sizeof(targets[0]),
                                               &truncated, &disp_w, &disp_h);
+    kiln_ui_set_collect_hidden(false);
     if (n == 0 && truncated) {
         return KILN_UI_CLICK_WALK_BUSY;
     }

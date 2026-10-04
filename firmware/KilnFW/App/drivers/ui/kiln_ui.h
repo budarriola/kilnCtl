@@ -167,6 +167,13 @@ typedef struct {
  * exact function, from lvgl_port_task, when servicing a request. */
 size_t kiln_ui_collect_tap_targets(kiln_ui_tap_target_t *out, size_t max, bool *truncated);
 
+/* While enabled, kiln_ui_collect_tap_targets() appends a final pass of HIDDEN
+ * widgets (and everything under one) with hidden=true, after every visible
+ * target. Only kiln_ui_click_by_name() turns it on, around its own walk, so
+ * it can answer KILN_UI_CLICK_HIDDEN instead of NOT_FOUND; LIST_TAP_TARGETS
+ * and the log dump never include hidden widgets. */
+void kiln_ui_set_collect_hidden(bool enable);
+
 typedef enum {
     KILN_UI_CLICK_OK,
     KILN_UI_CLICK_NOT_FOUND,
