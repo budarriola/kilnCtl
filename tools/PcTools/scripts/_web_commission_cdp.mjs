@@ -124,7 +124,7 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync } from 'node:fs';
-import { writeFile, mkdtemp, rm } from 'node:fs/promises';
+import { writeFile, mkdtemp, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -170,7 +170,9 @@ function findChrome() {
 }
 
 function parseArgs(argv) {
-  const out = { port: 9433 };
+  // 0 = let Chrome pick a free port itself (race-free; see the launch site).
+  // An explicit --port keeps the old probe-then-bind behavior.
+  const out = { port: 0 };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--host') out.host = argv[++i];
@@ -255,6 +257,21 @@ function trimUrl(url, maxLen) {
   } catch {
     return url.slice(0, maxLen);
   }
+}
+
+async function readDevToolsActivePort(userDataDir, timeoutMs, chrome) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (chrome && chrome.exitCode !== null) {
+      throw new Error(`Chrome exited early (code ${chrome.exitCode})`);
+    }
+    try {
+      const port = parseInt((await readFile(path.join(userDataDir, 'DevToolsActivePort'), 'utf8')).split(/\r?\n/)[0], 10);
+      if (port > 0) return port;
+    } catch { /* not written yet */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error('Chrome never wrote DevToolsActivePort');
 }
 
 async function waitForPort(port, timeoutMs, chrome) {
@@ -681,13 +698,19 @@ async function main() {
   const chromePath = findChrome();
   if (!chromePath) throw new Error('no Chrome/Edge binary found (set KC_SWEEP_CHROME)');
 
-  const cdpPort = await pickPort(args.port);
-  if (cdpPort !== args.port) {
-    console.log(`_web_commission_cdp: CDP port ${args.port} was busy, using ${cdpPort} instead`);
-  }
-  args.port = cdpPort;
-
   const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'kc-web-commission-'));
+  // An explicit --port is probed (EADDRINUSE falls back to ephemeral). With no
+  // --port, Chrome binds port 0 itself and reports it in DevToolsActivePort:
+  // probing a port, closing it, then handing it to Chrome is a TOCTOU race
+  // that concurrent runs on this shared machine lost (18/20 assertions of
+  // check_web_commission_cdp_driver.ps1 failing under parallel load).
+  if (args.port) {
+    const cdpPort = await pickPort(args.port);
+    if (cdpPort !== args.port) {
+      console.log(`_web_commission_cdp: CDP port ${args.port} was busy, using ${cdpPort} instead`);
+    }
+    args.port = cdpPort;
+  }
   const chrome = spawn(chromePath, [
     `--remote-debugging-port=${args.port}`,
     '--headless=new',
@@ -700,6 +723,7 @@ async function main() {
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
 
   try {
+    if (!args.port) args.port = await readDevToolsActivePort(userDataDir, 30000, chrome);
     await waitForPort(args.port, 30000, chrome);
     const tabResp = await fetch(`http://127.0.0.1:${args.port}/json/new?about:blank`, { method: 'PUT' });
     const tab = await tabResp.json();
