@@ -678,6 +678,7 @@ static bool finish_transfer(relay_t *r)
     memset(&cur, 0, sizeof(cur));
     uint32_t seen = r->st_seq;
     int64_t t_end = now_ms();
+    int64_t t_verify = 0;
     for (;;) {
         if (act == RPP_FIN_DONE) {
             return true;
@@ -741,6 +742,16 @@ static bool finish_transfer(relay_t *r)
         if (w > 0) {
             seen = r->st_seq;
             cur = r->st;
+        }
+        // Wall clock since the first VERIFYING report, for RPP_VERIFY_TIMEOUT_MS.
+        // Bounded: wait_status() returns within RPP_GAP_ROUND_WAIT_MS, so this
+        // is re-evaluated at least every 2.5 s and never blocks httpd (the
+        // relay runs in its own task).
+        if (w > 0 && cur.state == RPP_STATE_VERIFYING && t_verify == 0) {
+            t_verify = now_ms() ? now_ms() : 1; // 0 means "not started"
+        }
+        if (t_verify != 0) {
+            f.verify_elapsed_ms = (uint32_t)(now_ms() - t_verify);
         }
         act = rpp_fin_step(&f, w > 0 ? RPP_EV_STATUS : RPP_EV_QUIET, w > 0 ? &cur : NULL,
                            (uint32_t)(now_ms() - t_end));

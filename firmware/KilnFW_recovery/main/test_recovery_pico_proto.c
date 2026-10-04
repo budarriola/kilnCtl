@@ -1691,6 +1691,38 @@ static void test_fin_unit(void)
     rpp_fin_end_sent(&f);
     CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, RPP_END_REPLY_TIMEOUT_MS) == RPP_FIN_UNKNOWN,
           "END sends exhausted -> outcome unknown");
+
+    // Wall-clock cap on VERIFYING: every VERIFYING beacon restarts the END timer,
+    // so a Pico that beacons VERIFYING forever must still be cut off.
+    rpp_fin_start(&f);
+    rpp_fin_end_sent(&f);
+    st.state = RPP_STATE_VERIFYING;
+    f.verify_elapsed_ms = 0;
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_WAIT && f.verifying_seen,
+          "verify cap: first VERIFYING waits");
+    f.verify_elapsed_ms = RPP_VERIFY_TIMEOUT_MS - 1u;
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_WAIT,
+          "verify cap: still VERIFYING just under the cap waits");
+    f.verify_elapsed_ms = RPP_VERIFY_TIMEOUT_MS;
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_UNKNOWN && f.why &&
+              strstr(f.why, "verify timeout") && strstr(f.why, "do NOT retry blindly"),
+          "verify cap: endless VERIFYING beacons -> outcome unknown naming the verify timeout");
+    f.why = NULL;
+    CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, 0) == RPP_FIN_UNKNOWN && f.why &&
+              strstr(f.why, "verify timeout"),
+          "verify cap: silence after VERIFYING past the cap -> unknown, same text");
+    st.state = RPP_STATE_COMPLETE;
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_DONE,
+          "verify cap: a real COMPLETE past the cap still wins");
+    st.state = RPP_STATE_FAILED;
+    CHECK(rpp_fin_step(&f, RPP_EV_STATUS, &st, 0) == RPP_FIN_FAIL,
+          "verify cap: a real FAILED past the cap is still a failure");
+    // Never VERIFYING: the cap field alone must not fire.
+    rpp_fin_start(&f);
+    rpp_fin_end_sent(&f);
+    f.verify_elapsed_ms = RPP_VERIFY_TIMEOUT_MS * 4u;
+    CHECK(rpp_fin_step(&f, RPP_EV_QUIET, NULL, 100) == RPP_FIN_WAIT,
+          "verify cap: inert until VERIFYING was actually seen");
 }
 
 static void test_discover_classify(void)

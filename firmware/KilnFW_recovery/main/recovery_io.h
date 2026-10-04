@@ -48,6 +48,11 @@ void recovery_io_hold_relays_off(void);
 // The status route and the LCD show "RELAY CTRL FAULT" when this is true.
 bool recovery_io_relay_fault(void);
 
+// ESP_OK, or why the boot-time bring-up/hold never succeeded after its bounded
+// retries (the I2C driver's error, or ESP_ERR_INVALID_RESPONSE when the
+// expander answered but never verified). Reported by the status route.
+esp_err_t recovery_io_init_error(void);
+
 // True once the expander answered and the relay hold was verified.
 bool recovery_io_relays_verified_off(void);
 

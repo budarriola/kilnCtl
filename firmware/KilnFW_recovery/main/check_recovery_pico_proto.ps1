@@ -111,6 +111,13 @@ try {
         @{ Name = "operator_beats_reported"; Needle = 'if (app_active_slot == RPP_SLOT_A || app_active_slot == RPP_SLOT_B) {'; Repl = 'if (operator_slot == RPP_SLOT_UNKNOWN && (app_active_slot == RPP_SLOT_A || app_active_slot == RPP_SLOT_B)) {' },
         # FAILED after END no longer ends the transfer as a failure.
         @{ Name = "failed_not_fatal"; Needle = 'return fin_fail(f, "Pico ended the update");'; Repl = 'return RPP_FIN_WAIT;' },
+        # The VERIFYING wall-clock cap made unreachable / mis-transitioned.
+        @{ Name = "verify_cap_unreachable"; Needle = 'f->verify_elapsed_ms >= RPP_VERIFY_TIMEOUT_MS &&'; Repl = 'f->verify_elapsed_ms >= 0xFFFFFFFFu &&' },
+        @{ Name = "verify_cap_as_done"; Needle = 'return RPP_FIN_UNKNOWN;
+    }
+    if (ev == RPP_EV_QUIET || !st) {'; Repl = 'return RPP_FIN_DONE;
+    }
+    if (ev == RPP_EV_QUIET || !st) {' },
         # TRIP_PENDING no longer maps to power_cycle.
         @{ Name = "trip_no_power_cycle"; Needle = 'return (st->err & RPP_ERR_TRIP_PENDING) != 0u;'; Repl = 'return 0;' },
         # power_cycle raised for any refusal.

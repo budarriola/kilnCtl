@@ -159,11 +159,39 @@ static bool hold_once(bool first)
     return true;
 }
 
+// Real-time pause between bring-up/hold attempts. A transient first-init I2C
+// failure (expander still settling after a reset that does not power-cycle it)
+// clears within a few ms; 100 ms is 10 ticks at CONFIG_FREERTOS_HZ=100, so
+// vTaskDelay() really waits (pdMS_TO_TICKS(5) would be 0).
+#define IO_RETRY_DELAY_MS 100
+
+static esp_err_t s_init_err = ESP_OK; // last bring-up error if it never succeeded
+
+esp_err_t recovery_io_init_error(void)
+{
+    return s_init_err;
+}
+
 void recovery_io_hold_relays_off(void)
 {
-    esp_err_t err = i2c_bring_up();
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < HOLD_ATTEMPTS; i++) {
+        err = i2c_bring_up();
+        if (err == ESP_OK) {
+            break;
+        }
+        ESP_LOGW(TAG, "I2C bring-up attempt %d/%d failed: %s", i + 1, HOLD_ATTEMPTS,
+                 esp_err_to_name(err));
+        // A failed i2c_driver_install() leaves nothing installed, but a failure
+        // after a partial setup must not make the next attempt EALREADY.
+        (void)i2c_driver_delete(I2C_PORT);
+        vTaskDelay(pdMS_TO_TICKS(IO_RETRY_DELAY_MS));
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "I2C bring-up failed: %s -- RELAY CTRL FAULT", esp_err_to_name(err));
+        s_init_err = err; // status reports it via recovery_io_init_error()
+        s_fault = true;
+        ESP_LOGE(TAG, "I2C bring-up failed after %d attempts: %s -- RELAY CTRL FAULT",
+                 HOLD_ATTEMPTS, esp_err_to_name(err));
         return;
     }
     s_i2c_ready = true;
@@ -176,8 +204,10 @@ void recovery_io_hold_relays_off(void)
             return;
         }
         ESP_LOGW(TAG, "relay hold attempt %d/%d failed", i + 1, HOLD_ATTEMPTS);
+        vTaskDelay(pdMS_TO_TICKS(IO_RETRY_DELAY_MS));
     }
     s_fault = true;
+    s_init_err = ESP_ERR_INVALID_RESPONSE; // expander never verified
     ESP_LOGE(TAG, "RELAY CTRL FAULT: could not verify relays low after %d attempts. Recovery "
                   "keeps running (uploads must still work); heaters are NOT confirmed off "
                   "by this image.", HOLD_ATTEMPTS);

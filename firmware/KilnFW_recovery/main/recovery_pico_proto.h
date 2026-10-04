@@ -110,6 +110,15 @@ uint32_t rpp_data_pace_ms(bool bootloader);
 #define RPP_ERASE_TIMEOUT_MS 120000u
 #define RPP_END_REPLY_TIMEOUT_MS 15000u
 #define RPP_GAP_ROUND_WAIT_MS 2500u
+// Wall-clock cap on the Pico's VERIFYING state, measured from the FIRST
+// VERIFYING report. Every VERIFYING beacon restarts the END reply timer
+// (RPP_END_REPLY_TIMEOUT_MS), so without this cap a Pico that beacons
+// VERIFYING forever would hold the status in "finishing" indefinitely.
+// 30 s = 2x the 15 s END reply window: the verify is one CRC pass over at most
+// RPP_SLOT_SIZE (832 KB) read back from flash (UPDATE_PROTOCOL.md step 5),
+// which takes seconds, and the whole-slot erase (120 s) is the slowest legit
+// step in the protocol, so 30 s is generous for a read-only pass yet bounded.
+#define RPP_VERIFY_TIMEOUT_MS (2u * RPP_END_REPLY_TIMEOUT_MS)
 // Consecutive gap reports with no increase in received_chunks before giving up.
 #define RPP_MAX_RETRANSMIT_ROUNDS 12u
 // Hard cap on gap reports handled in one upload (a lossy link still ends).
@@ -356,6 +365,10 @@ typedef struct {
     bool restart_timer;   // caller: restart the END reply timer, then clear this
     bool end_sent_once;   // an END has been sent at some point (it may have been accepted)
     bool verifying_seen;  // the Pico reported VERIFYING (END was certainly accepted)
+    // Caller-maintained before every rpp_fin_step(): ms since the first VERIFYING
+    // report (0 until verifying_seen). At RPP_VERIFY_TIMEOUT_MS the step gives up
+    // with RPP_FIN_UNKNOWN naming the verify timeout.
+    uint32_t verify_elapsed_ms;
     const char *why;      // static text, set with RPP_FIN_FAIL
 } rpp_fin_t;
 

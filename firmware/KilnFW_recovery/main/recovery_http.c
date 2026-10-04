@@ -473,6 +473,11 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                       recovery_io_relays_verified_off() ? "true" : "false");
     }
     if (e == ESP_OK) {
+        esp_err_t ie = recovery_io_init_error();
+        e = ie == ESP_OK ? send_frag(req, "\"relay_io_init_error\":null,")
+                         : send_frag(req, "\"relay_io_init_error\":\"%s\",", esp_err_to_name(ie));
+    }
+    if (e == ESP_OK) {
         recovery_io_hold_status_t hs;
         recovery_io_hold_status(&hs);
         char fs_buf[16], ok_buf[16];

@@ -585,6 +585,21 @@ static rpp_fin_action_t fin_lost(rpp_fin_t *f, const char *fail_why)
 rpp_fin_action_t rpp_fin_step(rpp_fin_t *f, rpp_fin_event_t ev, const rpp_status_t *st,
                               uint32_t since_end_ms)
 {
+    // A fresh COMPLETE or a Pico-reported terminal state is a real answer and
+    // still wins; only an indefinitely-VERIFYING (or silent-after-VERIFYING)
+    // Pico is cut off. Never reported as success, never a blind-retry FAILED:
+    // the slot may or may not have been committed, so it is outcome-unknown.
+    if (f->verifying_seen && f->verify_elapsed_ms >= RPP_VERIFY_TIMEOUT_MS &&
+        !(ev == RPP_EV_STATUS && st &&
+          (st->state == RPP_STATE_COMPLETE || st->state == RPP_STATE_FAILED ||
+           st->state == RPP_STATE_ABORTED || st->state == RPP_STATE_REFUSED ||
+           st->state == RPP_STATE_REJECTED_SLOT_LINKAGE ||
+           st->state == RPP_STATE_REFUSED_RUNNING_IMAGE_OVERLAP))) {
+        f->why = "outcome unknown: verify timeout - the Pico stayed in VERIFYING for over 30 s "
+                 "without a final result - power-cycle and check the Pico version; do NOT retry "
+                 "blindly";
+        return RPP_FIN_UNKNOWN;
+    }
     if (ev == RPP_EV_QUIET || !st) {
         if (!f->end_outstanding) {
             // Receivers go silent once every chunk is in: silence means "send END".
