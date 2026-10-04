@@ -24,10 +24,21 @@
 #define RECOVERY_LCD_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Read-only panel health for GET /api/recovery/status. The passphrase is
+// shown only on the LCD, so a panel that is not ready means nobody can see it.
+typedef struct {
+    bool ready;                     // panel up and the last full draw succeeded
+    uint32_t init_attempts;         // cumulative init attempts (boot + retries)
+    uint32_t draw_failures;         // draw passes that dropped at least one line
+    const char *boot_guard_record;  // "none" | "valid" | "invalid" | "unreadable"
+} recovery_lcd_status_t;
+void recovery_lcd_get_status(recovery_lcd_status_t *out);
 
 // Brings up SPI + panel and draws the full status screen (title, boot_guard
 // count, reset reason, crash/coredump presence, relay state, SoftAP SSID and

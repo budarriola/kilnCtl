@@ -81,6 +81,12 @@ unsigned recovery_io_nvs_failed_mask(void);
 // Returns ESP_ERR_INVALID_STATE if the expander is not up.
 esp_err_t recovery_io_set_lcd_pins(bool dc_high, bool reset_high);
 
+// Re-resets the expander and re-applies + verifies the relay hold (the same
+// sequence as boot), under the I/O lock. Used by the LCD retry path because the
+// LCD's D/C and ~RESET live on the same expander. Returns true if the hold
+// verified. Pins float for the few ms of the reset, exactly as at boot.
+bool recovery_io_expander_rehold(void);
+
 #ifdef __cplusplus
 }
 #endif

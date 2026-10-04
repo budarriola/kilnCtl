@@ -341,3 +341,14 @@ esp_err_t recovery_io_set_lcd_pins(bool dc_high, bool reset_high)
     xSemaphoreGive(s_io_lock);
     return err;
 }
+
+bool recovery_io_expander_rehold(void)
+{
+    if (!s_i2c_ready || !s_io_lock) {
+        return false;
+    }
+    xSemaphoreTake(s_io_lock, portMAX_DELAY);
+    bool ok = hold_once(false);
+    xSemaphoreGive(s_io_lock);
+    return ok;
+}

@@ -19,7 +19,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "recovery_image_check.h"
 #include "recovery_io.h"
+#include "recovery_lcd_policy.h"
 #include "recovery_passphrase.h"
 #include "recovery_text.h"
 
@@ -106,7 +108,7 @@ static const uint8_t k_init_seq[] = {
 #define Y_NOTE    290
 
 static spi_device_handle_t s_spi;
-static bool s_ready = false;
+static volatile bool s_ready = false;
 static bool s_dc_data = true; // tracks D/C so we only touch the expander on change
 static DMA_ATTR uint8_t s_line[PANEL_W * 2];
 static StaticSemaphore_t s_lock_buf;
@@ -123,9 +125,15 @@ static bool s_net_none = false;      // every Wi-Fi bring-up path failed
 static bool s_net_storage_fail = false; // driver not RAM-only: AP refused
 static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 
+// Panel health, reported read-only through GET /api/recovery/status.
+static bool s_bus_up = false;   // SPI bus + device already added (never re-added)
+static volatile uint32_t s_init_attempts = 0;
+static volatile uint32_t s_draw_failures = 0;
+static int s_pass_failed = 0;   // failed draw_line() calls in the current draw pass
+
 // Status facts gathered once at show_message().
-static int s_boot_count = -1; // -1 unreadable, 0.. = persisted count
-static bool s_boot_record_present = false;
+static int s_boot_count = -1; // -1 unless the record decoded, 0.. = persisted count
+static rlcd_bg_state_t s_bg_state = RLCD_BG_UNREADABLE;
 static int s_reset_reason = 0;
 static int s_crash_state = 0; // 0 none, 1 coredump present, -1 unknown
 
@@ -191,6 +199,9 @@ static esp_err_t set_window(int x0, int y0, int x1, int y1)
 
 static esp_err_t spi_init(void)
 {
+    if (s_bus_up) {
+        return ESP_OK; // a retry must not re-initialise the bus or re-add the device
+    }
     // The three MAX31856 ~CS lines (KILNCTL_THERMO_CS0/1/2_IO = GPIO14/17/18,
     // App/drivers/Kconfig) share this SPI bus; park them high as outputs so
     // panel traffic can never select a thermocouple chip.
@@ -219,7 +230,13 @@ static esp_err_t spi_init(void)
         .spics_io_num = LCD_CS_GPIO,
         .queue_size = 2,
     };
-    return spi_bus_add_device(LCD_SPI_HOST, &dev, &s_spi);
+    err = spi_bus_add_device(LCD_SPI_HOST, &dev, &s_spi);
+    if (err != ESP_OK) {
+        (void)spi_bus_free(LCD_SPI_HOST); // so the next attempt starts clean
+        return err;
+    }
+    s_bus_up = true;
+    return ESP_OK;
 }
 
 static esp_err_t panel_init(void)
@@ -272,7 +289,7 @@ static esp_err_t panel_init(void)
 // Draws one full-width text line whose top edge is `y`. The whole band is
 // repainted (text padded with bg), so a shorter string fully replaces a
 // longer one.
-static esp_err_t draw_line(int y, int scale, uint16_t fg, uint16_t bg, const char *text)
+static esp_err_t draw_line_raw(int y, int scale, uint16_t fg, uint16_t bg, const char *text)
 {
     int h = RECOVERY_FONT_H * scale;
     esp_err_t err = set_window(0, y, PANEL_W - 1, y + h - 1);
@@ -289,6 +306,17 @@ static esp_err_t draw_line(int y, int scale, uint16_t fg, uint16_t bg, const cha
         }
     }
     return ESP_OK;
+}
+
+// Every draw_line() result is aggregated into s_pass_failed; draw_status()
+// turns any failure into s_ready=false so the retry task redraws.
+static esp_err_t draw_line(int y, int scale, uint16_t fg, uint16_t bg, const char *text)
+{
+    esp_err_t err = draw_line_raw(y, scale, fg, bg, text);
+    if (err != ESP_OK) {
+        s_pass_failed++;
+    }
+    return err;
 }
 
 static esp_err_t clear_screen(void)
@@ -311,15 +339,19 @@ static void draw_status(void)
 {
     char buf[64];
 
+    s_pass_failed = 0;
     (void)draw_line(Y_TITLE, TITLE_SCALE, COL_TITLE, COL_BG, "RECOVERY MODE");
     (void)draw_line(Y_SUB, TEXT_SCALE, COL_DIM, COL_BG, "KilnFW recovery image");
 
     if (recovery_io_nvs_failed_mask() != 0) {
         (void)draw_line(Y_BOOT, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "NVS UNAVAILABLE");
         buf[0] = 0;
-    } else if (s_boot_count >= 0) {
+    } else if (s_bg_state == RLCD_BG_VALID) {
         snprintf(buf, sizeof(buf), "Boot guard count: %d", s_boot_count);
-    } else if (s_boot_record_present) {
+    } else if (s_bg_state == RLCD_BG_INVALID) {
+        (void)draw_line(Y_BOOT, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, "BOOT GUARD RECORD INVALID");
+        buf[0] = 0;
+    } else if (s_bg_state == RLCD_BG_UNREADABLE) {
         snprintf(buf, sizeof(buf), "Boot guard count: unreadable");
     } else {
         snprintf(buf, sizeof(buf), "Boot guard count: none");
@@ -374,6 +406,14 @@ static void draw_status(void)
         (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
     }
+
+    if (!rlcd_draw_ok(s_pass_failed)) {
+        // A dropped line may be the passphrase: not ready, so the 1 Hz task
+        // re-inits and redraws the whole screen.
+        s_draw_failures++;
+        s_ready = false;
+        ESP_LOGE(TAG, "status draw failed on %d line(s)", s_pass_failed);
+    }
 }
 
 // --- status gathering ------------------------------------------------------
@@ -390,9 +430,9 @@ static void gather_status(void)
     // Read-only look at the boot_guard record (recovery never writes it
     // here). The partition has to be initialised before nvs_open_from_partition().
     s_boot_count = -1;
-    s_boot_record_present = false;
-    // Only ESP_ERR_NVS_NOT_FOUND means "no record" (count 0); any other NVS
-    // error leaves s_boot_count at -1, shown as "unreadable".
+    s_bg_state = RLCD_BG_UNREADABLE;
+    // Only ESP_ERR_NVS_NOT_FOUND means "no record" (count 0); a record of the
+    // wrong size/version/CRC is "invalid"; any other NVS error is "unreadable".
     if (nvs_flash_init_partition("kiln_nvs") == ESP_OK) {
         nvs_handle_t h;
         esp_err_t oerr = nvs_open_from_partition("kiln_nvs", "kiln_cfg", NVS_READONLY, &h);
@@ -400,20 +440,22 @@ static void gather_status(void)
             uint8_t rec[12];
             size_t len = sizeof(rec);
             esp_err_t gerr = nvs_get_blob(h, "bootguard", rec, &len);
-            if (gerr == ESP_OK) {
-                s_boot_record_present = true;
-                uint32_t crc_stored = (uint32_t)rec[8] | ((uint32_t)rec[9] << 8) |
-                                      ((uint32_t)rec[10] << 16) | ((uint32_t)rec[11] << 24);
-                if (len == sizeof(rec) && rec[0] == 1 && crc_stored == esp_rom_crc32_le(0, rec, 8)) {
-                    s_boot_count = (int)((uint32_t)rec[4] | ((uint32_t)rec[5] << 8) |
-                                         ((uint32_t)rec[6] << 16) | ((uint32_t)rec[7] << 24));
-                }
-            } else if (gerr == ESP_ERR_NVS_NOT_FOUND) {
-                s_boot_count = 0; // no record: a clean (or just-cleared) counter
+            rlcd_get_rc_t rc = gerr == ESP_OK ? RLCD_GET_OK
+                             : gerr == ESP_ERR_NVS_NOT_FOUND ? RLCD_GET_NOT_FOUND
+                             : gerr == ESP_ERR_NVS_INVALID_LENGTH ? RLCD_GET_BAD_LENGTH
+                                                                  : RLCD_GET_OTHER;
+            uint32_t count = 0;
+            bool decoded = gerr == ESP_OK && ric_boot_guard_decode(rec, len, &count) != 0;
+            s_bg_state = rlcd_classify_boot_guard(rc, decoded);
+            if (s_bg_state == RLCD_BG_VALID) {
+                s_boot_count = (int)count;
+            } else if (s_bg_state == RLCD_BG_NONE) {
+                s_boot_count = 0;
             }
             nvs_close(h);
         } else if (oerr == ESP_ERR_NVS_NOT_FOUND) {
-            s_boot_count = 0; // namespace never created
+            s_bg_state = RLCD_BG_NONE; // namespace never created
+            s_boot_count = 0;
         }
     }
 
@@ -428,6 +470,78 @@ static void gather_status(void)
             s_crash_state = (w != 0xFFFFFFFFu) ? 1 : 0;
         }
     }
+}
+
+// --- bring-up and retry -----------------------------------------------------
+
+// One init attempt (caller holds s_lock): bus, panel, clear, full draw. True
+// only if the whole screen drew (draw_status() clears s_ready on any failure).
+static bool lcd_init_once(void)
+{
+    esp_err_t err = spi_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "panel SPI bus init failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    err = panel_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "panel init sequence failed (expander down or SPI error): %s",
+                 esp_err_to_name(err));
+        return false;
+    }
+    err = clear_screen();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "panel clear failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    s_ready = true;
+    draw_status(); // clears s_ready again if any line failed
+    return s_ready;
+}
+
+// A burst of up to RLCD_BURST_ATTEMPTS attempts, re-resetting the SX1509
+// between them (caller holds s_lock).
+static bool lcd_bring_up_burst(void)
+{
+    for (int a = 0;; a++) {
+        s_init_attempts++;
+        if (rlcd_reset_expander_before(a)) {
+            if (!recovery_io_expander_rehold()) {
+                ESP_LOGW(TAG, "expander re-reset before LCD attempt %d did not verify", a + 1);
+            }
+        }
+        bool ok = lcd_init_once();
+        if (!rlcd_burst_continue(a + 1, ok)) {
+            return ok;
+        }
+    }
+}
+
+#define LCD_TASK_STACK_BYTES 4096
+#define LCD_TASK_PERIOD_MS   1000
+
+static void lcd_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(LCD_TASK_PERIOD_MS));
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (rlcd_tick_action(s_ready) == RLCD_TICK_WARN_AND_RETRY) {
+            ESP_LOGE(TAG, RLCD_NOT_READY_MSG); // never the passphrase itself
+            if (lcd_bring_up_burst()) {
+                ESP_LOGI(TAG, "LCD recovered after %u init attempts", (unsigned)s_init_attempts);
+            }
+        }
+        xSemaphoreGive(s_lock);
+    }
+}
+
+void recovery_lcd_get_status(recovery_lcd_status_t *out)
+{
+    out->ready = s_ready;
+    out->init_attempts = s_init_attempts;
+    out->draw_failures = s_draw_failures;
+    out->boot_guard_record = rlcd_bg_state_name(s_bg_state);
 }
 
 // --- public API ------------------------------------------------------------
@@ -446,20 +560,18 @@ void recovery_lcd_show_message(void)
     gpio_set_level(LCD_BL_GPIO, 1);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (spi_init() != ESP_OK) {
-        ESP_LOGE(TAG, "panel SPI bus init failed");
-    } else if (panel_init() != ESP_OK) {
-        ESP_LOGE(TAG, "panel init sequence failed (expander down or SPI error)");
-    } else if (clear_screen() != ESP_OK) {
-        ESP_LOGE(TAG, "panel clear failed");
-    } else {
-        s_ready = true;
-        draw_status();
+    if (lcd_bring_up_burst()) {
         ESP_LOGI(TAG, "status screen drawn (boot_count=%d reset=%s crash=%d relay_fault=%d)",
                  s_boot_count, recovery_reset_reason_name(s_reset_reason), s_crash_state,
                  (int)recovery_io_relay_fault());
     }
     xSemaphoreGive(s_lock);
+
+    // Keep re-attempting while the panel is not ready: the passphrase is shown
+    // nowhere else. Failure to start the task is logged; never fatal.
+    if (xTaskCreate(lcd_task, "lcd_retry", LCD_TASK_STACK_BYTES, NULL, 2, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "could not start the LCD retry task");
+    }
 }
 
 void recovery_lcd_set_ap(const char *ssid, const char *passphrase, const char *ip)

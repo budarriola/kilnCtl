@@ -46,6 +46,7 @@
 #include "recovery_image_check.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
+#include "recovery_lcd_policy.h"
 #include "recovery_pico.h"
 #include "recovery_pico_proto.h"
 #include "recovery_text.h"
@@ -249,25 +250,39 @@ typedef struct {
     size_t len;
     bool count_valid;
     uint32_t count;
+    rlcd_bg_state_t state; // none / valid / invalid / unreadable
 } boot_guard_info_t;
 
 static void read_boot_guard(boot_guard_info_t *info)
 {
     memset(info, 0, sizeof(*info));
+    info->state = RLCD_BG_UNREADABLE;
     nvs_handle_t h;
-    if (nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE, NVS_READONLY, &h) !=
-        ESP_OK) {
+    esp_err_t oerr = nvs_open_from_partition(KILN_NVS_PARTITION, BOOT_GUARD_NAMESPACE,
+                                             NVS_READONLY, &h);
+    if (oerr != ESP_OK) {
+        if (oerr == ESP_ERR_NVS_NOT_FOUND) {
+            info->state = RLCD_BG_NONE; // namespace never created
+        }
         return;
     }
-    if (nvs_get_blob(h, BOOT_GUARD_KEY, NULL, &info->len) == ESP_OK) {
+    esp_err_t gerr = nvs_get_blob(h, BOOT_GUARD_KEY, NULL, &info->len);
+    bool decoded = false;
+    if (gerr == ESP_OK) {
         info->present = true;
         uint8_t blob[16];
         size_t blen = sizeof(blob);
         if (info->len <= sizeof(blob) &&
             nvs_get_blob(h, BOOT_GUARD_KEY, blob, &blen) == ESP_OK) {
             info->count_valid = ric_boot_guard_decode(blob, blen, &info->count) != 0;
+            decoded = info->count_valid;
         }
     }
+    info->state = rlcd_classify_boot_guard(gerr == ESP_OK ? RLCD_GET_OK
+                                           : gerr == ESP_ERR_NVS_NOT_FOUND ? RLCD_GET_NOT_FOUND
+                                           : gerr == ESP_ERR_NVS_INVALID_LENGTH ? RLCD_GET_BAD_LENGTH
+                                                                                : RLCD_GET_OTHER,
+                                           decoded);
     nvs_close(h);
 }
 
@@ -275,8 +290,10 @@ static void read_boot_guard(boot_guard_info_t *info)
 // only when the record decoded cleanly (never guessed).
 static int fmt_boot_guard(char *out, size_t cap, const boot_guard_info_t *bg)
 {
-    int n = snprintf(out, cap, "\"record_present\":%s,\"record_len\":%u",
-                      bg->present ? "true" : "false", (unsigned)bg->len);
+    int n = snprintf(out, cap, "\"record_present\":%s,\"record_len\":%u,"
+                               "\"boot_guard_record\":\"%s\"",
+                      bg->present ? "true" : "false", (unsigned)bg->len,
+                      rlcd_bg_state_name(bg->state));
     if (n > 0 && (size_t)n < cap && bg->count_valid) {
         n += snprintf(out + n, cap - (size_t)n, ",\"boot_count\":%u", (unsigned)bg->count);
     }
@@ -478,6 +495,13 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                           (unsigned)hs.mismatch_count, (unsigned)hs.reassert_fail_count,
                           (unsigned)hs.task_stack_free_bytes);
         }
+    }
+    if (e == ESP_OK) {
+        recovery_lcd_status_t ls;
+        recovery_lcd_get_status(&ls);
+        e = send_frag(req, "\"lcd_ready\":%s,\"lcd_init_attempts\":%u,\"lcd_draw_failures\":%u,",
+                      ls.ready ? "true" : "false", (unsigned)ls.init_attempts,
+                      (unsigned)ls.draw_failures);
     }
     if (e == ESP_OK) {
         e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
