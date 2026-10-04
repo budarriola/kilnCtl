@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "cfg_fs.h"
 #include "cfg_fs_status.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
@@ -187,6 +188,9 @@ esp_err_t profiles_builtin_start(void)
     if (have_value) {
         s_hidden_mask = resolved;
         s_hidden_rev = resolved_rev;
+        if (used_file) {
+            load_err = HAL_OK; /* the value is good, the NVS read error is moot this boot */
+        }
     }
 
     ESP_LOGI(TAG, "%u builtin schedules, hidden mask 0x%08lx (source=%s, rev=%lu)",
@@ -320,7 +324,8 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
     s_hidden_mask = updated;
     hal_status_t err = hidden_mask_save();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "hidden-mask save failed: %s -- applied live but will revert on reboot",
+        ESP_LOGE(TAG, "hidden-mask NVS write failed: %s -- applied live; persisted only if the cfg file "
+                      "write succeeded",
                  hal_status_to_name(err));
     }
     return hal_status_to_esp_err(err);
@@ -334,8 +339,22 @@ esp_err_t profiles_builtin_restore_all(void)
     s_hidden_mask = 0;
     hal_status_t err = hidden_mask_save();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "hidden-mask save failed: %s -- restored live but will revert on reboot",
+        ESP_LOGE(TAG, "hidden-mask NVS write failed: %s -- restored live; persisted only if the cfg file "
+                      "write succeeded",
                  hal_status_to_name(err));
     }
     return hal_status_to_esp_err(err);
+}
+
+esp_err_t profiles_builtin_discard_file(void)
+{
+    /* Best-effort and unconditional (restore_all() returns early on an
+     * already-zero RAM mask, and its own file write can fail): after a
+     * profiles-scope NVS erase the file would have no NVS rival and would
+     * win the next boot's resolve, re-hiding schedules. */
+    esp_err_t err = cfg_fs_delete(PROFILES_HIDDEN_FILE_PATH);
+    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "hidden-mask file delete failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }

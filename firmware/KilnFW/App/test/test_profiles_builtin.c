@@ -332,6 +332,62 @@ static void test_hidden_nvs_migrates_to_file_and_status(void)
     cfg_fs_deinit();
 }
 
+static void test_hidden_nvs_write_failure_file_wins_next_boot(void)
+{
+    TEST_SECTION("hidden mask: NVS write fails but the file write succeeded -> file (rev+1) wins next boot");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    pb_reboot();
+    profiles_builtin_start();
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) != ESP_OK,
+               "set_hidden reports the NVS failure");
+    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "applied live");
+    pb_reboot();
+    TEST_CHECK(profiles_builtin_start() == ESP_OK, "next boot resolves cleanly");
+    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "file at rev 1 beat the empty NVS");
+    TEST_CHECK(s_hidden_rev == 1, "rev came from the file");
+    cfg_fs_deinit();
+}
+
+static void test_hidden_factory_reset_discards_stale_file(void)
+{
+    TEST_SECTION("hidden mask: profiles factory reset -- stale file + erased NVS must not re-hide schedules");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    uint32_t stale = (1u << 2) | (1u << 8);
+    TEST_CHECK(pref_cfg_fs_save(PROFILES_HIDDEN_FILE_PATH, &stale, sizeof(stale), 3) == ESP_OK, "stale file seeded");
+    pb_reboot();
+    profiles_builtin_start();
+    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 2), "precondition: stale mask is live");
+    s_hidden_mask = 0; /* RAM already 0 -> restore_all() early-returns, file untouched */
+    TEST_CHECK(profiles_builtin_restore_all() == ESP_OK, "restore_all early-returns OK");
+    fake_kv_reset_all(); /* the profiles_nvs erase */
+    hal_kv_init_partition(PROFILES_NVS_PARTITION);
+    TEST_CHECK(profiles_builtin_discard_file() == ESP_OK, "discard_file deletes the file");
+    pb_reboot();
+    TEST_CHECK(profiles_builtin_start() == ESP_OK, "start() succeeds");
+    TEST_CHECK(s_hidden_mask == 0 && !profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 2) &&
+                   !profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 8),
+               "no schedule is hidden after the reset");
+    TEST_CHECK(profiles_builtin_discard_file() == ESP_ERR_NOT_FOUND, "second discard: nothing left, tolerated");
+    cfg_fs_deinit();
+}
+
+static void test_hidden_nvs_read_error_but_file_resolved_is_ok(void)
+{
+    TEST_SECTION("hidden mask: NVS open error but the file resolved -> start() returns ESP_OK");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    uint32_t m = 1u << 4;
+    pref_cfg_fs_save(PROFILES_HIDDEN_FILE_PATH, &m, sizeof(m), 2);
+    pb_reboot();
+    fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO);
+    TEST_CHECK(profiles_builtin_start() == ESP_OK, "no 'shown unfiltered' fault when the file supplied the value");
+    TEST_CHECK(s_hidden_mask == m, "mask came from the file");
+    cfg_fs_deinit();
+}
+
 void run_test_profiles_builtin(void)
 {
     test_cone_label_unrated();
@@ -343,6 +399,9 @@ void run_test_profiles_builtin(void)
     test_hidden_higher_rev_wins_over_file();
     test_hidden_unmounted_leaves_nvs_path_working();
     test_hidden_nvs_migrates_to_file_and_status();
+    test_hidden_nvs_write_failure_file_wins_next_boot();
+    test_hidden_factory_reset_discards_stale_file();
+    test_hidden_nvs_read_error_but_file_resolved_is_ok();
 }
 
 int main(void)

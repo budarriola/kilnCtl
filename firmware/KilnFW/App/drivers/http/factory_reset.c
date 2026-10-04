@@ -206,12 +206,16 @@ static void execute_scope_job(void *arg)
     if (scope->restore_builtin_profiles) {
         esp_err_t restore_err = profiles_builtin_restore_all();
         if (restore_err != ESP_OK) {
-            ESP_LOGW(TAG, "profiles_builtin_restore_all() reported %s -- the partition erase below "
-                          "clears the hidden mask regardless",
+            ESP_LOGW(TAG, "profiles_builtin_restore_all() reported %s -- the file is deleted below and the "
+                          "partition erase clears the NVS copy",
                      esp_err_to_name(restore_err));
         } else {
             ESP_LOGW(TAG, "restored every shipped fire schedule to visible");
         }
+        /* The mask also lives at /cfg/profiles/hidden.json, which the NVS
+         * erase below does NOT reach; delete it unconditionally so a stale
+         * file cannot win the next boot's resolve. */
+        (void)profiles_builtin_discard_file();
     }
 
     for (size_t i = 0; scope->partitions[i] != NULL; i++) {

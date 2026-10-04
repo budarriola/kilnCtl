@@ -1409,11 +1409,12 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6, collapsed the
  * PROFILES_MAX_COUNT profile-slot rows -- 8 of them at the time -- into ONE
  * aggregate "profiles" row so raising that constant to 100 doesn't also
- * mean 100 rows here): worst case is now 10 item rows (zones,
- * kiln_cfg_store, 4 pref-backed items, one aggregate profiles row,
- * relay_cycles, adaptive_tune, firing_stats) at up to ~120 bytes each
+ * mean 100 rows here): worst case is now 11 item rows (zones,
+ * kiln_cfg_store, 4 pref-backed items, profiles_hidden, one aggregate
+ * profiles row, relay_cycles, adaptive_tune, firing_stats; plus ~190 B
+ * for the top-level dual_write_window object) at up to ~120 bytes each
  * (longest name "display_power" and "firing_stats" -- both under the same
- * 120 B/row estimate, both revs at UINT32_MAX) = 10 * 120 = 1200 bytes for
+ * 120 B/row estimate, both revs at UINT32_MAX) = 11 * 120 = 1320 bytes for
  * the items array alone (was 2040 B for 17 items), plus the pre-existing
  * sections (header/capacity/format
  * ~300 B typical, nvs_only/nvs_permanent name lists ~300 B fixed now that
@@ -1421,7 +1422,7 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * handful of entries in real use though pathologically up to
  * CFG_FS_STATUS_MAX_FILES=32 max-length names could itself exceed any
  * reasonable buffer -- that pre-existing limit is unchanged by this pass).
- * 1200 + 300 + 300 = ~1800 B worst case, well under 3072 (previously ~2640 B
+ * 1320 + 190 + 300 + 300 = ~2110 B worst case, well under 3072 (previously ~2640 B
  * worst case for 17 items) -- NOT raised this pass, and this collapse only
  * grows the headroom. cfg_fs_status_build_json() still fails loudly with
  * ESP_ERR_INVALID_SIZE rather than truncating if a pathological files[]

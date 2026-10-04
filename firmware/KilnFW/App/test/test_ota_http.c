@@ -234,6 +234,7 @@ void hal_wdt_reboot(void) {}
 // the "profiles"/"all" scopes that hit this stub.
 // ---------------------------------------------------------------------------
 esp_err_t profiles_builtin_restore_all(void) { return ESP_OK; }
+esp_err_t profiles_builtin_discard_file(void) { return ESP_OK; }
 // ---------------------------------------------------------------------------
 // profile_executor.h -- factory_reset.c's execute_scope_job() drops the
 // last-run-started RAM cache after erasing profiles_nvs (that erase destroys

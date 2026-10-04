@@ -173,6 +173,9 @@ Either outcome never blocks boot, never touches any partition other than
   build the moment a new `persist/*_cfg_fs.c` bridge lands without a matching
   `dual_write.items[]` row, so this array should not go stale silently a
   third time (see `2e88e90a`'s commit message for the second time it did).
+  The one item still genuinely NVS-only is zone normals (table item 2, in
+  flight as of 2026-10-03); it has no bridge yet, so `"nvs_only":[]` is
+  accurate only for the items that have one.
 
 ## If the filesystem fails to mount
 
@@ -206,7 +209,7 @@ Of 24 inventoried runtime-changeable items:
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`) | `288dc91c` |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
-| 6 | Hidden-builtin profile mask | dual-write, `/cfg/profiles/hidden.json` (NVS key `prof_bihid` + rev `prof_bihid_rev`; `/api/cfgfs` row `profiles_hidden`) | `39b92987` |
+| 6 | Hidden-builtin profile mask | dual-write, `/cfg/profiles/hidden.json` (NVS key `prof_bihid` + rev `prof_bihid_rev`; `/api/cfgfs` row `profiles_hidden`) | `2749be53` |
 | 7 | Firing stats / history | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 8 | Named kiln config slots | dual-write (`kiln_configs.json`, `kiln_cfg_store_cfg_fs.c`) | `9bd29cff` |
 | 9 | Adaptive-tune Ki baseline (opt-in mask lives in zone config, off this table) | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
@@ -238,9 +241,9 @@ Supporting infrastructure, not tied to one inventory item:
 | Equal-rev tie-break defect found and fixed (zones + profiles) | `2c7bd240` |
 | Boot-time mount call, auto-format-or-ask gate, `/api/cfgfs/format_pending`+`format_confirm`, factory-reset "all" scope format | *(this pass, 2026-09-07)* |
 
-11 items are dual-written (1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 14), 10 stay in NVS
-deliberately (13, 15-22, 24), 1 (23) is on the separate `logs` track, and 2
-(zone normals, item 2; hidden-builtin mask, item 6) are still NVS-only.
+12 items are dual-written (1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14), 10 stay in NVS
+deliberately (13, 15-22, 24), 1 (23) is on the separate `logs` track, and 1
+(zone normals, item 2 -- in flight) is still NVS-only.
 
 ## Open items (2026-09-07)
 
