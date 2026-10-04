@@ -290,6 +290,7 @@ extern struct wifi_prov_legacy_single s_legacy_single;
 void apply_ap_config(void);
 bool parse_ipv4(const char *s, esp_ip4_addr_t *out);
 void apply_sta_config(void);
+void wifi_prov_clear_backup_dns(void);
 void cancel_ap_fallback_timer(void);
 bool reconcile_sta_state(void);
 void do_ap_fallback_tick(void);

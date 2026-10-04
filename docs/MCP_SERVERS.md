@@ -168,12 +168,12 @@ resolvers for `mode="static"` only (strict dotted quads, non-zero, `dns2` only w
 `dns`; refused PC-side for DHCP). They map to the firmware's `POST /ip_config`
 fields `dns`/`dns2` (NVS keys `static_dns`/`static_dns2`, separate string keys, no
 blob and no version bump) and are applied with `esp_netif_set_dns_info` (MAIN =
-`dns`, else the gateway; BACKUP = `dns2`, else cleared). A static POST always
+`dns`, else the gateway; BACKUP = `dns2`, else the same address as MAIN). A static POST always
 overwrites both, so omitting them clears earlier resolvers, and the tool's
 already-configured check and read-back verification compare them (`GET /status`
 `static_dns`/`static_dns2`, redacted to null like the other static fields; a board
 on older firmware that omits the keys verifies only when no dns was requested).
-No new tool, so the counts above are unchanged.
+Switching back to DHCP also empties the lwIP BACKUP resolver. No new tool, so the counts above are unchanged.
 
 | tool | what it does |
 |------|--------------|

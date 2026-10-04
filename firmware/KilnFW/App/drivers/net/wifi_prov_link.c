@@ -23,6 +23,7 @@
 #include "esp_wifi.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
+#include "lwip/dns.h"
 #include "lwip/inet.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
@@ -151,6 +152,26 @@ bool wifi_prov_ip_in_ap_subnet(const char *ip)
  * needed" instead of the old "reports connected, actually stranded until a
  * saved network rejoins or someone power-cycles it." A GOOD static config
  * still ends up STA-only, just one HTTP round-trip later than before. */
+static esp_err_t clear_backup_dns_cb(void *ctx)
+{
+    (void)ctx;
+    ip_addr_t any;
+    ip_addr_set_zero(&any);
+    dns_setserver(ESP_NETIF_DNS_BACKUP, &any); /* lwIP slot 1 == ESP_NETIF_DNS_BACKUP */
+    return ESP_OK;
+}
+
+/* Empties the lwIP BACKUP resolver. esp_netif_set_dns_info() cannot (it refuses
+ * 0.0.0.0), and a DHCP lease only overwrites servers its offer includes, so after
+ * static -> DHCP a statically configured dns2 would otherwise linger. */
+void wifi_prov_clear_backup_dns(void)
+{
+    esp_err_t err = esp_netif_tcpip_exec(clear_backup_dns_cb, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(WIFI_PROV_TAG, "clearing the backup DNS server failed: %s", esp_err_to_name(err));
+    }
+}
+
 void apply_sta_config(void)
 {
     wifi_config_t sta_cfg = { 0 };
@@ -181,8 +202,8 @@ void apply_sta_config(void)
             }
             /* DNS: with the DHCP client stopped nothing else supplies a
              * resolver. Primary = configured dns, else the gateway (the
-             * common home-router case); backup = dns2, else cleared so a
-             * previously configured one cannot linger. */
+             * common home-router case); backup = dns2, else the same address
+             * as MAIN, so a previously configured dns2 cannot linger. */
             esp_netif_dns_info_t dns_info = { 0 };
             dns_info.ip.type = ESP_IPADDR_TYPE_V4;
             esp_ip4_addr_t dns_addr;
@@ -192,11 +213,15 @@ void apply_sta_config(void)
             if (dns_err != ESP_OK) {
                 ESP_LOGW(WIFI_PROV_TAG, "esp_netif_set_dns_info(main) failed: %s", esp_err_to_name(dns_err));
             }
+            /* esp_netif_set_dns_info() REFUSES 0.0.0.0 (ESP_IP_IS_ANY ->
+             * ESP_ERR_ESP_NETIF_INVALID_PARAMS), so an unset dns2 cannot clear the
+             * BACKUP slot by passing 0 -- the old backup would persist. Overwrite it
+             * with MAIN instead: a duplicate resolver is harmless, a stale one is not. */
             esp_netif_dns_info_t dns2_info = { 0 };
             dns2_info.ip.type = ESP_IPADDR_TYPE_V4;
-            if (parse_ipv4(s_wifi.static_dns2, &dns_addr)) {
-                dns2_info.ip.u_addr.ip4.addr = dns_addr.addr;
-            }
+            dns2_info.ip.u_addr.ip4.addr = (parse_ipv4(s_wifi.static_dns2, &dns_addr) && dns_addr.addr)
+                                               ? dns_addr.addr
+                                               : dns_info.ip.u_addr.ip4.addr;
             dns_err = esp_netif_set_dns_info(s_wifi.sta_netif, ESP_NETIF_DNS_BACKUP, &dns2_info);
             if (dns_err != ESP_OK) {
                 ESP_LOGW(WIFI_PROV_TAG, "esp_netif_set_dns_info(backup) failed: %s", esp_err_to_name(dns_err));

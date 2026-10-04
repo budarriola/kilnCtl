@@ -86,6 +86,7 @@ uint32_t g_stub_netif_ip_addr = 0;
 uint32_t g_stub_dns_main = 0;
 uint32_t g_stub_dns_backup = 0;
 int g_stub_dns_set_calls = 0;
+int g_stub_lwip_backup_clears = 0;
 extern void fake_kv_reset_all(void);
 
 // wifi_provision_http_start()/wifi_provision_http_get_server() are declared
@@ -238,6 +239,7 @@ static void reset_state(void)
     g_stub_ap_sta_count = 0;
     g_stub_dns_main = g_stub_dns_backup = 0;
     g_stub_dns_set_calls = 0;
+    g_stub_lwip_backup_clears = 0;
     g_stub_netif_ip_addr = 0; // no lease by default -- sta_link_is_live() reads false unless a test opts in
     g_stub_getsockname_family = AF_INET6; // matches this board's CONFIG_LWIP_IPV6=y shape by default
 }
@@ -523,7 +525,7 @@ static void test_dns_nvs_round_trip(void)
 
 static void test_apply_sta_config_dns(void)
 {
-    TEST_SECTION("apply_sta_config -- static mode pushes DNS: dns else gateway as MAIN, dns2 else cleared as BACKUP");
+    TEST_SECTION("apply_sta_config -- static mode pushes DNS: dns else gateway as MAIN, dns2 else the same as MAIN for BACKUP (never 0.0.0.0)");
 
     reset_state();
     s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
@@ -536,7 +538,16 @@ static void test_apply_sta_config_dns(void)
     g_stub_dns_main = g_stub_dns_backup = 0xDEADBEEFu;
     apply_sta_config();
     TEST_CHECK(g_stub_dns_main == gw, "no dns configured: MAIN follows the gateway");
-    TEST_CHECK(g_stub_dns_backup == 0, "no dns2 configured: BACKUP cleared");
+    TEST_CHECK(g_stub_dns_backup == gw, "no dns2 configured: BACKUP = MAIN (esp_netif_set_dns_info refuses 0.0.0.0, so a stale backup is overwritten, not zeroed)");
+
+    // A previously configured dns2 must not linger once dns2 is removed.
+    strcpy(s_wifi.static_dns, "1.1.1.1");
+    strcpy(s_wifi.static_dns2, "8.8.8.8");
+    apply_sta_config();
+    s_wifi.static_dns2[0] = '\0';
+    apply_sta_config();
+    TEST_CHECK(g_stub_dns_backup == (1u | (1u << 8) | (1u << 16) | (1u << 24)), "dns2 removed: BACKUP follows MAIN, the old 8.8.8.8 is gone");
+    s_wifi.static_dns[0] = '\0';
 
     strcpy(s_wifi.static_dns, "1.1.1.1");
     strcpy(s_wifi.static_dns2, "8.8.8.8");
@@ -548,6 +559,14 @@ static void test_apply_sta_config_dns(void)
     g_stub_dns_set_calls = 0;
     apply_sta_config();
     TEST_CHECK(g_stub_dns_set_calls == 0, "DHCP mode never touches DNS");
+
+    // static -> DHCP: do_set_dhcp() must empty the lwIP BACKUP slot (a DHCP
+    // lease only overwrites servers its offer includes).
+    reset_state();
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
+    g_stub_dns_backup = 0xDEADBEEFu;
+    do_set_dhcp();
+    TEST_CHECK(g_stub_lwip_backup_clears == 1 && g_stub_dns_backup == 0, "do_set_dhcp clears the lwIP backup resolver");
 }
 
 static void test_set_dhcp_resets_confirmation(void)

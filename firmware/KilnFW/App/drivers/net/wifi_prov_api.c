@@ -584,6 +584,7 @@ esp_err_t do_set_dhcp(void)
     }
 
     apply_sta_config();
+    wifi_prov_clear_backup_dns();
     reapply_sta_if_active();
     ESP_LOGI(WIFI_PROV_TAG, "STA IP mode set to DHCP");
     return ESP_OK;

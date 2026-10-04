@@ -358,10 +358,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     /* +64 over the previous size for the two new booleans and their keys, +24
      * more for ap_pending_teardown's own key+value. */
-    /* 2026-10-03: static_dns/static_dns2 added (+63 B worst case, written
-     * inline with no extra redaction buffers). Worst-case rendered length is
-     * now 678 B with every escaped field at its maximum; 680 B here, +8 B over
-     * the previous 672. */
+    /* 2026-10-03: static_dns/static_dns2 added (+63 B worst case). Measured
+     * worst-case rendered length with every escaped field at its maximum is
+     * 677 B + NUL = 678 B, so this buffer grew 672 -> 680 B (+8 B, kept rather
+     * than streaming the response: it is well inside the httpd stack budget,
+     * check_httpd_task_stack_budget.ps1). dns/dns2 are formatted inline below
+     * instead of through wifi_prov_status_redact_field(): that helper needs a
+     * caller-supplied buffer per field, and two more 19 B buffers on this
+     * handler's stack buy nothing since the values are already quote-safe
+     * dotted quads (validated before storage). */
     char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24 + 8];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"

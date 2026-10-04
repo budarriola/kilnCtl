@@ -84,6 +84,11 @@ static inline esp_err_t esp_netif_set_dns_info(esp_netif_t *netif, esp_netif_dns
                                                esp_netif_dns_info_t *dns)
 {
     (void)netif;
+    /* Real ESP-IDF (esp_netif_lwip.c): ESP_IP_IS_ANY(addr) -> ESP_ERR_ESP_NETIF_INVALID_PARAMS,
+     * so 0.0.0.0 can never be used to clear a slot. Records nothing, like IDF. */
+    if (dns == NULL || dns->ip.u_addr.ip4.addr == 0) {
+        return ESP_ERR_ESP_NETIF_INVALID_PARAMS;
+    }
     g_stub_dns_set_calls++;
     if (type == ESP_NETIF_DNS_MAIN) {
         g_stub_dns_main = dns->ip.u_addr.ip4.addr;
@@ -91,6 +96,13 @@ static inline esp_err_t esp_netif_set_dns_info(esp_netif_t *netif, esp_netif_dns
         g_stub_dns_backup = dns->ip.u_addr.ip4.addr;
     }
     return ESP_OK;
+}
+
+/* Runs `fn` synchronously (the real one hops to the tcpip thread). */
+typedef esp_err_t (*esp_netif_callback_fn)(void *ctx);
+static inline esp_err_t esp_netif_tcpip_exec(esp_netif_callback_fn fn, void *ctx)
+{
+    return fn(ctx);
 }
 
 /* 2026-09-28: controllable by a test (default 0, i.e. every pre-existing

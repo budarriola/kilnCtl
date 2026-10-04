@@ -74,7 +74,7 @@ def _diagnose(before: dict, old_host: str) -> str:
         return f"UART reports the board at {uart_ip}, but GET /status there failed ({type(exc).__name__})"
     unchanged = all(st.get(k) == before.get(k) for k in
                     ("ip_mode", "static_ip", "static_netmask", "static_gateway",
-                                                     "static_dns", "static_dns2"))
+                     "static_dns", "static_dns2"))
     if uart_ip == old_host and unchanged:
         return f"board UNCHANGED, still at {old_host} with the same ip configuration"
     return f"board is at {uart_ip} now ({_describe_status(st)}); previously {old_host}"
