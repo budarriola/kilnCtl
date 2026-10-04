@@ -473,6 +473,8 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                       recovery_io_relays_verified_off() ? "true" : "false");
     }
     if (e == ESP_OK) {
+        // Sticky boot-time record (never cleared by later hold-task recovery); a
+        // bring-up failure also means no hold task was started.
         esp_err_t ie = recovery_io_init_error();
         e = ie == ESP_OK ? send_frag(req, "\"relay_io_init_error\":null,")
                          : send_frag(req, "\"relay_io_init_error\":\"%s\",", esp_err_to_name(ie));

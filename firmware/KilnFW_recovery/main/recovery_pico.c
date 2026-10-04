@@ -748,7 +748,8 @@ static bool finish_transfer(relay_t *r)
         // is re-evaluated at least every 2.5 s and never blocks httpd (the
         // relay runs in its own task).
         if (w > 0 && cur.state == RPP_STATE_VERIFYING && t_verify == 0) {
-            t_verify = now_ms() ? now_ms() : 1; // 0 means "not started"
+            int64_t tv = now_ms();
+            t_verify = tv ? tv : 1; // 0 means "not started"
         }
         if (t_verify != 0) {
             f.verify_elapsed_ms = (uint32_t)(now_ms() - t_verify);

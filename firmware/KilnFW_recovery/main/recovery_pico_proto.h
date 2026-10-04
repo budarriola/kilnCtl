@@ -118,6 +118,10 @@ uint32_t rpp_data_pace_ms(bool bootloader);
 // RPP_SLOT_SIZE (832 KB) read back from flash (UPDATE_PROTOCOL.md step 5),
 // which takes seconds, and the whole-slot erase (120 s) is the slowest legit
 // step in the protocol, so 30 s is generous for a read-only pass yet bounded.
+// Overshoot is bounded: the cap is checked once per finish-loop pass, and a
+// RETRANSMIT batch runs to completion first (bounded by RPP_MAX_GAP_BATCHES and
+// the stall cap). The resulting error is published on
+// /api/recovery/pico/status, not /api/recovery/status.
 #define RPP_VERIFY_TIMEOUT_MS (2u * RPP_END_REPLY_TIMEOUT_MS)
 // Consecutive gap reports with no increase in received_chunks before giving up.
 #define RPP_MAX_RETRANSMIT_ROUNDS 12u

@@ -159,10 +159,11 @@ static bool hold_once(bool first)
     return true;
 }
 
-// Real-time pause between bring-up/hold attempts. A transient first-init I2C
-// failure (expander still settling after a reset that does not power-cycle it)
-// clears within a few ms; 100 ms is 10 ticks at CONFIG_FREERTOS_HZ=100, so
-// vTaskDelay() really waits (pdMS_TO_TICKS(5) would be 0).
+// Real-time pause between attempts (not after the last). The bring-up retry
+// covers I2C driver param-config/install failures only (neither touches the
+// bus); transient bus/expander failures are hold_once()'s retry. 100 ms is 10
+// ticks at CONFIG_FREERTOS_HZ=100, so vTaskDelay() really waits
+// (pdMS_TO_TICKS(5) would be 0).
 #define IO_RETRY_DELAY_MS 100
 
 static esp_err_t s_init_err = ESP_OK; // last bring-up error if it never succeeded
@@ -182,10 +183,11 @@ void recovery_io_hold_relays_off(void)
         }
         ESP_LOGW(TAG, "I2C bring-up attempt %d/%d failed: %s", i + 1, HOLD_ATTEMPTS,
                  esp_err_to_name(err));
-        // A failed i2c_driver_install() leaves nothing installed, but a failure
-        // after a partial setup must not make the next attempt EALREADY.
-        (void)i2c_driver_delete(I2C_PORT);
-        vTaskDelay(pdMS_TO_TICKS(IO_RETRY_DELAY_MS));
+        // No i2c_driver_delete(): i2c_bring_up() only fails before a successful
+        // install, and deleting a port with no driver logs an error.
+        if (i + 1 < HOLD_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(IO_RETRY_DELAY_MS));
+        }
     }
     if (err != ESP_OK) {
         s_init_err = err; // status reports it via recovery_io_init_error()
@@ -204,7 +206,9 @@ void recovery_io_hold_relays_off(void)
             return;
         }
         ESP_LOGW(TAG, "relay hold attempt %d/%d failed", i + 1, HOLD_ATTEMPTS);
-        vTaskDelay(pdMS_TO_TICKS(IO_RETRY_DELAY_MS));
+        if (i + 1 < HOLD_ATTEMPTS) {
+            vTaskDelay(pdMS_TO_TICKS(IO_RETRY_DELAY_MS));
+        }
     }
     s_fault = true;
     s_init_err = ESP_ERR_INVALID_RESPONSE; // expander never verified

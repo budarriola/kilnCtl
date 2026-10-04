@@ -50,7 +50,11 @@ bool recovery_io_relay_fault(void);
 
 // ESP_OK, or why the boot-time bring-up/hold never succeeded after its bounded
 // retries (the I2C driver's error, or ESP_ERR_INVALID_RESPONSE when the
-// expander answered but never verified). Reported by the status route.
+// expander answered but never verified). STICKY boot-time record: a later
+// recovery by the hold task never clears it (relay_fault/relays_verified_off
+// do track recovery). A driver bring-up failure returns WITHOUT
+// start_hold_task() (pre-existing behaviour, kept), so nothing retries later.
+// Reported by GET /api/recovery/status as relay_io_init_error.
 esp_err_t recovery_io_init_error(void);
 
 // True once the expander answered and the relay hold was verified.
