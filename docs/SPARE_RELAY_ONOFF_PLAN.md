@@ -182,6 +182,10 @@ conditional on ESP config.
 - Executor stray-relay check (`profile_executor_relay_io.c` ~line 1027:
   shadow & claimed & ~owned) must include aux bits in `claimed_relay_mask`,
   or a healthy aux relay is reported as a stray. Add a host test.
+- Aux wiring rule (owner 2026-10-04): aux loads must be outside the CT path; the
+  Pico keeps S3/S4 fully active and gets aux-bound relays excluded from its
+  correlation masks (WP-9, sec 15a). A miswired aux load gives a nuisance S3/S4
+  trip that fails safe (SAFETY_CASE item 14).
 - Welded-contact detection for aux outputs: none on the ESP (same accepted
   gap as ON_OFF zones, SAFETY_CASE item 12). Add a SAFETY_CASE row.
 - Relay-cycle accounting: `relay_cycles_add()` is keyed by relay index, so
@@ -245,7 +249,7 @@ Executor (`control/profile_executor.c`, `profile_executor_relay_io.c`):
    `SYS_ACTION_RAW_RELAY_DEBUG_WRITE` and refuses relay-ON during a firing or
    autotune with the "409 Conflict" from `system_mode_gate_http_send_refusal`.
    Danger Zone and the LCD Temperature page are the only callers today; the
-   LCD must learn aux ownership, and the idle evaluator needs a manual hold.
+   LCD must learn aux ownership. No manual hold: the manual toggle is idle-only (sec 14 item 12).
 
 ## 7. HTTP surface, web UI, LCD
 
@@ -463,6 +467,27 @@ earlier one merges.
   `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` governed-store row, `ROADMAP.md` row
   (mark D1 overturned, link here), supersede note on the two 2026-09-14
   audits, bench session sec 12. Owns those docs.
+- **WP-9 Pico aux-relay mask exclusion (S-M, Pico flash blocked).** Owner decision
+  2026-10-04 (sec 14 item 11). Today `safety_link_frames.c:391-415` sends the whole relay
+  shadow as `relay_now_mask`/`relay_recent_mask`, so the Pico cannot tell an aux relay
+  from a heater relay. The Pico must exclude aux-bound relays from the heat/CT
+  correlation masks (S3 `relay_recent_mask`, S4 `relay_now_mask`). It must therefore
+  learn which relays are aux. Minimal link proposal: one new trailing byte
+  `aux_relay_mask` (bit n = relay n is bound to an enabled aux output) appended to
+  the PUSH_CONTEXT payload (`CommonFW/include/kilnlink/kilnlink_context.h`; the current
+  15-byte header has no spare byte, and the per-zone reserved offset 13 is the wrong
+  scope), with the decoder accepting both lengths so an older ESP or Pico stays
+  compatible. This needs a `docs/LINK_PROTOCOL.md` and protocol-version decision before
+  coding. SaftyFW applies `relay_now_mask & ~aux_relay_mask` (and the recent mask
+  likewise) at the use sites `safety_core.c:1030` and `link_task.c:1359`. Cheaper
+  alternative needing no Pico flash: the ESP clears aux bits itself before building the
+  masks, but that hides aux from every Pico consumer of the masks and is an owner call.
+  Host tests: aux cycling with a stuck heater current still trips S3; aux on
+  continuously raises no S4. BLOCKED on hardware: the Pico flash path is down (no
+  CMSIS-DAP probe has enumerated since 2026-10-03). Until WP-9 flashes, a spurious S4
+  warn on an aux vent is expected and the S3 blind spot stays open, so do not rely on
+  S3 for welded-contactor detection while an aux relay cycles. Owns: SaftyFW mask use
+  in `safety_core.c`/`link_task.c`, `kilnlink_context.*`, `safety_link_frames.c`.
 
 Every WP: run the full `tools/run_all_checks.ps1 -ExecutionPolicy Bypass -Fast`
 (not an `-Only` subset), host tests via the gate, and a
@@ -481,6 +506,8 @@ build). Negative-test each new check.
 8. **Aux in saved kiln packages:** no (default accepted).
 9. **Convert existing ON_OFF zones to aux:** offer the confirm-gated one-shot (sec 10), never automatic (default accepted).
 10. **Bench relay 4 free of other duty:** default accepted; a profile's RELAY_IO segment targeting a relay bound to an enabled aux is refused at save.
+11. **S3 blind spot (aux current on the CT):** "require aux outside CT" (owner 2026-10-04). Commissioning assertion that aux loads are wired outside the CT path; no S3 or correlation suppression for aux; the Pico must not treat an aux relay as explaining CT current; a miswire is a nuisance S3/S4 trip that fails safe. Pico mask change is WP-9 (sec 13, 15a).
+12. **Manual versus rule:** the manual toggle applies only while idle; at firing start the profile rule takes over; at run end aux goes OFF. Resolves the "manual hold" question (sec 15f): no hold flag.
 - **tc_zone encoding:** `tc_zone_plus1`, 0 = none.
 
 ## 15. WP-0 findings (read-only premise check, 2026-10-04, origin/main 78dc15b2)
@@ -502,13 +529,16 @@ No board access, no code changes. Evidence is file:line at 78dc15b2; paths are u
      `any_current_present && !relay_commanded_recently`) is suppressed for
      `correlation_window_s` after any aux relay energizes
      (`SaftyFW/src/tasks/safety_core.c:1030`, `relay_recent_mask != 0`). A welded
-     heater contactor with real stuck-on current goes undetected while an aux relay
-     is cycling. Detection degrades; no new false trip. Needs a SAFETY_CASE row and
-     a host test of the aux relay-cycle case.
+     heater contactor with real stuck-on current would go undetected while an aux relay
+     is cycling. OWNER DECISION 2026-10-04 ("require aux outside CT"): this blind spot
+     is closed by wiring plus one Pico change, not by weakening S3. See the decision
+     paragraph after item 4 below.
   2. S4 (warn only, `safety_guards.c:887-891`) fires when an aux relay is on
      continuously (`SaftyFW/src/tasks/link_task.c:1359`, `relay_now_mask != 0`) and
-     the aux load is not on a fitted CT channel. Warn, never a trip. Expect a
-     spurious S4 warn on a vent; whether to mask it is a Pico change and an owner call.
+     the aux load is not on a fitted CT channel. Warn, never a trip. Resolved by the
+     same decision: once aux-bound relays are excluded from the Pico's masks (WP-9),
+     an aux relay no longer drives S4 either. Until WP-9 flashes, expect a spurious
+     S4 warn on a vent.
   3. No false trip from aux current on a CT: S3 sees `relay_recent` true; S14/S15 are
      keyed to commanded heater relays via `ct_channel_map` (`safety_core.c` ~729,
      ~1193, masked to fitted channels). With `ct_topology=summed`, aux current adds to
@@ -516,6 +546,20 @@ No board access, no code changes. Evidence is file:line at 78dc15b2; paths are u
      stands: aux loads must not pass through a heater CT. Not a Pico change.
   4. S9 (`TRIP_INEFFECTIVE`, `safety_guards.c:345-430`) is evaluated only after a
      trip: not affected by an aux relay.
+  **Owner decision 2026-10-04, S3 blind spot: "require aux outside CT".**
+  - Commissioning assertion: aux loads must be wired OUTSIDE the CT path (not
+    through a heater CT or the summed CT). Add it to the commissioning checklist
+    and the bench session (sec 12); it is a wiring rule, firmware cannot verify it.
+  - The firmware keeps S3 (and S14/S15/S4) fully active. NO S3 suppression and NO
+    correlation allowance for aux relays: the Pico must not treat an aux relay as
+    explaining CT current.
+  - A miswired aux load (on a CT) therefore gives a nuisance S3 or S4 trip/warn
+    while it runs. That fails safe (it stops heat, never permits it) and is the
+    intended signal that the wiring rule was broken. SAFETY_CASE item 14 records this.
+  - Pico-side work found by WP-0 and now required: `safety_link_frames.c:391-415`
+    builds `relay_now_mask`/`relay_recent_mask` from the whole relay shadow, so an
+    aux relay currently counts as "a relay was commanded" and masks S3. The Pico
+    must exclude aux-bound relays from the heat/CT correlation masks. See WP-9 (sec 13).
 - "H9 CT alarm" (owner decision 2026-10-04: current seen while every relay is
   commanded off): NOT implemented anywhere. Searched origin/main and, read-only,
   `C:\wt\safedec_yldzsu` and `C:\wt\safedec_ht1`: no source, test or doc hit beyond
@@ -626,12 +670,16 @@ Live relay writers (all through `kiln_io_owner`, MANUAL or AUTHORIZED):
   routed through the aux module.
 - Recommended hook for the admin-only toggle: a handler on an existing admin route family
   (no new URI; 7 spare under the cap) that calls the same `dashboard_set_relay()` path and
-  reuses `system_mode_gate_http_send_refusal`. The manual command must also set a "manual
-  hold" that the idle aux evaluator honors, or the evaluator will fight it.
+  reuses `system_mode_gate_http_send_refusal`.
+- RESOLVED (owner 2026-10-04, manual versus rule): the manual toggle applies ONLY while
+  idle. At firing start the profile rule takes over (the mode gate already refuses manual
+  ON mid-run, 409), and at run end aux goes OFF (sec 5). So there is no persistent
+  "manual hold" and the idle evaluator needs none: a manual state is simply dropped when
+  a run starts or ends. Do not build a hold flag.
 
 ### Blocks WP-1
 
-Nothing hard. Decisions to make in WP-1, not blockers: (1) the idle (no run) aux evaluator
-versus the manual toggle needs a defined winner; (2) the S3 blind spot and S4 warn while aux
-is energized need a SAFETY_CASE row and an owner call on the S4 warn. The 895 B cap claim must
-not be relied on until re-measured (WP-4).
+Nothing hard. Both former WP-1 questions are now decided (owner 2026-10-04): the manual
+toggle applies only while idle and the rule wins from firing start (sec 15f), and the S3
+blind spot is closed by "aux outside CT" wiring plus WP-9 (sec 15a). The 895 B cap claim
+must not be relied on until re-measured (WP-4).

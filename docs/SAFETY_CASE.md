@@ -516,6 +516,19 @@ here; none is copied from an unverified summary.
 
 ---
 
+14. **Aux (spare-relay on/off) loads must NOT be on the CT path -- owner
+    decision 2026-10-04, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 14 item 11.**
+    The relay masks the ESP sends the Pico are the whole relay shadow, so an
+    aux relay cycling would suppress S3's "current with no relay commanded"
+    for the correlation window and could hide a welded heater contactor.
+    Decision: aux loads are wired outside the CT (a commissioning assertion;
+    firmware cannot verify it), S3/S4/S14/S15 stay fully active with no aux
+    suppression, and the Pico is changed (WP-9) to exclude aux-bound relays
+    from its heat/CT correlation masks. If an aux load is miswired onto a CT
+    the expected outcome is a nuisance S3 or S4 trip, which fails safe.
+    **Argued only until WP-9 lands; the Pico change is not yet written and
+    Pico flashing is blocked (no debug probe).**
+
 ## 4. Evidence classification
 
 Every claim above and every guard in the summary table is one of:
