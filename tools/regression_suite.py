@@ -281,9 +281,9 @@ def _gate_pctools_pytest() -> Gate:
     return Gate(
         "pctools_pytest (full PcTools suite; live-bench tests self-skip, no KILNCTRL_BENCH_HOST set)",
         # No -q: the "collected N items" header feeds pytest_output_problems.
-        # -rs lists skip reasons; pytest_output_problems fails the gate if any
+        # -rfEs lists failures/errors (pytest default) plus skip reasons; pytest_output_problems fails the gate if any
         # @pytest.mark.slow test was skipped despite KILNCTL_SLOW_TESTS=1.
-        2, lambda: ([_pctools_python(), "-m", "pytest", tests_dir, "-rs",
+        2, lambda: ([_pctools_python(), "-m", "pytest", tests_dir, "-rfEs",
                      f"--timeout={PER_TEST_TIMEOUT_S}"], ROOT), timeout=600,
         prereq=_pytest_prereq, output_check=pytest_output_problems,
         extra_env={"KILNCTL_SLOW_TESTS": "1"})

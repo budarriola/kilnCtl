@@ -143,6 +143,25 @@ class SlowSkipTests(unittest.TestCase):
         problems = pv.pytest_output_problems(self.SKIPPED)
         self.assertTrue(any("KILNCTL_SLOW_TESTS" in p for p in problems), problems)
 
+    def test_dash_m_slow_collects_unskipped(self):
+        import subprocess, tempfile
+        d = tempfile.mkdtemp()
+        nl = chr(10)
+        open(os.path.join(d, "test_x.py"), "w").write(nl.join(
+            ["import pytest", "@pytest.mark.slow", "def test_a():", "    pass", ""]))
+        open(os.path.join(d, "conftest.py"), "w").write(nl.join([
+            "import importlib.util as u",
+            "s = u.spec_from_file_location('real_conftest', %r)" % os.path.join(os.path.dirname(__file__), "conftest.py"),
+            "m = u.module_from_spec(s); s.loader.exec_module(m)",
+            "pytest_configure = m.pytest_configure",
+            "pytest_collection_modifyitems = m.pytest_collection_modifyitems", ""]))
+        env = {k: v for k, v in os.environ.items() if k != "KILNCTL_SLOW_TESTS"}
+        run = lambda *a: subprocess.run(
+            [sys.executable, "-m", "pytest", d, "-p", "no:cacheprovider", "-n", "0", "-rs", *a],
+            capture_output=True, text=True, env=env).stdout
+        self.assertIn("KILNCTL_SLOW_TESTS", run())
+        self.assertNotIn("KILNCTL_SLOW_TESTS", run("-m", "slow"))
+
     def test_clean_output_has_no_slow_problem(self):
         self.assertEqual(pv.pytest_output_problems(CLEAN), [])
 

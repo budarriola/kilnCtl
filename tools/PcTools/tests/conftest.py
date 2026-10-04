@@ -58,6 +58,8 @@ def pytest_collection_modifyitems(config, items):
     """
     if os.environ.get(SLOW_TESTS_ENV) == "1":
         return
+    if "slow" in (config.getoption("-m", default="") or ""):
+        return  # an explicit `-m slow` selection means "run them"
     skip = pytest.mark.skip(reason=SLOW_SKIP_REASON)
     for item in items:
         if "slow" in item.keywords:

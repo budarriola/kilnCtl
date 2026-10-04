@@ -627,9 +627,9 @@ def run_pctools_tests(pattern: Optional[str] = None) -> str:
     # No -q: the "collected N items" header is what pytest_output_problems
     # compares against the summary line. --timeout makes a stuck test fail loud
     # instead of losing an xdist node.
-    # -rs lists skip reasons so pytest_output_problems can refuse a run that
+    # -rfEs lists failures/errors (pytest default) plus skip reasons so pytest_output_problems can refuse a run that
     # skipped @pytest.mark.slow tests; KILNCTL_SLOW_TESTS=1 makes them run.
-    argv = [sys.executable, "-m", "pytest", tests_dir, "-rs",
+    argv = [sys.executable, "-m", "pytest", tests_dir, "-rfEs",
             f"--timeout={PER_TEST_TIMEOUT_S}"]
     if pattern:
         argv += ["-k", pattern]
