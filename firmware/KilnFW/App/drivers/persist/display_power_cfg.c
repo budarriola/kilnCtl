@@ -30,7 +30,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_DISPLAY_POWER_REV);
 // this preference dual-writes to on the `cfg` LittleFS partition, once
 // mounted -- see pref_cfg_fs.h for the read-through/dual-write/tie-break
 // policy this module hands its NVS candidate to.
-#define DISPLAY_POWER_FILE_PATH "display_power.dat"
+/* DISPLAY_POWER_FILE_PATH now lives in display_power_cfg.h (kiln-scope reset names it). */
 
 // Versioned blob rather than four loose keys -- see display_power_cfg.h's
 // PERSISTENCE note. version bumps only if a field is ever added/reinterpreted;

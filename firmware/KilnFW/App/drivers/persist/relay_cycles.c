@@ -72,10 +72,7 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
  * cfg-file, since this bridge postdates v2) and stays entirely inside
  * relay_cycles_init()'s existing NVS load. A separate rev key, same
  * reasoning as every other pref_cfg_fs item (NVS_KEY_RAMP_ASSIST_REV etc). */
-#define RELAY_CYCLES_FILE_PATH "relay_cycles.dat" /* a cfg-filesystem relative path, NOT an NVS
-                                                       key -- no NVS_KEY_LEN_CHECK, same as every
-                                                       other *_FILE_PATH constant in this codebase
-                                                       (RELAY_NAMES_FILE_PATH etc). */
+/* RELAY_CYCLES_FILE_PATH now lives in relay_cycles.h (kiln-scope reset names it). */
 #define NVS_KEY_CYCLES_REV "relay_cyc_r"
 NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES_REV);
 

@@ -54,6 +54,9 @@
 
 #include "esp_err.h"
 
+/* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
+#define RAMP_ASSIST_FILE_PATH "ramp_assist.dat"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

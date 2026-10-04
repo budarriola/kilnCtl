@@ -39,6 +39,9 @@
 
 #include "esp_err.h"
 
+/* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
+#define UNIT_PREF_FILE_PATH "unit_pref.dat"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

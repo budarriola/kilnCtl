@@ -48,7 +48,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "pref_cfg_fs.h" /* PREF_CFG_FS_MAX_ITEM, RELAY_NAMES_FILE_PATH, ZONE_NORMALS_FILE_PATH */
+#include "pref_cfg_fs.h" /* PREF_CFG_FS_MAX_ITEM -- zone_normals_cfg_t size assert below */
 #include "kiln_io_owner.h" /* kiln_io_owner_relay_result_t, used by zone_sweep_zone_deps_t::energize */
 
 /* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs (ZONES_CFG_VERSION 20->21): the URL-key suffix
@@ -160,7 +160,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES_REV);
 /* The `cfg` LittleFS file relay names dual-writes to, via the generic
  * pref_cfg_fs.h bridge (see zones_config_store.c's relay_names_load()/
  * relay_names_save()). */
-/* RELAY_NAMES_FILE_PATH now lives in pref_cfg_fs.h (shared with the kiln-scope reset). */
+#define RELAY_NAMES_FILE_PATH "relay_names.dat"
 
 /* FROZEN v1 layout -- the shape that is on every board in the field today.
  * Never edit this struct: it is not "the old version of relay_names_cfg_t",
@@ -246,7 +246,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_ZONE_NORMALS);
 #define NVS_KEY_ZONE_NORMALS_REV "znorm_rev"
 NVS_KEY_LEN_CHECK(NVS_KEY_ZONE_NORMALS_REV);
 /* the `cfg` LittleFS file, via the generic pref_cfg_fs.h bridge */
-/* ZONE_NORMALS_FILE_PATH now lives in pref_cfg_fs.h (shared with the kiln-scope reset). */
+#define ZONE_NORMALS_FILE_PATH "zone_normals.dat"
 
 typedef struct {
     uint8_t  version;

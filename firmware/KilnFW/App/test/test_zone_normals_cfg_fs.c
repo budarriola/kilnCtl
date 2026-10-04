@@ -25,7 +25,10 @@
 #include "fake_kv.h"
 #include "hal_kv.h"
 
+#include "esp_crc.h"
+
 #include "cfg_fs.h"
+#include "kiln_scope_cfg_files.h"
 #include "pref_cfg_fs.h"
 #include "zones_http_internal.h"
 
@@ -143,6 +146,10 @@ static void test_future_version_file_rejected(void)
     bad.version = 2;
     bad.normal_current_a[0] = 9.0f;
     bad.measured_mask = 1;
+    /* Valid CRC (computed exactly as compute_zone_normals_crc() does: over the
+     * struct with crc32 == 0) so ONLY the version check can reject this file. */
+    bad.crc32 = 0;
+    bad.crc32 = esp_crc32_le(0, (const uint8_t *)&bad, sizeof(bad));
     TEST_CHECK(pref_cfg_fs_save(ZONE_NORMALS_FILE_PATH, &bad, sizeof(bad), 5) == ESP_OK,
                "setup: wrote a version-2 file at rev 5 (framing and CRC valid)");
     zone_normals_load();
@@ -176,10 +183,35 @@ static void test_kiln_reset_leaves_blank(void)
     TEST_CHECK(zone_normals_set(1, 6.0f), "save dual-writes");
     fake_kv_reset_all(); /* what erasing kiln_nvs does */
     hal_kv_init_partition(KILN_NVS_PARTITION);
-    TEST_CHECK(pref_cfg_fs_delete_kiln_scope_files() >= 1, "helper deleted at least the normals file");
+    TEST_CHECK(kiln_scope_cfg_files_delete(NULL) == ESP_OK, "kiln-scope cfg delete succeeds");
     zone_normals_load();
     float a = 0;
     TEST_CHECK(!normal_of(1, &a), "no stale normal resurrected from the file");
+}
+
+static void test_kiln_scope_deletes_every_listed_file(void)
+{
+    TEST_SECTION("kiln scope cfg files: every kiln_nvs mirror is deleted, other files survive");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    size_t n = 0;
+    const char *const *paths = kiln_scope_cfg_files_list(&n);
+    TEST_CHECK(n >= 11, "the list covers every kiln_nvs mirror (11 today)");
+    const uint8_t payload[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+    for (size_t i = 0; i < n; i++) {
+        TEST_CHECK(cfg_fs_write_atomic(paths[i], payload, sizeof(payload)) == ESP_OK, "setup: write listed file");
+    }
+    TEST_CHECK(cfg_fs_write_atomic("decoy_other.dat", payload, sizeof(payload)) == ESP_OK, "setup: decoy file");
+    int deleted = 0;
+    TEST_CHECK(kiln_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == (int)n, "all listed files deleted");
+    uint8_t buf[16];
+    size_t len = 0;
+    for (size_t i = 0; i < n; i++) {
+        TEST_CHECK(cfg_fs_read(paths[i], buf, sizeof(buf), &len) == ESP_ERR_NOT_FOUND, "listed file is gone");
+    }
+    TEST_CHECK(cfg_fs_read("decoy_other.dat", buf, sizeof(buf), &len) == ESP_OK, "an unlisted file is untouched");
+    TEST_CHECK(kiln_scope_cfg_files_delete(&deleted) == ESP_OK && deleted == 0, "second pass: absent files are not errors");
+    cfg_fs_delete("decoy_other.dat");
 }
 
 void run_test_zone_normals_cfg_fs(void)
@@ -191,5 +223,6 @@ void run_test_zone_normals_cfg_fs(void)
     test_future_version_file_rejected();
     test_nvs_failure_does_not_advance_rev();
     test_kiln_reset_leaves_blank();
+    test_kiln_scope_deletes_every_listed_file();
     reset_all();
 }

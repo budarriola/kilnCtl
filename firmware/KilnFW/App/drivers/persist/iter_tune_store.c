@@ -26,7 +26,7 @@ NVS_KEY_LEN_CHECK(ITER_TUNE_NVS_KEY_REV);
 
 // cfg LittleFS dual-write file, same "<4-byte LE rev><raw blob>" shape as
 // zones_config_cfg_fs.c/kiln_cfg_store_cfg_fs.c.
-#define ITER_TUNE_CFG_FILE_PATH "iter_tune.bin"
+/* ITER_TUNE_CFG_FILE_PATH now lives in iter_tune_store.h (kiln-scope reset names it). */
 #define ITER_TUNE_FILE_BUF_MAX (4 + sizeof(iter_tune_store_blob_t))
 
 static iter_tune_store_blob_t s_blob;

@@ -52,6 +52,9 @@
 
 #include "profile_executor.h" // profile_firing_run_record_t, MAX31856_CHANNEL_COUNT
 
+/* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
+#define ADAPTIVE_TUNE_KIBASE_FILE_PATH "ki_base.dat"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

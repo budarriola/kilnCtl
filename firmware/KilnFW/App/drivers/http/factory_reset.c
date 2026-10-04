@@ -14,7 +14,7 @@
 
 #include "cfg_fs_mount.h" /* cfg_fs_confirm_format_device() -- "all" scope formats the `cfg`
                             * LittleFS partition too, see reset_scope_t's format_cfg_fs field */
-#include "pref_cfg_fs.h" /* pref_cfg_fs_delete_kiln_scope_files() -- "kiln" scope cfg cleanup */
+#include "kiln_scope_cfg_files.h" /* kiln_scope_cfg_files_delete() -- "kiln" scope cfg cleanup */
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_wdt.h"
@@ -104,6 +104,12 @@ typedef struct {
      * category too, breaking that promise. Only "all" (erase everything) is
      * honest about reaching it. */
     bool format_cfg_fs;
+
+    /* "kiln" only: delete the cfg_fs mirrors whose NVS side lives in
+     * kiln_nvs (kiln_scope_cfg_files.h). Narrower than format_cfg_fs: the
+     * scope deletes ONLY its own mirror files, never formats. Without it a
+     * surviving file wins the next boot's resolve and undoes the reset. */
+    bool delete_kiln_cfg_files;
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -112,10 +118,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly, false, false },
-    { "kiln", kKilnOnly, false, false },
-    { "profiles", kProfilesOnly, true, false },
-    { "all", kAll, true, true },
+    { "wifi", kWifiOnly, false, false, false },
+    { "kiln", kKilnOnly, false, false, true },
+    { "profiles", kProfilesOnly, true, false, false },
+    { "all", kAll, true, true, false },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -336,14 +342,18 @@ static void execute_scope_job(void *arg)
         }
     }
 
-    /* "kiln" scope: kiln_nvs is erased above but the dual-written kiln-category
-     * cfg files (zones, relay names, zone normals, kiln_configs) survive, and a
-     * file would win the next boot's resolve with stale data. Delete them
-     * best-effort here on the flash worker. Scope is matched by name so the
-     * kScopes table (shared with the profiles scope) is not touched. */
-    if (strcmp(scope->name, "kiln") == 0) {
-        int n = pref_cfg_fs_delete_kiln_scope_files();
+    /* delete_kiln_cfg_files: kiln_nvs is erased above but its dual-written
+     * cfg mirrors survive, and a file would win the next boot's resolve with
+     * stale data (and the RAM revs would rewrite pre-reset values). Delete
+     * them here on the flash worker; a file that cannot be deleted FAILS the
+     * reset rather than only logging. */
+    if (scope->delete_kiln_cfg_files) {
+        int n = 0;
+        esp_err_t kerr = kiln_scope_cfg_files_delete(&n);
         ESP_LOGW(TAG, "kiln factory reset: %d cfg file(s) deleted", n);
+        if (kerr != ESP_OK && first_err == ESP_OK) {
+            first_err = kerr;
+        }
     }
 
     ctx->err = first_err;
@@ -373,8 +383,13 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
      * esp_restart() -- the NVS erase above already happened (either inline
      * or on the flash worker, both blocking this call until done), so
      * nothing on this task's own stack touches flash. */
-    xTaskCreatePinnedToCoreWithCaps(reboot_task, "factory_reset_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL,
-                                    tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (xTaskCreatePinnedToCoreWithCaps(reboot_task, "factory_reset_reboot", 2048, NULL, tskIDLE_PRIORITY + 1, NULL,
+                                        tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        /* No reboot means the RAM state (revs included) would keep running
+         * against just-erased storage and rewrite pre-reset data. Fail loud. */
+        ESP_LOGE(TAG, "factory_reset: could not create the reboot task -- reset NOT complete");
+        return ESP_ERR_NO_MEM;
+    }
     return ctx.err;
 }
 

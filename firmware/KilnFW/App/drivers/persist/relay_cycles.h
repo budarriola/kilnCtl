@@ -30,6 +30,9 @@
 
 #include "kiln_io.h"
 
+/* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
+#define RELAY_CYCLES_FILE_PATH "relay_cycles.dat"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

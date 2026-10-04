@@ -61,6 +61,9 @@
 
 #include "display_power_policy.h"
 
+/* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
+#define DISPLAY_POWER_FILE_PATH "display_power.dat"
+
 #ifdef __cplusplus
 extern "C" {
 #endif

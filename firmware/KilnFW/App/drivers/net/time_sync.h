@@ -39,6 +39,9 @@
 
 #include "time_sync_tz.h"
 
+/* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
+#define TIME_SYNC_TZ_FILE_PATH "tz.dat"
+
 typedef struct {
     /* True once ANY SNTP sync has landed since this boot. Never persisted
      * -- "synced" is a per-boot fact, not a stored one; a fresh boot always

@@ -29,7 +29,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_RAMP_ASSIST_REV);
 // this preference dual-writes to on the `cfg` LittleFS partition, once
 // mounted -- see pref_cfg_fs.h for the read-through/dual-write/tie-break
 // policy this module hands its NVS candidate to.
-#define RAMP_ASSIST_FILE_PATH "ramp_assist.dat"
+/* RAMP_ASSIST_FILE_PATH now lives in ramp_assist_cfg.h (kiln-scope reset names it). */
 
 // SAFE DEFAULT: disabled. See ramp_assist_cfg.h's header comment -- a board
 // that has never heard of this key, or whose stored value is unreadable/

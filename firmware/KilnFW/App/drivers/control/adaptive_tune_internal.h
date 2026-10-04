@@ -278,7 +278,7 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE);
 // kibase_file_validate() for the one structural check applied (the mask
 // cannot reference a zone index that does not exist), everything else is
 // trusted the same way the NVS blob always was.
-#define ADAPTIVE_TUNE_KIBASE_FILE_PATH "ki_base.dat"
+/* ADAPTIVE_TUNE_KIBASE_FILE_PATH now lives in adaptive_tune.h (kiln-scope reset names it). */
 #define ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV "kibase_rev"
 NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV);
 

@@ -194,9 +194,12 @@ The Settings page's "Factory default (erase everything)" button (scope
 `all`) now also erases and reformats `cfg`, unconditionally — its own
 confirm dialog IS the explicit operator action the mount-failure contract
 calls for, so this path never goes through the ask-first flow above.
-"Wi-Fi only"/"kiln config only"/"profiles only" do **not** touch `cfg` — it
-holds a mix of kiln-config-shaped and profile-shaped data today, and those
-narrower buttons promise to erase only what they say.
+"Wi-Fi only"/"kiln config only"/"profiles only" never format `cfg` — it
+holds a mix of kiln-config-shaped and profile-shaped data. Each narrower
+scope deletes only its own mirror files: "kiln config only" deletes the
+mirrors whose NVS side lives in `kiln_nvs` (`kiln_scope_cfg_files.c`),
+"profiles only" deletes `hidden.json`, "Wi-Fi only" has none. Leaving a
+mirror behind would let the file win the next boot and undo the reset.
 
 ## State of the migration, 2026-09-07
 

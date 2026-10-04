@@ -54,7 +54,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_TZ_REV);
 
 /* The `cfg` LittleFS file TZ dual-writes to, via the generic pref_cfg_fs.h
  * bridge. */
-#define TIME_SYNC_TZ_FILE_PATH "tz.dat"
+/* TIME_SYNC_TZ_FILE_PATH now lives in time_sync.h (kiln-scope reset names it). */
 
 /* Fixed item_size pref_cfg_fs.h's contract requires -- one byte more than
  * TIME_SYNC_TZ_MAX_LEN so a maximum-length string's NUL terminator always

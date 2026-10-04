@@ -31,7 +31,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_UNIT_PREF_REV);
 // this preference dual-writes to on the `cfg` LittleFS partition, once
 // mounted -- see pref_cfg_fs.h for the read-through/dual-write/tie-break
 // policy this module hands its NVS candidate to.
-#define UNIT_PREF_FILE_PATH "unit_pref.dat"
+/* UNIT_PREF_FILE_PATH now lives in unit_pref.h (kiln-scope reset names it). */
 
 static unit_pref_t s_unit_pref = UNIT_PREF_CELSIUS;
 static uint32_t s_unit_pref_rev = 0;

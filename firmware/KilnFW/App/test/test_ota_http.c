@@ -260,10 +260,21 @@ void firing_stats_cache_invalidate_all(void) {}
 // (it needs esp_littlefs.h/esp_partition.h, ESP-IDF only).
 esp_err_t cfg_fs_confirm_format_device(void) { return ESP_OK; }
 
-// factory_reset.c's "kiln" scope deletes the kiln-category cfg files via
-// pref_cfg_fs.c (not linked into this executable); the real behavior is covered
-// by test_zone_normals_cfg_fs.c.
-int pref_cfg_fs_delete_kiln_scope_files(void) { return 0; }
+// factory_reset.c's "kiln" scope deletes the kiln_nvs cfg mirrors via
+// kiln_scope_cfg_files.c (not linked into this executable); the real deletion
+// is covered by test_zone_normals_cfg_fs.c. Here the stub counts calls so the
+// scope wiring (kiln exactly once, wifi/profiles never) is pinned, and can be
+// made to fail to prove the error is folded into the reset result.
+static int g_kiln_scope_cfg_delete_calls = 0;
+static esp_err_t g_kiln_scope_cfg_delete_result = ESP_OK;
+esp_err_t kiln_scope_cfg_files_delete(int *out_deleted)
+{
+    g_kiln_scope_cfg_delete_calls++;
+    if (out_deleted) {
+        *out_deleted = 0;
+    }
+    return g_kiln_scope_cfg_delete_result;
+}
 
 // ---------------------------------------------------------------------------
 // uart_bridge.h/flash_worker.h (2026-09-07) -- execute_scope() now dispatches
@@ -1277,8 +1288,10 @@ static void test_credential_survives_factory_reset_wifi_scope(void)
     fake_kv_reset_all();
     TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "setup: init wifi_nvs");
     seed_webauth12b_credential();
+    g_kiln_scope_cfg_delete_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK,
               "factory_reset_execute(WIFI) must succeed");
+    TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the wifi scope never deletes the kiln_nvs cfg mirrors");
     assert_webauth12b_credential_survived(
         "the administrator password must still verify after a WIFI-scope factory reset");
 }
@@ -1289,8 +1302,18 @@ static void test_credential_survives_factory_reset_kiln_scope(void)
     fake_kv_reset_all();
     TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs");
     seed_webauth12b_credential();
+    g_kiln_scope_cfg_delete_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_OK,
               "factory_reset_execute(KILN) must succeed");
+    TEST_CHECK(g_kiln_scope_cfg_delete_calls == 1, "the kiln scope deletes its cfg mirrors exactly once");
+    g_kiln_scope_cfg_delete_result = ESP_FAIL;
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_FAIL,
+              "a cfg mirror that cannot be deleted fails the kiln reset (a stale file would undo it)");
+    g_kiln_scope_cfg_delete_result = ESP_OK;
+    g_stub_task_create_result = pdFAIL;
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_ERR_NO_MEM,
+              "a reboot task that cannot be created fails the reset");
+    g_stub_task_create_result = pdPASS;
     assert_webauth12b_credential_survived(
         "the administrator password must still verify after a KILN-scope factory reset");
 }
@@ -1302,10 +1325,12 @@ static void test_credential_survives_factory_reset_profiles_scope(void)
     TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
     seed_webauth12b_credential();
     g_stub_profiles_discard_calls = 0;
+    g_kiln_scope_cfg_delete_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
               "factory_reset_execute(PROFILES) must succeed");
     TEST_CHECK(g_stub_profiles_discard_calls == 1,
               "PROFILES scope must call profiles_builtin_discard_file() exactly once");
+    TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the profiles scope never deletes the kiln_nvs cfg mirrors");
     assert_webauth12b_credential_survived(
         "the administrator password must still verify after a PROFILES-scope factory reset");
 }
