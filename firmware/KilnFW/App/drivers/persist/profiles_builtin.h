@@ -132,6 +132,12 @@ bool      profiles_builtin_is_hidden(uint8_t id);
 esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden);
 esp_err_t profiles_builtin_restore_all(void);
 
+/* Read-only dual-write status for GET /api/cfgfs's "profiles_hidden" row --
+ * same contract as unit_pref_get_dualwrite_status() (fresh re-read of both
+ * sides, never a resync write, safe to poll). */
+void profiles_builtin_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                            bool *diverged);
+
 #ifdef __cplusplus
 }
 #endif

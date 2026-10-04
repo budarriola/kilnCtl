@@ -1598,7 +1598,11 @@ try {
     $cmd23 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$pbObjDir\\`" /Fe:`"$exe23`" `"$(Join-Path $testDir 'test_profiles_builtin.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`""
+    # cfg_fs.c/pref_cfg_fs.c/cfg_fs_status.c: the hidden-mask file dual-write
+    # (docs/FILESYSTEM_USER_DATA_PLAN.md item 6) goes through pref_cfg_fs.
     # fake_kv.c/hal_status.c added HW_ABSTRACTION.md Phase 3 item 3 (nvs.h ->
     # hal_kv.h migration): profiles_builtin.c's hidden-mask persistence now calls
     # hal_kv_get_u32()/hal_kv_set_u32()/hal_kv_init_partition() instead of

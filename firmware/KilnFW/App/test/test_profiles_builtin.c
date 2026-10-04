@@ -40,6 +40,19 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "fake_kv.h"
 
+#ifdef _WIN32
+#include <direct.h>
+#define PB_MKDIR(p) _mkdir(p)
+#define PB_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define PB_MKDIR(p) mkdir((p), 0755)
+#define PB_RMDIR(p) rmdir(p)
+#endif
+
+#include "cfg_fs.h"
+
 #include "profiles_builtin.c"
 
 static const char *UNRATED_CODES[] = {
@@ -149,12 +162,187 @@ static void test_every_rising_segment_has_bounded_positive_ramp(void)
     TEST_CHECK(checked >= 94, "checked at least 94 rising ZONE_RAMP segments across the catalogue");
 }
 
+// ---------------------------------------------------------------------
+// cfg_fs dual-write of the hidden-builtin mask (docs/FILESYSTEM_USER_DATA_PLAN.md
+// item 6, /cfg/profiles/hidden.json via pref_cfg_fs). Same shape as
+// test_unit_pref.c's dual-write cases.
+// ---------------------------------------------------------------------
+static const char *PB_SCRATCH_BASE = "cfg_fs_test_profiles_builtin";
+
+static void pb_cfg_fs_reset(void)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/.tmp/profiles_hidden.json", PB_SCRATCH_BASE);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", PB_SCRATCH_BASE, PROFILES_HIDDEN_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/profiles", PB_SCRATCH_BASE);
+    PB_RMDIR(path);
+    snprintf(path, sizeof(path), "%s/.tmp", PB_SCRATCH_BASE);
+    PB_RMDIR(path);
+    PB_RMDIR(PB_SCRATCH_BASE);
+    PB_MKDIR(PB_SCRATCH_BASE);
+    cfg_fs_deinit();
+    pref_cfg_fs_reset_write_fn_for_test();
+}
+
+static void pb_fresh(void)
+{
+    pb_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(PROFILES_NVS_PARTITION);
+}
+
+static void pb_reboot(void)
+{
+    s_hidden_mask = 0xDEADBEEFu; /* poison: start() must overwrite it */
+    s_hidden_rev = 0xFFFFu;
+}
+
+static bool pb_nvs_mask(uint32_t *mask, uint32_t *rev)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    bool ok = hal_kv_get_u32(&h, NVS_KEY_HIDDEN, mask) == HAL_OK;
+    *rev = 0;
+    hal_kv_get_u32(&h, NVS_KEY_HIDDEN_REV, rev);
+    hal_kv_close(&h);
+    return ok;
+}
+
+static void pb_set_nvs(uint32_t mask, uint32_t rev)
+{
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
+    hal_kv_set_u32(&h, NVS_KEY_HIDDEN, mask);
+    hal_kv_set_u32(&h, NVS_KEY_HIDDEN_REV, rev);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static void test_hidden_save_writes_file_and_nvs(void)
+{
+    TEST_SECTION("hidden mask: set_hidden() with cfg_fs mounted writes BOTH the file and NVS at the same rev");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+    pb_reboot();
+    profiles_builtin_start();
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 3, true) == ESP_OK, "set_hidden succeeds");
+
+    uint32_t f_mask = 0, f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    TEST_CHECK(f_valid && f_mask == (1u << 3), "the file decodes to the new mask");
+    uint32_t n_mask = 0, n_rev = 0;
+    TEST_CHECK(pb_nvs_mask(&n_mask, &n_rev) && n_mask == (1u << 3), "NVS also holds the new mask");
+    TEST_CHECK(f_rev == 1 && n_rev == 1 && s_hidden_rev == 1, "file rev, NVS rev and in-RAM rev all agree at 1");
+    cfg_fs_deinit();
+}
+
+static void test_hidden_boot_resolves_from_file_when_nvs_empty(void)
+{
+    TEST_SECTION("hidden mask: NVS empty + file present -> start() adopts the file");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    uint32_t mask = (1u << 1) | (1u << 5);
+    TEST_CHECK(pref_cfg_fs_save(PROFILES_HIDDEN_FILE_PATH, &mask, sizeof(mask), 7) == ESP_OK, "file seeded");
+    pb_reboot();
+    TEST_CHECK(profiles_builtin_start() == ESP_OK, "start() succeeds");
+    TEST_CHECK(s_hidden_mask == mask, "mask came from the file");
+    TEST_CHECK(s_hidden_rev == 7, "rev came from the file");
+    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 5), "entry 5 reads hidden through the public API");
+    cfg_fs_deinit();
+}
+
+static void test_hidden_higher_rev_wins_over_file(void)
+{
+    TEST_SECTION("hidden mask: both valid and different -> higher rev wins, loser resynced; NVS wins at higher rev");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    pb_reboot();
+    profiles_builtin_start();
+    profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 2, true); /* file+NVS rev 1, mask bit 2 */
+    pb_set_nvs(1u << 9, 5);                                         /* NVS moves ahead */
+
+    pb_reboot();
+    TEST_CHECK(profiles_builtin_start() == ESP_OK, "start() succeeds across diverged sides");
+    TEST_CHECK(s_hidden_mask == (1u << 9) && s_hidden_rev == 5, "NVS (rev 5) beat the file (rev 1)");
+    uint32_t f_mask = 0, f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    TEST_CHECK(f_valid && f_mask == (1u << 9) && f_rev == 5, "the file was resynced from NVS");
+
+    /* Reverse: file ahead of NVS. */
+    uint32_t newer = 1u << 11;
+    pref_cfg_fs_save(PROFILES_HIDDEN_FILE_PATH, &newer, sizeof(newer), 9);
+    pb_reboot();
+    profiles_builtin_start();
+    TEST_CHECK(s_hidden_mask == newer && s_hidden_rev == 9, "file (rev 9) beat NVS (rev 5)");
+    cfg_fs_deinit();
+}
+
+static void test_hidden_unmounted_leaves_nvs_path_working(void)
+{
+    TEST_SECTION("hidden mask: cfg_fs unmounted -> NVS-only save/boot round trip is unchanged");
+    pb_fresh();
+    TEST_CHECK(!cfg_fs_is_available(), "precondition: cfg_fs not mounted");
+    pb_reboot();
+    profiles_builtin_start();
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 4, true) == ESP_OK,
+               "set_hidden succeeds with no filesystem");
+    pb_reboot();
+    TEST_CHECK(profiles_builtin_start() == ESP_OK, "start() succeeds");
+    TEST_CHECK(s_hidden_mask == (1u << 4), "mask survived the simulated reboot via NVS alone");
+    TEST_CHECK(profiles_builtin_restore_all() == ESP_OK, "restore_all succeeds");
+    pb_reboot();
+    profiles_builtin_start();
+    TEST_CHECK(s_hidden_mask == 0, "restore_all persisted via NVS alone");
+
+    TEST_CHECK(cfg_fs_init("this_directory_does_not_exist_at_all", NULL) != ESP_OK, "a failed mount is reported");
+    pb_reboot();
+    profiles_builtin_start();
+    TEST_CHECK(s_hidden_mask == 0, "mount-failed boot still resolves from NVS");
+    cfg_fs_deinit();
+}
+
+static void test_hidden_nvs_migrates_to_file_and_status(void)
+{
+    TEST_SECTION("hidden mask: NVS-only value migrates to the file when cfg_fs mounts later; status reports it");
+    pb_fresh();
+    pb_reboot();
+    profiles_builtin_start();
+    profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 6, true); /* NVS only */
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts on a later boot");
+    pb_reboot();
+    profiles_builtin_start();
+    TEST_CHECK(s_hidden_mask == (1u << 6), "value came from NVS");
+    bool exists = false;
+    cfg_fs_exists(PROFILES_HIDDEN_FILE_PATH, &exists);
+    TEST_CHECK(exists, "the NVS candidate was migrated out to the file");
+
+    bool fv = false, nv = false, dv = true;
+    uint32_t fr = 0, nr = 0;
+    profiles_builtin_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && !dv, "status: both sides valid, not diverged");
+    pb_set_nvs(1u << 2, 4);
+    profiles_builtin_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(dv && nr == 4, "status: differing content reports diverged");
+    cfg_fs_deinit();
+}
+
 void run_test_profiles_builtin(void)
 {
     test_cone_label_unrated();
     test_cone_label_real_cone_unaffected();
     test_exactly_the_ten_named_entries_are_unrated();
     test_every_rising_segment_has_bounded_positive_ramp();
+    test_hidden_save_writes_file_and_nvs();
+    test_hidden_boot_resolves_from_file_when_nvs_empty();
+    test_hidden_higher_rev_wins_over_file();
+    test_hidden_unmounted_leaves_nvs_path_working();
+    test_hidden_nvs_migrates_to_file_and_status();
 }
 
 int main(void)

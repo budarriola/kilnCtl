@@ -30,6 +30,7 @@
 #include "lvgl_port.h"
 #include "adaptive_tune.h" /* adaptive_tune_get_kibase_dualwrite_status() -- /api/cfgfs row */
 #include "profile_executor.h" /* firing_stats_get_dualwrite_status() -- /api/cfgfs row */
+#include "profiles_builtin.h" /* profiles_builtin_get_dualwrite_status() */
 #include "profiles_http.h" /* profiles_http_get_dualwrite_status() -- /api/cfgfs per-slot rows */
 #include "profiles_types.h" /* PROFILES_MAX_COUNT */
 #include "ramp_assist_cfg.h"
@@ -1517,6 +1518,12 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         uint32_t file_rev = 0, nvs_rev = 0;
         unit_pref_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, "unit_pref", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        profiles_builtin_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "profiles_hidden", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
     {
         bool file_valid = false, nvs_valid = false, diverged = false;
