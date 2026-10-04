@@ -35,18 +35,6 @@ static uint32_t get_u32(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-uint32_t stage_header_crc32(const uint8_t *data, size_t len)
-{
-    uint32_t crc = 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int b = 0; b < 8; b++) {
-            crc = (crc & 1u) ? (crc >> 1) ^ 0xEDB88320u : (crc >> 1);
-        }
-    }
-    return ~crc;
-}
-
 static bool state_valid(uint32_t s)
 {
     return s == STAGE_STATE_WRITING || s == STAGE_STATE_VERIFIED || s == STAGE_STATE_APPLYING;

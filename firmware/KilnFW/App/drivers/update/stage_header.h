@@ -33,6 +33,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ota_image_crc.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -84,7 +86,10 @@ typedef struct {
 } stage_header_t;
 
 // IEEE 802.3 CRC-32 (reflected, poly 0xEDB88320), exposed for tests.
-uint32_t stage_header_crc32(const uint8_t *data, size_t len);
+// Implemented once, by ota_image_crc32() (same parameters: init 0xFFFFFFFF,
+// final XOR 0xFFFFFFFF; CRC-32("123456789") == 0xCBF43926), so no second CRC
+// implementation exists outside CommonFW/the allowlist (check_link_impl_isolation).
+#define stage_header_crc32(data, len) ota_image_crc32((data), (len))
 
 // Serialize *h into out[STAGE_HEADER_SIZE] after validating every field with
 // the same rules decode applies; image_capacity bounds image_length. On any
