@@ -372,6 +372,11 @@ def debug_reset(
         record["post_reset_states"] = {**post_state["states"], **{
             t: f"{post_state['states'].get(t, '?')}->{st}" for t, st in post_state["final"].items()}}
         record["resumed_targets"] = post_state["resumed"]
+        board_dark = (not ok) and bool(post_state["missing"] or post_state["not_running"])
+        if board_dark:
+            # Known not-running after reset run: the board is dark, so the
+            # dark-rereset guard must treat this like a probe-dark reset.
+            record["still_halted"] = True
     probe_res = None
     probe_error = None
     esp_run = peer == debug_probe.PEER_ESP and mode == "run"
@@ -388,11 +393,15 @@ def debug_reset(
     if not ok:
         record["openocd_decisive_line"] = _decisive_openocd_line(output)
     _append()
-    if post_state is not None and post_state["still_halted"]:
+    if not ok and post_state is not None and (post_state["missing"] or post_state["not_running"]):
+        what = (
+            "no post-reset state was reported (check did not complete)" if post_state["missing"]
+            else "target(s) " + ", ".join(f"{t}={st}" for t, st in sorted(post_state["not_running"].items()))
+            + " (not `running`) after `reset run` and a fallback resume"
+        )
         return (
-            f"error: reset {peer} (run) FAILED -- target(s) {', '.join(post_state['still_halted'])} "
-            "still report HALTED after `reset run` and a fallback resume; the core is NOT running "
-            "(board will be dark). Do not stack resets blindly; inspect with debug_read_registers.\n"
+            f"error: reset {peer} (run) FAILED -- {what}; the core is NOT confirmed running "
+            "(board will likely be dark). Do not stack resets blindly; inspect with debug_read_registers.\n"
             + output.strip()
         )
     if ok:

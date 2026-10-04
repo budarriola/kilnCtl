@@ -324,6 +324,18 @@ def recent_dark_esp_reset(
                 continue
             if not isinstance(rec, dict) or rec.get("peer") != "esp":
                 continue
+            if rec.get("still_halted") is True and rec.get("mode") == "run":
+                # debug_reset itself saw the core not running after reset run
+                # (and after its fallback resume): the board is known dark.
+                then = _parse_ts(rec.get("ts"))
+                if then is None:
+                    return None
+                now = now or datetime.datetime.now(datetime.timezone.utc)
+                age = (now - then).total_seconds()
+                if age < 0 or age >= window_s:
+                    return None
+                return DarkReset(age_s=age, remaining_s=window_s - age,
+                                 ts=str(rec.get("ts")), uart_answered=False)
             probe = rec.get("probe")
             if not (rec.get("openocd_ok") is True and rec.get("mode") == "run"
                     and isinstance(probe, dict)):

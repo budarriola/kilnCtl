@@ -105,7 +105,7 @@ class McpResetTest(_Base):
         msg, rec = self._call("KCTL_STATE esp32s3.cpu0 halted\nKCTL_RESUMED esp32s3.cpu0\n"
                               "KCTL_FINAL esp32s3.cpu0 halted\n")
         self.assertNotIn("reset esp (run) OK", msg)
-        self.assertIn("HALTED", msg)
+        self.assertIn("=halted", msg)
         self.assertFalse(rec["openocd_ok"])
 
 
@@ -163,6 +163,69 @@ class ResumeTest(_Base):
         self.run_mock.return_value = (True, "KCTL_BEFORE cpu0 halted\nKCTL_AFTER cpu0 halted\n")
         ok, _ = debug_probe.resume(debug_probe.PEER_ESP)
         self.assertFalse(ok)
+
+
+class ReviewFixesTest(_Base):
+    def test_resume_failure_in_guarded_batch_is_not_ok(self):
+        self.run_mock.return_value = (True, "REG pc 0x1\nKCTL_ERR resume: resume of a SMP target failed\n")
+        ok, out = debug_probe.read_registers(debug_probe.PEER_PICO)
+        self.assertFalse(ok)
+        self.assertIn("resume of a SMP target failed", out)
+
+    def test_guarded_tail_prints_resume_error(self):
+        debug_probe.read_memory(debug_probe.PEER_PICO, 0x20000000)
+        self.assertIn('KCTL_ERR resume: $_kctl_err2', self.tcl())
+
+    def test_fallback_resume_error_text_printed(self):
+        debug_probe.reset(debug_probe.PEER_ESP, "run")
+        self.assertIn('KCTL_ERR resume $_kctl_t: $_kctl_err', self.tcl())
+
+    def test_all_unknown_is_not_ok(self):
+        self.run_mock.return_value = (True, "KCTL_STATE esp32s3.cpu0 unknown\n")
+        ok, out = debug_probe.reset(debug_probe.PEER_ESP, "run")
+        self.assertFalse(ok)
+        self.assertIn("esp32s3.cpu0=unknown", out)
+
+    def test_missing_state_lines_is_not_ok(self):
+        self.run_mock.return_value = (True, "Info : something\n")
+        ok, out = debug_probe.reset(debug_probe.PEER_ESP, "run")
+        self.assertFalse(ok)
+        self.assertIn("no KCTL_STATE", out)
+
+    def test_resume_unknown_attempts_resume(self):
+        debug_probe.resume(debug_probe.PEER_ESP)
+        self.assertIn('$_kctl_s eq "unknown"', self.tcl())
+        self.run_mock.return_value = (True, "KCTL_BEFORE cpu0 unknown\nKCTL_AFTER cpu0 running\n")
+        ok, out = debug_probe.resume(debug_probe.PEER_ESP)
+        self.assertTrue(ok)
+        self.assertIn("cpu0: unknown -> running", out)
+
+
+class McpFailureAndGuardTest(McpResetTest):
+    def test_unknown_state_is_loud_and_history_keeps_states(self):
+        msg, rec = self._call("KCTL_STATE esp32s3.cpu0 unknown\n")
+        self.assertIn("FAILED", msg)
+        self.assertFalse(rec["openocd_ok"])
+        self.assertIn("esp32s3.cpu0", rec["post_reset_states"])
+        self.assertTrue(rec["still_halted"])
+
+    def test_guard_honours_still_halted_flag(self):
+        import datetime
+        from kilnctrl import reset_probe
+        with tempfile.TemporaryDirectory() as d:
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            rec = {"ts": ts, "peer": "esp", "mode": "run", "openocd_ok": False, "still_halted": True}
+            self.assertIsNone(reset_probe.recent_dark_esp_reset(d))
+            self.assertIsNone(reset_probe.append_history(d, rec))
+            dark = reset_probe.recent_dark_esp_reset(d)
+            self.assertIsNotNone(dark)
+            later = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=500)
+            self.assertIsNone(reset_probe.recent_dark_esp_reset(d, now=later))
+            # an openocd failure WITHOUT the flag stays "unknown, not dark"
+            rec2 = dict(rec, still_halted=False)
+            d2 = tempfile.mkdtemp()
+            reset_probe.append_history(d2, rec2)
+            self.assertIsNone(reset_probe.recent_dark_esp_reset(d2))
 
 
 if __name__ == "__main__":

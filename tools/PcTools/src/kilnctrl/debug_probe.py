@@ -426,12 +426,19 @@ def reset(peer: str, mode: str = "run") -> "tuple[bool, str]":
     )
     ok, output = _run(peer, tcl)
     if ok and post:
-        stuck = parse_post_reset(output)["still_halted"]
-        if stuck:
+        info = parse_post_reset(output)
+        if info["missing"]:
             ok = False
             output += (
-                "\nERROR: after `reset run` (and a fallback resume) target(s) "
-                f"{', '.join(stuck)} still report halted -- the core is NOT running."
+                "\nERROR: no KCTL_STATE lines in the OpenOCD output -- the post-reset "
+                "state check did not complete; the core is NOT confirmed running."
+            )
+        elif info["not_running"]:
+            ok = False
+            desc = ", ".join(f"{t}={st}" for t, st in sorted(info["not_running"].items()))
+            output += (
+                "\nERROR: after `reset run` (and a fallback resume if halted) target(s) "
+                f"{desc} -- not confirmed running; the core is NOT running."
             )
     return ok, output
 
@@ -447,7 +454,8 @@ _POST_RESET_STATE_TCL = (
     'if {$_kctl_s eq "running"} break; sleep 100 }; '
     'puts "KCTL_STATE $_kctl_t $_kctl_s"; '
     'if {$_kctl_s eq "halted"} { '
-    "catch {targets $_kctl_t; resume} _kctl_err; "
+    "if {[catch {targets $_kctl_t; resume} _kctl_err]} "
+    '{puts "KCTL_ERR resume $_kctl_t: $_kctl_err"}; '
     'puts "KCTL_RESUMED $_kctl_t"; sleep 200; '
     "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
     'puts "KCTL_FINAL $_kctl_t $_kctl_s" } }; '
@@ -476,7 +484,9 @@ def parse_post_reset(output: str) -> dict:
     last = dict(states)
     last.update(final)
     still = sorted(t for t, st in last.items() if st == "halted")
-    return {"states": states, "resumed": resumed, "final": final, "still_halted": still}
+    not_running = {t: st for t, st in last.items() if st != "running"}
+    return {"states": states, "resumed": resumed, "final": final, "still_halted": still,
+            "not_running": not_running, "missing": not states}
 
 
 def halt(peer: str) -> "tuple[bool, str]":
@@ -495,7 +505,7 @@ def resume(peer: str) -> "tuple[bool, str]":
         "foreach _kctl_t [target names] { "
         "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
         'puts "KCTL_BEFORE $_kctl_t $_kctl_s"; '
-        'if {$_kctl_s eq "halted"} {set _kctl_any 1} }; '
+        'if {$_kctl_s eq "halted" || $_kctl_s eq "unknown"} {set _kctl_any 1} }; '
         f"if {{$_kctl_any}} {{ if {{[catch {{{_RESUME_TCL}}} _kctl_err]}} "
         '{puts "KCTL_ERR $_kctl_err"} }; '
         "sleep 100; "
@@ -527,9 +537,9 @@ def _format_resume_report(output: str) -> "tuple[bool, str]":
     lines = []
     for t, b in before.items():
         a = after.get(t, "unknown")
-        if b == "halted":
-            lines.append(f"{t}: halted -> {a}")
-            if a == "halted":
+        if b in ("halted", "unknown"):
+            lines.append(f"{t}: {b} -> {a}")
+            if a in ("halted", "unknown"):
                 ok = False
         else:
             lines.append(f"{t}: {b} (no resume needed)" + ("" if a == b else f" -> now {a}"))
@@ -698,7 +708,7 @@ def _guarded_resume(dump: str, leave_halted: bool) -> str:
     guarded = f'if {{[catch {{{dump}}} _kctl_err]}} {{puts "KCTL_ERR $_kctl_err"}};'
     if leave_halted:
         return guarded
-    return f"{guarded} catch {{{_RESUME_TCL}}} _kctl_err2;"
+    return f'{guarded} if {{[catch {{{_RESUME_TCL}}} _kctl_err2]}} {{puts "KCTL_ERR resume: $_kctl_err2"}};'
 
 
 def _surface_kctl_err(ok: bool, output: str) -> "tuple[bool, str]":
