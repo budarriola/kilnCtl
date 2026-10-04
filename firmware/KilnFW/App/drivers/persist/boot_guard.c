@@ -9,6 +9,7 @@
 #include "freertos/semphr.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "startup_faults.h"
 
 static const char *TAG = "boot_guard";
 
@@ -470,6 +471,7 @@ static bool ensure_lock(void)
             ESP_LOGE(TAG, "xSemaphoreCreateMutex failed -- boot-guard cannot track boots this boot "
                           "(defaulting to NOT recovery mode, so a real lockup would go uncaught -- "
                           "this is the one failure path in this module worth flagging loudly)");
+            startup_fault_note(STARTUP_FAULT_BOOT_GUARD_NVS);
             return false;
         }
     }
@@ -497,6 +499,7 @@ esp_err_t boot_guard_init(void)
         ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- boot-guard counter will not persist "
                       "this boot (defaulting to NOT recovery mode)",
                  KILN_NVS_PARTITION, hal_status_to_name(part_err));
+        startup_fault_note(STARTUP_FAULT_BOOT_GUARD_NVS);
     }
 
     xSemaphoreTake(s_bg.lock, portMAX_DELAY);
@@ -544,6 +547,7 @@ esp_err_t boot_guard_init(void)
         ESP_LOGE(TAG, "could not persist boot-guard count %lu: %s -- next boot will not see this "
                       "one counted",
                  (unsigned long)new_count, hal_status_to_name(write_err));
+        startup_fault_note(STARTUP_FAULT_BOOT_GUARD_NVS);
     }
 
     if (recovery_mode) {

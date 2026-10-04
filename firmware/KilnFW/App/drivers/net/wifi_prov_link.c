@@ -38,6 +38,7 @@
  * firmware/KilnFW/App/drivers/CMakeLists.txt before adding it. */
 #include "http_auth_policy_iface.h"
 #include "http_session_iface.h"
+#include "startup_faults.h"
 
 /* ---- Wi-Fi driver config helpers -------------------------------------- */
 
@@ -1022,6 +1023,7 @@ static void dns_hijack_task(void *arg)
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(WIFI_PROV_TAG, "dns_hijack: socket() failed (errno %d) -- captive-portal redirect disabled", errno);
+        startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
         vTaskDelete(NULL);
         return;
     }
@@ -1032,6 +1034,7 @@ static void dns_hijack_task(void *arg)
     bind_addr.sin_port = htons(53);
     if (bind(sock, (struct sockaddr *)&bind_addr, sizeof(bind_addr)) != 0) {
         ESP_LOGE(WIFI_PROV_TAG, "dns_hijack: bind(:53) failed (errno %d) -- captive-portal redirect disabled", errno);
+        startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
         close(sock);
         vTaskDelete(NULL);
         return;
@@ -1120,5 +1123,6 @@ void start_dns_hijack_task(void)
                                                          tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         ESP_LOGW(WIFI_PROV_TAG, "xTaskCreatePinnedToCoreWithCaps(dns_hijack) failed -- no captive-portal DNS redirect");
+        startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
     }
 }

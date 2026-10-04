@@ -1912,6 +1912,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`" " +
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $driversDir 'persist/boot_guard.c')`" " +
+            "`"$(Join-Path $driversDir 'common/startup_faults.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
             # check_hal_include_boundary.ps1: cfg_fs_mount.c's format-timeout
@@ -2340,6 +2341,7 @@ try {
     New-Item -ItemType Directory -Force -Path $wifiProvObjDir | Out-Null
     $cmd51 = "call `"$vcvars`" x64 >nul && cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$wifiProvObjDir\\`" /Fe:`"$exe51`" `"$(Join-Path $testDir 'test_wifi_prov.c')`" " +
+            "`"$(Join-Path $driversDir 'common/startup_faults.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 

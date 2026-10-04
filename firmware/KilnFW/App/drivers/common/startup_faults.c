@@ -20,6 +20,18 @@ static const char *const k_name[STARTUP_FAULT_COUNT] = {
     [STARTUP_FAULT_OTA_ROUTES] = "OTA routes",
     [STARTUP_FAULT_KILN_CFG_SWAP] = "kiln config apply worker",
     [STARTUP_FAULT_LCD_UI] = "LCD UI",
+    [STARTUP_FAULT_BOOT_GUARD_NVS] = "boot_guard counter",
+    [STARTUP_FAULT_DANGER_MODE] = "danger mode",
+    [STARTUP_FAULT_PC_BRIDGES] = "PC bridge tasks",
+    [STARTUP_FAULT_DNS_HIJACK] = "captive-portal DNS",
+    [STARTUP_FAULT_HTTP_ROUTES] = "some web pages/APIs",
+    [STARTUP_FAULT_WEB_AUTH_ROUTES] = "login/security routes",
+    [STARTUP_FAULT_SETTINGS_STORE] = "settings store",
+    [STARTUP_FAULT_PICO_AUTO_UPDATE] = "Pico auto-update",
+    [STARTUP_FAULT_HEARTBEAT_MONITOR] = "heartbeat monitor",
+    [STARTUP_FAULT_TIME_SYNC] = "network time",
+    [STARTUP_FAULT_LCD_BACKLIGHT] = "LCD auto-blank/backlight",
+    [STARTUP_FAULT_TOUCH] = "LCD touch input",
 };
 
 static const char *const k_impact[STARTUP_FAULT_COUNT] = {
@@ -37,6 +49,30 @@ static const char *const k_impact[STARTUP_FAULT_COUNT] = {
     [STARTUP_FAULT_OTA_ROUTES] = "OTA, reset and recovery routes are absent this boot; reboot",
     [STARTUP_FAULT_KILN_CFG_SWAP] = "applying a saved kiln config is unavailable this boot; reboot",
     [STARTUP_FAULT_LCD_UI] = "the LCD stays blank this boot; the web UI still works",
+    [STARTUP_FAULT_BOOT_GUARD_NVS] =
+        "the boot-loop counter is not saved, so a reset loop would not reach recovery mode; reboot",
+    [STARTUP_FAULT_DANGER_MODE] =
+        "danger mode is unavailable this boot; reboot",
+    [STARTUP_FAULT_PC_BRIDGES] =
+        "some PC-link GUI/tool functions are dead this boot (see the log); reboot, and reflash if it repeats",
+    [STARTUP_FAULT_DNS_HIJACK] =
+        "phones joining the setup AP get no sign-in popup; browse to 192.168.4.1; reboot to retry",
+    [STARTUP_FAULT_HTTP_ROUTES] =
+        "some web pages or API routes are missing this boot (see the log); reboot, and reflash if it repeats",
+    [STARTUP_FAULT_WEB_AUTH_ROUTES] =
+        "login, security or TOTP routes are missing this boot, so sign-in may not work; reboot",
+    [STARTUP_FAULT_SETTINGS_STORE] =
+        "a saved-settings store did not load, so defaults apply this boot; check settings, reboot",
+    [STARTUP_FAULT_PICO_AUTO_UPDATE] =
+        "the safety processor firmware was not checked against the staged image this boot; reboot",
+    [STARTUP_FAULT_HEARTBEAT_MONITOR] =
+        "the IO-owner heartbeat monitor is not running this boot; reboot",
+    [STARTUP_FAULT_TIME_SYNC] =
+        "no network time this boot, so log timestamps are wrong; check Wi-Fi, reboot",
+    [STARTUP_FAULT_LCD_BACKLIGHT] =
+        "LCD auto-blank or backlight control is off this boot; reboot",
+    [STARTUP_FAULT_TOUCH] =
+        "the LCD touch panel does not respond this boot; use the web UI, check the touch cable, reboot",
 };
 
 void startup_fault_note(startup_fault_t id)

@@ -51,9 +51,11 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
 
         if (uart_bridge_start_info_task(&ctx->uart_proto) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start info uart bridge task");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
         if (uart_bridge_start_system_task(&ctx->uart_proto, &ctx->uart_owner) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start system uart bridge task");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
         if (ctx->thermo_bus.initialized) {
             /* Reports the actual error and the free heap: this failure was hit
@@ -67,10 +69,12 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                 ESP_LOGE(MAIN_TAG, "Failed to start thermo uart bridge task: %s (free heap %lu B, largest block %u B)",
                          esp_err_to_name(thermo_task_err), (unsigned long)esp_get_free_heap_size(),
                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+                startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
             }
         }
         if (ctx->io_ready && uart_bridge_start_io_task(&ctx->uart_proto, &ctx->kio) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start io uart bridge task");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
     }
     main_heap_stage("uart_bridges_1");
@@ -124,6 +128,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
         if (ctx->safety_err == ESP_OK &&
             uart_bridge_start_safety_task(&ctx->uart_proto, &ctx->safety) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start safety uart bridge task");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
     }
 
@@ -152,6 +157,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                      control_task_err == ESP_ERR_NO_MEM
                          ? " -- flash-safe executor unavailable; NO zone PID/model reads or writes over the PC link this boot"
                          : "");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
         esp_err_t profiles_task_err = uart_bridge_start_profiles_task(&ctx->uart_proto);
         if (profiles_task_err != ESP_OK) {
@@ -159,6 +165,7 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                      profiles_task_err == ESP_ERR_NO_MEM
                          ? " -- flash-safe executor unavailable; NO fire-profile list/save/delete or profile execution over the PC link this boot"
                          : "");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
         esp_err_t autotune_task_err = uart_bridge_start_autotune_task(&ctx->uart_proto);
         if (autotune_task_err != ESP_OK) {
@@ -166,9 +173,11 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                      autotune_task_err == ESP_ERR_NO_MEM
                          ? " -- flash-safe executor unavailable; NO autotune status or control over the PC link this boot"
                          : "");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
         if (uart_bridge_start_wifi_task(&ctx->uart_proto) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start wifi uart bridge task");
+            startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
         }
         // log_store_mount.c: mounts the `logs` SPIFFS partition (partitions.csv,
         // 0xCF0000, 3072K) at "/logs" -- the persistent home for firing/

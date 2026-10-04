@@ -266,6 +266,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
             ESP_LOGW(MAIN_TAG, "pico_auto_update_boot_start failed: %s -- the safety processor's "
                           "firmware will not be checked against the staged image this boot",
                      esp_err_to_name(pau_err));
+            startup_fault_note(STARTUP_FAULT_PICO_AUTO_UPDATE);
         }
     } else if (ctx->recovery_mode) {
         ESP_LOGW(MAIN_TAG, "RECOVERY MODE: pico_auto_update_boot_start() skipped");
@@ -323,6 +324,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
                       "and the thermo/io/safety bridges are unaffected. relay_cycles/adaptive_tune "
                       "migrate-on-load will also see the worker absent and defer (see GET /api/cfgfs).",
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        startup_fault_note(STARTUP_FAULT_PC_BRIDGES);
     }
 
     // Lifetime relay contact-cycle counts (TODO.md 6A.1), loaded before the

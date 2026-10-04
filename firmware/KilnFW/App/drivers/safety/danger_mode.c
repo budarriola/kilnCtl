@@ -12,6 +12,7 @@
 #include "profile_executor_state.h"
 #include "profile_executor.h"
 #include "stack_margin.h"
+#include "startup_faults.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED */
 
 static const char *TAG = "danger_mode";
@@ -365,6 +366,7 @@ void danger_mode_init(SafetyLinkClass *safety)
     if (xTaskCreate(danger_mode_task, "danger_mode", 3072, NULL, tskIDLE_PRIORITY + 1, &s_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "xTaskCreate(danger_mode_task) failed -- danger mode will not be available "
                       "this boot");
+        startup_fault_note(STARTUP_FAULT_DANGER_MODE);
         s_dm.initialized = false;
         return;
     }

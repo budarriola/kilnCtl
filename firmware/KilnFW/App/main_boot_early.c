@@ -300,6 +300,7 @@ void main_boot_early(main_boot_ctx_t *ctx)
     if (time_sync_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "time_sync_start failed: %s -- no network time this boot",
                  esp_err_to_name(time_sync_err));
+        startup_fault_note(STARTUP_FAULT_TIME_SYNC);
     }
 
     // --- Wi-Fi (station "home" mode / AP mode, see wifi_prov.h) -------------
@@ -793,6 +794,7 @@ void main_boot_early(main_boot_ctx_t *ctx)
             ESP_LOGW(MAIN_TAG, "FT6336U bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
                      esp_err_to_name(touch_err));
+            startup_fault_note(STARTUP_FAULT_TOUCH);
             // No FT6336U on the bus (or it failed identity check). Unlike
             // the pre-adopt code, this bus_t is adopted (owner_owned=false,
             // bus_owned=false, see hal_i2c_esp_owner.h) -- deinit here only
@@ -819,6 +821,7 @@ void main_boot_early(main_boot_ctx_t *ctx)
             ESP_LOGW(MAIN_TAG, "NS2009 bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
                      esp_err_to_name(touch_err));
+            startup_fault_note(STARTUP_FAULT_TOUCH);
         }
 #endif
     }
@@ -838,8 +841,10 @@ void main_boot_early(main_boot_ctx_t *ctx)
         if (idle_err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "screen_idle_init failed: %s -- no auto-blank this boot",
                      esp_err_to_name(idle_err));
+            startup_fault_note(STARTUP_FAULT_LCD_BACKLIGHT);
         } else if (screen_idle_start(&ctx->screen_idle) != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "Failed to start screen_idle task -- no auto-blank this boot");
+            startup_fault_note(STARTUP_FAULT_LCD_BACKLIGHT);
         } else {
             ctx->screen_idle_ready = true;
         }
@@ -855,10 +860,12 @@ void main_boot_early(main_boot_ctx_t *ctx)
         if (bl_err == ESP_OK) {
             if (backlight_pwm_start(&ctx->backlight) != ESP_OK) {
                 ESP_LOGE(MAIN_TAG, "Failed to start backlight_pwm task -- backlight stays as bring-up left it");
+                startup_fault_note(STARTUP_FAULT_LCD_BACKLIGHT);
             }
         } else if (bl_err != ESP_ERR_NOT_SUPPORTED) {
             ESP_LOGE(MAIN_TAG, "backlight_pwm_init failed: %s -- backlight stays as bring-up left it",
                      esp_err_to_name(bl_err));
+            startup_fault_note(STARTUP_FAULT_LCD_BACKLIGHT);
         } /* ESP_ERR_NOT_SUPPORTED: flag off, expected, nothing to log */
     }
 

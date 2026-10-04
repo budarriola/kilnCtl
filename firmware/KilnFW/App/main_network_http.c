@@ -292,6 +292,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (ctx->dash_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "dashboard_http_start failed: %s -- no dashboard this boot",
                  esp_err_to_name(ctx->dash_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // TODO.md 10.7: board-health IC temperature JSON, deliberately its own
@@ -306,6 +307,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (board_temps_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "board_temps_http_start failed: %s -- no /api/board_temps or /board_temps "
                       "page this boot", esp_err_to_name(board_temps_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // --- Settings/Profiles HTTP pages (TODO.md sections 3 and 5) -----------
@@ -327,6 +329,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (unit_pref_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "unit_pref_start failed: %s -- defaulting to Celsius this boot",
                  esp_err_to_name(unit_pref_err));
+        startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
 
     // 2026-09-02, forthcoming "ramp assist" feature: same non-fatal, load-
@@ -337,12 +340,14 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (ramp_assist_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "ramp_assist_cfg_start failed: %s -- ramp assist stays disabled this boot",
                  esp_err_to_name(ramp_assist_err));
+        startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
 
     esp_err_t zones_err = zones_http_start();
     if (zones_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "zones_http_start failed: %s -- no Thermocouples & Zones page this boot",
                  esp_err_to_name(zones_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
     // PID_EXPANSION_PLAN.md 3.3, U2: adaptive_tune.c's per-zone opt-in flags
     // now live in the zone config blob zones_http_start() just loaded (or
@@ -377,6 +382,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (builtin_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_builtin_start failed: %s -- built-in schedules shown unfiltered this boot",
                  esp_err_to_name(builtin_err));
+        startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
     // The operator's persisted "favorite" marks, on both saved slots and
     // shipped catalogue entries. Must load before profiles_http_start()
@@ -388,11 +394,13 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (fav_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_favorites_start failed: %s -- no favorites shown this boot",
                  esp_err_to_name(fav_err));
+        startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
     esp_err_t profiles_err = profiles_http_start();
     if (profiles_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_http_start failed: %s -- no Profiles page this boot",
                  esp_err_to_name(profiles_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
     // docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: must run after profiles_http_start()
     // just above -- calls the same profiles_http_get()/profiles_http_save()
@@ -401,6 +409,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (profiles_live_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_live_http_start failed: %s -- no live profile editing this boot",
                  esp_err_to_name(profiles_live_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
     // Must run AFTER profiles_http_start() just above -- see
     // profiles_export_http.h's own comment: both handlers read/write the
@@ -409,6 +418,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (profiles_export_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_export_http_start failed: %s -- no single-profile export/import this boot",
                  esp_err_to_name(profiles_export_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // TODO.md 8.1: the explicit-scope reset/factory-default endpoint. Only
@@ -419,6 +429,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (factory_reset_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "factory_reset_http_start failed: %s -- no reset/factory-default endpoint this boot",
                  esp_err_to_name(factory_reset_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // Owner request 2026-09-08: a non-destructive "reboot both processors"
@@ -429,6 +440,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (sw_reset_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "sw_reset_http_start failed: %s -- no sw-reset endpoint this boot",
                  esp_err_to_name(sw_reset_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // cfg_fs_mount_device() (main_boot_early.c) may have refused to
@@ -440,6 +452,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (cfg_fs_format_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "cfg_fs_format_http_start failed: %s -- no format-confirmation endpoint this boot",
                  esp_err_to_name(cfg_fs_format_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // TODO.md 8.2's boot-time report: capture AFTER every module above that
@@ -463,6 +476,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (readiness_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "readiness_http_start failed: %s -- no readiness page this boot",
                  esp_err_to_name(readiness_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // SETUP_WIZARD.md step 3: the /setup page shell. Registered right
@@ -474,6 +488,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (setup_wizard_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "setup_wizard_http_start failed: %s -- no /setup page this boot",
                  esp_err_to_name(setup_wizard_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // SETUP_WIZARD.md implementation step 2: GET/POST
@@ -486,6 +501,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (setup_progress_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "setup_progress_http_start failed: %s -- no /api/setup/progress endpoint this boot",
                  esp_err_to_name(setup_progress_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // log_http.c: read-back for the firing/autotune logs log_store_mount.c
@@ -498,6 +514,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (log_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "log_http_start failed: %s -- no /api/logs/* endpoints this boot",
                  esp_err_to_name(log_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // adaptive_tune_http.c: GET /api/adaptive_tune (status, all zones), POST
@@ -512,6 +529,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (adaptive_tune_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "adaptive_tune_http_start failed: %s -- no /api/adaptive_tune* endpoints this boot",
                  esp_err_to_name(adaptive_tune_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // UI_PLAN.md "page structure rework" section: /diagnostics, /diagnostics/
@@ -531,6 +549,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (diagnostics_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "diagnostics_http_start failed: %s -- no /diagnostics, /diagnostics/thermo "
                       "or /safety page this boot", esp_err_to_name(diagnostics_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // FLASH_BUDGET.md section 8 item 3: GET /api/partitions reports
@@ -543,6 +562,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (partition_info_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "partition_info_http_start failed: %s -- no /api/partitions this boot",
                  esp_err_to_name(partition_info_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7: persistence + read/restore
@@ -555,6 +575,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (iter_tune_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "iter_tune_http_start failed: %s -- no /api/iter_tune/* this boot",
                  esp_err_to_name(iter_tune_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // FILESYSTEM_PLAN.md "Dual-write window" section: GET /api/dualwrite_window
@@ -570,6 +591,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (dualwrite_window_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "dualwrite_window_http_start failed: %s -- no /api/dualwrite_window this boot",
                  esp_err_to_name(dualwrite_window_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // UI_PLAN.md "web page structure" section, items 2-4: the settings hub
@@ -583,6 +605,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (settings_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "settings_http_start failed: %s -- no /settings or "
                       "/settings/display page this boot", esp_err_to_name(settings_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // WEB_AUTH_PLAN.md items 10/11: installs the real security_backend_
@@ -596,6 +619,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (security_backend_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "security_backend_web_auth_start failed: %s -- no "
                       "/api/auth/bootstrap_password route this boot", esp_err_to_name(security_backend_err));
+        startup_fault_note(STARTUP_FAULT_WEB_AUTH_ROUTES);
     }
 
     // WEB_AUTH_PLAN.md section 6: the admin password/settings page --
@@ -610,6 +634,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (security_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "security_http_start failed: %s -- no /settings/security "
                       "page this boot", esp_err_to_name(security_http_err));
+        startup_fault_note(STARTUP_FAULT_WEB_AUTH_ROUTES);
     }
 
     // WEB_AUTH_PLAN.md section 6: the browser-side login -- GET /login and
@@ -621,6 +646,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (web_auth_login_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "web_auth_login_http_start failed: %s -- no /login or "
                       "/api/auth/login route this boot", esp_err_to_name(web_auth_login_err));
+        startup_fault_note(STARTUP_FAULT_WEB_AUTH_ROUTES);
     }
 
     // docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2: TOTP enrollment/status
@@ -634,6 +660,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (auth_totp_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "auth_totp_http_start failed: %s -- no TOTP enrollment or "
                       "password-reset routes this boot", esp_err_to_name(auth_totp_err));
+        startup_fault_note(STARTUP_FAULT_WEB_AUTH_ROUTES);
     }
 
     // WEB_AUTH_PLAN.md section 8, web-GUI half: the inactivity lock's status
@@ -643,6 +670,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (web_auth_session_status_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "web_auth_session_status_http_start failed: %s -- no "
                       "/api/auth/session route this boot", esp_err_to_name(web_auth_session_status_err));
+        startup_fault_note(STARTUP_FAULT_WEB_AUTH_ROUTES);
     }
 
     // CommonFW/docs/UPDATE_PROTOCOL.md section 1 / TODO.md 9.4: the OTA/
@@ -729,6 +757,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (kiln_cfg_store_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "kiln_cfg_store_init failed: %s -- saved kiln configs unavailable this boot",
                  esp_err_to_name(kiln_cfg_store_err));
+        startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
     /* docs/KILN_PROFILES_PLAN.md item 5 / section 4.4. Boot recovery for an
      * interrupted two-processor swap is NOT called here -- it runs as the
@@ -765,6 +794,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (kiln_cfg_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "kiln_cfg_http_start failed: %s -- no /api/kiln_configs this boot",
                  esp_err_to_name(kiln_cfg_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // TODO.md 0.5 / UI_PLAN.md's settings+profile import/export, unified into
@@ -777,6 +807,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (backup_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "backup_http_start failed: %s -- no /settings/backup page this boot",
                  esp_err_to_name(backup_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     /* Safety-processor commissioning (SaftyFW/docs/COMMISSIONING.md). The
@@ -799,6 +830,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         ESP_LOGW(MAIN_TAG, "safety_cfg_store_init failed: %s -- safety commissioning cache "
                       "unavailable this boot (values will refetch from the Pico)",
                  esp_err_to_name(safety_cfg_store_err));
+        startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
     esp_err_t safety_cfg_http_err =
         safety_cfg_http_start(ctx->safety_err == ESP_OK ? &ctx->safety : NULL,
@@ -806,6 +838,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (safety_cfg_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "safety_cfg_http_start failed: %s -- no /safety/commissioning this boot",
                  esp_err_to_name(safety_cfg_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     /* GET /api/saftyfw_stack_margin -- surfaces the Pico's nine live
@@ -822,6 +855,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     if (safety_stack_margin_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "safety_stack_margin_http_start failed: %s -- no /api/saftyfw_stack_margin this boot",
                  esp_err_to_name(safety_stack_margin_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
     // Development-only /api/sim (fault injection into the simulated plant).
@@ -839,6 +873,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     monitor_task_init(&monitor, &ctx->expander.owner.task_handle);
     if (monitor_task_start(&monitor) != pdPASS) {
         ESP_LOGE(MAIN_TAG, "Failed to start heartbeat monitor task");
+        startup_fault_note(STARTUP_FAULT_HEARTBEAT_MONITOR);
     }
 
     // --- PC link -----------------------------------------------------------

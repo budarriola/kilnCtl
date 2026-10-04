@@ -47,6 +47,18 @@ typedef enum {
     STARTUP_FAULT_OTA_ROUTES,        /* ota_http_start() failed */
     STARTUP_FAULT_KILN_CFG_SWAP,     /* kiln_cfg_swap worker did not start */
     STARTUP_FAULT_LCD_UI,            /* LVGL display task did not start */
+    STARTUP_FAULT_BOOT_GUARD_NVS, /* boot_guard NVS init/persist failed */
+    STARTUP_FAULT_DANGER_MODE, /* danger_mode task did not start */
+    STARTUP_FAULT_PC_BRIDGES, /* a PC-link bridge task did not start */
+    STARTUP_FAULT_DNS_HIJACK, /* captive-portal DNS did not start */
+    STARTUP_FAULT_HTTP_ROUTES, /* an HTTP page/API start failed */
+    STARTUP_FAULT_WEB_AUTH_ROUTES, /* a login/security route start failed */
+    STARTUP_FAULT_SETTINGS_STORE, /* a saved-settings store failed to load */
+    STARTUP_FAULT_PICO_AUTO_UPDATE, /* pico auto-update start failed */
+    STARTUP_FAULT_HEARTBEAT_MONITOR, /* heartbeat monitor task did not start */
+    STARTUP_FAULT_TIME_SYNC, /* time_sync_start failed */
+    STARTUP_FAULT_LCD_BACKLIGHT, /* screen idle/backlight start failed */
+    STARTUP_FAULT_TOUCH, /* touch controller bring-up failed */
     STARTUP_FAULT_COUNT
 } startup_fault_t;
 
