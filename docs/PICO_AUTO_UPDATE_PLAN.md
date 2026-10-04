@@ -69,7 +69,7 @@ Most of this feature is built. The honest gap is small, and this plan does not r
 
 Rejected alternative: teach the relay to read straight out of embedded `.rodata`. It saves one ~119 KB copy and a partition erase, and costs a change to the one module whose wire behaviour is exercised and recorded. Not worth it.
 
-Cost: the ESP application grows by both Pico slot images, 238,616 B (two 119,308 B slot binaries) against today's ~2.7 MB `KilnCtrl.bin`. Irrelevant under the 8 MiB slot of `docs/OTA_SINGLE_SLOT_PLAN.md:22`, and a real constraint worth naming if that plan does not land first.
+Cost: the ESP application grows by both Pico slot images, 238,616 B (two 119,308 B slot binaries) against today's ~2.7 MB `KilnCtrl.bin`. Irrelevant under the `app` slot of `docs/OTA_SINGLE_SLOT_PLAN.md` (8 MiB when written, 4 MiB since the 2026-10-04 WP2 split; `KilnCtrl.bin` still fits), and a real constraint worth naming if that plan does not land first.
 
 **The decision (closes G2): exact match on an identity string, not an ordering.** The build stamps the expected Pico identity — the `SaftyFW` commit the embedded image was built from — into the application. At boot the ESP compares it against the `commit` the Pico already reports (`firmware/CommonFW/include/kilnlink/kilnlink_fw_version.h:67`). Equal, and `dirty == 0`: nothing happens, no flash is touched, no counter moves. Unequal: update.
 

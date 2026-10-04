@@ -26,7 +26,7 @@ recovery,     app,  factory,   0xA10000, 0x1E0000,
 
 **Amended 2026-10-04 (WP2 of `docs/GITHUB_RELEASE_UPDATE_PLAN.md`): `app` is now `0x400000` (4 MiB), and a new `stage` data partition (`0x610000`/`0x400000`) takes the other half.** Every "8 MiB" / `0x800000` figure in this section and in sections 7-8 is the pre-split value; section 10 has the current table and the one-time flash procedure. The recovery row and every data partition are unchanged.
 
-`ota_1` is deleted. `app` is 8 MiB; `recovery` is 1,966,080 B and ends exactly at 0xBF0000, so the 917,504-byte gap is consumed rather than left stranded. Both offsets are 64 KiB-aligned as `gen_esp32part.py` requires. **No data partition moves or changes size**, so the coredump, the config, the profiles and the Wi-Fi credentials all survive by construction — which is what makes the migration in section 2 tractable.
+`ota_1` is deleted. `app` is 8 MiB as first designed (4 MiB since the 2026-10-04 WP2 amendment above); `recovery` is 1,966,080 B and ends exactly at 0xBF0000, so the 917,504-byte gap is consumed rather than left stranded. Both offsets are 64 KiB-aligned as `gen_esp32part.py` requires. **No data partition moves or changes size**, so the coredump, the config, the profiles and the Wi-Fi credentials all survive by construction — which is what makes the migration in section 2 tractable.
 
 `otadata` must still be erased and rewritten from `ota_data_initial.bin`, because app partition offsets and sizes changed; that is 8 KiB of boot-target state and nothing else.
 
