@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kilnctrl import mcp_server_safety as mss  # noqa: E402
 from kilnctrl import mcp_server_ota  # noqa: E402
-from kilnctrl.devices_safety import SafetyStatus  # noqa: E402
+from kilnctrl.devices_safety import SafetyStatus, CT_MASK_FALLBACK_MARKER  # noqa: E402
 from kilnctrl.protocol import SafetyFlag, ThermoFault  # noqa: E402
 
 
@@ -170,10 +170,12 @@ class SafetyGetStatusCtFittedTest(unittest.TestCase):
         self.assertIn("not fitted", out)
         self.assertIn("7.89 A", out)
         self.assertIn("zone 2", out)
+        self.assertNotIn(CT_MASK_FALLBACK_MARKER, out)
 
     def test_prefers_api_status_ct_fitted_per_zone(self):
         out = self._run({"ct_fitted": [True, True, True]})
         self.assertNotIn("not fitted", out)
+        self.assertNotIn(CT_MASK_FALLBACK_MARKER, out)
         self.assertIn("1.23 A", out)
 
     def test_api_status_summed_no_single_zone_shows_dash(self):
@@ -193,6 +195,7 @@ class SafetyGetStatusCtFittedTest(unittest.TestCase):
         self.assertIn("7.89 A", out)
         # no per-zone attribution available from the commissioning fallback
         self.assertIn("ct zone: -", out)
+        self.assertIn(CT_MASK_FALLBACK_MARKER, out)
 
     def test_falls_back_to_commissioning_per_zone(self):
         out = self._run(
@@ -205,6 +208,7 @@ class SafetyGetStatusCtFittedTest(unittest.TestCase):
         )
         self.assertNotIn("not fitted", out)
         self.assertIn("1.23 A", out)
+        self.assertIn(CT_MASK_FALLBACK_MARKER, out)
 
     def test_neither_source_available_prints_raw_amps(self):
         out = self._run({}, commissioning_body=None, status_fails=True)

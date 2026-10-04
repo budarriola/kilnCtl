@@ -27,6 +27,7 @@ from .device_log import LogClient
 from .devices import LogLine
 from .display import BlitError, DisplayClient, DisplayQueryError
 from .touch import TouchClient, TouchQueryError
+from .devices_safety import CT_MASK_FALLBACK_MARKER
 from .ui_test_client import UiTestClient, UiTestQueryError
 from .web_ui_client import WebUiClient
 from .info import InfoClient, InfoQueryError
@@ -155,8 +156,8 @@ def safety_get_status() -> str:
     text = status.describe(ct_fitted=ct_fitted, ct_summed_attrib_zone=ct_summed_attrib_zone)
     if ct_mask_from_fallback:
         # The fallback mask ignores ct_installed; flag it so a bench recorder
-        # does not trust it as a fitted mask (judgments.CURRENTS_MASK_FALLBACK_MARKER).
-        text += " | ct mask: topology fallback"
+        # does not trust it as a fitted mask (devices_safety.CT_MASK_FALLBACK_MARKER).
+        text += " " + CT_MASK_FALLBACK_MARKER
     if isinstance(http_status, dict) and http_status.get("safety_tc_is_separate_sensor") is False:
         text += " | safety TC: borrowed from a zone probe (same probe, not a second sensor)"
     if isinstance(http_status, dict):

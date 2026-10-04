@@ -2995,11 +2995,9 @@ def parse_trip_reason(diag_text: str) -> "int | None":
 #: unfitted channel would read as a fitted 0.00 A.
 CURRENTS_TOPOLOGY_UNKNOWN = "topology_unknown"
 
-#: Appended by `safety_get_status` when the fitted mask came from the
-#: commissioning `ct_topology` fallback rather than `/api/status` `ct_fitted`:
-#: that fallback ignores ct_installed (a board with no CTs reads (True,True,True)),
-#: so it is not trustworthy as a fitted mask.
-CURRENTS_MASK_FALLBACK_MARKER = "| ct mask: topology fallback"
+#: Single shared literal (defined beside SafetyStatus, emitted by
+#: `mcp_server_safety.safety_get_status` on the ct_topology fallback path).
+from ..devices_safety import CT_MASK_FALLBACK_MARKER as CURRENTS_MASK_FALLBACK_MARKER  # noqa: E402
 
 
 def parse_safety_currents(status_text: str) -> "list[float | None] | str | None":

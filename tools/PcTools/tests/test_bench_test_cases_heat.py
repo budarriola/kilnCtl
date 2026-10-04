@@ -631,6 +631,9 @@ class CurrentAggregationTest(unittest.TestCase):
         ctx["srv"]._thermo.read = self._stepped([_Reading(0, 30.0), _Reading(1, 30.0), _Reading(2, 25.9)])
         result = C._case_hp02(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
+        # failed on the rise judgment (zone 2 barely rose), not something unrelated
+        self.assertIn("2", result.reason)
+        self.assertIn("rise", result.reason.lower())
         cur = result.observed["heater_current_a"]
         self.assertEqual((cur["ch0"]["min"], cur["ch0"]["max"]), (1.0, 2.5))
         self.assertEqual(result.observed["heater_current_unreadable_samples"], 1)

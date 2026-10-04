@@ -278,6 +278,12 @@ def safety_request_rollback() -> bytes:
     """
     return struct.pack("<B", SAFETY_CMD_ROLLBACK)
 
+#: Appended by `mcp_server_safety.safety_get_status` when the CT fitted mask came
+#: from the commissioning `ct_topology` fallback rather than `/api/status`
+#: `ct_fitted`. The fallback ignores ct_installed (a board with no CTs reads
+#: (True, True, True)), so a consumer (bench_test.judgments) must not trust it.
+CT_MASK_FALLBACK_MARKER = "| ct mask: topology fallback"
+
 
 @dataclass(frozen=True)
 class SafetyStatus:

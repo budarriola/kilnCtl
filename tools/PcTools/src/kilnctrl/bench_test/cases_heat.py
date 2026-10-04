@@ -468,7 +468,11 @@ class _CurrentRecorder:
     BEFORE the profile starts so that cost is not paid with the relay live.
     Each per-poll `sample()` then calls `srv._safety.get_status(timeout=0.5)`:
     a live PC-to-ESP UART GET_STATUS query (no ESP-to-Pico or HTTP traffic)
-    that can block up to the 0.5 s timeout per poll and bypasses
+    that can block per poll: `safety.py` waits at most 0.5 s for the reply, but
+    that is only the reply wait after the ACK -- `link.send()` first waits for
+    the ACK with retries (about 4 s worst case, `link_hub.py`). A reply that
+    arrives after a timeout can satisfy the NEXT poll's request, so that sample
+    is one poll stale (acceptable: nothing is judged on it). It also bypasses
     `_send`'s firmware-compat gate; a timeout returns a non-status object and
     is counted as unreadable. The mask is trusted only when it came from
     `/api/status` `ct_fitted`; the ct_topology fallback is treated as topology
