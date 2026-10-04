@@ -462,15 +462,18 @@ def _zone_diag_snapshot(ctx: dict) -> Dict[str, Any]:
 
 
 class _CurrentRecorder:
-    """Heater-current observations for the HP cases (2026-10-04): one
-    `sample()` per poll, alongside the temperature sample, reading the cached
-    `safety_get_status()` text's per-channel currents. Aggregates only
-    (min/max/last/count) so a long run stays small. A channel the status
-    text calls "not fitted" is recorded as "not_fitted", never as 0 A, and a
-    sample that cannot be read at all is counted, not guessed. OBSERVATION
-    ONLY: no verdict depends on anything recorded here (the bench CT is not
-    fitted on two channels). Channel index is the CT channel, not a zone
-    number: the channel-to-zone mapping is commissioning-dependent."""
+    """Heater-current observations for the HP cases (2026-10-04). The CT
+    fitted mask is read ONCE per case (one `srv.safety_get_status()` call,
+    which costs HTTP round trips) in `__init__`; each per-poll `sample()` then
+    reads only `srv._safety.get_status()` (the UART cache, no HTTP) alongside
+    the temperature sample. Aggregates only (min/max/last/count). A channel
+    the mask calls "not fitted" is recorded as "not_fitted", never as 0 A. If
+    the fitted mask cannot be established (topology unknown: raw amps would be
+    indistinguishable from fitted readings) samples are counted in
+    `topology_unknown_samples` and never recorded as readings; samples that
+    cannot be read at all are counted in `unreadable_samples`. OBSERVATION
+    ONLY: no verdict depends on anything recorded here. Channel index is the
+    CT channel, not a zone number: the mapping is commissioning-dependent."""
 
     def __init__(self, ctx: dict):
         self._ctx = ctx
@@ -479,19 +482,44 @@ class _CurrentRecorder:
             for _ in range(3)
         ]
         self.unreadable_samples = 0
+        self.topology_unknown_samples = 0
+        #: None = topology unknown; else per-channel fitted flags.
+        self._fitted: "Optional[List[bool]]" = None
+        #: True when the one-time fitted-mask read itself failed.
+        self._mask_unreadable = False
+        try:
+            text = _srv(ctx).safety_get_status()
+            parsed = J.parse_safety_currents(text if isinstance(text, str) else str(text))
+        except Exception:  # noqa: BLE001 - an observation must never break a case
+            parsed = None
+        if parsed is None:
+            self._mask_unreadable = True
+        elif parsed != J.CURRENTS_TOPOLOGY_UNKNOWN:
+            self._fitted = [a is not None for a in parsed]
 
     def sample(self) -> None:
-        try:
-            text = _srv(self._ctx).safety_get_status()
-            amps = J.parse_safety_currents(text if isinstance(text, str) else str(text))
-        except Exception:  # noqa: BLE001 - an observation must never break a case
-            amps = None
-        if amps is None:
+        if self._mask_unreadable:
             self.unreadable_samples += 1
             return
-        for slot, a in zip(self._ch, amps):
-            if a is None:
+        try:
+            st = _srv(self._ctx)._safety.get_status()
+            if getattr(st, "never_received", False):
+                raise ValueError("safety status never received")
+            amps = list(st.current_a)
+            if len(amps) != 3:
+                raise ValueError("expected 3 current channels")
+        except Exception:  # noqa: BLE001
+            self.unreadable_samples += 1
+            return
+        if self._fitted is None:
+            self.topology_unknown_samples += 1
+            return
+        for slot, fitted, a in zip(self._ch, self._fitted, amps):
+            if not fitted:
                 slot["not_fitted_samples"] += 1
+                continue
+            if a is None or a != a:
+                self.unreadable_samples += 1
                 continue
             slot["samples"] += 1
             slot["last"] = a
@@ -507,7 +535,11 @@ class _CurrentRecorder:
                 chans[f"ch{i}"] = {"status": "no_samples"}
             else:
                 chans[f"ch{i}"] = dict(slot, status="fitted")
-        return {"heater_current_a": chans, "heater_current_unreadable_samples": self.unreadable_samples}
+        return {
+            "heater_current_a": chans,
+            "heater_current_unreadable_samples": self.unreadable_samples,
+            "heater_current_topology_unknown_samples": self.topology_unknown_samples,
+        }
 
 
 def _with_currents(result: CaseResult, rec: "_CurrentRecorder") -> CaseResult:

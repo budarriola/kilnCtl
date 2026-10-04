@@ -384,12 +384,15 @@ class _GatedFwSrv(_FakeSrv):
         super().__init__(*a, **kw)
         self.fw_confirmed = False
         self.fw_calls = 0
+        self.current_a = (3.10, 0.0, 1.50)
+        self.status_calls = 0
         self.status_text = status_text or (
             "no flags set | 24.00 C (CJ 24.00 C) | currents 3.10 A, not fitted, 1.50 A "
             "| ct zone: - | 10 ms old | tx_dropped 0")
         self._safety = type("S", (), {
             "get_link_stats": lambda self_: type("L", (), {"crc_errors": 0, "timeouts": 0, "broadcast_dropped": 0})(),
-            "get_status": lambda self_: type("St", (), {"link_up": True})(),
+            "get_status": lambda self_: type("St", (), {
+                "link_up": True, "never_received": False, "current_a": self.current_a})(),
             "get_diag": lambda self_: type("D", (), {"ever_received": True, "trip_reason": 0})(),
         })()
         self._autotune = type("A", (), {"get_status": lambda self_: type("As", (), {"state_name": "idle"})()})()
@@ -406,6 +409,7 @@ class _GatedFwSrv(_FakeSrv):
         return "uart_protocol_version: 13\ncompatible: yes\ncommit: feedbeef01\ntree: clean\nbuilt: x"
 
     def safety_get_status(self):
+        self.status_calls += 1
         return self.status_text
 
     def safety_clear_trip(self):
@@ -487,6 +491,31 @@ class HP07FirmwareGateAndCurrentsTest(unittest.TestCase):
         self.assertGreater(result.observed["heater_current_unreadable_samples"], 0)
         self.assertEqual(result.observed["heater_current_a"]["ch0"]["status"], "no_samples")
 
+    def test_status_http_read_once_per_case_not_per_poll(self):
+        ctx, srv = self._ctx()
+        srv.fw_confirmed = True
+        C._case_hp07(ctx)
+        self.assertEqual(srv.status_calls, 1)
+
+    def test_topology_unknown_never_recorded_as_fitted(self):
+        ctx, srv = self._ctx(status_text="no flags | 24.00 C | currents 0.00 A, 0.00 A, 0.00 A | 10 ms old")
+        srv.fw_confirmed = True
+        result = C._case_hp07(ctx)
+        self.assertGreater(result.observed["heater_current_topology_unknown_samples"], 0)
+        for ch in ("ch0", "ch1", "ch2"):
+            self.assertEqual(result.observed["heater_current_a"][ch]["status"], "no_samples")
+
+    def test_never_received_status_is_unreadable(self):
+        ctx, srv = self._ctx()
+        srv.fw_confirmed = True
+        srv._safety = type("S", (), {
+            "get_link_stats": lambda self_: type("L", (), {"crc_errors": 0, "timeouts": 0, "broadcast_dropped": 0})(),
+            "get_status": lambda self_: type("St", (), {"link_up": True, "never_received": True, "current_a": (0.0, 0.0, 0.0)})(),
+        })()
+        result = C._case_hp07(ctx)
+        self.assertGreater(result.observed["heater_current_unreadable_samples"], 0)
+        self.assertEqual(result.observed["heater_current_a"]["ch0"]["status"], "no_samples")
+
 
 class ParseSafetyCurrentsTest(unittest.TestCase):
     def test_parses_fitted_and_not_fitted(self):
@@ -495,9 +524,16 @@ class ParseSafetyCurrentsTest(unittest.TestCase):
             J.parse_safety_currents("x | currents 1.00 A, not fitted, 0.00 A | ct zone: - | 5 ms old"),
             [1.0, None, 0.0])
 
-    def test_no_ct_zone_suffix(self):
+    def test_no_ct_zone_suffix_is_topology_unknown(self):
         from kilnctrl.bench_test import judgments as J
-        self.assertEqual(J.parse_safety_currents("a | currents 1.00 A, 2.00 A, 3.00 A | 5 ms old"), [1.0, 2.0, 3.0])
+        self.assertEqual(
+            J.parse_safety_currents("a | currents 1.00 A, 2.00 A, 3.00 A | 5 ms old"),
+            J.CURRENTS_TOPOLOGY_UNKNOWN)
+
+    def test_never_received_is_unreadable(self):
+        from kilnctrl.bench_test import judgments as J
+        self.assertIsNone(J.parse_safety_currents(
+            "no flags set | safety TC invalid | currents 0.00 A, 0.00 A, 0.00 A | ct zone: - | never received | x"))
 
     def test_unparseable_is_none(self):
         from kilnctrl.bench_test import judgments as J

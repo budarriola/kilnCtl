@@ -240,7 +240,10 @@ class BenchTestRunner:
         # is skipped, not failed.
         self._mark("preflight: get_fw_version")
         fw_tool = getattr(srv, "get_fw_version", None)
-        if fw_tool is not None:
+        if fw_tool is None:
+            board_before["fw_version"] = "skipped: srv has no get_fw_version"
+            board_before["fw_commit"] = None
+        else:
             ok, fw_text = _safe_call(fw_tool)
             fw_text = str(fw_text)
             m = re.search(r"^commit:\s*(\S+)", fw_text, re.MULTILINE)

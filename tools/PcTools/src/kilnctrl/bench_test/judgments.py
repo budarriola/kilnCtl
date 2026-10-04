@@ -2989,13 +2989,25 @@ def parse_trip_reason(diag_text: str) -> "int | None":
     return int(m.group(1)) if m else None
 
 
-def parse_safety_currents(status_text: str) -> "list[float | None] | None":
+#: Returned by `parse_safety_currents` when the text carries no "| ct zone:"
+#: suffix: `SafetyStatus.describe()` only appends it once the CT topology is
+#: known, and with it unknown prints raw amps for ALL three channels -- an
+#: unfitted channel would read as a fitted 0.00 A.
+CURRENTS_TOPOLOGY_UNKNOWN = "topology_unknown"
+
+
+def parse_safety_currents(status_text: str) -> "list[float | None] | str | None":
     """Per-channel heater current from `srv.safety_get_status()`'s text
     ("... | currents 1.20 A, not fitted, 0.00 A | ct zone: - | ..."). Returns
     three entries, each a float (amps) or None for a channel the text says is
-    "not fitted" -- never a fabricated 0.0 for an unfitted CT. Returns None
-    when no parseable `currents` field is present at all."""
-    m = re.search(r"currents\s+(.+?)(?:\s+\|\s+|$)", status_text or "")
+    "not fitted" -- never a fabricated 0.0 for an unfitted CT. Returns
+    `CURRENTS_TOPOLOGY_UNKNOWN` when the "| ct zone:" suffix is absent (raw
+    amps would be indistinguishable from fitted readings), and None when no
+    parseable `currents` field is present or the status was "never received"."""
+    text = status_text or ""
+    if "never received" in text:
+        return None
+    m = re.search(r"currents\s+(.+?)(?:\s+\|\s+|$)", text)
     if not m:
         return None
     parts = [p.strip() for p in m.group(1).split(",")]
@@ -3011,6 +3023,8 @@ def parse_safety_currents(status_text: str) -> "list[float | None] | None":
             return None
         v = float(mm.group(1))
         out.append(None if v != v else v)
+    if "| ct zone:" not in text:
+        return CURRENTS_TOPOLOGY_UNKNOWN
     return out
 
 

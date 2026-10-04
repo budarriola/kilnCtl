@@ -424,5 +424,23 @@ class PreflightFirmwareVersionTest(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class PreflightFirmwareSkipVisibleTest(unittest.TestCase):
+    def test_srv_without_get_fw_version_records_visible_skip(self):
+        tmp = tempfile.mkdtemp(prefix="bench_test_runner_skip_")
+        try:
+            ctx = {
+                "srv": _FakeSrv(), "host": None,
+                "capability_preflight_run": lambda preset, host, **kw: _FakeCapabilityPreflightReport(ok=True),
+            }
+            ok, reason, before = BenchTestRunner(ctx, logs_root=tmp).preflight()
+            self.assertEqual(before["fw_version"], "skipped: srv has no get_fw_version")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_real_mcp_server_exposes_callable_get_fw_version(self):
+        from kilnctrl import mcp_server
+        self.assertTrue(callable(getattr(mcp_server, "get_fw_version", None)))
+
+
 if __name__ == "__main__":
     unittest.main()
