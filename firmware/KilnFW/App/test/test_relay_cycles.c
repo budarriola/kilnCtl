@@ -279,6 +279,66 @@ static void test_v1_blob_migrates_to_v2(void)
     fake_kv_reset_all();
 }
 
+// --- migrate_from_default_partition() must only run into an EMPTY kiln partition.
+// The old default-partition copy is never erased, so an unconditional copy would
+// overwrite live wear counts with the stale v1 copy on every boot (752f9ac0 forbids
+// moving a count downward).
+
+static void write_default_partition_v1(uint32_t c0, uint32_t c1)
+{
+    hal_kv_init_partition(NULL);
+    relay_cycles_blob_v1_t v1;
+    memset(&v1, 0, sizeof(v1));
+    v1.version = 1;
+    v1.counts[0] = c0;
+    v1.counts[1] = c1;
+    hal_kv_handle_t hw;
+    TEST_CHECK(hal_kv_open(&hw, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open default partition");
+    TEST_CHECK(hal_kv_set_blob(&hw, NVS_KEY_CYCLES, &v1, sizeof(v1)) == HAL_OK, "write stale v1 copy");
+    TEST_CHECK(hal_kv_commit(&hw) == HAL_OK, "commit stale v1 copy");
+    hal_kv_close(&hw);
+}
+
+static void test_migration_skipped_when_kiln_partition_already_has_blob(void)
+{
+    TEST_SECTION("relay_cycles_init -- kiln partition already holds a current blob with higher counts, "
+                 "default partition holds a stale v1 copy: live counts win, never overwritten");
+    fake_kv_reset_all();
+    fake_kv_set_write_safe_here(true);
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    write_default_partition_v1(10, 20);
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    s_rc.counts[0] = 5000;
+    s_rc.counts[1] = 7000;
+    s_rc.types[0] = RELAY_TYPE_CONTACTOR;
+    s_rc.rated_overrides[0] = 77;
+    TEST_CHECK(persist_locked() == HAL_OK, "persist the live current-version blob");
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds");
+    TEST_CHECK(s_rc.counts[0] == 5000 && s_rc.counts[1] == 7000,
+               "live counts survive; the stale default-partition v1 copy did not overwrite them");
+    TEST_CHECK(s_rc.types[0] == RELAY_TYPE_CONTACTOR && s_rc.rated_overrides[0] == 77,
+               "live relay type/override survive too");
+    fake_kv_reset_all();
+}
+
+static void test_migration_still_runs_on_fresh_kiln_partition(void)
+{
+    TEST_SECTION("relay_cycles_init -- kiln partition empty, default partition holds v1: still migrates");
+    fake_kv_reset_all();
+    fake_kv_set_write_safe_here(true);
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    write_default_partition_v1(111, 222);
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds");
+    TEST_CHECK(s_rc.counts[0] == 111 && s_rc.counts[1] == 222,
+               "counts migrated from the default partition on a board with no kiln copy");
+    fake_kv_reset_all();
+}
+
 // --- RELAY_LIFE_BUDGET.md: relay_cycles_reset() -- the API the
 // LCD diagnostics page's two-tap confirm and diagnostics_http.c's
 // POST /api/relay_cycles/reset both call.
@@ -1197,6 +1257,8 @@ void run_test_relay_cycles(void)
     test_budget_override_wins_over_table();
     test_safety_slot_edge_and_persistence();
     test_v1_blob_migrates_to_v2();
+    test_migration_skipped_when_kiln_partition_already_has_blob();
+    test_migration_still_runs_on_fresh_kiln_partition();
     test_reset_zeroes_count_and_persists();
     test_reset_rejects_out_of_range_relay();
     test_reset_snapshot_refuses_out_of_range_relay();

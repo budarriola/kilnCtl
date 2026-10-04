@@ -161,8 +161,14 @@ static bool caller_stack_is_external(void);
  * KILN_NVS_PARTITION, for boards provisioned by firmware predating the
  * split. The old copy is left in place (never deleted) so a rollback to
  * pre-split firmware still finds its counts -- see wifi_prov.c's
- * migrate_from_default_partition() for the fuller rationale. Only called
- * when KILN_NVS_PARTITION has nothing under NVS_KEY_CYCLES yet.
+ * migrate_from_default_partition() for the fuller rationale (same convention
+ * as zones_config_store.c). Runs only when KILN_NVS_PARTITION has nothing
+ * under NVS_KEY_CYCLES yet: this function itself probes for that and
+ * returns without writing otherwise, because the old copy is never erased
+ * and an unconditional copy would overwrite live wear counts with the stale
+ * v1 copy on every boot (moving counts downward, which 752f9ac0 forbids). A
+ * kiln-partition blob that exists but cannot be read is NOT "nothing": fail
+ * closed, skip, and log.
  *
  * DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
  * function writes NVS (hal_kv_set_blob()/hal_kv_commit() below) exactly like
@@ -180,7 +186,32 @@ static bool caller_stack_is_external(void);
 static void migrate_from_default_partition(void)
 {
     hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL);
+    hal_status_t err;
+
+    /* Guard: only migrate into an empty KILN_NVS_PARTITION. NOT_FOUND on the
+     * namespace open or on the key means genuinely absent; any other result
+     * (a readable blob, or an error such as a size/read failure) means
+     * something is there, so skip. */
+    err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_OK) {
+        relay_cycles_blob_t existing;
+        size_t existing_len = sizeof(existing);
+        hal_status_t gerr = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &existing, &existing_len);
+        hal_kv_close(&h);
+        if (gerr != HAL_NOT_FOUND) {
+            if (gerr != HAL_OK) {
+                ESP_LOGW(TAG, "migrate_from_default_partition: '%s' blob present but unreadable (%s) -- "
+                              "not migrating (fail closed)", KILN_NVS_PARTITION, hal_status_to_name(gerr));
+            }
+            return;
+        }
+    } else if (err != HAL_NOT_FOUND) {
+        ESP_LOGW(TAG, "migrate_from_default_partition: cannot probe '%s' (%s) -- not migrating (fail closed)",
+                 KILN_NVS_PARTITION, hal_status_to_name(err));
+        return;
+    }
+
+    err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL);
     if (err != HAL_OK) {
         return;
     }
