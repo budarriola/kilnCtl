@@ -1219,10 +1219,23 @@ only log and note, stored defaults unchanged). The impact strings are held to
 (17 + 63 + 4 + 99 + NUL = 184). Skipped as debug-only or cosmetic: the log,
 touch, ui_test and gpio_probe bridges, `board_temps_start`, `mdns_init`;
 skipped as already surfaced: i2c/SX1509/kiln_io/spi/thermo bring-up,
-`safety_link_start`, the UART owner/protocol init. Open: row 19 (boot-time
-persist writes beyond the settings stores) was not exhaustively audited;
-`FT6336U_start()` maps an identity mismatch to `ESP_ERR_NOT_FOUND`, so that
-one real fault is un-noted until it returns a distinct error. Owner decision
+`safety_link_start`, the UART owner/protocol init. Row 19 audited 2026-10-04
+(`aaed0689`): every boot-path persist write outside the settings stores is
+either self-retrying with no data loss (legacy partition migrations, kiln_cfg
+v1/v2 to v3 rewrites, the iter_tune NVS catch-up), a cfg_fs file sync where
+NVS stays authoritative and only the file goes stale, or already surfaced
+(zones migration write-back, kiln_cfg_swap boot recover, boot_guard, cfg_fs
+mount/format); no new note. `eb4090f5` makes `FT6336U_start()` return
+`ESP_ERR_INVALID_RESPONSE` for an identity mismatch or a failed ID read, so
+that case now notes STARTUP_FAULT_TOUCH; an absent panel stays
+`ESP_ERR_NOT_FOUND` and un-noted (the bench panel passes the identity check,
+so no standing fault). Found by that audit's review, open: `relay_cycles.c`
+`migrate_from_default_partition()` runs on every boot (`relay_cycles_init()`
+never checks whether the kiln partition already holds `NVS_KEY_CYCLES`,
+contrary to its own comment), so a board that predates the partition split
+and still carries the old default-partition copy would have its live wear
+counts and relay types overwritten by the stale v1 copy each boot; fix in
+flight. Owner decision
 pending: whether a guard-9 or PC-link-watchdog startup failure should gate
 firing (the `READINESS_GATE_KEY_*` set is unchanged for now, so the item is
 advisory).
