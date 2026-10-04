@@ -205,7 +205,7 @@ esp_err_t time_sync_start(void)
     esp_err_t sntp_err = esp_netif_sntp_init(&config);
     if (sntp_err != ESP_OK) {
         ESP_LOGW(TAG, "esp_netif_sntp_init failed: %s -- no network time this boot", esp_err_to_name(sntp_err));
-        return ESP_OK; /* non-fatal, same convention as unit_pref_start() */
+        return sntp_err; /* non-fatal to the caller (logs only); the error lets it latch a startup fault */
     }
     s_sntp_init_ok = true;
     return ESP_OK;

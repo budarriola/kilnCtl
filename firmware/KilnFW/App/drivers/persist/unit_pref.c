@@ -68,7 +68,7 @@ esp_err_t unit_pref_start(void)
     if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- defaulting to Celsius this boot",
                  KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return ESP_OK; // non-fatal, same convention as touch_cal_store_load()
+        return ESP_FAIL; // non-fatal to the caller (logs only); the error lets it latch a startup fault
     }
 
     hal_kv_handle_t h;
@@ -76,11 +76,13 @@ esp_err_t unit_pref_start(void)
     bool nvs_valid = false;
     uint8_t nvs_raw = (uint8_t)UNIT_PREF_CELSIUS;
     uint32_t nvs_rev = 0;
+    bool load_err = false; /* a real NVS open/read error, not merely "never written" */
     if (err == HAL_NOT_FOUND) {
         // Namespace never written (fresh board, or zones/profiles wrote it
         // first but this key specifically was never set) -- Celsius is the
         // expected steady state, not an error.
     } else if (err != HAL_OK) {
+        load_err = true;
         ESP_LOGW(TAG, "hal_kv_open failed: %s -- defaulting to Celsius this boot",
                  hal_status_to_name(err));
     } else {
@@ -98,6 +100,7 @@ esp_err_t unit_pref_start(void)
                 ESP_LOGW(TAG, "stored unit_pref value %u is out of range -- defaulting to Celsius", (unsigned)raw);
             }
         } else if (rerr != HAL_NOT_FOUND) {
+            load_err = true;
             ESP_LOGW(TAG, "unit_pref read failed: %s -- defaulting to Celsius this boot",
                      hal_status_to_name(rerr));
         }
@@ -120,7 +123,7 @@ esp_err_t unit_pref_start(void)
     bool have_value = pref_cfg_fs_resolve(UNIT_PREF_FILE_PATH, &nvs_raw, sizeof(nvs_raw), nvs_valid, nvs_rev,
                                            unit_pref_validate, &resolved_raw, &resolved_rev, &used_file);
     if (!have_value) {
-        return ESP_OK; // neither side had anything trustworthy -- Celsius default stands
+        return load_err ? ESP_FAIL : ESP_OK; // neither side had anything trustworthy -- Celsius default stands
     }
 
     s_unit_pref = (unit_pref_t)resolved_raw;

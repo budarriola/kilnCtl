@@ -794,7 +794,9 @@ void main_boot_early(main_boot_ctx_t *ctx)
             ESP_LOGW(MAIN_TAG, "FT6336U bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
                      esp_err_to_name(touch_err));
-            startup_fault_note(STARTUP_FAULT_TOUCH);
+            if (touch_err != ESP_ERR_NOT_FOUND) { /* absent controller = board config, not a fault */
+                startup_fault_note(STARTUP_FAULT_TOUCH);
+            }
             // No FT6336U on the bus (or it failed identity check). Unlike
             // the pre-adopt code, this bus_t is adopted (owner_owned=false,
             // bus_owned=false, see hal_i2c_esp_owner.h) -- deinit here only
@@ -821,7 +823,9 @@ void main_boot_early(main_boot_ctx_t *ctx)
             ESP_LOGW(MAIN_TAG, "NS2009 bring-up failed: %s -- touch input unavailable, synthetic "
                           "injection over the UART bridge still works",
                      esp_err_to_name(touch_err));
-            startup_fault_note(STARTUP_FAULT_TOUCH);
+            if (touch_err != ESP_ERR_NOT_FOUND) { /* absent controller = board config, not a fault */
+                startup_fault_note(STARTUP_FAULT_TOUCH);
+            }
         }
 #endif
     }

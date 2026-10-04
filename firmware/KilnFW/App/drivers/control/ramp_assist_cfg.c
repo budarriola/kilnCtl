@@ -67,7 +67,7 @@ esp_err_t ramp_assist_cfg_start(void)
     if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- ramp assist stays disabled this boot",
                  KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return ESP_OK; // non-fatal, same convention as unit_pref_start()/watchdog_cfg_init()
+        return ESP_FAIL; // non-fatal to the caller (logs only); the error lets it latch a startup fault
     }
 
     hal_kv_handle_t h;
@@ -75,11 +75,13 @@ esp_err_t ramp_assist_cfg_start(void)
     bool nvs_valid = false;
     uint8_t nvs_raw = 0;
     uint32_t nvs_rev = 0;
+    bool load_err = false; /* a real NVS open/read error, not merely "never written" */
     if (err == HAL_NOT_FOUND) {
         // Namespace never written (fresh board, or another module wrote it
         // first but this key specifically was never set) -- disabled is the
         // expected steady state, not an error.
     } else if (err != HAL_OK) {
+        load_err = true;
         ESP_LOGW(TAG, "hal_kv_open failed: %s -- ramp assist stays disabled this boot",
                  hal_status_to_name(err));
     } else {
@@ -101,6 +103,7 @@ esp_err_t ramp_assist_cfg_start(void)
                          (unsigned)raw);
             }
         } else if (rerr != HAL_NOT_FOUND) {
+            load_err = true;
             ESP_LOGW(TAG, "ramp_assist_cfg read failed: %s -- ramp assist stays disabled this boot",
                      hal_status_to_name(rerr));
         }
@@ -119,7 +122,7 @@ esp_err_t ramp_assist_cfg_start(void)
     bool have_value = pref_cfg_fs_resolve(RAMP_ASSIST_FILE_PATH, &nvs_raw, sizeof(nvs_raw), nvs_valid, nvs_rev,
                                            ramp_assist_validate, &resolved_raw, &resolved_rev, &used_file);
     if (!have_value) {
-        return ESP_OK; // neither side had anything trustworthy -- disabled default stands
+        return load_err ? ESP_FAIL : ESP_OK; // neither side had anything trustworthy -- disabled default stands
     }
 
     s_ramp_assist_enabled = (resolved_raw != 0);
