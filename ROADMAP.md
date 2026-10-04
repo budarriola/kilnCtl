@@ -1749,8 +1749,10 @@ Owner instruction, 2026-09-21.
   (username else password on login, username else the TOTP code field on
   the reset step, which now also carries over the login username).
   Focus trap and focus-restore-on-close were already correct and already
-  covered by tests. Retrying through the safety-ack wrapper is still
-  open. (2) Session/LCD timeouts -- already implemented
+  covered by tests. Retrying through the safety-ack wrapper is not a
+  defect: the retry already carries the ack (`app.js` `retryOnce()` and the
+  comment at the 403/401 handlers), pinned by `test_fetch_auth_ack.js`, which
+  `check_page_js_tests.ps1` runs. (2) Session/LCD timeouts -- already implemented
   (`web_auth_session.c`, `lcd_auth_state.c`); web timeout verified live
   PASS 2026-09-22, LCD timeout SKIP (no PIN set on bench); see `b3426467`.
   (3) `kiln_configs` apply reported `diverged=true` on a successful
