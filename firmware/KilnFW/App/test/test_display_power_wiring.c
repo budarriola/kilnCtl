@@ -1498,6 +1498,39 @@ static void run_section12_inject_failed_wired(void)
     free(ui_stripped_wb);
     free(ui_text_wb);
 
+    // --- log_all_tap_targets(): the hidden-target pass runs only for a click
+    // collect (s_collect_hidden && an out buffer), never a log dump (fec20423). ---
+    char *ui_text_hp = read_file_any(KILN_UI_C_CANDIDATES, 3);
+    char *ui_stripped_hp = ui_text_hp ? strip_c_comments(ui_text_hp) : NULL;
+    if (!ui_stripped_hp) {
+        TEST_CHECK(false, "could not locate/strip drivers/ui/kiln_ui.c");
+    } else {
+        size_t len = 0;
+        const char *body = find_function_body(ui_stripped_hp, "static void log_all_tap_targets(", &len);
+        char *fn = body ? dup_range(body, len) : NULL;
+        TEST_CHECK(fn != NULL, "found log_all_tap_targets()'s function body");
+        if (fn) {
+            const char *guard = strstr(fn, "if (!s_collect_hidden || !ctx->out || ctx->do_log)");
+            const char *ret = guard ? strstr(guard, "return;") : NULL;
+            const char *arm = strstr(fn, "ctx->hidden_pass = true;");
+            TEST_CHECK(guard != NULL && ret != NULL && arm != NULL && ret < arm,
+                       "log_all_tap_targets() must return early on `!s_collect_hidden || "
+                       "!ctx->out || ctx->do_log` BEFORE arming `ctx->hidden_pass = true` -- "
+                       "otherwise a log dump (do_log) runs the hidden pass and floods the log "
+                       "with hidden=true targets (fec20423).");
+            // The only place the hidden pass is armed is behind that guard.
+            const char *first = strstr(ui_stripped_hp, "ctx->hidden_pass = true;");
+            const char *second = first ? strstr(first + 1, "ctx->hidden_pass = true;") : NULL;
+            TEST_CHECK(first != NULL && second == NULL && first >= body && first < body + len,
+                       "`hidden_pass = true` must be armed exactly once in kiln_ui.c, inside "
+                       "log_all_tap_targets() behind the guard -- a second arming site would "
+                       "bypass it.");
+            free(fn);
+        }
+    }
+    free(ui_stripped_hp);
+    free(ui_text_hp);
+
     // --- uart_bridge_ui_test.c: an explicit case for every enum member. ---
     char *h_text = read_file_any(KILN_UI_H_CANDIDATES, 3);
     char *h_stripped = h_text ? strip_c_comments(h_text) : NULL;
