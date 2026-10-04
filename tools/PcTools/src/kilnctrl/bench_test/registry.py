@@ -65,6 +65,9 @@ class CaseSpec:
     description: str
     judge: Optional[Callable[[dict], CaseResult]] = None
     heat: bool = False
+    #: Reason the runner reports when allow_heat=False pre-skips this case
+    #: (default "allow_heat=False").
+    heat_skip_reason: str = ""
     depends_on: Optional[str] = None
     est_duration_s: float = 5.0
     operator_only: bool = False
@@ -247,7 +250,9 @@ for cid, desc in _SK:
     # dependency rule, plan §5.3 rule 1).
     register(_c(cid, "SK", desc, depends_on="HP-01" if cid == "SK-02" else None))
 for cid, desc in _OT:
-    register(_c(cid, "OT", desc, heat=cid in ("OT-E07", "OT-E08")))
+    register(_c(cid, "OT", desc, heat=cid in ("OT-E07", "OT-E08"),
+                heat_skip_reason=("allow_heat not set; OT-E07/E08 start their own heat"
+                                  if cid in ("OT-E07", "OT-E08") else "")))
 #: OT-P02 boots the slot OT-P01 relayed into and rolls it back, OT-P03 needs
 #: OT-P01's captured commit_before to prove an untouched running image, and
 #: OT-P04 is a pure observer over OT-P01's own captured relay data -- three

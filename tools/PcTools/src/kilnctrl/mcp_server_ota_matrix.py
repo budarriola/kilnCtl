@@ -309,7 +309,7 @@ def _run_ota_matrix(ctx: dict, cases: Optional[str], tag: Optional[str],
     runner = BenchTestRunner(ctx, logs_root=logs_root)
     try:
         outcome = runner.run(suite=_OTA_SUITE, cases=case_list, dry_run=False,
-                              allow_heat=allow_heat, tag=tag)
+                              allow_heat=allow_heat, ota_allow_heat=allow_heat, tag=tag)
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
     except bt_board_lock.BoardLockHeld as exc:

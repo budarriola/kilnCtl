@@ -361,7 +361,7 @@ class BenchTestRunner:
 
     def run(self, suite: str, cases: Optional[List[str]] = None, dry_run: bool = False,
              allow_heat: bool = True, lcd_stop_heat: bool = False,
-             lcd_edit_heat: bool = False,
+             lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
              tag: Optional[str] = None) -> RunOutcome:
         requested = suite_case_ids(suite)
         if cases:
@@ -410,6 +410,9 @@ class BenchTestRunner:
         # requires a second, default-False opt-in, ctx["lcd22_allow_heat"]
         # (`lcd_edit_heat` here), and returns NOT_RUN naming it without.
         self.ctx["lcd22_allow_heat"] = lcd_edit_heat
+        # OT-E07/OT-E08 start their own firing/autotune: same shape again, a
+        # default-False opt-in required in addition to allow_heat.
+        self.ctx["ota_allow_heat"] = ota_allow_heat
 
         # Board lock (docs/audits/profile_executor_panic_2026-09-24.md
         # HP-02/HP-05): acquired here, before preflight even runs, for any
@@ -478,7 +481,7 @@ class BenchTestRunner:
             for cid in requested:
                 spec = get_case(cid)
                 if spec.heat and not allow_heat:
-                    results[cid] = CaseResult(Verdict.SKIP, reason="allow_heat=False")
+                    results[cid] = CaseResult(Verdict.SKIP, reason=spec.heat_skip_reason or "allow_heat=False")
                     continue
                 if spec.depends_on:
                     dep = results.get(spec.depends_on)
@@ -563,7 +566,7 @@ class BenchTestRunner:
 
 def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = False,
               allow_heat: bool = True, lcd_stop_heat: bool = False,
-             lcd_edit_heat: bool = False,
+             lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
               tag: Optional[str] = None, host: Optional[str] = None,
               logs_root: Optional[str] = None) -> RunOutcome:
     """Convenience entry point -- NOT what mcp_server_bench_test.py's
@@ -581,4 +584,4 @@ def run_suite(suite: str, cases: Optional[List[str]] = None, dry_run: bool = Fal
     runner = BenchTestRunner(ctx, logs_root=logs_root)
     return runner.run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
                        lcd_stop_heat=lcd_stop_heat,
-                       lcd_edit_heat=lcd_edit_heat, tag=tag)
+                       lcd_edit_heat=lcd_edit_heat, ota_allow_heat=ota_allow_heat, tag=tag)

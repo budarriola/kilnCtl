@@ -64,7 +64,7 @@ class _FakeRunner:
             raise AssertionError("BenchTestRunner must not be constructed after a host-resolution refusal")
         _FakeRunner.captured_ctx = ctx
 
-    def run(self, suite, cases, dry_run, allow_heat, tag, lcd_stop_heat=False, lcd_edit_heat=False):
+    def run(self, suite, cases, dry_run, allow_heat, tag, lcd_stop_heat=False, lcd_edit_heat=False, ota_allow_heat=False):
         return _FakeOutcome()
 
 

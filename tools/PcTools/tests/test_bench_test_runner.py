@@ -263,6 +263,19 @@ class RunnerLifecycleTest(unittest.TestCase):
         outcome = runner.run(suite="heat", cases=[cid], allow_heat=False)
         self.assertEqual(outcome.results[cid].verdict, R.Verdict.SKIP)
 
+    def test_ota_heat_cases_preskip_names_how_to_enable_and_ota_opt_in_defaults_false(self):
+        import inspect
+        from kilnctrl import mcp_server_bench_test as MT
+        self.assertIs(inspect.signature(BenchTestRunner.run).parameters["ota_allow_heat"].default, False)
+        fn = MT.bench_test_run.__wrapped__ if hasattr(MT.bench_test_run, "__wrapped__") else MT.bench_test_run
+        self.assertIs(inspect.signature(fn).parameters["ota_allow_heat"].default, False)
+        runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
+        outcome = runner.run(suite="ota", cases=["OT-E07", "OT-E08"], allow_heat=False)
+        for cid in ("OT-E07", "OT-E08"):
+            self.assertEqual(outcome.results[cid].verdict, R.Verdict.SKIP)
+            self.assertIn("allow_heat not set; OT-E07/E08 start their own heat", outcome.results[cid].reason)
+        self.assertIs(runner.ctx.get("ota_allow_heat"), False)
+
     def test_case_raising_becomes_a_fail_not_a_crash(self):
         def _boom(ctx):
             raise RuntimeError("synthetic case blowup")

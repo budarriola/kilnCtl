@@ -1221,7 +1221,7 @@ class Ote07Ote08DefaultHeatTest(unittest.TestCase):
         key, getter = (("_exec_state_fn", lambda: st["exec"]) if kind == "e07"
                        else ("_autotune_state_fn", lambda: st["at"]))
         ctx = {
-            "host": "10.0.0.5", "ota_image_path": "/tmp/image.bin", "srv": self.srv, "allow_heat": True,
+            "host": "10.0.0.5", "ota_image_path": "/tmp/image.bin", "srv": self.srv, "allow_heat": True, "ota_allow_heat": True,
             "ota_http_client": _FakeOtaClient(push_result=_OtaPushResult(False, 409), interlock_ok=False,
                                               interlock_reason="not idle"),
             key: getter, "_now": self.now, "_sleep_fn": lambda s: None,
@@ -1261,6 +1261,67 @@ class Ote07Ote08DefaultHeatTest(unittest.TestCase):
             self.assertEqual(r.verdict, Verdict.SKIP)
             self.assertIn("allow_heat not set; OT-E07/E08 start their own heat", r.reason)
             self.assertEqual(self.state["starts"], 0)
+
+    def test_ota_allow_heat_unset_skips_even_with_allow_heat(self):
+        for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):
+            r = fn(self._ctx(kind, ota_allow_heat=False))
+            self.assertEqual(r.verdict, Verdict.SKIP)
+            self.assertIn("ota_allow_heat not set", r.reason)
+            self.assertEqual(self.state["starts"], 0)
+
+    def test_start_wait_timeout_confirmed_stopped_skips_after_teardown(self):
+        # profile "starts" but never reaches running: teardown must still run.
+        with unittest.mock.patch.object(self.H, "_start_bench_profile", lambda ctx, zone_mask, **kw: (True, "", 20.0)):
+            r = C._case_ote07(self._ctx("e07"))
+        self.assertEqual(r.verdict, Verdict.SKIP, r.reason)
+        self.assertEqual(self.state["stops"], 1)
+
+    def test_start_wait_timeout_unconfirmed_stop_fails_and_taints(self):
+        self.state["stop_works"] = False
+        ctx = self._ctx("e07")
+
+        def start(c, zone_mask, **kw):
+            self.state["exec"] = "starting"  # accepted, never reaches running
+            return True, "", 20.0
+
+        with unittest.mock.patch.object(self.H, "_start_bench_profile", start):
+            r = C._case_ote07(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("could NOT be confirmed stopped", r.reason)
+        self.assertTrue(ctx.get("_tainted"))
+
+    def test_autotune_start_raising_after_send_runs_teardown(self):
+        st = self.state
+
+        def start(zone, method, step_duty_or_setpoint_c):
+            st["at"] = "stepping"  # board accepted it, then the call raised
+            raise OSError("link dropped")
+
+        self.srv._autotune.start = start
+        ctx = self._ctx("e08")
+        r = C._case_ote08(ctx)
+        self.assertEqual(st["stops"], 1)
+        self.assertEqual(r.verdict, Verdict.SKIP, r.reason)
+        st["stop_works"] = False
+        st["stops"] = 0
+        st["at"] = "idle"
+        ctx = self._ctx("e08")
+        r = C._case_ote08(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertTrue(ctx.get("_tainted"))
+
+    def test_base_exception_during_start_wait_runs_teardown_and_reraises(self):
+        class Boom(BaseException):
+            pass
+
+        def sleep(_s):
+            raise Boom()
+
+        # never reaches running, so the wait sleeps and the sleep raises
+        with unittest.mock.patch.object(self.H, "_start_bench_profile", lambda c, zone_mask, **kw: (True, "", 20.0)):
+            with self.assertRaises(Boom):
+                C._case_ote07(self._ctx("e07", _sleep_fn=sleep))
+        self.assertEqual(self.state["stops"], 1)
 
     def test_failed_stop_fails_and_taints(self):
         for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):

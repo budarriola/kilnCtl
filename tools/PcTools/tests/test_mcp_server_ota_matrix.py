@@ -508,6 +508,19 @@ class RunOtaMatrixTest(unittest.TestCase):
         spec = R.REGISTRY[case_id]
         R.REGISTRY[case_id] = dataclasses.replace(spec, judge=judge_fn)
 
+    def test_allow_heat_sets_ota_allow_heat_on_the_runner(self):
+        seen = {}
+        real = M.BenchTestRunner.run
+
+        def spy(self_, *a, **kw):
+            seen.update(kw)
+            raise KeyError("stop here")
+
+        with unittest.mock.patch.object(M.BenchTestRunner, "run", spy):
+            for flag in (True, False):
+                M._run_ota_matrix(self.ctx, cases="OT-B01", tag=None, allow_heat=flag, logs_root=self.tmpdir)
+                self.assertIs(seen["ota_allow_heat"], flag)
+
     def test_run_level_precondition_failure_refuses_before_runner(self):
         # ARMED -- the run-level gate must refuse before BenchTestRunner
         # ever runs, distinct from BenchTestRunner's own preflight.

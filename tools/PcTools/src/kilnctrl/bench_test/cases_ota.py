@@ -935,11 +935,27 @@ def _case_ote06(ctx: dict) -> CaseResult:
     )
 
 
-#: Bounds for the self-started heat of OT-E07/OT-E08 (allow_heat=True).
+#: Bounds for the self-started heat of OT-E07/OT-E08 (allow_heat=True AND
+#: ota_allow_heat=True -- see _heat_opted_in).
 OTA_HEAT_START_WAIT_S = 30.0
 OTA_HEAT_STOP_WAIT_S = 30.0
 OTA_HEAT_POLL_S = 1.0
 OTA_HEAT_SKIP_NO_ALLOW = "allow_heat not set; OT-E07/E08 start their own heat"
+OTA_HEAT_SKIP_NO_OTA_ALLOW = (
+    "ota_allow_heat not set; OT-E07/E08 start their own heat (ota_matrix_run(allow_heat=True) "
+    "sets it; bench_test_run needs ota_allow_heat=True as well as allow_heat)"
+)
+
+
+def _heat_opted_in(ctx: dict) -> "tuple[bool, str]":
+    """OT-E07/E08 start a real firing/autotune only when BOTH ctx["allow_heat"]
+    and the OT-specific, default-False ctx["ota_allow_heat"] are true (same
+    shape as LCD-19/LCD-22: allow_heat alone defaults True in bench_test_run)."""
+    if not ctx.get("allow_heat"):
+        return False, OTA_HEAT_SKIP_NO_ALLOW
+    if not ctx.get("ota_allow_heat"):
+        return False, OTA_HEAT_SKIP_NO_OTA_ALLOW
+    return True, ""
 
 
 def _bounded_wait(ctx: dict, predicate, timeout_s: float, poll_s: float = OTA_HEAT_POLL_S) -> bool:
@@ -989,7 +1005,6 @@ def _default_ote07_heat(ctx: dict):
             raise RuntimeError(reason)
         if not _bounded_wait(ctx, lambda: srv._profiles.get_exec_status().state_name == OTE07_DEFAULT_STATE,
                              OTA_HEAT_START_WAIT_S):
-            H._cleanup_bench_profile(ctx)
             raise RuntimeError(f"executor not {OTE07_DEFAULT_STATE!r} within {OTA_HEAT_START_WAIT_S:.0f}s of start")
 
     def stop():
@@ -1017,7 +1032,6 @@ def _default_ote08_heat(ctx: dict):
             raise RuntimeError(f"autotune.start refused: {err}")
         if not _bounded_wait(ctx, lambda: srv._autotune.get_status().state_name in OTE08_ACTIVE_STATES,
                              OTA_HEAT_START_WAIT_S):
-            A._cleanup_autotune(ctx)
             raise RuntimeError(f"autotune not active within {OTA_HEAT_START_WAIT_S:.0f}s of start")
 
     def stop():
@@ -1057,11 +1071,18 @@ def _case_update_refused_during_state(
     is_stopped_fn = None
     state_before = get_exec_state_fn()
     if state_before != expected_state and start_fn is None and default_heat is not None:
-        # Injected fns keep precedence; otherwise allow_heat opts into the
-        # real HP-01/AT-01 starters.
-        if not ctx.get("allow_heat"):
-            return CaseResult(Verdict.SKIP, reason=OTA_HEAT_SKIP_NO_ALLOW)
+        # Injected fns keep precedence; otherwise allow_heat + ota_allow_heat
+        # opt into the real HP-01/AT-01 starters.
+        opted_in, why = _heat_opted_in(ctx)
+        if not opted_in:
+            return CaseResult(Verdict.SKIP, reason=why)
         start_fn, stop_fn, is_stopped_fn = default_heat(ctx)
+
+    def _teardown() -> str:
+        if stop_fn is None:
+            return ""
+        return _heat_stop_problem(ctx, stop_fn, is_stopped_fn or (lambda: True))
+
     started_here = False
     if state_before != expected_state:
         if start_fn is None:
@@ -1069,12 +1090,27 @@ def _case_update_refused_during_state(
                 Verdict.SKIP,
                 reason=f"state is {state_before!r}, not {expected_state!r}, and no _start_state_fn was provided to start one",
             )
+        # started_here BEFORE start_fn(): the board may have accepted the start
+        # before the call raised or the wait was interrupted, so every exit from
+        # here on runs the verified teardown.
+        started_here = True
         try:
             start_fn()
+            state_before = get_exec_state_fn()
         except Exception as exc:
+            problem = _teardown()
+            if problem:
+                ctx["_tainted"] = True
+                return CaseResult(
+                    Verdict.FAIL,
+                    reason=(f"could not start {expected_state}: {type(exc).__name__}: {exc}; heat could NOT be "
+                            f"confirmed stopped afterwards ({problem}) -- run tainted"),
+                )
             return CaseResult(Verdict.SKIP, reason=f"could not start {expected_state}: {type(exc).__name__}: {exc}")
-        started_here = True
-        state_before = get_exec_state_fn()
+        except BaseException:
+            if _teardown():
+                ctx["_tainted"] = True
+            raise
 
     def _attempt() -> CaseResult:
         if state_before != expected_state:
@@ -1104,11 +1140,6 @@ def _case_update_refused_during_state(
         return J.judge_ota_update_refused_during_state(
             interlock_ok, push_refused, state_before, state_after, expected_state,
         )
-
-    def _teardown() -> str:
-        if not (started_here and stop_fn is not None):
-            return ""
-        return _heat_stop_problem(ctx, stop_fn, is_stopped_fn or (lambda: True))
 
     try:
         result = _attempt()
@@ -1187,7 +1218,7 @@ def _case_ote08(ctx: dict) -> CaseResult:
     def body(c):
         return _case_update_refused_during_state(c, get_state_fn, expected_state, default_heat=_default_ote08_heat)
 
-    if ctx.get("allow_heat") and ctx.get("_start_state_fn") is None and get_state_fn() != expected_state:
+    if _heat_opted_in(ctx)[0] and ctx.get("_start_state_fn") is None and get_state_fn() != expected_state:
         # Self-started autotune: ramp assist must be off for it (as AT-01),
         # restored in finally; an unconfirmed restore taints and FAILs.
         from . import cases_autotune as A
