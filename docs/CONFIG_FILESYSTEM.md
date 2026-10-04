@@ -143,6 +143,8 @@ Either outcome never blocks boot, never touches any partition other than
 
 ## Reading `/api/cfgfs`
 
+Since `9310367b` the status path's transient scratch (the handler buffer, the two `cfg_fs_entry_t[32]` arrays, the firing-stats and profiles dual-write status blobs and `firing_stats_cfg_fs_load_raw`'s file buffer) is allocated PSRAM-first through `persist_scratch_alloc()`, so a poll does not move the internal heap low-water mark (bench: 16519 B before and after two GETs); `firing_stats_cfg_fs_save()` is the deliberate exception and stays MALLOC_CAP_INTERNAL because it writes flash from its buffer. The diagnostics page polls this route every 10 s.
+
 `GET /api/cfgfs` reports:
 
 - `"mounted"` / `"status"` — whether `cfg` is mounted this boot, and why
