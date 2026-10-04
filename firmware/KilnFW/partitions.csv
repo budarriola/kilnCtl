@@ -748,3 +748,8 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 # This table has NO OTA path: it is applied once per board over JTAG
 # (flash_firmware()). A board still on the old table has no `stage` partition
 # and must report the update-from-stage feature as unavailable.
+#
+# STAGE IS NOT BLANK AFTER MIGRATION: 0x610000..0xA10000 was the upper half of
+# the old 8 MiB `app` and holds stale bytes. Consumers (WP4/WP5) must reject
+# `stage` unless it has a valid image header and sha. A one-time erase after
+# the table flash is optional.

@@ -118,9 +118,9 @@
  * FACTORY VS. OTA-SLOT BOOTS (2026-08-24) ---------------------------------
  * esp_ota_mark_app_valid_cancel_rollback() only means something when running
  * from an OTA slot (ota_0/ota_1) that the bootloader put into PENDING_VERIFY.
- * partitions.csv places `factory` at 0x810000, and the JTAG flash path this
+ * partitions.csv placed `factory` at 0x810000 (pre-single-slot table; `app` is now ota_0 at 0x210000), and the JTAG flash path this
  * project uses on the bench (flash_firmware in tools/PcTools: bootloader @0x0,
- * partition table @0x8000, app @0x810000) writes every bench-flashed build
+ * partition table @0x8000, app @ the `app` row offset, 0x210000 now) wrote every (historical; the app is now an ota_0 image) bench-flashed build
  * into THAT partition, not an OTA slot -- there is no rollback to cancel, and
  * the call reliably returns ESP_FAIL. That used to be logged as two ERRORs on
  * every single boot ("esp_ota_ops: Running firmware is factory" from IDF

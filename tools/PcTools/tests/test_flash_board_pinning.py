@@ -138,7 +138,7 @@ class FlashFirmwareAdapterPinningTest(unittest.TestCase):
 
         # No real build/KilnCtrl.bin exists on disk for these tests
         # (isfile is faked above) -- fake a size under the real `app`
-        # partition's 0x800000 B so the pre-flight size check is a no-op.
+        # partition's 0x400000 B so the pre-flight size check is a no-op.
         self._getsize_patch = unittest.mock.patch.object(mf.os.path, "getsize", return_value=1024)
         self._getsize_patch.start()
         self.addCleanup(self._getsize_patch.stop)

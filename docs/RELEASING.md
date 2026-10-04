@@ -33,7 +33,7 @@ Written to `logs/release/<tag>/` and uploaded:
 `zones_config_json.h`, `kilnlink_version.h` and `uart_task_ids.h` at release time (all three are mandatory and must be positive: the generator refuses if one cannot be read, since the update policy treats zero as malformed), never
 typed by hand. A release is refused if `KilnCtrl.bin` exceeds 0x400000 (4 MB). That
 gate is deliberately the planned post-split app size (docs/GITHUB_RELEASE_UPDATE_PLAN.md
-WP2), stricter than today's `partitions.csv`, where `app` is 0x800000.
+WP2), which is now also the actual `app` partition size in `partitions.csv`.
 
 ## Cutting a release
 

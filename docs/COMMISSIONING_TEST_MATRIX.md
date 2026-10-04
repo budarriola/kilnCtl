@@ -392,7 +392,7 @@ with `PICO_SDK_PATH=C:\pico-tools\pico-sdk`, producing
 `SaftyFW_slotA.bin`/`SaftyFW_slotB.bin`) then KilnFW via `idf.py build`
 (sdkconfig copied from the main tree, byte-identical, board-tuned config).
 `KilnCtrl.bin` was 0x25b1b0 (2,470,320 B) against the `app` partition's
-0x800000 (8 MB) -- comfortable fit; the build's own "1/2 app partitions too
+0x800000 (8 MB, pre-WP2 table; `app` is 0x400000 since 2026-10-04) -- comfortable fit; the build's own "1/2 app partitions too
 small" warning refers to the unrelated, much smaller `recovery` partition,
 expected and harmless. Pre-flash: `get_fw_version` commit `08f1c451` (32
 commits behind HEAD), `get_heap_status` showed the same unacknowledged

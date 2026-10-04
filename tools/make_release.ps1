@@ -14,7 +14,7 @@
 #   * HEAD equals origin/main (after a read-only `git fetch origin main`)
 #   * the tag exists neither locally nor on origin (git ls-remote)
 #   * KilnCtrl.bin <= 0x400000: deliberately the planned post-split app size (see
-#     docs/GITHUB_RELEASE_UPDATE_PLAN.md WP2), stricter than today's 0x800000 app slot
+#     docs/GITHUB_RELEASE_UPDATE_PLAN.md WP2), which is now also the actual app partition size
 # -DevDryRun downgrades the git gates to warnings so the packaging path can be
 # exercised from a scratch worktree; it is refused together with -Publish.
 #
