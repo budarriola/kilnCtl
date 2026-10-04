@@ -83,7 +83,10 @@ class ParseAndFailureTest(_Base):
 
 class McpResetTest(_Base):
     def _call(self, openocd_out):
-        self.run_mock.return_value = (True, openocd_out)
+        return self._call_raw((True, openocd_out))
+
+    def _call_raw(self, result):
+        self.run_mock.return_value = result
         with tempfile.TemporaryDirectory() as d:
             with unittest.mock.patch.object(debug_probe, "_repo_root", return_value=d), \
                  unittest.mock.patch.object(md.reset_probe, "recent_dark_esp_reset", return_value=None):
@@ -102,7 +105,7 @@ class McpResetTest(_Base):
         self.assertTrue(rec["openocd_ok"])
 
     def test_still_halted_is_loud_failure(self):
-        msg, rec = self._call("KCTL_STATE esp32s3.cpu0 halted\nKCTL_RESUMED esp32s3.cpu0\n"
+        msg, rec = self._call("KCTL_RESET_ISSUED\nKCTL_STATE esp32s3.cpu0 halted\nKCTL_RESUMED esp32s3.cpu0\n"
                               "KCTL_FINAL esp32s3.cpu0 halted\n")
         self.assertNotIn("reset esp (run) OK", msg)
         self.assertIn("=halted", msg)
@@ -203,7 +206,7 @@ class ReviewFixesTest(_Base):
 
 class McpFailureAndGuardTest(McpResetTest):
     def test_unknown_state_is_loud_and_history_keeps_states(self):
-        msg, rec = self._call("KCTL_STATE esp32s3.cpu0 unknown\n")
+        msg, rec = self._call("KCTL_RESET_ISSUED\nKCTL_STATE esp32s3.cpu0 unknown\n")
         self.assertIn("FAILED", msg)
         self.assertFalse(rec["openocd_ok"])
         self.assertIn("esp32s3.cpu0", rec["post_reset_states"])
@@ -226,6 +229,39 @@ class McpFailureAndGuardTest(McpResetTest):
             d2 = tempfile.mkdtemp()
             reset_probe.append_history(d2, rec2)
             self.assertIsNone(reset_probe.recent_dark_esp_reset(d2))
+
+
+    def test_reset_marker_in_tcl_after_reset_run(self):
+        debug_probe.reset(debug_probe.PEER_ESP, "run")
+        t = self.run_mock.call_args.args[2]
+        self.assertLess(t.index("reset run"), t.index("KCTL_RESET_ISSUED"))
+
+    def test_early_openocd_failure_is_not_dark(self):
+        # adapter refusal / init failure: ok=False, no marker, no states
+        self.run_mock.return_value = (False, "Error: unable to open CMSIS-DAP device")
+        msg, rec = self._call_raw((False, "Error: unable to open CMSIS-DAP device"))
+        self.assertNotIn("still_halted", rec)
+        self.assertIn("unable to open CMSIS-DAP", msg)
+        self.assertNotIn("board will likely be dark", msg)
+
+    def test_marker_without_states_is_dark(self):
+        msg, rec = self._call("KCTL_RESET_ISSUED\n")
+        self.assertTrue(rec["still_halted"])
+        self.assertIn("FAILED", msg)
+        self.assertIn("no post-reset state", msg)
+
+    def test_guard_message_names_not_running_cause(self):
+        import datetime
+        from kilnctrl import reset_probe
+        with tempfile.TemporaryDirectory() as d:
+            ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+            reset_probe.append_history(d, {"ts": ts, "peer": "esp", "mode": "run",
+                                           "openocd_ok": False, "still_halted": True})
+            with unittest.mock.patch.object(debug_probe, "_repo_root", return_value=d):
+                msg = md.debug_reset("esp", "run", verify=False)
+        self.assertIn("refusing ESP reset", msg)
+        self.assertIn("core not running", msg)
+        self.assertNotIn("never got an HTTP answer", msg)
 
 
 if __name__ == "__main__":

@@ -338,7 +338,10 @@ def debug_reset(
         if dark is not None:
             return (
                 f"error: refusing ESP reset -- the previous ESP reset ({dark.ts}, "
-                f"{dark.age_s:.0f}s ago) never got an HTTP answer, so the board may still be dark. "
+                f"{dark.age_s:.0f}s ago) " + (
+                    "left the core not running (state check after reset run), so the board is dark. "
+                    if dark.cause == "not_running" else
+                    "never got an HTTP answer, so the board may still be dark. ") +
                 "A JTAG reset sends no ANNOUNCE_REBOOT grace; stacking resets extends the ESP link "
                 f"silence toward S6b (SAFETY_TRIP_LINK_DEAD, mask 0x0040) at "
                 f"{reset_probe.LINK_DEAD_HARD_S_DEFAULT:.0f}s (firmware default of link_dead_hard_s, "
@@ -372,7 +375,7 @@ def debug_reset(
         record["post_reset_states"] = {**post_state["states"], **{
             t: f"{post_state['states'].get(t, '?')}->{st}" for t, st in post_state["final"].items()}}
         record["resumed_targets"] = post_state["resumed"]
-        board_dark = (not ok) and bool(post_state["missing"] or post_state["not_running"])
+        board_dark = (not ok) and post_state["dark"]
         if board_dark:
             # Known not-running after reset run: the board is dark, so the
             # dark-rereset guard must treat this like a probe-dark reset.
@@ -393,7 +396,7 @@ def debug_reset(
     if not ok:
         record["openocd_decisive_line"] = _decisive_openocd_line(output)
     _append()
-    if not ok and post_state is not None and (post_state["missing"] or post_state["not_running"]):
+    if not ok and post_state is not None and post_state["dark"]:
         what = (
             "no post-reset state was reported (check did not complete)" if post_state["missing"]
             else "target(s) " + ", ".join(f"{t}={st}" for t, st in sorted(post_state["not_running"].items()))

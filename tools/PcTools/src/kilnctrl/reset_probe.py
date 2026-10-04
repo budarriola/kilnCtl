@@ -278,6 +278,9 @@ class DarkReset:
     ts: str
     #: UART answered although HTTP did not (maybe a Wi-Fi/host problem)
     uart_answered: bool = False
+    #: "no_http" (probe never got an HTTP answer) or "not_running"
+    #: (debug_reset's own state check saw the core not running)
+    cause: str = "no_http"
 
 
 def _parse_ts(ts: object) -> Optional[datetime.datetime]:
@@ -335,7 +338,8 @@ def recent_dark_esp_reset(
                 if age < 0 or age >= window_s:
                     return None
                 return DarkReset(age_s=age, remaining_s=window_s - age,
-                                 ts=str(rec.get("ts")), uart_answered=False)
+                                 ts=str(rec.get("ts")), uart_answered=False,
+                                 cause="not_running")
             probe = rec.get("probe")
             if not (rec.get("openocd_ok") is True and rec.get("mode") == "run"
                     and isinstance(probe, dict)):

@@ -447,6 +447,7 @@ def reset(peer: str, mode: str = "run") -> "tuple[bool, str]":
 # up to ~2 s (20 x `sleep 100`), print KCTL_STATE, and if a target is still
 # halted resume it (KCTL_RESUMED) and print its final state (KCTL_FINAL).
 _POST_RESET_STATE_TCL = (
+    'puts "KCTL_RESET_ISSUED"; '
     "foreach _kctl_t [target names] { "
     "set _kctl_s unknown; "
     "for {set _kctl_i 0} {$_kctl_i < 20} {incr _kctl_i} { "
@@ -485,8 +486,13 @@ def parse_post_reset(output: str) -> dict:
     last.update(final)
     still = sorted(t for t, st in last.items() if st == "halted")
     not_running = {t: st for t, st in last.items() if st != "running"}
+    issued = any(ln.strip() == "KCTL_RESET_ISSUED" for ln in (output or "").splitlines())
+    missing = not states
     return {"states": states, "resumed": resumed, "final": final, "still_halted": still,
-            "not_running": not_running, "missing": not states}
+            "not_running": not_running, "missing": missing, "reset_issued": issued,
+            # Dark only if the reset was actually issued: an OpenOCD failure
+            # before `reset run` never touched the board.
+            "dark": issued and (missing or bool(not_running))}
 
 
 def halt(peer: str) -> "tuple[bool, str]":
