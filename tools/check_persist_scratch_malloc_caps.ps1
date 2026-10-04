@@ -14,13 +14,17 @@
 #
 # HOW IT PARSES. Each file listed in $files has its C comments stripped from
 # the whole text (string/char literals are left alone), then every
-# malloc( / calloc( call is found and its argument text is extracted with
-# balanced parentheses, so a call whose arguments wrap across lines is seen
-# exactly like a one-line call. heap_caps_malloc() is not matched.
+# malloc( / calloc( / realloc( call is found and its whole argument text is
+# extracted with balanced parentheses, so a call whose arguments wrap across
+# lines is seen exactly like a one-line call. String and char literal bodies
+# are blanked first, so text inside a string is never mistaken for a call.
+# heap_caps_malloc() is not matched.
 #
-# WHAT IT FLAGS. From a call's argument text, integer literals below 1024
+# WHAT IT FLAGS. A call is flagged if its argument text has two or more
+# numeric factors (integer literals plus scalar sizeofs, e.g. 512 * 4).
+# Otherwise integer literals below 1024
 # (suffixes u/l/ul/ull etc. allowed) and sizeof() of a plain scalar type (no
-# '[' inside) are dropped. The call is flagged if what remains contains a
+# '[' inside) are dropped, and the call is flagged if what remains contains a
 # non-scalar sizeof, an integer literal of 1024 or more, or ANY identifier
 # (a runtime-sized or macro-sized allocation can be large). Fix a flagged
 # site by using persist_scratch_alloc(), or heap_caps_malloc(...,
@@ -33,6 +37,11 @@
 # heap_caps_malloc() attempt must be allowlisted like any other site. The
 # count must match exactly, so a duplicated call or a removed one fails the
 # check, and an entry that matches nothing fails as stale; the list cannot rot.
+#
+# NOT YET COVERED. kiln_cfg_store_cfg_fs.c, zones_config_cfg_fs.c and
+# firing_stats_cfg_fs.c hold the same scratch class (malloc(*_FILE_BUF_MAX)).
+# They are deliberately not in $files yet: adding them is a planned follow-up
+# once those sites move to persist_scratch_alloc().
 param(
     [string]$RepoRoot
 )
@@ -48,19 +57,18 @@ $files = @(
 
 # file | normalized call text | expected count | reason
 $allow = @(
-    @("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v1))", 1,
-      "v1 migration buffer: bounded legacy schema struct, once-per-board migration at boot, never on the import path"),
-    @("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v2))", 2,
-      "v2 migration buffer (two sites): bounded legacy schema struct, once-per-board migration at boot, never on the import path"),
-    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(*scratch))", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt"),
-    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt"),
-    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt"),
-    @("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(backup_import_job_ctx_t))", 1,
-      "24-byte job context handed to the async task, not scratch")
-)
+    ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v1))", 1,
+      "v1 migration buffer: bounded legacy schema struct, once-per-board migration at boot, never on the import path")
+    ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v2))", 2,
+      "v2 migration buffer (two sites): bounded legacy schema struct, once-per-board migration at boot, never on the import path")
+    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(*scratch))", 1,
+      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
+    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
+      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
+    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
+      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
+    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(backup_import_job_ctx_t))", 1,
+      "24-byte job context handed to the async task, not scratch"))
 
 $scalarSizeof = 'sizeof\s*\(\s*(?:const\s+|unsigned\s+|signed\s+)*(?:char|uint8_t|int8_t|uint16_t|int16_t|uint32_t|int32_t|uint64_t|int64_t|int|short|long|float|double|size_t|bool)\b[^\[\)]*\)'
 $intLiteral = '(?<![\w.])(0[xX][0-9a-fA-F]+|\d+)[uU]?[lL]{0,2}(?![\w.])'
@@ -73,7 +81,9 @@ function Get-CodeText {
     $pat = '"(?:\\.|[^"\\\r\n])*"|''(?:\\.|[^''\\\r\n])*''|/\*.*?\*/|//[^\r\n]*'
     return [regex]::Replace($text, $pat, {
         param($m)
-        if ($m.Value.StartsWith('/')) { [regex]::Replace($m.Value, '[^\r\n]', ' ') } else { $m.Value }
+        $v = $m.Value
+        if ($v.StartsWith('/')) { [regex]::Replace($v, '[^\r\n]', ' ') }
+        else { $v.Substring(0, 1) + (' ' * ($v.Length - 2)) + $v.Substring($v.Length - 1) }
     }, 'Singleline')
 }
 
@@ -104,7 +114,13 @@ function Get-BalancedArgs {
 
 function Test-Flagged {
     param([string]$ArgText)
-    $rest = [regex]::Replace($ArgText, $scalarSizeof, ' ')
+    # Two or more numeric factors (literals and scalar sizeofs together), e.g.
+    # 512 * 4 or sizeof(uint32_t) * 1000, can add up to a large size.
+    $factors = [regex]::Matches($ArgText, $scalarSizeof).Count
+    $stripped = [regex]::Replace($ArgText, $scalarSizeof, ' ')
+    $factors += [regex]::Matches($stripped, $intLiteral).Count
+    if ($factors -ge 2) { return $true }
+    $rest = $stripped
     foreach ($n in [regex]::Matches($rest, $intLiteral)) {
         $v = $n.Groups[1].Value
         $num = if ($v -match '^0[xX]') { [Convert]::ToInt64($v.Substring(2), 16) } else { [int64]$v }
@@ -116,13 +132,13 @@ function Test-Flagged {
 }
 
 $fail = @()
-$found = @{}      # "rel|call" -> count
-$where = @{}      # "rel|call" -> list of line numbers
+$found = [System.Collections.Hashtable]::new([StringComparer]::Ordinal)   # "rel|call" -> count
+$where = [System.Collections.Hashtable]::new([StringComparer]::Ordinal)   # "rel|call" -> list of line numbers
 foreach ($rel in $files) {
     $path = Join-Path $RepoRoot $rel
     if (-not (Test-Path $path)) { throw "check_persist_scratch_malloc_caps.ps1: $rel not found -- moved/renamed? update this script" }
     $text = Get-CodeText $path
-    foreach ($m in [regex]::Matches($text, '(?<![\w])(malloc|calloc)\s*\(')) {
+    foreach ($m in [regex]::Matches($text, '(?<![\w])(malloc|calloc|realloc)\s*\(')) {
         $open = $m.Index + $m.Length - 1
         $argText = Get-BalancedArgs $text $open
         $line = ($text.Substring(0, $m.Index) -split "`n").Count
@@ -140,7 +156,7 @@ foreach ($rel in $files) {
     }
 }
 
-$allowKeys = @{}
+$allowKeys = [System.Collections.Hashtable]::new([StringComparer]::Ordinal)
 foreach ($a in $allow) { $allowKeys["$($a[0])|$($a[1])"] = $a }
 
 foreach ($key in ($found.Keys | Sort-Object)) {
