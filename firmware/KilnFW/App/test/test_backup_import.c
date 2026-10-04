@@ -575,6 +575,7 @@ typedef struct {
     bool adaptive_tune_enabled;
     bool set_tuning_quality_called;
     zone_tuning_quality_t tuning_quality;
+    uint32_t tuning_seq; /* models zone_cfg_t::tuning_seq: bumped on EVERY setter call, like the real one */
     bool set_normal_current_called;
     bool normal_current_measured;
     float normal_current_a;
@@ -1788,6 +1789,7 @@ bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quali
     if (!q || zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_tuning_quality_called = true;
     s_writes[zone_index].tuning_quality = *q;
+    s_writes[zone_index].tuning_seq++;
     /* Also feed test_profile_feasibility.c's storage -- that file owns the
      * one zones_config_get_tuning_quality() definition in this binary (see
      * this file's forward-declared hook above), so a test seeding a zone's
@@ -1802,6 +1804,7 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
     if (!q || zone_index >= STUB_ZONE_COUNT) return false;
     s_writes[zone_index].set_tuning_quality_called = true;
     s_writes[zone_index].tuning_quality = *q;
+    s_writes[zone_index].tuning_seq++;
     /* Also feed test_profile_feasibility.c's storage -- that file owns the
      * one zones_config_get_tuning_quality() definition in this binary (see
      * this file's forward-declared hook above), so a test seeding a zone's
@@ -4474,6 +4477,14 @@ static void test_ct_normals_and_new_fields_round_trip_through_export_import(void
     zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
     zones_config_set_relay_type(1, 0);
     zones_config_set_coil_power_w(1, 0.0f);
+    /* reset_stub_state() clears s_writes[] but not the live getter's storage (it
+     * lives in test_profile_feasibility.c), so poison it too: the live tuning
+     * record must read invalid, else import (rightly) skips an identical record. */
+    {
+        zone_tuning_quality_t none;
+        memset(&none, 0, sizeof(none));
+        test_stub_zones_set_full_tuning_quality(1, &none);
+    }
     /* normal_current_a/adaptive_tune_enabled/tuning_quality: reset_stub_state()
      * already left these at "not measured"/false/"not called" -- the poison
      * for these three IS the untouched default, since that is exactly the
@@ -4502,6 +4513,64 @@ static void test_ct_normals_and_new_fields_round_trip_through_export_import(void
     TEST_CHECK_NEAR(s_writes[1].tuning_quality.rise_inf_c, 95.5, 1e-3, "tuning_quality.rise_inf_c restored exactly");
     TEST_CHECK(s_writes[1].tuning_quality.method == 1 && s_writes[1].tuning_quality.rule == 2,
               "tuning_quality.method/rule restored exactly");
+}
+
+// ---------------------------------------------------------------------------
+// 2026-10-04 bench finding: zones_config_set_tuning_quality_no_save() always
+// bumps the zone's tuning_seq, which is part of the kiln package canonical
+// bytes / pkg_hash but never exported/imported. Import used to re-commit the
+// record unconditionally, so restoring an UNCHANGED backup changed the active
+// kiln_config's pkg_hash and a later re-import made a duplicate slot instead
+// of the Case 1 no-op. The stub setter above models the unconditional bump
+// (s_writes[].tuning_seq); the seq standing still is the observable proxy for
+// the pkg_hash standing still.
+// ---------------------------------------------------------------------------
+static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
+{
+    TEST_SECTION("backup_import_apply -- an identical tuning_quality record is not re-committed "
+                 "(tuning_seq/pkg_hash stable); a differing one still commits and bumps");
+    reset_stub_state();
+
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    zone_tuning_quality_t tq;
+    memset(&tq, 0, sizeof(tq));
+    tq.valid = true;
+    tq.method = 1;
+    tq.rule = 2;
+    tq.settled = true;
+    tq.tau_consistent = true;
+    tq.baseline_c = 24.5f;
+    tq.step_ambient_c = 23.1f;
+    tq.raw_rise_c = 88.0f;
+    tq.rise_inf_c = 95.5f;
+    TEST_CHECK(zones_config_set_tuning_quality(1, &tq), "seed zone 1 tuning_quality");
+    TEST_CHECK(s_writes[1].tuning_seq == 1, "seeding bumps the seq once");
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    TEST_CHECK(strstr(s_export_body, "\"tuning_valid\":1") != NULL, "tuning_quality block is emitted");
+
+    char import_err[256];
+    TEST_CHECK(test_backup_import_apply(s_export_body, import_err, sizeof(import_err)),
+              "importing the unchanged export must succeed");
+    TEST_CHECK(s_writes[1].tuning_seq == 1,
+              "identical record: tuning_seq unchanged (pkg_hash would be unchanged)");
+
+    /* Again, to prove it is stable across repeated restores, not just one. */
+    TEST_CHECK(test_backup_import_apply(s_export_body, import_err, sizeof(import_err)),
+              "second import of the unchanged export must succeed");
+    TEST_CHECK(s_writes[1].tuning_seq == 1, "identical record: tuning_seq still unchanged after a second import");
+
+    /* Differing live record: import must still commit the file's values. */
+    zone_tuning_quality_t other = tq;
+    other.baseline_c = 30.0f;
+    TEST_CHECK(zones_config_set_tuning_quality(1, &other), "diverge the live record from the file");
+    TEST_CHECK(s_writes[1].tuning_seq == 2, "diverging write bumped the seq");
+    TEST_CHECK(test_backup_import_apply(s_export_body, import_err, sizeof(import_err)),
+              "importing over a differing live record must succeed");
+    TEST_CHECK(s_writes[1].tuning_seq == 3, "differing record: import commits and bumps the seq");
+    TEST_CHECK_NEAR(s_writes[1].tuning_quality.baseline_c, 24.5, 1e-3,
+                    "differing record: the file's value was restored");
 }
 
 // ---------------------------------------------------------------------------
@@ -5095,6 +5164,7 @@ void run_test_backup_import(void)
     test_export_emits_live_pico_tc_type_not_stale_esp_cache();
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();
+    test_import_of_identical_tuning_quality_does_not_bump_seq();
     test_timing_profiles_bundle_round_trips_nonempty();
     test_export_preserves_coupling_matrix_when_a_zone_is_on_off();
     test_import_tau_only_cell_preserves_coeff_touching_on_off_zone();

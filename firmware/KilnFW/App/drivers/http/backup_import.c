@@ -430,6 +430,28 @@ typedef struct {
     const char *package_json; // pointer into `body`, valid only when has_package
 } kiln_cfg_file_entry_t;
 
+/* True when the file's tuning-quality record already equals the live one on
+ * every field this import sets. zones_config_set_tuning_quality_no_save()
+ * unconditionally bumps the zone's tuning_seq, which is part of the kiln
+ * package canonical bytes / pkg_hash (but deliberately never exported or
+ * imported), so re-committing an identical record would change the active
+ * kiln_config's hash on every restore of an unchanged backup and break
+ * identity matching (a re-import would then create a duplicate slot instead
+ * of the "Case 1" no-op). Exact float compare is intended: the live record
+ * holds the very floats an export printed and this import re-parsed. */
+static bool backup_tuning_quality_matches_live(uint8_t zone_index, const zone_tuning_quality_t *q)
+{
+    zone_tuning_quality_t live;
+    if (!zones_config_get_tuning_quality(zone_index, &live) || !live.valid) {
+        return false;
+    }
+    return live.method == q->method && live.rule == q->rule && live.settled == q->settled &&
+           live.extrapolation_converged == q->extrapolation_converged &&
+           live.tau_consistent == q->tau_consistent && live.baseline_c == q->baseline_c &&
+           live.step_ambient_c == q->step_ambient_c && live.raw_rise_c == q->raw_rise_c &&
+           live.rise_inf_c == q->rise_inf_c;
+}
+
 // Suffix a colliding name until BOTH the live store (via
 // kiln_cfg_store_name_would_collide(), excluding `exclude_id`) and this same
 // restore's own already-claimed names (`claimed`, `claimed_count`) agree it
@@ -2487,7 +2509,8 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_tuning_quality && !zones_config_set_tuning_quality_no_save(zc->index, &zc->tuning_quality)) {
+        if (zc->has_tuning_quality && !backup_tuning_quality_matches_live(zc->index, &zc->tuning_quality) &&
+            !zones_config_set_tuning_quality_no_save(zc->index, &zc->tuning_quality)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting tuning quality",
                     (unsigned)i, zc->index);
