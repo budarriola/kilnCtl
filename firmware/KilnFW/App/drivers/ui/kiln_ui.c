@@ -514,15 +514,17 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
                          * test harness would ever want to tap. */
                         continue;
                     }
-                    /* A HIDDEN key keeps its slot in the layout but is not
-                     * drawn or hittable, and a DISABLED key ignores taps, so
-                     * neither is a target a harness can usefully aim at.
-                     * (Not skipped before 2026-10-03: lv_keyboard's
-                     * mode-switch layouts mark unused cells HIDDEN.) */
-                    if (lv_buttonmatrix_has_button_ctrl(child, k, LV_BUTTONMATRIX_CTRL_HIDDEN) ||
-                        lv_buttonmatrix_has_button_ctrl(child, k, LV_BUTTONMATRIX_CTRL_DISABLED)) {
-                        continue;
-                    }
+                    /* Defensive: a ctrl map may flag a key HIDDEN (kept in the
+                     * layout but not drawn or hittable). Report it with
+                     * hidden=true, like any other hidden widget, so
+                     * click_by_name answers "hidden" rather than
+                     * "not_found". DISABLED keys are NOT skipped: the
+                     * generic path below does not skip disabled objects
+                     * either, so they are reported identically (hidden
+                     * false). The vendored lv_keyboard sets neither flag
+                     * today. */
+                    bool key_hidden =
+                        lv_buttonmatrix_has_button_ctrl(child, k, LV_BUTTONMATRIX_CTRL_HIDDEN);
 
                     const lv_area_t *ka = &bm->button_areas[k];
                     int x1 = (int)bm_area.x1 + (int)ka->x1;
@@ -554,11 +556,9 @@ static void log_tap_targets(lv_obj_t *obj, int depth, tap_walk_ctx_t *ctx)
                                  depth * 2, "", (unsigned)k, x1, y1, x2, y2,
                                  (x1 + x2) / 2, (y1 + y2) / 2, key_text);
                     }
-                    /* A buttonmatrix key is never itself HIDDEN-flagged (its
-                     * whole widget was already filtered by the subtree skip
-                     * above if hidden) -- always false, matching every key
-                     * this walk can ever reach. */
-                    tap_walk_add(ctx, key_text, (x1 + x2) / 2, (y1 + y2) / 2, false);
+                    /* The whole widget being hidden was filtered above; only a
+                     * per-key HIDDEN ctrl flag can set key_hidden. */
+                    tap_walk_add(ctx, key_text, (x1 + x2) / 2, (y1 + y2) / 2, key_hidden);
                 }
             }
 
