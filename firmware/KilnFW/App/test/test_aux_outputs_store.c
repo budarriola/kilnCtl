@@ -266,6 +266,22 @@ static void test_oversize_blob_quarantined(void)
     hal_kv_close(&h);
 }
 
+static void test_checksum_known_answer(void)
+{
+    TEST_SECTION("blob checksum: known-answer vector pins the on-flash CRC32/IEEE (zlib) format");
+    /* Expected value computed independently with Python zlib.crc32 over the same 52 bytes
+     * (bytes (i*7+3)&255, i = 0..51 == offsetof(aux_outputs_blob_t, crc32)). */
+    uint8_t raw[sizeof(aux_outputs_blob_t)];
+    memset(raw, 0, sizeof(raw));
+    for (size_t i = 0; i < offsetof(aux_outputs_blob_t, crc32); i++) {
+        raw[i] = (uint8_t)((i * 7u + 3u) & 0xFFu);
+    }
+    aux_outputs_blob_t blob;
+    memcpy(&blob, raw, sizeof(blob));
+    TEST_CHECK(offsetof(aux_outputs_blob_t, crc32) == 52, "checksummed span is 52 bytes");
+    TEST_CHECK(blob_checksum(&blob) == 0x95bead8au, "checksum equals the independent zlib CRC-32 of the same bytes");
+}
+
 static void test_corrupt_blob_defaults(void)
 {
     TEST_SECTION("start(): corrupt blob (bad CRC / wrong size) -> all-disabled defaults, may be rewritten");
@@ -318,7 +334,7 @@ static void test_dual_write_and_file_tiebreak(void)
     memset(&blob, 0, sizeof(blob));
     blob.version = AUX_OUTPUTS_CFG_VERSION;
     blob.entries[2].enabled = 1;
-    blob.crc32 = blob_crc(&blob);
+    blob.crc32 = blob_checksum(&blob);
     TEST_CHECK(pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), 5) == ESP_OK, "file-only newer write");
     simulate_reboot();
     aux_outputs_cfg_start(0);
@@ -344,6 +360,7 @@ void run_test_aux_outputs_store(void)
     test_boot_conflict_forces_aux_off_in_ram_only();
     test_newer_version_quarantined();
     test_oversize_blob_quarantined();
+    test_checksum_known_answer();
     test_corrupt_blob_defaults();
     test_dual_write_and_file_tiebreak();
 
