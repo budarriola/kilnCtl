@@ -110,10 +110,18 @@ NVS_KEY_LEN_CHECK(NVS_KEY_HAS_AP_PASS);
 #define NVS_KEY_STATIC_IP "static_ip"
 #define NVS_KEY_STATIC_NETMASK "static_netmask"
 #define NVS_KEY_STATIC_GW "static_gw"
+/* 2026-10-03: optional static-mode DNS servers (ROADMAP M18). Individual
+ * string keys like the three above, NOT a versioned blob, so no version bump
+ * or old-size load path is needed: a board that predates them reads NOT_FOUND
+ * and gets empty strings (= "DNS follows the gateway"). */
+#define NVS_KEY_STATIC_DNS "static_dns"
+#define NVS_KEY_STATIC_DNS2 "static_dns2"
 NVS_KEY_LEN_CHECK(NVS_KEY_IP_MODE);
 NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_IP);
 NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_NETMASK);
 NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_GW);
+NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_DNS);
+NVS_KEY_LEN_CHECK(NVS_KEY_STATIC_DNS2);
 
 /* Winning legacy single-network credential (pre-8.4 NVS_KEY_SSID/PASS/
  * HAS_CREDS format), set by wifi_prov_migrate_from_default_partition() and consumed
@@ -254,6 +262,16 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
     err = hal_kv_get_str(&h, NVS_KEY_STATIC_GW, s_wifi.static_gateway, &len);
     if (err != HAL_OK) {
         s_wifi.static_gateway[0] = '\0';
+    }
+    len = sizeof(s_wifi.static_dns);
+    err = hal_kv_get_str(&h, NVS_KEY_STATIC_DNS, s_wifi.static_dns, &len);
+    if (err != HAL_OK) {
+        s_wifi.static_dns[0] = '\0';
+    }
+    len = sizeof(s_wifi.static_dns2);
+    err = hal_kv_get_str(&h, NVS_KEY_STATIC_DNS2, s_wifi.static_dns2, &len);
+    if (err != HAL_OK) {
+        s_wifi.static_dns2[0] = '\0';
     }
 
     hal_kv_close(&h);
@@ -471,6 +489,12 @@ esp_err_t nvs_save_ip_config(void)
     }
     if (err == HAL_OK) {
         err = hal_kv_set_str(&h, NVS_KEY_STATIC_GW, s_wifi.static_gateway);
+    }
+    if (err == HAL_OK) {
+        err = hal_kv_set_str(&h, NVS_KEY_STATIC_DNS, s_wifi.static_dns);
+    }
+    if (err == HAL_OK) {
+        err = hal_kv_set_str(&h, NVS_KEY_STATIC_DNS2, s_wifi.static_dns2);
     }
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);

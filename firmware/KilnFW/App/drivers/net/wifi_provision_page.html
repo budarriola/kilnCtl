@@ -185,6 +185,10 @@
       <input type="text" id="staticNetmask" name="netmask" maxlength="15" placeholder="255.255.255.0">
       <label for="staticGateway">Gateway</label>
       <input type="text" id="staticGateway" name="gateway" maxlength="15" placeholder="192.168.1.1">
+      <label for="staticDns">DNS server (optional, defaults to the gateway)</label>
+      <input type="text" id="staticDns" name="dns" maxlength="15" placeholder="1.1.1.1">
+      <label for="staticDns2">Second DNS server (optional)</label>
+      <input type="text" id="staticDns2" name="dns2" maxlength="15" placeholder="8.8.8.8">
     </div>
     <button type="submit">Save</button>
   </form>
@@ -777,7 +781,9 @@ function submitIpConfig(mode) {
     body = 'mode=static' +
       '&ip=' + encodeURIComponent(document.getElementById('staticIp').value) +
       '&netmask=' + encodeURIComponent(document.getElementById('staticNetmask').value) +
-      '&gateway=' + encodeURIComponent(document.getElementById('staticGateway').value);
+      '&gateway=' + encodeURIComponent(document.getElementById('staticGateway').value) +
+      '&dns=' + encodeURIComponent(document.getElementById('staticDns').value) +
+      '&dns2=' + encodeURIComponent(document.getElementById('staticDns2').value);
   }
   rows.innerHTML = '';
   var applyingLi = document.createElement('li');
@@ -925,6 +931,12 @@ function poll() {
     }
     if (document.activeElement !== document.getElementById('staticGateway')) {
       document.getElementById('staticGateway').value = s.static_gateway || '';
+    }
+    if (document.activeElement !== document.getElementById('staticDns')) {
+      document.getElementById('staticDns').value = s.static_dns || '';
+    }
+    if (document.activeElement !== document.getElementById('staticDns2')) {
+      document.getElementById('staticDns2').value = s.static_dns2 || '';
     }
     document.getElementById('mainLink').style.display = s.sta_connected ? '' : 'none';
     if (!autoScanDecided) {

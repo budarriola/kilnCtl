@@ -95,7 +95,9 @@ def get_status(host: str, timeout: float = WIFI_PROV_HTTP_TIMEOUT_S, trusted: bo
 # firmware/KilnFW/App/drivers/http/wifi_provision_http.c's
 # ip_config_post_handler(), ROUTE_TIER_ADMIN (route_tier_table.h): form-encoded
 # body (max 128 B), field "mode" = "dhcp" | "static"; static additionally needs
-# "ip", "netmask", "gateway", each a dotted quad. 400 for a missing/bad field
+# "ip", "netmask", "gateway", each a dotted quad, plus optional "dns"/"dns2"
+# (dotted quad, non-zero; dns2 only with dns; omitted = cleared, and the board
+# then uses the gateway as its DNS server). 400 for a missing/bad field
 # or an ip inside 192.168.4.0/24 (the fallback AP's own subnet); 500 if the
 # setter fails. No system_mode_gate in the handler. Success body is "ok", BUT
 # the change forces a Wi-Fi disconnect/rejoin, so the board usually resets
@@ -130,7 +132,7 @@ def _parse_quad(label: str, value) -> "tuple[Optional[ipaddress.IPv4Address], Op
         return None, f"{label}={value!r} is not a valid IPv4 address (octet > 255)"
 
 
-def validate_ip_config(mode, ip=None, netmask=None, gateway=None) -> Optional[str]:
+def validate_ip_config(mode, ip=None, netmask=None, gateway=None, dns=None, dns2=None) -> Optional[str]:
     """PC-side validation, mirroring (and in places stricter than) the
     firmware's own: returns None if acceptable, else a reason string. The
     firmware only checks that each string parses and that ip is outside the
@@ -140,11 +142,21 @@ def validate_ip_config(mode, ip=None, netmask=None, gateway=None) -> Optional[st
     if mode not in ("dhcp", "static"):
         return f"mode={mode!r} must be 'dhcp' or 'static'"
     if mode == "dhcp":
-        if any(v is not None for v in (ip, netmask, gateway)):
-            return "mode='dhcp' takes no ip/netmask/gateway -- omit them (the board clears its static fields)"
+        if any(v is not None for v in (ip, netmask, gateway, dns, dns2)):
+            return "mode='dhcp' takes no ip/netmask/gateway/dns/dns2 -- omit them (the board clears its static fields)"
         return None
     if ip is None or netmask is None or gateway is None:
         return "mode='static' requires ip, netmask and gateway"
+    if dns2 is not None and dns is None:
+        return "dns2 requires dns (a secondary resolver without a primary is refused by the firmware)"
+    for label, val in (("dns", dns), ("dns2", dns2)):
+        if val is None:
+            continue
+        dns_a, err = _parse_quad(label, val)
+        if err:
+            return err
+        if dns_a.is_unspecified or dns_a.is_loopback or dns_a.is_multicast or dns_a.is_reserved:
+            return f"{label}={val} is not a usable unicast address"
     ip_a, err = _parse_quad("ip", ip)
     if err:
         return err
@@ -176,10 +188,14 @@ def validate_ip_config(mode, ip=None, netmask=None, gateway=None) -> Optional[st
     return None
 
 
-def build_ip_config_body(mode: str, ip=None, netmask=None, gateway=None) -> bytes:
+def build_ip_config_body(mode: str, ip=None, netmask=None, gateway=None, dns=None, dns2=None) -> bytes:
     fields = [("mode", mode)]
     if mode == "static":
         fields += [("ip", ip), ("netmask", netmask), ("gateway", gateway)]
+        if dns is not None:
+            fields.append(("dns", dns))
+        if dns2 is not None:
+            fields.append(("dns2", dns2))
     body = urllib.parse.urlencode(fields).encode("ascii")
     if len(body) > IP_CONFIG_BODY_MAX:
         raise WifiProvHttpError(f"ip_config body is {len(body)} B, over the firmware's {IP_CONFIG_BODY_MAX} B cap")
@@ -203,7 +219,7 @@ def _is_expected_drop(exc: BaseException) -> bool:
 
 
 def post_ip_config(host: str, mode: str, ip=None, netmask=None, gateway=None,
-                   timeout: float = WIFI_PROV_HTTP_TIMEOUT_S) -> str:
+                   timeout: float = WIFI_PROV_HTTP_TIMEOUT_S, dns=None, dns2=None) -> str:
     """POST /ip_config. Returns "ok" if the board answered ok, "dropped" if
     the connection was reset/truncated after the request went out (the
     EXPECTED outcome of a successful change -- not proof of one; the caller
@@ -211,7 +227,7 @@ def post_ip_config(host: str, mode: str, ip=None, netmask=None, gateway=None,
     after the connection was established (ambiguous; verify). Raises WifiProvHttpError for an HTTP error
     status (400/500/401...), for an auth failure, and for any other failure
     (e.g. could not connect: nothing was sent, so nothing changed)."""
-    body = build_ip_config_body(mode, ip, netmask, gateway)
+    body = build_ip_config_body(mode, ip, netmask, gateway, dns, dns2)
     req = urllib.request.Request(
         _url(host, IP_CONFIG_PATH), data=body, method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"})
@@ -290,7 +306,7 @@ def probe_host_answers(host: str, timeout: float = 2.0) -> "tuple[bool, str]":
         return False, f"no answer ({type(cur).__name__})"
 
 
-def _matches(status: dict, mode: str, ip, netmask, gateway) -> "tuple[bool, str]":
+def _matches(status: dict, mode: str, ip, netmask, gateway, dns=None, dns2=None) -> "tuple[bool, str]":
     if status.get("ip_mode") != mode:
         return False, f"ip_mode={status.get('ip_mode')!r}, wanted {mode!r}"
     got = (status.get("static_ip"), status.get("static_netmask"), status.get("static_gateway"))
@@ -305,11 +321,24 @@ def _matches(status: dict, mode: str, ip, netmask, gateway) -> "tuple[bool, str]
     want = (ip, netmask, gateway)
     if got != want:
         return False, f"static fields read {got!r}, wanted {want!r}"
-    return True, "ip_mode=static and static_ip/netmask/gateway match"
+    # DNS: the firmware overwrites both on every static POST, so an unrequested
+    # dns reads back "" and must match that. Firmware older than the dns fields
+    # omits the keys entirely: acceptable only when no dns was requested.
+    for key, wanted in (("static_dns", dns), ("static_dns2", dns2)):
+        if key not in status:
+            if wanted:
+                return False, f"{key} not reported (firmware predates the dns fields), wanted {wanted!r}"
+            continue
+        have = status.get(key)
+        if have is None:
+            return False, f"{key} is redacted (null) -- no admin session, cannot verify"
+        if have != (wanted or ""):
+            return False, f"{key} reads {have!r}, wanted {(wanted or '')!r}"
+    return True, "ip_mode=static and static_ip/netmask/gateway/dns/dns2 match"
 
 
 def verify_ip_config(resolve_hosts: Callable[[], Iterable[str]], mode: str, ip=None, netmask=None,
-                     gateway=None, *, is_trusted: Callable[[str], bool],
+                     gateway=None, *, is_trusted: Callable[[str], bool], dns=None, dns2=None,
                      timeout_s: float = 90.0, poll_s: float = 3.0,
                      status_timeout: float = 4.0,
                      sleep: Callable[[float], None] = time.sleep,
@@ -347,7 +376,7 @@ def verify_ip_config(resolve_hosts: Callable[[], Iterable[str]], mode: str, ip=N
             except Exception as exc:  # noqa: BLE001 -- timeouts/resets mid-rejoin
                 last = f"{host}: {type(exc).__name__}"
                 continue
-            ok, why = _matches(st, mode, ip, netmask, gateway)
+            ok, why = _matches(st, mode, ip, netmask, gateway, dns, dns2)
             if ok:
                 return True, f"verified at {host}: {why}"
             last = f"{host}: {why}"

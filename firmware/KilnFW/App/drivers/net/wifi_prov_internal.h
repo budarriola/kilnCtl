@@ -109,6 +109,10 @@ struct wifi_prov_state {
     char static_ip[WIFI_PROV_IPV4_STR_MAX];
     char static_netmask[WIFI_PROV_IPV4_STR_MAX];
     char static_gateway[WIFI_PROV_IPV4_STR_MAX];
+    /* Optional DNS servers for STATIC mode (empty string == unset). Unset
+     * primary falls back to the gateway when applied (apply_sta_config()). */
+    char static_dns[WIFI_PROV_IPV4_STR_MAX];
+    char static_dns2[WIFI_PROV_IPV4_STR_MAX];
 
     bool static_ip_confirmed;
 
@@ -224,6 +228,8 @@ typedef struct {
             char ip[WIFI_PROV_IPV4_STR_MAX];
             char netmask[WIFI_PROV_IPV4_STR_MAX];
             char gateway[WIFI_PROV_IPV4_STR_MAX];
+            char dns[WIFI_PROV_IPV4_STR_MAX];  /* "" == unset */
+            char dns2[WIFI_PROV_IPV4_STR_MAX]; /* "" == unset */
         } set_static_ip;
     } args;
 } wifi_cmd_t;
@@ -309,7 +315,8 @@ esp_err_t do_set_mode(wifi_prov_mode_t mode, bool *out_join_after_reply);
 esp_err_t do_set_ap_ssid(const char *ssid);
 esp_err_t do_set_ap_password(const char *password);
 esp_err_t do_set_dhcp(void);
-esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gateway);
+esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gateway, const char *dns,
+                           const char *dns2);
 esp_err_t do_get_sta_ip(size_t out_cap, wifi_result_t *r);
 esp_err_t do_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *out_count);
 

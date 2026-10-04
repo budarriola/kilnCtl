@@ -83,6 +83,10 @@ int g_stub_ap_sta_count = 0;
 // reconcile_sta_state() can be tested with a station that genuinely holds a
 // lease, not just "associated." Any non-zero value stands in for a real IP.
 uint32_t g_stub_netif_ip_addr = 0;
+uint32_t g_stub_dns_main = 0;
+uint32_t g_stub_dns_backup = 0;
+int g_stub_dns_set_calls = 0;
+extern void fake_kv_reset_all(void);
 
 // wifi_provision_http_start()/wifi_provision_http_get_server() are declared
 // by the real wifi_provision_http.h (off-limits -- another agent owns
@@ -232,6 +236,8 @@ static void reset_state(void)
     g_stub_any_ap_session_active = false;
     g_stub_any_session_active = false;
     g_stub_ap_sta_count = 0;
+    g_stub_dns_main = g_stub_dns_backup = 0;
+    g_stub_dns_set_calls = 0;
     g_stub_netif_ip_addr = 0; // no lease by default -- sta_link_is_live() reads false unless a test opts in
     g_stub_getsockname_family = AF_INET6; // matches this board's CONFIG_LWIP_IPV6=y shape by default
 }
@@ -402,11 +408,11 @@ static void test_set_static_ip_resets_confirmation(void)
     // no "unchanged, so skip the reset" special case in the production code,
     // and there shouldn't be: a re-submit could be the operator fixing a
     // netmask/gateway typo while leaving the IP itself alone.
-    do_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1");
+    do_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1", NULL, NULL);
     TEST_CHECK(!s_wifi.static_ip_confirmed, "re-writing the static config resets confirmation, even to the same IP");
 
     s_wifi.static_ip_confirmed = true;
-    do_set_static_ip("10.0.0.5", "255.255.255.0", "10.0.0.1");
+    do_set_static_ip("10.0.0.5", "255.255.255.0", "10.0.0.1", NULL, NULL);
     TEST_CHECK(!s_wifi.static_ip_confirmed, "writing a genuinely different static config resets confirmation");
     TEST_CHECK(strcmp(s_wifi.static_ip, "10.0.0.5") == 0, "the new address is stored");
 }
@@ -418,11 +424,11 @@ static void test_set_static_ip_rejects_ap_subnet(void)
     reset_state();
     s_wifi.started = true;
 
-    esp_err_t err = wifi_prov_set_static_ip("192.168.4.1", "255.255.255.0", "192.168.4.1");
+    esp_err_t err = wifi_prov_set_static_ip("192.168.4.1", "255.255.255.0", "192.168.4.1", NULL, NULL);
     TEST_CHECK(err == ESP_ERR_INVALID_ARG, "the AP's own address is refused");
     TEST_CHECK(s_wifi.ip_mode != WIFI_PROV_IP_MODE_STATIC, "refused request never applies");
 
-    err = wifi_prov_set_static_ip("192.168.4.200", "255.255.255.0", "192.168.4.1");
+    err = wifi_prov_set_static_ip("192.168.4.200", "255.255.255.0", "192.168.4.1", NULL, NULL);
     TEST_CHECK(err == ESP_ERR_INVALID_ARG, "any other address in the AP subnet is refused too, not just .1");
 
     // A genuinely different subnet must still pass validation and reach the
@@ -431,8 +437,117 @@ static void test_set_static_ip_rejects_ap_subnet(void)
     // the real owner_task() dispatch never runs here and the call times out
     // rather than returning ESP_OK; ESP_ERR_TIMEOUT (not ESP_ERR_INVALID_ARG)
     // is exactly the signal that validation was passed.
-    err = wifi_prov_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1");
+    err = wifi_prov_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1", NULL, NULL);
     TEST_CHECK(err == ESP_ERR_TIMEOUT, "an address outside 192.168.4.0/24 passes validation (times out on the stubbed queue, not refused)");
+}
+
+// ---- static-IP DNS fields (ROADMAP M18) ----
+static void test_set_static_ip_dns_validation(void)
+{
+    TEST_SECTION("wifi_prov_set_static_ip() -- optional dns/dns2: malformed/0.0.0.0/orphan dns2 refused, unset or valid accepted");
+
+    reset_state();
+    s_wifi.started = true;
+    const char *ip = "192.168.1.50", *nm = "255.255.255.0", *gw = "192.168.1.1";
+
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "not-an-ip", NULL) == ESP_ERR_INVALID_ARG, "malformed dns refused");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "1.1.1", NULL) == ESP_ERR_INVALID_ARG, "3-octet dns refused");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "256.1.1.1", NULL) == ESP_ERR_INVALID_ARG, "octet > 255 refused");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "0.0.0.0", NULL) == ESP_ERR_INVALID_ARG, "0.0.0.0 dns refused");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "1.1.1.1", "bogus") == ESP_ERR_INVALID_ARG, "malformed dns2 refused");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, NULL, "8.8.8.8") == ESP_ERR_INVALID_ARG, "dns2 without dns refused (NULL)");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "", "8.8.8.8") == ESP_ERR_INVALID_ARG, "dns2 without dns refused (empty)");
+    TEST_CHECK(g_stub_queue_send_calls == 0, "refused requests post nothing");
+
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, NULL, NULL) == ESP_ERR_TIMEOUT, "no dns passes validation");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "", "") == ESP_ERR_TIMEOUT, "empty dns/dns2 pass validation");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "1.1.1.1", NULL) == ESP_ERR_TIMEOUT, "dns alone passes validation");
+    TEST_CHECK(wifi_prov_set_static_ip(ip, nm, gw, "1.1.1.1", "8.8.8.8") == ESP_ERR_TIMEOUT, "dns + dns2 pass validation");
+}
+
+static void test_set_static_ip_stores_and_clears_dns(void)
+{
+    TEST_SECTION("do_set_static_ip/do_set_dhcp -- dns/dns2 stored, overwritten (not merged) on re-post, cleared by DHCP");
+
+    reset_state();
+    do_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1", "1.1.1.1", "8.8.8.8");
+    TEST_CHECK(strcmp(wifi_prov_get_static_dns(), "1.1.1.1") == 0, "dns stored");
+    TEST_CHECK(strcmp(wifi_prov_get_static_dns2(), "8.8.8.8") == 0, "dns2 stored");
+
+    do_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1", NULL, NULL);
+    TEST_CHECK(wifi_prov_get_static_dns()[0] == '\0' && wifi_prov_get_static_dns2()[0] == '\0',
+               "re-posting without dns clears both");
+
+    do_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1", "9.9.9.9", NULL);
+    do_set_dhcp();
+    TEST_CHECK(wifi_prov_get_static_dns()[0] == '\0' && wifi_prov_get_static_dns2()[0] == '\0', "DHCP clears dns/dns2");
+}
+
+static void test_dns_nvs_round_trip(void)
+{
+    TEST_SECTION("static_dns/static_dns2 -- NVS round trip; a board that predates the keys loads empty (no version bump)");
+
+    reset_state();
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(WIFI_NVS_PARTITION) == HAL_OK, "setup: init wifi_nvs partition");
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    strcpy(s_wifi.static_ip, "192.168.1.50");
+    strcpy(s_wifi.static_netmask, "255.255.255.0");
+    strcpy(s_wifi.static_gateway, "192.168.1.1");
+    strcpy(s_wifi.static_dns, "1.1.1.1");
+    strcpy(s_wifi.static_dns2, "8.8.8.8");
+    TEST_CHECK(nvs_save_ip_config() == ESP_OK, "save succeeds");
+
+    memset(s_wifi.static_dns, 0, sizeof(s_wifi.static_dns));
+    memset(s_wifi.static_dns2, 0, sizeof(s_wifi.static_dns2));
+    memset(s_wifi.static_gateway, 0, sizeof(s_wifi.static_gateway));
+    bool found = false;
+    TEST_CHECK(wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &found) == ESP_OK, "load succeeds");
+    TEST_CHECK(strcmp(s_wifi.static_dns, "1.1.1.1") == 0, "dns round-trips");
+    TEST_CHECK(strcmp(s_wifi.static_dns2, "8.8.8.8") == 0, "dns2 round-trips");
+    TEST_CHECK(strcmp(s_wifi.static_gateway, "192.168.1.1") == 0, "existing gateway key still round-trips beside them");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION) == HAL_OK, "open for key erase");
+    hal_kv_erase_key(&h, NVS_KEY_STATIC_DNS);
+    hal_kv_erase_key(&h, NVS_KEY_STATIC_DNS2);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    strcpy(s_wifi.static_dns, "stale");
+    strcpy(s_wifi.static_dns2, "stale");
+    TEST_CHECK(wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &found) == ESP_OK, "load of a pre-feature record succeeds");
+    TEST_CHECK(s_wifi.static_dns[0] == '\0' && s_wifi.static_dns2[0] == '\0', "absent keys load as empty, not stale");
+    TEST_CHECK(strcmp(s_wifi.static_gateway, "192.168.1.1") == 0 && s_wifi.ip_mode == WIFI_PROV_IP_MODE_STATIC,
+               "the rest of the static config is unaffected");
+}
+
+static void test_apply_sta_config_dns(void)
+{
+    TEST_SECTION("apply_sta_config -- static mode pushes DNS: dns else gateway as MAIN, dns2 else cleared as BACKUP");
+
+    reset_state();
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    strcpy(s_wifi.static_ip, "192.168.1.50");
+    strcpy(s_wifi.static_netmask, "255.255.255.0");
+    strcpy(s_wifi.static_gateway, "192.168.1.1");
+    const uint32_t gw = 192u | (168u << 8) | (1u << 16) | (1u << 24);
+
+    g_stub_dns_main = g_stub_dns_backup = 0xDEADBEEFu;
+    apply_sta_config();
+    TEST_CHECK(g_stub_dns_main == gw, "no dns configured: MAIN follows the gateway");
+    TEST_CHECK(g_stub_dns_backup == 0, "no dns2 configured: BACKUP cleared");
+
+    strcpy(s_wifi.static_dns, "1.1.1.1");
+    strcpy(s_wifi.static_dns2, "8.8.8.8");
+    apply_sta_config();
+    TEST_CHECK(g_stub_dns_main == (1u | (1u << 8) | (1u << 16) | (1u << 24)), "dns configured: MAIN = dns");
+    TEST_CHECK(g_stub_dns_backup == (8u | (8u << 8) | (8u << 16) | (8u << 24)), "dns2 configured: BACKUP = dns2");
+
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_DHCP;
+    g_stub_dns_set_calls = 0;
+    apply_sta_config();
+    TEST_CHECK(g_stub_dns_set_calls == 0, "DHCP mode never touches DNS");
 }
 
 static void test_set_dhcp_resets_confirmation(void)
@@ -1343,6 +1458,10 @@ void run_test_wifi_prov(void)
     test_static_already_confirmed_got_ip_drops_ap();
     test_set_static_ip_resets_confirmation();
     test_set_static_ip_rejects_ap_subnet();
+    test_set_static_ip_dns_validation();
+    test_set_static_ip_stores_and_clears_dns();
+    test_dns_nvs_round_trip();
+    test_apply_sta_config_dns();
     test_set_dhcp_resets_confirmation();
     test_reply_slot_normal_roundtrip();
     test_reply_slot_abandon_then_owner_recycles();

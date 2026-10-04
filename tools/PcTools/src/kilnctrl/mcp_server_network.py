@@ -36,6 +36,9 @@ def _describe_status(st: dict) -> str:
         parts += [f"static_ip={_fmt(st.get('static_ip'))}",
                   f"static_netmask={_fmt(st.get('static_netmask'))}",
                   f"static_gateway={_fmt(st.get('static_gateway'))}"]
+        if "static_dns" in st:  # absent on firmware older than the dns fields
+            parts += [f"static_dns={_fmt(st.get('static_dns'))}",
+                      f"static_dns2={_fmt(st.get('static_dns2'))}"]
     else:
         parts.append("static fields: " + ("redacted (null: no admin session)"
                                           if st.get("static_ip") is None else "empty (DHCP)"))
@@ -70,7 +73,8 @@ def _diagnose(before: dict, old_host: str) -> str:
     except Exception as exc:  # noqa: BLE001
         return f"UART reports the board at {uart_ip}, but GET /status there failed ({type(exc).__name__})"
     unchanged = all(st.get(k) == before.get(k) for k in
-                    ("ip_mode", "static_ip", "static_netmask", "static_gateway"))
+                    ("ip_mode", "static_ip", "static_netmask", "static_gateway",
+                                                     "static_dns", "static_dns2"))
     if uart_ip == old_host and unchanged:
         return f"board UNCHANGED, still at {old_host} with the same ip configuration"
     return f"board is at {uart_ip} now ({_describe_status(st)}); previously {old_host}"
@@ -79,10 +83,12 @@ def _diagnose(before: dict, old_host: str) -> str:
 @_core._tool()
 def network_get_ip_config(host: Optional[str] = None) -> str:
     """READ-ONLY. Report the board's STA IP configuration from GET /status:
-    ``ip_mode`` (dhcp/static), the configured static ip/netmask/gateway, the
+    ``ip_mode`` (dhcp/static), the configured static ip/netmask/gateway and
+    optional dns/dns2 resolvers (empty = the board uses the gateway), the
     current station IP and whether the station is connected.
 
-    ``static_ip``/``static_netmask``/``static_gateway`` are redacted to JSON
+    ``static_ip``/``static_netmask``/``static_gateway``/``static_dns``/
+    ``static_dns2`` are redacted to JSON
     null by the firmware unless the caller holds an admin session (or web
     auth is off). The tool logs in from ``KILNCTL_WEB_USERNAME``/
     ``KILNCTL_WEB_PASSWORD`` only against the address the UART link reports as
@@ -105,11 +111,15 @@ def network_get_ip_config(host: Optional[str] = None) -> str:
 @_core._tool()
 def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional[str] = None,
                           gateway: Optional[str] = None, confirm: bool = False,
-                          host: Optional[str] = None, verify_timeout_s: float = 90.0) -> str:
+                          host: Optional[str] = None, verify_timeout_s: float = 90.0,
+                          dns: Optional[str] = None, dns2: Optional[str] = None) -> str:
     """Switch the board's STA interface between DHCP and a static IP --
     POST /ip_config (wifi_provision_http.c, ROUTE_TIER_ADMIN). ``mode`` is
     ``"dhcp"`` (no other fields) or ``"static"`` (``ip``, ``netmask`` and
-    ``gateway`` all required).
+    ``gateway`` all required; ``dns`` and ``dns2`` optional, ``dns2`` only
+    with ``dns``). Unset dns means the board resolves through the gateway, and
+    a static POST always overwrites both, so omitting them clears any
+    previously configured resolvers.
 
     DISRUPTIVE: the change forces a Wi-Fi disconnect/rejoin, so the board
     drops this connection and, for a static ip different from its current
@@ -149,7 +159,7 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
     """
     from .mcp_server_control import _profile_or_autotune_running_reason
 
-    reason = wph.validate_ip_config(mode, ip, netmask, gateway)
+    reason = wph.validate_ip_config(mode, ip, netmask, gateway, dns, dns2)
     if reason is not None:
         return f"refused: {reason}"
     if confirm is not True:
@@ -186,7 +196,7 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
     before_line = f"before: {_describe_status(before)}"
 
     if mode == "static":
-        if wph._matches(before, "static", ip, netmask, gateway)[0]:
+        if wph._matches(before, "static", ip, netmask, gateway, dns, dns2)[0]:
             return f"ok: already configured, nothing sent -- {before_line} (host={resolved})"
         expected = (f"static ip {ip} differs from the previous address {resolved}: the board MOVED to {ip}"
                     if ip != resolved else f"static ip equals the previous address {resolved}: no move")
@@ -196,7 +206,7 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
         expected = f"board re-leased an address from DHCP (previously {resolved})"
 
     try:
-        outcome = wph.post_ip_config(resolved, mode, ip, netmask, gateway)
+        outcome = wph.post_ip_config(resolved, mode, ip, netmask, gateway, dns=dns, dns2=dns2)
     except wph.WifiProvHttpError as exc:
         return f"failed: {exc}\n{before_line}"
 
@@ -210,7 +220,7 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
         return hosts
 
     ok, why = wph.verify_ip_config(resolve_hosts, mode, ip, netmask, gateway,
-                                   is_trusted=lambda h: h == _uart_sta_ip(),
+                                   is_trusted=lambda h: h == _uart_sta_ip(), dns=dns, dns2=dns2,
                                    timeout_s=float(verify_timeout_s))
     if ok:
         post_line = {"ok": "POST answered ok",
@@ -222,7 +232,7 @@ def network_set_ip_config(mode: str, ip: Optional[str] = None, netmask: Optional
                  "timeout": "POST response timed out after sending (outcome unconfirmed)"
                  }.get(outcome, f"POST answered an unexpected body ({outcome})")
     where = _diagnose(before, resolved)
-    requested = f"requested: {mode}" + (f" ip={ip} netmask={netmask} gateway={gateway}" if mode == "static" else "")
+    requested = f"requested: {mode}" + (f" ip={ip} netmask={netmask} gateway={gateway} dns={dns} dns2={dns2}" if mode == "static" else "")
     return (f"FAILED verification: ip configuration NOT confirmed -- {why}\n{requested}\n{where}\n"
             f"{post_line}\n{before_line}")
 

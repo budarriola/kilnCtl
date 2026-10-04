@@ -162,6 +162,19 @@ schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
 Each server now publishes six tools instead (seven for `kicad`). The rest stay registered, callable,
 and importable — only their advertisement is withdrawn.
 
+`network_set_ip_config(mode, ip, netmask, gateway, confirm, host, verify_timeout_s, dns, dns2)`
+and `network_get_ip_config` (2026-10-03, ROADMAP M18): `dns`/`dns2` are optional
+resolvers for `mode="static"` only (strict dotted quads, non-zero, `dns2` only with
+`dns`; refused PC-side for DHCP). They map to the firmware's `POST /ip_config`
+fields `dns`/`dns2` (NVS keys `static_dns`/`static_dns2`, separate string keys, no
+blob and no version bump) and are applied with `esp_netif_set_dns_info` (MAIN =
+`dns`, else the gateway; BACKUP = `dns2`, else cleared). A static POST always
+overwrites both, so omitting them clears earlier resolvers, and the tool's
+already-configured check and read-back verification compare them (`GET /status`
+`static_dns`/`static_dns2`, redacted to null like the other static fields; a board
+on older firmware that omits the keys verifies only when no dns was requested).
+No new tool, so the counts above are unchanged.
+
 | tool | what it does |
 |------|--------------|
 | `<p>help()` | groups with counts, plus the recipes that actually get run on this bench |

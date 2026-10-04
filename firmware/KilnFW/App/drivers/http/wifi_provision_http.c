@@ -358,18 +358,29 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 
     /* +64 over the previous size for the two new booleans and their keys, +24
      * more for ap_pending_teardown's own key+value. */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24];
+    /* 2026-10-03: static_dns/static_dns2 added (+63 B worst case, written
+     * inline with no extra redaction buffers). Worst-case rendered length is
+     * now 678 B with every escaped field at its maximum; 680 B here, +8 B over
+     * the previous 672. */
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24 + 8];
     int n = snprintf(json, sizeof(json),
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
                      "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
                      "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
                      "\"static_netmask\":%s,\"static_gateway\":%s,"
+                     "\"static_dns\":%s%s%s,\"static_dns2\":%s%s%s,"
                      "\"ap_password_known\":%s,\"ap_password_set\":%s,"
                      "\"ap_pending_teardown\":%s}",
                      mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
                      sta_connected ? "true" : "false", sta_ip_field, ap_ssid_escaped, ap_password_escaped,
                      (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
-                     static_gateway_field, on_ap ? "true" : "false",
+                     static_gateway_field,
+                     /* dns fields: same redaction rule as the three above (JSON null unless
+                      * may_disclose), written inline to avoid two more stack buffers. */
+                     may_disclose ? "\"" : "", may_disclose ? wifi_prov_get_static_dns() : "null",
+                     may_disclose ? "\"" : "", may_disclose ? "\"" : "",
+                     may_disclose ? wifi_prov_get_static_dns2() : "null", may_disclose ? "\"" : "",
+                     on_ap ? "true" : "false",
                      wifi_prov_get_ap_password()[0] ? "true" : "false",
                      ap_pending_teardown ? "true" : "false");
     if (n < 0) {
@@ -587,7 +598,7 @@ static esp_err_t forget_post_handler(httpd_req_t *req)
 
 /* 2026-08-20, web-GUI-only: POST /ip_config -- switches the STA interface
  * between DHCP and a static IP. mode=dhcp needs no other fields; mode=static
- * requires ip/netmask/gateway, each validated as dotted-quad IPv4 by
+ * requires ip/netmask/gateway (optional dns/dns2), each validated as dotted-quad IPv4 by
  * wifi_prov_set_static_ip() itself (ESP_ERR_INVALID_ARG on anything else) --
  * this handler never passes an unvalidated string to esp_netif. Deliberately
  * a separate endpoint from /provision: that one's body-field dispatch
@@ -595,7 +606,9 @@ static esp_err_t forget_post_handler(httpd_req_t *req)
  * branch on which fields are present, and ip_config's "mode" value space
  * (dhcp/static) is unrelated to and easily confused with /provision's own
  * "mode" field (home/ap) if merged into the same handler. */
-#define IP_CONFIG_BODY_MAX 128 /* "mode=static&ip=255.255.255.255&netmask=255.255.255.255&gateway=255.255.255.255" + slack */
+/* Longest legal body: "mode=static&ip=..&netmask=..&gateway=..&dns=..&dns2=.." with every
+ * address 15 chars is 119 B, so the 128 B cap is unchanged. */
+#define IP_CONFIG_BODY_MAX 128
 
 static esp_err_t ip_config_post_handler(httpd_req_t *req)
 {
@@ -649,6 +662,26 @@ static esp_err_t ip_config_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* Optional dns/dns2 (2026-10-03). Absent or empty == unset (the primary then
+     * follows the gateway, and re-posting without them clears stored ones).
+     * Malformed/too-long is a 400 here; wifi_prov_set_static_ip() re-validates
+     * (dotted quad, not 0.0.0.0, dns2 only with dns) and its INVALID_ARG maps
+     * to the same 400 below. */
+    char dns[WIFI_PROV_IPV4_STR_MAX];
+    char dns2[WIFI_PROV_IPV4_STR_MAX];
+    int dns_len = http_form_find_field(body, "dns", dns, sizeof(dns));
+    int dns2_len = http_form_find_field(body, "dns2", dns2, sizeof(dns2));
+    if (dns_len == -2 || dns2_len == -2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "dns/dns2 must each be a valid dotted-quad IPv4 address");
+        return ESP_OK;
+    }
+    if (dns_len < 0) {
+        dns[0] = '\0';
+    }
+    if (dns2_len < 0) {
+        dns2[0] = '\0';
+    }
+
     if (wifi_prov_ip_in_ap_subnet(ip)) {
         /* Distinct from the generic dotted-quad message below: this ip DOES
          * parse fine, it's just refused because it sits inside the fallback
@@ -662,12 +695,12 @@ static esp_err_t ip_config_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    esp_err_t err = wifi_prov_set_static_ip(ip, netmask, gateway);
+    esp_err_t err = wifi_prov_set_static_ip(ip, netmask, gateway, dns, dns2);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_set_static_ip failed: %s", esp_err_to_name(err));
         if (err == ESP_ERR_INVALID_ARG) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
-                                "ip/netmask/gateway must each be a valid dotted-quad IPv4 address");
+                                "ip/netmask/gateway (and dns/dns2 if given; dns2 needs dns) must each be a valid dotted-quad IPv4 address");
         } else {
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set static IP");
         }

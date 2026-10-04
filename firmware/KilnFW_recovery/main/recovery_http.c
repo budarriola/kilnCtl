@@ -69,7 +69,7 @@ extern const uint8_t recovery_page_html_end[] asm("_binary_recovery_page_html_en
 #define WIFI_NVS_NAMESPACE "wifi_cfg"
 static const char *const WIFI_RESET_KEYS[] = {
     "ssid", "pass", "has_creds", "saved_nets", "mode", "local_only",
-    "ip_mode", "static_ip", "static_netmask", "static_gw",
+    "ip_mode", "static_ip", "static_netmask", "static_gw", "static_dns", "static_dns2",
 };
 
 #define KILN_NVS_PARTITION "kiln_nvs"

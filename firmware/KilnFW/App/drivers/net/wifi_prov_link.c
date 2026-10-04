@@ -179,6 +179,28 @@ void apply_sta_config(void)
                 ESP_LOGE(WIFI_PROV_TAG, "esp_netif_set_ip_info failed: %s -- static IP not applied for this join",
                          esp_err_to_name(set_err));
             }
+            /* DNS: with the DHCP client stopped nothing else supplies a
+             * resolver. Primary = configured dns, else the gateway (the
+             * common home-router case); backup = dns2, else cleared so a
+             * previously configured one cannot linger. */
+            esp_netif_dns_info_t dns_info = { 0 };
+            dns_info.ip.type = ESP_IPADDR_TYPE_V4;
+            esp_ip4_addr_t dns_addr;
+            dns_info.ip.u_addr.ip4.addr = (parse_ipv4(s_wifi.static_dns, &dns_addr) && dns_addr.addr) ? dns_addr.addr
+                                                                                                      : gw.addr;
+            esp_err_t dns_err = esp_netif_set_dns_info(s_wifi.sta_netif, ESP_NETIF_DNS_MAIN, &dns_info);
+            if (dns_err != ESP_OK) {
+                ESP_LOGW(WIFI_PROV_TAG, "esp_netif_set_dns_info(main) failed: %s", esp_err_to_name(dns_err));
+            }
+            esp_netif_dns_info_t dns2_info = { 0 };
+            dns2_info.ip.type = ESP_IPADDR_TYPE_V4;
+            if (parse_ipv4(s_wifi.static_dns2, &dns_addr)) {
+                dns2_info.ip.u_addr.ip4.addr = dns_addr.addr;
+            }
+            dns_err = esp_netif_set_dns_info(s_wifi.sta_netif, ESP_NETIF_DNS_BACKUP, &dns2_info);
+            if (dns_err != ESP_OK) {
+                ESP_LOGW(WIFI_PROV_TAG, "esp_netif_set_dns_info(backup) failed: %s", esp_err_to_name(dns_err));
+            }
         } else {
             /* Stored config that no longer parses (shouldn't happen --
              * wifi_prov_set_static_ip() validates before ever persisting

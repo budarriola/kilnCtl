@@ -1882,7 +1882,7 @@ Owner instruction, 2026-09-21.
 - **Pending bench work:** hardware-verify the login gates, AP-fallback radio timing and the
   LCD's "[AP kept up]" render. `crash_report/clear` latency measured 2026-10-04: under 5.4 s
   round trip on a present-and-acknowledged record with a 872 KB coredump (row L/OTA A3 note).
-- [ ] Open: the static-IP API has no DNS field.
+- [x] The static-IP API now takes optional `dns`/`dns2` (firmware, NVS, web page, `network_*_ip_config`); needs a bench flash to confirm a real resolver is used.
 - [ ] Open (owner, manual): the AP-client `ap_password` check (a SoftAP-associated station seeing
   `ap_password` in `/status`) was SKIPPED for lack of a free Wi-Fi adapter on the bench PC. No
   coded bench case exists and none joins a SoftAP from PcTools today, so this stays a manual

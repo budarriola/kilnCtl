@@ -624,5 +624,100 @@ class GetToolTest(_Base):
             self.assertTrue(mn.network_get_ip_config().startswith("error:"))
 
 
+
+class DnsTest(unittest.TestCase):
+    def test_validate(self):
+        self.assertIsNone(wph.validate_ip_config("static", dns="1.1.1.1", **GOOD))
+        self.assertIsNone(wph.validate_ip_config("static", dns="1.1.1.1", dns2="8.8.8.8", **GOOD))
+        for kw in (dict(dns="1.1.1"), dict(dns="256.1.1.1"), dict(dns="0.0.0.0"), dict(dns="127.0.0.1"),
+                   dict(dns="224.0.0.1"), dict(dns="01.1.1.1"), dict(dns=7),
+                   dict(dns="1.1.1.1", dns2="bogus"), dict(dns2="8.8.8.8")):
+            self.assertIsNotNone(wph.validate_ip_config("static", **GOOD, **kw), kw)
+        self.assertIsNotNone(wph.validate_ip_config("dhcp", dns="1.1.1.1"))
+        self.assertIsNotNone(wph.validate_ip_config("dhcp", dns2="8.8.8.8"))
+
+    def test_body_and_cap(self):
+        self.assertEqual(wph.build_ip_config_body("static", dns="1.1.1.1", **GOOD),
+                         b"mode=static&ip=192.168.1.50&netmask=255.255.255.0&gateway=192.168.1.1&dns=1.1.1.1")
+        self.assertTrue(wph.build_ip_config_body("static", dns="1.1.1.1", dns2="8.8.8.8", **GOOD)
+                        .endswith(b"&dns=1.1.1.1&dns2=8.8.8.8"))
+        worst = wph.build_ip_config_body("static", ip="255.255.255.255", netmask="255.255.255.255",
+                                         gateway="255.255.255.255", dns="255.255.255.255", dns2="255.255.255.255")
+        self.assertLessEqual(len(worst), wph.IP_CONFIG_BODY_MAX)
+
+    def test_matches(self):
+        st = _status()
+        st.update(static_dns="1.1.1.1", static_dns2="")
+        self.assertTrue(wph._matches(st, "static", GOOD["ip"], GOOD["netmask"], GOOD["gateway"], "1.1.1.1")[0])
+        ok, why = wph._matches(st, "static", GOOD["ip"], GOOD["netmask"], GOOD["gateway"])
+        self.assertFalse(ok)  # dns left over when none requested
+        self.assertIn("static_dns", why)
+        ok, why = wph._matches(st, "static", GOOD["ip"], GOOD["netmask"], GOOD["gateway"], "1.1.1.1", "8.8.8.8")
+        self.assertFalse(ok)
+        self.assertIn("static_dns2", why)
+        st.update(static_dns=None, static_dns2=None)
+        self.assertIn("redacted", wph._matches(st, "static", GOOD["ip"], GOOD["netmask"], GOOD["gateway"])[1])
+
+    def test_matches_older_firmware_without_dns_keys(self):
+        st = _status()
+        self.assertNotIn("static_dns", st)
+        self.assertTrue(wph._matches(st, "static", GOOD["ip"], GOOD["netmask"], GOOD["gateway"])[0])
+        ok, why = wph._matches(st, "static", GOOD["ip"], GOOD["netmask"], GOOD["gateway"], "1.1.1.1")
+        self.assertFalse(ok)
+        self.assertIn("predates", why)
+
+    def test_post_sends_dns(self):
+        with unittest.mock.patch.object(wph.http_auth, "urlopen", return_value=_Resp("ok")) as m:
+            wph.post_ip_config("10.0.0.5", "static", dns="1.1.1.1", dns2="8.8.8.8", **GOOD)
+        req = m.call_args[0][0]
+        self.assertTrue(req.data.endswith(b"&dns=1.1.1.1&dns2=8.8.8.8"), req.data)
+
+    def test_describe_shows_dns_only_when_reported(self):
+        st = _status()
+        self.assertNotIn("static_dns", mn._describe_status(st))
+        st.update(static_dns="1.1.1.1", static_dns2="")
+        d = mn._describe_status(st)
+        self.assertIn("static_dns='1.1.1.1'", d)
+        self.assertIn("static_dns2=''", d)
+
+
+class DnsToolTest(_Base):
+    def test_dns_flows_to_post_and_verify(self):
+        seen = {}
+
+        def fake_verify(resolve_hosts, mode, ip, nm, gw, **kw):
+            seen["verify"] = (kw.get("dns"), kw.get("dns2"))
+            return True, "verified at x"
+
+        with unittest.mock.patch.object(wph, "get_status_admin",
+                                        return_value=_status(mode="dhcp", ip="", nm="", gw="", sta="10.0.0.5")), \
+                unittest.mock.patch.object(wph, "post_ip_config", return_value="dropped") as post, \
+                unittest.mock.patch.object(wph, "verify_ip_config", side_effect=fake_verify):
+            r = mn.network_set_ip_config("static", confirm=True, dns="1.1.1.1", dns2="8.8.8.8", **GOOD)
+        self.assertTrue(r.startswith("ok:"), r)
+        self.assertEqual(post.call_args.kwargs, dict(dns="1.1.1.1", dns2="8.8.8.8"))
+        self.assertEqual(seen["verify"], ("1.1.1.1", "8.8.8.8"))
+
+    def test_bad_dns_refused_before_any_io(self):
+        with unittest.mock.patch.object(wph, "post_ip_config") as post:
+            r = mn.network_set_ip_config("static", confirm=True, dns2="8.8.8.8", **GOOD)
+        self.assertTrue(r.startswith("refused:"), r)
+        post.assert_not_called()
+
+    def test_already_configured_includes_dns(self):
+        st = _status(sta="192.168.1.50")
+        st.update(static_dns="1.1.1.1", static_dns2="")
+        with unittest.mock.patch.object(wph, "get_status_admin", return_value=st), \
+                unittest.mock.patch.object(wph, "post_ip_config") as post:
+            r = mn.network_set_ip_config("static", confirm=True, dns="1.1.1.1", **GOOD)
+        self.assertIn("already configured", r)
+        post.assert_not_called()
+        with unittest.mock.patch.object(wph, "get_status_admin", return_value=st), \
+                unittest.mock.patch.object(wph, "post_ip_config", return_value="dropped") as post, \
+                unittest.mock.patch.object(wph, "verify_ip_config", return_value=(True, "v")):
+            mn.network_set_ip_config("static", confirm=True, **GOOD)  # dns dropped -> a real change
+        post.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

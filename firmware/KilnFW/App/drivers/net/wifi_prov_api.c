@@ -532,6 +532,16 @@ const char *wifi_prov_get_static_gateway(void)
     return s_wifi.static_gateway;
 }
 
+const char *wifi_prov_get_static_dns(void)
+{
+    return s_wifi.static_dns;
+}
+
+const char *wifi_prov_get_static_dns2(void)
+{
+    return s_wifi.static_dns2;
+}
+
 /* Common tail for do_set_dhcp()/do_set_static_ip(): if a station join is
  * currently active or in flight, force it to pick up the new netif config
  * right away rather than leaving a stale IP applied until the next natural
@@ -563,6 +573,8 @@ esp_err_t do_set_dhcp(void)
     s_wifi.static_ip[0] = '\0';
     s_wifi.static_netmask[0] = '\0';
     s_wifi.static_gateway[0] = '\0';
+    s_wifi.static_dns[0] = '\0';
+    s_wifi.static_dns2[0] = '\0';
     s_wifi.static_ip_confirmed = false; /* irrelevant in DHCP mode, reset for hygiene */
 
     esp_err_t err = nvs_save_ip_config();
@@ -595,7 +607,8 @@ esp_err_t wifi_prov_set_dhcp(void)
  * (wifi_prov_set_static_ip() below) before this is ever posted, same
  * "validation stays on the caller's side of the queue" convention as
  * do_add_network(). */
-esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gateway)
+esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gateway, const char *dns,
+                           const char *dns2)
 {
     strncpy(s_wifi.static_ip, ip, sizeof(s_wifi.static_ip) - 1);
     s_wifi.static_ip[sizeof(s_wifi.static_ip) - 1] = '\0';
@@ -603,6 +616,13 @@ esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gate
     s_wifi.static_netmask[sizeof(s_wifi.static_netmask) - 1] = '\0';
     strncpy(s_wifi.static_gateway, gateway, sizeof(s_wifi.static_gateway) - 1);
     s_wifi.static_gateway[sizeof(s_wifi.static_gateway) - 1] = '\0';
+    /* dns/dns2 may be NULL or "" (unset: the primary then follows the
+     * gateway, see apply_sta_config()). Always overwritten, never merged, so
+     * re-posting without dns clears a previously stored one. */
+    strncpy(s_wifi.static_dns, dns ? dns : "", sizeof(s_wifi.static_dns) - 1);
+    s_wifi.static_dns[sizeof(s_wifi.static_dns) - 1] = '\0';
+    strncpy(s_wifi.static_dns2, dns2 ? dns2 : "", sizeof(s_wifi.static_dns2) - 1);
+    s_wifi.static_dns2[sizeof(s_wifi.static_dns2) - 1] = '\0';
     s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
     /* A new (or re-typed) static config is unproven until something proves
      * it -- never carry a previous confirmation over to different numbers.
@@ -620,12 +640,25 @@ esp_err_t do_set_static_ip(const char *ip, const char *netmask, const char *gate
 
     apply_sta_config();
     reapply_sta_if_active();
-    ESP_LOGI(WIFI_PROV_TAG, "STA IP mode set to STATIC (%s/%s via %s)", s_wifi.static_ip, s_wifi.static_netmask,
-             s_wifi.static_gateway);
+    ESP_LOGI(WIFI_PROV_TAG, "STA IP mode set to STATIC (%s/%s via %s, dns %s / %s)", s_wifi.static_ip,
+             s_wifi.static_netmask, s_wifi.static_gateway, s_wifi.static_dns[0] ? s_wifi.static_dns : "(gateway)",
+             s_wifi.static_dns2[0] ? s_wifi.static_dns2 : "(none)");
     return ESP_OK;
 }
 
-esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway)
+/* Optional DNS argument check: NULL or "" is "unset" (valid); otherwise it
+ * must be a dotted-quad that is not 0.0.0.0. */
+static bool dns_arg_valid(const char *s)
+{
+    if (!s || !s[0]) {
+        return true;
+    }
+    esp_ip4_addr_t a;
+    return strlen(s) < WIFI_PROV_IPV4_STR_MAX && parse_ipv4(s, &a) && a.addr != 0;
+}
+
+esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway, const char *dns,
+                                  const char *dns2)
 {
     if (!ip || !netmask || !gateway) {
         return ESP_ERR_INVALID_ARG;
@@ -654,6 +687,12 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
     if (wifi_prov_ip_in_ap_subnet(ip)) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* A secondary DNS without a primary has no defined meaning (the primary
+     * would silently fall back to the gateway and the "secondary" would sit
+     * in the primary's place) -- refuse it rather than guess. */
+    if (!dns_arg_valid(dns) || !dns_arg_valid(dns2) || (dns2 && dns2[0] && !(dns && dns[0]))) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (strlen(ip) >= WIFI_PROV_IPV4_STR_MAX || strlen(netmask) >= WIFI_PROV_IPV4_STR_MAX ||
         strlen(gateway) >= WIFI_PROV_IPV4_STR_MAX) {
         return ESP_ERR_INVALID_ARG; /* can't happen if parse_ipv4 succeeded, defensive only */
@@ -666,6 +705,8 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
     strncpy(cmd.args.set_static_ip.ip, ip, sizeof(cmd.args.set_static_ip.ip) - 1);
     strncpy(cmd.args.set_static_ip.netmask, netmask, sizeof(cmd.args.set_static_ip.netmask) - 1);
     strncpy(cmd.args.set_static_ip.gateway, gateway, sizeof(cmd.args.set_static_ip.gateway) - 1);
+    strncpy(cmd.args.set_static_ip.dns, dns ? dns : "", sizeof(cmd.args.set_static_ip.dns) - 1);
+    strncpy(cmd.args.set_static_ip.dns2, dns2 ? dns2 : "", sizeof(cmd.args.set_static_ip.dns2) - 1);
 
     wifi_result_t r;
     if (!wifi_prov_post_and_wait(&cmd, &r, WIFI_OWNER_WAIT_MS)) {

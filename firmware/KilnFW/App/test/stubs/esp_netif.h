@@ -22,6 +22,27 @@ typedef struct {
     esp_ip4_addr_t gw;
 } esp_netif_ip_info_t;
 
+/* 2026-10-03: DNS surface for wifi_prov_link.c's static-IP DNS apply. The stub
+ * records the last MAIN/BACKUP address and call count so a test can check what
+ * apply_sta_config() pushed. Same layout as ESP-IDF's esp_netif_dns_info_t
+ * (a tagged union; only the v4 member is used here). */
+typedef enum { ESP_NETIF_DNS_MAIN = 0, ESP_NETIF_DNS_BACKUP, ESP_NETIF_DNS_FALLBACK, ESP_NETIF_DNS_MAX } esp_netif_dns_type_t;
+#define ESP_IPADDR_TYPE_V4 0
+typedef struct {
+    union {
+        esp_ip4_addr_t ip4;
+        uint32_t ip6_pad[4];
+    } u_addr;
+    uint8_t type;
+} esp_ip_addr_t;
+typedef struct {
+    esp_ip_addr_t ip;
+} esp_netif_dns_info_t;
+
+extern uint32_t g_stub_dns_main;
+extern uint32_t g_stub_dns_backup;
+extern int g_stub_dns_set_calls;
+
 /* IP_EVENT (the event base) is declared in esp_event.h, which wifi_prov.c
  * always includes first -- only the event ID constant belongs here. */
 #define IP_EVENT_STA_GOT_IP 0
@@ -56,6 +77,19 @@ static inline esp_err_t esp_netif_set_ip_info(esp_netif_t *netif, const esp_neti
 {
     (void)netif;
     (void)info;
+    return ESP_OK;
+}
+
+static inline esp_err_t esp_netif_set_dns_info(esp_netif_t *netif, esp_netif_dns_type_t type,
+                                               esp_netif_dns_info_t *dns)
+{
+    (void)netif;
+    g_stub_dns_set_calls++;
+    if (type == ESP_NETIF_DNS_MAIN) {
+        g_stub_dns_main = dns->ip.u_addr.ip4.addr;
+    } else if (type == ESP_NETIF_DNS_BACKUP) {
+        g_stub_dns_backup = dns->ip.u_addr.ip4.addr;
+    }
     return ESP_OK;
 }
 

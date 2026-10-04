@@ -856,7 +856,8 @@ static void owner_task(void *arg)
             break;
         case CMD_SET_STATIC_IP:
             r->err = do_set_static_ip(cmd.args.set_static_ip.ip, cmd.args.set_static_ip.netmask,
-                                      cmd.args.set_static_ip.gateway);
+                                      cmd.args.set_static_ip.gateway, cmd.args.set_static_ip.dns,
+                                      cmd.args.set_static_ip.dns2);
             break;
 
         /* Fire-and-forget events -- cmd.has_reply is false for these, so the

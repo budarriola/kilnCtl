@@ -394,6 +394,10 @@ wifi_prov_ip_mode_t wifi_prov_get_ip_mode(void);
 const char *wifi_prov_get_static_ip(void);
 const char *wifi_prov_get_static_netmask(void);
 const char *wifi_prov_get_static_gateway(void);
+/* Optional static-mode DNS servers; empty string when unset (the primary is
+ * then applied as the gateway). Same storage/lifetime contract as above. */
+const char *wifi_prov_get_static_dns(void);
+const char *wifi_prov_get_static_dns2(void);
 
 /* Switches the STA interface back to DHCP (the default/original behavior).
  * Persists the choice and, if a station join is currently active or in
@@ -425,7 +429,13 @@ esp_err_t wifi_prov_set_dhcp(void);
  * HTTP request actually reached the board at the static address, so a bad
  * config is reachable via the AP indefinitely rather than only until the
  * next power cycle. */
-esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway);
+esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway, const char *dns,
+                                  const char *dns2);
+/* dns/dns2 (2026-10-03): optional; NULL or "" means unset. A set value must be
+ * a dotted-quad other than 0.0.0.0, else ESP_ERR_INVALID_ARG; dns2 without dns
+ * is also refused. Applied via esp_netif_set_dns_info() (MAIN = dns, or the
+ * gateway when dns is unset; BACKUP = dns2 or cleared). Each call overwrites
+ * both, so omitting them clears a previously stored value. */
 
 /* True when `ip` parses as IPv4 and falls inside 192.168.4.0/24, the fallback
  * AP's own subnet -- an address there is never a legitimate static-IP choice
