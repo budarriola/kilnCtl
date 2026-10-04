@@ -183,8 +183,8 @@ conditional on ESP config.
   shadow & claimed & ~owned) must include aux bits in `claimed_relay_mask`,
   or a healthy aux relay is reported as a stray. Add a host test.
 - Aux wiring rule (owner 2026-10-04): aux loads must be outside the CT path; the
-  Pico keeps S3/S4 fully active and gets aux-bound relays excluded from its
-  correlation masks (WP-9, sec 15a). A miswired aux load gives a nuisance S3/S4
+  Pico keeps S3/S4 fully active and the ESP strips aux-bound relays from the
+  masks it sends (WP-9, sec 15a). A miswired aux load gives a nuisance S3/S4
   trip that fails safe (SAFETY_CASE item 14).
 - Welded-contact detection for aux outputs: none on the ESP (same accepted
   gap as ON_OFF zones, SAFETY_CASE item 12). Add a SAFETY_CASE row.
@@ -467,27 +467,30 @@ earlier one merges.
   `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` governed-store row, `ROADMAP.md` row
   (mark D1 overturned, link here), supersede note on the two 2026-09-14
   audits, bench session sec 12. Owns those docs.
-- **WP-9 Pico aux-relay mask exclusion (S-M, Pico flash blocked).** Owner decision
-  2026-10-04 (sec 14 item 11). Today `safety_link_frames.c:391-415` sends the whole relay
-  shadow as `relay_now_mask`/`relay_recent_mask`, so the Pico cannot tell an aux relay
-  from a heater relay. The Pico must exclude aux-bound relays from the heat/CT
-  correlation masks (S3 `relay_recent_mask`, S4 `relay_now_mask`). It must therefore
-  learn which relays are aux. Minimal link proposal: one new trailing byte
-  `aux_relay_mask` (bit n = relay n is bound to an enabled aux output) appended to
-  the PUSH_CONTEXT payload (`CommonFW/include/kilnlink/kilnlink_context.h`; the current
-  15-byte header has no spare byte, and the per-zone reserved offset 13 is the wrong
-  scope), with the decoder accepting both lengths so an older ESP or Pico stays
-  compatible. This needs a `docs/LINK_PROTOCOL.md` and protocol-version decision before
-  coding. SaftyFW applies `relay_now_mask & ~aux_relay_mask` (and the recent mask
-  likewise) at the use sites `safety_core.c:1030` and `link_task.c:1359`. Cheaper
-  alternative needing no Pico flash: the ESP clears aux bits itself before building the
-  masks, but that hides aux from every Pico consumer of the masks and is an owner call.
-  Host tests: aux cycling with a stuck heater current still trips S3; aux on
-  continuously raises no S4. BLOCKED on hardware: the Pico flash path is down (no
-  CMSIS-DAP probe has enumerated since 2026-10-03). Until WP-9 flashes, a spurious S4
-  warn on an aux vent is expected and the S3 blind spot stays open, so do not rely on
-  S3 for welded-contactor detection while an aux relay cycles. Owns: SaftyFW mask use
-  in `safety_core.c`/`link_task.c`, `kilnlink_context.*`, `safety_link_frames.c`.
+- **WP-9 ESP strips aux relay bits from the masks sent to the Pico (S, ESP only).**
+  Owner decision 2026-10-04 (sec 14 item 11, refined same day): the ESP removes
+  aux-bound relay bits from the relay masks it sends the Pico. No new kilnlink field,
+  no protocol bump, no Pico change, no Pico flash. Today `safety_link_frames.c:391-415`
+  sends the whole relay shadow (`kiln_io_get_relay_shadow()`) as
+  `relay_now_mask`, and derives `relay_recent_mask` from it via
+  `safety_context_update_relay_recent()`. Change: compute
+  `relay_now_mask = shadow & ~aux_bound_mask` BEFORE the recent-mask update, so the recent
+  mask never sees aux transitions either. `aux_bound_mask` comes from WP-1's aux
+  accessor (enabled aux bindings only). The Pico then sees an aux relay as never
+  commanded, so S3 stays fully active and aux current on a CT is NOT explained away
+  (S3/S4 nuisance trip, fails safe, SAFETY_CASE item 14). Same stripped masks feed S4,
+  so an aux vent no longer raises the S4 warn. Host tests (ESP side, in the
+  safety_link_frames tests): aux bit set in the shadow never appears in either sent mask;
+  a heater bit still does; aux bound but disabled is not stripped. Pre-work: grep every
+  SaftyFW consumer of `relay_now_mask`/`relay_recent_mask` (`safety_core.c:1030`,
+  `link_task.c:1359`, relay-feedback checks) to confirm none needs aux bits. Owns:
+  `safety_link_frames.c` mask build and its host test only. Needs WP-1's accessor.
+  Rejected alternative: a new trailing `aux_relay_mask` byte on PUSH_CONTEXT so the Pico
+  masks aux itself. It needs a protocol-version decision, a decoder accepting both
+  lengths, a SaftyFW change and a Pico flash, and the Pico flash path is currently
+  down (no CMSIS-DAP probe has enumerated since 2026-10-03). The ESP-side strip
+  achieves the same exclusion with none of that. It does depend on the ESP being
+  the only source of the masks, which it is.
 
 Every WP: run the full `tools/run_all_checks.ps1 -ExecutionPolicy Bypass -Fast`
 (not an `-Only` subset), host tests via the gate, and a
@@ -506,7 +509,7 @@ build). Negative-test each new check.
 8. **Aux in saved kiln packages:** no (default accepted).
 9. **Convert existing ON_OFF zones to aux:** offer the confirm-gated one-shot (sec 10), never automatic (default accepted).
 10. **Bench relay 4 free of other duty:** default accepted; a profile's RELAY_IO segment targeting a relay bound to an enabled aux is refused at save.
-11. **S3 blind spot (aux current on the CT):** "require aux outside CT" (owner 2026-10-04). Commissioning assertion that aux loads are wired outside the CT path; no S3 or correlation suppression for aux; the Pico must not treat an aux relay as explaining CT current; a miswire is a nuisance S3/S4 trip that fails safe. Pico mask change is WP-9 (sec 13, 15a).
+11. **S3 blind spot (aux current on the CT):** "require aux outside CT" (owner 2026-10-04). Commissioning assertion that aux loads are wired outside the CT path; no S3 or correlation suppression for aux; the Pico must not treat an aux relay as explaining CT current; a miswire is a nuisance S3/S4 trip that fails safe. The mask change is ESP-side only: the ESP strips aux bits from the masks it sends (WP-9, sec 13, 15a).
 12. **Manual versus rule:** the manual toggle applies only while idle; at firing start the profile rule takes over; at run end aux goes OFF. Resolves the "manual hold" question (sec 15f): no hold flag.
 - **tc_zone encoding:** `tc_zone_plus1`, 0 = none.
 
@@ -536,8 +539,8 @@ No board access, no code changes. Evidence is file:line at 78dc15b2; paths are u
   2. S4 (warn only, `safety_guards.c:887-891`) fires when an aux relay is on
      continuously (`SaftyFW/src/tasks/link_task.c:1359`, `relay_now_mask != 0`) and
      the aux load is not on a fitted CT channel. Warn, never a trip. Resolved by the
-     same decision: once aux-bound relays are excluded from the Pico's masks (WP-9),
-     an aux relay no longer drives S4 either. Until WP-9 flashes, expect a spurious
+     same decision: once the ESP strips aux-bound relays from the masks it sends (WP-9),
+     an aux relay no longer drives S4 either. Until WP-9 lands, expect a spurious
      S4 warn on a vent.
   3. No false trip from aux current on a CT: S3 sees `relay_recent` true; S14/S15 are
      keyed to commanded heater relays via `ct_channel_map` (`safety_core.c` ~729,
@@ -559,7 +562,9 @@ No board access, no code changes. Evidence is file:line at 78dc15b2; paths are u
   - Pico-side work found by WP-0 and now required: `safety_link_frames.c:391-415`
     builds `relay_now_mask`/`relay_recent_mask` from the whole relay shadow, so an
     aux relay currently counts as "a relay was commanded" and masks S3. The Pico
-    must exclude aux-bound relays from the heat/CT correlation masks. See WP-9 (sec 13).
+    must not see aux-bound relays in the heat/CT correlation masks. Decided approach: the
+    ESP strips aux bits from the masks it sends, so no kilnlink field, no protocol bump and
+    no Pico flash. See WP-9 (sec 13).
 - "H9 CT alarm" (owner decision 2026-10-04: current seen while every relay is
   commanded off): NOT implemented anywhere. Searched origin/main and, read-only,
   `C:\wt\safedec_yldzsu` and `C:\wt\safedec_ht1`: no source, test or doc hit beyond

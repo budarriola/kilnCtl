@@ -523,11 +523,12 @@ here; none is copied from an unverified summary.
     for the correlation window and could hide a welded heater contactor.
     Decision: aux loads are wired outside the CT (a commissioning assertion;
     firmware cannot verify it), S3/S4/S14/S15 stay fully active with no aux
-    suppression, and the Pico is changed (WP-9) to exclude aux-bound relays
-    from its heat/CT correlation masks. If an aux load is miswired onto a CT
+    suppression, and the ESP strips aux-bound relays from the relay masks it
+    sends the Pico (WP-9), so the Pico never sees an aux relay as a commanded
+    relay (no link field, no protocol bump, no Pico change). If an aux load is miswired onto a CT
     the expected outcome is a nuisance S3 or S4 trip, which fails safe.
-    **Argued only until WP-9 lands; the Pico change is not yet written and
-    Pico flashing is blocked (no debug probe).**
+    **Argued only until WP-9 lands (ESP-side, host-testable; not yet
+    written). The aux binding does not exist yet, so this row is forward-looking.**
 
 ## 4. Evidence classification
 
