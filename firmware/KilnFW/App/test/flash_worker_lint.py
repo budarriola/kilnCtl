@@ -160,6 +160,11 @@ ALLOWLIST = {
     # handler's own internal-SRAM-stack httpd task -- same story as
     # unit_pref.c/zones_config_store.c's identical entries below.
     "display_power_cfg.c",
+    # Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md WP-1):
+    # aux_outputs_cfg_set() is a per-relay config write called from the
+    # zones HTTP handler / MCP path on an httpd task's internal-SRAM stack,
+    # same story as display_power_cfg.c's entry immediately above.
+    "aux_outputs_cfg.c",
     # docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 7 (firing stats/
     # history cfg-filesystem bridge, 2026-09-08): firing_stats_cfg_fs_
     # write_rev()'s hal_kv_set_u32()/hal_kv_commit() calls are this file's

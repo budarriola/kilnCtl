@@ -3365,6 +3365,15 @@ uint32_t zones_config_json_compute_crc(const zones_cfg_t *cfg);
  * failure, *err_reason names the first field that failed. */
 bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason);
 
+/* Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md section 3): the aux
+ * store (aux_outputs_cfg.c) registers a provider returning its ENABLED relay
+ * mask once it has reconciled any boot-time conflict. While one is registered,
+ * zones_config_json_validate() refuses a candidate whose zone relay_masks claim
+ * a relay an aux output has enabled. NULL (the default, and every boot load
+ * before aux_outputs_cfg_start()) disables the check. */
+typedef uint8_t (*zones_aux_enabled_mask_fn)(void);
+void zones_config_json_set_aux_enabled_provider(zones_aux_enabled_mask_fn fn);
+
 /* Bounded chain walk starting at `start`, following settings_source[group]
  * links through `zones[]` (MAX31856_CHANNEL_COUNT-sized, indexed exactly
  * like zones_cfg_t::zones). `group` selects which of the SRC_GROUP_COUNT

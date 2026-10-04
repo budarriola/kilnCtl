@@ -132,6 +132,7 @@ try {
         (Join-Path $testDir "test_backlight_pwm.c"),
         (Join-Path $testDir "test_display_power_policy.c"),
         (Join-Path $testDir "test_display_power_cfg.c"),
+        (Join-Path $testDir "test_aux_outputs_store.c"),
         (Join-Path $testDir "test_setup_wizard_progress.c"),
         (Join-Path $testDir "test_display_power_wiring.c"),
         (Join-Path $testDir "test_diagnostics_safety_tc_state.c"),
@@ -575,6 +576,9 @@ try {
             # real nvs_save() bytes of a sentinel-filled zones_cfg_t, compared
             # against tools/PcTools/tests/fixtures/config_convert/.
             "`"$(Join-Path $testDir 'test_zones_blob_golden.c')`" " +
+            # WP-1 of docs/SPARE_RELAY_ONOFF_PLAN.md: the zones-validate aux-conflict hook
+            # and the kiln-scope reset list (both need zones_config_json.c / kiln_scope_cfg_files.c).
+            "`"$(Join-Path $testDir 'test_aux_outputs_zones_side.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_json.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_convert.c')`" " +
             "`"$(Join-Path $driversDir 'persist/zones_config_migrate.c')`" " +

@@ -15756,6 +15756,9 @@ extern void run_test_zone_normals_cfg_fs(void);
 /* test_zones_blob_golden.c -- same convention; config_convert.py's zones_blob golden. */
 extern void run_test_zones_blob_golden(void);
 
+/* test_aux_outputs_zones_side.c -- WP-1 of SPARE_RELAY_ONOFF_PLAN: validate hook + kiln-scope list. */
+extern void run_test_aux_outputs_zones_side(void);
+
 int main(void)
 {
     run_test_zones_http();
@@ -15763,6 +15766,7 @@ int main(void)
     run_test_relay_names_cfg_fs();
     run_test_zone_normals_cfg_fs();
     run_test_zones_blob_golden();
+    run_test_aux_outputs_zones_side();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
         printf("%d FAILURE(S)\n", g_test_failures);

@@ -21,6 +21,7 @@
 #include "esp_log.h"
 
 #include "http_form.h"
+#include "aux_outputs_conflict.h" /* one relay, one owner -- zones_config_json_validate() */
 #include "kiln_io.h" /* KILN_IO_RELAY_COUNT -- zones_config_json_validate() */
 #include "zone_settings_source_chain.h" /* the shared settings_source chain-walk -- see that
                                           * header's own comment for why it lives outside this
@@ -207,6 +208,13 @@ void zones_config_json_normalize_settings_source_cycles(zones_cfg_t *cfg, const 
         }
     }
 }
+static zones_aux_enabled_mask_fn s_aux_enabled_provider = NULL;
+
+void zones_config_json_set_aux_enabled_provider(zones_aux_enabled_mask_fn fn)
+{
+    s_aux_enabled_provider = fn;
+}
+
 /* Validates every field of `cand` -- a fully migrated, CURRENT-version
  * zones_cfg_t -- against the exact bounds parse_zone_fields()/
  * zones_config_set_*() enforce on a live POST. Used only by
@@ -697,6 +705,19 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
         if (!isfinite(z->tuning_baseline_c) || !isfinite(z->tuning_step_ambient_c) ||
             !isfinite(z->tuning_raw_rise_c) || !isfinite(z->tuning_rise_inf_c)) {
             *err_reason = "zone tuning quality temperature out of range";
+            return false;
+        }
+    }
+    /* Spare-relay aux conflict: a relay may not be claimed by a zone AND an
+     * enabled aux output. The provider is registered only after the boot-time
+     * reconcile, so a load never fails here over a pre-existing conflict. */
+    if (s_aux_enabled_provider != NULL) {
+        uint8_t zones_union = 0;
+        for (uint8_t zi = 0; zi < cand->thermo_count && zi < MAX31856_CHANNEL_COUNT; zi++) {
+            zones_union |= cand->zones[zi].relay_mask;
+        }
+        if (aux_outputs_relay_conflict(zones_union, s_aux_enabled_provider())) {
+            *err_reason = "zone relay_mask claims a relay an aux output already uses";
             return false;
         }
     }

@@ -19,6 +19,7 @@
 #include "estop_verification.h"
 #include "danger_mode.h"
 #include "dashboard_http.h"
+#include "aux_outputs_cfg.h"
 #include "display_power_cfg.h"
 #include "hal_kv.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_coredump_get_info()/_read() -- coredump_{info,chunk}_get_handler() below */
@@ -1415,7 +1416,9 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * rows, making it 13 rows: zones, kiln_cfg_store, unit_pref,
  * profiles_hidden, zone_normals, ramp_assist, display_power, tz, one
  * aggregate profiles row, relay_cycles, adaptive_tune, firing_stats,
- * relay_names).
+ * relay_names; WP-1 of docs/SPARE_RELAY_ONOFF_PLAN.md then added the 14th,
+ * aux_outputs, and the aux_out.dat root file -- see test_cfg_fs_status.c for the
+ * re-measured worst case).
  *
  * 2026-10-04 re-measurement (the earlier ~120 B/row estimate was too low):
  * a row with both revs at UINT32_MAX and migration_deferred is ~134 B plus
@@ -1640,6 +1643,12 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         uint32_t file_rev = 0, nvs_rev = 0;
         relay_names_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, "relay_names", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        aux_outputs_cfg_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "aux_outputs", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
 
     /* Deferred auto-format progress (cfg_fs_mount.c) -- ESP-IDF-only getters,

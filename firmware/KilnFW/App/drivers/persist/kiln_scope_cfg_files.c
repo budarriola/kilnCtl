@@ -4,6 +4,7 @@
 #include "esp_log.h"
 
 #include "adaptive_tune.h"
+#include "aux_outputs_cfg.h"
 #include "cfg_fs.h"
 #include "display_power_cfg.h"
 #include "iter_tune_store.h"
@@ -29,6 +30,7 @@ static const char *const kKilnScopeFiles[] = {
     TIME_SYNC_TZ_FILE_PATH,          /* timezone */
     ADAPTIVE_TUNE_KIBASE_FILE_PATH,  /* adaptive-tune Ki baseline (ADAPTIVE_TUNE_NVS_PARTITION == kiln_nvs) */
     ITER_TUNE_CFG_FILE_PATH,         /* iterative-tune store */
+    AUX_OUTPUTS_FILE_PATH,           /* spare-relay aux outputs */
 };
 
 const char *const *kiln_scope_cfg_files_list(size_t *out_count)
