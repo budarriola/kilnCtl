@@ -45,8 +45,40 @@ void run_test_startup_faults(void)
     /* Truncation never overruns and always terminates. */
     char tiny[12];
     memset(tiny, 'x', sizeof(tiny));
-    (void)startup_fault_summarize(tiny, sizeof(tiny));
+    /* Latch state at this point: EXEC_WATCHDOG (26-char label) and LOG_STORE. */
+    unsigned tiny_named = startup_fault_summarize(tiny, sizeof(tiny));
     TEST_CHECK(memchr(tiny, '\0', sizeof(tiny)) != NULL, "a tiny buffer is still NUL-terminated");
+    TEST_CHECK(tiny_named == 0, "a buffer too small for the first name writes none");
+    TEST_CHECK(strcmp(tiny, "...") == 0, "a buffer too small for the first name holds just the marker");
+
+    /* The real readiness buffer size (readiness_http.c passes 64) with all 13
+     * faults latched: must fit, terminate, mark the truncation, and count only
+     * the names actually written. */
+    startup_fault_reset_for_test();
+    for (int i = 0; i < (int)STARTUP_FAULT_COUNT; i++) {
+        startup_fault_note((startup_fault_t)i);
+    }
+    TEST_CHECK(startup_fault_count() == (unsigned)STARTUP_FAULT_COUNT, "all faults latch");
+    char real[64];
+    memset(real, 'x', sizeof(real));
+    unsigned real_named = startup_fault_summarize(real, sizeof(real));
+    TEST_CHECK(memchr(real, '\0', sizeof(real)) != NULL, "64-byte summary is NUL-terminated within the buffer");
+    size_t real_len = strnlen(real, sizeof(real));
+    TEST_CHECK(real_named > 0 && real_named < (unsigned)STARTUP_FAULT_COUNT, "13 faults do not all fit in 64 bytes");
+    TEST_CHECK(real_len >= 3 && strcmp(real + real_len - 3, "...") == 0, "truncated summary ends with the marker");
+    unsigned seen = 0;
+    for (int i = 0; i < (int)STARTUP_FAULT_COUNT; i++) {
+        if (strstr(real, startup_fault_name((startup_fault_t)i)) != NULL) {
+            seen++;
+        }
+    }
+    TEST_CHECK(seen == real_named, "named equals the number of labels actually written");
+
+    /* A roomy buffer holds all 13 with no marker. */
+    char big[1024];
+    unsigned big_named = startup_fault_summarize(big, sizeof(big));
+    TEST_CHECK(big_named == (unsigned)STARTUP_FAULT_COUNT, "a roomy buffer names all 13");
+    TEST_CHECK(strstr(big, "...") == NULL, "no marker when nothing was cut");
 
     startup_fault_reset_for_test();
 }

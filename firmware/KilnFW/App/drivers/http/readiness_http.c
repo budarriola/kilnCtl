@@ -1004,8 +1004,14 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         if (nfault == 0u) {
             snprintf(detail, sizeof(detail), "every required task and subsystem started this boot");
         } else {
-            char names[64];
-            (void)startup_fault_summarize(names, sizeof(names));
+            /* Names are summarized straight into the tail of `detail` (no
+             * second stack buffer: this handler runs on the shared 8 KB httpd
+             * stack, see check_httpd_task_stack_budget). Worst case: 17 prefix
+             * + 63 names + 4 separator + impact + NUL fits READINESS_DETAIL_MAX. */
+            static const char k_prefix[] = "failed to start: ";
+            const size_t plen = sizeof(k_prefix) - 1u;
+            memcpy(detail, k_prefix, sizeof(k_prefix));
+            (void)startup_fault_summarize(detail + plen, 64u);
             const char *impact = "reboot the board";
             for (unsigned i = 0; i < (unsigned)STARTUP_FAULT_COUNT; i++) {
                 if (startup_fault_is_set((startup_fault_t)i)) {
@@ -1013,11 +1019,12 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                     break;
                 }
             }
-            snprintf(detail, sizeof(detail), "failed to start: %s -- %s", names, impact);
+            const size_t used = strlen(detail);
+            snprintf(detail + used, sizeof(detail) - used, " -- %s", impact);
         }
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "startup", "Required tasks started", st, detail,
-                        "/diagnostics", &dropped);
+                        "/readiness", &dropped);
         if (o != before_o) {
             first = false;
         }
