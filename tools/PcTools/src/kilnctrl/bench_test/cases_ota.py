@@ -1026,6 +1026,9 @@ def _default_ote07_heat(ctx: dict):
         state = srv._profiles.get_exec_status().state_name
         if state not in ("idle", "done"):
             return f"executor state is {state!r}, not idle/done -- not starting heat over a firing this case did not start"
+        ok, reason = A._autotune_not_running(ctx)
+        if not ok:
+            return f"{reason} -- not starting a firing alongside an autotune this case did not start"
         return ""
 
     return start, stop, is_stopped, precheck
@@ -1256,6 +1259,14 @@ def _case_ote08(ctx: dict) -> CaseResult:
     if _heat_opted_in(ctx)[0] and ctx.get("_start_state_fn") is None and get_state_fn() != expected_state:
         if ctx.get("_tainted"):
             return CaseResult(Verdict.SKIP, reason=OTA_HEAT_SKIP_TAINTED)
+        # Precheck BEFORE the ramp-assist wrap: never flip ramp assist on a
+        # firing/autotune this case did not start.
+        try:
+            busy = _default_ote08_heat(ctx)[3]()
+        except Exception as exc:
+            busy = f"precheck raised {type(exc).__name__}: {exc}"
+        if busy:
+            return CaseResult(Verdict.SKIP, reason=busy)
         # Self-started autotune: ramp assist must be off for it (as AT-01),
         # restored in finally; an unconfirmed restore taints and FAILs.
         from . import cases_autotune as A
