@@ -47,7 +47,7 @@ static uint8_t s_conflict_mask = 0;
 static bool s_quarantined = false;
 static uint32_t s_rev = 0;
 
-static uint32_t blob_crc(const aux_outputs_blob_t *b)
+static uint32_t blob_checksum(const aux_outputs_blob_t *b)
 {
     /* CRC32/IEEE (zlib): same parameters the local copy used, so the on-flash blobs stay valid. */
     return ota_image_crc32((const uint8_t *)b, offsetof(aux_outputs_blob_t, crc32));
@@ -83,7 +83,7 @@ static bool aux_validate(const void *bytes, size_t len)
         return false;
     }
     const aux_outputs_blob_t *b = (const aux_outputs_blob_t *)bytes;
-    if (b->version == 0 || b->crc32 != blob_crc(b)) {
+    if (b->version == 0 || b->crc32 != blob_checksum(b)) {
         return false;
     }
     if (b->version > AUX_OUTPUTS_CFG_VERSION) {
@@ -236,7 +236,7 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
     blob.version = AUX_OUTPUTS_CFG_VERSION;
     memcpy(blob.entries, s_entries, sizeof(s_entries));
     blob.entries[relay - 1] = *entry;
-    blob.crc32 = blob_crc(&blob);
+    blob.crc32 = blob_checksum(&blob);
 
     /* In-RAM truth first. */
     s_entries[relay - 1] = *entry;
