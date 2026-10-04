@@ -1076,6 +1076,21 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
         Fail "idf.py build reported success (exit 0) but $partitionTablePath does not exist -- refusing to report PASS without a real build artifact (flash_firmware() requires this file)."
     }
 
+    # Size gate (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 3, WP2): the fresh
+    # KilnCtrl.bin must fit the 4 MiB `app` partition. Graded against the
+    # BUILT worktree's own partitions.csv and image, not whatever is in the
+    # invoking tree's build dir. ESP-IDF's check_sizes.py does not gate this
+    # (it only hard-fails when no app partition fits).
+    $appSizeGate = Join-Path $repoRoot "tools\check_app_image_size.py"
+    $appSizePython = "python"
+    if (Get-Command python3 -ErrorAction SilentlyContinue) { $appSizePython = "python3" }
+    $appSizeOut = & $appSizePython $appSizeGate --partitions-csv (Join-Path $WorktreePath "firmware\KilnFW\partitions.csv") --app-bin $binPath 2>&1
+    $appSizeExit = $LASTEXITCODE
+    $appSizeOut | Write-Host
+    if ($appSizeExit -ne 0) {
+        Fail "KilnCtrl.bin failed the application-image size gate (tools/check_app_image_size.py exit $appSizeExit) -- see output above."
+    }
+
     # Positive freshness check, not just existence: both artifacts' last-write
     # time must be AT OR AFTER the newest tracked source mtime captured above
     # -- see the "FRESHNESS SIGNAL" comment. A stale elf/bin that predates the

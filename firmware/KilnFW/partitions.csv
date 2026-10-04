@@ -274,7 +274,8 @@ wifi_nvs,     data, nvs,     0x187000, 0x6000,
 kiln_nvs,     data, nvs,     0x18D000, 0x10000,
 profiles_nvs, data, nvs,     0x19D000, 0x60000,
 otadata,      data, ota,       0x200000, 0x2000,
-app,          app,  ota_0,     0x210000, 0x800000,
+app,          app,  ota_0,     0x210000, 0x400000,
+stage,        data, undefined, 0x610000, 0x400000,
 recovery,     app,  factory,   0xA10000, 0x1E0000,
 coredump,     data, coredump,  0xBF0000, 0x100000,
 logs,         data, spiffs,    0xCF0000, 0xC0000,
@@ -709,3 +710,41 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 # and `tools/check_profiles_capacity.ps1` were both re-run against this
 # change in the same worktree (host-verification only) to confirm the parser
 # picks up the new bound and nothing else regresses.
+
+# --- `app` halved to 4 MiB, `stage` added, 2026-10-04
+#     (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 3, WP2) ---------------------
+#
+# `app` shrinks 0x800000 -> 0x400000 (offset 0x210000 UNCHANGED) and the freed
+# 4 MiB becomes a new data partition `stage` at 0x610000/0x400000. The
+# application cannot stage an image inside the running `app` partition (IDF
+# refuses writes/erases in the running partition), so a staged update needs a
+# partition of its own; the recovery image later copies `stage` -> `app`.
+#
+#   app:      0x210000 + 0x400000 = 0x610000
+#   stage:    0x610000 + 0x400000 = 0xA10000
+#   recovery: 0xA10000 + 0x1E0000 = 0xBF0000  (all UNCHANGED)
+#
+# NO EXISTING PARTITION MOVES. `nvs`, `phy_init`, `pico_img`, `wifi_nvs`,
+# `kiln_nvs`, `profiles_nvs`, `otadata`, `recovery`, `coredump`, `logs` and
+# `cfg` keep their exact offsets and sizes, so bench config, the coredump and
+# the LittleFS `cfg` volume survive the table write by construction. Only
+# `app` changes size, and the new row occupies the half it vacated.
+#
+# `stage` is `data`/`undefined` (0x06), the same subtype as `pico_img`;
+# firmware must therefore look it up BY LABEL ("stage"), never by subtype.
+#
+# SIZE GATE: KilnCtrl.bin must fit `app` (4,194,304 B). ESP-IDF's check_sizes.py
+# only hard-fails when a binary fits NO app partition, and `recovery` (the
+# other app-type row) is far smaller, so it never gates this. The hard gate is
+# tools/check_app_image_size.py (also run from
+# check_00_kilnfw_target_build.ps1 against the fresh build). It bounds against
+# this file's `app` row AND a pinned 0x400000 ceiling, and
+# check_flash_partition_map.ps1 pins the new rows below.
+#
+# OTADATA: `app` keeps its offset and subtype (ota_0), so a valid `otadata`
+# still selects it -- no erase is strictly required, but the one-time flash
+# procedure in docs/OTA_SINGLE_SLOT_PLAN.md section 10 handles it explicitly.
+#
+# This table has NO OTA path: it is applied once per board over JTAG
+# (flash_firmware()). A board still on the old table has no `stage` partition
+# and must report the update-from-stage feature as unavailable.

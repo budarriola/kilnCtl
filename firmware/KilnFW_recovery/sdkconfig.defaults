@@ -42,7 +42,7 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 CONFIG_SPIRAM_USE_CAPS_ALLOC=y
 
 # Flash size 16 MB, like the main app: this board's flash is 16 MB and the
-# `app` slot lives at 0x210000 for 8 MiB, past a 2 MB header's range. (The
+# `app` slot lives at 0x210000 (4 MiB since 2026-10-04), past a 2 MB header's range. (The
 # flashed bootloader's own header governs at runtime; this keeps the image
 # header and any size check honest.)
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -70,7 +70,7 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 #
 # Task watchdog PANIC is deliberately NOT enabled here (the main app does).
 # The TWDT default (5 s, idle tasks watched, nothing else subscribed) only
-# prints a warning on expiry. esp_ota_begin() erases the whole ~8 MiB `app`
+# prints a warning on expiry. esp_ota_begin() erases the whole 4 MiB `app`
 # partition in one call, which can run for far longer than 5 s, and whether
 # the flash driver yields to the idle tasks during that erase is unverified;
 # with PANIC on, a healthy upload could be reset mid-erase. Revisit after W5

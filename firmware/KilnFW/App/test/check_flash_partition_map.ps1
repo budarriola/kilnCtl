@@ -297,7 +297,8 @@ if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
         # 'ota_0'/'ota_1'/'factory' replaced by 'app'/'recovery'. See
         # partitions.csv's own "single application slot + recovery image"
         # header block for the fit arithmetic.
-        @('app',         0x210000,   0x800000),
+        @('app',         0x210000,   0x400000),   # halved 2026-10-04 (GITHUB_RELEASE_UPDATE_PLAN.md section 3)
+        @('stage',       0x610000,   0x400000),   # new 2026-10-04: staged-update image
         @('recovery',    0xA10000,   0x1E0000),
         @('coredump',    0xBF0000,   0x100000),
         @('logs',        0xCF0000,   0xC0000),

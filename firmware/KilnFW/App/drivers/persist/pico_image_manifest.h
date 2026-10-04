@@ -23,7 +23,7 @@
 //      "MANUAL SYNC HAZARD" that file already warns about.
 //
 // (The plan's sec 10.5 flash concern is separately moot: `app` in
-// firmware/KilnFW/partitions.csv is 0x800000 -- 8 MB -- against a ~1.94 MB
+// firmware/KilnFW/partitions.csv is 0x400000 -- 4 MiB (halved 2026-10-04 for `stage`) -- against a ~2.5 MB
 // image. ~95 KB was never the obstacle.)
 //
 // So the image source is the one that already exists: the `pico_img` staging

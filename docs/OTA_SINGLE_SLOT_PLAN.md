@@ -24,6 +24,8 @@ app,          app,  ota_0,     0x210000, 0x800000,
 recovery,     app,  factory,   0xA10000, 0x1E0000,
 ```
 
+**Amended 2026-10-04 (WP2 of `docs/GITHUB_RELEASE_UPDATE_PLAN.md`): `app` is now `0x400000` (4 MiB), and a new `stage` data partition (`0x610000`/`0x400000`) takes the other half.** Every "8 MiB" / `0x800000` figure in this section and in sections 7-8 is the pre-split value; section 10 has the current table and the one-time flash procedure. The recovery row and every data partition are unchanged.
+
 `ota_1` is deleted. `app` is 8 MiB; `recovery` is 1,966,080 B and ends exactly at 0xBF0000, so the 917,504-byte gap is consumed rather than left stranded. Both offsets are 64 KiB-aligned as `gen_esp32part.py` requires. **No data partition moves or changes size**, so the coredump, the config, the profiles and the Wi-Fi credentials all survive by construction — which is what makes the migration in section 2 tractable.
 
 `otadata` must still be erased and rewritten from `ota_data_initial.bin`, because app partition offsets and sizes changed; that is 8 KiB of boot-target state and nothing else.
@@ -171,3 +173,30 @@ owner weighs in on them later.
 4. **In-app RECOVERY MODE is deleted outright — owner-decided.** As this plan recommended. It is the source of three brickings, its job is now done properly by a separate image, and keeping both leaves two things called "recovery" that differ in capability.
 5. **Migration is accepted as cable-attached, one-time, per board — coordinator decision, open to reversal.** Not put to the owner. This plan's own recommendation: accept it. A partition table cannot be written any other way; the alternative is not shipping the change.
 6. **The recovery image does not carry the Pico firmware — owner-decided.** As this plan recommended. It is roughly 95 KB plus the whole relay protocol and the safety link, to serve a case — needing a Pico update while the ESP is in recovery — that should be handled by fixing the ESP first.
+
+## 10. WP2 amendment, 2026-10-04: `app` halved, `stage` added
+
+```
+otadata,      data, ota,       0x200000, 0x2000,
+app,          app,  ota_0,     0x210000, 0x400000,   # was 0x800000
+stage,        data, undefined, 0x610000, 0x400000,   # new
+recovery,     app,  factory,   0xA10000, 0x1E0000,   # unchanged
+```
+
+`app` 0x210000..0x610000, `stage` 0x610000..0xA10000, `recovery` 0xA10000..0xBF0000: contiguous, nothing else moved. `nvs`, `cfg`, `coredump`, `otadata` and `recovery` keep their offsets and sizes, so config, profiles, Wi-Fi credentials and the crash dump survive. `stage` has subtype `undefined` (same as `pico_img`), so firmware must find it by label, never by subtype.
+
+**Size headroom (measured 2026-10-04, clean worktree, `check_00_kilnfw_target_build.ps1`):** `KilnCtrl.bin` = 2,582,608 B (0x276850) against 4,194,304 B: 1,611,696 B (38%) free. `tools/check_app_image_size.py` (called by that check, also `tools/check_app_image_size.ps1`) fails the build if the `app` row exceeds 0x400000 or the image exceeds it. IDF's own `check_sizes.py` cannot do this (see section 1: it only hard-fails when the image fits no app partition).
+
+**Old-offset sweep:** `templates/KilnFW.tasks.json.in` `program_esp` used 0x810000 (long-dead `factory` offset), now 0x210000. `check_flash_partition_map.ps1` and `test_flash_board_pinning.py` pins updated. Comments in `pico_image_manifest.h`, `KilnFW_recovery/sdkconfig.defaults`, `FLASH_BUDGET.md`, `PICO_AUTO_UPDATE_PLAN.md` annotated. `flash_firmware()` reads the `app` offset from `partitions.csv` and needs no change; `stage` is deliberately NOT in its `ERASABLE_DATA_PARTITIONS`.
+
+### One-time JTAG procedure (per board, cable-attached, owner/bench only)
+
+The table changes, so the running board must be reflashed once over JTAG. A later OTA cannot rewrite the table.
+
+1. Build in a clean worktree at the commit: `check_00_saftyfw_target_build.ps1`, then `check_00_kilnfw_target_build.ps1`. Confirm its PASS line reports the `app` bound as 4194304 B.
+2. Optional safety: `backup_export` (saves under `logs/backup_export/`) and note the crash report state (`get_heap_status`; ack or clear it first).
+3. `flash_firmware(kiln_fw_root=<worktree>/firmware/KilnFW)` with `verify=False` for this first flash. It writes bootloader@0x0, the new partition table@0x8000 (offset from `CONFIG_PARTITION_TABLE_OFFSET`) and `KilnCtrl.bin`@0x210000 (resolved from the new `partitions.csv`). It does not write `otadata`.
+4. Handle `otadata`: the old `otadata` (0x200000, 0x2000) still points at the old layout's `app` slot index. Because `otadata` is unchanged in offset and the `app` partition keeps its offset (0x210000) and its ota_0 subtype, a board whose `otadata` already selects ota_0 boots `app` unchanged. If instead it boots `recovery` (blank/erased `otadata`, or after a boot_guard or `recovery_enter` switch), run `recovery_exit` over HTTP (recovery image is unauthenticated, see docs/RECOVERY_IMAGE_PLAN.md). Do NOT hand-write an `otadata` blob.
+5. Verify: `debug_check_partition_table()` shows `app` 0x400000, `stage` 0x610000/0x400000, `recovery` unchanged, RUNNING marker on `app`; `GET /api/partitions` agrees; `fw_build` matches the `.bin`; `get_heap_status` clean; `GET /api/cfgfs` still lists the 7 files; `control_get_zones` still shows tuned PID gains (a lost zones blob means a data partition was touched: stop).
+6. Expect S6a only if the Pico was reset in the same window; clear per the flash notes in CLAUDE.md. Then `boot_guard_get` and, if the counter is not 0, `boot_guard_reset` (flash_firmware does this by default once verified).
+7. Roll back: reflash the previous commit's table and `app` the same way; the data partitions never moved, so nothing else needs restoring.

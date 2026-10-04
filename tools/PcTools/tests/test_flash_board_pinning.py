@@ -205,7 +205,7 @@ class FlashFirmwareSizePreflightTest(FlashFirmwareAdapterPinningTest):
     `git hash-object` were confirmed to match, and the full test-file build
     directory was removed before re-measuring."""
 
-    _APP_PARTITION_SIZE = 0x800000  # firmware/KilnFW/partitions.csv: app,ota_0,0x210000,0x800000
+    _APP_PARTITION_SIZE = 0x400000  # firmware/KilnFW/partitions.csv: app,ota_0,0x210000,0x400000 (halved 2026-10-04)
 
     def test_refuses_before_touching_openocd_when_bin_exceeds_partition(self) -> None:
         oversized = self._APP_PARTITION_SIZE + 1

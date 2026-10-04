@@ -600,7 +600,9 @@ both SaftyFW two-slot bootloader binaries
 (`firmware/SaftyFW/build/SaftyFW_slotA.bin` /
 `SaftyFW_slotB.bin`) directly into `KilnCtrl.bin`, refusing to configure if
 either is missing. Measured this pass, same worktree/toolchain/sdkconfig,
-`check_00_kilnfw_target_build.ps1`:
+`check_00_kilnfw_target_build.ps1`.
+
+**Superseded 2026-10-04 (WP2, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` section 3):** the `app` row is now `0x400000` = 4,194,304 B (4 MiB; the other 4 MiB is the new `stage` data partition). Every `8,388,608 B` / `8 MiB` figure in this section is the pre-split value; `tools/check_app_image_size.py` now gates `KilnCtrl.bin` against 4 MiB.
 
 Corrected 2026-09-20 (review finding D3): the partition figure below had been
 copied from the OLD three-way `factory`/`ota_0`/`ota_1` table pre-dating the
