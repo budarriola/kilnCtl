@@ -314,6 +314,7 @@ static hal_status_t persist_locked(void)
         return err;
     }
     relay_cycles_blob_t blob;
+    memset(&blob, 0, sizeof(blob)); /* padding is written to flash; keep it deterministic */
     blob.version = RELAY_CYCLES_VERSION;
     memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
     memcpy(blob.types, s_rc.types, sizeof(blob.types));
@@ -444,6 +445,12 @@ esp_err_t relay_cycles_init(void)
      * partition (every board today) behaves byte-identically to before this
      * change. */
     relay_cycles_blob_t nvs_candidate;
+    /* Zero first: the struct has 3 padding bytes after `version` and 3 after
+     * `types`. pref_cfg_fs_resolve() memcmp()s this against the file's bytes,
+     * and stack garbage in the padding read as "differs" at equal revs (found
+     * on the bench 2026-10-04: GET /api/cfgfs relay_cycles diverged at
+     * file_rev == nvs_rev). */
+    memset(&nvs_candidate, 0, sizeof(nvs_candidate));
     nvs_candidate.version = RELAY_CYCLES_VERSION;
     memcpy(nvs_candidate.counts, s_rc.counts, sizeof(nvs_candidate.counts));
     memcpy(nvs_candidate.types, s_rc.types, sizeof(nvs_candidate.types));
@@ -1303,7 +1310,15 @@ void relay_cycles_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
         }
     }
 
-    bool content_equal = f_valid && n_valid && memcmp(&f_blob, &n_blob, sizeof(f_blob)) == 0;
+    /* Field by field, never memcmp() of the whole struct: relay_cycles_blob_t has
+     * padding after `version` and after `types`, and padding is not data. A file
+     * and an NVS copy with identical contents but different padding bytes (a
+     * writer that did not zero its buffer) must read as in sync. */
+    bool content_equal = f_valid && n_valid && f_blob.version == n_blob.version
+                         && memcmp(f_blob.counts, n_blob.counts, sizeof(f_blob.counts)) == 0
+                         && memcmp(f_blob.types, n_blob.types, sizeof(f_blob.types)) == 0
+                         && memcmp(f_blob.rated_overrides, n_blob.rated_overrides,
+                                   sizeof(f_blob.rated_overrides)) == 0;
     if (file_valid) {
         *file_valid = f_valid;
     }

@@ -24,6 +24,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -704,12 +705,53 @@ static void test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_u
     TEST_CHECK(!valid, "with the file write skipped, the file never catches up -- NVS alone carries the value");
 }
 
+static void test_kibase_status_padding_is_not_data(void)
+{
+    TEST_SECTION("adaptive_tune ki-baseline status: file and NVS identical except for padding bytes read as in "
+                 "sync; a real value difference is still diverged");
+    reset_all_cfg_fs_at();
+    TEST_CHECK(cfg_fs_init(AT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    adaptive_tune_kibase_blob_t fb;
+    memset(&fb, 0, sizeof(fb));
+    fb.mask = 0x02;
+    fb.vals[1] = 4.5f;
+    adaptive_tune_kibase_blob_t nb = fb;
+    unsigned char *fr = (unsigned char *)&fb;
+    unsigned char *nr = (unsigned char *)&nb;
+    for (size_t i = 1; i < offsetof(adaptive_tune_kibase_blob_t, vals); i++) { /* gap after `mask` */
+        fr[i] = 0xAA;
+        nr[i] = 0x55;
+    }
+    TEST_CHECK(memcmp(&fb, &nb, sizeof(fb)) != 0, "test setup: blobs differ only in padding");
+    TEST_CHECK(pref_cfg_fs_save(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &fb, sizeof(fb), 1) == ESP_OK, "file written");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION) == HAL_OK,
+               "open NVS");
+    TEST_CHECK(hal_kv_set_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &nb, sizeof(nb)) == HAL_OK, "NVS blob written");
+    TEST_CHECK(hal_kv_set_u32(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV, 1) == HAL_OK, "NVS rev written");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    bool fv = false, nv = false, div = true;
+    uint32_t frv = 0, nrv = 0;
+    adaptive_tune_get_kibase_dualwrite_status(&fv, &frv, &nv, &nrv, &div);
+    TEST_CHECK(fv && nv, "both sides valid");
+    TEST_CHECK(!div, "padding-only difference reads as in sync");
+
+    fb.vals[1] = 5.5f;
+    TEST_CHECK(pref_cfg_fs_save(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &fb, sizeof(fb), 1) == ESP_OK, "file value changed");
+    adaptive_tune_get_kibase_dualwrite_status(&fv, &frv, &nv, &nrv, &div);
+    TEST_CHECK(div, "a real value difference is still diverged");
+}
+
 int main(void)
 {
     run_test_adaptive_tune();
     test_kibase_cfg_fs_partition_absent_behaves_like_before();
     test_kibase_cfg_fs_migrates_then_prefers_file();
     test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_up();
+    test_kibase_status_padding_is_not_data();
     reset_all_cfg_fs_at();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -175,6 +175,14 @@ Either outcome never blocks boot, never touches any partition other than
   `relay_names.dat` and NVS key `relay_names_cfg` / rev key `relnames_rev`;
   a still-v1 NVS blob reads as valid (upgraded in memory). Every dual-written
   item now has a row (`adaptive_tune` is the `ki_base.dat` row).
+  **Struct padding is not data.** A status comparison must never `memcmp()`
+  a whole struct that has padding bytes, and a candidate struct handed to
+  `pref_cfg_fs_resolve()` must be zero-initialised (`memset`) before it is
+  filled field by field, because resolve compares raw bytes. Found on the bench
+  2026-10-04: `relay_cycles` read `diverged: true` at `file_rev == nvs_rev`
+  because `relay_cycles_init()` built an un-zeroed candidate (stack garbage in
+  the padding) and the status accessor compared the whole struct. Fixed by
+  zeroing the candidate and comparing field by field.
 - `"nvs_only"` — items that have not moved to file backing yet. **As of
   `2e88e90a` (2026-09-08) this array is empty** — every item this doc's
   migration table (below) tracks as MOVE (1-9) now has a real cfg-filesystem

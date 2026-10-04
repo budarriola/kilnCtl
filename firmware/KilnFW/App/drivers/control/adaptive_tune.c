@@ -1477,7 +1477,10 @@ void adaptive_tune_get_kibase_dualwrite_status(bool *file_valid, uint32_t *file_
         hal_kv_close(&h);
     }
 
-    bool content_equal = f_valid && n_valid && memcmp(&f_blob, &n_blob, sizeof(f_blob)) == 0;
+    /* Field by field, not memcmp() of the whole struct: adaptive_tune_kibase_blob_t has 3
+     * padding bytes after `mask`, and padding is not data (see docs/CONFIG_FILESYSTEM.md). */
+    bool content_equal = f_valid && n_valid && f_blob.mask == n_blob.mask
+                         && memcmp(f_blob.vals, n_blob.vals, sizeof(f_blob.vals)) == 0;
     if (file_valid) {
         *file_valid = f_valid;
     }

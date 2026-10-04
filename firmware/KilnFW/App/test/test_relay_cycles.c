@@ -1135,6 +1135,99 @@ static void test_get_dualwrite_status_reports_real_divergence(void)
     TEST_CHECK(diverged, "a real content disagreement at equal rev is reported as diverged:true");
 }
 
+/* 2026-10-04 bench finding: relay_cycles_blob_t has padding after `version`
+ * and after `types`. relay_cycles_init() handed pref_cfg_fs_resolve() an
+ * un-memset candidate (stack garbage in the padding), so resolve() saw
+ * "differs" at EQUAL revs, logged DIVERGED and rewrote the file, and
+ * relay_cycles_get_dualwrite_status()'s whole-struct memcmp then flagged the
+ * file-vs-NVS padding difference on every boot. Padding is not data. */
+#include <stddef.h>
+
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+__attribute__((noinline))
+#endif
+static void rc_scribble_stack(void)
+{
+    volatile unsigned char junk[4096];
+    for (size_t i = 0; i < sizeof(junk); i++) {
+        junk[i] = 0xA5;
+    }
+    (void)junk[100];
+}
+
+/* Overwrite every padding byte of `b` (the gaps between the declared members) with `pad`. */
+static void rc_fill_padding(relay_cycles_blob_t *b, unsigned char pad)
+{
+    unsigned char *raw = (unsigned char *)b;
+    for (size_t i = offsetof(relay_cycles_blob_t, version) + 1; i < offsetof(relay_cycles_blob_t, counts); i++) {
+        raw[i] = pad;
+    }
+    for (size_t i = offsetof(relay_cycles_blob_t, types) + RELAY_CYCLES_COUNT;
+         i < offsetof(relay_cycles_blob_t, rated_overrides); i++) {
+        raw[i] = pad;
+    }
+}
+
+static void test_padding_is_not_data_status_and_init(void)
+{
+    TEST_SECTION("relay_cycles: file and NVS with identical contents but different padding bytes read as "
+                 "in sync, and init() neither logs DIVERGED nor resolves (padding is not data)");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+    s_rc.counts[0] = 10;
+    s_rc.counts[1] = 20;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush -- file and NVS agree at rev 1");
+
+    /* (a) status: file padding 0xAA, NVS padding 0x55, same content, same rev. */
+    relay_cycles_blob_t fb;
+    memset(&fb, 0, sizeof(fb));
+    fb.version = RELAY_CYCLES_VERSION;
+    fb.counts[0] = 10;
+    fb.counts[1] = 20;
+    relay_cycles_blob_t nb = fb;
+    rc_fill_padding(&fb, 0xAA);
+    rc_fill_padding(&nb, 0x55);
+    TEST_CHECK(memcmp(&fb, &nb, sizeof(fb)) != 0, "test setup: the two blobs differ ONLY in padding bytes");
+    TEST_CHECK(pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &fb, sizeof(fb), 1) == ESP_OK, "file written, padding 0xAA");
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "open NVS");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_CYCLES, &nb, sizeof(nb)) == HAL_OK, "NVS written, padding 0x55");
+        TEST_CHECK(hal_kv_set_u32(&h, NVS_KEY_CYCLES_REV, 1) == HAL_OK, "NVS rev 1");
+        hal_kv_commit(&h);
+        hal_kv_close(&h);
+    }
+    bool file_valid = false, nvs_valid = false, diverged = true;
+    uint32_t file_rev = 0, nvs_rev = 0;
+    relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+    TEST_CHECK(file_valid && nvs_valid && file_rev == 1 && nvs_rev == 1, "both sides valid at rev 1");
+    TEST_CHECK(!diverged, "padding-only difference reads as in sync, diverged:false");
+
+    /* a real content difference must still be caught */
+    fb.counts[0] = 11;
+    TEST_CHECK(pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &fb, sizeof(fb), 1) == ESP_OK, "file content now differs");
+    relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+    TEST_CHECK(diverged, "a real count difference is still diverged:true");
+
+    /* (b) init: canonical zero-padded file (what this module writes) vs an NVS blob whose padding is
+     * non-zero (an older firmware's writer). The NVS candidate init hands to resolve() is rebuilt
+     * field-wise, so it must be zero-padded regardless of stack contents or NVS padding. */
+    fb.counts[0] = 10;
+    rc_fill_padding(&fb, 0x00);
+    TEST_CHECK(pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &fb, sizeof(fb), 1) == ESP_OK, "file zero-padded, rev 1");
+    rc_scribble_stack();
+    esp_log_test_capture_reset();
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init with padding-differing NVS");
+    TEST_CHECK(!esp_log_test_capture_contains("DIVERGED"), "init does not log a file/NVS DIVERGED resolve");
+    TEST_CHECK(s_rc.counts[0] == 10 && s_rc.counts[1] == 20 && s_rc.rev == 1, "counts and rev loaded unchanged");
+    relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+    TEST_CHECK(!diverged, "still in sync after init");
+}
+
 // flash_worker_wait_until_started() (persist/flash_worker_wait.c) -- the
 // shared bounded-poll helper this pass extracted out of cfg_fs_mount.c so
 // relay_cycles_init()'s kibase/cycles migrate-on-load writes (and adaptive_
@@ -1282,6 +1375,7 @@ void run_test_relay_cycles(void)
     test_cfg_fs_reset_all_composes_with_migration_never_loses_counts();
     test_cfg_fs_negative_no_file_write_means_file_never_catches_up();
     test_get_dualwrite_status_reports_real_divergence();
+    test_padding_is_not_data_status_and_init();
     test_flash_worker_wait_gives_up_after_ceiling();
     test_flash_worker_wait_succeeds_once_predicate_flips();
     test_flash_worker_wait_null_predicate_returns_false();
