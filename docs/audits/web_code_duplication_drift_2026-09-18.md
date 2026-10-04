@@ -252,7 +252,7 @@ the fixed three); restoring by hand in both cases reproduced the exact
 previously-committed blob (`git diff` clean, `git hash-object` match) before
 re-confirming green. `check_00_kilnfw_recovery_target_build.ps1`,
 `check_recovery_image_size.ps1` and `check_recovery_ota_auth_mirror.ps1` all
-pass. Fixed in `ea09ba0a`, hardened further in a follow-up commit on top.
+pass. Fixed in `dd15cb24`, hardened further in `8dafa48f` on top.
 
 ### 2.3 `/api/boot_guard` and `/api/partitions` return different JSON shapes in the two images
 
