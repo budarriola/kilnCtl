@@ -172,7 +172,7 @@ Shared files (`App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route
 (WP0); other WPs hand it their entries or serialize behind it so parallel packages do not collide.
 
 **Independent, starts now**
-- WP1 release script: `tools/make_release.ps1`, `tools/release_manifest.py`, `tools/check_release_manifest.ps1`, `docs/RELEASING.md`.
+- WP1 release script: `tools/make_release.ps1`, `tools/release_manifest.py`, `tools/check_release_manifest.ps1`, `docs/RELEASING.md`. DONE 2026-10-04 (`c2cd5dac`); the live GitHub hop (real release upload and asset fetch) is still unverified.
 
 **M1: stage partition + upload over normal Wi-Fi + recovery apply, no TLS (one-click phone/PC update)**
 - WP0 shared-file owner: `App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route_tier_table.h`, URI cap bump.
