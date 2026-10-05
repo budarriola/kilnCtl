@@ -220,7 +220,7 @@ D = flag on plus `MBEDTLS_EXTERNAL_MEM_ALLOC=y`, `DYNAMIC_BUFFER=y`, `DYNAMIC_FR
 
 | Section | A baseline | flag off, clean commit | B flag on | D flag on + PSRAM/dynamic |
 |---|---|---|---|---|
-| .dram0.bss (cap 101000) | 99240 | 99240 | 100344 | 100344 |
+| .dram0.bss (cap 101000) | 99240 (origin/main after WP-2: 99304) | 99240 | 100344 | 100344 |
 | .iram0.text | 89207 | 89207 | 89207 | 89207 |
 | .flash.text | 1490248 | 1490248 | 1562596 | 1565476 |
 | .flash.rodata | 982904 | 982904 | 1067632 | 1068008 |
@@ -229,7 +229,7 @@ D = flag on plus `MBEDTLS_EXTERNAL_MEM_ALLOC=y`, `DYNAMIC_BUFFER=y`, `DYNAMIC_FR
 
 - Flag off at the clean commit is section-for-section identical to baseline A and the same .bin size (the bytes differ, as every build's timestamps do).
 - Flag on costs +1104 B bss (mostly the spike's 1 KB static URL buffer), about +157 to +160 KB image, no IRAM. Image stays about 1.45 MB under the 4 MiB slot.
-- **bss headroom is the constraint:** baseline leaves 1760 B under the 101000 cap; the spike leaves 656 B. Production fetch code must keep URL, header and
+- **bss headroom is the constraint:** baseline leaves 1760 B under the 101000 cap (about 1696 B on origin/main after WP-2, 99304 measured there); the spike leaves 656 B on the old baseline (about 592 B if the +1104 B delta carries over; not re-measured). Production fetch code must keep URL, header and
   chunk buffers in PSRAM or heap, not static internal bss. The PSRAM/dynamic options themselves cost no bss.
 
 **Runtime (expectation, unmeasured).**
@@ -253,16 +253,19 @@ Each hop opens a fresh TLS session, so peak heap is per hop, not cumulative.
 downloads and the browser only triggers it.
 
 **Recommendation.** Adopt D9 as written: option D set, IN 16384 / OUT 4096, `esp_http_client` `buffer_size` 2048, manual allowlisted redirects, dedicated
-PSRAM-stack task, 4 KB PSRAM chunk. Revisit the proposed 40 KB free-internal precheck: the board idles near 30 KB free, so 40 KB would never pass; set it from the measured
-residual. Keep the 12 KB in-flight abort until measured. Both D9 gates still apply, with a negative test.
+PSRAM-stack task, 4 KB PSRAM chunk. Revisit the proposed 40 KB free-internal precheck: the board idles near 30 KB free, so 40 KB would never pass. The precheck compares CURRENT free internal heap (`heap_caps_get_free_size`), not the low-water `min_free`; set the threshold to the 8192 B floor plus the measured residual, never the residual alone. The in-flight abort should watch the same current-free number. Keep the 12 KB in-flight abort until measured. Both D9 gates still apply, with a negative test.
+
+**Production requirements (the spike deliberately does not meet these).**
+- Redirect allowlist is enforced on a parsed host with an exact or suffix match (`api.github.com`, `github.com`, `*.githubusercontent.com`), never a substring or prefix match on the URL string. Max 3 hops; the spike allows 4 and any https host, acceptable for a spike only.
+- Production fetch code lives under `App/drivers` (or registers by hand): `check_stack_margin_registration.ps1` does not scan `components/`, and the spike tasks are unregistered (flag-on builds only). Any production task is added to `$requiredNames` as `liveness: on-demand`.
 
 **Bench procedure (later, board free, owner-authorised flash).**
 1. Build the worktree with `CONFIG_KILNCTL_TLS_SPIKE=y` plus the D deltas (and B for comparison); `build_kilnfw_start` with `kiln_fw_root` pointing at it.
-2. `flash_firmware(kiln_fw_root=...)`; no other agent on the bench; firing idle.
+2. Confirm the board is running `app`, not recovery (`GET /api/partitions` RUNNING marker; otadata gap), then `flash_firmware(kiln_fw_root=...)`; no other agent on the bench; firing idle. The flag-on build is never left on the board, and `CONFIG_KILNCTL_TLS_SPIKE=y` is never committed (sdkconfig stays gitignored).
 3. Capture `get_heap_status` before; the `TLS_SPIKE` log lines (HEAP per stage, `int_free`, `int_largest`, `int_min_global`, `sampled_min_free`, Location length, per-hop status);
    `get_heap_status` after. Pass if `sampled_min_free >= 8192` with margin.
 4. Repeat with the asset URL (covers the redirect hop). Optionally raise `_REPEAT` to catch fragmentation.
-5. KDF trace: do a web login during the fetch; require no TASK_WDT in the log and record latency against a flag-off boot (gate b).
+5. KDF trace: do a web login during the fetch; require no TASK_WDT in the log and record latency against a flag-off boot (gate b). The spike heap sampler runs at priority 10 and perturbs this latency; note it, or lower its rate during this step.
 6. Reflash the normal build and confirm `fw_build`.
 
 **Not done / unverified.** No board access, no flash. No runtime heap numbers. Server max-fragment-length behaviour, CORS on the asset host and TLS 1.3 untested.
