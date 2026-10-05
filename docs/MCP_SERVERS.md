@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 212 tools (209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 214 tools (212 before `recovery_apply_status`/`recovery_apply_staged` were added 2026-10-05; 209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -495,7 +495,17 @@ UNKNOWN/UNVERIFIED. Hardening (2026-10-02): `recovery_pico_abort` reports UNVERI
 itself, not necessarily because of this POST). `recovery_push_esp_image` appends a loud "`app` may be partly erased"
 warning, with a fresh `app_valid` read from the status route, to any board-reported failure other than the
 pre-erase refusals (409/413/503), and reports `ok-with-warning` (never plain ok) when the 200 reply does not say
-"boot_guard cleared and verified". Unit tests use a fake board only
+"boot_guard cleared and verified". `recovery_apply_status` (READ-ONLY, `GET /api/recovery/apply_status`) renders the apply task's phase/result/
+bytes/`app_modified`/`stage_cleared`/stack-free and the staged image's state/semver/commit/sha256/length/source.
+`recovery_apply_staged(confirm=False, host, wait_s=120, poll_interval_s=2)` wraps `POST /api/recovery/apply_staged`
+(202, async; `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP5): refuses unless `confirm is True` exactly (before any network
+access), reads recovery status and apply status, refuses while the Pico relay is busy, an apply is running or nothing
+is staged, and reports the stage identity (commit, sha256, length) it is about to install. A board 409 is reported
+with the server's own text. After the 202 it polls apply_status up to `wait_s` (0 = no polling): `done` is ok (with
+the apply task's stack high-water; the board then reboots into the application, so a lost connection after done is
+EXPECTED), `failed` is FAILED with the error name and `app_modified`, a lost connection before done or a timeout is
+UNKNOWN/UNVERIFIED. It does not prove the new application booted healthy. No tool joins the AP.
+Unit tests use a fake board only
 (`tools/PcTools/tests/test_mcp_server_recovery.py`); never run against hardware.
 
 **Recovery image is unauthenticated (owner decision 2026-10-02):** no password, no key, no challenge, no signature

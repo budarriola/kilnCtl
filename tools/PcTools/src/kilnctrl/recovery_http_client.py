@@ -64,3 +64,18 @@ def get_pico_status(host: str, timeout: float = TIMEOUT_S) -> dict:
     """GET /api/recovery/pico/status. Note: while the relay is busy, polling
     this route is the relay's 'the operator is still watching' signal."""
     return _get_json(host, "/api/recovery/pico/status", timeout)
+
+
+#: recovery_apply.c recovery_apply_phase_name(): the phases in which the apply
+#: task is still working. "done" and "failed" are terminal, "idle" is no apply.
+APPLY_RUNNING_PHASES = ("checking", "copying", "verifying", "finalizing")
+APPLY_TERMINAL_PHASES = ("done", "failed")
+
+
+def get_apply_status(host: str, timeout: float = TIMEOUT_S) -> dict:
+    """GET /api/recovery/apply_status (apply_status_get()): the apply task's
+    progress (phase, result, done_bytes, total_bytes, app_modified,
+    stage_cleared, task_stack_free_bytes, stage_header) plus, when a stage
+    header is readable, a `staged` object (state, semver, commit, sha256,
+    length, source)."""
+    return _get_json(host, "/api/recovery/apply_status", timeout)

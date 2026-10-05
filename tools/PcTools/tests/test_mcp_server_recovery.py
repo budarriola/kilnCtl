@@ -251,6 +251,7 @@ class ConfirmGateTest(_Base):
             ("pico_abort", mr.recovery_pico_abort, {}),
             ("sw_reset", mr.recovery_sw_reset, {}),
             ("push_esp_image", mr.recovery_push_esp_image, {"image_path": img.name}),
+            ("apply_staged", mr.recovery_apply_staged, {}),
         ]
 
     def test_non_true_confirm_refuses_with_no_io(self):
@@ -932,6 +933,149 @@ class AppIdentityTest(unittest.TestCase):
         self.assertIn("running partition unreadable", text)
         self.assertIn("boot_guard unreadable", text)
         self.assertFalse(mr._not_app_partition(running))
+
+
+def _apply(phase="idle", result="ok", staged=True, **kw):
+    d = {"phase": phase, "result": result, "done_bytes": 0, "total_bytes": 0, "app_modified": False,
+         "stage_cleared": False, "task_stack_free_bytes": 3100, "stage_header": "ok" if staged else "blank"}
+    if staged:
+        d["staged"] = {"state": "verified", "semver": "1.2.3", "commit": "abc1234", "sha256": "ab" * 32,
+                       "length": 123456, "source": "upload"}
+    d.update(kw)
+    return d
+
+
+class ApplyBoard(FakeBoard):
+    """FakeBoard plus a scripted GET /api/recovery/apply_status."""
+
+    def __init__(self, apply=None, **kw):
+        super().__init__(**kw)
+        self.apply_script = list(apply if apply is not None else [_apply()])
+        self.apply_gets = 0
+
+    def get_apply_status(self, host, timeout=None):
+        self.apply_gets += 1
+        return self._next(self.apply_script)
+
+
+class _ApplyBase(_Base):
+    def run_tool(self, fn, board, **kw):
+        with unittest.mock.patch.object(rhc, "get_apply_status", board.get_apply_status):
+            return super().run_tool(fn, board, **kw)
+
+
+def _accepted():
+    return {"status": 202, "text": '{"started":true,"image_length":123456}'}
+
+
+class ApplyStatusToolTest(_ApplyBase):
+    def test_read_only_reports_stage_identity_and_never_posts(self):
+        board = ApplyBoard(apply=[_apply(phase="copying", done_bytes=10, total_bytes=100)])
+        out = self.run_tool(mr.recovery_apply_status, board)
+        self.assertIn("phase='copying'", out)
+        self.assertIn("commit='abc1234'", out)
+        self.assertIn("sha256='" + "ab" * 32 + "'", out)
+        self.assertIn("length=123456", out)
+        self.assertIn("task_stack_free_bytes=3100", out)
+        self.assertEqual(board.posts, [])
+        self.assertEqual((board.status_gets, board.pico_gets), (0, 0))
+
+    def test_nothing_staged(self):
+        out = self.run_tool(mr.recovery_apply_status, ApplyBoard(apply=[_apply(staged=False)]))
+        self.assertIn("staged: none readable", out)
+
+    def test_404_means_not_recovery_image(self):
+        out = self.run_tool(mr.recovery_apply_status, ApplyBoard(apply=[_not_found()]))
+        self.assertIn("not the recovery image", out)
+
+
+class ApplyStagedTest(_ApplyBase):
+    def test_gate_refuses_with_no_io(self):
+        for bad in (False, None, 1, "true", [True]):
+            board = ApplyBoard()
+            out = self.run_tool(mr.recovery_apply_staged, board, confirm=bad)
+            self.assertTrue(out.startswith("REFUSED"), (bad, out))
+            self.assertEqual((board.status_gets, board.pico_gets, board.apply_gets, board.posts), (0, 0, 0, []))
+
+    def test_success_done_then_connection_lost_is_expected(self):
+        board = ApplyBoard(
+            apply=[_apply(), _apply(phase="copying"), _apply(phase="done", done_bytes=5, total_bytes=5,
+                                                              task_stack_free_bytes=2222, app_modified=True),
+                   _unreachable()],
+            post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=30.0)
+        self.assertTrue(out.startswith("ok - "), out)
+        self.assertIn("commit='abc1234'", out)
+        self.assertIn("2222 bytes free", out)
+        self.assertEqual([p["path"] for p in board.posts], ["/api/recovery/apply_staged"])
+        self.assertEqual(board.posts[0]["data"], b"")
+
+    def test_lost_before_done_is_unknown_not_ok(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="finalizing"), _unreachable()], post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=10.0)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertNotIn("ok", out.split(":")[0])
+
+    def test_failed_reports_error_and_stack(self):
+        board = ApplyBoard(
+            apply=[_apply(), _apply(phase="failed", result="app_readback_mismatch", app_modified=True,
+                                    task_stack_free_bytes=1500)],
+            post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=30.0)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("app_readback_mismatch", out)
+        self.assertIn("app_modified=True", out)
+        self.assertIn("1500 bytes free", out)
+
+    def test_timeout_is_unverified(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="copying")], post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=5.0)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
+    def test_wait_zero_does_not_poll(self):
+        board = ApplyBoard(post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=0)
+        self.assertTrue(out.startswith("ok-started"), out)
+        self.assertEqual(board.apply_gets, 1)  # only the pre-POST read
+
+    def test_409_reports_server_text(self):
+        err = rpc.RecoveryPostError("refused", 409, "nothing is staged")
+        board = ApplyBoard(post_error=err)
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True)
+        self.assertTrue(out.startswith("REFUSED by board"), out)
+        self.assertIn("nothing is staged", out)
+        self.assertIn("commit='abc1234'", out)
+
+    def test_refuses_with_nothing_staged_without_posting(self):
+        board = ApplyBoard(apply=[_apply(staged=False)])
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertEqual(board.posts, [])
+
+    def test_refuses_while_apply_running_or_pico_busy(self):
+        board = ApplyBoard(apply=[_apply(phase="copying")])
+        self.assertTrue(self.run_tool(mr.recovery_apply_staged, board, confirm=True).startswith("REFUSED"))
+        self.assertEqual(board.posts, [])
+        board = ApplyBoard(pico=[_pico(phase="sending", busy=True)])
+        self.assertTrue(self.run_tool(mr.recovery_apply_staged, board, confirm=True).startswith("REFUSED"))
+        self.assertEqual(board.posts, [])
+
+    def test_other_http_error_is_failed(self):
+        err = rpc.RecoveryPostError("boom", 500, "no app partition")
+        out = self.run_tool(mr.recovery_apply_staged, ApplyBoard(post_error=err), confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_lost_reply_is_unknown(self):
+        err = rpc.RecoveryPostError("timeout", None, "", "post")
+        out = self.run_tool(mr.recovery_apply_staged, ApplyBoard(post_error=err), confirm=True)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+    def test_not_recovery_image_does_nothing(self):
+        board = ApplyBoard(status=[_not_found()])
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True)
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertEqual(board.posts, [])
+
 
 
 if __name__ == "__main__":

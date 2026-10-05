@@ -88,6 +88,16 @@ class PostTest(unittest.TestCase):
         self.assertEqual(captured["data"], b"fake-image-bytes")
         self._assert_unauthenticated(captured)
 
+    def test_apply_staged_path_and_empty_body(self):
+        captured, patch = _capture(b'{"started":true,"image_length":5}', 202)
+        with patch:
+            result = rec.recovery_apply_staged("10.0.0.5")
+        self.assertEqual(result["status"], 202)
+        self.assertEqual(captured["url"], "http://10.0.0.5/api/recovery/apply_staged")
+        self.assertEqual(captured["method"], "POST")
+        self.assertNotIn("?", captured["url"])
+        self._assert_unauthenticated(captured)
+
     def test_exit_and_wifi_reset_paths(self):
         for fn, path in ((rec.recovery_exit, "/api/recovery/exit"),
                          (rec.recovery_wifi_reset, "/api/recovery/wifi_reset")):

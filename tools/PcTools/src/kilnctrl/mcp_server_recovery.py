@@ -5,9 +5,10 @@ recovery mode); against a normally running board every tool here fails its
 first status read (404) and does nothing.
 
 Read-only:   recovery_status                     (GET /api/recovery/status + /pico/status)
+             recovery_apply_status               (GET /api/recovery/apply_status)
 Mutating:    recovery_exit, recovery_wifi_reset, recovery_boot_guard_reset,
              recovery_pico_upload, recovery_pico_abort, recovery_sw_reset,
-             recovery_push_esp_image
+             recovery_push_esp_image, recovery_apply_staged
 Every mutating tool: refuses unless ``confirm is True`` EXACTLY (before any
 network access), reads status BEFORE acting and AFTER, and fails loud when the read-back
 disagrees with what the board's own reply claimed.
@@ -871,6 +872,144 @@ def recovery_push_esp_image(image_path: str, confirm: bool = False, host: Option
                 f"still answers as the recovery image; {prefix}")
     return (f"UNVERIFIED: board replied {reply['text']!r} but {_unverified_tail(hosts, wait_s)} -- "
             f"check by hand; {prefix}")
+
+
+def _fmt_apply(a: dict) -> str:
+    keys = ("phase", "result", "done_bytes", "total_bytes", "app_modified", "stage_cleared",
+            "task_stack_free_bytes", "stage_header")
+    out = ", ".join(f"{k}={a[k]!r}" if isinstance(a[k], str) else f"{k}={a[k]}" for k in keys if k in a)
+    sg = a.get("staged")
+    if isinstance(sg, dict):
+        out += ("; staged: " + ", ".join(f"{k}={sg[k]!r}" if isinstance(sg[k], str) else f"{k}={sg[k]}"
+                                         for k in ("state", "semver", "commit", "sha256", "length", "source")
+                                         if k in sg))
+    else:
+        out += "; staged: none readable"
+    return out
+
+
+def _fmt_apply_final(a: dict) -> str:
+    """The terminal report: _fmt_apply plus the stack high-water and the
+    error (the result name) called out explicitly."""
+    out = _fmt_apply(a)
+    if "task_stack_free_bytes" in a:
+        out += f"; apply task stack high-water: {a['task_stack_free_bytes']} bytes free at minimum"
+    if a.get("result") not in (None, "ok"):
+        out += f"; error={a.get('result')!r}"
+    return out
+
+
+@_core._tool()
+def recovery_apply_status(host: Optional[str] = None) -> str:
+    """READ-ONLY: GET /api/recovery/apply_status on the standalone recovery
+    image -- the staged-update apply task's phase (idle/checking/copying/
+    verifying/finalizing/done/failed), result/error name, bytes done/total,
+    app_modified, stage_cleared, task stack free bytes, and the identity of
+    the staged image (state, semver, commit, sha256, length, source). The
+    route is unauthenticated and does not touch the Pico relay. A 404 means
+    this is not the recovery image (the application is running, or the
+    recovery image has already rebooted into it after a successful apply).
+    """
+    resolved = _resolve_host(host)
+    try:
+        a = rhc.get_apply_status(resolved)
+    except rhc.RecoveryHttpError as exc:
+        if exc.status == 404:
+            return (f"error: GET /api/recovery/apply_status answered 404 (host={resolved}) -- this is not the "
+                    f"recovery image (the application is running?)")
+        return f"error: could not read GET /api/recovery/apply_status (host={resolved}): {exc}"
+    return f"recovery apply (host={resolved}): {_fmt_apply(a)}"
+
+
+@_core._tool()
+def recovery_apply_staged(confirm: bool = False, host: Optional[str] = None, wait_s: float = 120.0,
+                          poll_interval_s: float = 2.0) -> str:
+    """Install the image in the `stage` partition (POST
+    /api/recovery/apply_staged on the RECOVERY image): the board copies it
+    into `app`, verifies it, clears boot_guard, selects `app` and reboots into
+    the application. The route answers 202 and works in a task; progress is
+    GET /api/recovery/apply_status. The recovery image is unauthenticated
+    and reached only over its own SoftAP; this tool does not join it.
+
+    REFUSES unless ``confirm is True`` exactly, before any network access.
+    Then reads recovery status and apply status, REFUSES while the Pico relay
+    is busy, while an apply is already running, or when no staged image is
+    readable, and reports the stage identity (commit, sha256, length, semver,
+    state) it is about to install. A board 409 is reported with the server's
+    own text. After a 202, polls apply_status every `poll_interval_s` until
+    phase done or failed, for at most `wait_s` (0 = do not poll; the apply
+    keeps running). done -> ok, with the stack high-water; the board then
+    reboots into the application, so losing the connection after done is
+    EXPECTED. failed -> FAILED with the error name, app_modified and stack
+    high-water. A lost connection BEFORE done, or a timeout, is UNKNOWN/
+    UNVERIFIED, never ok. Success here means the copy was verified and `app`
+    selected; it does not prove the new application booted healthy.
+    """
+    if confirm is not True:
+        return _refuse_unconfirmed("recovery_apply_staged (rewrites the application partition and reboots)")
+    resolved = _resolve_host(host)
+    st, pico, err = _preflight(resolved)
+    if err:
+        return f"error: {err}"
+    if pico.get("busy"):
+        return f"REFUSED: the Pico relay is busy ({_fmt_pico(pico)}); the board would 409"
+    try:
+        before = rhc.get_apply_status(resolved)
+    except rhc.RecoveryHttpError as exc:
+        if exc.status == 404:
+            return (f"error: GET /api/recovery/apply_status answered 404 (host={resolved}) -- this recovery "
+                    f"image has no apply route (older image?); nothing done")
+        return f"error: could not read GET /api/recovery/apply_status (host={resolved}): {exc}"
+    if before.get("phase") in rhc.APPLY_RUNNING_PHASES:
+        return f"REFUSED: an apply is already running ({_fmt_apply(before)})"
+    staged = before.get("staged")
+    if not isinstance(staged, dict):
+        return (f"REFUSED: no staged image is readable (stage_header={before.get('stage_header')!r}); "
+                f"nothing to apply ({_fmt_apply(before)})")
+    ident = (f"commit={staged.get('commit')!r} sha256={staged.get('sha256')!r} length={staged.get('length')} "
+             f"(semver={staged.get('semver')!r} state={staged.get('state')!r} source={staged.get('source')!r})")
+    try:
+        reply = rpc.recovery_apply_staged(resolved)
+    except rpc.RecoveryPostError as exc:
+        if exc.status == 409:
+            return f"REFUSED by board: HTTP 409: {exc.detail!r}; staged {ident} (host={resolved})"
+        if not _reply_lost(exc):
+            return _post_error("/api/recovery/apply_staged", exc)
+        return (f"UNKNOWN: POST /api/recovery/apply_staged was sent but the reply was lost ({exc}); the apply "
+                f"may have started -- read recovery_apply_status; staged {ident} (host={resolved})")
+    if reply["status"] != 202:
+        return (f"FAILED: POST /api/recovery/apply_staged answered HTTP {reply['status']} {reply['text']!r}, "
+                f"expected 202; staged {ident} (host={resolved})")
+    started = f"apply started (HTTP 202 {reply['text']!r}) for staged {ident} (host={resolved})"
+    if wait_s <= 0:
+        return f"ok-started: {started}; not polling (wait_s={wait_s:g}); read recovery_apply_status"
+    deadline = _monotonic() + wait_s
+    last: Optional[dict] = None
+    while True:
+        _sleep(poll_interval_s)
+        try:
+            last = rhc.get_apply_status(resolved)
+        except rhc.RecoveryHttpError as exc:
+            if exc.status == 404:
+                return (f"UNKNOWN: {started}; apply_status now answers 404 (the application may be up) but "
+                        f"done was never observed (last: {_fmt_apply(last) if last else 'none'}) -- check "
+                        f"by hand")
+            if _monotonic() >= deadline:
+                return (f"UNKNOWN: {started}; lost contact ({exc}) and done was never observed (last: "
+                        f"{_fmt_apply(last) if last else 'none'}) -- the board may be rebooting or hung; "
+                        f"check by hand")
+            continue
+        phase = last.get("phase")
+        if phase == "done":
+            return (f"ok - {started}; apply done: {_fmt_apply_final(last)}. The board now reboots into the "
+                    f"application; losing the connection from here is EXPECTED. The new application is "
+                    f"not verified by this tool")
+        if phase == "failed":
+            return f"FAILED: {started}; apply failed: {_fmt_apply_final(last)}"
+        if _monotonic() >= deadline:
+            return (f"UNVERIFIED: {started}; still in phase {phase!r} after {wait_s:g}s "
+                    f"({_fmt_apply(last)}) -- the apply keeps running; read recovery_apply_status")
+
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

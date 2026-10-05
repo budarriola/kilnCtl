@@ -157,3 +157,12 @@ def recovery_pico_abort(host: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
     relay is idle) and the real result is only ever in
     GET /api/recovery/pico/status (phase "aborted")."""
     return post(host, "/api/recovery/pico/abort", timeout=timeout)
+
+
+def recovery_apply_staged(host: str, timeout: float = DEFAULT_TIMEOUT_S) -> dict:
+    """POST /api/recovery/apply_staged (apply_staged_post()). A 202 JSON body
+    (``{"started":true,"image_length":N}``) means the apply task STARTED,
+    nothing more; progress and outcome are only ever in
+    GET /api/recovery/apply_status. 409 carries the reason as plain text
+    ("nothing is staged", "Pico update in progress", ...)."""
+    return post(host, "/api/recovery/apply_staged", timeout=timeout)
