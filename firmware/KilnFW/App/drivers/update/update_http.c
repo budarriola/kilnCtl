@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
@@ -26,10 +25,11 @@
 
 static const char *TAG = "update_http";
 
-// Chunk/scratch buffer: 4 KB, taken from PSRAM per request and freed before
-// the handler returns, so it costs no .bss. Never a stack buffer (the httpd
-// task stack is 8 KB).
-#define UPDATE_HTTP_BUF_SIZE 4096u
+// Chunk/scratch buffer: ota_http_esp.c's static internal-SRAM 4 KB chunk buffer
+// (no new RAM). Internal, not PSRAM: esp_partition_write from PSRAM would bounce
+// through a 32 B stack temp, and esp_partition_read into PSRAM allocates a hidden
+// internal temp per read. Shared safely because httpd is a single task. Never a
+// stack buffer (the httpd task stack is 8 KB).
 
 static const esp_partition_t *s_part;
 static update_stage_t s_stage;
@@ -110,16 +110,9 @@ static void io_yield(void *ctx)
     vTaskDelay(1); // let IDLE0 feed the watchdog during long erase/hash loops
 }
 
-static uint8_t *buf_alloc(void)
+static uint8_t *buf_get(size_t *cap)
 {
-    uint8_t *b = heap_caps_malloc(UPDATE_HTTP_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (b == NULL) {
-        // No PSRAM free: take internal RAM only if the 8 KB internal floor holds afterward.
-        if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >= 8192u + 2u * UPDATE_HTTP_BUF_SIZE) {
-            b = heap_caps_malloc(UPDATE_HTTP_BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        }
-    }
-    return b;
+    return ota_http_esp_chunk_buf(cap);
 }
 
 static const char *http_status_for(update_stage_err_t e)
@@ -189,12 +182,8 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier is the gate */
 
-    uint8_t *buf = buf_alloc();
-    if (buf == NULL) {
-        ESP_LOGE(TAG, "stage upload from %s: no buffer memory", ip);
-        (void)send_error_json(req, "503 Service Unavailable", "no_memory");
-        return ESP_FAIL; // body unread and no drain buffer: close the socket
-    }
+    size_t buf_cap = 0;
+    uint8_t *buf = buf_get(&buf_cap);
 
     bool refused = false;
     bool claimed = false;
@@ -230,7 +219,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
 
         update_stage_err_t e = UPDATE_STAGE_OK;
         if (!failed_mid_body) {
-            e = update_stage_upload_begin(&s_stage, buf, UPDATE_HTTP_BUF_SIZE, (uint32_t)req->content_len, semver,
+            e = update_stage_upload_begin(&s_stage, buf, buf_cap, (uint32_t)req->content_len, semver,
                                           commit, STAGE_SOURCE_UPLOAD);
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: refused: %s (%u bytes)", ip, update_stage_err_name(e),
@@ -242,7 +231,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
 
         size_t remaining = failed_mid_body ? 0 : req->content_len;
         while (!failed_mid_body && remaining > 0) {
-            size_t want = remaining < UPDATE_HTTP_BUF_SIZE ? remaining : UPDATE_HTTP_BUF_SIZE;
+            size_t want = remaining < buf_cap ? remaining : buf_cap;
             int r = httpd_req_recv(req, (char *)buf, want);
             if (r == HTTPD_SOCK_ERR_TIMEOUT) {
                 r = httpd_req_recv(req, (char *)buf, want); // one retry, as the OTA path does not need more
@@ -253,7 +242,6 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
                 update_stage_upload_abort(&s_stage);
                 // Socket is dead; nothing to send and nothing to drain.
                 ota_http_update_end();
-                free(buf);
                 return ESP_FAIL;
             }
             e = update_stage_upload_write(&s_stage, buf, (size_t)r);
@@ -286,9 +274,8 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
 
     esp_err_t ret = ESP_OK;
     if (refused || failed_mid_body) {
-        ret = ota_http_refusal_drain(req, buf, UPDATE_HTTP_BUF_SIZE);
+        ret = ota_http_refusal_drain(req, buf, buf_cap);
     }
-    free(buf);
     return ret;
 }
 
@@ -313,13 +300,10 @@ static esp_err_t stage_clear_post_handler(httpd_req_t *req)
 
 static esp_err_t stage_status_get_handler(httpd_req_t *req)
 {
-    uint8_t *buf = buf_alloc();
-    if (buf == NULL) {
-        return send_error_json(req, "503 Service Unavailable", "no_memory");
-    }
+    size_t buf_cap = 0;
+    uint8_t *buf = buf_get(&buf_cap);
     update_stage_info_t info = { 0 };
-    update_stage_err_t e = update_stage_get_status(&s_stage, buf, UPDATE_HTTP_BUF_SIZE, &info);
-    free(buf);
+    update_stage_err_t e = update_stage_get_status(&s_stage, buf, buf_cap, &info);
     if (e != UPDATE_STAGE_OK && e != UPDATE_STAGE_ERR_BUSY && info.reason == NULL) {
         return send_error_json(req, http_status_for(e), update_stage_err_name(e));
     }

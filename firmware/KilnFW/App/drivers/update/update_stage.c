@@ -154,6 +154,7 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
     st->head_len = 0;
     st->head_flushed = false;
     st->cache_valid = false;
+    st->bad_valid = false;
 
     if (given) {
         update_stage_err_t e = dry_run_header(st);
@@ -367,6 +368,7 @@ update_stage_err_t update_stage_upload_finish(update_stage_t *st)
     memcpy(st->cache_sha, streamed, STAGE_SHA256_LEN);
     st->cache_len = st->total;
     st->cache_valid = true;
+    st->bad_valid = false;
     set_phase(st, UPDATE_STAGE_IDLE);
     return UPDATE_STAGE_OK;
 }
@@ -391,6 +393,7 @@ update_stage_err_t update_stage_clear(update_stage_t *st)
         return UPDATE_STAGE_ERR_BUSY;
     }
     st->cache_valid = false;
+    st->bad_valid = false;
     int rc = st->io.erase(st->io.ctx, 0, STAGE_HEADER_SECTOR);
     set_phase(st, UPDATE_STAGE_IDLE);
     return rc == 0 ? UPDATE_STAGE_OK : UPDATE_STAGE_ERR_FLASH;
@@ -454,6 +457,10 @@ update_stage_err_t update_stage_get_status(update_stage_t *st, uint8_t *scratch,
         out->reason = "";
         goto done;
     }
+    if (st->bad_valid && st->bad_len == h.image_length && memcmp(st->bad_sha, h.sha256, STAGE_SHA256_LEN) == 0) {
+        out->reason = "sha_mismatch";
+        goto done;
+    }
     {
         update_stage_err_t e = hash_from_flash(st, h.image_length, computed);
         if (e != UPDATE_STAGE_OK) {
@@ -463,6 +470,9 @@ update_stage_err_t update_stage_get_status(update_stage_t *st, uint8_t *scratch,
         }
     }
     if (!stage_header_sha256_matches(&h, computed)) {
+        memcpy(st->bad_sha, h.sha256, STAGE_SHA256_LEN);
+        st->bad_len = h.image_length;
+        st->bad_valid = true;
         out->reason = "sha_mismatch";
         goto done;
     }

@@ -102,6 +102,17 @@ void ota_http_get_esp_progress(ota_http_esp_phase_t *phase_out, uint8_t *percent
 #define OTA_ESP_CHUNK_SIZE 4096
 static uint8_t s_ota_esp_chunk[OTA_ESP_CHUNK_SIZE];
 
+// Shared with update_http.c (the WP4 stage upload/status), which needs the same
+// internal-SRAM, DMA-safe 4 KB buffer. Safe to share: every user is an httpd
+// handler and httpd is a single task, so two handlers never overlap.
+uint8_t *ota_http_esp_chunk_buf(size_t *cap)
+{
+    if (cap != NULL) {
+        *cap = sizeof(s_ota_esp_chunk);
+    }
+    return s_ota_esp_chunk;
+}
+
 // Everything from "the mutex is held" to "the mutex is released" -- a
 // single function so ota_esp_post_handler() below has exactly one call site
 // for ota_http_update_end(), per TODO.md 9.5's "use a single cleanup path,

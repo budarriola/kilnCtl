@@ -531,6 +531,26 @@ static void test_interrupted_and_blank(void)
     TEST_CHECK(update_stage_upload_finish(&g_st) == UPDATE_STAGE_ERR_STATE, "finish without begin refused");
 }
 
+static void test_http_buffer_is_the_shared_internal_chunk(void)
+{
+    TEST_SECTION("update_http.c -- uses ota_http_esp.c's static internal chunk buffer, never PSRAM or a new allocation (source-text scan)");
+    static const char *const candidates[] = {
+        "../drivers/update/update_http.c",
+        "App/drivers/update/update_http.c",
+        "firmware/KilnFW/App/drivers/update/update_http.c",
+    };
+    char *text = test_read_source_anchored(__FILE__, "../drivers/update/update_http.c", candidates,
+                                           sizeof(candidates) / sizeof(candidates[0]));
+    TEST_CHECK(text != NULL, "update_http.c is readable");
+    if (text == NULL) {
+        return;
+    }
+    TEST_CHECK(strstr(text, "ota_http_esp_chunk_buf(") != NULL, "takes the shared static internal chunk buffer");
+    TEST_CHECK(strstr(text, "MALLOC_CAP_SPIRAM") == NULL && strstr(text, "heap_caps_malloc") == NULL &&
+                   strstr(text, "malloc(") == NULL,
+               "no PSRAM / heap buffer (bounce-through-stack-temp and hidden internal temp)");
+    free(text);
+}
 static void test_status_never_trusts_a_header_alone(void)
 {
     TEST_SECTION("update_stage -- staged needs a valid header AND a matching sha256");
@@ -583,6 +603,17 @@ static void test_status_never_trusts_a_header_alone(void)
     reboot_stager();
     i = status();
     TEST_CHECK(!i.staged && strcmp(i.reason, "sha_mismatch") == 0, "valid header, wrong sha: not staged");
+
+    // A mismatch is cached too: a repeat GET re-reads only the header, never the image.
+    {
+        unsigned reads_before = g_fl.read_ops;
+        i = status();
+        TEST_CHECK(!i.staged && strcmp(i.reason, "sha_mismatch") == 0 && g_fl.read_ops == reads_before + 1,
+                   "repeat status on a bad stage uses the negative cache (header read only)");
+        TEST_CHECK(update_stage_clear(&g_st) == UPDATE_STAGE_OK, "clear the bad stage");
+        TEST_CHECK(!g_st.bad_valid, "clear invalidates the negative cache");
+        TEST_CHECK(strcmp(status().reason, "blank") == 0, "cleared stage reads blank");
+    }
 
     // Garbage in the header sector.
     for (int k = 0; k < 256; k++) {
@@ -760,6 +791,7 @@ void run_test_update_stage(void)
     test_size_limits();
     test_bad_images();
     test_interrupted_and_blank();
+    test_http_buffer_is_the_shared_internal_chunk();
     test_status_never_trusts_a_header_alone();
     test_clear();
     test_flash_and_hash_failures();

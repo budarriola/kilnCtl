@@ -111,6 +111,11 @@ typedef struct {
     bool cache_valid;
     uint8_t cache_sha[STAGE_SHA256_LEN];
     uint32_t cache_len;
+    // Negative cache: a header whose sha256 does not match the flash image
+    // (keyed on the header's sha256 + image_length); spares re-hashing every GET.
+    bool bad_valid;
+    uint8_t bad_sha[STAGE_SHA256_LEN];
+    uint32_t bad_len;
 } update_stage_t;
 
 typedef struct {

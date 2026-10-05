@@ -117,6 +117,10 @@ void ota_http_set_fail_reason(char *dst, size_t dst_cap, const char *fmt, ...);
 #define OTA_REFUSAL_DRAIN_CAP_MS 30000u
 esp_err_t ota_http_refusal_drain(httpd_req_t *req, uint8_t *buf, size_t cap);
 
+// The static internal-SRAM 4 KB chunk buffer of ota_http_esp.c, lent to
+// update_http.c. Only valid inside an httpd handler (single task, no overlap).
+uint8_t *ota_http_esp_chunk_buf(size_t *cap);
+
 // --- Single cross-processor safety-link pointer ----------------------------
 // Read-only after ota_http_start() (App/drivers/http/ota_http.c), same
 // NULL-tolerant meaning as before the split. Needed outside ota_http.c: the
