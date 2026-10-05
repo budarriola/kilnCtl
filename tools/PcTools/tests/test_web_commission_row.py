@@ -1388,7 +1388,12 @@ def test_cdp_driver_bounds_and_trims_the_emitted_network_list():
     # the "switch the cap to only apply to the emitted copy" option named in
     # the advisory, chosen over shifting the cursor as the simpler safe fix.
     emit_block = text[text.index("const networkDropped ="):]
-    emit_block = emit_block[:emit_block.index("main().catch(")]
+    # 30f2d3e7 replaced `main().catch(` with `main().then(exit0, handler)`:
+    # the rejection handler is still there (and now also forces process exit so
+    # a leaked handle cannot hang the driver). Cut at the new marker, and make
+    # sure the cut is real so the block asserts below stay non-vacuous.
+    assert "main().then(() => process.exit(0), (err) => {" in emit_block
+    emit_block = emit_block[:emit_block.index("main().then(")]
     assert "cdp.completed.slice(cdp.completed.length - NETWORK_RECORD_CAP)" in emit_block
     assert "network_truncated: true, network_dropped: networkDropped" in emit_block
     # waitForPost's own scan/consume logic must be untouched by this change.
