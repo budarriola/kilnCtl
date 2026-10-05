@@ -2125,6 +2125,15 @@ void zones_config_restore_snapshot_no_save(const zones_cfg_t *snapshot)
     s_timing_profile_count = s_test_snapshot.timing_profile_count;
 }
 
+/* Spare-relay aux ownership (docs/SPARE_RELAY_ONOFF_PLAN.md WP-2): backup_import.c checks the
+ * post-batch zone relay masks against the enabled aux mask. zones_config_json.c is not linked into
+ * this executable, so this settable stand-in plays the provider-backed accessor. */
+static uint8_t g_fake_aux_enabled_mask = 0;
+uint8_t zones_config_json_aux_enabled_mask(void)
+{
+    return g_fake_aux_enabled_mask;
+}
+
 /* zones_config_push_relay_type() -- zones_http_internal.h declares this
  * (relay_cycles_set_type() push-out, defined for real in
  * zones_config_store.c); backup_import.c now calls it itself, once per
@@ -3539,6 +3548,38 @@ static void test_backup_import_rollback_tracks_pico_ceiling_back_to_restored_max
     TEST_CHECK(g_apply_lower_calls == 1, "apply_lower() still ran on the failure path");
     TEST_CHECK(g_apply_lower_last_max[1] == 1200.0f,
               "apply_lower() was handed the RESTORED max (1200), not the refused 1250");
+}
+
+static void test_backup_import_refuses_zone_relay_claimed_by_aux(void)
+{
+    TEST_SECTION("backup_import_apply -- a zone relay_mask that claims a relay an enabled aux output owns "
+                 "is refused and the WHOLE batch rolls back (nothing saved)");
+    reset_stub_state();
+    TEST_CHECK(zones_config_set_relay_mask(0, 0x01), "seed zone 0 relay_mask 0x01");
+    g_total_write_calls = 0;
+    g_fake_aux_enabled_mask = 0x04; /* relay 3 is an enabled aux output */
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"relay_mask\":4,"
+        "\"settings_source\":255}]}";
+    char err[200];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    printf("    refusal: %s\n", ok ? "(none)" : err);
+    TEST_CHECK(g_total_write_calls > 0, "control: the import reached the commit loop (not a pass-1 refusal)");
+    TEST_CHECK(!ok, "zone claiming an aux-owned relay is refused");
+    TEST_CHECK(strstr(err, "aux") != NULL, "refusal names the aux conflict");
+    TEST_CHECK(s_writes[0].relay_mask == 0x01, "zone 0 relay_mask rolled back to 0x01");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(!(zones_config_get_pid(0, &kp, &ki, &kd) && kp == 9.0f), "unrelated imported field rolled back too");
+    TEST_CHECK(g_settings_source_save_calls == 0, "no save on a refused batch");
+
+    /* Control: same import, aux owns a different relay -> accepted. */
+    reset_stub_state();
+    g_fake_aux_enabled_mask = 0x08;
+    ok = test_backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(ok, "control: disjoint aux mask imports");
+    TEST_CHECK(s_writes[0].relay_mask == 0x04, "control: relay_mask committed");
+    g_fake_aux_enabled_mask = 0;
 }
 
 static void test_backup_import_failure_restores_whole_batch_not_just_settings_source(void)
@@ -5154,6 +5195,7 @@ void run_test_backup_import(void)
     test_settings_source_commit_failure_restores_pre_import_values();
     test_backup_import_batched_save_fires_exactly_once();
     test_backup_import_failure_restores_whole_batch_not_just_settings_source();
+    test_backup_import_refuses_zone_relay_claimed_by_aux();
     test_backup_import_success_tracks_pico_ceiling_down_to_new_max();
     test_backup_import_rollback_tracks_pico_ceiling_back_to_restored_max();
 

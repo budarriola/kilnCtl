@@ -11,12 +11,13 @@
 # comment-stripped text calls zones_config_set_relay_mask[_no_save](),
 # zones_config_import_blob(), zones_config_restore_snapshot_no_save(), or
 # assigns a `.relay_mask =` / `->relay_mask =` field, and FAILS if the file is
-# not on the allowlist below. An allowlist reason starting with PENDING-WP2: marks
-# a path that is NOT yet covered (zones_config_json_validate is not called on it);
-# the check prints a WARN for each and WP-2 must add the explicit conflict check
-# there and delete the marker. A new entry needs a reviewed reason that the
-# path is covered by zones_config_json_validate()'s aux hook (or is not a
-# persistent authority).
+# not on the allowlist below. A new entry needs a reviewed reason that the path is
+# covered by zones_config_json_validate()'s aux hook (or is not a persistent
+# authority). The paths that commit a zones_cfg_t WITHOUT calling validate
+# (POST /api/zones, backup import) are listed in $mustCall below: the check also
+# FAILS unless each of those files still calls the explicit aux conflict helper
+# (zones_config_json_aux_conflict_mask / _aux_enabled_mask), so deleting the
+# explicit check can no longer pass silently.
 #
 # Exit: 0 PASS, 1 FAIL. Usage:
 #   powershell -ExecutionPolicy Bypass -File tools\check_aux_relay_conflict_sites.ps1 [-AppDir <path>]
@@ -28,14 +29,21 @@ $AppDir = (Resolve-Path $AppDir).Path
 
 $allow = @{
     'zones_config_accessors.c'            = 'defines the setters/import/restore; validated by zones_config_json_validate on commit'
-    'zones_http_post_parse.c'             = 'PENDING-WP2: NOT yet covered: WP-2 must add an explicit aux-conflict check; validate is not called on this path (POST /api/zones assigns s_zones.cfg = tmp without zones_config_json_validate)'
-    'backup_import.c'                     = 'PENDING-WP2: NOT yet covered: WP-2 must add an explicit aux-conflict check; validate is not called on this path (zones_config_set_relay_mask_no_save / restore_snapshot_no_save do not validate)'
+    'zones_http_post_parse.c'             = 'per-zone field parse only; the commit in zones_http_post.c runs the explicit aux conflict check (see $mustCall)'
+    'backup_import.c'                     = 'explicit post-batch aux conflict check with whole-batch rollback (see $mustCall); the _no_save setters do not validate'
     'kiln_cfg_store.c'                    = 'kiln package apply; whole-blob commit via zones_config_import_blob (validated)'
     'kiln_cfg_swap.c'                     = 'kiln package swap; whole-blob commit via zones_config_import_blob (validated)'
     'zones_config_convert.c'              = 'version-to-version struct copies, not a commit authority'
     'zones_config_migrate.c'              = 'NVS migration copy, loaded blob re-validated on load'
     'profile_executor_config_reload.c'    = 'runtime cache of an already-validated mask, not persistent'
     'profile_executor_run.c'              = 'runtime cache of an already-validated mask, not persistent'
+}
+
+# Files that commit zone relay masks without zones_config_json_validate(): each must call
+# the explicit aux conflict helper. Path -> required call (regex).
+$mustCall = @{
+    'zones_http_post.c' = 'zones_config_json_aux_conflict_mask\s*\('
+    'backup_import.c'   = 'zones_config_json_aux_enabled_mask\s*\('
 }
 
 function Strip-Comments([string]$t) {
@@ -62,8 +70,17 @@ if ($bad.Count -gt 0) {
     Write-Host "Review against the aux conflict invariant, then add to the allowlist with a reason."
     exit 1
 }
-$pend = @($hit.Keys | Where-Object { $allow[$_] -like 'PENDING-WP2:*' } | Sort-Object)
-foreach ($p in $pend) { Write-Host "WARN: $p is allowlisted as PENDING-WP2 -- aux conflict NOT enforced on this path yet" }
-if ($pend.Count -gt 0) { Write-Host "PASS-WITH-WARNINGS: $($hit.Count) writer file(s) allowlisted, $($pend.Count) uncovered pending WP-2"; exit 0 }
-Write-Host "PASS: $($hit.Count) writer file(s), all allowlisted"
+$missing = @()
+foreach ($k in $mustCall.Keys) {
+    $f = $files | Where-Object { $_.Name -eq $k } | Select-Object -First 1
+    if (-not $f) { $missing += "$k (file not found)"; continue }
+    $src = Strip-Comments ([IO.File]::ReadAllText($f.FullName))
+    $rx = [string]$mustCall[$k]
+    if (-not [regex]::IsMatch($src, $rx)) { $missing += "$k (no call matching $rx)" }
+}
+if ($missing.Count -gt 0) {
+    foreach ($m in $missing) { Write-Host "FAIL: explicit aux conflict check missing: $m" }
+    exit 1
+}
+Write-Host "PASS: $($hit.Count) writer file(s), all allowlisted; $($mustCall.Count) explicit aux checks present"
 exit 0

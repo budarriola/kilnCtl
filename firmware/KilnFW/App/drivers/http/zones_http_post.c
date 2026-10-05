@@ -401,6 +401,26 @@ static esp_err_t zones_post_body(httpd_req_t *req)
         }
     }
 
+    /* Spare-relay aux conflict (docs/SPARE_RELAY_ONOFF_PLAN.md WP-2): this handler
+     * commits `s_zones.cfg = tmp` below WITHOUT calling zones_config_json_validate(),
+     * so the aux hook that validate carries never runs here -- the check must be
+     * explicit. A zone may not claim a relay an ENABLED aux output owns. 409, the
+     * same "refused, nothing changed" status the mode gate uses; tmp is a scratch
+     * copy so nothing has been touched yet. Runs against the fully assembled
+     * `tmp` (preserved slots included), before any Pico ceiling write. */
+    {
+        uint8_t aux_conflict = zones_config_json_aux_conflict_mask(&tmp);
+        if (aux_conflict != 0) {
+            ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: relay mask 0x%02X is owned by an aux output",
+                     (unsigned)aux_conflict);
+            httpd_resp_set_status(req, "409 Conflict");
+            httpd_resp_sendstr(req, "a zone relay_mask claims a relay an aux (spare-relay) output already owns -- "
+                                    "disable that aux output first");
+            free(body);
+            return ESP_OK;
+        }
+    }
+
     /* Owner request 2026-09-10 ("if i change the max temp in the web gui it
      * should change it in the pico too."): the Pico's own independent
      * abs_max_temp_c ceiling must never end up TIGHTER than the highest

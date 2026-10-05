@@ -74,6 +74,7 @@ void run_test_backlight_pwm(void);
 void run_test_display_power_policy(void);
 void run_test_display_power_cfg(void);
 void run_test_aux_outputs_store(void);
+void run_test_aux_outputs_http(void);
 void run_test_setup_wizard_progress(void);
 void run_test_display_power_wiring(void);
 void run_test_diagnostics_safety_tc_state(void);
@@ -199,6 +200,7 @@ int main(void)
     run_test_display_power_policy();
     run_test_display_power_cfg();
     run_test_aux_outputs_store();
+    run_test_aux_outputs_http();
     run_test_setup_wizard_progress();
     run_test_display_power_wiring();
     run_test_diagnostics_safety_tc_state();

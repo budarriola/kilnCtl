@@ -2652,6 +2652,31 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * door immediately after. has_safety_tc/dsafety are still parsed and
      * range-checked above so an out-of-range value in an old backup still
      * fails the import loudly, rather than being silently ignored. */
+    /* Spare-relay aux conflict (docs/SPARE_RELAY_ONOFF_PLAN.md WP-2): the _no_save()
+     * setters above never run zones_config_json_validate(), so its aux hook did not
+     * see the relay_masks this batch just wrote. Check the post-loop live config
+     * explicitly and roll the whole batch back (RAM only so far -- nothing has been
+     * persisted) rather than save a config where a zone and an enabled aux output
+     * own the same relay. Reads per-zone masks through the getter (no second
+     * zones_cfg_t on this stack; zones_snapshot above is already one). */
+    if (zone_candidate_count > 0) {
+        uint8_t zones_union = 0;
+        for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+            uint8_t zmask = 0;
+            if (zones_config_get_relay_mask(zi, &zmask)) {
+                zones_union |= zmask;
+            }
+        }
+        uint8_t aux_conflict = (uint8_t)(zones_union & zones_config_json_aux_enabled_mask());
+        if (aux_conflict != 0) {
+            zones_config_restore_snapshot_no_save(&zones_snapshot);
+            snprintf(err_msg, err_cap,
+                     "zone relay_mask claims relay mask 0x%02X that an aux (spare-relay) output already owns -- "
+                     "disable that aux output first",
+                     (unsigned)aux_conflict);
+            return false;
+        }
+    }
     long long setter_loop_elapsed_ms = (long long)((hal_time_now_us() - setter_loop_start_us) / 1000u);
     ESP_LOGI(BACKUP_TAG,
             "backup import: setter loop (%u timing profiles, %u zones) took %lld ms",

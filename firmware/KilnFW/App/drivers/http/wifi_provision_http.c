@@ -1199,8 +1199,12 @@ esp_err_t wifi_provision_http_start(void)
      * (GET /api/iter_tune/status, POST /api/iter_tune/restore_commissioned,
      * ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7), which would have left only 5
      * spare against the 165 cap. Set to 170 for the same ~9-slot headroom
-     * convention as every bump above. */
-    config.max_uri_handlers = 170;
+     * convention as every bump above.
+     *
+     * Bumped 170 -> 175, 2026-10-04: aux_outputs_http.c added three routes (GET/POST
+     * /api/aux_outputs, POST /api/aux_outputs/manual, SPARE_RELAY_ONOFF_PLAN.md WP-2),
+     * leaving 4 spare against 170. Set to 175 for the same ~9-slot headroom convention. */
+    config.max_uri_handlers = 175;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

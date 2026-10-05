@@ -392,9 +392,11 @@ static const char *s_test_post_body = NULL;
 static bool s_test_err_called = false;
 static char s_test_err_msg[256];
 static bool s_test_ok_called = false;
+static char s_test_last_status[48]; /* last httpd_resp_set_status() text; "" if none this request */
 
 static void test_post_hooks_reset(void)
 {
+    s_test_last_status[0] = '\0';
     s_test_post_body = NULL;
     s_test_err_called = false;
     s_test_err_msg[0] = '\0';
@@ -415,7 +417,7 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
     (void)r;
-    (void)status;
+    snprintf(s_test_last_status, sizeof(s_test_last_status), "%s", status ? status : "");
     return ESP_OK;
 }
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
@@ -1727,6 +1729,50 @@ static void seed_two_zone_pid_baseline(void)
      * because of it. */
     run_zones_post(TWO_ZONE_MINIMAL_BODY("255", "255"));
     TEST_CHECK(!s_test_err_called, "baseline seed must itself be accepted");
+}
+
+// Spare-relay aux ownership (docs/SPARE_RELAY_ONOFF_PLAN.md WP-2): POST /api/zones does not call
+// zones_config_json_validate(), so zones_http_post.c runs its own explicit aux conflict check.
+static uint8_t s_test_aux_mask = 0;
+static uint8_t test_aux_provider(void)
+{
+    return s_test_aux_mask;
+}
+
+static void test_zones_post_refuses_relay_claimed_by_aux(void)
+{
+    TEST_SECTION("POST /api/zones -- a zone relay_mask claiming a relay an enabled aux output owns is "
+                 "refused with 409 and nothing is committed");
+    seed_two_zone_pid_baseline();
+    zones_config_json_set_aux_enabled_provider(test_aux_provider);
+    uint8_t mask1_before = 0;
+    TEST_CHECK(zones_config_get_relay_mask(1, &mask1_before) && mask1_before == 0x02, "baseline: zone 1 owns relay 2");
+
+    char body[1400];
+    snprintf(body, sizeof(body), "%s", TWO_ZONE_MINIMAL_BODY("255", "255"));
+    char *p = strstr(body, "z1_relay_mask=2");
+    TEST_CHECK(p != NULL, "test setup: found zone 1's relay_mask field");
+    if (p != NULL) {
+        p[strlen("z1_relay_mask=")] = '4'; /* zone 1 now claims relay 3 */
+    }
+
+    s_test_aux_mask = 0x04; /* relay 3 is an enabled aux output */
+    run_zones_post(body);
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "conflicting submit is answered 409");
+    TEST_CHECK(strstr(s_last_resp_body, "aux") != NULL, "refusal names the aux conflict");
+    uint8_t mask1 = 0;
+    TEST_CHECK(zones_config_get_relay_mask(1, &mask1) && mask1 == 0x02, "zone 1 relay_mask untouched by the refused submit");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+
+    s_test_aux_mask = 0x08; /* control: aux owns relay 4 -> same body is fine */
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called && strncmp(s_test_last_status, "409", 3) != 0,
+               "control: disjoint aux mask accepted");
+    TEST_CHECK(zones_config_get_relay_mask(1, &mask1) && mask1 == 0x04, "control: relay_mask committed");
+
+    s_test_aux_mask = 0;
+    zones_config_json_set_aux_enabled_provider(NULL);
+    seed_two_zone_pid_baseline();
 }
 
 static void test_zones_pid_post_refused_while_profile_running(void)
@@ -15738,6 +15784,7 @@ void run_test_zones_http(void)
     // test_safety_cfg_http.c -- once admitted here, http_async_job_busy()
     // reads true for the rest of this executable.
     test_zones_post_http_sync_claim();
+    test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refused_while_async_job_busy();
 }
 

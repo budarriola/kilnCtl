@@ -66,6 +66,7 @@
 #include "uart_owner.h"
 #include "uart_protocol.h"
 #include "kiln_cfg_http.h"
+#include "aux_outputs_http.h"
 #include "safety_cfg_http.h"
 #include "ct_leak_alarm_service.h"
 #include "safety_stack_margin_http.h"
@@ -759,6 +760,20 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         ESP_LOGW(MAIN_TAG, "kiln_cfg_store_init failed: %s -- saved kiln configs unavailable this boot",
                  esp_err_to_name(kiln_cfg_store_err));
         startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
+    }
+    /* Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md WP-2). MUST run AFTER
+     * kiln_cfg_store_init() just above: that call re-imports the active kiln package and
+     * can change zone relay_masks, and the aux store reconciles itself against the zones
+     * union at load. relay_names_load()/zones_http_start() are too early (union still 0).
+     * It also registers the zones-validate aux provider, so that import can never fail
+     * (and clear the active package id) over a conflict the reconcile has not yet
+     * resolved. A route-registration failure is non-fatal: the store and provider are
+     * already live, only the three /api/aux_outputs routes 404 this boot. */
+    esp_err_t aux_outputs_err = aux_outputs_http_start();
+    if (aux_outputs_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "aux_outputs_http_start failed: %s -- no /api/aux_outputs routes this boot",
+                 esp_err_to_name(aux_outputs_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
     /* docs/KILN_PROFILES_PLAN.md item 5 / section 4.4. Boot recovery for an
      * interrupted two-processor swap is NOT called here -- it runs as the

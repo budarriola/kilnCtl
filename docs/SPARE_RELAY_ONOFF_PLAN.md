@@ -434,6 +434,7 @@ earlier one merges.
   `test_aux_outputs_store.c`, check `check_aux_relay_conflict_sites.ps1`.
   Owns: those new files, `persist/zones_config_json.c` (validate hook only),
   `diagnostics_http.c` cfgfs item list, `check_*` script.
+- **WP-2 DONE.** Added `aux_outputs_http.c/.h` and `aux_outputs_http_core.c/.h`: GET/POST `/api/aux_outputs` and POST `/api/aux_outputs/manual` (all ADMIN tier; 166 of 175 URI slots, cap bumped 170 to 175). The pure core decides mode gate 409, field 400, quarantine 409, zone-claims-relay 409. The manual toggle is idle-only and refuses 409 mid-run via `system_mode_gate`. `POST /api/zones` and `backup_import` carry explicit aux conflict checks (`zones_config_json_aux_conflict_mask`, `zones_config_json_aux_enabled_mask`), and the zones validate provider is registered after `kiln_cfg_store_init`. PENDING-WP2 markers are removed. Not done: the `kiln_cfg_swap.c` pre-check was skipped. WP-3 hand-off: a firing start must hand aux control to the profile rule, and a run end must turn aux off; the manual route only refuses mid-run today.
 - **WP-2 HTTP + zones write paths (M).** Also the manual aux toggle's route/mode-gate check (Q5). `zones_http_post_parse.c`,
   `zones_http_get.c`, `zones_http_internal.h`, conflict hooks in
   `backup_import.c`, `kiln_cfg_swap.c`, `load_config_preset` path; json_cap

@@ -215,6 +215,23 @@ void zones_config_json_set_aux_enabled_provider(zones_aux_enabled_mask_fn fn)
     s_aux_enabled_provider = fn;
 }
 
+uint8_t zones_config_json_aux_enabled_mask(void)
+{
+    return s_aux_enabled_provider != NULL ? s_aux_enabled_provider() : 0u;
+}
+
+uint8_t zones_config_json_aux_conflict_mask(const zones_cfg_t *cfg)
+{
+    if (cfg == NULL) {
+        return 0u;
+    }
+    uint8_t zones_union = 0;
+    for (uint8_t zi = 0; zi < cfg->thermo_count && zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zones_union |= cfg->zones[zi].relay_mask;
+    }
+    return aux_outputs_relay_conflict_mask(zones_union, zones_config_json_aux_enabled_mask());
+}
+
 /* Validates every field of `cand` -- a fully migrated, CURRENT-version
  * zones_cfg_t -- against the exact bounds parse_zone_fields()/
  * zones_config_set_*() enforce on a live POST. Used only by

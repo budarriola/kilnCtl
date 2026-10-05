@@ -305,6 +305,8 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # file map.
                        "http/dashboard_status_http.c"
                        "http/dashboard_settings_http.c"
+                       "http/aux_outputs_http.c"
+                       "http/aux_outputs_http_core.c"
                        "http/dashboard_exec_http.c"
                        "http/dashboard_autotune_http.c"
                        "http/dashboard_json.c"
