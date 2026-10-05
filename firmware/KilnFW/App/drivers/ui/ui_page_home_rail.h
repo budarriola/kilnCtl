@@ -46,6 +46,19 @@ static inline bool ui_page_home_kiln_suffix_visible(uint8_t config_count)
     return config_count >= 2;
 }
 
+/* Relay pill state (spare-relay WP-6). A pill is lit only when the relay
+ * board read is good AND the relay is on -- a failed/absent read never lights
+ * a pill from a stale shadow. */
+bool ui_page_home_rail_pill_on(bool io_ok, bool relay_on);
+
+/* The short caption an AUX-bound relay's pill carries ("A1".."A4", relay
+ * 1-based like the profile editor's relay labels), or "" for a relay that is
+ * not an enabled aux output (zone relays stay colour-only, as before).
+ * aux_enabled_mask is dashboard_status_t.aux_enabled_mask (bit = relay-1);
+ * relay_idx is 0-based. Never NULL; the pointer is static storage. The LCD
+ * shows STATE only -- no control is attached to a pill. */
+const char *ui_page_home_rail_aux_caption(uint8_t aux_enabled_mask, uint32_t relay_idx);
+
 /* Clamps a duty fraction (0.0..1.0, but may arrive out of range from a
  * stale/degenerate snapshot) to an integer percent in [0, 100]. NaN maps to
  * 0 (never a garbage percent on screen). */

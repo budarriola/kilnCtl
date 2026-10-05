@@ -610,6 +610,17 @@ bool profile_executor_zone_is_active(uint8_t zone_index)
     return active;
 }
 
+uint8_t profile_executor_aux_claim_mask(void)
+{
+    if (s_exec.lock == NULL) {
+        return 0;
+    }
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    uint8_t mask = s_exec.aux_claim_mask;
+    xSemaphoreGive(s_exec.lock);
+    return mask;
+}
+
 bool profile_executor_get_active_id(uint8_t *out_id)
 {
     /* Narrow sibling of profile_executor_get_status() for callers that only

@@ -717,6 +717,11 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     STATUS_APPEND("]");
     STATUS_APPEND(",\"io_read_failed\":true");
 
+    /* Spare-relay WP-6: the REAL dashboard_json_append_aux() (not a copy), worst
+     * case = all 4 enabled, unclaimed and ON ("manual" is the widest source
+     * and needs ON, "true"+"manual" beats "false"+"rule"/"off"). */
+    if (!dashboard_json_append_aux(json, cap, &o, 0x0Fu, 0x00u, 0x0Fu)) { return false; }
+
     STATUS_APPEND(",\"relay_cycles\":[");
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
         STATUS_APPEND("%s%lu", r == 0 ? "" : ",", (unsigned long)0xFFFFFFFFu);
@@ -1375,12 +1380,47 @@ static void test_diag_json_mutation_field_creep_goes_red(void)
               "vacuous");
 }
 
+/* Spare-relay WP-6: /api/status "aux" block. */
+static void test_status_aux_block_content_and_source(void)
+{
+    TEST_SECTION("dashboard_json_append_aux -- one object per ENABLED aux only, source = rule when "
+                 "claimed, manual when unclaimed+ON, off when unclaimed+OFF");
+    char buf[256];
+    size_t o = 0;
+    buf[0] = '\0';
+    TEST_CHECK(dashboard_json_append_aux(buf, sizeof(buf), &o, 0x00u, 0x00u, 0x0Fu), "no aux enabled renders");
+    TEST_CHECK(strcmp(buf, ",\"aux\":[]") == 0, "no aux enabled: empty array, a relay that is ON is not listed");
+
+    o = 0;
+    /* aux 1 enabled+off, aux 2 enabled+on unclaimed, aux 3 enabled+on claimed, aux 4 disabled+on */
+    TEST_CHECK(dashboard_json_append_aux(buf, sizeof(buf), &o, 0x07u, 0x04u, 0x0Eu), "mixed renders");
+    TEST_CHECK(strcmp(buf, ",\"aux\":[{\"relay\":1,\"on\":false,\"source\":\"off\"},"
+                           "{\"relay\":2,\"on\":true,\"source\":\"manual\"},"
+                           "{\"relay\":3,\"on\":true,\"source\":\"rule\"}]") == 0,
+              "mixed: exact per-aux relay/on/source, disabled relay 4 omitted");
+    TEST_CHECK(o == strlen(buf), "returned offset matches the rendered length");
+
+    o = 0;
+    TEST_CHECK(dashboard_json_append_aux(buf, sizeof(buf), &o, 0x01u, 0x01u, 0x00u), "claimed-off renders");
+    TEST_CHECK(strstr(buf, "{\"relay\":1,\"on\":false,\"source\":\"rule\"}") != NULL,
+              "claimed but OFF is still source rule (the evaluator owns it)");
+
+    /* too small: refuses, restores the terminator at the entry offset */
+    char tiny[24];
+    strcpy(tiny, "{x");
+    o = 2;
+    TEST_CHECK(!dashboard_json_append_aux(tiny, sizeof(tiny), &o, 0x0Fu, 0x00u, 0x0Fu),
+              "a block that does not fit reports failure");
+    TEST_CHECK(o == 2 && strcmp(tiny, "{x") == 0, "failure leaves the prior document intact");
+}
+
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
     test_control_status_json_is_complete_and_well_formed_at_3_zones();
     test_exec_status_json_is_complete_and_well_formed_at_3_zones();
     test_exec_status_json_carries_aux_array();
+    test_status_aux_block_content_and_source();
     test_truncation_is_logged_and_still_produces_valid_json();
     test_json_append_clamped_never_walks_past_cap();
     test_heap_allocated_worst_case_render_matches_stack_sizing();

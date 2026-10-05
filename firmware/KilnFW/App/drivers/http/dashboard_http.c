@@ -27,6 +27,7 @@
 #include "thermo_owner.h" /* thermo_owner_command_read_all() -- see the status/refresh readings block below */
 #include "ota_http.h" /* ota_http_heat_blocked_by_update() -- see the ERR_UPDATING case below */
 #include "profile_executor.h"
+#include "aux_outputs_cfg.h" /* aux_outputs_cfg_enabled_mask() -- dashboard_status_t.aux_enabled_mask */
 #include "profile_feasibility.h" /* profile_feasibility_plan_curve() -- the duration model, see below */
 #include "profiles_http.h" /* profiles_http_get() -- /api/profile_plan, see that handler below */
 #include "relay_authority.h"
@@ -165,6 +166,12 @@ void dashboard_get_status(dashboard_status_t *out)
         }
         out->io_read_failed = (err != ESP_OK);
     }
+
+    /* Spare-relay WP-6: aux on/off source inputs. Two narrow reads (RAM masks,
+     * each under its own module's brief lock, no producer call), never the
+     * full profile_exec_status_t. */
+    out->aux_enabled_mask = aux_outputs_cfg_enabled_mask();
+    out->aux_claim_mask = profile_executor_aux_claim_mask();
 
     /* Lifetime contact-cycle count per relay (TODO.md 6A.1). Reported even
      * with no expander attached: it is persisted history, not live hardware

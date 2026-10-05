@@ -4,6 +4,20 @@
 #include <stdio.h>
 #include <string.h>
 
+bool ui_page_home_rail_pill_on(bool io_ok, bool relay_on)
+{
+    return io_ok && relay_on;
+}
+
+const char *ui_page_home_rail_aux_caption(uint8_t aux_enabled_mask, uint32_t relay_idx)
+{
+    static const char *const k_caption[4] = {"A1", "A2", "A3", "A4"};
+    if (relay_idx >= 4u || !(aux_enabled_mask & (1u << relay_idx))) {
+        return "";
+    }
+    return k_caption[relay_idx];
+}
+
 int ui_page_home_rail_duty_pct(float duty_fraction)
 {
     if (isnan(duty_fraction)) {

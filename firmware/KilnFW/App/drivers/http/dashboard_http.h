@@ -542,6 +542,18 @@ typedef struct {
      * notice. Clears once the format completes. */
     bool        cfg_fs_format_pending;
     const char *cfg_fs_format_reason;
+
+    /* Spare-relay WP-6: bit (relay-1). aux_enabled_mask is
+     * aux_outputs_cfg_enabled_mask() (the EFFECTIVE mask: a conflicted or
+     * quarantined entry reads disabled); aux_claim_mask is the relays a
+     * running profile has taken over (profile_executor_aux_claim_mask()),
+     * 0 while idle. Together with relay_on[] they give /api/status's "aux"
+     * block and the LCD rail's aux pills their on/off and source. Two bytes
+     * rather than a per-aux array on purpose: this struct is a stack local
+     * on the LVGL task (ui_page_home_refresh.c), whose stack budget has no
+     * headroom. */
+    uint8_t aux_enabled_mask;
+    uint8_t aux_claim_mask;
 } dashboard_status_t;
 
 void dashboard_get_status(dashboard_status_t *out);

@@ -28,6 +28,51 @@ static inline double bd_finite_or_zero(double v)
     return isfinite(v) ? v : 0.0;
 }
 
+uint8_t dashboard_aux_source(bool claimed, bool on)
+{
+    if (claimed) return DASHBOARD_AUX_SOURCE_RULE;
+    return on ? DASHBOARD_AUX_SOURCE_MANUAL : DASHBOARD_AUX_SOURCE_OFF;
+}
+
+const char *dashboard_aux_source_str(uint8_t source)
+{
+    switch (source) {
+    case DASHBOARD_AUX_SOURCE_RULE:   return "rule";
+    case DASHBOARD_AUX_SOURCE_MANUAL: return "manual";
+    default:                          return "off";
+    }
+}
+
+bool dashboard_json_append_aux(char *json, size_t cap, size_t *o, uint8_t enabled_mask, uint8_t claim_mask,
+                               uint8_t on_mask)
+{
+    size_t start = *o;
+    size_t w = start;
+    bool first = true;
+    int n = snprintf(json + w, cap - w, ",\"aux\":[");
+    if (n < 0 || (size_t)n >= cap - w) goto overflow;
+    w += (size_t)n;
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(enabled_mask & bit)) continue;
+        bool on = (on_mask & bit) != 0;
+        n = snprintf(json + w, cap - w, "%s{\"relay\":%u,\"on\":%s,\"source\":\"%s\"}", first ? "" : ",",
+                     (unsigned)i + 1u, on ? "true" : "false",
+                     dashboard_aux_source_str(dashboard_aux_source((claim_mask & bit) != 0, on)));
+        if (n < 0 || (size_t)n >= cap - w) goto overflow;
+        w += (size_t)n;
+        first = false;
+    }
+    n = snprintf(json + w, cap - w, "]");
+    if (n < 0 || (size_t)n >= cap - w) goto overflow;
+    *o = w + (size_t)n;
+    return true;
+
+overflow:
+    json[start] = '\0';
+    return false;
+}
+
 size_t json_append_clamped(char *json, size_t cap, size_t o, const char *fmt, ...)
 {
     if (o > cap - 1) {

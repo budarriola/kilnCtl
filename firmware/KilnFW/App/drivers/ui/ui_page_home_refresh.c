@@ -9,6 +9,7 @@
 #include "ui_page_home_internal.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #include "esp_heap_caps.h"
 #include "relay_cycles.h"
@@ -988,9 +989,17 @@ void ui_home_profile_label_refresh(const profile_exec_status_t *st)
 void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_status_t *st)
 {
     for (uint32_t i = 0; i < KILN_IO_RELAY_COUNT; i++) {
-        bool on = ds->io_ready && !ds->io_read_failed && ds->relay_on[i];
+        bool on = ui_page_home_rail_pill_on(ds->io_ready && !ds->io_read_failed, ds->relay_on[i]);
         lv_obj_set_style_bg_color(s_ui_home_rail_relay_pill[i],
                                    on ? UI_THEME_ACCENT_4 : UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        /* Spare-relay WP-6: aux-bound relays carry an "A<n>" caption (state
+         * only, no control). Written only on change so a steady state never
+         * invalidates the pill. */
+        lv_obj_t *cap_lbl = lv_obj_get_child(s_ui_home_rail_relay_pill[i], 0);
+        const char *cap_txt = ui_page_home_rail_aux_caption(ds->aux_enabled_mask, i);
+        if (cap_lbl != NULL && strcmp(lv_label_get_text(cap_lbl), cap_txt) != 0) {
+            lv_label_set_text(cap_lbl, cap_txt);
+        }
     }
 
     for (uint32_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {

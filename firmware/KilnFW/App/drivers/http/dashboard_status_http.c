@@ -372,6 +372,22 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         }
     }
 
+    /* Spare-relay WP-6: enabled aux outputs only, with source (rule/manual/off).
+     * Gated on io_ready like "relays" above; on mask is zero when the read failed,
+     * never a stale shadow. See dashboard_json_append_aux(). */
+    if (ds->io_ready) {
+        uint8_t on_mask = 0;
+        if (!ds->io_read_failed) {
+            for (uint8_t relay = 1; relay <= KILN_IO_RELAY_COUNT; relay++) {
+                if (ds->relay_on[relay - 1]) on_mask |= (uint8_t)(1u << (relay - 1));
+            }
+        }
+        if (!dashboard_json_append_aux(json, DASHBOARD_STATUS_JSON_BUF_SIZE, &o, ds->aux_enabled_mask,
+                                       ds->aux_claim_mask, on_mask)) {
+            goto truncated;
+        }
+    }
+
     APPEND(",\"relay_cycles\":[");
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
         APPEND("%s%lu", r == 0 ? "" : ",", (unsigned long)ds->relay_cycles[r]);

@@ -18,6 +18,21 @@ void run_test_ui_page_home_rail(void)
         TEST_CHECK(ui_page_home_kiln_suffix_visible(10) == true, "10 configs: visible");
     }
 
+    TEST_SECTION("ui_page_home_rail: pill_on / aux_caption (spare-relay WP-6)");
+    {
+        TEST_CHECK(ui_page_home_rail_pill_on(true, true) == true, "good read + on: lit");
+        TEST_CHECK(ui_page_home_rail_pill_on(true, false) == false, "good read + off: dark");
+        TEST_CHECK(ui_page_home_rail_pill_on(false, true) == false, "failed/absent read never lights a pill");
+
+        TEST_CHECK(strcmp(ui_page_home_rail_aux_caption(0x00, 0), "") == 0, "no aux: zone relay stays caption-free");
+        TEST_CHECK(strcmp(ui_page_home_rail_aux_caption(0x0F, 0), "A1") == 0, "relay 0 aux -> A1");
+        TEST_CHECK(strcmp(ui_page_home_rail_aux_caption(0x0F, 3), "A4") == 0, "relay 3 aux -> A4");
+        TEST_CHECK(strcmp(ui_page_home_rail_aux_caption(0x04, 1), "") == 0, "only the enabled relay is captioned");
+        TEST_CHECK(strcmp(ui_page_home_rail_aux_caption(0x04, 2), "A3") == 0, "bit 2 -> relay 2 -> A3");
+        TEST_CHECK(strcmp(ui_page_home_rail_aux_caption(0xFF, 4), "") == 0, "out-of-range relay index: empty");
+        TEST_CHECK(ui_page_home_rail_aux_caption(0x0F, 0) != NULL, "never NULL");
+    }
+
     TEST_SECTION("ui_page_home_rail: duty_pct");
     {
         TEST_CHECK(ui_page_home_rail_duty_pct(0.0f) == 0, "0.0 -> 0");

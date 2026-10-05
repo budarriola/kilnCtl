@@ -300,6 +300,42 @@ static void reset_fake_status_with_known_build_identity(void)
     strncpy(s_fake_status.fw_build, "Sep 17 2026 00:00:00", sizeof(s_fake_status.fw_build) - 1);
 }
 
+static void test_status_emits_aux_block(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- spare-relay WP-6: GET /api/status carries the enabled "
+                 "aux outputs with on/off and source, and omits disabled ones");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_status.io_ready = true;
+    s_fake_status.relay_on[1] = true;  /* aux 2: manual ON */
+    s_fake_status.relay_on[2] = true;  /* aux 3: claimed by a run */
+    s_fake_status.relay_on[3] = true;  /* relay 4: NOT an aux -- must not appear */
+    s_fake_status.aux_enabled_mask = 0x07u;
+    s_fake_status.aux_claim_mask = 0x04u;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, ",\"aux\":[{\"relay\":1,\"on\":false,\"source\":\"off\"},"
+                                        "{\"relay\":2,\"on\":true,\"source\":\"manual\"},"
+                                        "{\"relay\":3,\"on\":true,\"source\":\"rule\"}]") != NULL,
+              "enabled aux outputs listed with on/source; disabled relay 4 omitted");
+
+    /* a failed relay read must not report a stale shadow as ON */
+    s_fake_status.io_read_failed = true;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (read failed)");
+    TEST_CHECK(strstr(s_last_resp_body, "{\"relay\":2,\"on\":false,\"source\":\"off\"}") != NULL,
+              "io_read_failed: aux reports off, never the stale shadow");
+
+    /* io not ready: no block at all */
+    reset_fake_status_with_known_build_identity();
+    s_fake_status.aux_enabled_mask = 0x0Fu;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (no io)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"aux\"") == NULL, "no relay board: no aux block");
+}
+
 static void test_status_web_auth_off_shows_build_identity(void)
 {
     TEST_SECTION("dashboard_status_get_handler -- web auth OFF (default/never-configured board): "
@@ -590,6 +626,7 @@ static void run_test_dashboard_status_http(void)
     test_status_cfg_fs_format_pending_field();
     test_status_touch_cal_supported_reports_each_state();
     test_status_web_auth_off_shows_build_identity();
+    test_status_emits_aux_block();
     test_status_unauthenticated_redacts_build_identity();
     test_status_user_session_redacts_build_identity();
     test_status_admin_session_gets_full_payload();

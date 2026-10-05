@@ -585,6 +585,12 @@ bool profile_executor_zone_is_active(uint8_t zone_index);
  * (e.g. uart_bridge_ext_control.c's bx_flash_worker handlers). */
 bool profile_executor_get_active_id(uint8_t *out_id);
 
+/* Spare-relay WP-6: bit (relay-1) set for every aux relay the current run has
+ * taken over (s_exec.aux_claim_mask), 0 when idle or before
+ * profile_executor_start(). Narrow, one brief lock, pure field read -- for
+ * /api/status and the LCD, which must not materialize a profile_exec_status_t. */
+uint8_t profile_executor_aux_claim_mask(void);
+
 /* docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: GET /api/profile/live's one locked
  * read of the live-edit-relevant slice of s_exec -- the run's identity/
  * segment position (meaningful only while active), and the last definitive

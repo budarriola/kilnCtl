@@ -1056,6 +1056,14 @@ lv_obj_t *ui_page_home_build(void)
         lv_obj_set_style_border_width(pill, 0, 0);
         lv_obj_set_style_radius(pill, 4, 0);
         lv_obj_set_style_pad_all(pill, 0, 0);
+        /* Spare-relay WP-6: an enabled aux output's pill carries a short
+         * "A<n>" caption (ui_page_home_rail_aux_caption()); empty for a zone
+         * relay, so those stay colour-only. Child 0 of the pill, centered. */
+        lv_obj_t *pill_cap = lv_label_create(pill);
+        lv_obj_set_style_text_color(pill_cap, UI_THEME_COLOR_BG, 0);
+        lv_obj_set_style_text_font(pill_cap, &lv_font_montserrat_10, 0);
+        lv_label_set_text(pill_cap, "");
+        lv_obj_center(pill_cap);
         s_ui_home_rail_relay_pill[i] = pill;
     }
 

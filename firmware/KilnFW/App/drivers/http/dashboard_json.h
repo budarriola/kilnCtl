@@ -177,7 +177,27 @@
  * 5376 -> 5504 (+128, same step convention as every prior bump here) rather
  * than shaving margin to the bone. Measured headroom at this size, per
  * test_dashboard_json.c's fill_worst_case_zone()-driven render: 201B. */
-#define DASHBOARD_JSON_STATUS_BUF_SIZE 5504
+#define DASHBOARD_JSON_STATUS_BUF_SIZE 5760
+
+/* Spare-relay WP-6: /api/status's `"aux":[...]` block, one object per ENABLED
+ * aux output (an empty array when none): `{"relay":N,"on":b,"source":"s"}`,
+ * relay 1-based (same numbering as /api/aux_outputs and /api/profile_exec's
+ * aux[]). source: "rule" while a profile run has claimed the relay (the
+ * evaluator owns it, on or off), "manual" for an unclaimed relay that is ON
+ * (the idle-only manual toggle), "off" for an unclaimed relay that is OFF.
+ * Worst case `{"relay":4,"on":false,"source":"manual"}` = 43B, x4 + 3
+ * separators + `,"aux":[` / `]` framing (9B) = 184B; dashboard_json.h's
+ * DASHBOARD_JSON_STATUS_BUF_SIZE grew 5504 -> 5760 (+256) to carry it.
+ * enabled_mask/claim_mask/on_mask: bit (relay-1). Pure -- no locks, no
+ * hardware. Returns false (with *o and the buffer's terminator restored to
+ * what they were on entry) if the block does not fit. */
+#define DASHBOARD_AUX_SOURCE_OFF    0u
+#define DASHBOARD_AUX_SOURCE_MANUAL 1u
+#define DASHBOARD_AUX_SOURCE_RULE   2u
+uint8_t dashboard_aux_source(bool claimed, bool on);
+const char *dashboard_aux_source_str(uint8_t source);
+bool dashboard_json_append_aux(char *json, size_t cap, size_t *o, uint8_t enabled_mask, uint8_t claim_mask,
+                               uint8_t on_mask);
 
 /* Escapes '"' and '\\' for JSON string embedding. Truncates (never writes
  * past out_cap, always NUL-terminates) rather than overflow -- src is
