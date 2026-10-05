@@ -153,7 +153,7 @@ try {
     Test-Mutant "noerase" @(, @("prog->stage_cleared = io->stage_erase(io->ctx, 0, STAGE_HEADER_SECTOR) == 0;",
                                 "prog->stage_cleared = true;"))
 
-    Write-Host "check_recovery_apply: PASS ($passCount assertions; negative-test mutants failed as required)"
+    Write-Host "check_recovery_apply: PASS ($passCount assertions; 19 negative-test mutants plus the real build failed or passed as required)"
     exit 0
 }
 finally {

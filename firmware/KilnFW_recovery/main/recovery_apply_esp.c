@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "esp_image_format.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -19,6 +20,9 @@ static const char *TAG = "recovery_apply";
 #define APPLY_TASK_STACK 8192
 #define APPLY_TASK_PRIO 4
 #define STAGE_LABEL "stage"
+// Same floor as the Pico relay (recovery_pico.c): free internal RAM that must
+// remain after the task stack is allocated.
+#define APPLY_INTERNAL_FLOOR 8192u
 
 typedef struct {
     const esp_partition_t *stage;
@@ -34,6 +38,10 @@ typedef struct {
 static apply_ctx_t s_ctx;
 static recovery_apply_progress_t s_prog;
 static uint8_t s_scratch[RECOVERY_APPLY_CHUNK];
+// Lowest free stack seen in the apply task, bytes (0 until the task has run).
+// The recovery image has no stack_margin API, so it is reported locally, like
+// recovery_io.c / recovery_lcd.c / recovery_pico.c do.
+static volatile uint32_t s_stack_free;
 static volatile bool s_running; // set before the task exists, cleared never (restart follows)
 
 static int cb_stage_read(void *c, uint32_t off, void *buf, size_t len)
@@ -130,6 +138,7 @@ static int cb_set_boot(void *c)
 static void cb_yield(void *c)
 {
     (void)c;
+    s_stack_free = (uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t);
     vTaskDelay(1); // let the idle task (and its watchdog) run during long hash/copy loops
 }
 
@@ -155,6 +164,9 @@ static void apply_task(void *arg)
     };
     ESP_LOGW(TAG, "apply staged update: stage -> app (%u bytes of app partition)", (unsigned)io.app_size);
     recovery_apply_result_t r = recovery_apply_run(&io, s_scratch, sizeof(s_scratch), &s_prog);
+    s_stack_free = (uint32_t)uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t);
+    ESP_LOGW(TAG, "apply task stack high-water: %u B free of %u", (unsigned)s_stack_free,
+             (unsigned)APPLY_TASK_STACK);
     if (r == RECOVERY_APPLY_OK) {
         ESP_LOGW(TAG, "apply ok (stage header %s); restarting into the application",
                  s_prog.stage_cleared ? "erased" : "NOT erased");
@@ -185,7 +197,11 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
     if (s_running) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < APPLY_INTERNAL_FLOOR + APPLY_TASK_STACK + 1024u) {
+        return ESP_ERR_NO_MEM; // nothing touched; the caller reports it
+    }
     s_running = true;
+    s_stack_free = 0;
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.stage = stage;
     s_ctx.app = app;
@@ -217,6 +233,11 @@ void recovery_apply_esp_status(recovery_apply_progress_t *out)
     out->total_bytes = s_prog.total_bytes;
     out->app_modified = s_prog.app_modified;
     out->stage_cleared = s_prog.stage_cleared;
+}
+
+uint32_t recovery_apply_esp_stack_free(void)
+{
+    return s_stack_free;
 }
 
 stage_hdr_status_t recovery_apply_esp_stage_info(stage_header_t *out)

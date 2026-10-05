@@ -24,7 +24,8 @@ idf_component_register(
         "recovery_passphrase.c"
         "recovery_hold.c"
         "recovery_health.c"
-    INCLUDE_DIRS "." "${APP_DRIVERS_DIR}/update" "${APP_DRIVERS_DIR}/http"
+    INCLUDE_DIRS "."
+    PRIV_INCLUDE_DIRS "${APP_DRIVERS_DIR}/update" "${APP_DRIVERS_DIR}/http"
     EMBED_FILES "recovery_page.html"
     REQUIRES
         esp_wifi

@@ -10,6 +10,7 @@
 #define RECOVERY_APPLY_ESP_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "esp_partition.h"
@@ -36,6 +37,9 @@ bool recovery_apply_busy(void);
 
 // Snapshot of the last apply's progress (phase IDLE if none ran this boot).
 void recovery_apply_esp_status(recovery_apply_progress_t *out);
+
+// Lowest free stack (bytes) the apply task has seen; 0 before it has run.
+uint32_t recovery_apply_esp_stack_free(void);
 
 // Decodes the stage header from flash. STAGE_HDR_OK fills *out; STAGE_HDR_BLANK
 // means nothing is staged; any other value is a damaged header; STAGE_HDR_BAD_ARG

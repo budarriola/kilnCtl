@@ -15,6 +15,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "recovery_apply_esp.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
 #include "recovery_passphrase.h"
@@ -59,6 +60,14 @@ static void on_shutdown(void)
 
 static void restart_image_for_wifi(void)
 {
+    // A staged-update apply is copying into `app` and restarting would cut it
+    // short (safe -- recovery stays bootable -- but it throws the copy away).
+    // The apply does not need the AP, so wait it out: on success the apply
+    // restarts the chip itself, on failure this restart proceeds as before.
+    // s_shutting_down stays false meanwhile so the AP_STOP is still a fault.
+    while (recovery_apply_busy()) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
     s_shutting_down = true;
     recovery_health_restart_for_wifi(); // counted in RTC_NOINIT, capped by the policy
 }

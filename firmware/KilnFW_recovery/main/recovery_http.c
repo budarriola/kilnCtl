@@ -944,18 +944,24 @@ static esp_err_t apply_status_get(httpd_req_t *req)
     recovery_apply_esp_status(&p);
     stage_header_t hdr;
     stage_hdr_status_t hs = recovery_apply_esp_stage_info(&hdr);
-    char body[384];
+    char body[640];
     int n = snprintf(body, sizeof(body),
                      "{\"phase\":\"%s\",\"result\":\"%s\",\"done_bytes\":%u,\"total_bytes\":%u,"
-                     "\"app_modified\":%s,\"stage_cleared\":%s,\"stage_header\":\"%s\"",
+                     "\"app_modified\":%s,\"stage_cleared\":%s,\"task_stack_free_bytes\":%u,\"stage_header\":\"%s\"",
                      recovery_apply_phase_name((recovery_apply_phase_t)p.phase),
                      recovery_apply_result_name((recovery_apply_result_t)p.result), (unsigned)p.done_bytes,
                      (unsigned)p.total_bytes, p.app_modified ? "true" : "false",
-                     p.stage_cleared ? "true" : "false", stage_hdr_status_name(hs));
+                     p.stage_cleared ? "true" : "false", (unsigned)recovery_apply_esp_stack_free(),
+                     stage_hdr_status_name(hs));
     if (n > 0 && n < (int)sizeof(body) && hs == STAGE_HDR_OK) {
+        char sha_hex[2 * STAGE_SHA256_LEN + 1];
+        for (size_t i = 0; i < STAGE_SHA256_LEN; i++) {
+            snprintf(sha_hex + 2 * i, 3, "%02x", hdr.sha256[i]);
+        }
         n += snprintf(body + n, sizeof(body) - (size_t)n,
-                      ",\"staged\":{\"state\":\"%s\",\"semver\":\"%s\",\"length\":%u,\"source\":\"%s\"}",
-                      stage_state_name(hdr.state), hdr.semver, (unsigned)hdr.image_length,
+                      ",\"staged\":{\"state\":\"%s\",\"semver\":\"%s\",\"commit\":\"%s\",\"sha256\":\"%s\","
+                      "\"length\":%u,\"source\":\"%s\"}",
+                      stage_state_name(hdr.state), hdr.semver, hdr.commit, sha_hex, (unsigned)hdr.image_length,
                       stage_source_str(hdr.source));
     }
     if (n <= 0 || n >= (int)sizeof(body) - 1) {

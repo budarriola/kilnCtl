@@ -20,6 +20,11 @@ progress{width:100%}
 <input id="f" type="file" accept=".bin"><br>
 <button id="up" onclick="upload()">Upload and boot</button>
 <progress id="pr" value="0" max="100"></progress><div id="pp"></div></fieldset>
+<fieldset id="apl"><h2>Apply staged update</h2>
+<div>Applies an image already uploaded and verified in the application's update stage. The board re-checks it, copies it over the application, verifies the copy, then restarts into it. The recovery image itself is never changed.</div>
+<pre id="ast">loading...</pre>
+<button id="abtn" onclick="applyStaged()">Apply staged update</button>
+<progress id="apr" value="0" max="100"></progress><div id="apw" class="w"></div></fieldset>
 <fieldset id="pico"><h2>Upload Pico firmware</h2>
 <div>Choose SaftyFW_slotA.bin or SaftyFW_slotB.bin. The board buffers the image, checks it, then writes it to the safety processor over its UART (a few minutes).</div>
 <input id="pf" type="file" accept=".bin"><br>
@@ -88,5 +93,32 @@ if(r.s==202){$("ppp").textContent="uploaded; Pico transfer running";ppoll()}
 else{$("pwarn").textContent=r.t;$("pup").disabled=false}},
 function(e){log(e.message);$("pup").disabled=false})}
 function picoAbort(){post("/api/recovery/pico/abort",null).then(function(r){log(r.s+" "+r.t);ppoll()},function(e){log(e.message)})}
-status();ppoll();
+var at=null;
+function ashow(j){var s=j.staged,t="";
+if(s)t="staged: "+s.state+", "+(s.semver||"no version")+", commit "+(s.commit||"unknown")+"\nsha256 "+s.sha256+"\n"+s.length+" bytes, source "+s.source;
+else t="nothing installable staged (stage header: "+j.stage_header+")";
+t+="\napply: "+j.phase+(j.phase=="failed"?" ("+j.result+")":"");
+var busy=j.phase=="checking"||j.phase=="copying"||j.phase=="verifying"||j.phase=="finalizing";
+if(j.total_bytes)t+=" "+j.done_bytes+"/"+j.total_bytes+" bytes";
+$("ast").textContent=t;
+if(j.total_bytes)$("apr").value=100*j.done_bytes/j.total_bytes;
+var w="";
+if(j.phase=="failed")w="Apply failed: "+j.result+"."+(j.app_modified?" The application slot was modified; do not exit recovery until a good image is applied or uploaded.":" The application slot was not modified.");
+if(j.phase=="done")w="Applied. The board is restarting into the new image; reload this page in a few seconds.";
+$("apw").textContent=w;
+$("abtn").disabled=busy||!(s&&s.state=="verified");
+return busy}
+function apoll(){if(at)clearTimeout(at);at=null;
+xhr("GET","/api/recovery/apply_status").then(function(r){var b=false;
+try{b=ashow(JSON.parse(r.t))}catch(e){$("ast").textContent=r.t}
+at=setTimeout(apoll,b?1000:5000)},
+function(e){$("apw").textContent="status unavailable ("+e.message+"). The board may be restarting after the apply; reload in a few seconds.";at=setTimeout(apoll,2000)})}
+function applyStaged(){
+if(!confirm("Overwrite the application with the staged image and restart? An interrupted apply is safe: the board returns to this recovery image."))return;
+$("abtn").disabled=true;$("apw").textContent="";
+post("/api/recovery/apply_staged",null).then(function(r){log(r.s+" "+r.t);
+if(r.s==409)$("apw").textContent="Busy: another operation (apply, Pico transfer or upload) is running. Try again when it finishes.";
+else if(r.s!=202)$("apw").textContent="Refused: "+r.t;
+apoll()},function(e){log(e.message);apoll()})}
+status();ppoll();apoll();
 </script></body></html>
