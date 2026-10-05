@@ -2202,6 +2202,19 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
     return true;
 }
 
+bool zones_config_reinstate_tuning_quality_no_save(uint8_t zone_index)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return false;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    if (!z->tuning_valid) {
+        z->tuning_valid = 1;
+        s_config_generation++;
+    }
+    return true;
+}
+
 bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
 {
     if (!zones_config_set_tuning_quality_no_save(zone_index, q)) {

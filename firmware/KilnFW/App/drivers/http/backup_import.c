@@ -297,6 +297,7 @@ typedef struct {
      * no accessor anywhere exposes it, so it cannot be restored; see the
      * backup round-trip report. */
     bool has_tuning_quality;
+    bool tuning_matches_pre_commit; /* file record == live record BEFORE any commit-loop setter ran */
     zone_tuning_quality_t tuning_quality;
     /* CT normals -- the owner's own named example. Not bundled with
      * anything; zone_normals_set() takes just the one amps value. */
@@ -2223,6 +2224,19 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * restore it first. */
     zones_cfg_t zones_snapshot;
     zones_config_get_full_copy(&zones_snapshot);
+    /* Judge "does the file's tuning record equal the live one" NOW, before
+     * the loop below runs. zones_config_set_pid_no_save() invalidates the
+     * zone's tuning record (tuning_valid = 0) on every gain change, so a
+     * compare made after it always reads "not valid" and a restore of an
+     * unchanged backup would re-commit the record and bump tuning_seq (and
+     * with it the active kiln_config's pkg_hash). 2026-10-05 bench finding:
+     * the earlier fix compared at commit time, after set_pid, and was inert
+     * on hardware. */
+    for (size_t i = 0; i < zone_candidate_count; i++) {
+        zone_candidate_t *zc = &zone_candidates[i];
+        zc->tuning_matches_pre_commit =
+            zc->has_tuning_quality && backup_tuning_quality_matches_live(zc->index, &zc->tuning_quality);
+    }
     bool relay_type_changed[MAX31856_CHANNEL_COUNT] = {0};
     uint64_t setter_loop_start_us = hal_time_now_us();
 
@@ -2522,8 +2536,17 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
         }
-        if (zc->has_tuning_quality && !backup_tuning_quality_matches_live(zc->index, &zc->tuning_quality) &&
-            !zones_config_set_tuning_quality_no_save(zc->index, &zc->tuning_quality)) {
+        if (zc->has_tuning_quality && zc->tuning_matches_pre_commit) {
+            /* Identical record: undo set_pid's invalidation only. Live floats
+             * and tuning_seq stay exactly as they were. */
+            if (!zones_config_reinstate_tuning_quality_no_save(zc->index)) {
+                snprintf(err_msg, err_cap,
+                        "zone tuning entry %u (channel %u) rejected at commit reinstating tuning quality",
+                        (unsigned)i, zc->index);
+                zones_config_restore_snapshot_no_save(&zones_snapshot);
+                return false;
+            }
+        } else if (zc->has_tuning_quality && !zones_config_set_tuning_quality_no_save(zc->index, &zc->tuning_quality)) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u (channel %u) rejected at commit setting tuning quality",
                     (unsigned)i, zc->index);

@@ -1316,6 +1316,19 @@ void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)
 // own pass 1 has already validated everything by the time pass 2 calls
 // these). ----
 
+/* Models zones_config_set_pid_no_save()'s unconditional tuning_valid = 0
+ * (zones_config_accessors.c) -- the real setter clears the record on EVERY
+ * gain change, which the earlier stub omitted and so let a commit-time
+ * "matches live" compare pass here while failing on hardware. */
+static void stub_invalidate_tuning_record(uint8_t zi)
+{
+    zone_tuning_quality_t cur;
+    if (zones_config_get_tuning_quality(zi, &cur) && cur.valid) {
+        cur.valid = false;
+        test_stub_zones_set_full_tuning_quality(zi, &cur);
+    }
+}
+
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
@@ -1323,6 +1336,7 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     s_writes[zone_index].kp = kp;
     s_writes[zone_index].ki = ki;
     s_writes[zone_index].kd = kd;
+    stub_invalidate_tuning_record(zone_index);
     g_total_write_calls++;
     return true;
 }
@@ -1333,6 +1347,7 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
     s_writes[zone_index].kp = kp;
     s_writes[zone_index].ki = ki;
     s_writes[zone_index].kd = kd;
+    stub_invalidate_tuning_record(zone_index);
     g_total_write_calls++;
     return true;
 }
@@ -1797,6 +1812,14 @@ bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quali
      * with it too, not just this observability copy. */
     test_stub_zones_set_full_tuning_quality(zone_index, q);
     g_total_write_calls++;
+    return true;
+}
+bool zones_config_reinstate_tuning_quality_no_save(uint8_t zone_index)
+{
+    zone_tuning_quality_t cur;
+    if (zone_index >= STUB_ZONE_COUNT || !zones_config_get_tuning_quality(zone_index, &cur)) return false;
+    cur.valid = true; /* no seq bump, no other field touched -- mirrors the real accessor */
+    test_stub_zones_set_full_tuning_quality(zone_index, &cur);
     return true;
 }
 bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuning_quality_t *q)
@@ -4617,6 +4640,62 @@ static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
 }
 
 // ---------------------------------------------------------------------------
+// 2026-10-05 bench round trip (kilnctl_backup_20261005T071413Z.json ->
+// import -> ...071420Z.json): the fix above was inert on hardware, zones 1 and
+// 2's tuning_seq still went 13 -> 14. Cause: the commit loop calls
+// zones_config_set_pid_no_save() (which sets tuning_valid = 0 on every gain
+// change) BEFORE the tuning compare, so the compare always saw an invalid live
+// record. The stubs now model that invalidation; this test uses the two real
+// zones' tuning blocks from that bench file, with live values at full float
+// precision, and requires seq unchanged AND the record valid afterwards.
+// ---------------------------------------------------------------------------
+static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
+{
+    TEST_SECTION("backup_import_apply -- identity round trip with the bench's real tuning blocks "
+                 "(zones 1 and 2): tuning_seq unchanged, record still valid after set_pid's invalidation");
+    reset_stub_state();
+
+    static const struct { float base, amb, raw, inf; } bench[2] = {
+        { 36.3667f, 37.0f, 15.5333f, 16.1982f },
+        { 35.3281f, 36.1562f, 16.5719f, 16.9253f },
+    };
+    for (uint8_t zi = 1; zi <= 2; zi++) {
+        zone_tuning_quality_t q;
+        memset(&q, 0, sizeof(q));
+        q.valid = true;
+        q.method = 0;
+        q.rule = 0;
+        q.settled = true;
+        q.extrapolation_converged = true;
+        q.tau_consistent = true;
+        q.baseline_c = bench[zi - 1].base;
+        q.step_ambient_c = bench[zi - 1].amb;
+        q.raw_rise_c = bench[zi - 1].raw;
+        q.rise_inf_c = bench[zi - 1].inf;
+        zones_config_set_pid(zi, 1.0f, 0.0f, 0.0f);
+        TEST_CHECK(zones_config_set_tuning_quality(zi, &q), "seed tuning record");
+    }
+    zones_config_set_pid(0, 1.0f, 0.0f, 0.0f);
+    for (uint8_t zi = 1; zi <= 2; zi++) {
+        /* seeded after set_pid so the record is valid going into the export */
+        TEST_CHECK(s_writes[zi].tuning_seq == 1, "seeded once");
+    }
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    char import_err[256];
+    TEST_CHECK(test_backup_import_apply(s_export_body, import_err, sizeof(import_err)),
+              "importing the unchanged export must succeed");
+    for (uint8_t zi = 1; zi <= 2; zi++) {
+        zone_tuning_quality_t after;
+        TEST_CHECK(zones_config_get_tuning_quality(zi, &after) && after.valid,
+                  "tuning record is valid again after the restore (set_pid invalidated it mid-commit)");
+        TEST_CHECK(s_writes[zi].tuning_seq == 1, "tuning_seq did not move on an identity restore");
+        TEST_CHECK(after.baseline_c == bench[zi - 1].base, "live float not rewritten at export precision");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 2026-09-16, closing the LAST owner-relevant backup gap: the Pico's OWN
 // i_normal_a[0..2] (0x031A-0x031C, S14/S15's arming baseline) was never
 // covered by test_ct_normals_and_new_fields_round_trip_through_export_import()
@@ -5223,6 +5302,7 @@ void run_test_backup_import(void)
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();
     test_import_of_identical_tuning_quality_does_not_bump_seq();
+    test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
     test_timing_profiles_bundle_round_trips_nonempty();
     test_export_preserves_coupling_matrix_when_a_zone_is_on_off();
     test_import_tau_only_cell_preserves_coeff_touching_on_off_zone();
