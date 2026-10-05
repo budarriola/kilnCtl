@@ -462,7 +462,7 @@ function auxRuleTargetsFrom(aux) {
     var nm = relayNames[a.relay - 1];
     out.push({
       index: AUX_RULE_BASE + a.relay - 1,
-      name: (nm ? nm : 'Relay' + (a.relay - 1)) + ' (aux)',
+      name: (nm ? nm : 'Relay ' + a.relay) + ' (aux)',
       aux: true,
       tcZone: (typeof a.tc_zone === 'number') ? a.tc_zone : -1
     });
@@ -1025,8 +1025,10 @@ function ooZoneOptionsHtml(selected) {
     // ooHasStaleZoneRow() below reads the attribute, not the label text, so
     // a copy-editing change to the label alone can never silently disable
     // the save-refusal guard.
-    html += '<option value="' + selected + '" selected data-oo-stale="1">Zone ' + selected +
-            ' (no longer an on/off zone)</option>';
+    html += '<option value="' + selected + '" selected data-oo-stale="1">' +
+            (ooIsAuxTarget(selected)
+              ? 'Aux relay ' + (selected - AUX_RULE_BASE + 1) + ' (not an enabled aux output)'
+              : 'Zone ' + selected + ' (no longer an on/off zone)') + '</option>';
   }
   if (html === '') html = '<option value="">(none)</option>';
   return html;

@@ -1,6 +1,6 @@
 # Spare-relay on/off ("aux outputs") -- plan
 
-Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) landed; WP-3 (executor, host-tested only) landed, then WP-5..WP-8. Pending work only.
+Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) landed, then WP-6..WP-8. WP-5 still owes a browser/bench check. Pending work only.
 
 Owner requirement 2026-10-04 (overturns D1 of
 `docs/audits/on_off_zone_decisions_2026-09-14.md`): "we have 4 relays, the 4th
@@ -447,9 +447,7 @@ earlier one merges.
   Nothing else touches these files while WP-3 is open. Flash gets its own
   bench observation before anything is bound in a real firing.
 - **WP-4 DONE (`5dcf89f3`).** Profile rule targets for aux, validated on every entry point (`profiles_http.c`, edit/catalog/export, import).
-- **WP-5 Web UI (M).** Also the dashboard manual aux on/off toggle (Q5, refused 409 mid-run). `zones_page.html`, `profiles_page.html`, page JS + JS
-  tests, lint/responsive checks. Owns the pages. Needs WP-2 and WP-4 wire
-  formats frozen.
+- **WP-5 Web UI DONE 2026-10-05.** Zones-page aux editor, aux rule targets 8..11 in the profiles page, and the admin-only idle-only dashboard manual toggle (hidden on session loss via the new `kc-logout` event). Page JS tests, lint and responsive sweep pass. **Still owed: a real-browser and bench check** (never rendered in a live browser against the board).
 - **WP-6 LCD + status (S).** `ui_page_home_rail.c`/`ui_page_home_refresh.c`,
   `dashboard_http.c`/`.h` status fields (shared with WP-2: land `dashboard_http`
   edits in WP-6 only). Owns those. Camera verification via

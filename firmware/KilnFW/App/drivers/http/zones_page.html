@@ -2082,7 +2082,7 @@ function updateOnOffCycles(div) {
 
 document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('thermobit')) updateThermoWarnings();
-  if (e.target.classList.contains('relaybit')) { renderRelayNames(); renderAuxOutputs(); }
+  if (e.target.classList.contains('relaybit')) { renderRelayNames(); renderAuxOutputs(true); }
   if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
   if (e.target.classList.contains('zonetype')) toggleZoneTypeUi(e.target.closest('.zone'));
   if (e.target.classList.contains('failsafestate')) {
@@ -2971,6 +2971,12 @@ function auxRowHtml(relay, entry, zoneOwned, zoneNames, relayName) {
     tcOpts += '<option value="' + i + '"' + (e.tc_zone === i ? ' selected' : '') + '>' + i + ': ' +
       window.kcEscapeHtml(nm) + '</option>';
   });
+  // A stored tc_zone at or above the live thermocouple count would otherwise
+  // read as "none" and the next Apply would silently post -1. Keep the real
+  // value selectable and visibly flagged instead.
+  if (e.tc_zone >= zoneNames.length) {
+    tcOpts += '<option value="' + e.tc_zone + '" selected>' + e.tc_zone + ': (no such thermocouple zone)</option>';
+  }
   return '<label>' + title + '</label>' +
     (e.conflicted ? '<p class="hint" style="color:var(--bad)">Conflicted: a zone also claims this relay. ' +
       'Remove it from the zone, then re-save this row.</p>' : '') +
@@ -3001,9 +3007,17 @@ function auxZoneNames() {
   return names;
 }
 
-function renderAuxOutputs() {
+/* preserve = true keeps each row's unsaved field values across the re-render
+ * (a zone checkbox change rebuilds the rows only to refresh ownership). */
+function renderAuxOutputs(preserve) {
   var el = document.getElementById('auxOutputs');
   if (!el) return;
+  var kept = {};
+  if (preserve) {
+    Array.prototype.forEach.call(el.querySelectorAll('.auxrow'), function (row) {
+      if (row.querySelector('.aux-enabled')) kept[row.dataset.relay] = readAuxRow(row);
+    });
+  }
   if (!auxState.loaded) {
     el.innerHTML = '<p class="empty">' + window.kcEscapeHtml(auxState.error || 'Loading...') + '</p>';
     return;
@@ -3029,6 +3043,15 @@ function renderAuxOutputs() {
     div.dataset.relay = r;
     div.innerHTML = auxRowHtml(r, entry, zoneOwned, names, (current.relay_names || [])[r - 1] || '');
     el.appendChild(div);
+    var k = kept[r];
+    if (k && div.querySelector('.aux-enabled')) {
+      div.querySelector('.aux-enabled').checked = !!k.enabled;
+      div.querySelector('.aux-tc').value = String(k.tc_zone);
+      div.querySelector('.aux-hyst').value = isNaN(k.hyst_c) ? '' : k.hyst_c;
+      div.querySelector('.aux-minon').value = isNaN(k.min_on_s) ? '' : k.min_on_s;
+      div.querySelector('.aux-minoff').value = isNaN(k.min_off_s) ? '' : k.min_off_s;
+      div.querySelector('.aux-cycles').textContent = auxCyclesText(k.min_on_s, k.min_off_s);
+    }
   }
   applyAuxZoneGreying();
 }

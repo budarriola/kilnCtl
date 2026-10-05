@@ -187,6 +187,9 @@ function parseHtml(html) {
 // live entirely inside these functions).
 // ---------------------------------------------------------------------------
 const RULES_SRC =
+  'var AUX_RULE_BASE = 8;\nvar AUX_RULE_COUNT = 4;\n' +
+  extractRange('function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }',
+    'function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }') + '\n' +
   extractRange('function ooZoneOptionsHtml(selected) {', '}') + '\n' +
   extractRange('function ooSegmentOptionsHtml(selected) {', '}') + '\n' +
   extractRange('function refreshOoUi() {', '}') + '\n' +
@@ -391,7 +394,7 @@ function buildContext(rules, onOffZones, segmentCount) {
   const optionsHtml = ctx.ooZoneOptionsHtml(9);
   assert(optionsHtml.indexOf('value="9" selected') !== -1,
     'DEFECT 2: a stale zone_index (9) not among onOffZones still gets a selected orphan option');
-  assert(/no longer an on\/off zone/.test(optionsHtml),
+  assert(/no longer an on\/off zone|not an enabled aux output/.test(optionsHtml),
     'DEFECT 2: the orphan option is visibly flagged so the operator notices, not silently kept');
   assert(/data-oo-stale="1"/.test(optionsHtml),
     'the orphan option also carries data-oo-stale="1" -- the attribute ooHasStaleZoneRow() actually ' +
@@ -462,8 +465,9 @@ function buildContext(rules, onOffZones, segmentCount) {
     extractRange('function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }',
       'function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }') + '\n' +
     extractRange('function auxRuleTargetsFrom(aux) {', '}') + '\n' +
-    extractRange('function ooAuxTempProblem(zone, tempCmp) {', '}');
-  const sb = { relayNames: ['Vent', '', 'Fan', ''], onOffZones: [] };
+    extractRange('function ooAuxTempProblem(zone, tempCmp) {', '}') + '\n' +
+    extractRange('function ooZoneOptionsHtml(selected) {', '}');
+  const sb = { relayNames: ['Vent', '', 'Fan', ''], onOffZones: [], window: { kcEscapeHtml: (x) => String(x) } };
   vm.createContext(sb);
   vm.runInContext(AUX_SRC, sb);
 
@@ -486,7 +490,7 @@ function buildContext(rules, onOffZones, segmentCount) {
   const t = sb.auxRuleTargetsFrom(aux);
   assert(t.length === 2 && t[0].index === 8 && t[1].index === 11,
     'only enabled, non-conflicted, in-range aux relays become targets (relay1 -> 8, relay4 -> 11)');
-  assert(t[0].name === 'Vent (aux)' && t[1].name === 'Relay3 (aux)', 'aux target names use the relay name or a fallback');
+  assert(t[0].name === 'Vent (aux)' && t[1].name === 'Relay 4 (aux)', 'aux target names use the relay name or a fallback');
   assert(sb.auxRuleTargetsFrom({ quarantined: true, relays: aux.relays }).length === 0,
     'NEGATIVE: a quarantined aux store offers no targets');
   assert(sb.auxRuleTargetsFrom(null).length === 0 && sb.auxRuleTargetsFrom({}).length === 0,
@@ -498,6 +502,13 @@ function buildContext(rules, onOffZones, segmentCount) {
     'NEGATIVE: temperature rule on an aux output with no thermocouple zone is refused client-side');
   assert(sb.ooAuxTempProblem(11, 0) === '', 'a time-only rule on an aux output without a thermocouple zone is fine');
   assert(sb.ooAuxTempProblem(1, 1) === '', 'zone targets are never subject to the aux temperature check');
+  const staleAux = sb.ooZoneOptionsHtml(10);
+  assert(/Aux relay 3 \(not an enabled aux output\)/.test(staleAux) && /data-oo-stale="1"/.test(staleAux) &&
+    staleAux.indexOf('Zone 10') === -1,
+    'a stale aux rule target is labelled as an aux relay (still flagged stale), never as Zone N');
+  assert(/Zone 6 \(no longer an on\/off zone\)/.test(sb.ooZoneOptionsHtml(6)),
+    'a stale zone target keeps the zone wording');
+
 })();
 
 console.log('');

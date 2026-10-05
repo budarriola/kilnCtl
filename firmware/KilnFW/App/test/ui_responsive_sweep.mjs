@@ -465,6 +465,15 @@ ${ZONES_BASE_FIXTURE}
     suffix,
     script: `
 (function () {
+  // Spare-relay aux card (WP-5): render it with two enabled aux outputs so its rows and
+  // toggle buttons are swept at every width (the card is otherwise hidden: the static
+  // server answers no /api/aux_outputs).
+  if (typeof auxDash === 'undefined' || typeof renderAuxCard !== 'function') return 'aux card helpers not found';
+  auxDash.admin = true;
+  auxDash.relays = [{ relay: 1, enabled: true }, { relay: 2, enabled: true }];
+  renderAuxCard();
+  var auxEl = document.getElementById('auxCard');
+  if (!auxEl || auxEl.style.display === 'none') return 'aux card did not render';
   ${RECOVERY_BANNER_VARIANTS[suffix]}
   return 'ok';
 })()

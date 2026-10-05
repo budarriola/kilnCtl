@@ -2287,6 +2287,9 @@
         // actually expired it. Return to the Dashboard, per the plan's
         // wording ("the interface returns to the Dashboard"), not /login.
         if (lastKnownRole && lastKnownRole !== 'none' && role === 'none') {
+          // Tell page scripts (e.g. the dashboard aux card) the session is gone
+          // so they can drop admin-only controls without waiting for a reload.
+          try { window.dispatchEvent(new CustomEvent('kc-logout')); } catch (e) { /* old browser */ }
           if (lockPromptEl) lockPromptEl.setAttribute('hidden', '');
           // Not over a bootstrap redirect already issued above this tick.
           if (window.location.pathname !== '/' && !kcBootstrapRedirected) {

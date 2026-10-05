@@ -4320,7 +4320,9 @@ function renderRelayLife(data) {
 // (admin tier: a refused read leaves admin=false and the card hidden). The on/off
 // state is NOT in that response -- it comes from the /api/status relays array
 // (lastChannelsData.relays, 1-based, {relay, on}) this page already polls.
-var AUX_BLOCKED_TEXT = 'a firing, autotune run or sweep owns the relays -- manual control is not available';
+// Verbatim system_mode_gate.c SYS_ACTION_RAW_RELAY_DEBUG_WRITE reason (the mode gate runs
+// before the aux route's own AUX_RELAY_ERR_RUNNING check, so this is the real mid-run 409).
+var AUX_BLOCKED_TEXT = 'refused -- a firing or autotune run is active; manual relay control is not available until it ends';
 var auxDash = { admin: false, relays: [] };
 
 function auxBlockedReason() {
@@ -4376,6 +4378,13 @@ function renderAuxCard() {
   el.innerHTML = html;
   document.getElementById('auxCardMsg').textContent = prevText;
   el.style.display = '';
+}
+
+// Session expired / logged out: drop the admin-only card immediately.
+function hideAuxDash() {
+  auxDash.admin = false;
+  auxDash.relays = [];
+  renderAuxCard();
 }
 
 function loadAuxDash() {
@@ -4553,6 +4562,7 @@ function reloadAfterLoginPickers() {
 // choke point every successful login (401 retry or 403 role-elevate) passes
 // through, so this listener need not special-case which action triggered it.
 window.addEventListener('kc-login', reloadAfterLoginPickers);
+window.addEventListener('kc-logout', hideAuxDash);
 
 loadAuxDash();
 loadZones().then(function () {
