@@ -745,12 +745,17 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
         backup_stream_printf(&s, "]");
     }
     /* docs/GITHUB_RELEASE_UPDATE_PLAN.md WP9: the persisted update repo
-     * ("owner/name"; the default when unset). Re-validated on import. No
-     * BACKUP_FORMAT_VERSION bump: an absent key is a no-op on import, the
-     * same optional-key rule as safety_tc_type. */
+     * ("owner/name"). Re-validated on import. "" when the compiled-in default is
+     * in use, so a backup taken on a stock board never pins a restore onto
+     * today's default if the default later changes, and a restore onto a stock
+     * board writes nothing. No BACKUP_FORMAT_VERSION bump: an absent key is a
+     * no-op on import, the same optional-key rule as safety_tc_type. */
     {
         char repo_escaped[UPDATE_SETTINGS_REPO_MAX_LEN * 2 + 1];
-        json_escape(update_settings_repo(), repo_escaped, sizeof(repo_escaped));
+        repo_escaped[0] = '\0';
+        if (!update_settings_repo_is_default()) {
+            json_escape(update_settings_repo(), repo_escaped, sizeof(repo_escaped));
+        }
         backup_stream_printf(&s, ",\"update_repo\":\"%s\"", repo_escaped);
     }
     backup_stream_printf(&s, "}");

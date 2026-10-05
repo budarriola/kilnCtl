@@ -21,6 +21,7 @@
 #include "dashboard_http.h"
 #include "aux_outputs_cfg.h"
 #include "display_power_cfg.h"
+#include "update_settings.h" /* WP9: update_repo row of /api/cfgfs */
 #include "hal_kv.h"
 #include "hal_sysinfo.h" /* hal_sysinfo_coredump_get_info()/_read() -- coredump_{info,chunk}_get_handler() below */
 #include "nvs.h" /* nvs_entry_find()/nvs_entry_info() -- nvs_keys_get_handler() below */
@@ -1417,8 +1418,10 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * profiles_hidden, zone_normals, ramp_assist, display_power, tz, one
  * aggregate profiles row, relay_cycles, adaptive_tune, firing_stats,
  * relay_names; WP-1 of docs/SPARE_RELAY_ONOFF_PLAN.md then added the 14th,
- * aux_outputs, and the aux_out.dat root file -- see test_cfg_fs_status.c for the
- * re-measured worst case).
+ * aux_outputs, and the aux_out.dat root file; WP9 of
+ * docs/GITHUB_RELEASE_UPDATE_PLAN.md added the 15th, update_repo, and the
+ * update_repo.dat root file -- see test_cfg_fs_status.c for the re-measured
+ * worst case, 15 rows / 13 files).
  *
  * 2026-10-04 re-measurement (the earlier ~120 B/row estimate was too low):
  * a row with both revs at UINT32_MAX and migration_deferred is ~134 B plus
@@ -1451,7 +1454,7 @@ typedef struct {
 /* Fills one row of the /api/cfgfs dual-write item list and advances *n. A
  * full array (n == CFG_FS_STATUS_MAX_ITEMS) silently drops further rows --
  * see cfg_fs_status.h's CFG_FS_STATUS_MAX_ITEMS comment; today's fixed set
- * of 12 items sits well under that cap. */
+ * of 15 items sits well under that cap. */
 static void cfgfs_add_item_ex(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
                                uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged,
                                bool migration_deferred)
@@ -1564,6 +1567,12 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         uint32_t file_rev = 0, nvs_rev = 0;
         display_power_cfg_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, "display_power", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        update_settings_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "update_repo", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
     {
         bool file_valid = false, nvs_valid = false, diverged = false;

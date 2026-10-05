@@ -115,6 +115,10 @@ typedef enum {
     SYS_ACTION_STAGE_WRITE,          // wired: update_http.c's stage upload and stage clear handlers
                                       // (docs/GITHUB_RELEASE_UPDATE_PLAN.md WP4) -- refused outright
                                       // while a firing/autotune is active, PAUSED included
+    SYS_ACTION_UPDATE_SETTINGS_WRITE, // wired: update_settings_http.c's POST /api/update/settings
+                                      // handler and backup_import.c's update_repo persist step
+                                      // (docs/GITHUB_RELEASE_UPDATE_PLAN.md WP9) -- refused outright
+                                      // while a firing/autotune is active, PAUSED included
     SYS_ACTION_OTA_START,            // not gated here -- ota_interlock.c stays the owner (plan section 4)
 } sys_action_t;
 

@@ -123,6 +123,11 @@ static bool test_backup_import_apply(const char *body, char *err_msg, size_t err
                                err_msg, err_cap);
 }
 #include "../drivers/http/backup_http.c"
+// WP9 (GITHUB_RELEASE_UPDATE_PLAN.md): update_settings_http.c is #included, not linked, so the tests
+// below can call its static POST/GET handlers directly (its other two symbols resolve against
+// the real http_auth_http.c / the NULL wifi_provision_http_get_server() fake in this executable).
+esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other httpd stubs
+#include "../drivers/update/update_settings_http.c"
 
 // LIVE_EDIT_WORKING_SLOT_ID (== PROFILES_MAX_COUNT) -- used by the
 // live-edit-slot-id-rejected test below (task 7,
@@ -279,11 +284,21 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
    Same local-stub convention as httpd_resp_set_hdr() just above. */
 void web_set_asset_cache_headers(httpd_req_t *r);
 void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
+static char s_send_last_body[320] = "";
+static int s_send_last_err_code = 0;
+static char s_send_last_err_msg[96] = "";
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    (void)buf;
-    (void)buf_len;
+    s_send_last_body[0] = '\0';
+    if (buf != NULL) {
+        size_t n = buf_len < 0 ? strlen(buf) : (size_t)buf_len;
+        if (n >= sizeof(s_send_last_body)) {
+            n = sizeof(s_send_last_body) - 1;
+        }
+        memcpy(s_send_last_body, buf, n);
+        s_send_last_body[n] = '\0';
+    }
     return ESP_OK;
 }
 /* Export-side capture: backup_export_get_handler() streams its JSON out
@@ -333,9 +348,16 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r;
-    (void)error;
-    (void)msg;
+    s_send_last_err_code = (int)error;
+    snprintf(s_send_last_err_msg, sizeof(s_send_last_err_msg), "%s", msg != NULL ? msg : "");
     return ESP_OK;
+}
+esp_err_t httpd_resp_send_500(httpd_req_t *r)
+{
+    (void)r;
+    s_send_last_err_code = 500;
+    s_send_last_err_msg[0] = '\0';
+    return ESP_FAIL;
 }
 // Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known gap): the handler-level order
 // test below (test_backup_import_post_*) needs to see what status/body the
@@ -5360,8 +5382,14 @@ static void test_update_repo_export_round_trip(void)
     wp9_fresh_repo_setting();
     esp_err_t e = run_export();
     TEST_CHECK(e == ESP_OK, "export succeeds");
-    TEST_CHECK(strstr(s_export_body, "\"update_repo\":\"" UPDATE_SETTINGS_DEFAULT_REPO "\"") != NULL,
-               "an unset setting exports as the default repo");
+    TEST_CHECK(strstr(s_export_body, "\"update_repo\":\"\"") != NULL,
+               "an unset setting exports as empty, never as today's default string");
+    TEST_CHECK(strstr(s_export_body, UPDATE_SETTINGS_DEFAULT_REPO) == NULL,
+               "the default repo string does not appear in the export of a stock board");
+    update_settings_set(UPDATE_SETTINGS_DEFAULT_REPO);
+    e = run_export();
+    TEST_CHECK(e == ESP_OK && strstr(s_export_body, "\"update_repo\":\"\"") != NULL,
+               "the default spelled out is still exported as empty");
 
     update_settings_set("round/trip-repo");
     e = run_export();
@@ -5381,8 +5409,319 @@ static void test_update_repo_export_round_trip(void)
     }
 }
 
+typedef struct {
+    uint8_t version;
+    char repo[63];
+} tus_blob_probe_t; // mirrors update_settings.c's private blob layout (64 bytes)
+
+static void wp9_http_reset_capture(void)
+{
+    s_post_last_status[0] = '\0';
+    s_post_last_body[0] = '\0';
+    s_send_last_body[0] = '\0';
+    s_send_last_err_code = 0;
+    s_send_last_err_msg[0] = '\0';
+}
+
+static esp_err_t wp9_http_post(const char *form)
+{
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(form);
+    s_recv_feed = form;
+    s_recv_feed_off = 0;
+    wp9_http_reset_capture();
+    esp_err_t e = settings_post_handler(&req);
+    s_recv_feed = NULL;
+    return e;
+}
+
+static void test_update_settings_http_post(void)
+{
+    TEST_SECTION("update_settings_http -- POST handler: decode, refusals, mode gate, persist failure");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    update_settings_set("keep/me");
+
+    // %2F decodes to '/', success replies with the settings JSON and no error status.
+    TEST_CHECK(wp9_http_post("repo=someone%2Ffork") == ESP_OK, "a valid POST returns ESP_OK");
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "%2F is decoded and the repo applied");
+    TEST_CHECK(s_post_last_status[0] == '\0', "success sets no error status (200)");
+    TEST_CHECK(strstr(s_send_last_body, "\"repo\":\"someone/fork\"") != NULL, "the reply carries the new repo");
+
+    // Invalid value: 400 with the JSON error, setting unchanged.
+    wp9_http_post("repo=nope");
+    TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "an invalid repo gets 400");
+    TEST_CHECK(strstr(s_send_last_body, "invalid repo") != NULL, "the 400 body names the problem");
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "a refused POST leaves the setting alone");
+
+    // Leading-dot spellings.
+    wp9_http_post("repo=owner%2F.");
+    TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "owner/. is refused");
+    wp9_http_post("repo=.%2Fname");
+    TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "./name is refused");
+
+    // Over-long: one over the cap (63 chars) reaches the validator, far over is refused by the form parser.
+    char longform[320];
+    char longrepo[130];
+    memset(longrepo, 'n', sizeof(longrepo));
+    longrepo[0] = 'o';
+    longrepo[1] = '%';
+    longrepo[2] = '2';
+    longrepo[3] = 'F';
+    longrepo[63 + 2] = '\0'; // "o%2F" + 61 'n' decodes to 63 characters
+    snprintf(longform, sizeof(longform), "repo=%s", longrepo);
+    wp9_http_post(longform);
+    TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "a 63-character repo is refused");
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "a 63-character repo changes nothing");
+    memset(longrepo, 'n', sizeof(longrepo));
+    longrepo[0] = 'o';
+    longrepo[1] = '/';
+    longrepo[125] = '\0';
+    snprintf(longform, sizeof(longform), "repo=%s", longrepo);
+    wp9_http_post(longform);
+    TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "a 125-character repo is refused, not truncated");
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "a 125-character repo changes nothing");
+
+    // %00: an embedded NUL must not truncate into a valid-looking value.
+    wp9_http_post("repo=a%2Fb%00zzz");
+    TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "an embedded NUL (mid-value) is refused");
+    wp9_http_post("repo=other%2Frepo%00");
+    TEST_CHECK(strcmp(s_post_last_status, "400 Bad Request") == 0, "a trailing %00 is refused");
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "%00 requests change nothing");
+
+    // Missing field / empty / oversized body: plain 400 via httpd_resp_send_err.
+    wp9_http_post("other=1");
+    TEST_CHECK(s_send_last_err_code == 400, "a missing repo field gets 400");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    wp9_http_reset_capture();
+    req.content_len = 0;
+    settings_post_handler(&req);
+    TEST_CHECK(s_send_last_err_code == 400, "an empty body gets 400");
+    wp9_http_reset_capture();
+    req.content_len = SETTINGS_BODY_MAX + 1;
+    settings_post_handler(&req);
+    TEST_CHECK(s_send_last_err_code == 400, "an oversized body gets 400");
+
+    // Mode gate: 409 with the dedicated reason while a firing or autotune runs.
+    for (int which = 0; which < 2; which++) {
+        s_test_profile_running_for_mode_gate = which == 0;
+        s_test_autotune_running_for_mode_gate = which == 1;
+        wp9_http_post("repo=blocked%2Fwrite");
+        TEST_CHECK(strcmp(s_post_last_status, "409 Conflict") == 0, "a write during a run is refused with 409");
+        TEST_CHECK(strstr(s_send_last_body, "update repository") != NULL, "the 409 names the update repository");
+        TEST_CHECK(strstr(s_send_last_body, "update stage") == NULL, "the 409 is not the stage-write text");
+        TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "a gated POST changes nothing");
+    }
+    s_test_profile_running_for_mode_gate = false;
+    s_test_autotune_running_for_mode_gate = false;
+
+    // Persist failure: reported as a 500, never as success.
+    fake_kv_script_next_write_status(HAL_IO);
+    wp9_http_post("repo=flaky%2Fwrite");
+    TEST_CHECK(strcmp(s_post_last_status, "500 Internal Server Error") == 0, "a failed persist gets 500");
+    TEST_CHECK(strstr(s_send_last_body, "\"ok\":false") != NULL, "the 500 body says ok:false");
+
+    // GET reflects the live value.
+    wp9_fresh_repo_setting();
+    update_settings_set("get/check");
+    httpd_req_t greq;
+    memset(&greq, 0, sizeof(greq));
+    wp9_http_reset_capture();
+    settings_get_handler(&greq);
+    TEST_CHECK(strstr(s_send_last_body, "\"repo\":\"get/check\"") != NULL, "GET reports the live repo");
+    TEST_CHECK(strstr(s_send_last_body, "\"is_default\":false") != NULL, "GET reports is_default false");
+}
+
+static bool wp9_apply_full(const char *tail, kiln_cfg_restore_mode_t mode, bool dry_run, int32_t ack_delete,
+                           kiln_cfg_plan_t *plan, bool *partial_write, char *err, size_t err_cap)
+{
+    char body[768];
+    snprintf(body, sizeof(body), "%s%s}", WP9_BODY_HEAD, tail);
+    memset(plan, 0, sizeof(*plan));
+    *partial_write = false;
+    return backup_import_apply(body, mode, dry_run, ack_delete, true, plan, partial_write, err, err_cap);
+}
+
+static bool wp9_plan_has(const kiln_cfg_plan_t *plan, const char *needle)
+{
+    for (size_t i = 0; i < plan->count; i++) {
+        if (strstr(plan->lines[i], needle) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_update_repo_backslash_refused(void)
+{
+    TEST_SECTION("backup_import_apply -- any backslash in update_repo refuses the whole restore");
+    static const char *const tails[] = {
+        ",\"update_repo\":\"some\\u006fne/fork\"",  // \u006f would unescape to 'o'
+        ",\"update_repo\":\"someone\\/fork\"",     // \/ would unescape to '/'
+        ",\"update_repo\":\"someone/for\\\\k\"",   // an escaped backslash
+        ",\"update_repo\":\"so\\x\"",
+    };
+    for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); i++) {
+        reset_stub_state();
+        wp9_fresh_repo_setting();
+        update_settings_set("keep/me");
+        char err[160] = "";
+        TEST_CHECK(!wp9_import_with(tails[i], err, sizeof(err)), "an escaped update_repo is refused");
+        TEST_CHECK(strstr(err, "backslash") != NULL, "the error names the backslash");
+        TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0, "nothing was written");
+        TEST_CHECK(strcmp(update_settings_repo(), "keep/me") == 0, "the setting is unchanged");
+    }
+    // The dots rule reaches import too.
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    char err[160] = "";
+    TEST_CHECK(!wp9_import_with(",\"update_repo\":\"owner/.\"", err, sizeof(err)), "owner/. is refused on import");
+    TEST_CHECK(!wp9_import_with(",\"update_repo\":\"./name\"", err, sizeof(err)), "./name is refused on import");
+}
+
+static void test_update_repo_default_value_is_unset(void)
+{
+    TEST_SECTION("backup_import_apply -- update_repo equal to the default is treated as unset");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    update_settings_set("custom/repo");
+    char err[160] = "";
+    TEST_CHECK(wp9_import_with(",\"update_repo\":\"" UPDATE_SETTINGS_DEFAULT_REPO "\"", err, sizeof(err)),
+               "the default spelled out imports");
+    TEST_CHECK(update_settings_repo_is_default(), "the default is in use afterwards");
+    tus_blob_probe_t probe;
+    memset(&probe, 0xAB, sizeof(probe));
+    hal_kv_handle_t h;
+    hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, "kiln_nvs");
+    size_t len = sizeof(probe);
+    TEST_CHECK(hal_kv_get_blob(&h, "update_repo", &probe, &len) == HAL_OK, "the blob exists");
+    hal_kv_close(&h);
+    TEST_CHECK(probe.repo[0] == '\0', "stored as empty, not as the default string");
+
+    // Already default: an empty update_repo imports again and stays default.
+    reset_stub_state();
+    TEST_CHECK(wp9_import_with(",\"update_repo\":\"\"", err, sizeof(err)), "an empty update_repo imports again");
+    TEST_CHECK(update_settings_repo_is_default(), "still the default");
+}
+
+static void test_update_repo_dry_run_names_old_and_new(void)
+{
+    TEST_SECTION("backup_import_apply -- dry_run names the old and new update_repo and writes nothing");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    update_settings_set("keep/me");
+    kiln_cfg_plan_t plan;
+    bool partial = false;
+    char err[160] = "";
+    TEST_CHECK(wp9_apply_full(",\"update_repo\":\"someone/fork\"", KILN_CFG_RESTORE_MERGE, true, -1, &plan, &partial,
+                              err, sizeof(err)),
+               "dry_run succeeds");
+    TEST_CHECK(wp9_plan_has(&plan, "update_repo keep/me -> someone/fork"), "the plan names old and new repo");
+    TEST_CHECK(strcmp(update_settings_repo(), "keep/me") == 0, "dry_run did not change the setting");
+    TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0, "dry_run wrote nothing");
+
+    // Empty value: the new repo shown is the default.
+    TEST_CHECK(wp9_apply_full(",\"update_repo\":\"\"", KILN_CFG_RESTORE_MERGE, true, -1, &plan, &partial, err,
+                              sizeof(err)),
+               "dry_run with an empty update_repo succeeds");
+    TEST_CHECK(wp9_plan_has(&plan, "update_repo keep/me -> " UPDATE_SETTINGS_DEFAULT_REPO),
+               "an empty value is shown as the default");
+
+    // Same value: reported as unchanged.
+    TEST_CHECK(wp9_apply_full(",\"update_repo\":\"keep/me\"", KILN_CFG_RESTORE_MERGE, true, -1, &plan, &partial, err,
+                              sizeof(err)),
+               "dry_run with the current value succeeds");
+    TEST_CHECK(wp9_plan_has(&plan, "update_repo unchanged: keep/me"), "an identical value reads as unchanged");
+
+    // Absent key: no line at all.
+    TEST_CHECK(wp9_apply_full("", KILN_CFG_RESTORE_MERGE, true, -1, &plan, &partial, err, sizeof(err)),
+               "dry_run without the key succeeds");
+    TEST_CHECK(!wp9_plan_has(&plan, "update_repo"), "no update_repo line when the key is absent");
+
+    // Worst-case line (62 + 62 characters) is not truncated.
+    char big_old[64], big_tail[160];
+    memset(big_old, 'a', 62);
+    big_old[1] = '/';
+    big_old[62] = '\0';
+    update_settings_set(big_old);
+    char big_new[64];
+    memset(big_new, 'b', 62);
+    big_new[1] = '/';
+    big_new[62] = '\0';
+    snprintf(big_tail, sizeof(big_tail), ",\"update_repo\":\"%s\"", big_new);
+    TEST_CHECK(wp9_apply_full(big_tail, KILN_CFG_RESTORE_MERGE, true, -1, &plan, &partial, err, sizeof(err)),
+               "dry_run with 62-character repos succeeds");
+    char want[200];
+    snprintf(want, sizeof(want), "update_repo %s -> %s", big_old, big_new);
+    TEST_CHECK(wp9_plan_has(&plan, want), "the worst-case plan line is whole, not truncated");
+}
+
+static void test_update_repo_persist_failure_is_partial_write(void)
+{
+    TEST_SECTION("backup_import_apply -- update_repo persist failure after the rest landed is a partial write");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    update_settings_set("keep/me");
+    kiln_cfg_plan_t plan;
+    bool partial = false;
+    char err[160] = "";
+    fake_kv_script_next_write_status(HAL_IO);
+    bool ok = wp9_apply_full(",\"update_repo\":\"someone/fork\"", KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial,
+                             err, sizeof(err));
+    TEST_CHECK(!ok, "a failed update_repo persist fails the restore");
+    TEST_CHECK(partial, "it is reported as a partial write (the handler turns this into the 500)");
+    TEST_CHECK(strstr(err, "update_repo") != NULL, "the error names update_repo");
+    TEST_CHECK(g_profile_save_calls > 0, "the profiles had already been written (hence partial)");
+}
+
+static void test_update_repo_pass1_refusal_skips_kiln_configs_commit(void)
+{
+    TEST_SECTION("backup_import_apply -- a pass-1 update_repo refusal never reaches the kiln_configs commit");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    int32_t nonactive_count = 0;
+    mirror_ack_test_setup(&nonactive_count);
+    TEST_CHECK(nonactive_count > 0, "test assumption: a non-active slot exists that MIRROR would delete");
+    kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
+    uint8_t n_before = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+
+    kiln_cfg_plan_t plan;
+    bool partial = false;
+    char err[160] = "";
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],\"kiln_configs\":[],"
+             "\"update_repo\":\"not a repo\"}");
+    memset(&plan, 0, sizeof(plan));
+    bool ok = backup_import_apply(body, KILN_CFG_RESTORE_MIRROR, false, nonactive_count, true, &plan, &partial, err,
+                                  sizeof(err));
+    TEST_CHECK(!ok, "the bad update_repo refuses the restore");
+    TEST_CHECK(!partial, "a pass-1 refusal is not a partial write");
+    uint8_t n_after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after == n_before, "no kiln config slot was deleted (the commit pass never ran)");
+
+    // Control: the same body with a valid update_repo does delete, proving the setup is sensitive.
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[],\"kiln_configs\":[],"
+             "\"update_repo\":\"fine/repo\"}");
+    memset(&plan, 0, sizeof(plan));
+    ok = backup_import_apply(body, KILN_CFG_RESTORE_MIRROR, false, nonactive_count, true, &plan, &partial, err,
+                             sizeof(err));
+    TEST_CHECK(ok, "control: the valid update_repo restore succeeds");
+    n_after = kiln_cfg_store_list(rows, KILN_CFG_MAX_COUNT);
+    TEST_CHECK(n_after < n_before, "control: the MIRROR commit really deletes slots when pass 1 passes");
+}
+
 void run_test_backup_import(void)
 {
+    test_update_settings_http_post();
+    test_update_repo_backslash_refused();
+    test_update_repo_default_value_is_unset();
+    test_update_repo_dry_run_names_old_and_new();
+    test_update_repo_persist_failure_is_partial_write();
+    test_update_repo_pass1_refusal_skips_kiln_configs_commit();
     test_update_repo_imports_and_persists();
     test_update_repo_absent_is_noop();
     test_update_repo_invalid_refuses_whole_restore();

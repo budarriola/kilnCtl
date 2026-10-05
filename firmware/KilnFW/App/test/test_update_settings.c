@@ -88,6 +88,8 @@ static void test_validator(void)
         "", "a", "ab", "/", "a/", "/b", "a//b", "a/b/c", "noslash", "-a/b", "a-/b", "a b/c", "a/b c", "a/b?x=1",
         "a/b#frag", "a/b\\c", "a:b/c", "http://x/y", "a/../b", "a/b..c", "..a/b", "a/b%2F", "own\xc3\xa9r/n",
         "a/b\n", "a/b\"", "a/b'", "a@b/c", "a/b;c",
+        // leading-dot segments ("." / ".." spellings, hidden-name forms) -- WP9 review item 1
+        ".", "..", "./b", "a/.", "a/..", ".x/y", "a/.hidden", "./.", ".a/.b",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         char msg[96];
@@ -164,7 +166,10 @@ static void test_invalid_set_changes_nothing(void)
     TEST_CHECK(strcmp(update_settings_repo(), "keep/this-one") == 0, "refused sets left flash untouched too");
 }
 
-static void test_pointer_stays_valid_across_set(void)
+// Covers ONE set() only: the double buffer keeps the previous string intact across a single flip.
+// A pointer is NOT stable across two sets (the second reuses the first buffer); concurrent callers
+// must use update_settings_repo_copy() (see test_repo_copy and the header's locking notes).
+static void test_pointer_stays_valid_across_single_set(void)
 {
     tus_boot();
     update_settings_start();
@@ -173,6 +178,101 @@ static void test_pointer_stays_valid_across_set(void)
     update_settings_set("second/two");
     TEST_CHECK(strcmp(p, "first/one") == 0, "a pointer taken before one set still reads a whole string");
     TEST_CHECK(strcmp(update_settings_repo(), "second/two") == 0, "the accessor now returns the new value");
+}
+
+static void test_repo_copy(void)
+{
+    tus_boot();
+    update_settings_start();
+    char out[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
+    TEST_CHECK(update_settings_repo_copy(out, sizeof(out)), "copy succeeds with a big enough buffer");
+    TEST_CHECK(strcmp(out, UPDATE_SETTINGS_DEFAULT_REPO) == 0, "copy of the unset setting is the default");
+    update_settings_set("copy/me");
+    TEST_CHECK(update_settings_repo_copy(out, sizeof(out)) && strcmp(out, "copy/me") == 0, "copy reflects a set");
+    char tiny[4];
+    memset(tiny, 'X', sizeof(tiny));
+    TEST_CHECK(!update_settings_repo_copy(tiny, sizeof(tiny)), "a too-small buffer is refused, never truncated");
+    TEST_CHECK(tiny[0] == '\0', "a refused copy leaves an empty string");
+    TEST_CHECK(!update_settings_repo_copy(NULL, 10), "NULL out is refused");
+    TEST_CHECK(!update_settings_repo_copy(out, 0), "zero capacity is refused");
+}
+
+static uint32_t tus_nvs_rev(void)
+{
+    bool nv = false;
+    uint32_t rev = 0;
+    update_settings_get_dualwrite_status(NULL, NULL, &nv, &rev, NULL);
+    return nv ? rev : 0u;
+}
+
+static void test_default_canonicalised_and_unchanged_skip(void)
+{
+    tus_boot();
+    update_settings_start();
+    // fake_kv only counts reads, so a write is observed through the NVS rev instead.
+    uint32_t c0 = tus_nvs_rev();
+    TEST_CHECK(update_settings_set(UPDATE_SETTINGS_DEFAULT_REPO) == ESP_OK, "set(default) on a stock board succeeds");
+    TEST_CHECK(tus_nvs_rev() == c0, "set(default) on a stock board writes nothing (canonical empty)");
+    TEST_CHECK(update_settings_set("") == ESP_OK, "set(empty) on a stock board succeeds");
+    TEST_CHECK(tus_nvs_rev() == c0, "set(empty) on a stock board writes nothing");
+
+    TEST_CHECK(update_settings_set("same/value") == ESP_OK, "first set writes");
+    uint32_t c1 = tus_nvs_rev();
+    TEST_CHECK(c1 > c0, "the first set touched NVS");
+    TEST_CHECK(update_settings_set("same/value") == ESP_OK, "an identical set succeeds");
+    TEST_CHECK(tus_nvs_rev() == c1, "an identical set writes nothing (no flash wear, no rev bump)");
+
+    // Setting the default spelled out over a custom value stores "unset", reads back as default.
+    TEST_CHECK(update_settings_set(UPDATE_SETTINGS_DEFAULT_REPO) == ESP_OK, "set(default) over a custom value");
+    tus_reboot();
+    TEST_CHECK(update_settings_repo_is_default(), "after a reboot the default is in use");
+    tus_blob_t blob;
+    memset(&blob, 0xAB, sizeof(blob));
+    hal_kv_handle_t h;
+    hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, "kiln_nvs");
+    size_t len = sizeof(blob);
+    TEST_CHECK(hal_kv_get_blob(&h, "update_repo", &blob, &len) == HAL_OK && len == sizeof(blob), "blob present");
+    hal_kv_close(&h);
+    TEST_CHECK(blob.repo[0] == '\0', "the stored blob holds empty for the default, not the default string");
+}
+
+static void test_persist_failure_retries_on_same_value(void)
+{
+    tus_boot();
+    update_settings_start();
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(update_settings_set("flaky/write") != ESP_OK, "a failed NVS write is reported, not swallowed");
+    TEST_CHECK(strcmp(update_settings_repo(), "flaky/write") == 0, "RAM took the value regardless");
+    // Same value again must retry the persist, not hit the unchanged-skip.
+    TEST_CHECK(update_settings_set("flaky/write") == ESP_OK, "retrying the same value after a failure persists it");
+    tus_reboot();
+    TEST_CHECK(strcmp(update_settings_repo(), "flaky/write") == 0, "the retried value survives a reboot");
+}
+
+static void test_dualwrite_status(void)
+{
+    tus_cfg_fs_reset();
+    tus_boot();
+    TEST_CHECK(cfg_fs_init(TUS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+    update_settings_start();
+    bool fv = true, nv = true, dv = true;
+    uint32_t fr = 7, nr = 7;
+    update_settings_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(!fv && !nv && !dv, "nothing written yet: neither side valid, not diverged");
+    update_settings_set("dual/status");
+    update_settings_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv, "after a set both sides are valid");
+    TEST_CHECK(fr == nr && fr >= 1, "revs agree");
+    TEST_CHECK(!dv, "identical content: not diverged");
+    tus_blob_t other;
+    memset(&other, 0, sizeof(other));
+    other.version = 1;
+    strcpy(other.repo, "other/content");
+    tus_put_nvs_blob(&other, sizeof(other), 5);
+    update_settings_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(dv, "both valid with different content: diverged");
+    update_settings_get_dualwrite_status(NULL, NULL, NULL, NULL, NULL);
+    cfg_fs_deinit();
 }
 
 static void test_corrupt_storage_falls_back_to_default(void)
@@ -273,7 +373,11 @@ void run_test_update_settings(void)
     test_default_when_unset();
     test_round_trip_and_reset();
     test_invalid_set_changes_nothing();
-    test_pointer_stays_valid_across_set();
+    test_pointer_stays_valid_across_single_set();
+    test_repo_copy();
+    test_default_canonicalised_and_unchanged_skip();
+    test_persist_failure_retries_on_same_value();
+    test_dualwrite_status();
     test_corrupt_storage_falls_back_to_default();
     test_dual_write_and_divergence();
     test_mount_failed_is_nvs_only();

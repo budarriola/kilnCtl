@@ -32,9 +32,13 @@ static esp_err_t send_settings(httpd_req_t *req)
 {
     // repo is validated to [A-Za-z0-9._-/] only, so no JSON escaping is needed.
     char json[192];
+    char repo[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
+    if (!update_settings_repo_copy(repo, sizeof(repo))) {
+        return httpd_resp_send_500(req);
+    }
     int n = snprintf(json, sizeof(json),
-                     "{\"ok\":true,\"repo\":\"%s\",\"default_repo\":\"%s\",\"is_default\":%s}", update_settings_repo(),
-                     UPDATE_SETTINGS_DEFAULT_REPO, update_settings_repo_is_default() ? "true" : "false");
+                     "{\"ok\":true,\"repo\":\"%s\",\"default_repo\":\"%s\",\"is_default\":%s}", repo,
+                     UPDATE_SETTINGS_DEFAULT_REPO, strcmp(repo, UPDATE_SETTINGS_DEFAULT_REPO) == 0 ? "true" : "false");
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return httpd_resp_send_500(req);
     }
@@ -66,7 +70,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     relay_authority_heat_run_active(&snap.profile_running, &snap.autotune_running);
     char reason[SYSTEM_MODE_GATE_REASON_MAX];
     reason[0] = '\0';
-    if (system_mode_gate_check(SYS_ACTION_STAGE_WRITE, &snap, reason, sizeof(reason))) {
+    if (system_mode_gate_check(SYS_ACTION_UPDATE_SETTINGS_WRITE, &snap, reason, sizeof(reason))) {
         ESP_LOGW(TAG, "update settings write refused by system mode gate: %s", reason);
         (void)system_mode_gate_http_send_refusal(req, reason);
         return ESP_OK;
@@ -81,6 +85,12 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     }
     static const char kBad[] = "{\"ok\":false,\"error\":\"invalid repo\"}";
     if (len < 0) {
+        return send_json(req, "400 Bad Request", kBad, sizeof(kBad) - 1);
+    }
+    // A %00 in the value decodes to an embedded NUL: the string would read as a truncated, possibly
+    // valid repo while the request meant something else. Refuse when the C-string length disagrees
+    // with the decoded length.
+    if (strlen(repo) != (size_t)len) {
         return send_json(req, "400 Bad Request", kBad, sizeof(kBad) - 1);
     }
     esp_err_t err = update_settings_set(repo);

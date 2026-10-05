@@ -375,7 +375,9 @@ typedef enum {
     KILN_CFG_RESTORE_MIRROR = 1,
 } kiln_cfg_restore_mode_t;
 
-#define KILN_CFG_PLAN_LINE_MAX 128
+/* 144, not 128: WP9's dry-run line "update_repo <old> -> <new>" is at most
+ * 12 + 62 + 4 + 62 = 140 characters. */
+#define KILN_CFG_PLAN_LINE_MAX 144
 #define KILN_CFG_PLAN_MAX_LINES 32
 
 typedef struct {
@@ -2801,14 +2803,29 @@ static BACKUP_IMPORT_NOINLINE void backup_import_track_ceiling_lower(void)
  * is "" (reset to the default) or a valid "owner/name"; an over-long value is
  * refused, never truncated (the buffer is one byte over the longest valid
  * repo, and a truncated copy would be longer than the maximum, so it fails
- * the validator). commit=false only validates (pass 1, before the dry_run
- * return); commit=true persists. NOINLINE for the same stack-budget reason as
+ * the validator). A backslash anywhere in the raw JSON string is refused:
+ * backup_json_field_str() unescapes "\\x" to "x", so an escaped spelling could
+ * otherwise turn a malformed value into a valid-looking one. A value equal to
+ * the compiled-in default is treated as "" (the export spelling). commit=false
+ * only validates and, when `plan` is non-NULL, records "update_repo <old> ->
+ * <new>" for the dry-run response (pass 1, before the dry_run return);
+ * commit=true persists (update_settings_set() itself writes nothing when the
+ * value is unchanged). NOINLINE for the same stack-budget reason as
  * backup_import_track_ceiling_lower(). */
-static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, bool commit, char *err_msg,
-                                                             size_t err_cap)
+static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, bool commit, kiln_cfg_plan_t *plan,
+                                                             char *err_msg, size_t err_cap)
 {
-    if (backup_json_obj_find(body, "update_repo") == NULL) {
+    const char *raw = backup_json_obj_find(body, "update_repo");
+    if (raw == NULL) {
         return true;
+    }
+    if (*raw == '"') {
+        for (const char *p = raw + 1; *p != '\0' && *p != '"'; p++) {
+            if (*p == '\\') {
+                snprintf(err_msg, err_cap, "update_repo must not contain a backslash");
+                return false;
+            }
+        }
     }
     char repo[UPDATE_SETTINGS_REPO_MAX_LEN + 2];
     if (!backup_json_field_str(body, "update_repo", repo, sizeof(repo))) {
@@ -2818,6 +2835,21 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, b
     if (repo[0] != '\0' && !update_settings_repo_is_valid(repo)) {
         snprintf(err_msg, err_cap, "update_repo is not a valid owner/name");
         return false;
+    }
+    if (strcmp(repo, UPDATE_SETTINGS_DEFAULT_REPO) == 0) {
+        repo[0] = '\0'; // the default spelled out is the same as unset
+    }
+    if (!commit && plan != NULL) {
+        char old_repo[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
+        if (!update_settings_repo_copy(old_repo, sizeof(old_repo))) {
+            old_repo[0] = '\0';
+        }
+        const char *new_repo = repo[0] != '\0' ? repo : UPDATE_SETTINGS_DEFAULT_REPO;
+        if (strcmp(old_repo, new_repo) == 0) {
+            kiln_cfg_plan_add(plan, "update_repo unchanged: %s", old_repo);
+        } else {
+            kiln_cfg_plan_add(plan, "update_repo %s -> %s", old_repo, new_repo);
+        }
     }
     if (commit && update_settings_set(repo) != ESP_OK) {
         snprintf(err_msg, err_cap, "update_repo could not be persisted -- the rest of the restore already landed");
@@ -2863,7 +2895,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
                                     err_msg, err_cap)) {
         return false;
     }
-    if (!backup_import_update_repo(body, false, err_msg, err_cap)) {
+    if (!backup_import_update_repo(body, false, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed update_repo refuses the WHOLE restore, nothing written
     }
     if (dry_run) {
@@ -2962,7 +2994,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     free(timing_profile_candidates);
     free(zone_candidates);
     free(candidates);
-    if (ok && !backup_import_update_repo(body, true, err_msg, err_cap)) {
+    if (ok && !backup_import_update_repo(body, true, NULL, err_msg, err_cap)) {
         ok = false; // profiles/zones already landed: reported as a partial write below
     }
     if (!ok) {

@@ -1030,7 +1030,9 @@ CEILING_BYTES = {
     # (backup_import_update_repo(), NOINLINE) grew backup_import_apply_locked's own
     # frame by 16 B (1648 -> 1664 B; the helper's own frame is not on the deepest
     # path), so the measured total is 80 B own + 4512 B backup_import_job = 4592 B,
-    # still about 3.3 KB under the 8192 B stack after the ESP_LOG overhead above.
+    # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
+    # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
+    # an earlier revision of this note said 3.3 KB, which forgot that overhead).
     "http_async_job": 4592,
     "recovery_exit": 80,
     "backlight_pwm": 112,

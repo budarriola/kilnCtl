@@ -167,9 +167,13 @@ Since `9310367b` the status path's transient scratch (the handler buffer, the tw
   check — the newer revision won and resynced the loser, so this should
   self-clear; a `diverged` flag that stays true across repeated reads
   means something is repeatedly re-diverging, not resolving.
-  Rows today (13): `zones`, `kiln_cfg_store`, `unit_pref`, `profiles_hidden`,
-  `zone_normals`, `ramp_assist`, `display_power`, `tz`, one aggregate
-  `profiles` row, `relay_cycles`, `adaptive_tune`, `firing_stats`, `relay_names`. The
+  Rows today (15): `zones`, `kiln_cfg_store`, `unit_pref`, `profiles_hidden`,
+  `zone_normals`, `ramp_assist`, `display_power`, `update_repo`, `tz`, one
+  aggregate `profiles` row, `relay_cycles`, `adaptive_tune`, `firing_stats`,
+  `relay_names`, `aux_outputs` (this said 13 until 2026-10-05: `aux_outputs` made
+  it 14 unnoticed, `update_repo` from `update_settings_get_dualwrite_status()`,
+  GitHub-release WP9, the 15th; the `update_repo` row reads `update_repo.dat` and
+  NVS key `update_repo` / rev key `upd_repo_rev`). The
   `zone_normals` row comes from `zone_normals_get_dualwrite_status()`
   (`zones_config_store.c`): a fresh read of `zone_normals.dat` and of NVS key
   `zone_norm_cfg` with rev key `znorm_rev`, never a resync write. The

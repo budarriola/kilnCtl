@@ -153,6 +153,21 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
         }
         return false;
 
+    case SYS_ACTION_UPDATE_SETTINGS_WRITE:
+        // WP9: the update repo setting only changes where a LATER update is fetched
+        // from, but a change mid-run is still refused outright (same blanket rule as
+        // stage writes; the NVS/cfg write itself is not free on the httpd task).
+        // No ack, no override. Text is JSON-safe.
+        if (snap->profile_running || snap->autotune_running) {
+            if (reason != NULL && reason_cap > 0) {
+                snprintf(reason, reason_cap,
+                         "refused -- a firing or autotune run is active; the update repository setting "
+                         "cannot be changed until it ends");
+            }
+            return true;
+        }
+        return false;
+
     case SYS_ACTION_START_PROFILE:
     case SYS_ACTION_START_AUTOTUNE:
         // Slice 2: recovery mode only -- every other start refusal (safety

@@ -8,6 +8,8 @@
 // DEFAULT: UPDATE_SETTINGS_DEFAULT_REPO is compiled in. An unset setting
 // (fresh board, no valid stored value, or an operator reset) reads as the
 // default. A non-default repo needs no extra confirm (owner decision D5).
+// The default spelled out is canonicalised to "unset" by update_settings_set(),
+// and a set to the value already in effect (and already persisted) writes nothing.
 //
 // PERSISTENCE: same shape as display_power_cfg.c -- one small versioned blob
 // in kiln_nvs/kiln_cfg (NVS authoritative), dual-written to the cfg LittleFS
@@ -15,8 +17,17 @@
 // also named in kiln_scope_cfg_files.c.
 //
 // RAM: two 64-byte buffers. The accessor returns a pointer into the live one;
-// a set writes the other buffer and then flips an index, so a reader on
-// another task never sees a half-written string.
+// a set writes the other buffer and then flips an atomic index (release store,
+// acquire load), so a reader on another task never sees a half-written string.
+// A pointer from update_settings_repo() is only guaranteed whole across ONE
+// later set(); a consumer that holds the string across a network request must
+// use update_settings_repo_copy() instead.
+//
+// LOCKING: update_settings_set() calls are serialised by a writer mutex; the
+// in-RAM publish and update_settings_repo_copy() share a second, short mutex
+// that is never held across NVS/cfg_fs access (display_power_cfg keeps the
+// same "no lock over flash" shape; it has no lock at all because it has a
+// single writer, this setting has two: the HTTP route and backup import).
 #ifndef UPDATE_SETTINGS_H
 #define UPDATE_SETTINGS_H
 
@@ -33,8 +44,11 @@ extern "C" {
 #define UPDATE_SETTINGS_DEFAULT_REPO "budarriola/kilnCtl"
 
 // Longest accepted "owner/name" (characters, NUL excluded). GitHub allows a
-// 39-character owner and 100-character name; this firmware caps the whole
-// string at 62 to keep the RAM and the stored blob at 64 bytes.
+// 39-character owner and 100-character name; this firmware caps the WHOLE
+// string at 62 to keep the RAM and the stored blob at 64 bytes. The real
+// maxima follow from that: owner at most 39 and name at most 60 (1-char owner
+// + '/' + 60), and owner + name at most 61 together -- a 39-character owner
+// leaves 22 characters for the name.
 #define UPDATE_SETTINGS_REPO_MAX_LEN 62
 
 // cfg_fs relative path of this item's dual-write mirror (NVS side: kiln_nvs).
@@ -43,7 +57,9 @@ extern "C" {
 // Pure validator. true iff `repo` is a well-formed "owner/name":
 //   3..UPDATE_SETTINGS_REPO_MAX_LEN characters, exactly one '/';
 //   owner 1..39 chars of [A-Za-z0-9._-], not starting or ending with '-';
-//   name 1..100 chars of [A-Za-z0-9._-]; no ".." anywhere.
+//   name 1..100 chars of [A-Za-z0-9._-] (the 62-character total is the real cap);
+//   neither owner nor name starts with '.' (so no "." or ".."); no ".." anywhere.
+// WP8's update_repo_valid() (update_url.c, not on main yet) must merge into this.
 // NULL and "" are invalid here ("" is a reset spelling of update_settings_set()).
 bool update_settings_repo_is_valid(const char *repo);
 
@@ -55,6 +71,13 @@ esp_err_t update_settings_start(void);
 // always a valid "owner/name", O(1), no NVS access, safe from any task.
 const char *update_settings_repo(void);
 
+// Copies the current repo into `out` under the short state mutex, NUL-terminated.
+// Returns false (out[0] = '\0') only if `cap` is too small or an argument is NULL;
+// UPDATE_SETTINGS_REPO_MAX_LEN + 1 bytes always suffices. Use this, not the
+// pointer accessor, when the string is held across a blocking operation (WP8's
+// fetcher switches to it when it merges).
+bool update_settings_repo_copy(char *out, size_t cap);
+
 // true when update_settings_repo() is the compiled-in default.
 bool update_settings_repo_is_default(void);
 
@@ -63,6 +86,11 @@ bool update_settings_repo_is_default(void);
 // updates first, so a persistence failure (returned as the error) means the
 // choice will not survive a reboot, not that it failed to apply now.
 esp_err_t update_settings_set(const char *repo);
+
+// /api/cfgfs "update_repo" row: file vs NVS validity, revs and divergence
+// (modelled on display_power_cfg_get_dualwrite_status()). Any out-pointer may be NULL.
+void update_settings_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                          bool *diverged);
 
 // Test-only: forget the in-RAM value as a power cycle would (NVS/file stay).
 void update_settings_reset_ram_for_test(void);

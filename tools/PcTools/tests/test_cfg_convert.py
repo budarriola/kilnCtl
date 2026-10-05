@@ -244,3 +244,21 @@ def test_cli_rejects_forbidden_document(tmp_path):
     }))
     rc = cfg_convert.main([str(bad), "--to-version", "1", "--quiet"])
     assert rc == 1
+
+
+def test_update_repo_passes_through_every_direction_and_value():
+    """WP9: the top-level update_repo string is carried verbatim (including "" and a
+    non-default repo), across upgrade, downgrade and same-version conversion, and its
+    absence stays absent. It is never version-gated."""
+    base = json.loads((FIXTURES / "v1_synthesized.json").read_text(encoding="utf-8"))
+    for value in ("", "someone/fork", "budarriola/kilnCtl"):
+        doc = dict(base)
+        doc["update_repo"] = value
+        for target in (1, 3, 4, int(doc["version"])):
+            out, _report = cfg_convert.convert(doc, target)
+            assert out["update_repo"] == value, (value, target)
+    doc = dict(base)
+    doc.pop("update_repo", None)
+    for target in (1, 4):
+        out, _report = cfg_convert.convert(doc, target)
+        assert "update_repo" not in out
