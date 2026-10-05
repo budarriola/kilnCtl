@@ -51,6 +51,7 @@ if (-not (Test-Path (Join-Path $httpDir "ota_image_crc.h"))) { throw "missing $h
 
 $shared = @(
     (Join-Path $here "recovery_image_check.c"),
+    (Join-Path $here "test_ota_image_crc_double.c"),
     (Join-Path $updateDir "stage_header.c"),
     (Join-Path $updateDir "update_semver.c")
 )

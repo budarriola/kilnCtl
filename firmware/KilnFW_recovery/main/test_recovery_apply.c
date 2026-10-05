@@ -27,13 +27,6 @@ static int g_pass, g_fail;
         }                                                                   \
     } while (0)
 
-// The shared stage_header.c calls ota_image_crc32(); on target that is the
-// esp_rom wrapper, here the zlib CRC-32 recovery already carries.
-uint32_t ota_image_crc32(const uint8_t *buf, size_t len)
-{
-    return ric_crc32(buf, len);
-}
-
 #define APP_SIZE (2u * 65536u)
 #define STAGE_SIZE (4096u + APP_SIZE)
 #define IMG_LEN 70000u // not a multiple of 4096: exercises the tail chunk

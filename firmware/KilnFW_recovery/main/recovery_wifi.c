@@ -58,6 +58,8 @@ static void on_shutdown(void)
     s_shutting_down = true;
 }
 
+#define RESTART_APPLY_WAIT_MS (10 * 60 * 1000)
+
 static void restart_image_for_wifi(void)
 {
     // A staged-update apply is copying into `app` and restarting would cut it
@@ -65,7 +67,18 @@ static void restart_image_for_wifi(void)
     // The apply does not need the AP, so wait it out: on success the apply
     // restarts the chip itself, on failure this restart proceeds as before.
     // s_shutting_down stays false meanwhile so the AP_STOP is still a fault.
+    // Bounded (RESTART_APPLY_WAIT_MS): restarting mid-copy is safe because
+    // recovery_apply.c only calls set_boot AFTER the whole app is written and
+    // verified, so a cut copy leaves recovery as the boot image. Recovery is
+    // never written by the apply (D6).
+    // The AP is about to go down: stop the LCD advertising it and its passphrase.
+    recovery_lcd_set_ap_state(RLCD_AP_RESTARTING);
+    const int64_t wait_start_us = esp_timer_get_time();
     while (recovery_apply_busy()) {
+        if (esp_timer_get_time() - wait_start_us > (int64_t)RESTART_APPLY_WAIT_MS * 1000) {
+            ESP_LOGW(TAG, "apply still busy after %d ms; restarting WiFi anyway (set_boot not yet reached, recovery stays bootable)", RESTART_APPLY_WAIT_MS);
+            break;
+        }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
     s_shutting_down = true;

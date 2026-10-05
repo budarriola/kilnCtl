@@ -343,11 +343,11 @@ $allowlistPaths = @(
     (Join-Path $firmwareRoot "KilnFW_recovery\main\recovery_image_check.h"),
     (Join-Path $firmwareRoot "KilnFW_recovery\main\recovery_pico_proto.c"),
     (Join-Path $firmwareRoot "KilnFW_recovery\main\recovery_pico_proto.h"),
-    # test_recovery_apply.c: a one-line host-test double of ota_image_crc32() that
+    # test_ota_image_crc_double.c: a one-line host-test double of ota_image_crc32() that
     # forwards to ric_crc32() above (on target it is the esp_rom wrapper). It is a
     # delegation, not a CRC implementation, and exists only so the shared
     # stage_header.c links in the host test. Allowlisted by path with this reason.
-    (Join-Path $firmwareRoot "KilnFW_recovery\main\test_recovery_apply.c")
+    (Join-Path $firmwareRoot "KilnFW_recovery\main\test_ota_image_crc_double.c")
 )
 
 # Concurrent sessions are the norm in this repo: another agent's in-flight

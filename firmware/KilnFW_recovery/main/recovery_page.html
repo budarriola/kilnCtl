@@ -117,7 +117,7 @@ function applyStaged(){
 if(!confirm("Overwrite the application with the staged image and restart? An interrupted apply is safe: the board returns to this recovery image."))return;
 $("abtn").disabled=true;$("apw").textContent="";
 post("/api/recovery/apply_staged",null).then(function(r){log(r.s+" "+r.t);
-if(r.s==409)$("apw").textContent="Busy: another operation (apply, Pico transfer or upload) is running. Try again when it finishes.";
+if(r.s==409)$("apw").textContent="Not started: "+r.t;
 else if(r.s!=202)$("apw").textContent="Refused: "+r.t;
 apoll()},function(e){log(e.message);apoll()})}
 status();ppoll();apoll();
