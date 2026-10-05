@@ -202,3 +202,69 @@ Still open, all at their defaults, not yet owner-confirmed:
 - D9 mbedTLS to PSRAM globally: default yes, behind the two gates in section 11.
 - D10 publish token: default fine-grained PAT in `KILNCTL_GITHUB_TOKEN`.
 - D11 release trigger: default owner only, dry-run first.
+
+## 14. WP7 network spike findings (desk work and build measurement; nothing flashed)
+
+No runtime handshake number exists yet: the spike was built, never flashed. Everything under "Runtime" is an expectation from IDF docs/source and the
+board's current heap, to be replaced by the bench run below.
+
+**Spike code.** `firmware/KilnFW/components/tls_spike/` (commit 9f4623f0), `CONFIG_KILNCTL_TLS_SPIKE` default n. One-shot task after a boot delay
+(default 90 s): GET chain with manual redirects, bundle-verified TLS, heap sampler, writes no flash. No WP0 shared file touched.
+
+**sdkconfig today (A).** ESP-IDF v6.0.2, mbedTLS 4.1.0. Octal PSRAM 8 MB, `SPIRAM_USE_MALLOC`, `SPIRAM_MALLOC_ALWAYSINTERNAL=8192`,
+`SPIRAM_MALLOC_RESERVE_INTERNAL=32768`, `SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`. mbedTLS: `INTERNAL_MEM_ALLOC=y`, `ASYMMETRIC_CONTENT_LEN` IN 16384 / OUT 4096,
+dynamic buffer off, full cert bundle already built in, TLS 1.3 not enabled. Spike variants: B = flag on, sdkconfig otherwise unchanged;
+D = flag on plus `MBEDTLS_EXTERNAL_MEM_ALLOC=y`, `DYNAMIC_BUFFER=y`, `DYNAMIC_FREE_CONFIG_DATA=y`, `DYNAMIC_FREE_CA_CERT=y` (the section 11 / D9 set).
+
+**Measured sizes (bytes, `xtensa-esp32s3-elf-size -A`).**
+
+| Section | A baseline | flag off, clean commit | B flag on | D flag on + PSRAM/dynamic |
+|---|---|---|---|---|
+| .dram0.bss (cap 101000) | 99240 | 99240 | 100344 | 100344 |
+| .iram0.text | 89207 | 89207 | 89207 | 89207 |
+| .flash.text | 1490248 | 1490248 | 1562596 | 1565476 |
+| .flash.rodata | 982904 | 982904 | 1067632 | 1068008 |
+| .ext_ram.bss | 119972 | 119972 | 119972 | 119972 |
+| KilnCtrl.bin (4 MiB slot) | 2587232 | 2587232 | 2744304 | 2747552 |
+
+- Flag off at the clean commit is section-for-section identical to baseline A and the same .bin size (the bytes differ, as every build's timestamps do).
+- Flag on costs +1104 B bss (mostly the spike's 1 KB static URL buffer), about +157 to +160 KB image, no IRAM. Image stays about 1.45 MB under the 4 MiB slot.
+- **bss headroom is the constraint:** baseline leaves 1760 B under the 101000 cap; the spike leaves 656 B. Production fetch code must keep URL, header and
+  chunk buffers in PSRAM or heap, not static internal bss. The PSRAM/dynamic options themselves cost no bss.
+
+**Runtime (expectation, unmeasured).**
+- Board facts read earlier: idle `min_free` about 17.6 KB, largest free internal block 9728 B.
+- IDF mbedtls docs memory table: about 42 KB for a default TLS connection (16 KB IN + 16 KB OUT buffers plus contexts); asymmetric 16384/4096 saves about 12 KB, so
+  roughly 30 KB (my inference) in internal RAM. That exceeds the floor, and a 16 KB record buffer cannot even be allocated from a 9728 B largest block.
+  **Option B (internal) does not fit. Do not ship it.**
+- Option D: with `EXTERNAL_MEM_ALLOC` mbedTLS allocations route through `esp_mem.c` to PSRAM; dynamic buffer plus free-config/free-CA shrink the
+  PSRAM footprint (docs give about 22 KB total). Internal use should drop to small lwip/socket/esp_http_client mallocs plus DMA bounce buffers for
+  hardware AES/SHA on PSRAM data. That residual is the number the bench must produce. Not measured.
+- Keep IN = 16384: GitHub/Fastly servers will probably not honour max-fragment-length negotiation, so a smaller IN could fail on 16 KB records (inference, unverified).
+- TLS 1.3 not measured; GitHub serves TLS 1.2, which is enough.
+- External mode shifts crypto cost and may lengthen the login KDF: D9 gate (b) applies unchanged.
+
+**Redirects.** `api.github.com/.../releases/latest` returns JSON; the asset URL 302s to the `objects.githubusercontent.com` / release-assets host. Use
+`disable_auto_redirect` and follow Location manually: https only, host allowlist (`api.github.com`, `github.com`, `*.githubusercontent.com`), max 3 hops
+(the client default of 10 is too many). `buffer_size` 2048 for the long signed Location; the spike logs the real Location length so the bench can confirm 2048.
+Each hop opens a fresh TLS session, so peak heap is per hop, not cumulative.
+
+**CORS.** `api.github.com` is expected to send `Access-Control-Allow-Origin: *`; the asset redirect host is unproven (not checked from this session). That is why the board
+downloads and the browser only triggers it.
+
+**Recommendation.** Adopt D9 as written: option D set, IN 16384 / OUT 4096, `esp_http_client` `buffer_size` 2048, manual allowlisted redirects, dedicated
+PSRAM-stack task, 4 KB PSRAM chunk. Revisit the proposed 40 KB free-internal precheck: the board idles near 30 KB free, so 40 KB would never pass; set it from the measured
+residual. Keep the 12 KB in-flight abort until measured. Both D9 gates still apply, with a negative test.
+
+**Bench procedure (later, board free, owner-authorised flash).**
+1. Build the worktree with `CONFIG_KILNCTL_TLS_SPIKE=y` plus the D deltas (and B for comparison); `build_kilnfw_start` with `kiln_fw_root` pointing at it.
+2. `flash_firmware(kiln_fw_root=...)`; no other agent on the bench; firing idle.
+3. Capture `get_heap_status` before; the `TLS_SPIKE` log lines (HEAP per stage, `int_free`, `int_largest`, `int_min_global`, `sampled_min_free`, Location length, per-hop status);
+   `get_heap_status` after. Pass if `sampled_min_free >= 8192` with margin.
+4. Repeat with the asset URL (covers the redirect hop). Optionally raise `_REPEAT` to catch fragmentation.
+5. KDF trace: do a web login during the fetch; require no TASK_WDT in the log and record latency against a flag-off boot (gate b).
+6. Reflash the normal build and confirm `fw_build`.
+
+**Not done / unverified.** No board access, no flash. No runtime heap numbers. Server max-fragment-length behaviour, CORS on the asset host and TLS 1.3 untested.
+No network requests to GitHub from the host (a curl attempt was denied by the permission classifier and not retried). Full check suite not run (flag-off build
+identical to baseline; no check-relevant files changed).
