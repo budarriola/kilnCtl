@@ -271,3 +271,27 @@ PSRAM-stack task, 4 KB PSRAM chunk. Revisit the proposed 40 KB free-internal pre
 **Not done / unverified.** No board access, no flash. No runtime heap numbers. Server max-fragment-length behaviour, CORS on the asset host and TLS 1.3 untested.
 No network requests to GitHub from the host (a curl attempt was denied by the permission classifier and not retried). Full check suite not run (flag-off build
 identical to baseline; no check-relevant files changed).
+
+**Bench results (2026-10-05, option D build of 2d7bfb0d, bench board, one fetch of `releases/latest`).**
+
+| Measurement | Value |
+|---|---|
+| Flag-off idle, before | int free 30679 B, largest 9728 B, min_free 17687 B |
+| Spike boot (uptime 9 s) | int free 31403 B, largest 10240 B, min_free 18159 B |
+| pre_init / pre_open | int free 31683 B / 27247 B |
+| post_open_handshake | int free 23775 B, sampled_min 20639 B |
+| post_headers / post_body | 23635 B / 23775 B |
+| post_cleanup | 31291 B |
+| RESULT | sampled_min_free_internal 20639 B, sampled_min_largest_block 10240 B, int_min_global 18159 B |
+| Floor 8192 B | PASS (sampled minimum 20639 B, margin 12447 B) |
+| Spike task stack high-water | 7952 B of 12 KB |
+| Handshake | success, bundle-verified, about 2.7 to 3.9 s; TLS version and cipher not logged |
+| HTTP result | hop 0 status 404, content_length 130, url_len 63 |
+| Image size | flag-on KilnCtrl.bin 2753344 B; clean origin/main 2593136 B |
+| Login latency | about 480 ms flag-off; during the fetch the login POST timed out |
+
+- **Gate (b) FAILED in the spike configuration.** A web login during the handshake starved IDLE0 on core 0 (spike task, priority 3, pinned to core 0, inside mbedTLS
+  ECDH) and the board reset with `TASK_WDT` (crash report dump_id 2919415307, left unacknowledged). Production fetch needs a different placement (core 1, or
+  yielding between crypto steps) and a re-run of step 5.
+- Heap floor is met with wide margin, so the heap question is closed for one hop. Not done: asset-URL hop (the URL returned 404, so there was no redirect),
+  `_REPEAT` above 1, TLS version/cipher capture, a clean KDF latency under fetch.
