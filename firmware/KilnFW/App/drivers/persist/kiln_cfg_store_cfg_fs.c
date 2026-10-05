@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "persist_scratch.h"
 
 static const char *KCFG_FS_TAG = "kiln_cfg_store_fs";
 
@@ -64,7 +65,7 @@ void kiln_cfg_store_cfg_fs_load_raw(kiln_cfg_store_blob_t *out_blob, uint32_t *o
         return;
     }
 
-    uint8_t *raw = malloc(KCFG_FILE_BUF_MAX);
+    uint8_t *raw = persist_scratch_alloc(KCFG_FILE_BUF_MAX);
     if (!raw) {
         ESP_LOGW(KCFG_FS_TAG, "file read buffer alloc failed (%u bytes) -- treating as file absent, NVS "
                               "candidate decides",
@@ -124,7 +125,7 @@ esp_err_t kiln_cfg_store_cfg_fs_save(const kiln_cfg_store_blob_t *blob, uint32_t
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;
     }
-    uint8_t *raw = malloc(KCFG_FILE_BUF_MAX);
+    uint8_t *raw = persist_scratch_alloc(KCFG_FILE_BUF_MAX);
     if (!raw) {
         ESP_LOGE(KCFG_FS_TAG, "file write buffer alloc failed (%u bytes) -- refusing to write",
                  (unsigned)KCFG_FILE_BUF_MAX);

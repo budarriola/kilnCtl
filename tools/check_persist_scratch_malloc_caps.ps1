@@ -38,10 +38,9 @@
 # count must match exactly, so a duplicated call or a removed one fails the
 # check, and an entry that matches nothing fails as stale; the list cannot rot.
 #
-# NOT YET COVERED. kiln_cfg_store_cfg_fs.c and zones_config_cfg_fs.c hold the
-# same scratch class (malloc(*_FILE_BUF_MAX)) but still use plain malloc, so
-# they are deliberately not in $files yet: adding them is a planned follow-up
-# once those sites move to persist_scratch_alloc(). Also not matched by design:
+# COVERAGE. kiln_cfg_store_cfg_fs.c and zones_config_cfg_fs.c (their
+# *_FILE_BUF_MAX read/write scratch) now use persist_scratch_alloc() and are
+# listed in $files. Also not matched by design:
 # heap_caps_malloc(), so firing_stats_cfg_fs_save()'s deliberate
 # MALLOC_CAP_INTERNAL buffer (it is a flash-write source kept internal by choice,
 # not by necessity) and the other explicit-caps sites in the newer files never need an
@@ -59,6 +58,8 @@ $files = @(
     "firmware/KilnFW/App/drivers/http/backup_import.c",
     "firmware/KilnFW/App/drivers/http/diagnostics_http.c",
     "firmware/KilnFW/App/drivers/http/profiles_http.c",
+    "firmware/KilnFW/App/drivers/persist/kiln_cfg_store_cfg_fs.c",
+    "firmware/KilnFW/App/drivers/persist/zones_config_cfg_fs.c",
     "firmware/KilnFW/App/drivers/persist/cfg_fs_status.c",
     "firmware/KilnFW/App/drivers/persist/firing_stats_cfg_fs.c",
     "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c"

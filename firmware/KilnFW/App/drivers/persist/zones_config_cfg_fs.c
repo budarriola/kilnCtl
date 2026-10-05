@@ -8,6 +8,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "persist_scratch.h"
 
 static const char *ZCFG_FS_TAG = "zones_cfg_fs";
 
@@ -81,7 +82,7 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
      * (8192 B) at boot, and a stack buffer here plus a zones_cfg_t local
      * below made this one frame 1904 B -- part of the main-task overflow in
      * docs/audits/boot_hang_2026-09-08.md. */
-    uint8_t *raw = malloc(ZCFG_FILE_BUF_MAX);
+    uint8_t *raw = persist_scratch_alloc(ZCFG_FILE_BUF_MAX);
     if (!raw) {
         ESP_LOGW(ZCFG_FS_TAG, "zones config file read buffer alloc failed -- treating as file absent");
         return;
@@ -206,7 +207,7 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
      * revert_post_handler to 4880 B against check_httpd_task_stack_budget's
      * 4832 B ceiling on the shared 8 KB httpd_worker stack. Allocating it
      * takes ~1 KB off every one of those paths at once. */
-    uint8_t *raw = malloc(ZCFG_FILE_BUF_MAX);
+    uint8_t *raw = persist_scratch_alloc(ZCFG_FILE_BUF_MAX);
     if (!raw) {
         ESP_LOGW(ZCFG_FS_TAG, "zones config file write buffer alloc failed -- file not written (rev %lu)",
                  (unsigned long)rev);
