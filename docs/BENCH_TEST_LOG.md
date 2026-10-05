@@ -2962,3 +2962,10 @@ Item 4 (final health): uptime_s 1754, reset_reason 'software (esp_restart)' (sam
 - `20261005T160721Z_ota_bench20261005` suite=`ota` exit_code=0 PASS=2 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Oct  5 2026 08:55:34 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261005T160721Z_ota_bench20261005/`
 - `20261005T160745Z_autotune_bench20261005` suite=`autotune` exit_code=3 PASS=3 FAIL=0 INCONCLUSIVE=1 NOT_RUN=0 SKIP=0 esp_fw=Oct  5 2026 08:55:34 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261005T160745Z_autotune_bench20261005/`
 - `20261005T164532Z_heat_bench20261005` suite=`heat` exit_code=0 PASS=8 FAIL=0 INCONCLUSIVE=0 NOT_RUN=0 SKIP=0 esp_fw=Oct  5 2026 08:55:34 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261005T164532Z_heat_bench20261005/`
+
+## 2026-10-05 cfg dual-write window soak (board 192.168.1.156, firmware 5bbdb714)
+- 20 clean `debug_reset` boots: every `GET /api/cfgfs` read mounted, 10 files, 0 tmp, 14 rows, all `diverged:false`; persisted_count 0; no crash banner; no trip on counted boots. R1 (not counted): SX1509 init failure latched S6a, cleared by a second reset. Three resets (after boots 4, 13, 18) halted both cores at PC 0x403C8908 and needed `allow_dark_rereset=True`; each recovered clean.
+- Firing: profile #0 `M18C_TEST` ran to completion (state 3, no fault, peak about 47 C), acknowledged; `/api/cfgfs` still 14 rows `diverged:false`.
+- Backup round trip: export, import (confirm=True, ok), re-export; all sections equal except 11 bytes of the `kiln_configs` esp blob (rounding) and its CRC/hash. `/api/cfgfs` still clean.
+- Board window report: consecutive_clean_boots 24, firing_complete, restore_verified, window_may_close true.
+- Final: armed, no trip, link up, executor idle after ack, relays off.

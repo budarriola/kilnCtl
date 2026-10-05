@@ -456,3 +456,40 @@ judge `cfg`. Read progress at `GET /api/dualwrite_window`; a
 NVS writers) stays a deliberate, reviewed, owner-visible step performed by
 hand once all three conditions read true; nothing in this codebase acts on
 that flag automatically.
+
+## Dual-write window: evidence, 2026-10-05
+
+Bench fixture (192.168.1.156, firmware `5bbdb714`), all three conditions run
+on the board with no NVS writer removed:
+
+- **20 consecutive clean boots.** 20 `debug_reset(peer="esp")` boots, each
+  followed by `GET /api/cfgfs`: mounted, 10 files, 0 `.tmp` entries, 0
+  `nvs_only`, and all 14 rows `diverged:false` on every read (14 rows today:
+  `aux_outputs` is new since the 13 listed above). `persisted_count` stayed 0
+  (boot_guard threshold 3), no unacknowledged crash banner, no trip after
+  any counted boot, post-boot `heap_internal` min_free 15.5-17.1 KB. One
+  extra boot (R1) is not counted: the SX1509 expander failed init ("no
+  SX1509 at 0x3E"), latching S6a; `safety_clear_trip` refused while the
+  fault line was asserted and a second reset cleared it. Three resets
+  (after counted boots 4, 13 and 18) failed with both cores halted at PC
+  0x403C8908 and the board dark; each was recovered at once with
+  `debug_reset(allow_dark_rereset=True)`, with no S6b and a clean boot. That
+  is a reset-tooling observation, not a cfg result.
+- **File-backed firing.** Profile #0 `M18C_TEST` (40 C then 30 C, 3 min of
+  dwell), run to completion (exec state 3, no fault, zones peaked about
+  47 C, relays off, safety armed, no trip), then acknowledged. `/api/cfgfs`
+  afterwards: 10 files, 0 tmp, 14 rows `diverged:false`.
+- **Backup round trip.** `backup_export` (11019 B), `backup_import
+  (confirm=True)` ("ok - restored", 0.83 s, readiness 20 ok / 1 not_done /
+  3 other before and after), re-export (11019 B). The `profiles`, `zones`,
+  `timing_profiles`, `safety_tc_type` and informational sections are
+  identical. The files are not byte-identical: the `kiln_configs` package
+  `esp_blob_hex` differs in 11 of 896 bytes (7 float-field bytes in the
+  zone coupling tau/dead-time area, plus the 4-byte CRC) and `pkg_hash`
+  differs with it, consistent with the blob being rebuilt from the
+  1-decimal rounded live values; the live `zones` data did not change.
+  `/api/cfgfs` afterwards: 10 files, 0 tmp, 14 rows `diverged:false`.
+
+The board's own counter reads `consecutive_clean_boots` 24 (target 20),
+`firing_complete:true`, `restore_verified:true`, `window_may_close:true`.
+This is a report only; removing the NVS writers remains an owner decision.
