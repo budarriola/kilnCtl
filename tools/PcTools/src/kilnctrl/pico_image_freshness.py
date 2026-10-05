@@ -103,17 +103,30 @@ class MultipleIdentitiesFound(ValueError):
     """More than one DISTINCT valid record found -- ambiguous which is real."""
 
 
-def find_all_identities(buf: bytes) -> "list[ImageIdentity]":
-    """Scan `buf` 4 bytes at a time for every offset holding a structurally
-    valid record (both magics, the trailer, a recognised version, commit_len
-    in bounds). Returns them in offset order. Pure, no side effects."""
+def find_all_identities(buf: bytes, step: int = SCAN_STEP) -> "list[ImageIdentity]":
+    """Scan `buf` for every offset holding a structurally valid record (both
+    magics, the trailer, a recognised version, commit_len in bounds). Returns
+    them in offset order. Pure, no side effects.
+
+    `step=4` (default) matches the C scanner and is right for a standalone
+    slot image, whose first byte IS the image start. A KilnFW application
+    .bin that embeds the slot image (EMBED_FILES) is different: the slot
+    starts at an arbitrary byte offset of the app image (the generated .S
+    sets no alignment on `_binary_..._start`), so the record is only
+    4-byte aligned relative to the slot, not to the app -- scan an app
+    with `step=1` (see `find_embedded_identities`)."""
     found: list[ImageIdentity] = []
     n = len(buf)
     if n < RECORD_SIZE:
         return found
     last_start = n - RECORD_SIZE
+    magic_bytes = struct.pack("<II", MAGIC0, MAGIC1)
     off = 0
     while off <= last_start:
+        if step == 1:
+            off = buf.find(magic_bytes, off, last_start + 8)
+            if off < 0 or off > last_start:
+                break
         magic0, magic1 = struct.unpack_from("<II", buf, off)
         if magic0 == MAGIC0 and magic1 == MAGIC1:
             chunk = buf[off:off + RECORD_SIZE]
@@ -130,8 +143,31 @@ def find_all_identities(buf: bytes) -> "list[ImageIdentity]":
                     link_protocol_version=link_proto_ver,
                     offset=off,
                 ))
-        off += SCAN_STEP
+        off += step
     return found
+
+
+def find_embedded_identities(app: bytes) -> "list[ImageIdentity]":
+    """find_all_identities for a KilnFW application image: every byte offset,
+    since the embedded slot image has no alignment guarantee inside it."""
+    return find_all_identities(app, step=1)
+
+
+def locate_embedded_image(app: bytes, slot_image: bytes, window: int = 64) -> int:
+    """Byte offset at which `slot_image` is embedded in `app`, or -1.
+    Matches a `window`-byte sample from the start (the Cortex-M vector table)
+    and verifies the whole image, so a coincidental prefix is not enough.
+    Used to tell "the app carries the slot images but no record" apart from
+    "the slot images were never linked into the app at all"."""
+    if len(slot_image) < window:
+        return -1
+    head = slot_image[:window]
+    off = app.find(head)
+    while off >= 0:
+        if app[off:off + len(slot_image)] == slot_image:
+            return off
+        off = app.find(head, off + 1)
+    return -1
 
 
 def find_one_identity(buf: bytes) -> ImageIdentity:

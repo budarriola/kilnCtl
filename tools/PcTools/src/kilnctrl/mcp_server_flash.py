@@ -911,6 +911,29 @@ def _archive_flashed_elf(build_dir: str, app_bin_path: str, tree_state,
         return f"\nWARNING: elf archiving FAILED (flash itself succeeded): {exc}"
 
 
+def _pico_image_absence_reason(app_bin_path: str, app_data: bytes) -> str:
+    """Why no identity record: look for the sibling SaftyFW slot .bin's bytes
+    inside the app image. Best-effort; never raises."""
+    try:
+        slot = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(app_bin_path)), "..", "..", "SaftyFW",
+            "build", "SaftyFW_slotA.bin"))
+        if not os.path.isfile(slot):
+            return "(slot images not located to cross-check)"
+        with open(slot, "rb") as f:
+            slot_data = f.read()
+        off = pico_image_freshness.locate_embedded_image(app_data, slot_data)
+        if off < 0:
+            return ("(SaftyFW_slotA.bin content is NOT present in the app binary: the slot images "
+                    "are not linked into this build -- the linker drops the EMBED_FILES objects "
+                    "while automatic Pico update is compiled OFF, "
+                    "PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=0)")
+        return (f"(slot image IS embedded at app offset {off} but carries no valid "
+                "record -- stale or damaged slot image)")
+    except Exception as exc:  # noqa: BLE001
+        return f"(could not cross-check slot images: {exc})"
+
+
 def _pico_image_provenance_note(app_bin_path: str) -> str:
     """One-line note recording what the ESP application binary about to be
     flashed believes about its embedded Pico (SaftyFW) image(s), per the
@@ -929,11 +952,12 @@ def _pico_image_provenance_note(app_bin_path: str) -> str:
             return f"pico image: no embedded SaftyFW identity (app binary not found: {app_bin_path})"
         with open(app_bin_path, "rb") as f:
             data = f.read()
-        records = pico_image_freshness.find_all_identities(data)
+        records = pico_image_freshness.find_embedded_identities(data)
     except Exception as exc:  # noqa: BLE001 - provenance note must never block a flash
         return f"pico image: could not inspect embedded SaftyFW identity ({exc})"
     if not records:
-        return "pico image: no embedded SaftyFW identity record found in app binary (KilnFW built without embedded Pico images, or embedding not yet wired up)"
+        return ("pico image: no embedded SaftyFW identity record found in app binary "
+                + _pico_image_absence_reason(app_bin_path, data))
     distinct = sorted({(r.commit, r.dirty, r.config_format_version, r.link_protocol_version) for r in records})
     if len(distinct) == 1:
         commit, dirty, cfg_ver, link_proto_ver = distinct[0]

@@ -388,3 +388,43 @@ def test_scoped_paths_drift_is_actually_caught(monkeypatch, tmp_path):
     monkeypatch.setattr(sys.modules[__name__], "_GEN_BUILD_INFO_CMAKE", drifted_cmake)
     with pytest.raises(AssertionError):
         test_scoped_paths_match_cmake_and_stale_check()
+
+
+# ---------------------------------------------------------------------------
+# Embedded in a KilnFW application image (EMBED_FILES): the slot starts at an
+# arbitrary byte offset of the app, so the record is only 4-aligned relative
+# to the slot. The default 4-byte-step scan from app offset 0 misses it.
+# ---------------------------------------------------------------------------
+
+
+def _fake_slot(commit: str = "abc1234") -> bytes:
+    body = bytes((i * 7 + 3) & 0xFF for i in range(4096))  # vector-table-ish filler
+    return body + _make_record(commit) + body[:128]
+
+
+@pytest.mark.parametrize("misalign", [0, 1, 2, 3])
+def test_find_embedded_identities_at_any_app_alignment(misalign):
+    slot = _fake_slot()
+    app = b"\xE9" * (0x20000 + misalign) + slot + b"\xFF" * 4093
+    found = fresh.find_embedded_identities(app)
+    assert len(found) == 1
+    assert found[0].commit == "abc1234"
+    assert found[0].offset == 0x20000 + misalign + 4096
+
+
+def test_default_step_misses_misaligned_embedded_record_but_standalone_ok():
+    slot = _fake_slot()
+    app = b"\x00" * 0x20001 + slot
+    assert fresh.find_all_identities(app) == []          # the old blind spot
+    assert len(fresh.find_embedded_identities(app)) == 1
+    assert len(fresh.find_all_identities(slot)) == 1      # standalone image unaffected
+
+
+def test_locate_embedded_image():
+    slot = _fake_slot()
+    app = b"\x11" * 12345 + slot + b"\x22" * 99
+    assert fresh.locate_embedded_image(app, slot) == 12345
+    assert fresh.locate_embedded_image(b"\x11" * 20000, slot) == -1
+    # same prefix but different tail is not a match
+    other = slot[:200] + b"\x00" * (len(slot) - 200)
+    assert fresh.locate_embedded_image(app, other) == -1

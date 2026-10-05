@@ -76,3 +76,32 @@ def test_records_differing_only_in_link_protocol_version_flagged(tmp_path):
                   + _make_record("aaaaaaa", link_proto_ver=2))
     note = msf._pico_image_provenance_note(str(p))
     assert "disagree" in note
+
+
+def test_note_finds_record_in_misaligned_embedded_slot(tmp_path):
+    slot = b"\xA5" * 3001 + _make_record("feed123") + b"\x5A" * 64
+    p = tmp_path / "KilnCtrl.bin"
+    p.write_bytes(b"\x00" * 1001 + slot)  # slot starts at offset 1001 (not 4-aligned)
+    note = msf._pico_image_provenance_note(str(p))
+    assert "commit=feed123" in note
+
+
+def test_note_says_slot_images_not_linked(tmp_path):
+    (tmp_path / "KilnFW" / "build").mkdir(parents=True)
+    (tmp_path / "SaftyFW" / "build").mkdir(parents=True)
+    (tmp_path / "SaftyFW" / "build" / "SaftyFW_slotA.bin").write_bytes(bytes(range(256)) * 20)
+    app = tmp_path / "KilnFW" / "build" / "KilnCtrl.bin"
+    app.write_bytes(b"\x00" * 5000)
+    note = msf._pico_image_provenance_note(str(app))
+    assert "NOT present in the app binary" in note
+
+
+def test_note_says_slot_embedded_without_record(tmp_path):
+    (tmp_path / "KilnFW" / "build").mkdir(parents=True)
+    (tmp_path / "SaftyFW" / "build").mkdir(parents=True)
+    slot = bytes(range(256)) * 20
+    (tmp_path / "SaftyFW" / "build" / "SaftyFW_slotA.bin").write_bytes(slot)
+    app = tmp_path / "KilnFW" / "build" / "KilnCtrl.bin"
+    app.write_bytes(b"\x00" * 77 + slot)
+    note = msf._pico_image_provenance_note(str(app))
+    assert "IS embedded at app offset 77" in note
