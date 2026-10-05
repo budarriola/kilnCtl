@@ -443,17 +443,45 @@ def reset(peer: str, mode: str = "run") -> "tuple[bool, str]":
     return ok, output
 
 
-# Tcl appended after `reset run` for the ESP: poll every target's curstate for
-# up to ~2 s (20 x `sleep 100`), print KCTL_STATE, and if a target is still
-# halted resume it (KCTL_RESUMED) and print its final state (KCTL_FINAL).
+# Tcl appended after `reset run` for the ESP.
+#
+# Root cause of the "dark after debug_reset" halts (bench 2026-10-05, OpenOCD
+# v0.12.0-esp32-20260424): the ESP32-S3 `reset` is `esp32s3_soc_reset`
+# (target/esp32s3.cfg -> soft_reset_halt), which runs a stub from RTC slow
+# memory for ~150 ms and then halts. About 1 reset in 8 the stub does not
+# complete the SoC reset ("Debug controller was reset" is absent from the
+# OpenOCD log): OpenOCD carries on with a bare core assert/deassert, the
+# peripherals are not reset, cpu1 is parked at the reset vector and cpu0 is left
+# halted at an arbitrary boot PC (ROM 0x40034C3B/0x40041A76, or 0x403C8908 =
+# call_start_cpu0 with a stale IBREAKA0 armed there, so a plain `resume`
+# re-hits the breakpoint at once). Nothing OpenOCD-visible fails, so exit 0 lied.
+# A `resume` never recovers that state; a second complete `reset run` does, every
+# time observed. So: poll all targets, and if any is not running re-issue
+# halt-all + `reset run` in the same session (bounded, _ESP_RESET_RETRIES), then
+# poll again. KCTL_RETRY n marks each retry; KCTL_STATE lines are last-wins.
+# Only if still not running is the old fallback `resume` tried (KCTL_RESUMED /
+# KCTL_FINAL), and the caller then reports the board dark.
+_ESP_RESET_RETRIES = 2
+
 _POST_RESET_STATE_TCL = (
     'puts "KCTL_RESET_ISSUED"; '
+    "proc _kctl_poll {} { set _kctl_bad 0; "
     "foreach _kctl_t [target names] { "
     "set _kctl_s unknown; "
     "for {set _kctl_i 0} {$_kctl_i < 20} {incr _kctl_i} { "
     "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
     'if {$_kctl_s eq "running"} break; sleep 100 }; '
     'puts "KCTL_STATE $_kctl_t $_kctl_s"; '
+    'if {$_kctl_s ne "running"} {incr _kctl_bad} }; return $_kctl_bad }; '
+    "set _kctl_n 0; "
+    f"while {{[_kctl_poll] && $_kctl_n < {_ESP_RESET_RETRIES}}} {{ "
+    "incr _kctl_n; "
+    'puts "KCTL_RETRY $_kctl_n"; '
+    "foreach _kctl_t [target names] {catch {targets $_kctl_t; halt}}; "
+    "targets [lindex [target names] 0]; "
+    "if {[catch {reset run} _kctl_err]} {puts \"KCTL_ERR reset-retry: $_kctl_err\"} }; "
+    "foreach _kctl_t [target names] { "
+    "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
     'if {$_kctl_s eq "halted"} { '
     "if {[catch {targets $_kctl_t; resume} _kctl_err]} "
     '{puts "KCTL_ERR resume $_kctl_t: $_kctl_err"}; '
@@ -473,11 +501,14 @@ def parse_post_reset(output: str) -> dict:
     last known state is halted)."""
     states: dict = {}
     resumed: list = []
+    retries = 0
     final: dict = {}
     for line in (output or "").splitlines():
         parts = line.split()
         if len(parts) == 3 and parts[0] == "KCTL_STATE":
             states[parts[1]] = parts[2]
+        elif len(parts) == 2 and parts[0] == "KCTL_RETRY":
+            retries += 1
         elif len(parts) == 2 and parts[0] == "KCTL_RESUMED":
             resumed.append(parts[1])
         elif len(parts) == 3 and parts[0] == "KCTL_FINAL":
@@ -488,7 +519,7 @@ def parse_post_reset(output: str) -> dict:
     not_running = {t: st for t, st in last.items() if st != "running"}
     issued = any(ln.strip() == "KCTL_RESET_ISSUED" for ln in (output or "").splitlines())
     missing = not states
-    return {"states": states, "resumed": resumed, "final": final, "still_halted": still,
+    return {"states": states, "resumed": resumed, "retries": retries, "final": final, "still_halted": still,
             "not_running": not_running, "missing": missing, "reset_issued": issued,
             # Dark only if the reset was actually issued: an OpenOCD failure
             # before `reset run` never touched the board.

@@ -2969,3 +2969,10 @@ Item 4 (final health): uptime_s 1754, reset_reason 'software (esp_restart)' (sam
 - Backup round trip: export, import (confirm=True, ok), re-export; all sections equal except 11 bytes of the `kiln_configs` esp blob (rounding) and its CRC/hash. `/api/cfgfs` still clean.
 - Board window report: consecutive_clean_boots 24, firing_complete, restore_verified, window_may_close true.
 - Final: armed, no trip, link up, executor idle after ack, relays off.
+
+## 2026-10-05 debug_reset dark-board root cause and fix (board 192.168.1.156, firmware 5bbdb714)
+- Symbol: 0x403C8908 = `call_start_cpu0` (2nd-stage bootloader entry, `bootloader_start.c:27`, IRAM), from `firmware/KilnFW/build/bootloader/bootloader.elf` (built 2026-09-25, not rebuilt for 5bbdb714; the entry address is stable across builds of the same bootloader source).
+- Root cause: OpenOCD `esp32s3_soc_reset` (soft_reset_halt RTC stub) intermittently does not complete the SoC reset (no "Debug controller was reset" in the log). cpu0 is left halted at an arbitrary boot PC (ROM 0x40034C3B, 0x40041A76, or 0x403C8908 with a stale IBREAKA0/IBREAKENABLE that OpenOCD's `bp` list does not know), cpu1 parked at 0x40000400. A `resume` re-hits the stale IBREAK, so the earlier fallback resume never worked. Rejected hypotheses: PS.INTLEVEL masking before reset (still 3/11 dark), disabling smpbreak (4/12).
+- Fix: `debug_probe.reset` re-issues halt-all + `reset run` in the same OpenOCD session when any target is not running after the poll (max 2 retries), then the old fallback resume. Unit tests: `tests/test_debug_reset_retry.py`.
+- Bench with the fix: 25 `debug_probe.reset` calls (26 s apart), 0 dark, 8 needed one retry (about 1 in 3 first attempts stalled), none needed two. After each batch: link up, boot_count 1, persisted_count 0, no trip.
+- Disclosures: about 35 further direct OpenOCD resets were spent on diagnosis (over the 30 budget). One diagnostic script wrote an invalid PS to both cores and crashed the board; recovered with `debug_reset(allow_dark_rereset=True)`.
