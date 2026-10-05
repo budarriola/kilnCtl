@@ -56,6 +56,44 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
  * header for it. */
 bool profiles_http_delete(uint8_t id);
 
+/* ---- Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----
+ *
+ * Rewrites every stored profile's on/off rules with zone_index == `zone` to
+ * the aux target for `relay` (1..4). The rewrite is all-or-nothing: the commit
+ * validates each rewritten profile, persists it, reads every persisted blob
+ * back, and on ANY failure reverses the slots it already changed (the
+ * transform is an exact, invertible byte swap of zone_index, so the revert
+ * needs no stored copy of the old profiles). Never called while a profile
+ * runs; the caller owns that gate.
+ *
+ * Plan is read-only. It refuses (returns false, reason in err) when:
+ *   - a running/paused profile has a rule for `zone`;
+ *   - a rule for `zone` cannot be represented on an aux output (temp_source
+ *     above 1, or a temperature compare while `zone_has_tc` is false);
+ *   - any stored rule already targets the destination aux relay.
+ * Commit requires the aux entry for `relay` to be ENABLED already (it runs the
+ * normal rule validator on every rewritten profile). */
+typedef struct {
+    uint8_t profiles_scanned;   /* used slots examined */
+    uint8_t profiles_affected;  /* slots holding at least one rule for the zone */
+    uint16_t rules_retargeted;  /* rules rewritten (planned, or committed) */
+} profiles_retarget_counts_t;
+
+bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                        profiles_retarget_counts_t *counts, char *err, size_t err_cap);
+
+/* Returns true only if every affected slot was rewritten, persisted and read
+ * back. On false, stored state is back to what it was (err says whether the
+ * revert itself was clean). *counts is filled on both outcomes. */
+bool profiles_retarget_zone_to_aux_commit(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                          profiles_retarget_counts_t *counts, char *err, size_t err_cap);
+
+/* Swaps every rule aimed at aux `relay` back to `zone` in every stored profile and re-persists
+ * each changed slot (read-back verified). For the caller's own rollback after a commit that
+ * succeeded but a later step failed. Safe because the plan refuses any profile that already had
+ * a rule at the aux target. True = every changed slot persisted and verified. */
+bool profiles_retarget_zone_to_aux_revert(uint8_t zone, uint8_t relay);
+
 #ifdef __cplusplus
 }
 #endif

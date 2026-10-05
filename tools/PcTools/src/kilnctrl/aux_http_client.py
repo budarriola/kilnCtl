@@ -8,6 +8,14 @@ WP-2; firmware/KilnFW/App/drivers/http/aux_outputs_http.c):
                                 optional tc_zone/hyst_c/min_on_s/min_off_s, each
                                 omit-preserves the stored value. 200 {"ok":true}.
   POST /api/aux_outputs/manual  form: relay=1..4, on=0/1. Idle-only. 200 {"ok":true}.
+  POST /api/zones               ONLY the one-shot convert form move_zone_to_aux=Z&confirm=1
+                                (see post_move_zone_to_aux): frees ON_OFF zone Z's relay into an
+                                aux binding and rewrites every stored profile's rules for Z to the
+                                aux target. 200 {"ok":true,"zone","relay","profiles_scanned",
+                                "profiles_affected","rules_retargeted"}; 400 bad field/confirm;
+                                409 refused, nothing changed; 500 a step failed and was rolled back
+                                (plain-text body says whether the rollback was clean).
+  GET  /api/profiles, GET /api/profile?id=N   read-only, used to count and verify profile rules.
 
 All ADMIN tier: goes through the http_auth.urlopen() session seam, so no credential
 is handled, printed or logged here. Non-2xx bodies are plain text, surfaced in
@@ -110,3 +118,52 @@ def post_aux_manual(host: str, relay: int, on: bool, timeout: float = AUX_HTTP_T
     """POST /api/aux_outputs/manual. Returns True iff the board answered {"ok":true}."""
     return _is_ok(_post(host, "/api/aux_outputs/manual",
                         [("relay", str(relay)), ("on", "1" if on else "0")], timeout))
+
+
+def post_move_zone_to_aux(host: str, zone: int, timeout: float = 30.0) -> dict:
+    """POST /api/zones with ONLY ``move_zone_to_aux=<zone>&confirm=1`` -- the firmware's one-shot,
+    all-or-nothing convert of an ON_OFF zone to an aux output. Returns the parsed 200 JSON.
+    Raises AuxHttpError (status/detail set) on any non-2xx, or when a 200 body is not the expected
+    JSON. The write can touch up to 100 profile blobs, hence the longer timeout."""
+    text = _post(host, "/api/zones", [("move_zone_to_aux", str(zone)), ("confirm", "1")], timeout)
+    try:
+        data = json.loads(text)
+    except Exception as exc:
+        raise AuxHttpError(f"POST /api/zones move_zone_to_aux answered 200 with non-JSON: {text!r}") from exc
+    if not isinstance(data, dict) or data.get("ok") is not True:
+        raise AuxHttpError(f"POST /api/zones move_zone_to_aux did not answer ok: {text!r}")
+    return data
+
+
+def _get_json(host: str, path: str, timeout: float):
+    req = urllib.request.Request(_url(host, path), method="GET")
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise AuxHttpError(f"GET {path} failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(text)
+    except Exception as exc:
+        raise AuxHttpError(f"GET {path} response was not valid JSON: {text!r}") from exc
+
+
+def get_stored_profile_rules(host: str, timeout: float = AUX_HTTP_TIMEOUT_S) -> "dict[int, list]":
+    """{profile id: [rule dict, ...]} for every stored (non-builtin) profile, from GET /api/profiles
+    then GET /api/profile?id=N. Each rule carries "zone" (0..2 a zone, 8..11 aux relay 1..4),
+    "segment", "temp_source", ..."""
+    listing = _get_json(host, "/api/profiles", timeout)
+    if not isinstance(listing, list):
+        raise AuxHttpError(f"GET /api/profiles was not a JSON array: {listing!r}")
+    out: "dict[int, list]" = {}
+    for item in listing:
+        if not isinstance(item, dict) or item.get("builtin") or not isinstance(item.get("id"), int):
+            continue
+        pid = item["id"]
+        detail = _get_json(host, f"/api/profile?id={pid}", timeout)
+        rules = detail.get("on_off_rules") if isinstance(detail, dict) else None
+        if not isinstance(rules, list):
+            raise AuxHttpError(f"GET /api/profile?id={pid} has no on_off_rules array")
+        out[pid] = rules
+    return out

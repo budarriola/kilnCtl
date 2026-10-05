@@ -139,6 +139,7 @@ try {
         (Join-Path $testDir "test_display_power_cfg.c"),
         (Join-Path $testDir "test_aux_outputs_store.c"),
         (Join-Path $testDir "test_aux_outputs_http.c"),
+        (Join-Path $testDir "test_zone_aux_convert_core.c"),
         (Join-Path $testDir "test_setup_wizard_progress.c"),
         (Join-Path $testDir "test_display_power_wiring.c"),
         (Join-Path $testDir "test_diagnostics_safety_tc_state.c"),

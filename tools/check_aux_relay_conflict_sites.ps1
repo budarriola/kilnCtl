@@ -29,6 +29,7 @@ $AppDir = (Resolve-Path $AppDir).Path
 
 $allow = @{
     'zones_config_accessors.c'            = 'defines the setters/import/restore; validated by zones_config_json_validate on commit'
+    'zones_http_post.c'                   = 'zones_http_zone_free_for_aux only CLEARS relay_mask (to 0) so the relay can move to an aux entry; clearing cannot create a conflict. The ordinary commit still runs the explicit aux conflict check (see $mustCall)'
     'zones_http_post_parse.c'             = 'per-zone field parse only; the commit in zones_http_post.c runs the explicit aux conflict check (see $mustCall)'
     'backup_import.c'                     = 'explicit post-batch aux conflict check with whole-batch rollback (see $mustCall); the _no_save setters do not validate'
     'kiln_cfg_store.c'                    = 'kiln package apply; whole-blob commit via zones_config_import_blob (validated)'

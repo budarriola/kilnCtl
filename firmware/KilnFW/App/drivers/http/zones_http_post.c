@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "persist_scratch.h" /* persist_scratch_alloc() -- zone free/restore copies */
 #include "http_form.h"
 #include "ota_http.h" /* ota_http_check_interlocks() -- the shared "not while firing" gate */
 #include "ota_interlock.h"
@@ -25,6 +26,89 @@
 #include "zone_settings_source_chain.h"
 
 static esp_err_t zones_post_body(httpd_req_t *req);
+
+/* ---- move_zone_to_aux hook and the zone free/restore it drives ---- */
+static zones_move_to_aux_handler_t s_move_to_aux_handler;
+static zones_move_to_aux_is_request_t s_move_to_aux_is_request;
+static zone_cfg_t *s_aux_saved_zone; /* heap, valid between free_for_aux and restore/discard */
+
+void zones_http_set_move_to_aux_handler(zones_move_to_aux_is_request_t is_request, zones_move_to_aux_handler_t h)
+{
+    s_move_to_aux_is_request = is_request;
+    s_move_to_aux_handler = h;
+}
+
+static void aux_saved_zone_drop(void)
+{
+    free(s_aux_saved_zone);
+    s_aux_saved_zone = NULL;
+}
+
+bool zones_http_zone_free_for_aux(uint8_t zone)
+{
+    aux_saved_zone_drop();
+    if (zone >= s_zones.cfg.thermo_count || zone >= MAX31856_CHANNEL_COUNT ||
+        s_zones.cfg.zones[zone].zone_type != (uint8_t)ZONE_TYPE_ON_OFF) {
+        return false;
+    }
+    zones_cfg_t *tmp = persist_scratch_alloc(sizeof(*tmp));
+    zone_cfg_t *saved = persist_scratch_alloc(sizeof(*saved));
+    if (tmp == NULL || saved == NULL) {
+        free(tmp);
+        free(saved);
+        return false;
+    }
+    *tmp = s_zones.cfg;
+    zone_cfg_t *z = &tmp->zones[zone];
+    z->zone_type = (uint8_t)ZONE_TYPE_HEATER;
+    z->relay_mask = 0;
+    z->failsafe_state = 0;
+    z->hyst_c = 0.0f;
+    z->min_on_s = 0;
+    z->min_off_s = 0;
+    const char *why = NULL;
+    if (!zones_config_json_validate(tmp, &why)) {
+        ESP_LOGW(ZONES_HTTP_TAG, "zone free for aux refused by validate: %s", why ? why : "?");
+        free(tmp);
+        free(saved);
+        return false;
+    }
+    *saved = s_zones.cfg.zones[zone];
+    s_zones.cfg = *tmp;
+    free(tmp);
+    s_config_generation++;
+    zones_config_push_all_relay_types();
+    /* NVS is authoritative: a failed write here is a refusal, not the "applied live anyway" of
+     * an ordinary save, because the caller goes on to rewrite profiles against this state. */
+    if (nvs_save() != ESP_OK) {
+        s_zones.cfg.zones[zone] = *saved;
+        s_config_generation++;
+        zones_config_push_all_relay_types();
+        (void)nvs_save();
+        free(saved);
+        return false;
+    }
+    s_aux_saved_zone = saved;
+    return true;
+}
+
+bool zones_http_zone_restore_after_aux(uint8_t zone)
+{
+    if (s_aux_saved_zone == NULL || zone >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    s_zones.cfg.zones[zone] = *s_aux_saved_zone;
+    s_config_generation++;
+    zones_config_push_all_relay_types();
+    bool ok = nvs_save() == ESP_OK;
+    aux_saved_zone_drop();
+    return ok;
+}
+
+void zones_http_zone_discard_saved_for_aux(void)
+{
+    aux_saved_zone_drop();
+}
 
 esp_err_t zones_post_handler(httpd_req_t *req)
 {
@@ -140,6 +224,16 @@ static esp_err_t zones_post_body(httpd_req_t *req)
         received += (size_t)ret;
     }
     body[received] = '\0';
+
+    /* One-shot "move an ON_OFF zone to an aux output" (docs/SPARE_RELAY_ONOFF_PLAN.md section 10).
+     * Not a normal whole-page submit: it is a separate action carried on this route so no new URI
+     * slot is needed, dispatched through a hook the aux http module installs. Runs inside this
+     * handler's gates and HTTP_SYNC claim. */
+    if (s_move_to_aux_handler != NULL && s_move_to_aux_is_request != NULL && s_move_to_aux_is_request(body)) {
+        esp_err_t herr = s_move_to_aux_handler(req, body);
+        free(body);
+        return herr;
+    }
 
     zones_cfg_t tmp;
     memset(&tmp, 0, sizeof(tmp));

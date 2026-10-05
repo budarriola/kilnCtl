@@ -383,6 +383,17 @@ tool `control_convert_onoff_zone_to_aux(zone, confirm=False)`:
    on aux, Q3).
 4. The reverse is not provided (a zone slot is the scarcer resource).
 
+**Built 2026-10-05.** `move_zone_to_aux=Z&confirm=1` on `POST /api/zones` (no new route; 
+`zone_aux_convert_core.c`/`_http.c`, hooked from `zones_http_post.c`) and MCP 
+`control_convert_onoff_zone_to_aux`. The order is: free the zone (HEATER, no relay), enable the aux 
+binding (the profile validator needs it enabled), then rewrite the profile rules. Atomicity: there is 
+no cross-slot NVS transaction, so the rewrite is an exact byte swap of `zone_index` (the plan refuses any 
+slot already holding a rule at the destination, so the reverse swap restores bit-exactly), a journal of 
+rewritten slots, a read-back of every slot, and a newest-first revert on any failure; the reply is 500 
+"everything restored" or "ROLLBACK INCOMPLETE". Also refused: a running/paused profile that uses the 
+zone, a quarantined store, a rule an aux cannot represent (`temp_source` 2, or a temperature compare 
+with no thermocouple), and a missing `confirm`.
+
 Existing ON_OFF zones keep working unchanged until the operator converts.
 
 ## 11. Host tests (all host-only; no board)

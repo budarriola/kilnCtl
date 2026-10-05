@@ -231,6 +231,22 @@ void zones_config_push_relay_type(uint8_t zone_index);
  * right after a successful load, since a fresh boot has no per-zone "just
  * changed" edge to key a narrower push off. */
 void zones_config_push_all_relay_types(void);
+
+/* One-shot "move an ON_OFF zone to an aux output" (docs/SPARE_RELAY_ONOFF_PLAN.md section 10).
+ * zones_post_body() hands a request whose body `is_request` accepts to `handler` (which sends
+ * the reply and returns the httpd result), after the route's mode gate, interlock and HTTP_SYNC
+ * claim. A hook rather than a direct call so the zones unit does not link the aux modules.
+ *
+ * zones_http_zone_free_for_aux(): retypes the ON_OFF zone to HEATER with relay_mask 0,
+ * failsafe 0 and hyst/min_on/min_off 0 (validated, persisted; a failed write is refused and
+ * undone), keeping a heap copy of the zone it replaced. _restore_after_aux() puts that copy
+ * back and frees it; _discard_saved_for_aux() frees it after a successful move. */
+typedef bool (*zones_move_to_aux_is_request_t)(const char *body);
+typedef esp_err_t (*zones_move_to_aux_handler_t)(httpd_req_t *req, const char *body);
+void zones_http_set_move_to_aux_handler(zones_move_to_aux_is_request_t is_request, zones_move_to_aux_handler_t h);
+bool zones_http_zone_free_for_aux(uint8_t zone);
+bool zones_http_zone_restore_after_aux(uint8_t zone);
+void zones_http_zone_discard_saved_for_aux(void);
 void migrate_from_default_partition(void);
 
 void relay_names_load(void);

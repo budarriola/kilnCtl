@@ -14,6 +14,7 @@
 #include "relay_authority.h"
 #include "safety_cfg_writer_guard.h"
 #include "system_mode_gate.h"
+#include "zone_aux_convert_http.h"
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 #include "zones_config_json.h"
@@ -175,6 +176,8 @@ esp_err_t aux_outputs_http_start(void)
     /* Store + provider FIRST and unconditionally -- see the header on boot order. */
     (void)aux_outputs_cfg_start(op_zones_union());
     zones_config_json_set_aux_enabled_provider(aux_outputs_cfg_enabled_mask);
+    /* The move_zone_to_aux action on POST /api/zones needs the store and provider above. */
+    zone_aux_convert_http_start();
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {

@@ -312,7 +312,7 @@ if (-not $i2cOrigContent.Contains($i2cGoodBlock)) {
 Write-Host "`n--- Negative test: fake_kv commit-durability contract ---"
 
 $kvGoodBlock = (@'
-    if (s_next_write_fail_armed) {
+    if (take_write_fail()) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
     }
@@ -323,7 +323,7 @@ $kvGoodBlock = (@'
 '@) -replace "`r`n", "`n"
 
 $kvMutantBlock = (@'
-    if (s_next_write_fail_armed) {
+    if (take_write_fail()) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
     }

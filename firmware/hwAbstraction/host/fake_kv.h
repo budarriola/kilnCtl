@@ -158,6 +158,11 @@ bool fake_kv_script_corrupt_key(const char *partition, const char *namespace_nam
  * injection per the plan's "error injection ... no-space" spec. */
 void fake_kv_script_next_write_status(hal_status_t status);
 
+/* Like fake_kv_script_next_write_status(), but lets the first `skip` write-class
+ * calls (set_blob/set_str/erase_key/commit, any handle) succeed and fails the
+ * one after, once. Lets a test fail a multi-write sequence at every point. */
+void fake_kv_script_write_status_after(unsigned skip, hal_status_t status);
+
 /* Forces the NEXT hal_kv_open() call for `namespace_name` specifically to
  * return `status` instead of its normal result, then reverts to normal
  * behavior; other namespaces' opens are unaffected. Returns false (no-op)

@@ -1922,3 +1922,227 @@ void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *
     }
     free(s);
 }
+
+/* ---- Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----
+ *
+ * One transform, two directions: a rule whose zone_index is `from` gets `to`,
+ * nothing else changes. Because it is an exact byte swap and the plan refuses
+ * any slot that already carries a rule at the destination, the reverse swap
+ * restores the original profile bit-exactly -- the commit's rollback needs no
+ * saved copy of the old profiles. */
+static uint8_t retarget_rule_limit(const profile_t *p)
+{
+    return p->on_off_rule_count > PROFILE_MAX_ON_OFF_RULES ? (uint8_t)PROFILE_MAX_ON_OFF_RULES
+                                                           : p->on_off_rule_count;
+}
+
+static uint16_t retarget_swap_rules(profile_t *p, uint8_t from, uint8_t to)
+{
+    uint16_t n = 0;
+    uint8_t cnt = retarget_rule_limit(p);
+    for (uint8_t i = 0; i < cnt; i++) {
+        if (p->on_off_rules[i].zone_index == from) {
+            p->on_off_rules[i].zone_index = to;
+            n++;
+        }
+    }
+    return n;
+}
+
+static uint16_t retarget_count_rules(const profile_t *p, uint8_t target)
+{
+    uint16_t n = 0;
+    uint8_t cnt = retarget_rule_limit(p);
+    for (uint8_t i = 0; i < cnt; i++) {
+        if (p->on_off_rules[i].zone_index == target) {
+            n++;
+        }
+    }
+    return n;
+}
+
+bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                        profiles_retarget_counts_t *counts, char *err, size_t err_cap)
+{
+    profiles_retarget_counts_t c = {0};
+    uint8_t dest = profile_rule_target_from_aux_relay(relay);
+    if (dest == 0xFFu || zone >= MAX31856_CHANNEL_COUNT) {
+        snprintf(err, err_cap, "zone or relay out of range");
+        if (counts) *counts = c;
+        return false;
+    }
+    uint8_t active_id = 0;
+    bool have_active = profile_executor_get_active_id(&active_id);
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (!profiles_slot_used(id)) {
+            continue;
+        }
+        c.profiles_scanned++;
+        const profile_t *p = &s_profiles.profiles[id];
+        if (retarget_count_rules(p, dest) != 0) {
+            snprintf(err, err_cap, "profile slot %u already has a rule targeting aux relay %u", id, relay);
+            if (counts) *counts = c;
+            return false;
+        }
+        uint8_t cnt = retarget_rule_limit(p);
+        uint16_t hits = 0;
+        for (uint8_t i = 0; i < cnt; i++) {
+            const profile_on_off_rule_t *r = &p->on_off_rules[i];
+            if (r->zone_index != zone) {
+                continue;
+            }
+            hits++;
+            if (r->temp_source > 1) {
+                snprintf(err, err_cap,
+                         "profile slot %u rule %u uses temp_source %u, which an aux output cannot represent", id, i,
+                         r->temp_source);
+                if (counts) *counts = c;
+                return false;
+            }
+            if (r->temp_cmp != ON_OFF_TEMP_CMP_NONE && (r->temp_source != 1 || !zone_has_tc)) {
+                snprintf(err, err_cap,
+                         "profile slot %u rule %u has a temperature compare but the aux output would have no "
+                         "thermocouple zone",
+                         id, i);
+                if (counts) *counts = c;
+                return false;
+            }
+        }
+        if (hits != 0) {
+            if (have_active && active_id == id) {
+                snprintf(err, err_cap, "profile slot %u is running or paused and has a rule for zone %u", id, zone);
+                if (counts) *counts = c;
+                return false;
+            }
+            c.profiles_affected++;
+            c.rules_retargeted = (uint16_t)(c.rules_retargeted + hits);
+        }
+    }
+    if (counts) *counts = c;
+    return true;
+}
+
+/* Read slot `id` back out of NVS and require its rules to match RAM's. */
+static bool retarget_verify_slot(uint8_t id)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    char key[8];
+    profile_nvs_key(id, key, sizeof(key));
+    profile_persisted_t *loaded = persist_scratch_alloc(sizeof(*loaded));
+    profile_t *decoded = persist_scratch_alloc(sizeof(*decoded));
+    bool ok = false;
+    if (loaded && decoded) {
+        size_t len = sizeof(*loaded);
+        const char *reason = "";
+        if (hal_kv_get_blob(&h, key, loaded, &len) == HAL_OK &&
+            profile_decode_blob(loaded, len, decoded, &reason) == PROFILE_DECODE_OK) {
+            const profile_t *ram = &s_profiles.profiles[id];
+            ok = decoded->on_off_rule_count == ram->on_off_rule_count;
+            uint8_t cnt = retarget_rule_limit(ram);
+            for (uint8_t i = 0; ok && i < cnt; i++) {
+                ok = decoded->on_off_rules[i].zone_index == ram->on_off_rules[i].zone_index &&
+                     decoded->on_off_rules[i].segment_index == ram->on_off_rules[i].segment_index &&
+                     decoded->on_off_rules[i].enable == ram->on_off_rules[i].enable;
+            }
+        }
+    }
+    free(loaded);
+    free(decoded);
+    hal_kv_close(&h);
+    return ok;
+}
+
+/* Undo `from`->`to` on the first `n` journal entries, newest first. Returns
+ * false if any slot could not be re-persisted. */
+static bool retarget_revert(const uint8_t *journal, uint8_t n, uint8_t from, uint8_t to)
+{
+    bool clean = true;
+    while (n > 0) {
+        uint8_t id = journal[--n];
+        (void)retarget_swap_rules(&s_profiles.profiles[id], from, to);
+        if (nvs_save_slot(id) != ESP_OK || !retarget_verify_slot(id)) {
+            clean = false;
+        }
+    }
+    return clean;
+}
+
+bool profiles_retarget_zone_to_aux_commit(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                          profiles_retarget_counts_t *counts, char *err, size_t err_cap)
+{
+    profiles_retarget_counts_t plan;
+    if (!profiles_retarget_zone_to_aux_plan(zone, relay, zone_has_tc, &plan, err, err_cap)) {
+        if (counts) *counts = plan;
+        return false;
+    }
+    uint8_t dest = profile_rule_target_from_aux_relay(relay);
+    uint8_t journal[PROFILES_MAX_COUNT];
+    uint8_t jn = 0;
+    profiles_retarget_counts_t done = plan;
+    done.profiles_affected = 0;
+    done.rules_retargeted = 0;
+    profile_t *trial = persist_scratch_alloc(sizeof(*trial));
+    if (!trial) {
+        snprintf(err, err_cap, "out of memory");
+        if (counts) *counts = done;
+        return false;
+    }
+    const char *fail = NULL;
+    char why[96] = "";
+    uint8_t fail_id = 0;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT && !fail; id++) {
+        if (!profiles_slot_used(id) || retarget_count_rules(&s_profiles.profiles[id], zone) == 0) {
+            continue;
+        }
+        *trial = s_profiles.profiles[id];
+        uint16_t n = retarget_swap_rules(trial, zone, dest);
+        fail_id = id;
+        if (!validate_on_off_rules(trial, why, sizeof(why))) {
+            fail = "rewritten profile failed validation";
+            break;
+        }
+        s_profiles.profiles[id] = *trial;
+        journal[jn++] = id;
+        if (nvs_save_slot(id) != ESP_OK) {
+            fail = "persisting the rewritten profile failed";
+            break;
+        }
+        done.profiles_affected++;
+        done.rules_retargeted = (uint16_t)(done.rules_retargeted + n);
+    }
+    free(trial);
+    for (uint8_t k = 0; !fail && k < jn; k++) {
+        if (!retarget_verify_slot(journal[k])) {
+            fail = "read-back of a rewritten profile did not match";
+            fail_id = journal[k];
+        }
+    }
+    if (fail) {
+        bool clean = retarget_revert(journal, jn, dest, zone);
+        snprintf(err, err_cap, "profile slot %u: %s%s%s -- %s", fail_id, fail, why[0] ? ": " : "", why,
+                 clean ? "all profiles restored" : "REVERT INCOMPLETE, profiles may be mixed");
+        if (counts) *counts = done;
+        return false;
+    }
+    if (counts) *counts = done;
+    return true;
+}
+
+bool profiles_retarget_zone_to_aux_revert(uint8_t zone, uint8_t relay)
+{
+    uint8_t dest = profile_rule_target_from_aux_relay(relay);
+    if (dest == 0xFFu || zone >= MAX31856_CHANNEL_COUNT) {
+        return false;
+    }
+    uint8_t journal[PROFILES_MAX_COUNT];
+    uint8_t jn = 0;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (profiles_slot_used(id) && retarget_count_rules(&s_profiles.profiles[id], dest) != 0) {
+            journal[jn++] = id;
+        }
+    }
+    return retarget_revert(journal, jn, dest, zone);
+}

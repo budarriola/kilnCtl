@@ -72,6 +72,20 @@ static fake_kv_handle_slot_t  s_handles[FAKE_KV_MAX_HANDLES];
 static bool                   s_write_safe_here = true;
 static bool                   s_next_write_fail_armed = false;
 static hal_status_t           s_next_write_fail_status = HAL_OK;
+static unsigned                s_next_write_fail_skip = 0u;
+/* True when the armed write failure fires on THIS call: skips the first
+ * s_next_write_fail_skip write-class calls, then fires once. */
+static bool take_write_fail(void)
+{
+    if (!s_next_write_fail_armed) {
+        return false;
+    }
+    if (s_next_write_fail_skip > 0u) {
+        s_next_write_fail_skip--;
+        return false;
+    }
+    return true;
+}
 static bool                   s_lossy_uncommitted = false;
 static unsigned               s_silent_erase_noops = 0u;
 static unsigned               s_silent_set_noops = 0u;
@@ -159,6 +173,7 @@ void fake_kv_reset_all(void)
     memset(s_handles, 0, sizeof(s_handles));
     s_write_safe_here = true;
     s_next_write_fail_armed = false;
+    s_next_write_fail_skip = 0u;
     s_next_write_fail_status = HAL_OK;
     s_lossy_uncommitted = false;
     s_silent_erase_noops = 0u;
@@ -267,6 +282,7 @@ bool fake_kv_script_corrupt_key(const char *partition, const char *namespace_nam
 void fake_kv_script_next_write_status(hal_status_t status)
 {
     s_next_write_fail_armed = true;
+    s_next_write_fail_skip = 0u;
     s_next_write_fail_status = status;
 }
 
@@ -377,7 +393,7 @@ hal_status_t hal_kv_commit(hal_kv_handle_t *h)
     fake_kv_handle_slot_t *hs = get_handle(h);
     if (!hs) return HAL_NOT_READY;
 
-    if (s_next_write_fail_armed) {
+    if (take_write_fail()) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
     }
@@ -474,7 +490,7 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_s
     if (buf == NULL && len > 0) return HAL_INVALID_ARG;
     if (len > FAKE_KV_MAX_VALUE_BYTES) return HAL_INVALID_SIZE;
 
-    if (s_next_write_fail_armed) {
+    if (take_write_fail()) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
     }
@@ -561,7 +577,7 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
     if (key == NULL) return HAL_INVALID_ARG;
     if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
 
-    if (s_next_write_fail_armed) {
+    if (take_write_fail()) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
     }
@@ -652,4 +668,11 @@ hal_status_t hal_kv_stats(const char *partition, hal_kv_stats_t *out)
 bool hal_kv_write_safe_here(void)
 {
     return s_write_safe_here;
+}
+
+void fake_kv_script_write_status_after(unsigned skip, hal_status_t status)
+{
+    s_next_write_fail_armed = true;
+    s_next_write_fail_skip = skip;
+    s_next_write_fail_status = status;
 }

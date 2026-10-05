@@ -1956,6 +1956,218 @@ static void test_validate_on_off_rules_aux_targets(void)
     memset(g_stub_aux, 0, sizeof(g_stub_aux));
 }
 
+// ---------------------------------------------------------------------------
+// Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10):
+// profiles_retarget_zone_to_aux_{plan,commit,revert}.
+// ---------------------------------------------------------------------------
+#define RT_ZONE 1
+#define RT_RELAY 3
+#define RT_DEST 10 /* 8 + (relay - 1) */
+
+static void rt_rule(profile_t *p, uint8_t idx, uint8_t zone, uint8_t seg, uint8_t temp_source, uint8_t temp_cmp)
+{
+    memset(&p->on_off_rules[idx], 0, sizeof(p->on_off_rules[idx]));
+    p->on_off_rules[idx].segment_index = seg;
+    p->on_off_rules[idx].zone_index = zone;
+    p->on_off_rules[idx].enable = 1;
+    p->on_off_rules[idx].temp_source = temp_source;
+    p->on_off_rules[idx].temp_cmp = temp_cmp;
+    p->on_off_rules[idx].temp_threshold_c = 300.0f;
+    if (idx + 1u > p->on_off_rule_count) {
+        p->on_off_rule_count = (uint8_t)(idx + 1u);
+    }
+}
+
+/* Fresh store: slot 0 = two rules on zone 1 (one with a temperature compare), slot 1 = a rule on zone 2 only,
+ * slot 2 = one rule on zone 1, slot 3 = no rules. Zones 1 and 2 are ON_OFF while saving. */
+static void rt_seed(void)
+{
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(g_stub_zone_type, 0, sizeof(g_stub_zone_type));
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    g_stub_zone_type[1] = ZONE_TYPE_ON_OFF;
+    g_stub_zone_type[2] = ZONE_TYPE_ON_OFF;
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    char err[160];
+    uint8_t out_id = 0, warn = 0;
+    for (uint8_t id = 0; id < 4; id++) {
+        profile_t p = make_stored_profile();
+        snprintf(p.name, sizeof(p.name), "RtProf%u", id);
+        if (id == 0) {
+            rt_rule(&p, 0, RT_ZONE, 0, 0, 0);
+            rt_rule(&p, 1, RT_ZONE, 1, 1, ON_OFF_TEMP_CMP_ABOVE);
+        } else if (id == 1) {
+            rt_rule(&p, 0, 2, 0, 0, 0);
+        } else if (id == 2) {
+            rt_rule(&p, 0, RT_ZONE, 2, 0, 0);
+        }
+        err[0] = '\0';
+        bool ok = profiles_http_save(id, &p, &out_id, &warn, err, sizeof(err));
+        TEST_CHECK(ok && out_id == id, err[0] ? err : "retarget fixture profile saves");
+    }
+    /* The caller frees the zone and enables the aux before commit; mimic that. */
+    g_stub_zone_type[1] = ZONE_TYPE_HEATER;
+    g_stub_aux[RT_RELAY - 1].enabled = true;
+    g_stub_aux[RT_RELAY - 1].tc_zone = RT_ZONE;
+}
+
+static void rt_snapshot(profile_t out[4])
+{
+    for (uint8_t id = 0; id < 4; id++) {
+        out[id] = s_profiles.profiles[id];
+    }
+}
+
+static bool rt_nvs_matches_ram(void)
+{
+    static profiles_state_t loaded;
+    bool any = false;
+    if (nvs_load_all_from(PROFILES_NVS_PARTITION, &loaded, &any) != ESP_OK || !any) {
+        return false;
+    }
+    for (uint8_t id = 0; id < 4; id++) {
+        const profile_t *a = &loaded.profiles[id];
+        const profile_t *b = &s_profiles.profiles[id];
+        if (a->on_off_rule_count != b->on_off_rule_count) {
+            return false;
+        }
+        for (uint8_t i = 0; i < b->on_off_rule_count; i++) {
+            if (a->on_off_rules[i].zone_index != b->on_off_rules[i].zone_index ||
+                a->on_off_rules[i].segment_index != b->on_off_rules[i].segment_index) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool rt_unchanged_from(const profile_t snap[4])
+{
+    for (uint8_t id = 0; id < 4; id++) {
+        if (snap[id].on_off_rule_count != s_profiles.profiles[id].on_off_rule_count ||
+            memcmp(snap[id].on_off_rules, s_profiles.profiles[id].on_off_rules, sizeof(snap[id].on_off_rules)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void test_retarget_commit_success(void)
+{
+    TEST_SECTION("profiles_retarget_zone_to_aux_commit -- rewrites every rule for the zone, nothing else");
+    rt_seed();
+    profile_t before[4];
+    rt_snapshot(before);
+    profiles_retarget_counts_t c;
+    char err[160] = "";
+    TEST_CHECK(profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)), err);
+    TEST_CHECK(c.profiles_scanned == 4 && c.profiles_affected == 2 && c.rules_retargeted == 3,
+               "counts: 4 scanned, 2 affected, 3 rules");
+    const profile_t *p0 = &s_profiles.profiles[0];
+    TEST_CHECK(p0->on_off_rules[0].zone_index == RT_DEST && p0->on_off_rules[1].zone_index == RT_DEST,
+               "slot 0: both rules now target the aux");
+    TEST_CHECK(p0->on_off_rules[1].segment_index == 1 && p0->on_off_rules[1].temp_source == 1 &&
+                   p0->on_off_rules[1].temp_cmp == ON_OFF_TEMP_CMP_ABOVE &&
+                   p0->on_off_rules[1].temp_threshold_c == 300.0f,
+               "slot 0: every other rule field untouched");
+    TEST_CHECK(s_profiles.profiles[2].on_off_rules[0].zone_index == RT_DEST, "slot 2 retargeted");
+    TEST_CHECK(s_profiles.profiles[1].on_off_rules[0].zone_index == 2 &&
+                   memcmp(&s_profiles.profiles[1], &before[1], sizeof(profile_t)) == 0,
+               "slot 1 (other zone) byte-identical");
+    TEST_CHECK(s_profiles.profiles[3].on_off_rule_count == 0, "slot 3 (no rules) untouched");
+    TEST_CHECK(rt_nvs_matches_ram(), "NVS blobs match RAM after the commit");
+
+    TEST_CHECK(profiles_retarget_zone_to_aux_revert(RT_ZONE, RT_RELAY), "revert reports clean");
+    TEST_CHECK(rt_unchanged_from(before) && rt_nvs_matches_ram(), "revert restores RAM and NVS to the originals");
+}
+
+static void test_retarget_plan_refusals(void)
+{
+    TEST_SECTION("profiles_retarget_zone_to_aux_plan -- refusals change nothing");
+    profiles_retarget_counts_t c;
+    char err[160];
+    profile_t before[4];
+
+    rt_seed();
+    rt_snapshot(before);
+    TEST_CHECK(profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   c.profiles_affected == 2 && c.rules_retargeted == 3 && rt_unchanged_from(before),
+               "plan is read-only and counts match");
+
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(RT_ZONE, 5, true, &c, err, sizeof(err)), "relay out of aux range refused");
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(3, RT_RELAY, true, &c, err, sizeof(err)), "zone out of range refused");
+
+    rt_seed();
+    rt_rule(&s_profiles.profiles[3], 0, RT_DEST, 0, 0, 0);
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   strstr(err, "already has a rule"),
+               "a rule already at the aux target refuses");
+
+    rt_seed();
+    s_profiles.profiles[0].on_off_rules[0].temp_source = 2;
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   strstr(err, "temp_source"),
+               "temp_source 2 refuses");
+
+    rt_seed();
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, false, &c, err, sizeof(err)) &&
+                   strstr(err, "thermocouple"),
+               "temperature compare with no zone TC refuses");
+
+    rt_seed();
+    g_fake_exec_state = PROFILE_EXEC_RUNNING;
+    g_fake_exec_profile_id = 2;
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   strstr(err, "running or paused"),
+               "running slot that uses the zone refuses");
+    g_fake_exec_state = PROFILE_EXEC_PAUSED;
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)), "paused slot refuses too");
+    g_fake_exec_profile_id = 1; /* active slot does not use the zone */
+    TEST_CHECK(profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)),
+               "an active slot that does not use the zone does not block");
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    /* commit repeats the plan, so a refusal there writes nothing */
+    rt_seed();
+    s_profiles.profiles[0].on_off_rules[0].temp_source = 2;
+    rt_snapshot(before);
+    TEST_CHECK(!profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   rt_unchanged_from(before),
+               "commit refused by the plan leaves every slot as it was");
+}
+
+static void test_retarget_commit_rollback_at_every_write(void)
+{
+    TEST_SECTION("profiles_retarget_zone_to_aux_commit -- a write failure at ANY point leaves nothing half-done");
+    int failures_seen = 0;
+    bool succeeded = false;
+    for (unsigned skip = 0; skip < 24 && !succeeded; skip++) {
+        rt_seed();
+        profile_t before[4];
+        rt_snapshot(before);
+        profiles_retarget_counts_t c;
+        char err[160] = "";
+        fake_kv_script_write_status_after(skip, HAL_IO);
+        bool ok = profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err));
+        if (ok) {
+            succeeded = true;
+            TEST_CHECK(rt_nvs_matches_ram(), "a commit that outlived the injected failure point is fully persisted");
+            continue;
+        }
+        failures_seen++;
+        char label[96];
+        snprintf(label, sizeof(label), "failure after %u writes: RAM rules restored", skip);
+        TEST_CHECK(rt_unchanged_from(before), label);
+        snprintf(label, sizeof(label), "failure after %u writes: NVS matches RAM, reported restored", skip);
+        TEST_CHECK(rt_nvs_matches_ram() && strstr(err, "all profiles restored") != NULL, label);
+    }
+    TEST_CHECK(failures_seen >= 2, "failure injection actually hit the commit at several points");
+    TEST_CHECK(succeeded, "the sweep reached a point past every write");
+}
+
 static void test_aux_rule_survives_real_save_and_load(void)
 {
     TEST_SECTION("aux rule target 10 round-trips through the real save/load");
@@ -3203,6 +3415,9 @@ void run_test_profiles_http(void)
     test_profile_post_handler_collision_response_escapes_newline_in_name();
     test_profile_post_handler_allows_builtin_name();
     test_aux_rule_checks_hold_on_every_entry_point();
+    test_retarget_commit_success();
+    test_retarget_plan_refusals();
+    test_retarget_commit_rollback_at_every_write();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
     test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();

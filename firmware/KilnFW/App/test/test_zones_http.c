@@ -15457,8 +15457,84 @@ static void test_canonical_max_size_is_a_safe_upper_bound(void)
                "the canonical (padding-free, crc32-excluded) form is strictly smaller than the raw struct");
 }
 
+// ---------------------------------------------------------------------------
+// zones_http_zone_free_for_aux / _restore_after_aux / _discard_saved_for_aux
+// (docs/SPARE_RELAY_ONOFF_PLAN.md section 10): the zones half of the
+// "move an ON_OFF zone to an aux output" action.
+// ---------------------------------------------------------------------------
+static void zfa_seed(void)
+{
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.relay_count = 4;
+    s_zones.cfg.max_simultaneous_relays = 4;
+    s_zones.cfg.timing_profile_count = 1;
+    strncpy(s_zones.cfg.timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    for (uint8_t i = 0; i < 2; i++) {
+        snprintf(s_zones.cfg.zones[i].name, sizeof(s_zones.cfg.zones[i].name), "Z%u", i);
+        s_zones.cfg.zones[i].thermo_mask = (uint8_t)(1u << i);
+        s_zones.cfg.zones[i].max_temp_c = 1200.0f;
+    }
+    s_zones.cfg.zones[0].relay_mask = 0x01u;
+    s_zones.cfg.zones[1].zone_type = (uint8_t)ZONE_TYPE_ON_OFF;
+    s_zones.cfg.zones[1].relay_mask = 0x04u;
+    s_zones.cfg.zones[1].hyst_c = 2.0f;
+    s_zones.cfg.zones[1].min_on_s = 5;
+    s_zones.cfg.zones[1].min_off_s = 7;
+    zones_http_zone_discard_saved_for_aux();
+}
+
+static void test_zone_free_for_aux(void)
+{
+    TEST_SECTION("zones_http_zone_free_for_aux -- retypes to HEATER with no relay, restore puts the exact old zone back");
+    zfa_seed();
+    zone_cfg_t old = s_zones.cfg.zones[1];
+    zone_cfg_t other = s_zones.cfg.zones[0];
+
+    TEST_CHECK(!zones_http_zone_free_for_aux(0), "a HEATER zone is refused");
+    TEST_CHECK(!zones_http_zone_free_for_aux(5), "an out-of-range zone is refused");
+    TEST_CHECK(!zones_http_zone_restore_after_aux(1), "restore with nothing saved reports false");
+    TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "refusals change nothing");
+
+    TEST_CHECK(zones_http_zone_free_for_aux(1), "an ON_OFF zone is freed");
+    const zone_cfg_t *z = &s_zones.cfg.zones[1];
+    TEST_CHECK(z->zone_type == (uint8_t)ZONE_TYPE_HEATER && z->relay_mask == 0 && z->failsafe_state == 0 &&
+                   z->hyst_c == 0.0f && z->min_on_s == 0 && z->min_off_s == 0,
+               "zone is a relay-less HEATER with the on/off timing cleared");
+    TEST_CHECK(z->thermo_mask == old.thermo_mask && strcmp(z->name, old.name) == 0, "name and thermocouple kept");
+    TEST_CHECK(memcmp(&s_zones.cfg.zones[0], &other, sizeof(other)) == 0, "the other zone is untouched");
+
+    TEST_CHECK(zones_http_zone_restore_after_aux(1), "restore succeeds");
+    TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "restore is byte-exact");
+    TEST_CHECK(!zones_http_zone_restore_after_aux(1), "the saved copy is consumed by restore");
+
+    TEST_CHECK(zones_http_zone_free_for_aux(1), "free again");
+    zones_http_zone_discard_saved_for_aux();
+    TEST_CHECK(!zones_http_zone_restore_after_aux(1), "discard drops the saved copy");
+    TEST_CHECK(s_zones.cfg.zones[1].relay_mask == 0, "discard keeps the freed state");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_zone_free_for_aux_nvs_failure_restores_ram(void)
+{
+    TEST_SECTION("zones_http_zone_free_for_aux -- a failed NVS write is a refusal and RAM is put back");
+    zfa_seed();
+    zone_cfg_t old = s_zones.cfg.zones[1];
+    fake_kv_script_next_write_status(HAL_IO);
+    TEST_CHECK(!zones_http_zone_free_for_aux(1), "a persist failure refuses the free");
+    TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "RAM zone is back to the original");
+    TEST_CHECK(!zones_http_zone_restore_after_aux(1), "nothing is left saved after the refusal");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 void run_test_zones_http(void)
 {
+    test_zone_free_for_aux();
+    test_zone_free_for_aux_nvs_failure_restores_ram();
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
     test_small_ki_edit_tolerance_is_relative_not_absolute();
