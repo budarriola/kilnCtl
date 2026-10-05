@@ -185,9 +185,15 @@
  * aux[]). source: "rule" while a profile run has claimed the relay (the
  * evaluator owns it, on or off), "manual" for an unclaimed relay that is ON
  * (the idle-only manual toggle), "off" for an unclaimed relay that is OFF.
- * Worst case `{"relay":4,"on":false,"source":"manual"}` = 43B, x4 + 3
- * separators + `,"aux":[` / `]` framing (9B) = 184B; dashboard_json.h's
+ * Worst case: "manual" requires on, so the worst entry is
+ * `{"relay":4,"on":true,"source":"manual"}` = 39B, x4 + 3 separators +
+ * `,"aux":[` / `]` framing (9B) = 168B; dashboard_json.h's
  * DASHBOARD_JSON_STATUS_BUF_SIZE grew 5504 -> 5760 (+256) to carry it.
+ * Edge cases: (a) if the run-end OFF write fails, the claim persists into
+ * idle (aux_off_pending), so the relay reports "rule" while idle; that is
+ * intended, the fail-safe still owns it. (b) when io_read_failed, an unknown
+ * relay state is reported as "on":false,"source":"off"; the top-level
+ * io_read_failed flag disambiguates it.
  * enabled_mask/claim_mask/on_mask: bit (relay-1). Pure -- no locks, no
  * hardware. Returns false (with *o and the buffer's terminator restored to
  * what they were on entry) if the block does not fit. */

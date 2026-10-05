@@ -167,9 +167,11 @@ void dashboard_get_status(dashboard_status_t *out)
         out->io_read_failed = (err != ESP_OK);
     }
 
-    /* Spare-relay WP-6: aux on/off source inputs. Two narrow reads (RAM masks,
-     * each under its own module's brief lock, no producer call), never the
-     * full profile_exec_status_t. */
+    /* Spare-relay WP-6: aux on/off source inputs. Two narrow reads of RAM
+     * masks, never the full profile_exec_status_t. aux_outputs_cfg_enabled_mask()
+     * is a plain lockless byte read. profile_executor_aux_claim_mask() takes
+     * s_exec.lock, which the executor can hold across a kiln_io_owner relay
+     * write (bounded by the owner timeout), so /api/status can block that long. */
     out->aux_enabled_mask = aux_outputs_cfg_enabled_mask();
     out->aux_claim_mask = profile_executor_aux_claim_mask();
 
