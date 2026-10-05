@@ -741,7 +741,45 @@ def _run_cdp(row: Row, host: str, screenshot_dir: str, cookie: str, *,
         cmd += ["--fills", json.dumps([{"selector": s, "value": v} for s, v in fills])]
     if steps:
         cmd += ["--steps", json.dumps(steps)]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=_child_env(cookie))
+    return _run_child(cmd, timeout=60, env=_child_env(cookie))
+
+
+def _tree_kill(pid: int) -> None:
+    """Kill `pid` and its whole process tree (the node driver's headless
+    Chrome is a grandchild that Popen.kill() would orphan). Bounded; never
+    raises."""
+    try:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                       capture_output=True, timeout=15)
+    except Exception:  # noqa: BLE001 -- best effort, caller re-raises the timeout
+        pass
+
+
+def _run_child(cmd, *, timeout: float, env=None) -> "subprocess.CompletedProcess":
+    """subprocess.run(capture_output, text) equivalent that, on timeout,
+    tree-kills the child (`taskkill /T /F`) so its headless Chrome does not
+    outlive it, then re-raises subprocess.TimeoutExpired."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _tree_kill(proc.pid)
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.communicate(timeout=5)
+        except Exception:  # noqa: BLE001 -- pipes may be held by a straggler
+            pass
+        raise
+    except BaseException:
+        _tree_kill(proc.pid)
+        proc.kill()
+        proc.wait()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def _run_fill_and_restore(row: Row, host: str, screenshot_dir: str, cookie: str) -> "tuple[bool, str]":

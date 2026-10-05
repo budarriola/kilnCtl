@@ -110,7 +110,7 @@ def test_run_row_live_fails_when_readback_is_not_200(monkeypatch, fake_status, f
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
     monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (fake_status, fake_body))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
 
@@ -124,7 +124,7 @@ def test_run_row_live_passes_on_clean_readback(monkeypatch):
     monkeypatch.setattr(wcr, "validate_selector", lambda row: None)
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("u", "p"))
     monkeypatch.setattr(wcr, "_login_once", lambda host: "fake-cookie")
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {"trip_reason": "none"}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
 
@@ -154,7 +154,7 @@ def test_run_row_live_reuses_supplied_cookie_without_logging_in(monkeypatch):
         captured["env"] = kwargs.get("env")
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     ok, msg = wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever", cookie="reused-cookie")
 
     assert ok, msg
@@ -170,7 +170,7 @@ def test_run_row_live_still_logs_in_when_no_cookie_supplied(monkeypatch):
     monkeypatch.setattr(wcr, "_login_once", lambda host: calls.append(1) or "fresh-cookie")
     monkeypatch.setattr(wcr, "_get_json_with_cookie", lambda host, path, cookie: (200, {}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever")
     assert ok, msg
@@ -190,7 +190,7 @@ def _capture_cmd(monkeypatch, row_id="W30", **kwargs):
         captured["env"] = kw.get("env")
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     ok, msg = wcr.run_row_live(row_id, "192.0.2.1", "/tmp/whatever", **kwargs)
     assert ok, msg
     return captured
@@ -270,7 +270,7 @@ def test_run_row_live_passes_minimal_env_to_child(monkeypatch):
         captured["env"] = kwargs.get("env")
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     wcr.run_row_live("W4", "192.0.2.1", "/tmp/whatever")
 
     assert captured["env"]["KC_SID"] == "fake-cookie"
@@ -377,7 +377,7 @@ def test_run_cdp_renders_fills_as_json_arg(monkeypatch):
         captured["cmd"] = cmd
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     row = wcr.ROWS["W22"]
     proc = wcr._run_cdp(row, "192.0.2.1", "/tmp/whatever", "fake-cookie", fills=row.fills)
     assert proc.returncode == 0
@@ -442,7 +442,7 @@ def test_fill_and_restore_full_flow_passes(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
@@ -464,7 +464,7 @@ def test_fill_and_restore_fails_if_value_never_changes(monkeypatch):
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     runs = []
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: runs.append(1) or _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -486,7 +486,7 @@ def test_fill_and_restore_fails_loud_if_restore_does_not_take(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -512,7 +512,7 @@ def test_kiln_config_create_delete_full_flow_passes(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
     monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
 
@@ -540,7 +540,7 @@ def test_kiln_config_create_delete_fails_if_left_on_board(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
     monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
 
@@ -578,7 +578,7 @@ def test_kiln_config_create_delete_refuses_upfront_if_generated_name_already_lis
             return _FakeProc()  # cleanup delete of leftovers[0] ("kc_test_100")
         raise AssertionError("must not touch the board again once the name collision is found")
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -611,7 +611,7 @@ def test_kiln_config_create_delete_same_second_rerun_does_not_self_collide(monke
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
     monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
 
@@ -637,7 +637,7 @@ def test_kiln_config_create_delete_cleans_up_inactive_leftover_first(monkeypatch
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
     monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
 
@@ -669,7 +669,7 @@ def test_kiln_config_create_delete_cleans_up_active_leftover_via_fallback(monkey
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
     monkeypatch.setattr(wcr.time, "sleep", lambda *a: None)
 
@@ -690,7 +690,7 @@ def test_kiln_config_create_delete_refuses_when_active_leftover_has_no_fallback(
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -732,7 +732,7 @@ def test_kiln_config_create_delete_attempts_best_effort_delete_when_restore_appl
             return _RejectedApplyProc()
         return _OkProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -780,7 +780,7 @@ def test_kiln_config_create_delete_reports_delete_400(monkeypatch):
             return _RejectedDeleteProc()
         return _OkProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -810,7 +810,7 @@ def test_kiln_config_create_delete_refuses_leftover_as_fallback(monkeypatch):
         calls.append(cmd)
         raise AssertionError("no CDP action may run: there is no safe fallback to apply")
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -848,7 +848,7 @@ def test_kiln_config_create_delete_reports_diverged_and_writes_nothing_further(m
         seen.append("kcDeleteBtn" if "kcDeleteBtn" in cmd else "other")
         return _OkProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -887,7 +887,7 @@ def test_kiln_config_create_delete_reports_apply_still_running(monkeypatch):
         seen.append("kcDeleteBtn" if "kcDeleteBtn" in cmd else "other")
         return _OkProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -905,7 +905,7 @@ def test_kiln_config_create_delete_fails_if_create_never_landed(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -973,7 +973,7 @@ def test_kiln_config_create_delete_reports_real_status_on_rejected_create(monkey
         })
         stderr = ""
 
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _RejectedCreateProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _RejectedCreateProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1003,7 +1003,7 @@ def test_kiln_config_create_delete_reports_network_failed_create(monkeypatch):
         })
         stderr = ""
 
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailedCreateProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FailedCreateProc())
     monkeypatch.setattr(wcr.time, "time", lambda: 123)
 
     ok, msg = wcr._run_kiln_config_create_delete(wcr.ROWS["W42"], "192.0.2.1", "/tmp/x", "c")
@@ -1149,7 +1149,7 @@ def test_fill_and_restore_fails_if_save_also_changed_a_guarded_field(monkeypatch
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     runs = []
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: runs.append(1) or _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W38"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1173,7 +1173,7 @@ def test_fill_and_restore_guard_check_precedes_the_did_not_change_check(monkeypa
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1201,7 +1201,7 @@ def test_fill_and_restore_restores_even_when_the_set_driver_fails(monkeypatch):
         calls.append(1)
         return _FailProc() if len(calls) == 1 else _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1230,7 +1230,7 @@ def test_fill_and_restore_restores_when_the_set_driver_raises(monkeypatch):
             raise wcr.subprocess.TimeoutExpired(cmd="node", timeout=60)
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1249,7 +1249,7 @@ def test_fill_and_restore_fails_if_the_restore_save_drifts_a_guarded_field(monke
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1264,7 +1264,7 @@ def test_fill_and_restore_refuses_to_write_if_a_guarded_field_is_absent(monkeypa
     monkeypatch.setattr(wcr, "_get_json_with_cookie",
                         lambda host, path, cookie: (200, {"pc_link_abort_silence_ms": 30000}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: ran.append(1) or _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: ran.append(1) or _FakeProc())
 
     ok, msg = wcr._run_fill_and_restore(wcr.ROWS["W22"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1450,7 +1450,7 @@ def test_setup_wizard_step1_full_flow_passes(monkeypatch):
         ),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     post_calls = _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1499,7 +1499,7 @@ def test_setup_wizard_step1_fails_loud_on_a_non_2xx_tz_post(monkeypatch):
         calls.append(1)
         return _FakeProcWithNetwork(set_records) if len(calls) == 1 else _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1579,7 +1579,7 @@ def test_setup_wizard_step1_fails_if_unit_never_changes(monkeypatch):
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     runs = []
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: runs.append(1) or _FakeProc())
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1606,7 +1606,7 @@ def test_setup_wizard_step1_fails_loud_if_time_tz_drifts(monkeypatch):
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
     runs = []
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: runs.append(1) or _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: runs.append(1) or _FakeProc())
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1641,7 +1641,7 @@ def test_setup_wizard_step1_restores_even_when_the_set_driver_fails(monkeypatch)
         calls.append(1)
         return _FailProc() if len(calls) == 1 else _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1670,7 +1670,7 @@ def test_setup_wizard_step1_restores_when_the_set_driver_raises(monkeypatch):
             raise wcr.subprocess.TimeoutExpired(cmd="node", timeout=60)
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1692,7 +1692,7 @@ def test_setup_wizard_step1_reports_a_failed_restore_after_a_failed_set(monkeypa
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1713,7 +1713,7 @@ def test_setup_wizard_step1_fails_loud_if_restore_does_not_take(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1731,7 +1731,7 @@ def test_setup_wizard_step1_refuses_when_status_body_unusable(monkeypatch):
     monkeypatch.setattr(wcr, "_get_json_with_cookie",
                         lambda host, path, cookie: (200, {"time_tz": None, "temp_unit": "K"}))
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: ran.append(1) or _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: ran.append(1) or _FakeProc())
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1754,7 +1754,7 @@ def test_setup_wizard_step1_refuses_when_progress_body_unusable(monkeypatch):
         ),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: ran.append(1) or _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: ran.append(1) or _FakeProc())
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -1780,7 +1780,7 @@ def test_setup_wizard_step1_restores_progress_state_to_its_pre_run_value(monkeyp
         ),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     post_calls = _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1801,7 +1801,7 @@ def test_setup_wizard_step1_fails_loud_if_progress_restore_post_is_refused(monke
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     _w50_post_form(monkeypatch, status=500, body={"error": "internal"})
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1826,7 +1826,7 @@ def test_setup_wizard_step1_fails_loud_if_progress_restore_does_not_take(monkeyp
         ),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1859,7 +1859,7 @@ def test_setup_wizard_step1_both_cdp_calls_wait_for_the_progress_post(monkeypatc
         cmds.append(cmd)
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
     _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1889,7 +1889,7 @@ def test_setup_wizard_step1_fails_loud_if_the_progress_note_is_not_restored(monk
         ),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
     post_calls = _w50_post_form(monkeypatch)
 
     ok, msg = wcr._run_setup_wizard_step1(wcr.ROWS["W50"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
@@ -1966,7 +1966,7 @@ def test_w8_full_flow_passes(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_profile_segment_create_delete(wcr.ROWS["W8"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
@@ -1980,7 +1980,7 @@ def test_w8_refuses_when_leftover_scratch_profile_exists(monkeypatch):
         _sequential_get_json([(200, _profiles_body(("existing", 1), ("wc_test_999999", 5)))]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_profile_segment_create_delete(wcr.ROWS["W8"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2017,7 +2017,7 @@ def test_w8_reports_left_on_board_when_delete_cdp_fails(monkeypatch):
             return _FakeProc()  # the create succeeds
         return _FailProc()  # the delete fails
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_profile_segment_create_delete(wcr.ROWS["W8"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2038,7 +2038,7 @@ def test_w9_full_flow_passes(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
@@ -2051,7 +2051,7 @@ def test_w9_refuses_when_leftover_scratch_profile_exists(monkeypatch):
         _sequential_get_json([(200, _profiles_body(("existing", 1), ("wc_test_111111", 5)))]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2074,7 +2074,7 @@ def test_w9_still_present_after_bulk_delete_fails_loud(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2096,7 +2096,7 @@ def test_w10_full_flow_passes(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
@@ -2119,7 +2119,7 @@ def test_w10_fails_if_toggle_off_does_not_take(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2176,7 +2176,7 @@ def test_w9_cleans_up_the_second_profile_even_when_its_own_create_reports_failur
             return _FailProc()
         return _FakeProc()  # any cleanup delete calls
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     deleted_names = []
     real_delete = wcr._delete_profile_by_name
@@ -2237,7 +2237,7 @@ def test_w9_create_fails_and_cleanup_probe_401s_reports_unconfirmed_not_nothing(
         stdout = ""
         stderr = "selector not found"
 
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FailProc())
 
     ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2267,7 +2267,7 @@ def test_w9_create_fails_and_cleanup_probe_confirms_absent_reports_nothing_creat
         stdout = ""
         stderr = "selector not found"
 
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FailProc())
 
     ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2305,7 +2305,7 @@ def test_w9_second_create_fails_and_probe_401s_still_reports_unconfirmed(monkeyp
             return _FailProc()
         return _FakeProc()
 
-    monkeypatch.setattr(wcr.subprocess, "run", fake_run)
+    monkeypatch.setattr(wcr, "_run_child", fake_run)
 
     ok, msg = wcr._run_profile_multi_delete(wcr.ROWS["W9"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2332,7 +2332,7 @@ def test_w10_create_fails_and_cleanup_probe_401s_reports_unconfirmed_not_nothing
         stdout = ""
         stderr = "selector not found"
 
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FailProc())
 
     ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2357,7 +2357,7 @@ def test_w10_create_fails_and_cleanup_probe_confirms_absent_reports_nothing_crea
         stdout = ""
         stderr = "selector not found"
 
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FailProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FailProc())
 
     ok, msg = wcr._run_profile_favorite_toggle(wcr.ROWS["W10"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2384,7 +2384,7 @@ def test_w18_refuses_when_sweep_already_running(monkeypatch):
     def _no_subprocess(*a, **k):
         raise AssertionError("must not click abort while a real sweep is running")
 
-    monkeypatch.setattr(wcr.subprocess, "run", _no_subprocess)
+    monkeypatch.setattr(wcr, "_run_child", _no_subprocess)
 
     ok, msg = wcr._run_sweep_abort_guarded(wcr.ROWS["W18"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2401,7 +2401,7 @@ def test_w18_passes_when_idle_before_and_after(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_sweep_abort_guarded(wcr.ROWS["W18"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
@@ -2418,7 +2418,7 @@ def test_w18_fails_loud_if_running_after_click(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_sweep_abort_guarded(wcr.ROWS["W18"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2435,7 +2435,7 @@ def test_w20_refuses_when_autotune_not_idle(monkeypatch):
     def _no_subprocess(*a, **k):
         raise AssertionError("must not click abort while autotune is not idle")
 
-    monkeypatch.setattr(wcr.subprocess, "run", _no_subprocess)
+    monkeypatch.setattr(wcr, "_run_child", _no_subprocess)
 
     ok, msg = wcr._run_autotune_abort_guarded(wcr.ROWS["W20"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2452,7 +2452,7 @@ def test_w20_passes_when_idle_before_and_after(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_autotune_abort_guarded(wcr.ROWS["W20"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
@@ -2473,7 +2473,7 @@ def test_w20_passes_from_aborted_or_done_terminal_state(monkeypatch):
             ]),
         )
         monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-        monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+        monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
         ok, msg = wcr._run_autotune_abort_guarded(wcr.ROWS["W20"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
         assert ok, f"{terminal_state}: {msg}"
@@ -2489,7 +2489,7 @@ def test_w33_refuses_when_danger_mode_active(monkeypatch):
     def _no_subprocess(*a, **k):
         raise AssertionError("must not click exit while another operator's Danger Mode session is active")
 
-    monkeypatch.setattr(wcr.subprocess, "run", _no_subprocess)
+    monkeypatch.setattr(wcr, "_run_child", _no_subprocess)
 
     ok, msg = wcr._run_danger_exit_guarded(wcr.ROWS["W33"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert not ok
@@ -2506,7 +2506,7 @@ def test_w33_passes_when_inactive_before_and_after(monkeypatch):
         ]),
     )
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     ok, msg = wcr._run_danger_exit_guarded(wcr.ROWS["W33"], "192.0.2.1", "/tmp/whatever", "fake-cookie")
     assert ok, msg
@@ -2517,7 +2517,7 @@ def test_run_row_live_dispatches_to_guarded_click_for_w18_w20_w33(monkeypatch):
     monkeypatch.setattr(wcr, "_read_credentials", lambda: ("user", "pass"))
     monkeypatch.setattr(wcr, "_login_once", lambda *a, **k: "fake-cookie")
     monkeypatch.setattr(wcr.os, "makedirs", lambda *a, **k: None)
-    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: _FakeProc())
+    monkeypatch.setattr(wcr, "_run_child", lambda *a, **k: _FakeProc())
 
     for row_id, body in (("W18", {"state": "idle"}), ("W20", {"state": "idle"}), ("W33", {"active": False})):
         monkeypatch.setattr(wcr, "_get_json_with_cookie", _sequential_get_json([(200, body), (200, body)]))
@@ -2595,3 +2595,55 @@ def test_get_json_with_cookie_does_not_swallow_a_non_401_error(monkeypatch):
     monkeypatch.setattr(http_auth, "urlopen", fake_urlopen)
     status, body = wcr._get_json_with_cookie("192.0.2.1", "/api/status", "cookie")
     assert status == 500
+
+
+class _FakePopen:
+    """Stand-in child: communicate() times out once (hung node driver)."""
+    instances = []
+
+    def __init__(self, cmd, **kw):
+        self.cmd = cmd
+        self.pid = 4242
+        self.returncode = None
+        self.killed = False
+        self.calls = 0
+        _FakePopen.instances.append(self)
+
+    def communicate(self, timeout=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise wcr.subprocess.TimeoutExpired(cmd=self.cmd, timeout=timeout)
+        return ("", "")
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_run_child_timeout_tree_kills_child(monkeypatch):
+    # Never launches node/Chrome: Popen and the taskkill subprocess.run are faked.
+    _FakePopen.instances.clear()
+    killed = []
+    monkeypatch.setattr(wcr.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda cmd, **k: killed.append((cmd, k)))
+    with pytest.raises(wcr.subprocess.TimeoutExpired):
+        wcr._run_child(["node", "x.mjs"], timeout=1)
+    assert len(killed) == 1
+    cmd, kw = killed[0]
+    assert cmd == ["taskkill", "/T", "/F", "/PID", "4242"]
+    assert kw.get("timeout")  # the kill itself is bounded
+    assert _FakePopen.instances[0].killed
+
+
+def test_run_child_success_does_not_kill(monkeypatch):
+    class _Ok(_FakePopen):
+        def communicate(self, timeout=None):
+            self.returncode = 0
+            return ("out", "err")
+
+    monkeypatch.setattr(wcr.subprocess, "Popen", _Ok)
+    monkeypatch.setattr(wcr.subprocess, "run", lambda *a, **k: pytest.fail("must not taskkill"))
+    proc = wcr._run_child(["node"], timeout=1)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "out", "err")
