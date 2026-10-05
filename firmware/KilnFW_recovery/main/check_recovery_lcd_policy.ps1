@@ -51,7 +51,7 @@ function Build-And-Run {
     Copy-Item (Join-Path $here "test_recovery_lcd_policy.c") $test
     $exe = Join-Path $dir "t.exe"
     $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$dir`" `"$test`" /Fe:`"$exe`" /Fo:`"$dir\\`" /Fd:`"$dir\\`""
-    $gate = Enter-KilnBuildGate -Label "recovery_lcd_policy"
+    $gate = Enter-KilnBuildGate -Label "recovery_lcd_policy" -Lane light
     try {
         $ErrorActionPreference = "Continue"
         $bo = cmd /c $cmd 2>&1

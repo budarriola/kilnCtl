@@ -71,7 +71,7 @@ try {
         throw "cmake configure of firmware/CommonFW failed (exit $LASTEXITCODE)."
     }
 
-    $gate = Enter-KilnBuildGate -Label "commonfw_diag_vectors"
+    $gate = Enter-KilnBuildGate -Label "commonfw_diag_vectors" -Lane light
     try {
         $bld = & cmake --build $buildDir --target test_diag --config Debug 2>&1
         $bldExit = $LASTEXITCODE

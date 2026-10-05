@@ -39,7 +39,10 @@ back to the coordinator. You do not push.
   `tools/build_gate.ps1`'s machine-wide heavy-build gate before their real build step (see
   COMMON.md "Heavy builds") -- with several sessions active, your build may print
   `build gate: waiting ...` and queue rather than starting immediately. That is the gate
-  working, not a hang; never set `KILNCTL_BUILD_GATE_SLOTS=0` to skip the wait.
+  working, not a hang; never set `KILNCTL_BUILD_GATE_SLOTS=0` to skip the wait. Small
+  single-exe check compiles (`check_recovery_*.ps1`, `check_commonfw_*.ps1`) use the separate
+  `-Lane light` pool (`KILNCTL_LIGHT_GATE_SLOTS`, default 4) and do not wait on heavy builds;
+  a new check that compiles only a few C files should do the same.
 - Every new check or test gets a negative test: break the thing, watch it fail, restore the
   source by hand (never `git checkout --`), then force a full rebuild. An empty `git diff`
   proves the source, not the binaries.

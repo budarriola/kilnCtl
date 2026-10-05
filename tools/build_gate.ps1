@@ -39,6 +39,28 @@
 # machine running multiple agent sessions, leaving it enabled is the whole
 # point.
 #
+# LIGHT LANE (2026-10-05): a second, independent pool of slots for genuinely
+# small builds -- one cl.exe/cmake invocation over a handful of translation
+# units that finishes in seconds (check_recovery_*.ps1, check_commonfw_*.ps1).
+# Those used to take a HEAVY slot, so with several agents each holding both
+# heavy slots for a 7-18 minute host-test or target build, a seconds-long
+# check queued 30-50+ minutes and every run_all_checks.ps1 -Fast blew past the
+# 30-minute background limit. Pass -Lane light to Enter-KilnBuildGate for those
+# callers only; host tests and full target builds stay on the default heavy
+# lane. The lanes use different mutex names, so a light acquire never waits on
+# a heavy holder. Heavy concurrency is unchanged (still bounded by
+# KILNCTL_BUILD_GATE_SLOTS); light callers are bounded separately by
+# KILNCTL_LIGHT_GATE_SLOTS (default 4) so small compiles cannot themselves
+# pile up unboundedly. Never put a build that runs more than ~a minute on the
+# light lane.
+#
+# KILNCTL_LIGHT_GATE_SLOTS: light-lane slot count, default 4, 0 disables the
+# light lane only (heavy lane unaffected).
+#
+# KILNCTL_LIGHT_GATE_MUTEX_PREFIX: test-only override of the light lane's
+# "Global\kilnctl_build_light_" prefix, same caveats as the heavy one below
+# (must match mcpkit/buildgate.py's override if set).
+#
 # KILNCTL_BUILD_GATE_MUTEX_PREFIX: overrides the "Global\kilnctl_build_slot_"
 # mutex name prefix below. This exists ONLY so a unit test (Python's
 # mcpkit/buildgate.py has the matching override) can point at a private
@@ -51,26 +73,44 @@
 # state.
 
 function Get-KilnBuildGateSlotCount {
-    $raw = $env:KILNCTL_BUILD_GATE_SLOTS
+    param([ValidateSet("heavy", "light")][string]$Lane = "heavy")
+    if ($Lane -eq "light") {
+        $envName = "KILNCTL_LIGHT_GATE_SLOTS"
+        $default = 4
+    } else {
+        $envName = "KILNCTL_BUILD_GATE_SLOTS"
+        $default = 2
+    }
+    $raw = [Environment]::GetEnvironmentVariable($envName)
     if ([string]::IsNullOrWhiteSpace($raw)) {
-        return 2
+        return $default
     }
     $n = 0
     if (-not [int]::TryParse($raw.Trim(), [ref]$n)) {
-        [Console]::Error.WriteLine("build gate: KILNCTL_BUILD_GATE_SLOTS='$raw' is not an integer, defaulting to 2")
-        return 2
+        [Console]::Error.WriteLine("build gate: $envName='$raw' is not an integer, defaulting to $default")
+        return $default
     }
     return $n
 }
 
 function Get-KilnBuildGateMutexName {
-    param([Parameter(Mandatory = $true)][int]$SlotIndex)
+    param(
+        [Parameter(Mandatory = $true)][int]$SlotIndex,
+        [ValidateSet("heavy", "light")][string]$Lane = "heavy"
+    )
     # "Global\" so every session/user on the machine contends for the same
     # slots, not just the current logon session. The prefix is overridable
     # via KILNCTL_BUILD_GATE_MUTEX_PREFIX -- see that variable's header
     # comment above; must match mcpkit/buildgate.py's own default/override
     # exactly, since this name IS the shared contract between the two
     # languages.
+    if ($Lane -eq "light") {
+        $prefix = $env:KILNCTL_LIGHT_GATE_MUTEX_PREFIX
+        if ([string]::IsNullOrEmpty($prefix)) {
+            $prefix = "Global\kilnctl_build_light_"
+        }
+        return "$prefix$SlotIndex"
+    }
     $prefix = $env:KILNCTL_BUILD_GATE_MUTEX_PREFIX
     if ([string]::IsNullOrEmpty($prefix)) {
         $prefix = "Global\kilnctl_build_slot_"
@@ -85,18 +125,19 @@ function Enter-KilnBuildGate {
     param(
         [Parameter(Mandatory = $true)][string]$Label,
         [int]$TimeoutSeconds = 3600,
-        [int]$PollIntervalSeconds = 30
+        [int]$PollIntervalSeconds = 30,
+        [ValidateSet("heavy", "light")][string]$Lane = "heavy"
     )
 
-    $slots = Get-KilnBuildGateSlotCount
+    $slots = Get-KilnBuildGateSlotCount -Lane $Lane
     if ($slots -le 0) {
-        [Console]::Error.WriteLine("build gate: disabled (KILNCTL_BUILD_GATE_SLOTS=0) for '$Label'")
+        [Console]::Error.WriteLine("build gate: $Lane lane disabled (slot count 0) for '$Label'")
         return [PSCustomObject]@{ Disabled = $true; Mutex = $null; SlotIndex = -1; Label = $Label }
     }
 
     $mutexes = @()
     for ($i = 0; $i -lt $slots; $i++) {
-        $mutexes += New-Object System.Threading.Mutex($false, (Get-KilnBuildGateMutexName -SlotIndex $i))
+        $mutexes += New-Object System.Threading.Mutex($false, (Get-KilnBuildGateMutexName -SlotIndex $i -Lane $Lane))
     }
 
     # First pass: a non-blocking try at every slot, round robin. One of these
@@ -113,7 +154,7 @@ function Enter-KilnBuildGate {
             for ($j = 0; $j -lt $mutexes.Count; $j++) {
                 if ($j -ne $i) { $mutexes[$j].Dispose() }
             }
-            [Console]::Error.WriteLine("build gate: acquired slot $i for '$Label' (slots=$slots)")
+            [Console]::Error.WriteLine("build gate: acquired slot $i for '$Label' (lane=$Lane, slots=$slots)")
             return [PSCustomObject]@{ Disabled = $false; Mutex = $mutexes[$i]; SlotIndex = $i; Label = $Label }
         }
     }
@@ -125,7 +166,7 @@ function Enter-KilnBuildGate {
     # waiting line every $PollIntervalSeconds so this looks gated, not hung.
     $elapsed = 0
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-    [Console]::Error.WriteLine("build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)")
+    [Console]::Error.WriteLine("build gate: waiting (label=$Label, lane=$Lane, ${elapsed}s, slots=$slots)")
     while ($elapsed -lt $TimeoutSeconds) {
         $chunk = [Math]::Min($PollIntervalSeconds, $TimeoutSeconds - $elapsed)
         # WaitAny returns 0..n-1 on acquisition, or the sentinel
@@ -151,11 +192,11 @@ function Enter-KilnBuildGate {
             [Console]::Error.WriteLine("build gate: acquired slot $signaledIndex for '$Label' after ${elapsed}s wait")
             return [PSCustomObject]@{ Disabled = $false; Mutex = $wonMutex; SlotIndex = $signaledIndex; Label = $Label }
         }
-        [Console]::Error.WriteLine("build gate: waiting (label=$Label, ${elapsed}s, slots=$slots)")
+        [Console]::Error.WriteLine("build gate: waiting (label=$Label, lane=$Lane, ${elapsed}s, slots=$slots)")
     }
 
     foreach ($m in $mutexes) { $m.Dispose() }
-    throw "build gate: timed out after ${TimeoutSeconds}s waiting for a heavy-build slot (label=$Label, slots=$slots) -- another run appears stuck holding every slot"
+    throw "build gate: timed out after ${TimeoutSeconds}s waiting for a $Lane-lane build slot (label=$Label, slots=$slots) -- another run appears stuck holding every slot"
 }
 
 function Exit-KilnBuildGate {

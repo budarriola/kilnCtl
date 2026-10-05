@@ -70,6 +70,14 @@ through the gate: use `build_kilnfw(kiln_fw_root=...)` /
 invocation against that worktree either -- see docs/MCP_SERVERS.md's
 "Building from a clean worktree for `kiln_fw_root`" section.
 
+The gate has two lanes (2026-10-05). The **heavy** lane (default,
+`KILNCTL_BUILD_GATE_SLOTS`, 2 slots) is for host-test and target builds. The **light**
+lane (`Enter-KilnBuildGate -Lane light`, `KILNCTL_LIGHT_GATE_SLOTS`, default 4, separate
+mutex names) is for a single seconds-long compile over a handful of TUs --
+`check_recovery_*.ps1` and `check_commonfw_*.ps1` today -- so those never queue behind a
+7-18 minute heavy holder. Never put a build that runs more than about a minute on the
+light lane.
+
 ## Attribution
 
 Every subagent commit trailer in this repo is exactly:

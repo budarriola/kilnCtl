@@ -47,7 +47,7 @@ function Build-And-Run {
     $crc = Join-Path $common "src\kilnlink_crc.c"
     $frm = Join-Path $common "src\kilnlink_frame.c"
     $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$common\include`" `"$test`" `"$ImplC`" `"$crc`" `"$frm`" /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
-    $gate = Enter-KilnBuildGate -Label "recovery_pico_proto"
+    $gate = Enter-KilnBuildGate -Label "recovery_pico_proto" -Lane light
     try {
         $ErrorActionPreference = "Continue"
         $bo = cmd /c $cmd 2>&1

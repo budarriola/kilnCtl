@@ -65,7 +65,7 @@ function Build-And-Run {
     $test = Join-Path $here "test_recovery_apply.c"
     $srcs = ($Impls | ForEach-Object { "`"$_`"" }) -join " "
     $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$updateDir`" /I`"$httpDir`" `"$test`" $srcs /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
-    $gate = Enter-KilnBuildGate -Label "recovery_apply"
+    $gate = Enter-KilnBuildGate -Label "recovery_apply" -Lane light
     try {
         $ErrorActionPreference = "Continue"
         $bo = cmd /c $cmd 2>&1

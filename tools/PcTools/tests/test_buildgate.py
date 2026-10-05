@@ -128,3 +128,105 @@ def test_slots_two_uncontended_acquire_and_release_reports_no_wait(monkeypatch):
     with buildgate.kiln_build_gate(f"test-uncontended-{uuid.uuid4().hex[:8]}", wait_result=wr):
         pass
     assert wr.waited_seconds == 0.0
+
+
+# ---- light lane (2026-10-05) ------------------------------------------------
+# A seconds-long compile must never queue behind multi-minute heavy builds.
+
+def _private_prefixes(monkeypatch):
+    tag = uuid.uuid4().hex[:12]
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_SLOTS", "2")
+    # 2 (not the default 4) so that, if the light lane were ever pointed at the
+    # heavy prefix, it would see exactly the two held slots and the tests
+    # below would fail -- with 4 it would just take the unused slots 2 and 3.
+    monkeypatch.setenv("KILNCTL_LIGHT_GATE_SLOTS", "2")
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MUTEX_PREFIX", f"Local\\kilnctl_buildgate_test_{tag}_heavy_")
+    monkeypatch.setenv("KILNCTL_LIGHT_GATE_MUTEX_PREFIX", f"Local\\kilnctl_buildgate_test_{tag}_light_")
+
+
+class _HeavyHolder:
+    """Holds every heavy slot from a separate thread (mutexes are per-thread)."""
+
+    def __enter__(self):
+        self.held = threading.Event()
+        self.release = threading.Event()
+
+        def _run():
+            ms = [buildgate._KernelMutex(buildgate._mutex_name(i)) for i in range(2)]
+            for m in ms:
+                assert m.wait(2000) in (buildgate._WAIT_OBJECT_0, buildgate._WAIT_ABANDONED_0)
+            self.held.set()
+            self.release.wait(30)
+            for m in ms:
+                m.release()
+                m.close()
+
+        self.t = threading.Thread(target=_run, daemon=True)
+        self.t.start()
+        assert self.held.wait(5), "holder never took both heavy slots"
+        return self
+
+    def __exit__(self, *a):
+        self.release.set()
+        self.t.join(timeout=5)
+
+
+def test_light_lane_acquires_while_both_heavy_slots_are_held(monkeypatch):
+    _private_prefixes(monkeypatch)
+    with _HeavyHolder():
+        # Sanity: the heavy lane really is saturated.
+        with pytest.raises(TimeoutError):
+            with buildgate.kiln_build_gate("heavy-blocked", timeout_seconds=0.5, poll_interval_seconds=0.25):
+                pass
+        wr = buildgate.GateWaitResult()
+        with buildgate.kiln_build_gate("light-ok", lane="light", timeout_seconds=2,
+                                       poll_interval_seconds=0.25, wait_result=wr):
+            pass
+        assert wr.waited_seconds == 0.0
+
+
+def test_light_lane_has_its_own_bounded_slot_count(monkeypatch):
+    _private_prefixes(monkeypatch)
+    monkeypatch.setenv("KILNCTL_LIGHT_GATE_SLOTS", "1")
+    held = threading.Event()
+    release = threading.Event()
+
+    def _run():
+        with buildgate.kiln_build_gate("light-holder", lane="light"):
+            held.set()
+            release.wait(10)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    try:
+        assert held.wait(5)
+        with pytest.raises(TimeoutError):
+            with buildgate.kiln_build_gate("light-second", lane="light",
+                                           timeout_seconds=0.5, poll_interval_seconds=0.25):
+                pass
+    finally:
+        release.set()
+        t.join(timeout=5)
+
+
+def test_powershell_light_lane_acquires_while_both_heavy_slots_are_held(monkeypatch):
+    import shutil
+    import subprocess
+
+    ps = shutil.which("powershell")
+    if ps is None:
+        pytest.skip("powershell not available")
+    _private_prefixes(monkeypatch)
+    gate_ps1 = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "tools", "build_gate.ps1")
+    script = (
+        f". '{gate_ps1}'; "
+        "$g = Enter-KilnBuildGate -Label 'ps-light-test' -Lane light -TimeoutSeconds 3 -PollIntervalSeconds 1; "
+        "Exit-KilnBuildGate -Gate $g; Write-Output 'LIGHT-ACQUIRED'"
+    )
+    with _HeavyHolder():
+        r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                           capture_output=True, text=True, timeout=60, env=os.environ.copy())
+    assert r.returncode == 0 and "LIGHT-ACQUIRED" in r.stdout, (r.stdout, r.stderr)
+    assert "lane=light" in r.stderr

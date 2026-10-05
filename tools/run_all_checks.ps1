@@ -484,29 +484,59 @@ $checks = $checks | Sort-Object FullName
 # console-script .exe open.
 $pcToolsDir = Join-Path $repoRoot "tools\PcTools"
 $selfcheckPy = Join-Path $pcToolsDir "selfcheck.py"
-$selfcheckPython = Join-Path $pcToolsDir ".venv\Scripts\python.exe"
+# The worktree's own tools/PcTools/.venv is gitignored, so a fresh worktree
+# never has one. Resolve the interpreter in order: the worktree venv, then
+# $env:KILNCTL_PCTOOLS_PYTHON, then the main tree's venv (the parent of
+# `git rev-parse --git-common-dir`). selfcheck.py is always run from the
+# worktree's own tools\PcTools with PYTHONPATH=src (see Start-CheckAsync),
+# so a borrowed interpreter still tests THIS tree's code, not the main tree's.
+function Resolve-PcToolsPython {
+    param([string]$PcToolsDir, [string]$RepoRoot)
+    $own = Join-Path $PcToolsDir ".venv\Scripts\python.exe"
+    if (Test-Path $own) { return $own }
+    $envPy = $env:KILNCTL_PCTOOLS_PYTHON
+    if (-not [string]::IsNullOrWhiteSpace($envPy) -and (Test-Path $envPy)) { return $envPy }
+    $common = (& git -C $RepoRoot rev-parse --path-format=absolute --git-common-dir 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $common) {
+        $mainRoot = Split-Path -Parent ([string]($common | Select-Object -First 1)).Trim()
+        $mainPy = Join-Path $mainRoot "tools\PcTools\.venv\Scripts\python.exe"
+        if (Test-Path $mainPy) { return $mainPy }
+    }
+    return $own
+}
+$selfcheckPython = Resolve-PcToolsPython -PcToolsDir $pcToolsDir -RepoRoot $repoRoot
 if ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython)) {
     # A synthetic entry: the main loop below special-cases .py files to run
     # under $selfcheckPython instead of `powershell -File`.
     $checks += Get-Item $selfcheckPy
     $checks = $checks | Sort-Object FullName
+} elseif ((Test-Path $selfcheckPy) -and -not (Test-Path $selfcheckPython)) {
+    # The script exists but no interpreter resolved anywhere: fail even under
+    # -AllowFewerChecks. Silently dropping selfcheck was the old behaviour and
+    # meant every fresh-worktree run skipped it.
+    Write-Host ""
+    Write-Host "FAILED: $selfcheckPy exists but no PcTools python was found (tried the worktree" -ForegroundColor Red
+    Write-Host "        .venv, KILNCTL_PCTOOLS_PYTHON, and the main tree's tools\PcTools\.venv)." -ForegroundColor Red
+    Write-Host "        Set KILNCTL_PCTOOLS_PYTHON to a python with the PcTools dependencies." -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
 } elseif (-not $AllowFewerChecks) {
-    # A missing selfcheck.py/venv used to be a silent WARNING that just
+    # A missing selfcheck.py used to be a silent WARNING that just
     # dropped the check from the run while the script still reported "all
     # passed" -- exactly the "glob found nothing, still green" trap this
     # file's own header warns about, just for a hand-added entry instead of
     # a glob. Hard failure instead: a live selfcheck.py that regressed is
     # supposed to show up as FAIL below, not as a check quietly missing.
     Write-Host ""
-    Write-Host "FAILED: expected $selfcheckPy (or its venv $selfcheckPython) not found --" -ForegroundColor Red
+    Write-Host "FAILED: expected $selfcheckPy not found --" -ForegroundColor Red
     Write-Host "        has it moved? A missing selfcheck.py must not read as a clean run." -ForegroundColor Red
     Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
     Clear-ChecksFastEnv
     exit 2
-} elseif (-not ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython))) {
+} else {
     # Same restore as the hal-boundary block above.
     Write-Host ""
-    Write-Host "WARNING: expected $selfcheckPy (or its venv $selfcheckPython) not found -- proceeding" -ForegroundColor Yellow
+    Write-Host "WARNING: expected $selfcheckPy not found -- proceeding" -ForegroundColor Yellow
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
@@ -643,8 +673,17 @@ function Start-CheckAsync {
     # terminating NativeCommandError here, since Start-Process is not a
     # PowerShell-native invocation at all. So the Continue/Stop dance the
     # serial version needed is simply not a hazard for this path.
-    $proc = Start-Process -FilePath $exe -ArgumentList $procArgs -WorkingDirectory $checkDir `
-        -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
+    # selfcheck.py needs the worktree's own src on the path (a borrowed
+    # interpreter's venv may point at the main tree's). Set only around this
+    # launch; the child inherits it at creation.
+    $savedPyPath = $env:PYTHONPATH
+    if ($Check.FullName -eq $SelfcheckPy) { $env:PYTHONPATH = "src" }
+    try {
+        $proc = Start-Process -FilePath $exe -ArgumentList $procArgs -WorkingDirectory $checkDir `
+            -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
+    } finally {
+        $env:PYTHONPATH = $savedPyPath
+    }
 
     # Well-known Start-Process/-PassThru gotcha: with output redirected, the
     # returned Process object's ExitCode reads back $null forever -- even
@@ -841,6 +880,9 @@ $restChecks = $restChecks | Where-Object {
 # target builds across multiple agent sessions hard-froze this machine
 # (Kernel-Power 41, no dump) five times in one week. No change to this
 # script's own scheduling was needed -- the gate is inside the checks.
+# Small single-exe compiles (check_recovery_*.ps1, check_commonfw_*.ps1) use the
+# separate "light" lane (-Lane light, KILNCTL_LIGHT_GATE_SLOTS, default 4) so they
+# never queue behind a 7-18 minute heavy holder.
 $results = @()
 if ($buildChecks.Count -gt 0) {
     Write-Host "Phase 1/3: full target builds ($($buildChecks.Count))" -ForegroundColor Cyan

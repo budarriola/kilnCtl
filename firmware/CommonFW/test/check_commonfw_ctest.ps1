@@ -78,7 +78,7 @@ try {
 
     # No -target: build everything CMakeLists.txt declares (both libraries
     # plus every host-test executable), not just one.
-    $gate = Enter-KilnBuildGate -Label "commonfw_ctest"
+    $gate = Enter-KilnBuildGate -Label "commonfw_ctest" -Lane light
     try {
         $bld = & cmake --build $buildDir --config Debug 2>&1
         $bldExit = $LASTEXITCODE

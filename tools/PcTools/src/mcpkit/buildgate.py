@@ -58,20 +58,25 @@ class GateWaitResult:
         self.waited_seconds = waited_seconds
 
 
-def _slot_count() -> int:
-    raw = os.environ.get("KILNCTL_BUILD_GATE_SLOTS")
+def _slot_count(lane: str = "heavy") -> int:
+    env_name, default = (
+        ("KILNCTL_LIGHT_GATE_SLOTS", 4) if lane == "light" else ("KILNCTL_BUILD_GATE_SLOTS", 2))
+    raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
-        return 2
+        return default
     try:
         return int(raw.strip())
     except ValueError:
-        return 2
+        return default
 
 
 _DEFAULT_MUTEX_PREFIX = "Global\\kilnctl_build_slot_"
+# Light lane: a separate pool for genuinely small compiles, see
+# tools/build_gate.ps1's "LIGHT LANE" header. Must match that file's names.
+_DEFAULT_LIGHT_MUTEX_PREFIX = "Global\\kilnctl_build_light_"
 
 
-def _mutex_name(slot_index: int) -> str:
+def _mutex_name(slot_index: int, lane: str = "heavy") -> str:
     # Must match tools/build_gate.ps1's Get-KilnBuildGateMutexName exactly --
     # this name IS the shared contract between the two languages. The prefix
     # is overridable via KILNCTL_BUILD_GATE_MUTEX_PREFIX so tests can point
@@ -87,6 +92,9 @@ def _mutex_name(slot_index: int) -> str:
     # silently gate on different mutexes and stop admission-controlling each
     # other for the same real build. Leave it unset on both sides for every
     # real build.
+    if lane == "light":
+        prefix = os.environ.get("KILNCTL_LIGHT_GATE_MUTEX_PREFIX") or _DEFAULT_LIGHT_MUTEX_PREFIX
+        return f"{prefix}{slot_index}"
     prefix = os.environ.get("KILNCTL_BUILD_GATE_MUTEX_PREFIX") or _DEFAULT_MUTEX_PREFIX
     return f"{prefix}{slot_index}"
 
@@ -164,8 +172,13 @@ def kiln_build_gate(
     poll_interval_seconds: float = 30.0,
     log: "callable" = _log_to_stderr,
     wait_result: "GateWaitResult | None" = None,
+    lane: str = "heavy",
 ) -> Iterator[None]:
     """Hold one of the machine-wide heavy-build slots for the ``with`` block.
+
+    ``lane="light"`` uses a separate slot pool (``KILNCTL_LIGHT_GATE_SLOTS``,
+    default 4) so a seconds-long compile never queues behind a multi-minute
+    heavy build; see ``tools/build_gate.ps1``'s "LIGHT LANE" header.
 
     ``KILNCTL_BUILD_GATE_SLOTS=0`` disables this gate entirely (single-session
     machine only). Otherwise tries every slot non-blocking first, then waits
@@ -176,9 +189,11 @@ def kiln_build_gate(
     via ``wait_result`` to read back how long acquisition took, e.g. to fold
     "gate waited Ns" into a build report string (opus review finding A2).
     """
-    slots = _slot_count()
+    if lane not in ("heavy", "light"):
+        raise ValueError(f"build gate: unknown lane {lane!r}")
+    slots = _slot_count(lane)
     if slots <= 0:
-        log(f"build gate: disabled (KILNCTL_BUILD_GATE_SLOTS=0) for '{label}'")
+        log(f"build gate: {lane} lane disabled (slot count 0) for '{label}'")
         yield
         return
 
@@ -187,7 +202,7 @@ def kiln_build_gate(
         for i in range(slots):
             # If CreateMutexW fails partway through, close what was already
             # opened rather than leaking those handles (opus review A4).
-            mutexes.append(_KernelMutex(_mutex_name(i)))
+            mutexes.append(_KernelMutex(_mutex_name(i, lane)))
     except Exception:
         for m in mutexes:
             m.close()
@@ -201,7 +216,7 @@ def kiln_build_gate(
             result = m.wait(0)
             if result in (_WAIT_OBJECT_0, _WAIT_ABANDONED_0):
                 held, held_index = m, i
-                log(f"build gate: acquired slot {i} for '{label}' (slots={slots})")
+                log(f"build gate: acquired slot {i} for '{label}' (lane={lane}, slots={slots})")
                 break
             if result not in (_WAIT_TIMEOUT,):
                 raise OSError(f"build gate: WaitForSingleObject on slot {i} failed: {ctypes.get_last_error()}")
@@ -210,7 +225,7 @@ def kiln_build_gate(
             # Every slot busy -- wait on all of them together so a slot other
             # than 0 freeing up is noticed immediately, not just slot 0's.
             elapsed = 0.0
-            log(f"build gate: waiting (label={label}, {elapsed:.0f}s, slots={slots})")
+            log(f"build gate: waiting (label={label}, lane={lane}, {elapsed:.0f}s, slots={slots})")
             while elapsed < timeout_seconds:
                 chunk = min(poll_interval_seconds, timeout_seconds - elapsed)
                 started = time.monotonic()
@@ -220,7 +235,7 @@ def kiln_build_gate(
                     held, held_index = mutexes[idx], idx
                     log(f"build gate: acquired slot {idx} for '{label}' after {elapsed:.0f}s wait")
                     break
-                log(f"build gate: waiting (label={label}, {elapsed:.0f}s, slots={slots})")
+                log(f"build gate: waiting (label={label}, lane={lane}, {elapsed:.0f}s, slots={slots})")
             if held is None:
                 raise TimeoutError(
                     f"build gate: timed out after {timeout_seconds:.0f}s waiting for a heavy-build "

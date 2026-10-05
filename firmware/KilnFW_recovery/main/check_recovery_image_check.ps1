@@ -42,7 +42,7 @@ function Build-And-Run {
     New-Item -ItemType Directory -Path $obj -Force | Out-Null
     $test = Join-Path $here "test_recovery_image_check.c"
     $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" `"$test`" `"$ImplC`" /Fe:`"$exe`" /Fo:`"$obj\\`""
-    $gate = Enter-KilnBuildGate -Label "recovery_image_check"
+    $gate = Enter-KilnBuildGate -Label "recovery_image_check" -Lane light
     try {
         $ErrorActionPreference = "Continue"
         $bo = cmd /c $cmd 2>&1
