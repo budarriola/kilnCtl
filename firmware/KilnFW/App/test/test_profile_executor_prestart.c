@@ -77,6 +77,24 @@ static void spy_adaptive_tune_run_end(const profile_firing_run_record_t *rec, bo
 }
 #define adaptive_tune_run_end(rec, clean) spy_adaptive_tune_run_end((rec), (clean))
 
+// Spare-relay WP-3 review: executor_task_entry() is a `for (;;)` loop whose
+// only seam is vTaskDelay(). Redirect the calls in the #included .c files to
+// a hook that lets `g_task_delay_budget` ticks through and then longjmps out
+// (-1 = unlimited, i.e. the stub's old no-op, the default). The header's own
+// inline stub is already declared above (freertos/task.h), so the macro
+// shadows only the call sites textually below.
+#include <setjmp.h>
+static int g_task_delay_budget = -1;
+static jmp_buf g_task_delay_jmp;
+static void test_task_delay_hook(TickType_t ticks)
+{
+    (void)ticks;
+    if (g_task_delay_budget < 0) return;
+    if (g_task_delay_budget == 0) longjmp(g_task_delay_jmp, 1);
+    g_task_delay_budget--;
+}
+#define vTaskDelay(ticks) test_task_delay_hook(ticks)
+
 // profile_executor.c split 2026-09-01 ("files over 1500 lines should be
 // broken up where it makes sense") -- same convention as test_zones_http.c's
 // own #include block (see that file's header comment): every piece is
@@ -510,9 +528,15 @@ esp_err_t relay_cycles_init(void)
     return ESP_OK;
 }
 
+/* Records every call so the aux contact-wear test can see them. */
+static int g_relay_cycles_calls = 0;
+static uint32_t g_relay_cycles_total = 0;
+static uint8_t g_relay_cycles_last_mask = 0;
 void relay_cycles_add(uint8_t relay_mask, uint32_t cycles)
 {
-    (void)relay_mask; (void)cycles;
+    g_relay_cycles_calls++;
+    g_relay_cycles_total += cycles;
+    g_relay_cycles_last_mask = relay_mask;
 }
 
 void relay_cycles_maybe_persist(void)
@@ -10168,6 +10192,154 @@ static void test_aux_sweep_does_not_flag_a_driven_aux(void)
     profile_executor_halt();
 }
 
+static void test_aux_start_refused_when_cap_unsatisfiable(void)
+{
+    TEST_SECTION("aux WP-3: start refuses when on/off zones + aux outputs meet max_simultaneous_relays");
+    char err[256] = {0};
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    g_stub_max_simultaneous_relays = 1; /* one aux rule, cap 1 -> it could never switch on beside a heater */
+    esp_log_test_capture_reset();
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "run refused");
+    TEST_CHECK(strstr(err, "aux output") != NULL && strstr(err, "max_simultaneous_relays is 1") != NULL,
+               "err_msg names the aux outputs and the cap");
+    TEST_CHECK(esp_log_test_capture_contains("refusing run:"), "refusal is logged");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE && s_exec.aux_claim_mask == 0, "nothing started or claimed");
+    TEST_CHECK(g_aux_write_log_n == 0, "no relay written");
+
+    g_stub_max_simultaneous_relays = 2; /* headroom: one slot for the aux, one spare */
+    aux_test_setup(&p);
+    g_stub_max_simultaneous_relays = 2;
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "cap 2 with one aux rule starts");
+    profile_executor_halt();
+
+    /* An on/off zone counts too: zone 0 on/off + aux 1 against cap 2. */
+    aux_test_setup(&p);
+    g_stub_zone_is_on_off[0] = true;
+    g_stub_max_simultaneous_relays = 2;
+    err[0] = '\0';
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok && strstr(err, "1 on/off zone(s) and 1 aux output(s)") != NULL,
+               "on/off zone + aux together reach the cap and are refused");
+    g_stub_zone_is_on_off[0] = false;
+    g_stub_max_simultaneous_relays = 0;
+    if (ok) profile_executor_halt();
+}
+
+static void test_aux_relay_io_refusal_is_logged(void)
+{
+    TEST_SECTION("aux WP-3: the RELAY_IO-on-an-enabled-aux refusal also logs a warning");
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    s_test_profiles_http_get_out.segments[1] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE + 2, 1, 0, 1);
+    s_test_profiles_http_get_out.segment_count = 2;
+    s_test_profiles_http_get_out.on_off_rules[0].enable = 0;
+    g_stub_aux[2].enabled = true;
+    char err[192] = {0};
+    esp_log_test_capture_reset();
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "run refused");
+    TEST_CHECK(esp_log_test_capture_contains("RELAY_IO targets relay"), "refusal logged by name");
+}
+
+static void test_aux_contact_cycles_are_counted(void)
+{
+    TEST_SECTION("aux WP-3: every aux relay transition adds a contact cycle for that relay's mask");
+    char err[192];
+    g_relay_cycles_calls = 0;
+    g_relay_cycles_total = 0;
+    g_relay_cycles_last_mask = 0;
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "aux ON");
+    TEST_CHECK(g_relay_cycles_total == 1 && g_relay_cycles_last_mask == 0x01,
+               "the OFF->ON transition counted once against mask 0x01");
+    int before = g_relay_cycles_calls;
+    aux_test_settle();
+    TEST_CHECK(g_relay_cycles_calls == before, "a steady tick adds nothing");
+    profile_executor_halt();
+    TEST_CHECK(g_relay_cycles_total >= 1, "run-end OFF never undercounts");
+}
+
+static void test_aux_handoff_write_failure_sets_pending(void)
+{
+    TEST_SECTION("aux WP-3: a failed start-handoff OFF write raises aux_off_pending (and says so)");
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    g_relay_write_fail = true;
+    esp_log_test_capture_reset();
+    char err[192] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    g_relay_write_fail = false;
+    TEST_CHECK(ok, "a failed handoff write does not refuse the run");
+    TEST_CHECK(s_exec.aux_off_pending, "pending raised so the retry branch re-writes OFF");
+    TEST_CHECK(esp_log_test_capture_contains("retrying via aux_off_pending"), "log names the real mechanism");
+    profile_executor_halt();
+}
+
+static void test_aux_status_reports_claimed_aux(void)
+{
+    TEST_SECTION("aux WP-3: profile_executor_get_status() carries per-aux claimed/commanded/actuated/reason");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    aux_test_settle();
+    profile_exec_status_t *st = (profile_exec_status_t *)malloc(sizeof(*st));
+    profile_executor_get_status(st);
+    TEST_CHECK(st->aux[0].claimed && st->aux[0].commanded_on && st->aux[0].actuated_on, "aux 1 reported ON");
+    TEST_CHECK(st->aux[0].rule_reason == PROFILE_EXEC_RELAY_DENIED_NONE, "no reason while ON");
+    TEST_CHECK(!st->aux[1].claimed && !st->aux[1].commanded_on, "an unclaimed aux reads all-false");
+
+    s_test_relay_authority_blocked = true;
+    aux_test_settle();
+    profile_executor_get_status(st);
+    TEST_CHECK(!st->aux[0].commanded_on && st->aux[0].rule_reason == PROFILE_EXEC_RELAY_DENIED_AUTHORITY,
+               "global authority block reported as AUTHORITY");
+    s_test_relay_authority_blocked = false;
+    profile_executor_halt();
+    profile_executor_get_status(st);
+    TEST_CHECK(!st->aux[0].claimed, "nothing claimed after the run ends");
+    free(st);
+}
+
+/* executor_task_entry() runs forever; test_task_delay_hook() (defined above
+ * the executor #includes) longjmps out of its Nth vTaskDelay(). */
+static void aux_test_run_task_ticks(int ticks)
+{
+    g_task_delay_budget = ticks;
+    if (setjmp(g_task_delay_jmp) == 0) {
+        executor_task_entry(NULL);
+    }
+    g_task_delay_budget = -1;
+}
+
+static void test_aux_off_pending_retried_by_task_loop(void)
+{
+    TEST_SECTION("aux WP-3: the not-RUNNING task-loop branch retries a pending OFF, but never while PAUSED");
+    aux_test_start_and_close();
+    g_relay_write_fail = true;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    exec_enter_terminal_state(PROFILE_EXEC_DONE);
+    xSemaphoreGive(s_exec.lock);
+    g_relay_write_fail = false;
+    TEST_CHECK(s_exec.aux_off_pending && s_exec.aux_claim_mask == 0x01, "stranded: pending with the claim kept");
+
+    /* PAUSED: the retry must not run (a pause holds aux). Only DONE/FAULTED
+     * retry. State forced directly -- the branch is what is under test. */
+    s_exec.state = PROFILE_EXEC_PAUSED;
+    g_aux_write_log_n = 0;
+    aux_test_run_task_ticks(2);
+    TEST_CHECK(s_exec.aux_off_pending && s_exec.aux_claim_mask == 0x01, "PAUSED tick leaves the pending OFF alone");
+
+    s_exec.state = PROFILE_EXEC_DONE;
+    aux_test_run_task_ticks(2);
+    TEST_CHECK(!s_exec.aux_off_pending && s_exec.aux_claim_mask == 0, "DONE tick retries and clears pending");
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "the retry actually wrote OFF to the aux");
+    s_exec.state = PROFILE_EXEC_IDLE;
+}
+
 static void run_test_aux_wp3(void)
 {
     test_aux_start_control_run_succeeds();
@@ -10179,6 +10351,12 @@ static void run_test_aux_wp3(void)
     test_aux_off_on_every_end_path();
     test_aux_failed_off_write_is_retried();
     test_aux_sweep_does_not_flag_a_driven_aux();
+    test_aux_start_refused_when_cap_unsatisfiable();
+    test_aux_relay_io_refusal_is_logged();
+    test_aux_contact_cycles_are_counted();
+    test_aux_handoff_write_failure_sets_pending();
+    test_aux_status_reports_claimed_aux();
+    test_aux_off_pending_retried_by_task_loop();
 }
 
 static void run_test_on_off_actuation(void)

@@ -18,6 +18,7 @@
 #include <stdint.h>
 
 #include "MAX31856.h"
+#include "aux_outputs_cfg.h" /* AUX_OUTPUTS_COUNT -- profile_exec_status_t.aux[] */
 #include "kiln_io.h"
 #include "pid.h"
 #include "profiles_types.h"
@@ -359,6 +360,20 @@ typedef struct {
      * (profile_executor_internal.h) for the exact accumulation/reset rule. */
     float    ramp_dwell_credit_applied_s;
     profile_exec_zone_status_t zones[MAX31856_CHANNEL_COUNT];
+
+    /* Spare-relay WP-3 (docs/SPARE_RELAY_ONOFF_PLAN.md sec 6.3/7): one entry
+     * per aux relay (index = relay - 1). claimed is true only for an aux this
+     * run has taken over (so it is all-false while idle); the rest is zero
+     * for an unclaimed aux. rule_reason is a profile_exec_relay_denied_t
+     * (profile_executor.h), valid only while the aux is OFF: why the
+     * evaluator is holding it off this tick (NONE = the rule simply says
+     * off). Rendered only by /api/profile_exec. */
+    struct {
+        bool    claimed;
+        bool    commanded_on;
+        bool    actuated_on;
+        uint8_t rule_reason;
+    } aux[AUX_OUTPUTS_COUNT];
 
     /* Duration-model inputs for /api/profile_exec's total_planned_s/
      * elapsed_s/remaining_s and for /api/profile_plan's polyline against

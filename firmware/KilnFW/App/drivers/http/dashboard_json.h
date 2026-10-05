@@ -72,8 +72,16 @@
  * "255" = 3B, 22B key+colon+comma) to BOTH shapes: 10+18+3+22 = 53B more,
  * bringing this shape's worst case to 648+53 = 701B. 1024/zone still leaves
  * >320B headroom. See test_dashboard_json.c's fill_worst_case_zone() for the
- * exact widths this measures against. */
-#define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (960 + MAX31856_CHANNEL_COUNT * 1024)
+ * exact widths this measures against.
+ *
+ * Spare-relay WP-3 added a trailing `,"aux":[...]` array to this shape: up to
+ * AUX_OUTPUTS_COUNT (4) objects of
+ * `{"relay":4,"commanded_on":false,"actuated_on":false,"rule_reason":255}`
+ * = 71B worst case each, plus 1B of separator = 72B x 4 = 288B, plus the
+ * `,"aux":[` / `]` framing (9B) = 297B. The fixed part was raised 960 -> 1344
+ * (+384B) to carry it with headroom; the buffer is a PSRAM heap allocation
+ * (dashboard_exec_http.c), never a task-stack buffer. */
+#define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (1344 + MAX31856_CHANNEL_COUNT * 1024)
 
 /* ROADMAP.md M15 B4 (2026-09-04) raised the /api/control per-zone budget
  * from 448 to 900 -- dashboard_http.c's control_status_get_handler() doc

@@ -21,6 +21,7 @@
 #include "kiln_io_owner.h"
 #include "profile_rule_target.h"
 #include "relay_authority.h"
+#include "relay_cycles.h"
 #include "sim_backend.h"
 #include "zones_config_accessors.h"
 
@@ -490,6 +491,10 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
     }
     if (s_exec.aux[aux_idx].commanded_on != want_on) {
         ESP_LOGI(PE_TAG, "aux relay %u -> %s", (unsigned)aux_idx + 1u, want_on ? "ON" : "OFF");
+        /* Contact-wear accounting, same "count any transition" rule as the
+         * zone relays (heater_output.c note_transition()): an aux relay
+         * switching is a contact cycle like any other. */
+        relay_cycles_add(mask, 1u);
     }
     s_exec.aux[aux_idx].commanded_on = want_on;
 }
@@ -500,6 +505,7 @@ static void aux_reset_runtime(uint8_t aux_idx)
     s_exec.aux[aux_idx].actuated_on = false;
     s_exec.aux[aux_idx].held_s = 0.0f;
     s_exec.aux[aux_idx].commanded_on = false;
+    s_exec.aux[aux_idx].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
 }
 
 /* The run-end OFF. Writes OFF to every aux this run took over and resets
@@ -594,8 +600,10 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
         bool guard_5_6 = tz && tz->active && tz->guard_state.is_tripped &&
                          (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
                           tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
-        bool failsafe = !cfg_ok || authority_blocked || (s_exec.state == PROFILE_EXEC_FAULTED) ||
-                        (needs_temp && !temp_ok);
+        /* No FAULTED term: this tick runs only while RUNNING, and a fault
+         * leaves RUNNING through exec_enter_terminal_state(), whose
+         * force_aux_relays_off() is the aux fail-safe for that path. */
+        bool failsafe = !cfg_ok || authority_blocked || (needs_temp && !temp_ok);
 
         on_off_trigger_input_t oin = {
             .failsafe_override = failsafe,
@@ -627,6 +635,21 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
         }
         if (r.actuated_on) {
             relays_on_count++;
+        }
+        /* Same precedence as the zones' relay_denied_reason: authority, then
+         * the cap, then (aux only) an unevaluable input, then no rule. */
+        if (r.actuated_on) {
+            s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
+        } else if (authority_blocked) {
+            s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
+        } else if (r.cap_denied) {
+            s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
+        } else if (failsafe) {
+            s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUX_FAILSAFE;
+        } else if (!rule.enable) {
+            s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE;
+        } else {
+            s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
         }
         aux_apply_relay(i, r.actuated_on);
     }

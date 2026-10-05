@@ -362,6 +362,11 @@ typedef enum {
     /* relay_authority blocked the zone (heat_blocked/heat_blocked_sources
      * carry the detail). */
     PROFILE_EXEC_RELAY_DENIED_AUTHORITY = 3,
+    /* Aux outputs only (profile_exec_status_t.aux[].rule_reason): the aux
+     * could not be evaluated safely this tick (config unreadable, or a
+     * temperature rule whose thermocouple zone has no usable reading) and
+     * is held at its fixed fail-safe OFF. */
+    PROFILE_EXEC_RELAY_DENIED_AUX_FAILSAFE = 4,
 } profile_exec_relay_denied_t;
 
 #define PROFILE_EXECUTOR_DEFAULT_SANITY_RATE_C_PER_MIN 0.5f

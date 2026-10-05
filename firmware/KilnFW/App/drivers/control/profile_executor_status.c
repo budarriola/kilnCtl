@@ -469,6 +469,14 @@ void profile_executor_get_status(profile_exec_status_t *out)
             out->dwell_remaining_s = s_exec.segment_elapsed_s >= dwell_total_s ? 0 : dwell_total_s - s_exec.segment_elapsed_s;
         }
 
+        for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
+            if (!(s_exec.aux_claim_mask & (1u << ai))) continue;
+            out->aux[ai].claimed = true;
+            out->aux[ai].commanded_on = s_exec.aux[ai].commanded_on;
+            out->aux[ai].actuated_on = s_exec.aux[ai].actuated_on;
+            out->aux[ai].rule_reason = s_exec.aux[ai].rule_reason;
+        }
+
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             const zone_runtime_t *z = &s_exec.zones[zi];
             profile_exec_zone_status_t *zo = &out->zones[zi];

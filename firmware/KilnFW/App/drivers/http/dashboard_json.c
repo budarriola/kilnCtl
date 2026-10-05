@@ -180,6 +180,30 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
     }
     n = snprintf(json + o, cap - o, "]");
     if (n > 0 && (size_t)n < cap - o) o += (size_t)n;
+    if (!control_fields) {
+        /* Spare-relay WP-3: the aux outputs this run has taken over, one
+         * object per claimed aux (an empty array while none). /api/profile_exec
+         * only -- /api/control's budget is untouched. A truncation here just
+         * drops the tail of this array; it is closed below so the document
+         * stays parseable (the buffer is sized for the full set, see
+         * DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE). */
+        n = snprintf(json + o, cap - o, ",\"aux\":[");
+        if (n < 0 || (size_t)n >= cap - o) goto truncated;
+        o += (size_t)n;
+        bool aux_first = true;
+        for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
+            if (!st->aux[ai].claimed) continue;
+            n = snprintf(json + o, cap - o,
+                         "%s{\"relay\":%u,\"commanded_on\":%s,\"actuated_on\":%s,\"rule_reason\":%u}",
+                         aux_first ? "" : ",", (unsigned)ai + 1u, st->aux[ai].commanded_on ? "true" : "false",
+                         st->aux[ai].actuated_on ? "true" : "false", (unsigned)st->aux[ai].rule_reason);
+            if (n < 0 || (size_t)n >= cap - o) goto truncated;
+            o += (size_t)n;
+            aux_first = false;
+        }
+        n = snprintf(json + o, cap - o, "]");
+        if (n > 0 && (size_t)n < cap - o) o += (size_t)n;
+    }
     return o;
 
 truncated:

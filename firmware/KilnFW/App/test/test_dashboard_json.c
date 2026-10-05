@@ -128,6 +128,13 @@ static void fill_worst_case_status(profile_exec_status_t *st)
      * run-level fields too, same discipline as every other field here. */
     st->mode_state_fault_latched = true;
     st->mode_state_violation_count = 0xFFFFFFFFu; /* "%lu" worst case */
+    /* Spare-relay WP-3: every aux claimed, widest rule_reason. */
+    for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
+        st->aux[ai].claimed = true;
+        st->aux[ai].commanded_on = false; /* "false" is the widest bool */
+        st->aux[ai].actuated_on = false;
+        st->aux[ai].rule_reason = 255;
+    }
 }
 
 /* True iff `json` is a syntactically complete, balanced JSON object: starts
@@ -389,6 +396,63 @@ static void test_json_escape_doubles_every_quote_and_backslash(void)
  * bail with no goto/log) before this was written into the file -- see the
  * firmware cleanup report for the quoted FAIL output; not re-run here since
  * this file always exercises the current, fixed production function. */
+/* Spare-relay WP-3: the trailing "aux" array of /api/profile_exec. */
+static void test_exec_status_json_carries_aux_array(void)
+{
+    TEST_SECTION("append_zone_status_json(control_fields=false) -- the aux array lists exactly the "
+                 "claimed aux outputs, fits the buffer beside 3 worst-case zones, and is absent "
+                 "from the /api/control shape");
+
+    char *json = malloc(DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE);
+    TEST_CHECK(json != NULL, "malloc must succeed");
+    if (json == NULL) return;
+
+    /* Worst case: all 4 aux claimed next to 3 worst-case zones. */
+    profile_exec_status_t st;
+    fill_worst_case_status(&st);
+    size_t o = (size_t)snprintf(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, "{");
+    o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, false);
+    if (o + 1 < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE) json[o++] = '}';
+    json[o < DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE ? o : DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE - 1] = '\0';
+    TEST_CHECK(json_looks_complete(json), "3 worst-case zones + 4 aux must render complete JSON");
+    int aux_objects = 0;
+    for (const char *p = json; (p = strstr(p, "\"relay\":")) != NULL; p += 8) aux_objects++;
+    TEST_CHECK(aux_objects == 4, "all 4 claimed aux must be present");
+    TEST_CHECK(strstr(json, "\"relay\":4,\"commanded_on\":false,\"actuated_on\":false,\"rule_reason\":255}]") != NULL,
+              "the last aux object must be intact and close the array");
+
+    /* Mixed: only aux 2 (index 1) claimed, ON, reason NONE. */
+    memset(&st, 0, sizeof(st));
+    st.aux[1].claimed = true;
+    st.aux[1].commanded_on = true;
+    st.aux[1].actuated_on = true;
+    o = (size_t)snprintf(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, "{");
+    o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, false);
+    json[o++] = '}';
+    json[o] = '\0';
+    TEST_CHECK(json_looks_complete(json), "single-aux render must be complete JSON");
+    TEST_CHECK(strstr(json, "\"aux\":[{\"relay\":2,\"commanded_on\":true,\"actuated_on\":true,"
+                            "\"rule_reason\":0}]") != NULL,
+              "only the claimed aux is listed, 1-based relay number, true values");
+
+    /* Nothing claimed: empty array. */
+    memset(&st, 0, sizeof(st));
+    o = (size_t)snprintf(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, "{");
+    o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, false);
+    json[o++] = '}';
+    json[o] = '\0';
+    TEST_CHECK(strstr(json, "\"aux\":[]") != NULL, "no claimed aux -> empty array");
+
+    /* /api/control shape does not carry it. */
+    fill_worst_case_status(&st);
+    o = (size_t)snprintf(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, "{");
+    o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, true);
+    json[o++] = '}';
+    json[o] = '\0';
+    TEST_CHECK(strstr(json, "\"aux\":") == NULL, "control_fields=true must not render aux");
+    free(json);
+}
+
 static void test_truncation_is_logged_and_still_produces_valid_json(void)
 {
     TEST_SECTION("append_zone_status_json() -- a buffer far too small for even one zone must still "
@@ -1316,6 +1380,7 @@ static void run_test_dashboard_json(void)
     test_json_escape_doubles_every_quote_and_backslash();
     test_control_status_json_is_complete_and_well_formed_at_3_zones();
     test_exec_status_json_is_complete_and_well_formed_at_3_zones();
+    test_exec_status_json_carries_aux_array();
     test_truncation_is_logged_and_still_produces_valid_json();
     test_json_append_clamped_never_walks_past_cap();
     test_heap_allocated_worst_case_render_matches_stack_sizing();

@@ -525,6 +525,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * profile imported before the aux existed) is caught here. */
         if ((aux_outputs_cfg_enabled_mask() & (uint8_t)(1u << (t - PROFILE_IO_TARGET_RELAY_BASE))) != 0) {
             xSemaphoreGive(s_exec.lock);
+            ESP_LOGW(PE_TAG, "refusing run: segment %u RELAY_IO targets relay %u, now bound to an enabled aux output",
+                     (unsigned)i + 1u, (unsigned)t);
             if (err_msg) {
                 snprintf(err_msg, err_cap,
                          "segment %u: relay %u is now bound to an aux output -- this profile cannot run "
@@ -801,6 +803,36 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!(p.zone_mask & (1u << zi))) continue;
             if (zone_is_on_off(zi)) n_on_off_zones++;
+        }
+        /* Spare-relay WP-3 (plan sec 5): an aux output switched by this
+         * profile's rules draws a load slot like an on/off zone. Count each
+         * distinct enabled aux relay an enabled rule targets (the loop
+         * above already refused any that are not usable). */
+        uint8_t aux_seen_mask = 0;
+        for (uint8_t ri = 0; ri < p.on_off_rule_count && ri < PROFILE_MAX_ON_OFF_RULES; ri++) {
+            const profile_on_off_rule_t *pr = &p.on_off_rules[ri];
+            if (pr->enable && profile_rule_target_is_aux(pr->zone_index) && pr->segment_index < p.segment_count) {
+                aux_seen_mask |= (uint8_t)(1u << (profile_rule_target_aux_relay(pr->zone_index) - 1u));
+            }
+        }
+        uint8_t n_aux = 0;
+        for (uint8_t b = 0; b < AUX_OUTPUTS_COUNT; b++) {
+            if (aux_seen_mask & (1u << b)) n_aux++;
+        }
+        if (n_aux > 0 && (uint16_t)n_on_off_zones + n_aux >= cap_for_on_off_check) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "this profile has %u on/off zone(s) and %u aux output(s) but "
+                         "max_simultaneous_relays is %u -- on/off devices are always suppressed last when "
+                         "the cap binds, so at least one would never be able to turn on for the whole "
+                         "firing. Raise the cap in Settings, or reduce the on/off zones or aux rules in "
+                         "this profile.",
+                         (unsigned)n_on_off_zones, (unsigned)n_aux, (unsigned)cap_for_on_off_check);
+            }
+            ESP_LOGW(PE_TAG, "refusing run: %u on/off zone(s) + %u aux >= max_simultaneous_relays %u",
+                     (unsigned)n_on_off_zones, (unsigned)n_aux, (unsigned)cap_for_on_off_check);
+            return false;
         }
         if (n_on_off_zones >= cap_for_on_off_check) {
             xSemaphoreGive(s_exec.lock);
@@ -1320,8 +1352,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (aux_take != 0 && s_exec.io) {
             esp_err_t aux_err = kiln_io_owner_command_set_relay_mask_authorized(aux_take, 0);
             if (aux_err != ESP_OK) {
-                ESP_LOGW(PE_TAG, "aux start handoff OFF write failed (mask 0x%02X): %s -- the tick re-asserts it",
+                ESP_LOGW(PE_TAG, "aux start handoff OFF write failed (mask 0x%02X): %s -- retrying via aux_off_pending",
                          (unsigned)aux_take, esp_err_to_name(aux_err));
+                /* The retry branch of the task loop re-writes OFF to the
+                 * claim; without this the aux would stay as the operator
+                 * left it until the first rule decision. */
+                s_exec.aux_off_pending = true;
             }
         }
     }
