@@ -20,6 +20,10 @@
 //      image_length bytes of the RUNNING app partition must equal the header's
 //      sha256 (the same bytes recovery copied and re-hashed). Only this
 //      authorises the erase; the elf hash alone never does.
+//   3. The proof runs WITHOUT the update claim (a ~2.6 MB read-only hash must
+//      not block heat or an upload). Only afterwards is the claim taken
+//      (io->claim_begin), the header re-read and required to be byte-identical
+//      to the one that was hashed against, and only then cleared.
 //      esp_partition_get_sha256() is deliberately not used: it hashes the
 //      image per the app's own metadata length, which is not guaranteed to
 //      equal the uploaded .bin length, and the bootloader does not cache it.
@@ -62,6 +66,12 @@ typedef struct {
     // Erase the stage header via the normal clear path. 0 cleared, >0 busy or
     // refused (try again later), <0 failed.
     int (*stage_clear)(void *ctx);
+    // Take the update claim and every refusal that guards a stage write (mode
+    // gate, OTA interlock). 0 granted, nonzero refused/busy (may block and
+    // retry inside). Called only AFTER the hash, immediately before the header
+    // re-read and clear; claim_end is called exactly once per granted claim.
+    int (*claim_begin)(void *ctx);
+    void (*claim_end)(void *ctx);
     void (*yield)(void *ctx); // optional; called every ~64 KB of hashing
 } update_stale_io_t;
 
@@ -75,12 +85,13 @@ typedef enum {
     UPDATE_STALE_KEEP_NO_IDENTITY,   // running elf hash unavailable
     UPDATE_STALE_KEEP_DIFFERENT,     // stage is a different build (prefilter or size)
     UPDATE_STALE_KEEP_HASH_MISMATCH, // same elf hash but image bytes differ from the header sha256
-    UPDATE_STALE_KEEP_BUSY,          // clear refused (stage busy, gate, claim); retry later
+    UPDATE_STALE_KEEP_BUSY,          // claim/gate refused, or clear refused (stage busy); retry later
+    UPDATE_STALE_KEEP_CHANGED,       // header differs from the one hashed against (upload/clear raced); kept
     UPDATE_STALE_ERR_IO,             // a read or the hash failed; nothing cleared
     UPDATE_STALE_ERR_CLEAR,          // proven stale, but the clear itself failed
 } update_stale_result_t;
 
-// scratch >= UPDATE_STALE_SCRATCH_MIN bytes (larger is faster, 4096 is plenty).
+// scratch >= UPDATE_STALE_SCRATCH_MIN bytes (larger is faster).
 // app_confirmed_valid must be true only once the running image has been
 // marked valid (rollback cancelled); false returns immediately with no flash
 // access of any kind.

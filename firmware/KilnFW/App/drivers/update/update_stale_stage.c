@@ -8,7 +8,7 @@
 static bool io_complete(const update_stale_io_t *io)
 {
     return io && io->stage_read && io->app_read && io->sha_start && io->sha_update && io->sha_finish &&
-           io->stage_clear && io->stage_size > STAGE_IMAGE_OFFSET && io->app_size > 0;
+           io->stage_clear && io->claim_begin && io->claim_end && io->stage_size > STAGE_IMAGE_OFFSET && io->app_size > 0;
 }
 
 static uint32_t rd_le32(const uint8_t *p)
@@ -71,11 +71,12 @@ update_stale_result_t update_stale_stage_run(const update_stale_io_t *io, bool a
     }
 
     const uint32_t capacity = io->stage_size - STAGE_IMAGE_OFFSET;
-    if (io->stage_read(io->ctx, 0, scratch, STAGE_HEADER_SIZE) != 0) {
+    uint8_t hdr0[STAGE_HEADER_SIZE]; // the header every later step is proven against
+    if (io->stage_read(io->ctx, 0, hdr0, STAGE_HEADER_SIZE) != 0) {
         return UPDATE_STALE_ERR_IO;
     }
     stage_header_t h;
-    stage_hdr_status_t hs = stage_header_decode(scratch, STAGE_HEADER_SIZE, capacity, &h);
+    stage_hdr_status_t hs = stage_header_decode(hdr0, STAGE_HEADER_SIZE, capacity, &h);
     if (hs == STAGE_HDR_BLANK) {
         return UPDATE_STALE_KEEP_NO_STAGE;
     }
@@ -110,11 +111,21 @@ update_stale_result_t update_stale_stage_run(const update_stale_io_t *io, bool a
         return UPDATE_STALE_KEEP_HASH_MISMATCH;
     }
 
-    int c = io->stage_clear(io->ctx);
-    if (c == 0) {
-        return UPDATE_STALE_CLEARED;
+    // 3. Claim, then prove the header is still the one we hashed against.
+    if (io->claim_begin(io->ctx) != 0) {
+        return UPDATE_STALE_KEEP_BUSY;
     }
-    return c > 0 ? UPDATE_STALE_KEEP_BUSY : UPDATE_STALE_ERR_CLEAR;
+    update_stale_result_t res;
+    if (io->stage_read(io->ctx, 0, scratch, STAGE_HEADER_SIZE) != 0) {
+        res = UPDATE_STALE_ERR_IO;
+    } else if (memcmp(scratch, hdr0, STAGE_HEADER_SIZE) != 0) {
+        res = UPDATE_STALE_KEEP_CHANGED;
+    } else {
+        int c = io->stage_clear(io->ctx);
+        res = c == 0 ? UPDATE_STALE_CLEARED : (c > 0 ? UPDATE_STALE_KEEP_BUSY : UPDATE_STALE_ERR_CLEAR);
+    }
+    io->claim_end(io->ctx);
+    return res;
 }
 
 bool update_stale_result_cleared(update_stale_result_t r)
@@ -135,6 +146,7 @@ const char *update_stale_result_name(update_stale_result_t r)
     case UPDATE_STALE_KEEP_DIFFERENT: return "kept_different_image";
     case UPDATE_STALE_KEEP_HASH_MISMATCH: return "kept_hash_mismatch";
     case UPDATE_STALE_KEEP_BUSY: return "kept_busy";
+    case UPDATE_STALE_KEEP_CHANGED: return "kept_header_changed";
     case UPDATE_STALE_ERR_IO: return "io_error";
     case UPDATE_STALE_ERR_CLEAR: return "clear_failed";
     }

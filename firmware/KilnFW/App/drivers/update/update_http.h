@@ -35,12 +35,16 @@ esp_err_t update_http_start(void);
 // Boot-time stale-stage cleanup (OT-G06, update_stale_stage.h): when the
 // stage is VERIFIED and is byte-identical to the RUNNING image (a recovery
 // apply cut between set_boot and the header erase), clear the stage header.
-// Call ONLY after the running image is confirmed valid (it re-checks the
-// bootloader's own state and does nothing otherwise) and boot_guard is cleared;
-// it blocks for the hash (about 1 s) and on a busy gate for up to ~30 s, so
-// run it from the existing low-priority ota_confirm task, never from boot.
-// The result is reported as "auto_clear"/"auto_cleared" in GET /api/update/stage.
-update_stale_result_t update_http_stale_stage_check(void);
+// `app_marked_valid` must be true ONLY if esp_ota_mark_app_valid_cancel_rollback()
+// returned ESP_OK this boot (the caller's own result: esp_ota_get_state_partition()
+// is not trusted here, it reads otadata[0] which is not the active entry on
+// this single-slot table); false returns immediately. Call after boot_guard is
+// cleared. It hashes the whole app image WITHOUT the update claim (a few
+// seconds, yielding), then waits up to ~30 s for the claim/gates; run it from
+// the existing low-priority ota_confirm task, never from boot. The result is
+// boot-scoped and reported as "boot_auto_clear"/"boot_auto_cleared" in
+// GET /api/update/stage.
+update_stale_result_t update_http_stale_stage_check(bool app_marked_valid);
 
 #ifdef __cplusplus
 }

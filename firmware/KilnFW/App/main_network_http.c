@@ -171,6 +171,7 @@ static void main_ota_rollback_confirm_task(void *arg)
     TickType_t start = xTaskGetTickCount();
     bool       warned = false;
     bool       rollback_cancel_attempted = false; /* OTA-slot branch only -- see below */
+    bool       rollback_cancel_ok = false;        /* esp_ota_mark_app_valid_cancel_rollback() == ESP_OK */
     bool       clear_warned = false;
 
     for (;;) {
@@ -206,9 +207,6 @@ static void main_ota_rollback_confirm_task(void *arg)
              * (existing 500 ms cadence) and retrying the clear until it is
              * actually verified, rather than trusting one shot. */
             if (boot_guard_mark_healthy()) {
-                /* OT-G06: only now (confirmed valid, boot_guard cleared) drop a
-                 * stage that is the image we are running. Never gates anything. */
-                (void)update_http_stale_stage_check();
                 vTaskDelete(NULL);
                 return;
             }
@@ -226,6 +224,7 @@ static void main_ota_rollback_confirm_task(void *arg)
         if (action == BOOT_CONFIRM_CONFIRM_OTA_SLOT) {
             if (!rollback_cancel_attempted) {
                 esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+                rollback_cancel_ok = (err == ESP_OK);
                 if (err == ESP_OK) {
                     ESP_LOGI(MAIN_TAG, "OTA rollback confirmed: NVS readable, web server and OTA routes up "
                                   "-- this image is no longer PENDING_VERIFY");
@@ -255,9 +254,14 @@ static void main_ota_rollback_confirm_task(void *arg)
              * must never be allowed to disagree again. Retried the same way
              * as the factory-partition branch above -- see its comment. */
             if (boot_guard_mark_healthy()) {
-                /* OT-G06: only now (confirmed valid, boot_guard cleared) drop a
-                 * stage that is the image we are running. Never gates anything. */
-                (void)update_http_stale_stage_check();
+                /* OT-G06: only now (marked valid, boot_guard cleared) drop a
+                 * stage that is the image we are running. Uses OUR mark-valid
+                 * result, not esp_ota_get_state_partition() (otadata[0], not the
+                 * active entry on this table). Never gates anything. The stack
+                 * high-water mark is logged once so the bench can size this task. */
+                (void)update_http_stale_stage_check(rollback_cancel_ok);
+                ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
+                         (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
                 vTaskDelete(NULL);
                 return;
             }

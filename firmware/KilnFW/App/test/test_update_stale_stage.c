@@ -22,6 +22,7 @@ static uint8_t g_scratch[4096];
 typedef struct {
     int stage_reads, app_reads, sha_starts, sha_aborts, sha_finishes, clears, yields;
     int fail_stage_read, fail_app_read_at, fail_sha_finish, clear_rc;
+    int claim_begins, claim_ends, claim_rc, claim_after_hash_finishes, mutate_in_claim;
     uint8_t acc[32];
     bool hashing;
 } fake_t;
@@ -91,6 +92,24 @@ static void f_sha_abort(void *c)
     g_f.sha_aborts++;
     g_f.hashing = false;
     g_fold_pos = 0;
+}
+static int f_claim_begin(void *c)
+{
+    (void)c;
+    g_f.claim_begins++;
+    g_f.claim_after_hash_finishes = g_f.sha_finishes;
+    if (g_f.claim_rc != 0) {
+        return g_f.claim_rc;
+    }
+    if (g_f.mutate_in_claim) {
+        g_stage[200] ^= 0x01; // an upload touched the header between hash and claim
+    }
+    return 0;
+}
+static void f_claim_end(void *c)
+{
+    (void)c;
+    g_f.claim_ends++;
 }
 static int f_clear(void *c)
 {
@@ -167,6 +186,8 @@ static update_stale_io_t make_io(void)
     io.sha_finish = f_sha_finish;
     io.sha_abort = f_sha_abort;
     io.stage_clear = f_clear;
+    io.claim_begin = f_claim_begin;
+    io.claim_end = f_claim_end;
     io.yield = f_yield;
     return io;
 }
@@ -180,6 +201,8 @@ static void test_match_clears(void)
     TEST_CHECK(r == UPDATE_STALE_CLEARED, "cleared");
     TEST_CHECK(update_stale_result_cleared(r), "cleared predicate");
     TEST_CHECK(g_f.clears == 1, "cleared exactly once");
+    TEST_CHECK(g_f.claim_begins == 1 && g_f.claim_ends == 1, "claim taken and released once");
+    TEST_CHECK(g_f.claim_after_hash_finishes == 1, "claim taken only AFTER the hash finished");
     TEST_CHECK(g_f.sha_finishes == 1 && g_f.sha_aborts == 0, "one clean hash");
     TEST_CHECK(g_f.yields >= 2, "yielded during the 150 KB hash");
     TEST_CHECK(g_stage[0] == 0xFF && g_stage[100] == 0xFF, "header erased");
@@ -276,6 +299,50 @@ static void test_not_confirmed_touches_nothing(void)
     TEST_CHECK(g_f.stage_reads == 0 && g_f.clears == 0, "unknown identity: nothing touched");
 }
 
+static void test_claim_phase(void)
+{
+    TEST_SECTION("stale stage: claim is taken after the hash and the header is re-proven");
+    update_stale_io_t io = make_io();
+
+    make_world(ELF);
+    g_f.claim_rc = 1;
+    TEST_CHECK(update_stale_stage_run(&io, true, g_scratch, sizeof(g_scratch)) == UPDATE_STALE_KEEP_BUSY,
+               "refused claim -> kept busy");
+    TEST_CHECK(g_f.clears == 0 && g_f.claim_ends == 0, "refused claim: no clear, no claim_end");
+    TEST_CHECK(g_stage[0] == (STAGE_HEADER_MAGIC & 0xFF), "header intact");
+
+    make_world(ELF);
+    g_f.mutate_in_claim = 1;
+    TEST_CHECK(update_stale_stage_run(&io, true, g_scratch, sizeof(g_scratch)) == UPDATE_STALE_KEEP_CHANGED,
+               "header changed after the hash -> kept");
+    TEST_CHECK(g_f.clears == 0, "changed header is never cleared");
+    TEST_CHECK(g_f.claim_begins == 1 && g_f.claim_ends == 1, "claim released after a changed header");
+
+    // The claim is never taken when the prefilter or the proof already refused.
+    uint8_t other[32];
+    memcpy(other, ELF, 32);
+    other[0] ^= 1;
+    make_world(other);
+    (void)update_stale_stage_run(&io, true, g_scratch, sizeof(g_scratch));
+    TEST_CHECK(g_f.claim_begins == 0, "different image: claim never taken");
+    make_world(ELF);
+    g_app[7] ^= 1;
+    (void)update_stale_stage_run(&io, true, g_scratch, sizeof(g_scratch));
+    TEST_CHECK(g_f.claim_begins == 0 && g_f.clears == 0, "hash mismatch: claim never taken");
+
+    // Failed clear and busy clear still release the claim.
+    make_world(ELF);
+    g_f.clear_rc = -1;
+    TEST_CHECK(update_stale_stage_run(&io, true, g_scratch, sizeof(g_scratch)) == UPDATE_STALE_ERR_CLEAR, "failed clear");
+    TEST_CHECK(g_f.claim_ends == 1, "claim released after a failed clear");
+
+    // Missing claim callbacks are an argument error, never a clear.
+    make_world(ELF);
+    io.claim_begin = NULL;
+    TEST_CHECK(update_stale_stage_run(&io, true, g_scratch, sizeof(g_scratch)) == UPDATE_STALE_ERR_IO, "no claim callback refused");
+    TEST_CHECK(g_f.clears == 0, "no clear without a claim callback");
+}
+
 static void test_failures_never_clear(void)
 {
     TEST_SECTION("stale stage: I/O, hash and clear failures");
@@ -321,5 +388,6 @@ void run_test_update_stale_stage(void)
     test_mismatch_keeps();
     test_header_states_keep();
     test_not_confirmed_touches_nothing();
+    test_claim_phase();
     test_failures_never_clear();
 }
