@@ -112,6 +112,9 @@ typedef enum {
                                       // (POST /api/ota/esp/recovery_boot, docs/OTA_SINGLE_SLOT_PLAN.md
                                       // section 4 "Deliberate entry into recovery") -- refused while a
                                       // firing/autotune is active OR any relay is (or may be) energized
+    SYS_ACTION_STAGE_WRITE,          // wired: update_http.c's stage upload and stage clear handlers
+                                      // (docs/GITHUB_RELEASE_UPDATE_PLAN.md WP4) -- refused outright
+                                      // while a firing/autotune is active, PAUSED included
     SYS_ACTION_OTA_START,            // not gated here -- ota_interlock.c stays the owner (plan section 4)
 } sys_action_t;
 

@@ -139,6 +139,20 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
         }
         return false;
 
+    case SYS_ACTION_STAGE_WRITE:
+        // WP4: writing the stage partition streams ~2 MB of flash writes and a
+        // multi-second SHA-256 on the httpd task; refuse outright while a run
+        // is active. No ack, no override. Text is JSON-safe.
+        if (snap->profile_running || snap->autotune_running) {
+            if (reason != NULL && reason_cap > 0) {
+                snprintf(reason, reason_cap,
+                         "refused -- a firing or autotune run is active; the update stage cannot be "
+                         "written until it ends");
+            }
+            return true;
+        }
+        return false;
+
     case SYS_ACTION_START_PROFILE:
     case SYS_ACTION_START_AUTOTUNE:
         // Slice 2: recovery mode only -- every other start refusal (safety

@@ -240,6 +240,13 @@ ALLOWLIST = {
     # flash worker, never PSRAM-stacked -- so moving the calls here changes
     # nothing about which stack they run on, only which file owns the code.
     "pico_img_stage.c",
+    # docs/GITHUB_RELEASE_UPDATE_PLAN.md WP4: update_http.c's stage partition
+    # esp_partition_erase_range()/esp_partition_write() run from the
+    # POST /api/update/stage handler on the httpd task (internal-SRAM stack,
+    # never the flash worker, never PSRAM-stacked), the same reasoning as
+    # ota_http_pico.c/pico_img_stage.c above. Gated by system_mode_gate (no
+    # firing/autotune) and the single OTA claim before any write.
+    "update_http.c",
     # Pattern 3 (init-time only): ota_record_save() runs once from
     # app_main's boot-time OTA-verify sequence.
     "ota_record.c",

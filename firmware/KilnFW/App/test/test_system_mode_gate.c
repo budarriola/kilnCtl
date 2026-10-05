@@ -358,6 +358,31 @@ static void test_recovery_boot_gate(void)
     TEST_CHECK(system_mode_gate_check(SYS_ACTION_RECOVERY_BOOT, NULL, NULL, 0), "NULL snapshot refuses");
 }
 
+static void test_stage_write_gate(void)
+{
+    TEST_SECTION("SYS_ACTION_STAGE_WRITE -- refused while a firing or autotune is active");
+    for (int p = 0; p < 2; p++) {
+        for (int a = 0; a < 2; a++) {
+            sys_mode_snapshot_t snap = good_snapshot();
+            snap.profile_running = p != 0;
+            snap.autotune_running = a != 0;
+            char reason[SYSTEM_MODE_GATE_REASON_MAX];
+            reason[0] = '\0';
+            bool refused = system_mode_gate_check(SYS_ACTION_STAGE_WRITE, &snap, reason, sizeof(reason));
+            TEST_CHECK(refused == (p || a), "stage write refused exactly when a run is active");
+            if (refused) {
+                TEST_CHECK(strstr(reason, "update stage") != NULL, "reason names the update stage");
+                TEST_CHECK(strchr(reason, '"') == NULL && strchr(reason, '\\') == NULL, "reason is JSON-safe");
+            }
+        }
+    }
+    sys_mode_snapshot_t snap = good_snapshot();
+    snap.relays_energized = true;
+    snap.recovery_mode = true;
+    TEST_CHECK(!system_mode_gate_check(SYS_ACTION_STAGE_WRITE, &snap, NULL, 0), "relays/recovery facts do not gate stage write");
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_STAGE_WRITE, NULL, NULL, 0), "NULL snapshot refuses");
+}
+
 static void test_reason_truncation_is_safe(void)
 {
     TEST_SECTION("system_mode_gate_check -- a too-small reason buffer truncates, never overflows");
@@ -383,6 +408,7 @@ int main(void)
     test_factory_reset_and_cfgfs_format_refused_cross_product();
     test_relay_write_refused_while_restore_in_flight();
     test_recovery_boot_gate();
+    test_stage_write_gate();
     test_reason_truncation_is_safe();
 
     printf("\n%d/%d checks passed\n", g_checks - g_failures, g_checks);
