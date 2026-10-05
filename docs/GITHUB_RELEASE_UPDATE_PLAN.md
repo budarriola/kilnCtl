@@ -176,9 +176,9 @@ Shared files (`App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route
 
 **M1: stage partition + upload over normal Wi-Fi + recovery apply, no TLS (one-click phone/PC update)**
 - WP0 shared-file owner: `App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route_tier_table.h`, URI cap bump.
-- WP2 partition split: both `partitions.csv`, size gate in build checks, grep sweep for 0x800000, `docs/OTA_SINGLE_SLOT_PLAN.md`; then the one-time JTAG flash. **Code and checks landed 2026-10-04 (not yet flashed; see OTA_SINGLE_SLOT_PLAN.md section 10 for the JTAG procedure).**
+- WP2 partition split: both `partitions.csv`, size gate in build checks, grep sweep for 0x800000, `docs/OTA_SINGLE_SLOT_PLAN.md`; then the one-time JTAG flash. **Code and checks landed 2026-10-04; the one-time JTAG flash was done and bench-verified the same day (see OTA_SINGLE_SLOT_PLAN.md section 10).**
 - WP3 pure logic and host tests: `update_policy`, `stage_header`, version compare (`App/drivers/update/*.[ch]`, `App/test/test_update_*.c`). DONE 2026-10-04 (`update_semver`, `stage_header`, `update_policy`; registered in the drivers CMakeLists and `build_host_tests.ps1`).
-- WP4 stager: `stage_upload` handler and task, sha256 stream, interlock and mutex, `stage_clear`, status (`update_stage.c`, `update_http.c`).
+- WP4 stager: `stage_upload` handler and task, sha256 stream, interlock and mutex, `stage_clear`, status (`update_stage.c`, `update_http.c`). **Done 2026-10-04 (37ce90ba).** Routes `POST /api/update/stage`, `POST /api/update/stage/clear`, `GET /api/update/stage`, all ADMIN; refusal order is `system_mode_gate` (`SYS_ACTION_STAGE_WRITE`), OTA interlock, then the single update claim. Staged means a valid header (CRC) AND a matching sha256; the header is erased at begin and written last. Image capacity is the partition minus the 4096 B header sector (0x3FF000 on the 4 MiB stage). Bench-untested: host tests only.
 - WP5 recovery apply: `firmware/KilnFW_recovery/main/recovery_http.c`, `recovery_apply_staged.c`, `check_recovery_image_size.ps1` coverage, power-cut and pending-verify bench cases.
 - WP6 UI and MCP: `ota_page.html` section, `update_http_client.py`, `mcp_server_update.py`, `cases_ota.py` OT-G*, `docs/MCP_SERVERS.md`, CLAUDE.md count.
 
