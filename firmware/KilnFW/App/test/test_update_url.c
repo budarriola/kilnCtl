@@ -123,7 +123,7 @@ static void test_repo_and_builders(void)
     TEST_CHECK(update_repo_valid("a.b_c-d/e.f_g-h"), "punctuation inside parts");
     static const char *const bad[] = {
         "", "a", "a/", "/b", "a/b/c", "a b/c", "a/b c", "../b", "a/..", "a/b..c", "-a/b", "a-/b", "a/.",
-        "a/b?x=1", "a/b#f", "a/b%2f", "a\\b", "a/b\n", "\xc3\xa9/b",
+        "a/b?x=1", "a/b#f", "a/b%2f", "a\\b", "a/b\n", "\xc3\xa9/b", ".a/b", "a/.b", "./b",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         TEST_CHECK(!update_repo_valid(bad[i]), bad[i]);
@@ -136,12 +136,15 @@ static void test_repo_and_builders(void)
     memset(buf, 'a', 39);
     memcpy(buf + 39, "/b", 3);
     TEST_CHECK(update_repo_valid(buf), "owner of 39 chars accepted");
-    memcpy(buf, "a/", 2);
-    memset(buf + 2, 'b', 101);
-    buf[103] = '\0';
-    TEST_CHECK(!update_repo_valid(buf), "name of 101 chars refused");
-    buf[102] = '\0';
-    TEST_CHECK(update_repo_valid(buf), "name of 100 chars accepted");
+    // total-length cap (62) is the real bound; owner 39 + '/' + 22 is the longest accepted.
+    memset(buf, 'a', 39);
+    buf[39] = '/';
+    memset(buf + 40, 'b', 22);
+    buf[62] = '\0';
+    TEST_CHECK(update_repo_valid(buf), "62-char total accepted");
+    buf[62] = 'b';
+    buf[63] = '\0';
+    TEST_CHECK(!update_repo_valid(buf), "63-char total refused");
 
     char url[UPDATE_URL_MAX];
     TEST_CHECK(update_url_build_latest("budarriola/kilnCtl", url, sizeof(url)) &&

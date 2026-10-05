@@ -11,6 +11,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "update_url.h"
 
 static const char *TAG = "update_settings";
 
@@ -33,6 +34,7 @@ typedef struct {
     char repo[REPO_BUF - 1];
 } update_settings_blob_t;
 _Static_assert(sizeof(update_settings_blob_t) == REPO_BUF, "blob must stay 64 bytes");
+_Static_assert(UPDATE_SETTINGS_REPO_MAX_LEN == UPDATE_REPO_VALID_MAX_LEN, "one repo length cap");
 _Static_assert(UPDATE_SETTINGS_REPO_MAX_LEN < REPO_BUF - 1, "max repo length must fit the blob with its NUL");
 
 // Double buffer flipped by index: see update_settings.h's RAM note. s_live and
@@ -67,52 +69,10 @@ static void ensure_locks(void)
     }
 }
 
-static bool is_name_char(char c)
-{
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' ||
-           c == '-';
-}
-
 bool update_settings_repo_is_valid(const char *repo)
 {
-    if (repo == NULL) {
-        return false;
-    }
-    size_t len = strnlen(repo, UPDATE_SETTINGS_REPO_MAX_LEN + 1);
-    if (len < 3 || len > UPDATE_SETTINGS_REPO_MAX_LEN) {
-        return false;
-    }
-    const char *slash = strchr(repo, '/');
-    if (slash == NULL || strchr(slash + 1, '/') != NULL) {
-        return false;
-    }
-    size_t owner_len = (size_t)(slash - repo);
-    size_t name_len = len - owner_len - 1;
-    if (owner_len < 1 || owner_len > 39 || name_len < 1 || name_len > 100) {
-        return false;
-    }
-    // A segment starting with '.' (this includes "." and "..") is refused: GitHub rejects such
-    // owners, and a "." / ".." segment would be a path-traversal spelling once the fetcher
-    // builds /repos/<owner>/<name>/... from it.
-    //
-    // WP8 carries its own update_repo_valid() in update_url.c (not on main yet). These rules
-    // are meant to be a superset-safe match of it (the dots rule in particular); when WP8
-    // lands the two MUST be merged into this one function so there is a single definition.
-    if (repo[0] == '.' || slash[1] == '.') {
-        return false;
-    }
-    for (size_t i = 0; i < len; i++) {
-        if (repo[i] != '/' && !is_name_char(repo[i])) {
-            return false;
-        }
-    }
-    if (repo[0] == '-' || repo[owner_len - 1] == '-') {
-        return false;
-    }
-    if (strstr(repo, "..") != NULL) {
-        return false;
-    }
-    return true;
+    // One definition, shared with the WP8 fetcher (update_url.c).
+    return update_repo_valid(repo);
 }
 
 // Blob validator, also the pref_cfg_fs_validate_fn_t for the file. Accepts the

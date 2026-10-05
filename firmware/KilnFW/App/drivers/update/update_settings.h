@@ -59,7 +59,7 @@ extern "C" {
 //   owner 1..39 chars of [A-Za-z0-9._-], not starting or ending with '-';
 //   name 1..100 chars of [A-Za-z0-9._-] (the 62-character total is the real cap);
 //   neither owner nor name starts with '.' (so no "." or ".."); no ".." anywhere.
-// WP8's update_repo_valid() (update_url.c, not on main yet) must merge into this.
+// Implemented by update_repo_valid() (update_url.c): the single definition.
 // NULL and "" are invalid here ("" is a reset spelling of update_settings_set()).
 bool update_settings_repo_is_valid(const char *repo);
 

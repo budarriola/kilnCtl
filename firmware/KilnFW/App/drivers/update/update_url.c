@@ -180,11 +180,14 @@ bool update_repo_valid(const char *repo)
         return false;
     }
     size_t len = strnlen(repo, UPDATE_REPO_MAX);
-    if (len >= UPDATE_REPO_MAX) {
+    if (len >= UPDATE_REPO_MAX || len < 3 || len > UPDATE_REPO_VALID_MAX_LEN) {
         return false;
     }
     const char *slash = memchr(repo, '/', len);
     if (slash == NULL) {
+        return false;
+    }
+    if (memchr(slash + 1, '/', len - (size_t)(slash - repo) - 1) != NULL) {
         return false;
     }
     size_t olen = (size_t)(slash - repo);
@@ -206,8 +209,11 @@ bool update_repo_valid(const char *repo)
     if (repo[0] == '-' || repo[olen - 1] == '-') {
         return false;
     }
+    // A segment starting with '.' (this includes "." and "..") is refused: GitHub rejects such
+    // owners, and a "." / ".." segment would be a path-traversal spelling once the fetcher
+    // builds /repos/<owner>/<name>/... from it.
     const char *name = slash + 1;
-    if (nlen == 1 && name[0] == '.') {
+    if (repo[0] == '.' || name[0] == '.') {
         return false;
     }
     return true;

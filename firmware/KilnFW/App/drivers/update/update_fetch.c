@@ -36,6 +36,7 @@
 #include "update_http_internal.h"
 #include "update_policy.h"
 #include "update_release.h"
+#include "update_settings.h"
 #include "update_stage.h"
 #include "update_url.h"
 #include "zones_config_json.h"
@@ -164,15 +165,6 @@ struct work {
     uint8_t chunk[FETCH_CHUNK_LEN];
     uint8_t scratch[FETCH_SCRATCH_LEN];
 };
-
-// ---- weak default, replaced by WP9 ------------------------------------------------------------
-// WP9 (update_settings.[ch]) provides the persisted repo setting. Until it lands this weak default
-// keeps the fetch path buildable; the strong definition replaces it at link time.
-const char *update_settings_repo(void);
-__attribute__((weak)) const char *update_settings_repo(void)
-{
-    return "budarriola/kilnCtl";
-}
 
 // ---- small helpers ---------------------------------------------------------------------------
 static uint32_t free_internal(void)
@@ -568,8 +560,9 @@ static const char *run_job(work_t *w)
         ESP_LOGW(TAG, "refused: internal heap free %u < %u", (unsigned)free_internal(), FETCH_HEAP_PRECHECK_MIN);
         return "low_heap";
     }
-    const char *repo = update_settings_repo();
-    if (repo == NULL || !update_repo_valid(repo)) {
+    // WP9 publishes the repo under a writer mutex; copy it, never hold the pointer.
+    char repo[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
+    if (!update_settings_repo_copy(repo, sizeof(repo)) || !update_repo_valid(repo)) {
         return "bad_repo";
     }
     strlcpy(w->repo, repo, sizeof(w->repo));
@@ -897,7 +890,10 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     // Before any job has run the repo is the configured setting. Every v1 release is unsigned (D4
     // default repo, D5 any other repo; signature enforcement is M3), so every status says so.
     if (repo_now[0] == '\0') {
-        json_safe_copy(repo_now, sizeof(repo_now), update_settings_repo());
+        char cur[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
+        if (update_settings_repo_copy(cur, sizeof(cur))) {
+            json_safe_copy(repo_now, sizeof(repo_now), cur);
+        }
     }
     snprintf(rp, sizeof(rp), "\"repo\":\"%s\",\"unsigned\":true,", repo_now);
     httpd_resp_set_type(req, "application/json");

@@ -31,7 +31,8 @@ extern "C" {
 #define UPDATE_URL_MAX 2048 // incl. NUL; a signed release-assets redirect URL carries a JWT query
 #define UPDATE_HOST_MAX 64  // incl. NUL
 #define UPDATE_MAX_REDIRECTS 3
-#define UPDATE_REPO_MAX 141 // 39 + 1 + 100 + NUL
+#define UPDATE_REPO_MAX 141 // buffer size: 39 + 1 + 100 + NUL (a safe over-bound)
+#define UPDATE_REPO_VALID_MAX_LEN 62 // the real total-length cap (the persisted setting blob holds 62 + NUL)
 
 typedef enum {
     UPDATE_URL_OK = 0,
@@ -61,9 +62,10 @@ update_url_err_t update_redirect_check(unsigned hops_followed, const char *locat
 
 const char *update_url_err_name(update_url_err_t e);
 
-// `owner/name`: ^[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$, no "..", owner
-// neither starting nor ending with '-', name not ".". (Same rule as
-// tools/release_manifest.py's REPO_RE plus the plan's section 9 extras.)
+// `owner/name`: ^[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$, exactly one '/', total
+// length 3..UPDATE_REPO_VALID_MAX_LEN, no "..", owner neither starting nor ending with '-',
+// neither segment starting with '.'. THE single repo validator: update_settings_repo_is_valid()
+// (WP9) delegates here so the setting and the fetcher can never disagree.
 bool update_repo_valid(const char *repo);
 
 // "https://api.github.com/repos/<repo>/releases/latest". False on a bad repo
