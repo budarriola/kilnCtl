@@ -677,7 +677,7 @@ function Start-CheckAsync {
     # interpreter's venv may point at the main tree's). Set only around this
     # launch; the child inherits it at creation.
     $savedPyPath = $env:PYTHONPATH
-    if ($Check.FullName -eq $SelfcheckPy) { $env:PYTHONPATH = "src" }
+    if ($Check.FullName -eq $SelfcheckPy) { $env:PYTHONPATH = (Join-Path $checkDir "src") }
     try {
         $proc = Start-Process -FilePath $exe -ArgumentList $procArgs -WorkingDirectory $checkDir `
             -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow

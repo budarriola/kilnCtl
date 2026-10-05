@@ -40,10 +40,11 @@ $ErrorActionPreference = "Stop"
 $testDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $commonDir = Split-Path -Parent $testDir
 
-# Build gate: this cmake --build compiles ~three dozen host-test executables,
-# the same heavy-build shape build_host_tests.ps1 already goes through -- not
-# a "small ninja/cl call" exempt under COMMON.md's Heavy builds rule (opus
-# review advisory d). Gates only the --build call below, not the cheap
+# Build gate: LIGHT lane. This compiles small, self-contained CommonFW C host
+# tests, not an ESP-IDF or full host-test build, so it must not queue behind
+# multi-minute heavy builds. That is only valid while the build stays serial:
+# the --build call below passes --parallel 1 so CMAKE_BUILD_PARALLEL_LEVEL or a
+# Ninja generator cannot fan it out. Gates only the --build call, not the cheap
 # configure or the ctest run.
 . (Join-Path $testDir "..\..\..\tools\build_gate.ps1")
 
@@ -80,7 +81,7 @@ try {
     # plus every host-test executable), not just one.
     $gate = Enter-KilnBuildGate -Label "commonfw_ctest" -Lane light
     try {
-        $bld = & cmake --build $buildDir --config Debug 2>&1
+        $bld = & cmake --build $buildDir --config Debug --parallel 1 2>&1
         $bldExit = $LASTEXITCODE
     } finally {
         Exit-KilnBuildGate -Gate $gate

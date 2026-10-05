@@ -189,7 +189,7 @@ function Enter-KilnBuildGate {
             for ($j = 0; $j -lt $mutexes.Count; $j++) {
                 if ($j -ne $signaledIndex) { $mutexes[$j].Dispose() }
             }
-            [Console]::Error.WriteLine("build gate: acquired slot $signaledIndex for '$Label' after ${elapsed}s wait")
+            [Console]::Error.WriteLine("build gate: acquired slot $signaledIndex for '$Label' after ${elapsed}s wait (lane=$Lane)")
             return [PSCustomObject]@{ Disabled = $false; Mutex = $wonMutex; SlotIndex = $signaledIndex; Label = $Label }
         }
         [Console]::Error.WriteLine("build gate: waiting (label=$Label, lane=$Lane, ${elapsed}s, slots=$slots)")

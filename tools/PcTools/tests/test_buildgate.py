@@ -230,3 +230,34 @@ def test_powershell_light_lane_acquires_while_both_heavy_slots_are_held(monkeypa
                            capture_output=True, text=True, timeout=60, env=os.environ.copy())
     assert r.returncode == 0 and "LIGHT-ACQUIRED" in r.stdout, (r.stdout, r.stderr)
     assert "lane=light" in r.stderr
+
+
+def test_default_names_and_slot_counts_agree_between_python_and_powershell(monkeypatch):
+    import shutil
+    import subprocess
+
+    ps = shutil.which("powershell")
+    if ps is None:
+        pytest.skip("powershell not available")
+    for name in ("KILNCTL_BUILD_GATE_MUTEX_PREFIX", "KILNCTL_LIGHT_GATE_MUTEX_PREFIX",
+                 "KILNCTL_BUILD_GATE_SLOTS", "KILNCTL_LIGHT_GATE_SLOTS"):
+        monkeypatch.delenv(name, raising=False)
+    gate_ps1 = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "tools", "build_gate.ps1")
+    script = (
+        f". '{gate_ps1}'; "
+        "foreach ($l in 'heavy','light') { "
+        "Write-Output (\"$l slots=\" + (Get-KilnBuildGateSlotCount -Lane $l)); "
+        "foreach ($i in 0,1) { Write-Output (\"$l name$i=\" + (Get-KilnBuildGateMutexName -SlotIndex $i -Lane $l)) } }"
+    )
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                       capture_output=True, text=True, timeout=60, env=os.environ.copy())
+    assert r.returncode == 0, r.stderr
+    for lane in ("heavy", "light"):
+        lines = [l.strip() for l in r.stdout.splitlines() if l.startswith(lane + " ")]
+        assert f"{lane} slots={buildgate._slot_count(lane)}" in lines
+        for i in (0, 1):
+            assert f"{lane} name{i}={buildgate._mutex_name(i, lane)}" in lines
+    assert buildgate._slot_count("heavy") == 2 and buildgate._slot_count("light") == 4
+    assert buildgate._mutex_name(0, "heavy") != buildgate._mutex_name(0, "light")

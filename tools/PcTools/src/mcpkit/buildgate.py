@@ -233,13 +233,13 @@ def kiln_build_gate(
                 elapsed += time.monotonic() - started
                 if idx != _WAIT_TIMEOUT:
                     held, held_index = mutexes[idx], idx
-                    log(f"build gate: acquired slot {idx} for '{label}' after {elapsed:.0f}s wait")
+                    log(f"build gate: acquired slot {idx} for '{label}' after {elapsed:.0f}s wait (lane={lane})")
                     break
                 log(f"build gate: waiting (label={label}, lane={lane}, {elapsed:.0f}s, slots={slots})")
             if held is None:
                 raise TimeoutError(
-                    f"build gate: timed out after {timeout_seconds:.0f}s waiting for a heavy-build "
-                    f"slot (label={label}, slots={slots}) -- another run appears stuck holding every slot")
+                    f"build gate: timed out after {timeout_seconds:.0f}s waiting for a {lane}-lane "
+                    f"build slot (label={label}, slots={slots}) -- another run appears stuck holding every slot")
             if wait_result is not None:
                 wait_result.waited_seconds = elapsed
 

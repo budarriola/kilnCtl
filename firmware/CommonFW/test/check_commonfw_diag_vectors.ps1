@@ -42,9 +42,10 @@ $ErrorActionPreference = "Stop"
 $testDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $commonDir = Split-Path -Parent $testDir
 
-# Build gate: gates the cmake --build call below only (opus review advisory
-# d) -- same heavy-build class as check_commonfw_ctest.ps1's, just scoped to
-# one target.
+# Build gate: LIGHT lane, gating the cmake --build call below only. One small C
+# target (test_diag), built serially (--parallel 1, so CMAKE_BUILD_PARALLEL_LEVEL
+# or a Ninja generator cannot fan it out) -- the assumption that makes the light
+# lane valid; see check_commonfw_ctest.ps1.
 . (Join-Path $testDir "..\..\..\tools\build_gate.ps1")
 
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
@@ -73,7 +74,7 @@ try {
 
     $gate = Enter-KilnBuildGate -Label "commonfw_diag_vectors" -Lane light
     try {
-        $bld = & cmake --build $buildDir --target test_diag --config Debug 2>&1
+        $bld = & cmake --build $buildDir --target test_diag --config Debug --parallel 1 2>&1
         $bldExit = $LASTEXITCODE
     } finally {
         Exit-KilnBuildGate -Gate $gate
