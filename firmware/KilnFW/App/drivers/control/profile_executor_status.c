@@ -44,6 +44,10 @@ void profile_executor_halt(void)
         return;
     }
     force_all_relays_off();
+    /* Spare-relay WP-3: every aux OFF, before the claims below are released
+     * (exec_enter_terminal_state() would also do it; this keeps the order
+     * the same as the zone relays and does not rely on it). */
+    force_aux_relays_off();
     /* An operator halt is an abnormal stop for the segment machinery too --
      * force off regardless of leave_on_at_end, same as a guard trip. An
      * operator stopping a firing on purpose is not the "reached its own

@@ -50,6 +50,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "aux_outputs_cfg.h" /* AUX_OUTPUTS_COUNT -- s_exec.aux[] below (spare-relay WP-3) */
 #include "heater_output.h"
 #include "profile_executor_live_pickup.h" /* profile_live_pickup_result_t -- live_edit_last_refusal field below */
 #include "run_state.h"
@@ -944,6 +945,26 @@ typedef struct {
      * see sweep_unowned_relays(). */
     uint8_t claimed_relay_mask;
 
+    /* Spare-relay WP-3 (docs/SPARE_RELAY_ONOFF_PLAN.md): aux outputs this run
+     * drives. aux_claim_mask is the set of aux relay bits (bit = relay - 1)
+     * the run took over at start -- every aux ENABLED at that moment -- and it
+     * is also ORed into claimed_relay_mask, so the existing claim/release/
+     * pause-to-MANUAL/sweep machinery covers them with no second code path.
+     * It stays set until the run-end OFF write has actually succeeded
+     * (force_aux_relays_off()), which is also what makes aux_off_pending the
+     * retry latch for a write that failed. aux[] mirrors the per-zone on/off
+     * fields (decision state, actuation-gate state) and is reset at every run
+     * start; the real relay shadow is the other half of that pair, which is
+     * why start forces every claimed aux OFF before the first decision. */
+    uint8_t aux_claim_mask;
+    bool aux_off_pending;
+    struct {
+        on_off_trigger_state_t trigger;
+        bool actuated_on;
+        float held_s;
+        bool commanded_on; /* last level actually written (post authority gate) */
+    } aux[AUX_OUTPUTS_COUNT];
+
     /* TODO relay/IO segments (owner's request, see profiles_http.h's
      * profile_seg_kind_t doc comment): independent per-segment tracking
      * alongside the single segment_index/dwelling ramp-machine above.
@@ -1202,6 +1223,18 @@ void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_inp
                                              bool cap_denied);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
+/* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same
+ * claim-before-gate, same authorized kiln_io_owner write, but gated by the
+ * global relay_authority_on_blocked() (an aux has no zone). force_aux_relays_off()
+ * writes OFF to s_exec.aux_claim_mask and resets aux[] -- the run-end OFF,
+ * called from exec_enter_terminal_state() so every exit path gets it.
+ * profile_executor_aux_tick() evaluates every claimed aux's rule for the
+ * current segment; relays_on_count/cap are the load-cap bookkeeping the zone
+ * loop already did (aux is suppressed last). All must be called with
+ * s_exec.lock held. */
+void aux_apply_relay(uint8_t aux_idx, bool want_on);
+void force_aux_relays_off(void);
+void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap);
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);
 void io_seg_start(uint8_t idx, const profile_segment_t *seg);

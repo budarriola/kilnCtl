@@ -735,6 +735,13 @@ void executor_task_entry(void *arg)
              * doc comment. A segment already finished (DONE already swept
              * it, or it never started) costs nothing extra here. */
             io_segs_force_all_off(false);
+            /* Spare-relay WP-3: retry a run-end aux OFF whose write failed.
+             * Never while PAUSED (a pause holds aux at its last state) and a
+             * no-op once the write has landed, so it cannot fight a later
+             * manual toggle. */
+            if (s_exec.aux_off_pending && s_exec.state != PROFILE_EXEC_PAUSED) {
+                force_aux_relays_off();
+            }
             /* Backstop for K4, the same shape as the force-off above it: any
              * state that is not RUNNING must not be holding the safety
              * processor's permission to heat, whether or not the transition
@@ -1929,6 +1936,15 @@ void executor_task_entry(void *arg)
                 }
                 z->cycles_reported = cycles_now;
             }
+        }
+
+        /* Spare-relay WP-3: aux outputs, evaluated after every zone has
+         * claimed its load-cap slot (aux is suppressed last, like an on/off
+         * zone) and before the sweep so the sweep judges the state this tick
+         * actually left. Skipped if this tick already ended the run -- the
+         * terminal transition has turned every aux OFF. */
+        if (s_exec.state == PROFILE_EXEC_RUNNING) {
+            profile_executor_aux_tick(dt_s, stretched_this_tick, relays_on_count, on_off_cap);
         }
 
         /* --- Unowned-relay sweep (TODO.md 6A.7) -----------------------------

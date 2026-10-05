@@ -23,6 +23,7 @@
 #include "live_profile.h"
 #include "ota_state.h"
 #include "profiles_builtin.h" /* PROFILE_BUILTIN_ID_BASE -- HP-02 refusal exempts builtins */
+#include "profile_rule_target.h" /* spare-relay WP-3: aux rule targets 8..11 */
 #include "profiles_store.h"
 #include "readiness_gate.h"
 #include "relay_authority.h"
@@ -517,6 +518,73 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             }
             return false;
         }
+        /* Spare-relay WP-3 (WP-4 hand-back item 2): a relay bound to an
+         * ENABLED aux output belongs to the aux evaluator -- a RELAY_IO
+         * segment on it would fight the aux rule. profiles_http.c refuses
+         * this at save; an aux enabled AFTER the profile was saved (or a
+         * profile imported before the aux existed) is caught here. */
+        if ((aux_outputs_cfg_enabled_mask() & (uint8_t)(1u << (t - PROFILE_IO_TARGET_RELAY_BASE))) != 0) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "segment %u: relay %u is now bound to an aux output -- this profile cannot run "
+                         "until that segment's target is changed",
+                         i + 1, t);
+            }
+            return false;
+        }
+    }
+
+    /* Spare-relay WP-3 (WP-4 hand-back items 1 and 4): re-check every aux
+     * on/off rule target against the CURRENT aux store and zones. Rules
+     * already in NVS are not re-validated on load, and an aux can be
+     * disabled, conflicted, or have its relay assigned to a zone after the
+     * profile was saved, so the save-time check alone is not enough. A rule
+     * in a segment past segment_count can never run and is ignored, matching
+     * the resolver. Same refusal shape as the zone-ownership check above. */
+    for (uint8_t ri = 0; ri < p.on_off_rule_count && ri < PROFILE_MAX_ON_OFF_RULES; ri++) {
+        const profile_on_off_rule_t *pr = &p.on_off_rules[ri];
+        if (!pr->enable || !profile_rule_target_is_aux(pr->zone_index) || pr->segment_index >= p.segment_count) {
+            continue;
+        }
+        uint8_t relay = profile_rule_target_aux_relay(pr->zone_index);
+        aux_output_t ax;
+        const char *why = NULL;
+        uint8_t owning_zone = 0;
+        char why_buf[96];
+        if (!aux_outputs_cfg_get(relay, &ax)) {
+            why = "cannot be read";
+        } else if (ax.conflicted) {
+            why = "is conflicted (a zone also claims that relay)";
+        } else if (!ax.enabled) {
+            why = "is not an enabled aux output";
+        } else if (relay_io_target_is_zone_owned(relay, &owning_zone)) {
+            snprintf(why_buf, sizeof(why_buf), "is now assigned to zone %u", (unsigned)owning_zone);
+            why = why_buf;
+        } else if (pr->temp_source == 1 && pr->temp_cmp != ON_OFF_TEMP_CMP_NONE) {
+            /* A temperature axis reads the aux's own thermocouple zone out
+             * of the executor's per-zone readings, which only exist for the
+             * zones this profile runs. */
+            if (ax.tc_zone == AUX_TC_ZONE_NONE) {
+                why = "has a temperature rule but no thermocouple zone set";
+            } else if (!(p.zone_mask & (1u << ax.tc_zone))) {
+                snprintf(why_buf, sizeof(why_buf), "reads zone %u's thermocouple, which is not in this profile",
+                         (unsigned)ax.tc_zone);
+                why = why_buf;
+            }
+        }
+        if (why) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) {
+                snprintf(err_msg, err_cap,
+                         "segment %u: aux relay %u %s -- this profile cannot run until that rule is "
+                         "fixed or removed",
+                         (unsigned)pr->segment_index + 1u, (unsigned)relay, why);
+            }
+            ESP_LOGW(PE_TAG, "refusing run: aux relay %u rule in segment %u: %s", (unsigned)relay,
+                     (unsigned)pr->segment_index + 1u, why);
+            return false;
+        }
     }
 
     /* Guard 5's absolute ceiling, refused the same way the ramp ceiling just
@@ -587,6 +655,17 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * operator has since taken over manually. Each run starts owing nothing
      * and claims what it touches (see s_exec_state_t.claimed_relay_mask). */
     s_exec.claimed_relay_mask = 0;
+    /* Spare-relay WP-3: per-run aux decision/actuation state starts owing
+     * nothing too. aux_claim_mask is NOT zeroed here: a bit still set is a
+     * run-end OFF write that failed and has not landed yet, and forgetting it
+     * would strand a closed relay. The handoff below folds it in and writes
+     * OFF to it again. */
+    for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
+        on_off_trigger_state_reset(&s_exec.aux[ai].trigger);
+        s_exec.aux[ai].actuated_on = false;
+        s_exec.aux[ai].held_s = 0.0f;
+        s_exec.aux[ai].commanded_on = false;
+    }
     /* Same "starts owing nothing" reasoning as claimed_relay_mask just above,
      * for the relay/IO segment machinery: a previous run's io_segs[] state
      * (which segment was active, what its remaining_s countdown was) has no
@@ -1226,6 +1305,26 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * control is not blocked during a firing" gap: claim every relay this
      * run touches so /api/relay and the UART SET_RELAY* commands refuse a
      * manual command against it until pause/halt hands it back. */
+    /* Spare-relay WP-3 manual-toggle handoff (owner decision: firing start
+     * hands aux control from the manual toggle to the profile rule). Every
+     * aux enabled right now is taken over for this run: added to the claim
+     * (so /api/relay refuses it until the run ends) and written OFF, so a
+     * relay the operator left ON by hand starts the firing in the same state
+     * as the executor's own per-aux state (OFF, never actuated) -- the two
+     * halves of that pair must agree before the first decision. */
+    {
+        uint8_t aux_take = (uint8_t)(aux_outputs_cfg_enabled_mask() | s_exec.aux_claim_mask);
+        s_exec.aux_claim_mask = aux_take;
+        s_exec.claimed_relay_mask |= aux_take;
+        s_exec.aux_off_pending = false;
+        if (aux_take != 0 && s_exec.io) {
+            esp_err_t aux_err = kiln_io_owner_command_set_relay_mask_authorized(aux_take, 0);
+            if (aux_err != ESP_OK) {
+                ESP_LOGW(PE_TAG, "aux start handoff OFF write failed (mask 0x%02X): %s -- the tick re-asserts it",
+                         (unsigned)aux_take, esp_err_to_name(aux_err));
+            }
+        }
+    }
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);
 
     /* Ask the safety processor to permit heating -- i.e. close K4. THE fix

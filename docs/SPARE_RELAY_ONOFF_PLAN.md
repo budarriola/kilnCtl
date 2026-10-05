@@ -1,6 +1,6 @@
 # Spare-relay on/off ("aux outputs") -- plan
 
-Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) landed; WP-3 in progress, then WP-5..WP-8. Pending work only.
+Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) landed; WP-3 (executor, host-tested only) landed, then WP-5..WP-8. Pending work only.
 
 Owner requirement 2026-10-04 (overturns D1 of
 `docs/audits/on_off_zone_decisions_2026-09-14.md`): "we have 4 relays, the 4th
@@ -439,7 +439,7 @@ earlier one merges.
   `zones_http_get.c`, `zones_http_internal.h`, conflict hooks in
   `backup_import.c`, `kiln_cfg_swap.c`, `load_config_preset` path; json_cap
   measurement; route cap decision. Owns: those files + `test_zones_http.c`.
-- **WP-3 Executor (M-L, riskiest). IN PROGRESS.** `profile_executor.c`,
+- **WP-3 Executor (M-L, riskiest). DONE 2026-10-05, host tests only, never run on a board.** Aux tick, start handoff, run-end OFF funnel (`exec_enter_terminal_state`, `halt()`), start re-checks and the sweep ownership rule are in; no status JSON fields were added for aux; pause holds aux (zones are forced off). Remaining: bench observation. Original scope: `profile_executor.c`,
   `profile_executor_relay_io.c`, `profile_executor_internal.h`,
   `profile_executor_run.c` (start checks/reset), status fields in
   `profile_executor_status.c`; shared input-builder extraction; tests in

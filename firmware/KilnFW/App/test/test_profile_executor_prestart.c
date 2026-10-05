@@ -129,10 +129,11 @@ bool ramp_assist_cfg_enabled(void)
     return g_stub_ramp_assist_enabled;
 }
 
+static uint8_t g_stub_relay_shadow = 0; /* spare-relay WP-3 sweep test sets this */
 uint8_t kiln_io_get_relay_shadow(kiln_io_t *io)
 {
     (void)io;
-    return 0;
+    return g_stub_relay_shadow;
 }
 
 /* Warm-start tests (PROFILES.md "Warm-start: joining a profile already at
@@ -235,12 +236,48 @@ bool autotune_engine_is_active_on_zone(uint8_t zone_index)
 static int g_relay_write_calls = 0;
 static uint8_t g_last_relay_write_mask = 0;
 static uint8_t g_last_relay_write_value = 0;
+/* Spare-relay WP-3: full write history (a run makes several writes, and the
+ * aux tests need to ask "was OFF written to exactly this mask, and after
+ * which ON"), plus a failure injector for the failed-run-end-OFF retry path. */
+static struct { uint8_t mask; uint8_t value; } g_aux_write_log[64];
+static int g_aux_write_log_n = 0;
+static bool g_relay_write_fail = false;
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value)
 {
     g_relay_write_calls++;
     g_last_relay_write_mask = mask;
     g_last_relay_write_value = value;
-    return ESP_OK;
+    if (g_aux_write_log_n < (int)(sizeof(g_aux_write_log) / sizeof(g_aux_write_log[0]))) {
+        g_aux_write_log[g_aux_write_log_n].mask = mask;
+        g_aux_write_log[g_aux_write_log_n].value = value;
+        g_aux_write_log_n++;
+    }
+    return g_relay_write_fail ? ESP_FAIL : ESP_OK;
+}
+
+/* Spare-relay WP-3: controllable aux store. The executor's aux evaluator and
+ * run-start re-check read it; profiles_http.c (real object in the store-link
+ * build) reads it too. Default: no aux enabled, which leaves every
+ * pre-existing test in this file exactly as it was. An entry counts as
+ * enabled for the mask only when enabled AND not conflicted, like the real
+ * aux_outputs_cfg_enabled_mask(). */
+static aux_output_t g_stub_aux[AUX_OUTPUTS_COUNT];
+bool aux_outputs_cfg_get(uint8_t relay, aux_output_t *out)
+{
+    if (relay < 1 || relay > AUX_OUTPUTS_COUNT || !out) return false;
+    *out = g_stub_aux[relay - 1];
+    if (!out->enabled && !out->conflicted && out->tc_zone == 0 && out->hyst_c == 0.0f && out->min_on_s == 0) {
+        out->tc_zone = AUX_TC_ZONE_NONE; /* never-touched entry reads like a fresh default */
+    }
+    return true;
+}
+uint8_t aux_outputs_cfg_enabled_mask(void)
+{
+    uint8_t m = 0;
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        if (g_stub_aux[i].enabled && !g_stub_aux[i].conflicted) m |= (uint8_t)(1u << i);
+    }
+    return m;
 }
 
 /* TODO relay/IO segments: io_seg_start()/io_seg_finish() call this for a
@@ -9755,6 +9792,395 @@ static void run_test_on_off_log_transition(void)
     test_on_off_log_transition_hold_still_reported_when_the_cap_is_not_involved();
 }
 
+/* ===== Spare-relay WP-3: profile executor drives aux outputs =====
+ * docs/SPARE_RELAY_ONOFF_PLAN.md WP-3. Aux relay 1 is the one under test
+ * unless a case says otherwise; zone 0 owns relay 2 so it never collides. */
+
+static void aux_test_reset_stubs(void)
+{
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    for (int i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        g_stub_aux[i].tc_zone = AUX_TC_ZONE_NONE;
+        g_stub_aux[i].hyst_c = 2.0f;
+        g_stub_aux[i].min_on_s = 1;
+        g_stub_aux[i].min_off_s = 1;
+    }
+    g_aux_write_log_n = 0;
+    g_relay_write_fail = false;
+    s_test_relay_authority_blocked = false;
+    s_test_relay_authority_blocked_sources = 0;
+    g_stub_relay_shadow = 0;
+}
+
+static bool aux_test_wrote(uint8_t mask, uint8_t value)
+{
+    for (int i = 0; i < g_aux_write_log_n; i++) {
+        if (g_aux_write_log[i].mask == mask && g_aux_write_log[i].value == value) return true;
+    }
+    return false;
+}
+
+/* Index of the LAST logged write matching, or -1. */
+static int aux_test_last_write_idx(uint8_t mask, uint8_t value)
+{
+    for (int i = g_aux_write_log_n - 1; i >= 0; i--) {
+        if (g_aux_write_log[i].mask == mask && g_aux_write_log[i].value == value) return i;
+    }
+    return -1;
+}
+
+/* One zone-ramp segment plus one unconditional aux-1 rule on segment 0. */
+static profile_t aux_test_profile(void)
+{
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 10);
+    p.on_off_rule_count = 1;
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].zone_index = PROFILE_RULE_TARGET_AUX_BASE; /* aux relay 1 */
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_NONE;
+    return p;
+}
+
+static void aux_test_setup(const profile_t *p)
+{
+    warm_start_test_setup(p, 25.0f);
+    aux_test_reset_stubs();
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    g_stub_relay_mask[0] = 0x02; /* zone 0 owns relay 2 */
+    g_stub_thermo_count = 1;
+    g_stub_aux[0].enabled = true;
+}
+
+/* Starts a run on the standard profile; returns run()'s result. */
+static bool aux_test_start_run(char *err, size_t cap)
+{
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    err[0] = '\0';
+    return profile_executor_run(0, err, cap);
+}
+
+static void test_aux_start_control_run_succeeds(void)
+{
+    TEST_SECTION("aux WP-3: control -- a valid aux rule on an enabled aux starts cleanly");
+    char err[192];
+    bool ok = aux_test_start_run(err, sizeof(err));
+    TEST_CHECK(ok, "valid aux rule starts");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "run is RUNNING");
+    profile_executor_halt();
+}
+
+#define AUX_REFUSAL_CASE(title, setup_stmts, needle)                                                \
+    do {                                                                                            \
+        TEST_SECTION("aux WP-3 start refusal: " title);                                             \
+        profile_t p = aux_test_profile();                                                           \
+        aux_test_setup(&p);                                                                         \
+        setup_stmts;                                                                                \
+        char err[192] = {0};                                                                        \
+        bool ok = profile_executor_run(0, err, sizeof(err));                                        \
+        TEST_CHECK(!ok, title ": run refused");                                                     \
+        TEST_CHECK(strstr(err, needle) != NULL, title ": reason names the problem");                \
+        TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, title ": state stays IDLE");                  \
+        TEST_CHECK(s_exec.aux_claim_mask == 0, title ": nothing claimed");                          \
+        TEST_CHECK(g_aux_write_log_n == 0, title ": no relay written");                            \
+    } while (0)
+
+static void test_aux_start_refusals(void)
+{
+    AUX_REFUSAL_CASE("disabled aux", g_stub_aux[0].enabled = false, "not an enabled aux output");
+    AUX_REFUSAL_CASE("conflicted aux", g_stub_aux[0].conflicted = true, "conflicted");
+    AUX_REFUSAL_CASE("aux relay assigned to a zone", g_stub_relay_mask[0] = 0x03, "now assigned to zone");
+    AUX_REFUSAL_CASE("temperature rule without a tc zone",
+                     (s_test_profiles_http_get_out.on_off_rules[0].temp_source = 1,
+                      s_test_profiles_http_get_out.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW),
+                     "no thermocouple zone");
+    AUX_REFUSAL_CASE("tc zone outside the profile",
+                     (s_test_profiles_http_get_out.on_off_rules[0].temp_source = 1,
+                      s_test_profiles_http_get_out.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW,
+                      g_stub_aux[0].tc_zone = 2),
+                     "not in this profile");
+    AUX_REFUSAL_CASE("RELAY_IO segment on an aux-bound relay",
+                     (s_test_profiles_http_get_out.segments[1] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE + 2, 1, 0, 1),
+                      s_test_profiles_http_get_out.segment_count = 2,
+                      g_stub_aux[2].enabled = true,
+                      s_test_profiles_http_get_out.on_off_rules[0].enable = 0),
+                     "bound to an aux output");
+    {
+        /* A rule in a segment past segment_count can never run: ignored. */
+        TEST_SECTION("aux WP-3 start: a dead rule (segment past segment_count) is not re-checked");
+        profile_t p = aux_test_profile();
+        p.on_off_rules[0].segment_index = 5;
+        aux_test_setup(&p);
+        g_stub_aux[0].enabled = false;
+        char err[192] = {0};
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        TEST_CHECK(ok, "dead rule on a disabled aux does not refuse");
+        profile_executor_halt();
+    }
+}
+
+static void test_aux_manual_toggle_handoff_at_start(void)
+{
+    TEST_SECTION("aux WP-3: firing start takes every enabled aux, writes it OFF, claims it");
+    char err[192];
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    g_stub_aux[0].enabled = true;
+    g_stub_aux[3].enabled = true; /* aux 4 has no rule at all */
+    err[0] = '\0';
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "run starts");
+    TEST_CHECK(s_exec.aux_claim_mask == 0x09, "both enabled aux relays are taken over (1 and 4)");
+    TEST_CHECK((s_exec.claimed_relay_mask & 0x09) == 0x09, "added to the relay claim so manual writes are refused");
+    TEST_CHECK(aux_test_wrote(0x09, 0x00), "one OFF write over exactly the aux mask at start");
+    TEST_CHECK((g_last_claim_mask & 0x09) == 0x09, "relay_authority claim covers the aux bits");
+    profile_executor_halt();
+    TEST_CHECK(aux_test_last_write_idx(0x09, 0x00) >= 0, "halt writes OFF again");
+}
+
+static void aux_test_tick(float dt)
+{
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    profile_executor_aux_tick(dt, false, 0, 4);
+    xSemaphoreGive(s_exec.lock);
+}
+
+/* The decision core and the actuation gate each hold a freshly-reset state for
+ * their min-off time first, so a state change needs a few ticks, not one. */
+static void aux_test_settle(void)
+{
+    for (int i = 0; i < 3; i++) aux_test_tick(2.0f);
+}
+
+static void test_aux_rule_drives_relay_on_and_off(void)
+{
+    TEST_SECTION("aux WP-3: unconditional rule turns the relay ON through the owner; temp rule follows tc zone");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    aux_test_settle();
+    TEST_CHECK(aux_test_wrote(0x01, 0x01), "ON written for aux relay 1");
+    TEST_CHECK(s_exec.aux[0].commanded_on, "commanded_on set");
+    profile_executor_halt();
+
+    /* temperature rule: ON while tc zone reads BELOW 100 */
+    profile_t p = aux_test_profile();
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW;
+    p.on_off_rules[0].temp_threshold_c = 100.0f;
+    aux_test_setup(&p);
+    g_stub_aux[0].tc_zone = 0;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "temp-rule run starts");
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].faulted = false;
+    s_exec.zones[0].actual_c = 50.0f;
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "ON while tc zone below threshold");
+    s_exec.zones[0].actual_c = 150.0f;
+    aux_test_settle();
+    aux_test_settle();
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "OFF once tc zone above threshold plus hysteresis");
+
+    s_exec.zones[0].actual_c = 50.0f;
+    aux_test_settle();
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "ON again when it falls back");
+    s_exec.zones[0].actual_valid = false;
+    aux_test_tick(0.1f);
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "tc zone reading invalid is the fail-safe: OFF immediately");
+    TEST_CHECK(aux_test_last_write_idx(0x01, 0x00) >= 0, "OFF actually written");
+
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].actual_c = 50.0f;
+    aux_test_settle();
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "recovers when the reading returns");
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 0x02;
+    aux_test_tick(0.1f);
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "global relay authority block forces OFF");
+    s_test_relay_authority_blocked = false;
+    profile_executor_halt();
+}
+
+static void test_aux_disabled_mid_run_opens_once_and_stops_driving(void)
+{
+    TEST_SECTION("aux WP-3: an aux disabled after start is opened once and no longer driven");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "ON");
+    g_stub_aux[0].enabled = false;
+    int before = g_aux_write_log_n;
+    aux_test_settle();
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "opened");
+    TEST_CHECK(g_aux_write_log_n == before + 1, "exactly one OFF write");
+    aux_test_settle();
+    TEST_CHECK(g_aux_write_log_n == before + 1, "no further writes while disabled");
+    profile_executor_halt();
+}
+
+static void test_aux_pause_holds_state_resume_continues(void)
+{
+    TEST_SECTION("aux WP-3: pause holds the aux at its last state (unlike zones), resume continues");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "ON before pause");
+    int before = g_aux_write_log_n;
+    TEST_CHECK(profile_executor_pause(), "pause accepted");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_PAUSED, "PAUSED");
+    TEST_CHECK(s_exec.aux_claim_mask == 0x01, "aux claim kept across pause");
+    TEST_CHECK(s_exec.aux[0].commanded_on, "aux state held");
+    TEST_CHECK(aux_test_last_write_idx(0x01, 0x00) < before, "pause wrote no OFF to the aux relay");
+    TEST_CHECK(profile_executor_resume(), "resume accepted");
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "still ON after resume");
+    profile_executor_halt();
+}
+
+static void aux_test_assert_off_everywhere(const char *what)
+{
+    char msg[160];
+    snprintf(msg, sizeof(msg), "%s: aux OFF written", what);
+    TEST_CHECK(aux_test_last_write_idx(0x01, 0x00) > aux_test_last_write_idx(0x01, 0x01), msg);
+    snprintf(msg, sizeof(msg), "%s: aux claim released", what);
+    TEST_CHECK(s_exec.aux_claim_mask == 0, msg);
+    snprintf(msg, sizeof(msg), "%s: per-aux state reset", what);
+    TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, msg);
+}
+
+static void aux_test_start_and_close(void)
+{
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on, "aux ON going into the end path");
+}
+
+static void test_aux_off_on_every_end_path(void)
+{
+    TEST_SECTION("aux WP-3: every run-end path turns aux OFF (DONE, FAULTED, 3 guard branches, halt x2)");
+
+    aux_test_start_and_close();
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    exec_enter_terminal_state(PROFILE_EXEC_DONE);
+    xSemaphoreGive(s_exec.lock);
+    aux_test_assert_off_everywhere("DONE funnel");
+    profile_executor_halt();
+
+    aux_test_start_and_close();
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    exec_enter_terminal_state(PROFILE_EXEC_FAULTED);
+    xSemaphoreGive(s_exec.lock);
+    aux_test_assert_off_everywhere("FAULTED funnel (watchdog / fault_halt)");
+    profile_executor_halt();
+
+    aux_test_start_and_close();
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    escalate_guard_trip(0, THERMAL_GUARD_TRIP_MAX_TEMP, "over-temp");
+    xSemaphoreGive(s_exec.lock);
+    aux_test_assert_off_everywhere("guard trip, global branch");
+    profile_executor_halt();
+
+    aux_test_start_and_close();
+    g_continue_on_zone_trip = false;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+    xSemaphoreGive(s_exec.lock);
+    aux_test_assert_off_everywhere("guard trip, abort-policy branch");
+    profile_executor_halt();
+
+    aux_test_start_and_close();
+    g_continue_on_zone_trip = true;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+    xSemaphoreGive(s_exec.lock);
+    g_continue_on_zone_trip = false;
+    aux_test_assert_off_everywhere("guard trip, all-heaters-faulted branch");
+    profile_executor_halt();
+
+    aux_test_start_and_close();
+    profile_executor_halt();
+    aux_test_assert_off_everywhere("halt() from RUNNING");
+
+    aux_test_start_and_close();
+    TEST_CHECK(profile_executor_pause(), "pause accepted");
+    TEST_CHECK(s_exec.aux[0].commanded_on, "held ON while paused");
+    profile_executor_halt();
+    aux_test_assert_off_everywhere("halt() from PAUSED");
+}
+
+static void test_aux_failed_off_write_is_retried(void)
+{
+    TEST_SECTION("aux WP-3: a failed run-end OFF write keeps the claim, sets pending, and retries");
+    aux_test_start_and_close();
+    g_relay_write_fail = true;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    exec_enter_terminal_state(PROFILE_EXEC_DONE);
+    xSemaphoreGive(s_exec.lock);
+    TEST_CHECK(s_exec.aux_off_pending, "pending set after the failed write");
+    TEST_CHECK(s_exec.aux_claim_mask == 0x01, "claim kept so the relay stays nameable");
+    g_relay_write_fail = false;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    force_aux_relays_off();
+    xSemaphoreGive(s_exec.lock);
+    TEST_CHECK(!s_exec.aux_off_pending && s_exec.aux_claim_mask == 0, "retry clears pending and the claim");
+
+    /* A leftover failed OFF is folded into the NEXT run's handoff. */
+    aux_test_start_and_close();
+    g_relay_write_fail = true;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    exec_enter_terminal_state(PROFILE_EXEC_DONE);
+    xSemaphoreGive(s_exec.lock);
+    g_relay_write_fail = false;
+    g_stub_aux[0].enabled = false; /* no longer enabled, but still owed an OFF */
+    s_exec.state = PROFILE_EXEC_IDLE;
+    /* No aux rule in the stored profile, so start does not refuse the disabled
+     * aux; installed directly because aux_test_setup() would wipe the claim. */
+    s_test_profiles_http_get_out.on_off_rule_count = 0;
+    g_aux_write_log_n = 0;
+    char err[192] = {0};
+    profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "next run's handoff re-writes OFF to the stranded aux");
+    profile_executor_halt();
+}
+
+static void test_aux_sweep_does_not_flag_a_driven_aux(void)
+{
+    TEST_SECTION("aux WP-3: the unowned-relay sweep treats a driven aux as owned, a disabled one as stray");
+    aux_test_start_and_close();
+    g_stub_relay_shadow = 0x01;
+    g_aux_write_log_n = 0;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    sweep_unowned_relays();
+    xSemaphoreGive(s_exec.lock);
+    TEST_CHECK(g_aux_write_log_n == 0, "healthy aux relay is not swept");
+    g_stub_aux[0].enabled = false;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    sweep_unowned_relays();
+    xSemaphoreGive(s_exec.lock);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "aux disabled mid-run and still closed IS swept");
+    g_stub_relay_shadow = 0;
+    profile_executor_halt();
+}
+
+static void run_test_aux_wp3(void)
+{
+    test_aux_start_control_run_succeeds();
+    test_aux_start_refusals();
+    test_aux_manual_toggle_handoff_at_start();
+    test_aux_rule_drives_relay_on_and_off();
+    test_aux_disabled_mid_run_opens_once_and_stops_driving();
+    test_aux_pause_holds_state_resume_continues();
+    test_aux_off_on_every_end_path();
+    test_aux_failed_off_write_is_retried();
+    test_aux_sweep_does_not_flag_a_driven_aux();
+}
+
 static void run_test_on_off_actuation(void)
 {
     test_on_off_zone_tick_rule_turns_relay_on_through_owner();
@@ -10607,6 +11033,7 @@ static void test_thermo_channels_read_fault_filter(void)
 int main(void)
 {
     run_test_profile_executor_prestart();
+    run_test_aux_wp3();
     test_task_entry_reads_before_taking_s_exec_lock();
     test_thermo_channels_read_fault_filter();
     test_fscf_partition_absent_behaves_like_before();

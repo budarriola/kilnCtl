@@ -19,6 +19,7 @@
 #include "autotune_engine.h"
 #include "heat_enable.h"
 #include "kiln_io_owner.h"
+#include "profile_rule_target.h"
 #include "relay_authority.h"
 #include "sim_backend.h"
 #include "zones_config_accessors.h"
@@ -455,6 +456,182 @@ void force_all_relays_off(void)
     }
 }
 
+/* ---- Spare-relay WP-3: aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md) ----
+ *
+ * An aux output is a spare relay (not in any zone's relay_mask) that a
+ * profile's on/off rules (target byte 8..11) switch. It deliberately has NO
+ * heat claim, no K4 dependency and no CT/S3 involvement: the ESP strips aux
+ * bits from the masks it sends the Pico (WP-9). It does share the zone
+ * relays' kiln_io_owner write path and the global relay_authority gate.
+ *
+ * Must be called with s_exec.lock held. */
+void aux_apply_relay(uint8_t aux_idx, bool want_on)
+{
+    if (aux_idx >= AUX_OUTPUTS_COUNT) {
+        return;
+    }
+    uint8_t mask = (uint8_t)(1u << aux_idx);
+    /* Claimed in BOTH directions and before the authority gate, same
+     * reasoning as apply_relay(): a failed OFF write must stay nameable. */
+    s_exec.claimed_relay_mask |= mask;
+
+    uint32_t sources = 0;
+    if (want_on && relay_authority_on_blocked(s_exec.safety, &sources)) {
+        ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X", (unsigned)aux_idx + 1u,
+                 (unsigned)sources);
+        want_on = false;
+    }
+    if (s_exec.io) {
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
+                     esp_err_to_name(err));
+        }
+    }
+    if (s_exec.aux[aux_idx].commanded_on != want_on) {
+        ESP_LOGI(PE_TAG, "aux relay %u -> %s", (unsigned)aux_idx + 1u, want_on ? "ON" : "OFF");
+    }
+    s_exec.aux[aux_idx].commanded_on = want_on;
+}
+
+static void aux_reset_runtime(uint8_t aux_idx)
+{
+    on_off_trigger_state_reset(&s_exec.aux[aux_idx].trigger);
+    s_exec.aux[aux_idx].actuated_on = false;
+    s_exec.aux[aux_idx].held_s = 0.0f;
+    s_exec.aux[aux_idx].commanded_on = false;
+}
+
+/* The run-end OFF. Writes OFF to every aux this run took over and resets
+ * their per-run state. aux_claim_mask is only cleared once the write has
+ * succeeded (or there is no io to write to); a failed write leaves it set
+ * and raises aux_off_pending, which the not-RUNNING branch of the tick loop
+ * retries every tick. Idempotent: a second call with nothing claimed does
+ * nothing, so a later manual toggle is never fought. */
+void force_aux_relays_off(void)
+{
+    uint8_t mask = s_exec.aux_claim_mask;
+    if (mask == 0) {
+        s_exec.aux_off_pending = false;
+        return;
+    }
+    bool ok = true;
+    if (s_exec.io) {
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
+        if (err != ESP_OK) {
+            ok = false;
+            ESP_LOGE(PE_TAG, "aux run-end OFF write failed (mask 0x%02X): %s -- will retry", (unsigned)mask,
+                     esp_err_to_name(err));
+        }
+    }
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        if (mask & (1u << i)) {
+            aux_reset_runtime(i);
+        }
+    }
+    if (ok) {
+        s_exec.aux_claim_mask = 0;
+        s_exec.aux_off_pending = false;
+    } else {
+        s_exec.aux_off_pending = true;
+    }
+}
+
+/* Evaluates every claimed aux for the current segment. Same decision core
+ * and actuation gate as an on/off zone (profile_executor_on_off_zone_tick()),
+ * with an aux's own inputs: its tc_zone's reading for a temperature axis, the
+ * entry's hyst/min-on/min-off, fail-safe fixed OFF. Anything that cannot be
+ * evaluated safely (config unreadable, temperature rule with no usable
+ * thermocouple, global authority block, faulted run) is the fail-safe
+ * override: OFF, hold bypassed. Called only while RUNNING; PAUSED does not
+ * reach it, which is what makes a pause hold the last aux state. */
+void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap)
+{
+    if (s_exec.aux_claim_mask == 0) {
+        return;
+    }
+    uint8_t enabled_now = aux_outputs_cfg_enabled_mask();
+    uint32_t sources = 0;
+    bool authority_blocked = relay_authority_on_blocked(s_exec.safety, &sources);
+    uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
+    if (s_exec.target_rate_c_per_s > 0.0f) {
+        direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
+    } else if (s_exec.target_rate_c_per_s < 0.0f) {
+        direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
+    }
+    bool run_running = (s_exec.state == PROFILE_EXEC_RUNNING);
+
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(s_exec.aux_claim_mask & bit)) {
+            continue;
+        }
+        if (!(enabled_now & bit)) {
+            /* Disabled (or conflicted) after the run started: stop driving
+             * it, and open it once if we had it closed. */
+            if (s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) {
+                aux_apply_relay(i, false);
+            }
+            aux_reset_runtime(i);
+            continue;
+        }
+        aux_output_t ax;
+        bool cfg_ok = aux_outputs_cfg_get((uint8_t)(i + 1u), &ax);
+        if (!cfg_ok) {
+            memset(&ax, 0, sizeof(ax));
+            ax.tc_zone = AUX_TC_ZONE_NONE;
+        }
+        uint16_t min_on_s = (ax.min_on_s > 0) ? ax.min_on_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT;
+        uint16_t min_off_s = (ax.min_off_s > 0) ? ax.min_off_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT;
+        float hyst_c = (ax.hyst_c > 0.0f) ? ax.hyst_c : AUX_HYST_C_DEFAULT;
+
+        on_off_trigger_rule_t rule =
+            profile_resolve_on_off_rule(&s_exec.profile, (uint8_t)(PROFILE_RULE_TARGET_AUX_BASE + i),
+                                        s_exec.segment_index);
+        const zone_runtime_t *tz = (cfg_ok && ax.tc_zone < MAX31856_CHANNEL_COUNT) ? &s_exec.zones[ax.tc_zone] : NULL;
+        bool temp_ok = tz && tz->active && !tz->faulted && tz->actual_valid;
+        bool needs_temp = rule.enable && rule.temp_cmp != ON_OFF_TEMP_CMP_NONE;
+        bool guard_5_6 = tz && tz->active && tz->guard_state.is_tripped &&
+                         (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
+                          tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
+        bool failsafe = !cfg_ok || authority_blocked || (s_exec.state == PROFILE_EXEC_FAULTED) ||
+                        (needs_temp && !temp_ok);
+
+        on_off_trigger_input_t oin = {
+            .failsafe_override = failsafe,
+            .failsafe_state_on = false, /* aux fail-safe is fixed OFF (owner decision) */
+            .guard_5_6_tripped = guard_5_6,
+            .run_running = run_running,
+            .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
+            .failsafe_on_pause = false,
+            .min_on_s = min_on_s,
+            .min_off_s = min_off_s,
+            .rule = rule,
+            .current_phase_is_dwell = s_exec.dwelling || s_exec.aux[i].trigger.quasi_dwell,
+            .current_direction = direction_bit,
+            .temp_measurement_c = temp_ok ? tz->actual_c : 0.0f,
+            .hyst_c = hyst_c,
+            .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
+            .ramp_lock_held = s_exec.ramp_lock_held,
+            .stretched_this_tick = stretched_this_tick,
+            .segment_index = s_exec.segment_index,
+            .dt_s = dt_s,
+        };
+        bool bypass_hold = failsafe || guard_5_6 || !run_running;
+        on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(
+            &s_exec.aux[i].trigger, &s_exec.aux[i].actuated_on, &s_exec.aux[i].held_s, &oin, bypass_hold,
+            relays_on_count, cap);
+        if (r.cap_denied) {
+            ESP_LOGW(PE_TAG, "aux relay %u denied this tick: max_simultaneous_relays (%u) already reached",
+                     (unsigned)i + 1u, (unsigned)cap);
+        }
+        if (r.actuated_on) {
+            relays_on_count++;
+        }
+        aux_apply_relay(i, r.actuated_on);
+    }
+}
+
 /* Hands every relay this run ever claimed (claimed_relay_mask, see
  * apply_relay()'s comment) back to RELAY_OWNER_NONE. profile_executor_halt()
  * already did this on its own exit path; this is the SAME release, called
@@ -739,6 +916,12 @@ void exec_enter_terminal_state(profile_exec_state_t st)
     s_exec.state = st;
     s_exec.dwelling = false;
     s_exec.ramp_lock_held = false;
+    /* Spare-relay WP-3, owner decision: a run end (complete, stop, abort,
+     * fault) turns every aux OFF. This helper is the one funnel every such
+     * transition already goes through (DONE x2, the three escalate_guard_trip
+     * branches, the watchdog FAULTED, fault_halt, and halt()'s IDLE), so the
+     * OFF lives here rather than at each call site. */
+    force_aux_relays_off();
     if (st == PROFILE_EXEC_IDLE) {
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             s_exec.zones[zi].active = false;
@@ -1023,6 +1206,11 @@ void sweep_unowned_relays(void)
             owned |= mask;
         }
     }
+
+    /* Spare-relay WP-3: an aux this run is still driving is owned too, or
+     * every healthy aux relay would be flagged a stray and chattered off. An
+     * aux disabled mid-run drops out of this and IS swept. */
+    owned |= (uint8_t)(s_exec.aux_claim_mask & aux_outputs_cfg_enabled_mask());
 
     uint8_t stray = (uint8_t)(kiln_io_get_relay_shadow(s_exec.io) & s_exec.claimed_relay_mask & (uint8_t)~owned);
     if (stray == 0) {
