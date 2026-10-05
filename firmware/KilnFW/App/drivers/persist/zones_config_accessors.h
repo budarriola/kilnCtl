@@ -928,10 +928,11 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
 /* Sets zone_cfg_t::tuning_valid back to 1 WITHOUT touching any other tuning_*
  * field or tuning_seq. Only for undoing zones_config_set_pid_no_save()'s
  * unconditional invalidation when a restore re-applies the identical record
- * (backup_import.c). Refused (false) for a bad zone index or when the zone
- * has no stored record to reinstate (tuning_valid already 0 AND the record
- * was never populated is indistinguishable here, so the caller must only call
- * this after confirming the record matched the live one before set_pid). */
+ * (backup_import.c). Refused (false) ONLY for a bad zone index. It does NOT
+ * check that a stored record exists (tuning_valid 0 because set_pid just
+ * invalidated it and tuning_valid 0 because the record was never populated
+ * are indistinguishable here), so the caller must only call this after
+ * confirming the record matched the live one before set_pid. */
 bool zones_config_reinstate_tuning_quality_no_save(uint8_t zone_index);
 
 /* zone_cfg_t::fuzzy_strength_pct read-only accessor for the control loop

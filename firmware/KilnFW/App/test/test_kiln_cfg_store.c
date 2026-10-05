@@ -487,15 +487,16 @@ static void test_save_current_unfetched_cache_is_not_marked_populated(void)
     int32_t id1 = -1;
     char reason[96];
     reason[0] = '\0';
-    TEST_CHECK(kiln_cfg_store_save_current("Kiln A", -1, &id1, reason, sizeof(reason)),
-               "save succeeds (ESP half is saved regardless)");
+    TEST_CHECK(!kiln_cfg_store_save_current("Kiln A", -1, &id1, reason, sizeof(reason)),
+               "explicit save-as-new is refused while the safety cache is unfetched");
+    TEST_CHECK(strstr(reason, "safety processor config not fetched yet") != NULL,
+               "refusal names the unfetched safety config");
+    TEST_CHECK(id1 == -1, "no slot id was handed out by the refused save");
     bool pico_populated = true;
     uint16_t pkg_schema = 1;
     uint32_t pkg_hash = 1;
-    TEST_CHECK(kiln_cfg_store_get_package_identity(id1, &pico_populated, &pkg_schema, &pkg_hash),
-               "identity readable");
-    TEST_CHECK(!pico_populated, "unfetched cache: pico_populated is 0, not an all-unset populated half");
-    TEST_CHECK(pkg_schema == 0 && pkg_hash == 0, "unfetched cache: no package identity is minted");
+    TEST_CHECK(!kiln_cfg_store_get_package_identity(0, &pico_populated, &pkg_schema, &pkg_hash),
+               "no slot was created by the refused save");
 
     // Once the cache has been fetched, the same save captures normally.
     test_safety_cfg_store_reset_for_kiln_cfg_store_test();

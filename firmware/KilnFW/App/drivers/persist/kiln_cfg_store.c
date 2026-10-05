@@ -1147,6 +1147,14 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
     if (refuse_if_quarantined(reason_out, reason_cap)) {
         return false;
     }
+    /* Second-review LOW: an explicit save-as-new while the safety config cache
+     * is unfetched would quietly create a slot with pico_populated=0, which a
+     * later apply refuses as a "half package" with a misleading reason. Refuse
+     * here instead. Autosave/overwrite (id >= 0) keeps its deferral: it holds
+     * an existing populated half and leaves the dirty flag for later. */
+    if (id_or_negative < 0 && recapture_pico_half && !safety_cfg_store_has_data()) {
+        return set_reason(reason_out, reason_cap, "safety processor config not fetched yet");
+    }
     char normalized[KILN_CFG_NAME_MAX_LEN + 1];
     if (!normalize_name(name, normalized, sizeof(normalized))) {
         return set_reason(reason_out, reason_cap, "name missing, too long, or contains invalid characters");

@@ -89,6 +89,8 @@ void profile_executor_get_status(profile_exec_status_t *out)
         memset(out, 0, sizeof(*out));
     }
 }
+static bool s_stub_cfg_store_has_data = true;
+bool safety_cfg_store_has_data(void) { return s_stub_cfg_store_has_data; }
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_crc)
 { (void)link; (void)live_config_crc; return false; }
 bool safety_cfg_store_refetch(SafetyLinkClass *link, uint16_t config_crc)
@@ -2504,6 +2506,38 @@ static void test_recapture_cannot_stall_the_heartbeat_task(void)
     s_stub_recapture_pending = false;
 }
 
+// Second-review MEDIUM: no recapture job may be posted while the safety
+// config cache has never been fetched (it would re-defer and write NVS every
+// 5 s forever); one is posted once has_data becomes true.
+static void test_recapture_not_posted_while_cache_unfetched(void)
+{
+    TEST_SECTION("safety_poll: no recapture job while safety_cfg_store has no data");
+
+    fake_time_reset_all();
+    s_stub_recapture_pending = true;
+    s_stub_cfg_store_has_data = false;
+    s_stub_autosave_calls = 0;
+    s_stub_posted_fn = NULL;
+
+    for (int i = 0; i < 4; i++) {
+        s_fake_tick_count += 6000u; /* 1 tick = 1 ms; past the 5 s throttle */
+        safety_poll_service_pico_half_recapture();
+        TEST_CHECK(s_stub_posted_fn == NULL,
+                   "no autosave job may be posted while has_data is false");
+    }
+
+    s_stub_cfg_store_has_data = true;
+    s_fake_tick_count += 6000u; /* 1 tick = 1 ms; past the 5 s throttle */
+    safety_poll_service_pico_half_recapture();
+    TEST_CHECK(s_stub_posted_fn != NULL,
+               "the recapture job must be posted once has_data becomes true");
+    stub_run_posted_job_as_the_worker_would();
+    TEST_CHECK(s_stub_autosave_calls == 1, "exactly one autosave runs after has_data");
+
+    s_stub_recapture_pending = false;
+    s_fake_tick_count = 0;
+}
+
 // --------------------------------------------------------------------------
 // 2026-09-24 fault-edge instrumentation (safety_link.h's safety_fault_edge_t
 // comment): the ring/counters that let a latched S6a mainFault be traced
@@ -2888,6 +2922,7 @@ int main(void)
     test_fault_hold_is_independent_per_bit();
     test_exchange_timeout_is_reported_even_when_link_reads_up();
     test_recapture_cannot_stall_the_heartbeat_task();
+    test_recapture_not_posted_while_cache_unfetched();
 
     test_fault_edge_records_a_single_transition();
     test_fault_edge_no_op_set_does_not_record();

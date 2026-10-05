@@ -401,6 +401,15 @@ static void safety_poll_service_pico_half_recapture(void)
     if (!kiln_cfg_store_pico_half_recapture_pending()) {
         return;
     }
+    /* Second-review MEDIUM: while the safety_cfg_store cache has never been
+     * fetched, the autosave defers its Pico-half recapture again (it will not
+     * capture an unfetched cache), re-sets the dirty flag, and still bumps
+     * s_kiln_cfg_rev with a real LittleFS+NVS write. Posting here every 5 s
+     * would repeat that forever on a board with no Pico or a failing refetch.
+     * Wait until has_data; the flag stays set and is serviced then. */
+    if (!safety_cfg_store_has_data()) {
+        return;
+    }
 
     /* POST, not dispatch-and-await (2026-09-16, HIGH 1 of the adversarial
      * review of 60d6552f). This used to call uart_bridge_ext_run_on_flash_

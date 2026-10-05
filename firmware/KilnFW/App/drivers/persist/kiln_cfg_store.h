@@ -505,6 +505,14 @@ bool kiln_cfg_store_autosave_from_live(char *reason_out, size_t reason_cap);
  * surface (safety_ceiling_sync_is_diverged()/is_standing_diverged())
  * reports clear.
  *
+ * Known limitation (2026-10-05 review): a slot captured from an UNCOMMISSIONED
+ * Pico (fetched, config_crc 0) is marked populated with every parameter unset.
+ * Applying it pushes nothing yet reports success, so the Pico keeps the
+ * previous kiln's values, and the next autosave relabels the slot with them.
+ * The recapture is also held while the safety cache has no data
+ * (safety_cfg_store_has_data() false); both flags are reported by
+ * GET /api/kiln_configs (pico_half_recapture_pending, has_data).
+ *
  * That poller is safety_poll_task (safety_link_poll.c's
  * safety_poll_service_pico_half_recapture()), as of the 2026-09-15
  * review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,

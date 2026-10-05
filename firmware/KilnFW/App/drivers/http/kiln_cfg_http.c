@@ -18,6 +18,7 @@
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
+#include "safety_cfg_store.h" /* safety_cfg_store_has_data() -- GET /api/kiln_configs */
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
                                    * LOW) -- warn on an explicit save while diverged */
 #include "web_encoding.h" /* GET /settings/kiln_configs page shell -- same gzip-serving
@@ -140,7 +141,10 @@ static bool parse_required_name(const char *body, char *out, size_t out_cap)
 
 /* ---- GET /api/kiln_configs -------------------------------------------------
  * {"active_id":<int|null>,"configs":[{"id":N,"name":"...","is_active":bool},
- * ...],"max_count":N} */
+ * ...],"max_count":N,"pico_half_recapture_pending":bool,"has_data":bool}
+ * pico_half_recapture_pending: the active slot's Pico half is owed a recapture
+ * (deferred by a divergence or an unfetched safety cache); has_data: the
+ * safety_cfg_store cache holds a real fetch (false blocks the recapture). */
 static esp_err_t list_get_handler(httpd_req_t *req)
 {
     kiln_cfg_summary_t rows[KILN_CFG_MAX_COUNT];
@@ -174,7 +178,9 @@ static esp_err_t list_get_handler(httpd_req_t *req)
         APPEND("%s{\"id\":%ld,\"name\":\"%s\",\"is_active\":%s}", i == 0 ? "" : ",", (long)rows[i].id,
                name_escaped, rows[i].is_active ? "true" : "false");
     }
-    APPEND("],\"max_count\":%u}", (unsigned)kiln_cfg_store_max_count());
+    APPEND("],\"max_count\":%u,\"pico_half_recapture_pending\":%s,\"has_data\":%s}",
+           (unsigned)kiln_cfg_store_max_count(), kiln_cfg_store_pico_half_recapture_pending() ? "true" : "false",
+           safety_cfg_store_has_data() ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, o);
