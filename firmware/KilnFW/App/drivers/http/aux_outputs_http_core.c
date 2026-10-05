@@ -68,7 +68,7 @@ static bool gate_refused(const aux_http_ops_t *ops, aux_http_action_t action, au
     return false;
 }
 
-void aux_http_core_set(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
+static void core_set_locked(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
 {
     /* Mode gate FIRST: aux config is zones-class config (SYS_ACTION_WRITE_ZONES_CONFIG),
      * refused with 409 while a firing or autotune run is active. */
@@ -164,7 +164,7 @@ void aux_http_core_set(const aux_http_ops_t *ops, const char *body, aux_http_rep
     reply_set(reply, 200, "{\"ok\":true}");
 }
 
-void aux_http_core_manual(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
+static void core_manual_locked(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
 {
     /* Idle-only (owner Q5): blanket-refused while a firing/autotune run is active,
      * whichever way the relay would move. */
@@ -251,4 +251,36 @@ size_t aux_http_core_format_entry(const aux_http_ops_t *ops, uint8_t relay, char
         return 0;
     }
     return (size_t)n >= cap ? cap - 1 : (size_t)n;
+}
+
+/* Both write routes run under the shared HTTP_SYNC commissioning claim, the same one
+ * POST /api/zones holds around its commit: the aux set checks the zones union, the
+ * zones POST checks the aux mask, and the manual toggle checks the enabled mask before
+ * driving the relay; without one shared claim an aux disable/zones POST could slip
+ * between a check and its act. Busy -> 409, released on every path. */
+static bool claim_or_busy(const aux_http_ops_t *ops, aux_http_reply_t *reply)
+{
+    if (!ops->claim()) {
+        reply_set(reply, 409, "another commissioning operation is running");
+        return false;
+    }
+    return true;
+}
+
+void aux_http_core_set(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
+{
+    if (!claim_or_busy(ops, reply)) {
+        return;
+    }
+    core_set_locked(ops, body, reply);
+    ops->release();
+}
+
+void aux_http_core_manual(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
+{
+    if (!claim_or_busy(ops, reply)) {
+        return;
+    }
+    core_manual_locked(ops, body, reply);
+    ops->release();
 }

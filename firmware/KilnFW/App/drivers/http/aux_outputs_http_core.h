@@ -52,6 +52,10 @@ typedef struct {
     uint8_t (*conflict_mask)(void);
     bool (*quarantined)(void);
     aux_relay_result_t (*set_relay)(uint8_t relay, bool on);
+    /* Shared single-flight commissioning claim (SAFETY_CFG_WRITER_HTTP_SYNC) held across
+     * each write route; claim() false = busy -> 409. release() always follows a true claim. */
+    bool (*claim)(void);
+    void (*release)(void);
 } aux_http_ops_t;
 
 typedef struct {

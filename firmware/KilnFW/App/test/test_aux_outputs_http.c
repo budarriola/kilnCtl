@@ -35,6 +35,9 @@ static aux_relay_result_t f_relay_ret;
 static int f_relay_calls;
 static uint8_t f_relay_arg;
 static bool f_relay_on;
+static bool f_busy;
+static int f_claims;
+static int f_releases;
 
 static void reset_fakes(void)
 {
@@ -55,6 +58,9 @@ static void reset_fakes(void)
     f_set_calls = 0;
     f_relay_ret = AUX_RELAY_OK;
     f_relay_calls = 0;
+    f_busy = false;
+    f_claims = 0;
+    f_releases = 0;
 }
 
 static bool fk_blocked(aux_http_action_t a, char *reason, size_t cap)
@@ -93,6 +99,16 @@ static aux_relay_result_t fk_relay(uint8_t relay, bool on)
     return f_relay_ret;
 }
 
+static bool fk_claim(void)
+{
+    if (f_busy) {
+        return false;
+    }
+    f_claims++;
+    return true;
+}
+static void fk_release(void) { f_releases++; }
+
 static const aux_http_ops_t OPS = {
     .mode_blocked = fk_blocked,
     .zones_union = fk_union,
@@ -102,6 +118,8 @@ static const aux_http_ops_t OPS = {
     .conflict_mask = fk_conflict,
     .quarantined = fk_quar,
     .set_relay = fk_relay,
+    .claim = fk_claim,
+    .release = fk_release,
 };
 
 static int do_set(const char *body)
@@ -207,6 +225,29 @@ static void test_set_store_errors(void)
     TEST_CHECK(do_set("relay=1&enabled=1") == 500, "store write failure -> 500");
 }
 
+static void test_claim(void)
+{
+    TEST_SECTION("aux writes hold the HTTP_SYNC claim: busy -> 409 untouched, released on every path");
+    reset_fakes();
+    f_enabled_mask = 0x08; /* relay 4 enabled */
+    f_busy = true;
+    TEST_CHECK(do_manual("relay=4&on=1") == 409, "manual toggle while the claim is busy is 409");
+    TEST_CHECK(f_relay_calls == 0, "busy manual toggle never drives the relay");
+    TEST_CHECK(do_set("relay=4&enabled=0") == 409, "aux config write while busy is 409");
+    TEST_CHECK(f_set_calls == 0, "busy aux config write never touches the store");
+    TEST_CHECK(f_claims == 0 && f_releases == 0, "busy: nothing claimed, nothing released");
+    f_busy = false;
+    TEST_CHECK(do_manual("relay=4&on=1") == 200, "manual toggle succeeds when free");
+    TEST_CHECK(f_claims == 1 && f_releases == 1, "success path releases the claim");
+    TEST_CHECK(do_manual("relay=9&on=1") == 400, "validation refusal");
+    TEST_CHECK(do_manual("relay=1&on=1") == 409, "not-enabled refusal");
+    f_blocked = true;
+    f_reason = "run active";
+    TEST_CHECK(do_manual("relay=4&on=1") == 409, "mode-gate refusal");
+    TEST_CHECK(do_set("relay=4&enabled=0") == 409, "mode-gate refusal on config write");
+    TEST_CHECK(f_claims == f_releases && f_claims == 5, "every refusal path released its claim (5 claims, 5 releases)");
+}
+
 static void test_manual(void)
 {
     TEST_SECTION("aux manual toggle: gate, validation, enabled-only, result mapping");
@@ -289,5 +330,6 @@ void run_test_aux_outputs_http(void)
     test_set_zone_conflict();
     test_set_store_errors();
     test_manual();
+    test_claim();
     test_format();
 }

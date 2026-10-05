@@ -59,6 +59,15 @@ static aux_relay_result_t op_set_relay(uint8_t relay, bool on)
     }
 }
 
+static bool op_claim(void)
+{
+    return safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC);
+}
+static void op_release(void)
+{
+    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+}
+
 static const aux_http_ops_t s_ops = {
     .mode_blocked = op_mode_blocked,
     .zones_union = op_zones_union,
@@ -68,6 +77,8 @@ static const aux_http_ops_t s_ops = {
     .conflict_mask = aux_outputs_cfg_conflict_mask,
     .quarantined = aux_outputs_cfg_quarantined,
     .set_relay = op_set_relay,
+    .claim = op_claim,
+    .release = op_release,
 };
 
 static esp_err_t send_reply(httpd_req_t *req, const aux_http_reply_t *r)
@@ -136,16 +147,8 @@ static esp_err_t aux_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
     }
-    /* Serialize against POST /api/zones (same single-flight guard around its commit): the
-     * aux set checks the zones union and the zones POST checks the aux mask, and without a
-     * shared claim two concurrent writes could each pass and leave both sides owning a relay. */
-    if (!safety_cfg_writer_try_claim(SAFETY_CFG_WRITER_HTTP_SYNC)) {
-        aux_http_reply_t busy = { 409, "another commissioning operation is running" };
-        return send_reply(req, &busy);
-    }
     aux_http_reply_t reply;
-    aux_http_core_set(&s_ops, body, &reply);
-    (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_HTTP_SYNC);
+    aux_http_core_set(&s_ops, body, &reply); /* takes the HTTP_SYNC claim itself */
     if (reply.status != 200) {
         ESP_LOGW(TAG, "POST /api/aux_outputs refused (%d): %s", reply.status, reply.msg);
     }

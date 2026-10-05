@@ -3378,7 +3378,8 @@ uint8_t zones_config_json_aux_enabled_mask(void);
 /* Relays `cfg` claims (OR of zones[0..thermo_count) relay_mask) that an enabled aux output
  * also owns; 0 = no conflict, and always 0 with no provider registered. The explicit check
  * for write paths that assign or restore a zones_cfg_t WITHOUT calling
- * zones_config_json_validate() (POST /api/zones, backup import, kiln_cfg_swap). */
+ * zones_config_json_validate() (POST /api/zones, backup import). kiln_cfg_swap does not
+ * need it: it restores through zones_config_import_blob, which validates. */
 uint8_t zones_config_json_aux_conflict_mask(const zones_cfg_t *cfg);
 
 /* Bounded chain walk starting at `start`, following settings_source[group]
