@@ -413,8 +413,14 @@ static void test_pico_mask_call_site_shape(void)
     TEST_CHECK(strip != NULL, "relay_now_mask is built through safety_pico_relay_mask()");
     TEST_CHECK(recent != NULL, "relay_recent_mask is derived from that same relay_now_mask");
     TEST_CHECK(strip && recent && strip < recent, "strip happens before the recent-mask update");
-    TEST_CHECK(strstr(src, "= kiln_io_get_relay_shadow(") == NULL,
-               "no raw relay shadow assignment bypasses the helper in this file");
+    {
+        /* Exactly one call site: catches the ternary-revert form and any new raw use. */
+        int uses = 0;
+        for (const char *p = src; (p = strstr(p, "kiln_io_get_relay_shadow(")) != NULL; p += 1) {
+            uses++;
+        }
+        TEST_CHECK(uses == 1, "kiln_io_get_relay_shadow( appears exactly once in safety_link_frames.c");
+    }
 }
 
 void run_test_aux_outputs_store(void)
