@@ -247,7 +247,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
         first_profile = false;
         for (uint8_t i = 0; i < p->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
             const profile_segment_t *seg = &p->segments[i];
-            backup_stream_printf(&s, "%s{\"target_c\":%.2f,\"ramp_c_per_hr\":%.2f,\"dwell_min\":%lu}",
+            backup_stream_printf(&s, "%s{\"target_c\":%.9g,\"ramp_c_per_hr\":%.9g,\"dwell_min\":%lu}",
                                 i == 0 ? "" : ",", (double)seg->target_c, (double)seg->ramp_c_per_hr,
                                 (unsigned long)seg->dwell_min);
         }
@@ -379,27 +379,27 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * of one that could quietly drop the tail of a zone's entry. */
             backup_stream_printf(&s, "\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"ct_mask\":%u,",
                                 name_escaped, relay_mask, thermo_mask, ct_mask);
-            backup_stream_printf(&s, "\"cal_offset_c\":%.3f,\"max_ramp_c_per_hr\":%.2f,"
-                                "\"sanity_rate_c_per_min\":%.3f,\"control_mode\":%u,",
+            backup_stream_printf(&s, "\"cal_offset_c\":%.9g,\"max_ramp_c_per_hr\":%.9g,"
+                                "\"sanity_rate_c_per_min\":%.9g,\"control_mode\":%u,",
                                 (double)cal_offset_c, (double)max_ramp_c_per_hr, (double)sanity_rate_c_per_min,
                                 (unsigned)control_mode);
-            backup_stream_printf(&s, "\"max_temp_c\":%.1f,\"min_temp_c\":%.1f,\"heater_window_ms\":%.0f,"
-                                "\"heater_min_on_ms\":%.0f,\"heater_min_off_ms\":%.0f,",
+            backup_stream_printf(&s, "\"max_temp_c\":%.9g,\"min_temp_c\":%.9g,\"heater_window_ms\":%.9g,"
+                                "\"heater_min_on_ms\":%.9g,\"heater_min_off_ms\":%.9g,",
                                 (double)max_temp_c, (double)min_temp_c, (double)window_ms, (double)min_on_ms,
                                 (double)min_off_ms);
-            backup_stream_printf(&s, "\"guard_wrong_dir_window_s\":%.1f,\"guard_wrong_dir_rate_c_per_min\":%.3f,"
-                                "\"guard_off_settle_s\":%.1f,",
+            backup_stream_printf(&s, "\"guard_wrong_dir_window_s\":%.9g,\"guard_wrong_dir_rate_c_per_min\":%.9g,"
+                                "\"guard_off_settle_s\":%.9g,",
                                 (double)wrong_dir_window_s, (double)wrong_dir_rate_c_per_min,
                                 (double)off_settle_s);
-            backup_stream_printf(&s, "\"guard_runaway_rate_c_per_min\":%.3f,\"guard_runaway_margin_c\":%.1f,"
-                                "\"guard_drift_period_s\":%.1f,",
+            backup_stream_printf(&s, "\"guard_runaway_rate_c_per_min\":%.9g,\"guard_runaway_margin_c\":%.9g,"
+                                "\"guard_drift_period_s\":%.9g,",
                                 (double)runaway_rate_c_per_min, (double)runaway_margin_c,
                                 (double)drift_period_s);
-            backup_stream_printf(&s, "\"guard_sensor_fault_debounce_ticks\":%.0f,\"guard_frozen_window_s\":%.1f,"
-                                "\"cross_zone_max_delta_c\":%.1f,",
+            backup_stream_printf(&s, "\"guard_sensor_fault_debounce_ticks\":%.9g,\"guard_frozen_window_s\":%.9g,"
+                                "\"cross_zone_max_delta_c\":%.9g,",
                                 (double)sensor_fault_debounce_ticks, (double)frozen_window_s,
                                 (double)cross_zone_max_delta_c);
-            backup_stream_printf(&s, "\"fuzzy_strength_pct\":%.2f,", (double)fuzzy_strength_pct);
+            backup_stream_printf(&s, "\"fuzzy_strength_pct\":%.9g,", (double)fuzzy_strength_pct);
             /* Version 4 (2026-08-30, same-day follow-up): coupling_c0..
              * coupling_cN-1, one indexed key per neighbor -- see
              * BACKUP_FORMAT_VERSION's own 3->4 comment. Diagonal included
@@ -462,11 +462,11 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             float autotune_baseline_k_dc = 0.0f;
             zones_config_get_autotune_baseline_k_dc(zi, &autotune_baseline_k_dc);
             bool adaptive_tune_enabled = zones_config_get_adaptive_tune_enabled(zi);
-            backup_stream_printf(&s, "\"ease_off_window_mult\":%.3f,\"approach_rate_cap_c_per_hr\":%.2f,",
+            backup_stream_printf(&s, "\"ease_off_window_mult\":%.9g,\"approach_rate_cap_c_per_hr\":%.9g,",
                                 (double)ease_off_window_mult, (double)approach_rate_cap_c_per_hr);
-            backup_stream_printf(&s, "\"error_band_c\":%.3f,\"rate_band_c_per_s\":%.5f,\"relay_type\":%u,",
+            backup_stream_printf(&s, "\"error_band_c\":%.9g,\"rate_band_c_per_s\":%.9g,\"relay_type\":%u,",
                                 (double)error_band_c, (double)rate_band_c_per_s, (unsigned)relay_type);
-            backup_stream_printf(&s, "\"progress_band_c\":%.2f,\"zone_type\":%u,",
+            backup_stream_printf(&s, "\"progress_band_c\":%.9g,\"zone_type\":%u,",
                                 (double)progress_band_c, (unsigned)zone_type);
             backup_stream_printf(&s, "\"model_fit_temp_c\":%.9g,\"model_fit_ambient_c\":%.9g,",
                                 (double)model_fit_temp_c, (double)model_fit_ambient_c);
@@ -490,7 +490,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_min_off_s(zi, &min_off_s);
             uint8_t timing_profile_index = 0;
             zones_config_get_timing_profile_index(zi, &timing_profile_index);
-            backup_stream_printf(&s, "\"failsafe_state\":%u,\"hyst_c\":%.3f,",
+            backup_stream_printf(&s, "\"failsafe_state\":%u,\"hyst_c\":%.9g,",
                                 failsafe_state ? 1u : 0u, (double)hyst_c);
             backup_stream_printf(&s, "\"min_on_s\":%u,\"min_off_s\":%u,\"timing_profile\":%u,",
                                 (unsigned)min_on_s, (unsigned)min_off_s, (unsigned)timing_profile_index);
@@ -550,7 +550,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             bool normal_current_measured = false;
             if (zones_config_get_normal_current(zi, &normal_current_a, &normal_current_measured) &&
                 normal_current_measured) {
-                backup_stream_printf(&s, ",\"normal_current_a\":%.4f", (double)normal_current_a);
+                backup_stream_printf(&s, ",\"normal_current_a\":%.9g", (double)normal_current_a);
             }
             /* 2026-09-16 config-backup round-trip gap closure: the Pico's OWN
              * i_normal_a[zi] (0x031A-0x031C) -- the actual S14/S15 arming
@@ -566,7 +566,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * normal_current_a and model_k_dc above. */
             float safety_i_normal_a = 0.0f;
             if (zones_get_safety_pico_i_normal_a(zi, &safety_i_normal_a)) {
-                backup_stream_printf(&s, ",\"safety_i_normal_a\":%.4f", (double)safety_i_normal_a);
+                backup_stream_printf(&s, ",\"safety_i_normal_a\":%.9g", (double)safety_i_normal_a);
             }
         }
         /* settings_source_g%u above is now the last key of this object (it
@@ -609,13 +609,13 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             }
             char tp_name_escaped[TIMING_PROFILE_NAME_MAX_LEN * 2 + 1];
             json_escape(tp_name, tp_name_escaped, sizeof(tp_name_escaped));
-            backup_stream_printf(&s, "%s{\"name\":\"%s\",\"progress_duty_min\":%.4f,\"progress_window_s\":%.1f,",
+            backup_stream_printf(&s, "%s{\"name\":\"%s\",\"progress_duty_min\":%.9g,\"progress_window_s\":%.9g,",
                                 p == 0 ? "" : ",", tp_name_escaped, (double)duty_min, (double)window_s);
-            backup_stream_printf(&s, "\"drift_hysteresis_c\":%.2f,\"frozen_eps_c\":%.3f,"
-                                "\"cross_zone_period_s\":%.1f,",
+            backup_stream_printf(&s, "\"drift_hysteresis_c\":%.9g,\"frozen_eps_c\":%.9g,"
+                                "\"cross_zone_period_s\":%.9g,",
                                 (double)drift_c, (double)frozen_eps_c, (double)cross_zone_s);
-            backup_stream_printf(&s, "\"bangbang_hysteresis_c\":%.2f,\"cooling_limited_margin_c\":%.2f,"
-                                "\"cooling_limited_hold_s\":%.1f,\"ramp_lock_band_c\":%.2f}",
+            backup_stream_printf(&s, "\"bangbang_hysteresis_c\":%.9g,\"cooling_limited_margin_c\":%.9g,"
+                                "\"cooling_limited_hold_s\":%.9g,\"ramp_lock_band_c\":%.9g}",
                                 (double)bangbang_c, (double)cool_margin_c, (double)cool_hold_s,
                                 (double)ramp_lock_c);
         }
@@ -671,7 +671,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             if (!(k_ct_mask & (1u << ch))) {
                 continue;
             }
-            backup_stream_printf(&s, "%s{\"ct_channel\":%u,\"k_v_per_a\":%.5f}", first_k ? "" : ",", ch,
+            backup_stream_printf(&s, "%s{\"ct_channel\":%u,\"k_v_per_a\":%.9g}", first_k ? "" : ",", ch,
                                 (double)k_ct_v_per_a[ch]);
             first_k = false;
         }

@@ -63,6 +63,7 @@
 // is driven through these two hooks instead of being redefined here.
 void test_stub_zones_set_thermo_count(uint8_t n);
 void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_hr);
+void test_stub_zones_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
 
 // Defined in test_kiln_cfg_store.c -- see its own doc comment; flips one
 // byte of the shared zones_config_export_blob() stub content.
@@ -3748,7 +3749,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
 
     TEST_CHECK(strstr(s_export_body, "\"id\":0,\"name\":\"Cone6\",\"zone_mask\":3") != NULL,
               "the seeded profile's id/name/zone_mask are emitted exactly");
-    TEST_CHECK(strstr(s_export_body, "\"target_c\":1200.00,\"ramp_c_per_hr\":100.00,\"dwell_min\":10") != NULL,
+    TEST_CHECK(strstr(s_export_body, "\"target_c\":1200,\"ramp_c_per_hr\":100,\"dwell_min\":10") != NULL,
               "the seeded profile's one segment is emitted exactly");
 
     TEST_CHECK(strstr(s_export_body, "\"index\":1,\"pid_kp\":5,\"pid_ki\":0.600000024,\"pid_kd\":0.0199999996") != NULL,
@@ -3757,13 +3758,13 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(strstr(s_export_body, "\"name\":\"Mid\"") != NULL, "zone 1's name is emitted");
     TEST_CHECK(strstr(s_export_body, "\"relay_mask\":2,\"thermo_mask\":2,\"ct_mask\":2") != NULL,
               "zone 1's masks are emitted exactly");
-    TEST_CHECK(strstr(s_export_body, "\"cal_offset_c\":0.750") != NULL, "zone 1's cal_offset_c is emitted exactly");
-    TEST_CHECK(strstr(s_export_body, "\"max_ramp_c_per_hr\":150.00") != NULL,
+    TEST_CHECK(strstr(s_export_body, "\"cal_offset_c\":0.75,") != NULL, "zone 1's cal_offset_c is emitted exactly");
+    TEST_CHECK(strstr(s_export_body, "\"max_ramp_c_per_hr\":150,") != NULL,
               "zone 1's max_ramp_c_per_hr is emitted exactly");
-    TEST_CHECK(strstr(s_export_body, "\"sanity_rate_c_per_min\":2.500") != NULL,
+    TEST_CHECK(strstr(s_export_body, "\"sanity_rate_c_per_min\":2.5,") != NULL,
               "zone 1's sanity_rate_c_per_min is emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"control_mode\":3") != NULL, "zone 1's control_mode is emitted exactly");
-    TEST_CHECK(strstr(s_export_body, "\"max_temp_c\":1250.0,\"min_temp_c\":-15.0") != NULL,
+    TEST_CHECK(strstr(s_export_body, "\"max_temp_c\":1250,\"min_temp_c\":-15,") != NULL,
               "zone 1's temp limits are emitted exactly");
     TEST_CHECK(strstr(s_export_body, "\"heater_window_ms\":60000,\"heater_min_on_ms\":200,\"heater_min_off_ms\":200") != NULL,
               "zone 1's heater cfg is emitted exactly");
@@ -4448,6 +4449,14 @@ static void test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair(void)
 // 2026-09-28 pid %.9g fix: the fields must be exported at round-trip precision.
 // Asserts the second export is byte-identical to the first and that the live
 // floats are bit-exact after import.
+//
+// NOTE: the final strcmp alone would NOT catch the regression: rounded text
+// re-exports as the same rounded text, so two exports of a rounded value are
+// byte-identical even though the live float changed. The memcmp assertions on
+// the live values after import are what fail on a lossy export format; the
+// strcmp only guards the whole-document shape. Review round 1 (2026-10-05)
+// extended the field set to max_ramp_c_per_hr (autotune writes it), the four
+// tuning_* floats, model tau/dead_time and the other user-entered floats.
 static void test_export_import_export_is_byte_identical_for_non_round_floats(void)
 {
     TEST_SECTION("backup export -> import -> export is byte-identical with non-round identified floats "
@@ -4461,6 +4470,22 @@ static void test_export_import_export_is_byte_identical_for_non_round_floats(voi
     TEST_CHECK(zones_config_set_model_fit_context(1, fit_t, fit_a), "seed zone 1 model_fit context");
     TEST_CHECK(zones_config_set_coil_power_w(1, coil), "seed zone 1 coil_power_w");
     TEST_CHECK(zones_config_set_autotune_baseline_k_dc(1, base), "seed zone 1 autotune_baseline_k_dc");
+    const float m_k = 0.123456789f, m_tau = 987.654321f, m_dead = 33.333333f, ramp = 187.654321f;
+    /* export's model/max_ramp getters are the test_profile_feasibility.c hooks, not the setters */
+    test_stub_zones_set_model(1, m_k, m_tau, m_dead);
+    test_stub_zones_set_max_ramp(1, true, ramp);
+    zone_tuning_quality_t tq;
+    memset(&tq, 0, sizeof(tq));
+    tq.valid = true;
+    tq.method = 1;
+    tq.rule = 2;
+    tq.settled = true;
+    tq.tau_consistent = true;
+    tq.baseline_c = 24.567891f;
+    tq.step_ambient_c = 23.123457f;
+    tq.raw_rise_c = 88.123459f;
+    tq.rise_inf_c = 95.987654f;
+    TEST_CHECK(zones_config_set_tuning_quality(1, &tq), "seed zone 1 tuning_quality (valid=1, non-round floats)");
 
     TEST_CHECK(run_export() == ESP_OK, "first export succeeds");
     TEST_CHECK(s_export_body != NULL && s_export_len > 0, "first export produced a body");
@@ -4473,6 +4498,19 @@ static void test_export_import_export_is_byte_identical_for_non_round_floats(voi
     /* Poison the stub's live values (reset_stub_state clears s_writes[], which
      * backs these getters), then restore from the first export. */
     reset_stub_state();
+    /* reset_stub_state() does not clear the tuning-record storage (it lives in
+     * test_profile_feasibility.c), so poison it explicitly: otherwise import's
+     * "file matches live" branch would reinstate the seeded record and this
+     * part of the test would pass vacuously. */
+    zone_tuning_quality_t poison;
+    memset(&poison, 0, sizeof(poison));
+    poison.baseline_c = 1.0f;
+    poison.step_ambient_c = 2.0f;
+    poison.raw_rise_c = 3.0f;
+    poison.rise_inf_c = 4.0f;
+    test_stub_zones_set_full_tuning_quality(1, &poison);
+    test_stub_zones_set_model(1, 1.0f, 2.0f, 3.0f);
+    test_stub_zones_set_max_ramp(1, true, 4.0f);
     char err[256];
     bool ok = test_backup_import_apply(first, err, sizeof(err));
     TEST_CHECK(ok, "importing the first export must succeed");
@@ -4486,7 +4524,24 @@ static void test_export_import_export_is_byte_identical_for_non_round_floats(voi
     TEST_CHECK(memcmp(&s_writes[1].coil_power_w, &coil, sizeof(float)) == 0, "coil_power_w bit-exact");
     TEST_CHECK(memcmp(&s_writes[1].autotune_baseline_k_dc, &base, sizeof(float)) == 0,
               "autotune_baseline_k_dc bit-exact");
+    TEST_CHECK(memcmp(&s_writes[1].k_dc, &m_k, sizeof(float)) == 0, "model_k_dc bit-exact");
+    TEST_CHECK(memcmp(&s_writes[1].tau_s, &m_tau, sizeof(float)) == 0, "model_tau_s bit-exact");
+    TEST_CHECK(memcmp(&s_writes[1].dead_time_s, &m_dead, sizeof(float)) == 0, "model_dead_time_s bit-exact");
+    TEST_CHECK(memcmp(&s_writes[1].max_ramp_c_per_hr, &ramp, sizeof(float)) == 0, "max_ramp_c_per_hr bit-exact");
+    TEST_CHECK(s_writes[1].set_tuning_quality_called && s_writes[1].tuning_quality.valid,
+              "import wrote a valid tuning record over the poisoned one");
+    const zone_tuning_quality_t tq_after = s_writes[1].tuning_quality;
+    TEST_CHECK(memcmp(&tq_after.baseline_c, &tq.baseline_c, sizeof(float)) == 0, "tuning_baseline_c bit-exact");
+    TEST_CHECK(memcmp(&tq_after.step_ambient_c, &tq.step_ambient_c, sizeof(float)) == 0,
+              "tuning_step_ambient_c bit-exact");
+    TEST_CHECK(memcmp(&tq_after.raw_rise_c, &tq.raw_rise_c, sizeof(float)) == 0, "tuning_raw_rise_c bit-exact");
+    TEST_CHECK(memcmp(&tq_after.rise_inf_c, &tq.rise_inf_c, sizeof(float)) == 0, "tuning_rise_inf_c bit-exact");
 
+    /* The model/max_ramp export getters are fixed stub hooks, not backed by
+     * the *_no_save setters import calls; their import was proven bit-exact
+     * above, so point the hooks at that same state before re-exporting. */
+    test_stub_zones_set_model(1, s_writes[1].k_dc, s_writes[1].tau_s, s_writes[1].dead_time_s);
+    test_stub_zones_set_max_ramp(1, true, s_writes[1].max_ramp_c_per_hr);
     TEST_CHECK(run_export() == ESP_OK, "second export succeeds");
     TEST_CHECK(s_export_body != NULL && strcmp(first, s_export_body) == 0,
               "export, import, export is byte-identical");

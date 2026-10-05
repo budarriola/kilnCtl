@@ -27,7 +27,9 @@
 // uncorrected number; see zones_config_apply_cal()'s scope note for why
 // that gap is deliberate rather than overlooked.
 //
-// max_ramp_c_per_hr is a user-entered ceiling, not a PID-estimated one --
+// max_ramp_c_per_hr is a user-entered ceiling, not a PID-estimated one -- but
+// autotune also writes it, so it is blob-visible state and backup export must
+// print it round-trip exact (%.9g), not at a rounded display precision --
 // TODO.md section 3 poses both options and explicitly leaves the
 // PID-estimated one undesigned ("more work, needs a design of its own
 // before it's buildable"). The user-entered ceiling is what

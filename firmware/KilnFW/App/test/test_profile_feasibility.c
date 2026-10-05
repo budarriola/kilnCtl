@@ -264,6 +264,18 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
     }
 }
 
+// Same cross-file arrangement for the model getter: test_backup_import.c's
+// export tests need zones_config_get_model() to answer with a chosen value.
+void test_stub_zones_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    if (zone_index < STUB_MAX_ZONES) {
+        s_zones[zone_index].model_getter_answers = true;
+        s_zones[zone_index].k_dc = k_dc;
+        s_zones[zone_index].tau_s = tau_s;
+        s_zones[zone_index].dead_time_s = dead_time_s;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

@@ -111,14 +111,16 @@ esp_err_t backup_page_get_handler(httpd_req_t *req);      // backup_export.c
 esp_err_t backup_export_get_handler(httpd_req_t *req);    // backup_export.c
 esp_err_t backup_import_post_handler(httpd_req_t *req);   // backup_import.c
 
-// printf precision of the four tuning-quality floats (baseline/step_ambient/
+// printf format of the four tuning-quality floats (baseline/step_ambient/
 // raw_rise/rise_inf) in the backup JSON. Shared so export's printing and
 // import's "is the file value the same as the live one" comparison can never
-// drift apart: the file only carries this many decimals, so equality has to
-// be judged at this precision, not on the raw floats.
-#define BACKUP_TUNING_FLOAT_FMT "%.3f"
-// Buffer for one such printed float: FLT_MAX (~3.4e38) prints 39 integer digits
-// + sign + ".000" + NUL = 45 B, so 48 covers every finite float. Hardening only:
+// drift apart. %.9g round-trips a float32 exactly (these values are written
+// into the kiln_configs blob by autotune, so a rounded export would change
+// the blob on import); the comparison stays at the file's precision so older
+// %.3f backups still match a live value that rounds to the same text.
+#define BACKUP_TUNING_FLOAT_FMT "%.9g"
+// Buffer for one such printed float: %.9g is at most ~15 chars ("-1.23456789e+38");
+// 48 B is kept from the old "%.3f" sizing (FLT_MAX printed 45 B) and covers every finite float. Hardening only:
 // the old 32 B buffer truncated a value like 1e30 (35 chars) but, as the leading
 // digits still differ between distinct floats, that was not a false-match bug. 48 B on the
 // httpd stack, two of them, is far inside the 4832 B per-handler frame cap.
