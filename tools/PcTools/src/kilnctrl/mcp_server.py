@@ -430,6 +430,7 @@ from .mcp_server_fixture import *  # noqa: F401,F403
 from .mcp_server_bench_test import *  # noqa: F401,F403
 from .mcp_server_ota_matrix import *  # noqa: F401,F403
 from .mcp_server_recovery import *  # noqa: F401,F403
+from .mcp_server_update import *  # noqa: F401,F403
 
 # ---------------------------------------------------------------------------
 # facade + entry point

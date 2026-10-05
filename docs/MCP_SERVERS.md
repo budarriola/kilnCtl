@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 220 published tools
 
-`kilnctrl` registers 209 tools (207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 212 tools (209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in

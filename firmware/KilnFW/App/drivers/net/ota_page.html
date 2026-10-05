@@ -177,6 +177,34 @@ route.</p>
 </div>
 <p id="picoMsg" class="msg"></p>
 
+<h2>Stage an update (upload now, install later)</h2>
+<p>Send a firmware image from this PC or phone into the board's
+<b>stage</b> partition. Staging only stores and verifies the image; it does
+not change what is running and does not reboot. Installing a staged image is
+done by the recovery image and is not available from this page yet.</p>
+<div id="stageInfo" class="card kv">Loading&hellip;</div>
+<div id="stageUnsigned" class="blocker" style="display:none">
+  UNSIGNED: this image is verified by its sha256 only, which catches
+  corruption but does not prove who published it. Install only an image you
+  built or obtained from a source you trust.
+</div>
+<div id="stagePicker">
+  <label for="stageFile">New application image (KilnCtrl.bin)</label>
+  <input type="file" id="stageFile" accept=".bin">
+  <div>
+    <button id="stageUploadBtn" type="button" class="primary">Upload to stage</button>
+    <button id="stageClearBtn" type="button" class="danger">Clear stage</button>
+    <button id="stageInstallBtn" type="button" disabled
+            title="Waiting on the recovery image's apply route (WP5)">Install (reboots into recovery)</button>
+  </div>
+  <p class="note">Install is a placeholder: no route exists for it yet, so the
+  button stays disabled. Uploading erases any previously staged image first.</p>
+</div>
+<div id="stageProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="stageProgressBar" class="progress-inner">0%</div></div>
+</div>
+<p id="stageMsg" class="msg"></p>
+
 <script>
 /* ---- OTA-family fetch -----------------------------------------------------
  * This page used to sign every mutating request with an AP-password HMAC
@@ -645,6 +673,129 @@ function updateOrderHintFilesChanged() {
 document.getElementById('espFile').addEventListener('change', updateOrderHintFilesChanged);
 document.getElementById('picoFile').addEventListener('change', updateOrderHintFilesChanged);
 
+/* ---- Stage (WP6, docs/GITHUB_RELEASE_UPDATE_PLAN.md) ----------------------
+ * GET /api/update/stage, POST /api/update/stage (raw body), POST
+ * /api/update/stage/clear -- update_http.c, all ROUTE_TIER_ADMIN. An upload
+ * holds the board's single httpd task for its whole duration, so status
+ * cannot be polled meanwhile: progress comes from the browser's own XHR
+ * upload events, and the status card is re-read only once the POST ends. */
+var STAGE_SOURCES = { 0: 'unknown', 1: 'upload', 2: 'github' };
+
+function renderStageInfo(s) {
+  var box = document.getElementById('stageInfo');
+  var rows = [];
+  function row(k, v) { rows.push('<div><b>' + esc(k) + '</b> ' + esc(v) + '</div>'); }
+  if (s.busy) {
+    row('Operation', s.phase + ' (' + s.bytes_done + ' / ' + s.bytes_total + ' bytes)');
+  }
+  if (s.staged && s.header === 'ok') {
+    row('Staged', 'yes (' + s.state + ')');
+    row('Version', s.semver);
+    if (s.commit) row('Commit', s.commit);
+    row('Length', s.image_length + ' bytes');
+    row('SHA-256', s.sha256);
+    row('Source', STAGE_SOURCES[s.source] || String(s.source));
+  } else {
+    row('Staged', 'no' + (s.reason ? ' (' + s.reason + ')' : ''));
+  }
+  row('Capacity', s.capacity + ' bytes');
+  box.innerHTML = rows.join('');
+  document.getElementById('stageUnsigned').style.display = (s.staged && s.header === 'ok') ? '' : 'none';
+}
+
+function loadStageStatus() {
+  return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) {
+        throw new Error(r.status === 404 ? 'this board has no stage partition (older partition table)'
+                                         : (text || ('HTTP ' + r.status)));
+      }
+      renderStageInfo(JSON.parse(text));
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    document.getElementById('stageInfo').textContent = 'Could not load stage status: ' + e.message;
+  });
+}
+
+function stageXhrUpload(bytes) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    var wrap = document.getElementById('stageProgressWrap');
+    var bar = document.getElementById('stageProgressBar');
+    xhr.open('POST', '/api/update/stage');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = function (ev) {
+      if (!ev.lengthComputable) return;
+      var pct = Math.round(100 * ev.loaded / ev.total);
+      bar.style.width = pct + '%';
+      bar.textContent = pct + '%';
+    };
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(xhr.responseText); return; }
+      var e = new Error(xhr.responseText || ('HTTP ' + xhr.status));
+      e.status = xhr.status;
+      reject(e);
+    };
+    xhr.onerror = function () { reject(new Error('connection lost mid-upload; read the status card')); };
+    xhr.ontimeout = xhr.onerror;
+    wrap.style.display = '';
+    bar.style.width = '0%';
+    bar.textContent = '0%';
+    xhr.send(bytes);
+  });
+}
+
+document.getElementById('stageUploadBtn').addEventListener('click', function () {
+  var msg = document.getElementById('stageMsg');
+  var btn = document.getElementById('stageUploadBtn');
+  msg.textContent = 'Reading file…';
+  readFileBytes(document.getElementById('stageFile')).then(function (bytes) {
+    if (bytes.length < 1 || bytes[0] !== 0xE9) {
+      throw new Error('not an ESP application image (first byte is not 0xE9)');
+    }
+    // Authed GET first so an expired session opens the login modal now,
+    // not as a failed multi-megabyte POST.
+    return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
+      if (!r.ok) throw new Error('stage not available (HTTP ' + r.status + ')');
+      return window.kcConfirm('Upload ' + bytes.length + ' bytes to the stage? ' +
+        'Any previously staged image is erased first. Nothing is installed.');
+    }).then(function (ok) {
+      if (!ok) { msg.textContent = ''; return null; }
+      btn.disabled = true;
+      msg.textContent = 'Uploading ' + bytes.length + ' bytes… (the board answers nothing else until this ends)';
+      return stageXhrUpload(bytes).then(function () {
+        msg.textContent = 'Upload finished; verifying on the board…';
+        return loadStageStatus();
+      }).then(function () { msg.textContent = 'Upload finished. See the status card for the verified state.'; });
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Stage upload failed: ' + e.message;
+    loadStageStatus();
+  }).then(function () {
+    btn.disabled = false;
+    document.getElementById('stageProgressWrap').style.display = 'none';
+  });
+});
+
+document.getElementById('stageClearBtn').addEventListener('click', function () {
+  var msg = document.getElementById('stageMsg');
+  window.kcConfirm('Erase the staged image header so it can never be installed?').then(function (ok) {
+    if (!ok) return null;
+    return window.kcOtaAuthedFetch('/api/update/stage/clear', { method: 'POST' }).then(function (r) {
+      return r.text().then(function (text) {
+        if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+        msg.textContent = 'Stage cleared.';
+        return loadStageStatus();
+      });
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Stage clear failed: ' + e.message;
+  });
+});
+
 /* ---- Boot ------------------------------------------------------------------ */
 loadInterlock();
 setInterval(loadInterlock, 15000);
@@ -652,6 +803,7 @@ pollEspStatus();
 pollPicoStatus();
 pollSafetyBuildInfo();
 setInterval(pollSafetyBuildInfo, 3000);
+loadStageStatus();
 
 (function () {
   var btn = document.getElementById('themeBtn');
