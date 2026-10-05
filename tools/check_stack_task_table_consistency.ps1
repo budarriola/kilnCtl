@@ -200,7 +200,9 @@ $dedicatedCheckerNames = @(
 # named target instead of rediscovering these from scratch.
 $knownUnceilingedNames = @(
     "spi_owner",         # esp_spi_owner.c spi_owner_task: registered, no TASKS row or dedicated checker yet
-    "ui_test_uart_bridge" # uart_bridge_ui_test.c: registered, no TASKS row or dedicated checker yet
+    "ui_test_uart_bridge", # uart_bridge_ui_test.c: registered, no TASKS row or dedicated checker yet
+    "update_fetch",      # update_fetch.c fetch_task: on-demand GitHub fetch (TLS, PSRAM stack); margin measured on the bench, no static ceiling yet
+    "update_fetch_wr"    # update_fetch.c wr_task: on-demand flash writer for the fetch path, 4 KB internal stack; no static ceiling yet
 )
 $dedicatedCheckerSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$dedicatedCheckerNames)
 $knownUnceilingedSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$knownUnceilingedNames)

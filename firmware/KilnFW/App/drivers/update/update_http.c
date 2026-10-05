@@ -23,6 +23,8 @@
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
+#include "update_fetch.h"
+#include "update_http_internal.h"
 #include "update_stage.h"
 #include "update_stale_stage.h"
 #include "wifi_provision_http.h"
@@ -571,5 +573,16 @@ esp_err_t update_http_start(void)
             return err;
         }
     }
-    return ESP_OK;
+    return update_fetch_start(server);
+}
+
+// ---- shared with update_fetch.c (GitHub fetch path) ----
+update_stage_t *update_http_stage(void)
+{
+    return &s_stage;
+}
+
+bool update_http_gate_refuses(httpd_req_t *req, const char *what, const char *ip)
+{
+    return mode_gate_refuses(req, what, ip) || interlock_refuses(req, what, ip) || claim_refuses(req, what, ip);
 }

@@ -595,3 +595,13 @@ CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y
 # legacy resistive NS2009 path) -- see firmware/KilnFW/docs/PROJECT_STATUS.md
 # "Hardware present on this bench unit". Pinning an inert value would just be
 # noise.
+
+# GitHub release fetch (docs/GITHUB_RELEASE_UPDATE_PLAN.md WP7/WP8, section 11 option D): the TLS
+# contexts and record buffers live in PSRAM, so a handshake costs the internal heap only a few KB
+# instead of 35-45 KB. The fetch task itself runs off core 0 (update_fetch.c). Existing build
+# trees keep their old value until sdkconfig is regenerated (delete sdkconfig or run
+# `idf.py reconfigure` after removing these keys from it).
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y

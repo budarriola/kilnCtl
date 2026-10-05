@@ -1203,8 +1203,12 @@ esp_err_t wifi_provision_http_start(void)
      *
      * Bumped 170 -> 175, 2026-10-04: aux_outputs_http.c added three routes (GET/POST
      * /api/aux_outputs, POST /api/aux_outputs/manual, SPARE_RELAY_ONOFF_PLAN.md WP-2),
-     * leaving 4 spare against 170. Set to 175 for the same ~9-slot headroom convention. */
-    config.max_uri_handlers = 175;
+     * leaving 4 spare against 170. Set to 175 for the same ~9-slot headroom convention.
+     *
+     * Bumped 175 -> 180, 2026-10-05: update_fetch.c added four routes (POST /api/update/check,
+     * POST /api/update/download, GET /api/update/fetch, POST /api/update/fetch/cancel,
+     * GITHUB_RELEASE_UPDATE_PLAN.md WP8), leaving too few spare against 175. */
+    config.max_uri_handlers = 180;
     /* Default (4096) is tight for the largest POST handlers on this server:
      * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
      * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever

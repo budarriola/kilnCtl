@@ -187,6 +187,9 @@ if ($remoteTag.Count -gt 0) { Fail "tag $Tag already exists on origin." }
 
 # ---------------------------------------------------------------- build / collect
 if (-not $SkipBuild) {
+    # The build embeds the tag as FW_RELEASE_VERSION (gen_build_info.cmake) so the board can tell
+    # a downgrade from an upgrade when it fetches a release itself.
+    $env:KILNCTL_RELEASE_VERSION = $Tag
     foreach ($s in @("firmware\KilnFW\App\test\check_00_kilnfw_target_build.ps1",
                      "firmware\KilnFW\App\test\check_00_kilnfw_recovery_target_build.ps1")) {
         Write-Host "building: $s"

@@ -344,6 +344,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # WP4: the stager core (pure, host-tested) and its ESP/HTTP wiring.
                        "update/update_stage.c"
                        "update/update_stale_stage.c"
+                       # WP8: pure URL/allowlist and release-JSON rules (host-tested).
+                       "update/update_url.c"
+                       "update/update_release.c"
+                       # WP8: the board-side GitHub fetch (TLS client, two tasks, four routes).
+                       "update/update_fetch.c"
                        "update/update_http.c"
                        # WP9: persisted update repo and its ADMIN routes.
                        "update/update_settings.c"
@@ -697,7 +702,8 @@ idf_component_register(SRCS "hw/MAX31856.c"
                                 esp_partition kilnlink mbedtls lwip app_update esp_rom lvgl mdns
                                 esp_hw_support esp_hal_wdt
                                 espcoredump hwabstraction_esp
-                       PRIV_REQUIRES spi_flash bootloader_support spiffs joltwallet__littlefs)
+                       PRIV_REQUIRES spi_flash bootloader_support spiffs joltwallet__littlefs
+                                    esp_http_client esp-tls)
 
 # Firmware version info (git commit/dirty flag/build timestamp), regenerated
 # on *every* build invocation -- not just when CMake reconfigures -- so it

@@ -50,6 +50,25 @@ if(GIT_EXECUTABLE)
     endif()
 endif()
 
+# WP8 (GITHUB_RELEASE_UPDATE_PLAN.md): identity the board compares a fetched release against.
+# FW_RELEASE_VERSION is the release tag, exported as KILNCTL_RELEASE_VERSION by
+# tools/make_release.ps1 (empty for any other build, so a dev build never claims a version).
+# FW_PARTITIONS_SHA256 is sha256 of partitions.csv with CRLF normalised, exactly as
+# tools/release_manifest.py computes compat.partitions_sha256.
+set(release_version "")
+if(DEFINED ENV{KILNCTL_RELEASE_VERSION})
+    set(release_version "$ENV{KILNCTL_RELEASE_VERSION}")
+    if(NOT release_version MATCHES "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$")
+        set(release_version "")
+    endif()
+endif()
+set(partitions_sha "")
+if(EXISTS "${THIS_PROJECT_DIR}/partitions.csv")
+    file(READ "${THIS_PROJECT_DIR}/partitions.csv" _praw)
+    string(REPLACE "\r\n" "\n" _praw "${_praw}")
+    string(SHA256 partitions_sha "${_praw}")
+endif()
+
 string(TIMESTAMP build_date "%Y-%m-%d" UTC)
 string(TIMESTAMP build_time "%H:%M:%SZ" UTC)
 
@@ -70,6 +89,10 @@ set(_content "// Auto-generated on every build by gen_build_info.cmake -- do not
 string(APPEND _content "#ifndef BUILD_INFO_H\n#define BUILD_INFO_H\n\n")
 string(APPEND _content "#define FW_GIT_COMMIT \"${commit}\"\n")
 string(APPEND _content "#define FW_GIT_DIRTY ${dirty}\n")
+string(APPEND _content "#define FW_RELEASE_VERSION \"${release_version}\"
+")
+string(APPEND _content "#define FW_PARTITIONS_SHA256 \"${partitions_sha}\"
+")
 string(APPEND _content "#define FW_BUILD_DATE \"${build_date}\"\n")
 string(APPEND _content "#define FW_BUILD_TIME \"${build_time}\"\n")
 string(APPEND _content "\n#endif // BUILD_INFO_H\n")

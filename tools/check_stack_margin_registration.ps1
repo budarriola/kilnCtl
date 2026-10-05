@@ -154,6 +154,8 @@ $requiredNames = @(
     "ota_rollback_reboot",  # liveness: on-demand -- transient task ota_http_esp.c's rollback handler creates on demand
     "recovery_boot",  # liveness: on-demand -- transient task ota_http_recovery.c's POST /api/ota/esp/recovery_boot handler creates on demand
     "ota_pico_rollback",  # liveness: on-demand -- transient task ota_http_pico.c's rollback handler creates on demand
+    "update_fetch",  # liveness: on-demand -- transient TLS/HTTP task update_fetch.c creates per POST /api/update/check or /download (GitHub release fetch, GITHUB_RELEASE_UPDATE_PLAN.md WP8)
+    "update_fetch_wr",  # liveness: on-demand -- transient flash-writer task update_fetch.c creates per download
     "http_async_job",  # liveness: on-demand -- transient task http_async_job.c creates on demand for a slow POST handler's job (docs/HTTP_POST_OWNER_MIGRATION.md slice A1; first caller is safety_cfg_http.c's ct_auto_zero_post_handler())
     "profile_executor", "profile_exec_wdt",
     "safety_owner_evt", "safety_proto_rx", "safety_poll",
