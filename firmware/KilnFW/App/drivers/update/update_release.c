@@ -617,6 +617,7 @@ typedef struct {
     char sha[UPDATE_SHA256_HEX_LEN + 1];
     uint32_t size;
     bool size_ok, name_ok, file_ok, sha_ok;
+    bool seen_name, seen_file, seen_sha, seen_size; // a repeated key is a malformed manifest
 } image_ctx_t;
 
 static update_rel_err_t image_kv(const char *key, cur_t *c, int depth, void *vctx)
@@ -624,20 +625,41 @@ static update_rel_err_t image_kv(const char *key, cur_t *c, int depth, void *vct
     image_ctx_t *im = (image_ctx_t *)vctx;
     skip_ws(c);
     bool is_str = c->p < c->end && *c->p == '"';
-    if (strcmp(key, "name") == 0 && is_str) {
-        im->name_ok = take_string(c, im->name, sizeof(im->name));
-        return UPDATE_REL_OK;
-    }
-    if (strcmp(key, "file") == 0 && is_str) {
-        im->file_ok = take_string(c, im->file, sizeof(im->file));
-        return UPDATE_REL_OK;
-    }
-    if (strcmp(key, "sha256") == 0 && is_str) {
-        im->sha_ok = take_string(c, im->sha, sizeof(im->sha));
-        return UPDATE_REL_OK;
-    }
-    if (strcmp(key, "size") == 0 && c->p < c->end && *c->p >= '0' && *c->p <= '9') {
-        return read_number(c, &im->size, &im->size_ok) ? UPDATE_REL_OK : UPDATE_REL_E_JSON;
+    if (strcmp(key, "name") == 0) {
+        if (im->seen_name) {
+            return UPDATE_REL_E_JSON;
+        }
+        im->seen_name = true;
+        if (is_str) {
+            im->name_ok = take_string(c, im->name, sizeof(im->name));
+            return UPDATE_REL_OK;
+        }
+    } else if (strcmp(key, "file") == 0) {
+        if (im->seen_file) {
+            return UPDATE_REL_E_JSON;
+        }
+        im->seen_file = true;
+        if (is_str) {
+            im->file_ok = take_string(c, im->file, sizeof(im->file));
+            return UPDATE_REL_OK;
+        }
+    } else if (strcmp(key, "sha256") == 0) {
+        if (im->seen_sha) {
+            return UPDATE_REL_E_JSON;
+        }
+        im->seen_sha = true;
+        if (is_str) {
+            im->sha_ok = take_string(c, im->sha, sizeof(im->sha));
+            return UPDATE_REL_OK;
+        }
+    } else if (strcmp(key, "size") == 0) {
+        if (im->seen_size) {
+            return UPDATE_REL_E_JSON;
+        }
+        im->seen_size = true;
+        if (c->p < c->end && *c->p >= '0' && *c->p <= '9') {
+            return read_number(c, &im->size, &im->size_ok) ? UPDATE_REL_OK : UPDATE_REL_E_JSON;
+        }
     }
     return skip_value(c, depth + 1);
 }

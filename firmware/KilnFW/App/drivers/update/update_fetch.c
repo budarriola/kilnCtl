@@ -31,6 +31,7 @@
 #include "ota_http.h"
 #include "ota_http_internal.h" /* ota_http_get_client_ip() */
 #include "stack_margin.h"
+#include "time_sync.h"
 #include "uart_task_ids.h"
 #include "update_http_internal.h"
 #include "update_policy.h"
@@ -46,14 +47,27 @@ static const char *TAG = "update_fetch";
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
 #define FETCH_SCRATCH_LEN (16u * 1024u)      // stager scratch; PSRAM
+// The request buffer: a signed release-assets URL carries a JWT query, so the GET line alone can be
+// well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
+// (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
+#define FETCH_TX_BUF_BYTES 2048u
+#define FETCH_TX_BUF_SPIKE_BYTES 1024u       // the request buffer the WP7 spike's 25600 B was measured with
 // Current free internal heap (not the low-water mark) needed to even start: the 8192 B floor plus
 // the measured TLS residual (WP7 bench: handshake costs about 8 KB, writer stack about 4.5 KB)
-// plus slack. Below FETCH_HEAP_ABORT_BELOW mid-transfer the job gives up.
-#define FETCH_HEAP_PRECHECK_MIN 25600u
+// plus slack (25600 B, measured with a 1 KB request buffer) plus the growth of the request buffer
+// to FETCH_TX_BUF_BYTES. Below FETCH_HEAP_ABORT_BELOW mid-transfer the job gives up.
+#define FETCH_HEAP_PRECHECK_MIN (25600u + (FETCH_TX_BUF_BYTES - FETCH_TX_BUF_SPIKE_BYTES))
 #define FETCH_HEAP_ABORT_BELOW 12288u
 #define FETCH_JOB_DEADLINE_MS (20u * 60u * 1000u)
-#define FETCH_HTTP_TIMEOUT_MS 20000
-#define FETCH_TLS_STACK_BYTES 12288          // WP7 spike high-water 7952 B
+// Per-socket-operation timeout. Cancel latency is bounded by it: the loop checks the cancel flag
+// between reads, and a read may block this long, with at most FETCH_EAGAIN_RETRIES retries after a
+// timed-out read, so a cancel takes effect within (1 + retries) * timeout = 10 s.
+#define FETCH_HTTP_TIMEOUT_MS 5000
+#define FETCH_EAGAIN_RETRIES 1u
+// Stack sizes are still the WP7 spike's numbers. OWED ON THE BENCH: measure the production
+// high-water marks (stack_margin reports "update_fetch" and "update_fetch_wr") over a full
+// download that includes the redirect hop with a JWT-sized URL, and adjust. Not measured here.
+#define FETCH_TLS_STACK_BYTES 12288          // WP7 spike high-water 7952 B (spike, not production)
 #define FETCH_WR_STACK_BYTES 4096
 #define FETCH_TASK_PRIO 2
 #define FETCH_TASK_CORE 1                    // never core 0: spike gate (b), IDLE0 starvation
@@ -81,6 +95,7 @@ typedef struct {
     int http_status;
     uint32_t done;
     uint32_t total;
+    char repo[UPDATE_REPO_MAX];
     char tag[UPDATE_TAG_MAX];
     bool prerelease;
     uint32_t app_size;
@@ -133,6 +148,8 @@ struct work {
     job_params_t p;
     char repo[UPDATE_REPO_MAX];
     char url[UPDATE_URL_MAX];
+    char loc[UPDATE_URL_MAX]; // response Location of the current hop (PSRAM, bounded)
+    update_loc_capture_t loc_cap;
     update_release_info_t info;
     update_manifest_t man;
     uint8_t *body;
@@ -161,6 +178,16 @@ __attribute__((weak)) const char *update_settings_repo(void)
 static uint32_t free_internal(void)
 {
     return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+// SNTP has landed at least once this boot. Without a wall clock the certificate validity dates
+// cannot mean anything (plan item 11), so check and download refuse until it has.
+static bool clock_synced(void)
+{
+    time_sync_status_t ts;
+    memset(&ts, 0, sizeof(ts));
+    time_sync_get_status(&ts);
+    return ts.ever_synced;
 }
 
 static bool deadline_passed(const work_t *w)
@@ -326,6 +353,16 @@ static bool is_redirect(int s)
     return s == 301 || s == 302 || s == 303 || s == 307 || s == 308;
 }
 
+// esp_http_client_get_header() reads the REQUEST headers (IDF v6.0.2), so the response Location can
+// only come from the header events. The capture logic itself is host-tested: update_loc_capture_*.
+static esp_err_t http_event(esp_http_client_event_t *e)
+{
+    if (e->event_id == HTTP_EVENT_ON_HEADER && e->user_data != NULL) {
+        update_loc_capture_feed((update_loc_capture_t *)e->user_data, e->header_key, e->header_value);
+    }
+    return ESP_OK;
+}
+
 static const char *http_get(work_t *w, const char *url, const char *accept, const sink_t *sink)
 {
     update_url_err_t ue = update_url_check(url, NULL, 0);
@@ -346,11 +383,14 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         if (free_internal() < FETCH_HEAP_ABORT_BELOW) {
             return "low_heap";
         }
+        update_loc_capture_init(&w->loc_cap, w->loc, sizeof(w->loc));
         esp_http_client_config_t cfg = {
             .url = w->url,
             .timeout_ms = FETCH_HTTP_TIMEOUT_MS,
+            .event_handler = http_event,
+            .user_data = &w->loc_cap,
             .buffer_size = 2048,
-            .buffer_size_tx = 1024,
+            .buffer_size_tx = FETCH_TX_BUF_BYTES,
             .disable_auto_redirect = true,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
@@ -376,8 +416,11 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         if (clen < 0) {
             fail = "bad_response";
         } else if (is_redirect(status)) {
-            char *loc = NULL;
-            if (esp_http_client_get_header(c, "Location", &loc) != ESP_OK || loc == NULL) {
+            bool loc_refused = false;
+            const char *loc = update_loc_capture_get(&w->loc_cap, &loc_refused);
+            if (loc_refused) {
+                fail = "redirect_location_refused"; // too long for the buffer, or ambiguous
+            } else if (loc == NULL) {
                 fail = "redirect_no_location";
             } else {
                 ue = update_redirect_check(hops, loc);
@@ -427,7 +470,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                         fail = "short_body";
                     }
                     break;
-                } else if (n == -ESP_ERR_HTTP_EAGAIN && ++eagain <= 3) {
+                } else if (n == -ESP_ERR_HTTP_EAGAIN && ++eagain <= FETCH_EAGAIN_RETRIES) {
                     continue;
                 } else {
                     fail = "read_failed";
@@ -518,6 +561,9 @@ static const char *run_job(work_t *w)
 {
     const char *e;
     st_set_stage("precheck");
+    if (!clock_synced()) {
+        return "clock_not_synced";
+    }
     if (free_internal() < FETCH_HEAP_PRECHECK_MIN) {
         ESP_LOGW(TAG, "refused: internal heap free %u < %u", (unsigned)free_internal(), FETCH_HEAP_PRECHECK_MIN);
         return "low_heap";
@@ -527,6 +573,9 @@ static const char *run_job(work_t *w)
         return "bad_repo";
     }
     strlcpy(w->repo, repo, sizeof(w->repo));
+    st_lock();
+    strlcpy(s_c->st.repo, w->repo, sizeof(s_c->st.repo));
+    st_unlock();
     if (!update_url_build_latest(w->repo, w->url, sizeof(w->url))) {
         return "bad_repo";
     }
@@ -564,15 +613,18 @@ static const char *run_job(work_t *w)
     }
 
     // Policy. The typed confirm is folded in here, where the tag is known: allow_downgrade only
-    // counts when confirm_downgrade equals the release tag exactly.
+    // counts when confirm_downgrade equals the release tag exactly. When the running version is
+    // unknown (a dev build) force=1 needs the same typed confirm, because the policy cannot tell
+    // whether the release is a downgrade (update_policy_decide_typed).
     update_identity_t run;
     running_identity(&run, &w->man.identity);
+    const bool typed_ok = strcmp(w->p.confirm, w->info.tag) == 0;
     update_policy_flags_t flags = {
         .allow_prerelease = w->p.allow_prerelease,
-        .allow_downgrade = w->p.allow_downgrade && strcmp(w->p.confirm, w->info.tag) == 0,
+        .allow_downgrade = w->p.allow_downgrade && typed_ok,
         .force = w->p.force,
     };
-    update_decision_t d = update_policy_decide(&run, &w->man.identity, &flags);
+    update_decision_t d = update_policy_decide_typed(&run, &w->man.identity, &flags, typed_ok);
     st_lock();
     strlcpy(s_c->st.running, run.version, sizeof(s_c->st.running));
     strlcpy(s_c->st.commit, w->man.identity.commit, sizeof(s_c->st.commit));
@@ -716,8 +768,20 @@ static esp_err_t start_job(httpd_req_t *req, const job_params_t *p)
 
 static esp_err_t check_post_handler(httpd_req_t *req)
 {
+    char ip[46];
+    ota_http_get_client_ip(req, ip, sizeof(ip)); // logging only; ADMIN tier is the gate
     if (!job_try_begin()) {
         return send_error_json(req, "409 Conflict", "fetch_busy");
+    }
+    // Same mode gate as the download (409 while a firing or autotune runs): a check opens a TLS
+    // session and takes internal heap a run must not lose. The OTA claim is NOT taken.
+    if (update_http_mode_gate_refuses(req, "update check", ip)) {
+        s_c->busy = 0;
+        return ESP_OK;
+    }
+    if (!clock_synced()) {
+        s_c->busy = 0;
+        return send_error_json(req, "409 Conflict", "clock_not_synced");
     }
     job_params_t p;
     memset(&p, 0, sizeof(p));
@@ -766,6 +830,10 @@ static esp_err_t download_post_handler(httpd_req_t *req)
     if (!job_try_begin()) {
         return send_error_json(req, "409 Conflict", "fetch_busy");
     }
+    if (!clock_synced()) {
+        s_c->busy = 0;
+        return send_error_json(req, "409 Conflict", "clock_not_synced");
+    }
     // Same refusals, same order, as the manual upload: mode gate, OTA interlock, update claim.
     if (update_http_gate_refuses(req, "update download", ip)) {
         s_c->busy = 0;
@@ -803,6 +871,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 {
     char a[320];
     char b[768];
+    char rp[UPDATE_REPO_MAX + 48];
+    char repo_now[UPDATE_REPO_MAX];
     char running[UPDATE_VERSION_STR_MAX];
     char reason[FETCH_JSON_REASON_MAX];
     st_lock();
@@ -813,6 +883,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
              state_name(s->state), s->kind == KIND_CHECK ? "check" : "download", s->stage ? s->stage : "",
              s->error ? s->error : "", s->http_status, (unsigned)s->done, (unsigned)s->total,
              s_c->busy ? "true" : "false");
+    json_safe_copy(repo_now, sizeof(repo_now), s->repo);
     json_safe_copy(running, sizeof(running), s->running);
     json_safe_copy(reason, sizeof(reason), s->reason);
     snprintf(b, sizeof(b),
@@ -823,8 +894,15 @@ static esp_err_t status_get_handler(httpd_req_t *req)
              s->verdict ? s->verdict : "", reason, s->allowed ? "true" : "false",
              s->needs_typed_confirm ? "true" : "false", s->zones_cfg_lower ? "true" : "false");
     st_unlock();
+    // Before any job has run the repo is the configured setting. Every v1 release is unsigned (D4
+    // default repo, D5 any other repo; signature enforcement is M3), so every status says so.
+    if (repo_now[0] == '\0') {
+        json_safe_copy(repo_now, sizeof(repo_now), update_settings_repo());
+    }
+    snprintf(rp, sizeof(rp), "\"repo\":\"%s\",\"unsigned\":true,", repo_now);
     httpd_resp_set_type(req, "application/json");
     if (httpd_resp_send_chunk(req, a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+        httpd_resp_send_chunk(req, rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
         httpd_resp_send_chunk(req, b, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
         return ESP_FAIL;
     }

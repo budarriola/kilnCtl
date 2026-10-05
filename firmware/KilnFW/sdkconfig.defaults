@@ -605,3 +605,10 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+# DELIBERATELY NOT SET: CONFIG_MBEDTLS_HAVE_TIME_DATE. Without it mbedTLS does not compare the
+# certificate validity dates with the wall clock (chain, signature and hostname are still
+# verified). update_fetch.c instead refuses check and download until SNTP has synced (plan item 11),
+# so the clock is at least real, but an EXPIRED chain would be accepted. Turning it on is a
+# firmware-wide TLS behaviour change that cannot be proven here without a board (crt_bundle
+# against github.com with a synced clock, and every other TLS client). See
+# docs/GITHUB_RELEASE_UPDATE_PLAN.md WP8 status, "Clock".

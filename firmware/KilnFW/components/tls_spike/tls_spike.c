@@ -2,6 +2,7 @@
  * See docs/GITHUB_RELEASE_UPDATE_PLAN.md section 14. Never writes flash. */
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
@@ -16,6 +17,28 @@
 #include "freertos/task.h"
 
 static const char *TAG = "TLS_SPIKE";
+
+/* esp_http_client_get_header() returns REQUEST headers (IDF v6.0.2), so the redirect Location is
+ * captured from the response header event instead. Bounded; an overflow or a second Location
+ * counts as refused. Production twin: update_loc_capture_* in App/drivers/update/update_url.c. */
+static char s_loc[2048];
+static bool s_loc_seen;
+static bool s_loc_refused;
+
+static esp_err_t spike_http_event(esp_http_client_event_t *e)
+{
+    if (e->event_id == HTTP_EVENT_ON_HEADER && e->header_key != NULL && strcasecmp(e->header_key, "Location") == 0) {
+        size_t n = e->header_value != NULL ? strlen(e->header_value) : sizeof(s_loc);
+        if (s_loc_seen || n >= sizeof(s_loc)) {
+            s_loc_refused = true;
+            s_loc[0] = '\0';
+        } else {
+            memcpy(s_loc, e->header_value, n + 1);
+            s_loc_seen = true;
+        }
+    }
+    return ESP_OK;
+}
 
 static volatile uint32_t s_min_free_internal = UINT32_MAX;
 static volatile uint32_t s_min_largest_block = UINT32_MAX;
@@ -50,7 +73,7 @@ static bool is_redirect(int s) { return s == 301 || s == 302 || s == 303 || s ==
 
 static void one_chain(int iter)
 {
-    static char url[1024];
+    static char url[2048];
     strlcpy(url, CONFIG_KILNCTL_TLS_SPIKE_URL, sizeof url);
     uint8_t *chunk = heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!chunk) { ESP_LOGE(TAG, "no PSRAM chunk"); return; }
@@ -64,10 +87,14 @@ static void one_chain(int iter)
             .url = url,
             .timeout_ms = 20000,
             .buffer_size = 2048,
-            .buffer_size_tx = 1024,
+            .buffer_size_tx = 2048,
+            .event_handler = spike_http_event,
             .disable_auto_redirect = true,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
+        s_loc_seen = false;
+        s_loc_refused = false;
+        s_loc[0] = '\0';
         log_heap("pre_init");
         esp_http_client_handle_t c = esp_http_client_init(&cfg);
         if (!c) { ESP_LOGE(TAG, "init failed"); break; }
@@ -90,8 +117,8 @@ static void one_chain(int iter)
         ESP_LOGI(TAG, "hop %d status=%d content_length=%lld url_len=%u", hop, status, (long long)clen, (unsigned)strlen(url));
         log_heap("post_headers");
         if (is_redirect(status)) {
-            char *loc = NULL;
-            if (esp_http_client_get_header(c, "Location", &loc) == ESP_OK && loc) {
+            const char *loc = s_loc;
+            if (s_loc_seen && !s_loc_refused) {
                 ESP_LOGI(TAG, "redirect Location length=%u", (unsigned)strlen(loc));
                 if (strlen(loc) < sizeof url && strncmp(loc, "https://", 8) == 0) {
                     strlcpy(url, loc, sizeof url);

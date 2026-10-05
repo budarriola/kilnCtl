@@ -582,6 +582,11 @@ update_stage_t *update_http_stage(void)
     return &s_stage;
 }
 
+bool update_http_mode_gate_refuses(httpd_req_t *req, const char *what, const char *ip)
+{
+    return mode_gate_refuses(req, what, ip);
+}
+
 bool update_http_gate_refuses(httpd_req_t *req, const char *what, const char *ip)
 {
     return mode_gate_refuses(req, what, ip) || interlock_refuses(req, what, ip) || claim_refuses(req, what, ip);

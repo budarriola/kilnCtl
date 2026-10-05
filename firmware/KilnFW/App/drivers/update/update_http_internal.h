@@ -15,6 +15,10 @@ extern "C" {
 // The single stager instance (valid once update_http_start() has run).
 update_stage_t *update_http_stage(void);
 
+// The mode gate alone (409 while a firing or autotune runs), for a route that must not claim the
+// update slot (the release check). Returns true (response already sent) when refused.
+bool update_http_mode_gate_refuses(httpd_req_t *req, const char *what, const char *ip);
+
 // Mode gate, then OTA interlock, then the update claim, in the manual upload's order. Returns true
 // (response already sent) when refused. On false the claim is HELD: the caller releases it with
 // ota_http_update_end().

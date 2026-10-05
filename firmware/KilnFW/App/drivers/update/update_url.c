@@ -296,3 +296,49 @@ bool update_asset_url_matches(const char *url, const char *repo, const char *tag
     p++;
     return memcmp(p, name, nl) == 0;
 }
+
+// ---- Location capture ---------------------------------------------------------------------------
+void update_loc_capture_init(update_loc_capture_t *c, char *buf, size_t cap)
+{
+    if (c == NULL) {
+        return;
+    }
+    c->buf = buf;
+    c->cap = cap;
+    c->seen = false;
+    c->refused = (buf == NULL || cap == 0);
+    if (buf != NULL && cap > 0) {
+        buf[0] = '\0';
+    }
+}
+
+void update_loc_capture_feed(update_loc_capture_t *c, const char *key, const char *value)
+{
+    if (c == NULL || key == NULL || !(strlen(key) == 8 && ieq_n(key, "Location", 8))) {
+        return;
+    }
+    if (c->seen || value == NULL || c->buf == NULL) {
+        c->refused = true; // a second Location, or nothing to read: ambiguous
+        return;
+    }
+    c->seen = true;
+    size_t n = strnlen(value, c->cap);
+    if (n >= c->cap) {
+        c->refused = true; // would not fit with its NUL: never truncate a redirect target
+        c->buf[0] = '\0';
+        return;
+    }
+    memcpy(c->buf, value, n);
+    c->buf[n] = '\0';
+}
+
+const char *update_loc_capture_get(const update_loc_capture_t *c, bool *refused)
+{
+    if (refused != NULL) {
+        *refused = c != NULL && c->refused;
+    }
+    if (c == NULL || c->refused || !c->seen || c->buf == NULL || c->buf[0] == '\0') {
+        return NULL;
+    }
+    return c->buf;
+}

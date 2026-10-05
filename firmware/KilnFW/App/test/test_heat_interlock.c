@@ -46,6 +46,8 @@ static void test_esp_update_refuses(void)
                "an ESP update in progress refuses the heat-causing action");
     TEST_CHECK(strstr(reason, "ESP") != NULL, "reason names the ESP specifically");
     TEST_CHECK(strstr(reason, "update") != NULL, "reason says it's an update, not a generic refusal");
+    TEST_CHECK(strstr(reason, "/api/update/fetch/cancel") != NULL, "ESP reason names the fetch cancel route");
+    TEST_CHECK(strlen(reason) < HEAT_INTERLOCK_REASON_MAX, "ESP reason is not truncated by the 96-byte budget");
 }
 
 static void test_pico_update_refuses(void)

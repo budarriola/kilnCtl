@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define UPDATE_URL_MAX 1024 // incl. NUL; a signed release-assets redirect URL is long
+#define UPDATE_URL_MAX 2048 // incl. NUL; a signed release-assets redirect URL carries a JWT query
 #define UPDATE_HOST_MAX 64  // incl. NUL
 #define UPDATE_MAX_REDIRECTS 3
 #define UPDATE_REPO_MAX 141 // 39 + 1 + 100 + NUL
@@ -71,7 +71,9 @@ bool update_repo_valid(const char *repo);
 bool update_url_build_latest(const char *repo, char *out, size_t out_cap);
 
 // A release tag as GitHub hands it back and as the release tooling creates it:
-// ^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$ and at most 32 characters.
+// ^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$ and at most 32 characters (plus the semver rules).
+// gen_build_info.cmake's FW_RELEASE_VERSION regex must accept the same character set;
+// tools/check_release_version_regex.ps1 enforces that.
 bool update_tag_valid(const char *tag);
 
 // True when `url` is exactly
@@ -80,6 +82,24 @@ bool update_tag_valid(const char *tag);
 // This pins an asset URL taken from the release JSON to the configured repo,
 // the tag it claims, and the asset it claims to be.
 bool update_asset_url_matches(const char *url, const char *repo, const char *tag, const char *name);
+
+// Response `Location` capture. esp_http_client_get_header() reads the REQUEST headers (IDF v6.0.2),
+// so the redirect target has to be taken from the HTTP_EVENT_ON_HEADER events instead. This is the
+// pure, host-tested part: key compare is case-insensitive (HTTP field names are), the value is
+// copied into a caller-owned bounded buffer, and anything ambiguous (value too long for the buffer,
+// a second Location header) is REFUSED rather than truncated. Feed every response header, then read
+// the result with update_loc_capture_get().
+typedef struct {
+    char *buf;
+    size_t cap;
+    bool seen;
+    bool refused;
+} update_loc_capture_t;
+
+void update_loc_capture_init(update_loc_capture_t *c, char *buf, size_t cap);
+void update_loc_capture_feed(update_loc_capture_t *c, const char *key, const char *value);
+// Returns the captured Location, or NULL when none was seen or it was refused (*refused says which).
+const char *update_loc_capture_get(const update_loc_capture_t *c, bool *refused);
 
 #ifdef __cplusplus
 }

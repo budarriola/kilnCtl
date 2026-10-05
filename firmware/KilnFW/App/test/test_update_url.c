@@ -1,4 +1,5 @@
 // Host tests for App/drivers/update/update_url.c (GITHUB_RELEASE_UPDATE_PLAN.md WP8).
+#include <stdio.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -152,9 +153,13 @@ static void test_repo_and_builders(void)
     TEST_CHECK(!update_url_build_latest("a/b", url, 20) && url[0] == '\0', "small buffer refused");
 
     TEST_CHECK(update_tag_valid("v1.0.0") && update_tag_valid("v10.20.30-rc.1"), "valid tags");
+    TEST_CHECK(update_tag_valid("v1.2.3-rc-1") && update_tag_valid("v1.2.3-alpha-beta.2"),
+               "prerelease may contain '-'");
+    TEST_CHECK(update_tag_valid("v1.0.0-rc-01") && update_tag_valid("v123456789.0.0"), "edge tags accepted");
     static const char *const badtag[] = {"",         "1.0.0",       "v1.0",      "v1.0.0+build", "v1.0.0/x",
                                          "v1.0.0 ", "V1.0.0",      "v1.0.0-a%", "v01.0.0",      "vv1.0.0",
-                                         "v1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"};
+                                         "v1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "v1.2.3-01", "v1.2.3-rc.01", "v1.2.3-.",
+                                         "v1.2.3-rc..1", "v1234567890.0.0", "v1.2.3-"};
     for (size_t i = 0; i < sizeof(badtag) / sizeof(badtag[0]); i++) {
         TEST_CHECK(!update_tag_valid(badtag[i]), badtag[i]);
     }
@@ -196,6 +201,74 @@ static void test_asset_pin(void)
     TEST_CHECK(!update_asset_url_matches(NULL, r, "v1.2.3", "x"), "NULL url refused");
 }
 
+static void test_location_capture(void)
+{
+    TEST_SECTION("update_url -- response Location capture (event-handler side of redirects)");
+    char buf[64];
+    update_loc_capture_t c;
+    bool refused = true;
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Content-Type", "text/html");
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && !refused, "no Location header: NULL, not refused");
+
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Content-Type", "text/html");
+    update_loc_capture_feed(&c, "Location", "https://github.com/a");
+    const char *loc = update_loc_capture_get(&c, &refused);
+    TEST_CHECK(loc != NULL && !refused && strcmp(loc, "https://github.com/a") == 0, "Location captured");
+
+    const char *keys[] = {"location", "LOCATION", "LoCaTiOn"};
+    for (size_t i = 0; i < 3; i++) {
+        update_loc_capture_init(&c, buf, sizeof(buf));
+        update_loc_capture_feed(&c, keys[i], "https://github.com/b");
+        TEST_CHECK(update_loc_capture_get(&c, &refused) != NULL, keys[i]);
+    }
+
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "X-Location", "https://github.com/x");
+    update_loc_capture_feed(&c, "Locations", "https://github.com/x");
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && !refused, "similar header names ignored");
+
+    char big[80];
+    memset(big, 'a', sizeof(big));
+    big[sizeof(big) - 1] = '\0';
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Location", big);
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && refused, "overflow is refused, never truncated");
+
+    big[sizeof(buf)] = '\0'; // exactly cap bytes: no room for the NUL
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Location", big);
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && refused, "cap-length value refused");
+    big[sizeof(buf) - 1] = '\0'; // cap-1 bytes fits
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Location", big);
+    TEST_CHECK(update_loc_capture_get(&c, &refused) != NULL && !refused, "cap-1 value accepted");
+
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Location", "https://github.com/a");
+    update_loc_capture_feed(&c, "Location", "https://evil.com/");
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && refused, "duplicate Location refused");
+
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Location", NULL);
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && refused, "NULL value refused");
+    update_loc_capture_init(&c, NULL, 0);
+    update_loc_capture_feed(&c, "Location", "https://github.com/a");
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && refused, "no buffer refused");
+
+    // A long signed release-assets URL (JWT-sized query) fits the real limit and passes the checks.
+    static char jwt[UPDATE_URL_MAX];
+    static char store[UPDATE_URL_MAX];
+    int n = snprintf(jwt, sizeof(jwt), "https://release-assets.githubusercontent.com/github-production-release-asset/1?sp=r&sig=");
+    memset(jwt + n, 'A', 1500);
+    jwt[n + 1500] = '\0';
+    update_loc_capture_init(&c, store, sizeof(store));
+    update_loc_capture_feed(&c, "Location", jwt);
+    loc = update_loc_capture_get(&c, &refused);
+    TEST_CHECK(loc != NULL && update_redirect_check(0, loc) == UPDATE_URL_OK, "1.5 KB signed URL captured and allowed");
+}
+
 void run_test_update_url(void)
 {
     test_allowlist();
@@ -203,4 +276,5 @@ void run_test_update_url(void)
     test_redirects();
     test_repo_and_builders();
     test_asset_pin();
+    test_location_capture();
 }

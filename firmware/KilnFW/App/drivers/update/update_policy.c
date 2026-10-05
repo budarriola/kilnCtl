@@ -180,6 +180,31 @@ update_decision_t update_policy_decide(const update_identity_t *running, const u
     return d;
 }
 
+// Fetch-path rule on top of update_policy_decide(): when the running version is unknown (a dev
+// build, FW_RELEASE_VERSION ""), force=1 alone must not silently install an arbitrary release,
+// which may be a downgrade the policy cannot see. It also needs the typed confirm (the caller's
+// confirm_downgrade equal to the release tag), exactly as an explicit downgrade does.
+update_decision_t update_policy_decide_typed(const update_identity_t *running, const update_identity_t *candidate,
+                                             const update_policy_flags_t *flags, bool typed_confirm_ok)
+{
+    update_decision_t d = update_policy_decide(running, candidate, flags);
+    if (running == NULL || flags == NULL || !flags->force || typed_confirm_ok || !d.allowed ||
+        d.verdict != UPDATE_VERDICT_ALLOW_REINSTALL) {
+        return d;
+    }
+    update_semver_t run;
+    bool present;
+    if (parse_field(running->version, &run, &present)) {
+        return d; // version known: force keeps its ordinary same-version meaning
+    }
+    update_decision_t r = make(UPDATE_VERDICT_REFUSE_NEEDS_FORCE, false,
+                               "running version unknown; force also needs confirm_downgrade equal to the tag");
+    r.needs_typed_confirm = true;
+    r.semver_cmp = d.semver_cmp;
+    r.schema_newer = d.schema_newer;
+    return r;
+}
+
 const char *update_verdict_name(update_verdict_t v)
 {
     switch (v) {

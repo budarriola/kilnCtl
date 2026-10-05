@@ -58,7 +58,25 @@ endif()
 set(release_version "")
 if(DEFINED ENV{KILNCTL_RELEASE_VERSION})
     set(release_version "$ENV{KILNCTL_RELEASE_VERSION}")
-    if(NOT release_version MATCHES "^v[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.]+)?$")
+    # Must accept exactly what update_tag_valid() (update_url.c, via update_semver.c) accepts:
+    # core numbers 0 or 1-9 digits without a leading zero, a prerelease of non-empty dot-separated
+    # [0-9A-Za-z-] identifiers (so '-' is allowed inside: "v1.2.3-rc-1") whose all-digit identifiers
+    # have no leading zero, no build metadata, 6..32 characters in all. CMake regexes have no {n,m},
+    # hence the spelled-out digit limit. tools/check_release_version_regex.ps1 reads the two
+    # _RV_* variables below and keeps them in agreement with the host-test tag table.
+    set(_RV_TAG_REGEX "^v(0|[1-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?)\\.(0|[1-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?)\\.(0|[1-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?)(-[0-9A-Za-z.-]+)?$")
+    set(_RV_REJECT_REGEXES "\\.\\.;^v[0-9.]+-\\.;\\.$;^v[0-9.]+-$;(^v[0-9.]+-|\\.)0[0-9]+(\\.|$)")
+    string(LENGTH "${release_version}" _rv_len)
+    set(_rv_ok TRUE)
+    if(NOT release_version MATCHES "${_RV_TAG_REGEX}" OR _rv_len GREATER 32)
+        set(_rv_ok FALSE)
+    endif()
+    foreach(_rv_rx IN LISTS _RV_REJECT_REGEXES)
+        if(release_version MATCHES "${_rv_rx}")
+            set(_rv_ok FALSE)
+        endif()
+    endforeach()
+    if(NOT _rv_ok)
         set(release_version "")
     endif()
 endif()

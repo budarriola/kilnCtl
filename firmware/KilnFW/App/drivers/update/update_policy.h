@@ -94,6 +94,13 @@ typedef struct {
 update_decision_t update_policy_decide(const update_identity_t *running, const update_identity_t *candidate,
                                        const update_policy_flags_t *flags);
 
+// update_policy_decide() plus the fetch-path rule for an unknown running version: force=1 only
+// yields ALLOW_REINSTALL there when typed_confirm_ok (confirm_downgrade == the candidate tag).
+// Otherwise REFUSE_NEEDS_FORCE with needs_typed_confirm set. Known running version: identical to
+// update_policy_decide().
+update_decision_t update_policy_decide_typed(const update_identity_t *running, const update_identity_t *candidate,
+                                             const update_policy_flags_t *flags, bool typed_confirm_ok);
+
 const char *update_verdict_name(update_verdict_t v);
 
 // True for a 40-char lowercase-hex commit id.

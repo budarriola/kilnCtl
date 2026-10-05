@@ -26,8 +26,15 @@ heat_interlock_result_t heat_interlock_check(const heat_interlock_snapshot_t *sn
                 who = "a firmware update";
                 break;
         }
-        snprintf(reason_out, reason_cap, "%s is in progress -- heat cannot be commanded until it finishes",
-                 who);
+        if (snap->update_context == HEAT_INTERLOCK_UPDATE_ESP) {
+            // The ESP-side update may be a GitHub fetch that is stuck or unwanted; name the way out.
+            // Must stay within HEAT_INTERLOCK_REASON_MAX (96) -- test_heat_interlock.c checks it.
+            snprintf(reason_out, reason_cap,
+                     "%s is in progress; heat blocked (POST /api/update/fetch/cancel)", who);
+        } else {
+            snprintf(reason_out, reason_cap, "%s is in progress -- heat cannot be commanded until it finishes",
+                     who);
+        }
     }
     return HEAT_INTERLOCK_REFUSED;
 }

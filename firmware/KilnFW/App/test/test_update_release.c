@@ -280,6 +280,14 @@ static void test_manifest(void)
                "two app images refused");
     TEST_CHECK(man(mut(b, sizeof(b), "\"commit\"", "\"commit\":\"" COMMIT "\",\"commit\""), &m) == UPDATE_REL_E_JSON,
                "duplicate commit key refused");
+    TEST_CHECK(man(mut(b, sizeof(b), "\"name\":\"app\"", "\"name\":\"app\",\"name\":\"app\""), &m) == UPDATE_REL_E_JSON,
+               "duplicate image name key refused");
+    TEST_CHECK(man(mut(b, sizeof(b), "\"file\":\"KilnCtrl-v1.2.3.bin\"", "\"file\":\"KilnCtrl-v1.2.3.bin\",\"file\":\"KilnCtrl-v1.2.3.bin\""), &m) == UPDATE_REL_E_JSON,
+               "duplicate image file key refused");
+    TEST_CHECK(man(mut(b, sizeof(b), "\"size\":1234567", "\"size\":1234567,\"size\":1234567"), &m) == UPDATE_REL_E_JSON,
+               "duplicate image size key refused");
+    TEST_CHECK(man(mut(b, sizeof(b), "\"includes\"", "\"sha256\":\"" SHA_A "\",\"includes\""), &m) == UPDATE_REL_E_JSON,
+               "duplicate image sha256 key refused");
     TEST_CHECK(man("{\"schema\":1", &m) == UPDATE_REL_E_JSON, "truncated manifest refused");
     TEST_CHECK(update_release_parse_manifest(MANIFEST_OK, strlen(MANIFEST_OK), REPO, "bad", 1, &m) == UPDATE_REL_E_ARGS,
                "bad tag argument");

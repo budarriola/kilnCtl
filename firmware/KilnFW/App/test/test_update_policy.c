@@ -239,6 +239,35 @@ static void test_helpers(void)
     }
 }
 
+static void test_unknown_running_force_needs_typed(void)
+{
+    TEST_SECTION("update_policy -- unknown running version: force alone is not enough");
+    update_identity_t r = ident("", COMMIT_A), c = ident("v1.0.0", COMMIT_B);
+    update_policy_flags_t f = { false, false, true };
+    update_decision_t d = update_policy_decide_typed(&r, &c, &f, false);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE && !d.allowed && d.needs_typed_confirm,
+               "unknown running + force without typed confirm refused");
+    d = update_policy_decide_typed(&r, &c, &f, true);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_REINSTALL && d.allowed, "force + typed confirm allowed");
+    f.force = false;
+    d = update_policy_decide_typed(&r, &c, &f, true);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE && !d.allowed, "typed confirm without force still needs force");
+    r = ident("dev-3a243fea", COMMIT_A);
+    f.force = true;
+    TEST_CHECK(!update_policy_decide_typed(&r, &c, &f, false).allowed, "non-semver running treated as unknown");
+    r = ident("v1.0.0", COMMIT_A);
+    c = ident("v1.0.0", COMMIT_B);
+    TEST_CHECK(update_policy_decide_typed(&r, &c, &f, false).verdict == UPDATE_VERDICT_ALLOW_REINSTALL,
+               "known running version: force keeps its ordinary meaning");
+    r = ident("", COMMIT_A);
+    c = ident("v1.0.0", COMMIT_B);
+    c.zones_cfg_version = 25;
+    f.allow_downgrade = true;
+    TEST_CHECK(update_policy_decide_typed(&r, &c, &f, true).verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE,
+               "explicit typed downgrade unchanged");
+    TEST_CHECK(update_policy_decide_typed(NULL, &c, &f, false).verdict == UPDATE_VERDICT_REFUSE_MALFORMED, "NULL running");
+}
+
 void run_test_update_policy(void)
 {
     test_upgrade();
@@ -247,4 +276,5 @@ void run_test_update_policy(void)
     test_hard_refusals();
     test_malformed();
     test_helpers();
+    test_unknown_running_force_needs_typed();
 }
