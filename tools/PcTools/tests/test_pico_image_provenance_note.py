@@ -94,6 +94,8 @@ def test_note_says_slot_images_not_linked(tmp_path):
     app.write_bytes(b"\x00" * 5000)
     note = msf._pico_image_provenance_note(str(app))
     assert "NOT present in the app binary" in note
+    assert "rebuilt since this app was built" in note
+    assert "compiled OFF" in note
 
 
 def test_note_says_slot_embedded_without_record(tmp_path):

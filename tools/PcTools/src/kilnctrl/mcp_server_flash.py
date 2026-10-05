@@ -924,10 +924,10 @@ def _pico_image_absence_reason(app_bin_path: str, app_data: bytes) -> str:
             slot_data = f.read()
         off = pico_image_freshness.locate_embedded_image(app_data, slot_data)
         if off < 0:
-            return ("(SaftyFW_slotA.bin content is NOT present in the app binary: the slot images "
-                    "are not linked into this build -- the linker drops the EMBED_FILES objects "
-                    "while automatic Pico update is compiled OFF, "
-                    "PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=0)")
+            return ("(SaftyFW_slotA.bin content is NOT present in the app binary: not linked "
+                    "-- e.g. automatic Pico update compiled OFF, "
+                    "PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=0 -- or SaftyFW was rebuilt "
+                    "since this app was built)")
         return (f"(slot image IS embedded at app offset {off} but carries no valid "
                 "record -- stale or damaged slot image)")
     except Exception as exc:  # noqa: BLE001
