@@ -1926,15 +1926,20 @@ static void test_validate_on_off_rules_aux_targets(void)
     g_stub_aux[3].tc_zone = 1;
     TEST_CHECK(aux_rule_ok(11, 1, ON_OFF_TEMP_CMP_ABOVE, err, sizeof(err)),
               "temperature axis accepted with temp_source 1 and a tc_zone");
-    TEST_CHECK(!aux_rule_ok(11, 0, ON_OFF_TEMP_CMP_ABOVE, err, sizeof(err)),
-              "temperature axis with temp_source 0 refused (would be silently ignored)");
+    TEST_CHECK(!aux_rule_ok(11, 0, ON_OFF_TEMP_CMP_ABOVE, err, sizeof(err)) && strstr(err, "temp_source 1"),
+              "temperature axis with temp_source 0 refused with the temp_source 1 text (would be silently ignored)");
     TEST_CHECK(!aux_rule_ok(11, 2, 0, err, sizeof(err)) && strstr(err, "reserved"),
               "temp_source 2 reserved for aux targets");
 
     g_stub_aux[3].conflicted = true;
     g_stub_aux[3].enabled = false; /* forced disabled by a zone conflict */
-    TEST_CHECK(!aux_rule_ok(11, 0, 0, err, sizeof(err)), "a conflicted (forced-disabled) aux is refused");
+    TEST_CHECK(!aux_rule_ok(11, 0, 0, err, sizeof(err)) && strstr(err, "conflicted") &&
+                   !strstr(err, "not an enabled"),
+              "a conflicted (forced-disabled) aux is refused with its own 'conflicted' text");
     g_stub_aux[3].conflicted = false;
+    TEST_CHECK(!aux_rule_ok(11, 0, 0, err, sizeof(err)) && strstr(err, "not an enabled") &&
+                   !strstr(err, "conflicted"),
+              "a plainly disabled aux is refused with the 'not an enabled' text, distinct from conflicted");
 
     for (unsigned t = 3; t <= 7; t++) {
         TEST_CHECK(!aux_rule_ok((uint8_t)t, 0, 0, err, sizeof(err)) && strstr(err, "out of range"),
@@ -2498,6 +2503,112 @@ static void test_profile_post_handler_collision_response_escapes_newline_in_name
               "a collision response embedding a name with a raw newline must still be well-formed JSON");
     TEST_CHECK(strstr(s_resp_capture, "\\u000a") != NULL,
               "the newline must be escaped as \\u00XX, not left as a raw control byte");
+}
+
+// ---------------------------------------------------------------------------
+// WP-4 follow-up: the rule/target checks must hold on EVERY entry point, not
+// just profiles_http_save(). POST /api/profile and the live-edit accept path
+// both run profiles_validate_candidate() (live edit in HARD mode), which used
+// to skip validate_on_off_rules() entirely. Also: at most one rule per
+// (segment, target).
+// ---------------------------------------------------------------------------
+static profile_t aux_candidate_one_segment(void)
+{
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strcpy(p.name, "AuxCand");
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0].target_c = 100.0f;
+    p.segments[0].ramp_c_per_hr = 50.0f;
+    p.segments[0].dwell_min = 5;
+    g_stub_zone_max_temp_c[0] = 1300.0f;
+    g_stub_zone_max_ramp_c_per_hr[0] = 1000.0f;
+    return p;
+}
+
+static void test_aux_rule_checks_hold_on_every_entry_point(void)
+{
+    TEST_SECTION("rule target checks run from profiles_validate_candidate (POST + live edit) and duplicates are refused");
+    char err[224];
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+
+    for (int mode = 0; mode < 2; mode++) {
+        profile_validate_mode_t m = mode == 0 ? PROFILE_VALIDATE_HARD : PROFILE_VALIDATE_ADVISORY;
+        char warn[256];
+        profile_t p = aux_candidate_one_segment();
+        p.on_off_rule_count = 1;
+        p.on_off_rules[0].zone_index = 11; /* aux relay 4, currently disabled */
+        p.on_off_rules[0].enable = 1;
+        err[0] = '\0';
+        TEST_CHECK(!profiles_validate_candidate(&p, m, warn, sizeof(warn), err, sizeof(err)) &&
+                       strstr(err, "not an enabled aux output"),
+                  "candidate with a disabled-aux rule target is refused (HARD and ADVISORY)");
+        p.on_off_rules[0].zone_index = 200;
+        err[0] = '\0';
+        TEST_CHECK(!profiles_validate_candidate(&p, m, warn, sizeof(warn), err, sizeof(err)) &&
+                       strstr(err, "out of range"),
+                  "candidate with an out-of-range rule target is refused (HARD and ADVISORY)");
+
+        g_stub_aux[3].enabled = true;
+        p.on_off_rules[0].zone_index = 11;
+        TEST_CHECK(profiles_validate_candidate(&p, m, warn, sizeof(warn), err, sizeof(err)),
+                  "the same candidate is accepted once that aux is enabled");
+        p.on_off_rule_count = 2;
+        p.on_off_rules[1] = p.on_off_rules[0];
+        err[0] = '\0';
+        TEST_CHECK(!profiles_validate_candidate(&p, m, warn, sizeof(warn), err, sizeof(err)) &&
+                       strstr(err, "duplicates rule 0"),
+                  "a second rule on the same (segment, target) is refused");
+        memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    }
+
+    /* Same target on a DIFFERENT segment is fine. */
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    g_stub_aux[3].enabled = true;
+    profile_t q = aux_candidate_one_segment();
+    q.segment_count = 2;
+    q.segments[1] = q.segments[0];
+    q.on_off_rule_count = 2;
+    q.on_off_rules[0].zone_index = 11;
+    q.on_off_rules[0].segment_index = 0;
+    q.on_off_rules[1].zone_index = 11;
+    q.on_off_rules[1].segment_index = 1;
+    TEST_CHECK(validate_on_off_rules(&q, err, sizeof(err)), "same target on different segments is accepted");
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+
+    /* RELAY_IO segment on an aux-bound relay, via the candidate validator. */
+    g_stub_aux[3].enabled = true;
+    profile_t r = aux_candidate_one_segment();
+    r.segments[0].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    r.segments[0].io_state = 1;
+    r.segments[0].io_blocking = 1;
+    r.segments[0].io_target = 4;
+    g_zone_relay_mask_zone0 = 0x00;
+    err[0] = '\0';
+    TEST_CHECK(!profiles_validate_candidate(&r, PROFILE_VALIDATE_HARD, NULL, 0, err, sizeof(err)) &&
+                   strstr(err, "aux output"),
+              "live-edit (HARD) candidate with a RELAY_IO segment on an aux relay is refused");
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+
+    /* POST /api/profile with a rule aimed at a disabled aux / out-of-range / duplicate. */
+    const char *bad_bodies[3] = {
+        "id=-1&name=AuxPostA&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5"
+        "&rule0_zone=11&rule0_segment=0&rule0_enable=1",
+        "id=-1&name=AuxPostB&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5"
+        "&rule0_zone=200&rule0_segment=0&rule0_enable=1",
+        "id=-1&name=AuxPostC&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5"
+        "&rule0_zone=11&rule0_segment=0&rule0_enable=1&rule1_zone=11&rule1_segment=0&rule1_enable=1",
+    };
+    const char *want[3] = { "not an enabled aux output", "out of range", "duplicates rule 0" };
+    for (int i = 0; i < 3; i++) {
+        memset(&s_profiles, 0, sizeof(s_profiles));
+        g_stub_aux[3].enabled = (i == 2); /* the duplicate case must fail on duplication, not on a disabled aux */
+        TEST_CHECK(run_profile_post(bad_bodies[i]) == ESP_OK, "handler replies (400 body), not a transport error");
+        TEST_CHECK(strstr(s_resp_capture, "\"ok\":false") != NULL && strstr(s_resp_capture, want[i]) != NULL,
+                  "POST /api/profile refuses the bad rule with the validator's own message");
+    }
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
 }
 
 static void test_profile_post_handler_allows_builtin_name(void)
@@ -3091,6 +3202,7 @@ void run_test_profiles_http(void)
     test_profile_post_handler_collision_response_escapes_quote_in_name();
     test_profile_post_handler_collision_response_escapes_newline_in_name();
     test_profile_post_handler_allows_builtin_name();
+    test_aux_rule_checks_hold_on_every_entry_point();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
     test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();

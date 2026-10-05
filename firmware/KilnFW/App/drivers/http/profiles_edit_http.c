@@ -202,10 +202,12 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
      * wire -- the stored array itself may still end up sparse in the sense
      * that not every segment/zone pair has one, but the wire encoding is a
      * dense 0..N-1 list). Range/reference validation (segment exists, zone
-     * is ON_OFF, numeric bounds) is deliberately NOT duplicated here --
-     * validate_on_off_rules() (profiles_http.c) is the one place that runs,
-     * shared with the UART-bridge/import entry points, so a rule can never
-     * be accepted by one entry point and rejected by another. */
+     * is ON_OFF, numeric bounds) is deliberately NOT duplicated here -- this
+     * parser accepts any target byte 0..255 and leaves the verdict to
+     * validate_on_off_rules() (profiles_http.c), which runs from
+     * profiles_validate_candidate() (every POST /api/profile and live-edit
+     * path) and again from profiles_http_save() (UART bridge/import), so a
+     * rule can never be accepted by one entry point and rejected by another. */
     p->on_off_rule_count = 0;
     for (uint8_t i = 0; i < PROFILE_MAX_ON_OFF_RULES; i++) {
         char key[24];
@@ -226,7 +228,8 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
         }
         /* rule%u_zone is the rule TARGET byte: 0..2 = a zone, 8..11 = aux relay
          * 1..4 (profile_rule_target.h, SPARE_RELAY_ONOFF_PLAN sec 6). Passed
-         * through verbatim; validate_on_off_rules() owns the range/aux checks. */
+         * through verbatim; profiles_validate_candidate() ->
+         * validate_on_off_rules() owns the range/aux/duplicate checks. */
         r->zone_index = (uint8_t)zone_index;
 
         snprintf(key, sizeof(key), "rule%u_segment", i);
@@ -337,6 +340,27 @@ bool profiles_validate_candidate(const profile_t *candidate, profile_validate_mo
     bool have_warn_buf = warnings_json != NULL && warnings_json_cap > 0;
     if (have_warn_buf) {
         warnings_json[warn_o++] = '[';
+    }
+
+    /* Structural rule/segment checks come first, in EVERY mode: the live-edit
+     * accept path (profiles_live_http.c -> live_profile_save_working) and the
+     * executor's adopt step never reach profiles_http_save(), so without this a
+     * rule targeting a disabled aux, an out-of-range target or a duplicate
+     * (segment, target) pair was accepted there. The main save path runs the same
+     * two functions again inside profiles_http_save() -- identical code, identical
+     * messages, so the second pass can only repeat a verdict, never contradict it. */
+    if (candidate->on_off_rule_count > PROFILE_MAX_ON_OFF_RULES) {
+        snprintf(err_msg, err_cap, "on_off_rule_count out of range (0-%u)", (unsigned)PROFILE_MAX_ON_OFF_RULES);
+        return false;
+    }
+    for (uint8_t i = 0; i < candidate->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
+        if (candidate->segments[i].seg_kind == PROFILE_SEG_KIND_RELAY_IO &&
+            !validate_io_segment(&candidate->segments[i], (uint8_t)(i + 1), err_msg, err_cap)) {
+            return false;
+        }
+    }
+    if (!validate_on_off_rules(candidate, err_msg, err_cap)) {
+        return false;
     }
 
     /* Multi-zone (TODO.md 6A.5): check every participating zone's ceiling

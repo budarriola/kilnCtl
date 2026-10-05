@@ -1296,6 +1296,16 @@ bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err
                      i, r->segment_index, candidate->segment_count);
             return false;
         }
+        for (uint8_t j = 0; j < i; j++) {
+            /* At most one rule per (segment, target): the executor's resolver takes the
+             * first match and never looks for a second (profile_executor.c). */
+            if (candidate->on_off_rules[j].segment_index == r->segment_index &&
+                candidate->on_off_rules[j].zone_index == r->zone_index) {
+                snprintf(err_msg, err_cap, "rule %u: duplicates rule %u (segment %u, target %u) -- one rule per "
+                         "segment and target", i, j, r->segment_index, r->zone_index);
+                return false;
+            }
+        }
         if (profile_rule_target_is_aux(r->zone_index)) {
             /* Aux target (plan sec 6): the aux entry for that relay must be enabled
              * and not conflicted; a temperature axis needs a valid tc_zone and the
@@ -1303,7 +1313,18 @@ bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err
              * reserved. */
             uint8_t relay = profile_rule_target_aux_relay(r->zone_index);
             aux_output_t ax;
-            if (!aux_outputs_cfg_get(relay, &ax) || !ax.enabled) {
+            if (!aux_outputs_cfg_get(relay, &ax)) {
+                snprintf(err_msg, err_cap, "rule %u: aux relay %u cannot be read", i, relay);
+                return false;
+            }
+            if (ax.conflicted) {
+                snprintf(err_msg, err_cap,
+                         "rule %u: aux relay %u is conflicted (a zone also claims that relay) -- resolve it on the "
+                         "zones page first",
+                         i, relay);
+                return false;
+            }
+            if (!ax.enabled) {
                 snprintf(err_msg, err_cap,
                          "rule %u: aux relay %u is not an enabled aux output -- enable it on the zones page first",
                          i, relay);

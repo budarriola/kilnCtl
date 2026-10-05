@@ -8,7 +8,8 @@
 //   zone_index 0..2   a zone (must be typed ON_OFF, unchanged)
 //   zone_index 8..11  aux relay 1..4 (PROFILE_RULE_TARGET_AUX_BASE + relay - 1)
 //   anything else     invalid
-// Old firmware rejects 8..11 (out-of-range zone_index): fail loud, not silent.
+// Old firmware rejects 8..11 when SAVING a rule, but a rule already in NVS is not
+// re-validated on load: after a rollback it is silently inert, not loudly refused.
 #ifndef PROFILE_RULE_TARGET_H
 #define PROFILE_RULE_TARGET_H
 
