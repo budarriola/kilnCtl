@@ -82,7 +82,10 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     ``version`` plain semver, ``commit`` 40 lowercase hex), computes the
     sha256 and reads the board's current stage status, then sends nothing.
     ``version``/``commit`` are optional; the board reads the version from the
-    image's esp_app_desc when omitted.
+    image's esp_app_desc when omitted. If that embedded version is not semver
+    the board answers 400 bad_version; the result then says so and tells you
+    to retry with an explicit ``version="x.y.z"`` -- this tool never invents
+    one.
 
     With confirm: refuses while the board reports an upload already in
     flight; the result notes when a previously staged image was erased (an
@@ -136,6 +139,19 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
             return (f"UNKNOWN: the upload reply was lost or the board was unreachable ({exc}); "
                     f"read update_status -- NOT confirmed (host={resolved})")
         name = uhc.error_name(exc)
+        if exc.status == 400 and name == "bad_version":
+            if version:
+                why = (f"the version you passed ({version!r}) was not accepted as semver "
+                       "(or is 32+ characters)")
+            else:
+                why = ("no version was passed, so the board read the version embedded in the "
+                       "image's esp_app_desc, and that string is not valid semver (or is empty/"
+                       "too long)")
+            return (f"FAILED: board refused the upload: HTTP 400 bad_version -- {why}. "
+                    "Nothing was invented on your behalf. Retry with an explicit "
+                    "version=\"x.y.z\" (e.g. \"1.4.0\"; an optional leading v is stripped) "
+                    "that you choose for this image; a previously staged image may have been "
+                    f"erased (host={resolved})")
         return (f"FAILED: board refused the upload: HTTP {exc.status} {name or exc.detail!r}; "
                 f"a previously staged image may have been erased (host={resolved})")
     try:

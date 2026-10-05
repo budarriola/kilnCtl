@@ -296,6 +296,27 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     return _openocd_error_message(f"program failed for {peer}", output)
 
 
+def _reset_marker_line(post_state: "Optional[dict]") -> str:
+    """One line saying whether the reset script's markers were seen.
+
+    Lets a reader tell the dark-board path (reset issued, core never back to
+    `running`) from the healthy one without decoding the raw OpenOCD output.
+    ``post_state`` is ``debug_probe.parse_post_reset()``'s dict, or None when
+    the call was not an ESP run-mode reset (no markers exist then).
+    """
+    if post_state is None:
+        return ""
+    issued = "yes" if post_state["reset_issued"] else "NO (reset script never reached `reset run`)"
+    if post_state["missing"]:
+        state_check = "no KCTL_STATE line seen (state check did not complete)"
+    else:
+        state_check = "KCTL_STATE seen for " + ", ".join(sorted(post_state["states"]))
+    halted = post_state["still_halted"]
+    halted_txt = ("still_halted=" + ",".join(halted) + " (core not running: dark-board path)") \
+        if halted else "still_halted=none"
+    return f"reset markers: KCTL_RESET_ISSUED seen={issued}; {state_check}; {halted_txt}"
+
+
 @_core._tool()
 def debug_reset(
     peer: str,
@@ -405,10 +426,14 @@ def debug_reset(
         return (
             f"error: reset {peer} (run) FAILED -- {what}; the core is NOT confirmed running "
             "(board will likely be dark). Do not stack resets blindly; inspect with debug_read_registers.\n"
+            + _reset_marker_line(post_state) + "\n"
             + output.strip()
         )
     if ok:
         msg = f"reset {peer} ({mode}) OK"
+        marker_line = _reset_marker_line(post_state)
+        if marker_line:
+            msg += "\n" + marker_line
         if post_state is not None and post_state["states"]:
             msg += "\npost-reset target states: " + ", ".join(
                 f"{t}={st}" for t, st in post_state["states"].items())
@@ -423,7 +448,9 @@ def debug_reset(
                 "the board's state after the reset is UNVERIFIED."
             )
         return msg
-    return _openocd_error_message(f"reset failed for {peer}", output)
+    failed = _openocd_error_message(f"reset failed for {peer}", output)
+    marker_line = _reset_marker_line(post_state)
+    return f"{failed}\n{marker_line}" if marker_line else failed
 
 
 def _probe_esp_after_reset(window_s: float) -> "reset_probe.ProbeResult":

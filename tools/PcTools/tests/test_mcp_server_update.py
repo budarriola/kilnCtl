@@ -200,6 +200,30 @@ class UploadToolTest(_Base):
         self.assertTrue(out.startswith("FAILED"), out)
         self.assertIn("update_in_progress", out)
 
+    def test_bad_version_400_explained_and_no_version_invented(self):
+        self.board.refuse = (400, "bad_version")
+        out = msu.update_stage_upload(self.write_image(_image()), confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("bad_version", out)
+        self.assertIn("not valid semver", out)
+        self.assertIn('version="x.y.z"', out)
+        self.assertIn("Nothing was invented", out)
+        # the single POST carried no version header: nothing was made up
+        self.assertEqual(len(self.board.posts()), 1)
+        self.assertIsNone(self.board.posts()[0].get_header("X-stage-version"))
+
+    def test_bad_version_400_with_explicit_version_names_it(self):
+        self.board.refuse = (400, "bad_version")
+        out = msu.update_stage_upload(self.write_image(_image()), version="1.0", confirm=True)
+        self.assertIn("'1.0'", out)
+        self.assertIn('version="x.y.z"', out)
+
+    def test_other_400_keeps_generic_message(self):
+        self.board.refuse = (400, "bad_argument")
+        out = msu.update_stage_upload(self.write_image(_image()), confirm=True)
+        self.assertIn("bad_argument", out)
+        self.assertNotIn("semver", out)
+
     def test_lost_reply_is_unknown_not_ok(self):
         self.board.drop_reply = True
         out = msu.update_stage_upload(self.write_image(_image()), confirm=True)

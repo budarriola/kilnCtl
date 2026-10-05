@@ -231,7 +231,7 @@ class DebugResetWiringTest(unittest.TestCase):
         with unittest.mock.patch.object(md, "_probe_esp_after_reset") as probe:
             out = md.debug_reset(peer="esp", mode="run", verify=False)
         probe.assert_not_called()
-        self.assertEqual(out, "reset esp (run) OK")
+        self.assertTrue(out.startswith("reset esp (run) OK"), out)
         rec = self._history()[0]
         self.assertEqual(rec["probe_skipped"], "verify=False")
 

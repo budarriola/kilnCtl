@@ -73,7 +73,10 @@ access" constraint.
 """
 from __future__ import annotations
 
+import time
 from typing import Optional
+
+from mcpkit import build_jobs
 
 from . import mcp_server_core as _core
 from .devices_io import IO_RELAY_COUNT
@@ -438,6 +441,47 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
     }
     return _run_ota_matrix(ctx, cases=cases, tag=tag, allow_heat=allow_heat)
 
+
+@_core._tool()
+def ota_matrix_start(confirm: bool = False, dry_run: bool = False, cases: Optional[str] = None,
+                     host: Optional[str] = None,
+                     tag: Optional[str] = None, allow_heat: bool = False,
+                     ota_image_path: Optional[str] = None, ota_corrupt_image_path: Optional[str] = None,
+                     ota_truncated_image_path: Optional[str] = None,
+                     ota_wrong_build_image_path: Optional[str] = None,
+                     ota_image_build: Optional[str] = None,
+                     ota_pico_image_path: Optional[str] = None,
+                     ota_pico_image_commit: Optional[str] = None,
+                     ota_pico_corrupt_image_path: Optional[str] = None) -> str:
+    """Start `ota_matrix_run` in the background and return a job id at once.
+
+    Same arguments and gating as `ota_matrix_run` (read its docstring). A
+    `dry_run=True` call, or one without `confirm is True` exactly, is answered
+    synchronously by `ota_matrix_run` itself (case listing / refusal) and
+    starts no job. Otherwise the job runs that very tool function with
+    `confirm` and `allow_heat` passed through unchanged, so its run-level
+    preflight, the board lock and the per-case gates all still apply. Poll
+    with `bench_test_job_status(job_id, wait_s=100)`."""
+    kwargs = dict(cases=cases, host=host, tag=tag, allow_heat=allow_heat,
+                  ota_image_path=ota_image_path, ota_corrupt_image_path=ota_corrupt_image_path,
+                  ota_truncated_image_path=ota_truncated_image_path,
+                  ota_wrong_build_image_path=ota_wrong_build_image_path,
+                  ota_image_build=ota_image_build, ota_pico_image_path=ota_pico_image_path,
+                  ota_pico_image_commit=ota_pico_image_commit,
+                  ota_pico_corrupt_image_path=ota_pico_corrupt_image_path)
+    if dry_run or confirm is not True:
+        return ota_matrix_run(confirm=confirm, dry_run=dry_run, **kwargs)
+    started = time.time()
+    job_id = build_jobs.start_job(
+        "ota_matrix",
+        lambda: ota_matrix_run(confirm=confirm, dry_run=False, **kwargs),
+        {"cases": cases, "tag": tag, "allow_heat": allow_heat},
+        classify=_bt_tool.classify_bench_report,
+        progress=lambda: _bt_tool._runner_log_progress(started, _OTA_SUITE))
+    return (f"bench-job {job_id}: STARTED (ota_matrix). Poll "
+            f"bench_test_job_status(job_id=\"{job_id}\", wait_s=100); the run keeps "
+            f"going if you stop polling.")
+
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised
 # when this module is imported first (see mcp_server_core.py).
@@ -446,3 +490,4 @@ from . import mcp_server as _srv  # noqa: E402
 # aggregate at its own end, which would star-import this module half-initialised.
 from . import mcp_server_coordinated_gpio_test as _gpio_tool
 from . import mcp_server_ota as _ota_tool
+from . import mcp_server_bench_test as _bt_tool

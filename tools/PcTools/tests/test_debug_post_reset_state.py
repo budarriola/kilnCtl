@@ -112,6 +112,38 @@ class McpResetTest(_Base):
         self.assertFalse(rec["openocd_ok"])
 
 
+    def test_healthy_path_states_marker_seen_and_nothing_halted(self):
+        msg, _rec = self._call("KCTL_RESET_ISSUED\nKCTL_STATE esp32s3.cpu0 running\n"
+                               "KCTL_STATE esp32s3.cpu1 running\n")
+        self.assertTrue(msg.startswith("reset esp (run) OK"), msg)
+        self.assertIn("KCTL_RESET_ISSUED seen=yes", msg)
+        self.assertIn("KCTL_STATE seen for esp32s3.cpu0, esp32s3.cpu1", msg)
+        self.assertIn("still_halted=none", msg)
+        self.assertNotIn("dark-board", msg)
+
+    def test_dark_path_states_marker_and_still_halted(self):
+        msg, _rec = self._call("KCTL_RESET_ISSUED\nKCTL_STATE esp32s3.cpu0 halted\n"
+                               "KCTL_RESUMED esp32s3.cpu0\nKCTL_FINAL esp32s3.cpu0 halted\n")
+        self.assertTrue(msg.startswith("error: reset esp (run) FAILED"), msg)
+        self.assertIn("KCTL_RESET_ISSUED seen=yes", msg)
+        self.assertIn("still_halted=esp32s3.cpu0", msg)
+        self.assertIn("dark-board path", msg)
+
+    def test_marker_never_seen_is_reported_not_hidden(self):
+        msg, _rec = self._call("KCTL_STATE esp32s3.cpu0 running\n")
+        self.assertIn("KCTL_RESET_ISSUED seen=NO", msg)
+
+    def test_no_state_lines_at_all_is_reported(self):
+        msg, _rec = self._call("plain openocd chatter\n")
+        self.assertIn("no KCTL_STATE line seen", msg)
+
+    def test_pico_reset_has_no_marker_line(self):
+        self.run_mock.return_value = (True, "x")
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(debug_probe, "_repo_root", return_value=d):
+            msg = md.debug_reset("pico", "run", verify=False)
+        self.assertNotIn("KCTL_RESET_ISSUED", msg)
+
 class RegistersTest(_Base):
     def test_esp_list_has_no_cortex_m_regs(self):
         debug_probe.read_registers(debug_probe.PEER_ESP)

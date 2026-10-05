@@ -107,20 +107,34 @@ def classify_report(report: str) -> str:
     return "ok" if verdicts and all(v == "OK" for v in verdicts) else "failed"
 
 
+#: Keys of a live job dict that are not JSON-serialisable and so never persisted.
+_NON_PERSISTED = ("done", "progress", "classify")
+
+
 def start_job(tool: str, runner: "Callable[[], str]", params: "dict[str, Any]",
-              artifacts: "Optional[list[str]]" = None) -> str:
-    """Run ``runner`` on a daemon thread; return the new job id."""
+              artifacts: "Optional[list[str]]" = None,
+              classify: "Optional[Callable[[str], str]]" = None,
+              progress: "Optional[Callable[[], str]]" = None) -> str:
+    """Run ``runner`` on a daemon thread; return the new job id.
+
+    ``classify`` maps the finished report to the job state (default
+    :func:`classify_report`, which understands workbench build reports).
+    ``progress`` is called by :func:`job_status` while the job is still running
+    and returns a short text (e.g. a log tail); it must never raise and is
+    never persisted.
+    """
     job_id = uuid.uuid4().hex[:8]
     job: "dict[str, Any]" = {
         "id": job_id, "tool": tool, "params": params, "state": "running",
         "started": time.time(), "finished": None, "report": None,
         "artifacts": list(artifacts or []), "done": threading.Event(),
+        "progress": progress, "classify": classify or classify_report,
     }
 
     def work() -> None:
         try:
             report = runner()
-            state = classify_report(report)
+            state = job["classify"](report)
         except BaseException:  # noqa: BLE001 - a job thread must never vanish silently
             report = f"{tool}: FAILED (job thread raised)\n{traceback.format_exc()}"
             state = "failed"
@@ -129,7 +143,7 @@ def start_job(tool: str, runner: "Callable[[], str]", params: "dict[str, Any]",
             # Persist BEFORE publishing the state, so a caller that sees a
             # finished state can always also find the result file.
             try:
-                record = {k: v for k, v in job.items() if k != "done"}
+                record = {k: v for k, v in job.items() if k not in _NON_PERSISTED}
                 record.update(report=report, state=state, finished=finished_at)
                 _write_result(job_id, record)
             except Exception:  # noqa: BLE001 - persistence is best-effort
@@ -161,8 +175,13 @@ def _artifact_lines(paths: "list[str]") -> "list[str]":
     return lines
 
 
-def job_status(job_id: str, wait_s: float = 0.0) -> str:
-    """Report a job; optionally block up to ``wait_s`` (capped) for it to finish."""
+def job_status(job_id: str, wait_s: float = 0.0, noun: str = "build-job",
+               poll_tool: str = "build_job_status") -> str:
+    """Report a job; optionally block up to ``wait_s`` (capped) for it to finish.
+
+    ``noun``/``poll_tool`` only change the wording, so a non-build job (a bench
+    run) reads as what it is.
+    """
     try:
         wait_s = float(wait_s)
     except (TypeError, ValueError):
@@ -170,7 +189,7 @@ def job_status(job_id: str, wait_s: float = 0.0) -> str:
     if not math.isfinite(wait_s) or wait_s < 0:
         wait_s = MAX_WAIT_S if wait_s == math.inf else 0.0
     if not _JOB_ID.match(str(job_id)):
-        return f"build-job {job_id!r}: invalid job id (expected 8 hex characters)"
+        return f"{noun} {job_id!r}: invalid job id (expected 8 hex characters)"
     with _lock:
         job = _jobs.get(job_id)
     if job is None:
@@ -178,19 +197,27 @@ def job_status(job_id: str, wait_s: float = 0.0) -> str:
             with open(_job_file(job_id), encoding="utf-8") as handle:
                 job = json.load(handle)
         except (OSError, ValueError):
-            return (f"build-job {job_id}: unknown -- not in this server's memory and no "
-                    f"result file (the server may have restarted mid-build; check the "
-                    f"build directory)")
+            return (f"{noun} {job_id}: unknown -- not in this server's memory and no "
+                    f"result file (the server may have restarted mid-run; check the "
+                    f"build/run directory)")
     elif wait_s > 0 and job["state"] == "running":
         job["done"].wait(min(wait_s, MAX_WAIT_S))
     state = job["state"]
     end = job["finished"] or time.time()
-    head = f"build-job {job['id']} ({job['tool']}): {state.upper()} after {end - job['started']:.1f}s"
+    head = f"{noun} {job['id']} ({job['tool']}): {state.upper()} after {end - job['started']:.1f}s"
     parts = [head]
     if job["artifacts"]:
         parts.append("artifacts:\n" + "\n".join(_artifact_lines(job["artifacts"])))
     if state == "running":
-        parts.append("still running; call build_job_status again (wait_s up to "
+        tail_fn = job.get("progress")
+        if tail_fn is not None:
+            try:
+                tail = tail_fn()
+            except Exception as exc:  # noqa: BLE001 - progress is best-effort
+                tail = f"(progress unavailable: {type(exc).__name__}: {exc})"
+            if tail:
+                parts.append("progress:\n" + tail)
+        parts.append(f"still running; call {poll_tool} again (wait_s up to "
                      f"{int(MAX_WAIT_S)} blocks until done)")
     else:
         parts.append("--\n" + (job["report"] or "(no report)"))

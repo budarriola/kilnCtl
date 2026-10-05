@@ -10,13 +10,18 @@ implemented yet.
 """
 from __future__ import annotations
 
+import os
+import re
+import time
 from typing import Optional
+
+from mcpkit import build_jobs
 
 from . import mcp_server_core as _core
 from .bench_test import board_lock as bt_board_lock
 from .bench_test import registry as bt_registry
 from .bench_test import report as bt_report
-from .bench_test.runner import BenchTestRunner
+from .bench_test.runner import RUNNER_LOG_NAME, BenchTestRunner
 
 
 @_core._tool()
@@ -168,6 +173,98 @@ def bench_test_last(n: int = 1) -> str:
             reason = f" -- {case['reason']}" if case.get("reason") else ""
             lines.append(f"  {cid}: {case['verdict']}{reason}")
     return "\n".join(lines)
+
+
+# --- background runs: start now, poll later --------------------------------
+#
+# A long suite outlasts the MCP client's 300 s idle watchdog (the run keeps
+# going server-side, the caller loses the result). bench_test_start /
+# bench_test_job_status mirror build_kilnfw_start / build_job_status on the
+# same mcpkit.build_jobs registry. The job body calls the REAL bench_test_run /
+# ota_matrix_run tool function with the caller's arguments unchanged, so the
+# board lock, preflight, confirm and allow_heat gates all still run, exactly
+# once, inside that call -- nothing here re-implements or skips one.
+
+_EXIT_CODE_RE = re.compile(r"exit_code=(\d+)")
+_PROGRESS_TAIL_LINES = 12
+
+
+def classify_bench_report(report: str) -> str:
+    """Job state from a bench_test_run/ota_matrix_run report: ``ok`` only for
+    exit_code 0 (all PASS), ``incomplete`` for 3 (nothing FAILed but something
+    SKIPped/INCONCLUSIVE/NOT_RUN), else ``failed`` (including every ``error:``
+    refusal, which has no exit_code line)."""
+    first = (report or "").splitlines()[0] if report else ""
+    m = _EXIT_CODE_RE.search(first)
+    if not m or first.startswith("error"):
+        return "failed"
+    code = int(m.group(1))
+    return "ok" if code == 0 else "incomplete" if code == 3 else "failed"
+
+
+def _runner_log_progress(started: float, suite: str, logs_root: Optional[str] = None) -> str:
+    """Tail of runner.log of the newest run directory for ``suite`` created at
+    or after ``started``. A placeholder when the runner has not made one yet
+    (still in preflight/host resolution) -- never raises."""
+    root = logs_root or bt_report.default_logs_root()
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", suite)
+    try:
+        candidates = [os.path.join(root, n) for n in os.listdir(root)
+                      if f"_{safe}" in n and os.path.isdir(os.path.join(root, n))]
+        candidates = [c for c in candidates if os.path.getmtime(c) >= started - 2.0]
+        if not candidates:
+            return "(no run directory yet: runner still starting)"
+        run_dir = max(candidates, key=os.path.getmtime)
+        with open(os.path.join(run_dir, RUNNER_LOG_NAME), encoding="utf-8", errors="replace") as fh:
+            tail = fh.read().splitlines()[-_PROGRESS_TAIL_LINES:]
+    except OSError:
+        return "(runner.log not readable yet)"
+    return bt_report._redact(f"run dir: {run_dir}\n" + "\n".join(tail))
+
+
+@_core._tool()
+def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = False,
+                      allow_heat: bool = True, lcd_stop_heat: bool = False,
+                      lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
+                      tag: Optional[str] = None, host: Optional[str] = None,
+                      attended: bool = False, allow_flash: bool = False) -> str:
+    """Start `bench_test_run` in the background and return a job id at once.
+
+    Same arguments, same meaning, same gating as `bench_test_run` (read its
+    docstring): the job runs that very tool function, so the board lock,
+    preflight and every opt-in flag (`allow_heat`, `lcd_stop_heat`,
+    `lcd_edit_heat`, `ota_allow_heat`, `allow_flash`) apply unchanged, and a
+    refusal (`error: refused -- ...`) comes back as the job's FAILED report.
+    Use this for any suite that can outlast the MCP client's 300 s idle
+    watchdog. Poll with `bench_test_job_status(job_id, wait_s=100)`; the run
+    keeps going if you stop polling. A server restart loses a run that was
+    still going (check logs/bench_test/<run>/runner.log)."""
+    started = time.time()
+    job_id = build_jobs.start_job(
+        f"bench_test:{suite}",
+        lambda: bench_test_run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
+                               lcd_stop_heat=lcd_stop_heat, lcd_edit_heat=lcd_edit_heat,
+                               ota_allow_heat=ota_allow_heat, tag=tag, host=host,
+                               attended=attended, allow_flash=allow_flash),
+        {"suite": suite, "cases": cases, "dry_run": dry_run, "allow_heat": allow_heat,
+         "tag": tag},
+        classify=classify_bench_report,
+        progress=lambda: _runner_log_progress(started, suite))
+    return (f"bench-job {job_id}: STARTED (bench_test:{suite}). Poll "
+            f"bench_test_job_status(job_id=\"{job_id}\", wait_s=100); the run keeps "
+            f"going if you stop polling.")
+
+
+@_core._tool()
+def bench_test_job_status(job_id: str, wait_s: float = 0.0) -> str:
+    """Report a background run started by `bench_test_start` or
+    `ota_matrix_start`: RUNNING (with the tail of the run's runner.log), then
+    OK (exit_code 0) / INCOMPLETE (exit_code 3: skips/inconclusive) / FAILED,
+    plus the same report the synchronous tool prints. `wait_s` blocks up to
+    that many seconds (capped at 120, under the client idle watchdog) for
+    completion. Results survive a server restart in a file under the temp
+    `kilnctl-builds` directory; a run still going at restart reports unknown."""
+    return build_jobs.job_status(job_id, wait_s, noun="bench-job", poll_tool="bench_test_job_status")
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised
