@@ -516,6 +516,8 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * rule() (profile_executor.c) only honors temp_cmp when temp_source == 1,
      * so this field must round-trip or the editor's own preview would lie
      * about which rules are actually armed. */
+    /* "zone" is the rule target byte: 0..2 a zone, 8..11 aux relay 1..4
+     * (profile_rule_target.h). Same key, same numeric echo -- no new field. */
     for (uint8_t i = 0; i < p->on_off_rule_count; i++) {
         const profile_on_off_rule_t *r = &p->on_off_rules[i];
         APPEND("%s{\"zone\":%u,\"segment\":%u,\"enable\":%u,\"phase_mask\":%u,\"direction_mask\":%u,"

@@ -474,6 +474,24 @@ bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type)
     return zone_index < 8;
 }
 
+// ---- aux_outputs_cfg.h -- spare-relay aux outputs (WP-4). Controllable per test;
+// default: every aux disabled (today's behaviour). g_stub_aux[i] = relay i+1.
+static aux_output_t g_stub_aux[AUX_OUTPUTS_COUNT];
+bool aux_outputs_cfg_get(uint8_t relay, aux_output_t *out)
+{
+    if (relay < 1 || relay > AUX_OUTPUTS_COUNT || !out) return false;
+    *out = g_stub_aux[relay - 1];
+    return true;
+}
+uint8_t aux_outputs_cfg_enabled_mask(void)
+{
+    uint8_t m = 0;
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        if (g_stub_aux[i].enabled && !g_stub_aux[i].conflicted) m |= (uint8_t)(1u << i);
+    }
+    return m;
+}
+
 // Controllable by test_validate_io_segment_zone_ownership() -- bit N-1 of
 // this mask set means "zone 0 owns relay N", matching zone_cfg_t::relay_mask's
 // own bit convention. Every other zone (1-7) always reports "no mask", same
@@ -1870,6 +1888,120 @@ static void test_validate_on_off_rules_rejects_heater_zone(void)
 }
 
 // ---------------------------------------------------------------------------
+// WP-4 (SPARE_RELAY_ONOFF_PLAN sec 6/14): rule targets 8..11 address aux relay
+// 1..4. Valid/invalid matrix, plus the RELAY_IO-on-aux refusal and the
+// unchanged zone path.
+// ---------------------------------------------------------------------------
+static bool aux_rule_ok(uint8_t target, uint8_t temp_source, uint8_t temp_cmp, char *err, size_t cap)
+{
+    profile_t p = make_stored_profile();
+    p.on_off_rule_count = 1;
+    memset(&p.on_off_rules[0], 0, sizeof(p.on_off_rules[0]));
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].zone_index = target;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].temp_source = temp_source;
+    p.on_off_rules[0].temp_cmp = temp_cmp;
+    p.on_off_rules[0].temp_threshold_c = 100.0f;
+    return validate_on_off_rules(&p, err, cap);
+}
+
+static void test_validate_on_off_rules_aux_targets(void)
+{
+    TEST_SECTION("validate_on_off_rules -- aux targets 8..11");
+    char err[200] = "";
+    memset(g_stub_zone_type, 0, sizeof(g_stub_zone_type));
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+
+    TEST_CHECK(!aux_rule_ok(11, 0, 0, err, sizeof(err)) && strstr(err, "not an enabled aux output"),
+              "target 11 refused while aux relay 4 is disabled");
+
+    g_stub_aux[3].enabled = true; /* relay 4 */
+    g_stub_aux[3].tc_zone = AUX_TC_ZONE_NONE;
+    TEST_CHECK(aux_rule_ok(11, 0, 0, err, sizeof(err)), "target 11 accepted with aux relay 4 enabled (no temp axis)");
+    TEST_CHECK(!aux_rule_ok(8, 0, 0, err, sizeof(err)), "target 8 (relay 1) refused: that aux is disabled");
+
+    TEST_CHECK(!aux_rule_ok(11, 1, ON_OFF_TEMP_CMP_ABOVE, err, sizeof(err)) && strstr(err, "thermocouple zone"),
+              "temperature axis refused when the aux has no tc_zone");
+    g_stub_aux[3].tc_zone = 1;
+    TEST_CHECK(aux_rule_ok(11, 1, ON_OFF_TEMP_CMP_ABOVE, err, sizeof(err)),
+              "temperature axis accepted with temp_source 1 and a tc_zone");
+    TEST_CHECK(!aux_rule_ok(11, 0, ON_OFF_TEMP_CMP_ABOVE, err, sizeof(err)),
+              "temperature axis with temp_source 0 refused (would be silently ignored)");
+    TEST_CHECK(!aux_rule_ok(11, 2, 0, err, sizeof(err)) && strstr(err, "reserved"),
+              "temp_source 2 reserved for aux targets");
+
+    g_stub_aux[3].conflicted = true;
+    g_stub_aux[3].enabled = false; /* forced disabled by a zone conflict */
+    TEST_CHECK(!aux_rule_ok(11, 0, 0, err, sizeof(err)), "a conflicted (forced-disabled) aux is refused");
+    g_stub_aux[3].conflicted = false;
+
+    for (unsigned t = 3; t <= 7; t++) {
+        TEST_CHECK(!aux_rule_ok((uint8_t)t, 0, 0, err, sizeof(err)) && strstr(err, "out of range"),
+                  "targets 3..7 are refused as out of range");
+    }
+    TEST_CHECK(!aux_rule_ok(12, 0, 0, err, sizeof(err)) && strstr(err, "out of range"), "target 12 refused");
+    TEST_CHECK(!aux_rule_ok(255, 0, 0, err, sizeof(err)), "target 255 refused");
+
+    /* zone path unchanged: heater refused, on/off zone accepted */
+    TEST_CHECK(!aux_rule_ok(1, 0, 0, err, sizeof(err)), "zone 1 (HEATER) still refused");
+    g_stub_zone_type[1] = ZONE_TYPE_ON_OFF;
+    TEST_CHECK(aux_rule_ok(1, 0, 0, err, sizeof(err)), "zone 1 typed ON_OFF still accepted");
+    memset(g_stub_zone_type, 0, sizeof(g_stub_zone_type));
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+}
+
+static void test_aux_rule_survives_real_save_and_load(void)
+{
+    TEST_SECTION("aux rule target 10 round-trips through the real save/load");
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    g_stub_aux[2].enabled = true; /* relay 3 -> target 10 */
+    g_stub_aux[2].tc_zone = 0;
+    profile_t p = make_stored_profile();
+    p.on_off_rule_count = 1;
+    memset(&p.on_off_rules[0], 0, sizeof(p.on_off_rules[0]));
+    p.on_off_rules[0].zone_index = 10;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW;
+    p.on_off_rules[0].temp_threshold_c = 300.0f;
+    char err[160] = "";
+    uint8_t out_id = 0;
+    uint8_t warn = 0;
+    bool ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn, err, sizeof(err));
+    TEST_CHECK(ok, "save of a profile with an aux rule succeeds while that aux is enabled");
+    profile_t back;
+    TEST_CHECK(ok && profiles_http_get(out_id, &back) && back.on_off_rule_count == 1 &&
+                   back.on_off_rules[0].zone_index == 10 && back.on_off_rules[0].temp_cmp == ON_OFF_TEMP_CMP_BELOW,
+              "the stored rule keeps target byte 10 and its fields");
+    g_stub_aux[2].enabled = false;
+    ok = profiles_http_save(PROFILES_MAX_COUNT, &p, &out_id, &warn, err, sizeof(err));
+    TEST_CHECK(!ok, "the same save is refused once the aux is disabled");
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+}
+
+static void test_validate_io_segment_refuses_aux_bound_relay(void)
+{
+    TEST_SECTION("validate_io_segment -- a relay bound to an enabled aux output is refused");
+    profile_segment_t seg;
+    char err[160];
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_state = 1;
+    seg.io_blocking = 1;
+    seg.io_target = 4;
+    g_zone_relay_mask_zone0 = 0x00;
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    TEST_CHECK(validate_io_segment(&seg, 1, err, sizeof(err)), "relay 4 accepted while no aux binds it");
+    g_stub_aux[3].enabled = true;
+    TEST_CHECK(!validate_io_segment(&seg, 1, err, sizeof(err)) && strstr(err, "aux output"),
+              "relay 4 refused while aux relay 4 is enabled");
+    seg.io_target = 3;
+    TEST_CHECK(validate_io_segment(&seg, 1, err, sizeof(err)), "relay 3 still accepted (only relay 4 is aux)");
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+}
+
+// ---------------------------------------------------------------------------
 // Test 5 -- validate_io_segment(): a zone-assigned relay is REFUSED as a
 // segment target, and a genuinely unassigned one is ACCEPTED. Both
 // directions on purpose -- a gate that refuses everything is not a fix.
@@ -2941,6 +3073,9 @@ void run_test_profiles_http(void)
     test_profile_detail_json_valid_at_max_capacity();
     test_profiles_list_carries_last_run_started_unix_s();
     test_validate_io_segment_zone_ownership();
+    test_validate_on_off_rules_aux_targets();
+    test_aux_rule_survives_real_save_and_load();
+    test_validate_io_segment_refuses_aux_bound_relay();
     test_validate_io_segment_drdy_lcd_gap_refused();
     test_profiles_http_save_accepts_cone10_profile_on_80c_zone();
     test_profiles_http_save_accepts_in_range_profile();

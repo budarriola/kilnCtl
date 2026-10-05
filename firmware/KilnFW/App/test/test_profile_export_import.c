@@ -393,9 +393,36 @@ static void test_out_of_range_temp_c_is_not_stored_unbounded(void)
               "even when temp_cmp is NONE and the value is otherwise unused");
 }
 
+// WP-4: an aux target (zone byte 8..11 = aux relay 1..4) is carried through
+// import verbatim under the same "zone" key; the handler does not interpret it
+// (profiles_http_save()'s validate_on_off_rules() does, faked here).
+#define MAKE_BODY_WITH_AUX_RULES                                                                  \
+    "{\"kind\":\"kilnctl_profile\",\"version\":2,\"name\":\"Cone6\",\"zone_mask\":1,"              \
+    "\"segments\":[{\"seg_kind\":0,\"target_c\":1200,\"ramp_c_per_hr\":100,"                       \
+    "\"dwell_min\":30,\"io_target\":0,\"io_state\":0,\"io_blocking\":0,"                           \
+    "\"io_leave_on_at_end\":0}],"                                                                   \
+    "\"on_off_rules\":[{\"zone\":11,\"segment\":0,\"enable\":1,\"temp_source\":1,"                  \
+    "\"temp_cmp\":1,\"temp_c\":100,\"time_start_s\":0,\"time_stop_s\":0,\"invert\":0},"             \
+    "{\"zone\":8,\"segment\":0,\"enable\":1}]}"
+
+static void test_aux_target_byte_round_trips_through_import(void)
+{
+    reset_state();
+    esp_err_t err = run_import(MAKE_BODY_WITH_AUX_RULES);
+    TEST_CHECK(err == ESP_OK, "an export carrying aux targets 11 and 8 imports");
+    TEST_CHECK(s_last_saved.on_off_rule_count == 2, "both rules imported");
+    TEST_CHECK(s_last_saved.on_off_rules[0].zone_index == 11, "aux target 11 survives import verbatim");
+    TEST_CHECK(s_last_saved.on_off_rules[1].zone_index == 8, "aux target 8 survives import verbatim");
+    TEST_CHECK(s_last_saved.on_off_rules[0].temp_source == 1, "temp_source 1 survives for an aux rule");
+    reset_state();
+    TEST_CHECK(run_import(MAKE_BODY_WITH_RULE) == ESP_OK && s_last_saved.on_off_rules[0].zone_index == 2,
+              "an old-style zone-targeted rule still imports as zone 2");
+}
+
 int main(void)
 {
     TEST_SECTION("profile_export_import");
+    test_aux_target_byte_round_trips_through_import();
 
     test_valid_dwell_min_is_accepted();
     test_dwell_min_at_bound_is_accepted();

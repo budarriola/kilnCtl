@@ -224,6 +224,9 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
             snprintf(err_msg, err_cap, "rule %u: zone missing or out of range", i);
             return false;
         }
+        /* rule%u_zone is the rule TARGET byte: 0..2 = a zone, 8..11 = aux relay
+         * 1..4 (profile_rule_target.h, SPARE_RELAY_ONOFF_PLAN sec 6). Passed
+         * through verbatim; validate_on_off_rules() owns the range/aux checks. */
         r->zone_index = (uint8_t)zone_index;
 
         snprintf(key, sizeof(key), "rule%u_segment", i);

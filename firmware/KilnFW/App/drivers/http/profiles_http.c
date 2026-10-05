@@ -34,6 +34,8 @@
                                   * PROFILE_SLOTS_100_PLAN.md section 7). */
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
+#include "aux_outputs_cfg.h"   /* aux_outputs_cfg_get()/_enabled_mask() -- spare-relay targets (WP-4) */
+#include "profile_rule_target.h" /* zone_index 8..11 = aux relay 1..4 */
 #include "on_off_trigger_decide.h" /* on_off_phase_bit_t/on_off_direction_bit_t/on_off_temp_cmp_t --
                                      * validate_on_off_rules() bounds-checks against these same bit
                                      * layouts so a stored rule can never encode a bit the decision
@@ -1243,6 +1245,16 @@ bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *er
                     seg_num, t, owning_zone);
             return false;
         }
+        /* Owner decision 2026-10-04 (plan sec 14 item 10): a relay bound to an
+         * ENABLED aux output belongs to the aux evaluator; a RELAY_IO segment
+         * on it would fight the aux rule. Refused at save. */
+        if ((aux_outputs_cfg_enabled_mask() & (uint8_t)(1u << (t - 1u))) != 0) {
+            snprintf(err_msg, err_cap,
+                    "segment %u: relay %u is bound to an aux output -- only relays not owned by a zone "
+                    "or an aux output can be a segment target",
+                    seg_num, t);
+            return false;
+        }
     }
     if (seg->io_leave_on_at_end && (seg->io_blocking || !seg->io_state)) {
         /* "Leave it on at run end" is nonsensical for a segment that isn't
@@ -1284,20 +1296,51 @@ bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err
                      i, r->segment_index, candidate->segment_count);
             return false;
         }
-        if (r->zone_index >= MAX31856_CHANNEL_COUNT) {
-            snprintf(err_msg, err_cap, "rule %u: zone_index %u out of range", i, r->zone_index);
-            return false;
-        }
-        zone_type_t zt = ZONE_TYPE_HEATER;
-        if (!zones_config_get_zone_type(r->zone_index, &zt) || zt != ZONE_TYPE_ON_OFF) {
-            /* THE dangerous direction: refuse a rule aimed at anything that
-             * is not (already, currently) a typed on/off device -- most
-             * importantly a HEATER, which on/off logic must never drive. */
-            snprintf(err_msg, err_cap,
-                     "rule %u: zone %u is not configured as an on/off device -- refusing to let on/off logic "
-                     "drive it",
-                     i, r->zone_index);
-            return false;
+        if (profile_rule_target_is_aux(r->zone_index)) {
+            /* Aux target (plan sec 6): the aux entry for that relay must be enabled
+             * and not conflicted; a temperature axis needs a valid tc_zone and the
+             * "this zone's TC" source (1 = the entry's tc_zone). Sources 2/3 stay
+             * reserved. */
+            uint8_t relay = profile_rule_target_aux_relay(r->zone_index);
+            aux_output_t ax;
+            if (!aux_outputs_cfg_get(relay, &ax) || !ax.enabled) {
+                snprintf(err_msg, err_cap,
+                         "rule %u: aux relay %u is not an enabled aux output -- enable it on the zones page first",
+                         i, relay);
+                return false;
+            }
+            if (r->temp_source > 1) {
+                snprintf(err_msg, err_cap, "rule %u: temp_source %u is reserved for aux targets (use 0 or 1)", i,
+                         r->temp_source);
+                return false;
+            }
+            if (r->temp_cmp != ON_OFF_TEMP_CMP_NONE &&
+                (r->temp_source != 1 || ax.tc_zone == AUX_TC_ZONE_NONE)) {
+                snprintf(err_msg, err_cap,
+                         "rule %u: aux relay %u temperature rule needs temp_source 1 and a thermocouple zone "
+                         "set on the aux output",
+                         i, relay);
+                return false;
+            }
+        } else {
+            if (r->zone_index >= MAX31856_CHANNEL_COUNT) {
+                snprintf(err_msg, err_cap,
+                         "rule %u: zone_index %u out of range (zones 0-%u, aux relays %u-%u)", i, r->zone_index,
+                         (unsigned)(MAX31856_CHANNEL_COUNT - 1u), (unsigned)PROFILE_RULE_TARGET_AUX_BASE,
+                         (unsigned)(PROFILE_RULE_TARGET_AUX_BASE + PROFILE_RULE_TARGET_AUX_COUNT - 1u));
+                return false;
+            }
+            zone_type_t zt = ZONE_TYPE_HEATER;
+            if (!zones_config_get_zone_type(r->zone_index, &zt) || zt != ZONE_TYPE_ON_OFF) {
+                /* THE dangerous direction: refuse a rule aimed at anything that
+                 * is not (already, currently) a typed on/off device -- most
+                 * importantly a HEATER, which on/off logic must never drive. */
+                snprintf(err_msg, err_cap,
+                         "rule %u: zone %u is not configured as an on/off device -- refusing to let on/off logic "
+                         "drive it",
+                         i, r->zone_index);
+                return false;
+            }
         }
         if ((r->phase_mask & (uint8_t)~(ON_OFF_PHASE_RAMP | ON_OFF_PHASE_DWELL)) != 0) {
             snprintf(err_msg, err_cap, "rule %u: phase_mask has unknown bits set", i);

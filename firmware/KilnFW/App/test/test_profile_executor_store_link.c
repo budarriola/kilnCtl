@@ -48,6 +48,19 @@ esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri_handl
     (void)server; (void)uri_handler;
     return ESP_OK;
 }
+// profiles_http.c (real object here) consults the aux store when validating rule
+// targets 8..11 and RELAY_IO targets (WP-4). No aux is enabled in this suite.
+bool aux_outputs_cfg_get(uint8_t relay, aux_output_t *out)
+{
+    if (relay < 1 || relay > AUX_OUTPUTS_COUNT || !out) return false;
+    memset(out, 0, sizeof(*out));
+    out->tc_zone = AUX_TC_ZONE_NONE;
+    return true;
+}
+uint8_t aux_outputs_cfg_enabled_mask(void)
+{
+    return 0;
+}
 bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type)
 {
     if (out_type) *out_type = ZONE_TYPE_HEATER;

@@ -118,6 +118,9 @@ static esp_err_t export_get_handler(httpd_req_t *req)
      * temp_source == 1). import_post_handler() below defaults a missing key
      * to 0, so an OLD export (no "temp_source" key) still imports cleanly,
      * exactly like every other optional field in this object. */
+    /* "zone" is the rule target byte: 0..2 a zone, 8..11 aux relay 1..4
+     * (profile_rule_target.h). Same key as before; old firmware importing 8..11
+     * rejects it (zone_index out of range), which is the intended fail-loud. */
     for (uint8_t i = 0; i < p.on_off_rule_count; i++) {
         const profile_on_off_rule_t *r = &p.on_off_rules[i];
         APPEND("%s{\"zone\":%u,\"segment\":%u,\"enable\":%u,\"phase_mask\":%u,\"direction_mask\":%u,"
@@ -335,6 +338,9 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         if (!backup_json_field_num(re, "zone", &dz) || dz < 0 || dz > 255) {
             FAIL("on_off_rule missing or invalid \\\"zone\\\"");
         }
+        /* Target byte: 0..2 zone, 8..11 aux relay 1..4; validated by
+         * profiles_http_save() -> validate_on_off_rules() (aux must be enabled
+         * on THIS board, so an export from another board can be refused). */
         r->zone_index = (uint8_t)dz;
 
         double dseg = 0.0;
