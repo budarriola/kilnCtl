@@ -343,6 +343,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "update/update_policy.c"
                        # WP4: the stager core (pure, host-tested) and its ESP/HTTP wiring.
                        "update/update_stage.c"
+                       "update/update_stale_stage.c"
                        "update/update_http.c"
                        "net/ota_auth.c"
                        # 2026-09-28: shared login-lockout ladder, used by both

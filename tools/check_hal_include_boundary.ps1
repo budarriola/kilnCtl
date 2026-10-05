@@ -174,6 +174,7 @@ $OtaOpsAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/persist/recovery_switch.c";  Header = "esp_ota_ops.h"; Reason = "verify-then-set-boot-partition helper for the recovery image (threshold + deliberate route)"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/http/ota_http_recovery.c";   Header = "esp_ota_ops.h"; Reason = "recovery-mode OTA rollback path -- reads/sets boot partition"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c"; Header = "esp_ota_ops.h"; Reason = "diagnostics LCD page displays running partition/build info"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/update/update_http.c";   Header = "esp_ota_ops.h"; Reason = "boot-time stale-stage check reads the running partition and its ESP_OTA_IMG_VALID state (OT-G06) -- OTA partition owner"; ExpiresAtPhase = "n/a (out of scope: OTA partition state, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/main_network_http.c";           Header = "esp_ota_ops.h"; Reason = "wires the OTA HTTP handlers into the httpd instance at boot"; ExpiresAtPhase = "n/a (out of scope: OTA partition writes, see plan)" }
 )
 

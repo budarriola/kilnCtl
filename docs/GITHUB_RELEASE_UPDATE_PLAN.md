@@ -85,8 +85,16 @@ Current `app` is 0x210000 size 0x800000, `recovery` at 0xA10000. New layout; eve
 - End-to-end operator flow (recovery apply): app `/ota` stage upload (sha256 computed and verified, state VERIFIED) -> `recovery_enter` (app route
   `POST /api/ota/esp/recovery_boot`) -> join the recovery SoftAP (random passphrase shown only on the LCD) -> open the recovery page, check the
   staged semver/commit/sha256 in the "Apply staged update" box, press Apply and confirm -> the board copies, verifies and restarts into the new
-  image (pending-verify; it marks itself valid and `boot_guard_reset` runs). Follow-up (in progress, OT-G06): the app clears a stage whose sha or commit
-  matches the running image so an installed stage is not offered again. Pending MCP tools and bench cases are listed under WP5 in section 12.
+  image (pending-verify; it marks itself valid and `boot_guard_reset` runs). Stale stage (OT-G06, DONE app-side): a power cut between recovery's
+  set_boot and its header erase leaves a VERIFIED stage of the running image. `update_http_stale_stage_check()` runs from the existing `ota_confirm`
+  task only after `esp_ota_mark_app_valid_cancel_rollback()` succeeded and boot_guard is cleared (never before, never gating rollback). Identity:
+  prefilter on the stage image's `esp_app_desc_t.app_elf_sha256` equal to the running image's (one 256 B read, no hash on a normal boot), then proof:
+  SHA-256 of the first `image_length` bytes of the running app partition must equal the header sha256. The hash runs WITHOUT the update claim (heat
+  and uploads stay unblocked); only then does it take the same refusal order and claim as `POST /api/update/stage/clear`, re-read the header, require
+  it byte-identical to the one hashed, and clear. Commit is not used (optional, all zero for a hand upload). Boot-scoped result is `boot_auto_clear` /
+  `boot_auto_cleared` in `GET /api/update/stage`. Bench case owed: interrupt a real apply after set_boot (power cut between set_boot and the header
+  erase). Downgrade gate (section 6) is NOT in the stager: still pending, owned by WP6 / `update_policy`. Pending MCP tools and bench cases are
+  listed under WP5 in section 12.
 
 ## 5. Integrity, signing and threat model (stated plainly)
 

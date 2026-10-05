@@ -206,6 +206,9 @@ static void main_ota_rollback_confirm_task(void *arg)
              * (existing 500 ms cadence) and retrying the clear until it is
              * actually verified, rather than trusting one shot. */
             if (boot_guard_mark_healthy()) {
+                /* OT-G06: only now (confirmed valid, boot_guard cleared) drop a
+                 * stage that is the image we are running. Never gates anything. */
+                (void)update_http_stale_stage_check();
                 vTaskDelete(NULL);
                 return;
             }
@@ -252,6 +255,9 @@ static void main_ota_rollback_confirm_task(void *arg)
              * must never be allowed to disagree again. Retried the same way
              * as the factory-partition branch above -- see its comment. */
             if (boot_guard_mark_healthy()) {
+                /* OT-G06: only now (confirmed valid, boot_guard cleared) drop a
+                 * stage that is the image we are running. Never gates anything. */
+                (void)update_http_stale_stage_check();
                 vTaskDelete(NULL);
                 return;
             }
@@ -733,7 +739,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
             ota_ctx->nvs_ok = nvs_ok;
             ota_ctx->web_ok = (ctx->dash_err == ESP_OK);
             ota_ctx->ota_ok = (ota_http_err == ESP_OK);
-            if (xTaskCreate(main_ota_rollback_confirm_task, "ota_confirm", 3072, ota_ctx,
+            if (xTaskCreate(main_ota_rollback_confirm_task, "ota_confirm", 5120, ota_ctx,
                              tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
                 ESP_LOGE(MAIN_TAG, "Failed to start OTA rollback confirmation task -- this image "
                               "will stay PENDING_VERIFY for the rest of this boot, and boot_guard's "

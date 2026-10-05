@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -21,6 +23,7 @@
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
 #include "update_stage.h"
+#include "update_stale_stage.h"
 #include "wifi_provision_http.h"
 
 static const char *TAG = "update_http";
@@ -36,6 +39,8 @@ static update_stage_t s_stage;
 static SemaphoreHandle_t s_lock;
 static psa_hash_operation_t s_sha;
 static bool s_sha_active;
+// Result of the one boot-time stale-stage check (update_http_stale_stage_check()); 1 byte of .bss.
+static update_stale_result_t s_last_auto_clear;
 
 static int io_erase(void *ctx, uint32_t off, uint32_t len)
 {
@@ -315,19 +320,187 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     }
     // semver is validated charset (digits, '.', '-', '+', alnum) and commit is
     // lowercase hex, by stage_header_decode(); no escaping needed.
-    char json[512];
+    char json[576];
     int n = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"phase\":\"%s\",\"busy\":%s,\"bytes_done\":%u,\"bytes_total\":%u,"
                      "\"staged\":%s,\"reason\":\"%s\",\"header\":\"%s\",\"capacity\":%u,"
                      "\"image_length\":%u,\"state\":\"%s\",\"semver\":\"%s\",\"commit\":\"%s\","
-                     "\"sha256\":\"%s\",\"source\":%u}",
+                     "\"sha256\":\"%s\",\"source\":%u,\"auto_clear\":\"%s\",\"auto_cleared\":%s}",
                      update_stage_phase_name(info.phase), info.busy ? "true" : "false",
                      (unsigned)info.bytes_done, (unsigned)info.bytes_total, info.staged ? "true" : "false",
                      info.reason ? info.reason : "", stage_hdr_status_name(info.hdr_status),
                      (unsigned)update_stage_capacity(&s_stage), hdr_ok ? (unsigned)info.image_length : 0u,
                      hdr_ok ? stage_state_name(info.state) : "", hdr_ok ? info.semver : "",
-                     hdr_ok ? info.commit : "", sha_hex, hdr_ok ? (unsigned)info.source : 0u);
+                     hdr_ok ? info.commit : "", sha_hex, hdr_ok ? (unsigned)info.source : 0u,
+                     update_stale_result_name(s_last_auto_clear),
+                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false");
     return ota_http_send_json_clamped(req, json, n, sizeof(json));
+}
+
+// ---- boot-time stale-stage cleanup (OT-G06) --------------------------------
+// See update_stale_stage.h for the identity rule. This is only the ESP wiring:
+// its own PSA hash operation (never s_sha, which a concurrent upload or status
+// GET may restart), a small stack work area (no static RAM, no heap), the same refusal
+// order as POST /api/update/stage/clear (mode gate, OTA interlock, update
+// claim) and the same clear (update_stage_clear()).
+
+typedef struct {
+    const esp_partition_t *app;
+    psa_hash_operation_t sha;
+    bool sha_active;
+    uint8_t buf[1024]; // on the caller stack (ota_confirm, 5120 B): update_http.c takes no heap buffer
+} stale_work_t;
+
+static int st_stage_read(void *ctx, uint32_t off, void *data, size_t len)
+{
+    (void)ctx;
+    return esp_partition_read(s_part, off, data, len) == ESP_OK ? 0 : -1;
+}
+static int st_app_read(void *ctx, uint32_t off, void *data, size_t len)
+{
+    stale_work_t *w = ctx;
+    return esp_partition_read(w->app, off, data, len) == ESP_OK ? 0 : -1;
+}
+static int st_sha_start(void *ctx)
+{
+    stale_work_t *w = ctx;
+    w->sha = psa_hash_operation_init();
+    if (psa_hash_setup(&w->sha, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        return -1;
+    }
+    w->sha_active = true;
+    return 0;
+}
+static int st_sha_update(void *ctx, const void *data, size_t len)
+{
+    stale_work_t *w = ctx;
+    return (w->sha_active && psa_hash_update(&w->sha, data, len) == PSA_SUCCESS) ? 0 : -1;
+}
+static int st_sha_finish(void *ctx, uint8_t out[STAGE_SHA256_LEN])
+{
+    stale_work_t *w = ctx;
+    size_t n = 0;
+    if (!w->sha_active) {
+        return -1;
+    }
+    psa_status_t st = psa_hash_finish(&w->sha, out, STAGE_SHA256_LEN, &n);
+    w->sha_active = false;
+    return (st == PSA_SUCCESS && n == STAGE_SHA256_LEN) ? 0 : -1;
+}
+static void st_sha_abort(void *ctx)
+{
+    stale_work_t *w = ctx;
+    if (w->sha_active) {
+        psa_hash_abort(&w->sha);
+        w->sha_active = false;
+    }
+}
+static int st_stage_clear(void *ctx)
+{
+    (void)ctx;
+    update_stage_err_t e = update_stage_clear(&s_stage);
+    if (e == UPDATE_STAGE_OK) {
+        return 0;
+    }
+    return e == UPDATE_STAGE_ERR_BUSY ? 1 : -1;
+}
+static void st_yield(void *ctx)
+{
+    (void)ctx;
+    vTaskDelay(1);
+}
+
+// One attempt under the same gates as the clear route. KEEP_BUSY when the mode
+// gate, the OTA interlock or the update claim refuses (try again later).
+static update_stale_result_t stale_attempt(stale_work_t *w, const update_stale_io_t *io)
+{
+    sys_mode_snapshot_t snap = { 0 };
+    relay_authority_heat_run_active(&snap.profile_running, &snap.autotune_running);
+    char reason[OTA_INTERLOCK_REASON_MAX > SYSTEM_MODE_GATE_REASON_MAX ? OTA_INTERLOCK_REASON_MAX
+                                                                        : SYSTEM_MODE_GATE_REASON_MAX];
+    reason[0] = '\0';
+    if (system_mode_gate_check(SYS_ACTION_STAGE_WRITE, &snap, reason, sizeof(reason))) {
+        ESP_LOGI(TAG, "stale-stage check deferred by system mode gate: %s", reason);
+        return UPDATE_STALE_KEEP_BUSY;
+    }
+    reason[0] = '\0';
+    // ack_no_safety_processor=true: this only erases a 4 KB header sector, it
+    // never writes either processor, so a missing safety processor must not
+    // keep a stale stage on the page.
+    if (ota_http_check_interlocks(true, reason, sizeof(reason)) != OTA_INTERLOCK_OK) {
+        ESP_LOGI(TAG, "stale-stage check deferred by OTA interlock: %s", reason);
+        return UPDATE_STALE_KEEP_BUSY;
+    }
+    if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)) {
+        ESP_LOGI(TAG, "stale-stage check deferred: an update is in progress");
+        return UPDATE_STALE_KEEP_BUSY;
+    }
+    update_stale_result_t r = update_stale_stage_run(io, true, w->buf, sizeof(w->buf));
+    ota_http_update_end();
+    return r;
+}
+
+update_stale_result_t update_http_stale_stage_check(void)
+{
+    if (s_part == NULL) {
+        return UPDATE_STALE_NOT_RUN; // no stage partition this boot
+    }
+    const esp_partition_t *app = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
+    // Confirmed means the bootloader has the running image as VALID, i.e. the
+    // rollback was cancelled. Anything else (pending-verify, no state, a
+    // factory boot) keeps the stage and touches nothing.
+    bool confirmed = app && app->subtype != ESP_PARTITION_SUBTYPE_APP_FACTORY &&
+                     esp_ota_get_state_partition(app, &ota_state) == ESP_OK && ota_state == ESP_OTA_IMG_VALID;
+    if (!confirmed) {
+        s_last_auto_clear = UPDATE_STALE_KEEP_NOT_CONFIRMED;
+        ESP_LOGI(TAG, "stale-stage check skipped: running image is not confirmed valid");
+        return s_last_auto_clear;
+    }
+    stale_work_t work;
+    stale_work_t *w = &work;
+    memset(w, 0, sizeof(*w));
+    w->app = app;
+
+    update_stale_io_t io = {
+        .ctx = w,
+        .stage_size = s_part->size,
+        .app_size = app->size,
+        .stage_read = st_stage_read,
+        .app_read = st_app_read,
+        .sha_start = st_sha_start,
+        .sha_update = st_sha_update,
+        .sha_finish = st_sha_finish,
+        .sha_abort = st_sha_abort,
+        .stage_clear = st_stage_clear,
+        .yield = st_yield,
+    };
+    const esp_app_desc_t *desc = esp_app_get_description();
+    if (desc != NULL) {
+        memcpy(io.running_elf_sha256, desc->app_elf_sha256, STAGE_SHA256_LEN);
+        for (size_t i = 0; i < STAGE_SHA256_LEN; i++) {
+            if (io.running_elf_sha256[i] != 0) {
+                io.running_elf_valid = true;
+                break;
+            }
+        }
+    }
+
+    // Bounded retry for a transient refusal (busy gate/claim): 6 tries, 5 s apart.
+    update_stale_result_t r = UPDATE_STALE_KEEP_BUSY;
+    for (int attempt = 0; attempt < 6 && r == UPDATE_STALE_KEEP_BUSY; attempt++) {
+        if (attempt > 0) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+        }
+        r = stale_attempt(w, &io);
+    }
+    s_last_auto_clear = r;
+    if (r == UPDATE_STALE_CLEARED) {
+        ESP_LOGW(TAG, "stale stage matches the running image (interrupted recovery apply): stage header cleared");
+    } else {
+        ESP_LOGI(TAG, "stale-stage check: %s", update_stale_result_name(r));
+    }
+    return r;
 }
 
 esp_err_t update_http_start(void)
