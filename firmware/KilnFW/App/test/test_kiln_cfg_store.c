@@ -321,6 +321,7 @@ extern void test_safety_cfg_store_stage_f32_for_kiln_cfg_store_test(size_t page_
 // 2026-09-16): resets the live safety_cfg_store cache to empty, so a seed
 // staged by one test cannot leak into the next.
 extern void test_safety_cfg_store_reset_for_kiln_cfg_store_test(void);
+extern void test_safety_cfg_store_mark_unfetched_for_kiln_cfg_store_test(void);
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -474,6 +475,35 @@ static void test_save_current_captures_pico_half_and_hash(void)
     TEST_CHECK(kiln_cfg_store_get_package_identity(id2, NULL, NULL, &pkg_hash2),
                "second slot's identity is readable");
     TEST_CHECK(pkg_hash2 != pkg_hash, "a different ESP blob content produces a different pkg_hash");
+}
+
+static void test_save_current_unfetched_cache_is_not_marked_populated(void)
+{
+    TEST_SECTION("kiln_cfg_store_save_current -- an unfetched safety cache is never stored as a populated Pico half");
+    reset_state();
+    test_safety_cfg_store_mark_unfetched_for_kiln_cfg_store_test();
+
+    int32_t id1 = -1;
+    char reason[96];
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln A", -1, &id1, reason, sizeof(reason)),
+               "save succeeds (ESP half is saved regardless)");
+    bool pico_populated = true;
+    uint16_t pkg_schema = 1;
+    uint32_t pkg_hash = 1;
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id1, &pico_populated, &pkg_schema, &pkg_hash),
+               "identity readable");
+    TEST_CHECK(!pico_populated, "unfetched cache: pico_populated is 0, not an all-unset populated half");
+    TEST_CHECK(pkg_schema == 0 && pkg_hash == 0, "unfetched cache: no package identity is minted");
+
+    // Once the cache has been fetched, the same save captures normally.
+    test_safety_cfg_store_reset_for_kiln_cfg_store_test();
+    int32_t id2 = -1;
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_save_current("Kiln B", -1, &id2, reason, sizeof(reason)), "second save succeeds");
+    TEST_CHECK(kiln_cfg_store_get_package_identity(id2, &pico_populated, &pkg_schema, &pkg_hash) && pico_populated &&
+                   pkg_hash != 0,
+               "fetched cache: slot is populated with a real hash");
 }
 
 static void test_get_package_identity_unknown_id_and_migrated_slot(void)
@@ -3838,6 +3868,7 @@ void run_test_kiln_cfg_store(void)
     test_name_character_set_validation();
     test_store_full_rejected();
     test_save_current_captures_pico_half_and_hash();
+    test_save_current_unfetched_cache_is_not_marked_populated();
     test_get_package_identity_unknown_id_and_migrated_slot();
     test_apply_refuses_half_package();
     test_corrupt_store_quarantines_and_blocks_writes();

@@ -247,6 +247,10 @@ bool safety_cfg_store_cache_is_stale(void);
  * events" race described in that finding without adding a cross-module lock. */
 uint32_t safety_cfg_store_cache_generation(void);
 
+/* True once the cache holds Pico-sourced values (a successful refetch, or an
+ * NVS load with config_crc != 0). False for the empty default cache. */
+bool safety_cfg_store_has_data(void);
+
 /* 2026-09-15 review follow-up (item G): moved here from safety_cfg_http.h,
  * where a safety/ reader had to include an http/ header to reach it.
  *

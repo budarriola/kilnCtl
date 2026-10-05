@@ -1065,7 +1065,11 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
     }
 
     kiln_pkg_pico_source_t source = kiln_pkg_pico_source_default();
-    if (!kiln_package_capture_pico_half(&source, &e->pico)) {
+    /* An unfetched safety_cfg_store cache reads set=false for every param, and
+     * capture would succeed on it, storing an all-unset half as populated; a
+     * later real fetch then makes that slot look like a stale Pico half.
+     * Refuse until the cache holds real values. */
+    if (!safety_cfg_store_has_data() || !kiln_package_capture_pico_half(&source, &e->pico)) {
         memset(&e->pico, 0, sizeof(e->pico));
         e->pico_populated = 0;
         e->pkg_schema = 0;

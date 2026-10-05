@@ -225,6 +225,20 @@ void test_safety_cfg_store_stage_page_for_kiln_cfg_store_test(size_t page_idx, b
 void test_safety_cfg_store_reset_for_kiln_cfg_store_test(void)
 {
     reset_to_defaults();
+    /* Model a cache that has been fetched, which is what most kiln_cfg_store
+     * tests assume; test_safety_cfg_store_mark_unfetched_for_kiln_cfg_store_test()
+     * models the empty one. */
+    s_has_data = true;
+}
+
+void test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test(void)
+{
+    s_has_data = true;
+}
+
+void test_safety_cfg_store_mark_unfetched_for_kiln_cfg_store_test(void)
+{
+    s_has_data = false;
 }
 
 void test_safety_cfg_store_stage_f32_for_kiln_cfg_store_test(size_t page_idx, uint16_t id, float value)

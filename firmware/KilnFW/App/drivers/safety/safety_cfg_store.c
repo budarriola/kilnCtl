@@ -496,8 +496,16 @@ static esp_err_t nvs_partition_init(const char *partition)
     return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
+/* True once the cache holds Pico-sourced values: a successful refetch this
+ * boot, or a current-version NVS load carrying a non-zero config_crc.
+ * Never true for the empty default cache, whose every param reads set=false;
+ * kiln_cfg_store captures the Pico half only when this is true so an unfetched
+ * cache is never stored as a populated all-unset half. */
+static bool s_has_data;
+
 static void reset_to_defaults(void)
 {
+    s_has_data = false;
     memset(&s_store, 0, sizeof(s_store));
     s_store.version = SAFETY_CFG_STORE_VERSION;
     s_store.config_crc = 0; /* never fetched */
@@ -537,6 +545,7 @@ static void nvs_load_store(void)
             return;
         }
         s_store = loaded;
+        s_has_data = (loaded.config_crc != 0);
         return;
     }
     if (loaded.version < SAFETY_CFG_STORE_VERSION) {
@@ -1296,6 +1305,11 @@ uint16_t safety_cfg_store_cached_crc(void)
     return s_store.config_crc;
 }
 
+bool safety_cfg_store_has_data(void)
+{
+    return s_has_data;
+}
+
 /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
  * MEDIUM 5): true whenever the cache is KNOWN to disagree with the live
  * Pico's config_crc and a refetch has not yet caught up -- set the instant
@@ -1686,6 +1700,7 @@ static bool safety_cfg_store_refetch_locked(SafetyLinkClass *link, uint16_t conf
      * generation counter (MEDIUM 3) so a caller can detect "a fetch landed
      * since I last checked" without a lock. */
     s_cache_stale = false;
+    s_has_data = true;
     s_cache_generation++;
     s_fetched_at_us = (int64_t)hal_time_now_us();
     /* 2026-08-23 fix: no longer nvs_save_store() directly -- this function

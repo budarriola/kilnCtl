@@ -68,6 +68,11 @@ void test_stub_zones_set_max_ramp(uint8_t zone_index, bool answers, float c_per_
 // byte of the shared zones_config_export_blob() stub content.
 void test_stub_kiln_cfg_export_content_toggle_byte0(void);
 
+// Defined in test_safety_cfg_store.c -- flags the live safety_cfg_store cache as
+// fetched without touching its contents. kiln_cfg_store only captures the Pico
+// half of a slot from a fetched cache, and these tests expect populated slots.
+void test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test(void);
+
 // relay_authority.h -- backup_import.c's system_mode_gate wiring
 // (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slices-2/4/5, 2026-09-25). Defaults
 // idle so every pre-existing test in this file keeps exercising exactly the
@@ -666,6 +671,7 @@ static profile_t s_profile_slots[PROFILES_MAX_COUNT];
 
 static void reset_stub_state(void)
 {
+    test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test();
     memset(s_writes, 0, sizeof(s_writes));
     /* Real decoded zones configs never leave a zone's settings_source at raw
      * 0 unintentionally -- zones_http.c's convert_zone_v9() etc. explicitly
