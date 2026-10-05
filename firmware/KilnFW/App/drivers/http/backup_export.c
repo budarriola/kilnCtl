@@ -278,7 +278,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
          * restore not to overwrite a fitted model on a board that has one
          * with a "no model" this backup never actually measured. */
         if (have_model) {
-            backup_stream_printf(&s, "\"model_k_dc\":%.9g,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f,",
+            backup_stream_printf(&s, "\"model_k_dc\":%.9g,\"model_tau_s\":%.9g,\"model_dead_time_s\":%.9g,",
                                 (double)k_dc, (double)tau_s, (double)dead_time_s);
         }
         if (have_tc) {
@@ -413,10 +413,10 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * coupling_c%u just above -- no BACKUP_FORMAT_VERSION bump, see
              * backup_import_apply()'s own comment on the matching parse. */
             for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-                backup_stream_printf(&s, "\"coupling_tau_c%u\":%.1f,", (unsigned)j, (double)coupling_tau_row[j]);
+                backup_stream_printf(&s, "\"coupling_tau_c%u\":%.9g,", (unsigned)j, (double)coupling_tau_row[j]);
             }
             for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-                backup_stream_printf(&s, "\"coupling_dead_time_c%u\":%.1f,", (unsigned)j, (double)coupling_dead_row[j]);
+                backup_stream_printf(&s, "\"coupling_dead_time_c%u\":%.9g,", (unsigned)j, (double)coupling_dead_row[j]);
             }
             /* ZONES_CFG_VERSION 14->15 (PID_EXPANSION_PLAN.md 3.2 follow-up):
              * the coupling identification's own diagonal cell -- see
@@ -468,7 +468,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
                                 (double)error_band_c, (double)rate_band_c_per_s, (unsigned)relay_type);
             backup_stream_printf(&s, "\"progress_band_c\":%.2f,\"zone_type\":%u,",
                                 (double)progress_band_c, (unsigned)zone_type);
-            backup_stream_printf(&s, "\"model_fit_temp_c\":%.2f,\"model_fit_ambient_c\":%.2f,",
+            backup_stream_printf(&s, "\"model_fit_temp_c\":%.9g,\"model_fit_ambient_c\":%.9g,",
                                 (double)model_fit_temp_c, (double)model_fit_ambient_c);
             /* 2026-09-16 backup-round-trip-gap closure, group 1/2/3: these
              * four also have public getter+setter pairs added this pass
@@ -505,7 +505,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
              * worth a new parser code path on this board's fixed 8KB httpd
              * stack budget -- 0/1 round-trips through the existing numeric
              * reader exactly. */
-            backup_stream_printf(&s, "\"coil_power_w\":%.2f,\"autotune_baseline_k_dc\":%.4f,"
+            backup_stream_printf(&s, "\"coil_power_w\":%.9g,\"autotune_baseline_k_dc\":%.9g,"
                                 "\"adaptive_tune_enabled\":%u",
                                 (double)coil_power_w, (double)autotune_baseline_k_dc,
                                 adaptive_tune_enabled ? 1u : 0u);

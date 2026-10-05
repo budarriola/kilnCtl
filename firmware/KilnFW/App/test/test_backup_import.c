@@ -3784,7 +3784,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
 
     char model_needle[96];
     if (have_model) {
-        snprintf(model_needle, sizeof(model_needle), "\"model_k_dc\":%.9g,\"model_tau_s\":%.1f,\"model_dead_time_s\":%.1f",
+        snprintf(model_needle, sizeof(model_needle), "\"model_k_dc\":%.9g,\"model_tau_s\":%.9g,\"model_dead_time_s\":%.9g",
                  (double)exp_k_dc, (double)exp_tau_s, (double)exp_dead_time_s);
         TEST_CHECK(strstr(s_export_body, model_needle) != NULL,
                   "when the model getter answers, export emits its exact values");
@@ -4439,6 +4439,60 @@ static void test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair(void)
                     "pair (1,0) dead_time_s round-trips as 95.0, NOT pair (0,1)'s 30.5");
 }
 
+// 2026-10-05 bench finding: backup_export, backup_import, backup_export again
+// gave a different kiln_configs package (7 float bytes in the coupling
+// tau/dead-time area plus the CRC, so pkg_hash moved too) although every other
+// section matched. Export printed the identified (non-round) plant values with
+// %.1f/%.2f, import wrote the rounded text back into the live zones, and the
+// active kiln config slot is autosaved from live zones. Same class as the
+// 2026-09-28 pid %.9g fix: the fields must be exported at round-trip precision.
+// Asserts the second export is byte-identical to the first and that the live
+// floats are bit-exact after import.
+static void test_export_import_export_is_byte_identical_for_non_round_floats(void)
+{
+    TEST_SECTION("backup export -> import -> export is byte-identical with non-round identified floats "
+                 "(coupling tau/dead_time, model_fit, coil_power, autotune_baseline_k_dc)");
+    reset_stub_state();
+
+    const float tau = 123.456789f, dead = 45.678901f, fit_t = 632.7435f, fit_a = 110.78753f;
+    const float coil = 2750.4567f, base = 1.23456789f;
+    TEST_CHECK(zones_config_set_pid(1, 5.0f, 0.6f, 0.02f), "seed zone 1 pid");
+    TEST_CHECK(zones_config_set_coupling_cell(1, 0, 10.5f, tau, dead), "seed zone 1 coupling cell (1,0)");
+    TEST_CHECK(zones_config_set_model_fit_context(1, fit_t, fit_a), "seed zone 1 model_fit context");
+    TEST_CHECK(zones_config_set_coil_power_w(1, coil), "seed zone 1 coil_power_w");
+    TEST_CHECK(zones_config_set_autotune_baseline_k_dc(1, base), "seed zone 1 autotune_baseline_k_dc");
+
+    TEST_CHECK(run_export() == ESP_OK, "first export succeeds");
+    TEST_CHECK(s_export_body != NULL && s_export_len > 0, "first export produced a body");
+    char *first = s_export_body ? strdup(s_export_body) : NULL;
+    TEST_CHECK(first != NULL, "copy first export");
+    if (!first) {
+        return;
+    }
+
+    /* Poison the stub's live values (reset_stub_state clears s_writes[], which
+     * backs these getters), then restore from the first export. */
+    reset_stub_state();
+    char err[256];
+    bool ok = test_backup_import_apply(first, err, sizeof(err));
+    TEST_CHECK(ok, "importing the first export must succeed");
+
+    TEST_CHECK(memcmp(&s_writes[1].coupling_tau_s[0], &tau, sizeof(float)) == 0,
+              "coupling tau is bit-exact after import (123.456789, not 123.5)");
+    TEST_CHECK(memcmp(&s_writes[1].coupling_dead_time_s[0], &dead, sizeof(float)) == 0,
+              "coupling dead_time is bit-exact after import");
+    TEST_CHECK(memcmp(&s_writes[1].model_fit_temp_c, &fit_t, sizeof(float)) == 0, "model_fit_temp_c bit-exact");
+    TEST_CHECK(memcmp(&s_writes[1].model_fit_ambient_c, &fit_a, sizeof(float)) == 0, "model_fit_ambient_c bit-exact");
+    TEST_CHECK(memcmp(&s_writes[1].coil_power_w, &coil, sizeof(float)) == 0, "coil_power_w bit-exact");
+    TEST_CHECK(memcmp(&s_writes[1].autotune_baseline_k_dc, &base, sizeof(float)) == 0,
+              "autotune_baseline_k_dc bit-exact");
+
+    TEST_CHECK(run_export() == ESP_OK, "second export succeeds");
+    TEST_CHECK(s_export_body != NULL && strcmp(first, s_export_body) == 0,
+              "export, import, export is byte-identical");
+    free(first);
+}
+
 static void test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values(void)
 {
     TEST_SECTION("backup_import_apply -- an old-format backup that omits coupling_tau_c%u/"
@@ -4558,7 +4612,7 @@ static void test_ct_normals_and_new_fields_round_trip_through_export_import(void
     TEST_CHECK(strstr(s_export_body, "\"normal_current_a\":12.3450") != NULL,
               "the measured CT normal current is actually emitted by export");
     TEST_CHECK(strstr(s_export_body, "\"relay_type\":2") != NULL, "relay_type is emitted");
-    TEST_CHECK(strstr(s_export_body, "\"coil_power_w\":2750.50") != NULL, "coil_power_w is emitted");
+    TEST_CHECK(strstr(s_export_body, "\"coil_power_w\":2750.5,") != NULL, "coil_power_w is emitted");
     TEST_CHECK(strstr(s_export_body, "\"adaptive_tune_enabled\":1") != NULL, "adaptive_tune_enabled is emitted");
     TEST_CHECK(strstr(s_export_body, "\"tuning_valid\":1") != NULL, "tuning_quality block is emitted");
 
@@ -5792,6 +5846,7 @@ void run_test_backup_import(void)
     test_import_tau_only_cell_preserves_coeff_touching_on_off_zone();
 
     test_v4_coupling_tau_dead_time_round_trip_asymmetric_per_pair();
+    test_export_import_export_is_byte_identical_for_non_round_floats();
     test_v4_coupling_tau_dead_time_omitted_entirely_preserves_measured_values();
     test_v4_coupling_tau_dead_time_partial_per_cell_presence();
 
