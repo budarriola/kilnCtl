@@ -70,11 +70,7 @@ static bool gate_refused(const aux_http_ops_t *ops, aux_http_action_t action, au
 
 static void core_set_locked(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
 {
-    /* Mode gate FIRST: aux config is zones-class config (SYS_ACTION_WRITE_ZONES_CONFIG),
-     * refused with 409 while a firing or autotune run is active. */
-    if (gate_refused(ops, AUX_HTTP_ACTION_CONFIG, reply)) {
-        return;
-    }
+    /* (The mode gate already ran in aux_http_core_set(), before the claim.) */
     long relay = 0;
     if (field_long(body, "relay", 1, AUX_OUTPUTS_COUNT, &relay) != AUX_FIELD_OK) {
         reply_set(reply, 400, "relay missing or out of range");
@@ -166,11 +162,7 @@ static void core_set_locked(const aux_http_ops_t *ops, const char *body, aux_htt
 
 static void core_manual_locked(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
 {
-    /* Idle-only (owner Q5): blanket-refused while a firing/autotune run is active,
-     * whichever way the relay would move. */
-    if (gate_refused(ops, AUX_HTTP_ACTION_MANUAL, reply)) {
-        return;
-    }
+    /* (The idle-only mode gate already ran in aux_http_core_manual(), before the claim.) */
     long relay = 0;
     if (field_long(body, "relay", 1, AUX_OUTPUTS_COUNT, &relay) != AUX_FIELD_OK) {
         reply_set(reply, 400, "relay missing or out of range");
@@ -257,7 +249,11 @@ size_t aux_http_core_format_entry(const aux_http_ops_t *ops, uint8_t relay, char
  * POST /api/zones holds around its commit: the aux set checks the zones union, the
  * zones POST checks the aux mask, and the manual toggle checks the enabled mask before
  * driving the relay; without one shared claim an aux disable/zones POST could slip
- * between a check and its act. Busy -> 409, released on every path. */
+ * between a check and its act. Order matches zones_http_post.c: mode gate first (a
+ * mid-run request reports the gate's reason, takes no claim), then the claim (busy ->
+ * 409), then the body, then release on every path. aux config is zones-class config
+ * (SYS_ACTION_WRITE_ZONES_CONFIG); manual is idle-only (owner Q5), blanket-refused
+ * mid-run whichever way the relay would move. */
 static bool claim_or_busy(const aux_http_ops_t *ops, aux_http_reply_t *reply)
 {
     if (!ops->claim()) {
@@ -269,7 +265,7 @@ static bool claim_or_busy(const aux_http_ops_t *ops, aux_http_reply_t *reply)
 
 void aux_http_core_set(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
 {
-    if (!claim_or_busy(ops, reply)) {
+    if (gate_refused(ops, AUX_HTTP_ACTION_CONFIG, reply) || !claim_or_busy(ops, reply)) {
         return;
     }
     core_set_locked(ops, body, reply);
@@ -278,7 +274,7 @@ void aux_http_core_set(const aux_http_ops_t *ops, const char *body, aux_http_rep
 
 void aux_http_core_manual(const aux_http_ops_t *ops, const char *body, aux_http_reply_t *reply)
 {
-    if (!claim_or_busy(ops, reply)) {
+    if (gate_refused(ops, AUX_HTTP_ACTION_MANUAL, reply) || !claim_or_busy(ops, reply)) {
         return;
     }
     core_manual_locked(ops, body, reply);

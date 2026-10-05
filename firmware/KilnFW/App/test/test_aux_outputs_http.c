@@ -245,7 +245,16 @@ static void test_claim(void)
     f_reason = "run active";
     TEST_CHECK(do_manual("relay=4&on=1") == 409, "mode-gate refusal");
     TEST_CHECK(do_set("relay=4&enabled=0") == 409, "mode-gate refusal on config write");
-    TEST_CHECK(f_claims == f_releases && f_claims == 5, "every refusal path released its claim (5 claims, 5 releases)");
+    TEST_CHECK(f_claims == f_releases && f_claims == 3, "every claimed path released (3 claims, 3 releases); gate-refused paths take no claim");
+    f_busy = true;
+    TEST_CHECK(do_manual("relay=4&on=1") == 409 && f_last_action == AUX_HTTP_ACTION_MANUAL,
+               "gate-refused request under a busy claim still reports the gate (409 via gate, not busy)");
+    {
+        aux_http_reply_t r;
+        memset(&r, 0, sizeof(r));
+        aux_http_core_manual(&OPS, "relay=4&on=1", &r);
+        TEST_CHECK(strstr(r.msg, "run active") != NULL, "mid-run reply carries the mode-gate reason, not the busy text");
+    }
 }
 
 static void test_manual(void)

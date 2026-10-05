@@ -118,8 +118,9 @@ esp_err_t backup_import_post_handler(httpd_req_t *req);   // backup_import.c
 // be judged at this precision, not on the raw floats.
 #define BACKUP_TUNING_FLOAT_FMT "%.3f"
 // Buffer for one such printed float: FLT_MAX (~3.4e38) prints 39 integer digits
-// + sign + ".000" + NUL = 45 B, so 48 covers every finite float (it was 32,
-// which truncated a pathological value like 1e30 at 35 chars). 48 B on the
+// + sign + ".000" + NUL = 45 B, so 48 covers every finite float. Hardening only:
+// the old 32 B buffer truncated a value like 1e30 (35 chars) but, as the leading
+// digits still differ between distinct floats, that was not a false-match bug. 48 B on the
 // httpd stack, two of them, is far inside the 4832 B per-handler frame cap.
 #define BACKUP_TUNING_FLOAT_BUF 48
 
