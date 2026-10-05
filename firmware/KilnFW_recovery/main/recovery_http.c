@@ -43,6 +43,8 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "recovery_apply.h"
+#include "recovery_apply_esp.h"
 #include "recovery_health_policy.h"
 #include "recovery_image_check.h"
 #include "recovery_io.h"
@@ -54,6 +56,7 @@
 #include "recovery_text.h"
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
+#include "stage_header.h"
 
 static const char *TAG = "recovery_http";
 
@@ -165,11 +168,22 @@ static void restart_soon(uint32_t delay_ms)
     }
 }
 
+// 409 helper for every route that would write `app`, change the boot target or
+// reset the chip while the staged image is being copied into `app`.
+static esp_err_t refuse_while_applying(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "409 Conflict");
+    return httpd_resp_send(req, "staged update is being applied", HTTPD_RESP_USE_STRLEN);
+}
+
 // POST /api/ota/esp -- open, validated, streamed (recovery_upload.c).
 // Nothing is written until the first chunk passes ric_validate_first_chunk();
 // the boot partition is set only after esp_ota_end() verified the whole image.
 static esp_err_t ota_esp_post(httpd_req_t *req)
 {
+    if (recovery_apply_busy()) {
+        return refuse_while_applying(req);
+    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -416,7 +430,9 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
 
     // app_desc_present: cheap descriptor/chip/project check. app_valid: full
     // esp_image_verify(), cached (see app_image_verified()).
-    bool desc_present = app_has_valid_image(app);
+    // Never read `app` while it is being rewritten.
+    bool applying = recovery_apply_busy();
+    bool desc_present = !applying && app_has_valid_image(app);
     bool valid = desc_present && app_image_verified(app);
     unsigned nvs_failed = recovery_io_nvs_failed_mask();
     int rr = (int)esp_reset_reason();
@@ -610,6 +626,9 @@ static bool clear_boot_guard(char *msg, size_t cap)
 // POST /api/ota/esp/boot_guard_reset
 static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 {
+    if (recovery_apply_busy()) {
+        return refuse_while_applying(req);
+    }
     char bg_msg[96];
     if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -623,6 +642,9 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 // itself counted toward recovery, selects `app`, and restarts.
 static esp_err_t recovery_exit_post(httpd_req_t *req)
 {
+    if (recovery_apply_busy()) {
+        return refuse_while_applying(req);
+    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -662,6 +684,9 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
 // (WIFI_RESET_KEYS) and restart. The AP name is kept.
 static esp_err_t wifi_reset_post(httpd_req_t *req)
 {
+    if (recovery_apply_busy()) {
+        return refuse_while_applying(req);
+    }
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(WIFI_NVS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READWRITE,
                                              &h);
@@ -706,6 +731,9 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
 // POST /api/sw_reset
 static esp_err_t sw_reset_post(httpd_req_t *req)
 {
+    if (recovery_apply_busy()) {
+        return refuse_while_applying(req);
+    }
     if (recovery_pico_busy()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
@@ -795,6 +823,9 @@ static bool parse_pico_query(httpd_req_t *req, uint32_t *crc, int *operator_slot
 // UART while GET /api/recovery/pico/status keeps answering. 202 on start.
 static esp_err_t pico_upload_post(httpd_req_t *req)
 {
+    if (recovery_apply_busy()) {
+        return refuse_while_applying(req);
+    }
     uint32_t claimed_crc = 0;
     int operator_slot = RPP_SLOT_UNKNOWN;
     if (!parse_pico_query(req, &claimed_crc, &operator_slot)) {
@@ -852,6 +883,91 @@ static esp_err_t pico_abort_post(httpd_req_t *req)
     return httpd_resp_sendstr(req, "abort requested");
 }
 
+// boot_guard clear, run by the apply task just before the boot partition is
+// switched (same order as /api/recovery/exit).
+static int apply_pre_boot(void)
+{
+    char msg[96];
+    return clear_boot_guard(msg, sizeof(msg)) ? 0 : -1;
+}
+
+static const char *stage_source_str(stage_source_t s)
+{
+    return s == STAGE_SOURCE_GITHUB ? "github" : s == STAGE_SOURCE_UPLOAD ? "upload" : "unknown";
+}
+
+// POST /api/recovery/apply_staged -- open (the recovery image is
+// unauthenticated). Copies the staged image into `app`, verifies it, selects it
+// and restarts (recovery_apply.c). 202 starts a task; poll
+// GET /api/recovery/apply_status. 409 when nothing installable is staged or a
+// Pico transfer / another apply is running. The stage is not modified until
+// the new app is verified and selected.
+static esp_err_t apply_staged_post(httpd_req_t *req)
+{
+    if (recovery_apply_busy()) {
+        return refuse_while_applying(req);
+    }
+    if (recovery_pico_busy()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, "Pico update in progress", HTTPD_RESP_USE_STRLEN);
+    }
+    const esp_partition_t *app = find_app_partition();
+    if (!app) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "no app partition in the flashed table", HTTPD_RESP_USE_STRLEN);
+    }
+    stage_header_t hdr;
+    stage_hdr_status_t hs = recovery_apply_esp_stage_info(&hdr);
+    if (hs != STAGE_HDR_OK || !stage_header_is_installable(&hdr)) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_send(req, hs == STAGE_HDR_BLANK ? "nothing is staged" : "no installable staged image",
+                               HTTPD_RESP_USE_STRLEN);
+    }
+    app_verify_invalidate(); // `app` is about to be erased
+    esp_err_t e = recovery_apply_esp_start(app, apply_pre_boot);
+    if (e != ESP_OK) {
+        httpd_resp_set_status(req, e == ESP_ERR_INVALID_STATE ? "409 Conflict" : "500 Internal Server Error");
+        return httpd_resp_send(req, "could not start the apply", HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_set_status(req, "202 Accepted");
+    httpd_resp_set_type(req, "application/json");
+    char body[96];
+    int n = snprintf(body, sizeof(body), "{\"started\":true,\"image_length\":%u}", (unsigned)hdr.image_length);
+    return httpd_resp_send(req, body, n);
+}
+
+// GET /api/recovery/apply_status -- read-only: the apply task's progress plus a
+// summary of what is staged right now.
+static esp_err_t apply_status_get(httpd_req_t *req)
+{
+    recovery_apply_progress_t p;
+    recovery_apply_esp_status(&p);
+    stage_header_t hdr;
+    stage_hdr_status_t hs = recovery_apply_esp_stage_info(&hdr);
+    char body[384];
+    int n = snprintf(body, sizeof(body),
+                     "{\"phase\":\"%s\",\"result\":\"%s\",\"done_bytes\":%u,\"total_bytes\":%u,"
+                     "\"app_modified\":%s,\"stage_cleared\":%s,\"stage_header\":\"%s\"",
+                     recovery_apply_phase_name((recovery_apply_phase_t)p.phase),
+                     recovery_apply_result_name((recovery_apply_result_t)p.result), (unsigned)p.done_bytes,
+                     (unsigned)p.total_bytes, p.app_modified ? "true" : "false",
+                     p.stage_cleared ? "true" : "false", stage_hdr_status_name(hs));
+    if (n > 0 && n < (int)sizeof(body) && hs == STAGE_HDR_OK) {
+        n += snprintf(body + n, sizeof(body) - (size_t)n,
+                      ",\"staged\":{\"state\":\"%s\",\"semver\":\"%s\",\"length\":%u,\"source\":\"%s\"}",
+                      stage_state_name(hdr.state), hdr.semver, (unsigned)hdr.image_length,
+                      stage_source_str(hdr.source));
+    }
+    if (n <= 0 || n >= (int)sizeof(body) - 1) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "status unavailable", HTTPD_RESP_USE_STRLEN);
+    }
+    body[n++] = '}';
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, n);
+}
+
 esp_err_t recovery_http_start(void)
 {
     // Handlers' static buffers (send_frag's frag, s_verify_*) assume every
@@ -862,7 +978,7 @@ esp_err_t recovery_http_start(void)
     configASSERT(!s_started);
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 8192;
-    // 12 routes below (3 are the Pico update relay).
+    // 14 routes below (3 are the Pico update relay, 2 the staged-update apply).
     config.max_uri_handlers = 16;
     config.lru_purge_enable = true;
     httpd_handle_t server = NULL;
@@ -882,6 +998,8 @@ esp_err_t recovery_http_start(void)
         {.uri = "/api/recovery/pico/upload", .method = HTTP_POST, .handler = pico_upload_post},
         {.uri = "/api/recovery/pico/status", .method = HTTP_GET, .handler = pico_status_get},
         {.uri = "/api/recovery/pico/abort", .method = HTTP_POST, .handler = pico_abort_post},
+        {.uri = "/api/recovery/apply_staged", .method = HTTP_POST, .handler = apply_staged_post},
+        {.uri = "/api/recovery/apply_status", .method = HTTP_GET, .handler = apply_status_get},
     };
     const unsigned expected = (unsigned)(sizeof(routes) / sizeof(routes[0]));
     _Static_assert(sizeof(routes) / sizeof(routes[0]) <= 16, "routes exceed max_uri_handlers");

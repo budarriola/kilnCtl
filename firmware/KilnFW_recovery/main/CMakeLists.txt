@@ -1,6 +1,16 @@
+# Stage header / semver / image-CRC code is linked from the application tree so
+# the stage header format has exactly one implementation (the application's
+# stager writes it, recovery_apply.c reads it).
+set(APP_DRIVERS_DIR "${CMAKE_CURRENT_LIST_DIR}/../../KilnFW/App/drivers")
+
 idf_component_register(
     SRCS
         "recovery_main.c"
+        "recovery_apply.c"
+        "recovery_apply_esp.c"
+        "${APP_DRIVERS_DIR}/update/stage_header.c"
+        "${APP_DRIVERS_DIR}/update/update_semver.c"
+        "${APP_DRIVERS_DIR}/http/ota_image_crc.c"
         "recovery_wifi.c"
         "recovery_http.c"
         "recovery_boot_verify.c"
@@ -14,7 +24,7 @@ idf_component_register(
         "recovery_passphrase.c"
         "recovery_hold.c"
         "recovery_health.c"
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "${APP_DRIVERS_DIR}/update" "${APP_DRIVERS_DIR}/http"
     EMBED_FILES "recovery_page.html"
     REQUIRES
         esp_wifi
@@ -36,4 +46,5 @@ idf_component_register(
         esp_partition
         esp_system
         esp_hw_support
+        mbedtls
 )

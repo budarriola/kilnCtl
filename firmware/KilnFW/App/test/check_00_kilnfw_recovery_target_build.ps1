@@ -203,6 +203,31 @@ try {
         Fail "robocopy mirror of $commonSrc failed (exit $LASTEXITCODE)"
     }
 
+    # main/CMakeLists.txt also links the stage header / semver / image-CRC
+    # sources from the application tree (KilnFW/App/drivers/{update,http}) so the
+    # stage header format has one implementation. Mirror exactly those files
+    # into the same relative layout, wiping any stale copy first so a file
+    # removed from the source never lingers in the build directory.
+    $sharedFiles = @(
+        "update\stage_header.c", "update\stage_header.h",
+        "update\update_semver.c", "update\update_semver.h",
+        "http\ota_image_crc.c", "http\ota_image_crc.h"
+    )
+    $appDriversSrc = Join-Path $repoRoot "firmware\KilnFW\App\drivers"
+    $appDriversDst = Join-Path $WorktreePath "KilnFW\App\drivers"
+    if (Test-Path -LiteralPath (Join-Path $WorktreePath "KilnFW")) {
+        Remove-Item -LiteralPath (Join-Path $WorktreePath "KilnFW") -Recurse -Force
+    }
+    foreach ($rel in $sharedFiles) {
+        $s = Join-Path $appDriversSrc $rel
+        if (-not (Test-Path -LiteralPath $s)) {
+            Fail "shared source $s is missing -- KilnFW_recovery/main/CMakeLists.txt links it from the application tree."
+        }
+        $d = Join-Path $appDriversDst $rel
+        New-Item -ItemType Directory -Force -Path (Split-Path $d -Parent) | Out-Null
+        Copy-Item -LiteralPath $s -Destination $d -Force
+    }
+
     # Full-content verification: this project is small (~14 files today), so
     # a full hash comparison is cheap and leaves no sampling gap -- unlike
     # check_00_kilnfw_target_build.ps1's tree, there is no cost reason to
