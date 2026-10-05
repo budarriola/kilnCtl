@@ -71,7 +71,7 @@ def update_status(host: Optional[str] = None) -> str:
 
 @_core._tool()
 def update_stage_upload(image_path: str, version: str = "", commit: str = "", confirm: bool = False,
-                        host: Optional[str] = None) -> str:
+                        host: Optional[str] = None, ack_no_safety: bool = False) -> str:
     """Upload an ESP application image (KilnCtrl.bin, which embeds both
     processors' firmware) into the `stage` partition (POST /api/update/stage,
     ROUTE_TIER_ADMIN). Staging only: the running application and the `app`
@@ -93,7 +93,14 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     the board's sha256 equals the one computed locally; anything else is
     FAILED, never trusted from the POST reply alone. A reply lost mid-upload
     is UNKNOWN (read update_status). The staged image is UNSIGNED (sha256
-    only)."""
+    only).
+
+    HTTP 428 means the board's OTA interlock sees the safety processor not
+    answering: the upload is refused unless the operator acknowledges it.
+    Pass ``ack_no_safety=True`` (exactly True, still behind ``confirm=True``) to
+    send ``X-Ota-Ack-No-Safety: 1`` and proceed anyway; it is never sent
+    otherwise. A 409 (firing, hot zone, another update running) is final and
+    cannot be acknowledged away."""
     if not isinstance(image_path, str) or not os.path.isabs(image_path):
         return "REFUSED: image_path must be an absolute path"
     try:
@@ -123,7 +130,7 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
         warn = (f" NOTE: the previously staged image ({before.get('semver')}, "
                 f"sha256={before.get('sha256')}) was erased by this upload.")
     try:
-        reply = uhc.upload_stage(resolved, image, version, commit)
+        reply = uhc.upload_stage(resolved, image, version, commit, ack_no_safety=(ack_no_safety is True))
     except uhc.UpdateHttpError as exc:
         if exc.status is None:
             return (f"UNKNOWN: the upload reply was lost or the board was unreachable ({exc}); "
@@ -153,13 +160,15 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
 
 
 @_core._tool()
-def update_stage_clear(confirm: bool = False, host: Optional[str] = None) -> str:
+def update_stage_clear(confirm: bool = False, host: Optional[str] = None, ack_no_safety: bool = False) -> str:
     """Erase the stage header (POST /api/update/stage/clear, ROUTE_TIER_ADMIN)
     so a staged image can never be installed. Refused by the board during a
     firing/autotune/restore or while another update operation holds the
     single update claim. Without ``confirm=True`` (exactly) this only reports
     what is staged and sends nothing. After the POST it re-reads the status
-    and FAILS unless staged is false."""
+    and FAILS unless staged is false. A 428 (safety processor not answering) is
+    refused unless ``ack_no_safety=True`` (exactly True, still behind
+    ``confirm=True``) sends ``X-Ota-Ack-No-Safety: 1``; a 409 is final."""
     resolved = _resolve_host(host)
     try:
         before = uhc.get_stage_status(resolved)
@@ -170,7 +179,7 @@ def update_stage_clear(confirm: bool = False, host: Optional[str] = None) -> str
     if confirm is not True:
         return _refuse_unconfirmed(f"clearing the stage would discard: {_fmt_status(before)} (host={resolved})")
     try:
-        reply = uhc.clear_stage(resolved)
+        reply = uhc.clear_stage(resolved, ack_no_safety=(ack_no_safety is True))
     except uhc.UpdateHttpError as exc:
         name = uhc.error_name(exc)
         return f"FAILED: stage clear refused or lost: HTTP {exc.status} {name or exc.detail or exc} (host={resolved})"

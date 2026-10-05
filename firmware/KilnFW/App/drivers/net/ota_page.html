@@ -253,6 +253,7 @@ function readFileBytes(fileInput) {
 function setPickersVisible(visible) {
   document.getElementById('espPicker').style.display = visible ? '' : 'none';
   document.getElementById('picoPicker').style.display = visible ? '' : 'none';
+  document.getElementById('stagePicker').style.display = visible ? '' : 'none';
 }
 
 // Whether the kiln is idle right now is exactly a live device reading (a
@@ -718,13 +719,37 @@ function loadStageStatus() {
   });
 }
 
-function stageXhrUpload(bytes) {
+/* 401 mid-upload: open the shared login modal (via an authed GET) and replay once.
+ * 428 (safety processor not answering): ask, then replay once with the ack header,
+ * the same contract as app.js's kcFetchWithSafetyAck. */
+function stageXhrUpload(bytes, ack, relogged) {
+  return stageXhrOnce(bytes, ack).catch(function (e) {
+    if (e.status === 401 && !relogged) {
+      return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
+        if (!r.ok) throw e;
+        return stageXhrUpload(bytes, ack, true);
+      });
+    }
+    if (e.status === 428 && !ack) {
+      return window.kcConfirm((e.message ? e.message.trim() + '\n\n' : '') +
+        'Staging does not touch the running firmware, but the board refuses by default ' +
+        'while the safety processor is not answering. Continue anyway?').then(function (ok) {
+        if (!ok) throw e;
+        return stageXhrUpload(bytes, true, relogged);
+      });
+    }
+    throw e;
+  });
+}
+
+function stageXhrOnce(bytes, ack) {
   return new Promise(function (resolve, reject) {
     var xhr = new XMLHttpRequest();
     var wrap = document.getElementById('stageProgressWrap');
     var bar = document.getElementById('stageProgressBar');
     xhr.open('POST', '/api/update/stage');
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (ack) xhr.setRequestHeader('X-Ota-Ack-No-Safety', '1');
     xhr.upload.onprogress = function (ev) {
       if (!ev.lengthComputable) return;
       var pct = Math.round(100 * ev.loaded / ev.total);

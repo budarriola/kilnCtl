@@ -10,7 +10,7 @@ docs/GITHUB_RELEASE_UPDATE_PLAN.md), all ROUTE_TIER_ADMIN:
 Nothing here installs anything: applying a staged image is the recovery
 image's job (WP5) and has no client yet. Same "stdlib urllib.request through
 http_auth.urlopen()" convention as nvs_keys_http_client.py, unit-tested
-against mocked HTTP (tests/test_update_http_client.py), no socket, no board.
+against mocked HTTP (tests/test_mcp_server_update.py), no socket, no board.
 Credentials come only from http_auth (env vars) and are never echoed here.
 """
 from __future__ import annotations
@@ -127,12 +127,14 @@ def validate_upload_args(image: bytes, version: str = "", commit: str = "") -> O
 
 
 def upload_stage(host: str, image: bytes, version: str = "", commit: str = "",
-                 timeout: float = UPDATE_UPLOAD_TIMEOUT_S) -> dict:
+                 timeout: float = UPDATE_UPLOAD_TIMEOUT_S, ack_no_safety: bool = False) -> dict:
     """POST /api/update/stage with `image` as the raw body. Optional
     ``X-Stage-Version`` / ``X-Stage-Commit`` headers; when the version is
     omitted the board reads it from the image's esp_app_desc. Raises
     UpdateHttpError (never retries; a refused upload may already have erased
-    a previously good stage). Returns the board's reply body."""
+    a previously good stage). ``ack_no_safety=True`` adds ``X-Ota-Ack-No-Safety: 1``,
+    the operator acknowledgement that lets the board proceed while the safety
+    processor is not answering (otherwise HTTP 428). Returns the board's reply body."""
     problem = validate_upload_args(image, version, commit)
     if problem:
         raise UpdateHttpError(f"refusing to upload: {problem}")
@@ -142,13 +144,17 @@ def upload_stage(host: str, image: bytes, version: str = "", commit: str = "",
         req.add_header("X-Stage-Version", version)
     if commit:
         req.add_header("X-Stage-Commit", commit)
+    if ack_no_safety:
+        req.add_header("X-Ota-Ack-No-Safety", "1")
     return _request(req, STAGE_PATH, timeout)
 
 
-def clear_stage(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) -> dict:
+def clear_stage(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S, ack_no_safety: bool = False) -> dict:
     """POST /api/update/stage/clear (empty body); erases the stage header."""
     req = urllib.request.Request(_url(host, STAGE_CLEAR_PATH), data=b"", method="POST")
     req.add_header("Content-Type", "application/octet-stream")
+    if ack_no_safety:
+        req.add_header("X-Ota-Ack-No-Safety", "1")
     return _request(req, STAGE_CLEAR_PATH, timeout)
 
 

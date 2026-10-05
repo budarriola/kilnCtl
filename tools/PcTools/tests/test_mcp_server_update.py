@@ -50,6 +50,7 @@ class FakeBoard:
         self.staged = None  # dict or None
         self.busy = False
         self.refuse = None
+        self.needs_ack = False  # safety link down: 428 unless the ack header is sent
         self.corrupt_sha = False
         self.drop_reply = False
         self.requests = []
@@ -76,6 +77,8 @@ class FakeBoard:
         if m == "GET" and path == "/update/stage":
             return _Resp(json.dumps(self._status()).encode())
         if m == "POST" and path == "/update/stage":
+            if self.needs_ack and not req.has_header("X-ota-ack-no-safety"):
+                raise self._http_error(req, 428, {"ok": False, "error": "safety_not_answering"})
             if self.refuse:
                 raise self._http_error(req, self.refuse[0], {"ok": False, "error": self.refuse[1]})
             if self.drop_reply:
@@ -89,6 +92,8 @@ class FakeBoard:
                            "commit": req.get_header("X-stage-commit") or ""}
             return _Resp(b'{"ok":true,"staged":true}')
         if m == "POST" and path == "/update/stage/clear":
+            if self.needs_ack and not req.has_header("X-ota-ack-no-safety"):
+                raise self._http_error(req, 428, {"ok": False, "error": "safety_not_answering"})
             if self.refuse:
                 raise self._http_error(req, self.refuse[0], {"ok": False, "error": self.refuse[1]})
             self.staged = None
@@ -228,6 +233,39 @@ class UploadToolTest(_Base):
         self.assertIn("1.0.0", out)
 
 
+class AckNoSafetyTest(_Base):
+    def test_428_refused_without_ack_and_header_never_sent(self):
+        self.board.needs_ack = True
+        out = msu.update_stage_upload(self.write_image(_image()), confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("428", out)
+        for r in self.board.posts():
+            self.assertFalse(r.has_header("X-ota-ack-no-safety"))
+        self.assertIsNone(self.board.staged)
+
+    def test_ack_sent_only_when_exactly_true(self):
+        self.board.needs_ack = True
+        path = self.write_image(_image())
+        for val in ("yes", 1):
+            out = msu.update_stage_upload(path, confirm=True, ack_no_safety=val)  # type: ignore[arg-type]
+            self.assertTrue(out.startswith("FAILED"), out)
+        out = msu.update_stage_upload(path, confirm=True, ack_no_safety=True)
+        self.assertTrue(out.startswith("ok - staged and verified"), out)
+
+    def test_ack_does_not_bypass_confirm(self):
+        self.board.needs_ack = True
+        out = msu.update_stage_upload(self.write_image(_image()), ack_no_safety=True)
+        self.assertIn("DRY RUN", out)
+        self.assertEqual(self.board.posts(), [])
+
+    def test_clear_428_then_ack(self):
+        uhc.upload_stage("h", _image(), ack_no_safety=True)
+        self.board.needs_ack = True
+        self.assertTrue(msu.update_stage_clear(confirm=True).startswith("FAILED"))
+        self.assertIsNotNone(self.board.staged)
+        self.assertTrue(msu.update_stage_clear(confirm=True, ack_no_safety=True).startswith("ok - stage cleared"))
+
+
 class ClearToolTest(_Base):
     def test_unconfirmed_sends_nothing(self):
         uhc.upload_stage("h", _image())
@@ -284,6 +322,9 @@ class RegistrationTest(unittest.TestCase):
             self.assertIn(name, mcp_facade.GROUP_OVERRIDES)
             self.assertIn(name, mcp_facade.KEYWORDS)
         self.assertNotIn("update_apply", mcp_facade.GROUP_OVERRIDES)
+        registered = set(mcp_server.registry.by_name)
+        for name in ("update_status", "update_stage_upload", "update_stage_clear"):
+            self.assertIn(name, registered)
 
 
 if __name__ == "__main__":
