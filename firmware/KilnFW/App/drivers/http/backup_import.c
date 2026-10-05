@@ -443,8 +443,8 @@ typedef struct {
  * therefore judged on the text each side prints with that same format. */
 static bool backup_tuning_float_matches(float live, float file)
 {
-    char a[32];
-    char b[32];
+    char a[BACKUP_TUNING_FLOAT_BUF];
+    char b[BACKUP_TUNING_FLOAT_BUF];
     snprintf(a, sizeof(a), BACKUP_TUNING_FLOAT_FMT, (double)live);
     snprintf(b, sizeof(b), BACKUP_TUNING_FLOAT_FMT, (double)file);
     return strcmp(a, b) == 0;

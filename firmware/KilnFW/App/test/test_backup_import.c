@@ -5149,8 +5149,26 @@ static void test_kiln_configs_partial_write_set_on_mid_pass_create_failure(void)
     free(body);
 }
 
+/* backup_tuning_float_matches() formats each side into a bounded buffer.
+ * A huge-but-finite float must neither truncate (two different huge values
+ * comparing equal) nor overflow. FLT_MAX prints 39 integer digits under %.3f. */
+static void test_backup_tuning_float_matches_huge_values(void)
+{
+    char buf[BACKUP_TUNING_FLOAT_BUF];
+    int n = snprintf(buf, sizeof(buf), BACKUP_TUNING_FLOAT_FMT, (double)3.4e38f);
+    TEST_CHECK(n > 0 && n < (int)sizeof(buf), "FLT_MAX-scale value fits BACKUP_TUNING_FLOAT_BUF untruncated");
+    TEST_CHECK(backup_tuning_float_matches(1e30f, 1e30f), "equal huge values match");
+    /* 1e30f and its next float differ only past 35 chars: a 32 B buffer would
+     * truncate both to the same text and falsely match. */
+    TEST_CHECK(!backup_tuning_float_matches(1e30f, nextafterf(1e30f, 2e30f)),
+               "adjacent huge floats do not match (no truncation)");
+    TEST_CHECK(backup_tuning_float_matches(3.4e38f, 3.4e38f), "FLT_MAX-scale values match");
+    TEST_CHECK(!backup_tuning_float_matches(1e30f, -1e30f), "sign differs");
+}
+
 void run_test_backup_import(void)
 {
+    test_backup_tuning_float_matches_huge_values();
     test_backup_import_post_refused_by_mode_gate_before_interlock();
     test_backup_import_post_refused_by_interlock_after_mode_gate_passes();
     test_backup_import_post_refused_by_sweep_reason_via_interlock();
