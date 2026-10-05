@@ -561,7 +561,7 @@ negative-tested by assertions 19-22 (missing `sizeof` assert; `crc32` not
 the last field; a commented-out `sizeof` assert; a trailing comment naming
 `crc32` after the true last member), 22 assertions total as of 2026-09-19.
 
-**Landed 2026-10-03 (chain integrity, all three stores).** Each store's
+**Landed 2026-10-03, on origin/main 2026-10-05 (chain integrity, all three stores).** Each store's
 check now also enforces "one step per bump, no skipped version, the version
 constant matching the last step", in the shape that store actually has:
 
@@ -576,7 +576,7 @@ constant matching the last step", in the shape that store actually has:
   names a version >= current.
 
 All use comment-stripped text. Negative-tested by assertions 23-32 of
-`test_check_config_migration_steps.ps1` (32 total) and by hand against the
+`test_check_config_migration_steps.ps1` (40 total after the review-gap fixes: comment-stripped matching, no vacuous pass, forward declarations, RP2040 branch) and by hand against the
 real sources (each break named the store and version, then restored).
 
 **Still follow-up:** D1's "exactly one NEW step per bump" defect-catching rule
