@@ -291,7 +291,7 @@ here; none is copied from an unverified summary.
 8. **No cross-check exists that the two processors' "healthy" verdicts are
    independently correct** rather than merely self-consistent (H5/H9 above).
    A thermocouple physically shared or routed through the same failure point
-   for both processors is not designed against. Decided 2026-10-04, pending implementation: a heat-rise check for H5 and a CT-current-while-all-relays-off alarm for H9 (see H5/H9 above).
+   for both processors is not designed against. H5 is covered by the existing thermal_guard guard 1 (`THERMAL_GUARD_TRIP_HEATING_FAILED`, no disable, tests pinned in `91f974d0`), with the residual gaps listed in the H5 row above: (a) a low-reading TC that still tracks the rise, (b) on/off zones have guard 1 off by design, (c) it runs only while the executor or autotune drives the zone, (d) the Pico has no minimum-rise check. The H9 CT-current-while-all-relays-off alarm is implemented (see H9 above).
 
 9. **RESOLVED, corrected 2026-09-04 (was stale, not open).** This item
    previously claimed `SAFETY_FAULT_SRC_APP` latches forever on a transient
