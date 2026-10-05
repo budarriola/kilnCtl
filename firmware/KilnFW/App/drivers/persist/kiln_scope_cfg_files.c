@@ -13,6 +13,7 @@
 #include "relay_cycles.h"
 #include "time_sync.h"
 #include "unit_pref.h"
+#include "update_settings.h"
 #include "zones_config_cfg_fs.h"
 #include "zones_http_internal.h"
 
@@ -31,6 +32,7 @@ static const char *const kKilnScopeFiles[] = {
     ADAPTIVE_TUNE_KIBASE_FILE_PATH,  /* adaptive-tune Ki baseline (ADAPTIVE_TUNE_NVS_PARTITION == kiln_nvs) */
     ITER_TUNE_CFG_FILE_PATH,         /* iterative-tune store */
     AUX_OUTPUTS_FILE_PATH,           /* spare-relay aux outputs */
+    UPDATE_SETTINGS_FILE_PATH,       /* update repo preference */
 };
 
 const char *const *kiln_scope_cfg_files_list(size_t *out_count)

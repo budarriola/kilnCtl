@@ -75,7 +75,7 @@ INDEXED_PREFIXES = ("coupling_c", "coupling_tau_c", "coupling_dead_time_c", "set
 # Keys that are structural (not zone tuning data) or already covered by a
 # name collision with an indexed family and handled specially below.
 NON_ZONE_STRUCTURAL_KEYS = {"kind", "version", "profiles", "zones", "id", "segments", "zone_mask",
-                            "target_c", "ramp_c_per_hr", "dwell_min", "safety_tc_type"}
+                            "target_c", "ramp_c_per_hr", "dwell_min", "safety_tc_type", "update_repo"}
 
 
 def strip_comments(text: str) -> str:

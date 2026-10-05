@@ -27,6 +27,7 @@ void run_test_update_stage_header(void);
 void run_test_update_policy(void);
 void run_test_update_stage(void);
 void run_test_update_stale_stage(void);
+void run_test_update_settings(void);
 void run_test_ota_image_crc(void);
 void run_test_ota_esp_image_header(void);
 void run_test_auth_reset_gesture(void);
@@ -158,6 +159,7 @@ int main(void)
     run_test_update_policy();
     run_test_update_stage();
     run_test_update_stale_stage();
+    run_test_update_settings();
     run_test_ota_image_crc();
     run_test_ota_esp_image_header();
     run_test_auth_reset_gesture();

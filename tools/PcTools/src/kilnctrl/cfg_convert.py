@@ -427,6 +427,8 @@ def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
     ]
     if "safety_tc_type" in doc:
         out["safety_tc_type"] = doc["safety_tc_type"]
+    if "update_repo" in doc:  # WP9 top-level string, never version-gated
+        out["update_repo"] = doc["update_repo"]
 
     if source_version == target_version:
         report.add("document", "version", "kept", "source and target versions are identical; document unchanged")

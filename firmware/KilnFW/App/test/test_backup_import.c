@@ -156,6 +156,7 @@ static bool test_backup_import_apply(const char *body, char *err_msg, size_t err
 // executable's other files define it (ota_http.c/test_web_auth_store.c each
 // live in their own separate executables), so it is defined here.
 #include "web_auth_store.h"
+#include "update_settings.h"
 #include "fake_kv.h"
 #include "psa/crypto.h"
 psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
@@ -5278,8 +5279,114 @@ static void test_backup_tuning_float_matches_huge_values(void)
     TEST_CHECK(!backup_tuning_float_matches(1e30f, -1e30f), "sign differs");
 }
 
+// ---- WP9 (docs/GITHUB_RELEASE_UPDATE_PLAN.md): the "update_repo" key ----
+static void wp9_fresh_repo_setting(void)
+{
+    fake_kv_reset_all();
+    hal_kv_init_partition("kiln_nvs");
+    update_settings_reset_ram_for_test();
+    update_settings_start();
+}
+
+static const char *WP9_BODY_HEAD =
+    "{\"kind\":\"kilnctl_backup\",\"version\":5,"
+    "\"profiles\":[{\"id\":0,\"name\":\"P1\",\"zone_mask\":1,"
+    "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+    "\"zones\":[{\"index\":0,\"pid_kp\":1.5,\"pid_ki\":0.2,\"pid_kd\":0.05}]";
+
+static bool wp9_import_with(const char *tail, char *err, size_t err_cap)
+{
+    char body[768];
+    snprintf(body, sizeof(body), "%s%s}", WP9_BODY_HEAD, tail);
+    return test_backup_import_apply(body, err, err_cap);
+}
+
+static void test_update_repo_imports_and_persists(void)
+{
+    TEST_SECTION("backup_import_apply -- update_repo is applied and persisted");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    char err[160] = "";
+    TEST_CHECK(wp9_import_with(",\"update_repo\":\"someone/fork\"", err, sizeof(err)), "a valid update_repo imports");
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "the imported repo is live");
+    update_settings_reset_ram_for_test();
+    update_settings_start();
+    TEST_CHECK(strcmp(update_settings_repo(), "someone/fork") == 0, "the imported repo survives a reboot");
+
+    reset_stub_state();
+    TEST_CHECK(wp9_import_with(",\"update_repo\":\"\"", err, sizeof(err)), "an empty update_repo imports");
+    TEST_CHECK(update_settings_repo_is_default(), "an empty update_repo resets to the default");
+}
+
+static void test_update_repo_absent_is_noop(void)
+{
+    TEST_SECTION("backup_import_apply -- no update_repo key leaves the setting alone");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    update_settings_set("keep/me");
+    char err[160] = "";
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)), "an older backup without the key still imports");
+    TEST_CHECK(strcmp(update_settings_repo(), "keep/me") == 0, "the setting is untouched");
+}
+
+static void test_update_repo_invalid_refuses_whole_restore(void)
+{
+    TEST_SECTION("backup_import_apply -- an invalid update_repo refuses the whole restore, nothing written");
+    static const char *const tails[] = {
+        ",\"update_repo\":\"not a repo\"",
+        ",\"update_repo\":\"http://evil.example/x\"",
+        ",\"update_repo\":\"a/../b\"",
+        ",\"update_repo\":\"-a/b\"",
+        ",\"update_repo\":42",
+        ",\"update_repo\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+    };
+    for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); i++) {
+        reset_stub_state();
+        wp9_fresh_repo_setting();
+        update_settings_set("keep/me");
+        char err[160] = "";
+        TEST_CHECK(!wp9_import_with(tails[i], err, sizeof(err)), "a bad update_repo is refused");
+        TEST_CHECK(g_total_write_calls == 0, "pass 1 refusal: no profile/zone write happened");
+        TEST_CHECK(g_profile_save_calls == 0, "pass 1 refusal: no profile was saved");
+        TEST_CHECK(strcmp(update_settings_repo(), "keep/me") == 0, "pass 1 refusal: the setting is unchanged");
+        TEST_CHECK(strstr(err, "update_repo") != NULL, "the error names the update_repo field");
+    }
+}
+
+static void test_update_repo_export_round_trip(void)
+{
+    TEST_SECTION("backup_export_get_handler -- emits update_repo, and it round-trips through import");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    esp_err_t e = run_export();
+    TEST_CHECK(e == ESP_OK, "export succeeds");
+    TEST_CHECK(strstr(s_export_body, "\"update_repo\":\"" UPDATE_SETTINGS_DEFAULT_REPO "\"") != NULL,
+               "an unset setting exports as the default repo");
+
+    update_settings_set("round/trip-repo");
+    e = run_export();
+    TEST_CHECK(e == ESP_OK, "export succeeds after a set");
+    TEST_CHECK(strstr(s_export_body, "\"update_repo\":\"round/trip-repo\"") != NULL, "the set repo is exported");
+
+    // Restore that document onto a board configured differently.
+    char *saved = strdup(s_export_body);
+    TEST_CHECK(saved != NULL, "copy the exported document");
+    if (saved != NULL) {
+        update_settings_set("other/board");
+        char err[160] = "";
+        bool ok = test_backup_import_apply(saved, err, sizeof(err));
+        TEST_CHECK(ok, "the exported document imports back");
+        TEST_CHECK(strcmp(update_settings_repo(), "round/trip-repo") == 0, "the repo is restored from the backup");
+        free(saved);
+    }
+}
+
 void run_test_backup_import(void)
 {
+    test_update_repo_imports_and_persists();
+    test_update_repo_absent_is_noop();
+    test_update_repo_invalid_refuses_whole_restore();
+    test_update_repo_export_round_trip();
     test_backup_tuning_float_matches_huge_values();
     test_backup_import_post_refused_by_mode_gate_before_interlock();
     test_backup_import_post_refused_by_interlock_after_mode_gate_passes();

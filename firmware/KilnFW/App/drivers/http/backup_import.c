@@ -73,6 +73,7 @@
                                 * forced-read-back-confirm path safety_cfg_http.c's own POST handler uses,
                                 * reused here so the Pico's i_normal_a[0..2] restore is never trusted on a
                                 * bare ACK -- see the push immediately after the ceiling guard below. */
+#include "update_settings.h" /* WP9: top-level "update_repo" */
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
                                  * error_band_c/rate_band_c_per_s setters --
@@ -2795,6 +2796,36 @@ static BACKUP_IMPORT_NOINLINE void backup_import_track_ceiling_lower(void)
     }
 }
 
+/* docs/GITHUB_RELEASE_UPDATE_PLAN.md WP9: the optional top-level "update_repo"
+ * string. Absent = no-op (every older export). Present: must be a string that
+ * is "" (reset to the default) or a valid "owner/name"; an over-long value is
+ * refused, never truncated (the buffer is one byte over the longest valid
+ * repo, and a truncated copy would be longer than the maximum, so it fails
+ * the validator). commit=false only validates (pass 1, before the dry_run
+ * return); commit=true persists. NOINLINE for the same stack-budget reason as
+ * backup_import_track_ceiling_lower(). */
+static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, bool commit, char *err_msg,
+                                                             size_t err_cap)
+{
+    if (backup_json_obj_find(body, "update_repo") == NULL) {
+        return true;
+    }
+    char repo[UPDATE_SETTINGS_REPO_MAX_LEN + 2];
+    if (!backup_json_field_str(body, "update_repo", repo, sizeof(repo))) {
+        snprintf(err_msg, err_cap, "update_repo must be a string");
+        return false;
+    }
+    if (repo[0] != '\0' && !update_settings_repo_is_valid(repo)) {
+        snprintf(err_msg, err_cap, "update_repo is not a valid owner/name");
+        return false;
+    }
+    if (commit && update_settings_set(repo) != ESP_OK) {
+        snprintf(err_msg, err_cap, "update_repo could not be persisted -- the rest of the restore already landed");
+        return false;
+    }
+    return true;
+}
+
 /* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
  * this file's header comment above profile_candidate_t) and hands them to
  * backup_import_apply_locked(), which is otherwise byte-for-byte the
@@ -2831,6 +2862,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!backup_import_kiln_configs(body, mode, false, ack_delete_count, ack_no_safety_processor, plan, NULL,
                                     err_msg, err_cap)) {
         return false;
+    }
+    if (!backup_import_update_repo(body, false, err_msg, err_cap)) {
+        return false; // pass 1: malformed update_repo refuses the WHOLE restore, nothing written
     }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched
@@ -2928,6 +2962,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     free(timing_profile_candidates);
     free(zone_candidates);
     free(candidates);
+    if (ok && !backup_import_update_repo(body, true, err_msg, err_cap)) {
+        ok = false; // profiles/zones already landed: reported as a partial write below
+    }
     if (!ok) {
         // kiln_configs[] already committed above -- this restore is a
         // partial write, not the clean "nothing changed" a 400 implies.

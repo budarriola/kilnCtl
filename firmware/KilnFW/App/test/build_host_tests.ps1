@@ -69,6 +69,7 @@ try {
         (Join-Path $testDir "test_update_policy.c"),
         (Join-Path $testDir "test_update_stage.c"),
         (Join-Path $testDir "test_update_stale_stage.c"),
+        (Join-Path $testDir "test_update_settings.c"),
         (Join-Path $testDir "test_ota_image_crc.c"),
         (Join-Path $testDir "test_ota_esp_image_header.c"),
         (Join-Path $testDir "test_auth_reset_gesture.c"),
@@ -241,6 +242,7 @@ try {
         (Join-Path $driversDir "update/update_policy.c"),
         (Join-Path $driversDir "update/update_stage.c"),
         (Join-Path $driversDir "update/update_stale_stage.c"),
+        (Join-Path $driversDir "update/update_settings.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/web_auth_session.c"),
         (Join-Path $driversDir "net/web_auth_login.c"),
@@ -445,6 +447,7 @@ try {
         "/I`"$driversDir\safety`""
         "/I`"$driversDir\sim`""
         "/I`"$driversDir\ui`""
+        "/I`"$driversDir\update`""
         "/I`"$hwAbsDir\esp\spi`""
         "/I`"$hwAbsDir\esp\i2c`""
         "/I`"$hwAbsDir\esp\uart`""

@@ -31,6 +31,7 @@
 #include "MAX31856.h"
 #include "profiles_http.h"
 #include "web_encoding.h"
+#include "update_settings.h" /* WP9: the persisted update repo, top-level "update_repo" */
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
@@ -742,6 +743,15 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             backup_stream_printf(&s, "}");
         }
         backup_stream_printf(&s, "]");
+    }
+    /* docs/GITHUB_RELEASE_UPDATE_PLAN.md WP9: the persisted update repo
+     * ("owner/name"; the default when unset). Re-validated on import. No
+     * BACKUP_FORMAT_VERSION bump: an absent key is a no-op on import, the
+     * same optional-key rule as safety_tc_type. */
+    {
+        char repo_escaped[UPDATE_SETTINGS_REPO_MAX_LEN * 2 + 1];
+        json_escape(update_settings_repo(), repo_escaped, sizeof(repo_escaped));
+        backup_stream_printf(&s, ",\"update_repo\":\"%s\"", repo_escaped);
     }
     backup_stream_printf(&s, "}");
 

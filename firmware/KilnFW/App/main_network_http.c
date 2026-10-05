@@ -40,6 +40,8 @@
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
 #include "update_http.h"
+#include "update_settings.h"
+#include "update_settings_http.h"
 #include "factory_reset.h"
 #include "sw_reset_http.h"
 #include "kiln_io.h"
@@ -356,6 +358,11 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }
 
+    // docs/GITHUB_RELEASE_UPDATE_PLAN.md WP9: the persisted update repo. Same
+    // non-fatal, load-before-first-reader placement; a failed load leaves the
+    // compiled-in default repo in effect for this boot.
+    (void)update_settings_start();
+
     esp_err_t zones_err = zones_http_start();
     if (zones_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "zones_http_start failed: %s -- no Thermocouples & Zones page this boot",
@@ -471,6 +478,12 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // docs/GITHUB_RELEASE_UPDATE_PLAN.md WP4: the update stager's three ADMIN
     // routes. ESP_ERR_NOT_FOUND is a board still on the pre-WP2 partition
     // table (no `stage`), an expected, non-fault state.
+    esp_err_t update_settings_http_err = update_settings_http_start();
+    if (update_settings_http_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "update_settings_http_start failed: %s -- no update-settings endpoint this boot",
+                 esp_err_to_name(update_settings_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
+    }
     esp_err_t update_http_err = update_http_start();
     if (update_http_err == ESP_ERR_NOT_FOUND) {
         ESP_LOGW(MAIN_TAG, "update_http_start: no stage partition -- update staging unavailable this boot");

@@ -345,6 +345,9 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "update/update_stage.c"
                        "update/update_stale_stage.c"
                        "update/update_http.c"
+                       # WP9: persisted update repo and its ADMIN routes.
+                       "update/update_settings.c"
+                       "update/update_settings_http.c"
                        "net/ota_auth.c"
                        # 2026-09-28: shared login-lockout ladder, used by both
                        # web_auth_login_http.c and lcd_auth_state.c -- see

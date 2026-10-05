@@ -83,7 +83,7 @@
                      border-radius: var(--ui-radius); height: 1.6em; overflow: hidden; margin: 0.5em 0; }
   .progress-inner { background: var(--accent); height: 100%; width: 0%; transition: width 0.3s ease;
                      color: #fff; font-size: 0.8em; line-height: 1.6em; text-align: center; white-space: nowrap; }
-  input[type="password"], input[type="file"] { width: 100%; box-sizing: border-box; font-size: 1em;
+  input[type="password"], input[type="file"], input[type="text"] { width: 100%; box-sizing: border-box; font-size: 1em;
              background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
              border-radius: var(--ui-radius); padding: 0.5em; margin: 0.3em 0; }
   label { display: block; margin-top: 0.6em; font-size: 0.9em; color: var(--muted); }
@@ -204,6 +204,20 @@ done by the recovery image and is not available from this page yet.</p>
   <div class="progress-outer"><div id="stageProgressBar" class="progress-inner">0%</div></div>
 </div>
 <p id="stageMsg" class="msg"></p>
+
+<h2>Update source repository</h2>
+<p>The GitHub repository (<code>owner/name</code>) this board checks for
+releases. Leave it at the default unless you publish your own builds. A
+release from any other repository is shown as UNSIGNED. Cannot be changed
+while a firing or autotune is running.</p>
+<div id="repoInfo" class="card kv">Loading&hellip;</div>
+<div>
+  <label for="repoInput">Repository (owner/name, empty = default)</label>
+  <input type="text" id="repoInput" maxlength="62" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button id="repoSaveBtn" type="button" class="primary">Save repository</button>
+  <button id="repoResetBtn" type="button">Reset to default</button>
+</div>
+<p id="repoMsg" class="msg"></p>
 
 <script>
 /* ---- OTA-family fetch -----------------------------------------------------
@@ -821,6 +835,55 @@ document.getElementById('stageClearBtn').addEventListener('click', function () {
   });
 });
 
+/* ---- Update repo setting ---------------------------------------------------
+ * GET/POST /api/update/settings -- update_settings_http.c, ROUTE_TIER_ADMIN.
+ * POST is form-encoded `repo=owner/name`; empty resets to the default. */
+function renderRepo(s) {
+  document.getElementById('repoInfo').innerHTML =
+    '<dt>Current</dt><dd>' + esc(s.repo) + (s.is_default ? ' (default)' : '') + '</dd>' +
+    '<dt>Default</dt><dd>' + esc(s.default_repo) + '</dd>';
+  document.getElementById('repoInput').value = s.is_default ? '' : s.repo;
+}
+
+function loadRepo() {
+  return window.kcOtaAuthedFetch('/api/update/settings', { method: 'GET' }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+      renderRepo(JSON.parse(text));
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    document.getElementById('repoInfo').textContent = 'Could not load the update repository: ' + e.message;
+  });
+}
+
+function saveRepo(value) {
+  var msg = document.getElementById('repoMsg');
+  return window.kcOtaAuthedFetch('/api/update/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'repo=' + encodeURIComponent(value)
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) {
+        throw new Error(r.status === 400 ? 'not a valid owner/name repository'
+                        : r.status === 409 ? 'refused while a firing or autotune is running'
+                        : (text || ('HTTP ' + r.status)));
+      }
+      renderRepo(JSON.parse(text));
+      msg.textContent = 'Saved.';
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Save failed: ' + e.message;
+  });
+}
+
+document.getElementById('repoSaveBtn').addEventListener('click', function () {
+  saveRepo(document.getElementById('repoInput').value.trim());
+});
+document.getElementById('repoResetBtn').addEventListener('click', function () { saveRepo(''); });
+
 /* ---- Boot ------------------------------------------------------------------ */
 loadInterlock();
 setInterval(loadInterlock, 15000);
@@ -829,6 +892,7 @@ pollPicoStatus();
 pollSafetyBuildInfo();
 setInterval(pollSafetyBuildInfo, 3000);
 loadStageStatus();
+loadRepo();
 
 (function () {
   var btn = document.getElementById('themeBtn');

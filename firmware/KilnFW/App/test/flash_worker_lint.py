@@ -330,6 +330,11 @@ ALLOWLIST = {
     # display_power_cfg.c's/profiles_builtin.c's own entries in this list
     # rely on -- not a PSRAM-stacked task.
     "ramp_assist_cfg.c",
+    # Pattern 3 (internal-SRAM-stack httpd task, not init-time): the write
+    # call site is update_settings_set(), reached from update_settings_http.c's
+    # POST handler and backup import (http_async_job), the same httpd/internal
+    # stack story as display_power_cfg.c; update_settings_start() is boot-time.
+    "update_settings.c",
     # Pattern 2 (local caller_stack_is_external() guard), added when the
     # guard was introduced -- see this file's own comment; also called once
     # from app_main's own task before the scheduler starts.
