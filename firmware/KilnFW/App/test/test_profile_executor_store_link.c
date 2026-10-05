@@ -32,6 +32,7 @@
 #include "profiles_http.h"
 #include "live_profile.h"
 #include "http_auth_http.h"
+#include "aux_outputs_cfg.h"
 
 // ---- fakes for what profiles_http.c (separate object) needs and the prestart
 // fakes do not already supply ------------------------------------------------
