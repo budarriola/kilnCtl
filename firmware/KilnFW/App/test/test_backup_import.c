@@ -4645,6 +4645,37 @@ static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
                     "differing record: the file's value was restored");
 }
 
+static void test_import_refuses_duplicate_zone_index(void)
+{
+    TEST_SECTION("backup_import_apply -- two zone tuning entries with the same index are refused in pass 1, "
+                 "nothing committed");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    const char *first = strstr(s_export_body, "{\"index\":1,");
+    TEST_CHECK(first != NULL, "setup: the export has a zone 1 entry");
+    if (!first) {
+        return;
+    }
+    size_t head = (size_t)(first - s_export_body);
+    const char *dup = "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0},";
+    size_t total = strlen(s_export_body) + strlen(dup) + 1;
+    char *body = malloc(total);
+    TEST_CHECK(body != NULL, "setup: allocate the doctored body");
+    if (!body) {
+        return;
+    }
+    memcpy(body, s_export_body, head);
+    strcpy(body + head, dup);
+    strcpy(body + head + strlen(dup), first);
+    char import_err[256] = "";
+    bool ok = test_backup_import_apply(body, import_err, sizeof(import_err));
+    TEST_CHECK(!ok, "a duplicate zone index is refused");
+    TEST_CHECK(strstr(import_err, "duplicate index") != NULL, "the error names the duplicate index");
+    free(body);
+}
+
 // ---------------------------------------------------------------------------
 // 2026-10-05 bench round trip (kilnctl_backup_20261005T071413Z.json ->
 // import -> ...071420Z.json): the fix above was inert on hardware, zones 1 and
@@ -5308,6 +5339,7 @@ void run_test_backup_import(void)
     test_export_round_trips_through_import_to_identical_config();
     test_ct_normals_and_new_fields_round_trip_through_export_import();
     test_import_of_identical_tuning_quality_does_not_bump_seq();
+    test_import_refuses_duplicate_zone_index();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
     test_timing_profiles_bundle_round_trips_nonempty();
     test_export_preserves_coupling_matrix_when_a_zone_is_on_off();

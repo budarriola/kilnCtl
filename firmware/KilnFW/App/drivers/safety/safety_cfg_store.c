@@ -502,6 +502,10 @@ static esp_err_t nvs_partition_init(const char *partition)
  * kiln_cfg_store captures the Pico half only when this is true so an unfetched
  * cache is never stored as a populated all-unset half. */
 static bool s_has_data;
+/* Rule, same at runtime and after reboot: has_data == a successful refetch this
+ * boot (even one that installs config_crc 0, a true capture of an uncommissioned
+ * Pico's all-unset config) OR an NVS load with config_crc != 0. An NVS load with
+ * crc 0 is the empty default and does not count. */
 
 static void reset_to_defaults(void)
 {
@@ -1818,7 +1822,11 @@ static uint16_t s_retry_crc = 0;
 
 bool safety_cfg_store_maybe_refetch(SafetyLinkClass *link, uint16_t live_config_crc)
 {
-    if (s_store.config_crc == live_config_crc) {
+    /* An uncommissioned Pico reports config_crc 0, the same value the empty
+     * default cache holds, so a bare crc compare would never fetch it. Until
+     * the cache has data (a fetch this boot, or an NVS load with crc != 0),
+     * fetch at least once even when the crcs match. */
+    if (s_has_data && s_store.config_crc == live_config_crc) {
         s_cache_stale = false;
         return false; /* steady state -- no UART traffic at all, by design */
     }

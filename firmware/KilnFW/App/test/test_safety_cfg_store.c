@@ -343,6 +343,7 @@ static void test_no_refetch_when_crc_unchanged(void)
     reset_all();
 
     s_store.config_crc = 0x1234;
+    s_has_data = true; // a cache that already holds fetched values
     SafetyLinkClass fake_link;
     memset(&fake_link, 0, sizeof(fake_link));
 
@@ -386,6 +387,49 @@ static void test_refetch_when_crc_changes(void)
     TEST_CHECK(safety_cfg_store_get_by_index(0, &p) && !p.set,
                "tc_source (index 0), NOT present in the fetched page, reads back as unset -- "
                "the whole cache was replaced, not merged with the stale entry that used to be there");
+}
+
+static void test_has_data_transitions(void)
+{
+    TEST_SECTION("safety_cfg_store_has_data -- refetch (even crc 0) and NVS load with crc != 0 set it; "
+                 "crc 0 NVS load and reset_to_defaults leave it clear; an uncommissioned Pico is fetched once");
+    reset_all();
+    TEST_CHECK(!safety_cfg_store_has_data(), "empty default cache: no data");
+
+    // Uncommissioned Pico: live crc 0 equals the empty cache's crc 0, yet the
+    // cache has never been fetched -- maybe_refetch must still fetch once.
+    uint16_t ids[] = { 0x0203 };
+    uint16_t vals[] = { 42 };
+    stage_page(0, false, ids, vals, 1);
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    fake_time_advance_us(5000000);
+    TEST_CHECK(safety_cfg_store_maybe_refetch(&fake_link, 0) == true, "crc 0 vs empty cache: fetches once");
+    TEST_CHECK(s_stub_get_config_page_calls == 1, "exactly one page requested");
+    TEST_CHECK(safety_cfg_store_cached_crc() == 0, "the fetch installed crc 0");
+    TEST_CHECK(safety_cfg_store_has_data(), "a successful refetch installing crc 0 counts as data");
+    TEST_CHECK(safety_cfg_store_maybe_refetch(&fake_link, 0) == false, "second call: steady state");
+    TEST_CHECK(s_stub_get_config_page_calls == 1, "no further wire traffic once data is present");
+
+    reset_to_defaults();
+    TEST_CHECK(!safety_cfg_store_has_data(), "reset_to_defaults clears has_data");
+
+    // NVS load: crc != 0 counts, crc 0 does not.
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    s_store.config_crc = 0xBEEF;
+    TEST_CHECK(nvs_save_store() == ESP_OK, "setup: crc != 0 cache saves");
+    memset(&s_store, 0, sizeof(s_store));
+    s_has_data = false;
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "init loads it");
+    TEST_CHECK(s_store.config_crc == 0xBEEF && safety_cfg_store_has_data(), "NVS load with crc != 0: has data");
+
+    s_store.config_crc = 0;
+    TEST_CHECK(nvs_save_store() == ESP_OK, "setup: crc 0 cache saves");
+    memset(&s_store, 0, sizeof(s_store));
+    s_has_data = true;
+    TEST_CHECK(safety_cfg_store_init() == ESP_OK, "init loads it");
+    TEST_CHECK(!safety_cfg_store_has_data(), "NVS load with crc 0: no data (same rule after reboot as at runtime)");
+    fake_kv_reset_all();
 }
 
 // 2026-08-28 audit fix (N2, BLOCKER): safety_poll_task's own entry point
@@ -1475,6 +1519,7 @@ void run_test_safety_cfg_store(void)
     test_index_for_id_finds_known_and_rejects_unknown();
     test_no_refetch_when_crc_unchanged();
     test_refetch_when_crc_changes();
+    test_has_data_transitions();
     test_maybe_refetch_does_not_block_when_lock_is_busy();
     test_refetch_carries_unset_bit_through_not_unconditional_true();
     test_refetch_pages_until_more_is_false();

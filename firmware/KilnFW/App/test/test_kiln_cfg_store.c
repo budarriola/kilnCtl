@@ -322,6 +322,7 @@ extern void test_safety_cfg_store_stage_f32_for_kiln_cfg_store_test(size_t page_
 // staged by one test cannot leak into the next.
 extern void test_safety_cfg_store_reset_for_kiln_cfg_store_test(void);
 extern void test_safety_cfg_store_mark_unfetched_for_kiln_cfg_store_test(void);
+extern void test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test(void);
 
 // ---------------------------------------------------------------------------
 // Test scaffolding
@@ -3433,6 +3434,39 @@ static void test_autosave_from_live_updates_active_slot_and_hash(void)
     TEST_CHECK(hash_after != hash_before, "pkg_hash was recomputed over the new content");
 }
 
+static void test_autosave_keeps_existing_pico_half_while_cache_unfetched(void)
+{
+    TEST_SECTION("kiln_cfg_store_autosave_from_live -- an unfetched safety cache defers the Pico-half "
+                 "recapture like a divergence: the slot's existing good half is kept, never zeroed or "
+                 "overwritten with an all-unset one, and the recapture is owed until the cache is fetched");
+    reset_state();
+    int32_t id1 = -1;
+    char reason[96] = {0};
+    TEST_CHECK(kiln_cfg_store_save_current("Live Kiln", -1, &id1, reason, sizeof(reason)), "save succeeds");
+    int idx = find_index_by_id(id1);
+    TEST_CHECK(idx >= 0 && s_store.entries[idx].pico_populated, "setup: slot starts with a populated Pico half");
+    kiln_pkg_safety_t half_before = s_store.entries[idx].pico;
+
+    test_safety_cfg_store_mark_unfetched_for_kiln_cfg_store_test();
+    for (size_t i = 0; i < sizeof(s_stub_export_content); i++) {
+        s_stub_export_content[i] = (uint8_t)(i + 100);
+    }
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave reports success");
+    TEST_CHECK(reason[0] != '\0', "reason explains the deferral");
+    idx = find_index_by_id(id1);
+    TEST_CHECK(idx >= 0 && s_store.entries[idx].pico_populated, "the Pico half is still populated");
+    TEST_CHECK(memcmp(&s_store.entries[idx].pico, &half_before, sizeof(half_before)) == 0,
+               "the existing Pico half is byte-identical -- not zeroed or replaced");
+    TEST_CHECK(s_store.entries[idx].pkg_hash != 0, "pkg_hash still a real hash");
+    TEST_CHECK(kiln_cfg_store_pico_half_recapture_pending(), "a recapture is owed");
+
+    test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test();
+    reason[0] = '\0';
+    TEST_CHECK(kiln_cfg_store_autosave_from_live(reason, sizeof(reason)), "autosave succeeds once fetched");
+    TEST_CHECK(!kiln_cfg_store_pico_half_recapture_pending(), "the owed recapture ran and cleared the flag");
+}
+
 static void test_autosave_from_live_suppressed_while_diverged(void)
 {
     TEST_SECTION("kiln_cfg_store_autosave_from_live -- HIGH 1 rework (review_divergence_rework_c1d2c526_"
@@ -3914,6 +3948,7 @@ void run_test_kiln_cfg_store(void)
     test_autosave_override_ignores_a_foreign_dispatcher();
     test_autosave_override_applies_to_its_own_dispatcher();
     test_autosave_override_ignores_a_foreign_nonnull_dispatcher();
+    test_autosave_keeps_existing_pico_half_while_cache_unfetched();
     test_autosave_from_live_suppressed_while_diverged();
     test_autosave_from_live_suppressed_while_swap_pending();
     test_recapture_pico_half_confirmed_bypasses_divergence_gate();

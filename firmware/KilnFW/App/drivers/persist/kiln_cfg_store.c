@@ -1033,6 +1033,15 @@ bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap)
  * the ESP-side edit even when the Pico half is deliberately held back. */
 static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *cfg, bool recapture_pico_half)
 {
+    /* An unfetched safety_cfg_store cache reads set=false for every param and
+     * capture would succeed on it, storing an all-unset half as populated (or
+     * overwriting a good existing half with one). Hold the existing half
+     * instead: a slot that has one keeps it, a slot that has none stays
+     * pico_populated=0. The autosave path also owes a recapture (dirty flag)
+     * until the cache has been fetched. */
+    if (recapture_pico_half && !safety_cfg_store_has_data()) {
+        recapture_pico_half = false;
+    }
     if (!recapture_pico_half) {
         if (!e->pico_populated) {
             /* Nothing captured yet to keep (a brand-new slot, or one already
@@ -1065,11 +1074,7 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
     }
 
     kiln_pkg_pico_source_t source = kiln_pkg_pico_source_default();
-    /* An unfetched safety_cfg_store cache reads set=false for every param, and
-     * capture would succeed on it, storing an all-unset half as populated; a
-     * later real fetch then makes that slot look like a stale Pico half.
-     * Refuse until the cache holds real values. */
-    if (!safety_cfg_store_has_data() || !kiln_package_capture_pico_half(&source, &e->pico)) {
+    if (!kiln_package_capture_pico_half(&source, &e->pico)) {
         memset(&e->pico, 0, sizeof(e->pico));
         e->pico_populated = 0;
         e->pkg_schema = 0;
@@ -2683,6 +2688,14 @@ bool kiln_cfg_store_autosave_from_live_for_dispatcher(void *dispatcher_task, cha
     bool ceiling_diverged = safety_ceiling_sync_is_diverged(div_reason, sizeof(div_reason));
     bool standing_diverged = !ceiling_diverged && safety_ceiling_sync_is_standing_diverged(div_reason, sizeof(div_reason));
     bool diverged = ceiling_diverged || standing_diverged;
+    if (!diverged && !safety_cfg_store_has_data()) {
+        /* The Pico config cache has never been fetched (or loaded with data):
+         * recapturing now would overwrite the slot's Pico half with an
+         * all-unset one. Defer like a divergence; the post-fetch tick
+         * recaptures through the dirty flag. */
+        diverged = true;
+        snprintf(div_reason, sizeof(div_reason), "Pico config cache not fetched yet");
+    }
     if (!diverged && safety_cfg_store_cache_generation() != safety_ceiling_sync_latch_evaluated_generation()) {
         /* The Pico-config cache has been refreshed (a refetch landed) more
          * recently than the divergence latch above was last recomputed

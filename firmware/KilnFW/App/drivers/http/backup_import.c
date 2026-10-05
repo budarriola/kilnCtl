@@ -1165,6 +1165,15 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             return false;
         }
         zc->index = (uint8_t)didx;
+        /* Two entries for one zone would make the later commit order (and the
+         * pre-commit tuning compare) ambiguous; a hand-made file only. */
+        for (size_t j = 0; j < zone_candidate_count; j++) {
+            if (zone_candidates[j].index == zc->index) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: duplicate index %u",
+                         (unsigned)zone_candidate_count, zc->index);
+                return false;
+            }
+        }
         if (zc->index >= thermo_count) {
             snprintf(err_msg, err_cap,
                     "zone tuning entry %u: channel %u is not a configured zone on this board (Thermocouples & "
