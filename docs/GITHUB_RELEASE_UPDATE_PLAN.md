@@ -160,7 +160,7 @@ New OTA cases OT-G01..G06: bad sha256, truncated upload, downgrade refused, inte
 - `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` (and `DYNAMIC_BUFFER` with the free-config/free-CA options) moves contexts to PSRAM; `esp_http_client`
   buffer 2048 for the long redirect Location header. This is a global sdkconfig change (D9, default, not yet owner-confirmed) with TWO gates:
   (a) before/after `heap_internal min_free >= 8192 B` and `.dram0.bss`, with a recorded negative test;
-  (b) before/after login KDF latency (the KDF once starved the idle watchdog), measured through the web login path with no TASK_WDT in the log.
+  (b) before/after login KDF latency (the KDF once starved the idle watchdog), measured through the web login path with no TASK_WDT in the log. **Bench 2026-10-05: gate (b) FAILED in the spike configuration (see section 14, Bench results); must be re-run on the bench with the production fetch task before WP8 is done.**
 - Download only when idle, one update claim, free-internal precheck (proposed 40 KB) and an in-flight abort below 12 KB; 4 KB PSRAM chunk buffer;
   `vTaskDelay(1)` yields between flash writes.
 - `check_recovery_image_size.ps1` must cover the new recovery route (recovery.bin is about 771 KB of 1,966,080 B) and be negative-tested; any new task
@@ -295,3 +295,10 @@ identical to baseline; no check-relevant files changed).
   yielding between crypto steps) and a re-run of step 5.
 - Heap floor is met with wide margin, so the heap question is closed for one hop. Not done: asset-URL hop (the URL returned 404, so there was no redirect),
   `_REPEAT` above 1, TLS version/cipher capture, a clean KDF latency under fetch.
+
+
+**Gate (b) failure record and production requirements (2026-10-05).** Gate (b) FAILED on the bench: a web login during a fetch produced `TASK_WDT`, IDLE0 starved
+while `tls_spike` (priority 3, pinned to core 0) was inside mbedTLS ECDH. Coredump archived as `coredump-9ba85c503229.bin`, dump_id 2919415307.
+- The production fetch task must not starve IDLE0: run it on core 1 (or unpinned) at a priority that leaves the KDF and httpd tasks schedulable.
+- Re-run gate (b) on the bench with the production task before WP8 can be called done.
+- Hop 0 returned 404, so the asset/redirect hop is still untested and must be covered by the same re-run.
