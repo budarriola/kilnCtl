@@ -450,6 +450,56 @@ function buildContext(rules, onOffZones, segmentCount) {
     'reads "no longer an on/off zone" must never trip the stale guard');
 })();
 
+// ---------------------------------------------------------------------------
+// Spare-relay WP-5: aux outputs as rule targets (zone_index byte 8..11).
+// Extracted verbatim from the page, run in their own context.
+// ---------------------------------------------------------------------------
+(function testAuxRuleTargets() {
+  const AUX_SRC =
+    extractRange('var AUX_RULE_BASE = 8;', 'var AUX_RULE_BASE = 8;') + '\n' +
+    extractRange('var AUX_RULE_COUNT = 4;', 'var AUX_RULE_COUNT = 4;') + '\n' +
+    extractRange('function ooIsValidTarget(z) {', '}') + '\n' +
+    extractRange('function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }',
+      'function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }') + '\n' +
+    extractRange('function auxRuleTargetsFrom(aux) {', '}') + '\n' +
+    extractRange('function ooAuxTempProblem(zone, tempCmp) {', '}');
+  const sb = { relayNames: ['Vent', '', 'Fan', ''], onOffZones: [] };
+  vm.createContext(sb);
+  vm.runInContext(AUX_SRC, sb);
+
+  assert(sb.ooIsValidTarget(0) && sb.ooIsValidTarget(2), 'zone targets 0..2 stay valid');
+  assert(sb.ooIsValidTarget(8) && sb.ooIsValidTarget(11), 'aux targets 8 and 11 are valid');
+  assert(!sb.ooIsValidTarget(3) && !sb.ooIsValidTarget(7) && !sb.ooIsValidTarget(12) && !sb.ooIsValidTarget(-1) &&
+    !sb.ooIsValidTarget(NaN) && !sb.ooIsValidTarget('8'),
+    'NEGATIVE: 3, 7, 12, -1, NaN and a string are rejected as targets');
+
+  const aux = {
+    quarantined: false,
+    relays: [
+      { relay: 1, enabled: true, conflicted: false, tc_zone: 0 },
+      { relay: 2, enabled: false, conflicted: false, tc_zone: -1 },
+      { relay: 3, enabled: true, conflicted: true, tc_zone: 1 },
+      { relay: 4, enabled: true, conflicted: false, tc_zone: -1 },
+      { relay: 5, enabled: true, conflicted: false, tc_zone: 0 },
+    ],
+  };
+  const t = sb.auxRuleTargetsFrom(aux);
+  assert(t.length === 2 && t[0].index === 8 && t[1].index === 11,
+    'only enabled, non-conflicted, in-range aux relays become targets (relay1 -> 8, relay4 -> 11)');
+  assert(t[0].name === 'Vent (aux)' && t[1].name === 'Relay3 (aux)', 'aux target names use the relay name or a fallback');
+  assert(sb.auxRuleTargetsFrom({ quarantined: true, relays: aux.relays }).length === 0,
+    'NEGATIVE: a quarantined aux store offers no targets');
+  assert(sb.auxRuleTargetsFrom(null).length === 0 && sb.auxRuleTargetsFrom({}).length === 0,
+    'NEGATIVE: a missing/garbled aux response offers no targets');
+
+  sb.onOffZones = t;
+  assert(sb.ooAuxTempProblem(8, 1) === '', 'temperature rule on an aux output with a thermocouple zone is accepted');
+  assert(sb.ooAuxTempProblem(11, 1) !== '',
+    'NEGATIVE: temperature rule on an aux output with no thermocouple zone is refused client-side');
+  assert(sb.ooAuxTempProblem(11, 0) === '', 'a time-only rule on an aux output without a thermocouple zone is fine');
+  assert(sb.ooAuxTempProblem(1, 1) === '', 'zone targets are never subject to the aux temperature check');
+})();
+
 console.log('');
 console.log(passed + ' passed, ' + failed + ' failed');
 if (failed > 0) {

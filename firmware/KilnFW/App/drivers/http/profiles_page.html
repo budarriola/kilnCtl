@@ -385,8 +385,8 @@ selected zone has caught up)</label>
 <button id="addSegBtn" type="button" class="small">+ Add segment</button>
 
 <h2 id="ooHeading">On/off devices <span id="ooInfoSlot"></span></h2>
-<p class="hint" id="ooNoZonesMsg" style="display:none">No zones are configured as On/off devices yet --
-set a zone's type to "On/off device" on the
+<p class="hint" id="ooNoZonesMsg" style="display:none">No zones are configured as On/off devices and no
+spare relay is enabled as an aux output yet -- set a zone's type to "On/off device", or enable an aux output, on the
 <a href="/settings/zones">Thermocouples &amp; Zones</a> page first, then come back here to add a rule for it.</p>
 <div id="oorules"></div>
 <button id="addOoBtn" type="button" class="small">+ Add on/off rule</button>
@@ -438,7 +438,62 @@ var IO_DIGITAL_COUNT = 7; // KILN_IO_DIGITAL_COUNT (kiln_io.h); no live count in
 // (profiles_http.c) refuses anything else server-side, this is only the
 // client-side "don't even offer it" half, same precedent as
 // ioTargetOptionsHtml()'s relay-ownership filter above.
-var onOffZones = []; // [{index, name}]
+var onOffZones = []; // [{index, name, aux?, tcZone?}]
+
+// Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md WP-5): an enabled,
+// non-conflicted aux output is also a valid rule target. Wire encoding is the
+// same zone_index byte, 8..11 = aux relay 1..4 (profile_rule_target.h,
+// PROFILE_RULE_TARGET_AUX_BASE); 0..2 stay zones. GET /api/aux_outputs is
+// ADMIN-tier: a refusal or failure just means "no aux targets offered" -- a
+// stored aux rule then shows through the existing stale-target orphan option.
+var AUX_RULE_BASE = 8;
+var AUX_RULE_COUNT = 4;
+function ooIsValidTarget(z) {
+  return (typeof z === 'number' && z >= 0 && z < 3) ||
+    (typeof z === 'number' && z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT);
+}
+function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }
+function auxRuleTargetsFrom(aux) {
+  var out = [];
+  if (!aux || !Array.isArray(aux.relays) || aux.quarantined) return out;
+  aux.relays.forEach(function (a) {
+    if (!a || !a.enabled || a.conflicted) return;
+    if (typeof a.relay !== 'number' || a.relay < 1 || a.relay > AUX_RULE_COUNT) return;
+    var nm = relayNames[a.relay - 1];
+    out.push({
+      index: AUX_RULE_BASE + a.relay - 1,
+      name: (nm ? nm : 'Relay' + (a.relay - 1)) + ' (aux)',
+      aux: true,
+      tcZone: (typeof a.tc_zone === 'number') ? a.tc_zone : -1
+    });
+  });
+  return out;
+}
+var auxEnabledMask = 0; // bit N-1 set = relay N is an enabled aux output (not a RELAY_IO segment target)
+function loadAuxTargets() {
+  auxEnabledMask = 0;
+  return fetch('/api/aux_outputs').then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (aux) {
+    auxRuleTargetsFrom(aux).forEach(function (t) { onOffZones.push(t); });
+    auxEnabledMask = (aux && typeof aux.enabled_mask === 'number') ? aux.enabled_mask : 0;
+  }).catch(function () { /* no aux targets (not admin, or older firmware) */ });
+}
+
+// Client-side refusal for an aux rule whose temperature axis cannot work:
+// the server (profiles_http.c) refuses a temp rule on an aux output with no
+// thermocouple zone set. Returns an error string, or '' when fine.
+function ooAuxTempProblem(zone, tempCmp) {
+  if (!ooIsAuxTarget(zone) || !tempCmp) return '';
+  var tgt = null;
+  onOffZones.forEach(function (z) { if (z.index === zone) tgt = z; });
+  if (tgt && tgt.tcZone < 0) {
+    return tgt.name + ' has no thermocouple zone set -- pick one on the Thermocouples & Zones page or clear ' +
+      'the temperature condition.';
+  }
+  return '';
+}
 
 function loadZones() {
   return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
@@ -456,6 +511,8 @@ function loadZones() {
         onOffZones.push({ index: i, name: zname });
       }
     }
+    return loadAuxTargets();
+  }).then(function () {
     var container = document.getElementById('pzone');
     container.innerHTML = '';
     zones.forEach(function (name, i) {
@@ -596,10 +653,11 @@ function rampFieldsHtml(seg) {
 function ioTargetOptionsHtml(selected) {
   var html = '<optgroup label="Relay">';
   for (var r = 1; r <= relayCount; r++) {
-    var owned = (relayOwnedMask & (1 << (r - 1))) !== 0;
+    var auxOwned = (auxEnabledMask & (1 << (r - 1))) !== 0;
+    var owned = auxOwned || (relayOwnedMask & (1 << (r - 1))) !== 0;
     if (owned && r !== selected) continue;
     var label = window.kcEscapeHtml(relayNames[r - 1] || ('Relay ' + r));
-    if (owned) label += ' (assigned to a zone -- pick another)';
+    if (owned) label += auxOwned ? ' (aux output -- pick another)' : ' (assigned to a zone -- pick another)';
     html += '<option value="' + r + '"' + (r === selected ? ' selected' : '') +
             (owned ? ' disabled' : '') + '>' + label + '</option>';
   }
@@ -922,8 +980,8 @@ document.getElementById('addSegBtn').addEventListener('click', function () {
 // for the two-way mapping.
 var MAX_OO_RULES = 8; // PROFILE_MAX_ON_OFF_RULES
 
-var OO_INFO_HTML = '<p>A rule commands one On/off device (a vent, damper or fan -- never a heater; ' +
-  'guards 1/2/3/4/9 are already disabled for that zone) ON or OFF for the duration of one segment, ' +
+var OO_INFO_HTML = '<p>A rule commands one On/off device (a vent, damper or fan on an On/off zone or an ' +
+  'enabled aux relay -- never a heater; guards 1/2/3/4/9 are already disabled for that zone) ON or OFF for the duration of one segment, ' +
   'whenever ALL of its configured conditions hold at once. Phase/direction with nothing checked means ' +
   '"any" for that axis. "Invert" flips the result: the device is OFF while the conditions hold and ON ' +
   'otherwise, instead of the usual ON-while-true. At most one rule may target a given (segment, zone) ' +
@@ -1047,7 +1105,7 @@ function ooRuleFieldsHtml(r) {
   var invert = r.invert || 0;
   return (
     '<div class="oo-row2">' +
-      '<div><label>Device (on/off zone) ' + infoIconHtml('ooZone', 'the target zone') + '</label>' +
+      '<div><label>Device (on/off zone or aux relay) ' + infoIconHtml('ooZone', 'the target zone') + '</label>' +
       '<select class="oo-zone">' + ooZoneOptionsHtml(zone) + '</select></div>' +
       '<div><label>Segment</label><select class="oo-segment">' + ooSegmentOptionsHtml(segment) + '</select></div>' +
     '</div>' +
@@ -1090,8 +1148,10 @@ function ooRuleFieldsHtml(r) {
 }
 
 var OO_INFO = {
-  ooZone: 'Only zones set to "On/off device" on the Thermocouples &amp; Zones page can be picked here -- ' +
-    'validate_on_off_rules() refuses anything else server-side, most importantly a heater.',
+  ooZone: 'Only zones set to "On/off device", plus spare relays enabled as aux outputs, on the ' +
+    'Thermocouples &amp; Zones page can be picked here -- validate_on_off_rules() refuses anything else ' +
+    'server-side, most importantly a heater. An aux output with a temperature condition needs a ' +
+    'thermocouple zone set on the aux output.',
   ooPhase: 'Which part of the step this rule may fire in. Leave both unchecked to allow either.',
   ooDir: 'Whether the shared ramp/dwell target is rising, falling, or unchanged tick-to-tick. Leave all ' +
     'unchecked to allow any direction.',
@@ -1126,6 +1186,7 @@ var OO_DIR_NAMES = { 1: 'heating', 2: 'cooling', 4: 'flat' };
 function ooUpdateSummary(row) {
   var zoneIdx = parseInt(row.querySelector('.oo-zone').value, 10);
   var zoneName = 'Zone ' + zoneIdx;
+  if (ooIsAuxTarget(zoneIdx)) zoneName = 'Aux relay ' + (zoneIdx - AUX_RULE_BASE + 1);
   onOffZones.forEach(function (z) { if (z.index === zoneIdx) zoneName = z.name; });
   var segIdx = parseInt(row.querySelector('.oo-segment').value, 10);
   var phase = 0;
@@ -1227,6 +1288,28 @@ function ooRulesToParams() {
     params.push('rule' + i + '_invert=' + (row.querySelector('.oo-invert').checked ? 1 : 0));
   });
   return params;
+}
+
+// Client-side validation of every rule row's target before save: the zone
+// byte must be a real target (zone 0..2 or aux 8..11) and an aux target's
+// temperature condition needs a thermocouple zone on the aux output. Returns
+// the first problem as a message, or '' when every row is fine. The server
+// re-validates (profiles_http.c); this only keeps an obviously bad rule from
+// being sent.
+function ooRuleProblem() {
+  var problem = '';
+  document.querySelectorAll('#oorules .oorule').forEach(function (row, i) {
+    if (problem) return;
+    var zone = parseInt(row.querySelector('.oo-zone').value, 10);
+    if (!ooIsValidTarget(zone)) {
+      problem = 'On/off rule ' + (i + 1) + ' has no valid target device.';
+      return;
+    }
+    var cmp = parseInt(row.querySelector('.oo-tempcmp').value, 10) || 0;
+    var t = ooAuxTempProblem(zone, cmp);
+    if (t) problem = 'On/off rule ' + (i + 1) + ': ' + t;
+  });
+  return problem;
 }
 
 // True when any on/off rule row's zone <select> is currently showing the
@@ -2160,6 +2243,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   if (ooHasStaleZoneRow()) {
     msg.innerHTML = '<span class="err">One or more On/off device rules target a zone that is no ' +
       'longer an on/off device -- fix or remove that rule before saving.</span>';
+    return;
+  }
+  var ooBad = ooRuleProblem();
+  if (ooBad) {
+    msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(ooBad) + '</span>';
     return;
   }
   params = params.concat(ooRulesToParams());

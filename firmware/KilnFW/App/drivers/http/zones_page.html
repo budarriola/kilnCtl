@@ -370,6 +370,21 @@ its own name here is kept, not lost, and comes back if you ever uncheck it from
 every zone.</p>
 <div id="relayNames"></div>
 
+<!-- Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md WP-5): bind a relay
+     NO zone uses to a named on/off device (vent, damper, fan, water feed), driven
+     by profile rules (Profiles page) or, while idle, the dashboard toggle. Each
+     row saves on its own through POST /api/aux_outputs (ADMIN tier, refused 409
+     while a firing or autotune runs); it is not part of the zones Save below.
+     renderAuxOutputs() fills it and re-fills it whenever a zone relay checkbox
+     changes, so a relay a zone claims is shown disabled with the reason. -->
+<h2 id="auxHeading">Aux outputs (spare relays)</h2>
+<p class="hint">Use a relay that no zone heats with for an on/off device. Only enabled aux outputs can be
+targeted by profile rules or the dashboard toggle.</p>
+<p class="hint"><strong>Wiring:</strong> the aux load must be wired OUTSIDE the safety processor's CT current
+path (a load on the CT trips the safety processor).</p>
+<div id="auxOutputs"><p class="empty">Loading&hellip;</p></div>
+<p id="auxMsg" class="hint" role="status"></p>
+
 <!-- inline-flex with a 32px floor: the label is the hit area for the
      checkbox inside it. As an inline label it measured 480x19 on a tablet
      (only 35 on a phone because the text happened to wrap to two lines),
@@ -2067,7 +2082,7 @@ function updateOnOffCycles(div) {
 
 document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('thermobit')) updateThermoWarnings();
-  if (e.target.classList.contains('relaybit')) renderRelayNames();
+  if (e.target.classList.contains('relaybit')) { renderRelayNames(); renderAuxOutputs(); }
   if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
   if (e.target.classList.contains('zonetype')) toggleZoneTypeUi(e.target.closest('.zone'));
   if (e.target.classList.contains('failsafestate')) {
@@ -2301,6 +2316,7 @@ function renderZones() {
     /* No zone cards means no relay can be zone-owned -- every configured
        relay is nameable. */
     renderRelayNames();
+    renderAuxOutputs();
     return;
   }
   for (var i = 0; i < thermoCount; i++) {
@@ -2321,6 +2337,7 @@ function renderZones() {
      relaybit checkboxes) above actually exist in the DOM -- see
      clientOwnedRelayMask(). */
   renderRelayNames();
+  renderAuxOutputs();
   /* Same reasoning as renderRelayNames() above: settings-source resolution
      needs every zone div already in the DOM. */
   initInheritanceControls();
@@ -2894,6 +2911,205 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     msg.textContent = 'Save failed: ' + text;
   });
 });
+
+/* ---- Aux outputs (spare relays), docs/SPARE_RELAY_ONOFF_PLAN.md WP-5 ----
+ * Wire format is aux_outputs_http.c's (WP-2): GET /api/aux_outputs ->
+ * {quarantined, enabled_mask, conflict_mask, zones_relay_mask, relays:[{relay 1..4,
+ * enabled, conflicted, tc_zone (-1 = none), hyst_c, min_on_s, min_off_s}]};
+ * POST /api/aux_outputs form relay=N enabled=0|1 tc_zone= hyst_c= min_on_s= min_off_s=.
+ * The limits below mirror aux_outputs_cfg.h (AUX_HYST_C_MIN/MAX,
+ * AUX_MIN_ON_OFF_S_MIN/MAX, AUX_OUTPUTS_COUNT); the server re-validates. */
+var AUX_COUNT = 4;
+var AUX_HYST_MIN = 0.5, AUX_HYST_MAX = 25;
+var AUX_SECS_MIN = 1, AUX_SECS_MAX = 3600;
+var auxState = { loaded: false, quarantined: false, relays: [], enabledMask: 0, error: '' };
+
+/* '' when v is acceptable, otherwise the reason it is refused client-side. */
+function auxValidate(v, thermoCount) {
+  if (!v || typeof v.relay !== 'number' || v.relay !== Math.floor(v.relay) || v.relay < 1 || v.relay > AUX_COUNT) {
+    return 'relay must be 1-' + AUX_COUNT + '.';
+  }
+  if (v.enabled !== 0 && v.enabled !== 1) return 'enabled must be 0 or 1.';
+  if (typeof v.tc_zone !== 'number' || v.tc_zone !== Math.floor(v.tc_zone) || v.tc_zone < -1 ||
+      v.tc_zone > thermoCount - 1) {
+    return 'thermocouple zone is out of range.';
+  }
+  if (!(v.hyst_c >= AUX_HYST_MIN && v.hyst_c <= AUX_HYST_MAX)) {
+    return 'hysteresis must be ' + AUX_HYST_MIN + '-' + AUX_HYST_MAX + ' \u00b0C.';
+  }
+  if (!(v.min_on_s >= AUX_SECS_MIN && v.min_on_s <= AUX_SECS_MAX) || v.min_on_s !== Math.floor(v.min_on_s)) {
+    return 'minimum on time must be ' + AUX_SECS_MIN + '-' + AUX_SECS_MAX + ' s.';
+  }
+  if (!(v.min_off_s >= AUX_SECS_MIN && v.min_off_s <= AUX_SECS_MAX) || v.min_off_s !== Math.floor(v.min_off_s)) {
+    return 'minimum off time must be ' + AUX_SECS_MIN + '-' + AUX_SECS_MAX + ' s.';
+  }
+  return '';
+}
+
+function auxFormBody(v) {
+  return 'relay=' + v.relay + '&enabled=' + v.enabled + '&tc_zone=' + v.tc_zone +
+    '&hyst_c=' + v.hyst_c + '&min_on_s=' + v.min_on_s + '&min_off_s=' + v.min_off_s;
+}
+
+function auxCyclesText(onS, offS) {
+  var total = (onS || 0) + (offS || 0);
+  return total > 0 ? ('Worst-case switching: ' + (3600 / total).toFixed(1) + ' cycles/hr at these minimum times.') : '';
+}
+
+/* One relay row. zoneOwned = a zone card has the relay checked right now (live,
+ * unsaved edits included): the row is shown disabled with the reason instead of
+ * offering controls the server would refuse with a 409. */
+function auxRowHtml(relay, entry, zoneOwned, zoneNames, relayName) {
+  var title = RELAY_NAMES[relay - 1] + (relayName ? ' (' + window.kcEscapeHtml(relayName) + ')' : '');
+  if (zoneOwned) {
+    return '<label>' + title + '</label><p class="hint">Assigned to a zone above -- not available as an aux ' +
+      'output. Uncheck it from that zone (and save) first.</p>';
+  }
+  var e = entry || { enabled: false, conflicted: false, tc_zone: -1, hyst_c: 2, min_on_s: 30, min_off_s: 30 };
+  var tcOpts = '<option value="-1"' + (e.tc_zone === -1 ? ' selected' : '') + '>none</option>';
+  zoneNames.forEach(function (nm, i) {
+    tcOpts += '<option value="' + i + '"' + (e.tc_zone === i ? ' selected' : '') + '>' + i + ': ' +
+      window.kcEscapeHtml(nm) + '</option>';
+  });
+  return '<label>' + title + '</label>' +
+    (e.conflicted ? '<p class="hint" style="color:var(--bad)">Conflicted: a zone also claims this relay. ' +
+      'Remove it from the zone, then re-save this row.</p>' : '') +
+    '<label style="display:flex;align-items:center;gap:0.4em;min-height:32px;font-weight:normal;">' +
+      '<input type="checkbox" class="aux-enabled" style="width:auto;margin:0;"' + (e.enabled ? ' checked' : '') +
+      '> Enabled as an aux output</label>' +
+    '<label>Thermocouple zone for temperature rules</label>' +
+    '<select class="aux-tc">' + tcOpts + '</select>' +
+    '<label>Hysteresis (\u00b0C)</label>' +
+    '<input type="number" class="aux-hyst" min="' + AUX_HYST_MIN + '" max="' + AUX_HYST_MAX + '" step="0.1" value="' +
+      e.hyst_c + '">' +
+    '<label>Minimum on time (s)</label>' +
+    '<input type="number" class="aux-minon" min="' + AUX_SECS_MIN + '" max="' + AUX_SECS_MAX + '" step="1" value="' +
+      e.min_on_s + '">' +
+    '<label>Minimum off time (s)</label>' +
+    '<input type="number" class="aux-minoff" min="' + AUX_SECS_MIN + '" max="' + AUX_SECS_MAX + '" step="1" value="' +
+      e.min_off_s + '">' +
+    '<p class="hint aux-cycles">' + auxCyclesText(e.min_on_s, e.min_off_s) + '</p>' +
+    '<button type="button" class="aux-apply">Apply aux output</button>';
+}
+
+function auxZoneNames() {
+  var names = [];
+  var n = parseInt(document.getElementById('thermoCount').value, 10) || 0;
+  for (var i = 0; i < n; i++) {
+    names.push((current.zones && current.zones[i] && current.zones[i].name) || ('Zone ' + i));
+  }
+  return names;
+}
+
+function renderAuxOutputs() {
+  var el = document.getElementById('auxOutputs');
+  if (!el) return;
+  if (!auxState.loaded) {
+    el.innerHTML = '<p class="empty">' + window.kcEscapeHtml(auxState.error || 'Loading...') + '</p>';
+    return;
+  }
+  if (auxState.quarantined) {
+    el.innerHTML = '<p class="empty">The aux store holds data from newer firmware -- it cannot be edited here.</p>';
+    return;
+  }
+  var relayCount = Math.min(AUX_COUNT, parseInt(document.getElementById('relayCount').value, 10) || 0);
+  if (relayCount === 0) {
+    el.innerHTML = '<p class="empty">No relays configured -- set the count above.</p>';
+    return;
+  }
+  var owned = clientOwnedRelayMask();
+  var names = auxZoneNames();
+  el.innerHTML = '';
+  for (var r = 1; r <= relayCount; r++) {
+    var entry = null;
+    auxState.relays.forEach(function (a) { if (a.relay === r) entry = a; });
+    var zoneOwned = (owned & (1 << (r - 1))) !== 0 && !(entry && entry.conflicted);
+    var div = document.createElement('div');
+    div.className = 'auxrow';
+    div.dataset.relay = r;
+    div.innerHTML = auxRowHtml(r, entry, zoneOwned, names, (current.relay_names || [])[r - 1] || '');
+    el.appendChild(div);
+  }
+  applyAuxZoneGreying();
+}
+
+/* The zone cards' mirror image: a relay an enabled aux output uses cannot also be
+ * checked into a zone (POST /api/zones would 409), so its UNCHECKED zone checkbox
+ * is disabled with the reason. An already-checked one stays enabled so a
+ * conflict can be resolved by unchecking it. */
+function applyAuxZoneGreying() {
+  document.querySelectorAll('#zones .zone .relaybit').forEach(function (cb) {
+    var bit = parseInt(cb.dataset.bit, 10);
+    var auxUses = (auxState.enabledMask & (1 << bit)) !== 0;
+    cb.disabled = auxUses && !cb.checked;
+    cb.title = cb.disabled ? 'Used by an aux output -- disable it under Aux outputs first.' : '';
+  });
+}
+
+function loadAuxOutputs() {
+  return fetch('/api/aux_outputs').then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    auxState = { loaded: true, quarantined: !!data.quarantined, relays: data.relays || [],
+                 enabledMask: data.enabled_mask || 0, error: '' };
+    renderAuxOutputs();
+  }).catch(function (err) {
+    var cancelled = window.kcIsAuthCancelled && window.kcIsAuthCancelled(err);
+    auxState = { loaded: false, quarantined: false, relays: [], enabledMask: 0,
+                 error: cancelled ? 'Sign-in cancelled -- reload to retry.' :
+                   'Could not read aux outputs (older firmware, or the board did not answer).' };
+    renderAuxOutputs();
+  });
+}
+
+function readAuxRow(div) {
+  return {
+    relay: parseInt(div.dataset.relay, 10),
+    enabled: div.querySelector('.aux-enabled').checked ? 1 : 0,
+    tc_zone: parseInt(div.querySelector('.aux-tc').value, 10),
+    hyst_c: parseFloat(div.querySelector('.aux-hyst').value),
+    min_on_s: parseFloat(div.querySelector('.aux-minon').value),
+    min_off_s: parseFloat(div.querySelector('.aux-minoff').value)
+  };
+}
+
+function saveAuxRow(div) {
+  var msg = document.getElementById('auxMsg');
+  var v = readAuxRow(div);
+  var bad = auxValidate(v, parseInt(document.getElementById('thermoCount').value, 10) || 0);
+  if (bad) {
+    msg.textContent = RELAY_NAMES[(v.relay || 1) - 1] + ': ' + bad;
+    return Promise.resolve(false);
+  }
+  msg.textContent = 'Saving\u2026';
+  return fetch('/api/aux_outputs', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: auxFormBody(v)
+  }).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(r.status + ' ' + t); });
+    msg.textContent = RELAY_NAMES[v.relay - 1] + ': aux output ' + (v.enabled ? 'enabled' : 'disabled') + '.';
+    return loadAuxOutputs().then(function () { return true; });
+  }).catch(function (err) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
+      msg.textContent = 'Sign-in cancelled. Nothing was changed.';
+    } else {
+      msg.textContent = 'Not saved: ' + (err && err.message ? err.message : String(err));
+    }
+    return false;
+  });
+}
+
+document.getElementById('auxOutputs').addEventListener('click', function (e) {
+  if (!e.target.classList || !e.target.classList.contains('aux-apply')) return;
+  saveAuxRow(e.target.closest('.auxrow'));
+});
+document.getElementById('auxOutputs').addEventListener('input', function (e) {
+  var div = e.target.closest ? e.target.closest('.auxrow') : null;
+  if (!div || !div.querySelector('.aux-cycles')) return;
+  div.querySelector('.aux-cycles').textContent = auxCyclesText(
+    parseFloat(div.querySelector('.aux-minon').value), parseFloat(div.querySelector('.aux-minoff').value));
+});
+loadAuxOutputs();
 
 loadCurrent();
 

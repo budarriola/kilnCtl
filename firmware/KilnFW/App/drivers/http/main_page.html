@@ -463,6 +463,13 @@
      the danger zone (settings_page.html), so a second, redundant link to
      it from here would be pointing at a page with nothing left for the
      operator to do except something destructive. -->
+<!-- Spare-relay aux outputs manual toggle (docs/SPARE_RELAY_ONOFF_PLAN.md WP-5).
+     Stays hidden and empty until GET /api/aux_outputs (ADMIN tier) succeeds, so an
+     unauthenticated viewer sees no write control at all (owner rule: logged-out
+     means dashboards only). renderAuxCard() fills it from the polled /api/status
+     relays array; the buttons are disabled with the server's own 409 text while a
+     firing or autotune run owns the relays. -->
+<div id="auxCard" style="display:none"></div>
 <div id="channels"><p class="empty">Loading…</p></div>
 
 <!-- Press-and-hold PID popup (2026-09-01) -- markup only, built once here
@@ -4308,6 +4315,120 @@ function renderRelayLife(data) {
     ' % of rated life. Autotune relay identification switches faster than a firing and eats budget faster.';
 }
 
+// ---- Aux outputs manual toggle (docs/SPARE_RELAY_ONOFF_PLAN.md WP-5) ----
+// auxDash.relays is the enabled, non-conflicted subset of GET /api/aux_outputs
+// (admin tier: a refused read leaves admin=false and the card hidden). The on/off
+// state is NOT in that response -- it comes from the /api/status relays array
+// (lastChannelsData.relays, 1-based, {relay, on}) this page already polls.
+var AUX_BLOCKED_TEXT = 'a firing, autotune run or sweep owns the relays -- manual control is not available';
+var auxDash = { admin: false, relays: [] };
+
+function auxBlockedReason() {
+  if (lastExecStData && isFiringActive(lastExecStData.state)) return AUX_BLOCKED_TEXT;
+  if (typeof lastAutotuneStatus !== 'undefined' && lastAutotuneStatus && isAutotuneActive(lastAutotuneStatus.state)) {
+    return AUX_BLOCKED_TEXT;
+  }
+  return '';
+}
+
+function auxRelayIsOn(relay) {
+  var on = null;
+  if (lastChannelsData && lastChannelsData.relays) {
+    lastChannelsData.relays.forEach(function (r) { if (r.relay === relay) on = !!r.on; });
+  }
+  return on;
+}
+
+// '' when a manual toggle POST body may be sent, else the client-side refusal.
+function auxManualProblem(relay, on) {
+  if (typeof relay !== 'number' || relay !== Math.floor(relay) || relay < 1 || relay > 4) return 'relay must be 1-4.';
+  if (on !== 0 && on !== 1) return 'on must be 0 or 1.';
+  var ok = false;
+  auxDash.relays.forEach(function (a) { if (a.relay === relay) ok = true; });
+  if (!ok) return 'that relay is not an enabled aux output.';
+  return auxBlockedReason();
+}
+
+function renderAuxCard() {
+  var el = document.getElementById('auxCard');
+  if (!el) return;
+  if (!auxDash.admin || auxDash.relays.length === 0) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  var blocked = auxBlockedReason();
+  var names = (zonesCache && zonesCache.relay_names) || [];
+  var html = '';
+  auxDash.relays.forEach(function (a) {
+    var on = auxRelayIsOn(a.relay);
+    var label = names[a.relay - 1] ? window.kcEscapeHtml(names[a.relay - 1]) : ('Relay ' + a.relay);
+    var state = on === null ? 'unknown' : (on ? 'ON' : 'OFF');
+    html += '<div class="card aux-row"><span><b>' + label + '</b>: ' + state + '</span>' +
+      '<button type="button" class="aux-toggle" data-relay="' + a.relay + '" data-on="' + (on ? 0 : 1) + '"' +
+      ' style="min-height:32px;"' + (blocked || on === null ? ' disabled' : '') + '>Turn ' + (on ? 'off' : 'on') +
+      '</button></div>';
+  });
+  if (blocked) html += '<p class="empty aux-blocked">' + window.kcEscapeHtml(blocked) + '</p>';
+  html += '<p class="empty aux-msg" id="auxCardMsg"></p>';
+  var prev = document.getElementById('auxCardMsg');
+  var prevText = prev ? prev.textContent : '';
+  el.innerHTML = html;
+  document.getElementById('auxCardMsg').textContent = prevText;
+  el.style.display = '';
+}
+
+function loadAuxDash() {
+  return fetch('/api/aux_outputs').then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (data) {
+    auxDash.admin = true;
+    auxDash.relays = (data.relays || []).filter(function (a) { return a.enabled && !a.conflicted; });
+    renderAuxCard();
+  }).catch(function () {
+    auxDash.admin = false;
+    auxDash.relays = [];
+    renderAuxCard();
+  });
+}
+
+function auxToggle(relay, on) {
+  var msg = document.getElementById('auxCardMsg');
+  var bad = auxManualProblem(relay, on);
+  if (bad) {
+    if (msg) msg.textContent = bad;
+    return Promise.resolve(false);
+  }
+  return fetch('/api/aux_outputs/manual', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'relay=' + relay + '&on=' + on
+  }).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(r.status + ' ' + t); });
+    if (lastChannelsData && lastChannelsData.relays) {
+      lastChannelsData.relays.forEach(function (x) { if (x.relay === relay) x.on = !!on; });
+    }
+    renderAuxCard();
+    var m = document.getElementById('auxCardMsg');
+    if (m) m.textContent = '';
+    return true;
+  }).catch(function (err) {
+    var m = document.getElementById('auxCardMsg');
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
+      if (m) m.textContent = 'Sign-in cancelled. Nothing was changed.';
+    } else if (m) {
+      m.textContent = 'Not changed: ' + (err && err.message ? err.message : String(err));
+    }
+    return false;
+  });
+}
+
+document.getElementById('auxCard').addEventListener('click', function (e) {
+  var b = e.target.closest ? e.target.closest('.aux-toggle') : null;
+  if (!b || b.disabled) return;
+  auxToggle(parseInt(b.dataset.relay, 10), parseInt(b.dataset.on, 10));
+});
+
 function poll() {
   Promise.all([
     fetch('/api/status').then(function (r) { return r.json(); }).catch(function () { return null; }),
@@ -4326,6 +4447,7 @@ function poll() {
       // other status-derived control on this page already uses.
       lastWatchdogPanicDisabled = !!data.watchdog_panic_disabled;
       renderChannels(data);
+      renderAuxCard();
       renderRelayLife(data);
       renderSpiWedged(data);
       renderZonesConfigLoadFault(data);
@@ -4407,6 +4529,7 @@ function reloadAfterLoginPickers() {
   var sel = document.getElementById('profileSelect');
   var hadNoProfiles = sel && sel.options.length === 0;
   loadZones();
+  loadAuxDash();
   loadProfileList().then(function () {
     if (!sel) return;
     // Only re-derive the active-plan preview/icons when the picker actually
@@ -4431,6 +4554,7 @@ function reloadAfterLoginPickers() {
 // through, so this listener need not special-case which action triggered it.
 window.addEventListener('kc-login', reloadAfterLoginPickers);
 
+loadAuxDash();
 loadZones().then(function () {
   loadProfileList().then(function () {
     var sel = document.getElementById('profileSelect');

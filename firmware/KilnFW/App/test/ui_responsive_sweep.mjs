@@ -400,6 +400,9 @@ const ZONES_BASE_FIXTURE = `
   if (!tc || !rc || typeof window.renderZones !== 'function') return 'renderZones not found';
   tc.value = 3;
   rc.value = 4;
+  // Spare-relay aux card (WP-5): give it a loaded GET /api/aux_outputs so its rows render at every width.
+  window.auxState = { loaded: true, quarantined: false, enabledMask: 1, error: '', relays: [
+    { relay: 1, enabled: true, conflicted: false, tc_zone: 0, hyst_c: 2, min_on_s: 30, min_off_s: 30 }] };
   window.renderZones();
 `;
 
