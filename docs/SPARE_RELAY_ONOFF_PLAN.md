@@ -1,6 +1,6 @@
 # Spare-relay on/off ("aux outputs") -- plan
 
-Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) landed, then WP-6..WP-8. WP-5 still owes a browser/bench check. Pending work only.
+Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) and WP-6 landed; WP-7 (MCP half landed in `d6559fac`), WP-8 and the ON_OFF-zone-to-aux convert are in progress. WP-5 still owes a browser/bench check. Pending work only.
 
 Owner requirement 2026-10-04 (overturns D1 of
 `docs/audits/on_off_zone_decisions_2026-09-14.md`): "we have 4 relays, the 4th

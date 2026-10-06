@@ -1,6 +1,6 @@
 # Update from a GitHub release -- plan
 
-> Status: plan, opened 2026-10-04 (owner request). M1: WP1-WP5 landed (WP5 `5dc6d34e`, bench-untested); WP6 done, unpushed. Pending work only. No board was touched while writing it.
+> Status: plan, opened 2026-10-04 (owner request). M1: WP1-WP5 landed (WP5 `5dc6d34e`, bench-untested); WP6 landed; WP9 landed (`d0bb22e4`, `5e6a26f4`); WP8 (TLS fetch) in review, not landed. Pending work only. No board was touched while writing it.
 > (UNVERIFIED) marks facts from memory that need a bench or network test.
 
 ## 0. Scope and owner decisions (2026-10-04)
