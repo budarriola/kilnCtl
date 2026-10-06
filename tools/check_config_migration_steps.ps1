@@ -39,6 +39,10 @@
 #     config_store_unpack_ex(). Enforced: a CONFIG_STORE_FORMAT_VERSION_V
 #     <CURRENT-1> macro must be defined and actually branched on.
 #
+# 2026-10-06: the ESP aux-outputs (spare-relay) store is also checked
+# (Test-AuxOutputsCfgVersion): version symbol present, blob sizeof pinned,
+# and a bump past 1 needs aux_outputs_migrate_v<CURRENT-1>.
+#
 # 2026-10-03: each of those three stores also enforces chain integrity (one
 # step per bump, no skipped version, version constant == last step); see plan
 # section 5.1.
@@ -343,6 +347,44 @@ function Test-SaftyConfigStoreMigrationStep {
     return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
 }
 
+function Test-AuxOutputsCfgVersion {
+    <#
+      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1 row "ESP aux outputs
+      (spare-relay on/off)": AUX_OUTPUTS_CFG_VERSION in aux_outputs_cfg.c.
+      Version 1 has nothing older, so no converter exists. Enforced:
+        - the version symbol is defined and parseable;
+        - the blob's sizeof is pinned by a _Static_assert (on-flash layout);
+        - at version 1, no aux_outputs_migrate_v<N> function exists (a
+          converter for a version that never existed is a defect);
+        - at version > 1, aux_outputs_migrate_v<CURRENT-1> must exist, so a
+          bump cannot land without its converter.
+    #>
+    param([Parameter(Mandatory = $true)][string]$SourceText)
+    $failures = New-Object System.Collections.Generic.List[string]
+    $clean = Remove-CComments -Text $SourceText
+    $verMatch = [regex]::Match($clean, '#define\s+AUX_OUTPUTS_CFG_VERSION\s+(\d+)')
+    if (-not $verMatch.Success) {
+        $failures.Add("aux outputs store: could not find '#define AUX_OUTPUTS_CFG_VERSION <N>'")
+        return @{ Ok = $false; Failures = $failures }
+    }
+    $current = [int]$verMatch.Groups[1].Value
+    if ($clean -notmatch '_Static_assert\s*\(\s*sizeof\s*\(\s*aux_outputs_blob_t\s*\)\s*==') {
+        $failures.Add("aux outputs store: no _Static_assert pinning sizeof(aux_outputs_blob_t)")
+    }
+    $steps = @{}
+    foreach ($m in [regex]::Matches($clean, '\baux_outputs_migrate_v(\d+)\s*\(')) { $steps[[int]$m.Groups[1].Value] = $true }
+    if ($current -le 1) {
+        foreach ($n in $steps.Keys) {
+            $failures.Add("aux outputs store: aux_outputs_migrate_v$n exists but AUX_OUTPUTS_CFG_VERSION is only $current")
+        }
+    } else {
+        if (-not $steps.ContainsKey($current - 1)) {
+            $failures.Add("aux outputs store: AUX_OUTPUTS_CFG_VERSION is $current but no aux_outputs_migrate_v$($current - 1)(...) converter exists")
+        }
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
+
 function Test-ZonesMigrationSteps {
     <#
       Pure function over explicit file contents, so both the real check
@@ -511,7 +553,9 @@ $profilesSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\http\profiles
 $saftyVersionHeader = Join-Path $repoRoot "firmware\SaftyFW\src\config_store.h"
 $saftySource = Join-Path $repoRoot "firmware\SaftyFW\src\config_store.c"
 
-foreach ($p in @($versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
+$auxSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\aux_outputs_cfg.c"
+
+foreach ($p in @($auxSource, $versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
         $profilesSource, $saftyVersionHeader, $saftySource)) {
     if (-not (Test-Path $p)) {
         Write-Host "check_config_migration_steps: FAIL -- expected path not found: $p"
@@ -553,7 +597,10 @@ $profilesResult = Test-ProfilesMigrationStep -VersionHeaderText $profilesSourceT
 $saftyResult = Test-SaftyConfigStoreMigrationStep -VersionHeaderText (Get-Content -Raw $saftyVersionHeader) `
     -SourceText (Get-Content -Raw $saftySource)
 
+$auxResult = Test-AuxOutputsCfgVersion -SourceText (Get-Content -Raw $auxSource)
+
 $allFailures = @()
+$allFailures += $auxResult.Failures
 $allFailures += $zonesResult.Failures
 $allFailures += $kilnCfgResult.Failures
 $allFailures += $profilesResult.Failures
@@ -571,5 +618,5 @@ if ($allFailures.Count -gt 0) {
 }
 
 Write-Host ("check_config_migration_steps: PASS -- zones (full D1/D2 rule set, still within the tail), " +
-    "kiln-config slots, fire profiles, and RP2040 safety config (existence-of-current-step plus chain-integrity rules) all satisfied")
+    "aux outputs (version symbol + static assert), kiln-config slots, fire profiles, and RP2040 safety config (existence-of-current-step plus chain-integrity rules) all satisfied")
 exit 0
