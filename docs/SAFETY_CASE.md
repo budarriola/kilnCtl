@@ -545,14 +545,24 @@ here; none is copied from an unverified summary.
     global check, so a Pico trip or E-stop drops aux on the ESP side. Whether
     the load has power with K4 open is wiring: ahead of K4 it stays live, behind
     K4 it is dead (owner decision 2026-10-04: varies per install, document both).
-    Firmware cannot tell which. (c) No guard change: aux has no guard of its own,
-    adds no guard disable or exemption, and never relaxes `max_temp_c`. A zone
-    freed by converting an ON_OFF zone to aux is decided (owner 2026-10-05)
-    monitor-only: no PID, ramp lock or lag/heat-rise guards, while over-temp and
-    TC-fault guards stay; that behaviour is not in code at origin/main `4276d1aa`.
+    Firmware cannot tell which. (c) Aux itself has no guard of its own, adds no
+    guard disable or exemption, and never relaxes `max_temp_c`. A zone freed by
+    converting an ON_OFF zone to aux (a HEATER zone with `relay_mask == 0`) is
+    monitor-only (owner decision 2026-10-05, implemented via the single
+    predicate `zone_is_monitor_only()`): no PID output, no ramp lock, no
+    start-time ramp-rate-ceiling (guard 9) check, and the same `thermal_guard`
+    exemption an ON_OFF zone has (guards 1/2/3/4 and the cross-zone guard off).
+    Guards 5 (over/under temperature), 6 (sensor fault) and 7 (frozen sensor)
+    stay live, and its `max_temp_c` still applies at start. The zone has no
+    relay, so the exempted guards have no heater output to supervise. Its
+    coupling row and column are masked out of feedforward, the S8 estimate and
+    feasibility (`docs/SPARE_RELAY_ONOFF_PLAN.md` sec 10).
     (d) Aux fail-safe is fixed OFF on run end, abort and fault.
-    **Host-tested only (`test_aux_outputs_store.c`, executor prestart tests); no
-    aux relay has ever actuated a physical relay.**
+    **Host-tested only (`test_aux_outputs_store.c`, executor prestart tests,
+    `test_zones_http.c`'s monitor-only coupling test, and
+    `test_monitor_only_zone_tick_wiring()` driving the real executor tick:
+    no PID output, no ramp-lock hold, no lag accrual, no guard-3 trip, and
+    guard 5 still trips); no aux relay has ever actuated a physical relay.**
 
 ## 4. Evidence classification
 
