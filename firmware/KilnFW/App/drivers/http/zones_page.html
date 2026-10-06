@@ -977,6 +977,51 @@ function renderKilnGraphicHtml(z, st) {
   }
   return banner + s;
 }
+/* The relay name/device-type rows, one per HARDWARE relay (labels.length), as an
+ * HTML string. Pure (esc is passed in) so check_zone_graphic_render.ps1 can
+ * evaluate it. A relay below relayCount is zone-eligible: zone-owned -> note +
+ * hidden echoes (no type control, it drives that zone's heaters), else name +
+ * type inputs. A relay at or past relayCount is a SPARE the zones do not use
+ * (relayCount is "relays in use", 0-4); it gets the same name + type inputs so
+ * its device type (relay<N>_type, ZONE_GRAPHIC_PLAN M17) can be seen and set. */
+function relayTypeOptionsHtml(selected) {
+  var h = '';
+  for (var i = 0; i < KG_DEVICE_TYPES.length; i++) {
+    h += '<option value="' + i + '"' + (i === selected ? ' selected' : '') + '>' +
+      (i === 0 ? 'not set' : KG_DEVICE_TYPES[i]) + '</option>';
+  }
+  return h;
+}
+
+function relayRowsHtml(labels, relayCount, ownedMask, names, types, esc) {
+  var h = '';
+  for (var r = 0; r < labels.length; r++) {
+    var spare = r >= relayCount;
+    var owned = !spare && (ownedMask & (1 << r)) !== 0;
+    var storedName = names[r] || '';
+    var storedType = (typeof types[r] === 'number' && types[r] >= 0 && types[r] < KG_DEVICE_TYPES.length)
+      ? types[r] : 0;
+    h += '<div class="relayname' + (spare ? ' relayspare' : '') + '" data-relay="' + r + '">';
+    if (owned) {
+      h += '<label>' + labels[r] + '</label>' +
+        '<p class="hint">Assigned to a zone above -- named by that zone instead' +
+        (storedName ? ' (its own stored name, "' + esc(storedName) +
+          '", is kept and returns here if you unassign it)' : '') + '.</p>' +
+        '<input type="hidden" class="relaynameinput" value="' + esc(storedName) + '">' +
+        /* Stored type echoed so a save cannot change a zone-owned relay's type. */
+        '<input type="hidden" class="relaytypeinput" value="' + storedType + '">';
+    } else {
+      h += (spare ? '<p class="hint">' + labels[r] + ' is a spare relay (not used by any zone).</p>' : '') +
+        '<label>' + labels[r] + ' name</label>' +
+        '<input type="text" class="relaynameinput" maxlength="15" value="' + esc(storedName) + '">' +
+        '<label>' + labels[r] + ' device type</label>' +
+        '<select class="relaytypeinput">' + relayTypeOptionsHtml(storedType) + '</select>';
+    }
+    h += '</div>';
+  }
+  return h;
+}
+
 /* KILN_GRAPHIC_PURE_END */
 
 /* ---- DOM half, deliberately OUTSIDE the sentinels ---- */
@@ -2197,55 +2242,11 @@ function clientOwnedRelayMask() {
  * wire value). Value 0 (UNSET) is deliberately a real, selectable option --
  * "not set" is a legitimate stored answer meaning nobody has classified this
  * relay, and it renders as the graphic's unknown glyph, not as an error. */
-function relayTypeOptionsHtml(selected) {
-  var h = '';
-  for (var i = 0; i < KG_DEVICE_TYPES.length; i++) {
-    h += '<option value="' + i + '"' + (i === selected ? ' selected' : '') + '>' +
-      (i === 0 ? 'not set' : KG_DEVICE_TYPES[i]) + '</option>';
-  }
-  return h;
-}
-
 function renderRelayNames() {
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
-  var ownedMask = clientOwnedRelayMask();
-  var names = current.relay_names || [];
-  var types = current.relay_types || [];
   var el = document.getElementById('relayNames');
-  el.innerHTML = '';
-  if (relayCount === 0) {
-    el.innerHTML = '<p class="empty">No relays configured -- set the count above.</p>';
-    return;
-  }
-  for (var r = 0; r < relayCount; r++) {
-    var owned = (ownedMask & (1 << r)) !== 0;
-    var storedName = names[r] || '';
-    var storedType = (typeof types[r] === 'number' && types[r] >= 0 && types[r] < KG_DEVICE_TYPES.length)
-      ? types[r] : 0;
-    var div = document.createElement('div');
-    div.className = 'relayname';
-    div.dataset.relay = r; /* 0-based bit; relay r+1 on the wire (relay<N>_name) */
-    if (owned) {
-      div.innerHTML =
-        '<label>' + RELAY_NAMES[r] + '</label>' +
-        '<p class="hint">Assigned to a zone above -- named by that zone instead' +
-        (storedName ? ' (its own stored name, "' + window.kcEscapeHtml(storedName) +
-          '", is kept and returns here if you unassign it)' : '') + '.</p>' +
-        '<input type="hidden" class="relaynameinput" value="' + window.kcEscapeHtml(storedName) + '">' +
-        /* A zone-owned relay drives that zone's heaters, so it gets no device-type
-           control -- but its stored type is echoed so a save from this page cannot
-           change it. */
-        '<input type="hidden" class="relaytypeinput" value="' + storedType + '">';
-    } else {
-      div.innerHTML =
-        '<label>' + RELAY_NAMES[r] + ' name</label>' +
-        '<input type="text" class="relaynameinput" maxlength="15" value="' +
-        window.kcEscapeHtml(storedName) + '">' +
-        '<label>' + RELAY_NAMES[r] + ' device type</label>' +
-        '<select class="relaytypeinput">' + relayTypeOptionsHtml(storedType) + '</select>';
-    }
-    el.appendChild(div);
-  }
+  el.innerHTML = relayRowsHtml(RELAY_NAMES, relayCount, clientOwnedRelayMask(),
+    current.relay_names || [], current.relay_types || [], window.kcEscapeHtml);
 }
 
 /* Enable/disable-by-contiguous-prefix toggle row -- pure sugar over the

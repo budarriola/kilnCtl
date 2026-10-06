@@ -329,6 +329,24 @@ function status(opts) {
   });
 })();
 
+/* ---- 11. Spare relays (hardware relays at/after relay_count) show a device-type
+   selector; zone-owned ones do not (ZONE_GRAPHIC_PLAN M17, bench finding e35f2108) ---- */
+(function () {
+  var esc = function (x) { return String(x); };
+  var L = ['Relay0', 'Relay1', 'Relay2', 'Relay3'];
+  var out = relayRowsHtml(L, 3, 7, ['', '', '', 'Vent'], [0, 0, 0, 3], esc);
+  must(countOf(out, /class="relayname[ "]/g) === 4, 'one row per hardware relay (4), got ' + countOf(out, /class="relayname[ "]/g));
+  must(countOf(out, /<select class="relaytypeinput"/g) === 1, 'only the spare relay gets a type select');
+  must(out.indexOf('Relay3 device type') >= 0, 'relay 4 (spare) must offer a device type control');
+  must(/data-relay="3"[\s\S]*<option value="3" selected>valve/.test(out), 'relay 4 must preselect its stored type (valve)');
+  must(countOf(out, /type="hidden" class="relaytypeinput"/g) === 3, 'zone-owned relays echo type hidden');
+  var out2 = relayRowsHtml(L, 4, 0, [], [], esc);
+  must(countOf(out2, /<select class="relaytypeinput"/g) === 4 && out2.indexOf('relayspare') < 0,
+    'with all 4 relays in use and unowned, 4 selects and no spare rows');
+  var out3 = relayRowsHtml(L, 0, 0, [], [], esc);
+  must(countOf(out3, /<select class="relaytypeinput"/g) === 4, 'relay_count 0: all four are spare with selects');
+})();
+
 if (process.exitCode) {
   console.log('kiln graphic render check FAILED');
 } else {
