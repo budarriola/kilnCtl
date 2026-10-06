@@ -1837,7 +1837,7 @@ def _update_client(ctx: dict):
 def _release_client(ctx: dict):
     client = ctx.get("update_release_http_client")
     if client is None:
-        from .. import update_release_http_client as client
+        from .. import update_http_client as client
     return client
 
 
@@ -1971,8 +1971,11 @@ def _case_otg02(ctx: dict) -> CaseResult:
     if gated:
         return gated
     host = ctx.get("host")
-    cut_fn = ctx.get("_truncated_upload_fn") or (
-        lambda: _release_client(ctx).upload_stage_truncated(host, image, 0.6))
+    def _real_cut():
+        from .. import update_release_http_client as _cut
+        return _cut.upload_stage_truncated(host, image, 0.6)
+
+    cut_fn = ctx.get("_truncated_upload_fn") or _real_cut
     try:
         status, detail = cut_fn()
     except Exception as exc:
@@ -2002,7 +2005,7 @@ def _restore_repo(ctx: dict, host, restore_to: str) -> str:
     "" or a problem description. Verifies by read-back."""
     rel = _release_client(ctx)
     try:
-        rel.set_repo(host, restore_to)
+        rel.set_settings(host, restore_to)
         now = rel.get_settings(host)
     except Exception as exc:
         return f"repo restore failed: {type(exc).__name__}: {exc}"
@@ -2038,7 +2041,7 @@ def _fetch_job_case(ctx: dict, label: str, repo_key: str, start_fn, judge) -> Ca
 
     def _run() -> CaseResult:
         try:
-            rel.set_repo(host, repo)
+            rel.set_settings(host, repo)
             if rel.get_settings(host).get("repo") != repo:
                 return CaseResult(Verdict.FAIL, reason=f"repo setting did not read back as {repo!r}")
         except Exception as exc:

@@ -76,7 +76,7 @@ class _FakeRelease:
     def get_settings(self, host):
         return {"repo": self.repo, "is_default": self.is_default}
 
-    def set_repo(self, host, repo):
+    def set_settings(self, host, repo):
         self.set_calls.append(repo)
         if not repo:
             self.repo, self.is_default = "", True
@@ -254,14 +254,14 @@ class Otg03Test(unittest.TestCase):
 
     def test_failed_restore_fails_and_taints(self):
         rel = _FakeRelease(statuses=[{"state": "failed", "verdict": "refuse_downgrade"}])
-        orig = rel.set_repo
+        orig = rel.set_settings
 
         def flaky(host, repo):
             if not repo:
                 raise OSError("link down")
             orig(host, repo)
 
-        rel.set_repo = flaky
+        rel.set_settings = flaky
         ctx = _base_ctx(update_release_http_client=rel, update_downgrade_repo="o/old")
         r = C._case_otg03(ctx)
         self.assertEqual(r.verdict, Verdict.FAIL)
@@ -395,15 +395,61 @@ class WiringTest(unittest.TestCase):
         self.assertFalse(get_case("OT-G01").heat)
 
 
-class ReleaseClientTest(unittest.TestCase):
-    def test_get_fetch_status_requires_state(self):
-        with unittest.mock.patch.object(URC._u, "_request", return_value={"x": 1}):
-            with self.assertRaises(Exception):
-                URC.get_fetch_status("h")
+class TruncatedUploadClientTest(unittest.TestCase):
+    """upload_stage_truncated against a real loopback socket (no board)."""
 
-    def test_get_fetch_status_ok(self):
-        with unittest.mock.patch.object(URC._u, "_request", return_value={"state": "done"}):
-            self.assertEqual(URC.get_fetch_status("h")["state"], "done")
+    def _serve(self, reply):
+        import socket
+        import threading
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        got = {"body": b"", "head": b""}
+
+        def run():
+            conn, _ = srv.accept()
+            data = b""
+            sep = bytes([13, 10, 13, 10])
+            while sep not in data:
+                data += conn.recv(4096)
+            head, _, rest = data.partition(sep)
+            got["head"] = head
+            body = rest
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+            got["body"] = body
+            if reply:
+                conn.sendall(reply)
+            conn.close()
+            srv.close()
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return "127.0.0.1:%d" % srv.getsockname()[1], got, t
+
+    def test_declares_full_length_sends_part_and_reports_answer(self):
+        image = bytes([0xE9]) + b"A" * 99_999
+        crlf = bytes([13, 10])
+        host, got, t = self._serve(b"HTTP/1.1 400 Bad Request" + crlf + b"Content-Length: 2" + crlf + crlf + b"no")
+        with unittest.mock.patch("kilnctrl.http_auth.login", return_value="sid123"):
+            status, detail = URC.upload_stage_truncated(host, image, 0.6, timeout=5.0)
+        t.join(5)
+        self.assertEqual(status, 400)
+        self.assertEqual(detail, "no")
+        self.assertIn(b"Content-Length: 100000", got["head"])
+        self.assertIn(b"kiln_sid=sid123", got["head"])
+        self.assertEqual(len(got["body"]), 60_000)
+
+    def test_dropped_connection_reports_none(self):
+        host, _got, t = self._serve(b"")
+        with unittest.mock.patch("kilnctrl.http_auth.login", return_value="sid"):
+            status, detail = URC.upload_stage_truncated(host, bytes([0xE9]) + b"B" * 99_999, 0.6, timeout=5.0)
+        t.join(5)
+        self.assertIsNone(status)
+        self.assertTrue(detail)
 
 
 if __name__ == "__main__":
