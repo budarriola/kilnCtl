@@ -113,6 +113,13 @@ bool zone_is_on_off(uint8_t zone_index)
     if (zone_index >= TEST_MAX_ZONES) return false;
     return s_stub_zone_is_on_off[zone_index];
 }
+// zone_is_monitor_only() fake: no scenario here models a monitor-only zone
+// (docs/SPARE_RELAY_ONOFF_PLAN.md sec 10), so every zone is a driven heater.
+bool zone_is_monitor_only(uint8_t zone_index)
+{
+    (void)zone_index;
+    return false;
+}
 
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {

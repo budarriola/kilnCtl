@@ -344,6 +344,76 @@ static void test_coupled_refine_skips_on_off_column_leaves_stored_cell_untouched
                      "a non-on/off column in the same row still converges normally");
 }
 
+// docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone (HEATER, no
+// heater relay) is masked by zones_config_get_coupling() exactly like an
+// on/off zone, so its COLUMN must be skipped the same way -- same seeded-cell,
+// byte-for-byte survival check as the on/off test above.
+static void test_coupled_refine_skips_monitor_only_column_leaves_stored_cell_untouched(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 1.0f;
+    s_stub_zone_is_monitor_only[1] = true; // zone 1 (column under test) lost its heater relay
+    const float real_prior_before_convert = 17.25f;
+    s_fake_coupling[0][1] = real_prior_before_convert;
+    const float ambient = 20.0f;
+    const float duty_pts[5][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}};
+    for (int k = 0; k < 5; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_ref_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    for (int run = 0; run < 30; run++) {
+        profile_firing_run_record_t rec = make_clean_record(20, 0, 900);
+        adaptive_tune_run_end(&rec, true);
+    }
+    TEST_CHECK(s_fake_coupling[0][1] == real_prior_before_convert,
+               "a monitor-only column's stored coupling cell survives an adaptive update untouched");
+    TEST_CHECK_NEAR(s_fake_coupling[0][2], k_ref_C[0][2], 1.0,
+                     "a driven-heater column in the same row still converges normally");
+}
+
+// Same rule, other axis: a monitor-only zone's OWN row reads all-zero through
+// the masking getter. If run_end refined it anyway, the near-zero-prior blend
+// would write 0.15*fit over every real stored cell, and its K_dc would move on
+// evidence from a run that never drove it. adaptive_tune_run_end() must skip
+// the zone outright (no row cell, no K_dc change).
+static void test_run_end_skips_monitor_only_zone_row_and_model_untouched(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[0].enabled = true;
+    s_fake_zone_cfg[0].k_dc = 1.0f;
+    s_stub_zone_is_monitor_only[0] = true;
+    s_fake_coupling[0][1] = 17.25f;
+    s_fake_coupling[0][2] = 9.5f;
+    const float ambient = 20.0f;
+    const float duty_pts[5][MAX31856_CHANNEL_COUNT] = {
+        {0.20f, 0.50f, 0.80f}, {0.50f, 0.80f, 0.20f}, {0.80f, 0.20f, 0.50f},
+        {0.35f, 0.65f, 0.15f}, {0.65f, 0.15f, 0.65f}};
+    for (int k = 0; k < 5; k++) {
+        float target[MAX31856_CHANNEL_COUNT];
+        for (int i = 0; i < 3; i++) {
+            float rise = 0.0f;
+            for (int j = 0; j < 3; j++) rise += k_ref_C[i][j] * duty_pts[k][j];
+            target[i] = ambient + rise;
+        }
+        feed_joint_settled_dwell(target, ambient, duty_pts[k], SETTLE_TICKS, DT_S);
+    }
+    for (int run = 0; run < 30; run++) {
+        profile_firing_run_record_t rec = make_clean_record(20, 0, 900);
+        adaptive_tune_run_end(&rec, true);
+    }
+    TEST_CHECK(s_fake_coupling[0][1] == 17.25f && s_fake_coupling[0][2] == 9.5f,
+               "a monitor-only zone's own stored coupling row survives run_end untouched");
+    TEST_CHECK(s_fake_zone_cfg[0].k_dc == 1.0f, "a monitor-only zone's K_dc is not refined");
+}
+
 // F5/D1: zero coverage of either direction of the ratio guard's upper
 // bound (upper = max(prior*5, ADAPTIVE_TUNE_COUPLING_IMPLAUSIBLE_ABS)).
 // Accept direction: a confident-but-low prior must still accept a fit far

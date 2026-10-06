@@ -666,13 +666,23 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
      * commandable duty to). Enforced here, at every read, not only at
      * zones_config_set_coupling() time below -- the matrix is also editable
      * via autotune's coupling pass, so a getter-side guard is the only place
-     * that can never be bypassed by a future write path. */
-    if (zone_is_on_off(zone_index)) {
+     * that can never be bypassed by a future write path.
+     *
+     * docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: a MONITOR-ONLY zone
+     * (zone_is_monitor_only(): HEATER with no heater relay) is masked the
+     * same way, for the same two reasons -- it is never driven, so there is
+     * no duty of its own to correct for a neighbour's heat (row), and it
+     * injects no heat into anyone (column). Without this its stored column
+     * kept feeding coupled feedforward's neighbour sum, the S8 rate-guard
+     * estimate and profile_feasibility's effective_k_dc as if it still
+     * heated. _raw below stays unmasked, so the stored cells survive for a
+     * later revert to a real heater. */
+    if (zone_is_on_off(zone_index) || zone_is_monitor_only(zone_index)) {
         memset(out_row, 0, MAX31856_CHANNEL_COUNT * sizeof(out_row[0]));
         return true;
     }
     for (uint8_t j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        if (zone_is_on_off(j)) {
+        if (zone_is_on_off(j) || zone_is_monitor_only(j)) {
             out_row[j] = 0.0f;
         }
     }

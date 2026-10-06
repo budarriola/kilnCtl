@@ -675,6 +675,11 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             skip_reason = "zone not opted into adaptive tuning -- not used as training data";
         } else if (zone_is_on_off(zi)) {
             skip_reason = "on/off zone -- no PID, no model, not used as training data";
+        } else if (zone_is_monitor_only(zi)) {
+            // docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: never driven, so this run
+            // says nothing about its plant model; the masked (all-zero)
+            // coupling row must not be blended into the stored one either.
+            skip_reason = "monitor-only zone (no heater relay) -- not used as training data";
         } else if (!zr->active) {
             skip_reason = "zone not active in this profile's zone mask -- not used as training data";
         } else if (!clean) {

@@ -86,6 +86,14 @@ bool zone_is_on_off(uint8_t zone_index)
     if (zone_index >= TEST_MAX_ZONES) return false;
     return s_stub_zone_is_on_off[zone_index];
 }
+// zone_is_monitor_only() fake (docs/SPARE_RELAY_ONOFF_PLAN.md sec 10), same
+// convention as the on/off fake above: every zone defaults to a driven heater.
+static bool s_stub_zone_is_monitor_only[TEST_MAX_ZONES];
+bool zone_is_monitor_only(uint8_t zone_index)
+{
+    if (zone_index >= TEST_MAX_ZONES) return false;
+    return s_stub_zone_is_monitor_only[zone_index];
+}
 
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
@@ -203,7 +211,8 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
      * whole row if this zone is on/off, else every on/off COLUMN reads 0.0 --
      * so A4 follow-up B's test exercises the masked-zero prior it guards. */
     for (int j = 0; j < MAX31856_CHANNEL_COUNT; j++) {
-        if (s_stub_zone_is_on_off[zone_index] || s_stub_zone_is_on_off[j]) out_row[j] = 0.0f;
+        if (s_stub_zone_is_on_off[zone_index] || s_stub_zone_is_on_off[j] ||
+            s_stub_zone_is_monitor_only[zone_index] || s_stub_zone_is_monitor_only[j]) out_row[j] = 0.0f;
     }
     return true;
 }
@@ -355,6 +364,7 @@ static void reset_module_state(void)
     s_fake_control_mode_fail = false;
     s_fake_fuzzy_pct_fail = false;
     memset(s_stub_zone_is_on_off, 0, sizeof(s_stub_zone_is_on_off));
+    memset(s_stub_zone_is_monitor_only, 0, sizeof(s_stub_zone_is_monitor_only));
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -528,6 +538,8 @@ void run_test_adaptive_tune(void)
     test_coupling_ratio_guard_upper_bound_accepts_high_fit_from_low_confident_prior();
     test_coupling_ratio_guard_upper_bound_rejects_fit_above_absolute_ceiling();
     test_coupled_refine_skips_on_off_column_leaves_stored_cell_untouched();
+    test_coupled_refine_skips_monitor_only_column_leaves_stored_cell_untouched();
+    test_run_end_skips_monitor_only_zone_row_and_model_untouched();
 
     TEST_SECTION("adaptive_tune: joint observation floor counts distinct dwells (D4)");
     test_joint_floor_counts_distinct_dwells_not_rows();

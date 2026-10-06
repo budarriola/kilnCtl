@@ -7068,6 +7068,11 @@ static void test_coupling_row_whole_setter_round_trip_and_bounds(void)
     nvs_test_clear();
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 3;
+    /* Every zone gets a heater relay: a zeroed HEATER with relay_mask 0 is
+     * monitor-only (SPARE_RELAY_ONOFF_PLAN.md sec 10), and the live getter
+     * masks a monitor-only zone's row and column. */
+    s_zones.cfg.relay_count = 3;
+    for (uint8_t z = 0; z < 3; z++) s_zones.cfg.zones[z].relay_mask = (uint8_t)(1u << z);
 
     // The exact bench-measured asymmetric pair this whole change exists for.
     float row[MAX31856_CHANNEL_COUNT] = {10.887f, 0.0f, 3.332f};
@@ -7143,6 +7148,55 @@ static void test_coupling_zeroed_for_on_off_zone_row_and_column(void)
     nvs_test_clear();
 }
 
+// docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: a MONITOR-ONLY zone (HEATER, relay
+// mask 0 -- what move_zone_to_aux leaves behind) is masked by the live getter
+// exactly like an on/off zone, row AND column, so coupled feedforward, the S8
+// estimate and feasibility never count it as a heat source. The raw getter
+// (backup) must still return the stored cells, and giving the zone a relay
+// back must restore them.
+static void test_coupling_zeroed_for_monitor_only_zone_row_and_column(void)
+{
+    TEST_SECTION("zones_config_get_coupling -- a monitor-only zone's row AND column read zero; "
+                 "_raw keeps the stored cells");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+    s_zones.cfg.relay_count = 3;
+    for (uint8_t z = 0; z < 3; z++) {
+        s_zones.cfg.zones[z].zone_type = ZONE_TYPE_HEATER;
+        s_zones.cfg.zones[z].relay_mask = (uint8_t)(1u << z);
+    }
+    float row1[MAX31856_CHANNEL_COUNT] = {10.887f, 0.0f, 3.332f};
+    TEST_CHECK(zones_config_set_coupling(1, row1), "zone 1's row is accepted while it has a relay");
+    float row0[MAX31856_CHANNEL_COUNT] = {0.0f, 4.2f, 2.5f};
+    TEST_CHECK(zones_config_set_coupling(0, row0), "zone 0's row is accepted");
+
+    TEST_CHECK(zones_config_set_relay_mask(1, 0), "zone 1 loses its heater relay (now monitor-only)");
+    TEST_CHECK(zone_is_monitor_only(1), "setup: zone 1 reads monitor-only");
+
+    float out[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
+    TEST_CHECK(zones_config_get_coupling(1, out) && out[0] == 0.0f && out[2] == 0.0f,
+               "a monitor-only zone's own row reads all zero");
+    float out0[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
+    TEST_CHECK(zones_config_get_coupling(0, out0), "zone 0's getter succeeds");
+    TEST_CHECK(out0[1] == 0.0f, "zone 0's cell pointed at monitor-only zone 1 reads zero (it injects no heat)");
+    TEST_CHECK(out0[2] == 2.5f, "zone 0's cell pointed at driven heater zone 2 is untouched");
+
+    float raw[MAX31856_CHANNEL_COUNT] = {-1.0f, -1.0f, -1.0f};
+    TEST_CHECK(zones_config_get_coupling_raw(1, raw) && raw[0] == 10.887f && raw[2] == 3.332f,
+               "_raw still returns the stored row for backup");
+
+    TEST_CHECK(zones_config_set_relay_mask(1, 0x02), "zone 1 gets its heater relay back");
+    TEST_CHECK(zones_config_get_coupling(1, out) && out[0] == 10.887f && out[2] == 3.332f,
+               "the stored row is live again once the zone is driven");
+    TEST_CHECK(zones_config_get_coupling(0, out0) && out0[1] == 4.2f,
+               "zone 0's cell pointed at zone 1 is live again");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // The single-cell setter autotune_engine.c's finalize_fit() uses to persist
 // one neighbor's measured coefficient without disturbing the others.
 //
@@ -7163,6 +7217,11 @@ static void test_coupling_single_cell_setter_preserves_other_cells(void)
     nvs_test_clear();
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 3;
+    /* Every zone gets a heater relay: a zeroed HEATER with relay_mask 0 is
+     * monitor-only (SPARE_RELAY_ONOFF_PLAN.md sec 10), and the live getter
+     * masks a monitor-only zone's row and column. */
+    s_zones.cfg.relay_count = 3;
+    for (uint8_t z = 0; z < 3; z++) s_zones.cfg.zones[z].relay_mask = (uint8_t)(1u << z);
 
     // row=affected, column=stepped: zone 0's response to zone 1's step, and
     // zone 2's response to that SAME step -- two different rows, same column.
@@ -15674,6 +15733,7 @@ void run_test_zones_http(void)
     test_fuzzy_strength_pct_setter_round_trip_and_bounds();
     test_coupling_row_whole_setter_round_trip_and_bounds();
     test_coupling_zeroed_for_on_off_zone_row_and_column();
+    test_coupling_zeroed_for_monitor_only_zone_row_and_column();
     test_coupling_single_cell_setter_preserves_other_cells();
     test_coupling_matrix_2026_09_02_adopted_orientation_not_transposed();
     test_settings_source_setter_round_trip_and_bounds();

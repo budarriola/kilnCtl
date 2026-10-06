@@ -411,9 +411,13 @@ every heater-only site reads that, never `relay_mask == 0` itself:
   it is excluded as a peer of other zones. Guards 5 (over/under temperature), 6 (sensor fault) and 7
   (frozen sensor) stay live. Its `max_temp_c` still applies at start (target-vs-limit refusal and
   `profile_zones_have_ceiling`).
-- No new `zone_type`, no zones_cfg schema change. Not changed: the coupling-matrix getters still treat
-  the zone as a heater column, and the web/LCD zone display shows it with duty 0 and no explicit
-  monitor-only flag.
+- Coupling: `zones_config_get_coupling()` masks a monitor-only zone's row and column to zero, the same
+  as an on/off zone, so coupled feedforward, the S8 rate-guard estimate and `profile_feasibility`'s
+  effective gain never count it as a heat source. Adaptive tuning skips the zone and its column.
+  `zones_config_get_coupling_raw()` (backup) still returns the stored cells, and they are used again if
+  the zone is given a relay back.
+- No new `zone_type`, no zones_cfg schema change. Not changed: the web/LCD zone display shows the zone
+  with duty 0 and no explicit monitor-only flag.
 
 Existing ON_OFF zones keep working unchanged until the operator converts.
 

@@ -550,7 +550,10 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
                       // path (adaptive_tune_refine_zone_locked()) -- not duplicated here, see this function's
                       // header comment.
         }
-        if (zone_is_on_off(j)) {
+        // docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only column is
+        // masked by the same getter for the same reason, so it is skipped
+        // for the same reason as an on/off column below.
+        if (zone_is_on_off(j) || zone_is_monitor_only(j)) {
             // A4 review follow-up B (2026-09-28): zones_config_get_coupling()
             // (the getter prior_row was just filled from, above) always masks
             // an on/off zone's COLUMN to 0.0f -- "this zone injects no heat
