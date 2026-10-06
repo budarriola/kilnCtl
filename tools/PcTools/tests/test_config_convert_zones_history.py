@@ -200,7 +200,7 @@ def test_mirror_frozen_sizes_and_offsets_match_header():
             continue
         assert sizes.get(v) == z, f"zone_cfg_v{v}_t size drifted: header {sizes.get(v)} vs {z}"
     blank = cc._decode_zone_cfg(bytes(ZSZ))
-    f1 = struct.unpack("<f", b"")[0]  # every byte non-zero, so offset == first non-zero byte
+    f1 = struct.unpack("<f", b"\x01\x01\x01\x01")[0]  # every byte non-zero, so offset == first non-zero byte
     probes = {"progress_band_c": f1, "hyst_c": f1, "model_fit_temp_c": f1, "model_fit_ambient_c": f1,
               "coil_power_w": f1, "zone_type": 7, "failsafe_state": 9, "min_on_s": 0x0102, "min_off_s": 0x0304}
     offs = {}
