@@ -215,9 +215,9 @@ esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
 esp_err_t nvs_save(void);
 
-/* true = the zones blob re-read from NVS right now equals the in-RAM config byte for byte. For a
+/* true = the zones blob re-read from the cfg file right now equals the in-RAM config byte for byte. For a
  * caller that must know a write really landed (a RAM-only read-back cannot see a failed save). */
-bool zones_config_nvs_equals_ram(void);
+bool zones_config_persisted_equals_ram(void);
 
 /* RELAY_LIFE_BUDGET.md: pushes s_zones.cfg.zones[zone_index]'s
  * relay_type out to relay_cycles_set_type() for every relay named in that

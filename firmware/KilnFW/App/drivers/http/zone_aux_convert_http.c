@@ -107,7 +107,7 @@ static void op_busy(bool on)
 
 static bool op_verify_persisted(void)
 {
-    return zones_config_nvs_equals_ram() && aux_outputs_cfg_verify_persisted();
+    return zones_config_persisted_equals_ram() && aux_outputs_cfg_verify_persisted();
 }
 
 static void *op_scratch_alloc(size_t n)

@@ -460,6 +460,14 @@ static void test_pico_mask_call_site_shape(void)
     }
 }
 
+static esp_err_t ao_failing_cfg_write(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
 static void test_raw_verify_and_journal(void)
 {
     TEST_SECTION("get_raw / verify_persisted / conversion journal");
@@ -474,13 +482,29 @@ static void test_raw_verify_and_journal(void)
                "get_raw returns the stored entry without defaults");
     TEST_CHECK(!aux_outputs_cfg_get_raw(0, &raw) && !aux_outputs_cfg_get_raw(5, &raw), "get_raw refuses a bad relay");
     TEST_CHECK(aux_outputs_cfg_verify_persisted(), "verify_persisted true right after a good save");
+    {
+        /* The save went to the cfg file only: the NVS key holds nothing, and
+         * verify_persisted() must still read true (it re-reads the file). */
+        hal_kv_handle_t h;
+        aux_outputs_blob_t nb;
+        size_t nl = sizeof(nb);
+        bool nvs_has = false;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            nvs_has = hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &nb, &nl) == HAL_OK;
+            hal_kv_close(&h);
+        }
+        TEST_CHECK(!nvs_has, "no NVS copy was written, yet verify_persisted reads true from the file");
+    }
 
-    fake_kv_script_next_write_status(HAL_IO);
+    /* Failure injected at the cfg write seam, where saves land since the
+     * dual-write close (an NVS-seam injection would never be consumed). */
+    pref_cfg_fs_set_write_fn(ao_failing_cfg_write);
     aux_output_entry_t e2 = on_entry();
     e2.min_on_s = 30;
     TEST_CHECK(aux_outputs_cfg_set(3, &e2, 0x03) != ESP_OK, "save failure is returned");
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(aux_outputs_cfg_get_raw(3, &raw) && raw.enabled == 1, "the RAM value stands after the failed save");
-    TEST_CHECK(!aux_outputs_cfg_verify_persisted(), "verify_persisted false: RAM and NVS differ");
+    TEST_CHECK(!aux_outputs_cfg_verify_persisted(), "verify_persisted false: RAM and the cfg file differ");
 
     aux_convert_journal_t j;
     memset(&j, 0, sizeof(j));

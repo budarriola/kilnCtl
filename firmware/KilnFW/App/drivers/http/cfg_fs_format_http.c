@@ -6,6 +6,7 @@
 
 #include "esp_log.h"
 
+#include "cfg_fs.h" /* cfg_fs_skipped_for_recovery() -- recovery-mode refusal below */
 #include "cfg_fs_mount.h"
 #include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
                         * carry under OTA_HTTP_CONTEXT_FACTORY_RESET was retired 2026-09-29 */
@@ -61,6 +62,21 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
             ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused by system mode gate: %s", ip, mode_reason);
             return system_mode_gate_http_send_refusal(req, mode_reason);
         }
+    }
+
+    /* Recovery mode skipped the cfg mount on purpose (cfg_fs_mount_or_skip()),
+     * not because the partition is damaged. Since the NVS dual-write close
+     * (docs/CONFIG_FILESYSTEM.md) the partition holds the board's only
+     * up-to-date config, so formatting it from here would erase every saved
+     * setting for nothing. Leave recovery mode first; a genuinely damaged
+     * partition then shows up as pending in normal mode. */
+    if (cfg_fs_skipped_for_recovery()) {
+        ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused, recovery mode skipped the mount", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "refused: cfg is not mounted because the board is in recovery mode; it still holds "
+                                "the saved config. Leave recovery mode (POST /api/ota/esp/recovery_exit) instead "
+                                "of formatting.");
+        return ESP_OK;
     }
 
     ESP_LOGW(TAG, "cfg_fs format_confirm from %s: authenticated, formatting cfg partition now", ip);

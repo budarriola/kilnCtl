@@ -117,8 +117,9 @@ bool aux_outputs_cfg_entry_valid(const aux_output_entry_t *entry);
  * conflict/quarantine applied. For a caller that must put an entry back bit-for-bit. */
 bool aux_outputs_cfg_get_raw(uint8_t relay, aux_output_entry_t *out);
 
-/* true = the NVS blob re-read right now is valid and its entries equal the RAM entries. A RAM-only
- * read-back cannot see a save that failed or a blob NVS did not keep. */
+/* true = the cfg file re-read right now is valid, at the RAM rev, and its entries equal the RAM
+ * entries. A RAM-only read-back cannot see a save that failed or a file the filesystem did not keep.
+ * NVS is not consulted: since the dual-write close no save writes it. */
 bool aux_outputs_cfg_verify_persisted(void);
 
 /* ---- Zone-to-aux conversion journal (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----

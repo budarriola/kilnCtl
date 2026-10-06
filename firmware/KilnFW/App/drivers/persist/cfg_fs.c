@@ -26,6 +26,11 @@
 
 static char             s_base_dir[CFG_FS_BASE_MAX];
 static cfg_fs_status_t  s_status = CFG_FS_STATUS_UNMOUNTED;
+/* Set only by cfg_fs_mount_or_skip(true, ...): this boot deliberately never
+ * mounted cfg because boot_guard RECOVERY MODE is active. Lets the refusal
+ * text, readiness and the format route tell "skipped on purpose, the data is
+ * still on the partition" apart from "mount failed, format is the remedy". */
+static bool             s_skipped_for_recovery = false;
 
 /* fsync a FILE* portably: _commit() on Windows (host tests), fsync() on
  * POSIX/newlib (on-device, once cfg_fs_mount.c wires this file up to a real
@@ -232,15 +237,23 @@ esp_err_t cfg_fs_mount_or_skip(bool recovery_mode, const char *base_dir, size_t 
          * whatever it already was (UNMOUNTED on a fresh boot). Recovery
          * mode must be reachable with the cfg partition physically erased,
          * so this path must never touch the filesystem. */
+        s_skipped_for_recovery = true;
         return ESP_OK;
     }
+    s_skipped_for_recovery = false;
     return cfg_fs_init(base_dir, out_tmp_reaped);
+}
+
+bool cfg_fs_skipped_for_recovery(void)
+{
+    return s_skipped_for_recovery && s_status != CFG_FS_STATUS_MOUNTED;
 }
 
 void cfg_fs_deinit(void)
 {
     s_status = CFG_FS_STATUS_UNMOUNTED;
     s_base_dir[0] = '\0';
+    s_skipped_for_recovery = false;
 }
 
 cfg_fs_status_t cfg_fs_get_status(void)

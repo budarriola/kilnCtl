@@ -318,14 +318,26 @@ static void test_recovery_mode_skips_mount(void)
                "status stays UNMOUNTED -- cfg_fs_init() was never called, even though `base` is a real, "
                "perfectly mountable directory");
     TEST_CHECK(!cfg_fs_is_available(), "not available under recovery mode");
+    TEST_CHECK(cfg_fs_skipped_for_recovery(), "the skip is recorded as a recovery-mode skip");
+    TEST_CHECK(strcmp(cfg_fs_not_mounted_text(), CFG_FS_RECOVERY_SKIPPED_TEXT) == 0,
+               "recovery-mode refusal text is the recovery variant");
+    TEST_CHECK(strstr(cfg_fs_not_mounted_text(), "format_confirm") == NULL,
+               "recovery-mode refusal text never points at the format route: the partition still holds "
+               "the only saved config after the NVS dual-write close");
+    TEST_CHECK(strstr(cfg_fs_not_mounted_text(), "/api/ota/esp/recovery_exit") != NULL,
+               "recovery-mode refusal text names the recovery_exit route");
 
     /* Same real directory, recovery=false this time -> mounts normally.
      * Proves the skip above was really the recovery flag, not something
      * wrong with `base` itself. */
     TEST_CHECK(cfg_fs_mount_or_skip(false, base, NULL) == ESP_OK, "mount_or_skip(recovery=false) mounts");
     TEST_CHECK(cfg_fs_get_status() == CFG_FS_STATUS_MOUNTED, "status is MOUNTED once recovery mode is off");
+    TEST_CHECK(!cfg_fs_skipped_for_recovery(), "a normal mount clears the recovery-skip flag");
 
     cfg_fs_deinit();
+    TEST_CHECK(!cfg_fs_skipped_for_recovery(), "deinit leaves the recovery-skip flag clear");
+    TEST_CHECK(strcmp(cfg_fs_not_mounted_text(), CFG_FS_NOT_MOUNTED_TEXT) == 0,
+               "outside recovery mode the refusal text is the format-confirm one");
 }
 
 // ---------------------------------------------------------------------

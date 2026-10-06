@@ -1015,13 +1015,47 @@ esp_err_t nvs_erase_slot(uint8_t id)
         hal_kv_close(&h);
         return hal_status_to_esp_err(erase_err);
     }
-    kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
-    /* In-RAM rev updated in place and persisted directly rather than through
-     * a PROFILES_MAX_COUNT-sized stack copy (bx_flash_worker stack ceiling). */
+    /* READ-MODIFY-WRITE of the LEGACY NVS bitmap and rev array: only THIS
+     * id's bit and rev entry change. Writing the in-RAM bitmap/rev array
+     * wholesale (as the dual-write era did) is wrong once saves are
+     * file-only: any other slot saved since the close carries a file rev the
+     * NVS side never saw, so copying s_profile_rev[] into NVS made that
+     * slot's NVS rev EQUAL its file rev while the legacy "profN" blob still
+     * held the old content -- profiles_cfg_fs_resolve() then adopted the
+     * stale NVS copy at the next boot (equal rev, differing bytes), and a
+     * slot created file-only after the close (RAM bit copied into NVS, no
+     * "profN" key) had its file DELETED as "stale". The rev array is read
+     * into heap scratch, not a PROFILES_MAX_COUNT-sized stack copy
+     * (bx_flash_worker stack ceiling). */
     uint32_t old_rev = s_profile_rev[id];
     s_profile_rev[id] = new_rev;
+    profiles_slot_bitmap_t nvs_used;
+    memset(&nvs_used, 0, sizeof(nvs_used));
+    kv_err = used_bitmap_load(&h, &nvs_used);
+    if (kv_err == HAL_NOT_FOUND) {
+        memset(&nvs_used, 0, sizeof(nvs_used));
+        kv_err = HAL_OK;
+    }
     if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
+        profiles_slot_bitmap_clear(&nvs_used, id);
+        kv_err = used_bitmap_save(&h, &nvs_used);
+    }
+    if (kv_err == HAL_OK) {
+        uint32_t *nvs_rev = persist_scratch_alloc(sizeof(s_profile_rev));
+        if (nvs_rev == NULL) {
+            kv_err = HAL_NO_MEM;
+        } else {
+            memset(nvs_rev, 0, sizeof(s_profile_rev));
+            size_t rev_len = sizeof(s_profile_rev);
+            if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len) != HAL_OK) {
+                /* Missing/short/unreadable: the same all-zero "no opinion"
+                 * default nvs_load_all_from() uses -- never the RAM array. */
+                memset(nvs_rev, 0, sizeof(s_profile_rev));
+            }
+            nvs_rev[id] = new_rev;
+            kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, sizeof(s_profile_rev));
+            free(nvs_rev);
+        }
     }
     if (kv_err == HAL_OK) {
         kv_err = hal_kv_commit(&h);

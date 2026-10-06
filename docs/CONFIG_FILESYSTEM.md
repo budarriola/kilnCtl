@@ -680,16 +680,40 @@ quietly or reporting success.
   same. A plain unmounted board with no pending confirmation has no LCD
   message; the readiness item and the 503 bodies carry it.
 - Recovery mode: `cfg_fs_mount_or_skip(true, ...)` deliberately never mounts
-  cfg (recovery must work with the partition erased), so the application
-  firmware in boot-guard recovery mode is simply "unmounted" and the same 503
-  applies. The separate `firmware/KilnFW_recovery` image does not link `cfg_fs`
-  at all and has no settings save routes. No mount was added to recovery.
+  cfg (recovery must work with the partition erased), so saves are refused
+  there too. Because the partition then still holds the board's only
+  up-to-date config, recovery mode must never advise a format:
+  `cfg_fs_skipped_for_recovery()` records the skip, the 503 body uses
+  `CFG_FS_RECOVERY_SKIPPED_TEXT` ("... not mounted in recovery mode - leave
+  recovery mode (POST /api/ota/esp/recovery_exit) to save settings; do not
+  format"), the readiness `cfg_fs` detail says the same, and `POST
+  /api/cfgfs/format_confirm` answers `409` instead of formatting. The separate
+  `firmware/KilnFW_recovery` image does not link `cfg_fs` at all and has no
+  settings save routes. No mount was added to recovery.
+- Profile delete: `nvs_erase_slot()` erases the legacy `profN` key first, then
+  clears only that slot's bit and rev entry in the legacy NVS bitmap and rev
+  array (read-modify-write). Writing the whole in-RAM bitmap and rev array, as
+  the dual-write code did, made every other slot saved after the close look
+  like an equal-rev divergence (the stale NVS copy won at the next boot) and
+  deleted the file of any slot created after the close.
+- Persisted read-backs: `zones_config_persisted_equals_ram()` (formerly
+  `zones_config_nvs_equals_ram()`) and `aux_outputs_cfg_verify_persisted()`
+  re-read the cfg file, not NVS. The zone-to-aux conversion's final read-back
+  (`zone_aux_convert_http.c`, `op_verify_persisted()`) calls both; read
+  against NVS, which no save updates any more, every conversion would have
+  ended in a failed read-back.
 - `iter_tune_store.c`: its cfg write stays a silent no-op when cfg is not
   mounted. It runs from the autotune/iteration path with no request to answer,
   and its NVS write still holds the data. This is documented at
   `cfg_fs_save_raw()` and is intentionally not turned into an error.
 
-Tests: `test_readiness_commissioning.c` pins the item status and detail text,
-`test_zones_http.c` covers the 503 and 500 responses of `POST /api/zones` and
+Tests: `test_readiness_commissioning.c` pins the item status and detail text
+(recovery variant included), `test_cfg_fs.c` pins the recovery-skip flag and
+text, `test_profiles_http.c`
+(`test_pcfg_delete_does_not_revert_or_drop_other_file_only_slots`) covers the
+profile delete,
+`test_zones_http.c` (`test_zones_persisted_equals_ram_reads_the_cfg_file`) and
+`test_aux_outputs_store.c` (`test_raw_verify_and_journal`) cover the
+read-backs, `test_zones_http.c` also covers the 503 and 500 responses of `POST /api/zones` and
 the shared helper, and `test_backup_import.c` covers the update-settings
 route's 503 and 500 responses.

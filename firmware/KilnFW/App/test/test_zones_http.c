@@ -15724,16 +15724,83 @@ static void test_zone_free_for_aux(void)
     nvs_test_clear();
 }
 
+/* Fails the NEXT cfg write only, then behaves like the real writer -- the
+ * put-back save after a refused free must land. Saves are cfg-file-only since
+ * the NVS dual-write close, so an NVS (fake_kv) write fault no longer reaches
+ * this path at all; the failure must be injected at the cfg seam. */
+static int s_zfa_cfg_fail_writes;
+static int s_zfa_cfg_write_calls;
+static esp_err_t zfa_fail_once_cfg_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    s_zfa_cfg_write_calls++;
+    if (s_zfa_cfg_fail_writes > 0) {
+        s_zfa_cfg_fail_writes--;
+        return ESP_FAIL;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
 static void test_zone_free_for_aux_nvs_failure_restores_ram(void)
 {
-    TEST_SECTION("zones_http_zone_free_for_aux -- a failed NVS write is a refusal and RAM is put back");
+    TEST_SECTION("zones_http_zone_free_for_aux -- a failed cfg write is a refusal and RAM is put back");
     zfa_seed();
     zone_cfg_t old = s_zones.cfg.zones[1];
-    fake_kv_script_next_write_status(HAL_IO);
-    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_NOTHING_CHANGED,
+    s_zfa_cfg_fail_writes = 1;
+    s_zfa_cfg_write_calls = 0;
+    zones_config_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    int r = zones_http_zone_free_for_aux(1);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_zfa_cfg_write_calls >= 2, "the failed save and the put-back save both reached the cfg writer");
+    TEST_CHECK(r == ZONES_AUX_FREE_NOTHING_CHANGED,
                "a persist failure refuses the free and the put-back save is reported as clean");
     TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "RAM zone is back to the original");
     TEST_CHECK(!zones_http_zone_restore_after_aux(1), "nothing is left saved after the refusal");
+
+    /* Both saves fail: the put-back save could not land, so the cfg file may
+     * still hold the freed zone -- that must be reported as UNCERTAIN. */
+    zfa_seed();
+    s_zfa_cfg_fail_writes = 1000;
+    zones_config_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    r = zones_http_zone_free_for_aux(1);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    s_zfa_cfg_fail_writes = 0;
+    TEST_CHECK(r == ZONES_AUX_FREE_UNCERTAIN, "a failed put-back save is reported as uncertain, never clean");
+    TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "RAM zone is still put back");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+/* The zone-to-aux conversion's final read-back (zone_aux_convert_http.c's
+ * op_verify_persisted()) calls zones_config_persisted_equals_ram(). Saves are
+ * cfg-file-only since the dual-write close, so it must re-read the FILE: an
+ * NVS read-back would compare RAM against a blob no save updates, and every
+ * conversion would end in a failed read-back. */
+static void test_zones_persisted_equals_ram_reads_the_cfg_file(void)
+{
+    TEST_SECTION("zones_config_persisted_equals_ram -- re-reads the cfg file, the only save target");
+    zfa_seed();
+    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_OK, "a save lands (cfg file only)");
+    {
+        hal_kv_handle_t h;
+        bool nvs_has = false;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            size_t len = 0;
+            nvs_has = hal_kv_get_blob(&h, NVS_KEY_ZONES, NULL, &len) == HAL_OK;
+            hal_kv_close(&h);
+        }
+        TEST_CHECK(!nvs_has, "no NVS zones blob was written");
+    }
+    TEST_CHECK(zones_config_persisted_equals_ram(), "the cfg file equals RAM right after a good save");
+
+    s_zfa_cfg_fail_writes = 1000;
+    zones_config_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    s_zones.cfg.zones[0].max_temp_c = 1100.0f;
+    esp_err_t err = nvs_save();
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    s_zfa_cfg_fail_writes = 0;
+    TEST_CHECK(err != ESP_OK, "a failed cfg write is reported");
+    TEST_CHECK(!zones_config_persisted_equals_ram(), "RAM edited but not persisted: read-back is false");
+    zones_http_zone_discard_saved_for_aux();
     nvs_test_enable(false);
     nvs_test_clear();
 }
@@ -15772,6 +15839,7 @@ void run_test_zones_http(void)
     test_zone_free_for_aux();
     test_zone_restore_refuses_on_aux_conflict();
     test_zone_free_for_aux_nvs_failure_restores_ram();
+    test_zones_persisted_equals_ram_reads_the_cfg_file();
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
     test_small_ki_edit_tolerance_is_relative_not_absolute();

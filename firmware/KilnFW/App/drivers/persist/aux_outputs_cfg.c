@@ -221,20 +221,16 @@ bool aux_outputs_cfg_get_raw(uint8_t relay, aux_output_entry_t *out)
 
 bool aux_outputs_cfg_verify_persisted(void)
 {
-    if (nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
-        return false;
-    }
-    hal_kv_handle_t h;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
-        return false;
-    }
+    /* Re-reads the cfg FILE, the only place a save lands since the dual-write
+     * close (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"). Reading
+     * NVS here would compare RAM against a copy no save ever updates again. */
     aux_outputs_blob_t blob;
     memset(&blob, 0, sizeof(blob));
-    size_t len = sizeof(blob);
-    bool ok = hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && aux_validate(&blob, len) &&
-              blob.version == AUX_OUTPUTS_CFG_VERSION && memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
-    hal_kv_close(&h);
-    return ok;
+    uint32_t rev = 0;
+    bool valid = false;
+    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(blob), aux_validate, &blob, &rev, &valid);
+    return valid && rev == s_rev && blob.version == AUX_OUTPUTS_CFG_VERSION &&
+           memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
 }
 
 uint8_t aux_outputs_cfg_enabled_mask(void) { return s_enabled_mask; }

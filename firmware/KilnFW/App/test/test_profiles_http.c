@@ -1212,6 +1212,62 @@ static void test_pcfg_stale_file_after_delete_is_not_resurrected(void)
     TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 stays unused after delete: no NVS or file copy remains");
 }
 
+// Regression for the dual-write close: nvs_erase_slot() used to persist the
+// WHOLE in-RAM used bitmap and rev array into the legacy NVS keys. Once saves
+// are file-only, that copied a post-close slot's file rev into NVS next to a
+// stale legacy blob (equal revs, differing bytes -- the resolve adopts NVS and
+// silently reverts the edit) and set the NVS bit of a slot that only ever
+// existed as a file (no "profN" key, so the resolve deleted its file as a
+// stale leftover). Deleting ANY slot must leave every other slot intact.
+static void test_pcfg_delete_does_not_revert_or_drop_other_file_only_slots(void)
+{
+    TEST_SECTION("profiles cfg_fs -- deleting one slot neither reverts a post-close edit nor drops a file-only slot");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    TEST_CHECK(cfg_fs_init(PCFG_SCRATCH_BASE, &reaped) == ESP_OK, "cfg_fs mounts against the scratch dir");
+
+    profile_t old_p = make_stored_profile();
+    strncpy(old_p.name, "LegacyOld", PROFILE_NAME_MAX_LEN);
+    stage_legacy_slot(0, &old_p, 1); // pre-close board: slot 0 in NVS at rev 1
+
+    profiles_state_t out;
+    bool any_found = false;
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "first boot load succeeds");
+    s_profiles = out;
+
+    // Post-close edit of slot 0 (file rev 2, legacy NVS blob still "LegacyOld").
+    strncpy(s_profiles.profiles[0].name, "EditedNew", PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "post-close edit of slot 0 saves to the file");
+    // Post-close new slot 2, file only.
+    profile_t fresh = make_stored_profile();
+    strncpy(fresh.name, "FileOnly", PROFILE_NAME_MAX_LEN);
+    s_profiles.profiles[2] = fresh;
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 2);
+    TEST_CHECK(nvs_save_slot(2) == ESP_OK, "post-close new slot 2 saves to the file");
+    // Post-close slot 4, then delete it.
+    profile_t doomed = make_stored_profile();
+    strncpy(doomed.name, "Doomed", PROFILE_NAME_MAX_LEN);
+    s_profiles.profiles[4] = doomed;
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 4);
+    TEST_CHECK(nvs_save_slot(4) == ESP_OK, "slot 4 saves to the file");
+    profiles_slot_bitmap_clear(&s_profiles.used_bitmap, 4);
+    TEST_CHECK(nvs_erase_slot(4) == ESP_OK, "delete of slot 4 succeeds");
+
+    // Reboot.
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 still used");
+    TEST_CHECK(strcmp(out.profiles[0].name, "EditedNew") == 0,
+               "slot 0 keeps its post-close edit (not reverted to the stale legacy NVS blob)");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 2), "file-only slot 2 survives another slot's delete");
+    TEST_CHECK(strcmp(out.profiles[2].name, "FileOnly") == 0, "slot 2 content intact");
+    profile_t file_p;
+    TEST_CHECK(pcfg_file_profile(2, &file_p), "slot 2's file was not deleted as a stale leftover");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 4), "deleted slot 4 stays deleted");
+}
+
 static void test_pcfg_partition_absent_behaves_exactly_like_before(void)
 {
     TEST_SECTION("profiles cfg_fs -- partition never mounted: a legacy NVS slot still loads, a save fails loud");
@@ -3505,6 +3561,7 @@ void run_test_profiles_http(void)
     test_pcfg_file_wins_when_it_has_the_higher_rev();
     test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file();
     test_pcfg_stale_file_after_delete_is_not_resurrected();
+    test_pcfg_delete_does_not_revert_or_drop_other_file_only_slots();
     test_pcfg_partition_absent_behaves_exactly_like_before();
     test_pcfg_mount_failed_behaves_like_absent();
     test_pcfg_interrupted_write_leaves_old_file_intact();

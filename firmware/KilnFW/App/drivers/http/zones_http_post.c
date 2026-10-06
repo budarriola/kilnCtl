@@ -86,13 +86,14 @@ int zones_http_zone_free_for_aux(uint8_t zone)
     free(tmp);
     s_config_generation++;
     zones_config_push_all_relay_types();
-    /* NVS is authoritative: a failed write here is a refusal, not the "applied live anyway" of
-     * an ordinary save, because the caller goes on to rewrite profiles against this state. */
+    /* The cfg file is the only save target (NVS dual-write closed): a failed write here is a
+     * refusal, because the caller goes on to rewrite profiles against this state. */
     if (nvs_save() != ESP_OK) {
         s_zones.cfg.zones[zone] = *saved;
         s_config_generation++;
         zones_config_push_all_relay_types();
-        /* Report the put-back's own result: a failed second save leaves NVS holding the freed zone. */
+        /* Report the put-back's own result: a failed second save may leave the cfg file holding
+         * the freed zone. */
         bool restored = nvs_save() == ESP_OK;
         free(saved);
         return restored ? ZONES_AUX_FREE_NOTHING_CHANGED : ZONES_AUX_FREE_UNCERTAIN;

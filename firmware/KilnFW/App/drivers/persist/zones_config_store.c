@@ -655,21 +655,20 @@ static void zones_autosave_job(void *arg)
     }
 }
 
-bool zones_config_nvs_equals_ram(void)
+bool zones_config_persisted_equals_ram(void)
 {
+    /* Re-reads the cfg FILE, the only place nvs_save() writes since the
+     * dual-write close (docs/CONFIG_FILESYSTEM.md, "Dual-write window:
+     * closed"); the NVS blob is a frozen legacy copy no save updates. */
     zones_cfg_t *raw = malloc(sizeof(*raw));
     if (raw == NULL) {
         return false;
     }
     memset(raw, 0, sizeof(*raw));
-    size_t len = sizeof(*raw);
-    hal_kv_handle_t h;
-    bool ok = false;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
-        ok = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len) == HAL_OK && len == sizeof(s_zones.cfg) &&
-             memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0;
-        hal_kv_close(&h);
-    }
+    uint32_t rev = 0;
+    bool valid = false;
+    zones_config_cfg_fs_load_raw(raw, &rev, &valid);
+    bool ok = valid && memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0;
     free(raw);
     return ok;
 }

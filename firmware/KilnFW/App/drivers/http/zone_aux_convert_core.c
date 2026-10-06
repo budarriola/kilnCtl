@@ -97,7 +97,7 @@ static void journal_stage(const zone_aux_ops_t *ops, aux_convert_journal_t *jr, 
 
 /* Final read-back, shared by the run and the resume: zone relay-less heater, aux enabled with the
  * right tc_zone, the union no longer claiming the relay, AND the zones and aux blobs re-read from
- * NVS equal to RAM (a RAM-only read-back cannot see a save that failed). */
+ * the cfg files equal to RAM (a RAM-only read-back cannot see a save that failed). */
 static bool read_back_ok(const zone_aux_ops_t *ops, run_scratch_t *sc, uint8_t zone, uint8_t relay, bool has_tc)
 {
     memset(&sc->zafter, 0, sizeof(sc->zafter));

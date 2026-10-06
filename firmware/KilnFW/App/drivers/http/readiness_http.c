@@ -947,7 +947,8 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         readiness_status_t st = readiness_cfg_fs_status(mounted);
         char detail[READINESS_DETAIL_MAX];
         snprintf(detail, sizeof(detail), "%s",
-                 readiness_cfg_fs_detail(mounted, cfg_fs_mount_format_confirmation_pending()));
+                 readiness_cfg_fs_detail(mounted, cfg_fs_mount_format_confirmation_pending(),
+                                         cfg_fs_skipped_for_recovery()));
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "cfg_fs", "Config filesystem (cfg_fs)", st, detail,
                         "/diagnostics", &dropped);

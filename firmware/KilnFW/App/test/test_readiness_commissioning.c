@@ -321,9 +321,9 @@ void run_test_readiness_cfg_fs(void)
     TEST_CHECK(readiness_cfg_fs_status(false) == READY_NOT_DONE,
                 "an unmounted/failed cfg filesystem must read not_done");
 
-    const char *plain = readiness_cfg_fs_detail(false, false);
-    const char *pending = readiness_cfg_fs_detail(false, true);
-    const char *ok = readiness_cfg_fs_detail(true, false);
+    const char *plain = readiness_cfg_fs_detail(false, false, false);
+    const char *pending = readiness_cfg_fs_detail(false, true, false);
+    const char *ok = readiness_cfg_fs_detail(true, false, false);
     TEST_CHECK(strstr(plain, "POST /api/cfgfs/format_confirm") != NULL,
                 "unmounted detail must point at POST /api/cfgfs/format_confirm");
     TEST_CHECK(strstr(pending, "POST /api/cfgfs/format_confirm") != NULL,
@@ -333,6 +333,18 @@ void run_test_readiness_cfg_fs(void)
     TEST_CHECK(strstr(plain, "awaiting") == NULL, "plain unmounted detail must not claim a pending confirmation");
     TEST_CHECK(strstr(ok, "format_confirm") == NULL, "mounted detail must not nag about formatting");
     TEST_CHECK(strlen(plain) < 192 && strlen(pending) < 192, "details must fit READINESS_DETAIL_MAX (192)");
+    /* Recovery mode: the mount was skipped on purpose and the partition still
+     * holds the only saved config, so the detail must never advise a format,
+     * even if a format happened to be pending. */
+    const char *recovery = readiness_cfg_fs_detail(false, false, true);
+    const char *recovery_pending = readiness_cfg_fs_detail(false, true, true);
+    TEST_CHECK(strstr(recovery, "format_confirm") == NULL && strstr(recovery_pending, "format_confirm") == NULL,
+                "recovery-mode detail must not point at the format route");
+    TEST_CHECK(strstr(recovery, "/api/ota/esp/recovery_exit") != NULL,
+                "recovery-mode detail must point at leaving recovery mode");
+    TEST_CHECK(strlen(recovery) < 192, "recovery detail must fit READINESS_DETAIL_MAX (192)");
+    TEST_CHECK(strcmp(readiness_cfg_fs_detail(true, false, true), ok) == 0,
+                "a mounted cfg reads the same mounted detail whatever the recovery flag says");
     /* The same remedy the save-refusal text gives. */
     TEST_CHECK(strstr(CFG_FS_NOT_MOUNTED_TEXT, "POST /api/cfgfs/format_confirm") != NULL,
                 "CFG_FS_NOT_MOUNTED_TEXT must name the format-confirm route");

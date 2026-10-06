@@ -424,11 +424,19 @@ static inline readiness_status_t readiness_cfg_fs_status(bool mounted)
 /* Detail line for the cfg_fs item, pure so a host test can pin the text
  * (readiness_http.c itself cannot be host-compiled). The unmounted variants
  * must name POST /api/cfgfs/format_confirm: that is the operator's remedy,
- * and the same one CFG_FS_NOT_MOUNTED_TEXT points at. */
-static inline const char *readiness_cfg_fs_detail(bool mounted, bool format_pending)
+ * and the same one CFG_FS_NOT_MOUNTED_TEXT points at -- EXCEPT in recovery
+ * mode (`recovery_skipped`, cfg_fs_skipped_for_recovery()): there the mount
+ * was skipped on purpose and the partition still holds the board's only
+ * saved config, so the detail must point at leaving recovery mode and never
+ * at a format (same rule as CFG_FS_RECOVERY_SKIPPED_TEXT). */
+static inline const char *readiness_cfg_fs_detail(bool mounted, bool format_pending, bool recovery_skipped)
 {
     if (mounted) {
         return "cfg filesystem mounted -- config is saved to flash";
+    }
+    if (recovery_skipped) {
+        return "cfg filesystem not mounted in recovery mode -- saves are refused; leave recovery mode "
+               "(POST /api/ota/esp/recovery_exit), do not format";
     }
     if (format_pending) {
         return "cfg filesystem awaiting format confirmation -- saves are refused until you confirm: "
