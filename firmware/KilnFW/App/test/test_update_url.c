@@ -15,12 +15,14 @@ static void test_allowlist(void)
         "https://objects.githubusercontent.com/github-production-release-asset/1?X=Y&Z=W",
         "https://release-assets.githubusercontent.com/github-production-release-asset/2?sp=r",
         "https://GITHUB.com/a",
-        "HTTPS://Api.GitHub.com:443/x",
+        "https://Api.GitHub.com:443/x",
         "https://github.com",
     };
     for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
         TEST_CHECK(update_url_check(good[i], NULL, 0) == UPDATE_URL_OK, good[i]);
     }
+    TEST_CHECK(update_url_check("HTTPS://api.github.com/x", NULL, 0) == UPDATE_URL_E_SCHEME, "uppercase scheme refused");
+    TEST_CHECK(update_url_check("Https://api.github.com/x", NULL, 0) == UPDATE_URL_E_SCHEME, "mixed-case scheme refused");
     static const char *const bad_host[] = {
         "https://evil.com/",
         "https://github.com.evil.com/a",
@@ -231,6 +233,14 @@ static void test_location_capture(void)
     update_loc_capture_feed(&c, "X-Location", "https://github.com/x");
     update_loc_capture_feed(&c, "Locations", "https://github.com/x");
     TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && !refused, "similar header names ignored");
+
+    // Per-hop reset: a Location from hop 1 must not leak into hop 2 after re-init.
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    update_loc_capture_feed(&c, "Location", "https://github.com/hop1");
+    TEST_CHECK(update_loc_capture_get(&c, &refused) != NULL, "hop 1 Location captured");
+    update_loc_capture_init(&c, buf, sizeof(buf));
+    refused = true;
+    TEST_CHECK(update_loc_capture_get(&c, &refused) == NULL && !refused, "re-init clears the previous hop's Location");
 
     char big[80];
     memset(big, 'a', sizeof(big));

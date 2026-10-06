@@ -7,7 +7,16 @@
 heat_interlock_result_t heat_interlock_check(const heat_interlock_snapshot_t *snap, char *reason_out,
                                               size_t reason_cap)
 {
-    if (!snap || !snap->update_in_progress) {
+    if (!snap) {
+        return HEAT_INTERLOCK_OK;
+    }
+    if (!snap->update_in_progress && snap->fetch_busy) {
+        if (reason_out && reason_cap > 0) {
+            snprintf(reason_out, reason_cap, "a GitHub update check/download is running; heat blocked (POST /api/update/fetch/cancel)");
+        }
+        return HEAT_INTERLOCK_REFUSED;
+    }
+    if (!snap->update_in_progress) {
         return HEAT_INTERLOCK_OK;
     }
 
@@ -27,10 +36,11 @@ heat_interlock_result_t heat_interlock_check(const heat_interlock_snapshot_t *sn
                 break;
         }
         if (snap->update_context == HEAT_INTERLOCK_UPDATE_ESP) {
-            // The ESP-side update may be a GitHub fetch that is stuck or unwanted; name the way out.
+            // The ESP-side update may be a GitHub fetch that is stuck or unwanted; name the way out, worded
+            // as conditional because the same context also covers a manual upload or an OTA push.
             // Must stay within HEAT_INTERLOCK_REASON_MAX (96) -- test_heat_interlock.c checks it.
             snprintf(reason_out, reason_cap,
-                     "%s is in progress; heat blocked (POST /api/update/fetch/cancel)", who);
+                     "%s is in progress; heat blocked (GitHub fetch: POST .../cancel)", who);
         } else {
             snprintf(reason_out, reason_cap, "%s is in progress -- heat cannot be commanded until it finishes",
                      who);

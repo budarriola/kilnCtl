@@ -41,6 +41,13 @@
 #include "update_url.h"
 #include "zones_config_json.h"
 
+// The TLS memory plan this file's heap budget (and the WP7 spike) rests on is option D: mbedTLS
+// buffers outside internal RAM and freed after the handshake. An sdkconfig regenerated from an
+// older sdkconfig.defaults silently keeps option B (internal allocation), which does not fit.
+#if !CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC || !CONFIG_MBEDTLS_DYNAMIC_BUFFER
+#error "WP8 needs option D (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC and CONFIG_MBEDTLS_DYNAMIC_BUFFER); regenerate sdkconfig"
+#endif
+
 static const char *TAG = "update_fetch";
 
 // ---- limits ---------------------------------------------------------------------------------
@@ -56,7 +63,8 @@ static const char *TAG = "update_fetch";
 // Current free internal heap (not the low-water mark) needed to even start: the 8192 B floor plus
 // the measured TLS residual (WP7 bench: handshake costs about 8 KB, writer stack about 4.5 KB)
 // plus slack (25600 B, measured with a 1 KB request buffer) plus the growth of the request buffer
-// to FETCH_TX_BUF_BYTES. Below FETCH_HEAP_ABORT_BELOW mid-transfer the job gives up.
+// to FETCH_TX_BUF_BYTES. Below FETCH_HEAP_ABORT_BELOW mid-body (read loop only) the job gives up; every hop start uses
+// FETCH_HEAP_PRECHECK_MIN.
 #define FETCH_HEAP_PRECHECK_MIN (25600u + (FETCH_TX_BUF_BYTES - FETCH_TX_BUF_SPIKE_BYTES))
 #define FETCH_HEAP_ABORT_BELOW 12288u
 #define FETCH_JOB_DEADLINE_MS (20u * 60u * 1000u)
@@ -372,7 +380,10 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         if (deadline_passed(w)) {
             return "timeout";
         }
-        if (free_internal() < FETCH_HEAP_ABORT_BELOW) {
+        // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so
+        // gating on the mid-body abort floor alone could dip under the owner's 8192 B internal
+        // floor. Gate each esp_http_client_init on the full start threshold instead.
+        if (free_internal() < FETCH_HEAP_PRECHECK_MIN) {
             return "low_heap";
         }
         update_loc_capture_init(&w->loc_cap, w->loc, sizeof(w->loc));
@@ -905,6 +916,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
+static bool fetch_busy_probe(void)
+{
+    return s_c != NULL && s_c->busy != 0;
+}
+
 esp_err_t update_fetch_start(httpd_handle_t server)
 {
     s_c = heap_caps_calloc(1, sizeof(*s_c), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -922,6 +938,7 @@ esp_err_t update_fetch_start(httpd_handle_t server)
     s_c->st.error = "";
     s_c->st.verdict = "";
     s_c->st.reason = "";
+    ota_http_set_fetch_busy_probe(fetch_busy_probe);
     (void)stack_margin_register("update_fetch", &s_c->tls_task, FETCH_TLS_STACK_BYTES);
     (void)stack_margin_register("update_fetch_wr", &s_c->wr_task, FETCH_WR_STACK_BYTES);
 

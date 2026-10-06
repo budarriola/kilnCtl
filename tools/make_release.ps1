@@ -190,11 +190,16 @@ if (-not $SkipBuild) {
     # The build embeds the tag as FW_RELEASE_VERSION (gen_build_info.cmake) so the board can tell
     # a downgrade from an upgrade when it fetches a release itself.
     $env:KILNCTL_RELEASE_VERSION = $Tag
-    foreach ($s in @("firmware\KilnFW\App\test\check_00_kilnfw_target_build.ps1",
-                     "firmware\KilnFW\App\test\check_00_kilnfw_recovery_target_build.ps1")) {
-        Write-Host "building: $s"
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot $s)
-        if ($LASTEXITCODE -ne 0) { Fail "$s exited $LASTEXITCODE (a SKIP, exit 3, is also a refusal: a release needs real binaries)." }
+    try {
+        foreach ($s in @("firmware\KilnFW\App\test\check_00_kilnfw_target_build.ps1",
+                         "firmware\KilnFW\App\test\check_00_kilnfw_recovery_target_build.ps1")) {
+            Write-Host "building: $s"
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot $s)
+            if ($LASTEXITCODE -ne 0) { Fail "$s exited $LASTEXITCODE (a SKIP, exit 3, is also a refusal: a release needs real binaries)." }
+        }
+    } finally {
+        # Never leak the release tag into later builds in this process or its children.
+        Remove-Item Env:\KILNCTL_RELEASE_VERSION -ErrorAction SilentlyContinue
     }
 }
 if (-not $BuildDir)    { $BuildDir = Join-Path $repoRoot "firmware\KilnFW\build" }

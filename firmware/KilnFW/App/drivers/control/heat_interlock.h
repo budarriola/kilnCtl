@@ -54,6 +54,9 @@ typedef struct {
     bool update_in_progress;
     // Meaningful only when update_in_progress is true.
     heat_interlock_update_context_t update_context;
+    // A GitHub check or download job (update_fetch.c) is running. Checked independently of
+    // update_in_progress: a check takes no OTA claim, and a download holds one only part of the time.
+    bool fetch_busy;
 } heat_interlock_snapshot_t;
 
 typedef enum {

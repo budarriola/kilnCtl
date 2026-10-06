@@ -48,7 +48,9 @@ update_url_err_t update_url_parse(const char *url, char *host, size_t host_cap, 
         }
     }
     static const char scheme[] = "https://";
-    if (len < sizeof(scheme) - 1 || !ieq_n(url, scheme, sizeof(scheme) - 1)) {
+    // Lowercase only: the stored repo and every redirect hop are compared textually elsewhere, and
+    // esp_http_client's own scheme match is case-sensitive.
+    if (len < sizeof(scheme) - 1 || strncmp(url, scheme, sizeof(scheme) - 1) != 0) {
         return UPDATE_URL_E_SCHEME;
     }
     const char *auth = url + (sizeof(scheme) - 1);

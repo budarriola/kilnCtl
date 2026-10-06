@@ -56,7 +56,7 @@ endif()
 # FW_PARTITIONS_SHA256 is sha256 of partitions.csv with CRLF normalised, exactly as
 # tools/release_manifest.py computes compat.partitions_sha256.
 set(release_version "")
-if(DEFINED ENV{KILNCTL_RELEASE_VERSION})
+if(DEFINED ENV{KILNCTL_RELEASE_VERSION} AND NOT "$ENV{KILNCTL_RELEASE_VERSION}" STREQUAL "")
     set(release_version "$ENV{KILNCTL_RELEASE_VERSION}")
     # Must accept exactly what update_tag_valid() (update_url.c, via update_semver.c) accepts:
     # core numbers 0 or 1-9 digits without a leading zero, a prerelease of non-empty dot-separated
@@ -77,7 +77,10 @@ if(DEFINED ENV{KILNCTL_RELEASE_VERSION})
         endif()
     endforeach()
     if(NOT _rv_ok)
-        set(release_version "")
+        # A release build that asked for a version must get it or fail: silently baking an empty
+        # running version would make the board unable to tell an upgrade from a downgrade.
+        message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='${release_version}' is not a valid release tag "
+                            "(vMAJOR.MINOR.PREREL as update_tag_valid() accepts, at most 32 characters).")
     endif()
 endif()
 set(partitions_sha "")

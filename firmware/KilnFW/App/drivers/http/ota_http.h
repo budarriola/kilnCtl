@@ -115,6 +115,11 @@ bool ota_http_update_try_begin(ota_http_context_t ctx);
 // held, writes which context holds it.
 bool ota_http_update_in_progress(ota_http_context_t *out_ctx);
 
+// Registers a probe reporting whether a GitHub check/download job is running. Read by
+// ota_http_heat_blocked_by_update() so a firing cannot start during a check (which takes no claim).
+// update_fetch_start() registers it; unset means "not busy".
+void ota_http_set_fetch_busy_probe(bool (*probe)(void));
+
 // --- Interlocks (TODO.md 9.4, UPDATE_PROTOCOL.md section 1) --------------
 //
 // Gathers a live snapshot -- profile_executor_get_status() for run state

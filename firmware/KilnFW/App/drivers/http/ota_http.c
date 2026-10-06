@@ -558,10 +558,19 @@ bool ota_http_any_relay_energized(void)
 // See ota_http.h's doc comment above this function. The mirror-image glue
 // to ota_http_check_interlocks() above: same s_update_claim mutex, opposite
 // direction ("may heat proceed" instead of "may an update start").
+static bool (*s_fetch_busy_probe)(void);
+
+void ota_http_set_fetch_busy_probe(bool (*probe)(void))
+{
+    s_fetch_busy_probe = probe;
+}
+
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
     heat_interlock_snapshot_t snap = { 0 };
     ota_http_context_t ctx;
+
+    snap.fetch_busy = (s_fetch_busy_probe != NULL) && s_fetch_busy_probe();
 
     snap.update_in_progress = ota_http_update_in_progress(&ctx);
     if (snap.update_in_progress) {

@@ -560,12 +560,13 @@ void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
 // build_host_tests.ps1's 8th step) EXCEPT heat_interlock_check(), which
 // ota_http.c's ota_http_heat_blocked_by_update() calls and no test here
 // reaches; stubbed trivially so the link doesn't need heat_interlock.c too.
+static bool s_last_heat_snap_fetch_busy;
 heat_interlock_result_t heat_interlock_check(const heat_interlock_snapshot_t *snap, char *reason_out,
                                              size_t reason_cap)
 {
-    (void)snap;
+    s_last_heat_snap_fetch_busy = snap != NULL && snap->fetch_busy;
     if (reason_out && reason_cap) reason_out[0] = '\0';
-    return HEAT_INTERLOCK_OK;
+    return (snap != NULL && snap->fetch_busy) ? HEAT_INTERLOCK_REFUSED : HEAT_INTERLOCK_OK;
 }
 
 // ---------------------------------------------------------------------------
@@ -2315,6 +2316,25 @@ static void test_pico_img_stage_begin_refuses_oversize(void)
     TEST_CHECK(fail_reason[0] != '\0', "a non-empty failure reason is reported");
 }
 
+static bool s_fake_fetch_busy;
+static bool fake_fetch_busy_probe(void) { return s_fake_fetch_busy; }
+
+static void test_heat_blocked_while_fetch_or_check_busy(void)
+{
+    TEST_SECTION("ota_http_heat_blocked_by_update -- a busy GitHub fetch/check blocks heat even with no OTA claim (WP8 re-review 8)");
+    char reason[96];
+    ota_http_set_fetch_busy_probe(NULL);
+    TEST_CHECK(!ota_http_heat_blocked_by_update(reason, sizeof(reason)), "no probe registered -- heat not blocked");
+    ota_http_set_fetch_busy_probe(fake_fetch_busy_probe);
+    s_fake_fetch_busy = false;
+    TEST_CHECK(!ota_http_heat_blocked_by_update(reason, sizeof(reason)), "probe idle -- heat not blocked");
+    s_fake_fetch_busy = true;
+    TEST_CHECK(ota_http_heat_blocked_by_update(reason, sizeof(reason)), "probe busy -- heat blocked");
+    TEST_CHECK(s_last_heat_snap_fetch_busy, "the snapshot carried fetch_busy");
+    s_fake_fetch_busy = false;
+    ota_http_set_fetch_busy_probe(NULL);
+}
+
 static void test_ota_pico_do_stage_refuses_oversize_with_http_400(void)
 {
     TEST_SECTION("ota_pico_do_stage -- an oversize Content-Length is refused with HTTP 400, not 500 (N5)");
@@ -2422,6 +2442,7 @@ void run_test_ota_http(void)
     test_pico_img_stage_write_chunk_refuses_overrun();
     test_pico_img_stage_begin_refuses_oversize();
     test_ota_pico_do_stage_refuses_oversize_with_http_400();
+    test_heat_blocked_while_fetch_or_check_busy();
 }
 
 int main(void)

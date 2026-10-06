@@ -9,8 +9,9 @@
 #
 # This check evaluates that regex pair, as written in the cmake file, against a table of tags with
 # the expected verdict, and requires every tag of the table to appear in the host test
-# test_update_url.c with the same verdict (accepted tags in a TEST_CHECK(update_tag_valid(...)),
-# refused tags in the badtag[] table), so the C side is pinned to the same table. Change either
+# test_update_url.c with the same verdict: the badtag[] table is parsed, refused tags must be in it
+# and accepted tags must be outside it (and present elsewhere in the test), so the C side is pinned
+# to the same table. Change either
 # side and one of the two fails.
 #
 # Usage: powershell -ExecutionPolicy Bypass -File tools\check_release_version_regex.ps1
@@ -65,6 +66,14 @@ $table = @(
 )
 
 $test = Get-Content -Raw -LiteralPath $testPath
+# The refused-tag table of the C test, parsed out as the set of its string literals. A refused tag
+# must be IN it and an accepted tag must be OUTSIDE it (and still pinned elsewhere in the test), so
+# a tag moved to the wrong side of the C test cannot pass on mere presence.
+$bm = [regex]::Match($test, '(?s)badtag\[\]\s*=\s*\{(.*?)\};')
+if (-not $bm.Success) { throw 'test_update_url.c: no badtag[] table found' }
+$badSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+foreach ($lm in [regex]::Matches($bm.Groups[1].Value, '"([^"]*)"')) { [void]$badSet.Add($lm.Groups[1].Value) }
+if ($badSet.Count -lt 5) { throw "test_update_url.c: badtag[] parsed to only $($badSet.Count) entries" }
 $bad = New-Object System.Collections.Generic.List[string]
 foreach ($row in $table) {
     $tag = $row[0]
@@ -74,6 +83,10 @@ foreach ($row in $table) {
     }
     if ($test.IndexOf('"' + $tag + '"') -lt 0) {
         $bad.Add("host test test_update_url.c does not pin the tag '$tag' (add it to the tag tests)")
+    } elseif ($want -and $badSet.Contains($tag)) {
+        $bad.Add("host test lists the accepted tag '$tag' in badtag[] (the C side refuses it; cmake accepts it)")
+    } elseif ((-not $want) -and -not $badSet.Contains($tag)) {
+        $bad.Add("host test does not list the refused tag '$tag' in badtag[]")
     }
 }
 if ($bad.Count -gt 0) {

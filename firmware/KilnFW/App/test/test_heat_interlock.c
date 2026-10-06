@@ -46,8 +46,25 @@ static void test_esp_update_refuses(void)
                "an ESP update in progress refuses the heat-causing action");
     TEST_CHECK(strstr(reason, "ESP") != NULL, "reason names the ESP specifically");
     TEST_CHECK(strstr(reason, "update") != NULL, "reason says it's an update, not a generic refusal");
-    TEST_CHECK(strstr(reason, "/api/update/fetch/cancel") != NULL, "ESP reason names the fetch cancel route");
+    TEST_CHECK(strstr(reason, "GitHub fetch: POST .../cancel") != NULL,
+               "ESP reason names the fetch cancel route, conditional on it being a GitHub fetch");
     TEST_CHECK(strlen(reason) < HEAT_INTERLOCK_REASON_MAX, "ESP reason is not truncated by the 96-byte budget");
+}
+
+static void test_fetch_busy_refuses(void)
+{
+    TEST_SECTION("heat_interlock_check -- a busy GitHub fetch/check refuses with no OTA claim held");
+
+    heat_interlock_snapshot_t snap = { 0 };
+    snap.fetch_busy = true;
+    char reason[HEAT_INTERLOCK_REASON_MAX] = { 0 };
+
+    TEST_CHECK(heat_interlock_check(&snap, reason, sizeof(reason)) == HEAT_INTERLOCK_REFUSED,
+               "fetch_busy alone refuses");
+    TEST_CHECK(strstr(reason, "/api/update/fetch/cancel") != NULL, "reason names the cancel route");
+    TEST_CHECK(strlen(reason) < HEAT_INTERLOCK_REASON_MAX - 1, "reason fits the 96-byte budget untruncated");
+    snap.fetch_busy = false;
+    TEST_CHECK(heat_interlock_check(&snap, reason, sizeof(reason)) == HEAT_INTERLOCK_OK, "idle fetch does not refuse");
 }
 
 static void test_pico_update_refuses(void)
@@ -96,6 +113,7 @@ void run_test_heat_interlock(void)
 {
     test_no_update_is_ok();
     test_esp_update_refuses();
+    test_fetch_busy_refuses();
     test_pico_update_refuses();
     test_reason_out_null_tolerant_on_refusal();
     test_truncation_is_null_terminated();

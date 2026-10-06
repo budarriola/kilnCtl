@@ -81,6 +81,12 @@ import check_main_task_stack_budget as base  # noqa: E402  (reuse the ELF/objdum
 REPO_ROOT = base.REPO_ROOT
 DEFAULT_ELF = base.DEFAULT_ELF
 HTTP_DIR = os.path.join(REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "http")
+# Every directory whose .c files register `.handler = ...` on the shared httpd worker. The update
+# handlers (WP4 stage upload, WP8 fetch routes, WP9 settings) live in drivers/update, not http;
+# scanning only http left them unmeasured. Each entry must contribute at least one root (a
+# vacuity guard: an empty or renamed directory fails loudly instead of silently measuring less).
+UPDATE_DIR = os.path.join(REPO_ROOT, "firmware", "KilnFW", "App", "drivers", "update")
+HANDLER_DIRS = [HTTP_DIR, UPDATE_DIR]
 
 # Known worst case as of 2026-09-08, after the shared-safety-link-chain pass:
 # ct_cal_post_handler (5056 B) and revert_post_handler (4832 B) shared
@@ -177,6 +183,13 @@ def find_handler_roots(http_dir):
     return sorted(names)
 
 
+def find_all_handler_roots(dirs):
+    """(sorted roots across every dir, {dir: roots found there})."""
+    per_dir = {d: find_handler_roots(d) for d in dirs}
+    allr = sorted({r for roots in per_dir.values() for r in roots})
+    return allr, per_dir
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--elf", default=DEFAULT_ELF)
@@ -197,10 +210,11 @@ def main():
               "(set XTENSA_OBJDUMP). Unmeasured, not passing.")
         return 3
 
-    roots = find_handler_roots(HTTP_DIR)
-    if not roots:
-        print(f"check_httpd_task_stack_budget: FAIL -- no '.handler = ...' registrations found under {HTTP_DIR}")
-        return 1
+    roots, per_dir = find_all_handler_roots(HANDLER_DIRS)
+    for d in HANDLER_DIRS:
+        if not per_dir[d]:
+            print(f"check_httpd_task_stack_budget: FAIL -- no '.handler = ...' registrations found under {d}")
+            return 1
 
     try:
         frames, calls = base.parse(objdump, args.elf)
@@ -227,6 +241,13 @@ def main():
     print()
     print("deepest 5 handler paths:")
     for total, root, path in results[:5]:
+        print(f"  {total:>6} B  {root}")
+
+    upd_roots = set(per_dir[UPDATE_DIR])
+    upd = [(t, r) for t, r, _p in results if r in upd_roots]
+    print()
+    print(f"update handlers (drivers/update) measured: {len(upd)} of {len(upd_roots)}")
+    for total, root in upd:
         print(f"  {total:>6} B  {root}")
 
     worst_total, worst_root, worst_path = results[0]

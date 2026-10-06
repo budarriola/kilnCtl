@@ -68,7 +68,9 @@ $watchedKeys = @(
     'CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM', # 2026-09-23: bench-proven 10 vs. IDF's regenerated 16
     'CONFIG_ESP_WIFI_RX_BA_WIN',            # 2026-09-23: bench-proven 6 vs. IDF's regenerated 16
     'CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS',      # 2026-09-23: bench-proven 4 vs. IDF's regenerated 0
-    'CONFIG_KILNCTL_ENABLE_GPIO_PROBE'      # 2026-09-23: pinned y so a clean worktree keeps gpio_probe
+    'CONFIG_KILNCTL_ENABLE_GPIO_PROBE',     # 2026-09-23: pinned y so a clean worktree keeps gpio_probe
+    'CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC',    # 2026-10-05 WP8: TLS option D; a stale sdkconfig keeps option B (does not fit)
+    'CONFIG_MBEDTLS_DYNAMIC_BUFFER'         # 2026-10-05 WP8: TLS option D, same reason
 )
 
 function Get-ConfigValue {
