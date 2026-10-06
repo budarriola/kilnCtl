@@ -1885,6 +1885,8 @@ Owner instruction, 2026-09-21.
   2608 vs 2608 B mid_firing across the two baselines) is runtime path depth (ESP_LOGW under log-queue pressure), already absorbed by SK-01's 384 B tolerance;
   the static ceiling is `check_all_task_stack_budgets.py`'s `info_uart_bridge` row (2208 B).
 - **SK-01/SK-02 baselines captured 2026-10-06 (bench agent, delegated owner step), on `c0fefe16`:** `idle` and `web_ui_open` records committed under `docs/stack_margin_baseline/` (`web_ui_open` is synthetic HTTP polling, not two browser tabs; no firing was run, so no new `mid_firing` record -- the existing `eb83c1ac` one is the only one). Stack suite re-run `20261006T151338Z_stack`: SK-01/02/03 PASS; SK-04 FAIL, DRAM largest free block 8192 B under the 8704 B floor (same 8192 B in `get_heap_status` before the suite; not investigated). See `docs/BENCH_TEST_LOG.md` 2026-10-06.
+- **SK-04 sampling 2026-10-06 (bench agent):** 29 samples over 85-7293 s uptime, internal largest free block 9728 B in every row (floor 8704 B), no step at web-page fetches or a login; the 57000 s 8192 B failure is not reproduced and 2 h is too short to refute it. A >16 h run is still needed. See `docs/BENCH_TEST_LOG.md` 2026-10-06.
+- **M17 relay_type round trip 2026-10-06 (bench agent):** `control_set_relay_type` relay 4 0->4->0 read back, persisted across `sw_reset_esp`, `control_get_zones` identical to the snapshot after restore. Web page rendering not checked. See `docs/BENCH_TEST_LOG.md` 2026-10-06.
 - **Pending bench work:** hardware-verify the login gates, AP-fallback radio timing and the
   LCD's "[AP kept up]" render. `crash_report/clear` latency measured 2026-10-04: under 5.4 s
   round trip on a present-and-acknowledged record with a 872 KB coredump (row L/OTA A3 note).
