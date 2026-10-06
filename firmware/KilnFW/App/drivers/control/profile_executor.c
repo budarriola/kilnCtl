@@ -842,6 +842,9 @@ void executor_task_entry(void *arg)
                                                     * on_off_zone flag and as every OTHER zone's
                                                     * peer_is_on_off[] so guard 9/cross-zone excludes an
                                                     * on/off zone from both sides of the comparison. */
+        bool zone_guard_exempt[MAX31856_CHANNEL_COUNT]; /* on/off OR monitor-only: guards 1/2/3/4/cross-zone are
+                                                    * not meaningful for it (no heat commanded, or no
+                                                    * setpoint). Guards 5/6/7 still run. */
         bool sensor_ok[MAX31856_CHANNEL_COUNT]; /* per ZONE: true iff >=1 assigned channel is valid --
                                                   * this IS guard 6's extended "invalid" definition
                                                   * (TODO.md 10.8: "all assigned thermocouples for
@@ -854,6 +857,8 @@ void executor_task_entry(void *arg)
             raw_c[zi] = NAN;
             sensor_ok[zi] = false;
             zone_on_off[zi] = zone_is_on_off(zi);
+            s_exec.zones[zi].monitor_only = zone_is_monitor_only(zi);
+            zone_guard_exempt[zi] = zone_on_off[zi] || s_exec.zones[zi].monitor_only;
             if (!s_exec.zones[zi].active) continue;
             /* Live read every tick, not cached in zone_runtime_t -- same
              * "no hardware-safety handover needed" reasoning
@@ -908,6 +913,10 @@ void executor_task_entry(void *arg)
              * at all) freeze the whole firing's ramp forever. Hard
              * requirement, not an optimisation. */
             if (zone_is_on_off(zi)) continue;
+            /* SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone (relay
+             * converted to an aux) cannot heat, so it must not hold the
+             * firing's ramp either. */
+            if (s_exec.zones[zi].monitor_only) continue;
             /* ONE-SIDED (2026-09-03, hot-start defect): only a zone that is
              * COLDER than the shared target by more than the band can hold
              * the lock. A zone that is HOTTER than target by the same
@@ -1213,6 +1222,7 @@ void executor_task_entry(void *arg)
         s_exec.fs_target_max_c = isnan(s_exec.fs_target_max_c) ? s_exec.target_c : fmaxf(s_exec.fs_target_max_c, s_exec.target_c);
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
+            if (s_exec.zones[zi].monitor_only) continue; /* no setpoint tracking to score */
             firing_stats_zone_tick(&s_exec.zones[zi], s_exec.target_c, s_exec.dwelling, s_exec.total_elapsed_s,
                                     s_exec.segment_index, dt_s);
             /* PID_EXPANSION_PLAN.md Phase 7d, Layer 1: harvest one dwell
@@ -1270,6 +1280,7 @@ void executor_task_entry(void *arg)
                  * comment, profile_executor_internal.h, and profile_executor_
                  * ramp_assist.c). Credit's own gate is "behind schedule at
                  * all", against the moving s_exec.target_c. */
+                if (s_exec.zones[zi].monitor_only) continue;
                 bool behind_schedule_now = (s_exec.zones[zi].actual_c < s_exec.target_c);
                 /* seg->target_c, not s_exec.target_c: the segment's own
                  * final target, not the still-interpolating commanded
@@ -1361,6 +1372,15 @@ void executor_task_entry(void *arg)
 
             float duty = 0.0f;
             z->last_pid_terms = (pid_terms_t){0}; /* only ZONE_CONTROL_MODE_PID/PID_FUZZY below fill this in */
+            if (s_exec.zones[zi].monitor_only) {
+                /* Monitor-only (SPARE_RELAY_ONOFF_PLAN.md sec 10): no PID, no
+                 * output, no heater_state movement. Its thermocouple is still
+                 * read above and the guards below still run. */
+                z->duty = 0.0f;
+                z->cooling_limited_hold_s = 0.0f;
+                z->cooling_limited = false;
+                continue;
+            }
             if (zone_on_off[zi]) {
                 /* HP-02 root cause (bench, 2026-09-25..27, ESP 0fb8ad98): an
                  * on/off-typed zone whose control_mode is still PID used to
@@ -1529,7 +1549,7 @@ void executor_task_entry(void *arg)
              * known) and applied there instead. Heater zones are
              * unaffected: this call and its position are bit-identical to
              * before this feature existed. */
-            if (!zone_on_off[zi]) {
+            if (!zone_on_off[zi] && !z->monitor_only) {
                 apply_relay(zi, want_relay_on[zi]);
                 if (z->heat_blocked) {
                     z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
@@ -1720,8 +1740,8 @@ void executor_task_entry(void *arg)
                  * this), guards 5/6/7/8 unaffected. peer_is_on_off excludes
                  * every on/off zone from the OTHER side of guard 9 too, for
                  * every zone's tick, not only an on/off zone's own. */
-                .peer_is_on_off = zone_on_off,
-                .on_off_zone = zone_on_off[zi],
+                .peer_is_on_off = zone_guard_exempt,
+                .on_off_zone = zone_guard_exempt[zi],
             };
             if (thermal_guard_tick(&z->guard_state, &guard_cfg_this_tick, &gin)) {
                 if (escalate_guard_trip(zi, z->guard_state.reason, z->guard_state.detail)) {

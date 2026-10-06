@@ -1100,6 +1100,26 @@ bool zone_is_on_off(uint8_t zone_index)
     return t == ZONE_TYPE_ON_OFF;
 }
 
+/* docs/SPARE_RELAY_ONOFF_PLAN.md sec 10 (owner decision, finding 6): the one
+ * rule for a MONITOR-ONLY zone -- a valid ZONE_TYPE_HEATER zone whose
+ * relay_mask is 0, which is what a zone is left as after its relay was
+ * converted to an aux output. Every executor/guard site asks this predicate;
+ * none of them test relay_mask == 0 themselves. Fail-closed: false for an
+ * out-of-range index or an unreadable type/mask, so a read failure can never
+ * exempt a zone from heater supervision. */
+bool zone_is_monitor_only(uint8_t zone_index)
+{
+    zone_type_t t;
+    if (!zones_config_get_zone_type(zone_index, &t) || t != ZONE_TYPE_HEATER) {
+        return false;
+    }
+    uint8_t mask = 0;
+    if (!zones_config_get_relay_mask(zone_index, &mask)) {
+        return false;
+    }
+    return mask == 0;
+}
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 2's zone_needs_ceiling(zi) predicate -- see
  * zones_config_accessors.h for the fail-closed convention on an out-of-range
  * zone_index (true here, i.e. "needs a ceiling", the safer default). */

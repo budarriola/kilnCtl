@@ -1234,6 +1234,15 @@ bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type);
  * separate error path to check. */
 bool zone_is_on_off(uint8_t zone_index);
 
+/* docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: true iff `zone_index` is a valid
+ * ZONE_TYPE_HEATER zone with relay_mask == 0 (its relay was converted to an
+ * aux output). Such a zone is MONITOR-ONLY: the executor reads its
+ * thermocouple but gives it no PID/output, no ramp-lock or dwell
+ * participation and no heating-failure/lag supervision; over-temperature and
+ * sensor-validity guards stay live. False for an out-of-range index
+ * (fail-closed: an unreadable zone is still supervised as a heater). */
+bool zone_is_monitor_only(uint8_t zone_index);
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 2's zone_needs_ceiling(zi) predicate: a HEATER
  * zone always needs a max_temp_c ceiling (the existing, unchanged "0 means
  * uncommissioned, refuse to start" rule); a ZONE_TYPE_ON_OFF zone needs one

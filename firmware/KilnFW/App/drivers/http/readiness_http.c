@@ -250,7 +250,9 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
             uint8_t assigned = 0;
             for (uint8_t i = 0; i < thermo_count; i++) {
                 uint8_t mask = 0;
-                if (zones_config_get_relay_mask(i, &mask) && mask != 0) {
+                /* SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone (relay
+                 * converted to an aux) is complete as it stands. */
+                if ((zones_config_get_relay_mask(i, &mask) && mask != 0) || zone_is_monitor_only(i)) {
                     assigned++;
                 }
             }

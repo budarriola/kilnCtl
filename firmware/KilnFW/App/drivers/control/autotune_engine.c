@@ -1137,6 +1137,14 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * looks identical to a genuinely dead element. An on/off zone is never a
      * heat source (plan sec 1's "one rule governs everything"): autotune has
      * no step response to identify on it at all. */
+    if (zone_is_monitor_only(zone_index)) {
+        if (err_msg) {
+            snprintf(err_msg, err_cap,
+                     "zone %u is monitor-only (no heater relay) -- autotune has nothing to drive",
+                     zone_index);
+        }
+        return false;
+    }
     if (zone_is_on_off(zone_index)) {
         if (err_msg) {
             snprintf(err_msg, err_cap,

@@ -259,6 +259,9 @@ float ramp_assist_dwell_credit_spend(s_exec_state_t *ex, float nominal_dwell_s, 
         if (!z->active || z->faulted) {
             continue;
         }
+        if (z->monitor_only) {
+            continue; /* SPARE_RELAY_ONOFF_PLAN.md sec 10: never accrues credit, must not floor the minimum */
+        }
         if (min_credit_s < 0.0f || z->dwell_credit_s < min_credit_s) {
             min_credit_s = z->dwell_credit_s;
         }
@@ -291,7 +294,7 @@ float ramp_assist_dwell_credit_peek_min_s(const s_exec_state_t *ex)
     float min_credit_s = -1.0f; /* sentinel: "no active zone seen yet" */
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         const zone_runtime_t *z = &ex->zones[zi];
-        if (!z->active || z->faulted) {
+        if (!z->active || z->faulted || z->monitor_only) {
             continue;
         }
         if (min_credit_s < 0.0f || z->dwell_credit_s < min_credit_s) {
@@ -326,8 +329,8 @@ bool ramp_assist_dwell_target_reached(const s_exec_state_t *ex)
 {
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         const zone_runtime_t *z = &ex->zones[zi];
-        if (!z->active || z->faulted) {
-            continue;
+        if (!z->active || z->faulted || z->monitor_only) {
+            continue; /* a monitor-only zone cannot reach the heated target */
         }
         if (!z->actual_valid || z->actual_c < ex->target_c) {
             return false; /* Bound 2: not every active zone is there yet */

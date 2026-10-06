@@ -64,6 +64,7 @@ typedef struct {
     bool  faulted;
     bool  sensor_ok;
     float actual_c;
+    bool  monitor_only; /* SPARE_RELAY_ONOFF_PLAN.md sec 10: zone_runtime_t.monitor_only */
 } mirror_zone_t;
 
 /* docs/ON_OFF_ZONE_PLAN.md sec 1: stand-in for the real zones_config_
@@ -89,6 +90,7 @@ static uint8_t lock_lagging_mask(const mirror_zone_t zones[TEST_ZONE_COUNT], flo
     for (uint8_t zi = 0; zi < TEST_ZONE_COUNT; zi++) {
         if (!zones[zi].active || zones[zi].faulted) continue;
         if (zone_is_on_off(zi)) continue;
+        if (zones[zi].monitor_only) continue;
         bool held;
         if (old_fabsf) {
             held = !zones[zi].sensor_ok || fabsf(zones[zi].actual_c - target_c) > TEST_RAMP_LOCK_BAND_C;
@@ -283,5 +285,29 @@ void run_test_ramp_lock_onesided(void)
                                           "ramp lock -- only the real heater zone's own state matters");
         s_mirror_on_off[0] = false;
         s_mirror_on_off[1] = false; /* reset for any test added after this one */
+    }
+
+    /* docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone (relay
+     * converted to an aux) cannot heat, so sitting 100 C cold must not hold
+     * the ramp lock. Control: the identical zone as a heater DOES hold it. */
+    {
+        for (int monitor_only = 0; monitor_only < 2; monitor_only++) {
+            mirror_zone_t zones[TEST_ZONE_COUNT] = {
+                {.active = true, .faulted = false, .sensor_ok = true, .actual_c = 45.0f},
+                {.active = true, .faulted = false, .sensor_ok = true, .actual_c = -55.0f, .monitor_only = (monitor_only != 0)},
+            };
+            float target_c = 45.0f;
+            uint32_t segment_elapsed_s = 0;
+            for (int i = 0; i < 10; i++) {
+                uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
+                bool lock_ok = (lagging == 0);
+                step_schedule(&target_c, &segment_elapsed_s, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+            }
+            if (monitor_only) {
+                TEST_CHECK(segment_elapsed_s > 0, "a cold monitor-only zone must NOT hold the ramp lock");
+            } else {
+                TEST_CHECK(segment_elapsed_s == 0, "the same cold zone as a HEATER holds the lock (control case)");
+            }
+        }
     }
 }

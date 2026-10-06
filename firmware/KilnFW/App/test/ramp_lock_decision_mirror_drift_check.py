@@ -120,6 +120,8 @@ def strip_comments(text: str) -> str:
 FOLDS = [
     (re.compile(r"\bs_exec\.zones\[zi\]\.active\b"), "ZONE_ACTIVE"),
     (re.compile(r"\bzones\[zi\]\.active\b"), "ZONE_ACTIVE"),
+    (re.compile(r"\bs_exec\.zones\[zi\]\.monitor_only\b"), "ZONE_MONITOR_ONLY"),
+    (re.compile(r"\bzones\[zi\]\.monitor_only\b"), "ZONE_MONITOR_ONLY"),
     (re.compile(r"\bs_exec\.zones\[zi\]\.faulted\b"), "ZONE_FAULTED"),
     (re.compile(r"\bzones\[zi\]\.faulted\b"), "ZONE_FAULTED"),
     (re.compile(r"\bsensor_ok\[zi\](?=\W|$)"), "ZONE_SENSOR_OK"),

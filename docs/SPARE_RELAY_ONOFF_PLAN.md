@@ -394,6 +394,27 @@ rewritten slots, a read-back of every slot, and a newest-first revert on any fai
 zone, a quarantined store, a rule an aux cannot represent (`temp_source` 2, or a temperature compare 
 with no thermocouple), and a missing `confirm`.
 
+**Converted zone is monitor-only (owner decision 2026-10-05).** A HEATER zone with `relay_mask == 0`
+(what a conversion leaves behind) is MONITOR-ONLY, decided by the single predicate `zone_is_monitor_only()`
+(`zones_config_accessors.c`; valid HEATER zone, mask 0, false on any read failure so an unreadable zone
+stays supervised as a heater). The executor mirrors it per tick into `zone_runtime_t.monitor_only` and
+every heater-only site reads that, never `relay_mask == 0` itself:
+
+- Skipped: PID/output (duty 0, `heater_state` untouched, no `apply_relay`), ramp-lock participation, dwell
+  target-reached and dwell-credit minimum, sustained-lag/ramp-assist, firing stats and adaptive-tune
+  harvesting, the "all heaters faulted" run-end test, the start-time ramp-rate-ceiling check, and the
+  start-time "does anything heat" count (a profile whose only zones are monitor-only is refused as
+  "nothing would heat"). Autotune refuses it. Readiness `relays_assigned` counts it as complete.
+- Still read: its thermocouple (`actual_c`), so aux `tc_zone` temperature rules keep working.
+- Guards: it is fed to `thermal_guard_tick()` through the same exemption an ON_OFF zone gets, so guards
+  1 (heat-rise), 2 (wrong direction), 3 (runaway), 4 (drift) and the cross-zone guard are off for it and
+  it is excluded as a peer of other zones. Guards 5 (over/under temperature), 6 (sensor fault) and 7
+  (frozen sensor) stay live. Its `max_temp_c` still applies at start (target-vs-limit refusal and
+  `profile_zones_have_ceiling`).
+- No new `zone_type`, no zones_cfg schema change. Not changed: the coupling-matrix getters still treat
+  the zone as a heater column, and the web/LCD zone display shows it with duty 0 and no explicit
+  monitor-only flag.
+
 Existing ON_OFF zones keep working unchanged until the operator converts.
 
 ## 11. Host tests (all host-only; no board)

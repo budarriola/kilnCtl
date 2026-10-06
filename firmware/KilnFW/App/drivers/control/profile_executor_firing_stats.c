@@ -446,7 +446,7 @@ static void firing_stats_build_record(profile_firing_run_record_t *rec)
         // report it as inactive here so no thermal-model statistic is ever
         // derived from it downstream (adaptive_tune, comparators). See
         // ON_OFF_ZONE_PLAN.md sec 1 "Firing stats / IAE" row.
-        zr->active = z->active && !zone_is_on_off(zi);
+        zr->active = z->active && !zone_is_on_off(zi) && !z->monitor_only;
         if (!zr->active) continue;
         firing_stats_snapshot(z, span, &zr->stats);
         if (z->control_mode == ZONE_CONTROL_MODE_PID || z->control_mode == ZONE_CONTROL_MODE_PID_FUZZY) {

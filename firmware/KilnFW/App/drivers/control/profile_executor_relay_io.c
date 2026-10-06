@@ -1053,7 +1053,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
      * simply does not participate. */
     bool all_heaters_faulted = true;
     for (uint8_t zi2 = 0; zi2 < MAX31856_CHANNEL_COUNT; zi2++) {
-        if (!s_exec.zones[zi2].active || zone_is_on_off(zi2)) continue;
+        if (!s_exec.zones[zi2].active || zone_is_on_off(zi2) || s_exec.zones[zi2].monitor_only) continue;
         if (!s_exec.zones[zi2].faulted) {
             all_heaters_faulted = false;
             break;

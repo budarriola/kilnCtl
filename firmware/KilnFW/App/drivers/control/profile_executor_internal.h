@@ -357,6 +357,12 @@ typedef struct {
 
 typedef struct {
     bool     active;   /* this zone is in the current run's zone_mask */
+    /* docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: refreshed every tick from
+     * zone_is_monitor_only() (the one rule). A monitor-only zone is read but
+     * never driven, and is skipped by every heater-only decision (ramp lock,
+     * dwell reach/credit, lag, heating-failed guards). Never set anywhere
+     * else. */
+    bool     monitor_only;
 
     pid_cfg_t pid_cfg;
     pid_state_t pid_state;

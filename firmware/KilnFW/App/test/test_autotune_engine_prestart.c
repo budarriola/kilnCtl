@@ -719,6 +719,15 @@ bool zone_is_on_off(uint8_t zone_index)
     return s_stub_zone_is_on_off;
 }
 
+// SPARE_RELAY_ONOFF_PLAN.md sec 10: monitor-only predicate stand-in, false by default.
+static bool s_stub_zone_monitor_only = false;
+
+bool zone_is_monitor_only(uint8_t zone_index)
+{
+    (void)zone_index;
+    return s_stub_zone_monitor_only;
+}
+
 bool zones_config_is_valid(void)
 {
     // True so autotune_begin_run_locked() (real code, called for real by the
@@ -3138,6 +3147,41 @@ static void test_run_refuses_on_off_zone(void)
     errbuf[0] = '\0';
     ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
     TEST_CHECK(ok, "control: with zone_type back to HEATER, the identical setup must succeed");
+}
+
+// SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone (relay converted to an
+// aux) has nothing for autotune to drive; refuse before any heating starts.
+static void test_run_refuses_monitor_only_zone(void)
+{
+    TEST_SECTION("autotune_engine_run() refuses a monitor-only zone before any heating starts");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_stub_thermo_mask = 0x01;
+    s_stub_zone_monitor_only = true;
+
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(!ok, "a monitor-only zone must refuse the autotune run");
+    TEST_CHECK(strstr(errbuf, "monitor-only") != NULL, "the refusal must name the zone as monitor-only");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a refused run must never leave the engine running");
+
+    s_stub_zone_monitor_only = false;
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    errbuf[0] = '\0';
+    ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    TEST_CHECK(ok, "control: with the zone no longer monitor-only, the identical setup must succeed");
 }
 
 // The shared heat claim's atomic gate (relay_authority.h) -- proves the LATE
@@ -6760,6 +6804,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_refuses_while_zone_sweep_is_active();
     test_run_refuses_zone_with_no_thermo_mask();
     test_run_refuses_on_off_zone();
+    test_run_refuses_monitor_only_zone();
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_at_atomic_zone_claim_gate();
 

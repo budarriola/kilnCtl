@@ -1122,6 +1122,67 @@ void run_test_thermal_guard(void)
                   "what the relay drives");
     }
 
+    /* docs/SPARE_RELAY_ONOFF_PLAN.md sec 10: a MONITOR-ONLY zone (relay
+     * converted to an aux) is fed to the guard exactly like an on/off zone
+     * (profile_executor.c passes on_off_zone for it), with commanded duty 0.
+     * Same input stream, heater vs monitor-only: a heated zone trips guard 3
+     * (rising with heat off) and guard 1 (duty 1, flat), a monitor-only zone
+     * trips neither -- and still trips guard 5 over-temperature. */
+    {
+        thermal_guard_cfg_t cfg = {.max_temp_c = 500.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 0.5f,
+                                   .off_settle_s = 30.0f, .runaway_margin_c = 5.0f};
+        for (int monitor_only = 0; monitor_only < 2; monitor_only++) {
+            thermal_guard_state_t s;
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.on_off_zone = (monitor_only != 0);
+            in.setpoint_c = 600.0f;
+            in.measurement_c = 100.0f;
+            in.commanded_duty = 0.0f;
+            bool tripped = false;
+            for (int i = 0; i < 60 && !tripped; i++) {
+                in.measurement_c += 2.0f; /* neighbours heat the chamber while this zone's heat is off */
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            if (monitor_only) {
+                TEST_CHECK(!tripped, "monitor-only zone: rising with no heat commanded must NOT trip guard 3");
+            } else {
+                TEST_CHECK(tripped && s.reason == THERMAL_GUARD_TRIP_RUNAWAY,
+                           "heated zone: rising with heat commanded off DOES trip guard 3 (control case)");
+            }
+        }
+        for (int monitor_only = 0; monitor_only < 2; monitor_only++) {
+            thermal_guard_state_t s;
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.on_off_zone = (monitor_only != 0);
+            in.setpoint_c = 600.0f;
+            in.commanded_duty = monitor_only ? 0.0f : 1.0f;
+            bool tripped = false;
+            for (int i = 0; i < 3000 && !tripped; i++) {
+                in.measurement_c = (i % 2) ? 400.1f : 400.0f; /* flat, dithered to stay clear of guard 7 */
+                tripped = thermal_guard_tick(&s, &cfg, &in);
+            }
+            if (monitor_only) {
+                TEST_CHECK(!tripped, "monitor-only zone: a flat reading must NOT trip guard 1 (heat-rise)");
+            } else {
+                TEST_CHECK(tripped && s.reason == THERMAL_GUARD_TRIP_HEATING_FAILED,
+                           "heated zone: duty 1 with a flat reading DOES trip guard 1 (control case)");
+            }
+        }
+        {
+            thermal_guard_state_t s;
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.on_off_zone = true; /* monitor-only */
+            in.commanded_duty = 0.0f;
+            in.measurement_c = 600.0f; /* over the 500 C ceiling */
+            bool tripped = thermal_guard_tick(&s, &cfg, &in);
+            TEST_CHECK(tripped && s.reason == THERMAL_GUARD_TRIP_MAX_TEMP,
+                       "monitor-only zone: guard 5 over-temperature still trips");
+        }
+    }
+
     /* Guard 9/cross-zone: an on/off zone excluded from BOTH sides -- as the
      * zone being ticked (peer readings ignored), and as a PEER of another
      * (heater) zone's own tick. */

@@ -421,6 +421,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (rate <= 0.0f) continue;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!(p.zone_mask & (1u << zi))) continue;
+            /* SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone is never
+             * driven, so a ramp-rate ceiling means nothing for it. */
+            if (zone_is_monitor_only(zi)) continue;
             float ceiling = 0.0f;
             zones_config_get_max_ramp(zi, &ceiling);
             if (rate > ceiling) {
@@ -767,6 +770,10 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     uint8_t n_heating_zones = 0;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if (!(p.zone_mask & (1u << zi))) continue;
+        if (zone_is_monitor_only(zi)) {
+            ESP_LOGW(PE_TAG, "zone %u is in this profile but has no heater relay (monitor-only) -- it will not heat", zi);
+            continue;
+        }
         zone_control_mode_t m = ZONE_CONTROL_MODE_OFF;
         zones_config_get_control_mode(zi, &m);
         if (m != ZONE_CONTROL_MODE_OFF) {

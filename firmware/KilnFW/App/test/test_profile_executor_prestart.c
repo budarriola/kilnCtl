@@ -1345,6 +1345,14 @@ bool zone_is_on_off(uint8_t zone_index)
     return zone_index < MAX31856_CHANNEL_COUNT && g_stub_zone_is_on_off[zone_index];
 }
 
+/* SPARE_RELAY_ONOFF_PLAN.md sec 10: monitor-only predicate stand-in. Defaults
+ * false so every pre-existing test is unchanged. */
+static bool g_stub_zone_monitor_only[MAX31856_CHANNEL_COUNT];
+bool zone_is_monitor_only(uint8_t zone_index)
+{
+    return zone_index < MAX31856_CHANNEL_COUNT && g_stub_zone_monitor_only[zone_index];
+}
+
 /* docs/ON_OFF_ZONE_PLAN.md sec 3/7 -- on_off_trigger_decide's report-only
  * wiring in profile_executor.c reads these every tick for an on/off zone.
  * Fixed, defaults-shaped fakes (never true/nonzero) so every pre-existing
@@ -2053,6 +2061,53 @@ static void test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted(void)
     TEST_CHECK(g_relay_release_calls == 1, "relay_authority_release_mask() must be called exactly once");
 
     g_stub_zone_is_on_off[1] = false; /* restore for other tests sharing this stub array */
+}
+
+static void test_escalate_guard_trip_monitor_only_zone_excluded_from_all_faulted(void)
+{
+    TEST_SECTION("escalate_guard_trip() -- a monitor-only zone (relay converted to an aux) is not a heater: "
+                 "it must not keep the run alive when every real heater zone has faulted "
+                 "(docs/SPARE_RELAY_ONOFF_PLAN.md sec 10)");
+    reset_relay_claim_test_state();
+    g_continue_on_zone_trip = true;
+    s_exec.zones[0].active = true; /* heater */
+    s_exec.zones[1].active = true; /* monitor-only, stays healthy throughout */
+    s_exec.zones[1].monitor_only = true;
+    s_exec.claimed_relay_mask = 0x0F;
+
+    bool run_faulted = escalate_guard_trip(0, THERMAL_GUARD_TRIP_HEATING_FAILED, "zone 0 guard 1");
+    TEST_CHECK(run_faulted, "zone 0 was the only heater; its fault must end the run even though the "
+                            "monitor-only zone 1 is still unfaulted and active");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_FAULTED, "state must be FAULTED once every real heater has faulted");
+
+    s_exec.zones[1].monitor_only = false;
+}
+
+static void test_ramp_assist_dwell_target_and_credit_skip_monitor_only_zone(void)
+{
+    TEST_SECTION("ramp_assist_dwell_target_reached()/_peek_min_s() -- a monitor-only zone sitting at ambient must "
+                 "not block the dwell from starting nor floor the shared credit, while the same zone as a heater does "
+                 "(docs/SPARE_RELAY_ONOFF_PLAN.md sec 10)");
+    static s_exec_state_t ex;
+    memset(&ex, 0, sizeof(ex));
+    ex.target_c = 500.0f;
+    ex.zones[0].active = true;
+    ex.zones[0].actual_valid = true;
+    ex.zones[0].actual_c = 500.0f;
+    ex.zones[0].dwell_credit_s = 100.0f;
+    ex.zones[1].active = true;
+    ex.zones[1].actual_valid = true;
+    ex.zones[1].actual_c = 25.0f; /* ambient */
+    ex.zones[1].dwell_credit_s = 0.0f;
+
+    ex.zones[1].monitor_only = false;
+    TEST_CHECK(!ramp_assist_dwell_target_reached(&ex), "a cold heater zone blocks the dwell (control case)");
+    TEST_CHECK(ramp_assist_dwell_credit_peek_min_s(&ex) == 0.0f, "a zero-credit heater floors the minimum (control case)");
+
+    ex.zones[1].monitor_only = true;
+    TEST_CHECK(ramp_assist_dwell_target_reached(&ex), "a cold monitor-only zone must NOT block the dwell");
+    TEST_CHECK(ramp_assist_dwell_credit_peek_min_s(&ex) == 100.0f,
+               "a monitor-only zone must NOT floor the shared dwell credit");
 }
 
 static void test_pause_keeps_claim_resume_reclaims_it(void)
@@ -10541,6 +10596,8 @@ void run_test_profile_executor_prestart(void)
     test_escalate_guard_trip_abort_policy_releases_relay_claim();
     test_escalate_guard_trip_all_zones_faulted_releases_relay_claim();
     test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted();
+    test_escalate_guard_trip_monitor_only_zone_excluded_from_all_faulted();
+    test_ramp_assist_dwell_target_and_credit_skip_monitor_only_zone();
     test_stale_per_zone_latch_leaks_from_undismissed_done_into_new_run();
     test_pause_keeps_claim_resume_reclaims_it();
     test_guard9_asserts_and_ors_global_fault_source();
