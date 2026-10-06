@@ -176,6 +176,9 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     # transplanting), so these are listed here purely so the mirror-drift
     # check can confirm this module has not simply never heard of them.
     "kiln_configs", "is_active", "package", "omitted",
+    # Top-level aux_outputs[] (spare-relay on/off outputs, 2026-10-06) and its per-entry
+    # field names (hyst_c/min_on_s/min_off_s are listed above). Passed through verbatim.
+    "aux_outputs", "relay", "enabled", "tc_zone",
 })
 
 # Calibration fields this module will NEVER fabricate, default, or derive.
@@ -448,6 +451,10 @@ def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
     ):
         if key in doc:
             report.add("document", key, "dropped", why)
+    if "aux_outputs" in doc:  # spare-relay outputs: additive top-level array, never version-gated
+        out["aux_outputs"] = copy.deepcopy(doc["aux_outputs"])
+        report.add("document", "aux_outputs", "kept",
+                   "spare-relay aux_outputs array carried through unchanged")
 
     if source_version == target_version:
         report.add("document", "version", "kept", "source and target versions are identical; document unchanged")

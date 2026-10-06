@@ -5823,6 +5823,263 @@ static void test_update_repo_pass1_refusal_skips_kiln_configs_commit(void)
     TEST_CHECK(n_after < n_before, "control: the MIRROR commit really deletes slots when pass 1 passes");
 }
 
+// ---- aux_outputs (spare-relay on/off outputs): the top-level "aux_outputs" key ----
+static void aux_bk_fresh(void)
+{
+    wp9_fresh_repo_setting(); // fake_kv_reset_all + kiln_nvs partition + update_settings
+    (void)aux_outputs_cfg_start(0);
+}
+
+static aux_output_entry_t aux_bk_entry(bool enabled, uint8_t tc_plus1, float hyst, uint16_t on_s, uint16_t off_s)
+{
+    aux_output_entry_t e;
+    memset(&e, 0, sizeof(e));
+    e.enabled = enabled ? 1 : 0;
+    e.tc_zone_plus1 = tc_plus1;
+    e.hyst_c = hyst;
+    e.min_on_s = on_s;
+    e.min_off_s = off_s;
+    return e;
+}
+
+static void test_aux_outputs_import_applies_and_persists(void)
+{
+    TEST_SECTION("backup_import_apply -- aux_outputs entries are applied, persisted and omit-preserve unnamed fields");
+    reset_stub_state();
+    aux_bk_fresh();
+    aux_output_entry_t base = aux_bk_entry(false, 0, 7.0f, 90, 91);
+    TEST_CHECK(aux_outputs_cfg_set(3, &base, 0) == ESP_OK, "seed relay 3 with distinctive fields");
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with(",\"aux_outputs\":[{\"relay\":2,\"enabled\":true,\"tc_zone\":1,\"hyst_c\":3.5,"
+                               "\"min_on_s\":45,\"min_off_s\":60},{\"relay\":3,\"enabled\":true},"
+                               "{\"relay\":4,\"enabled\":0}]",
+                               err, sizeof(err)),
+               "a valid aux_outputs array imports");
+    aux_output_t o;
+    TEST_CHECK(aux_outputs_cfg_get(2, &o) && o.enabled && o.tc_zone == 1 && o.hyst_c == 3.5f && o.min_on_s == 45 &&
+                   o.min_off_s == 60,
+               "relay 2 carries every imported field");
+    TEST_CHECK(aux_outputs_cfg_get(3, &o) && o.enabled && o.hyst_c == 7.0f && o.min_on_s == 90 && o.min_off_s == 91,
+               "relay 3: enabled imported, omitted fields keep their current values");
+    TEST_CHECK(aux_outputs_cfg_get(4, &o) && !o.enabled, "relay 4 stays disabled (enabled:0)");
+    TEST_CHECK(aux_outputs_cfg_get(1, &o) && !o.enabled, "relay 1 not named: untouched");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x06, "enabled mask is relays 2 and 3");
+    (void)aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x06 && aux_outputs_cfg_get(2, &o) && o.hyst_c == 3.5f,
+               "the imported state survives a reboot (persisted, not RAM only)");
+}
+
+static void test_aux_outputs_absent_is_noop(void)
+{
+    TEST_SECTION("backup_import_apply -- no aux_outputs key leaves the aux store alone");
+    reset_stub_state();
+    aux_bk_fresh();
+    aux_output_entry_t e = aux_bk_entry(true, 2, 4.0f, 11, 12);
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) == ESP_OK, "seed relay 1 enabled");
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)), "an older backup without the key still imports");
+    aux_output_t o;
+    TEST_CHECK(aux_outputs_cfg_get(1, &o) && o.enabled && o.tc_zone == 1 && o.hyst_c == 4.0f,
+               "relay 1 is untouched");
+}
+
+static void test_aux_outputs_malformed_refuses_whole_restore(void)
+{
+    TEST_SECTION("backup_import_apply -- a malformed aux_outputs entry refuses the whole restore, nothing applied");
+    static const char *const tails[] = {
+        /* a valid first entry must not land when a later one is bad */
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true},{\"relay\":2,\"enabled\":\"x\"}]",
+        ",\"aux_outputs\":5",
+        ",\"aux_outputs\":[3]",
+        ",\"aux_outputs\":[{\"relay\":0,\"enabled\":true}]",
+        ",\"aux_outputs\":[{\"relay\":5,\"enabled\":true}]",
+        ",\"aux_outputs\":[{\"relay\":1.5,\"enabled\":true}]",
+        ",\"aux_outputs\":[{\"enabled\":true}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true},{\"relay\":1,\"enabled\":false}]",
+        ",\"aux_outputs\":[{\"relay\":1}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":2}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"tc_zone\":9}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"tc_zone\":0.5}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"hyst_c\":0.1}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"hyst_c\":99}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"min_on_s\":0}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"min_off_s\":4000}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"min_on_s\":1.5}]",
+        ",\"aux_outputs\":[{\"relay\":1,\"enabled\":true,\"hyst_c\":\"2\"}]",
+    };
+    for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); i++) {
+        reset_stub_state();
+        aux_bk_fresh();
+        aux_output_entry_t keep = aux_bk_entry(true, 0, 5.0f, 20, 21);
+        TEST_CHECK(aux_outputs_cfg_set(4, &keep, 0) == ESP_OK, "seed relay 4 enabled");
+        g_total_write_calls = 0;
+        char err[200] = "";
+        TEST_CHECK(!wp9_import_with(tails[i], err, sizeof(err)), "a bad aux_outputs is refused");
+        TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0,
+                   "pass 1 refusal: no profile/zone write happened");
+        TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x08, "pass 1 refusal: the aux store is unchanged");
+        aux_output_t o;
+        TEST_CHECK(aux_outputs_cfg_get(1, &o) && !o.enabled, "pass 1 refusal: relay 1 was not applied");
+        TEST_CHECK(strstr(err, "aux_outputs") != NULL, "the error names aux_outputs");
+    }
+}
+
+static void test_aux_outputs_quarantined_store_refuses_import(void)
+{
+    TEST_SECTION("backup_import_apply -- a quarantined aux store refuses a restore carrying aux_outputs, "
+                 "and the export omits the key");
+    reset_stub_state();
+    aux_bk_fresh();
+    uint8_t huge[400];
+    memset(huge, 0xCD, sizeof(huge));
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK, "open for stash");
+    TEST_CHECK(hal_kv_set_blob(&h, "aux_out_cfg", huge, sizeof(huge)) == HAL_OK, "stash oversize blob");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    (void)aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_quarantined(), "test setup: store is quarantined");
+    g_total_write_calls = 0;
+    char err[200] = "";
+    TEST_CHECK(!wp9_import_with(",\"aux_outputs\":[{\"relay\":1,\"enabled\":true}]", err, sizeof(err)),
+               "refused while quarantined");
+    TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0, "nothing else was written");
+    TEST_CHECK(strstr(err, "quarantined") != NULL, "the error says why");
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)), "a backup without the key still imports");
+    TEST_CHECK(run_export() == ESP_OK && strstr(s_export_body, "\"aux_outputs\"") == NULL,
+               "the export omits aux_outputs rather than fabricating defaults");
+    aux_bk_fresh();
+}
+
+static void test_aux_outputs_conflict_with_zone_relay_refused_in_pass_1(void)
+{
+    TEST_SECTION("backup_import_apply -- an enabled aux relay a restored (or live) zone also claims is refused "
+                 "before anything is written");
+    static const char *const file_zone_body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"relay_mask\":4,\"settings_source\":255}],"
+        "\"aux_outputs\":[{\"relay\":3,\"enabled\":true}]}";
+    reset_stub_state();
+    aux_bk_fresh();
+    g_total_write_calls = 0;
+    char err[200] = "";
+    TEST_CHECK(!test_backup_import_apply(file_zone_body, err, sizeof(err)),
+               "file zone claims the relay the file enables");
+    TEST_CHECK(strstr(err, "aux_outputs") != NULL, "the error names aux_outputs");
+    TEST_CHECK(g_total_write_calls == 0, "pass 1 refusal: no zone write");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "pass 1 refusal: aux not enabled");
+
+    reset_stub_state();
+    aux_bk_fresh();
+    TEST_CHECK(zones_config_set_relay_mask(0, 0x04), "live zone 0 claims relay 3");
+    g_total_write_calls = 0;
+    TEST_CHECK(!wp9_import_with(",\"aux_outputs\":[{\"relay\":3,\"enabled\":true}]", err, sizeof(err)),
+               "live zone claims the relay the file enables (file has no relay_mask)");
+    TEST_CHECK(g_total_write_calls == 0 && aux_outputs_cfg_enabled_mask() == 0, "nothing written");
+}
+
+static void test_aux_outputs_zone_and_aux_swap_applies_in_either_direction(void)
+{
+    TEST_SECTION("backup_import_apply -- a backup that moves a relay between a zone and an aux output applies "
+                 "cleanly (disables land before zones, enables after)");
+    static const char *const free_for_aux =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"relay_mask\":1,\"settings_source\":255}],"
+        "\"aux_outputs\":[{\"relay\":3,\"enabled\":true}]}";
+    static const char *const free_for_zone =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"relay_mask\":4,\"settings_source\":255}],"
+        "\"aux_outputs\":[{\"relay\":3,\"enabled\":false}]}";
+    char err[200] = "";
+    reset_stub_state();
+    aux_bk_fresh();
+    TEST_CHECK(zones_config_set_relay_mask(0, 0x04), "zone 0 starts on relay 3");
+    TEST_CHECK(test_backup_import_apply(free_for_aux, err, sizeof(err)), "zone gives relay 3 up while aux takes it");
+    TEST_CHECK(s_writes[0].relay_mask == 0x01, "zone 0 now owns relay 1");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x04, "aux relay 3 is enabled");
+
+    reset_stub_state();
+    aux_bk_fresh();
+    aux_output_entry_t on = aux_bk_entry(true, 0, 0, 0, 0);
+    TEST_CHECK(aux_outputs_cfg_set(3, &on, 0) == ESP_OK, "aux relay 3 starts enabled");
+    TEST_CHECK(test_backup_import_apply(free_for_zone, err, sizeof(err)),
+               "aux gives relay 3 up while a zone takes it");
+    TEST_CHECK(s_writes[0].relay_mask == 0x04, "zone 0 now owns relay 3");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "aux relay 3 is disabled");
+}
+
+static void test_aux_outputs_dry_run_and_partial_write(void)
+{
+    TEST_SECTION("backup_import_apply -- aux_outputs dry run writes nothing; a failed persist is a partial write");
+    reset_stub_state();
+    aux_bk_fresh();
+    kiln_cfg_plan_t plan;
+    bool partial = false;
+    char err[200] = "";
+    TEST_CHECK(wp9_apply_full(",\"aux_outputs\":[{\"relay\":2,\"enabled\":true}]", KILN_CFG_RESTORE_MERGE, true, -1,
+                              &plan, &partial, err, sizeof(err)),
+               "dry run succeeds");
+    TEST_CHECK(wp9_plan_has(&plan, "aux_outputs"), "the plan names aux_outputs");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "dry run: the aux store is untouched");
+
+    reset_stub_state();
+    aux_bk_fresh();
+    fake_kv_script_next_write_status(HAL_IO);
+    bool ok = wp9_apply_full(",\"aux_outputs\":[{\"relay\":2,\"enabled\":true}]", KILN_CFG_RESTORE_MERGE, false, -1,
+                             &plan, &partial, err, sizeof(err));
+    TEST_CHECK(!ok, "a failed aux persist fails the restore");
+    TEST_CHECK(partial, "reported as a partial write (the handler turns this into the 500)");
+    TEST_CHECK(strstr(err, "aux_outputs") != NULL, "the error names aux_outputs");
+    TEST_CHECK(g_profile_save_calls > 0, "the profiles had already been written (hence partial)");
+}
+
+static const char *aux_bk_slice(char *dst, size_t cap, const char *doc)
+{
+    const char *p = strstr(doc, "\"aux_outputs\":[");
+    const char *q = p ? strchr(p, ']') : NULL;
+    if (p == NULL || q == NULL || (size_t)(q - p) + 2 > cap) {
+        dst[0] = '\0';
+        return dst;
+    }
+    memcpy(dst, p, (size_t)(q - p) + 1);
+    dst[(size_t)(q - p) + 1] = '\0';
+    return dst;
+}
+
+static void test_aux_outputs_export_round_trip(void)
+{
+    TEST_SECTION("backup_export_get_handler -- aux_outputs round-trips export, import, export byte-identically");
+    reset_stub_state();
+    aux_bk_fresh();
+    TEST_CHECK(run_export() == ESP_OK &&
+                   strstr(s_export_body, "\"aux_outputs\":[{\"relay\":1,\"enabled\":false,\"tc_zone\":-1") != NULL,
+               "a stock board exports four disabled entries");
+    aux_output_entry_t a = aux_bk_entry(true, 3, 4.25f, 10, 20);
+    aux_output_entry_t b = aux_bk_entry(true, 0, 1.5f, 33, 44);
+    aux_output_entry_t c = aux_bk_entry(false, 1, 8.0f, 5, 6);
+    TEST_CHECK(aux_outputs_cfg_set(1, &a, 0) == ESP_OK && aux_outputs_cfg_set(3, &b, 0) == ESP_OK &&
+                   aux_outputs_cfg_set(4, &c, 0) == ESP_OK,
+               "configure three relays");
+    TEST_CHECK(run_export() == ESP_OK, "export succeeds");
+    char first[600], second[600];
+    (void)aux_bk_slice(first, sizeof(first), s_export_body);
+    TEST_CHECK(strstr(first, "\"relay\":1,\"enabled\":true,\"tc_zone\":2,\"hyst_c\":4.25,\"min_on_s\":10,"
+                             "\"min_off_s\":20") != NULL,
+               "relay 1 exported with its exact values");
+    char *saved = strdup(s_export_body);
+    TEST_CHECK(saved != NULL, "copy the exported document");
+    if (saved != NULL) {
+        aux_bk_fresh(); // a blank board
+        char err[200] = "";
+        TEST_CHECK(test_backup_import_apply(saved, err, sizeof(err)), "the exported document imports back");
+        TEST_CHECK(run_export() == ESP_OK, "re-export succeeds");
+        (void)aux_bk_slice(second, sizeof(second), s_export_body);
+        TEST_CHECK(first[0] != '\0' && strcmp(first, second) == 0, "aux_outputs is byte-identical after the round trip");
+        free(saved);
+    }
+    aux_bk_fresh();
+}
+
 void run_test_backup_import(void)
 {
     test_update_settings_http_post();
@@ -5835,6 +6092,14 @@ void run_test_backup_import(void)
     test_update_repo_absent_is_noop();
     test_update_repo_invalid_refuses_whole_restore();
     test_update_repo_export_round_trip();
+    test_aux_outputs_import_applies_and_persists();
+    test_aux_outputs_absent_is_noop();
+    test_aux_outputs_malformed_refuses_whole_restore();
+    test_aux_outputs_quarantined_store_refuses_import();
+    test_aux_outputs_conflict_with_zone_relay_refused_in_pass_1();
+    test_aux_outputs_zone_and_aux_swap_applies_in_either_direction();
+    test_aux_outputs_dry_run_and_partial_write();
+    test_aux_outputs_export_round_trip();
     test_backup_tuning_float_matches_huge_values();
     test_backup_import_post_refused_by_mode_gate_before_interlock();
     test_backup_import_post_refused_by_interlock_after_mode_gate_passes();

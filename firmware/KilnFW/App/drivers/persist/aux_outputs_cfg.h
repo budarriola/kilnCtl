@@ -107,6 +107,12 @@ bool aux_outputs_cfg_quarantined(void);
  * display_power_cfg_set(); a save failure is returned but the RAM value stands. */
 esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, uint8_t zones_relay_union);
 
+/* Pure field-range check shared with the backup importer (backup_import.c), so a restored
+ * entry is held to exactly the rules aux_outputs_cfg_set() applies: enabled 0/1, reserved 0,
+ * tc_zone_plus1 within MAX31856_CHANNEL_COUNT, hyst_c / min_on_s / min_off_s either 0
+ * ("default") or within their AUX_* bounds. Touches no state. */
+bool aux_outputs_cfg_entry_valid(const aux_output_entry_t *entry);
+
 /* Read-only dual-write status for GET /api/cfgfs (see display_power_cfg.h). */
 void aux_outputs_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
                                           uint32_t *nvs_rev, bool *diverged);

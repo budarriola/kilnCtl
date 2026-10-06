@@ -327,6 +327,18 @@ ZERO new routes:
   unknown key ignored (same precedent as `on_off_rules`). Add
   `aux_out.dat` to the `GET /api/cfgfs` items (`diagnostics_http.c`
   `cfgfs_add_item`, ~line 1641) and to `docs/CONFIG_FILESYSTEM.md`.
+  **Landed 2026-10-06 (backup half of WP-7).** The export emits a top-level `aux_outputs`
+  array (one entry per relay, the live route's field names; omitted when the aux store is
+  quarantined). Import differs from the sketch above in one deliberate way: an absent key is a
+  no-op (omit preserves, as `update_repo` does), not "all disabled", so no format-version bump.
+  Pass 1 validates every entry with the live route's rules plus the store's own
+  `aux_outputs_cfg_entry_valid()` and checks the enabled aux relays against the zone relay
+  masks of the restored configuration, refusing the whole restore (400, nothing written) on a
+  malformed entry, a quarantined store or a conflict. Commit is two phases around the zones
+  commit (entries that disable a relay first, entries that enable one last) so a backup that
+  moves a relay between a zone and an aux output applies in either direction; a failure after
+  anything landed is the usual 500 partial write. Tests: `test_backup_import.c`
+  (`test_aux_outputs_*`).
 - Migration chain: the new store is governed by
   `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` from its first release. v1 has no
   step (nothing older). Add a row to that plan's 0.1 governed-store table and

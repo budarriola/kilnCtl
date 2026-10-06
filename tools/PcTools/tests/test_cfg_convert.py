@@ -282,3 +282,19 @@ def test_absent_top_level_keys_stay_absent():
     out, report = cfg_convert.convert(_load("v4_synthesized.json"), 4)
     assert "timing_profiles" not in out
     assert not any(o.field in ("timing_profiles", "kiln_configs") for o in report.outcomes)
+
+
+def test_aux_outputs_passes_through_every_direction():
+    """The top-level aux_outputs array is carried verbatim in every direction, and its
+    absence stays absent (old firmware ignores the unknown key, new firmware omit-preserves)."""
+    base = json.loads((FIXTURES / "v1_synthesized.json").read_text(encoding="utf-8"))
+    aux = [{"relay": 3, "enabled": True, "tc_zone": 1, "hyst_c": 4.25, "min_on_s": 10, "min_off_s": 20}]
+    doc = dict(base)
+    doc["aux_outputs"] = aux
+    for target in (1, 3, 4, int(doc["version"])):
+        out, _report = cfg_convert.convert(doc, target)
+        assert out["aux_outputs"] == aux, target
+    doc = dict(base)
+    doc.pop("aux_outputs", None)
+    out, _report = cfg_convert.convert(doc, 4)
+    assert "aux_outputs" not in out

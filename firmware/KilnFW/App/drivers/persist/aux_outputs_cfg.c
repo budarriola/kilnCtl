@@ -215,6 +215,11 @@ uint8_t aux_outputs_cfg_conflict_mask(void) { return s_conflict_mask; }
 bool aux_outputs_cfg_conflict(void) { return s_conflict_mask != 0; }
 bool aux_outputs_cfg_quarantined(void) { return s_quarantined; }
 
+bool aux_outputs_cfg_entry_valid(const aux_output_entry_t *entry)
+{
+    return entry != NULL && entry_valid(entry);
+}
+
 esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, uint8_t zones_relay_union)
 {
     if (relay < 1 || relay > AUX_OUTPUTS_COUNT || entry == NULL || !entry_valid(entry)) {

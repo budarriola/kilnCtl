@@ -40,6 +40,7 @@
                                  * docs/audits for the field-by-field enumeration */
 #include "zones_http_internal.h" /* zone_normals_set()/zones_config_get_normal_current()
                                    * -- CT normals, the owner's own named example */
+#include "aux_outputs_cfg.h" /* top-level "aux_outputs" array (spare-relay on/off outputs) */
 #include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up: "kiln_configs"
                               * array below -- every saved kiln config slot, not just
                               * the active one, is now part of the backup document. */
@@ -190,6 +191,44 @@ typedef struct {
     float coupling_dead_row[MAX31856_CHANNEL_COUNT];
     uint8_t settings_source_group[SRC_GROUP_COUNT];
 } backup_export_zone_scratch_t;
+
+/* Top-level "aux_outputs" array: the spare-relay on/off outputs
+ * (docs/SPARE_RELAY_ONOFF_PLAN.md), one entry per relay, in the same shape GET /api/aux_outputs
+ * prints for each of its relays[] (relay 1-based, enabled bool, tc_zone -1 = none, hyst_c,
+ * min_on_s, min_off_s) -- minus "conflicted", which is derived state, not configuration. The
+ * values are the EFFECTIVE ones (defaults substituted), hyst_c at %.9g so a float32 round-trips
+ * exactly (the live route's %.2f would not). A quarantined store (newer-firmware blob) is NOT
+ * exported: its effective view is all-disabled defaults, not the stored data, and a restore must
+ * not stamp those over it -- the key is omitted, which import treats as "preserve". Not part of a
+ * kiln package. No BACKUP_FORMAT_VERSION bump: an absent key is a no-op on import (same optional
+ * key rule as update_repo). Kept out of line so its locals never join the handler's frame. */
+#if defined(_MSC_VER)
+#define BACKUP_EXPORT_NOINLINE
+#else
+#define BACKUP_EXPORT_NOINLINE __attribute__((noinline))
+#endif
+static BACKUP_EXPORT_NOINLINE void backup_export_aux_outputs(backup_stream_t *s)
+{
+    if (aux_outputs_cfg_quarantined()) {
+        return;
+    }
+    backup_stream_printf(s, ",\"aux_outputs\":[");
+    bool first = true;
+    for (uint8_t relay = 1; relay <= AUX_OUTPUTS_COUNT; relay++) {
+        aux_output_t a;
+        if (!aux_outputs_cfg_get(relay, &a)) {
+            continue;
+        }
+        backup_stream_printf(s,
+                             "%s{\"relay\":%u,\"enabled\":%s,\"tc_zone\":%d,\"hyst_c\":%.9g,"
+                             "\"min_on_s\":%u,\"min_off_s\":%u}",
+                             first ? "" : ",", (unsigned)relay, a.enabled ? "true" : "false",
+                             a.tc_zone == AUX_TC_ZONE_NONE ? -1 : (int)a.tc_zone, (double)a.hyst_c,
+                             (unsigned)a.min_on_s, (unsigned)a.min_off_s);
+        first = false;
+    }
+    backup_stream_printf(s, "]");
+}
 
 esp_err_t backup_export_get_handler(httpd_req_t *req)
 {
@@ -758,6 +797,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
         }
         backup_stream_printf(&s, ",\"update_repo\":\"%s\"", repo_escaped);
     }
+    backup_export_aux_outputs(&s);
     backup_stream_printf(&s, "}");
 
     backup_stream_flush(&s);

@@ -74,6 +74,7 @@
                                 * reused here so the Pico's i_normal_a[0..2] restore is never trusted on a
                                 * bare ACK -- see the push immediately after the ceiling guard below. */
 #include "update_settings.h" /* WP9: top-level "update_repo" */
+#include "aux_outputs_cfg.h" /* top-level "aux_outputs" (spare-relay on/off outputs) */
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
                                  * error_band_c/rate_band_c_per_s setters --
@@ -2858,6 +2859,245 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, b
     return true;
 }
 
+/* Top-level "aux_outputs": the spare-relay on/off outputs (docs/SPARE_RELAY_ONOFF_PLAN.md), the
+ * array backup_export_aux_outputs() writes. Absent key = no-op (every older export, and an export
+ * from a quarantined store). Each entry is held to the same rules POST /api/aux_outputs applies:
+ * relay 1..AUX_OUTPUTS_COUNT and enabled (0/1 or true/false) are required, tc_zone -1..zones-1,
+ * hyst_c, min_on_s and min_off_s are optional and keep the relay's current value when omitted, all
+ * within the AUX_* bounds; a relay listed twice, a non-object element or a non-array value is
+ * refused. The finished entry also goes through aux_outputs_cfg_entry_valid(), the store's own
+ * check. Unknown keys (the live route's "conflicted") are ignored.
+ *
+ * Pass 1 (backup_import_aux_outputs_validate) refuses the WHOLE restore before anything is
+ * written: a malformed entry, a quarantined aux store, or an enabled aux relay that a zone
+ * relay_mask of the restored configuration would also claim (one relay, one owner -- the
+ * projected union uses the file's zone masks where it has them and the live ones elsewhere).
+ * Commit is two phases around the zones commit so the conflict invariant holds at every step:
+ * phase 1 (enable_phase=false, before zones) writes the entries that DISABLE a relay -- which can
+ * never conflict, and frees a relay a restored zone is about to claim; phase 2 (enable_phase=true,
+ * after zones) writes the entries that ENABLE one against the zones union as committed. An entry
+ * identical to the live effective value is skipped (no flash write for an identity restore).
+ * NOINLINE for the same stack-budget reason as backup_import_track_ceiling_lower(). */
+typedef struct {
+    bool present;
+    bool has[AUX_OUTPUTS_COUNT];
+    aux_output_entry_t entry[AUX_OUTPUTS_COUNT];
+} backup_aux_import_t;
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_aux_num(const char *obj, const char *key, double min, double max,
+                                                         bool integer, bool *has, double *out, unsigned idx,
+                                                         char *err_msg, size_t err_cap)
+{
+    *has = false;
+    if (!backup_json_obj_find(obj, key)) {
+        return true;
+    }
+    double d = 0.0;
+    if (!backup_json_field_num(obj, key, &d) || d < min || d > max || (integer && (double)(long long)d != d)) {
+        snprintf(err_msg, err_cap, "aux_outputs[%u]: %s is not a valid number in range", idx, key);
+        return false;
+    }
+    *out = d;
+    *has = true;
+    return true;
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_aux_parse(const char *body, backup_aux_import_t *out,
+                                                           char *err_msg, size_t err_cap)
+{
+    memset(out, 0, sizeof(*out));
+    const char *arr = backup_json_obj_find(body, "aux_outputs");
+    if (arr == NULL) {
+        return true;
+    }
+    if (*backup_json_skip_ws(arr) != '[') {
+        snprintf(err_msg, err_cap, "aux_outputs must be an array");
+        return false;
+    }
+    out->present = true;
+    unsigned n = 0;
+    for (const char *e = backup_json_arr_first(arr); e; e = backup_json_arr_next(e), n++) {
+        if (*backup_json_skip_ws(e) != '{') {
+            snprintf(err_msg, err_cap, "aux_outputs[%u] must be an object", n);
+            return false;
+        }
+        double drelay = 0.0;
+        if (!backup_json_field_num(e, "relay", &drelay) || drelay < 1 || drelay > AUX_OUTPUTS_COUNT ||
+            (double)(long long)drelay != drelay) {
+            snprintf(err_msg, err_cap, "aux_outputs[%u]: relay missing or not 1-%u", n, (unsigned)AUX_OUTPUTS_COUNT);
+            return false;
+        }
+        uint8_t relay = (uint8_t)drelay;
+        if (out->has[relay - 1]) {
+            snprintf(err_msg, err_cap, "aux_outputs[%u]: relay %u listed twice", n, (unsigned)relay);
+            return false;
+        }
+        bool enabled = false;
+        double den = 0.0;
+        if (!kiln_cfg_json_field_bool(e, "enabled", &enabled)) {
+            if (!backup_json_field_num(e, "enabled", &den) || (den != 0.0 && den != 1.0)) {
+                snprintf(err_msg, err_cap, "aux_outputs[%u]: enabled missing or not true/false", n);
+                return false;
+            }
+            enabled = den == 1.0;
+        }
+        // Omitted optional fields keep the relay's current effective values, as the live route does.
+        aux_output_t cur;
+        memset(&cur, 0, sizeof(cur));
+        (void)aux_outputs_cfg_get(relay, &cur);
+        aux_output_entry_t ent;
+        memset(&ent, 0, sizeof(ent));
+        ent.enabled = enabled ? 1u : 0u;
+        ent.tc_zone_plus1 = cur.tc_zone == AUX_TC_ZONE_NONE ? 0u : (uint8_t)(cur.tc_zone + 1u);
+        ent.hyst_c = cur.hyst_c;
+        ent.min_on_s = cur.min_on_s;
+        ent.min_off_s = cur.min_off_s;
+        bool has = false;
+        double d = 0.0;
+        if (!backup_import_aux_num(e, "tc_zone", -1, MAX31856_CHANNEL_COUNT - 1, true, &has, &d, n, err_msg, err_cap)) {
+            return false;
+        }
+        if (has) {
+            ent.tc_zone_plus1 = (uint8_t)(d + 1.0);
+        }
+        if (!backup_import_aux_num(e, "hyst_c", AUX_HYST_C_MIN, AUX_HYST_C_MAX, false, &has, &d, n, err_msg, err_cap)) {
+            return false;
+        }
+        if (has) {
+            ent.hyst_c = (float)d;
+        }
+        if (!backup_import_aux_num(e, "min_on_s", AUX_MIN_ON_OFF_S_MIN, AUX_MIN_ON_OFF_S_MAX, true, &has, &d, n,
+                                   err_msg, err_cap)) {
+            return false;
+        }
+        if (has) {
+            ent.min_on_s = (uint16_t)d;
+        }
+        if (!backup_import_aux_num(e, "min_off_s", AUX_MIN_ON_OFF_S_MIN, AUX_MIN_ON_OFF_S_MAX, true, &has, &d, n,
+                                   err_msg, err_cap)) {
+            return false;
+        }
+        if (has) {
+            ent.min_off_s = (uint16_t)d;
+        }
+        if (!aux_outputs_cfg_entry_valid(&ent)) {
+            snprintf(err_msg, err_cap, "aux_outputs[%u]: entry rejected by the aux store's range check", n);
+            return false;
+        }
+        out->has[relay - 1] = true;
+        out->entry[relay - 1] = ent;
+    }
+    return true;
+}
+
+static bool backup_import_aux_entry_matches_live(uint8_t relay, const aux_output_entry_t *ent)
+{
+    aux_output_t cur;
+    memset(&cur, 0, sizeof(cur));
+    if (!aux_outputs_cfg_get(relay, &cur) || cur.conflicted) {
+        return false; // a conflicted relay is persisted enabled but forced off live: always rewrite it
+    }
+    uint8_t want_tc = ent->tc_zone_plus1 == 0 ? (uint8_t)AUX_TC_ZONE_NONE : (uint8_t)(ent->tc_zone_plus1 - 1u);
+    return cur.enabled == (ent->enabled != 0) && cur.tc_zone == want_tc && cur.hyst_c == ent->hyst_c &&
+           cur.min_on_s == ent->min_on_s && cur.min_off_s == ent->min_off_s;
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char *body, kiln_cfg_plan_t *plan,
+                                                                      char *err_msg, size_t err_cap)
+{
+    backup_aux_import_t a;
+    if (!backup_import_aux_parse(body, &a, err_msg, err_cap)) {
+        return false;
+    }
+    if (!a.present) {
+        return true;
+    }
+    if (aux_outputs_cfg_quarantined()) {
+        snprintf(err_msg, err_cap,
+                 "aux_outputs cannot be restored: the aux store holds newer-firmware data and is quarantined");
+        return false;
+    }
+    uint8_t zmask[MAX31856_CHANNEL_COUNT];
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zmask[zi] = 0;
+        (void)zones_config_get_relay_mask(zi, &zmask[zi]);
+    }
+    for (const char *ze = backup_json_arr_first(backup_json_obj_find(body, "zones")); ze;
+         ze = backup_json_arr_next(ze)) {
+        double di = 0.0, dm = 0.0;
+        if (backup_json_field_num(ze, "index", &di) && di >= 0 && di < MAX31856_CHANNEL_COUNT &&
+            backup_json_field_num(ze, "relay_mask", &dm) && dm >= 0 && dm <= 255) {
+            zmask[(unsigned)di] = (uint8_t)dm;
+        }
+    }
+    uint8_t zones_union = 0;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zones_union |= zmask[zi];
+    }
+    uint8_t result_enabled = aux_outputs_cfg_enabled_mask();
+    unsigned changed = 0, same = 0;
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        if (!a.has[i]) {
+            continue;
+        }
+        uint8_t bit = (uint8_t)(1u << i);
+        result_enabled = a.entry[i].enabled ? (uint8_t)(result_enabled | bit) : (uint8_t)(result_enabled & ~bit);
+        if (backup_import_aux_entry_matches_live((uint8_t)(i + 1u), &a.entry[i])) {
+            same++;
+        } else {
+            changed++;
+        }
+    }
+    uint8_t conflict = (uint8_t)(result_enabled & zones_union);
+    if (conflict != 0) {
+        snprintf(err_msg, err_cap,
+                 "aux_outputs: relay mask 0x%02X would be both an enabled aux output and claimed by a zone "
+                 "relay_mask in the restored configuration",
+                 (unsigned)conflict);
+        return false;
+    }
+    if (plan != NULL) {
+        kiln_cfg_plan_add(plan, "aux_outputs: %u relay(s) change, %u unchanged", changed, same);
+    }
+    return true;
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote,
+                                                                    char *err_msg, size_t err_cap)
+{
+    backup_aux_import_t a;
+    if (!backup_import_aux_parse(body, &a, err_msg, err_cap)) {
+        return false;
+    }
+    if (!a.present) {
+        return true;
+    }
+    uint8_t zones_union = 0;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        uint8_t zmask = 0;
+        if (zones_config_get_relay_mask(zi, &zmask)) {
+            zones_union |= zmask;
+        }
+    }
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        if (!a.has[i] || (a.entry[i].enabled != 0) != enable_phase ||
+            backup_import_aux_entry_matches_live((uint8_t)(i + 1u), &a.entry[i])) {
+            continue;
+        }
+        esp_err_t err = aux_outputs_cfg_set((uint8_t)(i + 1u), &a.entry[i], zones_union);
+        if (err != ESP_ERR_INVALID_ARG && err != ESP_ERR_INVALID_STATE) {
+            *wrote = true; // applied in RAM first even when the save then failed
+        }
+        if (err != ESP_OK) {
+            snprintf(err_msg, err_cap,
+                     "aux_outputs relay %u could not be applied (%s) -- earlier parts of the restore already landed",
+                     (unsigned)(i + 1u), esp_err_to_name(err));
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
  * this file's header comment above profile_candidate_t) and hands them to
  * backup_import_apply_locked(), which is otherwise byte-for-byte the
@@ -2898,6 +3138,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!backup_import_update_repo(body, false, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed update_repo refuses the WHOLE restore, nothing written
     }
+    if (!backup_import_aux_outputs_validate(body, plan, err_msg, err_cap)) {
+        return false; // pass 1: malformed/conflicting aux_outputs refuses the WHOLE restore, nothing written
+    }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched
     }
@@ -2917,6 +3160,13 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!backup_import_kiln_configs(body, mode, true, ack_delete_count, ack_no_safety_processor, plan,
                                     &kiln_configs_wrote, err_msg, err_cap)) {
         *partial_write_out = kiln_configs_wrote;
+        return false;
+    }
+    // aux_outputs phase 1 (the entries that DISABLE a relay) lands before zones; phase 2 follows
+    // update_repo below. See the block comment above backup_import_aux_num().
+    bool aux_wrote = false;
+    if (!backup_import_aux_outputs_commit(body, false, &aux_wrote, err_msg, err_cap)) {
+        *partial_write_out = kiln_configs_wrote || aux_wrote;
         return false;
     }
 
@@ -2996,6 +3246,10 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     free(candidates);
     if (ok && !backup_import_update_repo(body, true, NULL, err_msg, err_cap)) {
         ok = false; // profiles/zones already landed: reported as a partial write below
+    }
+    // aux_outputs phase 2 (the entries that ENABLE a relay) against the zones union as committed.
+    if (ok && !backup_import_aux_outputs_commit(body, true, &aux_wrote, err_msg, err_cap)) {
+        ok = false;
     }
     if (!ok) {
         // kiln_configs[] already committed above -- this restore is a
