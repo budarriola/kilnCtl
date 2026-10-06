@@ -507,9 +507,15 @@ static void convert_profile_v2(const profile_persisted_v2_t *src, profile_t *out
  * check it at load time. */
 static uint32_t compute_profile_crc(const profile_persisted_t *p)
 {
-    profile_persisted_t tmp = *p;
-    tmp.crc32 = 0;
-    return esp_crc32_le(0, (const uint8_t *)&tmp, sizeof(tmp));
+    /* Chained over the bytes before crc32, four zero bytes, and the bytes after: the same value as
+     * zeroing a copy, without a ~460 B copy on the stack (the executor and httpd budgets both walk
+     * through here). */
+    static const uint8_t zero4[sizeof(p->crc32)] = {0};
+    const uint8_t *base = (const uint8_t *)p;
+    const size_t off = offsetof(profile_persisted_t, crc32);
+    uint32_t crc = esp_crc32_le(0, base, off);
+    crc = esp_crc32_le(crc, zero4, sizeof(zero4));
+    return esp_crc32_le(crc, base + off + sizeof(p->crc32), sizeof(*p) - off - sizeof(p->crc32));
 }
 
 /* profile_encode_current_blob() -- see profiles_http_internal.h. The one
