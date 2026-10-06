@@ -30,6 +30,7 @@
 #include "http_auth_http.h" /* kiln_http_register() */
 #include "ota_http.h"
 #include "ota_http_internal.h" /* ota_http_get_client_ip() */
+#include "relay_authority.h" /* relay_authority_heat_run_active() */
 #include "stack_margin.h"
 #include "time_sync.h"
 #include "uart_task_ids.h"
@@ -178,6 +179,17 @@ struct work {
 static uint32_t free_internal(void)
 {
     return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+// The start-time mode gate and the heat-side fetch_busy refusal read each other's state without a
+// shared lock, so a firing or autotune start that interleaves with a check/download start can let
+// both through. Re-check from the job itself and give up, so the loser of that race is the fetch.
+static bool heat_run_active(void)
+{
+    bool profile = false;
+    bool autotune = false;
+    relay_authority_heat_run_active(&profile, &autotune);
+    return profile || autotune;
 }
 
 // SNTP has landed at least once this boot. Without a wall clock the certificate validity dates
@@ -380,6 +392,9 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         if (deadline_passed(w)) {
             return "timeout";
         }
+        if (heat_run_active()) {
+            return "heat_run_active";
+        }
         // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so
         // gating on the mid-body abort floor alone could dip under the owner's 8192 B internal
         // floor. Gate each esp_http_client_init on the full start threshold instead.
@@ -466,6 +481,10 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     }
                     fail = sink->data(w, w->chunk, (size_t)n);
                     if ((++chunks & 7u) == 0) {
+                        if (fail == NULL && heat_run_active()) {
+                            fail = "heat_run_active";
+                            break;
+                        }
                         vTaskDelay(1);
                     }
                 } else if (n == 0) {
