@@ -1053,9 +1053,17 @@ def control_set_zone_type(
 #: omit-PRESERVES-current -- verified per key against that file: z%u_k/
 #: z%u_tau/z%u_deadtime (`http_form_find_field(...) > 0` else current_z),
 #: z%u_coupling_diag_k_dc and z%u_coupling_c%u
-#: (`zones_config_json_field_present()` else current_z). Nothing else is
-#: stripped: a required field left out of the body would 400 or zero.
-_ZONE_OMIT_PRESERVED_KEY_RE = re.compile(r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+)$")
+#: (`zones_config_json_field_present()` else current_z). 2026-10-06 review
+#: of control_set_relay_type(): six more float fields use that same
+#: field_present-else-current_z branch and were being re-posted at GET's
+#: %.2f/%.3f/%.4f print -- z%u_fuzzy_strength, z%u_easeoffmult,
+#: z%u_approachratecap, z%u_errorband, z%u_rateband, z%u_progressband
+#: (zones_http_post_parse.c) -- so they are stripped too and stay bit-exact.
+#: Nothing else is stripped: a required field left out of the body would 400
+#: or zero.
+_ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
+    r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+|fuzzy_strength|easeoffmult"
+    r"|approachratecap|errorband|rateband|progressband)$")
 
 
 def _strip_omit_preserved_zone_fields(body: str, keep_key: "Optional[str]") -> str:
