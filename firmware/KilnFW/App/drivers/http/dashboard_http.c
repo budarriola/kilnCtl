@@ -8,6 +8,7 @@
 #include <strings.h> /* strcasecmp -- unit_pref_post_handler's "fahrenheit"/"celsius" match */
 
 #include "esp_flash.h" /* esp_flash_get_size() -- flash_size below, same call as ui_page_diagnostics.c */
+#include "dram_watch.h" /* dram_watch_get() -- heap_internal_largest_low below */
 #include "esp_heap_caps.h"
 #include "esp_image_format.h" /* esp_image_get_metadata() -- flash_used below, address/size now sourced from hal_sysinfo */
 #include "esp_log.h"
@@ -529,6 +530,8 @@ void dashboard_get_status(dashboard_status_t *out)
     out->heap_internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     out->heap_internal_largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     out->heap_internal_min_free = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    out->heap_internal_largest_low_known = dram_watch_get(&out->heap_internal_largest_low,
+                                                          &out->heap_internal_largest_low_at_s);
     out->heap_internal_total = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
     /* MALLOC_CAP_SPIRAM reads back as a real 0 (not an error) on a board
      * built without PSRAM enabled -- see dashboard_http.h's field comment

@@ -941,6 +941,14 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     APPEND(",\"heap_internal\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds->heap_internal_free, (unsigned long)ds->heap_internal_largest_free_block,
            (unsigned long)ds->heap_internal_min_free, (unsigned long)ds->heap_internal_total);
+    /* SK-04: sampled largest-free-block low-water mark (dram_watch.h), a
+     * sibling of heap_internal; null until the first sample exists. */
+    if (ds->heap_internal_largest_low_known) {
+        APPEND(",\"heap_internal_largest_low\":{\"bytes\":%lu,\"at_uptime_s\":%lu}",
+               (unsigned long)ds->heap_internal_largest_low, (unsigned long)ds->heap_internal_largest_low_at_s);
+    } else {
+        APPEND(",\"heap_internal_largest_low\":null");
+    }
     APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
            (unsigned long)ds->heap_spiram_free, (unsigned long)ds->heap_spiram_largest_free_block,
            (unsigned long)ds->heap_spiram_min_free, (unsigned long)ds->heap_spiram_total);

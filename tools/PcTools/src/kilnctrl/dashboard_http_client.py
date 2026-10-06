@@ -95,7 +95,7 @@ def get_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
 #: the read path every other diagnostic in this tree already calls; rather
 #: than add a new tool nobody would think to call, these two keys are always
 #: carried through from here on -- loud, not buried behind a separate GET.
-_CARRY_THROUGH_KEYS = ("reset_reason", "uptime_s")
+_CARRY_THROUGH_KEYS = ("reset_reason", "uptime_s", "heap_internal_largest_low")
 
 #: reset_reason values that mean "the board did not shut down cleanly" --
 #: mirrors pid_validation.PANIC_RESET_REASONS's intent (that module compares

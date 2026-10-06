@@ -966,6 +966,8 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
     STATUS_APPEND(",\"heap_internal\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
                   (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu,
                   (unsigned long)0xFFFFFFFFu);
+    STATUS_APPEND(",\"heap_internal_largest_low\":{\"bytes\":%lu,\"at_uptime_s\":%lu}",
+                  (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu);
     STATUS_APPEND(",\"heap_spiram\":{\"free\":%lu,\"largest_free_block\":%lu,\"min_free\":%lu,\"total\":%lu}",
                   (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu, (unsigned long)0xFFFFFFFFu,
                   (unsigned long)0xFFFFFFFFu);

@@ -239,6 +239,14 @@ def get_heap_status(host: Optional[str] = None) -> str:
             f"{key}: free={h['free']} B, largest_free_block={h['largest_free_block']} B, "
             f"min_free={h['min_free']} B (low-water since boot), total={h['total']} B"
         )
+    low = heap.get("heap_internal_largest_low")
+    if isinstance(low, dict):
+        lines.append(
+            f"heap_internal largest_free_block low-water: {low.get('bytes')} B first seen at "
+            f"uptime_s={low.get('at_uptime_s')} (SK-04 alarm 8704 B)"
+        )
+    else:
+        lines.append("heap_internal largest_free_block low-water: not reported (older firmware or not sampled yet)")
     timing_err = heap.get("diagnostics_timing_check_error")
     if timing_err:
         lines.append(f"(could not check /api/diagnostics/timing: {timing_err})")

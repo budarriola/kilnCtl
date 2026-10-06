@@ -194,6 +194,32 @@ class UnacknowledgedCrashSurfacingTest(unittest.TestCase):
         self.assertIn("reset_reason='power-on'", result)
 
 
+class LargestLowTest(unittest.TestCase):
+    def test_largest_low_carried_and_printed(self):
+        low = {"bytes": 8192, "at_uptime_s": 57000}
+        responses = {
+            "/api/status": json.dumps(_sample_status(heap_internal_largest_low=low)).encode(),
+            "/api/crash_report": _CRASH_NONE_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            heap = dh.get_heap_status("10.0.0.5")
+        self.assertEqual(heap["heap_internal_largest_low"], low)
+        from kilnctrl import mcp_server as m
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            result = m.get_heap_status(host="10.0.0.5")
+        self.assertIn("low-water: 8192 B first seen at uptime_s=57000", result)
+
+    def test_largest_low_absent_is_reported(self):
+        responses = {
+            "/api/status": json.dumps(_sample_status()).encode(),
+            "/api/crash_report": _CRASH_NONE_BODY,
+        }
+        from kilnctrl import mcp_server as m
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            result = m.get_heap_status(host="10.0.0.5")
+        self.assertIn("low-water: not reported", result)
+
+
 class McpToolTest(unittest.TestCase):
     """get_heap_status() as wired into mcp_server_info.py -- the string
     formatting a caller actually sees, and the host-resolution/error path."""

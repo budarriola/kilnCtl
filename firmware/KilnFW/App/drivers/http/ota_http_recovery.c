@@ -45,6 +45,7 @@
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
 #include "stack_margin.h"
+#include "dram_watch.h"
 #include "web_encoding.h"
 #include "sim_backend.h"
 #include "wifi_prov.h"
@@ -164,8 +165,10 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
      * recovery-mode escape hatch panics the board instead of rebooting it.
      * (Same trap that produced a real crash in profile_executor.c earlier
      * the same day; see its task-creation comment.) */
-    if (xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
-                    tskIDLE_PRIORITY + 1, &s_recovery_exit_reboot_task) != pdPASS) {
+    dram_watch_log_task("recovery_exit", "before-create");
+    if (dram_watch_task_after("recovery_exit",
+                              xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
+                                          tskIDLE_PRIORITY + 1, &s_recovery_exit_reboot_task)) != pdPASS) {
         ESP_LOGE(OTA_HTTP_TAG, "recovery-mode exit: failed to start the reboot task -- board will NOT "
                       "reboot; power-cycle it, the counter is already cleared");
     }
@@ -336,8 +339,10 @@ esp_err_t ota_recovery_boot_post_handler(httpd_req_t *req)
 
     // Create the task BEFORE sending the response so a failure can still be
     // reported honestly and the boot target reverted.
-    if (xTaskCreate(ota_recovery_boot_reboot_task, "recovery_boot", 3072, NULL, tskIDLE_PRIORITY + 1,
-                    &s_recovery_boot_reboot_task) != pdPASS) {
+    dram_watch_log_task("recovery_boot", "before-create");
+    if (dram_watch_task_after("recovery_boot",
+                              xTaskCreate(ota_recovery_boot_reboot_task, "recovery_boot", 3072, NULL,
+                                          tskIDLE_PRIORITY + 1, &s_recovery_boot_reboot_task)) != pdPASS) {
         ESP_LOGE(OTA_HTTP_TAG, "recovery_boot from %s: failed to start the reboot task -- restoring the "
                       "boot target to the running image", ip);
         if (!recovery_switch_restore_running()) {

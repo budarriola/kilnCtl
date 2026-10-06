@@ -39,6 +39,7 @@
 #include <math.h>
 
 #include "autotune_engine.h"
+#include "dram_watch.h"
 #include "boot_guard.h"
 #include "kilnlink/kilnlink_rollback_result.h" /* KILNLINK_ROLLBACK_RESULT_REASON_* -- ota_pico_rollback_post_handler()'s response mapping */
 #include "kiln_io.h"
@@ -814,8 +815,10 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // out from under this claim entirely. A fresh boot starts with
     // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
     // is nothing left to release.
-    if (xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 3072, NULL,
-                     tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task) != pdPASS) {
+    dram_watch_log_task("ota_rollback_reboot", "before-create");
+    if (dram_watch_task_after("ota_rollback_reboot",
+                              xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 3072, NULL,
+                                          tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task)) != pdPASS) {
         ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
                       "board will NOT reboot, still running the current image", ip);
         ota_http_update_end();

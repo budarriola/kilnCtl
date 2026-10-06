@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 
 #include "safety_cfg_writer_guard.h"
+#include "dram_watch.h"
 #include "stack_margin.h"
 
 static const char *TAG = "http_async_job";
@@ -116,8 +117,10 @@ http_async_job_start_result_t http_async_job_try_start(httpd_req_t *req, const c
     // HTTPD_DEFAULT_CONFIG()) -- it is doing httpd_worker's own deferred
     // work, so nothing lower-priority should preempt it (2026-09-25
     // fix-then-push review; was tskIDLE_PRIORITY+1).
-    if (xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx, tskIDLE_PRIORITY + 5,
-                     &s_task_handle) != pdPASS) {
+    dram_watch_log_task(task_name ? task_name : "http_async_job", "before-create");
+    if (dram_watch_task_after(task_name ? task_name : "http_async_job",
+                              xTaskCreate(http_async_job_task, task_name, stack_bytes, &s_run_ctx,
+                                          tskIDLE_PRIORITY + 5, &s_task_handle)) != pdPASS) {
         ESP_LOGE(TAG, "%s: failed to create the job task", task_name ? task_name : "?");
         // A4 review follow-up C (2026-09-28): httpd_req_async_handler_begin()
         // already succeeded above, so req's body (if any) has never been

@@ -61,6 +61,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "dram_watch.h"
 #include "esp_log.h"
 #include "hal_time.h" // hal_time_now_us() -- ota_record_t's uptime_s, same source ota_http.c uses
 
@@ -754,8 +755,10 @@ bool ota_pico_relay_start(SafetyLinkClass *link, uint32_t image_length, uint32_t
     s_last_error[0] = '\0';
     taskEXIT_CRITICAL(&s_status_mux);
 
-    if (xTaskCreate(relay_task_fn, "ota_pico_relay", OTA_PICO_RELAY_TASK_STACK, NULL,
-                     OTA_PICO_RELAY_TASK_PRIORITY, &s_relay_task) != pdPASS) {
+    dram_watch_log_task("ota_pico_relay", "before-create");
+    if (dram_watch_task_after("ota_pico_relay",
+                              xTaskCreate(relay_task_fn, "ota_pico_relay", OTA_PICO_RELAY_TASK_STACK, NULL,
+                                          OTA_PICO_RELAY_TASK_PRIORITY, &s_relay_task)) != pdPASS) {
         ESP_LOGE(TAG, "failed to create ota_pico_relay task");
         taskENTER_CRITICAL(&s_status_mux);
         s_relay_running = false;

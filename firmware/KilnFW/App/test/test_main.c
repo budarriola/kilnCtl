@@ -103,6 +103,7 @@ void run_test_st7796_panel(void);
 void run_test_panel_detect(void);
 void run_test_owner_slot_pool(void);
 void run_test_dram_margin(void);
+void run_test_dram_watch(void);
 void run_test_httpd_socket_budget(void);
 void run_test_stack_margin(void);
 void run_test_stack_margin_registry(void);
@@ -232,6 +233,7 @@ int main(void)
     run_test_panel_detect();
     run_test_owner_slot_pool();
     run_test_dram_margin();
+    run_test_dram_watch();
     run_test_httpd_socket_budget();
     run_test_stack_margin();
     run_test_stack_margin_registry();

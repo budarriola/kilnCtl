@@ -32,6 +32,7 @@
 #include "ota_http_internal.h" /* ota_http_get_client_ip() */
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
 #include "stack_margin.h"
+#include "dram_watch.h"
 #include "time_sync.h"
 #include "uart_task_ids.h"
 #include "update_http_internal.h"
@@ -316,8 +317,10 @@ static bool wr_start(void)
     if (s_c->wr_req == NULL || s_c->wr_done == NULL) {
         goto fail;
     }
-    if (xTaskCreatePinnedToCore(wr_task, "update_fetch_wr", FETCH_WR_STACK_BYTES, NULL, FETCH_TASK_PRIO,
-                                &s_c->wr_task, FETCH_TASK_CORE) != pdPASS) {
+    dram_watch_log_task("update_fetch_wr", "before-create");
+    if (dram_watch_task_after("update_fetch_wr",
+                              xTaskCreatePinnedToCore(wr_task, "update_fetch_wr", FETCH_WR_STACK_BYTES, NULL,
+                                                      FETCH_TASK_PRIO, &s_c->wr_task, FETCH_TASK_CORE)) != pdPASS) {
         s_c->wr_task = NULL;
         goto fail;
     }

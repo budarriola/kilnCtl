@@ -14,6 +14,7 @@
  * main_bridges_bringup() last. */
 
 #include "esp_err.h"
+#include "dram_watch.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -240,5 +241,6 @@ void main_bridges_bringup(main_boot_ctx_t *ctx)
                               "no link watchdog, so relays cannot be guaranteed to drop");
     }
 
+    dram_watch_start(); /* SK-04: largest-free-block low-water mark, sampled by an esp_timer (dram_watch.h) */
     main_heap_stage("app_main_done");
 }

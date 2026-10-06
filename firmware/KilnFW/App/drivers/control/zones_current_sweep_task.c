@@ -25,6 +25,7 @@
 #include "ct_verify_store.h"
 #include "readiness_http.h" /* readiness_ct_attribution_fact_t -- pure inline header */
 #include "stack_margin.h"
+#include "dram_watch.h"
 
 /* opus review finding (LOW): zone_sweep_task_record_ct_channels()'s summed-
  * topology unmeasured path packs zone index zi into a uint8_t bitmask
@@ -2456,7 +2457,9 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
     s_sweep.i_normal_reason[0] = '\0';
     s_sweep.summed_unmeasured_mask = 0;
 
-    BaseType_t created = xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task);
+    dram_watch_log_task("zone_sweep", "before-create");
+    BaseType_t created = dram_watch_task_after(
+        "zone_sweep", xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task));
     /* Registered unconditionally, success or not, same as recovery_exit/
      * ota_pico_rollback/ota_rollback_reboot (ota_http_*.c) -- stack_margin_
      * register() reads *task_handle_slot fresh at report time, so a creation

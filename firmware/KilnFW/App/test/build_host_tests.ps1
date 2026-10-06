@@ -160,6 +160,7 @@ try {
         (Join-Path $testDir "test_panel_detect.c"),
         (Join-Path $testDir "test_owner_slot_pool.c"),
         (Join-Path $testDir "test_dram_margin.c"),
+        (Join-Path $testDir "test_dram_watch.c"),
         (Join-Path $testDir "test_httpd_socket_budget.c"),
         (Join-Path $testDir "test_stack_margin.c"),
         (Join-Path $testDir "test_stack_margin_registry.c"),

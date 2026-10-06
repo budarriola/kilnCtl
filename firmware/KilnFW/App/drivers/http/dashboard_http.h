@@ -453,6 +453,12 @@ typedef struct {
     size_t   heap_internal_free;
     size_t   heap_internal_largest_free_block;
     size_t   heap_internal_min_free;
+    /* SK-04: lowest internal largest-free-block seen since the dram_watch
+     * sampler started (dram_watch.h), and the uptime second it was first
+     * seen. _known false until the first sample exists. */
+    bool     heap_internal_largest_low_known;
+    size_t   heap_internal_largest_low;
+    uint32_t heap_internal_largest_low_at_s;
     size_t   heap_internal_total;
     size_t   heap_spiram_free;
     size_t   heap_spiram_largest_free_block;

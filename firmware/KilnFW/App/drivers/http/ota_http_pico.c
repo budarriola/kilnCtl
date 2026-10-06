@@ -48,6 +48,7 @@
 #include "profile_executor.h" /* PROFILE_EXEC_* enum only, not its live state -- see below */
 #include "run_state.h"
 #include "stack_margin.h"
+#include "dram_watch.h"
 #include "web_encoding.h"
 #include "sim_backend.h"
 #include "wifi_prov.h"
@@ -586,8 +587,10 @@ esp_err_t ota_pico_rollback_post_handler(httpd_req_t *req)
         xSemaphoreGive(ota_http_pico_rollback_async_lock);
     }
 
-    if (xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL, tskIDLE_PRIORITY + 1,
-                     &s_ota_pico_rollback_task) !=
+    dram_watch_log_task("ota_pico_rollback", "before-create");
+    if (dram_watch_task_after("ota_pico_rollback",
+                              xTaskCreate(ota_pico_rollback_task, "ota_pico_rollback", 4096, NULL,
+                                          tskIDLE_PRIORITY + 1, &s_ota_pico_rollback_task)) !=
         pdPASS) {
         ESP_LOGE(OTA_HTTP_TAG, "OTA pico rollback from %s: failed to start the rollback task -- "
                       "the update claim was never released, this OTA layer is now wedged", ip);

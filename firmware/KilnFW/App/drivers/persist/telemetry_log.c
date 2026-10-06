@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 
 #include "autotune_engine.h"
+#include "dram_watch.h" /* dram_watch_service() -- SK-04 log lines, run here, not in the esp_timer callback */
 #include "event_log.h"
 #include "profile_executor.h"
 #include "stack_margin.h"
@@ -162,6 +163,13 @@ static void telemetry_log_task(void *arg)
 
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TELEMETRY_LOG_TICK_MS));
+
+        /* SK-04 (dram_watch.h): the 2 s esp_timer sampler only records; its
+         * "new low" line and the once-per-boot alarm heap dump are logged
+         * here, on this task's 6144 B stack, instead of on the shared
+         * esp_timer task. No flash access, so the PSRAM-stack note in
+         * telemetry_log_start() still holds. */
+        dram_watch_service();
 
         /* The live debug-UART feed (ESP_LOGI below) stays exactly as it
          * was: default-OFF, opt-in via telemetry_log_set_enabled(), the
