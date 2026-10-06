@@ -3010,6 +3010,11 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char
         return false;
     }
     if (!a.present) {
+        uint8_t live = aux_outputs_cfg_enabled_mask();
+        if (plan != NULL && live != 0) {
+            kiln_cfg_plan_add(plan, "aux_outputs not in this backup: enabled aux relay mask 0x%02X is kept",
+                              (unsigned)live);
+        }
         return true;
     }
     if (aux_outputs_cfg_quarantined()) {
@@ -3062,16 +3067,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char
     return true;
 }
 
-static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote,
-                                                                    char *err_msg, size_t err_cap)
+static uint8_t backup_import_aux_zones_union_live(void)
 {
-    backup_aux_import_t a;
-    if (!backup_import_aux_parse(body, &a, err_msg, err_cap)) {
-        return false;
-    }
-    if (!a.present) {
-        return true;
-    }
     uint8_t zones_union = 0;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         uint8_t zmask = 0;
@@ -3079,14 +3076,55 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_commit(const char *
             zones_union |= zmask;
         }
     }
+    return zones_union;
+}
+
+/* Undo record for phase 1 (ported from the competing WP-7 candidate, 3ba51c23): the pre-restore
+ * entry of every relay phase 1 rewrote, so a restore whose profiles/zones step then fails can put
+ * those relays back. static, not a local: one import runs at a time (http_async_job is
+ * single-flight) and this keeps the record off http_async_job's budgeted stack. */
+static struct {
+    aux_output_entry_t entry[AUX_OUTPUTS_COUNT];
+    uint8_t written; /* bit i = relay i+1 was rewritten by phase 1 */
+} s_aux_undo;
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote,
+                                                                    char *err_msg, size_t err_cap)
+{
+    if (!enable_phase) {
+        s_aux_undo.written = 0;
+    }
+    backup_aux_import_t a;
+    if (!backup_import_aux_parse(body, &a, err_msg, err_cap)) {
+        return false;
+    }
+    if (!a.present) {
+        return true;
+    }
+    uint8_t zones_union = backup_import_aux_zones_union_live();
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         if (!a.has[i] || (a.entry[i].enabled != 0) != enable_phase ||
             backup_import_aux_entry_matches_live((uint8_t)(i + 1u), &a.entry[i])) {
             continue;
         }
+        if (!enable_phase) {
+            aux_output_t cur;
+            memset(&cur, 0, sizeof(cur));
+            (void)aux_outputs_cfg_get((uint8_t)(i + 1u), &cur);
+            aux_output_entry_t *u = &s_aux_undo.entry[i];
+            memset(u, 0, sizeof(*u));
+            u->enabled = (cur.enabled || cur.conflicted) ? 1u : 0u; // conflicted = persisted enabled
+            u->tc_zone_plus1 = cur.tc_zone == AUX_TC_ZONE_NONE ? 0u : (uint8_t)(cur.tc_zone + 1u);
+            u->hyst_c = cur.hyst_c;
+            u->min_on_s = cur.min_on_s;
+            u->min_off_s = cur.min_off_s;
+        }
         esp_err_t err = aux_outputs_cfg_set((uint8_t)(i + 1u), &a.entry[i], zones_union);
         if (err != ESP_ERR_INVALID_ARG && err != ESP_ERR_INVALID_STATE) {
             *wrote = true; // applied in RAM first even when the save then failed
+            if (!enable_phase) {
+                s_aux_undo.written = (uint8_t)(s_aux_undo.written | (1u << i));
+            }
         }
         if (err != ESP_OK) {
             snprintf(err_msg, err_cap,
@@ -3096,6 +3134,29 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_commit(const char *
         }
     }
     return true;
+}
+
+/* Best-effort undo of phase 1 after the profiles/zones step failed (zones rolled back, or never
+ * reached). Each relay goes back through aux_outputs_cfg_set() against the LIVE zones union, so the
+ * one-owner-per-relay invariant still holds: a relay a half-applied zone now claims is refused and
+ * logged, never forced. The restore is reported as a partial write either way. */
+static BACKUP_IMPORT_NOINLINE void backup_import_aux_outputs_revert_phase1(void)
+{
+    if (s_aux_undo.written == 0) {
+        return;
+    }
+    uint8_t zones_union = backup_import_aux_zones_union_live();
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        if ((s_aux_undo.written & (1u << i)) == 0) {
+            continue;
+        }
+        esp_err_t err = aux_outputs_cfg_set((uint8_t)(i + 1u), &s_aux_undo.entry[i], zones_union);
+        if (err != ESP_OK) {
+            ESP_LOGE(BACKUP_TAG, "backup import: could not revert aux relay %u after a failed restore (%s)",
+                     (unsigned)(i + 1u), esp_err_to_name(err));
+        }
+    }
+    s_aux_undo.written = 0;
 }
 
 /* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
@@ -3166,6 +3227,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     // update_repo below. See the block comment above backup_import_aux_num().
     bool aux_wrote = false;
     if (!backup_import_aux_outputs_commit(body, false, &aux_wrote, err_msg, err_cap)) {
+        backup_import_aux_outputs_revert_phase1();
         *partial_write_out = kiln_configs_wrote || aux_wrote;
         return false;
     }
@@ -3187,6 +3249,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
                               "(%u B) -- refusing rather than falling back to internal DRAM",
                               (unsigned)PROFILES_MAX_COUNT, (unsigned)(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT));
         snprintf(err_msg, err_cap, "out of memory (profile candidates) -- kiln configs were already restored");
+        backup_import_aux_outputs_revert_phase1();
         *partial_write_out = true;
         return false;
     }
@@ -3198,6 +3261,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!zone_candidates) {
         free(candidates);
         snprintf(err_msg, err_cap, "out of memory (zone candidates) -- kiln configs were already restored");
+        backup_import_aux_outputs_revert_phase1();
         *partial_write_out = true;
         return false;
     }
@@ -3212,6 +3276,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         free(zone_candidates);
         free(candidates);
         snprintf(err_msg, err_cap, "out of memory (timing profile candidates) -- kiln configs were already restored");
+        backup_import_aux_outputs_revert_phase1();
         *partial_write_out = true;
         return false;
     }
@@ -3240,6 +3305,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
      * same as the POST handler: a failure is logged, never this request's
      * own failure. */
     backup_import_track_ceiling_lower();
+    if (!ok) {
+        backup_import_aux_outputs_revert_phase1(); // profiles/zones failed: put the phase-1 aux disables back
+    }
 
     free(timing_profile_candidates);
     free(zone_candidates);

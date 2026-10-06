@@ -1,6 +1,6 @@
 # Spare-relay on/off ("aux outputs") -- plan
 
-Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) and WP-6 landed; WP-7 (MCP half landed in `d6559fac`), WP-8 docs half landed 2026-10-06 (bench session pending) and the ON_OFF-zone-to-aux convert are in progress. WP-5 still owes a browser/bench check. Pending work only.
+Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) and WP-6 landed; WP-7 (MCP half `d6559fac`, backup half 2026-10-06) landed; WP-8 docs half landed 2026-10-06 (bench session pending); the ON_OFF-zone-to-aux convert is in progress. WP-5 still owes a browser/bench check. Pending work only.
 
 Owner requirement 2026-10-04 (overturns D1 of
 `docs/audits/on_off_zone_decisions_2026-09-14.md`): "we have 4 relays, the 4th
@@ -331,13 +331,20 @@ ZERO new routes:
   array (one entry per relay, the live route's field names; omitted when the aux store is
   quarantined). Import differs from the sketch above in one deliberate way: an absent key is a
   no-op (omit preserves, as `update_repo` does), not "all disabled", so no format-version bump.
+  Why (overrides the sketch, whose logic is wrong here): a missing key in an optional, additive,
+  unversioned field means "not described", not "off" -- reading it as off would silently disable
+  aux outputs configured since the backup and contradict the export's own omission of the key for
+  a quarantined store; an old backup whose zones claim an enabled aux relay is refused loudly in
+  pass 1 instead, and the dry-run plan names the aux relays it keeps.
   Pass 1 validates every entry with the live route's rules plus the store's own
   `aux_outputs_cfg_entry_valid()` and checks the enabled aux relays against the zone relay
   masks of the restored configuration, refusing the whole restore (400, nothing written) on a
   malformed entry, a quarantined store or a conflict. Commit is two phases around the zones
   commit (entries that disable a relay first, entries that enable one last) so a backup that
   moves a relay between a zone and an aux output applies in either direction; a failure after
-  anything landed is the usual 500 partial write. Tests: `test_backup_import.c`
+  anything landed is the usual 500 partial write, after a best-effort revert of the disables
+  already written (re-checked against the live zone masks, so the revert never creates a
+  zone/aux double owner). Tests: `test_backup_import.c`
   (`test_aux_outputs_*`).
 - Migration chain: the new store is governed by
   `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` from its first release. v1 has no

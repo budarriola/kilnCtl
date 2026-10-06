@@ -689,8 +689,5 @@ Pending:
   D2 already expires the pre-v26 tail, so port only on a concrete need.
 - **`kiln_configs[]` entries.** Each embeds a `kilnctl_kiln_package`; not
   converted inside a backup document (convert each package separately).
-- **`aux_outputs` (spare-relay) store** is not in the backup export at all
-  (`backup_export.c` never emits it), so no converter can carry it; a firmware
-  export/import change is needed first.
 - **Cfg LittleFS files** (`/api/cfgfs`) duplicate the NVS stores and are not
   separate converter inputs.

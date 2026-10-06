@@ -176,9 +176,6 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     # transplanting), so these are listed here purely so the mirror-drift
     # check can confirm this module has not simply never heard of them.
     "kiln_configs", "is_active", "package", "omitted",
-    # Top-level aux_outputs[] (spare-relay on/off outputs, 2026-10-06) and its per-entry
-    # field names (hyst_c/min_on_s/min_off_s are listed above). Passed through verbatim.
-    "aux_outputs", "relay", "enabled", "tc_zone",
 })
 
 # Calibration fields this module will NEVER fabricate, default, or derive.

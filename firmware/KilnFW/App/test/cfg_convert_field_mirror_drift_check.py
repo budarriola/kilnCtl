@@ -75,7 +75,11 @@ INDEXED_PREFIXES = ("coupling_c", "coupling_tau_c", "coupling_dead_time_c", "set
 # Keys that are structural (not zone tuning data) or already covered by a
 # name collision with an indexed family and handled specially below.
 NON_ZONE_STRUCTURAL_KEYS = {"kind", "version", "profiles", "zones", "id", "segments", "zone_mask",
-                            "target_c", "ramp_c_per_hr", "dwell_min", "safety_tc_type", "update_repo"}
+                            "target_c", "ramp_c_per_hr", "dwell_min", "safety_tc_type", "update_repo",
+                            # Spare-relay WP-7: the top-level aux_outputs[] array and the per-entry keys
+                            # that are not also zone keys (hyst_c/min_on_s/min_off_s are). Not zone
+                            # data: cfg_convert.py carries the whole array verbatim, see its convert().
+                            "aux_outputs", "relay", "enabled", "tc_zone"}
 
 
 def strip_comments(text: str) -> str:

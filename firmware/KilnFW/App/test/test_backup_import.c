@@ -4202,6 +4202,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
 
     char import_err[256];
     bool ok = test_backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    if (!ok) printf("    round-trip refusal: %s\n", import_err);
     TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
 
     TEST_CHECK_NEAR(s_writes[1].kp, 5.0, 1e-6, "pid_kp round-trips through export->import");
@@ -4696,6 +4697,7 @@ static void test_ct_normals_and_new_fields_round_trip_through_export_import(void
 
     char import_err[256];
     bool ok = test_backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    if (!ok) printf("    round-trip refusal: %s\n", import_err);
     TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
 
     TEST_CHECK(s_writes[1].set_normal_current_called,
@@ -4926,6 +4928,7 @@ static void test_safety_i_normal_a_round_trips_through_export_import(void)
 
     char import_err[256];
     bool ok = test_backup_import_apply(s_export_body, import_err, sizeof(import_err));
+    if (!ok) printf("    round-trip refusal: %s\n", import_err);
     TEST_CHECK(ok, "re-importing exactly what was just exported must succeed");
     TEST_CHECK(g_stub_safety_cfg_write_n_pairs == 1,
               "safety_cfg_write_apply_pairs() was called with exactly one pair");
@@ -6033,6 +6036,58 @@ static void test_aux_outputs_dry_run_and_partial_write(void)
     TEST_CHECK(g_profile_save_calls > 0, "the profiles had already been written (hence partial)");
 }
 
+static void test_aux_outputs_phase1_reverted_when_zones_fail(void)
+{
+    TEST_SECTION("backup_import_apply -- a zones failure after phase 1 disabled an aux relay puts it back");
+    reset_stub_state();
+    aux_bk_fresh();
+    aux_output_entry_t on = aux_bk_entry(true, 0, 3.0f, 40, 41);
+    TEST_CHECK(aux_outputs_cfg_set(4, &on, 0) == ESP_OK, "aux relay 4 starts enabled");
+    s_force_fail_settings_source_zone = 1;
+    s_force_fail_settings_source_group = SRC_GROUP_LIMITS;
+    static const char *const body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":3,\"profiles\":[],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":1},"
+        "{\"index\":1,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}],"
+        "\"aux_outputs\":[{\"relay\":4,\"enabled\":false}]}";
+    char err[200] = "";
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    s_force_fail_settings_source_zone = 0xFFu;
+    s_force_fail_settings_source_group = 0xFFu;
+    TEST_CHECK(!ok, "the injected zone failure refuses the restore");
+    aux_output_t o;
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x08 && aux_outputs_cfg_get(4, &o) && o.hyst_c == 3.0f &&
+                   o.min_on_s == 40 && o.min_off_s == 41,
+               "relay 4 is enabled again with its fields");
+    (void)aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x08, "and that is what is persisted");
+
+    // Control: without the injected failure the same body really disables relay 4.
+    reset_stub_state();
+    aux_bk_fresh();
+    TEST_CHECK(aux_outputs_cfg_set(4, &on, 0) == ESP_OK, "control: aux relay 4 starts enabled");
+    TEST_CHECK(test_backup_import_apply(body, err, sizeof(err)), "control: the restore succeeds");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "control: relay 4 is disabled");
+}
+
+static void test_aux_outputs_absent_key_named_in_dry_run_plan(void)
+{
+    TEST_SECTION("backup_import_apply -- an older backup's dry-run plan says the enabled aux outputs are kept");
+    reset_stub_state();
+    aux_bk_fresh();
+    aux_output_entry_t on = aux_bk_entry(true, 0, 0, 0, 0);
+    TEST_CHECK(aux_outputs_cfg_set(2, &on, 0) == ESP_OK, "aux relay 2 enabled");
+    kiln_cfg_plan_t plan;
+    bool partial = false;
+    char err[200] = "";
+    TEST_CHECK(wp9_apply_full("", KILN_CFG_RESTORE_MERGE, true, -1, &plan, &partial, err, sizeof(err)),
+               "dry run of a backup without aux_outputs succeeds");
+    TEST_CHECK(wp9_plan_has(&plan, "aux_outputs not in this backup") && wp9_plan_has(&plan, "0x02"),
+               "the plan names the kept aux relays");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x02, "relay 2 is still enabled");
+    aux_bk_fresh();
+}
+
 static const char *aux_bk_slice(char *dst, size_t cap, const char *doc)
 {
     const char *p = strstr(doc, "\"aux_outputs\":[");
@@ -6100,6 +6155,8 @@ void run_test_backup_import(void)
     test_aux_outputs_zone_and_aux_swap_applies_in_either_direction();
     test_aux_outputs_dry_run_and_partial_write();
     test_aux_outputs_export_round_trip();
+    test_aux_outputs_phase1_reverted_when_zones_fail();
+    test_aux_outputs_absent_key_named_in_dry_run_plan();
     test_backup_tuning_float_matches_huge_values();
     test_backup_import_post_refused_by_mode_gate_before_interlock();
     test_backup_import_post_refused_by_interlock_after_mode_gate_passes();
