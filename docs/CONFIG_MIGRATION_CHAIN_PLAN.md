@@ -665,24 +665,31 @@ firmware's own `REC_OFF_*`/`REC_V1_OFF_*`/`REC_V2_OFF_*` offsets directly
 cannot cancel each other out; each version has a wrong-CRC and a
 truncated/wrong-magic/wrong-version negative test.
 
-Still NOT implemented, and unlike the note this section used to carry, for
-two different reasons rather than one shared "not yet" reason:
+**`zones_cfg_t` and `kilnctl_kiln_package` (2026-10-05).** Both now convert.
+`decode_zones_blob()` handles the current version (pinned by the
+firmware-generated golden) plus v21..v25: every hop v21->v26 is a pure
+tail-append prefix (`zones_config_migrate.c` cases 21..25), so each older
+zone is zero-extended into the current layout, CRC-verified, and given
+firmware's load fixups (`model_fit_*` -> UNKNOWN below v24, heater floors).
+The PC side keeps real v24/v25 `model_fit_*` and reports it; firmware's own
+upgrade path wipes them. Tests derive older blobs from the golden and mirror
+the frozen sizes/offsets against `zones_config_json.h`. `kiln_package`
+inherits the range through `esp_blob_hex`. `cfg_convert.convert()` now also
+carries the top-level `timing_profiles` and reports (as dropped) the
+export-only `ct_map_informational_only`/`k_ct_v_per_a_informational_only`
+and device-local `kiln_configs`, instead of discarding them silently.
 
-- **`zones_cfg_t` (the ESP's raw zone-configuration blob).** This one IS
-  deterministically decodable in principle -- KilnFW's own
-  `zones_config_json.h`/`.c` guard the struct with `_Static_assert`s on
-  exact byte layout the same way `config_store.c` does, and there are 26
-  versions of documented history to migrate across (`ZONES_CFG_VERSION`).
-  It is left out purely for size: mirroring ~3500 lines of struct evolution
-  across every version bump is a project on its own, not a same-session
-  addition, and doing it partially (e.g. only the last few versions) would
-  silently misrepresent the tool's own claimed coverage. `KNOWN_UNSUPPORTED_KINDS`
-  names this reason explicitly rather than implying indeterminism.
-- **`kiln_cfg_store`'s package format.** This format is already a JSON
-  envelope in firmware (kind `kilnctl_kiln_package` per `kiln_package.h`,
-  distinct from this tool's refused kind string `kilnctl_kiln_cfg_package`)
-  whose `pico` array needs no migration (safety param ids only ever grow),
-  but whose `esp_blob_hex` field carries a raw `zones_cfg_t` blob. Since that
-  inner blob is exactly the format above, this format is blocked
-  transitively on `zones_cfg_t` support, not on any indeterminism of its
-  own envelope.
+Pending:
+
+- **`zones_cfg_t` v1..v20.** Refused by name. v20->v21 grew `settings_source`
+  mid-struct and v1..v6 predate `crc32`, so the tail-append trick does not
+  reach them; each needs a blob of that exact version (a firmware host test
+  emitting one per historical struct, or a captured one) to verify a port.
+  D2 already expires the pre-v26 tail, so port only on a concrete need.
+- **`kiln_configs[]` entries.** Each embeds a `kilnctl_kiln_package`; not
+  converted inside a backup document (convert each package separately).
+- **`aux_outputs` (spare-relay) store** is not in the backup export at all
+  (`backup_export.c` never emits it), so no converter can carry it; a firmware
+  export/import change is needed first.
+- **Cfg LittleFS files** (`/api/cfgfs`) duplicate the NVS stores and are not
+  separate converter inputs.

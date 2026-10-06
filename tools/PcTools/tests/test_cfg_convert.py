@@ -262,3 +262,23 @@ def test_update_repo_passes_through_every_direction_and_value():
     for target in (1, 4):
         out, _report = cfg_convert.convert(doc, target)
         assert "update_repo" not in out
+
+
+def test_top_level_timing_profiles_carried_and_device_local_keys_reported():
+    doc = _load("v4_synthesized.json")
+    doc = dict(doc)
+    doc["timing_profiles"] = [{"name": "fast", "ramp_lock_band_c": 25.0}]
+    doc["ct_map_informational_only"] = [{"zone": 0, "ct_channel": 1}]
+    doc["kiln_configs"] = []
+    out, report = cfg_convert.convert(doc, 4)
+    assert out["timing_profiles"] == doc["timing_profiles"]
+    assert "ct_map_informational_only" not in out and "kiln_configs" not in out
+    dropped = {o.field for o in report.outcomes if o.outcome == "dropped"}
+    assert {"ct_map_informational_only", "kiln_configs"} <= dropped
+    assert report.lossy
+
+
+def test_absent_top_level_keys_stay_absent():
+    out, report = cfg_convert.convert(_load("v4_synthesized.json"), 4)
+    assert "timing_profiles" not in out
+    assert not any(o.field in ("timing_profiles", "kiln_configs") for o in report.outcomes)

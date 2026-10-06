@@ -429,6 +429,25 @@ def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
         out["safety_tc_type"] = doc["safety_tc_type"]
     if "update_repo" in doc:  # WP9 top-level string, never version-gated
         out["update_repo"] = doc["update_repo"]
+    # Top-level keys the firmware import restores but earlier passes of this
+    # converter silently discarded. timing_profiles[] is the bundle each
+    # zone's "timing_profile" index points into, so dropping it left those
+    # indices dangling; it is version-independent and carried unchanged.
+    if "timing_profiles" in doc:
+        out["timing_profiles"] = copy.deepcopy(doc["timing_profiles"])
+        report.add("document", "timing_profiles", "kept",
+                   "named timing-profile bundle carried through unchanged")
+    # Export-only / device-local keys stay out of the output by design (see
+    # the module's drift-control comments), but are now REPORTED as dropped
+    # so a caller sees the loss instead of it being silent.
+    for key, why in (
+        ("ct_map_informational_only", "export-only CT map; never restored (wiring hazard)"),
+        ("k_ct_v_per_a_informational_only", "export-only CT gain; never restored (wiring hazard)"),
+        ("kiln_configs", "device-local kiln_cfg_store slots; their embedded kiln packages are not "
+                         "converted here -- use convert_config on each package"),
+    ):
+        if key in doc:
+            report.add("document", key, "dropped", why)
 
     if source_version == target_version:
         report.add("document", "version", "kept", "source and target versions are identical; document unchanged")

@@ -909,9 +909,9 @@ def test_zones_blob_rejects_wrong_size():
         cc.decode_zones_blob(blob[:-1])
 
 
-def test_zones_blob_rejects_old_version():
-    with pytest.raises(cc.ConfigConvertError, match="not supported"):
-        cc.decode_zones_blob(bytes([cc.ZONES_CFG_VERSION - 1]) + bytes(cc.ZONES_CONFIG_BLOB_MAX_SIZE - 1))
+def test_zones_blob_rejects_pre_v21_version():
+    with pytest.raises(cc.ConfigConvertError, match="older than"):
+        cc.decode_zones_blob(bytes([cc.ZONES_CFG_MIN_PC_VERSION - 1]) + bytes(cc.ZONES_CONFIG_BLOB_MAX_SIZE - 1))
 
 
 def test_zones_blob_rejects_bad_crc():
