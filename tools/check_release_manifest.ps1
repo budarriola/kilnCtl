@@ -7,6 +7,11 @@
 #      end to end through the CLI against a throwaway git repo), tamper detection.
 #   2. make_release.ps1 refuses a non-semver tag.
 #   2b. -Publish is refused with -SkipBuild/-BuildDir/-RecoveryBin (provenance).
+#   2b2. Release gates (tools/release_gates.py, docs/release_gates.json): the
+#      tools/PcTools/tests/test_release_gates.py unit tests run; the tracked gates file
+#      validates; a stable-tag -Publish against an open-gates file is refused with "release
+#      gates not satisfied" (the gate check runs before every git/build step, so this
+#      never reaches a build); a missing -NotesFile is refused.
 #   2c. The real Get-AssetToFile (HttpClient, manual redirect) against a local 127.0.0.1
 #      server: token required on hop 1, forbidden on hop 2, bytes match; a 404 on hop 2 throws.
 #   3. The -Publish REST flow, with Invoke-RestMethod / Get-AssetToFile shadowed by
@@ -52,6 +57,42 @@ foreach ($extra in @(@("-SkipBuild"), @("-BuildDir", "C:\nonexistent"), @("-Reco
     if ($LASTEXITCODE -ne 1 -or $o -notmatch "cannot be combined") { Note-Fail "make_release.ps1 -Publish $($extra -join ' ') was not refused for provenance (exit $LASTEXITCODE)" }
     else { Write-Host "ok: -Publish refused with $($extra[0])" }
 }
+
+# 2b2. release gates and notes ---------------------------------------------------------
+$gatesTest = Join-Path $repoRoot "tools\PcTools\tests\test_release_gates.py"
+$ErrorActionPreference = "Continue"
+$out = & $python -m unittest $gatesTest 2>&1 | Out-String
+$gt = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($gt -ne 0) { Note-Fail "test_release_gates.py failed:`n$out" }
+elseif ($out -notmatch 'Ran (\d+) tests' -or [int]$Matches[1] -lt 10) { Note-Fail "test_release_gates.py ran too few tests (vacuous?):`n$out" }
+else { Write-Host "ok: $($Matches[0]) (release gates)" }
+
+$realGates = Join-Path $repoRoot "docs\release_gates.json"
+$ErrorActionPreference = "Continue"
+$o = & $python (Join-Path $PSScriptRoot "release_gates.py") status --file $realGates 2>&1 | Out-String
+$st = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($st -ne 0 -or $o -notmatch 'Release gates: \d+ of \d+ pass') { Note-Fail "docs/release_gates.json did not validate (exit $st):`n$o" }
+else { Write-Host "ok: docs/release_gates.json validates" }
+
+$openGates = Join-Path ([System.IO.Path]::GetTempPath()) ("relgates_" + [guid]::NewGuid().ToString("N") + ".json")
+try {
+    '{"schema":1,"gates":[{"id":"x","title":"open one","status":"open","evidence":"","source":"s"}]}' | Set-Content -LiteralPath $openGates -Encoding ascii
+    $ErrorActionPreference = "Continue"
+    $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "v1.0.0" -Publish -GatesFile $openGates 2>&1 | Out-String
+    $rc = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($rc -ne 1 -or $o -notmatch "release gates not satisfied" -or $o -notmatch "OPEN GATES") { Note-Fail "stable -Publish with an open gate was not refused for gates (exit $rc):`n$o" }
+    else { Write-Host "ok: stable -Publish refused while a gate is open" }
+} finally { Remove-Item -LiteralPath $openGates -Force -ErrorAction SilentlyContinue }
+
+$ErrorActionPreference = "Continue"
+$o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "v1.0.0" -NotesFile XX 2>&1 | Out-String
+$rc = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($rc -ne 1 -or $o -notmatch "-NotesFile .* does not exist") { Note-Fail "missing -NotesFile was not refused (exit $rc)" }
+else { Write-Host "ok: missing -NotesFile refused" }
 
 # 2c. real Get-AssetToFile against a local redirect server ------------------------
 . (Join-Path $PSScriptRoot "make_release.ps1") -LoadFunctionsOnly

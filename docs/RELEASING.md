@@ -13,9 +13,11 @@ release's `target_commitish`; never `git push --force` and never push a tag by h
 | File | Role |
 |------|------|
 | `tools/make_release.ps1` | gates, build, collect, manifest, optional publish (dry run by default) |
+| `tools/release_gates.py` | validates and checks the gates record; builds the default release-notes body |
+| `docs/release_gates.json` | tracked gates record: every stable gate, `open` or `pass`, with evidence |
 | `tools/release_manifest.py` | stdlib-only `generate` / `validate` of `release.json` and `SHA256SUMS` |
 | `tools/check_release_manifest.ps1` | standing check: unit tests, bad-tag refusal, mocked publish flow |
-| `tools/PcTools/tests/test_release_manifest.py` | the unit tests |
+| `tools/PcTools/tests/test_release_manifest.py`, `test_release_gates.py` | the unit tests |
 
 ## Release assets
 
@@ -52,10 +54,15 @@ WP2), which is now also the actual `app` partition size in `partitions.csv`.
    prints what `-Publish` would send. Nothing leaves the machine.
    `-SkipBuild [-BuildDir <dir>] [-RecoveryBin <file>]` reuses existing artifacts (dry run
    only: see the provenance rule under step 5);
+   `-NotesFile <path>` makes that file's content the release body verbatim; without it the
+   body is generated (see "Release notes" below). `-GatesFile <path>` points at another gates
+   record (tests only).
    `-DevDryRun` downgrades the git gates to warnings (refused with `-Publish`) for
    exercising the packaging path from a scratch worktree.
 4. Review `logs/release/<tag>/release.json` (commit, compat, sizes).
-5. Publish: add `-Publish`. Flow: POST a draft release with `target_commitish`, upload each
+5. Publish: add `-Publish`. A stable tag is refused while any gate in
+   `docs/release_gates.json` is open (see "Gates record"); `-AllowOpenGates` overrides that and
+   prints the open gates loudly. Flow: POST a draft release with `target_commitish`, upload each
    asset to uploads.github.com, re-download each asset and compare sha256, then PATCH
    `draft=false`. A mismatch leaves the draft unpublished (delete it on GitHub, fix, retry
    with a fresh `logs/release/<tag>` directory). `-WhatIf` prints the REST plan and calls
@@ -92,8 +99,49 @@ WP2), which is now also the actual `app` partition size in `partitions.csv`.
 8. `KilnCtrl.bin` <= 0x400000 and `.dram0.bss` <= 101000 B.
 9. Release notes list schema versions and any rollback hazard versus the previous release.
 
-`make_release.ps1` enforces only what it can prove mechanically (clean tree, origin/main,
-free tag, size gate, manifest consistency); gates 1 and 3-9 are the releaser's checklist.
+`make_release.ps1` enforces mechanically what it can prove (clean tree, origin/main, free
+tag, size gate, manifest consistency) and, for gates 1 and 3-9 plus the update-feature gates
+from the plan, checks that the gates record says `pass` (below). The tool cannot verify the
+evidence; it only refuses to publish a stable tag while the record says otherwise.
+
+## Gates record
+
+`docs/release_gates.json` (schema 1, validated by `tools/release_gates.py`):
+
+    {"schema": 1, "gates": [
+      {"id": "soak-24h", "title": "...", "status": "open", "evidence": "", "source": "..."}]}
+
+- `status` is exactly `open` or `pass`. A `pass` needs non-empty `evidence` (log path, commit,
+  date and what was observed). There is no `waived`: an owner waiver is recorded by setting
+  the gate to `pass` with the waiver as its evidence, so git history shows who decided and when.
+- Seeded 2026-10-06 from the readiness audit; everything not yet demonstrated is `open`
+  (only `clean-origin-main` is `pass`, because `make_release.ps1` enforces it itself).
+- Every `make_release.ps1` run (including the dry run) prints each gate and a summary. A dry
+  run never fails on open gates; a missing, unreadable or malformed gates file (bad JSON,
+  wrong schema, duplicate or bad id, unknown status, `pass` without evidence) refuses every
+  run, dry or not.
+- `-Publish` of a stable tag (no `-suffix`) exits 1 while any gate is `open`, before any git
+  or build step. `-AllowOpenGates` lets it through and prints the open gates between `!!!`
+  lines.
+- A pre-release tag (`v1.0.0-pre.1`) may publish with open gates but still prints them.
+  Pre-release shapes are accepted end to end: `update_semver.c` parses `-prerelease`
+  (sorts below the same release), the manifest generator accepts the tag shape, and the
+  `-Channel pre` switch marks the GitHub release as a prerelease. The tag suffix, not
+  `-Channel`, decides whether gates may be open. Use a pre-release first to exercise the
+  still-unverified live GitHub hop.
+- `tools/check_release_manifest.ps1` (standing check) validates the tracked file, runs
+  `test_release_gates.py`, and asserts the stable-tag refusal.
+
+## Release notes
+
+`-NotesFile <path>` (must exist and be non-empty) becomes the GitHub release body verbatim.
+Without it the body is `git log --oneline <previous semver tag merged into HEAD>..HEAD`
+(tags matching `vX.Y.Z[-pre]` only, highest wins, a prerelease below its release), or the
+last 50 commits when there is no previous semver tag, followed by the commit and
+`zones_cfg_version`. The body is resolved before the build starts and written to
+`logs/release/<tag>.notes.md` for review (outside the asset directory, so it is not uploaded).
+Gate 9 (schema versions and rollback hazards versus the previous release) stays a human
+review: pass a hand-written notes file for a real release.
 
 ## Token setup
 

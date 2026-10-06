@@ -25,6 +25,16 @@
 # idf.py is never invoked by hand here. -SkipBuild uses existing artifacts
 # (-BuildDir / -RecoveryBin override the default locations).
 #
+# Release gates: docs/release_gates.json (tools/release_gates.py) lists the stable gates, each
+# open or pass with evidence. Every run prints their status. -Publish of a STABLE tag is refused
+# while any gate is open unless -AllowOpenGates (prints them loudly); a pre-release tag
+# (vX.Y.Z-pre.N, accepted by update_semver.c and release_manifest.py) may publish with open
+# gates but still prints them. -GatesFile overrides the path (tests).
+#
+# Release notes: -NotesFile <path> becomes the release body verbatim. Without it the body is
+# generated: git log --oneline <previous semver tag merged into HEAD>..HEAD, or the last 50
+# commits if there is none. The body is also written to logs\release\<tag>.notes.md for review.
+#
 # -Publish (token from env KILNCTL_GITHUB_TOKEN, never printed): POST a DRAFT release
 # with target_commitish = the commit, upload every asset, re-download each one and
 # compare sha256, and only then PATCH draft=false. Any mismatch leaves the draft in
@@ -39,6 +49,9 @@ param(
     [string]$RecoveryBin,
     [switch]$Publish,
     [switch]$DevDryRun,
+    [string]$NotesFile,
+    [string]$GatesFile,
+    [switch]$AllowOpenGates,
     [switch]$LoadFunctionsOnly
 )
 
@@ -170,6 +183,26 @@ function Gate([string]$msg) {
     if ($DevDryRun) { Write-Host "WARNING (DevDryRun): $msg" -ForegroundColor Yellow } else { Fail $msg }
 }
 
+$python = $null
+foreach ($cand in @((Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"))) {
+    if (Test-Path -LiteralPath $cand) { $python = $cand }
+}
+if (-not $python) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $cmd) { Fail "no python (tools\PcTools\.venv or PATH); release_manifest.py needs one." }
+    $python = $cmd.Source
+}
+if ($NotesFile -and -not (Test-Path -LiteralPath $NotesFile -PathType Leaf)) { Fail "-NotesFile $NotesFile does not exist." }
+if ($NotesFile -and ((Get-Item -LiteralPath $NotesFile).Length -eq 0)) { Fail "-NotesFile $NotesFile is empty." }
+if (-not $GatesFile) { $GatesFile = Join-Path $repoRoot "docs\release_gates.json" }
+$gatesTool = Join-Path $PSScriptRoot "release_gates.py"
+# Gate status is printed on every run; the refusal (stable tag, open gates, no -AllowOpenGates)
+# applies only to -Publish. A dry run of a stable tag therefore never fails on gates.
+$gateArgs = @($gatesTool, "check", "--file", $GatesFile, "--tag", $Tag)
+if ($AllowOpenGates -or -not $Publish) { $gateArgs += "--allow-open" }
+& $python @gateArgs
+if ($LASTEXITCODE -ne 0) { Fail "release gates not satisfied (see above)." }
+
 $dirty = @(& git -C $repoRoot status --porcelain -- . ":(exclude)logs/release")
 if ($LASTEXITCODE -ne 0) { Fail "git status failed." }
 if ($dirty.Count -gt 0) { Gate "working tree is dirty ($($dirty.Count) change(s), first: $($dirty[0])); build releases from a clean worktree (tools\worktree_mint.ps1)." }
@@ -184,6 +217,19 @@ if ((& git -C $repoRoot tag --list $Tag)) { Fail "tag $Tag already exists locall
 $remoteTag = @(& git -C $repoRoot ls-remote --tags origin "refs/tags/$Tag")
 if ($LASTEXITCODE -ne 0) { Fail "git ls-remote --tags origin failed (cannot prove the tag is free)." }
 if ($remoteTag.Count -gt 0) { Fail "tag $Tag already exists on origin." }
+
+# Release body: resolved before the (long) build so a bad -NotesFile or a git failure costs nothing.
+if ($NotesFile) {
+    $bodyBase = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile).Path)
+    $bodySuffix = ""
+} else {
+    $notesTmp = Join-Path ([System.IO.Path]::GetTempPath()) ("kilnrel_notes_" + [guid]::NewGuid().ToString("N") + ".md")
+    & $python $gatesTool notes --root $repoRoot --tag $Tag --out $notesTmp
+    if ($LASTEXITCODE -ne 0) { Fail "release_gates.py notes failed (see above)." }
+    $bodyBase = [System.IO.File]::ReadAllText($notesTmp)
+    Remove-Item -LiteralPath $notesTmp -Force -ErrorAction SilentlyContinue
+    $bodySuffix = "`n`nCommit: {0}`nzones_cfg_version: {1}`n"
+}
 
 # ---------------------------------------------------------------- build / collect
 if (-not $SkipBuild) {
@@ -220,15 +266,6 @@ $elfZip = Join-Path $outDir "KilnCtrl-$Tag.elf.zip"
 Compress-Archive -LiteralPath $elf -DestinationPath $elfZip -CompressionLevel Optimal
 
 # ---------------------------------------------------------------- manifest
-$python = $null
-foreach ($cand in @((Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"))) {
-    if (Test-Path -LiteralPath $cand) { $python = $cand }
-}
-if (-not $python) {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { Fail "no python (tools\PcTools\.venv or PATH); release_manifest.py needs one." }
-    $python = $cmd.Source
-}
 $genArgs = @((Join-Path $PSScriptRoot "release_manifest.py"), "generate", "--root", $repoRoot, "--out", $outDir,
              "--tag", $Tag, "--repo", $Repo, "--channel", $Channel, "--app", $appBin,
              "--recovery", $RecoveryBin, "--elf-zip", $elfZip, "--max-app-size", "$MaxAppSize")
@@ -249,7 +286,12 @@ Write-Host "Release $Tag ($Channel) of $Repo, commit $($manifest.commit)"
 Write-Host "zones_cfg_version $($manifest.compat.zones_cfg_version), partitions_sha256 $($manifest.compat.partitions_sha256.Substring(0,16))..."
 Get-ChildItem -LiteralPath $outDir -File | ForEach-Object { Write-Host ("  {0,-34} {1,10} B" -f $_.Name, $_.Length) }
 
-$body = "kilnCtl $Tag`n`nCommit: $($manifest.commit)`nzones_cfg_version: $($manifest.compat.zones_cfg_version)`nSee release.json and SHA256SUMS."
+$notesOut = Join-Path $repoRoot "logs\release\$Tag.notes.md"
+$body = $bodyBase
+if ($bodySuffix) { $body = $bodyBase.TrimEnd() + ($bodySuffix -f $manifest.commit, $manifest.compat.zones_cfg_version) }
+Set-Content -LiteralPath $notesOut -Value $body -Encoding UTF8
+Write-Host ""
+Write-Host "Release body ($(if ($NotesFile) { "from -NotesFile" } else { "generated" }), $($body.Length) chars) written to $notesOut"
 if (-not $Publish) {
     Write-Host ""
     Write-Host "DRY RUN: nothing published. -Publish would POST a draft release (target_commitish $($manifest.commit)),"
