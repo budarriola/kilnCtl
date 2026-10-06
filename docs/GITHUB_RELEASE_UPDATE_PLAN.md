@@ -169,7 +169,7 @@ UI: a section on the existing `/ota` page (`ota_page.html`, ADMIN): choose file 
 recovery)"; M2 adds the repo field, "Check for updates" and the result card. After apply the page says to rejoin the normal Wi-Fi.
 MCP (CLAUDE.md convention; bump the tool count and `docs/MCP_SERVERS.md`): M1 `update_stage_upload`, `update_status`, `update_apply(confirm)`,
 `update_stage_clear`; M2 `update_check`, `update_stage_release(confirm)`, `update_fetch_status`, `update_fetch_cancel(confirm)`, `update_get_settings`, `update_set_settings(confirm)`.
-New OTA cases OT-G01..G06: bad sha256, truncated upload, downgrade refused, interlock refused, wrong repo, stale stage not re-applied.
+New OTA cases OT-G01..G06: bad sha256, truncated upload, downgrade refused, interlock refused, wrong repo, stale stage not re-applied. Bodies written 2026-10-06 (fake-board tests only, not yet run on hardware); see `docs/BENCH_TEST_SYSTEM_PLAN.md` section 3.4.
 
 ## 11. Memory plan for M2 (TLS)
 

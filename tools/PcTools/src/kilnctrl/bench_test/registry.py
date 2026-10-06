@@ -169,6 +169,12 @@ _OT = [
     ("OT-P05", "Update with a trip pending is refused"),
     ("OT-B01", "Dual reset handshake trip"),
     ("OT-B02", "Regression wrapper"),
+    ("OT-G01", "Staged upload sha256 equals the local digest"),
+    ("OT-G02", "Truncated stage upload leaves nothing staged"),
+    ("OT-G03", "Release downgrade refused without allow_downgrade"),
+    ("OT-G04", "Stage upload during a firing is refused"),
+    ("OT-G05", "Wrong release repo fails cleanly"),
+    ("OT-G06", "Stale stage auto-cleared at boot"),
 ]
 _AT = [
     ("AT-01", "Step test, zone 0, bounded"), ("AT-02", "Abort is immediate"),
@@ -250,9 +256,9 @@ for cid, desc in _SK:
     # dependency rule, plan §5.3 rule 1).
     register(_c(cid, "SK", desc, depends_on="HP-01" if cid == "SK-02" else None))
 for cid, desc in _OT:
-    register(_c(cid, "OT", desc, heat=cid in ("OT-E07", "OT-E08"),
-                heat_skip_reason=("allow_heat not set; OT-E07/E08 start their own heat"
-                                  if cid in ("OT-E07", "OT-E08") else "")))
+    register(_c(cid, "OT", desc, heat=cid in ("OT-E07", "OT-E08", "OT-G04"),
+                heat_skip_reason=("allow_heat not set; OT-E07/E08/G04 start their own heat"
+                                  if cid in ("OT-E07", "OT-E08", "OT-G04") else "")))
 #: OT-P02 boots the slot OT-P01 relayed into and rolls it back, OT-P03 needs
 #: OT-P01's captured commit_before to prove an untouched running image, and
 #: OT-P04 is a pure observer over OT-P01's own captured relay data -- three

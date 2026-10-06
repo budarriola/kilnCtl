@@ -98,6 +98,7 @@ _IMAGE_CTX_KEYS = (
     "ota_image_path", "ota_corrupt_image_path", "ota_truncated_image_path",
     "ota_wrong_build_image_path", "ota_image_build", "ota_pico_image_path",
     "ota_pico_image_commit", "ota_pico_corrupt_image_path",
+    "update_downgrade_repo", "update_wrong_repo",
 )
 
 
@@ -119,11 +120,12 @@ def _ota_preconditions_text() -> str:
         "Checked again, per case, immediately before each mutating call "
         "(cases_ota.py's _is_idle()/_interlock_ok()) -- EXCEPT OT-E07/OT-E08, which "
         "deliberately push during a firing/autotune run to prove the push is refused; "
-        "those two only run at all when allow_heat=True (default False). OT-B01 checks "
+        "those two (and OT-G04, the stage-upload twin) only run at all when allow_heat=True (default False). OT-B01 checks "
         "executor-idle and clears a latched trip but does not itself check the OTA "
         "interlock -- covered by this tool's run-level gate above, not by OT-B01 itself.",
         "Without ota_image_path/ota_pico_image_path (and friends) set, every OT-E*/OT-P* "
-        "case SKIPs for lack of an image -- only OT-B01 actually executes.",
+        "case SKIPs for lack of an image -- only OT-B01 actually executes. OT-G03/OT-G05 "
+        "(GitHub-release cases) also need update_downgrade_repo/update_wrong_repo and SKIP without them.",
     ])
 
 
@@ -343,7 +345,9 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
                     ota_image_build: Optional[str] = None,
                     ota_pico_image_path: Optional[str] = None,
                     ota_pico_image_commit: Optional[str] = None,
-                    ota_pico_corrupt_image_path: Optional[str] = None) -> str:
+                    ota_pico_corrupt_image_path: Optional[str] = None,
+                    update_downgrade_repo: Optional[str] = None,
+                    update_wrong_repo: Optional[str] = None) -> str:
     """Run the OTA test matrix -- ROADMAP.md M8's "scripted
     run_pctools_tests-style regression" for suite `ota`
     (docs/BENCH_TEST_SYSTEM_PLAN.md section 3.4: OT-B01, OT-E01..12,
@@ -438,6 +442,8 @@ def ota_matrix_run(confirm: bool = False, dry_run: bool = False, cases: Optional
         "ota_pico_image_path": ota_pico_image_path,
         "ota_pico_image_commit": ota_pico_image_commit,
         "ota_pico_corrupt_image_path": ota_pico_corrupt_image_path,
+        "update_downgrade_repo": update_downgrade_repo,
+        "update_wrong_repo": update_wrong_repo,
     }
     return _run_ota_matrix(ctx, cases=cases, tag=tag, allow_heat=allow_heat)
 
@@ -452,7 +458,9 @@ def ota_matrix_start(confirm: bool = False, dry_run: bool = False, cases: Option
                      ota_image_build: Optional[str] = None,
                      ota_pico_image_path: Optional[str] = None,
                      ota_pico_image_commit: Optional[str] = None,
-                     ota_pico_corrupt_image_path: Optional[str] = None) -> str:
+                     ota_pico_corrupt_image_path: Optional[str] = None,
+                    update_downgrade_repo: Optional[str] = None,
+                    update_wrong_repo: Optional[str] = None) -> str:
     """Start `ota_matrix_run` in the background and return a job id at once.
 
     Same arguments and gating as `ota_matrix_run` (read its docstring). A
@@ -468,7 +476,8 @@ def ota_matrix_start(confirm: bool = False, dry_run: bool = False, cases: Option
                   ota_wrong_build_image_path=ota_wrong_build_image_path,
                   ota_image_build=ota_image_build, ota_pico_image_path=ota_pico_image_path,
                   ota_pico_image_commit=ota_pico_image_commit,
-                  ota_pico_corrupt_image_path=ota_pico_corrupt_image_path)
+                  ota_pico_corrupt_image_path=ota_pico_corrupt_image_path,
+                  update_downgrade_repo=update_downgrade_repo, update_wrong_repo=update_wrong_repo)
     if dry_run or confirm is not True:
         return ota_matrix_run(confirm=confirm, dry_run=dry_run, **kwargs)
     started = time.time()
