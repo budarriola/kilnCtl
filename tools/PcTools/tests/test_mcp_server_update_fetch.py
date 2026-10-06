@@ -163,7 +163,10 @@ class CheckTest(_Base):
 
     def test_failed_job_reported(self):
         self.board.fail_error = "http_status"
-        self.assertTrue(msu.update_check().startswith("FAILED"))
+        out = msu.update_check()
+        self.assertTrue(out.startswith("FAILED"))
+        self.assertIn("http_status=404", out)
+        self.assertIn("no release published", out)
 
     def test_timeout_is_unknown(self):
         self.board.polls_to_finish = 10 ** 6

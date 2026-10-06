@@ -232,6 +232,10 @@ def _fmt_fetch(st: dict) -> str:
         parts.append(f"stage={st.get('stage')}")
     if st.get("error"):
         parts.append(f"error={st.get('error')}")
+        if st.get("http_status"):
+            parts.append(f"http_status={st.get('http_status')}")
+        if st.get("error") == "http_status" and st.get("http_status") == 404:
+            parts.append("(404 = no release published in this repo)")
     if st.get("tag"):
         parts.append(f"tag={st.get('tag')}")
         parts.append(f"prerelease={st.get('prerelease')}")
