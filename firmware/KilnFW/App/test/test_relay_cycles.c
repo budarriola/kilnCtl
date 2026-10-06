@@ -1,4 +1,4 @@
-// Host tests for App/drivers/persist/relay_cycles.c -- specifically persist_locked()'s
+// Host tests for App/drivers/persist/relay_cycles.c -- specifically persist_snapshot()'s
 // PSRAM-stack guard (DRAM_PSRAM_PLAN.md section 7: relay_cycles_maybe_persist()/
 // relay_cycles_flush() are called directly from profile_executor's tick and
 // stop paths, the same task that plan names as its highest-care relocation
@@ -8,8 +8,8 @@
 //
 // relay_cycles.c is #included directly (same convention as
 // test_crash_report.c's #include of crash_report.c) so this file can reach
-// persist_locked() directly and exercise it via fake_kv.h's RAM-backed
-// hal_kv fake, plus fake_kv_set_write_safe_here() to simulate a
+// persist_snapshot() directly and exercise it with
+// fake_kv.h's RAM-backed hal_kv fake plus a real cfg_fs scratch mount, plus fake_kv_set_write_safe_here() to simulate a
 // PSRAM-stacked caller (relay_cycles.c's caller_stack_is_external() is now
 // !hal_kv_write_safe_here() -- see HW_ABSTRACTION.md Phase 3 item 3,
 // the nvs.h -> hal_kv.h migration).
@@ -54,73 +54,108 @@
 
 #include "../drivers/persist/relay_cycles.c"
 
+static void mount_cfg_fresh(void);
+
 static void reset_all(void)
 {
-    fake_kv_reset_all(); // every test in this file needs a real round trip
-    fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
-    hal_kv_init_partition(KILN_NVS_PARTITION); // relay_cycles_init() normally does this once at boot;
-                                                // these tests call persist_locked()/hal_kv_open() directly
-    memset(&s_rc, 0, sizeof(s_rc));
+    // Saves are cfg-file-only since the dual-write close, so every test that
+    // persists needs a real mounted cfg scratch (this also resets the fake NVS,
+    // re-inits the partition and zeroes s_rc).
+    mount_cfg_fresh();
     s_rc.counts[0] = 42;
     s_rc.counts[1] = 7;
     s_rc.dirty = true;
 }
 
-static void test_persist_locked_refuses_when_calling_stack_is_external_ram(void)
+/* Forward declarations: the cfg_fs scratch mount lives further down this file. */
+static void reset_all_cfg_fs(void);
+static void mount_cfg_fresh(void);
+static void read_cycles_file(relay_cycles_blob_t *out, uint32_t *rev, bool *valid);
+
+/* Stages the blob a LEGACY (pre dual-write-close) firmware would have left in
+ * NVS -- relay_cycles.c no longer has any NVS writer for it, so a test that
+ * needs a legacy NVS-only board writes the bytes itself. */
+static hal_status_t stage_legacy_nvs_blob(uint32_t rev)
 {
-    TEST_SECTION("relay_cycles persist_locked -- refuses (does not crash) when called with a "
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return err;
+    }
+    relay_cycles_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = RELAY_CYCLES_VERSION;
+    memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
+    memcpy(blob.types, s_rc.types, sizeof(blob.types));
+    memcpy(blob.rated_overrides, s_rc.rated_overrides, sizeof(blob.rated_overrides));
+    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_CYCLES_REV, rev);
+    }
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return err;
+}
+
+static void test_persist_snapshot_refuses_when_calling_stack_is_external_ram(void)
+{
+    TEST_SECTION("relay_cycles persist_snapshot -- refuses (does not crash) when called with a "
                  "PSRAM stack underneath it (DRAM_PSRAM_PLAN.md section 7 safety net)");
     reset_all();
 
     fake_kv_set_write_safe_here(false); // simulate being called from a PSRAM-stacked task
 
-    hal_status_t err = persist_locked();
+    reset_persist_job_arg_t snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.counts[0] = 42;
+    snap.rev = 1;
+    esp_err_t err = persist_snapshot(&snap);
 
-    TEST_CHECK(err == HAL_NOT_READY,
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE,
                "the wrong-task guard refuses with a diagnosable error, not a crash -- exactly "
-               "the class of bug (an NVS write reached from a PSRAM-stack task) this net exists "
+               "the class of bug (a flash write reached from a PSRAM-stack task) this net exists "
                "to catch before a future relocation of profile_executor (DRAM_PSRAM_PLAN.md "
                "section 7) makes it reachable for real");
     TEST_CHECK(s_rc.dirty == true, "a refused write must not clear the dirty flag -- the counts "
                                    "are still unpersisted and must be retried later");
 
-    // The refused write never created the namespace at all, so a READ_ONLY
-    // open of it fails NOT_FOUND -- matching real NVS's nvs_open_from_
-    // partition(..., NVS_READONLY, ...) behavior on a namespace that has
-    // never been written (see hal_kv.h/fake_kv.c; this is a stricter, more
-    // accurate model than the old stubs/nvs.h fake's always-succeeds open).
+    // The refused write wrote nothing: no NVS namespace either.
     hal_kv_handle_t h;
     hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    TEST_CHECK(open_err == HAL_NOT_FOUND,
-               "the refused write left no namespace behind at all -- persist_locked() returned "
-               "before calling hal_kv_open(HAL_KV_MODE_READ_WRITE, ...)/hal_kv_set_blob() at all");
+    TEST_CHECK(open_err == HAL_NOT_FOUND, "the refused write left no NVS namespace behind");
 
     fake_kv_set_write_safe_here(true); // leave shared fake state as every other test expects
 }
 
-static void test_persist_locked_proceeds_normally_on_an_internal_ram_stack(void)
+static void test_persist_snapshot_proceeds_normally_on_an_internal_ram_stack(void)
 {
-    TEST_SECTION("relay_cycles persist_locked -- proceeds normally when the calling task's "
-                 "stack is internal RAM");
-    reset_all();
+    TEST_SECTION("relay_cycles persist_snapshot -- proceeds normally when the calling task's "
+                 "stack is internal RAM, and writes the cfg file ONLY (NVS untouched)");
+    mount_cfg_fresh();
 
-    // fake_kv_set_write_safe_here(true) is the fake's default state (also reset_all()'s).
-    hal_status_t err = persist_locked();
+    reset_persist_job_arg_t snap;
+    memset(&snap, 0, sizeof(snap));
+    snap.counts[0] = 42;
+    snap.counts[1] = 7;
+    snap.rev = 1;
+    esp_err_t err = persist_snapshot(&snap);
 
-    TEST_CHECK(err == HAL_OK, "the guard does not fire on an internal-RAM stack -- the write "
-                              "proceeds and lands in the fake store");
-    TEST_CHECK(s_rc.dirty == false, "a successful write clears the dirty flag");
+    TEST_CHECK(err == ESP_OK, "the guard does not fire on an internal-RAM stack -- the write "
+                              "proceeds and lands in the cfg file");
 
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "stub NVS opens for read-back");
     relay_cycles_blob_t readback;
-    size_t len = sizeof(readback);
-    hal_status_t get_err = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &readback, &len);
-    hal_kv_close(&h);
-    TEST_CHECK(get_err == HAL_OK && len == sizeof(readback), "the blob round-trips through the fake store");
+    uint32_t rev = 0;
+    bool valid = false;
+    read_cycles_file(&readback, &rev, &valid);
+    TEST_CHECK(valid && rev == 1, "the file round-trips at the snapshot's rev");
     TEST_CHECK(readback.counts[0] == 42 && readback.counts[1] == 7,
                "the persisted counts are the ones that were passed in, unmodified");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "NVS was never written -- the dual-write window is closed");
 }
 
 // --- RELAY_LIFE_BUDGET.md: type table, budget math, fifth slot,
@@ -208,7 +243,10 @@ static void test_safety_slot_edge_and_persistence(void)
 {
     TEST_SECTION("relay_cycles_note_safety_edge -- increments the fifth slot (K4) independently "
                  "of relay_cycles_add(), and it round-trips through persist/load like the others");
-    reset_all();
+    mount_cfg_fresh();
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+    s_rc.counts[0] = 42;
+    s_rc.counts[1] = 7;
 
     TEST_CHECK(RELAY_CYCLES_SAFETY_INDEX == KILN_IO_RELAY_COUNT,
                "the safety slot is the one right after the four heater relays");
@@ -221,18 +259,14 @@ static void test_safety_slot_edge_and_persistence(void)
     TEST_CHECK(s_rc.counts[RELAY_CYCLES_SAFETY_INDEX] == 3, "three edges noted, one each call");
     TEST_CHECK(s_rc.counts[0] == 42 + 5, "relay_cycles_add() still only touches the four heater slots");
 
-    hal_status_t err = persist_locked();
-    TEST_CHECK(err == HAL_OK, "persist succeeds with the fifth slot populated");
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "persist succeeds with the fifth slot populated");
 
     memset(&s_rc, 0, sizeof(s_rc));
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "reopen for readback");
     relay_cycles_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
-               "the v2 blob round-trips at its full size");
-    hal_kv_close(&h);
+    uint32_t rev = 0;
+    bool valid = false;
+    read_cycles_file(&blob, &rev, &valid);
+    TEST_CHECK(valid, "the v2 blob round-trips at its full size through the cfg file");
     TEST_CHECK(blob.counts[RELAY_CYCLES_SAFETY_INDEX] == 3,
                "the persisted blob carries the safety slot's count, not just the four heater ones");
 }
@@ -241,12 +275,10 @@ static void test_v1_blob_migrates_to_v2(void)
 {
     TEST_SECTION("relay_cycles_init -- a v1 blob (bare 4-count array, no types, no fifth slot) "
                  "migrates to v2: existing counts kept, type defaults to ssr, fifth slot starts at 0");
-    fake_kv_reset_all();
-    fake_kv_set_write_safe_here(true);
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    mount_cfg_fresh();
 
-    // Write a v1-shaped blob directly, bypassing persist_locked() (which
-    // only ever writes the current version) -- this simulates a board that
+    // Write a v1-shaped blob directly, bypassing the
+    // production writer (which only ever writes the current version) -- this simulates a board that
     // last persisted before this change shipped.
     relay_cycles_blob_v1_t v1;
     v1.version = 1;
@@ -277,6 +309,15 @@ static void test_v1_blob_migrates_to_v2(void)
     relay_cycles_budget(0, &b);
     TEST_CHECK(b.has_budget == false, "a migrated relay's default ssr type means no budget shown yet");
 
+    {
+        relay_cycles_blob_t mig;
+        uint32_t mig_rev = 0;
+        bool mig_valid = false;
+        read_cycles_file(&mig, &mig_rev, &mig_valid);
+        TEST_CHECK(mig_valid && mig.counts[0] == 111 && mig.counts[1] == 222,
+                   "the v1 counts were migrated into the cfg file (the only store written now)");
+    }
+
     fake_kv_reset_all();
 }
 
@@ -304,9 +345,7 @@ static void test_migration_skipped_when_kiln_partition_already_has_blob(void)
 {
     TEST_SECTION("relay_cycles_init -- kiln partition already holds a current blob with higher counts, "
                  "default partition holds a stale v1 copy: live counts win, never overwritten");
-    fake_kv_reset_all();
-    fake_kv_set_write_safe_here(true);
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    mount_cfg_fresh();
     write_default_partition_v1(10, 20);
 
     memset(&s_rc, 0, sizeof(s_rc));
@@ -314,7 +353,7 @@ static void test_migration_skipped_when_kiln_partition_already_has_blob(void)
     s_rc.counts[1] = 7000;
     s_rc.types[0] = RELAY_TYPE_CONTACTOR;
     s_rc.rated_overrides[0] = 77;
-    TEST_CHECK(persist_locked() == HAL_OK, "persist the live current-version blob");
+    TEST_CHECK(stage_legacy_nvs_blob(1) == HAL_OK, "stage the live current-version blob in NVS (legacy writer)");
 
     memset(&s_rc, 0, sizeof(s_rc));
     TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds");
@@ -322,21 +361,33 @@ static void test_migration_skipped_when_kiln_partition_already_has_blob(void)
                "live counts survive; the stale default-partition v1 copy did not overwrite them");
     TEST_CHECK(s_rc.types[0] == RELAY_TYPE_CONTACTOR && s_rc.rated_overrides[0] == 77,
                "live relay type/override survive too");
+    {
+        relay_cycles_blob_t mig;
+        uint32_t mig_rev = 0;
+        bool mig_valid = false;
+        read_cycles_file(&mig, &mig_rev, &mig_valid);
+        TEST_CHECK(mig_valid && mig.counts[0] == 5000, "the live legacy NVS blob was migrated into the cfg file");
+    }
     fake_kv_reset_all();
 }
 
 static void test_migration_still_runs_on_fresh_kiln_partition(void)
 {
     TEST_SECTION("relay_cycles_init -- kiln partition empty, default partition holds v1: still migrates");
-    fake_kv_reset_all();
-    fake_kv_set_write_safe_here(true);
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    mount_cfg_fresh();
     write_default_partition_v1(111, 222);
 
     memset(&s_rc, 0, sizeof(s_rc));
     TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds");
     TEST_CHECK(s_rc.counts[0] == 111 && s_rc.counts[1] == 222,
                "counts migrated from the default partition on a board with no kiln copy");
+    {
+        relay_cycles_blob_t mig;
+        uint32_t mig_rev = 0;
+        bool mig_valid = false;
+        read_cycles_file(&mig, &mig_rev, &mig_valid);
+        TEST_CHECK(mig_valid && mig.counts[0] == 111, "and landed in the cfg file");
+    }
     fake_kv_reset_all();
 }
 
@@ -362,14 +413,11 @@ static void test_reset_zeroes_count_and_persists(void)
 
     TEST_CHECK(s_rc.dirty == false, "the dispatched persist actually landed (dirty cleared)");
 
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "reopen for readback");
     relay_cycles_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
-               "blob round-trips");
-    hal_kv_close(&h);
+    uint32_t blob_rev = 0;
+    bool blob_valid = false;
+    read_cycles_file(&blob, &blob_rev, &blob_valid);
+    TEST_CHECK(blob_valid, "the cfg file round-trips");
     TEST_CHECK(blob.counts[0] == 0, "the zeroed count is what actually landed in the store, "
                                     "not just in RAM");
 }
@@ -464,15 +512,12 @@ static void test_reset_timeout_idle_worker_succeeds(void)
     TEST_CHECK(s_stub_dispatch_count == dispatch_before + 1, "exactly one job was dispatched "
                                                               "through the flash worker");
 
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "the fake store must be reachable for readback");
     relay_cycles_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
-               "readback of the persisted blob succeeds");
+    uint32_t blob_rev = 0;
+    bool blob_valid = false;
+    read_cycles_file(&blob, &blob_rev, &blob_valid);
+    TEST_CHECK(blob_valid, "readback of the persisted cfg file succeeds");
     TEST_CHECK(blob.counts[2] == 0, "the zeroed count actually reached the store, not just RAM");
-    hal_kv_close(&h);
 }
 
 // opus review (MEDIUM, follow-up audit): relay_cycles_reset() used to hold
@@ -551,14 +596,11 @@ static void test_reset_does_not_lose_a_concurrent_add(void)
     // persists relay 1's incremented count, not just relay 0's reset.
     TEST_CHECK(relay_cycles_flush() == ESP_OK, "the follow-up flush this dirty flag exists to "
                                                "trigger succeeds");
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "reopen for readback");
     relay_cycles_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
-               "blob round-trips");
-    hal_kv_close(&h);
+    uint32_t blob_rev = 0;
+    bool blob_valid = false;
+    read_cycles_file(&blob, &blob_rev, &blob_valid);
+    TEST_CHECK(blob_valid, "the cfg file round-trips");
     TEST_CHECK(blob.counts[1] == 7 + 9, "the concurrent add()'s increment actually reached flash "
                                         "via the follow-up flush -- not just left dirty in RAM "
                                         "forever");
@@ -597,14 +639,11 @@ static void test_persist_lock_created_and_back_to_back_persists_keep_the_latest_
     s_rc.dirty = true;
     TEST_CHECK(persist_snapshot_now(portMAX_DELAY) == HAL_OK, "second, later persist succeeds");
 
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "reopen for readback");
     relay_cycles_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
-               "blob round-trips");
-    hal_kv_close(&h);
+    uint32_t blob_rev = 0;
+    bool blob_valid = false;
+    read_cycles_file(&blob, &blob_rev, &blob_valid);
+    TEST_CHECK(blob_valid, "the cfg file round-trips");
     TEST_CHECK(blob.counts[0] == 47, "the LATER snapshot's value is what's on flash, not the "
                                      "earlier one -- an older snapshot landing after a newer one "
                                      "would leave 42 here instead");
@@ -686,14 +725,11 @@ static void test_restore_all_sets_every_count_and_persists(void)
 
     TEST_CHECK(s_rc.dirty == false, "the dispatched persist actually landed (dirty cleared)");
 
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "reopen for readback");
     relay_cycles_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len) == HAL_OK && len == sizeof(blob),
-               "blob round-trips");
-    hal_kv_close(&h);
+    uint32_t blob_rev = 0;
+    bool blob_valid = false;
+    read_cycles_file(&blob, &blob_rev, &blob_valid);
+    TEST_CHECK(blob_valid, "the cfg file round-trips");
     for (uint8_t i = 0; i < RELAY_CYCLES_COUNT; i++) {
         TEST_CHECK(blob.counts[i] == backup[i], "the restored counts are what actually landed in the "
                                                  "store, not just in RAM (byte-equal to the archive)");
@@ -712,18 +748,17 @@ static void test_restore_all_is_idempotent(void)
     }
     TEST_CHECK(relay_cycles_restore_all(backup, 0, NULL) == true, "first restore succeeds");
     relay_cycles_blob_t blob_first;
-    hal_kv_handle_t h;
-    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    size_t len = sizeof(blob_first);
-    hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob_first, &len);
-    hal_kv_close(&h);
+    uint32_t rev_first = 0;
+    bool valid_first = false;
+    read_cycles_file(&blob_first, &rev_first, &valid_first);
+    TEST_CHECK(valid_first, "first restore's file is valid");
 
     TEST_CHECK(relay_cycles_restore_all(backup, 0, NULL) == true, "second restore of the same archive succeeds");
     relay_cycles_blob_t blob_second;
-    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    len = sizeof(blob_second);
-    hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob_second, &len);
-    hal_kv_close(&h);
+    uint32_t rev_second = 0;
+    bool valid_second = false;
+    read_cycles_file(&blob_second, &rev_second, &valid_second);
+    TEST_CHECK(valid_second, "second restore's file is valid");
 
     TEST_CHECK(memcmp(&blob_first, &blob_second, sizeof(blob_first)) == 0,
                "restoring the same archive twice writes byte-identical blobs -- idempotent");
@@ -901,49 +936,99 @@ static void reset_all_cfg_fs(void)
     memset(&s_rc, 0, sizeof(s_rc));
 }
 
-static void test_cfg_fs_partition_absent_behaves_like_before(void)
+static void mount_cfg_fresh(void)
 {
-    TEST_SECTION("relay_cycles cfg_fs: partition absent -- init/flush behave exactly like NVS-only");
+    reset_all_cfg_fs();
+    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+}
+
+static void read_cycles_file(relay_cycles_blob_t *out, uint32_t *rev, bool *valid)
+{
+    memset(out, 0, sizeof(*out));
+    pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(*out), relay_cycles_file_validate, out, rev, valid);
+}
+
+static esp_err_t rc_failing_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
+static bool rc_nvs_namespace_absent(void)
+{
+    hal_kv_handle_t h;
+    return hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND;
+}
+
+static void test_cfg_fs_partition_absent_fails_loud_and_still_loads_legacy(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs: no partition mounted -- a legacy NVS copy still loads, a save fails loud "
+                 "and never falls back to NVS");
     reset_all_cfg_fs();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
 
-    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds with no `cfg` partition mounted");
     s_rc.counts[0] = 55;
+    TEST_CHECK(stage_legacy_nvs_blob(1) == HAL_OK, "stage the legacy NVS blob");
+    memset(&s_rc, 0, sizeof(s_rc));
+
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds with no `cfg` partition mounted");
+    TEST_CHECK(s_rc.counts[0] == 55, "the legacy NVS-only board still loads its count");
+
+    s_rc.counts[0] = 56;
     s_rc.dirty = true;
-    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush succeeds, NVS-only");
+    TEST_CHECK(relay_cycles_flush() != ESP_OK, "flush fails loud: there is nowhere to persist");
+    TEST_CHECK(s_rc.dirty, "the counts stay dirty for a retry");
 
     memset(&s_rc, 0, sizeof(s_rc));
     TEST_CHECK(relay_cycles_init() == ESP_OK, "re-init");
-    TEST_CHECK(s_rc.counts[0] == 55, "count reloads from NVS alone");
+    TEST_CHECK(s_rc.counts[0] == 55, "the NVS copy was NOT overwritten by the failed save (no fallback)");
 }
 
 static void test_cfg_fs_migrates_nvs_value_to_file_then_prefers_it(void)
 {
-    TEST_SECTION("relay_cycles cfg_fs: NVS fallback migrates to file; a later boot prefers the file");
-    reset_all_cfg_fs();
-    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_SECTION("relay_cycles cfg_fs: legacy NVS value migrates to the file; a later boot needs only the file");
+    mount_cfg_fresh();
 
-    TEST_CHECK(relay_cycles_init() == ESP_OK, "first boot: nothing in NVS or file yet");
     s_rc.counts[0] = 10;
     s_rc.counts[1] = 20;
-    s_rc.dirty = true;
-    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush dual-writes file first, then NVS");
-
-    bool exists = false;
-    TEST_CHECK(cfg_fs_exists(RELAY_CYCLES_FILE_PATH, &exists) == ESP_OK && exists,
-               "the flush's dual-write actually created the file");
-
+    TEST_CHECK(stage_legacy_nvs_blob(3) == HAL_OK, "stage the legacy NVS blob at rev 3");
     memset(&s_rc, 0, sizeof(s_rc));
-    TEST_CHECK(relay_cycles_init() == ESP_OK, "second boot");
-    TEST_CHECK(s_rc.counts[0] == 10 && s_rc.counts[1] == 20, "counts reload correctly (file-preferred)");
-    TEST_CHECK(s_rc.rev == 1, "rev tracks the one flush");
+
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "first boot after the upgrade");
+    TEST_CHECK(s_rc.counts[0] == 10 && s_rc.counts[1] == 20, "legacy counts load");
+
+    relay_cycles_blob_t mig;
+    uint32_t mig_rev = 0;
+    bool mig_valid = false;
+    read_cycles_file(&mig, &mig_rev, &mig_valid);
+    TEST_CHECK(mig_valid && mig.counts[0] == 10 && mig.counts[1] == 20,
+               "init migrated the legacy value into the cfg file");
+
+    // The legacy copy vanishes (erased, or a board that never had it): the file alone suffices.
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "later boot, no NVS copy");
+    TEST_CHECK(s_rc.counts[0] == 10 && s_rc.counts[1] == 20, "counts reload from the file alone");
+
+    s_rc.counts[0] = 11;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "a later save lands");
+    uint32_t after_rev = 0;
+    bool after_valid = false;
+    relay_cycles_blob_t after;
+    read_cycles_file(&after, &after_rev, &after_valid);
+    TEST_CHECK(after_valid && after.counts[0] == 11 && after_rev == mig_rev + 1,
+               "the save advanced the file rev by one");
+    TEST_CHECK(rc_nvs_namespace_absent(), "and never recreated an NVS copy");
 }
 
 static void test_cfg_fs_dual_write_stays_in_sync_across_repeated_flushes(void)
 {
-    TEST_SECTION("relay_cycles cfg_fs: repeated flushes keep file and NVS in sync (incrementing rev)");
-    reset_all_cfg_fs();
-    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_SECTION("relay_cycles cfg_fs: repeated flushes advance the file rev; NVS is never written");
+    mount_cfg_fresh();
     TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
 
     for (int i = 1; i <= 3; i++) {
@@ -958,41 +1043,30 @@ static void test_cfg_fs_dual_write_stays_in_sync_across_repeated_flushes(void)
     pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(raw), relay_cycles_file_validate, &raw, &rev, &valid);
     TEST_CHECK(valid && rev == 3, "file rev tracks three flushes");
     TEST_CHECK(raw.counts[0] == 300, "file holds the LATEST flush");
+    TEST_CHECK(rc_nvs_namespace_absent(), "no NVS copy was ever written");
 
     memset(&s_rc, 0, sizeof(s_rc));
     TEST_CHECK(relay_cycles_init() == ESP_OK, "reload");
-    TEST_CHECK(s_rc.counts[0] == 300, "NVS agrees with the file after three dual-writes");
-}
-
-static esp_err_t rc_failing_write_fn(const char *rel_path, const void *data, size_t len)
-{
-    (void)rel_path;
-    (void)data;
-    (void)len;
-    return ESP_FAIL;
+    TEST_CHECK(s_rc.counts[0] == 300, "the file alone carries the latest value");
 }
 
 static void test_cfg_fs_divergence_tie_break_strict_greater_than(void)
 {
-    TEST_SECTION("relay_cycles cfg_fs: divergence tie-break -- STRICT file_rev > nvs_rev, not >=");
-    reset_all_cfg_fs();
-    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_SECTION("relay_cycles cfg_fs: legacy NVS copy vs file -- higher rev wins, EQUAL rev goes to NVS");
+    mount_cfg_fresh();
     TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
 
     s_rc.counts[0] = 1;
     s_rc.dirty = true;
-    TEST_CHECK(relay_cycles_flush() == ESP_OK, "rev 1 written to both sides");
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "file rev 1 written");
 
-    // File write fails from here -- NVS advances, file is stuck at rev 1.
-    pref_cfg_fs_set_write_fn(rc_failing_write_fn);
+    // A rolled-back/legacy firmware wrote NVS at a HIGHER rev.
+    memset(&s_rc, 0, sizeof(s_rc));
     s_rc.counts[0] = 2;
-    s_rc.dirty = true;
-    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush still reports OK -- NVS write is authoritative");
-    pref_cfg_fs_reset_write_fn_for_test();
-
+    TEST_CHECK(stage_legacy_nvs_blob(2) == HAL_OK, "stage a legacy NVS blob at rev 2");
     memset(&s_rc, 0, sizeof(s_rc));
     TEST_CHECK(relay_cycles_init() == ESP_OK, "reload");
-    TEST_CHECK(s_rc.counts[0] == 2, "NVS (higher rev) wins -- the stale rev-1 file is NOT trusted");
+    TEST_CHECK(s_rc.counts[0] == 2, "NVS (higher rev) wins -- the older rev-1 file is NOT trusted");
 
     // EQUAL rev, differing content: NVS must still win (never file_rev >= nvs_rev).
     relay_cycles_blob_t stale_equal_rev;
@@ -1006,6 +1080,37 @@ static void test_cfg_fs_divergence_tie_break_strict_greater_than(void)
     TEST_CHECK(relay_cycles_init() == ESP_OK, "reload after equal-rev divergence");
     TEST_CHECK(s_rc.counts[0] == 2,
                "NVS wins the EQUAL-rev tie -- content 999 from the file is refused (STRICT > required)");
+}
+
+static void test_cfg_write_failure_is_loud_and_rev_unadvanced(void)
+{
+    TEST_SECTION("relay_cycles cfg_fs: a failed cfg write is reported, leaves the old file and rev intact, "
+                 "and is NOT retried against NVS");
+    mount_cfg_fresh();
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+    s_rc.counts[0] = 1;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "first save lands at rev 1");
+    TEST_CHECK(s_rc.rev == 1, "in-RAM rev is 1");
+
+    pref_cfg_fs_set_write_fn(rc_failing_write_fn);
+    s_rc.counts[0] = 2;
+    s_rc.dirty = true;
+    TEST_CHECK(relay_cycles_flush() != ESP_OK, "flush reports the failed cfg write");
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_rc.dirty, "still dirty so the next persist retries");
+    TEST_CHECK(s_rc.rev == 1, "rev did not advance without a verified write");
+
+    relay_cycles_blob_t raw;
+    uint32_t rev = 0;
+    bool valid = false;
+    read_cycles_file(&raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 1 && raw.counts[0] == 1, "the previous file is intact");
+    TEST_CHECK(rc_nvs_namespace_absent(), "nothing fell back to NVS");
+
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "the retry lands");
+    read_cycles_file(&raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 2 && raw.counts[0] == 2, "file now at rev 2 with the new count");
 }
 
 static void test_cfg_fs_reset_all_composes_with_migration_never_loses_counts(void)
@@ -1067,24 +1172,23 @@ static void test_cfg_fs_reset_all_composes_with_migration_never_loses_counts(voi
 // exact failing line and the `git diff` proof after restoring it.
 static void test_cfg_fs_negative_no_file_write_means_file_never_catches_up(void)
 {
-    TEST_SECTION("relay_cycles cfg_fs NEGATIVE TEST: if the file write is skipped, the file falls "
-                 "permanently behind -- the exact regression the migration must not reintroduce");
-    reset_all_cfg_fs();
-    TEST_CHECK(cfg_fs_init(RC_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    TEST_SECTION("relay_cycles cfg_fs NEGATIVE TEST: if the file write is skipped nothing is persisted "
+                 "anywhere -- NVS is no longer a safety net, so the save must report failure");
+    mount_cfg_fresh();
     TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
 
     pref_cfg_fs_set_write_fn(rc_failing_write_fn); // stands in for "the file-write call was deleted"
     s_rc.counts[0] = 4242;
     s_rc.dirty = true;
-    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush still reports OK (NVS is authoritative)");
+    TEST_CHECK(relay_cycles_flush() != ESP_OK, "flush reports failure (never a silent OK)");
     pref_cfg_fs_reset_write_fn_for_test();
 
     relay_cycles_blob_t raw;
     uint32_t rev = 0;
     bool valid = false;
     pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(raw), relay_cycles_file_validate, &raw, &rev, &valid);
-    TEST_CHECK(!valid, "with the file write skipped, the file never catches up -- exactly the loss "
-                        "this migration must not reintroduce (NVS alone is carrying the counts)");
+    TEST_CHECK(!valid, "with the file write skipped there is no file");
+    TEST_CHECK(rc_nvs_namespace_absent(), "and no NVS fallback either");
 }
 
 /* 2026-09-08: relay_cycles_get_dualwrite_status() -- GET /api/cfgfs's row
@@ -1106,34 +1210,25 @@ static void test_get_dualwrite_status_reports_real_divergence(void)
     s_rc.counts[0] = 10;
     s_rc.counts[1] = 20;
     s_rc.dirty = true;
-    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush -- file and NVS agree at rev 1");
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush -- file written at rev 1, NVS untouched");
 
     bool file_valid = false, nvs_valid = false, diverged = true;
     uint32_t file_rev = 0, nvs_rev = 0;
     relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
-    TEST_CHECK(file_valid && nvs_valid, "both sides valid after a normal flush");
-    TEST_CHECK(file_rev == 1 && nvs_rev == 1, "both revs agree at 1");
-    TEST_CHECK(!diverged, "healthy dual-write state reports diverged:false");
+    TEST_CHECK(file_valid && !nvs_valid, "only the file is valid after a normal cfg-only flush");
+    TEST_CHECK(file_rev == 1, "file rev is 1");
+    TEST_CHECK(!diverged, "no NVS copy means nothing to diverge from");
 
-    /* Force the file to disagree with NVS AT THE SAME REV (so the
-     * divergence is genuinely a content mismatch, not just an in-flight
-     * rev skew) -- same setup test_cfg_fs_divergence_tie_break_strict_
-     * greater_than() above already uses for the load-side tie-break. */
-    relay_cycles_blob_t stale_equal_rev;
-    memset(&stale_equal_rev, 0, sizeof(stale_equal_rev));
-    stale_equal_rev.version = RELAY_CYCLES_VERSION;
-    stale_equal_rev.counts[0] = 999; // disagrees with NVS's counts[0] == 10
-    TEST_CHECK(pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &stale_equal_rev, sizeof(stale_equal_rev), 1) == ESP_OK,
-               "test setup: file rewritten at the SAME rev (1) with different content");
-
-    file_valid = false;
-    nvs_valid = false;
-    diverged = false;
-    file_rev = 0;
-    nvs_rev = 0;
+    /* A legacy writer leaves an NVS copy at the SAME rev with different content. */
+    {
+        uint32_t keep = s_rc.counts[0];
+        s_rc.counts[0] = 999;
+        TEST_CHECK(stage_legacy_nvs_blob(1) == HAL_OK, "stage a legacy NVS blob at rev 1, count 999");
+        s_rc.counts[0] = keep;
+    }
     relay_cycles_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
-    TEST_CHECK(file_valid && nvs_valid, "both sides still individually valid");
-    TEST_CHECK(diverged, "a real content disagreement at equal rev is reported as diverged:true");
+    TEST_CHECK(file_valid && nvs_valid && nvs_rev == 1, "both sides valid, equal rev");
+    TEST_CHECK(diverged, "equal rev with differing content is reported (raw) diverged:true");
 }
 
 /* 2026-10-04 bench finding: relay_cycles_blob_t has padding after `version`
@@ -1179,7 +1274,7 @@ static void test_padding_is_not_data_status_and_init(void)
     s_rc.counts[0] = 10;
     s_rc.counts[1] = 20;
     s_rc.dirty = true;
-    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush -- file and NVS agree at rev 1");
+    TEST_CHECK(relay_cycles_flush() == ESP_OK, "flush -- file written at rev 1");
 
     /* (a) status: file padding 0xAA, NVS padding 0x55, same content, same rev. */
     relay_cycles_blob_t fb;
@@ -1361,9 +1456,9 @@ static void test_reset_snapshot_refuses_out_of_range_relay(void)
 void run_test_relay_cycles(void)
 {
     g_test_stub_semaphore_take_default = 1; // pdTRUE -- see comment above test_maybe_persist_skips_...
-    test_persist_locked_refuses_when_calling_stack_is_external_ram();
+    test_persist_snapshot_refuses_when_calling_stack_is_external_ram();
     test_persist_lock_created_and_back_to_back_persists_keep_the_latest_write();
-    test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
+    test_persist_snapshot_proceeds_normally_on_an_internal_ram_stack();
     test_budget_ssr_has_no_budget();
     test_budget_quantized_thresholds();
     test_budget_override_wins_over_table();
@@ -1387,7 +1482,8 @@ void run_test_relay_cycles(void)
     test_restore_all_allow_lower_mask_overrides_one_relay_only();
     test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy();
 
-    test_cfg_fs_partition_absent_behaves_like_before();
+    test_cfg_fs_partition_absent_fails_loud_and_still_loads_legacy();
+    test_cfg_write_failure_is_loud_and_rev_unadvanced();
     test_cfg_fs_migrates_nvs_value_to_file_then_prefers_it();
     test_cfg_fs_dual_write_stays_in_sync_across_repeated_flushes();
     test_cfg_fs_divergence_tie_break_strict_greater_than();

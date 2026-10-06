@@ -8276,14 +8276,24 @@ static void test_dwell_credit_spend_no_active_zones_returns_zero(void)
     TEST_CHECK(spend == 0.0f, "nothing to spend when nothing is active");
 }
 
+/* Firing-stats saves are cfg-file-only since the NVS dual-write close: every
+ * test that persists needs a freshly mounted cfg scratch directory. Defined
+ * further down with the cfg_fs section's own scratch helpers. */
+static const char *FS_SCRATCH_BASE;
+static void reset_all_fscf(void);
+static void fs_fresh_mounted(void)
+{
+    reset_all_fscf();
+    (void)cfg_fs_init(FS_SCRATCH_BASE, NULL);
+}
+
 static void test_firing_stats_persist_load_round_trip_and_ring_depth(void)
 {
     TEST_SECTION("firing_stats_persist()/profile_executor_get_firing_history() -- round-trips a run record "
                  "through NVS, newest-first, and keeps only the last "
                  "PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH entries per profile");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     // Write PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH + 2 runs for the same
     // profile, each carrying a distinguishable duration_s so the ring order
@@ -8344,8 +8354,7 @@ static void test_firing_stats_load_migrates_known_old_size_blob(void)
                  "of the current layout and the tail is zero-filled, rather than the whole ring being "
                  "discarded (docs/audits/firing_history_blob_versioning_2026-09-07.md option (b)).");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     // Build a full-size blob with real content, then persist only its first
     // PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 bytes -- simulating "this is what
@@ -8392,8 +8401,7 @@ static void test_firing_stats_load_discards_unknown_size_blob(void)
                  "layout nor the one known prior (V1) size is discarded, loudly (this is the "
                  "'garbage/unknown size' branch -- distinct from the V1-migration branch above).");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     uint8_t garbage[PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 - 4]; // neither current nor V1 size
     memset(garbage, 0x5A, sizeof(garbage));
@@ -8432,8 +8440,7 @@ static void test_firing_stats_last_run_cache_hit_avoids_nvs_reads(void)
                  "the cache directly, so every subsequent call for that id is a cache hit and "
                  "touches no NVS at all (the O(1)-per-request fix this pass adds).");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     profile_firing_run_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -8467,8 +8474,7 @@ static void test_firing_stats_last_run_cache_first_miss_then_hit(void)
                  "writing the NVS blob directly, bypassing firing_stats_persist()) is a real, "
                  "correct load; every lookup after that is a cache hit.");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     profile_firing_history_blob_t blob;
     memset(&blob, 0, sizeof(blob));
@@ -8515,8 +8521,7 @@ static void test_firing_stats_last_run_cache_invalidated_on_persist_and_erase(vo
                  "writer/eraser of \"fs_<id>\", so it is also the one place that must keep the "
                  "cache in step).");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     profile_firing_run_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -8572,8 +8577,7 @@ static void test_firing_stats_cache_invalidate_all_after_partition_erase(void)
                  "(factory_reset.c, which never calls firing_stats_erase()) must not leave "
                  "GET /api/profiles serving pre-erase last-run timestamps out of the RAM cache.");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     profile_firing_run_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -8587,9 +8591,14 @@ static void test_firing_stats_cache_invalidate_all_after_partition_erase(void)
                "precondition: the persisted run is cached");
 
     // The erase factory_reset.c actually performs: the whole partition, with
-    // no per-id firing_stats_erase() anywhere in that path.
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    // no per-id firing_stats_erase() anywhere in that path, plus the profiles
+    // scope's cfg file cleanup (the file is now the only copy).
+    fs_fresh_mounted();
+    {
+        char rel[40];
+        firing_stats_cfg_fs_path(4, rel, sizeof(rel));
+        (void)cfg_fs_delete(rel);
+    }
     TEST_CHECK(profile_executor_last_run_started_unix_s(4) == 4242u,
                "without invalidation the cache DOES keep serving the pre-erase value -- this is "
                "the defect being guarded, asserted so the guard cannot go vacuous");
@@ -8609,8 +8618,7 @@ static void test_firing_stats_persist_refuses_when_calling_stack_is_external_ram
                  "halt paths -- the same task DRAM_PSRAM_PLAN.md section 7 names as its "
                  "highest-care relocation candidate.");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     profile_firing_run_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -8641,8 +8649,7 @@ static void test_firing_stats_persist_proceeds_normally_on_an_internal_ram_stack
     TEST_SECTION("firing_stats_persist -- proceeds normally when the calling task's stack is "
                  "internal RAM");
 
-    fake_kv_reset_all();
-    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    fs_fresh_mounted();
 
     profile_firing_run_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -11062,48 +11069,86 @@ static profile_firing_run_record_t make_fscf_record(uint8_t profile_id, uint32_t
     return rec;
 }
 
+/* Stages what a LEGACY (pre dual-write-close) firmware left in NVS for one
+ * profile id: a one-run history blob plus its fsr_<id> rev key. Nothing in
+ * production writes these keys any more. */
+static void stage_legacy_fscf(uint8_t profile_id, uint32_t started, uint32_t duration, uint32_t rev)
+{
+    static profile_firing_history_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.count = 1;
+    blob.runs[0] = make_fscf_record(profile_id, started, duration);
+    char key[16];
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, FIRING_STATS_NVS_PARTITION) ==
+                   HAL_OK,
+               "stage legacy: open NVS");
+    snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
+    TEST_CHECK(hal_kv_set_blob(&h, key, &blob, sizeof(blob)) == HAL_OK, "stage legacy: blob");
+    snprintf(key, sizeof(key), "fsr_%u", (unsigned)profile_id);
+    TEST_CHECK(hal_kv_set_u32(&h, key, rev) == HAL_OK, "stage legacy: rev");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "stage legacy: commit");
+    hal_kv_close(&h);
+}
+
 static void test_fscf_partition_absent_behaves_like_before(void)
 {
-    TEST_SECTION("firing stats cfg_fs: partition absent -- load/persist behave exactly like NVS-only");
+    TEST_SECTION("firing stats cfg_fs: partition absent -- a legacy NVS history still loads, a persist "
+                 "fails loud and never falls back to NVS");
     reset_all_fscf();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
 
-    profile_firing_run_record_t rec = make_fscf_record(5, 1000, 900);
-    firing_stats_persist(&rec);
+    stage_legacy_fscf(5, 1000, 900, 1);
+    profile_firing_run_record_t rec = make_fscf_record(5, 5000, 100);
+    firing_stats_persist(&rec); // no cfg partition: nothing may be written anywhere
 
     profile_firing_history_blob_t out;
     TEST_CHECK(firing_stats_load(5, &out), "load succeeds with no `cfg` partition mounted");
-    TEST_CHECK(out.count == 1 && out.runs[0].profile_id == 5, "run reloads from NVS alone");
+    TEST_CHECK(out.count == 1 && out.runs[0].profile_id == 5 && out.runs[0].run_started_unix_s == 1000,
+               "the legacy run reloads from NVS alone and the failed persist did not touch it");
 }
 
 static void test_fscf_migrates_then_prefers_file(void)
 {
-    TEST_SECTION("firing stats cfg_fs: NVS fallback migrates to file; a later load prefers the file");
+    TEST_SECTION("firing stats cfg_fs: a legacy NVS history migrates to the file on first load; the file "
+                 "carries it afterward");
     reset_all_fscf();
     TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
 
-    profile_firing_run_record_t rec = make_fscf_record(7, 2000, 1800);
-    firing_stats_persist(&rec); // dual-write: file first, then NVS
+    stage_legacy_fscf(7, 2000, 1800, 1);
+    profile_firing_history_blob_t out;
+    TEST_CHECK(firing_stats_load(7, &out), "first load adopts the legacy NVS history");
+    TEST_CHECK(out.count == 1 && out.runs[0].run_started_unix_s == 2000, "loaded run matches the legacy one");
 
     char path[64];
     firing_stats_cfg_fs_path(7, path, sizeof(path));
     bool exists = false;
-    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && exists, "the persist's dual-write actually created the file");
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && exists, "the first load migrated it into the file");
 
-    profile_firing_history_blob_t out;
-    TEST_CHECK(firing_stats_load(7, &out), "reload succeeds");
-    TEST_CHECK(out.count == 1 && out.runs[0].run_started_unix_s == 2000, "reloaded run matches what was persisted");
+    // NVS gone entirely: the file alone must carry the history.
+    fake_kv_reset_all();
+    hal_kv_init_partition(FIRING_STATS_NVS_PARTITION);
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(firing_stats_load(7, &out), "reload succeeds from the file alone");
+    TEST_CHECK(out.count == 1 && out.runs[0].run_started_unix_s == 2000, "reloaded run matches");
 
     profile_firing_history_blob_t raw;
     uint32_t rev = 0;
     bool valid = false;
     firing_stats_cfg_fs_load_raw(7, &raw, &rev, &valid);
-    TEST_CHECK(valid && rev == 1, "the file holds a rev-1 copy after one persist");
+    TEST_CHECK(valid, "the file holds a valid copy");
+
+    // An ordinary persist now lands in the file only.
+    profile_firing_run_record_t rec = make_fscf_record(7, 3000, 100);
+    firing_stats_persist(&rec);
+    firing_stats_cfg_fs_load_raw(7, &raw, &rev, &valid);
+    TEST_CHECK(valid && raw.count == 2 && raw.runs[0].run_started_unix_s == 3000,
+               "a persist after the migration extends the ring in the file");
 }
 
 static void test_fscf_dual_write_stays_in_sync_across_repeated_persists(void)
 {
-    TEST_SECTION("firing stats cfg_fs: repeated persists keep file and NVS in sync (incrementing rev, "
+    TEST_SECTION("firing stats cfg_fs: repeated persists write the file only (incrementing rev, "
                  "growing the ring)");
     reset_all_fscf();
     TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
@@ -11123,7 +11168,7 @@ static void test_fscf_dual_write_stays_in_sync_across_repeated_persists(void)
     profile_firing_history_blob_t out;
     TEST_CHECK(firing_stats_load(9, &out), "reload");
     TEST_CHECK(out.count == 3 && out.runs[0].run_started_unix_s == 3000,
-               "NVS agrees with the file after three dual-writes");
+               "a reload returns the same ring from the file");
 }
 
 // NEGATIVE TEST (per this task's brief -- exercised here via write-fn
@@ -11138,8 +11183,8 @@ static esp_err_t fscf_failing_write_fn(const char *rel_path, const void *data, s
 
 static void test_fscf_negative_no_file_write_means_file_never_catches_up(void)
 {
-    TEST_SECTION("firing stats cfg_fs NEGATIVE TEST: skipped file write leaves the file permanently "
-                 "behind -- firing history is never silently discarded either way (NVS keeps carrying it)");
+    TEST_SECTION("firing stats cfg_fs NEGATIVE TEST: a failed cfg write leaves no history anywhere and "
+                 "never falls back to NVS");
     reset_all_fscf();
     TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
 
@@ -11152,14 +11197,14 @@ static void test_fscf_negative_no_file_write_means_file_never_catches_up(void)
     uint32_t rev = 0;
     bool valid = false;
     firing_stats_cfg_fs_load_raw(11, &raw, &rev, &valid);
-    TEST_CHECK(!valid, "with the file write skipped, the file never catches up");
+    TEST_CHECK(!valid, "with the file write failing, the file never catches up");
 
-    // Crucially, the history is NOT lost -- NVS still carries it, and
-    // firing_stats_load() must still return it (never discard it).
+    // The history was NOT written to NVS as a fallback: a load reports an
+    // empty (never fired) history, successfully.
     profile_firing_history_blob_t out;
+    memset(&out, 0xAA, sizeof(out));
     TEST_CHECK(firing_stats_load(11, &out), "load still succeeds");
-    TEST_CHECK(out.count == 1 && out.runs[0].profile_id == 11,
-               "the run is NOT lost -- NVS alone is carrying it, and firing_stats_load() still returns it");
+    TEST_CHECK(out.count == 0, "nothing fell back to NVS -- the failed write left no history anywhere");
 }
 
 /* 2026-09-08 REGRESSION (docs/audits/firing_history_stack_overflow_2026-09-08.md):
@@ -11244,7 +11289,7 @@ static void test_fscf_history_read_uses_the_heap_not_the_httpd_stack(void)
 static void test_firing_stats_erase_deletes_file_and_nvs(void)
 {
     TEST_SECTION("firing_stats_erase() -- real firing_stats_cfg_fs_delete(): a persisted run's file and "
-                 "NVS blob are both gone afterward, and the read path reports no history");
+                 "any legacy NVS blob are both gone afterward, and the read path reports no history");
     reset_all_fscf();
     TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
 
@@ -11255,6 +11300,7 @@ static void test_firing_stats_erase_deletes_file_and_nvs(void)
     firing_stats_cfg_fs_path(13, path, sizeof(path));
     bool exists = false;
     TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && exists, "the persist created a file for id 13");
+    stage_legacy_fscf(13, 100, 10, 1); // a stale legacy NVS copy must not resurrect after the erase
 
     firing_stats_erase(13);
 
@@ -11302,11 +11348,10 @@ static void test_firing_stats_erase_never_fired_id_is_a_safe_no_op(void)
 static void test_firing_stats_erase_degrades_when_cfg_fs_unmounted(void)
 {
     TEST_SECTION("firing_stats_erase() -- cfg_fs UNMOUNTED: the file half degrades to a no-op "
-                 "(cfg_fs_is_available() false), but the NVS half still runs and behaves like before");
+                 "(cfg_fs_is_available() false), but the legacy NVS half is still erased");
     reset_all_fscf(); // deliberately no cfg_fs_init() -- partition absent for this test
 
-    profile_firing_run_record_t rec = make_fscf_record(13, 6000, 100);
-    firing_stats_persist(&rec); // NVS-only dual-write half, same as test_fscf_partition_absent_behaves_like_before()
+    stage_legacy_fscf(13, 6000, 100, 1);
 
     profile_firing_history_blob_t out;
     TEST_CHECK(firing_stats_load(13, &out) && out.count == 1, "the NVS-only record reads back before erase");

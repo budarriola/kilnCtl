@@ -247,6 +247,35 @@ static inline void nvs_test_enable(bool enable)
                   // in this file MUST keep the enable(true)/nvs_test_clear() bracket regardless.
 }
 
+// Saves are cfg-file-only since the NVS dual-write close, so every persistence
+// test needs a mounted cfg scratch directory. This wipes it between tests so a
+// leftover file never wins over NVS staged by the next test.
+#ifdef _WIN32
+#include <direct.h>
+#define ZH_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define ZH_MKDIR(p) mkdir((p), 0755)
+#endif
+#include "cfg_fs.h"
+static const char *ZH_CFG_SCRATCH = "cfg_fs_test_zones_http";
+
+static inline void zh_cfg_remount_fresh(void)
+{
+    if (cfg_fs_is_available()) {
+        cfg_fs_entry_t ents[32];
+        size_t n = 0;
+        if (cfg_fs_list("", ents, 32, &n) == ESP_OK) {
+            for (size_t i = 0; i < n; i++) {
+                (void)cfg_fs_delete(ents[i].name);
+            }
+        }
+    }
+    cfg_fs_deinit();
+    (void)ZH_MKDIR(ZH_CFG_SCRATCH);
+    (void)cfg_fs_init(ZH_CFG_SCRATCH, NULL);
+}
+
 static inline void nvs_test_clear(void)
 {
     // Called both right after nvs_test_enable(true) (to guarantee a clean
@@ -255,6 +284,7 @@ static inline void nvs_test_clear(void)
     // effect the old stub's nvs_test_clear() gave.
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
+    zh_cfg_remount_fresh();
 }
 
 // ---- Embedded-page symbols page_get_handler() references ------------------
@@ -2722,15 +2752,18 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
     (void)zones_http_start(); // ESP_ERR_INVALID_STATE from the stub HTTP server is expected/ignored --
                               // the NVS load/migrate/persist logic under test already ran by then.
 
-    hal_kv_handle_t readback_h;
-    hal_status_t readback_err = hal_kv_open(&readback_h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    // The cfg file is the only store written now: 4-byte LE rev + raw blob.
+    uint8_t readback_file[sizeof(zones_cfg_t) + 4];
+    size_t readback_file_len = 0;
+    esp_err_t readback_ferr = cfg_fs_read(ZONES_CFG_FILE_PATH, readback_file, sizeof(readback_file),
+                                          &readback_file_len);
+    hal_status_t readback_err = (readback_ferr == ESP_OK && readback_file_len >= 4) ? HAL_OK : HAL_IO;
     uint8_t readback[sizeof(zones_cfg_t)];
-    size_t readback_len = sizeof(readback);
-    if (readback_err == HAL_OK) {
-        readback_err = hal_kv_get_blob(&readback_h, NVS_KEY_ZONES, readback, &readback_len);
-        hal_kv_close(&readback_h);
+    size_t readback_len = readback_file_len >= 4 ? readback_file_len - 4 : 0;
+    if (readback_err == HAL_OK && readback_len <= sizeof(readback)) {
+        memcpy(readback, readback_file + 4, readback_len);
     }
-    TEST_CHECK(readback_err == HAL_OK, "the migrated blob must actually be readable back from flash");
+    TEST_CHECK(readback_err == HAL_OK, "the migrated blob must actually be readable back from the cfg file");
     TEST_CHECK(readback_len == sizeof(zones_cfg_t),
               "the persisted blob must be full current-version size, not the old v1 size still sitting there");
     TEST_CHECK(readback[0] == ZONES_CFG_VERSION,
@@ -2760,6 +2793,14 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
 // docs/audits/boot_guard_recovery_loop_2026-09-08.md that motivated the
 // read-back-verified pattern this function copies) must latch the fault; an
 // ordinary successful migration (the test above) must NOT.
+static esp_err_t zh_failing_cfg_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
 static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
 {
     TEST_SECTION("zones_config_get_migration_persist_fault -- latches when the migrated blob's "
@@ -2787,16 +2828,10 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     src.zones[0].max_temp_c = 1000.0f;
     stage_zones_blob(&src, sizeof(src));
 
-    // Arm BOTH write-back attempts (zones_config_persist_migrated_blob_verified()'s
-    // bounded retry loop tries up to 2 times) to lie -- report HAL_OK while
-    // leaving the key's persisted value untouched, so the read-back inside
-    // that function can never match and it must exhaust its retry and give up.
-    // 4, not 2: nvs_save() makes TWO set-shaped calls per attempt
-    // (hal_kv_set_blob(NVS_KEY_ZONES) then hal_kv_set_u32(NVS_KEY_ZONES_REV)) --
-    // arming only 2 lies covers just attempt 0's pair, leaving attempt 1 to
-    // write for real and defeat this test (found by running it: it failed
-    // with the fault never latching, because attempt 1 silently succeeded).
-    fake_kv_script_silent_set_noops(4);
+    // Sabotage the cfg write so BOTH write-back attempts
+    // (zones_config_persist_migrated_blob_verified()'s bounded retry loop
+    // tries up to 2 times) fail and the verification can never succeed.
+    zones_config_cfg_fs_set_write_fn(zh_failing_cfg_write_fn);
 
     s_zones_config_valid = false;
     (void)zones_http_start();
@@ -2807,6 +2842,7 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     TEST_CHECK(fault.on_disk_version == 1, "the latched fault must name the pre-migration on-disk version");
     TEST_CHECK(fault.fw_version == ZONES_CFG_VERSION,
               "the latched fault must name the firmware version the migration was TO, not a stale value");
+    zones_config_cfg_fs_reset_write_fn_for_test();
 
     nvs_test_enable(false);
     nvs_test_clear();

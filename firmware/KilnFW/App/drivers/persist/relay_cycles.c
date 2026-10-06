@@ -297,39 +297,9 @@ static bool caller_stack_is_external(void)
     return !hal_kv_write_safe_here();
 }
 
-static hal_status_t persist_locked(void)
-{
-    if (caller_stack_is_external()) {
-        ESP_LOGE(TAG, "persist_locked: REFUSING -- calling task's stack is in external RAM "
-                      "(PSRAM). A flash/NVS write from here would abort the whole board "
-                      "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
-                      "through a task with an internal-SRAM stack instead -- see "
-                      "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
-                      "worker for the established pattern.");
-        return HAL_NOT_READY;
-    }
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
-    }
-    relay_cycles_blob_t blob;
-    memset(&blob, 0, sizeof(blob)); /* padding is written to flash; keep it deterministic */
-    blob.version = RELAY_CYCLES_VERSION;
-    memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
-    memcpy(blob.types, s_rc.types, sizeof(blob.types));
-    memcpy(blob.rated_overrides, s_rc.rated_overrides, sizeof(blob.rated_overrides));
-    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err == HAL_OK) {
-        s_rc.dirty = false;
-        s_rc.last_persist_us = (int64_t)hal_time_now_us();
-    }
-    return err;
-}
+/* (persist_locked(), a rev-less NVS-only writer with no remaining caller, was
+ * removed when the dual-write window closed -- persist_snapshot() below is the
+ * one writer, and it writes the cfg file only.) */
 
 esp_err_t relay_cycles_init(void)
 {
@@ -723,12 +693,12 @@ typedef struct {
  * item uses (ramp_assist_cfg.c etc). The rev key is written in the SAME NVS
  * transaction as the blob so a torn write can never leave rev ahead of a
  * blob that was never actually committed. */
-static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
+static esp_err_t persist_snapshot(const reset_persist_job_arg_t *snap)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "persist_snapshot: REFUSING -- calling task's stack is in external RAM "
                       "(PSRAM). See persist_locked()'s identical guard comment in this file.");
-        return HAL_NOT_READY;
+        return ESP_ERR_INVALID_STATE;
     }
 
     relay_cycles_blob_t blob;
@@ -747,26 +717,8 @@ static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
     memcpy(blob.types, snap->types, sizeof(blob.types));
     memcpy(blob.rated_overrides, snap->rated_overrides, sizeof(blob.rated_overrides));
 
-    esp_err_t file_err = pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &blob, sizeof(blob), snap->rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "relay cycle counts file write failed: %s -- NVS remains the source of truth "
-                      "this boot", esp_err_to_name(file_err));
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_CYCLES_REV, snap->rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    return err;
+    /* cfg file ONLY -- docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed". */
+    return pref_cfg_fs_commit(RELAY_CYCLES_FILE_PATH, &blob, sizeof(blob), snap->rev, "relay cycle counts");
 }
 
 /* The job run ON the flash worker's own internal-SRAM stack -- see
@@ -783,7 +735,7 @@ typedef struct {
 static void reset_persist_job(void *arg)
 {
     reset_persist_job_ctx_t *ctx = (reset_persist_job_ctx_t *)arg;
-    ctx->err = hal_status_to_esp_err(persist_snapshot(ctx->snap));
+    ctx->err = persist_snapshot(ctx->snap);
 }
 
 /* THE one owning copy of this module's snapshot head, shared by EVERY writer

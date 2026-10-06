@@ -46,6 +46,13 @@
 #include "fake_kv.h"
 #include "hal_kv.h"
 
+#ifdef _WIN32
+#include <direct.h>
+#define ZBG_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define ZBG_MKDIR(p) mkdir((p), 0755)
+#endif
 #include "cfg_fs.h"
 #include "zones_config_cfg_fs.h"
 #include "zones_http_internal.h" /* s_zones, nvs_save(), NVS_NAMESPACE/NVS_KEY_ZONES */
@@ -304,6 +311,11 @@ static void test_zones_blob_golden_matches_firmware_layout(void)
     zones_config_cfg_fs_reset_write_fn_for_test();
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
+    /* Saves go to the cfg file only (NVS dual-write closed): mount a scratch
+     * directory and start from no zones file. */
+    (void)ZBG_MKDIR("cfg_fs_test_zones_golden");
+    TEST_CHECK(cfg_fs_init("cfg_fs_test_zones_golden", NULL) == ESP_OK, "zones blob golden: cfg_fs mounts");
+    (void)cfg_fs_delete(ZONES_CFG_FILE_PATH);
 
     s_text_len = 0;
     s_text[0] = '\0';
@@ -324,12 +336,16 @@ static void test_zones_blob_golden_matches_firmware_layout(void)
     TEST_CHECK(nvs_save() == ESP_OK, "zones blob golden: real nvs_save() succeeds");
 
     uint8_t blob[sizeof(zones_cfg_t)];
-    size_t len = sizeof(blob);
-    hal_kv_handle_t h;
-    bool read_ok = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK;
-    read_ok = read_ok && hal_kv_get_blob(&h, NVS_KEY_ZONES, blob, &len) == HAL_OK;
-    hal_kv_close(&h);
-    TEST_CHECK(read_ok && len == sizeof(zones_cfg_t), "zones blob golden: blob reads back from NVS at full size");
+    static uint8_t filebuf[4 + sizeof(zones_cfg_t)];
+    size_t len = 0;
+    bool read_ok = cfg_fs_read(ZONES_CFG_FILE_PATH, filebuf, sizeof(filebuf), &len) == ESP_OK;
+    if (read_ok && len >= 4) {
+        len -= 4; /* 4-byte LE rev prefix */
+        memcpy(blob, filebuf + 4, len < sizeof(blob) ? len : sizeof(blob));
+    } else {
+        read_ok = false;
+    }
+    TEST_CHECK(read_ok && len == sizeof(zones_cfg_t), "zones blob golden: blob reads back from the cfg file at full size");
     if (!read_ok || len != sizeof(zones_cfg_t)) {
         return;
     }

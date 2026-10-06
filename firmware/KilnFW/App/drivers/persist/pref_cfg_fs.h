@@ -139,6 +139,19 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
 // exceeds PREF_CFG_FS_MAX_ITEM.
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev);
 
+// The persistence step of every preference setter since the dual-write window
+// closed (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"): the cfg file
+// is the ONLY place a save goes -- no NVS write follows it, and a failure here
+// is never papered over by one. pref_cfg_fs_save() (cfg_fs_write_atomic()'s
+// temp-file/rename/read-back-verify underneath) plus a loud ESP_LOGE naming
+// `what` on any failure, INCLUDING ESP_ERR_INVALID_STATE (cfg not mounted):
+// before the close that code was an expected non-error because NVS carried the
+// save; now it means the setting was NOT persisted. The caller must return the
+// error to its own caller and must NOT advance its in-RAM rev counter on
+// failure.
+esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev,
+                             const char *what);
+
 #ifdef __cplusplus
 }
 #endif

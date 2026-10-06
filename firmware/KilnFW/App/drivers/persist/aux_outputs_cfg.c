@@ -280,35 +280,12 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
     }
 
     uint32_t new_rev = s_rev + 1;
-    esp_err_t file_err = pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "aux outputs file write failed: %s -- NVS remains the source of truth",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        return hal_status_to_esp_err(part_err);
-    }
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_AUX_OUT, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_AUX_OUT_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "could not persist aux outputs: %s -- will not survive a reboot", hal_status_to_name(err));
-    } else {
+    /* cfg file ONLY -- docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed". */
+    esp_err_t err = pref_cfg_fs_commit(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), new_rev, "aux outputs");
+    if (err == ESP_OK) {
         s_rev = new_rev;
     }
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 #define NVS_KEY_AUX_JRNL "aux_conv_jrnl"

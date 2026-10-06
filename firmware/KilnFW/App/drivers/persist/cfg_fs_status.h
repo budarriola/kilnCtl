@@ -57,6 +57,10 @@ typedef struct {
     bool        nvs_valid;
     uint32_t    nvs_rev;
     bool        diverged;
+    /* true iff the legacy NVS copy is valid, differs in content and has a
+     * strictly LOWER rev than the file (see cfg_fs_status_item_nvs_stale()).
+     * Mutually exclusive with `diverged`. */
+    bool        nvs_stale;
     /* 2026-09-08 (hardware verification 3e226f28): true iff this item's
      * boot-time migrate-on-load write was attempted before the flash-safe
      * worker existed and the bounded wait (flash_worker_wait.h) gave up --
@@ -85,7 +89,7 @@ typedef struct {
  * (diagnostics_http.c's cfgfs_status_scratch_t). Shared so the worst-case
  * host test in test_cfg_fs_status.c sizes its buffer from the same constant
  * the handler uses, rather than a second literal that could drift. */
-#define CFG_FS_STATUS_HANDLER_JSON_BUF 4096u
+#define CFG_FS_STATUS_HANDLER_JSON_BUF 4608u
 
 /* THE single definition of "this item's file and NVS copies disagree",
  * shared by every caller so a future bridge cannot invent a second one.
@@ -100,6 +104,16 @@ typedef struct {
  * entirely. Callers must therefore pass the real result of comparing
  * decoded file vs. NVS bytes, never infer it from revs. */
 bool cfg_fs_status_item_diverged(bool file_valid, bool nvs_valid, bool content_equal);
+
+/* NVS-dual-write close (docs/CONFIG_FILESYSTEM.md "NVS dual-write closed"):
+ * saves go to the cfg file only, so the legacy NVS copy of an item that was
+ * saved after the upgrade is simply OLD. Given the raw result of
+ * cfg_fs_status_item_diverged() and both revs, this is true when the file's
+ * rev is STRICTLY higher: that is "nvs_stale" (expected, harmless, only an
+ * older rollback firmware would read it), not a divergence. An equal rev, or
+ * an NVS rev ahead of the file, with differing content stays a real
+ * divergence (check_cfg_fs_tie_break.ps1's dangerous case). */
+bool cfg_fs_status_item_nvs_stale(bool raw_diverged, uint32_t file_rev, uint32_t nvs_rev);
 
 /* Boot-hang-2026-09-08 follow-up (docs/audits/boot_hang_2026-09-08.md, "A
  * bounded-time format... would be the more robust fix"): the auto-format

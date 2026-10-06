@@ -129,6 +129,18 @@ esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_
     return err;
 }
 
+esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev,
+                             const char *what)
+{
+    esp_err_t err = pref_cfg_fs_save(rel_path, bytes, item_size, rev);
+    if (err != ESP_OK) {
+        ESP_LOGE(PREF_FS_TAG, "%s NOT persisted: cfg write of %s (rev %lu) failed: %s -- NVS is no longer written, "
+                              "the value lives in RAM until reboot",
+                 what ? what : "setting", rel_path ? rel_path : "?", (unsigned long)rev, esp_err_to_name(err));
+    }
+    return err;
+}
+
 bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,
                           uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes, uint32_t *out_rev,
                           bool *out_used_file)

@@ -164,6 +164,19 @@ esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other h
 #include "web_auth_store.h"
 #include "update_settings.h"
 #include "fake_kv.h"
+#include "cfg_fs.h"
+#include "pref_cfg_fs.h"
+#include "kiln_cfg_store_cfg_fs.h"
+#ifdef _WIN32
+#include <direct.h>
+#define BI_MKDIR(p) _mkdir(p)
+#define BI_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define BI_MKDIR(p) mkdir((p), 0755)
+#define BI_RMDIR(p) rmdir(p)
+#endif
 #include "psa/crypto.h"
 psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
@@ -693,8 +706,45 @@ static profile_t g_last_saved_profile;
 static bool s_profile_present[PROFILES_MAX_COUNT];
 static profile_t s_profile_slots[PROFILES_MAX_COUNT];
 
+/* Config saves go to the `cfg` partition ONLY now (docs/CONFIG_FILESYSTEM.md,
+ * NVS dual-write close), so every test that persists something needs a mounted
+ * scratch cfg. Each call starts from an EMPTY one: leftover files from an
+ * earlier test would otherwise win over a freshly wiped NVS. */
+static const char *BI_SCRATCH_BASE = "cfg_fs_test_backup_import";
+
+static esp_err_t bi_failing_cfg_write(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
+static void bi_mount_fresh_cfg(void)
+{
+    static const char *const files[] = { KILN_CFG_STORE_FILE_PATH, UPDATE_SETTINGS_FILE_PATH };
+    char path[600];
+    cfg_fs_deinit();
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        snprintf(path, sizeof(path), "%s/.tmp/%s", BI_SCRATCH_BASE, files[i]);
+        remove(path);
+        snprintf(path, sizeof(path), "%s/%s", BI_SCRATCH_BASE, files[i]);
+        remove(path);
+    }
+    snprintf(path, sizeof(path), "%s/.tmp", BI_SCRATCH_BASE);
+    BI_RMDIR(path);
+    BI_RMDIR(BI_SCRATCH_BASE);
+    BI_MKDIR(BI_SCRATCH_BASE);
+    pref_cfg_fs_reset_write_fn_for_test();
+    kiln_cfg_store_cfg_fs_reset_write_fn_for_test();
+    if (cfg_fs_init(BI_SCRATCH_BASE, NULL) != ESP_OK) {
+        TEST_CHECK(false, "setup: the scratch cfg mounts");
+    }
+}
+
 static void reset_stub_state(void)
 {
+    bi_mount_fresh_cfg();
     test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test();
     memset(s_writes, 0, sizeof(s_writes));
     /* Real decoded zones configs never leave a zone's settings_source at raw
@@ -5416,6 +5466,7 @@ static void test_backup_tuning_float_matches_huge_values(void)
 // ---- WP9 (docs/GITHUB_RELEASE_UPDATE_PLAN.md): the "update_repo" key ----
 static void wp9_fresh_repo_setting(void)
 {
+    bi_mount_fresh_cfg();
     fake_kv_reset_all();
     hal_kv_init_partition("kiln_nvs");
     update_settings_reset_ram_for_test();
@@ -5517,6 +5568,10 @@ static void test_update_repo_export_round_trip(void)
         bool ok = test_backup_import_apply(saved, err, sizeof(err));
         TEST_CHECK(ok, "the exported document imports back");
         TEST_CHECK(strcmp(update_settings_repo(), "round/trip-repo") == 0, "the repo is restored from the backup");
+        // cfg-file-only saves (NVS dual-write close): neither the set()s nor the import wrote NVS.
+        bool nvs_has_copy = true;
+        update_settings_get_dualwrite_status(NULL, NULL, &nvs_has_copy, NULL, NULL);
+        TEST_CHECK(!nvs_has_copy, "set()/import saved to the cfg file only: no NVS copy was written");
         free(saved);
     }
 }
@@ -5630,8 +5685,9 @@ static void test_update_settings_http_post(void)
     s_test_autotune_running_for_mode_gate = false;
 
     // Persist failure: reported as a 500, never as success.
-    fake_kv_script_next_write_status(HAL_IO);
+    pref_cfg_fs_set_write_fn(bi_failing_cfg_write);
     wp9_http_post("repo=flaky%2Fwrite");
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(strcmp(s_post_last_status, "500 Internal Server Error") == 0, "a failed persist gets 500");
     TEST_CHECK(strstr(s_send_last_body, "\"ok\":false") != NULL, "the 500 body says ok:false");
 
@@ -5705,11 +5761,10 @@ static void test_update_repo_default_value_is_unset(void)
     TEST_CHECK(update_settings_repo_is_default(), "the default is in use afterwards");
     tus_blob_probe_t probe;
     memset(&probe, 0xAB, sizeof(probe));
-    hal_kv_handle_t h;
-    hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, "kiln_nvs");
-    size_t len = sizeof(probe);
-    TEST_CHECK(hal_kv_get_blob(&h, "update_repo", &probe, &len) == HAL_OK, "the blob exists");
-    hal_kv_close(&h);
+    uint32_t probe_rev = 0;
+    bool probe_ok = false;
+    pref_cfg_fs_load_raw(UPDATE_SETTINGS_FILE_PATH, sizeof(probe), NULL, &probe, &probe_rev, &probe_ok);
+    TEST_CHECK(probe_ok, "the cfg file exists");
     TEST_CHECK(probe.repo[0] == '\0', "stored as empty, not as the default string");
 
     // Already default: an empty update_repo imports again and stays default.
@@ -5779,9 +5834,10 @@ static void test_update_repo_persist_failure_is_partial_write(void)
     kiln_cfg_plan_t plan;
     bool partial = false;
     char err[160] = "";
-    fake_kv_script_next_write_status(HAL_IO);
+    pref_cfg_fs_set_write_fn(bi_failing_cfg_write);
     bool ok = wp9_apply_full(",\"update_repo\":\"someone/fork\"", KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial,
                              err, sizeof(err));
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(!ok, "a failed update_repo persist fails the restore");
     TEST_CHECK(partial, "it is reported as a partial write (the handler turns this into the 500)");
     TEST_CHECK(strstr(err, "update_repo") != NULL, "the error names update_repo");

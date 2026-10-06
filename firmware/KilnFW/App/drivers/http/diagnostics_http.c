@@ -1433,10 +1433,10 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * iter_tune.bin, relay_cycles.dat, relay_names.dat, zone_normals.dat) with
  * multi-digit sizes ~470 B. Measured total: 3153 B (3123 B rendered plus 30 B
  * for the longest esp_err name), which would leave only ~0 B in the old 3072 B
- * buffer, so the buffer is 4096 B (CFG_FS_STATUS_HANDLER_JSON_BUF, about
- * 940 B spare). test_cfg_fs_status.c's test_worst_case_fits_handler_buffer renders
+ * buffer, so the buffer is now 4608 B (CFG_FS_STATUS_HANDLER_JSON_BUF; raised from
+ * 4096 B when item rows gained nvs_stale). test_cfg_fs_status.c's test_worst_case_fits_handler_buffer renders
  * exactly this worst case through cfg_fs_status_build_json_ex(), the same
- * entry point this handler uses, and requires >= 400 B of margin in 4096 B,
+ * entry point this handler uses, and requires >= 400 B of margin in 4608 B,
  * so a future row or file that eats that margin fails the host test rather
  * than the board. The buffer is part of this heap scratch, never an httpd
  * stack buffer, so growing it costs no task-stack margin. A pathological
@@ -1455,18 +1455,30 @@ typedef struct {
  * full array (n == CFG_FS_STATUS_MAX_ITEMS) silently drops further rows --
  * see cfg_fs_status.h's CFG_FS_STATUS_MAX_ITEMS comment; today's fixed set
  * of 15 items sits well under that cap. */
-static void cfgfs_add_item_ex(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
-                               uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged,
-                               bool migration_deferred)
+static void cfgfs_add_item_full(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
+                                 uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged,
+                                 bool nvs_stale, bool migration_deferred)
 {
     if (*n >= CFG_FS_STATUS_MAX_ITEMS) {
         return;
     }
     items[*n] = (cfg_fs_dualwrite_item_t){
         .name = name, .file_valid = file_valid, .file_rev = file_rev, .nvs_valid = nvs_valid, .nvs_rev = nvs_rev,
-        .diverged = diverged, .migration_deferred = migration_deferred,
+        .diverged = diverged, .nvs_stale = nvs_stale, .migration_deferred = migration_deferred,
     };
     (*n)++;
+}
+
+/* Single-blob items: the per-item accessors report the RAW content-differs
+ * result; the file-rev-strictly-higher case is reclassified here as nvs_stale
+ * (the NVS-dual-write close, cfg_fs_status.h), not a divergence. */
+static void cfgfs_add_item_ex(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
+                               uint32_t file_rev, bool nvs_valid, uint32_t nvs_rev, bool diverged,
+                               bool migration_deferred)
+{
+    bool stale = cfg_fs_status_item_nvs_stale(diverged, file_rev, nvs_rev);
+    cfgfs_add_item_full(items, n, name, file_valid, file_rev, nvs_valid, nvs_rev, diverged && !stale, stale,
+                        migration_deferred);
 }
 
 static void cfgfs_add_item(cfg_fs_dualwrite_item_t *items, size_t *n, const char *name, bool file_valid,
@@ -1594,7 +1606,7 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
      * repurposed); `diverged` is true iff any slot diverged, which is what
      * actually gates operator attention. */
     {
-        uint32_t used_count = 0, diverged_count = 0;
+        uint32_t used_count = 0, diverged_count = 0, stale_count = 0;
         uint32_t worst_file_rev = 0, worst_nvs_rev = 0, worst_gap = 0;
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             bool file_valid = false, nvs_valid = false, diverged = false;
@@ -1603,7 +1615,9 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
             if (file_valid || nvs_valid) {
                 used_count++;
             }
-            if (diverged) {
+            if (diverged && cfg_fs_status_item_nvs_stale(true, file_rev, nvs_rev)) {
+                stale_count++;
+            } else if (diverged) {
                 diverged_count++;
                 uint32_t gap = (nvs_rev > file_rev) ? (nvs_rev - file_rev) : (file_rev - nvs_rev);
                 if (gap >= worst_gap) {
@@ -1620,7 +1634,8 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         }
         /* file_rev carries the used-slot count, nvs_rev carries the
          * diverged-slot count -- see the comment above this block. */
-        cfgfs_add_item(items, &n_items, "profiles", true, used_count, true, diverged_count, diverged_count > 0);
+        cfgfs_add_item_full(items, &n_items, "profiles", true, used_count, true, diverged_count, diverged_count > 0,
+                            stale_count > 0, false);
     }
 
     /* 2026-09-08: the three items that used to be reported via the stale
@@ -1642,10 +1657,11 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
                           adaptive_tune_kibase_migration_worker_wait_deferred());
     }
     {
-        bool file_valid = false, nvs_valid = false, diverged = false;
+        bool file_valid = false, nvs_valid = false, diverged = false, stale = false;
         uint32_t file_rev = 0, nvs_rev = 0;
-        firing_stats_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
-        cfgfs_add_item(items, &n_items, "firing_stats", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+        firing_stats_get_dualwrite_status_ex(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged, &stale);
+        cfgfs_add_item_full(items, &n_items, "firing_stats", file_valid, file_rev, nvs_valid, nvs_rev, diverged,
+                            stale, false);
     }
     {
         bool file_valid = false, nvs_valid = false, diverged = false;

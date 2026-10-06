@@ -119,8 +119,10 @@ static esp_err_t hal_to_esp(hal_status_t st)
 // stage into -- fake_kv_reset_all() wipes hal_kv_init_partition()'s
 // bookkeeping along with every key, so each test must redo that init, same
 // as profiles_http.c's own nvs_partition_init() would on a real boot.
+static void pcfg_mount_fresh(void); /* defined with the cfg_fs section below */
 static void nvs_stub_reset(void)
 {
+    pcfg_mount_fresh(); /* profile saves are cfg-file-only: every reset starts from a clean, mounted cfg */
     fake_kv_reset_all();
     hal_kv_init_partition("profiles_nvs"); /* PROFILES_NVS_PARTITION's literal -- that macro isn't
                                              * defined until profiles_http.c's own #include below */
@@ -598,10 +600,11 @@ uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id)
 // without needing a real firing-stats store here.
 static int     g_firing_stats_erase_calls = 0;
 static uint8_t g_firing_stats_erase_last_id = 0xFF;
-void firing_stats_erase(uint8_t profile_id)
+esp_err_t firing_stats_erase(uint8_t profile_id)
 {
     g_firing_stats_erase_calls++;
     g_firing_stats_erase_last_id = profile_id;
+    return ESP_OK;
 }
 
 // ---- profile_executor.h -- fake profile_executor_get_status(): Opus review
@@ -830,7 +833,7 @@ static const char *PCFG_SCRATCH_BASE = "cfg_fs_test_profiles";
 // applied to this test's own scratch directory), then re-creates a clean
 // base directory and resets every piece of shared state a test in this
 // section could have touched.
-static void pcfg_reset_all(void)
+static void pcfg_mount_fresh(void)
 {
     char path[600];
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
@@ -852,9 +855,16 @@ static void pcfg_reset_all(void)
     cfg_fs_deinit();
     profiles_cfg_fs_reset_write_fn_for_test();
     profiles_cfg_fs_reset_delete_fn_for_test();
-    nvs_stub_reset();
     memset(&s_profiles, 0, sizeof(s_profiles));
     memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    (void)cfg_fs_init(PCFG_SCRATCH_BASE, NULL);
+}
+
+// Fresh NVS and a freshly MOUNTED, empty cfg scratch. Tests that need the
+// partition absent call cfg_fs_deinit() afterwards.
+static void pcfg_reset_all(void)
+{
+    nvs_stub_reset();
 }
 
 static esp_err_t pcfg_failing_write_fn(const char *rel_path, const void *data, size_t len)
@@ -881,17 +891,51 @@ static bool pcfg_file_profile(uint8_t id, profile_t *out)
     return valid;
 }
 
+// Stages what a LEGACY (pre dual-write-close) firmware left in profiles_nvs
+// for one slot: the decodable blob, the used bitmap and the rev array. Nothing
+// in production writes these keys any more.
+static void stage_legacy_slot(uint8_t id, const profile_t *p, uint32_t rev)
+{
+    profile_persisted_t persisted = { .version = PROFILE_VERSION, .profile = *p, .crc32 = 0 };
+    persisted.crc32 = compute_profile_crc(&persisted);
+    stage_profile_blob(id, &persisted, sizeof(persisted));
+    profiles_slot_bitmap_t bm;
+    memset(&bm, 0, sizeof(bm));
+    profiles_slot_bitmap_set(&bm, id);
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, NVS_KEY_USED, &bm, sizeof(bm));
+    uint32_t rev_arr[PROFILES_MAX_COUNT] = {0};
+    rev_arr[id] = rev;
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, rev_arr, sizeof(rev_arr));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static bool pcfg_nvs_slot_blob_present(uint8_t id)
+{
+    nvs_handle_t h;
+    if (nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    char key[8];
+    profile_nvs_key(id, key, sizeof(key));
+    profile_persisted_t tmp;
+    size_t len = sizeof(tmp);
+    esp_err_t e = nvs_get_blob(h, key, &tmp, &len);
+    nvs_close(h);
+    return e == ESP_OK;
+}
+
 static void test_pcfg_mounted_migrates_nvs_only_slot_to_file(void)
 {
-    TEST_SECTION("profiles cfg_fs -- NVS-only slot is lazily migrated to a file on load");
+    TEST_SECTION("profiles cfg_fs -- a legacy NVS-only slot is lazily migrated to a file on load");
     pcfg_reset_all();
     size_t reaped = 0;
     TEST_CHECK(cfg_fs_init(PCFG_SCRATCH_BASE, &reaped) == ESP_OK, "cfg_fs mounts against the scratch dir");
 
     profile_t src = make_stored_profile();
-    s_profiles.profiles[0] = src;
-    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
-    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "nvs_save_slot succeeds with cfg_fs mounted");
+    stage_legacy_slot(0, &src, 1);
 
     // Simulate a reboot: wipe the RAM/file view of what a fresh load
     // produces are not wiped (cfg_fs itself is real on-disk state), but the
@@ -922,12 +966,10 @@ static void test_pcfg_file_wins_when_it_has_the_higher_rev(void)
     profile_t file_side = make_stored_profile();
     strncpy(file_side.name, "FileSide", PROFILE_NAME_MAX_LEN);
 
-    s_profiles.profiles[0] = nvs_side;
-    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
-    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "nvs_save_slot(0) writes rev 1 to both sides");
-    // Overwrite JUST the file with different content at a HIGHER rev, as if
-    // an earlier save's file write landed but its NVS write then failed.
-    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 5) == ESP_OK, "file overwritten at rev 5");
+    stage_legacy_slot(0, &nvs_side, 1);
+    // The file holds different content at a HIGHER rev: a save made after the
+    // dual-write close, over a stale legacy NVS copy.
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 5) == ESP_OK, "file written at rev 5");
 
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
@@ -955,20 +997,7 @@ static void test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file(void)
     // file write is simulated as having failed by not calling
     // profiles_cfg_fs_save() for it -- the direct NVS stage below plays that
     // role).
-    s_profiles.profiles[0] = fresh_nvs;
-    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
-    profile_persisted_t persisted = { .version = PROFILE_VERSION, .profile = fresh_nvs, .crc32 = 0 };
-    persisted.crc32 = compute_profile_crc(&persisted);
-    stage_profile_blob(0, &persisted, sizeof(persisted));
-    stage_bitmap(0x01);
-    uint32_t rev_arr[PROFILES_MAX_COUNT] = {0};
-    rev_arr[0] = 9;
-    {
-        nvs_handle_t h;
-        nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-        nvs_set_blob(h, NVS_KEY_PROFILE_REV, rev_arr, sizeof(rev_arr));
-        nvs_close(h);
-    }
+    stage_legacy_slot(0, &fresh_nvs, 9);
 
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
@@ -1159,54 +1188,56 @@ static void test_pcfg_stale_file_after_delete_is_not_resurrected(void)
     profile_t p = make_stored_profile();
     s_profiles.profiles[0] = p;
     profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
-    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save lands on both sides at rev 1");
+    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save lands in the file at rev 1");
+    stage_legacy_slot(0, &p, 1); // a stale legacy NVS copy from before the dual-write close
 
-    // Simulate the file-delete half of nvs_erase_slot() failing (the NVS
-    // half still succeeds and bumps the persisted rev) by installing a
-    // failing delete fn for exactly the delete call, then restoring it --
-    // mirrors profiles_cfg_fs_delete()'s own no-op-on-failure contract.
+    // The cfg file delete fails: erase must fail loud and leave the slot
+    // intact (erase-first order: legacy NVS keys are gone, file kept).
     profiles_cfg_fs_set_delete_fn(pcfg_failing_delete_fn);
     esp_err_t erase_err = nvs_erase_slot(0);
     profiles_cfg_fs_reset_delete_fn_for_test();
-    TEST_CHECK(erase_err == ESP_OK, "erase still succeeds through NVS even though the file-side delete failed");
+    TEST_CHECK(erase_err != ESP_OK, "erase reports the failed file delete instead of claiming success");
+    TEST_CHECK(!pcfg_nvs_slot_blob_present(0), "the legacy NVS blob was erased first, so it cannot resurrect");
 
     profile_t leftover;
-    TEST_CHECK(pcfg_file_profile(0, &leftover), "the stale file is confirmed still present on disk");
+    TEST_CHECK(pcfg_file_profile(0, &leftover), "the file is still present (delete failed)");
 
-    // Whether or not the delete_fn above actually intercepted anything, the
-    // real assertion this test exists for is: after erase, a reload must
-    // NEVER resurrect slot 0 from a leftover file, because nvs_erase_slot()
-    // bumps s_profile_rev[0] past whatever the file holds.
+    // A retry with a working delete finishes the job and the slot stays gone.
+    TEST_CHECK(nvs_erase_slot(0) == ESP_OK, "retry erase succeeds");
+    TEST_CHECK(!pcfg_file_profile(0, &leftover), "the file is gone after the retry");
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
-    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 0),
-               "slot 0 stays unused after delete even if a stale file existed -- rev comparison, not file "
-               "presence alone, decides");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 stays unused after delete: no NVS or file copy remains");
 }
 
 static void test_pcfg_partition_absent_behaves_exactly_like_before(void)
 {
-    TEST_SECTION("profiles cfg_fs -- partition never mounted: NVS-only behavior is unchanged");
-    pcfg_reset_all(); // cfg_fs_deinit() inside -- status is UNMOUNTED, cfg_fs_is_available() is false
+    TEST_SECTION("profiles cfg_fs -- partition never mounted: a legacy NVS slot still loads, a save fails loud");
+    pcfg_reset_all();
+    cfg_fs_deinit(); // status UNMOUNTED, cfg_fs_is_available() is false
 
     profile_t src = make_stored_profile();
-    s_profiles.profiles[0] = src;
-    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
-    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save succeeds with no cfg partition at all");
+    stage_legacy_slot(0, &src, 1);
+
+    s_profiles.profiles[1] = src;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x02);
+    TEST_CHECK(nvs_save_slot(1) != ESP_OK, "save fails loud with no cfg partition at all");
+    TEST_CHECK(!pcfg_nvs_slot_blob_present(1), "the failed save did not fall back to NVS");
 
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
-    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 used");
-    assert_profiles_equal(&out.profiles[0], &src, "NVS is the sole source of truth when cfg_fs is unavailable");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "legacy slot 0 still used");
+    assert_profiles_equal(&out.profiles[0], &src, "the legacy NVS copy loads when cfg_fs is unavailable");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 1), "the refused save left no slot 1");
 }
 
 static void test_pcfg_mount_failed_behaves_like_absent(void)
 {
-    TEST_SECTION("profiles cfg_fs -- mount attempted and failed: same degrade-to-NVS behavior");
+    TEST_SECTION("profiles cfg_fs -- mount attempted and failed: same legacy-load / fail-loud-save behavior");
     pcfg_reset_all();
     size_t reaped = 0;
     // A path that cannot be listed at all makes cfg_fs_init() report
@@ -1216,15 +1247,16 @@ static void test_pcfg_mount_failed_behaves_like_absent(void)
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs_is_available() is false after a failed mount");
 
     profile_t src = make_stored_profile();
-    s_profiles.profiles[0] = src;
-    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x01);
-    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save still succeeds through NVS despite the failed mount");
+    stage_legacy_slot(0, &src, 1);
+    s_profiles.profiles[1] = src;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x02);
+    TEST_CHECK(nvs_save_slot(1) != ESP_OK, "save fails loud despite NVS being available");
 
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
-    assert_profiles_equal(&out.profiles[0], &src, "NVS remains authoritative when the mount failed");
+    assert_profiles_equal(&out.profiles[0], &src, "the legacy NVS copy still loads when the mount failed");
 }
 
 static void test_pcfg_interrupted_write_leaves_old_file_intact(void)
@@ -1268,7 +1300,7 @@ static void test_pcfg_save_load_delete_round_trip_through_real_api(void)
     TEST_CHECK(out_id == 0, "slot 0 assigned as requested");
 
     profile_t file_p;
-    TEST_CHECK(pcfg_file_profile(0, &file_p), "a file now backs slot 0 (dual-write landed)");
+    TEST_CHECK(pcfg_file_profile(0, &file_p), "a file now backs slot 0");
     assert_profiles_equal(&file_p, &candidate, "the file's content matches what was saved");
 
     profile_t got;
@@ -1278,7 +1310,7 @@ static void test_pcfg_save_load_delete_round_trip_through_real_api(void)
     TEST_CHECK(profiles_http_delete(0), "profiles_http_delete succeeds through the unchanged public API");
     TEST_CHECK(!profiles_http_get(0, &got), "get no longer finds a deleted slot");
     bool still_there = pcfg_file_profile(0, &file_p);
-    TEST_CHECK(!still_there, "the file is also gone after delete (dual-delete landed)");
+    TEST_CHECK(!still_there, "the file is gone after delete");
 }
 
 // Test 1 -- THE regression test: a version-1 blob (the historical,
@@ -1807,9 +1839,9 @@ static void test_v3_blob_migrates_with_no_rules(void)
 // ---------------------------------------------------------------------------
 static void test_on_off_rule_round_trip_through_real_save_and_load(void)
 {
-    TEST_SECTION("profiles_http_save/nvs_load_all_from -- an on/off rule round-trips byte-for-byte through NVS");
+    TEST_SECTION("profiles_http_save/nvs_load_all_from -- an on/off rule round-trips byte-for-byte through the cfg file");
 
-    memset(&s_profiles, 0, sizeof(s_profiles));
+    nvs_stub_reset();
     memset(g_stub_zone_type, 0, sizeof(g_stub_zone_type)); /* every zone HEATER by default */
     g_stub_zone_type[2] = ZONE_TYPE_ON_OFF;
 
@@ -1836,7 +1868,7 @@ static void test_on_off_rule_round_trip_through_real_save_and_load(void)
     bool any_found = false;
     esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
     TEST_CHECK(err == ESP_OK, "no NVS error reloading the saved slot");
-    assert_profiles_equal(&out.profiles[out_id], &p, "on/off rule NVS round-trip");
+    assert_profiles_equal(&out.profiles[out_id], &p, "on/off rule cfg round-trip");
 }
 
 // ---------------------------------------------------------------------------
@@ -3051,7 +3083,7 @@ static void test_nvs_save_slot_refuses_when_calling_stack_is_external_ram(void)
 static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
 {
     TEST_SECTION("nvs_save_slot -- proceeds normally when the calling task's stack is internal RAM");
-    memset(&s_profiles, 0, sizeof(s_profiles));
+    nvs_stub_reset();
 
     // fake_kv_set_write_safe_here(true) is the fake's default state.
     esp_err_t err = nvs_save_slot(0);
@@ -3165,29 +3197,26 @@ static void test_slot_bitmap_persisted_byte_identical_for_8slot_fixture(void)
     }
     TEST_CHECK(err == ESP_OK, "saving all 8 fixture slots as used must not error");
 
-    /* Since task 6 a save always writes the widened 4-word blob (never the
-     * old scalar byte) -- the byte-identical wire-format guarantee applies
-     * only to the READ side (a pre-existing board's legacy byte, covered by
-     * test_slot_bitmap_legacy_u8_migrates_on_read() above), not to a fresh
-     * save. Confirm the persisted key is now the full-size blob. */
-    nvs_handle_t h;
-    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
-    profiles_slot_bitmap_t persisted;
-    memset(&persisted, 0, sizeof(persisted));
-    size_t len = sizeof(persisted);
-    esp_err_t rd = nvs_get_blob(h, NVS_KEY_USED, &persisted, &len);
-    nvs_close(h);
-    TEST_CHECK(rd == ESP_OK, "the prof_used key must exist and be blob-typed after a save");
-    TEST_CHECK(len == sizeof(persisted), "the persisted blob must be the full widened size");
-    TEST_CHECK(profiles_slot_bitmap_to_u32(&persisted) == 0xFFu,
-              "REGRESSION: word[0] of the persisted blob for an 8-slot fixture must be 0xFF");
+    /* Saves are cfg-file-only: no prof_used key (legacy or widened) is
+     * written to NVS any more, and the loader derives the used bitmap from the
+     * files alone (no kiln_cfg namespace exists on this partition). */
+    {
+        nvs_handle_t h;
+        profiles_slot_bitmap_t persisted;
+        size_t len = sizeof(persisted);
+        bool nvs_has_used = nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK &&
+                            (nvs_get_blob(h, NVS_KEY_USED, &persisted, &len) == ESP_OK);
+        TEST_CHECK(!nvs_has_used, "a save must not write the prof_used key to NVS");
+    }
 
-    /* And the round trip back through the real loader reconstructs the same
-     * 8-slot set. */
+    /* The round trip back through the real loader reconstructs the 8-slot
+     * set from the cfg files. */
     profiles_state_t out;
     bool any_found = false;
     err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
-    TEST_CHECK(err == ESP_OK && any_found, "reload after the fixture save must succeed");
+    TEST_CHECK(err == ESP_OK && any_found, "reload after the fixture save must succeed (files-only path)");
+    TEST_CHECK(profiles_slot_bitmap_to_u32(&out.used_bitmap) == 0xFFu,
+              "word[0] of the reloaded bitmap for an 8-slot fixture must be 0xFF");
     for (uint8_t id = 0; id < SLOT_BITMAP_FIXTURE_SLOTS; id++) {
         TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, id),
                   "every one of the 8 fixture slots must still read back used");

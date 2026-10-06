@@ -153,47 +153,16 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     uint32_t new_rev = s_unit_pref_rev + 1;
     uint8_t raw = (uint8_t)pref;
 
-    // FILE FIRST (best-effort; a failure here is logged and swallowed --
-    // NVS below remains the persistence guarantee every existing caller
-    // already depends on, same policy zones_config_cfg_fs.c's step-5 note
-    // documents), THEN NVS (authoritative, failure returned to the caller).
-    esp_err_t file_err = pref_cfg_fs_save(UNIT_PREF_FILE_PATH, &raw, sizeof(raw), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "unit preference file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- unit preference not persisted",
-                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return hal_status_to_esp_err(part_err);
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "hal_kv_open failed: %s -- unit preference not persisted",
-                 hal_status_to_name(err));
-        return hal_status_to_esp_err(err);
-    }
-    err = hal_kv_set_u8(&h, NVS_KEY_UNIT_PREF, (uint8_t)pref);
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_UNIT_PREF_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "could not persist unit preference: %s -- will not survive a reboot",
-                 hal_status_to_name(err));
-    } else {
+    // cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
+    // no NVS write follows, and a failed write is returned, never masked by
+    // one. The rev only advances once the write is verified (cfg_fs_write_atomic
+    // reads the file back), so a retry reuses the same next rev.
+    esp_err_t err = pref_cfg_fs_commit(UNIT_PREF_FILE_PATH, &raw, sizeof(raw), new_rev, "unit preference");
+    if (err == ESP_OK) {
         s_unit_pref_rev = new_rev;
         ESP_LOGI(TAG, "unit preference saved: %s", pref == UNIT_PREF_FAHRENHEIT ? "Fahrenheit" : "Celsius");
     }
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 const char *unit_pref_suffix(unit_pref_t pref)

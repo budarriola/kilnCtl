@@ -206,49 +206,16 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     blob.keep_on_while_firing = keep_on_while_firing ? 1 : 0;
     blob.display_on_error = display_on_error ? 1 : 0;
 
-    // FILE FIRST (best-effort, failure logged and swallowed -- NVS below
-    // remains the persistence guarantee), THEN NVS (authoritative).
-    esp_err_t file_err = pref_cfg_fs_save(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "display power file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- display power settings not persisted",
-                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return hal_status_to_esp_err(part_err);
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_open_from_partition failed: %s -- display power settings not persisted",
-                 hal_status_to_name(err));
-        return hal_status_to_esp_err(err);
-    }
-
-    err = hal_kv_set_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_DISPLAY_POWER_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "could not persist display power settings: %s -- will not survive a reboot",
-                 hal_status_to_name(err));
-    } else {
+    // cfg file ONLY -- see unit_pref_set() and docs/CONFIG_FILESYSTEM.md.
+    esp_err_t err = pref_cfg_fs_commit(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev, "display power settings");
+    if (err == ESP_OK) {
         s_display_power_rev = new_rev;
         ESP_LOGI(TAG, "display power settings saved: brightness=%u%% timeout_setting=%u keep_on_while_firing=%s "
                       "display_on_error=%s",
                  (unsigned)brightness_percent, (unsigned)timeout_setting,
                  keep_on_while_firing ? "true" : "false", display_on_error ? "true" : "false");
     }
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 void display_power_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,

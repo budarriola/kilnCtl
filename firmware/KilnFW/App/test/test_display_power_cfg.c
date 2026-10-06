@@ -55,6 +55,35 @@ static void dp_cfg_fs_reset(void)
 // cycle (the RAM-cached settings) while leaving the stubbed NVS blob (the
 // flash stand-in) exactly as it was.
 // ---------------------------------------------------------------------------
+static void dp_mount_scratch(void)
+{
+    dp_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(DP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+}
+
+/* Stages the blob+rev a LEGACY (pre dual-write-close) firmware left in NVS:
+ * display_power_cfg.c no longer has any NVS writer. */
+static void dp_stage_legacy_nvs(uint8_t brightness, uint8_t timeout, uint8_t keep_on, uint8_t on_error,
+                                uint32_t rev)
+{
+    display_power_cfg_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = DISPLAY_POWER_CFG_VERSION;
+    blob.brightness_percent = brightness;
+    blob.timeout_setting = timeout;
+    blob.keep_on_while_firing = keep_on;
+    blob.display_on_error = on_error;
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "stage: open the legacy namespace");
+    hal_kv_set_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, sizeof(blob));
+    hal_kv_set_u32(&h, NVS_KEY_DISPLAY_POWER_REV, rev);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
 static void simulate_reboot(void)
 {
     // Deliberately the WRONG values -- proves display_power_cfg_start()
@@ -85,8 +114,7 @@ static void test_defaults_on_empty_nvs(void)
 
 static void test_persistence_round_trip(void)
 {
-    fake_kv_reset_all();
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    dp_mount_scratch();
     simulate_reboot();
     display_power_cfg_start();
 
@@ -104,6 +132,23 @@ static void test_persistence_round_trip(void)
     TEST_CHECK(display_power_cfg_timeout_setting() == DISPLAY_TIMEOUT_10_MIN, "reload: timeout survives the round trip");
     TEST_CHECK(display_power_cfg_keep_on_while_firing() == true, "reload: keep-on-while-firing survives the round trip");
     TEST_CHECK(display_power_cfg_display_on_error() == true, "reload: display-on-error survives the round trip");
+    cfg_fs_deinit();
+}
+
+static void test_set_without_cfg_partition_fails_loud(void)
+{
+    TEST_SECTION("display_power_cfg_set: no cfg partition mounted -- fails loud, nothing falls back to NVS");
+    dp_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+    display_power_cfg_start();
+
+    TEST_CHECK(display_power_cfg_set(42, DISPLAY_TIMEOUT_10_MIN, true, true) != ESP_OK,
+               "set() reports the failed cfg write");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "no NVS write was made as a fallback");
 }
 
 static void test_set_refuses_out_of_range_brightness(void)
@@ -219,13 +264,8 @@ static void test_dual_write_lands_on_both_file_and_nvs(void)
                "the file was written and decodes to the values just set");
 
     hal_kv_handle_t h;
-    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    display_power_cfg_blob_t nvs_blob;
-    memset(&nvs_blob, 0, sizeof(nvs_blob));
-    size_t len = sizeof(nvs_blob);
-    hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &nvs_blob, &len);
-    hal_kv_close(&h);
-    TEST_CHECK(nvs_blob.brightness_percent == 55, "NVS also holds the new value -- both sides written");
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "NVS was never written -- the dual-write window is closed");
     TEST_CHECK(file_rev == s_display_power_rev, "file rev matches the in-RAM rev this save just bumped to");
 
     cfg_fs_deinit();
@@ -238,7 +278,7 @@ static void test_nvs_fallback_when_file_absent_then_migrates(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     display_power_cfg_start();
-    display_power_cfg_set(80, DISPLAY_TIMEOUT_10_MIN, true, false); // NVS-only, cfg_fs not mounted yet
+    dp_stage_legacy_nvs(80, (uint8_t)DISPLAY_TIMEOUT_10_MIN, 1, 0, 1); // legacy NVS-only board, cfg_fs not mounted yet
 
     TEST_CHECK(cfg_fs_init(DP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts on a later boot");
     simulate_reboot();
@@ -304,7 +344,7 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     display_power_cfg_start();
-    display_power_cfg_set(33, DISPLAY_TIMEOUT_1_MIN, false, false);
+    dp_stage_legacy_nvs(33, (uint8_t)DISPLAY_TIMEOUT_1_MIN, 0, 0, 1);
 
     esp_err_t mount_err = cfg_fs_init("this_directory_does_not_exist_at_all", NULL);
     TEST_CHECK(mount_err != ESP_OK, "cfg_fs_init() against a nonexistent base dir fails, as documented");
@@ -322,6 +362,7 @@ void run_test_display_power_cfg(void)
 {
     test_defaults_on_empty_nvs();
     test_persistence_round_trip();
+    test_set_without_cfg_partition_fails_loud();
     test_set_refuses_out_of_range_brightness();
     test_set_refuses_invalid_timeout_setting();
     test_corrupt_blob_size_falls_back_to_defaults();

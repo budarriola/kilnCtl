@@ -171,27 +171,14 @@ esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob
     return err;
 }
 
-// docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: deletes id's file and
-// its "fsr_<id>" rev key. Mirrors profiles_cfg_fs_delete()'s own
-// NOT_FOUND-is-success convention on the file half; the rev-key erase uses
-// the same convention via hal_kv_erase_key()'s HAL_NOT_FOUND. cfg_fs
-// unmounted degrades the file half to a no-op (nothing to delete), matching
-// every other function in this file's "PARTITION ABSENT" policy -- the rev
-// key is still erased regardless, since that lives in NVS, not cfg_fs.
+// docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: deletes id's legacy
+// "fsr_<id>" rev key and file. ERASE-FIRST (docs/CONFIG_FILESYSTEM.md "NVS
+// dual-write closed"): the NVS side goes first and is checked; if it fails the
+// file is left intact and the error returned, so a failed delete never leaves
+// a stale NVS history that the NVS fallback would resurrect. NOT_FOUND on
+// either half is success. cfg_fs unmounted degrades the file half to a no-op.
 esp_err_t firing_stats_cfg_fs_delete(uint8_t id)
 {
-    esp_err_t file_err = ESP_OK;
-    if (cfg_fs_is_available()) {
-        char path[40];
-        firing_stats_cfg_fs_path(id, path, sizeof(path));
-        file_err = cfg_fs_delete(path);
-        if (file_err != ESP_OK && file_err != ESP_ERR_NOT_FOUND) {
-            ESP_LOGW(FSCF_TAG, "fs%u file delete failed: %s", id, esp_err_to_name(file_err));
-        } else {
-            file_err = ESP_OK;
-        }
-    }
-
     char key[16];
     snprintf(key, sizeof(key), "fsr_%u", (unsigned)id);
     hal_kv_handle_t h;
@@ -199,44 +186,47 @@ esp_err_t firing_stats_cfg_fs_delete(uint8_t id)
         hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, FIRING_STATS_NVS_PARTITION);
     if (kv_err != HAL_OK) {
         ESP_LOGW(FSCF_TAG, "fs%u rev key delete: hal_kv_open failed: %s", id, hal_status_to_name(kv_err));
-        return file_err;
+        return hal_status_to_esp_err(kv_err);
     }
     hal_status_t erase_err = hal_kv_erase_key(&h, key);
     if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
         ESP_LOGW(FSCF_TAG, "fs%u rev key delete failed: %s", id, hal_status_to_name(erase_err));
-    } else {
-        hal_status_t commit_err = hal_kv_commit(&h);
-        if (commit_err != HAL_OK) {
-            ESP_LOGW(FSCF_TAG, "fs%u rev key delete: commit failed: %s", id, hal_status_to_name(commit_err));
-        }
+        hal_kv_close(&h);
+        return hal_status_to_esp_err(erase_err);
     }
+    hal_status_t commit_err = hal_kv_commit(&h);
     hal_kv_close(&h);
-    return file_err;
+    if (commit_err != HAL_OK) {
+        ESP_LOGW(FSCF_TAG, "fs%u rev key delete: commit failed: %s", id, hal_status_to_name(commit_err));
+        return hal_status_to_esp_err(commit_err);
+    }
+
+    if (!cfg_fs_is_available()) {
+        return ESP_OK;
+    }
+    char path[40];
+    firing_stats_cfg_fs_path(id, path, sizeof(path));
+    esp_err_t file_err = cfg_fs_delete(path);
+    if (file_err != ESP_OK && file_err != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(FSCF_TAG, "fs%u file delete failed: %s", id, esp_err_to_name(file_err));
+        return file_err;
+    }
+    return ESP_OK;
 }
 
-// Persists just the rev counter, called alongside the caller's own NVS blob
-// write so both land in the same read-modify-write transaction. Exposed as
-// a small helper rather than folded into firing_stats_cfg_fs_save() itself,
-// since the rev lives in NVS (like every other item's rev key) while the
-// blob lives in the file -- the two are written by different callers
-// (profile_executor_firing_stats.c's firing_stats_persist() owns the NVS
-// side) at slightly different points in that function.
-esp_err_t firing_stats_cfg_fs_write_rev(uint8_t id, uint32_t rev)
+// Rev of id's cfg file, 0 when absent/invalid. Used by the save path to pick
+// max(file, legacy NVS) + 1 now that saves no longer advance the NVS rev key.
+uint32_t firing_stats_cfg_fs_read_file_rev(uint8_t id)
 {
-    hal_kv_handle_t h;
-    hal_status_t err =
-        hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, FIRING_STATS_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
+    profile_firing_history_blob_t *blob = persist_scratch_alloc(sizeof(*blob));
+    if (blob == NULL) {
+        return 0;
     }
-    char key[16];
-    snprintf(key, sizeof(key), "fsr_%u", (unsigned)id);
-    err = hal_kv_set_u32(&h, key, rev);
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    return hal_status_to_esp_err(err);
+    uint32_t rev = 0;
+    bool valid = false;
+    firing_stats_cfg_fs_load_raw(id, blob, &rev, &valid);
+    free(blob);
+    return valid ? rev : 0;
 }
 
 bool firing_stats_cfg_fs_resolve(uint8_t id, const profile_firing_history_blob_t *nvs_blob, bool nvs_valid,

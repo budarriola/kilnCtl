@@ -614,38 +614,15 @@ static bool kibase_file_validate(const void *bytes, size_t len)
     return (b->mask & (uint8_t)~valid_mask) == 0;
 }
 
-// FILE FIRST (best-effort, failure logged and swallowed), THEN NVS
-// (authoritative) -- same ordering every other pref_cfg_fs item uses. The
-// rev key is written in the SAME NVS transaction as the blob, same reason
-// relay_cycles.c's persist_snapshot() does it that way.
+// cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"): no
+// NVS write follows, and a failed write is reported through job->result. The
+// rev counter still advances on failure (a gap is harmless, a reused rev is not).
 static void save_kibase_job(void *arg)
 {
     kibase_job_t *job = (kibase_job_t *)arg;
     uint32_t rev = ++s_kibase_rev;
-
-    esp_err_t file_err =
-        pref_cfg_fs_save(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &job->blob, sizeof(job->blob), rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(ADAPTIVE_TUNE_TAG, "ki-baseline file write failed: %s -- NVS remains the source of "
-                                    "truth this boot", esp_err_to_name(file_err));
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err =
-        hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION);
-    if (err != HAL_OK) {
-        job->result = hal_status_to_esp_err(err);
-        return;
-    }
-    err = hal_kv_set_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &job->blob, sizeof(job->blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV, rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    job->result = hal_status_to_esp_err(err);
+    job->result = pref_cfg_fs_commit(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &job->blob, sizeof(job->blob), rev,
+                                     "adaptive-tune ki baseline");
 }
 
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)

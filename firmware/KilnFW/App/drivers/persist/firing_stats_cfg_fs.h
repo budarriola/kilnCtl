@@ -91,23 +91,22 @@ void firing_stats_cfg_fs_load_raw(uint8_t id, profile_firing_history_blob_t *out
  * cfg_fs never mounted. */
 esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob_t *blob, uint32_t rev);
 
-/* Deletes id's file ("stats/fs<id>.dat") and its "fsr_<id>" rev key --
- * profile_executor.h's firing_stats_erase() calls this for the file/rev
- * half of a slot-delete prune (it erases the "fs_<id>" blob key itself).
- * ESP_ERR_NOT_FOUND on either half is treated as success, same convention
- * as profiles_cfg_fs_delete(); cfg_fs unmounted degrades to "file side is a
- * no-op, rev key still erased." Safe to call for an id that never fired. */
+/* Deletes id's legacy "fsr_<id>" rev key and then its file
+ * ("stats/fs<id>.dat"). ERASE-FIRST: the NVS key is erased and committed
+ * first; on failure the file is left intact and the error returned (see
+ * docs/CONFIG_FILESYSTEM.md "NVS dual-write closed"). profile_executor.h's
+ * firing_stats_erase() erases the "fs_<id>" blob key itself before calling
+ * this. ESP_ERR_NOT_FOUND on either half is success; cfg_fs unmounted makes
+ * the file half a no-op. Safe for an id that never fired. */
 esp_err_t firing_stats_cfg_fs_delete(uint8_t id);
 
-/* Reads id's persisted rev counter ("fsr_<id>" in FIRING_STATS_NVS_NAMESPACE/
- * PARTITION). Missing (never saved through the bridge yet) reads as 0. */
+/* Reads id's LEGACY persisted rev counter ("fsr_<id>" in
+ * FIRING_STATS_NVS_NAMESPACE/PARTITION). Missing reads as 0. Saves no longer
+ * advance this key; it is only the NVS-side rev for read-through resolution. */
 uint32_t firing_stats_cfg_fs_read_rev(uint8_t id);
 
-/* Writes id's rev counter. Called by profile_executor_firing_stats.c's
- * firing_stats_persist() in the SAME NVS read-modify-write transaction as
- * the blob write, so a torn write can never leave rev ahead of a blob that
- * was never actually committed. */
-esp_err_t firing_stats_cfg_fs_write_rev(uint8_t id, uint32_t rev);
+/* Rev stored in id's cfg file; 0 when the file is absent or invalid. */
+uint32_t firing_stats_cfg_fs_read_file_rev(uint8_t id);
 
 /* Core of the read-through policy (see header comment above for the table).
  * nvs_blob/nvs_valid/nvs_rev are whatever firing_stats_load() already

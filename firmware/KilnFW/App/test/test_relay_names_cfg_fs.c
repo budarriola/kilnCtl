@@ -81,6 +81,41 @@ static void prime_rev_to_zero(void)
     relay_names_load();
 }
 
+/* Stages what a LEGACY (pre dual-write-close) firmware left in NVS: a
+ * production-shaped v2 blob (one name in relay 1) plus its rev key. Nothing in
+ * the firmware writes these keys any more. */
+static void put_v2_nvs_blob(const char *name1, uint32_t rev)
+{
+    relay_names_cfg_t v2;
+    memset(&v2, 0, sizeof(v2));
+    v2.version = RELAY_NAMES_CFG_VERSION;
+    strncpy(v2.names[0], name1, RELAY_NAME_MAX_LEN);
+    relay_names_cfg_t crc_tmp = v2;
+    crc_tmp.crc32 = 0;
+    v2.crc32 = esp_crc32_le(0, (const uint8_t *)&crc_tmp, sizeof(crc_tmp));
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "test setup: open NVS read-write");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_RELAY_NAMES, &v2, sizeof(v2)) == HAL_OK, "test setup: v2 blob");
+    TEST_CHECK(hal_kv_set_u32(&h, NVS_KEY_RELAY_NAMES_REV, rev) == HAL_OK, "test setup: rev");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "test setup: NVS commit");
+    hal_kv_close(&h);
+}
+
+/* true when the relay-names blob key is absent from NVS (never written). */
+static bool nvs_relay_names_absent(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
+        return true;
+    }
+    relay_names_cfg_t raw;
+    size_t len = sizeof(raw);
+    hal_status_t g = hal_kv_get_blob(&h, NVS_KEY_RELAY_NAMES, &raw, &len);
+    hal_kv_close(&h);
+    return g != HAL_OK;
+}
+
 static void set_name(uint8_t relay1based, const char *name)
 {
     strncpy(s_relay_names.cfg.names[relay1based - 1], name, RELAY_NAME_MAX_LEN);
@@ -92,17 +127,23 @@ static void set_name(uint8_t relay1based, const char *name)
 // ---------------------------------------------------------------------
 static void test_partition_absent_falls_through_to_nvs_only(void)
 {
-    TEST_SECTION("relay names cfg_fs: partition absent -- save/load behave exactly like NVS-only");
+    TEST_SECTION("relay names cfg_fs: partition absent -- a legacy NVS copy still loads; save fails loud, no NVS "
+                 "fallback");
     reset_all();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
 
+    put_v2_nvs_blob("Legacy Name", 1);
+    relay_names_load();
+    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "Legacy Name") == 0,
+               "the legacy NVS-only copy still loads with no `cfg` partition");
+
     set_name(1, "Top Element");
-    TEST_CHECK(relay_names_save() == ESP_OK, "relay_names_save succeeds with no `cfg` partition mounted");
+    TEST_CHECK(relay_names_save() != ESP_OK, "relay_names_save fails loud with no `cfg` partition mounted");
 
     memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
     relay_names_load();
-    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "Top Element") == 0,
-               "loaded names match what was saved, sourced purely from NVS");
+    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "Legacy Name") == 0,
+               "the NVS copy was NOT overwritten by the failed save -- there is no NVS fallback");
 }
 
 // ---------------------------------------------------------------------
@@ -110,18 +151,19 @@ static void test_partition_absent_falls_through_to_nvs_only(void)
 // ---------------------------------------------------------------------
 static void test_nvs_fallback_then_file_preferred_after_migration(void)
 {
-    TEST_SECTION("relay names cfg_fs: NVS fallback on first load migrates to file; second load prefers the file");
+    TEST_SECTION("relay names cfg_fs: a save lands in the file only; a reload prefers the file");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero();
 
     set_name(1, "Zone1");
     set_name(2, "Zone2");
-    TEST_CHECK(relay_names_save() == ESP_OK, "relay_names_save succeeds (dual-write: file first, then NVS)");
+    TEST_CHECK(relay_names_save() == ESP_OK, "relay_names_save succeeds (cfg file only)");
+    TEST_CHECK(nvs_relay_names_absent(), "NVS was never written -- the dual-write window is closed");
 
     bool exists = false;
     TEST_CHECK(cfg_fs_exists(RELAY_NAMES_FILE_PATH, &exists) == ESP_OK && exists,
-               "the save's dual-write actually created the file");
+               "the save actually created the file");
 
     memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
     relay_names_load();
@@ -144,7 +186,7 @@ static void test_nvs_fallback_then_file_preferred_after_migration(void)
 // ---------------------------------------------------------------------
 static void test_dual_write_keeps_file_and_nvs_in_sync(void)
 {
-    TEST_SECTION("relay names cfg_fs: repeated saves keep file and NVS in sync (incrementing rev)");
+    TEST_SECTION("relay names cfg_fs: repeated saves advance the file rev; NVS is never written");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero();
@@ -165,7 +207,8 @@ static void test_dual_write_keeps_file_and_nvs_in_sync(void)
 
     memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
     relay_names_load();
-    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "v3") == 0, "NVS agrees with the file after three dual-writes");
+    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "v3") == 0, "the reload resolves to the latest file");
+    TEST_CHECK(nvs_relay_names_absent(), "NVS still untouched after three saves");
 }
 
 // ---------------------------------------------------------------------
@@ -181,19 +224,18 @@ static esp_err_t failing_write_fn(const char *rel_path, const void *data, size_t
 
 static void test_divergence_tie_break_both_directions(void)
 {
-    TEST_SECTION("relay names cfg_fs: divergence tie-break picks the higher rev in both directions");
+    TEST_SECTION("relay names cfg_fs: a failed file write is reported, leaves the file at the old rev, and the "
+                 "next save reuses the unadvanced rev; a higher-rev legacy NVS copy still wins a load");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero();
 
     set_name(1, "rev1");
-    TEST_CHECK(relay_names_save() == ESP_OK, "rev 1 saved to both sides");
+    TEST_CHECK(relay_names_save() == ESP_OK, "rev 1 saved to the file");
 
-    // File write fails from here on -- NVS advances, file is stuck.
     pref_cfg_fs_set_write_fn(failing_write_fn);
-    set_name(1, "rev2_nvs_only");
-    TEST_CHECK(relay_names_save() == ESP_OK, "rev 2 save still reports OK -- NVS write is what relay_names_save()'s "
-                                              "return value depends on");
+    set_name(1, "rev2_failed");
+    TEST_CHECK(relay_names_save() != ESP_OK, "rev 2 save reports the cfg write failure");
     pref_cfg_fs_reset_write_fn_for_test();
 
     relay_names_cfg_t raw_before;
@@ -203,18 +245,25 @@ static void test_divergence_tie_break_both_directions(void)
                           &raw_valid_before);
     TEST_CHECK(raw_valid_before && rev_before == 1 && strcmp(raw_before.names[0], "rev1") == 0,
                "file is stuck at rev 1 -- the failed write never landed");
+    TEST_CHECK(nvs_relay_names_absent(), "nothing fell back to NVS");
 
+    set_name(1, "rev2_retry");
+    TEST_CHECK(relay_names_save() == ESP_OK, "the retry succeeds");
+    pref_cfg_fs_load_raw(RELAY_NAMES_FILE_PATH, sizeof(raw_before), NULL, &raw_before, &rev_before,
+                          &raw_valid_before);
+    TEST_CHECK(raw_valid_before && rev_before == 2 && strcmp(raw_before.names[0], "rev2_retry") == 0,
+               "the retry reused the unadvanced rev: file is at rev 2, not 3");
+
+    /* A legacy NVS copy with a strictly higher rev (rolled-back firmware kept
+     * saving) wins the tie-break and is migrated into the file. */
+    put_v2_nvs_blob("nvs_rev9", 9);
     memset(&s_relay_names.cfg, 0, sizeof(s_relay_names.cfg));
     relay_names_load();
-    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "rev2_nvs_only") == 0,
-               "NVS (higher rev) wins the tie-break, not the stale file");
-
-    relay_names_cfg_t raw_after;
-    uint32_t rev_after = 0;
-    bool raw_valid_after = false;
-    pref_cfg_fs_load_raw(RELAY_NAMES_FILE_PATH, sizeof(raw_after), NULL, &raw_after, &rev_after, &raw_valid_after);
-    TEST_CHECK(raw_valid_after && rev_after == 2 && strcmp(raw_after.names[0], "rev2_nvs_only") == 0,
-               "the file was resynced from NVS as a side effect of resolving the divergence");
+    TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "nvs_rev9") == 0, "the higher-rev NVS copy wins");
+    pref_cfg_fs_load_raw(RELAY_NAMES_FILE_PATH, sizeof(raw_before), NULL, &raw_before, &rev_before,
+                          &raw_valid_before);
+    TEST_CHECK(raw_valid_before && strcmp(raw_before.names[0], "nvs_rev9") == 0 && rev_before >= 9,
+               "and it was migrated into the file at the NVS rev");
 }
 
 // ---------------------------------------------------------------------
@@ -229,7 +278,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     prime_rev_to_zero();
 
     set_name(1, "before_rollback");
-    TEST_CHECK(relay_names_save() == ESP_OK, "rev 1 dual-written to both sides");
+    TEST_CHECK(relay_names_save() == ESP_OK, "rev 1 written to the file");
 
     // Act like firmware that predates this change: rewrite ONLY the NVS
     // blob, leaving NVS_KEY_RELAY_NAMES_REV at 1 and the file at rev 1/old
@@ -251,7 +300,8 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
         TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
                    "test setup: NVS opened for the pre-dual-write-style blob rewrite");
         TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_RELAY_NAMES, &rolled_back, sizeof(rolled_back)) == HAL_OK,
-                   "test setup: NVS blob rewritten WITHOUT touching the rev key, exactly as older firmware would");
+                   "test setup: NVS blob staged, as older firmware that still dual-wrote would have left it");
+        TEST_CHECK(hal_kv_set_u32(&h, NVS_KEY_RELAY_NAMES_REV, 1) == HAL_OK, "test setup: NVS rev key at 1");
         TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "test setup: NVS commit");
         hal_kv_close(&h);
     }
@@ -321,11 +371,10 @@ static void test_interrupted_file_write_leaves_old_or_new(void)
 // ---------------------------------------------------------------------
 static void test_mount_failed_falls_through_to_nvs_only(void)
 {
-    TEST_SECTION("relay names cfg_fs: cfg_fs mount FAILED -- falls through to NVS, non-fatal");
+    TEST_SECTION("relay names cfg_fs: cfg_fs mount FAILED -- a legacy NVS copy still loads, non-fatal");
     reset_all();
 
-    set_name(1, "unmounted_case");
-    TEST_CHECK(relay_names_save() == ESP_OK, "save succeeds before any mount attempt");
+    put_v2_nvs_blob("unmounted_case", 1);
 
     esp_err_t mount_err = cfg_fs_init("this_directory_does_not_exist_at_all", NULL);
     TEST_CHECK(mount_err != ESP_OK, "cfg_fs_init() against a nonexistent base dir fails, as documented");
@@ -335,6 +384,8 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     relay_names_load();
     TEST_CHECK(strcmp(s_relay_names.cfg.names[0], "unmounted_case") == 0,
                "mount-failed: the NVS value is still adopted correctly");
+    set_name(1, "cannot_persist");
+    TEST_CHECK(relay_names_save() != ESP_OK, "and a save fails loud");
 
     cfg_fs_deinit();
 }
@@ -435,21 +486,26 @@ static void test_dualwrite_status_row(void)
     set_name(1, "A");
     TEST_CHECK(relay_names_save() == ESP_OK, "save 1");
     relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
-    TEST_CHECK(fv && nv && fr == 1 && nr == 1 && !dv, "after one dual-write: both valid at rev 1, not diverged");
+    TEST_CHECK(fv && !nv && fr == 1 && nr == 0 && !dv, "after one save: file valid at rev 1, no NVS copy, not diverged");
 
     pref_cfg_fs_set_write_fn(failing_write_fn);
     set_name(1, "B");
-    TEST_CHECK(relay_names_save() == ESP_OK, "save 2 (file write fails, NVS advances)");
+    TEST_CHECK(relay_names_save() != ESP_OK, "save 2 reports the file write failure");
     pref_cfg_fs_reset_write_fn_for_test();
     relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
-    TEST_CHECK(fv && nv && fr == 1 && nr == 2 && dv, "file stuck at rev 1, NVS at rev 2: diverged");
+    TEST_CHECK(fv && !nv && fr == 1 && !dv, "file stuck at rev 1, still no NVS copy: not diverged");
 
     relay_names_get_dualwrite_status(NULL, NULL, NULL, NULL, NULL);
     TEST_CHECK(true, "NULL out-params do not crash");
 
+    /* Legacy NVS copy at the SAME rev with different names: diverged. */
+    put_v2_nvs_blob("LegacyDiffers", 1);
+    relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && nv && fr == 1 && nr == 1 && dv, "equal rev, different content: diverged");
+
     cfg_fs_deinit();
     relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
-    TEST_CHECK(!fv && nv && nr == 2 && !dv, "unmounted: file side absent, NVS valid, not diverged");
+    TEST_CHECK(!fv && nv && nr == 1 && !dv, "unmounted: file side absent, NVS valid, not diverged");
 
     /* v1 NVS blob (a board that never re-saved since the v2 bump) against a
      * v2 file. The status read decodes the v1 blob in memory (and stays
@@ -459,7 +515,7 @@ static void test_dualwrite_status_row(void)
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts (v1 NVS cases)");
     prime_rev_to_zero();
     set_name(1, "SameName");
-    TEST_CHECK(relay_names_save() == ESP_OK, "v2 file (and v2 NVS) saved at rev 1");
+    TEST_CHECK(relay_names_save() == ESP_OK, "v2 file saved at rev 1");
     put_v1_nvs_blob("SameName", 1);
     relay_names_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
     TEST_CHECK(fv && nv && fr == 1 && nr == 1 && !dv, "v1 NVS blob vs migrated-equivalent v2 file: valid, in sync");

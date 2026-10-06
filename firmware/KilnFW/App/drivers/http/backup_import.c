@@ -779,9 +779,11 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
     // ---- this commit -- see the `is_active` comment above.
     for (size_t i = 0; i < file_n; i++) {
         if (action[i] == ACT_RENAME) {
-            if (!kiln_cfg_store_rename(action_board_id[i], action_name[i])) {
-                snprintf(err_msg, err_cap, "kiln_configs[%u]: rename to \"%.23s\" failed at commit", (unsigned)i,
-                         action_name[i]);
+            char rename_reason[96];
+            rename_reason[0] = '\0';
+            if (!kiln_cfg_store_rename_ex(action_board_id[i], action_name[i], rename_reason, sizeof(rename_reason))) {
+                snprintf(err_msg, err_cap, "kiln_configs[%u]: rename to \"%.23s\" failed at commit%s%.60s",
+                         (unsigned)i, action_name[i], rename_reason[0] ? ": " : "", rename_reason);
                 return false;
             }
             if (wrote_out) {

@@ -84,6 +84,11 @@ bool cfg_fs_status_item_diverged(bool file_valid, bool nvs_valid, bool content_e
     return file_valid && nvs_valid && !content_equal;
 }
 
+bool cfg_fs_status_item_nvs_stale(bool raw_diverged, uint32_t file_rev, uint32_t nvs_rev)
+{
+    return raw_diverged && file_rev > nvs_rev;
+}
+
 esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
                                     const cfg_fs_dualwrite_item_t *items, size_t item_count,
                                     const cfg_fs_format_progress_t *fmt, char *buf, size_t buf_cap,
@@ -181,7 +186,7 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
 
     APPEND(",\"tmp_entries_now\":%lu", (unsigned long)tmp_count);
 
-    APPEND(",\"dual_write\":{\"items\":[");
+    APPEND(",\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":[");
     size_t n_items = items ? item_count : 0;
     if (n_items > CFG_FS_STATUS_MAX_ITEMS) {
         /* Clamped, not rejected -- see cfg_fs_status.h's CFG_FS_STATUS_MAX_ITEMS
@@ -195,10 +200,11 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
     for (size_t i = 0; i < n_items; i++) {
         const cfg_fs_dualwrite_item_t *it = &items[i];
         APPEND("%s{\"name\":\"%s\",\"file_backed\":%s,\"file_rev\":%lu,\"nvs_backed\":%s,\"nvs_rev\":%lu,"
-              "\"diverged\":%s,\"migration_deferred\":%s}",
+              "\"diverged\":%s,\"nvs_stale\":%s,\"migration_deferred\":%s}",
               i == 0 ? "" : ",", it->name ? it->name : "?", it->file_valid ? "true" : "false",
               (unsigned long)it->file_rev, it->nvs_valid ? "true" : "false", (unsigned long)it->nvs_rev,
-              it->diverged ? "true" : "false", it->migration_deferred ? "true" : "false");
+              it->diverged ? "true" : "false", it->nvs_stale ? "true" : "false",
+              it->migration_deferred ? "true" : "false");
     }
     APPEND("]");
     /* 2026-09-08 audit (deaccc4f): this list used to also carry "prefs" and

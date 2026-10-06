@@ -259,36 +259,11 @@ static esp_err_t update_settings_set_locked(const char *repo)
     blob.version = UPDATE_SETTINGS_VERSION;
     strncpy(blob.repo, repo, sizeof(blob.repo) - 1);
 
-    // FILE FIRST (best effort), THEN NVS (authoritative), as display_power_cfg_set().
-    esp_err_t file_err = pref_cfg_fs_save(UPDATE_SETTINGS_FILE_PATH, &blob, sizeof(blob), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "update repo file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_status_t part_err = hal_kv_init_partition(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- update repo not persisted", KILN_NVS_PARTITION,
-                 hal_status_to_name(part_err));
-        return hal_status_to_esp_err(part_err);
-    }
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs open failed: %s -- update repo not persisted", hal_status_to_name(err));
-        return hal_status_to_esp_err(err);
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_UPDATE_REPO, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_UPDATE_REPO_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "could not persist update repo: %s -- will not survive a reboot", hal_status_to_name(err));
-        return hal_status_to_esp_err(err);
+    // cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"); s_persist_dirty
+    // stays set on failure so an identical retry is not short-circuited above.
+    esp_err_t err = pref_cfg_fs_commit(UPDATE_SETTINGS_FILE_PATH, &blob, sizeof(blob), new_rev, "update repo");
+    if (err != ESP_OK) {
+        return err;
     }
     s_rev = new_rev;
     s_persist_dirty = false;

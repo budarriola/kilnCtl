@@ -121,6 +121,57 @@ static void prime_rev_to_zero(void)
     (void)nvs_load(&found, &valid);
 }
 
+/* Stages what a LEGACY (pre dual-write-close) firmware left in NVS: a valid
+ * current-version blob plus its zones_rev key. Nothing in production writes
+ * these keys any more. */
+static void stage_legacy_nvs(const char *tag, float kp, uint32_t rev)
+{
+    zones_cfg_t c;
+    fill_valid_cfg(&c, tag, kp);
+    c.version = ZONES_CFG_VERSION;
+    c.crc32 = zones_config_json_compute_crc(&c);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "stage: open NVS");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_ZONES, &c, sizeof(c)) == HAL_OK, "stage: blob");
+    TEST_CHECK(hal_kv_set_u32(&h, "zones_rev", rev) == HAL_OK, "stage: rev");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "stage: commit");
+    hal_kv_close(&h);
+}
+
+static bool nvs_zones_blob_absent(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
+        return true;
+    }
+    static uint8_t blob[sizeof(zones_cfg_t)];
+    size_t len = sizeof(blob);
+    hal_status_t g = hal_kv_get_blob(&h, NVS_KEY_ZONES, blob, &len);
+    hal_kv_close(&h);
+    return g != HAL_OK;
+}
+
+/* Raw bytes of the cfg file: 4-byte rev prefix + the stored blob, NOT run
+ * through the decode/migrate/normalize path. Returns the blob length. */
+static size_t read_file_blob_raw(uint8_t *blob, size_t cap, uint32_t *rev)
+{
+    static uint8_t buf[4 + sizeof(zones_cfg_t)];
+    size_t len = 0;
+    if (cfg_fs_read(ZONES_CFG_FILE_PATH, buf, sizeof(buf), &len) != ESP_OK || len < 4) {
+        return 0;
+    }
+    if (rev) {
+        *rev = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    }
+    size_t n = len - 4;
+    if (n > cap) {
+        n = cap;
+    }
+    memcpy(blob, buf + 4, n);
+    return n;
+}
+
 // ---------------------------------------------------------------------
 // 1. Partition absent (today's real state on every board): dual-write
 //    save/load must behave EXACTLY like plain NVS save/load -- the file
@@ -128,18 +179,20 @@ static void prime_rev_to_zero(void)
 // ---------------------------------------------------------------------
 static void test_partition_absent_falls_through_to_nvs_only(void)
 {
-    TEST_SECTION("zones cfg_fs: partition absent -- save/load behave exactly like NVS-only");
+    TEST_SECTION("zones cfg_fs: partition absent -- a legacy NVS copy still loads, a save fails loud");
     reset_all();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
 
-    stage("absent", 7.5f);
-    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save succeeds with no `cfg` partition mounted");
-
-    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    stage_legacy_nvs("absent", 7.5f, 1);
     bool found = false, valid = false;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "nvs_load succeeds and reports valid");
     TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "absent") == 0 && s_zones.cfg.zones[0].pid_kp == 7.5f,
-               "loaded config is the one that was saved, sourced purely from NVS");
+               "loaded config is the legacy one, sourced purely from NVS");
+
+    stage("changed", 1.0f);
+    TEST_CHECK(nvs_save() != ESP_OK, "nvs_save fails loud with no `cfg` partition mounted -- no NVS fallback");
+    TEST_CHECK(!nvs_zones_blob_absent(), "the legacy NVS blob is untouched by the failed save");
 
     zones_cfg_t raw;
     uint32_t rev = 999;
@@ -157,31 +210,34 @@ static void test_partition_absent_falls_through_to_nvs_only(void)
 // ---------------------------------------------------------------------
 static void test_nvs_fallback_then_file_preferred_after_migration(void)
 {
-    TEST_SECTION("zones cfg_fs: NVS fallback on first load migrates to file; second load prefers the file");
+    TEST_SECTION("zones cfg_fs: legacy NVS blob migrates to the file on first load; the file is read after that");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
-    prime_rev_to_zero();
 
-    stage("migrate", 3.25f);
-    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save succeeds (dual-write: file first, then NVS)");
+    stage_legacy_nvs("migrate", 3.25f, 1);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    bool found = false, valid = false;
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "first load adopts the legacy NVS blob");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "migrate") == 0 && s_zones.cfg.zones[0].pid_kp == 3.25f,
+               "loaded config is the legacy one");
 
     bool exists = false;
     TEST_CHECK(cfg_fs_exists(ZONES_CFG_FILE_PATH, &exists) == ESP_OK && exists,
-               "nvs_save's dual-write actually created the file");
-
-    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
-    bool found = false, valid = false;
-    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load after wipe succeeds");
-    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "migrate") == 0 && s_zones.cfg.zones[0].pid_kp == 3.25f,
-               "reloaded config matches what was saved");
+               "the first load migrated it into the file");
 
     zones_cfg_t raw;
     uint32_t rev = 0;
     bool raw_valid = false;
     zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
-    TEST_CHECK(raw_valid && rev == 1, "the file itself holds a valid, rev-1 copy -- this is where the load "
-                                       "preferentially reads from now");
-    TEST_CHECK(strcmp(raw.zones[0].name, "migrate") == 0, "file content matches the saved config");
+    TEST_CHECK(raw_valid && strcmp(raw.zones[0].name, "migrate") == 0, "the file holds a valid copy");
+
+    /* Second boot: NVS now gone entirely, the file alone carries the config. */
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "second load succeeds from the file alone");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "migrate") == 0 && s_zones.cfg.zones[0].pid_kp == 3.25f,
+               "reloaded config matches");
 }
 
 // ---------------------------------------------------------------------
@@ -191,7 +247,7 @@ static void test_nvs_fallback_then_file_preferred_after_migration(void)
 // ---------------------------------------------------------------------
 static void test_dual_write_keeps_file_and_nvs_in_sync(void)
 {
-    TEST_SECTION("zones cfg_fs: repeated saves keep file and NVS in sync (same content, incrementing rev)");
+    TEST_SECTION("zones cfg_fs: repeated saves write the file only (incrementing rev), NVS never written");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero();
@@ -213,8 +269,8 @@ static void test_dual_write_keeps_file_and_nvs_in_sync(void)
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     bool found = false, valid = false;
     TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load succeeds");
-    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "v3") == 0, "NVS agrees with the file -- no divergence after "
-                                                              "three consecutive dual-writes");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "v3") == 0, "reload yields the latest save");
+    TEST_CHECK(nvs_zones_blob_absent(), "NVS was never written -- the dual-write window is closed");
 }
 
 // ---------------------------------------------------------------------
@@ -344,53 +400,46 @@ static esp_err_t failing_write_fn(const char *rel_path, const void *data, size_t
 
 static void test_divergence_tie_break_both_directions(void)
 {
-    TEST_SECTION("zones cfg_fs: divergence tie-break picks the higher rev in both directions, and resyncs "
-                 "the loser");
+    TEST_SECTION("zones cfg_fs: a failed cfg write is loud and leaves the rev alone; legacy NVS vs file "
+                 "tie-break picks the strictly higher rev in both directions");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero();
 
-    // Establish rev 1 on both sides.
     stage("rev1", 1.0f);
-    TEST_CHECK(nvs_save() == ESP_OK, "rev 1 saved to both sides");
+    TEST_CHECK(nvs_save() == ESP_OK, "rev 1 saved to the file");
 
-    // Simulate a file write failure: NVS advances to rev 2, file stays at
-    // rev 1 with the OLD content.
+    // A cfg write failure is reported to the caller and nothing falls back to NVS.
     zones_config_cfg_fs_set_write_fn(failing_write_fn);
-    stage("rev2_nvs_only", 2.0f);
-    TEST_CHECK(nvs_save() == ESP_OK, "rev 2 save still reports OK -- NVS write is what nvs_save()'s return "
-                                      "value depends on, not the file write");
+    stage("rev2_lost", 2.0f);
+    TEST_CHECK(nvs_save() != ESP_OK, "a failed cfg write is returned to the caller");
     zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(nvs_zones_blob_absent(), "nothing fell back to NVS");
 
-    zones_cfg_t raw_before;
-    uint32_t rev_before = 0;
-    bool raw_valid_before = false;
-    zones_config_cfg_fs_load_raw(&raw_before, &rev_before, &raw_valid_before);
-    TEST_CHECK(raw_valid_before && rev_before == 1 && strcmp(raw_before.zones[0].name, "rev1") == 0,
+    zones_cfg_t raw;
+    uint32_t rev = 0;
+    bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 1 && strcmp(raw.zones[0].name, "rev1") == 0,
                "file is stuck at rev 1 -- the failed write never landed");
 
-    // NVS rev (2) > file rev (1): load must adopt NVS and resync the file.
+    // Direction (a): legacy NVS copy at a strictly higher rev wins, file resynced.
+    stage_legacy_nvs("legacy_nvs", 5.0f, 5);
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     bool found = false, valid = false;
-    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load after the simulated failure succeeds");
-    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "rev2_nvs_only") == 0,
-               "NVS (higher rev) wins the tie-break, not the stale file");
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load succeeds");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "legacy_nvs") == 0, "NVS (rev 5) beats the file (rev 1)");
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev >= 5 && strcmp(raw.zones[0].name, "legacy_nvs") == 0,
+               "the file was resynced from the legacy NVS copy");
 
-    zones_cfg_t raw_after;
-    uint32_t rev_after = 0;
-    bool raw_valid_after = false;
-    zones_config_cfg_fs_load_raw(&raw_after, &rev_after, &raw_valid_after);
-    TEST_CHECK(raw_valid_after && rev_after == 2 && strcmp(raw_after.zones[0].name, "rev2_nvs_only") == 0,
-               "the file was resynced from NVS as a side effect of resolving the divergence");
-
-    // Now the normal direction: one more ordinary dual-write puts file
-    // AHEAD in the sense that matters (file_rev >= nvs_rev, the expected
-    // steady state) -- confirm the file is what a subsequent load reports.
-    stage("rev3", 3.0f);
-    TEST_CHECK(nvs_save() == ESP_OK, "rev 3 saved normally, both sides in sync again");
+    // Direction (b): a normal save now puts the file strictly above NVS and it wins.
+    stage("rev6", 6.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "next save lands");
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
-    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load after rev 3 succeeds");
-    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "rev3") == 0, "file/NVS agree again after the normal save");
+    TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "load after the save succeeds");
+    TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "rev6") == 0,
+               "the file (strictly higher rev) beats the stale legacy NVS blob");
 }
 
 // ---------------------------------------------------------------------
@@ -535,24 +584,11 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
 
     // Both sides land at rev 1 with the same content.
     stage("before_rollback", 1.0f);
-    TEST_CHECK(nvs_save() == ESP_OK, "rev 1 dual-written to both sides");
+    TEST_CHECK(nvs_save() == ESP_OK, "rev 1 saved to the file");
 
     // Now act like firmware that predates this change: rewrite ONLY the
-    // NVS blob, leaving zones_rev at 1 and the file at rev 1/old content.
-    zones_cfg_t rolled_back;
-    fill_valid_cfg(&rolled_back, "rolled_edit", 42.0f);
-    rolled_back.version = ZONES_CFG_VERSION;
-    rolled_back.crc32 = zones_config_json_compute_crc(&rolled_back);
-    {
-        hal_kv_handle_t h;
-        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
-                   "test setup: NVS opened for the pre-dual-write-style blob rewrite");
-        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_ZONES, &rolled_back, sizeof(rolled_back)) == HAL_OK,
-                   "test setup: NVS blob rewritten WITHOUT touching zones_rev, exactly as older firmware "
-                   "would");
-        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "test setup: NVS commit");
-        hal_kv_close(&h);
-    }
+    // NVS blob at the same rev, leaving the file at rev 1/old content.
+    stage_legacy_nvs("rolled_edit", 42.0f, 1);
 
     // Confirm the fixture really is the equal-rev case, not an accidental
     // strictly-higher one -- otherwise this test would pass for the wrong
@@ -604,7 +640,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
 static void test_file_wins_after_migration_writes_back_to_nvs(void)
 {
     TEST_SECTION("zones cfg_fs: cfg file wins with an old-version blob (NVS empty) -- the migrated result "
-                 "must be written back to NVS too, not left RAM-only");
+                 "must be written back to the file, not left RAM-only");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero();
@@ -653,47 +689,18 @@ static void test_file_wins_after_migration_writes_back_to_nvs(void)
                "in-RAM config is the migrated file content");
     TEST_CHECK(s_zones.cfg.version == ZONES_CFG_VERSION, "in-RAM version is CURRENT, not the staged v21 byte");
 
-    // THE FIX: NVS must now actually hold the migrated, current-version
-    // blob -- read back from flash, never trust an in-RAM assertion alone
-    // (same discipline zones_config_persist_migrated_blob_verified() itself
-    // uses).
-    hal_kv_handle_t h;
-    hal_status_t open_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    TEST_CHECK(open_err == HAL_OK, "NVS opened read-only for verification");
-    uint8_t readback[sizeof(zones_cfg_t)];
-    size_t readback_len = sizeof(readback);
-    hal_status_t rb_err = HAL_IO;
-    uint32_t nvs_rev_after = 0;
-    if (open_err == HAL_OK) {
-        rb_err = hal_kv_get_blob(&h, NVS_KEY_ZONES, readback, &readback_len);
-        (void)hal_kv_get_u32(&h, "zones_rev", &nvs_rev_after);
-        hal_kv_close(&h);
-    }
-    TEST_CHECK(rb_err == HAL_OK, "THE FIX: the migrated blob must now be readable back from NVS -- before this "
-                                 "pass, a file-sourced migration was never persisted to NVS at all");
-    TEST_CHECK(readback_len == sizeof(zones_cfg_t), "the persisted NVS blob is full current-version size");
-    TEST_CHECK(readback_len == sizeof(zones_cfg_t) && readback[0] == ZONES_CFG_VERSION,
-               "THE FIX: NVS holds the migrated CURRENT version, not left empty/stale for a future one-step "
-               "migration to choke on");
-    TEST_CHECK(nvs_rev_after > 7, "the dual-write rev counter advanced past the file's staged rev 7 once the "
-                                 "write-back ran");
-
-    // Both copies must now agree: the file itself (already migrated, so
-    // this also confirms the write-back's nvs_save() call re-wrote the file
-    // at the new rev rather than leaving it at the old rev-7/v21 bytes).
-    zones_cfg_t file_raw;
+    // THE FIX: the cfg file must now hold the migrated, current-version
+    // blob, read back as raw bytes (not through the decode path, which would
+    // migrate the old bytes again and mask an unwritten file). NVS is no
+    // longer written at all.
+    static uint8_t raw_blob[sizeof(zones_cfg_t)];
     uint32_t file_rev_after = 0;
-    bool file_raw_valid = false;
-    zones_config_cfg_fs_load_raw(&file_raw, &file_rev_after, &file_raw_valid);
-    TEST_CHECK(file_raw_valid && file_rev_after == nvs_rev_after,
-               "file and NVS report the SAME rev after the write-back -- no lingering divergence");
-    zones_cfg_t nvs_readback_cfg;
-    memcpy(&nvs_readback_cfg, readback, sizeof(nvs_readback_cfg)); /* properly aligned copy, never a cast of
-                                                                     * the raw byte buffer -- see
-                                                                     * zones_config_cfg_fs.c's own alignment
-                                                                     * comment on why that matters. */
-    TEST_CHECK(memcmp(&file_raw, &nvs_readback_cfg, sizeof(file_raw)) == 0,
-               "file and NVS hold byte-identical content after the write-back");
+    size_t raw_len = read_file_blob_raw(raw_blob, sizeof(raw_blob), &file_rev_after);
+    TEST_CHECK(raw_len == sizeof(zones_cfg_t), "the file blob is full current-version size");
+    TEST_CHECK(raw_len == sizeof(zones_cfg_t) && raw_blob[0] == ZONES_CFG_VERSION,
+               "THE FIX: the file holds the migrated CURRENT version, not the staged v21 bytes");
+    TEST_CHECK(file_rev_after > 7, "the rev advanced past the staged rev 7 once the write-back ran");
+    TEST_CHECK(nvs_zones_blob_absent(), "NVS was not written by the write-back");
 }
 
 // ---------------------------------------------------------------------
@@ -758,15 +765,15 @@ static void test_file_won_migration_persist_fault_names_real_file_version(void)
     zones_cfg_migration_persist_fault_t fault;
     memset(&fault, 0xAA, sizeof(fault));
 
-    // Arm the write-back to lie on both retry attempts, same shape and same
-    // count (4 -- nvs_save() makes two set-shaped calls per attempt) as
-    // test_zones_http.c's NVS-sourced lying-write test.
-    fake_kv_script_silent_set_noops(4);
+    // Sabotage the cfg write so the write-back cannot be verified on either
+    // retry attempt.
+    zones_config_cfg_fs_set_write_fn(failing_write_fn);
 
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     bool found = false, valid = false;
     TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid,
                "load still adopts the file-sourced, migrated in-RAM config even though write-back will fail");
+    zones_config_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "FileMigLying") == 0,
                "in-RAM config is the migrated file content regardless of the write-back outcome");
 
@@ -858,14 +865,11 @@ static void test_newer_nvs_blob_is_not_overwritten_by_file_writeback(void)
 //     nvs_save()) standing still, and by the NVS blob bytes being
 //     unchanged.
 // ---------------------------------------------------------------------
-static uint32_t read_nvs_zones_rev(void)
+static uint32_t read_file_rev(void)
 {
-    hal_kv_handle_t h;
+    static uint8_t blob[sizeof(zones_cfg_t)];
     uint32_t rev = 0;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
-        (void)hal_kv_get_u32(&h, "zones_rev", &rev);
-        hal_kv_close(&h);
-    }
+    (void)read_file_blob_raw(blob, sizeof(blob), &rev);
     return rev;
 }
 
@@ -911,18 +915,12 @@ static void test_file_sourced_writeback_happens_once_not_every_boot(void)
     bool found = false, valid = false;
     TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid,
                "first load adopts and writes back");
-    uint32_t rev_after_first = read_nvs_zones_rev();
+    uint32_t rev_after_first = read_file_rev();
     TEST_CHECK(rev_after_first > 9, "the write-back ran on the first load (rev advanced past the file's 9)");
 
-    uint8_t blob_after_first[sizeof(zones_cfg_t)];
-    memset(blob_after_first, 0, sizeof(blob_after_first));
-    size_t len1 = sizeof(blob_after_first);
-    hal_kv_handle_t h1;
-    TEST_CHECK(hal_kv_open(&h1, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "NVS opened after the first load");
-    TEST_CHECK(hal_kv_get_blob(&h1, NVS_KEY_ZONES, blob_after_first, &len1) == HAL_OK,
-               "NVS holds the written-back blob after the first load");
-    hal_kv_close(&h1);
+    static uint8_t blob_after_first[sizeof(zones_cfg_t)];
+    size_t len1 = read_file_blob_raw(blob_after_first, sizeof(blob_after_first), NULL);
+    TEST_CHECK(len1 == sizeof(zones_cfg_t), "the file holds the written-back current-version blob");
 
     // SECOND boot: same on-flash state, in-RAM struct wiped. Both sides now
     // decode to the same bytes, so nothing must be written.
@@ -932,20 +930,14 @@ static void test_file_sourced_writeback_happens_once_not_every_boot(void)
     TEST_CHECK(nvs_load(&found, &valid) == ESP_OK && found && valid, "second load succeeds");
     TEST_CHECK(strcmp(s_zones.cfg.zones[0].name, "OnceOnly") == 0 && s_zones.cfg.zones[0].pid_kp == 2.75f,
                "second load still yields the same config");
-    TEST_CHECK(read_nvs_zones_rev() == rev_after_first,
-               "THE CONVERGENCE GUARD: the rev counter did NOT advance on the second load -- no nvs_save(), "
+    TEST_CHECK(read_file_rev() == rev_after_first,
+               "THE CONVERGENCE GUARD: the rev did NOT advance on the second load -- no nvs_save(), "
                "so no write every boot (flash wear / reset-one-side class)");
 
-    uint8_t blob_after_second[sizeof(zones_cfg_t)];
-    memset(blob_after_second, 0, sizeof(blob_after_second));
-    size_t len2 = sizeof(blob_after_second);
-    hal_kv_handle_t h2;
-    TEST_CHECK(hal_kv_open(&h2, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "NVS opened after the second load");
-    TEST_CHECK(hal_kv_get_blob(&h2, NVS_KEY_ZONES, blob_after_second, &len2) == HAL_OK, "NVS still readable");
-    hal_kv_close(&h2);
+    static uint8_t blob_after_second[sizeof(zones_cfg_t)];
+    size_t len2 = read_file_blob_raw(blob_after_second, sizeof(blob_after_second), NULL);
     TEST_CHECK(len1 == len2 && memcmp(blob_after_first, blob_after_second, len1) == 0,
-               "the NVS blob is byte-identical across the second load -- nothing was rewritten");
+               "the file blob is byte-identical across the second load -- nothing was rewritten");
 }
 
 // ---------------------------------------------------------------------
@@ -966,7 +958,7 @@ static void test_file_sourced_writeback_happens_once_not_every_boot(void)
 static void test_file_cycle_is_normalized_in_ram_and_on_writeback(void)
 {
     TEST_SECTION("zones cfg_fs: a settings_source cycle stored in the `cfg` file is normalized on load, "
-                 "both in RAM and in the NVS blob the file-won migration path writes back");
+                 "both in RAM and in the file the write-back rewrites");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero();
@@ -1019,26 +1011,19 @@ static void test_file_cycle_is_normalized_in_ram_and_on_writeback(void)
                     "normalization touched only settings_source -- zone 0's pid_kp survives intact");
 
     // THE FIX: the write-back this file-won load triggers must persist the
-    // ALREADY-NORMALIZED struct, not the raw cyclic bytes -- read NVS back
-    // directly (never through nvs_load_from(), which would normalize AGAIN
-    // on ITS OWN decode and mask an unfixed bug in the file-side path).
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK,
-               "NVS opened read-only for verification");
-    uint8_t readback[sizeof(zones_cfg_t)];
-    memset(readback, 0, sizeof(readback));
-    size_t readback_len = sizeof(readback);
-    hal_status_t rb_err = hal_kv_get_blob(&h, NVS_KEY_ZONES, readback, &readback_len);
-    hal_kv_close(&h);
-    TEST_CHECK(rb_err == HAL_OK && readback_len == sizeof(zones_cfg_t), "the write-back landed in NVS");
-    zones_cfg_t nvs_cfg;
-    memcpy(&nvs_cfg, readback, sizeof(nvs_cfg));
-    uint8_t nvs_s0 = nvs_cfg.zones[0].settings_source[SRC_GROUP_LIMITS];
-    uint8_t nvs_s1 = nvs_cfg.zones[1].settings_source[SRC_GROUP_LIMITS];
-    TEST_CHECK(nvs_s0 != 1 || nvs_s1 != 0,
-              "THE FIX: the NVS blob written back by the file-won migration path does NOT hold the "
-              "un-normalized cycle -- before this fix, the raw cyclic bytes were persisted verbatim and "
-              "only converged on NVS's own next decode, one boot later");
+    // ALREADY-NORMALIZED struct, not the raw cyclic bytes -- read the file
+    // as raw bytes (never through zones_config_cfg_fs_load_raw(), which
+    // normalizes AGAIN on its own decode and would mask an unfixed bug in
+    // the write-back path).
+    static uint8_t raw_blob[sizeof(zones_cfg_t)];
+    size_t raw_len = read_file_blob_raw(raw_blob, sizeof(raw_blob), NULL);
+    TEST_CHECK(raw_len == sizeof(zones_cfg_t), "the write-back landed in the file");
+    zones_cfg_t file_cfg;
+    memcpy(&file_cfg, raw_blob, sizeof(file_cfg));
+    uint8_t f_s0 = file_cfg.zones[0].settings_source[SRC_GROUP_LIMITS];
+    uint8_t f_s1 = file_cfg.zones[1].settings_source[SRC_GROUP_LIMITS];
+    TEST_CHECK(f_s0 != 1 || f_s1 != 0,
+              "THE FIX: the file written back by the file-won path does NOT hold the un-normalized cycle");
 }
 
 void run_test_zones_config_cfg_fs(void)

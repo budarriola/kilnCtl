@@ -238,6 +238,8 @@ mirror behind would let the file win the next boot and undo the reset.
 
 ## State of the migration, 2026-09-07
 
+**Update 2026-10-06:** the "dual-write" label in this table is historical. Every item marked dual-write below is now cfg-only on save, with NVS kept as a read-only legacy source (see "NVS dual-write close" at the end of this document).
+
 Of 24 inventoried runtime-changeable items:
 
 | # | Item | Status | Commit |
@@ -301,7 +303,10 @@ and 1 (23) is on the separate `logs` track.
   board is next reflashed and this note is updated with what actually
   happened. See `docs/RELEASE_HARDENING_PLAN.md` section 10 for the
   decision this drove (parked, not finished, pending bench time).
-- **Dual-write window.** Every migrated item currently writes both the
+- **Dual-write window (closing, see "NVS dual-write close" at the end of this
+  document).** Superseded: the paragraph below describes the window as it was
+  before the owner decision of 2026-10-05; saves are now cfg-file-only. Every
+  migrated item used to write both the
   file and its NVS copy; reads prefer the file. This closes — NVS writers
   removed — only once, on the bench board: 20 consecutive clean boots with
   no mount failure/fallback/defaults-banner, one complete firing run
@@ -498,3 +503,139 @@ on the board with no NVS writer removed:
 The board's own counter reads `consecutive_clean_boots` 24 (target 20),
 `firing_complete:true`, `restore_verified:true`, `window_may_close:true`.
 This is a report only; removing the NVS writers remains an owner decision.
+
+## NVS dual-write close (owner decision 2026-10-05)
+
+The three preconditions in "Open items" were met on the bench (the evidence
+section above, plus the backup round-trip drift fix on origin/main and a
+fresh soak), so the dual-write window closes: every item that `/api/cfgfs`
+lists (15 rows) is saved to the `cfg` partition only. This section is the
+plan; it was written before the code was finished and the implementation
+follows it.
+
+### Read order (unchanged in shape, NVS stays readable)
+
+1. The cfg file wins when it is valid.
+2. If the file is missing or invalid and a valid legacy NVS copy exists, the
+   item loads from NVS and is then migrated once: a verified write into cfg
+   (`cfg_fs_write_atomic` already reads the file back). A board upgrading
+   from older firmware therefore keeps its settings and ends up file-backed
+   after its first boot.
+3. If both exist and differ, the strictly higher rev wins. At equal revs with
+   different bytes NVS wins, because the only writer that can produce that
+   state is a legacy or rolled-back firmware that wrote NVS without touching
+   the file (`pref_cfg_fs_resolve()`, unchanged).
+4. After the close a save writes the file at rev `max(nvs_rev, file_rev) + 1`
+   and never touches the NVS copy, so the NVS rev stays old and the file rev
+   is strictly higher.
+
+Marker and migration writes that are not config saves stay as they are:
+relay_cycles' NVS-to-NVS default-partition migration, adaptive_tune's
+enable-mask migrated marker, and the iter_tune store (not a `/api/cfgfs`
+item). Each is documented in the code where it lives.
+
+### Write failure: fail loud, never fall back to NVS
+
+A failed cfg write (partition not mounted, `cfg_fs_write_atomic` or its
+read-back verify failing, injected failure in tests) is returned to the
+caller as an error and logged as "NOT persisted ... NVS is no longer
+written". The in-RAM value takes effect first, exactly as before, so a
+running firing is not interrupted by a storage fault, but the caller (HTTP
+handler, backup import, LCD page) is told the save did not stick and the rev
+only advances after a verified write. Nothing silently writes the NVS copy
+instead; that would recreate the stale-NVS problem below in the opposite
+direction. A board with no cfg partition mounted (recovery mode, mount
+failure) therefore cannot persist these settings until cfg mounts; this is
+deliberate and is listed as an open question for the owner.
+
+### What `/api/cfgfs` and readiness report afterwards
+
+- `dual_write.write_mode` is `"cfg_only"`.
+- A per-item row gains `nvs_stale`: true when the legacy NVS copy is valid,
+  its content differs from the file, and the file rev is strictly higher.
+  This is the expected state of any item saved after the upgrade and is not a
+  fault. `diverged` keeps its meaning for the dangerous cases only: equal
+  revs or an NVS rev ahead of the file, with different content. The two
+  flags are mutually exclusive (`cfg_fs_status_item_nvs_stale()`).
+- The profiles and firing_stats aggregate rows are reclassified per slot and
+  per id the same way.
+- The `dualwrite_window` counters (clean boots, firing complete, restore
+  verified) stay as a historical record; the window they gate is closed.
+- Readiness items are unchanged.
+
+### Rollback hazard
+
+An older firmware reads NVS only, so after any post-close save it sees the
+values from before the upgrade (or from the last save made by a pre-close
+firmware), not the current ones. This is the same class as the `zones_cfg`
+schema-bump hazard in CLAUDE.md's `ota_rollback_esp()` note: flash is left
+alone, reflashing the newer firmware restores everything, but a firing
+started right after a rollback runs on stale values. After any rollback,
+read back `control_get_zones` and the other settings before heating. The
+legacy NVS copies are deliberately left in place for this reason (an older
+image still boots with something sane) and are only erased by the delete
+paths below.
+
+### Delete design change: erase NVS first, checked, then the file
+
+Previously a delete removed the file and left the NVS copy, which was safe
+only because every save rewrote both. With NVS no longer written, deleting
+only the file would resurrect the stale NVS copy through read step 2. So a
+delete now erases the legacy NVS keys first and checks the result; if that
+fails the delete fails loud with the file left intact; only then is the cfg
+file deleted. There are no tombstones: after the erase the item is simply
+absent in both stores, which already means "defaults". The profiles delete
+also persists its rev bump, and `kiln_cfg_store_quarantine_clear` erases the
+legacy NVS blob and rev key explicitly so a cleared quarantine does not
+re-trigger from the old NVS copy.
+
+### Tests
+
+Host tests cover: a cfg-only save (NVS untouched), legacy NVS-only load plus
+migration into cfg, cfg write failure (error returned, rev unadvanced, no NVS
+fallback, file intact), delete not resurrecting, `nvs_stale` versus
+`diverged`, and the backup export/import round trip. The key ones were
+negative-tested.
+
+### Results and review pass (2026-10-06)
+
+Mutators report failure. Every public `kiln_cfg_store` mutator (save,
+clone, apply-id, delete, rename via the new `kiln_cfg_store_rename_ex`,
+`set_active_id_raw`) now returns false when the cfg file write fails, rolls
+its RAM change back, and puts `KILN_CFG_PERSIST_FAIL_TEXT` in the reason.
+`kiln_cfg_http.c` answers such a failure with HTTP 500 (400 stays for
+ordinary refusals) and `backup_import.c` appends the reason to its error.
+`kiln_cfg_store_quarantine_clear` refuses from a PSRAM-stacked caller before
+its legacy NVS erase, like every other write path in the file.
+
+Verification:
+
+- Host tests (`check_00_kilnfw_host_tests`, clean build each run): pass.
+  New `test_cfg_fs_all_mutators_report_persist_failure`; the unmounted,
+  mount-failed, tie-break, stale-delete and nvs_fallback tests were updated
+  to the fail-loud behaviour.
+- Negative test: an NVS write injected into `update_settings.c`'s save path
+  made `test_update_settings` fail, and, after adding an NVS-absent
+  assertion to the update-settings round trip in `test_backup_import.c`,
+  `test_backup_import` fails too. The source was restored by hand, compared
+  byte-identical, and a clean rebuild passed.
+- Target build: `.dram0.bss` 100200 B against the 101000 ceiling (800 B
+  headroom, same as origin/main; `zones_config_store.c`'s verify buffer moved
+  from a static to `persist_scratch_alloc()` to keep it there). Stack budget
+  checks pass: httpd honest free 3240 B (39.6% of 8192 B), executor 3132 B
+  (51.0% of 6144 B). `check_uri_handler_cap`: 171 routes against a cap of
+  175. The `/api/cfgfs` 4608 B buffer is part of a `persist_scratch_alloc()`
+  allocation, not a stack buffer.
+- `flash_worker_lint.py`: seven stale `ALLOWLIST` entries (the converted
+  preference files) removed; lint clean.
+
+Behaviour when the cfg partition is NOT mounted (unchanged, owner decision
+pending): these paths refuse to save and return an error rather than falling
+back to NVS: `pref_cfg_fs_save`/`pref_cfg_fs_commit` (unit_pref,
+update_settings, aux_outputs_cfg, display_power_cfg, ramp_assist_cfg,
+time_sync, relay_cycles snapshot, adaptive_tune ki baseline, hidden-builtin
+mask, relay_names, zone_normals); every `kiln_cfg_store` mutator and, through
+them, backup import; `profiles_cfg_fs_save`/`_delete`; `zones_config_cfg_fs_save`
+(zones POST, autosave, migration write-back, import); `firing_stats_cfg_fs_write`.
+`iter_tune_store.c` keeps writing NVS (deliberate exception). Loads fall back
+to the legacy NVS copy.

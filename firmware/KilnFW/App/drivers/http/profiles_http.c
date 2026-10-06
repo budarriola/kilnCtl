@@ -768,6 +768,32 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
  * requirement). *out_any_found reports whether the used-bitmap key existed
  * at all (vs. existing but empty/unreadable), which the one-time migration
  * below keys off. */
+/* nvs_load_all_from()'s no-legacy-namespace path: every slot is resolved from its
+ * cfg file alone (no NVS copy, rev 0). */
+static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *out, bool *out_any_found)
+{
+    if (strcmp(partition, PROFILES_NVS_PARTITION) != 0) {
+        memset(s_profile_rev, 0, sizeof(s_profile_rev));
+        return ESP_OK;
+    }
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profile_t resolved;
+        uint32_t resolved_rev = 0;
+        bool used_file = false;
+        profile_t none;
+        memset(&none, 0, sizeof(none));
+        if (profiles_cfg_fs_resolve(id, &none, false, 0, &resolved, &resolved_rev, &used_file)) {
+            out->profiles[id] = resolved;
+            profiles_slot_bitmap_set(&out->used_bitmap, id);
+            if (out_any_found) {
+                *out_any_found = true; /* a file-backed profile counts as "recorded": keeps the pre-split migration from re-running over it */
+            }
+        }
+        s_profile_rev[id] = resolved_rev;
+    }
+    return ESP_OK;
+}
+
 static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out, bool *out_any_found)
 {
     memset(out, 0, sizeof(*out));
@@ -778,7 +804,11 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
     if (kv_err == HAL_NOT_FOUND) {
-        return ESP_OK; /* no kiln_cfg namespace on this partition yet -- nothing configured */
+        /* No kiln_cfg namespace on this partition: nothing legacy in NVS. Saves are
+         * cfg-file-only now, so a board that never had (or no longer has) the
+         * namespace still carries its profiles in the cfg files -- fall through to
+         * the file resolve instead of returning empty. */
+        return nvs_load_files_only(partition, out, out_any_found);
     }
     if (kv_err != HAL_OK) {
         return hal_status_to_esp_err(kv_err);
@@ -882,6 +912,9 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             if (trustworthy) {
                 out->profiles[id] = resolved;
                 profiles_slot_bitmap_set(&out->used_bitmap, id);
+                if (out_any_found) {
+                    *out_any_found = true; /* see nvs_load_files_only() */
+                }
             } else {
                 memset(&out->profiles[id], 0, sizeof(out->profiles[id]));
                 profiles_slot_bitmap_clear(&out->used_bitmap, id);
@@ -925,59 +958,22 @@ esp_err_t nvs_save_slot(uint8_t id)
                       "worker for the established pattern.");
         return ESP_ERR_INVALID_STATE;
     }
-    /* FILE FIRST, then NVS (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step
-     * 4 requirement 1). A file write failure is logged and swallowed here --
-     * profiles_cfg_fs_save() already does that logging -- NVS below remains
-     * the persistence guarantee every existing caller of nvs_save_slot()
-     * already depends on; a subsequent NVS write failure is a hard error
-     * (ESP_LOGE below, exactly as before this pass) even though the profile
-     * is still applied live in RAM, same convention as before. */
+    /* FILE ONLY (docs/CONFIG_FILESYSTEM.md "NVS dual-write closed"). The file
+     * write is verified by read-back inside cfg_fs_write_atomic(); a failure
+     * is returned to the caller (never silently fallen back to NVS) and the
+     * in-RAM rev only advances on success so a retry reuses the same rev. The
+     * legacy "profN" NVS blob, used bitmap and rev array are no longer written
+     * here: nvs_load_all_from() already derives the used bitmap and rev from
+     * the file, and a legacy NVS-only slot is migrated to a file on first
+     * load. */
     uint32_t new_rev = s_profile_rev[id] + 1;
-    (void)profiles_cfg_fs_save(id, &s_profiles.profiles[id], new_rev);
-
-    hal_kv_handle_t h;
-    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
-    if (kv_err != HAL_OK) {
-        return hal_status_to_esp_err(kv_err);
+    esp_err_t ferr = profiles_cfg_fs_save(id, &s_profiles.profiles[id], new_rev);
+    if (ferr != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u): cfg file write failed: %s", (unsigned)id, esp_err_to_name(ferr));
+        return ferr;
     }
-    char key[8];
-    profile_nvs_key(id, key, sizeof(key));
-    profile_persisted_t persisted = {
-        .version = PROFILE_VERSION,
-        .profile = s_profiles.profiles[id],
-        .crc32 = 0,
-    };
-    persisted.crc32 = compute_profile_crc(&persisted);
-    kv_err = hal_kv_set_blob(&h, key, &persisted, sizeof(persisted));
-    if (kv_err == HAL_OK) {
-        kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
-    }
-    /* Update the in-RAM rev in place and persist s_profile_rev itself rather
-     * than a stack copy of it: at PROFILES_MAX_COUNT == 100 that copy was a
-     * 400 B local (32 B at the old 8 slots) and it pushed nvs_erase_slot()'s
-     * twin of this block over bx_flash_worker's stack ceiling
-     * (check_all_task_stack_budgets.ps1). The persisted bytes are identical
-     * -- the snapshot only ever differed from s_profile_rev by this one
-     * element, which is assigned here instead. Assigning before the write
-     * rather than after it is also behaviour-identical: the old code
-     * assigned unconditionally once it got past hal_kv_open(), which is the
-     * only early return above this point.
-     *
-     * The in-RAM rev is updated regardless of NVS outcome: it is ephemeral for
-     * this boot only (a reboot re-derives it from whatever actually got
-     * persisted, via nvs_load_all_from()'s resolve pass), and keeping it in
-     * lockstep with the file (already written above) means a subsequent
-     * save/delete this boot bumps from the true latest rev instead of
-     * replaying an already-used one. */
     s_profile_rev[id] = new_rev;
-    if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
-    }
-    if (kv_err == HAL_OK) {
-        kv_err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    return hal_status_to_esp_err(kv_err);
+    return ESP_OK;
 }
 
 /* DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
@@ -997,20 +993,15 @@ esp_err_t nvs_erase_slot(uint8_t id)
                       "DRAM_PSRAM_PLAN.md section 7.2/9.");
         return ESP_ERR_INVALID_STATE;
     }
-    /* A delete is a mutation of this slot's rev too (docs/
-     * FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 requirement 1 /
-     * profiles_cfg_fs.h's header comment) -- bumping it here, and deleting
-     * the file FIRST, is what lets profiles_cfg_fs_resolve() tell "this
-     * slot was legitimately deleted" apart from "a save's NVS write failed
-     * after its file write succeeded" on the next boot. */
+    /* ERASE-FIRST DELETE (docs/CONFIG_FILESYSTEM.md "NVS dual-write closed").
+     * Saves no longer touch NVS, so a legacy "profN" blob left behind would
+     * resurrect a deleted slot through the NVS fallback at next boot. The
+     * legacy key, used bitmap and rev array are therefore erased FIRST and the
+     * result is checked: on failure the file is left intact and the error is
+     * returned (the slot stays, loudly), never half-deleted. Only then is the
+     * file deleted. The rev bump is persisted so a later save into a reused
+     * id always carries a rev above any stale value. */
     uint32_t new_rev = s_profile_rev[id] + 1;
-    (void)profiles_cfg_fs_delete(id); /* logged internally on failure, best-effort */
-    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: prune this id's
-     * firing history too, best-effort, same "delete must not itself fail"
-     * contract as the cfg-fs delete just above -- see firing_stats_erase()'s
-     * own doc comment (profile_executor.h) for why this matters once ids
-     * start being reused at higher slot counts. */
-    firing_stats_erase(id);
 
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
@@ -1025,9 +1016,9 @@ esp_err_t nvs_erase_slot(uint8_t id)
         return hal_status_to_esp_err(erase_err);
     }
     kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
-    /* ephemeral this boot, see nvs_save_slot()'s identical comment -- and see
-     * that function for why s_profile_rev is updated in place and persisted
-     * directly instead of through a PROFILES_MAX_COUNT-sized stack copy. */
+    /* In-RAM rev updated in place and persisted directly rather than through
+     * a PROFILES_MAX_COUNT-sized stack copy (bx_flash_worker stack ceiling). */
+    uint32_t old_rev = s_profile_rev[id];
     s_profile_rev[id] = new_rev;
     if (kv_err == HAL_OK) {
         kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
@@ -1036,7 +1027,25 @@ esp_err_t nvs_erase_slot(uint8_t id)
         kv_err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
-    return hal_status_to_esp_err(kv_err);
+    if (kv_err != HAL_OK) {
+        s_profile_rev[id] = old_rev;
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): legacy NVS erase failed, file kept", (unsigned)id);
+        return hal_status_to_esp_err(kv_err);
+    }
+
+    esp_err_t ferr = profiles_cfg_fs_delete(id);
+    if (ferr != ESP_OK && ferr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): cfg file delete failed: %s", (unsigned)id, esp_err_to_name(ferr));
+        return ferr;
+    }
+    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: prune this id's firing
+     * history too (erase-first as well; see firing_stats_erase()). A failure
+     * there is reported but does not undo the slot delete. */
+    esp_err_t serr = firing_stats_erase(id);
+    if (serr != ESP_OK) {
+        ESP_LOGW(PROFILES_TAG, "nvs_erase_slot(%u): firing stats prune failed: %s", (unsigned)id, esp_err_to_name(serr));
+    }
+    return ESP_OK;
 }
 
 /* One-time move of persisted profiles out of the default partition's

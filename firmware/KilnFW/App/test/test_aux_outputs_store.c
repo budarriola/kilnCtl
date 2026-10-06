@@ -66,11 +66,34 @@ static void simulate_reboot(void)
     s_rev = 77;
 }
 
+/* Fresh fake NVS plus a freshly mounted cfg scratch: saves are cfg-file-only
+ * since the dual-write close, so a mounted partition is the normal case. */
 static void fresh_board(void)
 {
+    ao_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(AO_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+    simulate_reboot();
+}
+
+/* Same, with NO cfg partition mounted. */
+static void fresh_board_unmounted(void)
+{
+    ao_cfg_fs_reset();
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
+}
+
+static aux_outputs_blob_t make_blob_one_enabled(unsigned idx)
+{
+    aux_outputs_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = AUX_OUTPUTS_CFG_VERSION;
+    blob.entries[idx].enabled = 1;
+    blob.crc32 = blob_checksum(&blob);
+    return blob;
 }
 
 static aux_output_entry_t on_entry(void)
@@ -291,16 +314,10 @@ static void test_corrupt_blob_defaults(void)
     aux_output_entry_t e = on_entry();
     TEST_CHECK(aux_outputs_cfg_set(3, &e, 0) == ESP_OK, "persist a good blob");
 
-    /* Flip one payload byte inside the stored blob: CRC no longer matches. */
-    hal_kv_handle_t h;
-    aux_outputs_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "open");
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && len == sizeof(blob), "read back");
-    blob.entries[0].hyst_c = 3.0f;
-    hal_kv_set_blob(&h, NVS_KEY_AUX_OUT, &blob, sizeof(blob));
-    hal_kv_commit(&h);
-    hal_kv_close(&h);
+    /* Overwrite the cfg file with a blob whose CRC no longer matches. */
+    aux_outputs_blob_t blob = make_blob_one_enabled(2);
+    blob.entries[0].hyst_c = 3.0f; /* payload changed after the CRC was computed */
+    TEST_CHECK(pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), 9) == ESP_OK, "stage a bad-CRC file");
 
     simulate_reboot();
     aux_outputs_cfg_start(0);
@@ -308,6 +325,8 @@ static void test_corrupt_blob_defaults(void)
     TEST_CHECK(!aux_outputs_cfg_quarantined(), "a corrupt blob is not a quarantine");
     TEST_CHECK(aux_outputs_cfg_set(3, &e, 0) == ESP_OK, "and it can be rewritten");
 
+    /* A legacy NVS blob of the wrong size, no cfg file. */
+    fresh_board();
     uint8_t two[2] = { 1, 2 };
     stash_blob(two, sizeof(two), 1);
     simulate_reboot();
@@ -315,12 +334,22 @@ static void test_corrupt_blob_defaults(void)
     TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0 && !aux_outputs_cfg_quarantined(), "wrong size: defaults");
 }
 
+static void test_set_without_cfg_partition_fails_loud(void)
+{
+    TEST_SECTION("aux_outputs_cfg_set: no cfg partition mounted -- fails loud, nothing falls back to NVS");
+    fresh_board_unmounted();
+    aux_outputs_cfg_start(0);
+    aux_output_entry_t e = on_entry();
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) != ESP_OK, "set() reports the failed cfg write");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "no NVS write was made as a fallback");
+}
+
 static void test_dual_write_and_file_tiebreak(void)
 {
-    TEST_SECTION("cfg_fs dual-write: file mirrors NVS, higher rev wins on divergence");
+    TEST_SECTION("cfg-only save: file written, NVS untouched, higher rev wins, equal-rev legacy NVS wins");
     fresh_board();
-    ao_cfg_fs_reset();
-    TEST_CHECK(cfg_fs_init(AO_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     aux_outputs_cfg_start(0);
     aux_output_entry_t e = on_entry();
     TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) == ESP_OK, "set lands");
@@ -328,7 +357,7 @@ static void test_dual_write_and_file_tiebreak(void)
     bool fv = false, nv = false, div = true;
     uint32_t fr = 0, nr = 0;
     aux_outputs_cfg_get_dualwrite_status(&fv, &fr, &nv, &nr, &div);
-    TEST_CHECK(fv && nv && fr == nr && fr == 1 && !div, "file and NVS both valid, same rev, not diverged");
+    TEST_CHECK(fv && !nv && fr == 1 && !div, "file valid at rev 1, no NVS copy written, not diverged");
 
     /* File ahead of NVS: a later write that only reached the file. */
     aux_outputs_blob_t blob;
@@ -346,6 +375,14 @@ static void test_dual_write_and_file_tiebreak(void)
     aux_outputs_cfg_start(0x04);
     TEST_CHECK(aux_outputs_cfg_conflict_mask() == 0x04 && aux_outputs_cfg_enabled_mask() == 0,
                "file-sourced entry is reconciled against the zones too");
+
+    /* A legacy/rollback writer left an NVS copy at the SAME rev with different
+     * content: NVS wins the equal-rev tie (the dangerous case stays visible). */
+    aux_outputs_blob_t legacy = make_blob_one_enabled(0);
+    stash_blob(&legacy, sizeof(legacy), 5);
+    simulate_reboot();
+    aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x01, "equal rev, differing bytes: NVS wins");
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
@@ -476,6 +513,7 @@ void run_test_aux_outputs_store(void)
     test_oversize_blob_quarantined();
     test_checksum_known_answer();
     test_corrupt_blob_defaults();
+    test_set_without_cfg_partition_fails_loud();
     test_dual_write_and_file_tiebreak();
     test_pico_mask_strips_aux();
     test_pico_mask_call_site_shape();

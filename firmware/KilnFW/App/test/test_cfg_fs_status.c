@@ -64,7 +64,7 @@ static void test_unmounted(void)
     TEST_CHECK(json_has(json, "\"reason\":"), "carries a reason string when not mounted");
     TEST_CHECK(json_has(json, "\"capacity\":{\"known\":false}"), "capacity reported unknown, not zeroed");
     TEST_CHECK(json_has(json, "\"file_count\":0"), "no files when unmounted");
-    TEST_CHECK(json_has(json, "\"dual_write\":{\"items\":[]"),
+    TEST_CHECK(json_has(json, "\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":[]"),
                "dual-write section present but empty when no items are supplied");
     TEST_CHECK(json_has(json, "\"format\":{\"known\":false}"),
                "format section present but reports known:false when no progress info is supplied "
@@ -213,11 +213,11 @@ static void test_mounted_with_files(void)
     TEST_CHECK(json_has(json, "\"capacity\":{\"known\":true,\"total_bytes\":524288,\"used_bytes\":4096,"
                               "\"free_bytes\":520192}"),
                "capacity section echoes the caller-supplied values and computes free correctly");
-    TEST_CHECK(json_has(json, "\"dual_write\":{\"items\":["
+    TEST_CHECK(json_has(json, "\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":["
                               "{\"name\":\"zones\",\"file_backed\":true,\"file_rev\":5,\"nvs_backed\":true,"
-                              "\"nvs_rev\":5,\"diverged\":false,\"migration_deferred\":false},"
+                              "\"nvs_rev\":5,\"diverged\":false,\"nvs_stale\":false,\"migration_deferred\":false},"
                               "{\"name\":\"unit_pref\",\"file_backed\":true,\"file_rev\":2,\"nvs_backed\":true,"
-                              "\"nvs_rev\":2,\"diverged\":false,\"migration_deferred\":false}]"),
+                              "\"nvs_rev\":2,\"diverged\":false,\"nvs_stale\":false,\"migration_deferred\":false}]"),
                "dual-write: every item passed in gets its own row, not just zones -- 70ed6514 fixed the stale "
                "lists but left per-item detail zones-only; this is the widened per-bridge picture");
     TEST_CHECK(json_has(json, "\"nvs_only\":[]"),
@@ -250,7 +250,7 @@ static void test_mounted_with_files(void)
         TEST_CHECK(cfg_fs_status_build_json_ex(base, &cap, items, 2, NULL, &win, wjson, sizeof(wjson), &wlen) == ESP_OK &&
                        json_has(wjson, "\"restore_verified\":true,\"window_may_close\":true}"),
                    "flipped flags are rendered independently");
-        TEST_CHECK(json_has(wjson, "\"dual_write\":{\"items\":[") && json_has(wjson, "\"format\":{"),
+        TEST_CHECK(json_has(wjson, "\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":[") && json_has(wjson, "\"format\":{"),
                    "window section sits between dual_write and format without disturbing either");
     }
 
@@ -416,7 +416,7 @@ static void test_buffer_too_small(void)
  * host esp_err_to_name() stub returns "ESP_FAIL", so the longest real error name
  * (ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED, 38 chars) is added to the measured
  * length by hand. The result must fit the handler's cfgfs_status_scratch_t.json
- * (CFG_FS_STATUS_HANDLER_JSON_BUF, 4096 B) with at least 400 B to spare. */
+ * (CFG_FS_STATUS_HANDLER_JSON_BUF, 4608 B) with at least 400 B to spare. */
 #define WORST_CASE_HANDLER_BUF CFG_FS_STATUS_HANDLER_JSON_BUF
 static void test_worst_case_fits_handler_buffer(void)
 {
