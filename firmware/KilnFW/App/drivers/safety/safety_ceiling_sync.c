@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see the reconcile scratch arrays below */
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h" /* MEDIUM 5 -- s_standing_warning_active/_reason (and the ceiling-
@@ -441,17 +442,22 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
      * (safety_poll_task and kiln_cfg_swap_worker); s_reconcile_lock, taken
      * by the caller (safety_ceiling_sync_reconcile_on_link_up()) around its
      * whole body, is what makes reusing this static state across both safe
-     * -- see that function's doc comment. */
-    static config_identity_field_t esp_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
-    static config_identity_field_t pico_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
-    static safety_ceiling_expected_param_t expected[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
+     * -- see that function's doc comment.
+     * EXT_RAM_BSS_ATTR (PSRAM, not internal .dram0.bss): these four arrays
+     * are ~5.4 KB of plain CPU-side scratch (never DMA, never touched with
+     * the cache disabled, no flash write sources them), moved 2026-10-06 to
+     * recover internal DRAM for the 8704 B largest-free-block floor
+     * (KILN_DRAM_LARGEST_ALARM_BYTES, bench SK-04). */
+    static EXT_RAM_BSS_ATTR config_identity_field_t esp_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
+    static EXT_RAM_BSS_ATTR config_identity_field_t pico_fields[1 + SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
+    static EXT_RAM_BSS_ATTR safety_ceiling_expected_param_t expected[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS];
     /* Field names must outlive config_divergence_check()'s call below --
      * these are static storage too, one small fixed-width buffer per
      * possible extra field, formatted once per tick from the live param
      * table (safety_cfg_store_lookup() names are compile-time string
      * literals themselves, but a param this build's mirror table does not
      * recognize still needs SOME name for the reason string). */
-    static char extra_names[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS][24];
+    static EXT_RAM_BSS_ATTR char extra_names[SAFETY_CEILING_SYNC_MAX_STANDING_FIELDS][24];
 
     esp_fields[0].name = "abs_max_temp_c";
     esp_fields[0].known = target_known;
