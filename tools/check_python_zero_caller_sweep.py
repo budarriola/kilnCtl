@@ -241,6 +241,15 @@ ZERO_CALLER_ALLOWLIST = {
     ("tools/PcTools/src/kilnctrl/totp.py", "verify_totp"),
     ("tools/PcTools/src/kilnctrl/totp.py", "base32_encode"),
     ("tools/PcTools/src/kilnctrl/totp.py", "base32_decode"),
+    # config_convert.decode_zones_blob: the module's public, read-only
+    # zones_cfg_t decoder (v21..current, CRC-verified), named in the module
+    # docstring and the decode half of the encode_zones_blob() round trip.
+    # Its only production caller, convert_zones_blob(), moved to the private
+    # _decode_zones_blob_any() in config_convert stage 2 because it also
+    # needs the fixup notes this wrapper drops. Kept for interactive
+    # inspection of a raw blob and as the seam the golden/history tests
+    # (test_config_convert*.py) decode through.
+    ("tools/PcTools/src/kilnctrl/config_convert.py", "decode_zones_blob"),
 }
 
 # Found genuinely zero-caller by this check's first full-coverage run
