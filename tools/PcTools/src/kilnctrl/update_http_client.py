@@ -7,6 +7,15 @@ docs/GITHUB_RELEASE_UPDATE_PLAN.md), all ROUTE_TIER_ADMIN:
   POST /api/update/stage        stream an ESP image into `stage` (raw body)
   POST /api/update/stage/clear  erase the stage header
 
+and (WP10) the GitHub fetch job of update_fetch.c / the repo setting of
+update_settings_http.c, also ADMIN:
+
+  POST /api/update/check            start a release check (202, async)
+  POST /api/update/download         start a download into the stage (202, async)
+  GET  /api/update/fetch            job status and the last check's verdict
+  POST /api/update/fetch/cancel     cancel a running job
+  GET/POST /api/update/settings     the update repo (form body repo=owner/name)
+
 Nothing here installs anything: applying a staged image is the recovery
 image's job (WP5) and has no client yet. Same "stdlib urllib.request through
 http_auth.urlopen()" convention as nvs_keys_http_client.py, unit-tested
@@ -19,6 +28,7 @@ import hashlib
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Optional
 
@@ -33,6 +43,11 @@ UPDATE_CLEAR_TIMEOUT_S = 30.0
 
 STAGE_PATH = "/api/update/stage"
 STAGE_CLEAR_PATH = "/api/update/stage/clear"
+FETCH_PATH = "/api/update/fetch"
+CHECK_PATH = "/api/update/check"
+DOWNLOAD_PATH = "/api/update/download"
+SETTINGS_PATH = "/api/update/settings"
+FETCH_CANCEL_PATH = "/api/update/fetch/cancel"
 
 ESP_IMAGE_MAGIC = 0xE9
 #: stage_header.h STAGE_SEMVER_FIELD_LEN / STAGE_COMMIT_HEX_LEN.
@@ -156,6 +171,79 @@ def clear_stage(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S, ack_no_safet
     if ack_no_safety:
         req.add_header("X-Ota-Ack-No-Safety", "1")
     return _request(req, STAGE_CLEAR_PATH, timeout)
+
+
+def get_fetch_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
+    """GET /api/update/fetch. Keys: state (idle/checking/downloading/done/failed),
+    kind, stage, error, http_status, bytes_done, bytes_total, busy, repo, unsigned,
+    tag, prerelease, app_size, running, commit, sha256, verdict, reason, allowed,
+    needs_typed_confirm, zones_cfg_lower."""
+    req = urllib.request.Request(_url(host, FETCH_PATH), method="GET")
+    data = _request(req, FETCH_PATH, timeout)
+    if "state" not in data or "busy" not in data:
+        raise UpdateHttpError(f"GET {FETCH_PATH} response lacks state/busy: {data!r}")
+    return data
+
+
+def _empty_post(host: str, path: str, timeout: float, ack_no_safety: bool = False) -> dict:
+    req = urllib.request.Request(_url(host, path), data=b"", method="POST")
+    req.add_header("Content-Type", "application/octet-stream")
+    if ack_no_safety:
+        req.add_header("X-Ota-Ack-No-Safety", "1")
+    return _request(req, path, timeout)
+
+
+def start_check(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) -> dict:
+    """POST /api/update/check; the board answers 202 {"ok":true,"started":true}."""
+    return _empty_post(host, CHECK_PATH, timeout)
+
+
+def download_query(allow_prerelease: bool = False, force: bool = False,
+                   allow_downgrade: bool = False, confirm_downgrade: str = "") -> str:
+    """The query string for POST /api/update/download: only set flags are sent, and
+    confirm_downgrade only together with allow_downgrade."""
+    q = []
+    if allow_prerelease:
+        q.append("allow_prerelease=1")
+    if force:
+        q.append("force=1")
+    if allow_downgrade:
+        q.append("allow_downgrade=1")
+        if confirm_downgrade:
+            q.append("confirm_downgrade=" + urllib.parse.quote(confirm_downgrade, safe=""))
+    return ("?" + "&".join(q)) if q else ""
+
+
+def start_download(host: str, allow_prerelease: bool = False, force: bool = False,
+                   allow_downgrade: bool = False, confirm_downgrade: str = "",
+                   timeout: float = UPDATE_CLEAR_TIMEOUT_S, ack_no_safety: bool = False) -> dict:
+    """POST /api/update/download. 202 when the job started; a refusal raises
+    UpdateHttpError (409 mode gate/claim/clock, 428 safety link not answering)."""
+    return _empty_post(host, DOWNLOAD_PATH + download_query(allow_prerelease, force, allow_downgrade,
+                                                            confirm_downgrade), timeout, ack_no_safety)
+
+def cancel_fetch(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
+    """POST /api/update/fetch/cancel; {"ok":true,"cancelling":bool}."""
+    return _empty_post(host, FETCH_CANCEL_PATH, timeout)
+
+
+def get_settings(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
+    """GET /api/update/settings: ok, repo, default_repo, is_default."""
+    req = urllib.request.Request(_url(host, SETTINGS_PATH), method="GET")
+    data = _request(req, SETTINGS_PATH, timeout)
+    if "repo" not in data:
+        raise UpdateHttpError(f"GET {SETTINGS_PATH} response lacks repo: {data!r}")
+    return data
+
+
+def set_settings(host: str, repo: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) -> dict:
+    """POST /api/update/settings with form body repo=<owner/name> (empty resets
+    to the default). The board validates; a 400 raises UpdateHttpError."""
+    req = urllib.request.Request(_url(host, SETTINGS_PATH),
+                                 data=("repo=" + urllib.parse.quote(repo, safe="")).encode("ascii"),
+                                 method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    return _request(req, SETTINGS_PATH, timeout)
 
 
 def sha256_hex(image: bytes) -> str:

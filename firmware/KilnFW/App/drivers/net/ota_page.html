@@ -181,7 +181,7 @@ route.</p>
 <p>Send a firmware image from this PC or phone into the board's
 <b>stage</b> partition. Staging only stores and verifies the image; it does
 not change what is running and does not reboot. Installing a staged image is
-done by the recovery image and is not available from this page yet.</p>
+done by the recovery image: <b>Install</b> below reboots the board into it.</p>
 <div id="stageInfo" class="card kv">Loading&hellip;</div>
 <div id="stageUnsigned" class="blocker" style="display:none">
   UNSIGNED: this image is verified by its sha256 only, which catches
@@ -195,15 +195,46 @@ done by the recovery image and is not available from this page yet.</p>
     <button id="stageUploadBtn" type="button" class="primary">Upload to stage</button>
     <button id="stageClearBtn" type="button" class="danger">Clear stage</button>
     <button id="stageInstallBtn" type="button" disabled
-            title="Waiting on the recovery image's apply route (WP5)">Install (reboots into recovery)</button>
+            title="Needs a verified staged image">Install (reboots into recovery)</button>
   </div>
-  <p class="note">Install is a placeholder: no route exists for it yet, so the
-  button stays disabled. Uploading erases any previously staged image first.</p>
+  <p class="note">Install restarts the board into the recovery image, where you
+  join its Wi-Fi (the passphrase is shown on the LCD) and press
+  <i>Apply staged update</i>. Uploading erases any previously staged image first.</p>
 </div>
 <div id="stageProgressWrap" style="display:none">
   <div class="progress-outer"><div id="stageProgressBar" class="progress-inner">0%</div></div>
 </div>
 <p id="stageMsg" class="msg"></p>
+
+<h2>Update from GitHub</h2>
+<p>Ask GitHub for the newest release of the repository below and, if you
+choose, download it into the stage. The board does the download itself and
+needs its Wi-Fi connected to the internet with the clock synced. Nothing is
+installed until you press Install above. Not possible during a firing or an
+autotune run.</p>
+<div id="ghBusyBox" class="blocker" style="display:none"></div>
+<div id="ghInfo" class="card kv">Loading&hellip;</div>
+<div id="ghUnsigned" class="blocker" style="display:none">
+  UNSIGNED: releases are not signature-checked yet. The board verifies the
+  download against the release's own sha256 manifest, which catches corruption
+  but does not prove who published it. Only use a repository you trust.
+</div>
+<div id="ghProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="ghProgressBar" class="progress-inner">0%</div></div>
+</div>
+<div>
+  <label><input type="checkbox" id="ghPre"> Include pre-releases</label>
+  <label><input type="checkbox" id="ghForce"> Reinstall the same version (force)</label>
+  <label><input type="checkbox" id="ghDown"> Allow an older version (downgrade)</label>
+  <div id="ghTypedWrap" style="display:none">
+    <label for="ghTyped">Downgrade: type the release tag to confirm</label>
+    <input type="text" id="ghTyped" maxlength="40" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </div>
+  <button id="ghCheckBtn" type="button" class="primary">Check for updates</button>
+  <button id="ghDownloadBtn" type="button">Download to stage</button>
+  <button id="ghCancelBtn" type="button" class="danger" style="display:none">Cancel</button>
+</div>
+<p id="ghMsg" class="msg"></p>
 
 <h2>Update source repository</h2>
 <p>The GitHub repository (<code>owner/name</code>) this board checks for
@@ -716,6 +747,7 @@ function renderStageInfo(s) {
   row('Capacity', s.capacity + ' bytes');
   box.innerHTML = rows.join('');
   document.getElementById('stageUnsigned').style.display = (s.staged && s.header === 'ok') ? '' : 'none';
+  document.getElementById('stageInstallBtn').disabled = !stageInstallable(s);
 }
 
 function loadStageStatus() {
@@ -835,6 +867,246 @@ document.getElementById('stageClearBtn').addEventListener('click', function () {
   });
 });
 
+/* ---- Update from GitHub (WP10, docs/GITHUB_RELEASE_UPDATE_PLAN.md) --------
+ * POST /api/update/check, POST /api/update/download, GET /api/update/fetch,
+ * POST /api/update/fetch/cancel -- update_fetch.c, all ROUTE_TIER_ADMIN. The
+ * board runs the TLS job itself; this page only starts it and polls. Unlike a
+ * manual upload the job does not hold the httpd task, so status can be polled. */
+/* UPDATE_CARD_PURE_BEGIN -- no DOM below this line until the matching END
+ * marker; test_update_page.js evaluates exactly this block. */
+var GH_ERRORS = {
+  fetch_busy: 'Another check or download is already running.',
+  clock_not_synced: 'The board clock is not synced yet (needs internet and SNTP). Try again in a minute.',
+  heat_run_active: 'Stopped: a firing or autotune run is active. Updates never run during a firing.',
+  low_heap: 'The board is low on memory right now. Try again when it is idle.',
+  no_memory: 'The board ran out of memory.',
+  connect_failed: 'Could not reach GitHub. Check the board internet connection.',
+  timeout: 'GitHub did not answer in time.',
+  cancelled: 'Cancelled.',
+  bad_repo: 'The configured repository is not valid.',
+  too_large: 'The release image is larger than the stage.',
+  size_mismatch: 'The downloaded size does not match the release manifest.',
+  short_body: 'The download ended early.',
+  overrun: 'The download was larger than announced.',
+  sha256_mismatch: 'The download does not match the release sha256 and was discarded.',
+  hash_failed: 'The board could not hash the download.',
+  task_create_failed: 'The board could not start the download task.',
+  redirect_no_location: 'GitHub sent a redirect the board could not follow.',
+  redirect_location_refused: 'GitHub redirected to a host the board does not allow.'
+};
+
+var GH_VERDICTS = {
+  allow_upgrade: 'A newer release is available.',
+  allow_reinstall: 'Same version: reinstalling needs "Reinstall (force)".',
+  allow_downgrade: 'Older than the running version: needs "Allow an older version".',
+  up_to_date: 'You are up to date.',
+  refuse_downgrade: 'Older than the running version: refused.',
+  refuse_partitions: 'This release needs a different partition layout and cannot be installed over the air.',
+  refuse_too_old: 'This release is older than the oldest version this board can update from.',
+  refuse_dirty: 'This release is a development build and is refused.',
+  refuse_prerelease: 'This is a pre-release: tick "Include pre-releases" to allow it.',
+  refuse_malformed: 'The release data is malformed.',
+  refuse_needs_force: 'Same version but a different build (or an unknown running version): needs "Reinstall (force)".'
+};
+
+function ghErrorText(name) {
+  if (!name) return '';
+  return GH_ERRORS.hasOwnProperty(name) ? GH_ERRORS[name] : ('Failed: ' + name);
+}
+
+function ghVerdictText(v) {
+  return GH_VERDICTS.hasOwnProperty(v) ? GH_VERDICTS[v] : String(v || '');
+}
+
+/* The query string for POST /api/update/download. Only flags the operator
+ * ticked are sent; the typed downgrade confirm goes only with a downgrade. */
+function ghDownloadQuery(opts) {
+  var q = [];
+  if (opts.pre) q.push('allow_prerelease=1');
+  if (opts.force) q.push('force=1');
+  if (opts.down) {
+    q.push('allow_downgrade=1');
+    if (opts.typed) q.push('confirm_downgrade=' + encodeURIComponent(opts.typed));
+  }
+  return q.length ? '?' + q.join('&') : '';
+}
+
+/* Whether Download is worth offering for a finished check: allowed by the
+ * board's own policy, or blocked only by a flag the operator can tick. */
+function ghCanDownload(s, opts) {
+  if (!s || s.state !== 'done' || !s.tag) return false;
+  if (s.allowed) return true;
+  if (s.verdict === 'allow_reinstall' || s.verdict === 'refuse_needs_force') return !!opts.force;
+  if (s.verdict === 'allow_downgrade' || s.verdict === 'refuse_downgrade') return !!opts.down;
+  if (s.verdict === 'refuse_prerelease') return !!opts.pre;
+  return false;
+}
+
+/* Install is offered only for a verified stage. */
+function stageInstallable(s) {
+  return !!(s && s.staged === true && s.header === 'ok' && s.state === 'verified' && !s.busy);
+}
+
+/* A non-2xx reply is either {"ok":false,"error":name} or the plain-text
+ * mode-gate/interlock refusal; both end up as one readable sentence. */
+function ghRefusalText(status, text) {
+  var body = null;
+  try { body = JSON.parse(text); } catch (e) { body = null; }
+  if (body && typeof body.error === 'string') return ghErrorText(body.error);
+  if (status === 409 || status === 428) return text ? String(text).trim() : 'Refused (HTTP ' + status + ').';
+  return text ? String(text).trim() : ('HTTP ' + status);
+}
+/* UPDATE_CARD_PURE_END */
+
+var ghPoll = null;
+var ghLast = null;
+
+function ghOpts() {
+  return {
+    pre: document.getElementById('ghPre').checked,
+    force: document.getElementById('ghForce').checked,
+    down: document.getElementById('ghDown').checked,
+    typed: document.getElementById('ghTyped').value.trim()
+  };
+}
+
+function renderGh(s) {
+  ghLast = s;
+  var rows = [];
+  function row(k, v) { rows.push('<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>'); }
+  row('Repository', s.repo || '(unknown)');
+  if (s.state === 'checking' || s.state === 'downloading') {
+    row('Working', (s.kind === 'check' ? 'checking' : 'downloading') + (s.stage ? ' (' + s.stage + ')' : ''));
+  } else if (s.state === 'failed') {
+    row('Last job', ghErrorText(s.error));
+  }
+  if (s.tag) {
+    row('Latest release', s.tag + (s.prerelease ? ' (pre-release)' : ''));
+    row('Running', s.running || '(unknown)');
+    row('Image size', s.app_size + ' bytes');
+    if (s.sha256) row('SHA-256', s.sha256);
+    row('Verdict', ghVerdictText(s.verdict) + (s.reason ? ' ' + s.reason : ''));
+    if (s.zones_cfg_lower) row('Warning', 'This release has an older zones config version: installing it can reset PID gains to defaults.');
+  }
+  document.getElementById('ghInfo').innerHTML = rows.join('');
+  document.getElementById('ghUnsigned').style.display = s.unsigned ? '' : 'none';
+  var busy = !!s.busy;
+  var opts = ghOpts();
+  document.getElementById('ghCheckBtn').disabled = busy;
+  document.getElementById('ghDownloadBtn').disabled = busy || !ghCanDownload(s, opts);
+  document.getElementById('ghCancelBtn').style.display = busy ? '' : 'none';
+  document.getElementById('ghTypedWrap').style.display = opts.down ? '' : 'none';
+  var wrap = document.getElementById('ghProgressWrap');
+  if (busy && s.kind === 'download' && s.bytes_total > 0) {
+    var pct = Math.min(100, Math.floor(100 * s.bytes_done / s.bytes_total));
+    wrap.style.display = '';
+    document.getElementById('ghProgressBar').style.width = pct + '%';
+    document.getElementById('ghProgressBar').textContent = pct + '%';
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+
+function loadGh() {
+  return window.kcOtaAuthedFetch('/api/update/fetch', { method: 'GET' }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(r.status === 404 ? 'this board has no GitHub update support' : (text || ('HTTP ' + r.status)));
+      var s = JSON.parse(text);
+      renderGh(s);
+      if (s.busy) {
+        if (!ghPoll) ghPoll = setInterval(loadGh, 1500);
+      } else if (ghPoll) {
+        clearInterval(ghPoll); ghPoll = null;
+        // A finished download changes the stage; a finished check has a verdict.
+        loadStageStatus();
+        var m = document.getElementById('ghMsg');
+        if (s.state === 'failed') m.textContent = ghErrorText(s.error);
+        else if (s.kind === 'download') m.textContent = 'Downloaded and staged ' + s.tag + '. Press Install above to apply it.';
+        else m.textContent = ghVerdictText(s.verdict);
+      }
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    document.getElementById('ghInfo').textContent = 'Could not load GitHub update status: ' + e.message;
+  });
+}
+
+function ghStart(path, label) {
+  var msg = document.getElementById('ghMsg');
+  var box = document.getElementById('ghBusyBox');
+  box.style.display = 'none';
+  msg.textContent = label;
+  return window.kcOtaAuthedFetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: new Uint8Array(0)
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) {
+        msg.textContent = '';
+        box.textContent = 'Refused: ' + ghRefusalText(r.status, text);
+        box.style.display = '';
+      }
+      return loadGh();
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Request failed: ' + e.message;
+  });
+}
+
+document.getElementById('ghCheckBtn').addEventListener('click', function () {
+  ghStart('/api/update/check', 'Checking GitHub…');
+});
+document.getElementById('ghDownloadBtn').addEventListener('click', function () {
+  var s = ghLast;
+  var opts = ghOpts();
+  if (!ghCanDownload(s, opts)) return;
+  if (opts.down && opts.typed !== s.tag) {
+    document.getElementById('ghMsg').textContent = 'Type the release tag (' + s.tag + ') exactly to confirm a downgrade.';
+    return;
+  }
+  window.kcConfirm('Download ' + s.tag + ' (' + s.app_size + ' bytes) into the stage? ' +
+    'Any previously staged image is erased. This image is UNSIGNED. Nothing is installed.').then(function (ok) {
+    if (!ok) return;
+    return ghStart('/api/update/download' + ghDownloadQuery(opts), 'Starting download…');
+  });
+});
+document.getElementById('ghCancelBtn').addEventListener('click', function () {
+  window.kcOtaAuthedFetch('/api/update/fetch/cancel', {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(0)
+  }).then(function () { return loadGh(); }).catch(function () {});
+});
+['ghPre', 'ghForce', 'ghDown', 'ghTyped'].forEach(function (id) {
+  document.getElementById(id).addEventListener('input', function () { if (ghLast) renderGh(ghLast); });
+  document.getElementById(id).addEventListener('change', function () { if (ghLast) renderGh(ghLast); });
+});
+
+/* Install: POST /api/ota/esp/recovery_boot (ADMIN, mode gate, interlock) points the
+ * bootloader at the recovery image and reboots. Applying is then done on the
+ * recovery image's own page; this page cannot reach it. */
+document.getElementById('stageInstallBtn').addEventListener('click', function () {
+  var msg = document.getElementById('stageMsg');
+  window.kcConfirm('Restart the board into the recovery image to install the staged update? ' +
+    'This page will stop responding. Join the recovery Wi-Fi (passphrase on the LCD), open ' +
+    'its page and press "Apply staged update". The kiln cannot fire while in recovery.').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting recovery boot…';
+    return window.kcOtaAuthedFetch('/api/ota/esp/recovery_boot', {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(0)
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(ghRefusalText(r.status, text));
+      msg.textContent = 'Rebooting into the recovery image. Join its Wi-Fi (passphrase on the LCD), open its page and press "Apply staged update". Afterwards rejoin your normal Wi-Fi.';
+    });
+  }).catch(function (e) {
+    if (e && e.__kcHandled) return;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Install refused: ' + e.message;
+  });
+});
+
 /* ---- Update repo setting ---------------------------------------------------
  * GET/POST /api/update/settings -- update_settings_http.c, ROUTE_TIER_ADMIN.
  * POST is form-encoded `repo=owner/name`; empty resets to the default. */
@@ -893,6 +1165,7 @@ pollSafetyBuildInfo();
 setInterval(pollSafetyBuildInfo, 3000);
 loadStageStatus();
 loadRepo();
+loadGh();
 
 (function () {
   var btn = document.getElementById('themeBtn');

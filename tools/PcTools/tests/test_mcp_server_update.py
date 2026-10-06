@@ -17,6 +17,7 @@ import tempfile
 import unittest
 import unittest.mock
 import urllib.error
+import urllib.parse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -349,6 +350,226 @@ class RegistrationTest(unittest.TestCase):
         registered = set(mcp_server.registry.by_name)
         for name in ("update_status", "update_stage_upload", "update_stage_clear"):
             self.assertIn(name, registered)
+
+
+class GhBoard(FakeBoard):
+    """FakeBoard plus the WP8/WP9 routes: check, download, fetch status, settings."""
+
+    DEFAULT = "budarriola/kilnCtl"
+
+    def __init__(self):
+        super().__init__()
+        self.repo = self.DEFAULT
+        self.job = None            # None | "check" | "download"
+        self.polls_busy = 0        # GET /update/fetch answers busy this many times first
+        self.last = {}             # fields overriding the finished-job status
+        self.verdict = ("allow_upgrade", True)
+        self.release_sha = "ab" * 32
+        self.release_len = 4096
+        self.stage_corrupt = False
+        self.refuse_gh = None      # (status, name) for check/download
+        self.settings_ignored = False
+
+    def _fetch(self) -> dict:
+        if self.job is not None and self.polls_busy > 0:
+            self.polls_busy -= 1
+            return {"ok": True, "state": "downloading", "kind": self.job, "busy": True, "repo": self.repo,
+                    "bytes_done": 10, "bytes_total": 100, "unsigned": True}
+        if self.job is None:
+            return {"ok": True, "state": "idle", "kind": "none", "busy": False, "repo": self.repo, "unsigned": True}
+        d = {"ok": True, "state": "done", "kind": self.job, "busy": False, "repo": self.repo, "unsigned": True,
+             "tag": "v1.0.1", "prerelease": False, "app_size": self.release_len, "running": "1.0.0",
+             "sha256": self.release_sha, "verdict": self.verdict[0], "allowed": self.verdict[1],
+             "needs_typed_confirm": False, "zones_cfg_lower": False}
+        d.update(self.last)
+        return d
+
+    def urlopen(self, req, timeout=None, **kw):
+        path = req.full_url.split("/api", 1)[1]
+        m = req.get_method()
+        base = path.split("?", 1)[0]
+        if base in ("/update/fetch", "/update/check", "/update/download", "/update/settings"):
+            self.requests.append(req)
+            if m == "GET" and base == "/update/fetch":
+                return _Resp(json.dumps(self._fetch()).encode())
+            if m == "GET" and base == "/update/settings":
+                return _Resp(json.dumps({"ok": True, "repo": self.repo, "default_repo": self.DEFAULT,
+                                         "is_default": self.repo == self.DEFAULT}).encode())
+            if m == "POST" and base == "/update/settings":
+                body = urllib.parse.parse_qs(req.data.decode())
+                if not self.settings_ignored:
+                    self.repo = (body.get("repo") or [""])[0] or self.DEFAULT
+                return _Resp(b'{"ok":true}')
+            if m == "POST" and base in ("/update/check", "/update/download"):
+                if self.needs_ack and not req.has_header("X-ota-ack-no-safety"):
+                    raise self._http_error(req, 428, {"ok": False, "error": "safety_not_answering"})
+                if self.refuse_gh:
+                    raise self._http_error(req, self.refuse_gh[0], {"ok": False, "error": self.refuse_gh[1]})
+                self.job = "check" if base == "/update/check" else "download"
+                if self.job == "download":
+                    self.staged = {"len": self.release_len,
+                                   "sha": "0" * 64 if self.stage_corrupt else self.release_sha,
+                                   "semver": "1.0.1", "commit": "c" * 40, "source": self.stage_source}
+                return _Resp(b'{"ok":true,"started":true}')
+        return super().urlopen(req, timeout, **kw)
+
+    stage_source = 2
+
+    def _status(self) -> dict:
+        d = super()._status()
+        if self.staged:
+            d["source"] = self.staged.get("source", 1)
+        return d
+
+
+class GhBase(_Base):
+    def setUp(self):
+        super().setUp()
+        self.board = GhBoard()
+        p = unittest.mock.patch.object(uhc.http_auth, "urlopen", self.board.urlopen)
+        p.start()
+        self.addCleanup(p.stop)
+        q = unittest.mock.patch.object(msu, "_POLL_S", 0)
+        q.start()
+        self.addCleanup(q.stop)
+
+
+class GhCheckTest(GhBase):
+    def test_check_reports_verdict_and_sha(self):
+        self.board.polls_busy = 2
+        out = msu.update_check()
+        self.assertTrue(out.startswith("ok"), out)
+        for s in ("v1.0.1", "allow_upgrade", "UNSIGNED", self.board.release_sha):
+            self.assertIn(s, out)
+        self.assertIsNone(self.board.staged)
+
+    def test_check_refusal_names_error(self):
+        self.board.refuse_gh = (409, "clock_not_synced")
+        out = msu.update_check()
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertIn("clock_not_synced", out)
+
+    def test_check_failed_job_not_ok(self):
+        self.board.job = "check"
+        self.board.last = {"state": "failed", "error": "connect_failed"}
+        out = msu.update_check()
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("connect_failed", out)
+
+    def test_check_wait_expiry_is_unknown(self):
+        self.board.polls_busy = 10 ** 6
+        out = msu.update_check(wait_s=0)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+
+
+class GhStageReleaseTest(GhBase):
+    def test_dry_run_posts_nothing(self):
+        for val in (False, 1, "yes", None):
+            out = msu.update_stage_release(confirm=val, force=True)  # type: ignore[arg-type]
+            self.assertTrue(out.startswith("DRY RUN"), out)
+            self.assertIn("force=1", out)
+        self.assertEqual(self.board.posts(), [])
+
+    def test_confirmed_download_verified_by_readback(self):
+        self.board.polls_busy = 1
+        out = msu.update_stage_release(confirm=True)
+        self.assertTrue(out.startswith("ok - release v1.0.1 staged and verified"), out)
+        self.assertIn("UNSIGNED", out)
+        self.assertEqual(len(self.board.posts()), 1)
+
+    def test_query_carries_flags_and_typed_tag(self):
+        msu.update_stage_release(confirm=True, allow_downgrade=True, confirm_downgrade="v0.9.0",
+                                 allow_prerelease=True)
+        url = self.board.posts()[0].full_url
+        self.assertIn("allow_prerelease=1", url)
+        self.assertIn("allow_downgrade=1&confirm_downgrade=v0.9.0", url)
+
+    def test_stage_sha_mismatch_fails_loud(self):
+        self.board.stage_corrupt = True
+        out = msu.update_stage_release(confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("sha256", out)
+
+    def test_stage_wrong_source_fails(self):
+        self.board.stage_source = 1
+        out = msu.update_stage_release(confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("expected github", out)
+
+    def test_refusal_409_final(self):
+        self.board.refuse_gh = (409, "heat_run_active")
+        out = msu.update_stage_release(confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertIn("heat_run_active", out)
+
+    def test_in_flight_refused_before_post(self):
+        self.board.busy = True
+        out = msu.update_stage_release(confirm=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertEqual(self.board.posts(), [])
+
+    def test_428_needs_exact_ack(self):
+        self.board.needs_ack = True
+        self.assertTrue(msu.update_stage_release(confirm=True, ack_no_safety=1).startswith("REFUSED"))  # type: ignore[arg-type]
+        self.assertTrue(msu.update_stage_release(confirm=True, ack_no_safety=True).startswith("ok"))
+        self.assertTrue(msu.update_stage_release(ack_no_safety=True).startswith("DRY RUN"))
+
+    def test_replaced_stage_noted(self):
+        uhc.upload_stage("h", _image(), version="1.0.0")
+        out = msu.update_stage_release(confirm=True)
+        self.assertIn("previously staged image", out)
+
+
+class GhSettingsTest(GhBase):
+    def test_get(self):
+        out = msu.update_get_settings()
+        self.assertIn("repo=budarriola/kilnCtl", out)
+        self.assertIn("is_default=True", out)
+
+    def test_set_needs_exact_confirm(self):
+        for val in (False, 1, "yes"):
+            out = msu.update_set_settings("a/b", confirm=val)  # type: ignore[arg-type]
+            self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertEqual(self.board.posts(), [])
+        self.assertEqual(self.board.repo, GhBoard.DEFAULT)
+
+    def test_set_verified_by_readback(self):
+        out = msu.update_set_settings("someone/else", confirm=True)
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertEqual(self.board.repo, "someone/else")
+
+    def test_empty_resets_default(self):
+        self.board.repo = "x/y"
+        out = msu.update_set_settings("", confirm=True)
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertEqual(self.board.repo, GhBoard.DEFAULT)
+
+    def test_ignored_write_fails_loud(self):
+        self.board.settings_ignored = True
+        out = msu.update_set_settings("someone/else", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_board_400_reported(self):
+        orig = self.board.urlopen
+
+        def bad(req, timeout=None, **kw):
+            if req.get_method() == "POST" and req.full_url.endswith("/update/settings"):
+                raise self.board._http_error(req, 400, {"ok": False, "error": "bad_repo"})
+            return orig(req, timeout, **kw)
+        with unittest.mock.patch.object(uhc.http_auth, "urlopen", bad):
+            out = msu.update_set_settings("nonsense", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("bad_repo", out)
+
+
+class GhRegistrationTest(unittest.TestCase):
+    def test_registered_and_findable(self):
+        from kilnctrl import mcp_server
+        from kilnctrl import mcp_facade
+        for name in ("update_check", "update_stage_release", "update_get_settings", "update_set_settings"):
+            self.assertIn(name, mcp_facade.GROUP_OVERRIDES)
+            self.assertIn(name, mcp_facade.KEYWORDS)
+            self.assertIn(name, set(mcp_server.registry.by_name))
 
 
 if __name__ == "__main__":
