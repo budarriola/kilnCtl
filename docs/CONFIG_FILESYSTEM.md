@@ -211,9 +211,9 @@ Since `9310367b` the status path's transient scratch (the handler buffer, the tw
 
 ## If the filesystem fails to mount
 
-Nothing to do at the board — every item falls back to its NVS copy and the
-board runs on firmware defaults for anything genuinely file-only (nothing
-is file-only yet; see above). A persistent mount failure (as opposed to
+Saves are refused until cfg mounts (owner decision 2026-10-06, see "cfg
+unmounted: refuse and prompt the format" below). Loads still fall back to the
+legacy NVS copy, so the board boots and runs on the last values it had. A persistent mount failure (as opposed to
 "not yet formatted") is reported via `/api/cfgfs`'s `status` field; when the failure is the ask-first gate refusing to format,
 the LCD/web dashboard banner described above (`/api/status`) shows it too.
 No safety decision
@@ -546,7 +546,7 @@ only advances after a verified write. Nothing silently writes the NVS copy
 instead; that would recreate the stale-NVS problem below in the opposite
 direction. A board with no cfg partition mounted (recovery mode, mount
 failure) therefore cannot persist these settings until cfg mounts; this is
-deliberate and is listed as an open question for the owner.
+deliberate, and the owner confirmed it on 2026-10-06 (see the last section).
 
 ### What `/api/cfgfs` and readiness report afterwards
 
@@ -561,7 +561,7 @@ deliberate and is listed as an open question for the owner.
   per id the same way.
 - The `dualwrite_window` counters (clean boots, firing complete, restore
   verified) stay as a historical record; the window they gate is closed.
-- Readiness items are unchanged.
+- Readiness item `cfg_fs` is now `not_done` when cfg is unmounted (see the last section).
 
 ### Rollback hazard
 
@@ -629,13 +629,67 @@ Verification:
 - `flash_worker_lint.py`: seven stale `ALLOWLIST` entries (the converted
   preference files) removed; lint clean.
 
-Behaviour when the cfg partition is NOT mounted (unchanged, owner decision
-pending): these paths refuse to save and return an error rather than falling
+Behaviour when the cfg partition is NOT mounted (owner decision 2026-10-06,
+last section): these paths refuse to save and return an error rather than falling
 back to NVS: `pref_cfg_fs_save`/`pref_cfg_fs_commit` (unit_pref,
 update_settings, aux_outputs_cfg, display_power_cfg, ramp_assist_cfg,
 time_sync, relay_cycles snapshot, adaptive_tune ki baseline, hidden-builtin
 mask, relay_names, zone_normals); every `kiln_cfg_store` mutator and, through
 them, backup import; `profiles_cfg_fs_save`/`_delete`; `zones_config_cfg_fs_save`
 (zones POST, autosave, migration write-back, import); `firing_stats_cfg_fs_write`.
-`iter_tune_store.c` keeps writing NVS (deliberate exception). Loads fall back
+`iter_tune_store.c` keeps writing NVS and silently skips its cfg write
+(deliberate exception, documented in the last section). Loads fall back
 to the legacy NVS copy.
+
+### cfg unmounted: refuse and prompt the format (owner decision 2026-10-06)
+
+Decision: "Refuse, and prompt the format." Saves stay refused while cfg is not
+mounted, and every surface now says why and what to do instead of failing
+quietly or reporting success.
+
+- One shared message, `CFG_FS_NOT_MOUNTED_TEXT` in `persist/cfg_fs.h`:
+  "settings storage (cfg) not mounted - confirm format via POST
+  /api/cfgfs/format_confirm". It is a string literal so handlers can
+  concatenate it into JSON without a stack buffer.
+- Shared HTTP helper, `common/cfg_fs_refusal_http.h` (header-only):
+  `cfg_fs_http_refuse_if_unmounted(req)` is a pre-check at the top of each save
+  handler, before any RAM mutation, and answers `503` with
+  `{"ok":false,"error":"<text>"}`. `cfg_fs_http_persist_failed(req)` is the
+  post-failure response: `503` with the same text when cfg is unmounted, `500`
+  `{"ok":false,"error":"could not be saved to flash"}` when it is mounted but
+  the write failed. Neither is ever a success body.
+- Save routes using it: unit preference, update settings, `settings/tz`,
+  `settings/display_power`, ramp assist, relay cycles reset and restore, the
+  profile save, delete, builtin hide and builtin restore routes, `POST
+  /api/zones` (pre-check, and a failed zones or relay-names save is now a 500
+  instead of `ok`), `POST /api/aux_outputs` (the aux core maps
+  `ESP_ERR_INVALID_STATE` to a 409 "zone conflict", so it needs the pre-check),
+  the four `kiln_cfg_http.c` mutators (save, clone, delete, rename; a persist
+  failure with cfg unmounted is a 503 instead of a 500), and the backup import
+  job (a real import is refused with 503 before anything is applied; a dry run
+  still works because it writes nothing).
+- `GET /api/readiness` item `cfg_fs` is `not_done` (was `deliberately_off`)
+  when cfg is unmounted, with a detail naming `POST /api/cfgfs/format_confirm`,
+  and a variant saying "awaiting format confirmation" when the ask-first gate
+  refused to auto-format. It stays non-gating for a firing: only the four gate
+  items (recovery_mode, safety_trip, crash_report, estop_verified) block one,
+  because a firing runs from the config already in RAM.
+- LCD: the one existing path is the home-page strip shown while the format
+  confirmation is pending; its text now reads "SAVES REFUSED: CONFIG FS NEEDS
+  FORMAT CONFIRM -- see web Settings". No new page. The web banner says the
+  same. A plain unmounted board with no pending confirmation has no LCD
+  message; the readiness item and the 503 bodies carry it.
+- Recovery mode: `cfg_fs_mount_or_skip(true, ...)` deliberately never mounts
+  cfg (recovery must work with the partition erased), so the application
+  firmware in boot-guard recovery mode is simply "unmounted" and the same 503
+  applies. The separate `firmware/KilnFW_recovery` image does not link `cfg_fs`
+  at all and has no settings save routes. No mount was added to recovery.
+- `iter_tune_store.c`: its cfg write stays a silent no-op when cfg is not
+  mounted. It runs from the autotune/iteration path with no request to answer,
+  and its NVS write still holds the data. This is documented at
+  `cfg_fs_save_raw()` and is intentionally not turned into an error.
+
+Tests: `test_readiness_commissioning.c` pins the item status and detail text,
+`test_zones_http.c` covers the 503 and 500 responses of `POST /api/zones` and
+the shared helper, and `test_backup_import.c` covers the update-settings
+route's 503 and 500 responses.

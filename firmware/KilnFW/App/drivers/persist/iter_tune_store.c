@@ -187,6 +187,13 @@ static bool cfg_fs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev) {
     return true;
 }
 
+/* Intentional silent no-op when cfg is not mounted (owner decision
+ * 2026-10-06, docs/CONFIG_FILESYSTEM.md): unlike the HTTP save routes, which
+ * refuse with 503 and CFG_FS_NOT_MOUNTED_TEXT, this store is written from the
+ * autotune/iteration path with no request to answer, and NVS (above) still
+ * holds the write, so there is nobody to surface an error to and no data is
+ * lost. The not-mounted state is already visible on /api/readiness
+ * ("cfg_fs" item). Do not "fix" this into an error return. */
 static void cfg_fs_save_raw(const iter_tune_store_blob_t *in, uint32_t rev) {
     if (!cfg_fs_is_available()) {
         return;

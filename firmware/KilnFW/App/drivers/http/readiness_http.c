@@ -14,6 +14,7 @@
 #include "aux_outputs_cfg.h"
 #include "boot_guard.h"
 #include "cfg_fs.h"
+#include "cfg_fs_mount.h"
 #include "crash_report.h"
 #include "ct_verify_store.h"
 #include "dashboard_http.h"
@@ -937,22 +938,16 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 14. Config filesystem (cfg_fs). 2026-09-08 follow-on: a failed/absent
-     * `cfg` LittleFS mount leaves every *_cfg_fs.c bridge running on its NVS
-     * fallback alone -- degraded, not broken, so this is deliberately
-     * non-blocking. See readiness_cfg_fs_status()'s doc comment in
-     * readiness_http.h for why DELIBERATELY_OFF rather than NOT_DONE. */
+    /* 14. Config filesystem (cfg_fs). Owner decision 2026-10-06: with cfg
+     * unmounted every save route refuses (503), so this is NOT_DONE and the
+     * detail names the remedy. Non-gating for firing, see
+     * readiness_cfg_fs_status()'s doc comment in readiness_http.h. */
     {
         bool mounted = cfg_fs_is_available();
         readiness_status_t st = readiness_cfg_fs_status(mounted);
         char detail[READINESS_DETAIL_MAX];
-        if (mounted) {
-            snprintf(detail, sizeof(detail), "cfg filesystem mounted -- config is file-backed with NVS mirror");
-        } else {
-            snprintf(detail, sizeof(detail),
-                     "cfg filesystem not mounted -- running on NVS-only fallback storage (degraded, not "
-                     "blocking; see /diagnostics)");
-        }
+        snprintf(detail, sizeof(detail), "%s",
+                 readiness_cfg_fs_detail(mounted, cfg_fs_mount_format_confirmation_pending()));
         size_t before_o = o;
         o = append_item(json, item_cap, o, first, "cfg_fs", "Config filesystem (cfg_fs)", st, detail,
                         "/diagnostics", &dropped);

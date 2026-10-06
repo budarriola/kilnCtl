@@ -5689,7 +5689,21 @@ static void test_update_settings_http_post(void)
     wp9_http_post("repo=flaky%2Fwrite");
     pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(strcmp(s_post_last_status, "500 Internal Server Error") == 0, "a failed persist gets 500");
-    TEST_CHECK(strstr(s_send_last_body, "\"ok\":false") != NULL, "the 500 body says ok:false");
+    TEST_CHECK(strstr(s_post_last_body, "\"ok\":false") != NULL, "the 500 body says ok:false");
+
+    // cfg unmounted (owner decision 2026-10-06): a 503 refusal with the shared
+    // text, the live value untouched -- never a success, never a 500 that
+    // pretends the write was attempted.
+    wp9_fresh_repo_setting();
+    update_settings_set("before/unmount");
+    cfg_fs_deinit();
+    s_post_last_status[0] = '\0';
+    s_post_last_body[0] = '\0';
+    wp9_http_post("repo=never%2Fapplied");
+    TEST_CHECK(strcmp(s_post_last_status, "503 Service Unavailable") == 0, "an unmounted cfg is refused with 503");
+    TEST_CHECK(strstr(s_post_last_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL, "the 503 body carries the shared text");
+    TEST_CHECK(strcmp(update_settings_repo(), "before/unmount") == 0, "a refused save must not change the live value");
+    bi_mount_fresh_cfg();
 
     // GET reflects the live value.
     wp9_fresh_repo_setting();

@@ -258,6 +258,7 @@ static inline void nvs_test_enable(bool enable)
 #define ZH_MKDIR(p) mkdir((p), 0755)
 #endif
 #include "cfg_fs.h"
+#include "cfg_fs_refusal_http.h"
 static const char *ZH_CFG_SCRATCH = "cfg_fs_test_zones_http";
 
 static inline void zh_cfg_remount_fresh(void)
@@ -2846,6 +2847,95 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
 
     nvs_test_enable(false);
     nvs_test_clear();
+}
+
+// Owner decision 2026-10-06 ("Refuse, and prompt the format"): cfg is the only
+// save target, so with cfg unmounted a save must be REFUSED with a 503 whose
+// body names the cause and the format-confirm remedy (the shared
+// CFG_FS_NOT_MOUNTED_TEXT), before any RAM mutation, and must never be
+// reported as success. A write failure on a mounted cfg is a 500, also never
+// "ok".
+static void test_zones_post_refused_when_cfg_unmounted(void)
+{
+    TEST_SECTION("zones_post_handler -- cfg unmounted is a 503 refusal naming the format-confirm remedy; "
+                 "mounted-but-write-failing is a 500; neither reports ok");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    // A body that really commits (the same shape the legal-chain test uses),
+    // so "refused" cannot be confused with "rejected as malformed".
+    zh_cfg_remount_fresh();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    run_zones_post(body);
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") == 0, "test setup: this body must commit when cfg is mounted");
+
+    // 1. Unmounted: refused up front.
+    cfg_fs_deinit();
+    TEST_CHECK(!cfg_fs_is_available(), "test setup: cfg must be unmounted");
+    uint32_t gen_before = s_config_generation;
+    s_ceiling_writer_calls = 0;
+    run_zones_post(body);
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0,
+              "unmounted cfg must refuse with 503, not 400/409/500/200");
+    TEST_CHECK(strstr(s_last_resp_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL,
+              "the 503 body must carry the shared cfg-not-mounted text");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":false") != NULL, "the 503 body must say ok:false");
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") != 0, "must never answer the plain-text success body");
+    TEST_CHECK(s_config_generation == gen_before, "a refused save must not commit to RAM (generation unchanged)");
+    TEST_CHECK(s_ceiling_writer_calls == 0, "a refused save must not write the Pico ceiling");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after a refused run");
+
+    // 2. Mounted but the write fails: 500 whose body is not a success.
+    zh_cfg_remount_fresh();
+    TEST_CHECK(cfg_fs_is_available(), "test setup: cfg must be mounted again");
+    zones_config_cfg_fs_set_write_fn(zh_failing_cfg_write_fn);
+    run_zones_post(body);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0,
+              "a mounted cfg whose write fails must answer 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":false") != NULL, "the 500 body must say ok:false");
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") != 0, "a failed save must never answer the plain-text success body");
+
+    // 3. Healthy mounted: still succeeds.
+    run_zones_post(body);
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") == 0, "a healthy mounted save must still answer ok");
+}
+
+// The shared helper itself (cfg_fs_refusal_http.h), used by every other save
+// route (settings, profiles, aux, kiln_configs, backup import).
+static void test_cfg_fs_refusal_helper(void)
+{
+    TEST_SECTION("cfg_fs_http_refuse_if_unmounted / cfg_fs_http_persist_failed -- shared text and statuses");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    zh_cfg_remount_fresh();
+    test_post_hooks_reset();
+    s_last_resp_body[0] = '\0';
+    TEST_CHECK(!cfg_fs_http_refuse_if_unmounted(&req), "mounted cfg must not be refused");
+    TEST_CHECK(s_last_resp_body[0] == '\0' && s_test_last_status[0] == '\0', "a pass-through must send nothing");
+    (void)cfg_fs_http_persist_failed(&req);
+    TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0, "mounted persist failure is a 500");
+    TEST_CHECK(strstr(s_last_resp_body, "could not be saved to flash") != NULL, "500 body names the cause");
+
+    cfg_fs_deinit();
+    test_post_hooks_reset();
+    TEST_CHECK(cfg_fs_http_refuse_if_unmounted(&req), "unmounted cfg must be refused");
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0, "refusal is a 503");
+    TEST_CHECK(strstr(s_last_resp_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL, "refusal body carries the shared text");
+    TEST_CHECK(strstr(CFG_FS_NOT_MOUNTED_TEXT, "/api/cfgfs/format_confirm") != NULL,
+              "the shared text must name the format-confirm route");
+    test_post_hooks_reset();
+    (void)cfg_fs_http_persist_failed(&req);
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0,
+              "persist failure with cfg unmounted is also a 503");
+    TEST_CHECK(strstr(s_last_resp_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL, "same shared text on the failure path");
+    zh_cfg_remount_fresh();
 }
 
 // ---------------------------------------------------------------------------
@@ -15676,6 +15766,9 @@ static void test_zone_restore_refuses_on_aux_conflict(void)
 
 void run_test_zones_http(void)
 {
+    // cfg is the only save target now, so every handler test that commits a
+    // config needs it mounted: a save with cfg unmounted is refused (503).
+    zh_cfg_remount_fresh();
     test_zone_free_for_aux();
     test_zone_restore_refuses_on_aux_conflict();
     test_zone_free_for_aux_nvs_failure_restores_ram();
@@ -16005,6 +16098,8 @@ void run_test_zones_http(void)
     // test_safety_cfg_http.c -- once admitted here, http_async_job_busy()
     // reads true for the rest of this executable.
     test_zones_post_http_sync_claim();
+    test_zones_post_refused_when_cfg_unmounted();
+    test_cfg_fs_refusal_helper();
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refused_while_async_job_busy();
 }

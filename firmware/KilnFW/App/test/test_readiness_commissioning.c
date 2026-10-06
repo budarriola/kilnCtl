@@ -11,6 +11,7 @@
 
 #include "test_common.h"
 #include "../drivers/http/readiness_http.h"
+#include "../drivers/persist/cfg_fs.h"
 
 void run_test_readiness_commissioning(void)
 {
@@ -305,18 +306,38 @@ void run_test_readiness_recovery_mode(void)
                 "a recovery-mode boot must read not_done, not ok");
 }
 
-/* readiness_cfg_fs_status(): a failed/absent cfg_fs mount is degraded (NVS
- * fallback keeps config working), not blocking -- deliberately
- * DELIBERATELY_OFF rather than NOT_DONE, same idiom as the calibration
- * item's "nothing to do, but say so" state. */
+/* readiness_cfg_fs_status(): owner decision 2026-10-06 ("Refuse, and prompt
+ * the format"). cfg is the only save target, so an unmounted cfg means every
+ * save route refuses (503). The item must be NOT_DONE (not OK, not the old
+ * DELIBERATELY_OFF that hid it as informational) and its detail must point at
+ * POST /api/cfgfs/format_confirm. It stays non-gating for firing: only the
+ * four gate items block, and cfg_fs is not one of them. */
 void run_test_readiness_cfg_fs(void)
 {
-    TEST_SECTION("readiness cfg_fs item -- mount failure must be informational, not blocking");
+    TEST_SECTION("readiness cfg_fs item -- unmounted must be not_done and name the format confirmation");
 
     TEST_CHECK(readiness_cfg_fs_status(true) == READY_OK,
                 "a mounted cfg filesystem must read ok");
-    TEST_CHECK(readiness_cfg_fs_status(false) == READY_DELIBERATELY_OFF,
-                "an unmounted/failed cfg filesystem must read deliberately_off, not not_done");
+    TEST_CHECK(readiness_cfg_fs_status(false) == READY_NOT_DONE,
+                "an unmounted/failed cfg filesystem must read not_done");
+
+    const char *plain = readiness_cfg_fs_detail(false, false);
+    const char *pending = readiness_cfg_fs_detail(false, true);
+    const char *ok = readiness_cfg_fs_detail(true, false);
+    TEST_CHECK(strstr(plain, "POST /api/cfgfs/format_confirm") != NULL,
+                "unmounted detail must point at POST /api/cfgfs/format_confirm");
+    TEST_CHECK(strstr(pending, "POST /api/cfgfs/format_confirm") != NULL,
+                "format-pending detail must point at POST /api/cfgfs/format_confirm");
+    TEST_CHECK(strstr(pending, "awaiting format confirmation") != NULL,
+                "format-pending detail must say it is awaiting confirmation");
+    TEST_CHECK(strstr(plain, "awaiting") == NULL, "plain unmounted detail must not claim a pending confirmation");
+    TEST_CHECK(strstr(ok, "format_confirm") == NULL, "mounted detail must not nag about formatting");
+    TEST_CHECK(strlen(plain) < 192 && strlen(pending) < 192, "details must fit READINESS_DETAIL_MAX (192)");
+    /* The same remedy the save-refusal text gives. */
+    TEST_CHECK(strstr(CFG_FS_NOT_MOUNTED_TEXT, "POST /api/cfgfs/format_confirm") != NULL,
+                "CFG_FS_NOT_MOUNTED_TEXT must name the format-confirm route");
+    TEST_CHECK(strstr(CFG_FS_NOT_MOUNTED_TEXT, "settings storage (cfg) not mounted") != NULL,
+                "CFG_FS_NOT_MOUNTED_TEXT must name the cause");
 }
 
 /* readiness_safety_context_status(): the fourth 2026-09-08 blind spot -- a

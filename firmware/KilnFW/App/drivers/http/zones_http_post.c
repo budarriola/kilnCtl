@@ -24,6 +24,7 @@
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
 #include "zone_settings_source_chain.h"
+#include "cfg_fs_refusal_http.h"
 
 static esp_err_t zones_post_body(httpd_req_t *req);
 /* Portable noinline, same guard as autotune_engine.c: cl.exe (the host tests) rejects the GCC syntax. */
@@ -547,6 +548,13 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         }
     }
 
+    /* cfg is the only save target: refuse before any Pico write or RAM commit
+     * when it is not mounted. */
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        free(body);
+        return ESP_OK;
+    }
+
     /* Owner request 2026-09-10 ("if i change the max temp in the web gui it
      * should change it in the pico too."): the Pico's own independent
      * abs_max_temp_c ceiling must never end up TIGHTER than the highest
@@ -665,17 +673,14 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "nvs_save failed: %s -- config applied live but will not survive a reboot",
                  esp_err_to_name(err));
-        /* Still applied above -- the operator asked for this right now,
-         * whether or not it persists past a reboot, same convention as
-         * wifi_prov.c's nvs_save_creds failure handling. */
+        /* Still applied above, but the save failed: reported as an error
+         * after the ceiling sync below, never as "ok". */
     }
     esp_err_t names_err = relay_names_save();
     if (names_err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "relay_names_save failed: %s -- names applied live but will not survive a reboot",
                  esp_err_to_name(names_err));
-        /* Same "applied now either way" convention as nvs_save() above --
-         * cosmetic data that failed to persist is not worth refusing a
-         * whole-page save that DID validate and apply everything else. */
+        /* Applied live; the failed save is reported after the ceiling sync. */
     }
 
     /* LOWERING direction, deliberately AFTER the commit above -- see
@@ -710,5 +715,8 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     }
 
     free(body);
+    if (err != ESP_OK || names_err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     return httpd_resp_sendstr(req, "ok");
 }

@@ -30,6 +30,7 @@
 // if pass 1 fully succeeded, and commits every candidate via the same
 // profiles_http_save()/zones_config_set_*() calls the UI's own pages use.
 
+#include "cfg_fs_refusal_http.h"
 #include "backup_http.h"
 #include "backup_http_internal.h"
 #include "backup_json.h"
@@ -3464,6 +3465,14 @@ static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
      * backup_import_job()'s comment for the store-then-read pairing that
      * makes this close the window rather than merely narrow it. */
     if (backup_import_job_recheck_refused(async_req, ack_no_safety)) {
+        free(body);
+        return;
+    }
+
+    /* cfg is the only save target: a real import with cfg unmounted would
+     * commit nothing durable. Refuse up front (503, same text as every other
+     * save route); a dry run writes nothing and is still allowed. */
+    if (!dry_run && cfg_fs_http_refuse_if_unmounted(async_req)) {
         free(body);
         return;
     }

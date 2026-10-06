@@ -16,6 +16,7 @@
                                  * the slot the executor is currently running/paused on. */
 #include "profiles_builtin.h"
 #include "profiles_favorites.h"
+#include "cfg_fs_refusal_http.h"
 #include "zones_config_accessors.h"
 
 /* profiles_http_json_escape() now lives in profiles_http_internal.h (Opus review of
@@ -474,6 +475,9 @@ static const char *profile_post_name_at(void *ctx, uint8_t id)
 
 esp_err_t profile_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > PROFILE_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -656,6 +660,8 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
+        free(warn_json);
+        return cfg_fs_http_persist_failed(req);
     }
 
     /* HEAP (PSRAM), same reasoning as warn_json above -- embeds warn_json's
@@ -682,6 +688,9 @@ esp_err_t profile_post_handler(httpd_req_t *req)
 
 esp_err_t profile_delete_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -747,6 +756,7 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
+        return cfg_fs_http_persist_failed(req);
     }
     return httpd_resp_sendstr(req, "ok");
 }
@@ -780,6 +790,9 @@ static bool read_small_body(httpd_req_t *req, char *buf, size_t cap)
 
 esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     char body[65];
     if (!read_small_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
@@ -803,6 +816,9 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
     bool hidden = (hid_len <= 0) || (hid_val[0] != '0');
 
     esp_err_t err = profiles_builtin_set_hidden((uint8_t)id, hidden);
+    if (err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"id\":%ld,\"hidden\":%s,\"persisted\":%s}",
                      "true", id, hidden ? "true" : "false", err == ESP_OK ? "true" : "false");
@@ -812,12 +828,18 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 
 esp_err_t builtin_restore_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     char body[65];
     if (req->content_len > 0 && !read_small_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large or read failed");
         return ESP_OK;
     }
     esp_err_t err = profiles_builtin_restore_all();
+    if (err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     char json[96];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"persisted\":%s}", err == ESP_OK ? "true" : "false");
     httpd_resp_set_type(req, "application/json");

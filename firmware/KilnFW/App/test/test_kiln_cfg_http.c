@@ -104,6 +104,9 @@ bool g_stub_hardware_differs = false;
 uint8_t kiln_cfg_store_max_count(void) { return 8; }
 bool kiln_cfg_store_pico_half_recapture_pending(void) { return false; }
 bool safety_cfg_store_has_data(void) { return true; }
+/* kiln_cfg_http.c's persist-failure branch asks cfg_fs_is_available() (via
+ * cfg_fs_refusal_http.h); the store is stubbed here, so cfg counts as mounted. */
+bool cfg_fs_is_available(void) { return true; }
 uint8_t kiln_cfg_store_list(kiln_cfg_summary_t *out, uint8_t out_cap) { (void)out; (void)out_cap; return 0; }
 int32_t kiln_cfg_store_get_active_id(void) { return KILN_CFG_NO_ACTIVE_ID; }
 bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap)

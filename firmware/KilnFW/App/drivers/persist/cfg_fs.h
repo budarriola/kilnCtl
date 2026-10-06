@@ -104,6 +104,13 @@ void cfg_fs_deinit(void);
 cfg_fs_status_t cfg_fs_get_status(void);
 bool cfg_fs_is_available(void); /* true only when status == MOUNTED */
 
+/* The one user-facing message for "a save was refused because cfg is not
+ * mounted". cfg is the only save target (NVS is a read-only legacy source),
+ * so every save route, and the readiness/LCD prompts, point at the same
+ * remedy. A string literal on purpose: HTTP handlers concatenate it into JSON
+ * bodies without a stack buffer. */
+#define CFG_FS_NOT_MOUNTED_TEXT     "settings storage (cfg) not mounted - confirm format via POST /api/cfgfs/format_confirm"
+
 /* `rel_path` is always relative to the mounted base, e.g. "zones.json" or
  * "profiles/3.json" -- at most one '/' level of nesting is supported (the
  * plan's layout never nests deeper than one directory). Every function

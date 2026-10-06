@@ -8,6 +8,7 @@
 
 #include "http_auth_http.h" /* kiln_http_register() */
 #include "http_form.h"
+#include "cfg_fs_refusal_http.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
@@ -49,6 +50,9 @@ static esp_err_t settings_get_handler(httpd_req_t *req) { return send_settings(r
 
 static esp_err_t settings_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > SETTINGS_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -99,9 +103,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     }
     if (err != ESP_OK) {
         // Applied in RAM, not persisted: report it as a failure, never as success.
-        char json[96];
-        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(err));
-        return send_json(req, "500 Internal Server Error", json, n < 0 ? 0 : (size_t)n);
+        return cfg_fs_http_persist_failed(req);
     }
     return send_settings(req);
 }

@@ -13,6 +13,7 @@
 
 #include "MAX31856.h"
 #include "cfg_fs.h"
+#include "cfg_fs_refusal_http.h"
 #include "cfg_fs_mount.h"
 #include "cfg_fs_status.h"
 #include "crash_report.h"
@@ -833,6 +834,9 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
              relay, (unsigned long)before.cycles);
 
     bool ok = relay_cycles_reset((unsigned)relay);
+    if (!ok && !cfg_fs_is_available()) {
+        return cfg_fs_http_persist_failed(req);
+    }
 
     /* 256, not 192: opus review's corrected failure-path message (below) is
      * longer than the old "will retry on the next periodic persist" text --
@@ -959,6 +963,9 @@ static esp_err_t relay_cycles_restore_post_handler(httpd_req_t *req)
     relay_cycles_restore_result_t result;
     memset(&result, 0, sizeof(result));
     bool ok = relay_cycles_restore_all(counts, allow_lower_mask, &result);
+    if (!ok && !cfg_fs_is_available()) {
+        return cfg_fs_http_persist_failed(req);
+    }
 
     /* Build the "which relays were clamped" fragment first -- shared between
      * the success and failure response bodies below, since a clamp is a
@@ -1026,6 +1033,9 @@ static esp_err_t ramp_assist_get_handler(httpd_req_t *req)
 #define RAMP_ASSIST_BODY_MAX 32
 static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > RAMP_ASSIST_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -1051,6 +1061,9 @@ static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
     bool enabled = (val[0] == '1');
 
     esp_err_t err = ramp_assist_cfg_set_enabled(enabled);
+    if (err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     char json[96];
     int n;
     if (err == ESP_OK) {

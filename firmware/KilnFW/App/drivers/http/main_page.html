@@ -2153,8 +2153,8 @@ function renderCfgFsFormatPending(data) {
   el.innerHTML = '<div class="banner interrupted">' +
     '<h3>CONFIG FILESYSTEM NEEDS FORMAT CONFIRMATION</h3>' +
     '<div class="row"><span>The config filesystem did not mount and was not auto-formatted because it ' +
-    'may contain data' + (reason ? ' (' + window.kcEscapeHtml(reason) + ')' : '') + '. Settings fall back ' +
-    'to the values stored in NVS.</span></div>' +
+    'may contain data' + (reason ? ' (' + window.kcEscapeHtml(reason) + ')' : '') + '. Settings changes ' +
+    'are refused (503) until you confirm the format.</span></div>' +
     '<div class="row"><span>To clear</span><span>Review and confirm on the Settings page.</span></div>' +
     '</div>';
 }

@@ -12,6 +12,7 @@
 #include "esp_log.h"
 
 #include "http_form.h"
+#include "cfg_fs_refusal_http.h"
 #include "safety_trip_words.h"
 #include "unit_pref.h"
 
@@ -34,6 +35,9 @@ void uart_log_bridge_set_safety_relay_level(uint8_t level);
 
 esp_err_t unit_pref_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > UNIT_PREF_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -70,11 +74,10 @@ esp_err_t unit_pref_post_handler(httpd_req_t *req)
     }
 
     if (unit_pref_set(pref) != ESP_OK) {
-        /* Live value still took effect (unit_pref_set() updates RAM before
-         * attempting the NVS write) -- only persistence failed, so this is
-         * reported but not treated as a request failure the client needs to
-         * retry differently. */
+        /* Live value took effect (unit_pref_set() updates RAM first) but the
+         * cfg save failed. With no NVS fallback that is an error, never ok. */
         ESP_LOGW(DASH_TAG, "unit preference applied but not persisted -- will not survive a reboot");
+        return cfg_fs_http_persist_failed(req);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
