@@ -10,7 +10,9 @@
 //   1. free zone Z (HEATER, relay_mask 0, failsafe 0, hyst/min_on/min_off 0), persisted
 //   2. enable the aux entry on Z's old relay (copies hyst/min_on/min_off, tc_zone = Z if it has a TC)
 //   3. rewrite every stored profile's rules for Z to the aux target, read back
-//   4. read zone and aux back
+//   4. read zone and aux back (RAM and re-read from NVS)
+// An in-progress marker (zone, relay, stage) is persisted before step 1 and cleared after step 4; a
+// power loss leaves it behind and `resume=1 relay=R` finishes the missing steps.
 // Any failure undoes the completed steps in reverse and reports whether the undo was clean.
 //
 // Status codes: 200 done; 400 malformed/out-of-range field or confirm missing; 409 refused with
@@ -43,19 +45,28 @@ typedef struct {
     uint16_t min_off_s;   /* effective */
 } zone_aux_zone_info_t;
 
+typedef enum {
+    ZONE_AUX_FREE_OK = 0,
+    ZONE_AUX_FREE_NOTHING_CHANGED,
+    ZONE_AUX_FREE_UNCERTAIN,
+} zone_aux_free_result_t;
+
 typedef struct {
     /* true = REFUSE; writes the operator-facing reason. */
     bool (*mode_blocked)(char *reason, size_t cap);
     bool (*zone_get)(uint8_t zone, zone_aux_zone_info_t *out);
     /* Frees zone `zone` (see above) and persists; saves what it replaced for zone_restore().
-     * false = nothing changed. */
-    bool (*zone_free)(uint8_t zone);
+     * NOTHING_CHANGED = the save failed and the stored zone was put back and confirmed;
+     * UNCERTAIN = the save failed and the put-back could not be confirmed. */
+    zone_aux_free_result_t (*zone_free)(uint8_t zone);
     /* Puts back exactly what zone_free() replaced and persists. */
     bool (*zone_restore)(uint8_t zone);
     /* Called once after a successful move: release whatever zone_free() kept. */
     void (*zone_done)(void);
     uint8_t (*zones_union)(void);
     bool (*aux_get)(uint8_t relay, aux_output_t *out);
+    /* The stored entry exactly as persisted (no defaults substituted). */
+    bool (*aux_get_raw)(uint8_t relay, aux_output_entry_t *out);
     esp_err_t (*aux_set)(uint8_t relay, const aux_output_entry_t *entry, uint8_t zones_union);
     bool (*aux_quarantined)(void);
     /* true = the live working copy of a profile (live_profile) holds a rule for `zone`. */
@@ -66,6 +77,19 @@ typedef struct {
                             char *err, size_t cap);
     /* Swaps every rule at the aux target back to `zone`; true = every changed slot persisted. */
     bool (*profiles_revert)(uint8_t zone, uint8_t relay);
+    /* Like profiles_commit, but rules already at the aux target count as done (resume). */
+    bool (*profiles_resume)(uint8_t zone, uint8_t relay, bool zone_has_tc, profiles_retarget_counts_t *counts,
+                            char *err, size_t cap);
+    /* Persisted in-progress marker; write/clear verify by read-back. */
+    bool (*journal_read)(aux_convert_journal_t *out);
+    bool (*journal_write)(const aux_convert_journal_t *j);
+    bool (*journal_clear)(void);
+    /* Zones and aux blobs re-read from NVS equal RAM. */
+    bool (*verify_persisted)(void);
+    /* Raise/lower the config-change-in-progress flag run starts refuse on. */
+    void (*busy)(bool on);
+    /* malloc-compatible block (freed with free()); NULL on failure. */
+    void *(*scratch_alloc)(size_t n);
 } zone_aux_ops_t;
 
 typedef struct {

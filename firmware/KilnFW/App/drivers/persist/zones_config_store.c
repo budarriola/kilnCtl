@@ -643,6 +643,25 @@ static void zones_autosave_job(void *arg)
     }
 }
 
+bool zones_config_nvs_equals_ram(void)
+{
+    zones_cfg_t *raw = malloc(sizeof(*raw));
+    if (raw == NULL) {
+        return false;
+    }
+    memset(raw, 0, sizeof(*raw));
+    size_t len = sizeof(*raw);
+    hal_kv_handle_t h;
+    bool ok = false;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+        ok = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len) == HAL_OK && len == sizeof(s_zones.cfg) &&
+             memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0;
+        hal_kv_close(&h);
+    }
+    free(raw);
+    return ok;
+}
+
 esp_err_t nvs_save(void)
 {
     s_zones.cfg.version = ZONES_CFG_VERSION;

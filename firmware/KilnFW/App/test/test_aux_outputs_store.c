@@ -423,6 +423,47 @@ static void test_pico_mask_call_site_shape(void)
     }
 }
 
+static void test_raw_verify_and_journal(void)
+{
+    TEST_SECTION("get_raw / verify_persisted / conversion journal");
+    fresh_board();
+    aux_outputs_cfg_start(0x03);
+    aux_output_entry_t e = on_entry();
+    e.hyst_c = 0.0f; /* zero stays zero in the RAW view, defaults only at get() */
+    TEST_CHECK(aux_outputs_cfg_set(4, &e, 0x03) == ESP_OK, "enable relay 4");
+    aux_output_entry_t raw;
+    memset(&raw, 0xEE, sizeof(raw));
+    TEST_CHECK(aux_outputs_cfg_get_raw(4, &raw) && raw.enabled == 1 && raw.hyst_c == 0.0f && raw.min_on_s == 0,
+               "get_raw returns the stored entry without defaults");
+    TEST_CHECK(!aux_outputs_cfg_get_raw(0, &raw) && !aux_outputs_cfg_get_raw(5, &raw), "get_raw refuses a bad relay");
+    TEST_CHECK(aux_outputs_cfg_verify_persisted(), "verify_persisted true right after a good save");
+
+    fake_kv_script_next_write_status(HAL_IO);
+    aux_output_entry_t e2 = on_entry();
+    e2.min_on_s = 30;
+    TEST_CHECK(aux_outputs_cfg_set(3, &e2, 0x03) != ESP_OK, "save failure is returned");
+    TEST_CHECK(aux_outputs_cfg_get_raw(3, &raw) && raw.enabled == 1, "the RAM value stands after the failed save");
+    TEST_CHECK(!aux_outputs_cfg_verify_persisted(), "verify_persisted false: RAM and NVS differ");
+
+    aux_convert_journal_t j;
+    memset(&j, 0, sizeof(j));
+    TEST_CHECK(!aux_convert_journal_read(&j), "no marker on a fresh board");
+    TEST_CHECK(aux_convert_journal_clear(), "clear with no marker is fine");
+    aux_convert_journal_t w = {.zone = 1, .relay = 4, .stage = 2, .has_tc = 1, .hyst_c = 3.5f, .min_on_s = 60, .min_off_s = 90};
+    TEST_CHECK(aux_convert_journal_write(&w), "write marker");
+    memset(&j, 0, sizeof(j));
+    TEST_CHECK(aux_convert_journal_read(&j) && j.zone == 1 && j.relay == 4 && j.stage == 2 && j.has_tc == 1 &&
+                   j.hyst_c == 3.5f && j.min_on_s == 60 && j.min_off_s == 90,
+               "marker round trips");
+    TEST_CHECK(aux_convert_journal_read(NULL), "read tolerates a NULL out");
+    w.stage = 3;
+    TEST_CHECK(aux_convert_journal_write(&w) && aux_convert_journal_read(&j) && j.stage == 3, "marker updated in place");
+    fake_kv_script_next_write_status(HAL_IO);
+    w.stage = 4;
+    TEST_CHECK(!aux_convert_journal_write(&w), "a failed marker write is reported");
+    TEST_CHECK(aux_convert_journal_clear() && !aux_convert_journal_read(&j), "clear removes the marker");
+}
+
 void run_test_aux_outputs_store(void)
 {
     test_predicate();
@@ -438,6 +479,7 @@ void run_test_aux_outputs_store(void)
     test_dual_write_and_file_tiebreak();
     test_pico_mask_strips_aux();
     test_pico_mask_call_site_shape();
+    test_raw_verify_and_journal();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

@@ -29,7 +29,7 @@ $AppDir = (Resolve-Path $AppDir).Path
 
 $allow = @{
     'zones_config_accessors.c'            = 'defines the setters/import/restore; validated by zones_config_json_validate on commit'
-    'zones_http_post.c'                   = 'zones_http_zone_free_for_aux only CLEARS relay_mask (to 0) so the relay can move to an aux entry; clearing cannot create a conflict. The ordinary commit still runs the explicit aux conflict check (see $mustCall)'
+    'zones_http_post.c'                   = 'two functions write relay_mask here. zones_http_zone_free_for_aux only CLEARS it (to 0) so the relay can move to an aux entry; clearing cannot create a conflict. zones_http_zone_restore_after_aux PUTS BACK a saved nonzero mask, which CAN conflict, so it runs zones_config_json_aux_conflict_mask on its candidate and refuses (function-scoped, see $mustCallInFunc). The ordinary commit runs the same explicit check (see $mustCall)'
     'zones_http_post_parse.c'             = 'per-zone field parse only; the commit in zones_http_post.c runs the explicit aux conflict check (see $mustCall)'
     'backup_import.c'                     = 'explicit post-batch aux conflict check with whole-batch rollback (see $mustCall); the _no_save setters do not validate'
     'kiln_cfg_store.c'                    = 'kiln package apply; whole-blob commit via zones_config_import_blob (validated)'
@@ -45,6 +45,26 @@ $allow = @{
 $mustCall = @{
     'zones_http_post.c' = 'zones_config_json_aux_conflict_mask\s*\('
     'backup_import.c'   = 'zones_config_json_aux_enabled_mask\s*\('
+}
+
+# Function-scoped: the named function body (not merely the file) must contain the call. The restore
+# path PUTS BACK a relay mask, so it is the one place in zones_http_post.c that can re-create a conflict.
+$mustCallInFunc = @(
+    @{ File = 'zones_http_post.c'; Func = 'zones_http_zone_restore_after_aux'; Rx = 'zones_config_json_aux_conflict_mask\s*\(' }
+)
+
+function Get-FunctionBody([string]$text, [string]$fname) {
+    $m = [regex]::Match($text, '(?m)^[A-Za-z_][^;{}()]*' + [regex]::Escape($fname) + '\s*\([^;{}]*\)\s*\{')
+    if (-not $m.Success) { return $null }
+    $i = $m.Index + $m.Length
+    $depth = 1
+    while ($i -lt $text.Length -and $depth -gt 0) {
+        $c = $text[$i]
+        if ($c -eq '{') { $depth++ } elseif ($c -eq '}') { $depth-- }
+        $i++
+    }
+    if ($depth -ne 0) { return $null }
+    return $text.Substring($m.Index, $i - $m.Index)
 }
 
 function Strip-Comments([string]$t) {
@@ -79,9 +99,16 @@ foreach ($k in $mustCall.Keys) {
     $rx = [string]$mustCall[$k]
     if (-not [regex]::IsMatch($src, $rx)) { $missing += "$k (no call matching $rx)" }
 }
+foreach ($e in $mustCallInFunc) {
+    $f = $files | Where-Object { $_.Name -eq $e.File } | Select-Object -First 1
+    if (-not $f) { $missing += "$($e.File) (file not found)"; continue }
+    $body = Get-FunctionBody (Strip-Comments ([IO.File]::ReadAllText($f.FullName))) $e.Func
+    if ($null -eq $body) { $missing += "$($e.File) (function $($e.Func) not found)"; continue }
+    if (-not [regex]::IsMatch($body, $e.Rx)) { $missing += "$($e.File) $($e.Func)() (no call matching $($e.Rx))" }
+}
 if ($missing.Count -gt 0) {
     foreach ($m in $missing) { Write-Host "FAIL: explicit aux conflict check missing: $m" }
     exit 1
 }
-Write-Host "PASS: $($hit.Count) writer file(s), all allowlisted; $($mustCall.Count) explicit aux checks present"
+Write-Host "PASS: $($hit.Count) writer file(s), all allowlisted; $($mustCall.Count + $mustCallInFunc.Count) explicit aux checks present"
 exit 0

@@ -28,6 +28,11 @@ extern "C" {
 // other time. Never blocks.
 bool backup_import_restore_in_flight(void);
 
+// Raises/lowers a second flag that makes backup_import_restore_in_flight() read true: set by the
+// zone-to-aux conversion around its multi-write sequence so a profile or autotune start cannot land
+// between its steps. Same lock-free contract as the restore flag.
+void backup_import_config_change_set(bool in_progress);
+
 #ifdef __cplusplus
 }
 #endif

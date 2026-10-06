@@ -82,7 +82,7 @@ class ConvertTest(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def _run(self, *, zones=None, aux=None, profiles=None, after_zones=None, after_aux=None,
-             after_profiles=None, post=None, **kw):
+             after_profiles=None, post=None, io_hits=None, **kw):
         zones = zones if zones is not None else _zones()
         aux = aux if aux is not None else _aux()
         profiles = profiles if profiles is not None else _profiles()
@@ -95,6 +95,7 @@ class ConvertTest(unittest.TestCase):
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=zs), \
              unittest.mock.patch.object(ahc, "get_aux_outputs", side_effect=ax), \
              unittest.mock.patch.object(ahc, "get_stored_profile_rules", side_effect=pr), \
+             unittest.mock.patch.object(ahc, "get_stored_relay_io_hits", return_value=io_hits or {}), \
              unittest.mock.patch.object(ahc, "post_move_zone_to_aux",
                                         side_effect=ack if isinstance(ack, Exception) else None,
                                         return_value=None if isinstance(ack, Exception) else ack) as p:
@@ -180,6 +181,43 @@ class ConvertTest(unittest.TestCase):
         self.assertIn("3 rule(s)", r)
         p.assert_not_called()
 
+    def test_dry_run_lists_relay_io_segments_that_target_the_relay(self):
+        r, p = self._run(confirm=False, io_hits={2: [1, 3], 5: [2]})
+        self.assertIn("DRY RUN", r)
+        self.assertIn("RELAY_IO", r)
+        self.assertIn("profile 2 segment(s) 1, 3", r)
+        self.assertIn("profile 5 segment(s) 2", r)
+        p.assert_not_called()
+
+    def test_no_relay_io_note_when_none(self):
+        r, _ = self._run(confirm=False)
+        self.assertNotIn("RELAY_IO", r)
+
+    def test_resume_validation_and_gate(self):
+        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux") as p, \
+             unittest.mock.patch.object(zones_http_client, "get_zones") as g:
+            for bad in (-1, 5, True, "3", 1.0):
+                r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=bad)
+                self.assertTrue(r.startswith("refused"), (bad, r))
+            r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=False, resume_relay=3)
+            self.assertIn("DRY RUN", r)
+            p.assert_not_called()
+            g.assert_not_called()
+
+    def test_resume_posts_resume_fields_only(self):
+        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", return_value={"ok": True}) as p, \
+             unittest.mock.patch.object(zones_http_client, "get_zones") as g:
+            r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=3)
+        self.assertTrue(r.startswith("ok - resumed"), r)
+        p.assert_called_once_with("10.0.0.5", ZONE, resume_relay=3)
+        g.assert_not_called()
+
+    def test_resume_409_is_a_refusal(self):
+        exc = ahc.AuxHttpError("x", 409, "no interrupted conversion is recorded -- nothing to resume")
+        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", side_effect=exc):
+            r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=3)
+        self.assertTrue(r.startswith("refused"), r)
+
     def test_409_gate_is_a_refusal(self):
         exc = ahc.AuxHttpError("x", 409, "refused -- a firing or autotune run is active")
         r, _ = self._run(post=exc)
@@ -234,6 +272,7 @@ class ConvertTest(unittest.TestCase):
                                         side_effect=[_zones(), zones_http_client.ZonesHttpError("down")]), \
              unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_aux()), \
              unittest.mock.patch.object(ahc, "get_stored_profile_rules", return_value=_profiles()), \
+             unittest.mock.patch.object(ahc, "get_stored_relay_io_hits", return_value={}), \
              unittest.mock.patch.object(ahc, "post_move_zone_to_aux", return_value={"ok": True}):
             r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True)
         self.assertTrue(r.startswith("error"), r)
@@ -273,6 +312,47 @@ class PostMoveClientTest(unittest.TestCase):
         self.assertTrue(sent["url"].endswith("/api/zones"))
         self.assertEqual(sent["data"], b"move_zone_to_aux=1&confirm=1")
         self.assertTrue(out["ok"])
+
+    def test_resume_fields(self):
+        sent = {}
+
+        class _Resp:
+            status = 200
+
+            def read(self):
+                return b'{"ok":true}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            sent["data"] = req.data
+            return _Resp()
+
+        with unittest.mock.patch.object(ahc.http_auth, "urlopen", side_effect=fake_urlopen):
+            ahc.post_move_zone_to_aux("10.0.0.5", 1, resume_relay=3)
+        self.assertEqual(sent["data"], b"move_zone_to_aux=1&confirm=1&resume=1&relay=3")
+
+
+class RelayIoHitsTest(unittest.TestCase):
+    def test_lists_only_matching_relay_io_segments_of_stored_profiles(self):
+        listing = [{"id": 0, "builtin": True}, {"id": 1}, {"id": 2}]
+        detail = {
+            1: {"segments": [{"seg_kind": 0}, {"seg_kind": 1, "io_target": 3}, {"seg_kind": 1, "io_target": 2}]},
+            2: {"segments": [{"seg_kind": 1, "io_target": 1}]},
+        }
+
+        def fake_get(host, path, timeout):
+            if path == "/api/profiles":
+                return listing
+            return detail[int(path.rsplit("=", 1)[1])]
+
+        with unittest.mock.patch.object(ahc, "_get_json", side_effect=fake_get):
+            self.assertEqual(ahc.get_stored_relay_io_hits("h", 3), {1: [2]})
+            self.assertEqual(ahc.get_stored_relay_io_hits("h", 4), {})
 
 
 if __name__ == "__main__":

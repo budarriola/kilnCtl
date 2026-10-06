@@ -120,12 +120,16 @@ def post_aux_manual(host: str, relay: int, on: bool, timeout: float = AUX_HTTP_T
                         [("relay", str(relay)), ("on", "1" if on else "0")], timeout))
 
 
-def post_move_zone_to_aux(host: str, zone: int, timeout: float = 30.0) -> dict:
+def post_move_zone_to_aux(host: str, zone: int, timeout: float = 30.0, resume_relay: Optional[int] = None) -> dict:
     """POST /api/zones with ONLY ``move_zone_to_aux=<zone>&confirm=1`` -- the firmware's one-shot,
     all-or-nothing convert of an ON_OFF zone to an aux output. Returns the parsed 200 JSON.
     Raises AuxHttpError (status/detail set) on any non-2xx, or when a 200 body is not the expected
-    JSON. The write can touch up to 100 profile blobs, hence the longer timeout."""
-    text = _post(host, "/api/zones", [("move_zone_to_aux", str(zone)), ("confirm", "1")], timeout)
+    JSON. The write can touch up to PROFILES_MAX_COUNT (8) profile blobs, hence the longer timeout."""
+    fields = [("move_zone_to_aux", str(zone)), ("confirm", "1")]
+    if resume_relay is not None:
+        # Finish an interrupted conversion: forward only, runs just the missing steps.
+        fields += [("resume", "1"), ("relay", str(resume_relay))]
+    text = _post(host, "/api/zones", fields, timeout)
     try:
         data = json.loads(text)
     except Exception as exc:
@@ -147,6 +151,28 @@ def _get_json(host: str, path: str, timeout: float):
         return json.loads(text)
     except Exception as exc:
         raise AuxHttpError(f"GET {path} response was not valid JSON: {text!r}") from exc
+
+
+def get_stored_relay_io_hits(host: str, relay: int, timeout: float = AUX_HTTP_TIMEOUT_S) -> "dict[int, list]":
+    """{profile id: [1-based segment numbers]} of stored (non-builtin) profiles that hold a RELAY_IO
+    segment (seg_kind 1) whose io_target is `relay`. A conversion does NOT rewrite these: they drive the
+    relay directly, so after the relay becomes an aux output they would fight the aux logic."""
+    listing = _get_json(host, "/api/profiles", timeout)
+    if not isinstance(listing, list):
+        raise AuxHttpError(f"GET /api/profiles was not a JSON array: {listing!r}")
+    out: "dict[int, list]" = {}
+    for item in listing:
+        if not isinstance(item, dict) or item.get("builtin") or not isinstance(item.get("id"), int):
+            continue
+        detail = _get_json(host, f"/api/profile?id={item['id']}", timeout)
+        segs = detail.get("segments") if isinstance(detail, dict) else None
+        if not isinstance(segs, list):
+            continue
+        hit = [i + 1 for i, sg in enumerate(segs)
+               if isinstance(sg, dict) and sg.get("seg_kind") == 1 and sg.get("io_target") == relay]
+        if hit:
+            out[item["id"]] = hit
+    return out
 
 
 def get_stored_profile_rules(host: str, timeout: float = AUX_HTTP_TIMEOUT_S) -> "dict[int, list]":

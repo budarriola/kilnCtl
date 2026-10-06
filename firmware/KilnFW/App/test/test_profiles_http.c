@@ -2168,6 +2168,39 @@ static void test_retarget_commit_rollback_at_every_write(void)
     TEST_CHECK(succeeded, "the sweep reached a point past every write");
 }
 
+static void test_retarget_resume_and_whole_blob_verify(void)
+{
+    TEST_SECTION("profiles_retarget_zone_to_aux_resume -- finishes a half-done rewrite; slot verify compares the whole blob");
+    rt_seed();
+    profiles_retarget_counts_t c;
+    char err[160] = "";
+    TEST_CHECK(profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)), err);
+    TEST_CHECK(retarget_verify_slot(0), "whole-slot verify passes right after a commit");
+    s_profiles.profiles[0].name[0] = (char)(s_profiles.profiles[0].name[0] ^ 0x01);
+    TEST_CHECK(!retarget_verify_slot(0), "a difference OUTSIDE the rules (the name) now fails the verify");
+    s_profiles.profiles[0].name[0] = (char)(s_profiles.profiles[0].name[0] ^ 0x01);
+    TEST_CHECK(retarget_verify_slot(0), "restoring the byte passes again");
+
+    /* Simulate a power loss after slot 0 was rewritten but before slot 2 was: put slot 2 back. */
+    (void)retarget_swap_rules(&s_profiles.profiles[2], RT_DEST, RT_ZONE);
+    TEST_CHECK(nvs_save_slot(2) == ESP_OK, "slot 2 put back to the original");
+    TEST_CHECK(!profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)),
+               "a fresh plan refuses: slot 0 already has a rule at the destination");
+    TEST_CHECK(!profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)),
+               "a plain commit refuses for the same reason");
+    err[0] = '\0';
+    TEST_CHECK(profiles_retarget_zone_to_aux_resume(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)), err);
+    TEST_CHECK(c.profiles_affected == 1 && c.rules_retargeted == 1, "resume rewrote only the missing slot");
+    TEST_CHECK(s_profiles.profiles[0].on_off_rules[0].zone_index == RT_DEST &&
+                   s_profiles.profiles[2].on_off_rules[0].zone_index == RT_DEST &&
+                   s_profiles.profiles[1].on_off_rules[0].zone_index == 2,
+               "every slot is at the destination, the other zone is untouched");
+    TEST_CHECK(rt_nvs_matches_ram() && retarget_verify_slot(2), "NVS matches RAM after the resume");
+    TEST_CHECK(profiles_retarget_zone_to_aux_resume(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   c.profiles_affected == 0 && c.rules_retargeted == 0,
+               "resuming a finished conversion is a no-op success");
+}
+
 static void test_aux_rule_survives_real_save_and_load(void)
 {
     TEST_SECTION("aux rule target 10 round-trips through the real save/load");
@@ -3418,6 +3451,7 @@ void run_test_profiles_http(void)
     test_retarget_commit_success();
     test_retarget_plan_refusals();
     test_retarget_commit_rollback_at_every_write();
+    test_retarget_resume_and_whole_blob_verify();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
     test_validate_candidate_hard_mode_refuses_ramp_above_zone_ceiling();

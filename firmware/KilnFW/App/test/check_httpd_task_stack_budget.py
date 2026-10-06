@@ -171,6 +171,54 @@ CEILING_BYTES = 4832
 # stops the printed number from being read as real margin when it isn't.
 UNMODELED_OVERHEAD_BYTES = 1800
 
+# Explicit call edges the objdump walk cannot see because they are indirect (a function pointer
+# stored in a table). The zone-to-aux conversion (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) is
+# dispatched from zones_post_handler through a hook pointer and then reaches the profile store,
+# the aux store and the journal through zone_aux_ops_t, so without these edges the static walk
+# stops at zones_post_handler and misses the deepest chain on the httpd task. An edge whose
+# caller or callee is absent from the ELF is a FAIL, not a skip: a renamed function would
+# otherwise silently turn the edge (and the measurement) vacuous.
+_AUX_CORE_FNS = ("zone_aux_convert_run", "run_locked", "resume_run", "rollback", "read_back_ok",
+                 "fail_rolled_back", "journal_stage")
+_AUX_OPS_TARGETS = (
+    "aux_outputs_cfg_get", "aux_outputs_cfg_get_raw", "aux_outputs_cfg_set", "aux_outputs_cfg_quarantined",
+    "aux_convert_journal_read", "aux_convert_journal_write", "aux_convert_journal_clear",
+    "profiles_retarget_zone_to_aux_plan", "profiles_retarget_zone_to_aux_commit",
+    "profiles_retarget_zone_to_aux_revert", "profiles_retarget_zone_to_aux_resume",
+    "op_mode_blocked", "op_zone_get", "op_zone_free", "op_zone_restore", "op_zone_done", "op_zones_union",
+    "op_live_uses_zone", "op_verify_persisted", "op_busy", "op_scratch_alloc",
+)
+EXTRA_EDGES = (
+    [("zones_post_handler", "move_handler"), ("move_handler", "zone_aux_convert_run")]
+    + [(c, t) for c in _AUX_CORE_FNS for t in _AUX_OPS_TARGETS]
+)
+# Names the compiler may legitimately fold away (static helpers): only these may be absent from
+# the ELF, as caller or callee, without failing.
+_EDGE_MAY_BE_INLINED = frozenset(
+    _AUX_CORE_FNS[1:] + ("op_busy", "op_scratch_alloc", "op_verify_persisted", "op_zone_done",
+                         "op_zones_union", "op_mode_blocked", "op_zone_get", "op_zone_free",
+                         "op_zone_restore", "op_live_uses_zone", "aux_outputs_cfg_quarantined",
+                         "aux_outputs_cfg_get", "aux_outputs_cfg_get_raw"))
+
+
+def apply_extra_edges(frames, calls):
+    """Adds EXTRA_EDGES to `calls`. Returns a list of problems (empty = fine)."""
+    problems = []
+    for caller, callee in EXTRA_EDGES:
+        if caller not in frames:
+            if caller in _EDGE_MAY_BE_INLINED:
+                continue
+            problems.append(f"edge caller {caller} is not in the ELF")
+            continue
+        if callee not in frames:
+            if callee in _EDGE_MAY_BE_INLINED:
+                continue
+            problems.append(f"edge callee {callee} is not in the ELF")
+            continue
+        calls.setdefault(caller, set()).add(callee)
+    return problems
+
+
 HANDLER_RE = re.compile(r"\.handler\s*=\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 
@@ -223,6 +271,12 @@ def main():
             print(f"check_httpd_task_stack_budget: SKIP: {exc}")
             return 3
         print(f"check_httpd_task_stack_budget: FAIL -- {exc}")
+        return 1
+
+    edge_problems = apply_extra_edges(frames, calls)
+    if edge_problems:
+        for pr in sorted(set(edge_problems)):
+            print(f"check_httpd_task_stack_budget: FAIL -- {pr} (EXTRA_EDGES went stale)")
         return 1
 
     ceiling = args.ceiling_bytes or CEILING_BYTES

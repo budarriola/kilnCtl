@@ -113,6 +113,38 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
  * ("default") or within their AUX_* bounds. Touches no state. */
 bool aux_outputs_cfg_entry_valid(const aux_output_entry_t *entry);
 
+/* The STORED entry for `relay` (1-based), exactly as persisted: no defaults substituted, no
+ * conflict/quarantine applied. For a caller that must put an entry back bit-for-bit. */
+bool aux_outputs_cfg_get_raw(uint8_t relay, aux_output_entry_t *out);
+
+/* true = the NVS blob re-read right now is valid and its entries equal the RAM entries. A RAM-only
+ * read-back cannot see a save that failed or a blob NVS did not keep. */
+bool aux_outputs_cfg_verify_persisted(void);
+
+/* ---- Zone-to-aux conversion journal (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----
+ * One small persisted marker, kept in the same NVS namespace as the aux store, written BEFORE the
+ * conversion's first write and erased only after its final read-back. If power fails in the middle
+ * the marker survives the reboot: /api/readiness reports it, and a resume request can finish the
+ * missing steps. `stage`: 1 begun (nothing changed yet), 2 zone freed, 3 aux enabled, 4 profiles
+ * rewritten. hyst/min_on/min_off/has_tc are the entry to enable, because freeing the zone zeroes
+ * the values they came from. */
+typedef struct {
+    uint8_t zone;
+    uint8_t relay; /* 1-based */
+    uint8_t stage;
+    uint8_t has_tc;
+    float hyst_c;
+    uint16_t min_on_s;
+    uint16_t min_off_s;
+} aux_convert_journal_t;
+
+/* true = a valid marker exists and was copied to *out. */
+bool aux_convert_journal_read(aux_convert_journal_t *out);
+/* true = written AND read back equal. */
+bool aux_convert_journal_write(const aux_convert_journal_t *j);
+/* true = the marker is gone (also when there was none). */
+bool aux_convert_journal_clear(void);
+
 /* Read-only dual-write status for GET /api/cfgfs (see display_power_cfg.h). */
 void aux_outputs_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
                                           uint32_t *nvs_rev, bool *diverged);

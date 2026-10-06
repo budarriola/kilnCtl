@@ -210,6 +210,33 @@ bool aux_outputs_cfg_get(uint8_t relay, aux_output_t *out)
     return true;
 }
 
+bool aux_outputs_cfg_get_raw(uint8_t relay, aux_output_entry_t *out)
+{
+    if (relay < 1 || relay > AUX_OUTPUTS_COUNT || out == NULL) {
+        return false;
+    }
+    *out = s_entries[relay - 1];
+    return true;
+}
+
+bool aux_outputs_cfg_verify_persisted(void)
+{
+    if (nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    aux_outputs_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    size_t len = sizeof(blob);
+    bool ok = hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && aux_validate(&blob, len) &&
+              blob.version == AUX_OUTPUTS_CFG_VERSION && memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
+    hal_kv_close(&h);
+    return ok;
+}
+
 uint8_t aux_outputs_cfg_enabled_mask(void) { return s_enabled_mask; }
 uint8_t aux_outputs_cfg_conflict_mask(void) { return s_conflict_mask; }
 bool aux_outputs_cfg_conflict(void) { return s_conflict_mask != 0; }
@@ -282,6 +309,84 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
         s_rev = new_rev;
     }
     return hal_status_to_esp_err(err);
+}
+
+#define NVS_KEY_AUX_JRNL "aux_conv_jrnl"
+NVS_KEY_LEN_CHECK(NVS_KEY_AUX_JRNL);
+
+typedef struct {
+    uint8_t version;
+    aux_convert_journal_t j;
+    uint32_t crc32; /* over every byte before this field */
+} aux_convert_journal_blob_t;
+
+static uint32_t jrnl_checksum(const aux_convert_journal_blob_t *b)
+{
+    return ota_image_crc32((const uint8_t *)b, offsetof(aux_convert_journal_blob_t, crc32));
+}
+
+bool aux_convert_journal_read(aux_convert_journal_t *out)
+{
+    if (nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    aux_convert_journal_blob_t b;
+    memset(&b, 0, sizeof(b));
+    size_t len = sizeof(b);
+    bool ok = hal_kv_get_blob(&h, NVS_KEY_AUX_JRNL, &b, &len) == HAL_OK && len == sizeof(b) && b.version == 1 &&
+              b.crc32 == jrnl_checksum(&b);
+    hal_kv_close(&h);
+    if (ok && out != NULL) {
+        *out = b.j;
+    }
+    return ok;
+}
+
+bool aux_convert_journal_write(const aux_convert_journal_t *j)
+{
+    if (j == NULL || nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    aux_convert_journal_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = 1;
+    b.j = *j;
+    b.crc32 = jrnl_checksum(&b);
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    hal_status_t err = hal_kv_set_blob(&h, NVS_KEY_AUX_JRNL, &b, sizeof(b));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        return false;
+    }
+    aux_convert_journal_t back;
+    return aux_convert_journal_read(&back) && memcmp(&back, j, sizeof(back)) == 0;
+}
+
+bool aux_convert_journal_clear(void)
+{
+    if (nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    hal_status_t err = hal_kv_erase_key(&h, NVS_KEY_AUX_JRNL);
+    if (err == HAL_OK || err == HAL_NOT_FOUND) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return err == HAL_OK && !aux_convert_journal_read(NULL);
 }
 
 void aux_outputs_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,

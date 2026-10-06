@@ -3341,9 +3341,19 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
  * s_live_profile_generation already avoid the same way. */
 static _Atomic bool s_backup_restore_in_flight = false;
 
+/* Second reason a start must refuse: a multi-write configuration change (today the zone-to-aux
+ * conversion) is between its steps. Reuses every start gate and commit-point re-check that already
+ * reads backup_import_restore_in_flight(), so a run cannot start in the middle of it. */
+static _Atomic bool s_config_change_in_flight = false;
+
+void backup_import_config_change_set(bool in_progress)
+{
+    atomic_store(&s_config_change_in_flight, in_progress);
+}
+
 bool backup_import_restore_in_flight(void)
 {
-    return atomic_load(&s_backup_restore_in_flight);
+    return atomic_load(&s_backup_restore_in_flight) || atomic_load(&s_config_change_in_flight);
 }
 
 /* Context for backup_import_job() below, heap-allocated (plain malloc --

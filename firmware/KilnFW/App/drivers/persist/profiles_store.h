@@ -88,6 +88,12 @@ bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_h
 bool profiles_retarget_zone_to_aux_commit(uint8_t zone, uint8_t relay, bool zone_has_tc,
                                           profiles_retarget_counts_t *counts, char *err, size_t err_cap);
 
+/* Resume variant of commit for an interrupted conversion: slots an earlier run already moved
+ * (rules at the aux target) are accepted and left alone; the rest are rewritten the same way.
+ * Counts report this call's own rewrites. */
+bool profiles_retarget_zone_to_aux_resume(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                          profiles_retarget_counts_t *counts, char *err, size_t err_cap);
+
 /* Swaps every rule aimed at aux `relay` back to `zone` in every stored profile and re-persists
  * each changed slot (read-back verified). For the caller's own rollback after a commit that
  * succeeded but a later step failed. Safe because the plan refuses any profile that already had

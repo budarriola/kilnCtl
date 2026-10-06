@@ -215,6 +215,10 @@ esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
 esp_err_t nvs_save(void);
 
+/* true = the zones blob re-read from NVS right now equals the in-RAM config byte for byte. For a
+ * caller that must know a write really landed (a RAM-only read-back cannot see a failed save). */
+bool zones_config_nvs_equals_ram(void);
+
 /* RELAY_LIFE_BUDGET.md: pushes s_zones.cfg.zones[zone_index]'s
  * relay_type out to relay_cycles_set_type() for every relay named in that
  * zone's relay_mask (rated_override left at 0 -- use the type's table value;
@@ -239,12 +243,16 @@ void zones_config_push_all_relay_types(void);
  *
  * zones_http_zone_free_for_aux(): retypes the ON_OFF zone to HEATER with relay_mask 0,
  * failsafe 0 and hyst/min_on/min_off 0 (validated, persisted; a failed write is refused and
- * undone), keeping a heap copy of the zone it replaced. _restore_after_aux() puts that copy
+ * undone, and the undo's own save result is reported), keeping a heap copy of the zone it replaced. _restore_after_aux() puts that copy
  * back and frees it; _discard_saved_for_aux() frees it after a successful move. */
 typedef bool (*zones_move_to_aux_is_request_t)(const char *body);
 typedef esp_err_t (*zones_move_to_aux_handler_t)(httpd_req_t *req, const char *body);
 void zones_http_set_move_to_aux_handler(zones_move_to_aux_is_request_t is_request, zones_move_to_aux_handler_t h);
-bool zones_http_zone_free_for_aux(uint8_t zone);
+/* Results of zones_http_zone_free_for_aux(); values match zone_aux_free_result_t. */
+#define ZONES_AUX_FREE_OK 0
+#define ZONES_AUX_FREE_NOTHING_CHANGED 1 /* save failed, the put-back save succeeded */
+#define ZONES_AUX_FREE_UNCERTAIN 2       /* save failed and the put-back save failed too */
+int zones_http_zone_free_for_aux(uint8_t zone);
 bool zones_http_zone_restore_after_aux(uint8_t zone);
 void zones_http_zone_discard_saved_for_aux(void);
 void migrate_from_default_partition(void);

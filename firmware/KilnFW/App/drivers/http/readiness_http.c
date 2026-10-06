@@ -11,6 +11,7 @@
 #include "esp_log.h"
 
 #include "MAX31856.h"
+#include "aux_outputs_cfg.h"
 #include "boot_guard.h"
 #include "cfg_fs.h"
 #include "crash_report.h"
@@ -1111,6 +1112,27 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
                         "/safety", &dropped);
         if (o != before_o) {
             first = false;
+        }
+    }
+
+    /* A zone-to-aux conversion that did not finish (power loss, or a rollback that could not
+     * complete) leaves a persisted in-progress marker. Listed only while the marker exists, so a
+     * normal board's checklist is unchanged. Advisory like every item outside the gate's four: it
+     * says the zone/aux/profile state may be half moved and how to finish it. */
+    {
+        aux_convert_journal_t jr;
+        if (aux_convert_journal_read(&jr)) {
+            char detail[READINESS_DETAIL_MAX];
+            snprintf(detail, sizeof(detail),
+                     "zone %u to aux relay %u unfinished (stage %u of 4); resume: move_zone_to_aux=%u resume=1 relay=%u",
+                     (unsigned)jr.zone, (unsigned)jr.relay, (unsigned)jr.stage, (unsigned)jr.zone,
+                     (unsigned)jr.relay);
+            size_t before_o = o;
+            o = append_item(json, item_cap, o, first, "zone_aux_conversion", "Zone-to-aux conversion unfinished",
+                            READY_NOT_DONE, detail, "/zones", &dropped);
+            if (o != before_o) {
+                first = false;
+            }
         }
     }
 

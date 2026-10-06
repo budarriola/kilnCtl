@@ -240,7 +240,8 @@ def _count_rules(rules_by_profile: dict, target: int) -> int:
 
 
 @_core._tool()
-def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Optional[str] = None) -> str:
+def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Optional[str] = None,
+                                      resume_relay: int = 0) -> str:
     """ONE-WAY, confirm-gated. Convert an ON_OFF zone into a spare-relay aux output:
     the zone becomes a heater zone with no relay, its single relay becomes an aux binding
     (tc_zone = the zone if it has a thermocouple; hysteresis and min on/off copied), and
@@ -259,14 +260,34 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
     enabled with the right tc_zone, no zone/relay other than the two touched changed, no rule
     for the zone remains and exactly the planned number of rules now target the aux. Take a
     backup_export() first: a failure after commit is not reversed by this tool. Uses the
-    http_auth admin-session seam; never prints a credential."""
+    http_auth admin-session seam; never prints a credential.
+
+    The firmware records an in-progress marker (zone, relay, stage) before its first write and
+    clears it after its read-back; GET /api/readiness shows it as "zone_aux_conversion" while it
+    exists, and run start is refused meanwhile. If a conversion was interrupted (power loss, a
+    rollback that could not finish), pass resume_relay=<the marker's relay 1..4> with confirm=True
+    to finish only the missing steps (forward only)."""
     if not _is_int(zone) or not 0 <= zone <= 2:
         return f"refused: zone={zone!r} must be an integer 0..2"
+    if not _is_int(resume_relay) or not 0 <= resume_relay <= ahc.AUX_RELAY_COUNT:
+        return f"refused: resume_relay={resume_relay!r} must be 0 (normal) or a relay 1..{ahc.AUX_RELAY_COUNT}"
 
     resolved = _resolve_host(host)
     running = _running_reason()
     if running is not None:
         return f"refused: {running} -- zones are not converted mid-run (host={resolved})"
+
+    if resume_relay:
+        if confirm is not True:
+            return (f"DRY RUN (pass confirm=True, exactly, to resume) -- would ask the firmware to finish the "
+                    f"interrupted conversion of zone {zone} to aux relay {resume_relay} (host={resolved})")
+        try:
+            ack = ahc.post_move_zone_to_aux(resolved, zone, resume_relay=resume_relay)
+        except ahc.AuxHttpError as exc:
+            return _gate_or_error(exc, "POST /api/zones move_zone_to_aux resume", resolved)
+        return (f"ok - resumed and finished the conversion of zone {zone} to aux relay {resume_relay}; the "
+                f"firmware read it back (zones, aux store from NVS, every profile slot) before clearing its "
+                f"marker; firmware ack: {ack}; host={resolved}")
 
     try:
         zones_before = zones_http_client.get_zones(resolved)
@@ -311,9 +332,19 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
                 return (f"refused: profile {pid} has a temperature-compare rule for zone {zone} but the aux "
                         f"output would have no thermocouple zone (host={resolved})")
 
+    try:
+        io_hits = ahc.get_stored_relay_io_hits(resolved, relay)
+    except ahc.AuxHttpError as exc:
+        return f"error: precheck read of stored RELAY_IO segments failed (host={resolved}): {exc}"
+
     want_tc = zone if has_tc else -1
     plan = (f"zone {zone} (relay {relay}) -> aux relay {relay}, tc_zone={want_tc}; "
             f"{n_rules} rule(s) in {len(hits)} of {len(profiles_before)} stored profile(s) retargeted to {dest}")
+    if io_hits:
+        listing = "; ".join(f"profile {pid} segment(s) {', '.join(str(n) for n in segs)}"
+                            for pid, segs in sorted(io_hits.items()))
+        plan += (f". NOTE: stored RELAY_IO segments that drive relay {relay} directly are NOT rewritten and "
+                 f"will fight the aux logic once the relay is an aux output: {listing}")
     if confirm is not True:
         return (f"DRY RUN (pass confirm=True, exactly, to actually write; take a backup_export first) -- "
                 f"would convert {plan} (host={resolved})")

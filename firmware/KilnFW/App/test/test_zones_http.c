@@ -15493,12 +15493,12 @@ static void test_zone_free_for_aux(void)
     zone_cfg_t old = s_zones.cfg.zones[1];
     zone_cfg_t other = s_zones.cfg.zones[0];
 
-    TEST_CHECK(!zones_http_zone_free_for_aux(0), "a HEATER zone is refused");
-    TEST_CHECK(!zones_http_zone_free_for_aux(5), "an out-of-range zone is refused");
+    TEST_CHECK(zones_http_zone_free_for_aux(0) == ZONES_AUX_FREE_NOTHING_CHANGED, "a HEATER zone is refused");
+    TEST_CHECK(zones_http_zone_free_for_aux(5) == ZONES_AUX_FREE_NOTHING_CHANGED, "an out-of-range zone is refused");
     TEST_CHECK(!zones_http_zone_restore_after_aux(1), "restore with nothing saved reports false");
     TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "refusals change nothing");
 
-    TEST_CHECK(zones_http_zone_free_for_aux(1), "an ON_OFF zone is freed");
+    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_OK, "an ON_OFF zone is freed");
     const zone_cfg_t *z = &s_zones.cfg.zones[1];
     TEST_CHECK(z->zone_type == (uint8_t)ZONE_TYPE_HEATER && z->relay_mask == 0 && z->failsafe_state == 0 &&
                    z->hyst_c == 0.0f && z->min_on_s == 0 && z->min_off_s == 0,
@@ -15510,7 +15510,7 @@ static void test_zone_free_for_aux(void)
     TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "restore is byte-exact");
     TEST_CHECK(!zones_http_zone_restore_after_aux(1), "the saved copy is consumed by restore");
 
-    TEST_CHECK(zones_http_zone_free_for_aux(1), "free again");
+    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_OK, "free again");
     zones_http_zone_discard_saved_for_aux();
     TEST_CHECK(!zones_http_zone_restore_after_aux(1), "discard drops the saved copy");
     TEST_CHECK(s_zones.cfg.zones[1].relay_mask == 0, "discard keeps the freed state");
@@ -15524,9 +15524,36 @@ static void test_zone_free_for_aux_nvs_failure_restores_ram(void)
     zfa_seed();
     zone_cfg_t old = s_zones.cfg.zones[1];
     fake_kv_script_next_write_status(HAL_IO);
-    TEST_CHECK(!zones_http_zone_free_for_aux(1), "a persist failure refuses the free");
+    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_NOTHING_CHANGED,
+               "a persist failure refuses the free and the put-back save is reported as clean");
     TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "RAM zone is back to the original");
     TEST_CHECK(!zones_http_zone_restore_after_aux(1), "nothing is left saved after the refusal");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static uint8_t s_zfa_aux_mask;
+static uint8_t zfa_aux_provider(void) { return s_zfa_aux_mask; }
+
+static void test_zone_restore_refuses_on_aux_conflict(void)
+{
+    TEST_SECTION("zones_http_zone_restore_after_aux -- refuses when an enabled aux output owns the saved relay");
+    zfa_seed();
+    zone_cfg_t old = s_zones.cfg.zones[1];
+    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_OK, "freed");
+    s_zfa_aux_mask = 0x04u; /* aux on relay 3 took the zone's old relay */
+    zones_config_json_set_aux_enabled_provider(zfa_aux_provider);
+    TEST_CHECK(!zones_http_zone_restore_after_aux(1), "restore refused: relay 3 now belongs to an aux output");
+    TEST_CHECK(s_zones.cfg.zones[1].relay_mask == 0 && s_zones.cfg.zones[1].zone_type == (uint8_t)ZONE_TYPE_HEATER,
+               "the zone stays freed, the relay is never owned twice");
+    TEST_CHECK(!zones_http_zone_restore_after_aux(1), "the saved copy is dropped after the refusal");
+
+    zfa_seed();
+    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_OK, "freed again");
+    s_zfa_aux_mask = 0x08u; /* an aux on an unrelated relay does not block it */
+    TEST_CHECK(zones_http_zone_restore_after_aux(1) && memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0,
+               "restore still works when the aux owns a different relay");
+    zones_config_json_set_aux_enabled_provider(NULL);
     nvs_test_enable(false);
     nvs_test_clear();
 }
@@ -15534,6 +15561,7 @@ static void test_zone_free_for_aux_nvs_failure_restores_ram(void)
 void run_test_zones_http(void)
 {
     test_zone_free_for_aux();
+    test_zone_restore_refuses_on_aux_conflict();
     test_zone_free_for_aux_nvs_failure_restores_ram();
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();

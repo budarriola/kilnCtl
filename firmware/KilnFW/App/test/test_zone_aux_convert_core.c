@@ -38,6 +38,16 @@ static aux_output_entry_t c_first_set;
 static uint8_t c_order[16];
 static int c_order_n;
 static zone_aux_zone_info_t w_zone_saved;
+static aux_output_entry_t w_raw[AUX_OUTPUTS_COUNT + 1]; /* stored (raw) entries */
+static aux_output_entry_t c_last_set;
+static bool w_set_touches_on_fail;  /* a failing aux_set still changed RAM, like the real store */
+static bool w_free_uncertain;       /* zone_free fails and its put-back is unconfirmed */
+static bool w_verify_ok;
+static bool w_jr_present;
+static aux_convert_journal_t w_jr;
+static bool w_jr_write_ok, w_jr_clear_ok, w_alloc_ok, w_resume_ok;
+static int c_jw, c_jc, c_resume, c_busy_on, c_busy_off;
+static bool w_busy, w_busy_at_free;
 
 static void note(uint8_t tag)
 {
@@ -45,7 +55,7 @@ static void note(uint8_t tag)
         c_order[c_order_n++] = tag;
     }
 }
-enum { T_FREE = 1, T_SET, T_COMMIT, T_REVERT, T_RESTORE, T_DONE };
+enum { T_FREE = 1, T_SET, T_COMMIT, T_REVERT, T_RESTORE, T_DONE, T_JW, T_JC };
 
 static void reset_world(void)
 {
@@ -75,6 +85,16 @@ static void reset_world(void)
     w_aux_set_ret = ESP_OK;
     w_aux_set_fail_on_call = 0;
     w_corrupt_after_commit = false;
+    memset(w_raw, 0, sizeof(w_raw));
+    memset(&c_last_set, 0, sizeof(c_last_set));
+    w_set_touches_on_fail = false;
+    w_free_uncertain = false;
+    w_verify_ok = true;
+    w_jr_present = false;
+    memset(&w_jr, 0, sizeof(w_jr));
+    w_jr_write_ok = w_jr_clear_ok = w_alloc_ok = w_resume_ok = true;
+    c_jw = c_jc = c_resume = c_busy_on = c_busy_off = 0;
+    w_busy = w_busy_at_free = false;
     c_free = c_restore = c_done = c_set = c_plan = c_commit = c_revert = 0;
     c_order_n = 0;
     memset(&c_first_set, 0, sizeof(c_first_set));
@@ -96,19 +116,20 @@ static bool fk_zone_get(uint8_t zone, zone_aux_zone_info_t *out)
     *out = w_zone;
     return true;
 }
-static bool fk_zone_free(uint8_t zone)
+static zone_aux_free_result_t fk_zone_free(uint8_t zone)
 {
     (void)zone;
     c_free++;
     note(T_FREE);
+    w_busy_at_free = w_busy;
     if (!w_free_ok) {
-        return false;
+        return w_free_uncertain ? ZONE_AUX_FREE_UNCERTAIN : ZONE_AUX_FREE_NOTHING_CHANGED;
     }
     w_zone_saved = w_zone;
     w_zone.is_on_off = false;
     w_zone.relay_mask = 0;
     w_zone.failsafe_on = false;
-    return true;
+    return ZONE_AUX_FREE_OK;
 }
 static bool fk_zone_restore(uint8_t zone)
 {
@@ -135,25 +156,36 @@ static bool fk_aux_get(uint8_t relay, aux_output_t *out)
     *out = w_aux[relay];
     return true;
 }
+static bool fk_aux_get_raw(uint8_t relay, aux_output_entry_t *out)
+{
+    if (relay < 1 || relay > AUX_OUTPUTS_COUNT) {
+        return false;
+    }
+    *out = w_raw[relay];
+    return true;
+}
 static esp_err_t fk_aux_set(uint8_t relay, const aux_output_entry_t *e, uint8_t u)
 {
     (void)u;
     c_set++;
     note(T_SET);
+    c_last_set = *e;
     if (c_set == 1) {
         c_first_set = *e;
     }
-    if (w_aux_set_fail_on_call == c_set) {
-        return ESP_FAIL;
+    bool fail = w_aux_set_fail_on_call == c_set || w_aux_set_ret != ESP_OK;
+    if (fail && !w_set_touches_on_fail) {
+        return w_aux_set_ret != ESP_OK ? w_aux_set_ret : ESP_FAIL;
     }
-    if (w_aux_set_ret != ESP_OK) {
-        return w_aux_set_ret;
-    }
+    w_raw[relay] = *e;
     w_aux[relay].enabled = e->enabled;
     w_aux[relay].tc_zone = e->tc_zone_plus1 == 0 ? AUX_TC_ZONE_NONE : (uint8_t)(e->tc_zone_plus1 - 1u);
     w_aux[relay].hyst_c = e->hyst_c;
     w_aux[relay].min_on_s = e->min_on_s;
     w_aux[relay].min_off_s = e->min_off_s;
+    if (fail) {
+        return w_aux_set_ret != ESP_OK ? w_aux_set_ret : ESP_FAIL;
+    }
     return ESP_OK;
 }
 static bool fk_quar(void) { return w_quar; }
@@ -206,6 +238,64 @@ static bool fk_revert(uint8_t zone, uint8_t relay)
     return w_revert_ok;
 }
 
+static bool fk_resume(uint8_t zone, uint8_t relay, bool has_tc, profiles_retarget_counts_t *c, char *err, size_t cap)
+{
+    (void)zone;
+    (void)relay;
+    (void)has_tc;
+    c_resume++;
+    memset(c, 0, sizeof(*c));
+    c->profiles_scanned = 4;
+    c->profiles_affected = 1;
+    c->rules_retargeted = 2;
+    if (!w_resume_ok) {
+        snprintf(err, cap, "slot 3 write failed");
+    }
+    return w_resume_ok;
+}
+static bool fk_jr_read(aux_convert_journal_t *out)
+{
+    if (!w_jr_present) {
+        return false;
+    }
+    if (out) {
+        *out = w_jr;
+    }
+    return true;
+}
+static bool fk_jr_write(const aux_convert_journal_t *j)
+{
+    c_jw++;
+    note(T_JW);
+    if (!w_jr_write_ok) {
+        return false;
+    }
+    w_jr = *j;
+    w_jr_present = true;
+    return true;
+}
+static bool fk_jr_clear(void)
+{
+    c_jc++;
+    note(T_JC);
+    if (!w_jr_clear_ok) {
+        return false;
+    }
+    w_jr_present = false;
+    return true;
+}
+static bool fk_verify(void) { return w_verify_ok; }
+static void fk_busy(bool on)
+{
+    w_busy = on;
+    if (on) {
+        c_busy_on++;
+    } else {
+        c_busy_off++;
+    }
+}
+static void *fk_alloc(size_t n) { return w_alloc_ok ? malloc(n) : NULL; }
+
 static const zone_aux_ops_t OPS = {
     .mode_blocked = fk_blocked,
     .zone_get = fk_zone_get,
@@ -214,18 +304,28 @@ static const zone_aux_ops_t OPS = {
     .zone_done = fk_zone_done,
     .zones_union = fk_union,
     .aux_get = fk_aux_get,
+    .aux_get_raw = fk_aux_get_raw,
     .aux_set = fk_aux_set,
     .aux_quarantined = fk_quar,
     .live_uses_zone = fk_live,
     .profiles_plan = fk_plan,
     .profiles_commit = fk_commit,
     .profiles_revert = fk_revert,
+    .profiles_resume = fk_resume,
+    .journal_read = fk_jr_read,
+    .journal_write = fk_jr_write,
+    .journal_clear = fk_jr_clear,
+    .verify_persisted = fk_verify,
+    .busy = fk_busy,
+    .scratch_alloc = fk_alloc,
 };
 
 static int run(const char *body, zone_aux_reply_t *r)
 {
     memset(r, 0, sizeof(*r));
     zone_aux_convert_run(&OPS, body, r);
+    /* The in-progress flag is raised for every run and lowered on every exit path. */
+    TEST_CHECK(c_busy_on == c_busy_off && !w_busy, "busy flag lowered after the run");
     return r->status;
 }
 
@@ -325,9 +425,12 @@ static void test_success(void)
     zone_aux_reply_t r;
     reset_world();
     TEST_CHECK(run("move_zone_to_aux=1&confirm=1", &r) == 200, "200");
-    TEST_CHECK(c_order_n == 4 && c_order[0] == T_FREE && c_order[1] == T_SET && c_order[2] == T_COMMIT &&
-                   c_order[3] == T_DONE,
-               "order: free zone, enable aux, rewrite profiles, release saved zone");
+    TEST_CHECK(c_order_n == 9 && c_order[0] == T_JW && c_order[1] == T_FREE && c_order[2] == T_JW &&
+                   c_order[3] == T_SET && c_order[4] == T_JW && c_order[5] == T_COMMIT && c_order[6] == T_JW &&
+                   c_order[7] == T_DONE && c_order[8] == T_JC,
+               "order: marker, free zone, enable aux, rewrite profiles, release saved zone");
+    TEST_CHECK(c_jw == 4 && c_jc == 1 && !w_jr_present && w_busy_at_free,
+               "marker advanced per stage, cleared at the end, busy up during the run");
     TEST_CHECK(c_first_set.enabled == 1 && c_first_set.tc_zone_plus1 == 2 && c_first_set.hyst_c == 3.0f &&
                    c_first_set.min_on_s == 20 && c_first_set.min_off_s == 30,
                "aux entry copies zone params, tc_zone = zone");
@@ -364,7 +467,9 @@ static void test_rollbacks(void)
     w_commit_ok = false;
     TEST_CHECK(run(body, &r) == 500 && c_revert == 0 && c_set == 2 && c_restore == 1,
                "commit fails (it reverts its own slots) -> aux off, zone back, no second profile revert");
-    TEST_CHECK(c_order[c_order_n - 2] == T_SET && c_order[c_order_n - 1] == T_RESTORE, "undo order: aux, zone");
+    TEST_CHECK(c_order[c_order_n - 3] == T_SET && c_order[c_order_n - 2] == T_RESTORE &&
+                   c_order[c_order_n - 1] == T_JC,
+               "undo order: aux, zone, marker cleared");
     TEST_CHECK(!w_aux[3].enabled && w_zone.is_on_off && strstr(r.msg, "everything restored"), "world restored");
 
     reset_world();
@@ -390,6 +495,140 @@ static void test_rollbacks(void)
     TEST_CHECK(run(body, &r) == 500 && strstr(r.msg, "ROLLBACK INCOMPLETE"), "failed zone restore reported");
 }
 
+static void test_review_fixes(void)
+{
+    TEST_SECTION("move_zone_to_aux: partial aux write, raw snapshot, marker, resume");
+    zone_aux_reply_t r;
+    const char *body = "move_zone_to_aux=1&confirm=1";
+
+    /* item 1: aux_set failed AFTER changing RAM -> aux undone too, or the zone gets relay 3 back while an
+     * enabled aux still owns it */
+    reset_world();
+    w_aux_set_fail_on_call = 1;
+    w_set_touches_on_fail = true;
+    TEST_CHECK(run(body, &r) == 500 && c_set == 2 && c_restore == 1, "touched aux failure -> aux undone, zone restored");
+    TEST_CHECK(!w_aux[3].enabled && !w_raw[3].enabled && w_zone.is_on_off && w_zone.relay_mask == 0x04,
+               "aux no longer enabled after the restore");
+    TEST_CHECK(strstr(r.msg, "everything restored") != NULL && !w_jr_present, "reported clean, marker cleared");
+
+    /* item 8: roll back to the RAW stored entry, not the defaults view */
+    reset_world();
+    w_raw[3].min_on_s = 99;
+    w_raw[3].hyst_c = 7.0f;
+    w_commit_ok = false;
+    TEST_CHECK(run(body, &r) == 500 && c_last_set.enabled == 0 && c_last_set.min_on_s == 99 &&
+                   c_last_set.hyst_c == 7.0f,
+               "rollback writes the stored raw entry back bit for bit");
+
+    /* item 5: marker behavior on the failure paths */
+    reset_world();
+    w_free_ok = false;
+    TEST_CHECK(run(body, &r) == 500 && !w_jr_present && c_jw == 1, "free failed clean -> marker cleared");
+    reset_world();
+    w_free_ok = false;
+    w_free_uncertain = true;
+    TEST_CHECK(run(body, &r) == 500 && w_jr_present && strstr(r.msg, "ROLLBACK INCOMPLETE") && c_set == 0,
+               "free failed and put-back unconfirmed -> marker kept, loud message");
+    reset_world();
+    w_aux_set_fail_on_call = 1;
+    w_restore_ok = false;
+    TEST_CHECK(run(body, &r) == 500 && w_jr_present, "unclean rollback keeps the marker");
+    reset_world();
+    w_jr_write_ok = false;
+    TEST_CHECK(run(body, &r) == 500 && c_free == 0 && c_set == 0, "marker write failed -> nothing changed");
+    reset_world();
+    w_verify_ok = false;
+    TEST_CHECK(run(body, &r) == 500 && c_revert == 1 && c_restore == 1 && strstr(r.msg, "read-back"),
+               "NVS read-back mismatch undoes all three steps");
+    reset_world();
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    w_jr.stage = 2;
+    TEST_CHECK(run(body, &r) == 409 && strstr(r.msg, "resume=1") && c_free == 0, "pending marker blocks a new run");
+    reset_world();
+    w_alloc_ok = false;
+    TEST_CHECK(run(body, &r) == 500 && untouched() && c_busy_on == 0, "no scratch memory -> nothing changed");
+    reset_world();
+    w_blocked = true;
+    TEST_CHECK(run(body, &r) == 409 && c_busy_on == 1, "refusal path still raises and lowers the busy flag");
+
+    /* resume */
+    const char *rb = "move_zone_to_aux=1&confirm=1&resume=1&relay=3";
+    reset_world();
+    w_zone.is_on_off = false;
+    w_zone.relay_mask = 0;
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    w_jr.stage = 2;
+    w_jr.has_tc = 1;
+    w_jr.hyst_c = 3.0f;
+    w_jr.min_on_s = 20;
+    w_jr.min_off_s = 30;
+    TEST_CHECK(run(rb, &r) == 200 && c_set == 1 && c_resume == 1 && c_free == 0 && !w_jr_present &&
+                   strstr(r.msg, "resumed") && w_aux[3].enabled && w_aux[3].tc_zone == 1,
+               "resume from stage 2 enables aux with the journaled values, finishes profiles, clears marker");
+    TEST_CHECK(c_first_set.hyst_c == 3.0f && c_first_set.min_on_s == 20 && c_first_set.tc_zone_plus1 == 2,
+               "resumed aux entry equals the journaled one");
+
+    reset_world();
+    w_zone.is_on_off = false;
+    w_zone.relay_mask = 0;
+    w_aux[3].enabled = 1;
+    w_aux[3].tc_zone = 1;
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    w_jr.stage = 3;
+    w_jr.has_tc = 1;
+    TEST_CHECK(run(rb, &r) == 200 && c_set == 0 && c_resume == 1, "resume from stage 3 skips the aux write");
+
+    reset_world();
+    TEST_CHECK(run(rb, &r) == 409 && c_resume == 0, "resume with no marker -> 409");
+    reset_world();
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 2;
+    TEST_CHECK(run(rb, &r) == 409 && c_resume == 0 && w_jr_present, "resume for a different relay -> 409, marker kept");
+    reset_world();
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    TEST_CHECK(run("move_zone_to_aux=1&confirm=1&resume=1", &r) == 400, "resume without relay -> 400");
+    reset_world();
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    w_jr.stage = 1;
+    TEST_CHECK(run(rb, &r) == 409 && !w_jr_present && c_set == 0 && strstr(r.msg, "had not changed anything"),
+               "resume of a run that never freed the zone clears the marker and changes nothing");
+    reset_world();
+    w_zone.is_on_off = false;
+    w_zone.relay_mask = 0;
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    w_jr.stage = 2;
+    w_resume_ok = false;
+    TEST_CHECK(run(rb, &r) == 500 && w_jr_present && strstr(r.msg, "marker kept"), "failed resume keeps the marker");
+    reset_world();
+    w_zone.is_on_off = false;
+    w_zone.relay_mask = 0;
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    w_jr.stage = 2;
+    w_verify_ok = false;
+    TEST_CHECK(run(rb, &r) == 500 && w_jr_present, "resume read-back mismatch keeps the marker");
+    reset_world();
+    w_blocked = true;
+    w_jr_present = true;
+    w_jr.zone = 1;
+    w_jr.relay = 3;
+    TEST_CHECK(run(rb, &r) == 409 && c_resume == 0, "resume honors the mode gate");
+}
+
 void run_test_zone_aux_convert_core(void)
 {
     test_requested();
@@ -397,4 +636,5 @@ void run_test_zone_aux_convert_core(void)
     test_refusals();
     test_success();
     test_rollbacks();
+    test_review_fixes();
 }

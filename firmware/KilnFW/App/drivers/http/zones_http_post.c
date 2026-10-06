@@ -26,6 +26,13 @@
 #include "zone_settings_source_chain.h"
 
 static esp_err_t zones_post_body(httpd_req_t *req);
+/* Portable noinline, same guard as autotune_engine.c: cl.exe (the host tests) rejects the GCC syntax. */
+#if defined(_MSC_VER)
+#define ZONES_POST_NOINLINE
+#else
+#define ZONES_POST_NOINLINE __attribute__((noinline))
+#endif
+static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *body);
 
 /* ---- move_zone_to_aux hook and the zone free/restore it drives ---- */
 static zones_move_to_aux_handler_t s_move_to_aux_handler;
@@ -44,19 +51,19 @@ static void aux_saved_zone_drop(void)
     s_aux_saved_zone = NULL;
 }
 
-bool zones_http_zone_free_for_aux(uint8_t zone)
+int zones_http_zone_free_for_aux(uint8_t zone)
 {
     aux_saved_zone_drop();
     if (zone >= s_zones.cfg.thermo_count || zone >= MAX31856_CHANNEL_COUNT ||
         s_zones.cfg.zones[zone].zone_type != (uint8_t)ZONE_TYPE_ON_OFF) {
-        return false;
+        return ZONES_AUX_FREE_NOTHING_CHANGED;
     }
     zones_cfg_t *tmp = persist_scratch_alloc(sizeof(*tmp));
     zone_cfg_t *saved = persist_scratch_alloc(sizeof(*saved));
     if (tmp == NULL || saved == NULL) {
         free(tmp);
         free(saved);
-        return false;
+        return ZONES_AUX_FREE_NOTHING_CHANGED;
     }
     *tmp = s_zones.cfg;
     zone_cfg_t *z = &tmp->zones[zone];
@@ -71,7 +78,7 @@ bool zones_http_zone_free_for_aux(uint8_t zone)
         ESP_LOGW(ZONES_HTTP_TAG, "zone free for aux refused by validate: %s", why ? why : "?");
         free(tmp);
         free(saved);
-        return false;
+        return ZONES_AUX_FREE_NOTHING_CHANGED;
     }
     *saved = s_zones.cfg.zones[zone];
     s_zones.cfg = *tmp;
@@ -84,12 +91,13 @@ bool zones_http_zone_free_for_aux(uint8_t zone)
         s_zones.cfg.zones[zone] = *saved;
         s_config_generation++;
         zones_config_push_all_relay_types();
-        (void)nvs_save();
+        /* Report the put-back's own result: a failed second save leaves NVS holding the freed zone. */
+        bool restored = nvs_save() == ESP_OK;
         free(saved);
-        return false;
+        return restored ? ZONES_AUX_FREE_NOTHING_CHANGED : ZONES_AUX_FREE_UNCERTAIN;
     }
     s_aux_saved_zone = saved;
-    return true;
+    return ZONES_AUX_FREE_OK;
 }
 
 bool zones_http_zone_restore_after_aux(uint8_t zone)
@@ -97,6 +105,23 @@ bool zones_http_zone_restore_after_aux(uint8_t zone)
     if (s_aux_saved_zone == NULL || zone >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
+    /* The saved zone is a struct copy from before the conversion; by now the aux store may own its
+     * relay. Putting it back unchecked would break the one-owner-per-relay invariant, so check the
+     * candidate with the same conflict test the POST path uses and refuse on any overlap. */
+    zones_cfg_t *cand = persist_scratch_alloc(sizeof(*cand));
+    if (cand == NULL) {
+        aux_saved_zone_drop();
+        return false;
+    }
+    *cand = s_zones.cfg;
+    cand->zones[zone] = *s_aux_saved_zone;
+    if (zones_config_json_aux_conflict_mask(cand) != 0) {
+        ESP_LOGE(ZONES_HTTP_TAG, "zone restore refused: relay is owned by an enabled aux output");
+        free(cand);
+        aux_saved_zone_drop();
+        return false;
+    }
+    free(cand);
     s_zones.cfg.zones[zone] = *s_aux_saved_zone;
     s_config_generation++;
     zones_config_push_all_relay_types();
@@ -234,7 +259,14 @@ static esp_err_t zones_post_body(httpd_req_t *req)
         free(body);
         return herr;
     }
+    return zones_post_apply(req, body);
+}
 
+/* The ordinary whole-page submit, split out of zones_post_body() so the move-to-aux path above never
+ * carries this frame (zones_cfg_t tmp alone is ~1.1 KB) on top of its own: noinline keeps the compiler
+ * from folding it back, and takes ownership of `body` (frees it on every return). */
+static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *body)
+{
     zones_cfg_t tmp;
     memset(&tmp, 0, sizeof(tmp));
 

@@ -1961,8 +1961,10 @@ static uint16_t retarget_count_rules(const profile_t *p, uint8_t target)
     return n;
 }
 
-bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_has_tc,
-                                        profiles_retarget_counts_t *counts, char *err, size_t err_cap)
+/* allow_dest: a resume, where an earlier run already moved some slots, so rules at the destination
+ * are expected and not a refusal. */
+static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool allow_dest,
+                          profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t c = {0};
     uint8_t dest = profile_rule_target_from_aux_relay(relay);
@@ -1979,7 +1981,7 @@ bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_h
         }
         c.profiles_scanned++;
         const profile_t *p = &s_profiles.profiles[id];
-        if (retarget_count_rules(p, dest) != 0) {
+        if (!allow_dest && retarget_count_rules(p, dest) != 0) {
             snprintf(err, err_cap, "profile slot %u already has a rule targeting aux relay %u", id, relay);
             if (counts) *counts = c;
             return false;
@@ -2022,7 +2024,17 @@ bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_h
     return true;
 }
 
-/* Read slot `id` back out of NVS and require its rules to match RAM's. */
+bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                        profiles_retarget_counts_t *counts, char *err, size_t err_cap)
+{
+    return retarget_plan(zone, relay, zone_has_tc, false, counts, err, err_cap);
+}
+
+/* Read slot `id` back out of NVS and require the WHOLE stored profile to equal RAM: right length and
+ * version, a CRC that matches the stored bytes, and the profile payload byte-for-byte equal. A
+ * three-field compare of the rules could not see a save that lost or altered anything else. The
+ * wrapper is NOT compared against a freshly encoded one: its padding bytes are indeterminate, so two
+ * encodes of the same profile can differ while both are valid. */
 static bool retarget_verify_slot(uint8_t id)
 {
     hal_kv_handle_t h;
@@ -2032,25 +2044,14 @@ static bool retarget_verify_slot(uint8_t id)
     char key[8];
     profile_nvs_key(id, key, sizeof(key));
     profile_persisted_t *loaded = persist_scratch_alloc(sizeof(*loaded));
-    profile_t *decoded = persist_scratch_alloc(sizeof(*decoded));
     bool ok = false;
-    if (loaded && decoded) {
+    if (loaded) {
         size_t len = sizeof(*loaded);
-        const char *reason = "";
-        if (hal_kv_get_blob(&h, key, loaded, &len) == HAL_OK &&
-            profile_decode_blob(loaded, len, decoded, &reason) == PROFILE_DECODE_OK) {
-            const profile_t *ram = &s_profiles.profiles[id];
-            ok = decoded->on_off_rule_count == ram->on_off_rule_count;
-            uint8_t cnt = retarget_rule_limit(ram);
-            for (uint8_t i = 0; ok && i < cnt; i++) {
-                ok = decoded->on_off_rules[i].zone_index == ram->on_off_rules[i].zone_index &&
-                     decoded->on_off_rules[i].segment_index == ram->on_off_rules[i].segment_index &&
-                     decoded->on_off_rules[i].enable == ram->on_off_rules[i].enable;
-            }
-        }
+        ok = hal_kv_get_blob(&h, key, loaded, &len) == HAL_OK && len == sizeof(*loaded) &&
+             loaded->version == PROFILE_VERSION && loaded->crc32 == compute_profile_crc(loaded) &&
+             memcmp(&loaded->profile, &s_profiles.profiles[id], sizeof(loaded->profile)) == 0;
     }
     free(loaded);
-    free(decoded);
     hal_kv_close(&h);
     return ok;
 }
@@ -2070,11 +2071,11 @@ static bool retarget_revert(const uint8_t *journal, uint8_t n, uint8_t from, uin
     return clean;
 }
 
-bool profiles_retarget_zone_to_aux_commit(uint8_t zone, uint8_t relay, bool zone_has_tc,
-                                          profiles_retarget_counts_t *counts, char *err, size_t err_cap)
+static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool resume,
+                            profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t plan;
-    if (!profiles_retarget_zone_to_aux_plan(zone, relay, zone_has_tc, &plan, err, err_cap)) {
+    if (!retarget_plan(zone, relay, zone_has_tc, resume, &plan, err, err_cap)) {
         if (counts) *counts = plan;
         return false;
     }
@@ -2129,6 +2130,18 @@ bool profiles_retarget_zone_to_aux_commit(uint8_t zone, uint8_t relay, bool zone
     }
     if (counts) *counts = done;
     return true;
+}
+
+bool profiles_retarget_zone_to_aux_commit(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                          profiles_retarget_counts_t *counts, char *err, size_t err_cap)
+{
+    return retarget_commit(zone, relay, zone_has_tc, false, counts, err, err_cap);
+}
+
+bool profiles_retarget_zone_to_aux_resume(uint8_t zone, uint8_t relay, bool zone_has_tc,
+                                          profiles_retarget_counts_t *counts, char *err, size_t err_cap)
+{
+    return retarget_commit(zone, relay, zone_has_tc, true, counts, err, err_cap);
 }
 
 bool profiles_retarget_zone_to_aux_revert(uint8_t zone, uint8_t relay)
