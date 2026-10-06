@@ -10395,6 +10395,110 @@ static void test_aux_off_pending_retried_by_task_loop(void)
     s_exec.state = PROFILE_EXEC_IDLE;
 }
 
+/* ===== SPARE_RELAY_ONOFF_PLAN.md sec 10: monitor-only zone, per-tick wiring =====
+ * The predicate tests above prove each consumer on its own; this drives the
+ * real executor_task_entry() tick body one tick at a time (budget 1 lets one
+ * vTaskDelay() through, the next longjmps out) with a two-zone run: zone 0 a
+ * normal heater dithering near 100 C, zone 1 the subject sitting 75 C cold.
+ * Same stimulus, zone 1 heater (control) vs monitor-only. */
+static void monitor_only_tick_setup(bool zone1_monitor_only)
+{
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(600.0f, 100.0f, 10);
+    warm_start_test_setup(&p, 100.0f);
+    aux_test_reset_stubs();
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    memset(g_stub_zone_monitor_only, 0, sizeof(g_stub_zone_monitor_only));
+    g_stub_relay_mask[0] = 0x01;
+    g_stub_relay_mask[1] = zone1_monitor_only ? 0x00 : 0x02; /* converted to an aux: no heater relay left */
+    g_stub_zone_monitor_only[1] = zone1_monitor_only;
+    g_stub_max_temp_c[1] = 1300.0f;
+    g_stub_control_mode[1] = ZONE_CONTROL_MODE_PID;
+    g_stub_thermo_mask[1] = 0x02; /* zone 1 reads channel 1 */
+    g_stub_max_ramp_c_per_hr[1] = 500.0f;
+    g_stub_thermo_count = 2;
+    set_test_thermo_reading(1, 25.0f);
+}
+
+/* One tick: zone 0 dithers around 100 C (clear of guard 7), zone 1 reads zone1_c. */
+static void monitor_only_one_tick(int i, float zone1_c)
+{
+    set_test_thermo_reading(0, (i % 2) ? 100.1f : 100.0f);
+    set_test_thermo_reading(1, zone1_c);
+    aux_test_run_task_ticks(1);
+}
+
+static void test_monitor_only_zone_tick_wiring(void)
+{
+    TEST_SECTION("monitor-only zone (relay converted to an aux) through the real executor tick: no PID "
+                 "output, no ramp-lock hold, no lag accrual, no guard-3 runaway on a rising reading -- and "
+                 "guard 5 over-temperature still trips (docs/SPARE_RELAY_ONOFF_PLAN.md sec 10)");
+    char err[192];
+
+    /* Control: zone 1 as an ordinary heater. 40 cold ticks hold the ramp
+     * lock and accrue lag past EXEC_SUSTAINED_LAG_S; its PID runs. */
+    monitor_only_tick_setup(false);
+    err[0] = '\0';
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "control: two-heater run starts");
+    for (int i = 0; i < 40; i++) monitor_only_one_tick(i, 25.0f);
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "control: still RUNNING after 40 ticks");
+    TEST_CHECK(s_exec.ramp_lock_held && (s_exec.ramp_lock_lagging_mask & 0x02),
+               "control: a cold heater zone 1 holds the ramp lock (the lock is live in this harness)");
+    TEST_CHECK(s_exec.zones[1].lag_held_s >= 30.0f && s_exec.zones[1].lag_sustained,
+               "control: a cold heater zone 1 accrues sustained lag");
+    TEST_CHECK(s_exec.zones[1].pid_state.initialized, "control: zone 1's PID ran");
+    TEST_CHECK(!s_exec.zones[1].monitor_only, "control: zone 1 not flagged monitor-only");
+    profile_executor_halt();
+
+    /* Monitor-only: same stimulus. */
+    monitor_only_tick_setup(true);
+    err[0] = '\0';
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "monitor-only: run starts (zone 0 still heats)");
+    bool ever_lock = false, ever_lag = false, ever_pid = false, ever_duty = false, ever_relay = false;
+    for (int i = 0; i < 40; i++) {
+        monitor_only_one_tick(i, 25.0f);
+        if (s_exec.ramp_lock_held || (s_exec.ramp_lock_lagging_mask & 0x02)) ever_lock = true;
+        if (s_exec.zones[1].lag_held_s > 0.0f || s_exec.zones[1].lag_sustained) ever_lag = true;
+        if (s_exec.zones[1].pid_state.initialized || s_exec.zones[1].pid_state.integral != 0.0f) ever_pid = true;
+        if (s_exec.zones[1].duty != 0.0f) ever_duty = true;
+        if (s_exec.zones[1].relay_commanded_on) ever_relay = true;
+    }
+    TEST_CHECK(s_exec.zones[1].monitor_only, "zone 1 is flagged monitor-only by the tick's predicate refresh");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING && !s_exec.zones[1].faulted,
+               "monitor-only: still RUNNING, zone 1 not faulted");
+    TEST_CHECK(!ever_lock, "monitor-only: a cold zone 1 never holds the ramp lock");
+    TEST_CHECK(!ever_lag, "monitor-only: zone 1 never accrues lag");
+    TEST_CHECK(!ever_pid, "monitor-only: zone 1's PID never runs");
+    TEST_CHECK(!ever_duty && !ever_relay, "monitor-only: zone 1 never gets duty or a relay command");
+    TEST_CHECK(s_exec.zones[1].actual_valid && fabsf(s_exec.zones[1].actual_c - 25.0f) < 0.01f,
+               "monitor-only: zone 1's thermocouple is still read");
+
+    /* Rising 1 C/tick with heat off for 160 ticks: past guard 3's 120 s
+     * settle and 20 C margin, which trips a heater sitting at duty 0. */
+    float t1 = 25.0f;
+    for (int i = 0; i < 160; i++) {
+        t1 += 1.0f;
+        monitor_only_one_tick(i, t1);
+    }
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING && !s_exec.zones[1].faulted &&
+                   s_exec.zones[1].guard_state.reason == THERMAL_GUARD_TRIP_NONE,
+               "monitor-only: a reading rising 160 C with no heat commanded trips no guard (guard 3 exempt)");
+
+    /* Guard 5 stays live. */
+    monitor_only_one_tick(0, 1350.0f);
+    TEST_CHECK(s_exec.zones[1].guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP,
+               "monitor-only: zone 1 over max_temp_c trips guard 5 MAX_TEMP");
+    TEST_CHECK(s_exec.zones[1].faulted || s_exec.state == PROFILE_EXEC_FAULTED,
+               "monitor-only: the over-temperature trip is escalated (zone faulted / run faulted)");
+    profile_executor_halt();
+    memset(g_stub_zone_monitor_only, 0, sizeof(g_stub_zone_monitor_only));
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    reset_test_thermo_readings();
+}
+
 static void run_test_aux_wp3(void)
 {
     test_aux_start_control_run_succeeds();
@@ -10412,6 +10516,7 @@ static void run_test_aux_wp3(void)
     test_aux_handoff_write_failure_sets_pending();
     test_aux_status_reports_claimed_aux();
     test_aux_off_pending_retried_by_task_loop();
+    test_monitor_only_zone_tick_wiring();
 }
 
 static void run_test_on_off_actuation(void)
