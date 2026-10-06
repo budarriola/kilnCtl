@@ -227,7 +227,7 @@ autotune run.</p>
   <label><input type="checkbox" id="ghForce"> Reinstall the same version (force)</label>
   <label><input type="checkbox" id="ghDown"> Allow an older version (downgrade)</label>
   <div id="ghTypedWrap" style="display:none">
-    <label for="ghTyped">Downgrade: type the release tag to confirm</label>
+    <label for="ghTyped">Downgrade, or force on a dev build: type the release tag to confirm</label>
     <input type="text" id="ghTyped" maxlength="40" autocomplete="off" autocapitalize="off" spellcheck="false">
   </div>
   <button id="ghCheckBtn" type="button" class="primary">Check for updates</button>
@@ -926,15 +926,15 @@ function ghCheckQuery(opts) {
 }
 
 /* The query string for POST /api/update/download. Only flags the operator
- * ticked are sent; the typed downgrade confirm goes only with a downgrade. */
+ * ticked are sent; the typed confirm goes with a downgrade or with force (a
+ * board whose running version is unknown needs it for force too). The tag
+ * alone never allows a downgrade: the board ANDs it with allow_downgrade=1. */
 function ghDownloadQuery(opts) {
   var q = [];
   if (opts.pre) q.push('allow_prerelease=1');
   if (opts.force) q.push('force=1');
-  if (opts.down) {
-    q.push('allow_downgrade=1');
-    if (opts.typed) q.push('confirm_downgrade=' + encodeURIComponent(opts.typed));
-  }
+  if (opts.down) q.push('allow_downgrade=1');
+  if (opts.typed && (opts.down || opts.force)) q.push('confirm_downgrade=' + encodeURIComponent(opts.typed));
   return q.length ? '?' + q.join('&') : '';
 }
 
@@ -1002,7 +1002,7 @@ function renderGh(s) {
   document.getElementById('ghCheckBtn').disabled = busy;
   document.getElementById('ghDownloadBtn').disabled = busy || !ghCanDownload(s, opts);
   document.getElementById('ghCancelBtn').style.display = busy ? '' : 'none';
-  document.getElementById('ghTypedWrap').style.display = opts.down ? '' : 'none';
+  document.getElementById('ghTypedWrap').style.display = (opts.down || opts.force) ? '' : 'none';
   var wrap = document.getElementById('ghProgressWrap');
   if (busy && s.kind === 'download' && s.bytes_total > 0) {
     var pct = Math.min(100, Math.floor(100 * s.bytes_done / s.bytes_total));
@@ -1069,8 +1069,8 @@ document.getElementById('ghDownloadBtn').addEventListener('click', function () {
   var s = ghLast;
   var opts = ghOpts();
   if (!ghCanDownload(s, opts)) return;
-  if (opts.down && opts.typed !== s.tag) {
-    document.getElementById('ghMsg').textContent = 'Type the release tag (' + s.tag + ') exactly to confirm a downgrade.';
+  if ((opts.down || (opts.force && s.needs_typed_confirm)) && opts.typed !== s.tag) {
+    document.getElementById('ghMsg').textContent = 'Type the release tag (' + s.tag + ') exactly to confirm.';
     return;
   }
   window.kcConfirm('Download ' + s.tag + ' (' + s.app_size + ' bytes) into the stage? ' +

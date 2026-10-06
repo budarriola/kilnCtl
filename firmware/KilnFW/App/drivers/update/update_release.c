@@ -546,12 +546,17 @@ update_rel_err_t update_release_parse_api(const char *json, size_t len, const ch
 // releases list (allow_prerelease): pick the highest-semver usable element
 // ---------------------------------------------------------------------------
 
+// The candidate parse goes into the caller's *out (PSRAM on the board), never a stack copy: an
+// update_release_info_t is two UPDATE_URL_MAX buffers (~4 KiB). Only the winning element's span is
+// remembered, and it is parsed into *out once more at the end.
 typedef struct {
     const char *repo;
     uint32_t max_app_size;
     bool allow_pre;
     bool have;
     update_semver_t best;
+    const char *best_start;
+    size_t best_len;
     update_release_info_t *out;
 } list_ctx_t;
 
@@ -566,21 +571,22 @@ static update_rel_err_t list_elem(cur_t *c, int depth, void *vctx)
     if (*start != '{') {
         return UPDATE_REL_E_JSON; // the list holds objects only
     }
-    update_release_info_t r;
-    if (update_release_parse_api(start, (size_t)(c->p - start), x->repo, x->max_app_size, &r) != UPDATE_REL_OK) {
+    const size_t len = (size_t)(c->p - start);
+    if (update_release_parse_api(start, len, x->repo, x->max_app_size, x->out) != UPDATE_REL_OK) {
         return UPDATE_REL_OK; // draft / bad tag / missing assets: not a candidate, keep looking
     }
     update_semver_t v;
-    if (!update_semver_parse(r.tag, &v)) {
+    if (!update_semver_parse(x->out->tag, &v)) {
         return UPDATE_REL_OK;
     }
-    if (!x->allow_pre && (r.prerelease || v.has_pre)) {
+    if (!x->allow_pre && (x->out->prerelease || v.has_pre)) {
         return UPDATE_REL_OK;
     }
     if (!x->have || update_semver_compare(&v, &x->best) > 0) {
         x->best = v;
         x->have = true;
-        *x->out = r;
+        x->best_start = start;
+        x->best_len = len;
     }
     return UPDATE_REL_OK;
 }
@@ -609,13 +615,16 @@ update_rel_err_t update_release_pick_from_list(const char *json, size_t len, con
             e = UPDATE_REL_E_JSON;
         }
     }
+    if (e == UPDATE_REL_OK && !x.have) {
+        e = UPDATE_REL_E_NO_RELEASE;
+    }
+    if (e == UPDATE_REL_OK) {
+        // The span parsed OK once already; a second parse of the same bytes cannot differ.
+        e = update_release_parse_api(x.best_start, x.best_len, repo, max_app_size, out);
+    }
     if (e != UPDATE_REL_OK) {
         memset(out, 0, sizeof(*out));
         return e;
-    }
-    if (!x.have) {
-        memset(out, 0, sizeof(*out));
-        return UPDATE_REL_E_NO_RELEASE;
     }
     return UPDATE_REL_OK;
 }

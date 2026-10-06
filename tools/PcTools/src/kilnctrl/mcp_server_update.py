@@ -326,7 +326,10 @@ def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, 
     starts the download and polls up to ``wait_s``. The board decides policy
     (a downgrade needs ``allow_downgrade=True`` AND ``confirm_downgrade`` equal
     to the release tag; the same version needs ``force``; a pre-release needs
-    ``allow_prerelease``). Success is claimed only after a read-back of
+    ``allow_prerelease``, which also makes the board pick from the releases list
+    instead of /releases/latest; on a board whose running version is unknown, a
+    dev build, ``force`` also needs ``confirm_downgrade`` equal to the tag, and it
+    is sent with ``force`` alone for that reason). Success is claimed only after a read-back of
     GET /api/update/stage shows a verified header with source github whose
     sha256 equals the one the board reported for the release; anything else is
     FAILED. The staged image is UNSIGNED. A 409 (firing, hot zone, clock not

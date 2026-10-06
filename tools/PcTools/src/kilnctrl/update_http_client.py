@@ -203,7 +203,10 @@ def start_check(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S,
 def download_query(allow_prerelease: bool = False, force: bool = False,
                    allow_downgrade: bool = False, confirm_downgrade: str = "") -> str:
     """The query string for POST /api/update/download: only set flags are sent, and
-    confirm_downgrade only together with allow_downgrade."""
+    confirm_downgrade only together with allow_downgrade or force. The board needs the
+    typed tag with force too when its running version is unknown (a dev build,
+    update_policy_decide_typed()); the tag alone never enables a downgrade, because
+    the board ANDs it with allow_downgrade=1."""
     q = []
     if allow_prerelease:
         q.append("allow_prerelease=1")
@@ -211,8 +214,8 @@ def download_query(allow_prerelease: bool = False, force: bool = False,
         q.append("force=1")
     if allow_downgrade:
         q.append("allow_downgrade=1")
-        if confirm_downgrade:
-            q.append("confirm_downgrade=" + urllib.parse.quote(confirm_downgrade, safe=""))
+    if confirm_downgrade and (allow_downgrade or force):
+        q.append("confirm_downgrade=" + urllib.parse.quote(confirm_downgrade, safe=""))
     return ("?" + "&".join(q)) if q else ""
 
 

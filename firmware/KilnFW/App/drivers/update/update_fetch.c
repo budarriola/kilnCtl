@@ -803,6 +803,19 @@ static esp_err_t check_post_handler(httpd_req_t *req)
 {
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip)); // logging only; ADMIN tier is the gate
+    job_params_t p;
+    memset(&p, 0, sizeof(p));
+    p.kind = KIND_CHECK;
+    // Same buffer and refusal as the download: a query that does not fit is a 400, never read as
+    // "no flag" (that would silently fall back to /releases/latest and hide the pre-release).
+    char q[160];
+    q[0] = '\0';
+    esp_err_t qe = httpd_req_get_url_query_str(req, q, sizeof(q));
+    if (qe == ESP_OK) {
+        p.allow_prerelease = query_flag(q, "allow_prerelease");
+    } else if (qe != ESP_ERR_NOT_FOUND) {
+        return send_error_json(req, "400 Bad Request", "bad_query");
+    }
     if (!job_try_begin()) {
         return send_error_json(req, "409 Conflict", "fetch_busy");
     }
@@ -815,13 +828,6 @@ static esp_err_t check_post_handler(httpd_req_t *req)
     if (!clock_synced()) {
         s_c->busy = 0;
         return send_error_json(req, "409 Conflict", "clock_not_synced");
-    }
-    job_params_t p;
-    memset(&p, 0, sizeof(p));
-    p.kind = KIND_CHECK;
-    char q[32];
-    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
-        p.allow_prerelease = query_flag(q, "allow_prerelease");
     }
     return start_job(req, &p);
 }

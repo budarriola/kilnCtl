@@ -60,6 +60,8 @@ assert(api.ghDownloadQuery({ force: true, down: true, typed: 'v1.2.3' }) ===
   '?force=1&allow_downgrade=1&confirm_downgrade=v1.2.3', 'force + downgrade + typed tag');
 assert(api.ghDownloadQuery({ down: true, typed: '' }) === '?allow_downgrade=1', 'downgrade without typed tag sends no confirm');
 assert(api.ghDownloadQuery({ typed: 'v1.2.3' }) === '', 'a typed tag alone is never sent');
+assert(api.ghDownloadQuery({ pre: true, force: true, typed: 'v1.0.0-pre.1' }) ===
+  '?allow_prerelease=1&force=1&confirm_downgrade=v1.0.0-pre.1', 'force carries the typed tag (dev build) without a downgrade');
 
 // Download offered only when the policy allows or a tickable flag unlocks it.
 const done = (verdict, allowed) => ({ state: 'done', tag: 'v1.0.1', verdict: verdict, allowed: allowed });

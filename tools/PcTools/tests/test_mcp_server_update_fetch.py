@@ -127,6 +127,21 @@ class ClientTest(_Base):
         uhc.start_download("h")
         self.assertEqual(self.board.last_query, "")
 
+    def test_force_carries_typed_tag_without_downgrade(self):
+        # A dev build (running version unknown) needs force=1 plus the typed tag; the
+        # tag must reach the board even when allow_downgrade is not set.
+        uhc.start_download("h", allow_prerelease=True, force=True, confirm_downgrade="v1.0.0-pre.1")
+        self.assertEqual(self.board.last_query,
+                         "allow_prerelease=1&force=1&confirm_downgrade=v1.0.0-pre.1")
+        uhc.start_download("h", confirm_downgrade="v1.0.0")
+        self.assertEqual(self.board.last_query, "", "a typed tag alone is never sent")
+
+    def test_start_check_prerelease_flag(self):
+        uhc.start_check("h", allow_prerelease=True)
+        self.assertEqual(self.board.last_query, "allow_prerelease=1")
+        uhc.start_check("h")
+        self.assertEqual(self.board.last_query, "")
+
     def test_confirm_downgrade_is_url_quoted(self):
         uhc.start_download("h", allow_downgrade=True, confirm_downgrade="v1&force=1")
         self.assertNotIn("&force=1", self.board.last_query.split("confirm_downgrade=")[1])
@@ -200,6 +215,19 @@ class DownloadTest(_Base):
     def test_overrides_passed_through(self):
         msu.update_stage_release(confirm=True, allow_downgrade=True, confirm_downgrade="v1.0.0")
         self.assertEqual(self.board.last_query, "allow_downgrade=1&confirm_downgrade=v1.0.0")
+
+    def test_bench_prerelease_flow_query(self):
+        # The owner's bench flow: a pre-release onto a dev build, force + typed tag.
+        out = msu.update_stage_release(confirm=True, allow_prerelease=True, force=True,
+                                       confirm_downgrade="v1.0.0-pre.1")
+        self.assertTrue(out.startswith("ok - release"), out)
+        self.assertEqual(self.board.last_query, "allow_prerelease=1&force=1&confirm_downgrade=v1.0.0-pre.1")
+
+    def test_update_check_prerelease_passed_through(self):
+        msu.update_check(allow_prerelease=True)
+        self.assertEqual(self.board.last_query, "allow_prerelease=1")
+        msu.update_check()
+        self.assertEqual(self.board.last_query, "")
 
     def test_stage_sha_mismatch_fails_loud(self):
         self.board.stage_sha = "0" * 64
