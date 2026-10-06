@@ -168,6 +168,7 @@ function fakeRow(relay) {
   };
   return { dataset: { relay: String(relay) }, className: '', set innerHTML(v) {}, querySelector: (q) => f[q] };
 }
+let relayCountValue = '4';
 const auxEl = {
   rows: [], set innerHTML(v) { this.rows = []; }, appendChild(r) { this.rows.push(r); },
   querySelectorAll() { return this.rows; },
@@ -179,11 +180,11 @@ const rsb = {
   auxCyclesText: zsb.auxCyclesText, readAuxRow: zsb.readAuxRow, parseInt, parseFloat, isNaN, String, Array,
   document: {
     createElement: () => fakeRow(0),
-    getElementById: (id) => (id === 'auxOutputs' ? auxEl : { value: '4' }),
+    getElementById: (id) => (id === 'auxOutputs' ? auxEl : { value: relayCountValue }),
   },
 };
 vm.createContext(rsb);
-vm.runInContext(extract(Z, 'function renderAuxOutputs'), rsb);
+vm.runInContext(extract(Z, 'function auxRowRelays') + '\n' + extract(Z, 'function renderAuxOutputs'), rsb);
 // createElement must hand back a distinct row per call; relay is set by dataset afterwards.
 rsb.document.createElement = () => fakeRow(0);
 rsb.renderAuxOutputs();
@@ -199,6 +200,16 @@ assert(auxEl.rows.length === 4 && r2b.querySelector('.aux-enabled').checked === 
 rsb.renderAuxOutputs();
 assert(auxEl.rows[1].querySelector('.aux-enabled').checked === false,
   'NEGATIVE: a plain re-render (after a load) rebuilds from the stored state');
+
+// Spare relays: aux rows cover every relay the firmware accepts (1..4) whatever
+// relay_count says (bench: relay_count 3, aux exists to drive spare relay 4).
+relayCountValue = '3';
+rsb.renderAuxOutputs();
+assert(auxEl.rows.length === 4, 'NEGATIVE: with relay_count 3 the spare relay 4 still gets an aux row (4 rows)');
+relayCountValue = '0';
+rsb.renderAuxOutputs();
+assert(auxEl.rows.length === 4, 'relay_count 0: all four relays are spares and still get aux rows');
+relayCountValue = '4';
 
 // (4) session loss hides the card; app.js dispatches the event; main_page listens.
 d = mkDash({});

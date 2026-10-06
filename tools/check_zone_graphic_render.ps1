@@ -347,6 +347,14 @@ function status(opts) {
   must(countOf(out3, /<select class="relaytypeinput"/g) === 4, 'relay_count 0: all four are spare with selects');
 })();
 
+/* ---- 12. Aux-output rows cover every relay the firmware accepts (1..4), including
+   spares at/after relay_count; the helper takes no relay_count at all ---- */
+(function () {
+  var rs = auxRowRelays(4);
+  must(JSON.stringify(rs) === '[1,2,3,4]', 'aux rows must cover relays 1-4 (spare relay 4 included), got ' + JSON.stringify(rs));
+  must(auxRowRelays.length === 1, 'auxRowRelays must not depend on relay_count');
+})();
+
 if (process.exitCode) {
   console.log('kiln graphic render check FAILED');
 } else {

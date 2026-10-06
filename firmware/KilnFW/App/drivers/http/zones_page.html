@@ -993,6 +993,16 @@ function relayTypeOptionsHtml(selected) {
   return h;
 }
 
+/* The 1-based relays that get an aux-output row: EVERY relay the firmware accepts
+ * (aux_outputs_http_core.c takes relay 1..AUX_OUTPUTS_COUNT regardless of
+ * relay_count; aux outputs exist to drive spares at/after relay_count). relayCount
+ * is deliberately not a parameter. Pure so check_zone_graphic_render.ps1 can run it. */
+function auxRowRelays(auxCount) {
+  var rs = [];
+  for (var r = 1; r <= auxCount; r++) rs.push(r);
+  return rs;
+}
+
 function relayRowsHtml(labels, relayCount, ownedMask, names, types, esc) {
   var h = '';
   for (var r = 0; r < labels.length; r++) {
@@ -2226,7 +2236,8 @@ function clientOwnedRelayMask() {
   return mask;
 }
 
-/* Renders one row per configured relay (relayCount above): an editable text
+/* Renders one row per HARDWARE relay (spares at/after relayCount included; see
+ * relayRowsHtml): an editable text
  * input for a relay no zone currently claims, or -- for a zone-owned relay --
  * a note saying so plus a HIDDEN input carrying the stored name unchanged.
  * The hidden input matters: /api/zones is a whole-page submit, and while
@@ -3027,15 +3038,10 @@ function renderAuxOutputs(preserve) {
     el.innerHTML = '<p class="empty">The aux store holds data from newer firmware -- it cannot be edited here.</p>';
     return;
   }
-  var relayCount = Math.min(AUX_COUNT, parseInt(document.getElementById('relayCount').value, 10) || 0);
-  if (relayCount === 0) {
-    el.innerHTML = '<p class="empty">No relays configured -- set the count above.</p>';
-    return;
-  }
   var owned = clientOwnedRelayMask();
   var names = auxZoneNames();
   el.innerHTML = '';
-  for (var r = 1; r <= relayCount; r++) {
+  auxRowRelays(AUX_COUNT).forEach(function (r) {
     var entry = null;
     auxState.relays.forEach(function (a) { if (a.relay === r) entry = a; });
     var zoneOwned = (owned & (1 << (r - 1))) !== 0 && !(entry && entry.conflicted);
@@ -3053,7 +3059,7 @@ function renderAuxOutputs(preserve) {
       div.querySelector('.aux-minoff').value = isNaN(k.min_off_s) ? '' : k.min_off_s;
       div.querySelector('.aux-cycles').textContent = auxCyclesText(k.min_on_s, k.min_off_s);
     }
-  }
+  });
   applyAuxZoneGreying();
 }
 
