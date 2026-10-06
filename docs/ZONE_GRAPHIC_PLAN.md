@@ -2,7 +2,7 @@
 
 > **Status: fully implemented, hardware verification pending.** All 5 stages
 > landed 2026-09-18 — the relay device type/storage/migration data layer
-> (stage 1); `"relay_types"` on the `GET`, `relay_type_N=` on the `POST`, and
+> (stage 1); `"relay_types"` on the `GET`, `relay<N>_type=` on the `POST`, and
 > the device-type dropdown beside each unowned relay's name field feeding
 > `kgDeviceType()` real types, with `UNSET` selectable and rendering as the
 > unknown glyph, the array costing a measured 24 bytes with no buffer growth
@@ -235,7 +235,7 @@ Already present on `GET /api/zones`, and sufficient:
 | Whether a zone's normal current was ever measured | per-zone `normal_current_measured`, `normal_current_a` |
 
 **The one addition: `"relay_types":[t0,t1,t2,t3]`**, one small integer per
-relay, mirrored by a `relay_type_N=` parameter on the POST, alongside the
+relay, mirrored by a `relay<N>_type=` parameter on the POST, alongside the
 existing relay-name parameters. Roughly 24 bytes on the wire.
 
 **The `json_cap` budget is not touched.** `zones_get_handler()`'s buffer is
@@ -509,10 +509,10 @@ Three things stage 2 needs to know about how stage 1 actually landed:
   Inert on every board today, since no board mounts `cfg` yet.
 
 **Stage 2 — the type on the wire and in the form. LANDED 2026-09-18.**
-`"relay_types"` on the `GET`, `relay_type_N=` on the `POST`, and a dropdown
+`"relay_types"` on the `GET`, `relay<N>_type=` on the `POST`, and a dropdown
 beside each unowned relay's name field (a zone-owned relay echoes its stored
 type in a hidden field instead, so no page can wipe it). An out-of-range or
-non-numeric `relay_type_N` is refused with a 400 and commits nothing — never
+non-numeric `relay<N>_type` is refused with a 400 and commits nothing — never
 coerced to `UNSET`, which is itself a legitimate selectable, persisted value
 rendering as the unknown glyph. Host tests cover every enum value's
 serialization, the `POST`→`GET` round trip, omitted-means-keep, and the

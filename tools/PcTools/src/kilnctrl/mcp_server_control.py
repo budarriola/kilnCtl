@@ -6,6 +6,7 @@ logic changes. See mcp_server.py's module docstring for the overall map.
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import functools
 import glob
@@ -436,6 +437,7 @@ def control_get_zones(host: Optional[str] = None) -> str:
         + "\n" + _describe_model_fields(zones_json, diag_error)
         + "\n" + _describe_coupling_matrix(zones_json)
         + "\n" + _describe_http_only_zone_fields(zones_json)
+        + "\n" + _describe_relay_types(zones_json)
     )
 
 
@@ -1056,12 +1058,13 @@ def control_set_zone_type(
 _ZONE_OMIT_PRESERVED_KEY_RE = re.compile(r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+)$")
 
 
-def _strip_omit_preserved_zone_fields(body: str, keep_key: str) -> str:
+def _strip_omit_preserved_zone_fields(body: str, keep_key: "Optional[str]") -> str:
     """Drop every _ZONE_OMIT_PRESERVED_KEY_RE key from a build_post_body()
-    form body except `keep_key`. Raises ZonesHttpError if `keep_key` is not
-    in the body (the write would silently be a no-op)."""
+    form body except `keep_key` (None keeps none: control_set_relay_type()
+    posts no zone field at all). Raises ZonesHttpError if a non-None
+    `keep_key` is not in the body (the write would silently be a no-op)."""
     pairs = urllib.parse.parse_qsl(body, keep_blank_values=True)
-    if not any(k == keep_key for k, _ in pairs):
+    if keep_key is not None and not any(k == keep_key for k, _ in pairs):
         raise zones_http_client.ZonesHttpError(
             f"built POST body carries no {keep_key!r} field -- refusing to post a no-op")
     kept = [(k, v) for k, v in pairs if k == keep_key or not _ZONE_OMIT_PRESERVED_KEY_RE.match(k)]
@@ -1230,6 +1233,190 @@ def control_set_zone_coupling(
 
     return (f"ok - zone {zone}: {field_name}={got:g} (zone {from_zone}'s effect on zone {zone}) "
             f"(confirmed by read-back; host={resolved})")
+
+
+# ---------------------------------------------------------------------------
+# control_set_relay_type -- narrow writer for ONE relay's device type (what the
+# relay physically drives), modeled on control_set_zone_type()/
+# control_set_zone_coupling() above (same GET-merge-POST /api/zones path, same
+# confirm gate, mode-gate precheck + 409, collateral read-back).
+#
+# Why this exists: docs/ZONE_GRAPHIC_PLAN.md M17's bench round trip needs to
+# change a relay's device type, and the only POST path was a hand-built form.
+#
+# Wire format (read from the firmware, not the plan doc -- the plan says
+# `relay_type_N=`, the code says otherwise): GET /api/zones carries a TOP-LEVEL
+# "relay_types":[t0..t3], one small integer per relay, index r = relay r+1
+# (zones_http_get.c). The POST key is "relay<N>_type" with N = 1-based relay
+# number (zones_http_post.c: snprintf(tkey, ..., "relay%u_type", r), r in
+# 1..KILN_IO_RELAY_COUNT), a decimal integer in [0, RELAY_DEVICE_TYPE_COUNT)
+# (zones_config_accessors.h's relay_device_type_t: 0 unset, 1 damper, 2 outlet,
+# 3 valve, 4 fan, 5 light, 6 other); out of range or non-numeric is a 400. NOT
+# to be confused with the per-ZONE "z%u_relaytype" (SSR/contactor/mercury,
+# zones_http_post_parse.c), which is a different field.
+#
+# The field is omit-PRESERVES (relay_names_cfg_t, a separate struct), and
+# build_post_body() never echoes relay_types/relay_names, so the body carries
+# exactly one relay-keyed field: the one this tool appends. Every zone field
+# the firmware omit-preserves (plant model, coupling cells, coupling_diag_k_dc)
+# is stripped from the body so it stays bit-exact, as in
+# control_set_zone_coupling(); required fields are re-posted at GET's print
+# precision, the same residual the other narrow writers carry.
+# ---------------------------------------------------------------------------
+#: zones_config_accessors.h's relay_device_type_t, mirrored (a unit test
+#: parses the header and fails on drift).
+_RELAY_DEVICE_TYPE_NAMES = {0: "unset", 1: "damper", 2: "outlet", 3: "valve",
+                            4: "fan", 5: "light", 6: "other"}
+_RELAY_DEVICE_TYPE_BY_NAME = {v: k for k, v in _RELAY_DEVICE_TYPE_NAMES.items()}
+
+
+def _relay_device_type_name(value: Any) -> str:
+    if isinstance(value, int) and not isinstance(value, bool) and value in _RELAY_DEVICE_TYPE_NAMES:
+        return _RELAY_DEVICE_TYPE_NAMES[value]
+    return "?"
+
+
+def _parse_relay_device_type(device_type: Any) -> "Optional[int]":
+    """Number or name (case-insensitive) -> enum value, or None if invalid.
+    bool is refused (True would otherwise read as 1)."""
+    if isinstance(device_type, bool):
+        return None
+    if isinstance(device_type, int):
+        return device_type if device_type in _RELAY_DEVICE_TYPE_NAMES else None
+    if isinstance(device_type, str):
+        s = device_type.strip().lower()
+        if s in _RELAY_DEVICE_TYPE_BY_NAME:
+            return _RELAY_DEVICE_TYPE_BY_NAME[s]
+        if s.isdigit():
+            return int(s) if int(s) in _RELAY_DEVICE_TYPE_NAMES else None
+    return None
+
+
+def _describe_relay_types(zones_json: dict) -> str:
+    """One line: every relay's device type (GET /api/zones' top-level
+    relay_types), 1-based like the POST key, each with its name."""
+    types = zones_json.get("relay_types")
+    if not isinstance(types, list):
+        return "relay device types: not present in this response (firmware predates relay_types)"
+    bits = [f"relay{n}={t!r} ({_relay_device_type_name(t)})" for n, t in enumerate(types, start=1)]
+    return "relay device types (what each relay drives; 1-based like relay<N>_type): " + "  ".join(bits)
+
+
+@_core._tool()
+def control_set_relay_type(
+    relay: int,
+    device_type: "int | str",
+    confirm: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Set ONE relay's persistent device type (what it physically drives):
+    0/unset, 1/damper, 2/outlet, 3/valve, 4/fan, 5/light, 6/other -- a number
+    or a case-insensitive name. `relay` is 1-based, the same numbering as the
+    POST key relay<N>_type and relay_mask bit N-1 (GET /api/zones
+    relay_types[relay-1]). Not the per-zone SSR/contactor/mercury field.
+
+    Touches ONLY that one field over the GET-merge-POST /api/zones path
+    (zones_http_client.build_post_body()); every zone field the firmware
+    omit-preserves (plant model, coupling cells, coupling_diag_k_dc) is
+    stripped from the body so it stays bit-exact. See this module's section
+    comment above for the wire format and why it differs from the plan doc.
+
+    Refused: a `relay` outside 1..len(relay_types) or a bad `device_type`
+    (before any board access beyond the GET that learns the relay count);
+    unless `confirm is True` exactly (dry run otherwise, no POST); unless
+    the profile executor reads idle/done/faulted and autotune idle/done/
+    aborted (precheck), and again if POST answers the system_mode_gate 409.
+
+    After a confirmed write, re-fetches GET /api/zones and FAILS LOUD unless
+    relay_types[relay-1] reads back as posted, or if ANY other config field
+    (any zone, or top-level, including every other relay's type) differs,
+    via _zone_collateral_diff().
+
+    Uses the http_auth ADMIN-session seam via zones_http_client -- never
+    prints, logs, or echoes a credential.
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import, same convention as control_set_zone_limits()
+
+    if isinstance(relay, bool) or not isinstance(relay, int):
+        return f"refused: relay={relay!r} is not an integer relay number (1-based)"
+    wanted = _parse_relay_device_type(device_type)
+    if wanted is None:
+        return (f"refused: device_type={device_type!r} is not valid -- use a number or name from "
+                f"{', '.join(f'{k}={v}' for k, v in _RELAY_DEVICE_TYPE_NAMES.items())}")
+
+    resolved = _ota_resolve_host(host)
+
+    running_reason = _profile_or_autotune_running_reason()
+    if running_reason is not None:
+        return f"refused: {running_reason} -- a relay's device type is not changed mid-run (host={resolved})"
+
+    try:
+        before = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: GET /api/zones failed (host={resolved}): {exc}"
+
+    types = before.get("relay_types")
+    if not isinstance(types, list) or not types:
+        return (f"refused: GET /api/zones reports no relay_types (host={resolved}) -- "
+                f"firmware predates the field; nothing to write")
+    if relay < 1 or relay > len(types):
+        return f"refused: relay {relay} is out of range -- board has relays 1..{len(types)} (host={resolved})"
+
+    current = types[relay - 1]
+    field_name = f"relay{relay}_type"
+
+    if confirm is not True:
+        return (
+            f"DRY RUN (pass confirm=True, exactly, to actually write) -- would set {field_name}="
+            f"{wanted} ({_relay_device_type_name(wanted)}) (current: {current!r} "
+            f"({_relay_device_type_name(current)}); host={resolved})"
+        )
+
+    try:
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": []}), None)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: could not build POST body from the GET snapshot: {exc}"
+    body = body + ("&" if body else "") + urllib.parse.urlencode({field_name: str(wanted)})
+
+    try:
+        post_result = zones_http_client.post_zones(resolved, body)
+    except zones_http_client.ZonesHttpError as exc:
+        if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
+            return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
+                    f"a firing or autotune run started after this tool's own precheck "
+                    f"(host={resolved})")
+        return f"error: POST /api/zones failed (host={resolved}): {exc}"
+    if post_result != "ok":
+        return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
+
+    try:
+        after = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: POST /api/zones returned ok, but the confirming re-fetch of GET "
+                f"/api/zones failed (host={resolved}): {exc} -- state UNKNOWN, re-check before "
+                f"trusting this")
+
+    after_types = after.get("relay_types")
+    got = after_types[relay - 1] if isinstance(after_types, list) and len(after_types) >= relay else None
+    if got != wanted:
+        return (f"FAILED: POST /api/zones returned ok, but read-back does not confirm it "
+                f"landed -- {field_name}: wanted {wanted}, board now reports {got!r} "
+                f"(host={resolved}). Do not trust this as applied.")
+
+    # The target relay's type is the one expected top-level change: compare
+    # against a before-snapshot with it already applied, so every OTHER
+    # relay_types cell (and everything else) must be unchanged.
+    expected = copy.deepcopy(before)
+    expected["relay_types"][relay - 1] = wanted
+    collateral = _zone_collateral_diff(expected, after, -1, set())
+    if collateral:
+        return (f"FAILED: {field_name} landed correctly, but other field(s) changed "
+                f"unexpectedly -- {'; '.join(collateral)} (host={resolved}). This tool must touch "
+                f"only {field_name}; investigate before trusting this board's config.")
+
+    return (f"ok - {field_name}={got} ({_relay_device_type_name(got)}) "
+            f"(was {current!r} ({_relay_device_type_name(current)}); confirmed by read-back; host={resolved})")
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

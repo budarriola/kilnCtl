@@ -321,6 +321,8 @@ KEYWORDS = {
                               "zone_type", "control strategy"),
     "control_set_zone_coupling": ("coupling", "coupling matrix", "coupling_c", "coupling_coeff",
                                   "cross-zone", "cross zone", "cell", "restore"),
+    "control_set_relay_type": ("relay type", "device type", "relay_types", "relay<N>_type", "damper",
+                               "outlet", "valve", "fan", "light", "what the relay drives", "zone graphic"),
     "control_get_aux_outputs": ("aux", "aux output", "spare relay", "vent", "damper", "relay binding",
                                 "read-only", "conflict", "enabled_mask"),
     "control_set_aux_output": ("aux", "aux output", "spare relay", "vent", "damper", "bind", "unbind",
