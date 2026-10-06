@@ -245,6 +245,7 @@ Of 24 inventoried runtime-changeable items:
 | 1 | Zones config (PID/FOPDT/coupling/guards/wiring/tc_type) | dual-write | `19f74959` |
 | 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`; `/api/cfgfs` row `zone_normals`) | `208de3d4` |
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`; `/api/cfgfs` row `relay_names`) | `288dc91c` |
+| - | Aux outputs (spare-relay on/off; not one of the 24) | dual-write (`aux_out.dat` via `pref_cfg_fs`; NVS key `aux_out_cfg`, rev key `aux_out_rev`, both in `kiln_nvs`; `/api/cfgfs` row `aux_outputs`; `persist/aux_outputs_cfg.c`; NVS authoritative). Factory reset: the `kiln` and `all` scopes erase `kiln_nvs` and `kiln_scope_cfg_files.c` lists `aux_out.dat`, so aux returns to all-disabled. Not in the backup export. `docs/SPARE_RELAY_ONOFF_PLAN.md` | `1f70c419` |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
 | 6 | Hidden-builtin profile mask | dual-write, `/cfg/profiles/hidden.json` (NVS key `prof_bihid` + rev `prof_bihid_rev`; `/api/cfgfs` row `profiles_hidden`) | `2749be53` |

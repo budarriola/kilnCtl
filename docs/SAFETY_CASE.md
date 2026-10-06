@@ -527,8 +527,32 @@ here; none is copied from an unverified summary.
     sends the Pico (WP-9), so the Pico never sees an aux relay as a commanded
     relay (no link field, no protocol bump, no Pico change). If an aux load is miswired onto a CT
     the expected outcome is a nuisance S3 or S4 trip, which fails safe.
-    **Argued only until WP-9 lands (ESP-side, host-testable; not yet
-    written). The aux binding does not exist yet, so this row is forward-looking.**
+    **Host-tested, not hardware-verified.** WP-9 landed (`bc21b218`): the single
+    helper `safety_pico_relay_mask()` (`safety/safety_pico_relay_mask.h`) strips
+    the enabled aux bits live on every PUSH_CONTEXT, before the
+    `relay_recent_mask` update; host tests are in `test_aux_outputs_store.c`.
+    No aux relay has ever actuated on a board. Residual: PUSH_CONTEXT per-zone
+    fields still derive from zone `relay_mask` only. The "outside the CT" wiring
+    rule is a commissioning assertion; firmware cannot verify it.
+
+15. **Aux (spare-relay) outputs: no welded-contact detection, no K4 dependency,
+    no guard change -- `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 4, 5 and 14.**
+    (a) Same accepted gap as item 12: the ESP has no welded-contactor detection
+    for an aux output, and the Pico cannot see one (item 14 strips aux from its
+    masks). (b) Aux is not behind K4 in firmware: the aux path takes no
+    `heat_enable` claim of its own and is gated only by
+    `relay_authority_on_blocked()` (link loss, Pico trip/fault source), the
+    global check, so a Pico trip or E-stop drops aux on the ESP side. Whether
+    the load has power with K4 open is wiring: ahead of K4 it stays live, behind
+    K4 it is dead (owner decision 2026-10-04: varies per install, document both).
+    Firmware cannot tell which. (c) No guard change: aux has no guard of its own,
+    adds no guard disable or exemption, and never relaxes `max_temp_c`. A zone
+    freed by converting an ON_OFF zone to aux is decided (owner 2026-10-05)
+    monitor-only: no PID, ramp lock or lag/heat-rise guards, while over-temp and
+    TC-fault guards stay; that behaviour is not in code at origin/main `4276d1aa`.
+    (d) Aux fail-safe is fixed OFF on run end, abort and fault.
+    **Host-tested only (`test_aux_outputs_store.c`, executor prestart tests); no
+    aux relay has ever actuated a physical relay.**
 
 ## 4. Evidence classification
 

@@ -1,6 +1,6 @@
 # Spare-relay on/off ("aux outputs") -- plan
 
-Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) and WP-6 landed; WP-7 (MCP half landed in `d6559fac`), WP-8 and the ON_OFF-zone-to-aux convert are in progress. WP-5 still owes a browser/bench check. Pending work only.
+Status: 2026-10-05. WP-0, WP-1 (`1f70c419`), WP-2 (`622f0539`) and WP-9 (`bc21b218`) and WP-4 (`5dcf89f3`) and WP-5 (web UI) landed; WP-3 (executor, host-tested only) and WP-6 landed; WP-7 (MCP half landed in `d6559fac`), WP-8 docs half landed 2026-10-06 (bench session pending) and the ON_OFF-zone-to-aux convert are in progress. WP-5 still owes a browser/bench check. Pending work only.
 
 Owner requirement 2026-10-04 (overturns D1 of
 `docs/audits/on_off_zone_decisions_2026-09-14.md`): "we have 4 relays, the 4th
@@ -457,7 +457,7 @@ earlier one merges.
   server module, `control_set_aux_output`, `control_set_aux_manual`, `control_convert_onoff_zone_to_aux`,
   CLAUDE.md/MCP_SERVERS.md count. Owns those. Backup edits after WP-2's
   `backup_import.c` hooks merge.
-- **WP-8 Docs + bench (S).** `docs/SAFETY_CASE.md` rows (aux relay: no welded
+- **WP-8 Docs half DONE 2026-10-06; bench session (sec 12) still pending.** Original scope: `docs/SAFETY_CASE.md` rows (aux relay: no welded
   detection; aux not behind K4 wiring note; no guard change),
   `docs/ON_OFF_ZONE_PLAN.md` cross-link, `docs/CONFIG_FILESYSTEM.md`,
   `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` governed-store row, `ROADMAP.md` row

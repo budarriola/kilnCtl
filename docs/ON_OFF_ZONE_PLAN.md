@@ -1,5 +1,9 @@
 # On/Off Device Zones — plan
 
+> **Spare-relay binding (2026-10-04):** an on/off device may bind a relay no zone
+> uses, without a zone slot, via a separate aux-outputs store (landed host-tested; not bench-verified). See
+> `docs/SPARE_RELAY_ONOFF_PLAN.md`; this plan still owns the evaluator and rules it reuses.
+
 > **Status:** step 1 (zone typing + safety exclusions) DONE, 2026-09-07,
 > `d58492c9`. Steps 4 and 7 (trigger evaluation core: quasi_dwell classifier
 > + precedence-ordered decision function) DONE together, 2026-09-07,

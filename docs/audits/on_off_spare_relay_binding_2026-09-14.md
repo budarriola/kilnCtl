@@ -1,5 +1,7 @@
 # On/off device: bind to a spare relay instead of a zone slot — 2026-09-14
 
+> **Superseded, 2026-10-04:** the owner approved spare-relay binding anyway. `docs/SPARE_RELAY_ONOFF_PLAN.md` takes the alternative this audit did not cost: a small parallel aux-outputs store, so `zones[]` is not widened and `ZONES_CFG_VERSION` is not bumped. The cost analysis below still holds for widening the zone array.
+
 **Owner request, verbatim:** *"We should allow support for up to 3 zones like
 my test kiln. All unused relays may be used for on off control test kiln"*
 
