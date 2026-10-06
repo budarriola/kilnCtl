@@ -21,9 +21,25 @@ from kilnctrl import update_release_http_client as URC  # noqa: E402
 from kilnctrl.bench_test import cases_ota as C  # noqa: E402
 from kilnctrl.bench_test.registry import Verdict, get_case  # noqa: E402
 from test_bench_test_cases_ota import (  # noqa: E402
-    _Clock, _FakeOtaClient, _FakeSrv, _OtaHttpErr)
+    _Clock, _FakeDashboardClient, _FakeOtaClient, _FakeSrv, _OtaHttpErr)
 
 IMAGE = b"kiln-image-bytes" * 8
+
+RUNNING_BUILD = "Oct  6 2026 12:34:56"
+
+
+def _image_with_build(date="Oct  6 2026", time_s="12:34:56"):
+    """A minimal ESP app image carrying a real esp_app_desc_t (magic, time and
+    date at the offsets esp_app_desc.parse_app_desc reads)."""
+    import struct
+    from kilnctrl import esp_app_desc as D
+    img = bytearray(2048)
+    img[0] = 0xE9
+    base = D.APP_DESC_OFFSET
+    struct.pack_into("<I", img, base, D.ESP_APP_DESC_MAGIC_WORD)
+    img[base + 80:base + 80 + len(time_s)] = time_s.encode()
+    img[base + 96:base + 96 + len(date)] = date.encode()
+    return bytes(img)
 
 
 class _FakeUpdate:
@@ -71,6 +87,7 @@ class _FakeRelease:
         self.start_exc = start_exc
         self.set_calls = []
         self.started = []
+        self.cancels = 0
         self.stage_to_mutate = stage_to_mutate
 
     def get_settings(self, host):
@@ -97,6 +114,11 @@ class _FakeRelease:
 
     def get_fetch_status(self, host):
         return self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+
+    def cancel_fetch(self, host):
+        self.cancels += 1
+        self.statuses = [{"state": "failed", "error": "cancelled", "busy": False}]
+        return {"ok": True, "cancelling": True}
 
     @staticmethod
     def error_name(exc):
@@ -173,10 +195,26 @@ class Otg01Test(unittest.TestCase):
         r = C._case_otg01(_base_ctx(update_http_client=_FakeUpdate(upload_exc=_OtaHttpErr(400, "bad"))))
         self.assertEqual(r.verdict, Verdict.FAIL)
 
-    def test_clear_failure_is_reported_not_hidden(self):
+    def test_clear_failure_fails_never_passes(self):
+        # A PASS that leaves a verified image staged is not a pass.
         r = C._case_otg01(_base_ctx(update_http_client=_FakeUpdate(clear_exc=RuntimeError("nope"))))
-        self.assertEqual(r.verdict, Verdict.PASS)
-        self.assertIn("stage clear afterwards failed", r.reason)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("NOT confirmed cleared", r.reason)
+
+    def test_upload_error_after_board_staged_clears_leftover(self):
+        # Client timeout while the board still finished staging.
+        upd = _FakeUpdate()
+        orig = upd.upload_stage
+
+        def staged_then_timeout(host, image, **kw):
+            orig(host, image, **kw)
+            raise TimeoutError("client gave up")
+
+        upd.upload_stage = staged_then_timeout
+        r = C._case_otg01(_base_ctx(update_http_client=upd))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(upd.clears, 1)
+        self.assertFalse(upd.stage["staged"])
 
 
 class Otg02Test(unittest.TestCase):
@@ -203,6 +241,25 @@ class Otg02Test(unittest.TestCase):
     def test_stuck_busy_fails(self):
         r = C._case_otg02(self._ctx(stage={"staged": False, "busy": True}))
         self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_missing_busy_field_fails_never_passes(self):
+        r = C._case_otg02(self._ctx(stage={"staged": False, "phase": "idle"}))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_missing_staged_field_fails_never_passes(self):
+        r = C._case_otg02(self._ctx(stage={"busy": False, "phase": "idle"}))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_staged_after_truncation_is_cleared(self):
+        ctx = self._ctx(stage={"staged": True, "busy": False})
+        C._case_otg02(ctx)
+        self.assertEqual(ctx["update_http_client"].clears, 1)
+        self.assertFalse(ctx["update_http_client"].stage["staged"])
+
+    def test_2xx_answer_clears_leftover_stage(self):
+        ctx = self._ctx(status=200, stage={"staged": True, "busy": False})
+        self.assertEqual(C._case_otg02(ctx).verdict, Verdict.FAIL)
+        self.assertEqual(ctx["update_http_client"].clears, 1)
 
     def test_unreadable_stage_fails_never_passes(self):
         upd = _FakeUpdate()
@@ -280,14 +337,61 @@ class Otg03Test(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
         self.assertTrue(rel.is_default)
 
+    def test_job_never_finishes_is_cancelled(self):
+        r, rel, ctx = self._run({"state": "downloading", "busy": True})
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(rel.cancels, 1)
+        self.assertNotIn("_tainted", ctx)
+
+    def test_job_that_will_not_end_taints(self):
+        rel = _FakeRelease(statuses=[{"state": "downloading", "busy": True}])
+        rel.cancel_fetch = lambda host: {"ok": True}
+        ctx = _base_ctx(update_release_http_client=rel, update_downgrade_repo="o/old")
+        r = C._case_otg03(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertTrue(ctx["_tainted"])
+
+    def test_indefinite_is_default_skips_without_touching_repo(self):
+        for flag in (None, "yes", 1):
+            rel = _FakeRelease(is_default=flag)
+            r = C._case_otg03(_base_ctx(update_release_http_client=rel, update_downgrade_repo="o/old"))
+            self.assertEqual(r.verdict, Verdict.SKIP, flag)
+            self.assertEqual(rel.set_calls, [], flag)
+
+    def test_download_that_staged_is_cleared(self):
+        upd = _FakeUpdate()
+        rel = _FakeRelease(statuses=[{"state": "done", "allowed": True}])
+        orig = rel.start_download
+
+        def stage_it(host, **kw):
+            orig(host, **kw)
+            upd.stage = {"staged": True, "busy": False, "sha256": "ab"}
+
+        rel.start_download = stage_it
+        r = C._case_otg03(_base_ctx(update_http_client=upd, update_release_http_client=rel,
+                                    update_downgrade_repo="o/old"))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(upd.clears, 1)
+        self.assertFalse(upd.stage["staged"])
+
 
 class Otg05Test(unittest.TestCase):
     def _run(self, status):
         rel = _FakeRelease(statuses=[status])
         return C._case_otg05(_base_ctx(update_release_http_client=rel, update_wrong_repo="o/none")), rel
 
+    def test_unusable_release_passes(self):
+        self.assertEqual(self._run({"state": "failed", "error": "no_app_asset"})[0].verdict, Verdict.PASS)
+
+    def test_transport_failure_is_not_a_pass(self):
+        for st in ({"state": "failed", "error": "connect_failed"},
+                   {"state": "failed", "error": "timeout"},
+                   {"state": "failed", "error": "http_status", "http_status": 403},
+                   {"state": "failed"}):
+            self.assertEqual(self._run(st)[0].verdict, Verdict.INCONCLUSIVE, st)
+
     def test_clean_failure_passes(self):
-        r, rel = self._run({"state": "failed", "error": "http_404", "http_status": 404})
+        r, rel = self._run({"state": "failed", "error": "http_status", "http_status": 404})
         self.assertEqual(r.verdict, Verdict.PASS, r.reason)
         self.assertEqual(rel.started, [("check", {})])
         self.assertTrue(rel.is_default)
@@ -315,6 +419,18 @@ class Otg04Test(unittest.TestCase):
     def test_accepted_upload_fails(self):
         r = C._case_otg04(self._ctx(_FakeUpdate()))
         self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_accepted_upload_is_cleared_after_the_run(self):
+        upd = _FakeUpdate()
+        r = C._case_otg04(self._ctx(upd))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(upd.clears, 1)
+        self.assertFalse(upd.stage["staged"])
+
+    def test_refused_upload_does_not_clear(self):
+        upd = _FakeUpdate(upload_exc=_OtaHttpErr(409, "busy"))
+        C._case_otg04(self._ctx(upd))
+        self.assertEqual(upd.clears, 0)
 
     def test_refusal_that_still_changes_stage_fails(self):
         upd = _FakeUpdate(upload_exc=_OtaHttpErr(409, "busy"))
@@ -354,9 +470,57 @@ class _Ota06(_FakeOtaClient):
 
 
 class Otg06Test(unittest.TestCase):
-    def _ctx(self, behaviour):
+    def _ctx(self, behaviour, upd=None, **over):
+        upd = upd or _FakeUpdate()
+        kw = dict(update_http_client=upd, ota_http_client=_Ota06(upd, behaviour, interlock_ok=True),
+                  _read_image_fn=lambda p: _image_with_build(),
+                  dashboard_http_client=_FakeDashboardClient(fw_build=RUNNING_BUILD))
+        kw.update(over)
+        return _base_ctx(**kw)
+
+    def test_not_running_build_skips_before_staging(self):
+        ctx = self._ctx("clear", dashboard_http_client=_FakeDashboardClient(fw_build="Oct  5 2026 01:02:03"))
+        r = C._case_otg06(ctx)
+        self.assertEqual(r.verdict, Verdict.SKIP)
+        self.assertEqual(ctx["update_http_client"].uploads, 0)
+        self.assertEqual(ctx["ota_http_client"].resets, 0)
+
+    def test_unreadable_fw_build_skips_before_staging(self):
+        class _Dead:
+            def get_status(self, host):
+                raise OSError("down")
+
+        ctx = self._ctx("clear", dashboard_http_client=_Dead())
+        self.assertEqual(C._case_otg06(ctx).verdict, Verdict.SKIP)
+        self.assertEqual(ctx["update_http_client"].uploads, 0)
+
+    def test_image_without_app_desc_skips(self):
+        ctx = self._ctx("clear", _read_image_fn=lambda p: IMAGE)
+        self.assertEqual(C._case_otg06(ctx).verdict, Verdict.SKIP)
+        self.assertEqual(ctx["update_http_client"].uploads, 0)
+
+    def test_relay_energized_or_unreadable_skips_reset_and_clears(self):
+        for energized in (True, None):
+            ctx = self._ctx("clear", dashboard_http_client=_FakeDashboardClient(
+                fw_build=RUNNING_BUILD, relay_energized=energized))
+            r = C._case_otg06(ctx)
+            self.assertEqual(r.verdict, Verdict.SKIP, r.reason)
+            self.assertEqual(ctx["ota_http_client"].resets, 0)
+            self.assertEqual(ctx["update_http_client"].clears, 1)
+            self.assertFalse(ctx["update_http_client"].stage["staged"])
+
+    def test_survived_and_uncleared_fails(self):
         upd = _FakeUpdate()
-        return _base_ctx(update_http_client=upd, ota_http_client=_Ota06(upd, behaviour, interlock_ok=True))
+        ctx = self._ctx("keep", upd=upd)
+
+        def no_clear(host):
+            upd.clears += 1
+            return {"ok": True}  # claims success, stage stays
+
+        upd.clear_stage = no_clear
+        r = C._case_otg06(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("could NOT be cleared", r.reason)
 
     def test_auto_cleared_passes(self):
         ctx = self._ctx("clear")
@@ -375,15 +539,28 @@ class Otg06Test(unittest.TestCase):
 
     def test_no_reset_when_upload_fails(self):
         upd = _FakeUpdate(upload_exc=_OtaHttpErr(400, "bad"))
-        ota = _Ota06(upd, "clear", interlock_ok=True)
-        r = C._case_otg06(_base_ctx(update_http_client=upd, ota_http_client=ota))
+        ctx = self._ctx("clear", upd=upd)
+        r = C._case_otg06(ctx)
         self.assertEqual(r.verdict, Verdict.FAIL)
-        self.assertEqual(ota.resets, 0)
+        self.assertEqual(ctx["ota_http_client"].resets, 0)
 
-    def test_board_never_answers_fails(self):
+    def test_board_never_answers_after_reset_fails(self):
+        # Answers until the reset, then never again: exercises the post-reset
+        # poll, not the post-upload read.
         ctx = self._ctx("clear")
-        ctx["update_http_client"].get_stage_status = lambda host, **kw: None
-        self.assertEqual(C._case_otg06(ctx).verdict, Verdict.FAIL)
+        upd, ota = ctx["update_http_client"], ctx["ota_http_client"]
+        orig = upd.get_stage_status
+
+        def status(host, **kw):
+            if ota.resets:
+                raise TimeoutError("gone")
+            return orig(host, **kw)
+
+        upd.get_stage_status = status
+        r = C._case_otg06(ctx)
+        self.assertEqual(ota.resets, 1)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("did not answer", r.reason)
 
 
 class WiringTest(unittest.TestCase):

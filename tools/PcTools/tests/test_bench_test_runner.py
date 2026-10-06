@@ -273,7 +273,7 @@ class RunnerLifecycleTest(unittest.TestCase):
         outcome = runner.run(suite="ota", cases=["OT-E07", "OT-E08"], allow_heat=False)
         for cid in ("OT-E07", "OT-E08"):
             self.assertEqual(outcome.results[cid].verdict, R.Verdict.SKIP)
-            self.assertIn("allow_heat not set; OT-E07/E08 start their own heat", outcome.results[cid].reason)
+            self.assertIn("allow_heat not set; OT-E07/E08/G04 start their own heat", outcome.results[cid].reason)
         self.assertIs(runner.ctx.get("ota_allow_heat"), False)
 
     def test_case_raising_becomes_a_fail_not_a_crash(self):

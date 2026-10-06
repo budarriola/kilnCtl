@@ -940,9 +940,9 @@ def _case_ote06(ctx: dict) -> CaseResult:
 OTA_HEAT_START_WAIT_S = 30.0
 OTA_HEAT_STOP_WAIT_S = 30.0
 OTA_HEAT_POLL_S = 1.0
-OTA_HEAT_SKIP_NO_ALLOW = "allow_heat not set; OT-E07/E08 start their own heat"
+OTA_HEAT_SKIP_NO_ALLOW = "allow_heat not set; OT-E07/E08/G04 start their own heat"
 OTA_HEAT_SKIP_NO_OTA_ALLOW = (
-    "ota_allow_heat not set; OT-E07/E08 start their own heat (ota_matrix_run(allow_heat=True) "
+    "ota_allow_heat not set; OT-E07/E08/G04 start their own heat (ota_matrix_run(allow_heat=True) "
     "sets it; bench_test_run needs ota_allow_heat=True as well as allow_heat)"
 )
 
@@ -1823,6 +1823,8 @@ def _case_otp05(ctx: dict) -> CaseResult:
 
 #: How long G03/G05/G06 wait for the board's fetch job / reboot, seconds.
 OTG_FETCH_WAIT_S = 180.0
+#: update_fetch.c bounds cancel latency at about 10 s; generous slack.
+OTG_FETCH_CANCEL_WAIT_S = 30.0
 OTG_REBOOT_WAIT_S = 90.0
 OTG_POLL_S = 2.0
 
@@ -1889,6 +1891,32 @@ def _clear_stage_note(ctx: dict, host) -> str:
         return f" (stage clear afterwards failed: {type(exc).__name__}: {exc})"
 
 
+def _clear_stage_verified(ctx: dict, host) -> str:
+    """Clear the stage and read it back. Returns "" only when GET
+    /api/update/stage then reads ``staged: false``; otherwise a problem
+    description (a failed clear, an unreadable read-back, or a stage that is
+    still staged). Never raises. A case must not leave an image staged, where
+    the recovery image's apply would offer to install it."""
+    note = _clear_stage_note(ctx, host)
+    st = _read_stage(ctx, host)
+    if st is None:
+        return f"stage could not be confirmed cleared (status unreadable){note}"
+    if st.get("staged") is not False:
+        return f"stage still reads staged={st.get('staged')!r} after a clear{note}"
+    return ""
+
+
+def _leftover_stage_note(ctx: dict, host) -> str:
+    """For a FAIL path that may have left something staged: read the stage
+    and, unless it reads ``staged: false``, clear it with a verified
+    read-back. Returns a reason suffix ("" when nothing was left)."""
+    st = _read_stage(ctx, host)
+    if st is not None and st.get("staged") is False:
+        return ""
+    problem = _clear_stage_verified(ctx, host)
+    return f"; LEFTOVER STAGE NOT CLEARED: {problem}" if problem else "; leftover stage cleared"
+
+
 def _poll_until(ctx: dict, fn, done_fn, timeout_s: float):
     """Poll ``fn()`` (exceptions count as no answer) until ``done_fn(value)``;
     returns ``(last non-None value or None, whether done_fn was satisfied)``.
@@ -1937,22 +1965,28 @@ def _case_otg01(ctx: dict) -> CaseResult:
     try:
         upd.upload_stage(host, image)
     except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"valid image refused by the stager: {type(exc).__name__}: {exc}",
+        # A client-side timeout does not stop the board: it may still finish
+        # staging. Check, and clear anything left.
+        return CaseResult(Verdict.FAIL, reason=(f"valid image refused by the stager: {type(exc).__name__}: {exc}"
+                                                f"{_leftover_stage_note(ctx, host)}"),
                           observed={"error": f"{type(exc).__name__}: {exc}"})
     st = _read_stage(ctx, host)
-    cleanup = _clear_stage_note(ctx, host)
+    problem = _clear_stage_verified(ctx, host)
+    cleanup = f"; stage NOT confirmed cleared afterwards: {problem}" if problem else ""
     if st is None:
         return CaseResult(Verdict.FAIL, reason=f"stage status unreadable after upload{cleanup}")
     observed = {"local_sha256": local, "board_sha256": st.get("sha256"), "staged": st.get("staged"),
                 "state": st.get("state")}
-    if not st.get("staged"):
+    if st.get("staged") is not True:
         return CaseResult(Verdict.FAIL,
                           reason=f"upload accepted but stage not staged (reason={st.get('reason')!r}){cleanup}",
                           observed=observed)
     if str(st.get("sha256", "")).lower() != local:
         return CaseResult(Verdict.FAIL, reason=f"board sha256 {st.get('sha256')!r} != local {local}{cleanup}",
                           observed=observed)
-    return CaseResult(Verdict.PASS, reason=f"stage sha256 equals local digest{cleanup}", observed=observed)
+    if problem:
+        return CaseResult(Verdict.FAIL, reason=f"stage sha256 equals local digest{cleanup}", observed=observed)
+    return CaseResult(Verdict.PASS, reason="stage sha256 equals local digest; stage cleared", observed=observed)
 
 
 def _case_otg02(ctx: dict) -> CaseResult:
@@ -1981,18 +2015,22 @@ def _case_otg02(ctx: dict) -> CaseResult:
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"truncated upload could not be performed: {type(exc).__name__}: {exc}")
     if status is not None and 200 <= status < 300:
-        return CaseResult(Verdict.FAIL, reason=f"board answered {status} to a truncated upload",
+        return CaseResult(Verdict.FAIL, reason=(f"board answered {status} to a truncated upload"
+                                                f"{_leftover_stage_note(ctx, host)}"),
                           observed={"status": status, "detail": detail})
-    st, _settled = _poll_until(ctx, lambda: _read_stage(ctx, host), lambda s: not s.get("busy"),
+    # Strict booleans: a reply missing busy/staged is not "idle, nothing staged".
+    st, _settled = _poll_until(ctx, lambda: _read_stage(ctx, host), lambda s: s.get("busy") is False,
                                OTA_REFUSAL_DRAIN_SETTLE_S)
     if st is None:
         return CaseResult(Verdict.FAIL, reason="stage status unreadable after the truncated upload")
     observed = {"status": status, "detail": detail, "staged": st.get("staged"), "phase": st.get("phase"),
                 "busy": st.get("busy")}
-    if st.get("busy"):
-        return CaseResult(Verdict.FAIL, reason="stager still busy after the truncated upload", observed=observed)
-    if st.get("staged"):
-        return CaseResult(Verdict.FAIL, reason="a truncated upload left a staged image", observed=observed)
+    if st.get("busy") is not False:
+        return CaseResult(Verdict.FAIL, reason=f"stager not idle after the truncated upload (busy={st.get('busy')!r})",
+                          observed=observed)
+    if st.get("staged") is not False:
+        return CaseResult(Verdict.FAIL, reason=(f"a truncated upload left staged={st.get('staged')!r}"
+                                                f"{_leftover_stage_note(ctx, host)}"), observed=observed)
     return CaseResult(Verdict.PASS, reason="truncated upload refused/aborted, nothing staged", observed=observed)
 
 
@@ -2034,7 +2072,15 @@ def _fetch_job_case(ctx: dict, label: str, repo_key: str, start_fn, judge) -> Ca
         settings = rel.get_settings(host)
     except Exception as exc:
         return CaseResult(Verdict.SKIP, reason=f"cannot read the repo setting: {type(exc).__name__}: {exc}")
-    restore_to = "" if settings.get("is_default") else str(settings.get("repo", ""))
+    # Only a definite is_default lets the restore reproduce the setting: a
+    # missing/odd flag would restore a default repo as an explicit custom one
+    # (or a custom one to the default).
+    is_default = settings.get("is_default")
+    repo_now = settings.get("repo")
+    if not isinstance(is_default, bool) or not isinstance(repo_now, str) or (not is_default and not repo_now):
+        return CaseResult(Verdict.SKIP, reason=(f"repo setting not definite (repo={repo_now!r}, "
+                                                f"is_default={is_default!r}): cannot promise to restore it"))
+    restore_to = "" if is_default else repo_now
     stage_before = _read_stage(ctx, host)
     if stage_before is None:
         return CaseResult(Verdict.SKIP, reason="stage status unreadable before the case")
@@ -2054,14 +2100,30 @@ def _fetch_job_case(ctx: dict, label: str, repo_key: str, start_fn, judge) -> Ca
             return CaseResult(Verdict.FAIL, reason=f"job start failed: {type(exc).__name__}: {exc}")
         status, finished = _poll_until(ctx, lambda: rel.get_fetch_status(host),
                                        lambda s: s.get("state") in ("done", "failed"), OTG_FETCH_WAIT_S)
+        cancel_note = ""
+        if not finished:
+            # A job still running would keep downloading (into the stage) after
+            # the repo is restored: cancel it and wait for it to end.
+            try:
+                rel.cancel_fetch(host)
+            except Exception as exc:
+                cancel_note = f"; cancel failed: {type(exc).__name__}: {exc}"
+            _st, ended = _poll_until(ctx, lambda: rel.get_fetch_status(host),
+                                     lambda s: s.get("busy") is False and s.get("state") in ("done", "failed", "idle"),
+                                     OTG_FETCH_CANCEL_WAIT_S)
+            if not ended:
+                ctx["_tainted"] = True
+                cancel_note += "; job could NOT be confirmed ended after a cancel -- run tainted"
         stage_after = _read_stage(ctx, host)
+        changed = stage_after is None or _stage_key(stage_after) != _stage_key(stage_before)
+        leftover = _leftover_stage_note(ctx, host) if changed else ""
         if status is None or not finished:
-            return CaseResult(Verdict.FAIL, reason="fetch job did not finish or status unreadable",
+            return CaseResult(Verdict.FAIL, reason=f"fetch job did not finish or status unreadable{cancel_note}{leftover}",
                               observed={"status": status})
         if stage_after is None:
-            return CaseResult(Verdict.FAIL, reason="stage status unreadable after the job")
-        if _stage_key(stage_after) != _stage_key(stage_before):
-            return CaseResult(Verdict.FAIL, reason="stage changed during a case that must not stage anything",
+            return CaseResult(Verdict.FAIL, reason=f"stage status unreadable after the job{leftover}")
+        if changed:
+            return CaseResult(Verdict.FAIL, reason=f"stage changed during a case that must not stage anything{leftover}",
                               observed={"before": _stage_key(stage_before), "after": _stage_key(stage_after)})
         return judge(status, repo)
 
@@ -2107,14 +2169,31 @@ def _case_otg03(ctx: dict) -> CaseResult:
                            lambda rel, host: rel.start_download(host), _judge_otg03)
 
 
+#: update_release.c's release-parse error names: GitHub answered 200 but the
+#: latest release is not a usable kilnCtl release.
+OTG05_RELEASE_ERRORS = frozenset({
+    "bad_json", "no_tag", "bad_tag", "draft_release", "no_app_asset", "no_manifest_asset",
+    "duplicate_asset", "bad_asset_url", "bad_asset_size",
+})
+
+
 def _judge_otg05(status: dict, repo: str) -> CaseResult:
     observed = {k: status.get(k) for k in ("state", "error", "http_status", "tag", "allowed", "repo")}
     if status.get("state") == "failed" and status.get("allowed") is not True and not status.get("tag"):
         if status.get("repo") not in (None, "", repo):
             return CaseResult(Verdict.FAIL, reason=f"job ran against {status.get('repo')!r}, not the configured {repo!r}",
                               observed=observed)
-        return CaseResult(Verdict.PASS, reason=f"check against {repo!r} failed cleanly "
-                          f"(error={status.get('error')!r}, http={status.get('http_status')})", observed=observed)
+        err = status.get("error")
+        # Only GitHub's own answer proves "this repo has no release": a 404, or
+        # a 200 whose release does not parse. A transport failure
+        # (connect_failed, timeout, low_heap, ...) or a 403/429 rate limit says
+        # nothing about the repo and must not read as a pass.
+        if (err == "http_status" and status.get("http_status") == 404) or err in OTG05_RELEASE_ERRORS:
+            return CaseResult(Verdict.PASS, reason=f"check against {repo!r} failed cleanly "
+                              f"(error={err!r}, http={status.get('http_status')})", observed=observed)
+        return CaseResult(Verdict.INCONCLUSIVE,
+                          reason=(f"check failed for a reason that does not show the repo has no release "
+                                  f"(error={err!r}, http={status.get('http_status')!r})"), observed=observed)
     if status.get("state") == "done":
         return CaseResult(Verdict.INCONCLUSIVE, reason=f"{repo!r} has a usable release; pick a repo with none",
                           observed=observed)
@@ -2178,9 +2257,23 @@ def _case_otg04(ctx: dict) -> CaseResult:
                                                default_heat=_default_ote07_heat)
     if inner.get("_tainted"):
         ctx["_tainted"] = inner["_tainted"]
+    # Keys the heat helpers added (e.g. cases_heat's firing-history snapshots)
+    # belong to the run, not to this case's private copy.
+    for key, value in inner.items():
+        if key != "_push_fn" and key not in ctx:
+            ctx[key] = value
     if result.verdict == Verdict.PASS and (box.get("before") is None or box.get("after") is None):
         return CaseResult(Verdict.FAIL, reason="stage status unreadable around the refused upload",
                           observed=result.observed)
+    if result.verdict != Verdict.PASS and "after" in box:
+        after = box["after"]
+        if after is None or (after.get("staged") is not False
+                             and (box.get("before") is None or _stage_key(box["before"]) != _stage_key(after))):
+            # The upload was accepted (or the stage is unknown): the heat is
+            # stopped by now, so the clear is no longer mode-gated.
+            leftover = _leftover_stage_note(ctx, host)
+            return CaseResult(result.verdict, reason=f"{result.reason}{leftover}", observed=result.observed,
+                              expected=result.expected, evidence=list(result.evidence) + [leftover.lstrip("; ")])
     return result
 
 
@@ -2191,8 +2284,11 @@ def _case_otg06(ctx: dict) -> CaseResult:
     running. Uploads it, soft-resets the board (``POST /api/sw_reset``;
     executor idle and interlock ok are re-checked right before), waits for it
     to come back and requires GET /api/update/stage to read staged:false with
-    boot_auto_cleared true. If the stage survives, the image was probably not
-    the running build: INCONCLUSIVE (and the stage is cleared). The real
+    boot_auto_cleared true. SKIPs before staging unless the image's
+    esp_app_desc build time equals the board's fw_build, and before the reset
+    unless the safety relay reads de-energized (as OT-B01). If the stage
+    survives anyway: INCONCLUSIVE, stage cleared and verified (FAIL if it
+    cannot be). Every exit clears what it staged. The real
     power-cut-between-set_boot-and-header-erase variant stays an operator
     case. Resets the ESP and, through the link, the safety processor."""
     if not ctx.get("ota_image_path"):
@@ -2204,17 +2300,37 @@ def _case_otg06(ctx: dict) -> CaseResult:
     if gated:
         return gated
     host = ctx.get("host")
+    # Stage only a copy of the RUNNING build: any other image would survive
+    # the reboot as a real pending update. Unreadable either side refuses.
+    from .. import esp_app_desc as _desc
+    try:
+        image_desc = _desc.parse_app_desc(image)
+    except Exception as exc:
+        return CaseResult(Verdict.SKIP, reason=f"ota_image_path has no readable app descriptor: {exc}")
+    running = _fw_build(ctx, host)
+    if running is None:
+        return CaseResult(Verdict.SKIP, reason="board fw_build unreadable: cannot confirm ota_image_path is the running build")
+    if not _desc.build_timestamps_match(image_desc, running):
+        return CaseResult(Verdict.SKIP, reason=(f"ota_image_path build {image_desc.build_timestamp!r} is not the "
+                                                f"running build {running!r}; OT-G06 needs the running image"))
     upd = _update_client(ctx)
     try:
         upd.upload_stage(host, image)
     except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"could not stage the image: {type(exc).__name__}: {exc}")
+        return CaseResult(Verdict.FAIL, reason=(f"could not stage the image: {type(exc).__name__}: {exc}"
+                                                f"{_leftover_stage_note(ctx, host)}"))
     st = _read_stage(ctx, host)
-    if st is None or not st.get("staged"):
-        return CaseResult(Verdict.FAIL, reason=f"image not staged after upload (status={st!r})")
+    if st is None or st.get("staged") is not True:
+        return CaseResult(Verdict.FAIL, reason=f"image not staged after upload (status={st!r}){_leftover_stage_note(ctx, host)}")
     gated = _otg_gate(ctx, "OT-G06 reset")
+    if gated is None and _relays_energized(ctx, host) is not False:
+        # Same dual-reset precondition OT-B01 uses: unreadable counts as energized.
+        gated = CaseResult(Verdict.SKIP, reason="safety relay energized or unreadable: not resetting both processors")
     if gated:
-        return CaseResult(Verdict.SKIP, reason=f"{gated.reason}{_clear_stage_note(ctx, host)}")
+        problem = _clear_stage_verified(ctx, host)
+        if problem:
+            return CaseResult(Verdict.FAIL, reason=f"{gated.reason}; staged image NOT cleared: {problem}")
+        return CaseResult(Verdict.SKIP, reason=f"{gated.reason}; stage cleared")
     try:
         _ota_client(ctx).sw_reset(host)
         reset_note = "sw_reset sent"
@@ -2222,20 +2338,25 @@ def _case_otg06(ctx: dict) -> CaseResult:
         # The board may drop the connection as it resets; the poll below decides.
         reset_note = f"sw_reset raised {type(exc).__name__}"
     after, _ok = _poll_until(ctx, lambda: upd.get_stage_status(host, **_read_kw(ctx, "update_http_client")),
-                             lambda s: s.get("boot_auto_cleared") is True or not s.get("staged"), OTG_REBOOT_WAIT_S)
+                             lambda s: s.get("staged") is False, OTG_REBOOT_WAIT_S)
     if after is None:
-        return CaseResult(Verdict.FAIL, reason=f"board did not answer GET /api/update/stage after reset ({reset_note})")
+        return CaseResult(Verdict.FAIL, reason=(f"board did not answer GET /api/update/stage after reset ({reset_note})"
+                                                f"{_leftover_stage_note(ctx, host)}"))
     observed = {"staged": after.get("staged"), "boot_auto_clear": after.get("boot_auto_clear"),
                 "boot_auto_cleared": after.get("boot_auto_cleared"), "reset": reset_note}
-    if not after.get("staged") and after.get("boot_auto_cleared") is True:
+    if after.get("staged") is False and after.get("boot_auto_cleared") is True:
         return CaseResult(Verdict.PASS, reason="stale stage auto-cleared at boot", observed=observed)
-    if not after.get("staged"):
+    if after.get("staged") is False:
         return CaseResult(Verdict.FAIL, reason="stage empty after reset but boot_auto_cleared is not true "
                           "(board may not have rebooted)", observed=observed)
-    note = _clear_stage_note(ctx, host)
+    problem = _clear_stage_verified(ctx, host)
+    if problem:
+        return CaseResult(Verdict.FAIL, reason=(f"stage survived the reboot (boot_auto_clear="
+                                                f"{after.get('boot_auto_clear')!r}) and could NOT be cleared: {problem}"),
+                          observed=observed)
     return CaseResult(Verdict.INCONCLUSIVE,
                       reason=f"stage survived the reboot (boot_auto_clear={after.get('boot_auto_clear')!r}); "
-                             f"ota_image_path is probably not the running build{note}", observed=observed)
+                             f"stage cleared", observed=observed)
 
 
 _CASE_FUNCS = {

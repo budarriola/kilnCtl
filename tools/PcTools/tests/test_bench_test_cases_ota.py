@@ -1259,7 +1259,7 @@ class Ote07Ote08DefaultHeatTest(unittest.TestCase):
         for kind, fn in (("e07", C._case_ote07), ("e08", C._case_ote08)):
             r = fn(self._ctx(kind, allow_heat=False))
             self.assertEqual(r.verdict, Verdict.SKIP)
-            self.assertIn("allow_heat not set; OT-E07/E08 start their own heat", r.reason)
+            self.assertIn("allow_heat not set; OT-E07/E08/G04 start their own heat", r.reason)
             self.assertEqual(self.state["starts"], 0)
 
     def test_ota_allow_heat_unset_skips_even_with_allow_heat(self):
