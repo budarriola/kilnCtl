@@ -51,7 +51,8 @@ typedef enum {
     UPDATE_REL_E_DIRTY,          // manifest dirty is not false
     UPDATE_REL_E_BAD_COMPAT,     // compat block missing / malformed
     UPDATE_REL_E_NO_APP_IMAGE,   // images[] has no usable "app" entry
-    UPDATE_REL_E_SIZE_MISMATCH   // manifest app size != API asset size
+    UPDATE_REL_E_SIZE_MISMATCH,  // manifest app size != API asset size
+    UPDATE_REL_E_NO_RELEASE      // releases list holds no usable release
 } update_rel_err_t;
 
 typedef struct {
@@ -74,6 +75,14 @@ typedef struct {
 // the largest app image the stage partition can take. Zeroes *out first.
 update_rel_err_t update_release_parse_api(const char *json, size_t len, const char *repo, uint32_t max_app_size,
                                           update_release_info_t *out);
+
+// Parses the `GET /repos/<repo>/releases?per_page=N` array (newest first). Every element goes
+// through update_release_parse_api(); drafts, malformed tags and elements without both assets are
+// skipped, a pre-release (flag or `-pre` tag) is skipped unless allow_prerelease, and the highest
+// semver wins (first of equals). UPDATE_REL_E_JSON for a document that is not a well-formed array,
+// UPDATE_REL_E_NO_RELEASE when nothing qualifies. Zeroes *out first.
+update_rel_err_t update_release_pick_from_list(const char *json, size_t len, const char *repo, uint32_t max_app_size,
+                                               bool allow_prerelease, update_release_info_t *out);
 
 // Parses release.json. `tag` and `app_size` come from the API reply and must
 // agree with the manifest; `repo` is checked when the manifest names one.

@@ -136,3 +136,6 @@ build_sim_*_obj/
 # instead of a build directory (sizeof_before.obj, probe3.obj, and similar
 # one-off compiler scratch). Not build output anyone commits on purpose.
 /*.obj
+
+# make_release.ps1 output (assets, notes, gate record); never committed.
+logs/release/

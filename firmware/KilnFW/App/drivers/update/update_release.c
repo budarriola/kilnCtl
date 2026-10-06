@@ -543,6 +543,84 @@ update_rel_err_t update_release_parse_api(const char *json, size_t len, const ch
 }
 
 // ---------------------------------------------------------------------------
+// releases list (allow_prerelease): pick the highest-semver usable element
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    const char *repo;
+    uint32_t max_app_size;
+    bool allow_pre;
+    bool have;
+    update_semver_t best;
+    update_release_info_t *out;
+} list_ctx_t;
+
+static update_rel_err_t list_elem(cur_t *c, int depth, void *vctx)
+{
+    list_ctx_t *x = (list_ctx_t *)vctx;
+    const char *start = c->p;
+    update_rel_err_t e = skip_value(c, depth + 1);
+    if (e != UPDATE_REL_OK) {
+        return e;
+    }
+    if (*start != '{') {
+        return UPDATE_REL_E_JSON; // the list holds objects only
+    }
+    update_release_info_t r;
+    if (update_release_parse_api(start, (size_t)(c->p - start), x->repo, x->max_app_size, &r) != UPDATE_REL_OK) {
+        return UPDATE_REL_OK; // draft / bad tag / missing assets: not a candidate, keep looking
+    }
+    update_semver_t v;
+    if (!update_semver_parse(r.tag, &v)) {
+        return UPDATE_REL_OK;
+    }
+    if (!x->allow_pre && (r.prerelease || v.has_pre)) {
+        return UPDATE_REL_OK;
+    }
+    if (!x->have || update_semver_compare(&v, &x->best) > 0) {
+        x->best = v;
+        x->have = true;
+        *x->out = r;
+    }
+    return UPDATE_REL_OK;
+}
+
+update_rel_err_t update_release_pick_from_list(const char *json, size_t len, const char *repo, uint32_t max_app_size,
+                                               bool allow_prerelease, update_release_info_t *out)
+{
+    if (out == NULL) {
+        return UPDATE_REL_E_ARGS;
+    }
+    memset(out, 0, sizeof(*out));
+    if (json == NULL || len == 0 || repo == NULL || !update_repo_valid(repo) || max_app_size == 0) {
+        return UPDATE_REL_E_ARGS;
+    }
+    list_ctx_t x;
+    memset(&x, 0, sizeof(x));
+    x.repo = repo;
+    x.max_app_size = max_app_size;
+    x.allow_pre = allow_prerelease;
+    x.out = out;
+    cur_t c = {json, json + len};
+    update_rel_err_t e = visit_array(&c, 1, list_elem, &x);
+    if (e == UPDATE_REL_OK) {
+        skip_ws(&c);
+        if (c.p != c.end) {
+            e = UPDATE_REL_E_JSON;
+        }
+    }
+    if (e != UPDATE_REL_OK) {
+        memset(out, 0, sizeof(*out));
+        return e;
+    }
+    if (!x.have) {
+        memset(out, 0, sizeof(*out));
+        return UPDATE_REL_E_NO_RELEASE;
+    }
+    return UPDATE_REL_OK;
+}
+
+// ---------------------------------------------------------------------------
 // release.json
 // ---------------------------------------------------------------------------
 
@@ -885,6 +963,7 @@ const char *update_rel_err_name(update_rel_err_t e)
     case UPDATE_REL_E_BAD_COMPAT: return "manifest_bad_compat";
     case UPDATE_REL_E_NO_APP_IMAGE: return "manifest_no_app_image";
     case UPDATE_REL_E_SIZE_MISMATCH: return "manifest_size_mismatch";
+    case UPDATE_REL_E_NO_RELEASE: return "no_release";
     }
     return "unknown";
 }

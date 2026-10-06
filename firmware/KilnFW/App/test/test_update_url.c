@@ -157,6 +157,15 @@ static void test_repo_and_builders(void)
                "bad repo refused, out emptied");
     TEST_CHECK(!update_url_build_latest("a/b", url, 20) && url[0] == '\0', "small buffer refused");
 
+    TEST_CHECK(update_url_build_list("budarriola/kilnCtl", 5, url, sizeof(url)) &&
+                   strcmp(url, "https://api.github.com/repos/budarriola/kilnCtl/releases?per_page=5") == 0,
+               "list URL");
+    TEST_CHECK(update_url_check(url, NULL, 0) == UPDATE_URL_OK, "list URL passes its own check");
+    TEST_CHECK(!update_url_build_list("bad repo", 5, url, sizeof(url)) && url[0] == '\0', "list: bad repo refused");
+    TEST_CHECK(!update_url_build_list("a/b", 0, url, sizeof(url)) && url[0] == '\0', "list: per_page 0 refused");
+    TEST_CHECK(!update_url_build_list("a/b", 31, url, sizeof(url)) && url[0] == '\0', "list: per_page 31 refused");
+    TEST_CHECK(!update_url_build_list("a/b", 5, url, 40) && url[0] == '\0', "list: small buffer refused");
+
     TEST_CHECK(update_tag_valid("v1.0.0") && update_tag_valid("v10.20.30-rc.1"), "valid tags");
     TEST_CHECK(update_tag_valid("v1.2.3-rc-1") && update_tag_valid("v1.2.3-alpha-beta.2"),
                "prerelease may contain '-'");

@@ -884,6 +884,7 @@ var GH_ERRORS = {
   timeout: 'GitHub did not answer in time.',
   cancelled: 'Cancelled.',
   bad_repo: 'The configured repository is not valid.',
+  no_release: 'GitHub lists no usable release (pre-releases only count when "Include pre-releases" is ticked).',
   too_large: 'The release image is larger than the stage.',
   size_mismatch: 'The downloaded size does not match the release manifest.',
   short_body: 'The download ended early.',
@@ -916,6 +917,12 @@ function ghErrorText(name) {
 
 function ghVerdictText(v) {
   return GH_VERDICTS.hasOwnProperty(v) ? GH_VERDICTS[v] : String(v || '');
+}
+
+/* The query string for POST /api/update/check: with pre-releases ticked the board reads the
+ * releases list instead of /releases/latest (which GitHub never fills with a pre-release). */
+function ghCheckQuery(opts) {
+  return opts.pre ? '?allow_prerelease=1' : '';
 }
 
 /* The query string for POST /api/update/download. Only flags the operator
@@ -1056,7 +1063,7 @@ function ghStart(path, label) {
 }
 
 document.getElementById('ghCheckBtn').addEventListener('click', function () {
-  ghStart('/api/update/check', 'Checking GitHub…');
+  ghStart('/api/update/check' + ghCheckQuery(ghOpts()), 'Checking GitHub…');
 });
 document.getElementById('ghDownloadBtn').addEventListener('click', function () {
   var s = ghLast;

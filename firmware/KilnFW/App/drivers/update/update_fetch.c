@@ -52,7 +52,8 @@
 static const char *TAG = "update_fetch";
 
 // ---- limits ---------------------------------------------------------------------------------
-#define FETCH_API_BODY_CAP (128u * 1024u)    // releases/latest JSON; PSRAM
+#define FETCH_API_BODY_CAP (256u * 1024u)    // releases/latest or releases?per_page=N JSON; PSRAM
+#define FETCH_LIST_PER_PAGE 5u               // releases list size when pre-releases are allowed
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
 #define FETCH_SCRATCH_LEN (16u * 1024u)      // stager scratch; PSRAM
@@ -599,7 +600,11 @@ static const char *run_job(work_t *w)
     st_lock();
     strlcpy(s_c->st.repo, w->repo, sizeof(s_c->st.repo));
     st_unlock();
-    if (!update_url_build_latest(w->repo, w->url, sizeof(w->url))) {
+    // /releases/latest never returns a pre-release or a draft, so when pre-releases are allowed the
+    // list endpoint is read instead and the highest-semver usable release is picked from it.
+    const bool use_list = w->p.allow_prerelease;
+    if (!(use_list ? update_url_build_list(w->repo, FETCH_LIST_PER_PAGE, w->url, sizeof(w->url))
+                   : update_url_build_latest(w->repo, w->url, sizeof(w->url)))) {
         return "bad_repo";
     }
     w->deadline_tick = xTaskGetTickCount() + pdMS_TO_TICKS(FETCH_JOB_DEADLINE_MS);
@@ -610,8 +615,11 @@ static const char *run_job(work_t *w)
     if (e != NULL) {
         return e;
     }
-    update_rel_err_t re = update_release_parse_api((const char *)w->body, w->body_len, w->repo,
-                                                   update_stage_capacity(update_http_stage()), &w->info);
+    const uint32_t max_app = update_stage_capacity(update_http_stage());
+    update_rel_err_t re = use_list ? update_release_pick_from_list((const char *)w->body, w->body_len, w->repo,
+                                                                    max_app, true, &w->info)
+                                   : update_release_parse_api((const char *)w->body, w->body_len, w->repo, max_app,
+                                                              &w->info);
     if (re != UPDATE_REL_OK) {
         ESP_LOGW(TAG, "release parse: %s", update_rel_err_name(re));
         return update_rel_err_name(re);
@@ -789,6 +797,8 @@ static esp_err_t start_job(httpd_req_t *req, const job_params_t *p)
     return httpd_resp_sendstr(req, "{\"ok\":true,\"started\":true}");
 }
 
+static bool query_flag(const char *q, const char *key);
+
 static esp_err_t check_post_handler(httpd_req_t *req)
 {
     char ip[46];
@@ -809,6 +819,10 @@ static esp_err_t check_post_handler(httpd_req_t *req)
     job_params_t p;
     memset(&p, 0, sizeof(p));
     p.kind = KIND_CHECK;
+    char q[32];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        p.allow_prerelease = query_flag(q, "allow_prerelease");
+    }
     return start_job(req, &p);
 }
 

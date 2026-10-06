@@ -129,6 +129,15 @@ evidence; it only refuses to publish a stable tag while the record says otherwis
   `-Channel pre` switch marks the GitHub release as a prerelease. The tag suffix, not
   `-Channel`, decides whether gates may be open. Use a pre-release first to exercise the
   still-unverified live GitHub hop.
+- A GitHub release flagged pre-release (the "Set as a pre-release" box, or `-Channel pre`)
+  is invisible to `GET /repos/<repo>/releases/latest`, so the board reads
+  `releases?per_page=5` instead whenever pre-releases are allowed (tick "Include
+  pre-releases" on the OTA page, or `update_check(allow_prerelease=True)` / the
+  `allow_prerelease=1` query on `POST /api/update/check` and `/download`) and takes the
+  highest-semver non-draft release, `-pre.10` above `-pre.9`. With pre-releases off the
+  board keeps using `/releases/latest`. Only the five newest releases are looked at, and a
+  draft is never offered. A pre-release is still refused by policy unless the download is
+  also made with `allow_prerelease=1`.
 - `tools/check_release_manifest.ps1` (standing check) validates the tracked file, runs
   `test_release_gates.py`, and asserts the stable-tag refusal.
 

@@ -4,6 +4,8 @@
 //
 // Routes (all ROUTE_TIER_ADMIN, registered by update_fetch_start()):
 //   POST /api/update/check            start an async check of the latest release (no flash access)
+//                                       query: allow_prerelease=1 reads releases?per_page=5 and picks the
+//                                       highest-semver non-draft release (/releases/latest hides pre-releases)
 //   POST /api/update/download         start an async download into the stage; query overrides:
 //                                       allow_downgrade=1&confirm_downgrade=<tag>  (typed confirm)
 //                                       allow_prerelease=1   force=1

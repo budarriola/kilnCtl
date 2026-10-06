@@ -193,9 +193,11 @@ def _empty_post(host: str, path: str, timeout: float, ack_no_safety: bool = Fals
     return _request(req, path, timeout)
 
 
-def start_check(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) -> dict:
-    """POST /api/update/check; the board answers 202 {"ok":true,"started":true}."""
-    return _empty_post(host, CHECK_PATH, timeout)
+def start_check(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S,
+                allow_prerelease: bool = False) -> dict:
+    """POST /api/update/check; the board answers 202 {"ok":true,"started":true}.
+    allow_prerelease reads the releases list (GitHub's /releases/latest hides pre-releases)."""
+    return _empty_post(host, CHECK_PATH + ("?allow_prerelease=1" if allow_prerelease else ""), timeout)
 
 
 def download_query(allow_prerelease: bool = False, force: bool = False,

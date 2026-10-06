@@ -337,6 +337,125 @@ static void test_policy_from_manifest(void)
     TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_PARTITIONS, "partition map mismatch never overridable");
 }
 
+// One releases-list element. `assets` false leaves the asset array empty.
+static void rel_elem(char *buf, size_t cap, const char *tag, bool draft, bool pre, bool assets)
+{
+    char a[600] = "";
+    if (assets) {
+        snprintf(a, sizeof(a),
+                 "{\"name\":\"KilnCtrl-%s.bin\",\"size\":5,\"browser_download_url\":\"" BASE "%s/KilnCtrl-%s.bin\"},"
+                 "{\"name\":\"release.json\",\"size\":5,\"browser_download_url\":\"" BASE "%s/release.json\"}",
+                 tag, tag, tag, tag);
+    }
+    snprintf(buf, cap, "{\"tag_name\":\"%s\",\"draft\":%s,\"prerelease\":%s,\"assets\":[%s]}", tag,
+             draft ? "true" : "false", pre ? "true" : "false", a);
+}
+
+static update_rel_err_t pick(const char *json, bool allow_pre, update_release_info_t *r)
+{
+    return update_release_pick_from_list(json, strlen(json), REPO, MAXAPP, allow_pre, r);
+}
+
+static void test_list_pick(void)
+{
+    TEST_SECTION("update_release -- releases list pick (allow_prerelease)");
+    char e1[1200], e2[1200], e3[1200], e4[1200], list[5000];
+    update_release_info_t r;
+
+    // newest first as GitHub returns them: a pre-release above the latest stable
+    rel_elem(e1, sizeof(e1), "v1.4.0-rc.1", false, true, true);
+    rel_elem(e2, sizeof(e2), "v1.3.0", false, false, true);
+    rel_elem(e3, sizeof(e3), "v1.2.0", false, false, true);
+    snprintf(list, sizeof(list), "[%s,%s,%s]", e1, e2, e3);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.4.0-rc.1") == 0 && r.prerelease,
+               "pre-releases allowed: the pre-release above the stable wins");
+    TEST_CHECK(pick(list, false, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0 && !r.prerelease,
+               "pre-releases disallowed: highest stable wins");
+    TEST_CHECK(strcmp(r.app_name, "KilnCtrl-v1.3.0.bin") == 0 && r.app_size == 5u, "chosen element's assets are returned");
+
+    // order independence: highest semver, not first element
+    snprintf(list, sizeof(list), "[%s,%s,%s]", e3, e2, e1);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.4.0-rc.1") == 0, "highest semver wins wherever it sits");
+
+    // a pre-release of an older line does not beat the newer stable
+    rel_elem(e1, sizeof(e1), "v1.2.5-rc.1", false, true, true);
+    snprintf(list, sizeof(list), "[%s,%s]", e1, e2);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0, "stable v1.3.0 beats v1.2.5-rc.1");
+
+    // drafts are skipped even with pre-releases allowed and even if highest
+    rel_elem(e1, sizeof(e1), "v9.0.0", true, false, true);
+    rel_elem(e2, sizeof(e2), "v1.3.0", false, false, true);
+    snprintf(list, sizeof(list), "[%s,%s]", e1, e2);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0, "draft skipped");
+    rel_elem(e1, sizeof(e1), "v1.5.0-rc.1", true, true, true);
+    snprintf(list, sizeof(list), "[%s,%s]", e1, e2);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.3.0") == 0, "draft pre-release skipped");
+
+    // numeric pre-release identifiers compare numerically
+    rel_elem(e1, sizeof(e1), "v2.0.0-pre.9", false, true, true);
+    rel_elem(e2, sizeof(e2), "v2.0.0-pre.10", false, true, true);
+    rel_elem(e3, sizeof(e3), "v2.0.0-pre.2", false, true, true);
+    snprintf(list, sizeof(list), "[%s,%s,%s]", e1, e2, e3);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v2.0.0-pre.10") == 0, "pre.10 > pre.9 > pre.2");
+    snprintf(list, sizeof(list), "[%s,%s,%s]", e2, e1, e3);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v2.0.0-pre.10") == 0, "pre.10 wins in any order");
+    rel_elem(e4, sizeof(e4), "v2.0.0", false, false, true);
+    snprintf(list, sizeof(list), "[%s,%s,%s]", e1, e4, e2);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v2.0.0") == 0, "release beats its own pre-releases");
+
+    // a tag with a -pre suffix but prerelease:false is still not a stable release
+    rel_elem(e1, sizeof(e1), "v3.0.0-rc.1", false, false, true);
+    rel_elem(e2, sizeof(e2), "v1.0.0", false, false, true);
+    snprintf(list, sizeof(list), "[%s,%s]", e1, e2);
+    TEST_CHECK(pick(list, false, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.0.0") == 0, "-pre tag skipped when disallowed");
+
+    // elements that cannot be installed (no assets, bad tag) are skipped, not fatal
+    rel_elem(e1, sizeof(e1), "v4.0.0", false, false, false);
+    rel_elem(e3, sizeof(e3), "v1.0.0", false, false, true);
+    snprintf(list, sizeof(list), "[%s,{\"tag_name\":\"nightly\",\"draft\":false,\"prerelease\":false,\"assets\":[]},%s]", e1, e3);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.0.0") == 0, "assetless / bad-tag elements skipped");
+
+    // equal versions: first (newest) kept
+    rel_elem(e1, sizeof(e1), "v1.0.0", false, false, true);
+    snprintf(list, sizeof(list), "[%s,%s]", e1, e1);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_OK && strcmp(r.tag, "v1.0.0") == 0, "duplicate tag tolerated");
+
+    // nothing usable
+    TEST_CHECK(pick("[]", true, &r) == UPDATE_REL_E_NO_RELEASE && r.tag[0] == '\0', "empty list: no_release");
+    rel_elem(e1, sizeof(e1), "v1.0.0-rc.1", false, true, true);
+    snprintf(list, sizeof(list), "[%s]", e1);
+    TEST_CHECK(pick(list, false, &r) == UPDATE_REL_E_NO_RELEASE, "only a pre-release and pre-releases disallowed: no_release");
+    rel_elem(e1, sizeof(e1), "v1.0.0", true, false, true);
+    snprintf(list, sizeof(list), "[%s]", e1);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_E_NO_RELEASE, "only a draft: no_release");
+}
+
+static void test_list_refusals(void)
+{
+    TEST_SECTION("update_release -- releases list refusals");
+    char e1[1200], list[5000];
+    update_release_info_t r;
+    rel_elem(e1, sizeof(e1), "v1.0.0", false, false, true);
+
+    TEST_CHECK(pick("", true, &r) == UPDATE_REL_E_ARGS, "empty body");
+    TEST_CHECK(pick("{}", true, &r) == UPDATE_REL_E_JSON, "object at top level (a single release is not a list)");
+    TEST_CHECK(pick("[", true, &r) == UPDATE_REL_E_JSON, "truncated");
+    TEST_CHECK(pick("[1,2]", true, &r) == UPDATE_REL_E_JSON, "non-object elements");
+    TEST_CHECK(pick("[\"v1.0.0\"]", true, &r) == UPDATE_REL_E_JSON, "string elements");
+    snprintf(list, sizeof(list), "[%s", e1);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_E_JSON && r.tag[0] == '\0', "unterminated array: refused, out zeroed");
+    snprintf(list, sizeof(list), "[%s,{\"tag_name\":\"v2.0.0\",\"assets\":[}]", e1);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_E_JSON && r.tag[0] == '\0', "malformed later element poisons the whole list");
+    snprintf(list, sizeof(list), "[%s] trailing", e1);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_E_JSON, "trailing junk");
+    snprintf(list, sizeof(list), "[%s,{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":{\"g\":{\"h\":1}}}}}}}}]", e1);
+    TEST_CHECK(pick(list, true, &r) == UPDATE_REL_E_JSON, "nesting beyond the depth bound refused");
+    TEST_CHECK(update_release_pick_from_list(NULL, 5, REPO, MAXAPP, true, &r) == UPDATE_REL_E_ARGS, "NULL body");
+    TEST_CHECK(update_release_pick_from_list("[]", 2, "bad repo", MAXAPP, true, &r) == UPDATE_REL_E_ARGS, "bad repo");
+    TEST_CHECK(update_release_pick_from_list("[]", 2, REPO, 0, true, &r) == UPDATE_REL_E_ARGS, "zero stage capacity");
+    TEST_CHECK(update_release_pick_from_list("[]", 2, REPO, MAXAPP, true, NULL) == UPDATE_REL_E_ARGS, "NULL out");
+}
+
 void run_test_update_release(void)
 {
     test_api_pick();
@@ -344,4 +463,6 @@ void run_test_update_release(void)
     test_api_bounds();
     test_manifest();
     test_policy_from_manifest();
+    test_list_pick();
+    test_list_refusals();
 }

@@ -72,6 +72,10 @@ bool update_repo_valid(const char *repo);
 // or a too-small buffer (out left empty).
 bool update_url_build_latest(const char *repo, char *out, size_t out_cap);
 
+// "https://api.github.com/repos/<repo>/releases?per_page=<n>" (n 1..30), the list that, unlike
+// /releases/latest, includes pre-releases. False on a bad repo, bad n or a too-small buffer.
+bool update_url_build_list(const char *repo, unsigned per_page, char *out, size_t out_cap);
+
 // A release tag as GitHub hands it back and as the release tooling creates it:
 // ^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$ and at most 32 characters (plus the semver rules).
 // gen_build_info.cmake's FW_RELEASE_VERSION regex must accept the same character set;

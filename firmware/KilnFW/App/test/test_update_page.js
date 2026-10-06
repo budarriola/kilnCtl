@@ -26,7 +26,7 @@ const m = SRC.match(/UPDATE_CARD_PURE_BEGIN[\s\S]*?\*\/\r?\n([\s\S]*?)\/\* UPDAT
 assert(!!m, 'sanity: found the pure block in ota_page.html');
 const api = new Function(m[1] +
   '; return { GH_ERRORS: GH_ERRORS, GH_VERDICTS: GH_VERDICTS, ghErrorText: ghErrorText,' +
-  ' ghVerdictText: ghVerdictText, ghDownloadQuery: ghDownloadQuery, ghCanDownload: ghCanDownload,' +
+  ' ghVerdictText: ghVerdictText, ghDownloadQuery: ghDownloadQuery, ghCheckQuery: ghCheckQuery, ghCanDownload: ghCanDownload,' +
   ' stageInstallable: stageInstallable, ghRefusalText: ghRefusalText };')();
 
 // Every verdict name the firmware can emit has a sentence.
@@ -48,6 +48,10 @@ errs.forEach(e => assert(api.GH_ERRORS.hasOwnProperty(e), 'error text exists for
 // Unknown names stay readable, never blank.
 assert(api.ghErrorText('weird_code') === 'Failed: weird_code', 'unknown error name is shown');
 assert(api.ghErrorText('') === '', 'no error is blank');
+
+assert(api.ghCheckQuery({}) === '', 'check: no flag -> no query');
+assert(api.ghCheckQuery({ pre: true }) === '?allow_prerelease=1', 'check: prerelease flag reads the list');
+assert(api.ghErrorText('no_release').indexOf('Include pre-releases') > 0, 'no_release text');
 
 // Download query: nothing ticked sends nothing; downgrade carries the typed tag.
 assert(api.ghDownloadQuery({}) === '', 'no flags -> no query');

@@ -279,7 +279,7 @@ def _wait_job(host: str, wait_s: float) -> "tuple[Optional[dict], Optional[str]]
 
 
 @_core._tool()
-def update_check(wait_s: float = 60.0, host: Optional[str] = None) -> str:
+def update_check(wait_s: float = 60.0, host: Optional[str] = None, allow_prerelease: bool = False) -> str:
     """Ask the board to check GitHub for the newest release of the configured
     repository (POST /api/update/check then GET /api/update/fetch, ROUTE_TIER_ADMIN)
     and report the version, the policy verdict (upgrade / up to date / downgrade /
@@ -288,10 +288,15 @@ def update_check(wait_s: float = 60.0, host: Optional[str] = None) -> str:
     (409) during a firing or autotune, while another job runs, or until its clock
     has synced from the internet. The release is UNSIGNED in v1 (sha256 from the
     release's own manifest only). ``wait_s`` bounds how long this call polls the
-    job; a check normally takes a few seconds."""
+    job; a check normally takes a few seconds. ``allow_prerelease=True`` makes the
+    board read the releases list and pick the highest-semver non-draft release, so a
+    GitHub pre-release is found (plain /releases/latest never returns one)."""
     resolved = _resolve_host(host)
     try:
-        uhc.start_check(resolved)
+        if allow_prerelease is True:
+            uhc.start_check(resolved, allow_prerelease=True)
+        else:
+            uhc.start_check(resolved)
     except uhc.UpdateHttpError as exc:
         return f"REFUSED: check not started: {_refusal_text(exc)} (host={resolved})"
     st, err = _wait_job(resolved, wait_s)

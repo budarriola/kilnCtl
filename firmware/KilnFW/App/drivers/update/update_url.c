@@ -1,6 +1,7 @@
 // update_url.c -- see update_url.h.
 #include "update_url.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "update_semver.h"
@@ -239,6 +240,29 @@ bool update_url_build_latest(const char *repo, char *out, size_t out_cap)
     memcpy(out, pre, sizeof(pre) - 1);
     memcpy(out + sizeof(pre) - 1, repo, rl);
     memcpy(out + sizeof(pre) - 1 + rl, post, sizeof(post));
+    return true;
+}
+
+bool update_url_build_list(const char *repo, unsigned per_page, char *out, size_t out_cap)
+{
+    static const char pre[] = "https://api.github.com/repos/";
+    static const char post[] = "/releases?per_page=";
+    if (out == NULL || out_cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (!update_repo_valid(repo) || per_page < 1 || per_page > 30) {
+        return false;
+    }
+    size_t rl = strlen(repo);
+    if (out_cap < sizeof(pre) - 1 + rl + sizeof(post) - 1 + 2 + 1) {
+        return false;
+    }
+    int n = snprintf(out, out_cap, "%s%s%s%u", pre, repo, post, per_page);
+    if (n < 0 || (size_t)n >= out_cap) {
+        out[0] = '\0';
+        return false;
+    }
     return true;
 }
 
