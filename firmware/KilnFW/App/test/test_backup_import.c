@@ -722,7 +722,10 @@ static esp_err_t bi_failing_cfg_write(const char *rel_path, const void *data, si
 
 static void bi_mount_fresh_cfg(void)
 {
-    static const char *const files[] = { KILN_CFG_STORE_FILE_PATH, UPDATE_SETTINGS_FILE_PATH };
+    /* aux_out.dat too: it lives on the same scratch mount, and a file left by an
+     * earlier test would otherwise leak aux state into the next one. */
+    static const char *const files[] = { KILN_CFG_STORE_FILE_PATH, UPDATE_SETTINGS_FILE_PATH,
+                                         AUX_OUTPUTS_FILE_PATH };
     char path[600];
     cfg_fs_deinit();
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
@@ -6097,9 +6100,12 @@ static void test_aux_outputs_dry_run_and_partial_write(void)
 
     reset_stub_state();
     aux_bk_fresh();
-    fake_kv_script_next_write_status(HAL_IO);
+    /* aux_outputs now persists to the cfg file only, so the failure is injected
+     * at the cfg write seam, not the NVS one. */
+    pref_cfg_fs_set_write_fn(bi_failing_cfg_write);
     bool ok = wp9_apply_full(",\"aux_outputs\":[{\"relay\":2,\"enabled\":true}]", KILN_CFG_RESTORE_MERGE, false, -1,
                              &plan, &partial, err, sizeof(err));
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(!ok, "a failed aux persist fails the restore");
     TEST_CHECK(partial, "reported as a partial write (the handler turns this into the 500)");
     TEST_CHECK(strstr(err, "aux_outputs") != NULL, "the error names aux_outputs");
