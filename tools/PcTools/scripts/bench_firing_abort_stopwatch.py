@@ -169,61 +169,86 @@ def main() -> int:
     print("Pre-abort state: RUNNING, confirmed. Silencing the safety link now "
           "(debug_reset(peer=\"pico\")) -- the same technique the 1.5 s bench "
           "pass used.")
-    t0 = time.time()
-    reset_result = m.debug_reset(peer="pico")
-    print(f"  debug_reset(peer=pico) -> {reset_result}")
+    meas = measure_abort(args.poll_period, args.max_wait, emit=print)
+    ok, report = judge_abort(meas["t0"], meas["t_faulted"], meas["t_relays_off"],
+                             args.poll_period, args.max_wait)
+    for line in report:
+        print(line)
+    return 0 if ok else 1
 
+
+def measure_abort(poll_period, max_wait, *, clock=time.time, sleep=time.sleep,
+                  silence=None, exec_status=None, relays_all_off=None, emit=None):
+    """Silence the link and poll until FAULTED + relays off or the deadline.
+    All I/O is injectable so host tests can drive it with a fake clock."""
+    silence = silence or (lambda: m.debug_reset(peer="pico"))
+    exec_status = exec_status or _exec_status
+    relays_all_off = relays_all_off or _relays_all_off
+    t0 = clock()
+    reset_result = silence()
+    if emit:
+        emit(f"  debug_reset(peer=pico) -> {reset_result}")
     t_faulted = None
     t_relays_off = None
     fault_guard = None
-    deadline = t0 + ABORT_THRESHOLD_S + args.max_wait
-    while time.time() < deadline:
-        now = time.time()
-        state, guard = _exec_status()
+    log = []
+    deadline = t0 + ABORT_THRESHOLD_S + max_wait
+    while clock() < deadline:
+        now = clock()
+        state, guard = exec_status()
         if t_faulted is None and state == PROFILE_EXEC_FAULTED:
             t_faulted = now
             fault_guard = guard
-        relays_off = _relays_all_off()
+        relays_off = relays_all_off()
         if t_relays_off is None and relays_off:
             t_relays_off = now
         elapsed = now - t0
-        print(f"  t+{elapsed:6.1f}s  exec_state={state}  relays_off={relays_off}"
-              + (f"  fault_guard={fault_guard}" if fault_guard is not None else ""))
+        line = (f"  t+{elapsed:6.1f}s  exec_state={state}  relays_off={relays_off}"
+                + (f"  fault_guard={fault_guard}" if fault_guard is not None else ""))
+        log.append(line)
+        if emit:
+            emit(line)
         if t_faulted is not None and t_relays_off is not None:
             break
-        time.sleep(args.poll_period)
+        sleep(poll_period)
+    return {"t0": t0, "t_faulted": t_faulted, "t_relays_off": t_relays_off,
+            "fault_guard": fault_guard, "reset_result": reset_result, "log": log}
 
+
+def judge_abort(t0, t_faulted, t_relays_off, poll_period, max_wait):
+    """Pure verdict. Returns (ok, report_lines)."""
+    out = []
     if t_faulted is None:
-        print(f"\nFAIL: firing never reached FAULTED within "
-              f"{ABORT_THRESHOLD_S + args.max_wait:.0f}s of silence. "
-              "The 30 s safety-link firing-abort did not fire.")
-        return 1
+        out.append(f"\nFAIL: firing never reached FAULTED within "
+                   f"{ABORT_THRESHOLD_S + max_wait:.0f}s of silence. "
+                   "The 30 s safety-link firing-abort did not fire.")
+        return False, out
 
     abort_latency_s = t_faulted - t0
-    upper_bound = ABORT_THRESHOLD_S + args.poll_period + 1.0  # +1s transport/exec slack
+    upper_bound = ABORT_THRESHOLD_S + poll_period + 1.0  # +1s transport/exec slack
     ok = ABORT_THRESHOLD_S <= abort_latency_s <= upper_bound
 
-    print(f"\nAbort latency (silence -> FAULTED): {abort_latency_s:.2f}s "
-          f"(pass window [{ABORT_THRESHOLD_S:.1f}, {upper_bound:.1f}]s)")
-    print("Note: fault_guard is 0/unset on this path by design (the "
-          "safety-link-silent branch in profile_executor_wd_decide() does "
-          "not set it) -- confirm the cause was this link-silence path, not "
-          "an unrelated fault, by checking the ESP device log "
-          "(get_device_log()) for 'safety processor link silent' around this "
-          "timestamp if this run's context is not already unambiguous.")
+    out.append(f"\nAbort latency (silence -> FAULTED): {abort_latency_s:.2f}s "
+               f"(pass window [{ABORT_THRESHOLD_S:.1f}, {upper_bound:.1f}]s)")
+    out.append("Note: fault_guard is 0/unset on this path by design (the "
+               "safety-link-silent branch in profile_executor_wd_decide() does "
+               "not set it) -- confirm the cause was this link-silence path, not "
+               "an unrelated fault, by checking the ESP device log "
+               "(get_device_log()) for 'safety processor link silent' around this "
+               "timestamp if this run's context is not already unambiguous.")
     if t_relays_off is not None:
-        print(f"Relays confirmed off at t+{t_relays_off - t0:.2f}s "
-              f"({t_relays_off - t_faulted:.2f}s after FAULTED)")
+        out.append(f"Relays confirmed off at t+{t_relays_off - t0:.2f}s "
+                   f"({t_relays_off - t_faulted:.2f}s after FAULTED)")
     else:
-        print("Relays never confirmed off within the wait window -- "
-              "check io_read() by hand now.")
+        out.append("Relays never confirmed off within the wait window -- "
+                   "check io_read() by hand now.")
         ok = False
 
     verdict = "PASS" if ok else "FAIL"
-    print(f"\n{verdict}: 30 s firing-abort "
-          + ("fired within tolerance and dropped relays." if ok else
-             "did not meet the pass window or relays did not confirm off."))
-    return 0 if ok else 1
+    out.append(f"\n{verdict}: 30 s firing-abort "
+               + ("fired within tolerance and dropped relays." if ok else
+                  "did not meet the pass window or relays did not confirm off."))
+    return ok, out
 
 
 if __name__ == "__main__":
