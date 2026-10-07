@@ -38,6 +38,7 @@
 #ifndef ZONES_CONFIG_ACCESSORS_H
 #define ZONES_CONFIG_ACCESSORS_H
 
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -784,8 +785,17 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
  * small-gain edit visible (a fixed absolute tolerance swallowed a ~50% Ki edit
  * at Ki = 3.4e-5). The 1e-6 absolute floor is defence in depth for a client
  * that reposts with a few ULP of error; it costs about 1% at Ki = 1e-4, i.e.
- * an edit smaller than that does not invalidate the tuning record. */
-bool zones_config_gain_changed(float cur, float next);
+ * an edit smaller than that does not invalidate the tuning record.
+ *
+ * static inline so the host-test binaries that stub the setters (e.g.
+ * test_backup_import.c) call this exact code rather than a hand copy that
+ * could drift. Written as !(delta <= tol) so a NaN on either side counts as
+ * a change (both setters reject a non-finite new gain, but a corrupt stored
+ * one being replaced must still clear the record). */
+static inline bool zones_config_gain_changed(float cur, float next)
+{
+    return !(fabsf(next - cur) <= (1e-6f + 1e-5f * fabsf(cur)));
+}
 
 /* The FOPDT plant model autotune fitted for this zone (TODO.md 6A.4),
  * persisted so TODO.md 6A.2's feedforward term

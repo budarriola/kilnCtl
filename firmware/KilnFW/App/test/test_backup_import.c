@@ -1400,14 +1400,8 @@ void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)
 // own pass 1 has already validated everything by the time pass 2 calls
 // these). ----
 
-/* This binary links test stubs, not zones_config_accessors.c, so the shared
- * tolerance helper is stubbed with the same formula (the real one is covered
- * through the real accessor in test_zones_http.c). */
-bool zones_config_gain_changed(float cur, float next)
-{
-    return fabsf(next - cur) > (1e-6f + 1e-5f * fabsf(cur));
-}
-
+/* zones_config_gain_changed() is static inline in zones_config_accessors.h,
+ * so these stubs call the real compare, not a copy of it. */
 /* Models zones_config_set_pid_no_save()'s tuning_valid = 0 (zones_config_
  * accessors.c): the real setter clears the record only when a gain changes
  * beyond zones_config_gain_changed()'s tolerance versus the stored gains, and

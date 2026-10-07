@@ -512,11 +512,6 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     return true;
 }
 
-bool zones_config_gain_changed(float cur, float next)
-{
-    return fabsf(next - cur) > (1e-6f + 1e-5f * fabsf(cur));
-}
-
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
