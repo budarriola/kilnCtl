@@ -20,8 +20,8 @@
 #include "heat_interlock.h" /* HEAT_INTERLOCK_REASON_MAX -- previously transitive via ota_http.h */
 #include "ota_state.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "owner_slot_pool.h"
-#include "relay_authority.h"
-#include "relay_off_tracker.h" /* ON-to-OFF times for the on/off min_off_s hold -- see owner_task() */ /* relay_authority_heat_run_active() -- see system_mode_gate_blocks_relay() below */
+#include "relay_authority.h" /* relay_authority_heat_run_active() -- see system_mode_gate_blocks_relay() below */
+#include "relay_off_tracker.h" /* ON-to-OFF times for the on/off min_off_s hold -- see owner_task() */
 #include "stack_margin.h"
 #include "system_mode_gate.h" /* SYS_ACTION_RAW_RELAY_DEBUG_WRITE -- see relay_on_blocked() below */
 

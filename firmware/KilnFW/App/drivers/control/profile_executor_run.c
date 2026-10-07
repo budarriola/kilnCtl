@@ -77,15 +77,6 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
     }
 }
 
-/* Lowest zone in zone_mask that is NOT monitor-only, or -1 if there is none.
- * The run-start temperature baseline and the warm-start pick both key off
- * this (profile_executor_capture_baseline() is its only caller, and
- * profile_executor_run() applies that capture without re-picking): a
- * monitor-only zone (HEATER with relay_mask==0, zone_is_monitor_only(), the
- * one rule) is never driven, so its reading must not seed the run's target
- * or decide a warm start. All-monitor-only masks return -1; the capture then
- * yields no baseline/warm-start (fail closed) and profile_executor_run()
- * refuses such a start anyway via its n_heating_zones == 0 check. */
 /* The one predicate for "this zone's reading/state is part of the run's shared
  * temperature drive": not an on/off zone (it has no obligation to the shared
  * setpoint, ON_OFF_ZONE_PLAN.md sec 1) and not monitor-only (never driven,
@@ -98,6 +89,17 @@ bool profile_executor_zone_drives_run(uint8_t zi)
     return !zone_is_on_off(zi) && !zone_is_monitor_only(zi);
 }
 
+/* Lowest zone in zone_mask that drives the run
+ * (profile_executor_zone_drives_run(): neither on/off nor monitor-only), or
+ * -1 if there is none. The run-start temperature baseline and the warm-start
+ * pick both key off this (profile_executor_capture_baseline() is its only
+ * caller, and profile_executor_run() applies that capture without
+ * re-picking): an on/off zone has no obligation to the shared setpoint and a
+ * monitor-only zone (HEATER with relay_mask==0, zone_is_monitor_only(), the
+ * one rule) is never driven, so neither reading may seed the run's target or
+ * decide a warm start. A mask with no such zone returns -1; the capture then
+ * yields no baseline/warm-start (fail closed). An all-monitor-only mask is
+ * refused at start anyway via the n_heating_zones == 0 check. */
 static int8_t profile_executor_baseline_zone(uint8_t zone_mask)
 {
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -117,8 +119,8 @@ static int8_t profile_executor_baseline_zone(uint8_t zone_mask)
  * caller (the dashboard/LCD status readers, profiles_stop(), etc.) for that
  * whole window.
  *
- * first_active (the lowest NON-monitor-only zone index set in zone_mask, see
- * profile_executor_baseline_zone()) is purely a property
+ * first_active (the lowest zone index set in zone_mask that drives the run,
+ * see profile_executor_baseline_zone()) is purely a property
  * of the profile being started -- it does not depend on any s_exec state
  * guarded by the lock, so it is safe to compute here, before that state
  * (s_exec.zones[]) is even touched. zones_config_get_thermo_mask()/
@@ -1110,7 +1112,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * profile_executor_capture_baseline(), BEFORE s_exec.lock was taken
      * (see that function's doc comment), and that function alone picks the
      * baseline zone (profile_executor_baseline_zone(): lowest zone in the
-     * mask that is not monitor-only). The snapshot is applied here, once,
+     * mask that is neither on/off nor monitor-only). The snapshot is applied here, once,
      * after the zone loop, rather than at a second "zi == first_active"
      * gate inside it: a second pick evaluated later, under the lock, could
      * disagree with the capture's if a zone's type or relay mask changed in
