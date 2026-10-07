@@ -2108,7 +2108,7 @@ static void rt_snapshot(profile_t out[4])
     }
 }
 
-static bool rt_nvs_matches_ram(void)
+static bool rt_persisted_matches_ram(void)
 {
     static profiles_state_t loaded;
     bool any = false;
@@ -2165,10 +2165,10 @@ static void test_retarget_commit_success(void)
                    memcmp(&s_profiles.profiles[1], &before[1], sizeof(profile_t)) == 0,
                "slot 1 (other zone) byte-identical");
     TEST_CHECK(s_profiles.profiles[3].on_off_rule_count == 0, "slot 3 (no rules) untouched");
-    TEST_CHECK(rt_nvs_matches_ram(), "NVS blobs match RAM after the commit");
+    TEST_CHECK(rt_persisted_matches_ram(), "persisted profiles match RAM after the commit");
 
     TEST_CHECK(profiles_retarget_zone_to_aux_revert(RT_ZONE, RT_RELAY), "revert reports clean");
-    TEST_CHECK(rt_unchanged_from(before) && rt_nvs_matches_ram(), "revert restores RAM and NVS to the originals");
+    TEST_CHECK(rt_unchanged_from(before) && rt_persisted_matches_ram(), "revert restores RAM and the persisted profiles to the originals");
 }
 
 static void test_retarget_plan_refusals(void)
@@ -2227,6 +2227,25 @@ static void test_retarget_plan_refusals(void)
                "commit refused by the plan leaves every slot as it was");
 }
 
+/* Lets the first s_rt_writes_left cfg writes through and fails the one after,
+ * once (fake_kv_script_write_status_after()'s semantics), so the revert's own
+ * saves run for real. Profile saves are cfg-file-only since the NVS
+ * dual-write close, so the failure is injected at the cfg write seam: an NVS
+ * (fake_kv) script would never be consumed by a save. */
+static unsigned s_rt_writes_left;
+static bool s_rt_fail_armed;
+static esp_err_t rt_fail_after_cfg_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    if (s_rt_fail_armed) {
+        if (s_rt_writes_left == 0) {
+            s_rt_fail_armed = false;
+            return ESP_FAIL;
+        }
+        s_rt_writes_left--;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
 static void test_retarget_commit_rollback_at_every_write(void)
 {
     TEST_SECTION("profiles_retarget_zone_to_aux_commit -- a write failure at ANY point leaves nothing half-done");
@@ -2238,19 +2257,23 @@ static void test_retarget_commit_rollback_at_every_write(void)
         rt_snapshot(before);
         profiles_retarget_counts_t c;
         char err[160] = "";
-        fake_kv_script_write_status_after(skip, HAL_IO);
+        s_rt_writes_left = skip;
+        s_rt_fail_armed = true;
+        profiles_cfg_fs_set_write_fn(rt_fail_after_cfg_write_fn);
         bool ok = profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err));
+        profiles_cfg_fs_reset_write_fn_for_test();
+        s_rt_fail_armed = false;
         if (ok) {
             succeeded = true;
-            TEST_CHECK(rt_nvs_matches_ram(), "a commit that outlived the injected failure point is fully persisted");
+            TEST_CHECK(rt_persisted_matches_ram(), "a commit that outlived the injected failure point is fully persisted");
             continue;
         }
         failures_seen++;
         char label[96];
         snprintf(label, sizeof(label), "failure after %u writes: RAM rules restored", skip);
         TEST_CHECK(rt_unchanged_from(before), label);
-        snprintf(label, sizeof(label), "failure after %u writes: NVS matches RAM, reported restored", skip);
-        TEST_CHECK(rt_nvs_matches_ram() && strstr(err, "all profiles restored") != NULL, label);
+        snprintf(label, sizeof(label), "failure after %u writes: persisted profiles match RAM, reported restored", skip);
+        TEST_CHECK(rt_persisted_matches_ram() && strstr(err, "all profiles restored") != NULL, label);
     }
     TEST_CHECK(failures_seen >= 2, "failure injection actually hit the commit at several points");
     TEST_CHECK(succeeded, "the sweep reached a point past every write");
@@ -2283,7 +2306,7 @@ static void test_retarget_resume_and_whole_blob_verify(void)
                    s_profiles.profiles[2].on_off_rules[0].zone_index == RT_DEST &&
                    s_profiles.profiles[1].on_off_rules[0].zone_index == 2,
                "every slot is at the destination, the other zone is untouched");
-    TEST_CHECK(rt_nvs_matches_ram() && retarget_verify_slot(2), "NVS matches RAM after the resume");
+    TEST_CHECK(rt_persisted_matches_ram() && retarget_verify_slot(2), "persisted profiles match RAM after the resume");
     TEST_CHECK(profiles_retarget_zone_to_aux_resume(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
                    c.profiles_affected == 0 && c.rules_retargeted == 0,
                "resuming a finished conversion is a no-op success");

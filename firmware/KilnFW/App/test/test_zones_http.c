@@ -15779,6 +15779,14 @@ static void test_zones_persisted_equals_ram_reads_the_cfg_file(void)
 {
     TEST_SECTION("zones_config_persisted_equals_ram -- re-reads the cfg file, the only save target");
     zfa_seed();
+    /* zfa_seed()'s memset leaves every settings_source at 0, i.e. zone 0
+     * inheriting from itself: a cycle the load path normalizes to CUSTOM, so
+     * the decoded file would never equal this un-normalized RAM. A real RAM
+     * config never holds a cycle (load normalizes, POST/import reject). */
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        memset(s_zones.cfg.zones[i].settings_source, ZONE_SETTINGS_SOURCE_CUSTOM,
+               sizeof(s_zones.cfg.zones[i].settings_source));
+    }
     TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_OK, "a save lands (cfg file only)");
     {
         hal_kv_handle_t h;

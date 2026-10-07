@@ -112,6 +112,14 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): boot_guard_record_boot() is called once
     # from app_main's own task before the scheduler starts any other task.
     "boot_guard.c",
+    # Pattern 3 (internal-SRAM-stack caller): since the NVS dual-write close
+    # the aux config itself persists through pref_cfg_fs.c, but the
+    # zone-to-aux conversion journal (aux_convert_journal_write()/_clear(),
+    # docs/SPARE_RELAY_ONOFF_PLAN.md section 10) is still an NVS marker. Its
+    # only callers are zone_aux_convert_http.c's move_handler(), reached from
+    # zones_post_handler on the httpd task's internal-SRAM stack -- never the
+    # flash worker, never a PSRAM stack.
+    "aux_outputs_cfg.c",
     # Pattern 3 (init-time only): crash_report_save() runs from the panic/
     # boot path, before normal task concurrency exists.
     "crash_report.c",

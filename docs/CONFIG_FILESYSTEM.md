@@ -701,7 +701,9 @@ quietly or reporting success.
   re-read the cfg file, not NVS. The zone-to-aux conversion's final read-back
   (`zone_aux_convert_http.c`, `op_verify_persisted()`) calls both; read
   against NVS, which no save updates any more, every conversion would have
-  ended in a failed read-back.
+  ended in a failed read-back. The profile retarget step's per-slot read-back
+  (`profiles_http.c`, `retarget_verify_slot()`) re-reads the slot's cfg file
+  through `profiles_cfg_fs_load_raw()` at the RAM rev for the same reason.
 - `iter_tune_store.c`: its cfg write stays a silent no-op when cfg is not
   mounted. It runs from the autotune/iteration path with no request to answer,
   and its NVS write still holds the data. This is documented at

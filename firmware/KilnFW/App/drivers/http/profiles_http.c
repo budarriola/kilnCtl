@@ -2079,29 +2079,23 @@ bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_h
     return retarget_plan(zone, relay, zone_has_tc, false, counts, err, err_cap);
 }
 
-/* Read slot `id` back out of NVS and require the WHOLE stored profile to equal RAM: right length and
- * version, a CRC that matches the stored bytes, and the profile payload byte-for-byte equal. A
- * three-field compare of the rules could not see a save that lost or altered anything else. The
- * wrapper is NOT compared against a freshly encoded one: its padding bytes are indeterminate, so two
- * encodes of the same profile can differ while both are valid. */
+/* Read slot `id` back out of its cfg FILE (the only place nvs_save_slot() writes since the NVS
+ * dual-write close, docs/CONFIG_FILESYSTEM.md) and require the WHOLE stored profile to equal RAM:
+ * a file that decodes as valid (length, version and CRC checked by profiles_cfg_fs_load_raw()), at
+ * the RAM rev, with the profile payload byte-for-byte equal. A three-field compare of the rules
+ * could not see a save that lost or altered anything else. Reading the legacy NVS blob here would
+ * compare RAM against a copy no save updates, so every retarget would fail its read-back. */
 static bool retarget_verify_slot(uint8_t id)
 {
-    hal_kv_handle_t h;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION) != HAL_OK) {
+    profile_t *loaded = persist_scratch_alloc(sizeof(*loaded));
+    if (!loaded) {
         return false;
     }
-    char key[8];
-    profile_nvs_key(id, key, sizeof(key));
-    profile_persisted_t *loaded = persist_scratch_alloc(sizeof(*loaded));
-    bool ok = false;
-    if (loaded) {
-        size_t len = sizeof(*loaded);
-        ok = hal_kv_get_blob(&h, key, loaded, &len) == HAL_OK && len == sizeof(*loaded) &&
-             loaded->version == PROFILE_VERSION && loaded->crc32 == compute_profile_crc(loaded) &&
-             memcmp(&loaded->profile, &s_profiles.profiles[id], sizeof(loaded->profile)) == 0;
-    }
+    uint32_t rev = 0;
+    bool valid = false;
+    profiles_cfg_fs_load_raw(id, loaded, &rev, &valid);
+    bool ok = valid && rev == s_profile_rev[id] && memcmp(loaded, &s_profiles.profiles[id], sizeof(*loaded)) == 0;
     free(loaded);
-    hal_kv_close(&h);
     return ok;
 }
 
