@@ -1,6 +1,7 @@
 #include "ui_page_safety.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -24,10 +25,10 @@
 //
 // "Reset one side of a pair" (CLAUDE.md): this file holds NO trip latch. Every
 // refresh re-derives ui_safety_view_t from the live DIAG state
-// (ui_safety_view_derive), the clear action re-derives it again at execution
-// time, and the only thing the button does is send the same clear the web
-// route sends (dashboard_safety_clear_trip). Feedback text is cosmetic and
-// is overwritten, never consulted.
+// (ui_safety_view_derive), and the only thing the button does is send the
+// same clear the web route sends (dashboard_safety_clear_trip), whose own
+// live check refuses a trip that is no longer latched. Feedback text is
+// cosmetic and is overwritten, never consulted.
 //
 // History: the only retained trip record is the last Frame D event
 // (trip_event_*); there is no multi-trip ring on the link, so "history" here
@@ -59,11 +60,23 @@ static lv_obj_t *s_btn;
 static lv_obj_t *s_btn_label;
 static lv_obj_t *s_feedback_label;
 static lv_obj_t *s_scr;
-/* One LVGL-task-only status snapshot shared by refresh_cb and clear_action
- * (both run on the LVGL task, never concurrently): keeps the large
- * dashboard_status_t off the 8 KB LVGL task stack. */
-static dashboard_status_t s_ds;
 static ui_topbar_t s_topbar;
+/* The view refresh_cb last derived (LVGL task only). clear_action uses it
+ * ONLY to pick the operator-facing message; it is never the gate on whether
+ * a clear may happen. The live "is a trip latched, is DIAG fresh" check is
+ * safety_link_send_clear_trip()'s own, applied at send time on the same path
+ * the web route uses, so a stale copy here can at worst produce a refused
+ * send, never a clear of something that is not latched. Overwritten every
+ * refresh, never reset by the button (no LCD-local latch). */
+static ui_safety_view_t s_view = { .tripped_live = false, .diag_unknown = true };
+/* One text scratch buffer for every label refresh_cb writes (LVGL task only;
+ * lv_label_set_text() copies, so reuse between labels is safe). 340 =
+ * "Detected: " (10) + the 320-byte numbered-cause room ui_page_diagnostics.c
+ * sizes for pathological float magnitudes + NUL headroom; also covers
+ * "To clear: " + the longest remedy (149). Static rather than on the LVGL
+ * stack only because it is cheap to keep; the 1 KB dashboard_status_t is on
+ * the stack, same as every other live LCD page. */
+static char s_text[340];
 
 static lv_obj_t *build_row(lv_obj_t *parent, lv_color_t accent, bool dot_long)
 {
@@ -114,57 +127,63 @@ static void refresh_cb(lv_timer_t *t)
         return;
     }
 
-    /* Static, not stack: this runs on the LVGL task (8 KB stack). The timer
-     * callback is the only user and LVGL timers never nest, so one copy is
-     * safe -- same reasoning as the other LVGL-task-only scratch buffers. */
-    static char buf[200];
-    dashboard_get_status(&s_ds);
-    const ui_safety_view_t view = ui_safety_view_derive(s_ds.diag_ever_received, s_ds.diag_state,
-                                                         s_ds.diag_age_ms);
+    /* On the LVGL task stack (10 KB), like ui_page_home_refresh.c,
+     * ui_page_temperature.c and ui_page_diagnostics.c -- the last holds this
+     * same struct plus ~1 KB of text buffers in one frame, so this frame is
+     * strictly shallower than one the stack already carries. Kept off .bss:
+     * .dram0.bss headroom is the scarcer budget. */
+    dashboard_status_t ds;
+    char *const buf = s_text;
+    const size_t buf_len = sizeof(s_text);
+    dashboard_get_status(&ds);
+    const ui_safety_view_t view = ui_safety_view_derive(ds.diag_ever_received, ds.diag_state,
+                                                         ds.diag_age_ms);
+    s_view = view;
 
     if (view.diag_unknown) {
-        snprintf(buf, sizeof(buf), "State: UNKNOWN (no fresh diagnostics)");
+        snprintf(buf, buf_len, "State: UNKNOWN (no fresh diagnostics)");
     } else if (view.tripped_live) {
-        snprintf(buf, sizeof(buf), "State: TRIPPED NOW -- %s",
-                 safety_trip_words_short(s_ds.diag_trip_reason));
+        snprintf(buf, buf_len, "State: TRIPPED NOW -- %s", safety_trip_words_short(ds.diag_trip_reason));
     } else {
-        switch (s_ds.diag_state) {
-        case SAFETY_LINK_DIAG_STATE_INIT:  snprintf(buf, sizeof(buf), "State: starting up"); break;
-        case SAFETY_LINK_DIAG_STATE_GRACE: snprintf(buf, sizeof(buf), "State: startup grace"); break;
-        case SAFETY_LINK_DIAG_STATE_ARMED: snprintf(buf, sizeof(buf), "State: ARMED, no trip"); break;
-        case SAFETY_LINK_DIAG_STATE_WARN:  snprintf(buf, sizeof(buf), "State: ARMED (warning)"); break;
-        default:                           snprintf(buf, sizeof(buf), "State: unrecognised"); break;
+        switch (ds.diag_state) {
+        case SAFETY_LINK_DIAG_STATE_INIT:  snprintf(buf, buf_len, "State: starting up"); break;
+        case SAFETY_LINK_DIAG_STATE_GRACE: snprintf(buf, buf_len, "State: startup grace"); break;
+        case SAFETY_LINK_DIAG_STATE_ARMED: snprintf(buf, buf_len, "State: ARMED, no trip"); break;
+        case SAFETY_LINK_DIAG_STATE_WARN:  snprintf(buf, buf_len, "State: ARMED (warning)"); break;
+        default:                           snprintf(buf, buf_len, "State: unrecognised"); break;
         }
     }
     lv_label_set_text(s_state_label, buf);
     lv_obj_set_style_border_color(lv_obj_get_parent(s_state_label),
                                   view.tripped_live ? UI_THEME_ACCENT_5 : UI_THEME_ACCENT_4, 0);
 
-    if (!s_ds.trip_event_ever_received) {
+    if (!ds.trip_event_ever_received) {
         lv_label_set_text(s_last_label, "Last trip: none recorded");
         lv_label_set_text(s_cause_label, "Detected: --");
         lv_label_set_text(s_remedy_label, "To clear: --");
     } else {
         char age[24];
-        ui_safety_format_age(s_ds.trip_event_age_ms, age, sizeof(age));
-        snprintf(buf, sizeof(buf), "Last trip: %s (%s)", safety_trip_words_short(s_ds.trip_reason), age);
+        ui_safety_format_age(ds.trip_event_age_ms, age, sizeof(age));
+        snprintf(buf, buf_len, "Last trip: %s (%s)", safety_trip_words_short(ds.trip_reason), age);
         lv_label_set_text(s_last_label, buf);
 
-        static char num[320];
-        static char cause[340];
-        snprintf(cause, sizeof(cause), "Detected: %s",
-                 safety_trip_words_cause_numbered(s_ds.trip_reason, s_ds.trip_safety_tc_c,
-                                                   s_ds.trip_deciding_threshold, s_ds.trip_current_a,
-                                                   s_ds.trip_context_age_100ms, num, sizeof(num)));
-        lv_label_set_text(s_cause_label, cause);
+        /* Prefix written in place, numbered cause rendered straight after it
+         * (cause_numbered() always writes into the buffer it is given and
+         * NUL-terminates within its length), so no second 320-byte buffer. */
+        static const char k_detected[] = "Detected: ";
+        memcpy(buf, k_detected, sizeof(k_detected) - 1u);
+        (void)safety_trip_words_cause_numbered(ds.trip_reason, ds.trip_safety_tc_c,
+                                               ds.trip_deciding_threshold, ds.trip_current_a,
+                                               ds.trip_context_age_100ms, buf + (sizeof(k_detected) - 1u),
+                                               buf_len - (sizeof(k_detected) - 1u));
+        lv_label_set_text(s_cause_label, buf);
 
-        static char remedy[160];
-        snprintf(remedy, sizeof(remedy), "To clear: %s", safety_trip_words_remedy(s_ds.trip_reason));
-        lv_label_set_text(s_remedy_label, remedy);
+        snprintf(buf, buf_len, "To clear: %s", safety_trip_words_remedy(ds.trip_reason));
+        lv_label_set_text(s_remedy_label, buf);
     }
 
     /* Offered only while the live state says tripped; the admin gate runs on
-     * tap, and the action re-derives both again. */
+     * tap, and the send re-checks the live state itself. */
     set_button_enabled(view.tripped_live);
     if (!view.tripped_live) {
         /* Stale "Cleared"/"Refused" text must not outlive its trip. */
@@ -172,16 +191,18 @@ static void refresh_cb(lv_timer_t *t)
     }
 }
 
-/* Runs only after the LCD admin gate has passed (or auth is off). Re-derives
- * the live view and re-checks the role: the gate is not trusted to be the
- * only check, and the trip may have been cleared elsewhere meanwhile. */
+/* Runs only after the LCD admin gate has passed (or auth is off). Re-checks
+ * the role (the gate is not trusted to be the only check) and then sends
+ * through dashboard_safety_clear_trip() -- the web route's exact path, whose
+ * safety_link_send_clear_trip() re-reads the LIVE cached DIAG under the link
+ * lock and refuses (ESP_ERR_INVALID_STATE) a trip that is no longer latched
+ * or a stale link. No dashboard_get_status() here: that is a heavy producer
+ * call (SPI reads, heap walks) and the authoritative live check is the
+ * send's own; s_view (<= one refresh old) only chooses the message. */
 static void clear_action(void *user)
 {
     (void)user;
-    dashboard_get_status(&s_ds);
-    const ui_safety_view_t view = ui_safety_view_derive(s_ds.diag_ever_received, s_ds.diag_state,
-                                                         s_ds.diag_age_ms);
-    switch (ui_safety_clear_verdict(&view, ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN))) {
+    switch (ui_safety_clear_verdict(&s_view, ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN))) {
     case UI_SAFETY_CLEAR_NOT_TRIPPED:
         lv_label_set_text(s_feedback_label, "No trip to clear");
         return;
@@ -199,7 +220,7 @@ static void clear_action(void *user)
          * later DIAG frame says so, never from this call's return. */
         lv_label_set_text(s_feedback_label, "Clear sent");
     } else if (err == ESP_ERR_INVALID_STATE) {
-        lv_label_set_text(s_feedback_label, "Refused: not clearable now");
+        lv_label_set_text(s_feedback_label, "Refused: no live trip");
     } else {
         lv_label_set_text(s_feedback_label, "Clear failed");
     }

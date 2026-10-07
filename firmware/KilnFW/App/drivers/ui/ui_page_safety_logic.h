@@ -36,10 +36,11 @@ typedef enum {
     UI_SAFETY_CLEAR_NEEDS_ADMIN,        // trip is live but the LCD session is not an admin
 } ui_safety_clear_verdict_t;
 
-// Decides what the Clear Trip button may do, from a FRESH derive() taken at
-// the moment the action runs (not at the moment the button was drawn) and the
-// LCD session's admin status. Never a bypass: SEND only means "call the same
-// clear path the web uses"; that path still applies its own refusals.
+// Decides what the Clear Trip button may do, from the page's latest derive()
+// (at most one refresh old) and the LCD session's admin status. Never a
+// bypass and never the live gate: SEND only means "call the same clear path
+// the web uses", and that path (safety_link_send_clear_trip) re-reads the
+// live DIAG under the link lock and refuses a trip that is no longer latched.
 ui_safety_clear_verdict_t ui_safety_clear_verdict(const ui_safety_view_t *view, bool has_admin);
 
 // "12s ago" / "3m05s ago" / "2h07m ago".

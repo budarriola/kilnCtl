@@ -74,13 +74,14 @@ void run_test_ui_page_safety_logic(void)
         }
 
         // A Clear tap armed while tripped, with the trip cleared elsewhere
-        // before the PIN was entered: the verdict re-derived at action time
-        // must refuse, not send a clear for a trip that no longer exists.
+        // before the PIN was entered: once a refresh has re-derived the view,
+        // the verdict refuses (and if no refresh ran yet, the send path's own
+        // live check in safety_link_send_clear_trip() refuses instead).
         ui_safety_view_t at_tap = ui_safety_view_derive(true, SAFETY_LINK_DIAG_STATE_TRIPPED, 10);
         TEST_CHECK(ui_safety_clear_verdict(&at_tap, true) == UI_SAFETY_CLEAR_SEND, "tap time: send allowed");
         ui_safety_view_t at_action = ui_safety_view_derive(true, SAFETY_LINK_DIAG_STATE_ARMED, 10);
         TEST_CHECK(ui_safety_clear_verdict(&at_action, true) == UI_SAFETY_CLEAR_NOT_TRIPPED,
-                   "cleared while the PIN prompt was open: action-time verdict refuses");
+                   "cleared while the PIN prompt was open: re-derived verdict refuses");
     }
 
     TEST_SECTION("ui_safety_format_age");
