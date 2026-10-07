@@ -413,7 +413,7 @@ Additive to `LINK_PROTOCOL.md`. All are ESP→Pico except the responses.
 
 | Command | ID | Payload | Notes |
 |---|---|---|---|
-| `UPDATE_BEGIN` | 0x10 | 32 B: image length u32, image CRC32, target slot u8, version string 16 B, flags | Pico validates preconditions and replies `UPDATE_STATUS` |
+| `UPDATE_BEGIN` | 0x10 | 36 B (`update_image_header_t`, `image_header.h`): magic, target, header_version, protocol_version, min_compatible, requested_slot, flags, length u32, CRC32, version 16 B | Pico validates preconditions and replies `UPDATE_STATUS` |
 | `UPDATE_DATA` | 0x11 | 4 B offset + up to 248 B | Offset is explicit, so a retry cannot silently write the wrong place |
 | `UPDATE_END` | 0x12 | 4 B: image CRC32 repeated | Pico verifies the whole slot before accepting |
 | `UPDATE_ABORT` | 0x13 | — | Marks the staged slot invalid, returns to normal operation |

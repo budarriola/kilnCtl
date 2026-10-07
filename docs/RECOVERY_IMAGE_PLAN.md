@@ -85,9 +85,10 @@ IDLE beacons and 5 s and never restarts during an erase; the pace delay is round
 whole ticks and also applies before END; relay buffers live in PSRAM with an 8 KB
 internal-free check after context allocation, task creation and UART install; the status
 JSON is built into one PSRAM buffer under the relay lock; a trip-pending refusal tells the
-operator to power-cycle (still no CLEAR_TRIP). SaftyFW follow-up (not done here, the bootloader is untouched):
-the bootloader IDLE status should report `active_slot`, which would remove the operator
-choice. Original requirements below.
+operator to power-cycle (still no CLEAR_TRIP). SaftyFW follow-up, since done: the bootloader IDLE status already reports `active_slot`
+(2-byte `[active][target]` trailer on every UPDATE_STATUS, including IDLE,
+`bootloader/recovery_update.c:269-276`); the operator choice is needed only for an older
+bootloader. Original requirements below.
 - kilnlink UPDATE_BEGIN/DATA/END/ABORT/STATUS per `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`
   section 4; send SAFETY_CMD_ANNOUNCE_REBOOT first. Send BEGIN to whichever receiver
   answers (Pico app or Pico bootloader; wire-compatible). If nothing answers, the page says
@@ -171,8 +172,26 @@ short body, recv timeouts, an `esp_ota_end` failure leaving the boot target alon
 
 ## Open risks
 
-- The Pico bootloader's recovery frame set may differ from the application's frame set;
-  confirm against `firmware/SaftyFW/docs/BOOTLOADER.md` before W4.
+- Pico bootloader frame set vs the relay: CHECKED 2026-10-07 by source comparison, no mismatch
+  (never run on a board). Bootloader `bootloader/recovery_update.c` dispatches only BROADCAST
+  UPDATE_BEGIN 0x10/DATA 0x11/END 0x12/ABORT 0x13 (lines 32-36, 523-546) and answers UPDATE_STATUS
+  0x14 (239-279); the relay's `recovery_pico_proto.c` packers match: BEGIN 1+36 B, SAFU header
+  (`image_header.h:75-85`, relay 210-240), DATA u32 offset + <=248 B at chunk-aligned offsets
+  (`received_ranges.c:29`, relay 258-267), END u32 crc (relay 269-274; bootloader reads it, gates on
+  its own read-back CRC, 398-422), ABORT 1 B (relay 276-280; bootloader reverts the slot and answers
+  ABORTED even when idle, 470-474), addressing ESP dev 0/task 7 -> dev 2/task 7 (relay 171-190,
+  bootloader 43-45, 206-219), UPDATE_STATUS 16 B header + <=32 u16 gaps + 2-byte `[active][target]`
+  trailer (bootloader 55-67, 239-279; relay `rpp_parse_status` 341-382, `RPP_STATUS_MAX_GAPS` 32),
+  state ids 0-8 (bootloader 75-87, relay header 41-52), err bits (bootloader 89-96), 248 B chunk
+  (`UPDATE_CHUNK_LEN`), 230400 baud 8N1 (`bootloader/main.c:132-145`, relay `PICO_BAUD`), pins
+  (Pico TX GP4/RX GP5 `board_pins.h:24-25` vs relay `PICO_TX_GPIO` 5/`PICO_RX_GPIO` 4), slot windows
+  (`flash_layout.h:70-72` vs `RPP_SLOT_*`). Timing: bootloader IDLE beacon 1 s
+  (`RECOVERY_STATUS_PERIOD_US`), silent during erase and VERIFYING, no REBOOT 0x29, no ANNOUNCE
+  handling (ignored via the default case), END before all chunks answers RECEIVING with no gap
+  list; all consistent with `RPP_BEGIN_IDLE_BEACONS`/`RPP_ERASE_TIMEOUT_MS`/`rpp_fin_step`. Retransmit
+  cap 10 rounds on the Pico (`UPDATE_MAX_RETRANSMIT_ROUNDS`) is reported as FAILED +
+  ERR_RETRANSMIT_CAP, which the relay surfaces. Doc drift only: `UPDATE_PROTOCOL.md` section 4's BEGIN
+  row said 32 B (fixed to 36 B). The pace and erase timings remain unmeasured on hardware (W5).
 - A partially working PSRAM chip with an unknown MR2 density asserts at esp_psram.c:219,
   which would put the factory image in a reboot loop (IGNORE_NOTFOUND does not cover it).
 - After PSRAM not-found the MSPI stays in low-speed mode (flash about 20 MHz for that boot).
