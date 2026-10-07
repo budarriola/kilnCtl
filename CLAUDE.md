@@ -998,7 +998,7 @@ kicad hardware\mainBoard\kiln.kicad_sch
 ### Replicate Routing Across Repeated Blocks
 There is no autorouter in this repo any more -- it was removed from `mykicadMcp`, and
 `kicad_router_tool.py` no longer exists. Route by hand in KiCad, then replicate that work onto the
-sibling instances of a repeated block (the five identical thermocouple channels, for example):
+sibling instances of a repeated block (the three identical thermocouple channels on `hardware/ThermocoupleBoard`, for example):
 
 ```
 kicad_call(name="copy_kicad_component_routing", args={

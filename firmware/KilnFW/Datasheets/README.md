@@ -16,7 +16,7 @@ the comm-interface rule since they aren't datasheets).
 
 | File | Part | Interface | Used for | Source |
 |---|---|---|---|---|
-| `MAX31856.pdf` | MAX31856 | SPI | 5-channel thermocouple ADC/cold-junction-compensation front end (ThermocoupleBoard) | copied from repo `datasheets\ThermocoupleBoard_Sensor_Temperature\MAX31856.pdf` |
+| `MAX31856.pdf` | MAX31856 | SPI | 3-channel thermocouple ADC/cold-junction-compensation front end (ThermocoupleBoard) | copied from repo `datasheets\ThermocoupleBoard_Sensor_Temperature\MAX31856.pdf` |
 | `SX1509.pdf` | SX1509 | I2C | I2C GPIO expander (mainBoard) | copied from repo `datasheets\mainBoard_SX1509\SX1509.pdf` |
 | `RaspberryPi_Pico.pdf` | Raspberry Pi Pico / RP2040 | UART | UART peer MCU across the ESP32-S3 <-> Pico isolation barrier | copied from repo `datasheets\MCU_Module\RaspberryPi_Pico.pdf` |
 | `ILI9488.pdf` | ILI9488 | SPI | TFT display controller in the BIGTREETECH TFT35 SPI V2.1 480x320 panel | https://www.waveshare.com/w/upload/2/2d/ILI9488_Data_Sheet.pdf |

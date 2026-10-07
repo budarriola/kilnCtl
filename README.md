@@ -77,7 +77,7 @@ The rationale for the split, and what broke during it, is
 | Board | What it is |
 |---|---|
 | `hardware/mainBoard` | ESP32-S3 controller, SSR drivers, current sense, isolated link, safety RP2040 |
-| `hardware/ThermocoupleBoard` | 5-channel MAX31856 daughterboard |
+| `hardware/ThermocoupleBoard` | 3-channel MAX31856 daughterboard |
 | `hardware/SaftyThermocoupleBoard` | The safety processor's own thermocouple front end |
 
 `Thermocouple.kicad_sch` appears in more than one project as a copy of the same
