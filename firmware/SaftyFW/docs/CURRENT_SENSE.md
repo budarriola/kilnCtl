@@ -168,7 +168,8 @@ channels 2 and 3 are identical (`R78/R83/…`, `R84/R89/…`).
 - **R77 ∥ C57 = 1 MΩ ∥ 1 µF is a peak hold**, τ = **1.0 s**. It charges through
   D14 from the op-amp's output (fast, current-limited only by the AD8542's
   ~50 mA short-circuit current) and discharges only through R77 (slow).
-- **D12/D13 are two BZX84C3V3 back-to-back**, giving a bidirectional clamp at
+- **D12/D13 are two BZX84C3V3 back-to-back**, giving a bidirectional clamp (netlist: on the
+  U8A inverting summing node, behind R43, not on the jack) at
   roughly ±(3.3 + 0.7) V. This is the input's survival protection, not part of
   the signal path.
 - **R90 (1M) is the DC return** for the CT secondary. Without it the input node
@@ -219,7 +220,7 @@ SCT-013-**000** (current output, 50 mA at 100 A, needs a burden).
 Consequences:
 
 - **Fitting a current-output CT is a wiring error the firmware cannot detect.**
-  With R72 absent the secondary sees only R90 (1 M) and the clamp diodes: the
+  With R72 absent the secondary sees only R90 (1 M) and R43 (10 k) into the clamp diodes: the
   CT drives itself into its own compliance limit, the clamp conducts, and the
   reading saturates at a value that has nothing to do with the primary current.
   Put this in the build documentation and check it at commissioning.
@@ -230,8 +231,8 @@ Consequences:
 
 ### Range and clipping
 
-The ADC and the buffer both top out at the 3.3 V rail, and the input clamp
-starts conducting at about ±4 V, so:
+The ADC and the buffer both top out at the 3.3 V rail, and the summing-node
+clamp (behind R43, so the jack itself is not clamped) starts conducting at about ±4 V, so:
 
 ```
 V_adc full scale = 3.3 V  ⇒  V̂_ct ≈ 4.6 V  ⇒  V_ct_rms ≈ 3.26 V

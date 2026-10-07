@@ -21,8 +21,8 @@
 // check in tools/check_isolation.ps1.
 // Isolated via U6 (ADuM1201WT digital isolator, non-inverting) as of
 // 2026-08-25; previously via a TCMT1109 optocoupler pair (U2/U3, R7/R12/R15).
-#define SAFTYFW_PIN_UART1_TX    4   // GP4, PicoTx -> U6 VIB -> U6 VOB -> ESP RX (GPIO4)
-#define SAFTYFW_PIN_UART1_RX    5   // GP5, PicoRx <- U6 VOA <- U6 VIA <- ESP TX (GPIO5)
+#define SAFTYFW_PIN_UART1_TX    4   // GP4, PicoTx -> U6 VIA (pin 7) -> U6 VOA (pin 2) -> ESP RX (GPIO4)
+#define SAFTYFW_PIN_UART1_RX    5   // GP5, PicoRx <- U6 VOB (pin 6) <- U6 VIB (pin 3) <- ESP TX (GPIO5)
 
 // --- The safety actuator (relay_owner). The ONLY code that may write this. -
 #define SAFTYFW_PIN_RELAY       6   // GPIO6, saftyRelay -> Q4 gate -> K4 coil. High = energized.
