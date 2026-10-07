@@ -68,7 +68,7 @@
 > 2. **Fail-safe default OFF, per-zone confirm-gated opt-in to ON.** Encoded
 >    directly in the schema (`zone_cfg_t::failsafe_state`, 0 = OFF, migration
 >    and zero-init default) -- see §5 and §7 below, now implemented for step
->    1. The confirm-gate itself is UI (step 6), not yet built.
+>    1. The confirm-gate itself is UI (step 6), implemented in `zones_page.html`.
 
 **Interpretation (confirm or correct before step 1).** A zone's relay drives
 something that is not a heating element — vent, damper, fan, blower, water feed

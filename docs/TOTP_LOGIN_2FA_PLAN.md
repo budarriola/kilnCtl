@@ -300,8 +300,8 @@ Cannot be exercised meaningfully without WT-A of the reset plan first
 ## 12. Work breakdown (not yet tranched)
 
 This plan is not split into work tranches the way the reset plan is,
-since none of it can start before that plan's WT-A lands (the routes and
-`totp_config_verify_and_consume()` this plan calls do not exist yet).
+on top of that plan's WT-A (landed: the routes and
+`totp_config_verify_and_consume()` this plan calls exist).
 When picked up, expect roughly: one firmware tranche (NVS key, pending-
 session state, new route, settings-page toggle wired through the
 existing `/api/auth/security` `cmd=` dispatch rather than a second new

@@ -286,14 +286,12 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    `http_async_job_busy()` (landed alongside A1). Handler-level test:
    `test_zones_http.c`'s
    `test_zones_post_refused_by_mode_gate_before_interlock`.
-   **Known test gap (still open):** `kiln_cfg_http.c`'s and
-   `backup_import.c`'s handler-level gate wiring are now covered
-   (`test_kiln_cfg_http.c`, `test_backup_import.c`).
-   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` still has no
-   host-test harness exercising the UART entry point itself — its gate
-   wiring is verified by code-pattern review and an ESP-IDF target build
-   only. `zones_http_pid.c` and `iter_tune_http.c` DO have handler-level
-   tests (`test_zones_http.c`, `test_iter_tune_http.c`).
+   **Handler-level gate coverage:** `kiln_cfg_http.c` and `backup_import.c`
+   (`test_kiln_cfg_http.c`, `test_backup_import.c`), `zones_http_pid.c` and
+   `iter_tune_http.c` (`test_zones_http.c`, `test_iter_tune_http.c`), and
+   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` UART entry
+   point (`test_uart_bridge_ext_control_gate.c`, its own executable in
+   `build_host_tests.ps1`).
    **Closed:** `adaptive_tune_http.c`'s `enable`/`revert` handlers (including
    the 2026-09-25 enabled=false carve-out) now have their own executable,
    `test_adaptive_tune_http_gate.c` (separate from `test_adaptive_tune_http.c`,

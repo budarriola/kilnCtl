@@ -361,9 +361,6 @@ current reading.
 - [ ] **Run the full commissioning check in `docs/CURRENT_SENSE.md` §5** — in
       particular step 2, one relay at a time, confirming each CT maps to the
       channel you think it does. Needs real hardware; not done.
-- [ ] Implement **S9** (trip ineffective / contactor welded) consumer wiring
-      against real current data — the guard logic exists (Phase 4); this is
-      about feeding it real `link_task` relay context (Phase 7).
 - [ ] ⚠️ **S3 and S4 stay disabled until the CT channel mapping is confirmed.**
       A correlation guard fed by a mis-mapped CT trips on healthy firings and
       stays quiet on the failure it exists to catch.
