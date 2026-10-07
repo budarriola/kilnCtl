@@ -33,7 +33,7 @@ extern "C" {
 const char *const *profiles_scope_cfg_files_dirs(size_t *out_count);
 
 /* Best-effort cfg_fs_delete() of every profile-slot and firing-stats mirror
- * file. Absent files/directories and an unmounted cfg_fs are normal (not
+ * file plus the root files (favorites, live-edit record and working profile). Absent files/directories and an unmounted cfg_fs are normal (not
  * errors). Every file is attempted even after a failure; returns the FIRST
  * hard error (a stale file that survives must fail the reset), ESP_OK
  * otherwise. *out_deleted (optional) receives the number of files removed. */

@@ -21,6 +21,11 @@
 #include "danger_mode.h"
 #include "dashboard_http.h"
 #include "aux_outputs_cfg.h"
+#include "ct_verify_store.h"
+#include "iter_tune_store.h"
+#include "live_profile.h"
+#include "profiles_favorites.h"
+#include "setup_wizard_progress.h"
 #include "display_power_cfg.h"
 #include "update_settings.h" /* WP9: update_repo row of /api/cfgfs */
 #include "hal_kv.h"
@@ -1687,6 +1692,39 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         uint32_t file_rev = 0, nvs_rev = 0;
         aux_outputs_cfg_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, "aux_outputs", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    /* Owner decision 2026-10-07: iter_tune closed like zones/profiles/prefs;
+     * favorites, ct_verify, setup-wizard progress and the live-edit record moved
+     * to cfg (cfg-only writes, NVS read fallback). */
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        iter_tune_store_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "iter_tune", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        profiles_favorites_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "profiles_favorites", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        ct_verify_store_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "ct_verify_store", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        setup_wizard_progress_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "setup_wizard_progress", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
+    }
+    {
+        bool file_valid = false, nvs_valid = false, diverged = false;
+        uint32_t file_rev = 0, nvs_rev = 0;
+        live_profile_get_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
+        cfgfs_add_item(items, &n_items, "live_profile", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
 
     /* Deferred auto-format progress (cfg_fs_mount.c) -- ESP-IDF-only getters,

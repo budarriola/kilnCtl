@@ -960,6 +960,7 @@ try {
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             # Owner request 2026-09-19 (dup-name save refusal): profiles_http.c
             # (#included above) now calls live_edit_name_collides(), which
             # lives in live_profile.c. Linked in for REAL rather than faked --
@@ -1053,6 +1054,8 @@ try {
     # documented MSVC switch that turns it on.
     $cmdLp = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$lpObjDir\\`" /Fe:`"$exeLp`" `"$(Join-Path $testDir 'test_live_profile.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
@@ -1074,6 +1077,8 @@ try {
     New-Item -ItemType Directory -Force -Path $plhObjDir | Out-Null
     $cmdPlh = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$plhObjDir\\`" /Fe:`"$exePlh`" `"$(Join-Path $testDir 'test_profiles_live_http.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
@@ -1091,6 +1096,8 @@ try {
     New-Item -ItemType Directory -Force -Path $efaObjDir | Out-Null
     $cmdEfa = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
             "/Fo:`"$efaObjDir\\`" /Fe:`"$exeEfa`" `"$(Join-Path $testDir 'test_ui_edit_firing_apply.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 

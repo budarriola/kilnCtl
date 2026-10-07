@@ -83,13 +83,15 @@ typedef struct {
  * own comment on why that is the right failure mode here (unlike
  * CFG_FS_STATUS_MAX_FILES, this list is built by firmware code, not by
  * whatever a user has dropped on the filesystem). */
-#define CFG_FS_STATUS_MAX_ITEMS 18
+#define CFG_FS_STATUS_MAX_ITEMS 24
+/* 2026-10-07: iter_tune and the four moved stores (favorites, ct_verify, setup
+ * wizard progress, live-edit record) took the live handler to 20 rows. */
 
 /* Size in bytes of the heap json[] buffer GET /api/cfgfs renders into
  * (diagnostics_http.c's cfgfs_status_scratch_t). Shared so the worst-case
  * host test in test_cfg_fs_status.c sizes its buffer from the same constant
  * the handler uses, rather than a second literal that could drift. */
-#define CFG_FS_STATUS_HANDLER_JSON_BUF 4608u
+#define CFG_FS_STATUS_HANDLER_JSON_BUF 5632u
 
 /* THE single definition of "this item's file and NVS copies disagree",
  * shared by every caller so a future bridge cannot invent a second one.
