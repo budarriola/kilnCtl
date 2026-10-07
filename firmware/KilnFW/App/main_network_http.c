@@ -51,6 +51,7 @@
 #include "ota_http.h"
 #include "profile_executor.h"
 #include "profiles_builtin.h"
+#include "live_profile.h"
 #include "profiles_favorites.h"
 #include "ramp_assist_cfg.h"
 #include "unit_pref.h"
@@ -410,6 +411,9 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     // hidden-mask above must. Non-fatal in the same way: a failed load means
     // nothing shows as favorited this boot, and nothing is lost -- a
     // favorite is a shortcut, never the profile's only home.
+    // Copy any legacy NVS live-edit record / working profile into cfg once
+    // (owner decision 2026-10-07); never erases NVS, never fatal.
+    live_profile_start();
     esp_err_t fav_err = profiles_favorites_start();
     if (fav_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "profiles_favorites_start failed: %s -- no favorites shown this boot",

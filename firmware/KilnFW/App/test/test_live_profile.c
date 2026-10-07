@@ -79,6 +79,54 @@ const builtin_profile_t *profiles_builtin_entry(uint8_t id)
 #include "../drivers/persist/live_profile.c"
 #include "../drivers/control/profile_executor_live_pickup.c"
 
+#ifdef _WIN32
+#include <direct.h>
+#define LPT_MKDIR(p) _mkdir(p)
+#define LPT_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define LPT_MKDIR(p) mkdir((p), 0755)
+#define LPT_RMDIR(p) rmdir(p)
+#endif
+#include "cfg_fs.h"
+
+/* flash_worker_wait.c (linked for pref_cfg_fs) asks whether the flash worker
+ * started; on the host there is no worker, so answer yes at once. */
+bool uart_bridge_ext_flash_worker_started(void)
+{
+    return true;
+}
+
+static const char *LPT_SCRATCH = "cfg_fs_test_live_profile";
+
+/* The record and working profile are cfg-only (owner decision 2026-10-07):
+ * mount a fresh, empty cfg scratch directory. */
+static void lpt_mount_fresh_cfg(void)
+{
+    cfg_fs_deinit();
+    static const char *const files[] = {LIVE_PROFILE_RECORD_FILE_PATH, LIVE_PROFILE_WORKING_FILE_PATH};
+    for (size_t i = 0; i < 2; i++) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s/.tmp/%s", LPT_SCRATCH, files[i]);
+        remove(path);
+        snprintf(path, sizeof(path), "%s/%s", LPT_SCRATCH, files[i]);
+        remove(path);
+    }
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", LPT_SCRATCH);
+    LPT_RMDIR(tmp);
+    LPT_RMDIR(LPT_SCRATCH);
+    LPT_MKDIR(LPT_SCRATCH);
+    (void)cfg_fs_init(LPT_SCRATCH, NULL);
+}
+
+static bool lpt_file_exists(const char *rel)
+{
+    bool e = false;
+    return cfg_fs_exists(rel, &e) == ESP_OK && e;
+}
+
 // ---------------------------------------------------------------------------
 // live_edit_record_t encode/decode
 
@@ -655,11 +703,7 @@ static void test_load_working_for_origin_permanent_on_missing_blob(void)
 
     // Delete just the working blob out from under the still-pending record --
     // the record alone is not enough to load.
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, LIVE_PROFILE_NVS_PARTITION) == HAL_OK,
-               "kv open for the erase succeeds");
-    TEST_CHECK(hal_kv_erase_key(&h, NVS_KEY_LIVE_PROFILE) == HAL_OK, "erasing the working blob key succeeds");
-    hal_kv_close(&h);
+    TEST_CHECK(pref_cfg_fs_remove(LIVE_PROFILE_WORKING_FILE_PATH) == ESP_OK, "removing the working file succeeds");
 
     profile_t out;
     live_profile_load_result_t r = live_profile_load_working_for_origin(11, &out);
@@ -685,13 +729,10 @@ static void test_load_working_for_origin_permanent_on_decode_failure(void)
     // Overwrite the working blob with fewer bytes than sizeof(profile_t) --
     // hal_kv_get_blob() succeeds (a shorter blob genuinely exists), but this
     // file's profile_decode_blob() fake rejects any length != sizeof(profile_t).
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, LIVE_PROFILE_NVS_PARTITION) == HAL_OK,
-               "kv open for the corrupt-write succeeds");
     uint8_t short_blob[4] = {0, 1, 2, 3};
-    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_LIVE_PROFILE, short_blob, sizeof(short_blob)) == HAL_OK,
-               "writing a too-short blob over the working slot succeeds");
-    hal_kv_close(&h);
+    TEST_CHECK(pref_cfg_fs_commit(LIVE_PROFILE_WORKING_FILE_PATH, short_blob, sizeof(short_blob), 99,
+                                  "test short working blob") == ESP_OK,
+               "writing a too-short blob over the working file succeeds");
 
     profile_t out;
     live_profile_load_result_t r = live_profile_load_working_for_origin(13, &out);
@@ -711,6 +752,98 @@ static void test_load_working_for_origin_permanent_on_decode_failure(void)
 // RUNNING (what a poll made while paused reaches) must never advance the
 // generation, so the SAME generation is still "new" on the tick that finds
 // RUNNING again.
+
+static void test_cfg_only_storage(void)
+{
+    TEST_SECTION("live_profile -- record and working profile are cfg files only; saves never touch NVS");
+    lpt_mount_fresh_cfg();
+    profile_t origin = make_test_profile();
+    profile_t working;
+    live_edit_record_t rec;
+    char err[160];
+    TEST_CHECK(live_profile_fork(3, false, "Cfg Only", &origin, &working, &rec, err, sizeof(err)), "fork succeeds");
+    TEST_CHECK(lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "record file written");
+    TEST_CHECK(lpt_file_exists(LIVE_PROFILE_WORKING_FILE_PATH), "working file written");
+    uint8_t buf[256];
+    size_t len = sizeof(buf);
+    TEST_CHECK(nvs_legacy_get(NVS_KEY_LIVE_RECORD, buf, &len, NULL) != HAL_OK, "no NVS record was written");
+    uint8_t big[PROFILE_BLOB_MAX_SIZE];
+    len = sizeof(big);
+    TEST_CHECK(nvs_legacy_get(NVS_KEY_LIVE_PROFILE, big, &len, NULL) != HAL_OK, "no NVS working profile written");
+    bool fv = false, nv = true, dv = true;
+    uint32_t fr = 0, nr = 0;
+    live_profile_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && fr >= 1 && !nv && !dv, "status: record file valid, no NVS side, not diverged");
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+    TEST_CHECK(!lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH) && !lpt_file_exists(LIVE_PROFILE_WORKING_FILE_PATH),
+               "clear removes both files");
+}
+
+static void test_save_refused_when_cfg_unmounted(void)
+{
+    TEST_SECTION("live_profile -- with cfg unmounted a fork/save is REFUSED with a message naming cfg");
+    lpt_mount_fresh_cfg();
+    cfg_fs_deinit();
+    profile_t origin = make_test_profile();
+    profile_t working;
+    live_edit_record_t rec;
+    char err[160] = {0};
+    TEST_CHECK(!live_profile_fork(3, false, "No Cfg", &origin, &working, &rec, err, sizeof(err)),
+               "fork refused when cfg is unmounted");
+    TEST_CHECK(strstr(err, "cfg") != NULL, "the refusal names cfg");
+    err[0] = '\0';
+    TEST_CHECK(!live_profile_save_working(&origin, err, sizeof(err)), "save_working refused when unmounted");
+    TEST_CHECK(strstr(err, "format_confirm") != NULL, "and points at format_confirm");
+    live_edit_record_t r2;
+    TEST_CHECK(!live_profile_load_record(&r2), "nothing was written to fall back on");
+    lpt_mount_fresh_cfg();
+}
+
+static void test_legacy_nvs_migrates_to_cfg(void)
+{
+    TEST_SECTION("live_profile -- a legacy NVS record + working profile are read as fallback and migrated by start()");
+    lpt_mount_fresh_cfg();
+    profile_t origin = make_test_profile();
+    live_edit_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.version = LIVE_EDIT_RECORD_VERSION;
+    rec.origin_id = 6;
+    rec.working_id = LIVE_EDIT_WORKING_SLOT_ID;
+    rec.pending = 1;
+    strncpy(rec.origin_name, "Legacy", sizeof(rec.origin_name) - 1);
+    uint8_t rbuf[64];
+    size_t rlen = live_edit_record_encode(&rec, rbuf, sizeof(rbuf));
+    uint8_t wbuf[PROFILE_BLOB_MAX_SIZE];
+    size_t wlen = profile_encode_current_blob(&origin, wbuf, sizeof(wbuf));
+    TEST_CHECK(rlen > 0 && wlen > 0, "test setup: encode the legacy blobs");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, LIVE_PROFILE_NVS_PARTITION) == HAL_OK,
+               "test setup: open the legacy partition");
+    hal_kv_set_blob(&h, NVS_KEY_LIVE_RECORD, rbuf, rlen);
+    hal_kv_set_blob(&h, NVS_KEY_LIVE_PROFILE, wbuf, wlen);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+
+    live_edit_record_t got;
+    profile_t gotp;
+    TEST_CHECK(live_profile_load_record(&got) && got.origin_id == 6, "the legacy record is readable as the fallback");
+    TEST_CHECK(live_profile_load_working(&gotp), "the legacy working profile is readable as the fallback");
+    TEST_CHECK(!lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "precondition: no cfg record file yet");
+
+    live_profile_start();
+    TEST_CHECK(lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "start() migrated the record into cfg");
+    TEST_CHECK(lpt_file_exists(LIVE_PROFILE_WORKING_FILE_PATH), "start() migrated the working profile into cfg");
+    uint8_t chk[256];
+    size_t clen = sizeof(chk);
+    TEST_CHECK(nvs_legacy_get(NVS_KEY_LIVE_RECORD, chk, &clen, NULL) == HAL_OK, "start() did not erase the NVS copy");
+
+    char err[160];
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+    clen = sizeof(chk);
+    TEST_CHECK(nvs_legacy_get(NVS_KEY_LIVE_RECORD, chk, &clen, NULL) != HAL_OK, "clear erased the NVS record");
+    TEST_CHECK(!live_profile_load_record(&got), "after clear the NVS fallback cannot resurrect the edit");
+    TEST_CHECK(!live_profile_load_working(&gotp), "nor the working profile");
+}
 
 static void test_should_advance_generation_false_when_not_running(void)
 {
@@ -858,6 +991,11 @@ int main(void)
     test_pickup_ok_when_window_and_validate_both_pass();
     test_pickup_refuses_on_window_violation_before_validating();
     test_pickup_refuses_on_hard_validate_failure();
+    lpt_mount_fresh_cfg();
+    test_cfg_only_storage();
+    test_save_refused_when_cfg_unmounted();
+    test_legacy_nvs_migrates_to_cfg();
+    lpt_mount_fresh_cfg();
     test_clear_is_idempotent(); // run before the fork tests so state starts clean
     test_fork_then_load_working_and_record();
     test_fork_is_idempotent_when_already_pending();

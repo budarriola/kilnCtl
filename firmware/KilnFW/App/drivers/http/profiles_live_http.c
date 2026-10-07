@@ -26,6 +26,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "cfg_fs_refusal_http.h" /* cfg_fs_http_refuse_if_unmounted() */
 #include "dashboard_json.h" /* json_escape() */
 #include "http_auth_http.h"
 #include "http_form.h"
@@ -317,6 +318,11 @@ static esp_err_t api_profile_live_get_handler(httpd_req_t *req)
 
 static esp_err_t api_profile_live_fork_post_handler(httpd_req_t *req)
 {
+    /* The working copy and its record live in cfg only (2026-10-07): refuse
+     * up front with the 503 naming the cause rather than fork and fail. */
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     profile_executor_live_status_t st;
     profile_executor_get_live_status(&st);
     if (!st.active) {
@@ -368,6 +374,9 @@ static esp_err_t api_profile_live_fork_post_handler(httpd_req_t *req)
 
 static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     profile_executor_live_status_t st;
     profile_executor_get_live_status(&st);
     if (!st.active) {

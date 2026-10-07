@@ -39,6 +39,13 @@
 #ifndef LIVE_PROFILE_H
 #define LIVE_PROFILE_H
 
+/* cfg_fs relative paths (owner decision 2026-10-07, docs/CONFIG_FILESYSTEM.md):
+ * the pending record and the working profile are cfg files; the legacy NVS
+ * keys are a read-only fallback until live_profile_clear() erases them.
+ * profiles_nvs-scope factory reset names both. */
+#define LIVE_PROFILE_RECORD_FILE_PATH "prof_live_rec.bin"
+#define LIVE_PROFILE_WORKING_FILE_PATH "prof_live_work.bin"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -279,7 +286,8 @@ live_profile_load_result_t live_profile_load_working_for_origin(uint8_t expect_o
  * "reboot ends any run" seeding used to be wrong for a warm-started run. */
 bool live_profile_has_pending_for_origin(uint8_t origin_id);
 
-/* Read-back verified: writes, then reads the value back and compares before
+/* Saved to the cfg file ONLY (fails with a message naming cfg when it is not
+ * mounted). Read-back verified: writes, then reads the value back and compares before
  * reporting success -- same discipline boot_guard_mark_healthy()'s
  * verify_persisted_count() fix uses (never trust a write's return code
  * alone, CLAUDE.md's "logging unchecked success" class). Returns false
@@ -294,6 +302,15 @@ bool live_profile_load_record(live_edit_record_t *out);
  * lands, since the working slot's job for that edit is done. Idempotent:
  * calling it with nothing pending is not an error. */
 bool live_profile_clear(char *err, size_t err_cap);
+
+/* Boot hook: copies a legacy NVS record / working profile into the cfg files
+ * when the matching file is absent. Never erases NVS. */
+void live_profile_start(void);
+
+/* Read-only dual-write status for GET /api/cfgfs (record file stands for the
+ * pair). Any output pointer may be NULL. */
+void live_profile_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                       bool *diverged);
 
 /* RAM-only generation counter, same shape as zones_config_generation() --
  * bumped by live_profile_fork()/live_profile_save_working(), polled once per
