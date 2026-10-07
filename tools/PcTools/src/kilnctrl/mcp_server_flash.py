@@ -911,6 +911,48 @@ def _archive_flashed_elf(build_dir: str, app_bin_path: str, tree_state,
         return f"\nWARNING: elf archiving FAILED (flash itself succeeded): {exc}"
 
 
+# The ESP_LOGW literal pico_auto_update_boot.c emits when the auto-update path
+# is compiled OFF (PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=0). With it off
+# the linker drops the EMBED_FILES SaftyFW slot blobs, so this string being in
+# the app .bin is the proof the missing identity record is intentional. A test
+# pins this constant to the firmware source.
+_PICO_AUTO_UPDATE_OFF_LITERAL = b"automatic Pico update is compiled OFF"
+_PICO_AUTO_UPDATE_BOOT_SRC = os.path.join(
+    "firmware", "KilnFW", "App", "drivers", "net", "pico_auto_update_boot.c")
+_PICO_OFF_NOTE = ("pico image: Pico auto-update compiled OFF "
+                  "(PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=0); "
+                  "embedded SaftyFW image intentionally absent")
+
+
+def _pico_off_literal_from_source(start_dir: str) -> Optional[bytes]:
+    """Read the compiled-off ESP_LOGW literal out of the firmware source if a
+    checkout is found above start_dir (or above this module); None otherwise."""
+    import re
+    roots = [os.path.abspath(start_dir), os.path.dirname(os.path.abspath(__file__))]
+    for root in roots:
+        cur = root
+        for _ in range(8):
+            cand = os.path.join(cur, _PICO_AUTO_UPDATE_BOOT_SRC)
+            if os.path.isfile(cand):
+                try:
+                    with open(cand, "r", encoding="utf-8", errors="replace") as f:
+                        m = re.search(r'"(automatic Pico update is compiled OFF)', f.read())
+                except OSError:
+                    m = None
+                if m:
+                    return m.group(1).encode("ascii")
+            parent = os.path.dirname(cur)
+            if parent == cur:
+                break
+            cur = parent
+    return None
+
+
+def _pico_auto_update_compiled_off(app_bin_path: str, app_data: bytes) -> bool:
+    literal = _pico_off_literal_from_source(os.path.dirname(os.path.abspath(app_bin_path)))
+    return (literal or _PICO_AUTO_UPDATE_OFF_LITERAL) in app_data
+
+
 def _pico_image_absence_reason(app_bin_path: str, app_data: bytes) -> str:
     """Why no identity record: look for the sibling SaftyFW slot .bin's bytes
     inside the app image. Best-effort; never raises."""
@@ -919,12 +961,14 @@ def _pico_image_absence_reason(app_bin_path: str, app_data: bytes) -> str:
             os.path.dirname(os.path.abspath(app_bin_path)), "..", "..", "SaftyFW",
             "build", "SaftyFW_slotA.bin"))
         if not os.path.isfile(slot):
-            return "(slot images not located to cross-check)"
+            return (f"(cross-check skipped: sibling SaftyFW slot image not found at {slot}"
+                    " -- SaftyFW not built there, or its worktree was removed)")
         with open(slot, "rb") as f:
             slot_data = f.read()
         off = pico_image_freshness.locate_embedded_image(app_data, slot_data)
         if off < 0:
-            return ("(SaftyFW_slotA.bin content is NOT present in the app binary: not linked "
+            return ("(SaftyFW_slotA.bin content is NOT present in the app binary: "
+                    "the auto-update embed is not linked or the Pico slot bins are stale "
                     "-- e.g. automatic Pico update compiled OFF, "
                     "PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=0 -- or SaftyFW was rebuilt "
                     "since this app was built)")
@@ -956,6 +1000,8 @@ def _pico_image_provenance_note(app_bin_path: str) -> str:
     except Exception as exc:  # noqa: BLE001 - provenance note must never block a flash
         return f"pico image: could not inspect embedded SaftyFW identity ({exc})"
     if not records:
+        if _pico_auto_update_compiled_off(app_bin_path, data):
+            return _PICO_OFF_NOTE
         return ("pico image: no embedded SaftyFW identity record found in app binary "
                 + _pico_image_absence_reason(app_bin_path, data))
     distinct = sorted({(r.commit, r.dirty, r.config_format_version, r.link_protocol_version) for r in records})
