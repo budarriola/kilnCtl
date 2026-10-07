@@ -23,6 +23,7 @@
 #include "live_profile.h" /* live_profile_load_record()/live_profile_generation() -- "Keep?" button */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 #include "ct_leak_alarm.h" /* H9 CT alarm -- trip-strip branch */
+#include "ui_page_safety_logic.h" /* shared live-trip derive for the trip strip */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
  * items A/B/C and HIGH 1): the deferred Pico-half recapture poll and its
@@ -231,8 +232,11 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * layout, so this costs zero height whenever nothing is wrong, which is
      * what lets the chart still reach all the way down to the Start button. */
     if (s_ui_home_trip_strip != NULL) {
-        bool safety_tripped = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
-                              ds.diag_age_ms < SAFETY_LINK_STALE_MS;
+        /* Same live-trip predicate the Safety page uses (one shared derive,
+         * ui_page_safety_logic.h) so the strip and the page cannot disagree. */
+        bool safety_tripped = ui_safety_view_derive(ds.diag_ever_received, ds.diag_state,
+                                                     ds.diag_age_ms).tripped_live;
+        s_ui_home_trip_strip_is_safety = safety_tripped;
         // The BOOT-button OTA-auth bypass banner that used to rank above the
         // safety-trip text here was retired 2026-09-29 along with the
         // AP-password HMAC scheme itself: ROUTE_TIER_ADMIN is the only gate

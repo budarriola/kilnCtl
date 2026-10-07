@@ -89,6 +89,10 @@ extern const char *UI_HOME_TAG;
  * read/written by refresh.c and (for a few) actions.c / chart.c ---------- */
 extern uint8_t s_ui_home_zone_count;
 extern lv_obj_t *s_ui_home_trip_strip;
+/* True only while the strip is showing a LIVE safety trip (set every refresh
+ * from ui_safety_view_derive(), never latched). A tap on the strip opens the
+ * Safety page only then; viewing needs no PIN (owner 2026-10-07). */
+extern bool s_ui_home_trip_strip_is_safety;
 extern lv_obj_t *s_ui_home_lag_notice;
 extern uint32_t s_ui_home_lag_notice_ticks;
 extern lv_obj_t *s_ui_home_chart;

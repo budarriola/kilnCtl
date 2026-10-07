@@ -542,21 +542,16 @@ in the fewest taps (phone-screen constraint). Built as described.
 
 **Four more pages added to plan 2026-08-18** (web + LCD both):
 
-- **Safety / Alarm page — still OPEN; the M5 blocker this note named is now
-  cleared, the LCD page still isn't built.** CORRECTED 2026-09-04: the
-  `TRIP_EVENT` frame this item said SaftyFW doesn't send is now sent
-  (`LINK_PROTOCOL.md` line 1393, `[x]`) and applied on the ESP side by
-  `safety_apply_trip_event()` (`safety_link_frames.c:883-928`, backed by
-  `safety_trip_decision.c`). The send-command plumbing (`clear_trip`,
-  `SET_CONFIG`) is already built end-to-end (`safety_link.c`, `dashboard_http.c`,
-  `uart_bridge.c`, MCP `safety_set_tc_type`) — see `firmware/SaftyFW/TODO.md`'s
-  Phase 9 for the receiving end. But `ui_page_safety.c` does not exist in the
-  source tree (only a stale build object remains under `build/`) — there is
-  no dedicated LCD Safety/Alarm page at all today, scrollable history or not.
-  The only on-LCD trip indication is `ui_page_home.c`'s inline trip strip
-  (`s_ui_home_trip_strip`), which shows the latest trip, not a history, and
-  has no Clear button. Building the page is still open; it is no longer
-  blocked on the link.
+- ~~**Safety / Alarm page.**~~ **DONE 2026-10-07** (`ui_page_safety.c`, hub cell
+  "Safety", tap on the home trip strip): live state, last trip (reason, age,
+  cause, remedy) and a Clear Trip button. Viewing is dashboard-level (no PIN);
+  Clear needs an LCD admin login (`ui_lcd_lock_run_gated`) and sends the same
+  `dashboard_safety_clear_trip()` the web route uses (same refusals). The alarm
+  is derived from live DIAG state every refresh (`ui_safety_view_derive`, shared
+  with the home strip, host-tested), never a page-local latch, so a clear from
+  web/MCP/UART removes it. History is only the last Frame D event (no multi-trip
+  ring on the link); the diagnostics Trip Detail page still shows it in full.
+  The config hub became 3 columns to fit the extra cell.
 - **Diagnostics / System info page — DONE for the ESP-only half; SAFETY-LINK
   STATS HALF STILL BLOCKED ON M5.** `ui_page_diagnostics.c`/`.h` (fw version,
   uptime, heap/PSRAM, die temp) built 2026-08-20. A separate

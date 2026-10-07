@@ -11,6 +11,7 @@
 
 #include "ui_page_config.h"
 #include "ui_page_diagnostics.h"
+#include "ui_page_safety.h"
 #include "ui_page_edit_firing.h"
 #include "ui_page_live_decide.h"
 #include "ui_page_home.h"
@@ -199,6 +200,11 @@ esp_err_t kiln_ui_init(void)
      * now uses). Linked from ui_page_config.c's nav hub like every other
      * diagnostic/settings page. */
     err = kiln_ui_register_page("diagnostics", ui_page_diagnostics_build);
+    if (err != ESP_OK) return err;
+
+    /* "safety" (ui_page_safety.c): trip state/last trip + admin-gated Clear
+     * Trip, TODO.md sec 0.5. Linked from the config hub and the home trip strip. */
+    err = kiln_ui_register_page("safety", ui_page_safety_build);
     if (err != ESP_OK) return err;
 
     /* "thermo_faults" (ui_page_thermo_faults.c) and "tc_types"

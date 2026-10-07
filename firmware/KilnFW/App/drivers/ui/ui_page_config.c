@@ -85,6 +85,12 @@ static void diagnostics_nav_cb(lv_event_t *e)
     kiln_ui_show("diagnostics");
 }
 
+static void safety_nav_cb(lv_event_t *e)
+{
+    (void)e;
+    kiln_ui_show("safety");
+}
+
 static void profiles_nav_cb(lv_event_t *e)
 {
     (void)e;
@@ -139,11 +145,12 @@ static ui_topbar_t s_topbar;
 #define UI_CONFIG_HUB_GRID_HEIGHT_PX (UI_THEME_MIN_TOUCH_TARGET_PX * 3 + (UI_THEME_PADDING_PX / 2) * 2)
 
 /* A real, clickable nav cell -- `parent` is a FLEX_FLOW_ROW_WRAP container,
- * each cell claims lv_pct(48) width so two fit per row with a gap between. */
+ * each cell claims lv_pct(32) width so three fit per row with a gap between
+ * (3 columns since the Safety cell was added: 7 cells must fit 3 rows). */
 static void build_nav_item(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
 {
     lv_obj_t *row = lv_button_create(parent);
-    lv_obj_set_width(row, lv_pct(48));
+    lv_obj_set_width(row, lv_pct(32));
     lv_obj_set_height(row, UI_THEME_MIN_TOUCH_TARGET_PX);
     lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
@@ -170,7 +177,7 @@ static void build_nav_item(lv_obj_t *parent, const char *text, lv_event_cb_t cb)
 static void build_unit_toggle_item(lv_obj_t *parent)
 {
     lv_obj_t *row = lv_button_create(parent);
-    lv_obj_set_width(row, lv_pct(48));
+    lv_obj_set_width(row, lv_pct(32));
     lv_obj_set_height(row, UI_THEME_MIN_TOUCH_TARGET_PX);
     lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
     lv_obj_set_style_radius(row, UI_THEME_CORNER_RADIUS_PX, 0);
@@ -260,6 +267,7 @@ lv_obj_t *ui_page_config_build(void)
     if (touch_cal_support_is_offerable(lvgl_port_touch_cal_support())) {
         build_nav_item(grid, "Touch Calibration", touch_cal_nav_cb);
     }
+    build_nav_item(grid, "Safety", safety_nav_cb);
     build_nav_item(grid, "Diagnostics", diagnostics_nav_cb);
     build_unit_toggle_item(grid);
 
