@@ -332,7 +332,7 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 
 **Logging and consoles**
 - [x] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP — landed 2026-09-20 (see "Logging and consoles" above)
-- [ ] RTT-over-SWD console as the fallback path — open, see "Logging and consoles" above
+- RTT-over-SWD console as the fallback path -- still open; single tracker is the "Logging and consoles" item above (duplicate checkbox merged 2026-10-07)
 - [x] Pico USB CDC **not** offered as a transport; reported as absent unless built in
 - [x] Transport marked per line (relayed / probe-UART / RTT) — for the transports that exist today
 - [x] Per-peer level filter — landed 2026-09-20 (see "Logging and consoles" above)
@@ -351,7 +351,7 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
       version-negotiation enforcement (`peer.protocol >= self.min_compatible`
       on both sides) is firmware work, tracked in `UPDATE_PROTOCOL.md`, not
       here
-- [ ] Live-hardware verification — open, see "Firmware updates from here" above
+- Live-hardware verification of the firmware-update tools -- still open; single tracker is the "Firmware updates from here" item above (duplicate checkbox merged 2026-10-07). OT-E-series bench evidence: `firmware/KilnFW/TODO.md` 9.7
 
 **Integrity**
 - [x] Python codec checked against `firmware/CommonFW/test/vectors/` --

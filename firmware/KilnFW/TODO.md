@@ -649,6 +649,8 @@ Idle-state chart behavior: `docs/ARCHITECTURE_DECISIONS.md`, "Idle chart / pinne
       there is no path for a session expiring mid-stream. If 2s ever proves
       inadequate, do the cheap wins first: ETag/304 on `/api/status` and a
       slower idle interval, as `pollHistory`/`pollAutotune` already use.
+      Also covers the 6A.9 polling note (merged 2026-10-07). ETag/304 work on
+      `/api/status` is in progress (not verified landed in this pass).
 - [ ] **Pixel-level appearance of the idle dots was not visually confirmed**
       — no framebuffer readback and the browser was not driven during
       verification; only the API/serving behavior was checked.
@@ -989,6 +991,8 @@ no thermocouple is attached in this environment.
       strongly temperature-dependent (radiative loss ~T^4). v1 ships a single
       band per zone, by design — `zone_cfg_t`/the NVS blob would need a band
       array to add this without a storage migration, and don't carry one yet.
+      Also owns the Settings → Thermocouples & Zones page remainder (per-band PID
+      gains/fitted model UI), merged here 2026-10-07 from section 6A.9.
 - [x] DONE: predicted ramp ceiling adoption. `autotune_engine_accept(opts, out)`, with
       `opts->adopt_ceiling` set (autotune_engine.c/.h), writes `max_ramp_c_per_hr` via the
       existing `zones_config_set_max_ramp()` when requested; `POST /api/autotune/accept`'s optional
@@ -1110,7 +1114,7 @@ overlays desired/actual/duty with guard trips marked; `GET /api/control`
 live status endpoint; CSV export of history and autotune traces (paginated
 after an early out-of-memory bug, see `docs/BRINGUP_HAZARDS.md`).
 
-- [ ] **Settings → Thermocouples & Zones page is only partially grown to
+- [x] **Settings → Thermocouples & Zones page is only partially grown to
       match this section.** Control mode, `max_temp_c`/`min_temp_c`, per-zone
       heater timing, and a working autotune card are on the page. Bang-bang
       hysteresis is DONE -- exposed per-timing-profile as
@@ -1124,6 +1128,8 @@ after an early out-of-memory bug, see `docs/BRINGUP_HAZARDS.md`).
       save; covered by `test_zones_type_toggle.js`. Still missing: per-band
       PID gains/fitted model (gain scheduling is unbuilt, 6A.4) -- the only
       remaining part of this line item.
+      MERGED 2026-10-07 into the "Gain scheduling by temperature band" item
+      (6A.4): that is now the single tracker; this checkbox is closed.
 - [x] **Per-relay `window_ms`/`min_on_ms`/`min_off_ms`** — CLOSED
       2026-09-20, deliberately kept per-zone, not implemented per-relay.
       `zones_config_json.h`'s `zone_cfg_t::heater_window_ms` comment (added
@@ -1135,9 +1141,8 @@ after an early out-of-memory bug, see `docs/BRINGUP_HAZARDS.md`).
       a multi-relay zone's single duty-cycle decision into independently
       timed sub-relay control, a control-path redesign, not a config/UI
       addition — out of scope for this line item.
-- [ ] The 2s dashboard polling is probably fine for all of this; revisit
-      push (WebSocket/SSE) only if watching a real firing proves otherwise
-      (same open item as section 2).
+- [x] The 2s dashboard polling revisit -- MERGED 2026-10-07 into the "Still
+      polled (2s), not pushed" item in section 2 (single tracker).
 
 ### 6A.10 Suggested build order
 
@@ -1327,9 +1332,10 @@ all above `0x200000` where nothing else lives. Rollback enabled
 (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`). `idf.py build` clean, no
 overlap/overflow.
 
-- [ ] **`esptool flash_id` never run** — size was confirmed via the board's
-      product page (N16R8) instead; the buy-list and 3D-model records (both
-      stale, claiming 8MB/N8R8) still need correcting at the source.
+- [x] **`esptool flash_id` never run** — CLOSED 2026-10-07: esptool is forbidden
+      by policy (`docs/agent_rules/BENCH.md`; OpenOCD only) and the N16R8 part is
+      known. (The buy-list and 3D-model records claiming 8MB/N8R8 were noted stale
+      here; not re-verified in this pass.)
 - [x] **Bootloader + partition table reflashed on the physical board** —
       2026-08-24 (the date this was directly observed; an earlier flash on
       2026-08-22 is likely but was not confirmed against this table), via
@@ -1339,8 +1345,9 @@ overlap/overflow.
       the app offset: 0x810000 is `factory`'s offset in this table, so this
       path has never written an OTA slot (see 9.2's note on what that means
       for rollback confirmation).
-- [ ] **Pre-change partition table archived** so a rollback to pre-OTA
-      firmware is possible — not done before the flash above.
+- [x] **Pre-change partition table archived** — MOOT 2026-10-07: the table was
+      redesigned (single-slot, `docs/OTA_SINGLE_SLOT_PLAN.md`) and flashed; there is
+      no pre-OTA table to roll back to.
 - [x] **One-time serial flash documented as a prerequisite step**, not a
       footnote. DONE — added a dedicated bullet to
       `firmware/KilnFW/docs/PROJECT_STATUS.md`'s "Current build/hardware
@@ -1348,9 +1355,11 @@ overlap/overflow.
       and pointing at `firmware/CommonFW/docs/UPDATE_PROTOCOL.md` §3, which
       already carried the underlying rationale but only as narrative prose,
       not a bring-up-checklist item.
-- [ ] **`nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` read out and archived from
-      the physical board with `esptool read_flash` before the new table is
-      ever flashed for real.** The one irreversible step in this whole plan.
+- [x] **`nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` archived with `esptool
+      read_flash` before the new table is flashed** — MOOT 2026-10-07: the new
+      table was flashed long ago, and esptool is forbidden by policy (OpenOCD
+      only); the step can no longer be done as written. Use `backup_export` for a
+      config backup.
 
 ### 9.1a PSRAM — enabled 2026-08-17
 
@@ -1367,9 +1376,9 @@ R2/no-PSRAM part would break the LCD memory plan.
 - [ ] **Second, weaker trigger**: TLS on the web server, or many concurrent
       HTTP connections — measure the heap before assuming either needs more
       PSRAM use.
-- [ ] **Keep GPIO 33-37 unassigned** — consumed by the R8 module's own PSRAM
-      regardless of software config. No conflict today (board uses 0-21,
-      38, 43, 44, 47, 48); keep it that way on any future pin assignment.
+Standing rule (not a task): keep GPIO 33-37 unassigned -- they are consumed by
+the R8 module's own PSRAM regardless of software config. No conflict today (board
+uses 0-21, 38, 43, 44, 47, 48); keep it that way on any future pin assignment.
 
 ### 9.2 Rollback
 
@@ -1389,11 +1398,14 @@ update). `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` deliberately left off.
       `boot_confirm_decide()` (`boot_guard.h`), skips that call on a factory
       boot with an explanatory INFO line instead — `boot_guard_mark_healthy()`
       still runs. OTA-slot boots are unchanged.
-- [ ] **Still not exercised end-to-end by anything on this bench**: the
-      JTAG path only ever writes `factory`, so the PENDING_VERIFY /
-      rollback-cancel machinery itself has only run in host tests
-      (`test_boot_guard.c`), never on real hardware. Exercising it requires an
-      actual OTA push into `ota_0`/`ota_1` (9.5), not another JTAG flash.
+- [ ] **Still not exercised end-to-end by anything on this bench** (re-checked
+      2026-10-07: no evidence in `docs/BENCH_TEST_LOG.md` or `logs/bench_test/`). The
+      PENDING_VERIFY / rollback-cancel machinery has only run in host tests
+      (`test_boot_guard.c`). Under the single-slot design
+      (`docs/OTA_SINGLE_SLOT_PLAN.md`) a direct push into the running `app` slot is
+      refused (OT-E01), so exercising it needs the recovery-image path
+      (`recovery_enter` -> `recovery_apply_staged` -> `recovery_exit`); that apply
+      has not been performed on the bench (the stage step only, BENCH_TEST_LOG).
 
 ### 9.3 Authentication — the AP password, not sent over the wire
 
@@ -1521,15 +1533,32 @@ note).
 
 ### 9.7 Verification
 
-None of the following has been performed — no ESP32-S3/Pico hardware in
-this environment.
+Superseded 2026-10-07 by the scripted OT matrix in
+`tools/PcTools/src/kilnctrl/bench_test/cases_ota.py`
+(`docs/BENCH_TEST_SYSTEM_PLAN.md` section 3.4; run with `bench_test_run(suite="ota")`
+or `ota_matrix_run`). Execution status, from `logs/bench_test/*ota*` (gitignored) and
+`docs/BENCH_TEST_LOG.md`, not from the matrix existing:
 
-- [ ] Power pulled mid-transfer, both processors — both still boot the old image
-- [ ] Corrupt image rejected, both processors
-- [ ] An image that boots but fails bring-up is rolled back with no intervention
-- [ ] Update attempted while firing: refused, blocker named
-- [ ] Wrong password: refused, locked out, logged
-- [ ] Recovery from a deliberately bricked Pico over SWD
+- [x] Corrupt image rejected (OT-E03 bad CRC, OT-E04 truncated, OT-E05 wrong build):
+      real-board PASS for the ESP push path, run `20261003T223938Z_ota_ot_410c346c_rerun`
+      (with OT-E01 self-push 409, OT-E09 no-credential, OT-E12 otadata state). Pico-side
+      corrupt-image refusal is not covered by an OT case.
+- [x] Update attempted while firing/autotune refused (OT-E07/OT-E08): real-board PASS,
+      run `20261005T160721Z_ota_bench20261005` (an earlier run `20261004T000619Z`
+      SKIPped both because no state was running).
+- [x] Dual reflash (OT-B01): PASS on hardware 2026-10-03, with the caveat that
+      `sw_reset_esp` does not latch S6a, so the "expected S6a trip" branch has not
+      been observed via this path.
+- [ ] Power pulled mid-transfer, both processors (OT-E06): attended case, never
+      executed to a verdict. Needs an operator.
+- [ ] An image that boots but fails bring-up is rolled back with no intervention:
+      no OT case exists for it; still open.
+- [ ] Recovery from a deliberately bricked Pico over SWD: blocked on the missing
+      CMSIS-DAP probe (2026-10-03, see the Pico debug-probe note in
+      `docs/BENCH_TEST_LOG.md`).
+- [x] ~~Wrong password: refused, locked out, logged~~ MOOT 2026-10-07: the AP-password
+      HMAC scheme was retired 2026-09-29 ("Retire; open when login off",
+      `docs/WEB_AUTH_PLAN.md` item 2b); OT-E09/E10 cover the web-auth gate instead.
 
 ## 10. LCD touchscreen GUI (Klipper-style screen)
 
@@ -1749,13 +1778,12 @@ place and costs nothing when unused.
 
 ### 10.5 Web/LCD parity rule
 
-- [ ] **Whenever either the LCD screen or the web interface changes,
-      consider whether the other should change too.** If the answer isn't
-      clear, ask the user rather than guessing; if it's clear-cut (e.g. a
-      new zone field needs to show up in both places), make the matching
-      change without asking. Applies to both directions — a web feature
-      added later needs the same consideration for the LCD, not just LCD
-      to web.
+Standing rule (not a task): whenever either the LCD screen or the web interface
+changes, consider whether the other should change too. If the answer isn't clear,
+ask the user rather than guessing; if it's clear-cut (e.g. a new zone field needs
+to show up in both places), make the matching change without asking. Applies in
+both directions -- a web feature added later needs the same consideration for the
+LCD, not just LCD to web.
 
 ### 10.6 Web dashboard restyle to match the LCD
 
@@ -1851,11 +1879,11 @@ are deliberately not wired to it yet — needs the per-channel CT-mapping
 commissioning check on real hardware first (`SaftyFW/docs/CURRENT_SENSE.md`
 sec 5).
 
-- [ ] **Not hardware-verified, and cannot be from this environment.** No
-      ESP32-S3/Pico is attached, and the isolated link doesn't pass a byte
-      end-to-end on the real board (`ROADMAP.md` M0) — every field reads
-      `null`/"---" today by design, not by bug. Needs both M0 (link fixed)
-      and a live Pico emitting Frame A/Frame E.
+- [ ] **Not verified against the live Pico's Frame A/Frame E fields.** The
+      M0 half is CLOSED 2026-10-07: the isolated link has passed bytes
+      end-to-end since 2026-08-23 (`ROADMAP.md` M0) and the bench board has a Pico
+      attached. What remains is confirming on hardware that each field on this
+      page shows the live value rather than `null`/"---".
 
 ### 10.11 Liveness: 1.5 s fault, 30 s firing-abort (ROADMAP.md M6)
 
@@ -1869,8 +1897,9 @@ records the end) rather than a new mechanism.
 - [ ] **Not hardware-timing-verified.** No ESP32-S3/Pico is attached — whether
       the fault really asserts at 1.5s and the abort at 30s on real hardware
       is unverified; this closes the code gap, not the timing-verified gap.
-      `safety_link_is_stale()` is a pure function that could be host-tested
-      but lives in an ESP-IDF-only header today — left as a follow-up.
+      (Host-test part CLOSED 2026-10-07: `safety_link_is_stale()` is covered by
+      `App/test/test_safety_link.c` -- threshold boundary at 1500/1501/1499 ms --
+      and `App/test/test_safety_watchdog.c`.)
 
 ### 10.12 ESP → Pico context broadcast, `SAFETY_CMD_PUSH_CONTEXT` (ROADMAP.md M5)
 
@@ -1901,11 +1930,10 @@ purely from the cache. This closes "the ESP can receive and decode these
 frames" — SaftyFW does not send either frame yet (tracked in
 `firmware/SaftyFW/TODO.md`).
 
-- [ ] **Not hardware-verified, and cannot be from this environment.** No
-      ESP32-S3/Pico is attached — `safety_apply_diag()`/`safety_apply_trip_
-      event()` have never decoded a frame that actually crossed the wire,
-      only a clean cross-compile. Needs both the link fixed (M0) and a
-      SaftyFW build that sends Frame B/D.
+- [ ] **Not verified on the wire.** The M0 half is CLOSED 2026-10-07 (link
+      passes bytes end-to-end since 2026-08-23, `ROADMAP.md` M0). Still open:
+      `safety_apply_diag()`/`safety_apply_trip_event()` decoding a real Frame B/D
+      from a SaftyFW build that sends them (not re-checked in this pass).
 - [x] **`pc_tools`/MCP client-side decode of the two new GET_DIAG/
       GET_TRIP_EVENT subcommands is not built** — DONE 2026-09-22:
       `tools/PcTools/src/kilnctrl/devices_safety.py`'s `parse_safety_response()`
@@ -2004,13 +2032,17 @@ suspected to be related to this work, was root-caused separately (also in
       (slice 4); and factory reset/cfgfs format (slice 5) — each wired into
       the callers' existing single choke points ahead of
       `readiness_gate.h`/the owner locks, never replacing them.
-- [ ] `profile_executor.c`/`relay_authority.c` gaining the same
-      `relay_owner.c`-style queue is a candidate once the web/LCD callers
-      that drive them are migrated — not urgent (current call pattern
-      hasn't been observed to freeze anything).
-- [ ] `ui_page_network.c`'s three job structs are candidates to migrate onto
-      `wifi_prov`'s real owner queue once a shared async shape exists,
-      rather than staying page-local one-offs.
+#### Design notes / not planned (2026-10-07)
+
+Not scheduled, kept for context; reopen only if a real freeze or race is observed.
+
+- `profile_executor.c`/`relay_authority.c` gaining the same
+  `relay_owner.c`-style queue is a candidate once the web/LCD callers
+  that drive them are migrated -- not urgent (current call pattern
+  hasn't been observed to freeze anything).
+- `ui_page_network.c`'s three job structs are candidates to migrate onto
+  `wifi_prov`'s real owner queue once a shared async shape exists,
+  rather than staying page-local one-offs.
 
 ## 11. PC-link command acknowledgement (moved from ROADMAP.md 2026-08-24)
 
