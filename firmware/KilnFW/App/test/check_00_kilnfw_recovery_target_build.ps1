@@ -69,6 +69,7 @@ $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\lib_safe_remove.ps1")
 
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")
 $repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
@@ -147,7 +148,7 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
             continue
         }
         Write-Host "Pruning stale build directory $($stale.FullName) -- its tree '$owner' no longer exists"
-        Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-TreeSafe -Path $stale.FullName
     } finally {
         if ($staleHeld) {
             try { $staleMutex.ReleaseMutex() } catch { }

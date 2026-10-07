@@ -139,6 +139,7 @@ $ErrorActionPreference = "Continue"
 # against another tree's build directory.
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\lib_safe_remove.ps1")
 
 # This file lives at firmware/KilnFW/App/test/ -- four levels below repo root.
 # -LiteralPath: Resolve-Path glob-expands otherwise, so a tree path containing
@@ -412,9 +413,10 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
             continue
         }
         Write-Host "Pruning stale build worktree $($stale.FullName) -- its tree '$owner' no longer exists"
+        Remove-ReparsePointsUnder -Path $stale.FullName | Out-Null
         & git -C $repoRoot worktree remove --force $stale.FullName 2>&1 | Write-Host
         if ([System.IO.Directory]::Exists($stale.FullName)) {
-            Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-TreeSafe -Path $stale.FullName
         }
         & git -C $repoRoot worktree prune 2>&1 | Write-Host
     } finally {

@@ -149,6 +149,10 @@ if ($Remove) {
         Write-Host $porcelain
     }
 
+    # Strip junctions/symlinks (e.g. a .venv junction into the main tree) as links
+    # BEFORE git recurses; see tools\lib_safe_remove.ps1 for the 2026-10-07 incident.
+    . (Join-Path $PSScriptRoot "lib_safe_remove.ps1")
+    foreach ($l in (Remove-ReparsePointsUnder -Path $full)) { Write-Host "unlinked reparse point (target untouched): $l" }
     git -C $repoRoot worktree remove $full --force *>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: git worktree remove failed for '$full'." -ForegroundColor Red
