@@ -714,9 +714,13 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * gains (above) and the model (just above) are both already persisted --
      * a quality record attached to a model that failed to save would
      * describe a fit the zone isn't actually running. zones_config_set_pid()
-     * already invalidated any PRIOR record unconditionally the moment it ran
-     * (see that function's own comment), so this call is what re-establishes
-     * a fresh one for the run that just completed; a failure here is logged,
+     * invalidated any PRIOR record when the gains changed beyond
+     * zones_config_gain_changed()'s tolerance (see that function's own
+     * comment), so this call is what re-establishes a fresh one for the run
+     * that just completed. Edge: if the accepted gains equal the stored ones
+     * within tolerance, set_pid leaves the old record valid, and a failure of
+     * set_tuning_quality below then leaves that old record standing (it still
+     * describes gains equal within tolerance to the live ones); a failure here is logged,
      * not propagated, for the exact same reason the model-persist failure
      * just above isn't -- the gains and model the operator actually clicked
      * Accept for are already live either way. */

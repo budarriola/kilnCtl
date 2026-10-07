@@ -432,45 +432,15 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * a STALE one). Carry the old record through by default, then
      * invalidate ONLY on an actual gain change.
      *
-     * Tolerance, not exact equality, for the change check: GET /api/zones
-     * used to emit pid_kp/ki/kd at %.4f, so an ordinary read-back-and-repost
-     * round trip through the page's own form fields lost precision below
-     * the 4th decimal place -- an exact `!=` here would have invalidated a
-     * good record on every single resave, even one that changes nothing
-     * about the gains at all. 2026-09-28: GET /api/zones now emits these at
-     * %.9g (zones_http_get.c), lossless for a float32, so an ordinary round
-     * trip no longer loses precision at all -- but a FIXED absolute
-     * tolerance was still wrong at the other end of the range: for a
-     * small-gain zone (a tuned Ki like 0.000034) a real operator edit to,
-     * say, 0.00005 is inside 0.0001 and would NOT invalidate the tuning
-     * record, silently keeping a stale record for a gain that actually
-     * changed by ~50%. 2026-09-28 follow-up: switched to a relative
-     * tolerance, `1e-6f + 1e-5f*fabsf(cur)`, and the `1e-5f*fabsf(cur)` term
-     * scales with the gain so a small-Ki edit like the one above is no
-     * longer swallowed. A %.9g repost (the web pages' JS-number repost and
-     * PcTools' repr(float) repost both carry the %.9g digits through
-     * unchanged) reparses BIT-EXACT for every finite float32 -- 9
-     * significant digits put the decimal within 5e-9 relative of the float,
-     * far inside float32's >= 2.98e-8 relative half-ULP, so even a strtof
-     * implemented as strtod-then-cast cannot land on a neighbour -- so the
-     * delta on an unedited gain is exactly 0 and both terms are margin, not
-     * noise absorption (test_gain_round_trip_at_9g_never_invalidates_any_
-     * magnitude). The `1e-6f` floor is defence in depth for a client that
-     * reposts with a few ULP of error; its cost is that an edit smaller
-     * than 1e-6 absolute (a ~3% change on Ki = 3.4e-5) still does not
-     * invalidate.
-     *
-     * Deliberate behavior change for a client that still round-trips gains
-     * through %.4f (none in this tree as of 2026-09-28: zones_page.html,
-     * setup_wizard_page.html, safety_config_page.html and
-     * zones_http_client.py all repost the GET value unrounded): the old
-     * 0.0001 absolute tolerance always exceeded %.4f's 5e-5 rounding, so
-     * such a repost never cleared tuning_valid. It now can for any gain
-     * below ~5, which covers every real bench gain (presets carry Kp
-     * ~0.03-0.06, Ki ~1e-4, Kd ~1). That is the honest outcome, not
-     * collateral damage: such a client really does change the stored gain
-     * (a Ki of 3.4e-5 reposted as 0.0000 is zeroed), and a tuning-quality
-     * record describing gains that are no longer stored should not stand. */
+     * "Gain changed" is zones_config_gain_changed() (zones_config_accessors.h,
+     * which carries the tolerance rationale), the same helper
+     * zones_config_set_pid_no_save() uses, so both paths agree. A tolerance
+     * rather than `!=` because a repost through a lossy client (the old %.4f
+     * GET) must not invalidate a good record on every resave; a client that
+     * still rounds to %.4f does clear it for any gain below ~5, which is the
+     * honest outcome (a Ki of 3.4e-5 reposted as 0.0000 really is zeroed;
+     * test_gain_round_trip_at_9g_never_invalidates_any_magnitude covers the
+     * lossless %.9g path). */
     z->tuning_valid = current_z->tuning_valid;
     z->tuning_method = current_z->tuning_method;
     z->tuning_rule = current_z->tuning_rule;
@@ -518,9 +488,9 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
      * zone and persisted the clear to NVS -- a reset-one-side defect, the
      * enable side having no idea the save happened. */
     z->adaptive_tune_enabled = current_z->adaptive_tune_enabled;
-    if (fabsf(z->pid_kp - current_z->pid_kp) > (1e-6f + 1e-5f * fabsf(current_z->pid_kp)) ||
-        fabsf(z->pid_ki - current_z->pid_ki) > (1e-6f + 1e-5f * fabsf(current_z->pid_ki)) ||
-        fabsf(z->pid_kd - current_z->pid_kd) > (1e-6f + 1e-5f * fabsf(current_z->pid_kd))) {
+    if (zones_config_gain_changed(current_z->pid_kp, z->pid_kp) ||
+        zones_config_gain_changed(current_z->pid_ki, z->pid_ki) ||
+        zones_config_gain_changed(current_z->pid_kd, z->pid_kd)) {
         z->tuning_valid = 0;
     }
     snprintf(key, sizeof(key), "z%u_ramp", i);

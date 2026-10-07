@@ -512,11 +512,9 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     return true;
 }
 
-/* Relative-tolerance gain comparison, identical to zones_http_post_parse.c's
- * whole-page check (see the rationale there). */
-static bool gain_changed(float cur, float neu)
+bool zones_config_gain_changed(float cur, float next)
 {
-    return fabsf(neu - cur) > (1e-6f + 1e-5f * fabsf(cur));
+    return fabsf(next - cur) > (1e-6f + 1e-5f * fabsf(cur));
 }
 
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
@@ -538,12 +536,12 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
         return false;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
-    /* Judged BEFORE the stores below overwrite the old values. Same relative
-     * tolerance as the whole-page POST /api/zones path
-     * (zones_http_post_parse.c's gain-change check, which carries the
-     * rationale), so both paths agree on what "the gains changed" means. */
-    const bool gains_changed = gain_changed(z->pid_kp, kp) || gain_changed(z->pid_ki, ki) ||
-                               gain_changed(z->pid_kd, kd);
+    /* Judged BEFORE the stores below overwrite the old values. Uses
+     * zones_config_gain_changed(), the same helper the whole-page POST
+     * /api/zones path uses (which carries the rationale), so both paths
+     * agree on what "the gains changed" means. */
+    const bool gains_changed = zones_config_gain_changed(z->pid_kp, kp) || zones_config_gain_changed(z->pid_ki, ki) ||
+                               zones_config_gain_changed(z->pid_kd, kd);
     z->pid_kp = kp;
     z->pid_ki = ki;
     z->pid_kd = kd;

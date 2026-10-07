@@ -772,6 +772,21 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd);
 
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd);
 
+/* The one definition of "this PID gain changed", shared by
+ * zones_config_set_pid()/_no_save() (which clear zone_cfg_t::tuning_valid on a
+ * change) and the whole-page POST /api/zones parser
+ * (zones_http_post_parse.c), so the two write paths cannot disagree.
+ * True when |next - cur| > 1e-6 + 1e-5*|cur| (cur = the stored gain).
+ *
+ * Why this shape: GET /api/zones emits gains at %.9g, which round-trips every
+ * finite float32 bit-exactly, so an unedited repost has delta exactly 0 and
+ * the tolerance is margin, not noise absorption. The relative term keeps a
+ * small-gain edit visible (a fixed absolute tolerance swallowed a ~50% Ki edit
+ * at Ki = 3.4e-5). The 1e-6 absolute floor is defence in depth for a client
+ * that reposts with a few ULP of error; it costs about 1% at Ki = 1e-4, i.e.
+ * an edit smaller than that does not invalidate the tuning record. */
+bool zones_config_gain_changed(float cur, float next);
+
 /* The FOPDT plant model autotune fitted for this zone (TODO.md 6A.4),
  * persisted so TODO.md 6A.2's feedforward term
  * u_ff = (T_sp - T_ambient)/K_dc + (dT_sp/dt)*tau/K_dc has something to
@@ -915,8 +930,9 @@ bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *
  * STEP-method run's gains AND plant model are both already persisted (never
  * before either, and never for a RELAY-method run, which measures no FOPDT
  * model to attach a quality record to). q->valid must be true (a caller
- * wanting to CLEAR the record uses zones_config_set_pid(), which already
- * invalidates it -- see that function's own comment; this setter only ever
+ * wanting to CLEAR the record uses zones_config_set_pid(), which invalidates
+ * it only when a gain changed beyond zones_config_gain_changed()'s tolerance
+ * -- see that function's own comment; this setter only ever
  * writes a populated record, refusing q==NULL/q->valid==false rather than
  * silently accepting a "set but empty" record that would be indistinguishable
  * from a genuine all-zero fit). Bumps and stores its own tuning_seq (the
@@ -929,8 +945,9 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
 
 /* Sets zone_cfg_t::tuning_valid back to 1 WITHOUT touching any other tuning_*
  * field or tuning_seq. Only for undoing zones_config_set_pid_no_save()'s
- * unconditional invalidation when a restore re-applies the identical record
- * (backup_import.c). Refused (false) ONLY for a bad zone index. It does NOT
+ * invalidation (which happens only when a gain changed beyond
+ * zones_config_gain_changed()'s tolerance) when a restore re-applies the
+ * identical record (backup_import.c). Refused (false) ONLY for a bad zone index. It does NOT
  * check that a stored record exists (tuning_valid 0 because set_pid just
  * invalidated it and tuning_valid 0 because the record was never populated
  * are indistinguishable here), so the caller must only call this after

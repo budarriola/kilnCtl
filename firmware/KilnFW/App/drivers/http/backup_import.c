@@ -2242,10 +2242,13 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     zones_config_get_full_copy(&zones_snapshot);
     /* Judge "does the file's tuning record equal the live one" NOW, before
      * the loop below runs. zones_config_set_pid_no_save() invalidates the
-     * zone's tuning record (tuning_valid = 0) on every gain change, so a
-     * compare made after it always reads "not valid" and a restore of an
-     * unchanged backup would re-commit the record and bump tuning_seq (and
-     * with it the active kiln_config's pkg_hash). 2026-10-05 bench finding:
+     * zone's tuning record (tuning_valid = 0) when a gain changes beyond
+     * zones_config_gain_changed()'s tolerance (equal-within-tolerance gains
+     * leave it standing), so a compare made after it reads "not valid"
+     * whenever the file's gains differ from the live ones, and a restore of
+     * such a backup would re-commit the record and bump tuning_seq (and
+     * with it the active kiln_config's pkg_hash) even when the record is
+     * unchanged. 2026-10-05 bench finding:
      * the earlier fix compared at commit time, after set_pid, and was inert
      * on hardware. */
     for (size_t i = 0; i < zone_candidate_count; i++) {

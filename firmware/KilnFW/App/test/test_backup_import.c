@@ -39,6 +39,7 @@
 // other two through test_stub_zones_set_thermo_count()/
 // test_stub_zones_set_max_ramp(), two small hooks added to
 // test_profile_feasibility.c for exactly this cross-file sharing.
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -1399,14 +1400,29 @@ void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)
 // own pass 1 has already validated everything by the time pass 2 calls
 // these). ----
 
-/* Models zones_config_set_pid_no_save()'s unconditional tuning_valid = 0
- * (zones_config_accessors.c) -- the real setter clears the record on EVERY
- * gain change, which the earlier stub omitted and so let a commit-time
- * "matches live" compare pass here while failing on hardware. */
-static void stub_invalidate_tuning_record(uint8_t zi)
+/* This binary links test stubs, not zones_config_accessors.c, so the shared
+ * tolerance helper is stubbed with the same formula (the real one is covered
+ * through the real accessor in test_zones_http.c). */
+bool zones_config_gain_changed(float cur, float next)
 {
+    return fabsf(next - cur) > (1e-6f + 1e-5f * fabsf(cur));
+}
+
+/* Models zones_config_set_pid_no_save()'s tuning_valid = 0 (zones_config_
+ * accessors.c): the real setter clears the record only when a gain changes
+ * beyond zones_config_gain_changed()'s tolerance versus the stored gains, and
+ * leaves it standing for equal-within-tolerance gains. The earlier stub
+ * invalidated unconditionally (a mirror false-green: it made the identity
+ * round trip look like it exercised the reinstate path when the real setter
+ * never invalidates there). Must run BEFORE the s_writes[] gains are
+ * overwritten, so the live gains are the pre-write ones. */
+static void stub_invalidate_tuning_record_if_gains_changed(uint8_t zi, float kp, float ki, float kd)
+{
+    const bool changed = zones_config_gain_changed(s_writes[zi].kp, kp) ||
+                         zones_config_gain_changed(s_writes[zi].ki, ki) ||
+                         zones_config_gain_changed(s_writes[zi].kd, kd);
     zone_tuning_quality_t cur;
-    if (zones_config_get_tuning_quality(zi, &cur) && cur.valid) {
+    if (changed && zones_config_get_tuning_quality(zi, &cur) && cur.valid) {
         cur.valid = false;
         test_stub_zones_set_full_tuning_quality(zi, &cur);
     }
@@ -1415,22 +1431,22 @@ static void stub_invalidate_tuning_record(uint8_t zi)
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
+    stub_invalidate_tuning_record_if_gains_changed(zone_index, kp, ki, kd);
     s_writes[zone_index].set_pid_called = true;
     s_writes[zone_index].kp = kp;
     s_writes[zone_index].ki = ki;
     s_writes[zone_index].kd = kd;
-    stub_invalidate_tuning_record(zone_index);
     g_total_write_calls++;
     return true;
 }
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
+    stub_invalidate_tuning_record_if_gains_changed(zone_index, kp, ki, kd);
     s_writes[zone_index].set_pid_called = true;
     s_writes[zone_index].kp = kp;
     s_writes[zone_index].ki = ki;
     s_writes[zone_index].kd = kd;
-    stub_invalidate_tuning_record(zone_index);
     g_total_write_calls++;
     return true;
 }
@@ -4866,19 +4882,17 @@ static void test_import_refuses_duplicate_zone_index(void)
 // ---------------------------------------------------------------------------
 // 2026-10-05 bench round trip (kilnctl_backup_20261005T071413Z.json ->
 // import -> ...071420Z.json): the fix above was inert on hardware, zones 1 and
-// 2's tuning_seq still went 13 -> 14. Cause: the commit loop calls
-// zones_config_set_pid_no_save() (which sets tuning_valid = 0 on every gain
-// change) BEFORE the tuning compare, so the compare always saw an invalid live
-// record. The stubs now model that invalidation; this test uses the two real
-// zones' tuning blocks from that bench file, with live values at full float
-// precision, and requires seq unchanged AND the record valid afterwards.
+// 2's tuning_seq still went 13 -> 14. Cause: when the file's gains differ from
+// the live ones, the commit loop's zones_config_set_pid_no_save() sets
+// tuning_valid = 0 BEFORE the tuning compare, so a commit-time compare always
+// saw an invalid live record. The stubs model that invalidation (only when a
+// gain changes beyond zones_config_gain_changed()'s tolerance, as the real
+// setter does). Two tests: an identity round trip (gains equal, set_pid never
+// invalidates, record untouched) and a gains-differ case where the record
+// really is invalidated mid-commit and `reinstate` must run.
 // ---------------------------------------------------------------------------
-static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
+static void seed_bench_tuning_records(void)
 {
-    TEST_SECTION("backup_import_apply -- identity round trip with the bench's real tuning blocks "
-                 "(zones 1 and 2): tuning_seq unchanged, record still valid after set_pid's invalidation");
-    reset_stub_state();
-
     static const struct { float base, amb, raw, inf; } bench[2] = {
         { 36.3667f, 37.0f, 15.5333f, 16.1982f },
         { 35.3281f, 36.1562f, 16.5719f, 16.9253f },
@@ -4904,6 +4918,15 @@ static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
         /* seeded after set_pid so the record is valid going into the export */
         TEST_CHECK(s_writes[zi].tuning_seq == 1, "seeded once");
     }
+}
+
+static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
+{
+    TEST_SECTION("backup_import_apply -- identity round trip with the bench's real tuning blocks "
+                 "(zones 1 and 2): gains equal so set_pid never invalidates; tuning_seq unchanged, "
+                 "record still valid");
+    reset_stub_state();
+    seed_bench_tuning_records();
 
     esp_err_t err = run_export();
     TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
@@ -4913,10 +4936,53 @@ static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
     for (uint8_t zi = 1; zi <= 2; zi++) {
         zone_tuning_quality_t after;
         TEST_CHECK(zones_config_get_tuning_quality(zi, &after) && after.valid,
-                  "tuning record is valid again after the restore (set_pid invalidated it mid-commit)");
+                  "tuning record is still valid after an identity restore");
         TEST_CHECK(s_writes[zi].tuning_seq == 1, "tuning_seq did not move on an identity restore");
-        TEST_CHECK(after.baseline_c == bench[zi - 1].base, "live float not rewritten at export precision");
     }
+}
+
+static void test_import_gains_differ_invalidates_then_reinstates_matching_record(void)
+{
+    TEST_SECTION("backup_import_apply -- file gains differ from live gains but the tuning record is "
+                 "identical: set_pid invalidates mid-commit and reinstate restores it, tuning_seq unchanged");
+    reset_stub_state();
+    seed_bench_tuning_records();
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    char *body = s_export_body ? strdup(s_export_body) : NULL;
+    TEST_CHECK(body != NULL, "copy the export (file gains: zone 1/2 kp = 1.0)");
+    if (!body) {
+        return;
+    }
+
+    /* Move the LIVE gains away from the file's (a real edit, so set_pid
+     * invalidates), then put the identical record back, valid, at the same
+     * seq: live record == file record, live gains != file gains. */
+    for (uint8_t zi = 1; zi <= 2; zi++) {
+        zone_tuning_quality_t before;
+        TEST_CHECK(zones_config_get_tuning_quality(zi, &before) && before.valid, "setup: record valid");
+        const uint32_t seq_before = (uint32_t)s_writes[zi].tuning_seq;
+        zones_config_set_pid(zi, 2.0f, 0.0f, 0.0f);
+        zone_tuning_quality_t mid;
+        TEST_CHECK(zones_config_get_tuning_quality(zi, &mid) && !mid.valid,
+                  "setup: a real gain change invalidated the record");
+        test_stub_zones_set_full_tuning_quality(zi, &before);
+        TEST_CHECK((uint32_t)s_writes[zi].tuning_seq == seq_before, "setup: seq untouched");
+    }
+
+    char import_err[256];
+    TEST_CHECK(test_backup_import_apply(body, import_err, sizeof(import_err)),
+              "importing the differing-gains export must succeed");
+    for (uint8_t zi = 1; zi <= 2; zi++) {
+        float kp, ki, kd;
+        zone_tuning_quality_t after;
+        TEST_CHECK(zones_config_get_pid(zi, &kp, &ki, &kd) && kp == 1.0f, "file gains were applied");
+        TEST_CHECK(zones_config_get_tuning_quality(zi, &after) && after.valid,
+                  "record reinstated after set_pid's invalidation");
+        TEST_CHECK(s_writes[zi].tuning_seq == 1, "tuning_seq did not move (reinstate, not re-commit)");
+    }
+    free(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -6294,6 +6360,7 @@ void run_test_backup_import(void)
     test_import_of_identical_tuning_quality_does_not_bump_seq();
     test_import_refuses_duplicate_zone_index();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
+    test_import_gains_differ_invalidates_then_reinstates_matching_record();
     test_timing_profiles_bundle_round_trips_nonempty();
     test_export_preserves_coupling_matrix_when_a_zone_is_on_off();
     test_import_tau_only_cell_preserves_coeff_touching_on_off_zone();

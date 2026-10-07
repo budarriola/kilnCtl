@@ -7722,6 +7722,75 @@ static void test_zones_config_set_pid_invalidates_tuning_quality(void)
     nvs_test_clear();
 }
 
+// Setter-path boundary of zones_config_gain_changed(): the tolerance is
+// |next - cur| > 1e-6 + 1e-5*|cur|, cur = the STORED gain. Drives the real
+// zones_config_set_pid()/_no_save() (the narrow POST /api/zones/pid, autotune,
+// LCD and backup-import path), not the whole-page parser the sibling
+// round-trip test covers. Boundary pairs sit ~10% inside/outside the
+// tolerance so float32 rounding cannot flip them.
+static bool gain_edit_keeps_record(bool use_no_save, float kp0, float ki0, float kd0, float kp1, float ki1,
+                                   float kd1)
+{
+    const zone_tuning_quality_t q = {
+        .valid = true, .method = 0, .rule = 0,
+        .settled = true, .extrapolation_converged = true, .tau_consistent = true,
+        .baseline_c = 25.0f, .step_ambient_c = 25.0f, .raw_rise_c = 50.0f, .rise_inf_c = 50.0f,
+    };
+    /* Establish the stored gains (this itself may invalidate), then a fresh valid record. */
+    TEST_CHECK(zones_config_set_pid(1, kp0, ki0, kd0), "boundary setup: store the starting gains");
+    TEST_CHECK(zones_config_set_tuning_quality(1, &q), "boundary setup: record set after the gains");
+    zone_tuning_quality_t pre = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &pre) && pre.valid, "boundary setup: record reads valid");
+    const bool ok = use_no_save ? zones_config_set_pid_no_save(1, kp1, ki1, kd1)
+                                : zones_config_set_pid(1, kp1, ki1, kd1);
+    TEST_CHECK(ok, "boundary: the edit itself succeeds");
+    zone_tuning_quality_t post = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &post), "boundary: getter succeeds");
+    return post.valid;
+}
+
+static void test_zones_config_set_pid_gain_tolerance_boundaries(void)
+{
+    TEST_SECTION("zones_config_set_pid()/_no_save() tolerance boundary -- just inside keeps the tuning "
+                 "record, just outside clears it, the 1e-6 floor dominates a small Ki, a Ki-only edit counts");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    for (int ns = 0; ns < 2; ns++) {
+        const bool no_save = ns != 0;
+        // Kp = 1.0: tolerance 1e-6 + 1e-5 = 1.1e-5. Inside +1.0e-5, outside +1.3e-5.
+        TEST_CHECK(gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.00001f, 0.5f, 3.0f),
+                  "Kp +1.0e-5 on Kp=1 (inside 1.1e-5) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.000013f, 0.5f, 3.0f),
+                  "Kp +1.3e-5 on Kp=1 (outside 1.1e-5) clears the record");
+        // Kd = 3: tolerance 1e-6 + 3e-5 = 3.1e-5. Inside +2.8e-5, outside +3.5e-5 (Kd-only).
+        TEST_CHECK(gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.0f, 0.5f, 3.000028f),
+                  "Kd +2.8e-5 on Kd=3 (inside 3.1e-5) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.0f, 0.5f, 3.000035f),
+                  "Kd +3.5e-5 on Kd=3 (outside 3.1e-5) clears the record");
+        // Small Ki = 1e-4: the relative term is 1e-9, so the 1e-6 floor sets the tolerance
+        // (1.001e-6). +0.9e-6 (0.9%) is inside, +1.2e-6 (1.2%) is outside.
+        TEST_CHECK(gain_edit_keeps_record(no_save, 1.0f, 1.0e-4f, 3.0f, 1.0f, 1.009e-4f, 3.0f),
+                  "Ki +0.9e-6 on Ki=1e-4 (floor-dominated tolerance 1.001e-6) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 1.0f, 1.0e-4f, 3.0f, 1.0f, 1.012e-4f, 3.0f),
+                  "Ki +1.2e-6 on Ki=1e-4 (outside the floor) clears the record");
+        // A Ki-only change, large and visible: Kp/Kd identical, only Ki moves.
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 12.0f, 0.5f, 3.0f, 12.0f, 0.6f, 3.0f),
+                  "a Ki-only change (0.5 -> 0.6, Kp/Kd identical) clears the record");
+        // The tolerance is relative to the STORED gain, not the new one: a large Kp is
+        // forgiving by 1e-5*|cur| (Kp=100 -> 1.001e-3), so +5e-4 is inside, +2e-3 outside.
+        TEST_CHECK(gain_edit_keeps_record(no_save, 100.0f, 0.5f, 3.0f, 100.0005f, 0.5f, 3.0f),
+                  "Kp +5e-4 on Kp=100 (inside 1.001e-3) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 100.0f, 0.5f, 3.0f, 100.002f, 0.5f, 3.0f),
+                  "Kp +2e-3 on Kp=100 (outside 1.001e-3) clears the record");
+    }
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // ZONES_CFG_VERSION 12->13: a v12 blob (predates the tuning-quality record
 // entirely) must migrate cleanly, with every tuning_* field reading as
 // UNKNOWN (tuning_valid == false) rather than a value indistinguishable
@@ -15852,6 +15921,7 @@ void run_test_zones_http(void)
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
     test_small_ki_edit_tolerance_is_relative_not_absolute();
     test_gain_round_trip_at_9g_never_invalidates_any_magnitude();
+    test_zones_config_set_pid_gain_tolerance_boundaries();
     test_in_range_zone_thermo_mask_legacy_fallback_unchanged();
     test_old_behaviour_would_have_zeroed_it();
 
