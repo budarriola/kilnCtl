@@ -118,6 +118,24 @@ cfg_fs_format_gate_verdict_t cfg_fs_format_gate_conclude(const cfg_fs_format_gat
 void cfg_fs_format_gate_describe(const cfg_fs_format_gate_t *gate, cfg_fs_format_gate_verdict_t verdict,
                                   char *buf, size_t buf_cap);
 
+/* POST /api/cfgfs/format_confirm decision (pure, host-tested). Since the NVS
+ * dual-write close (docs/CONFIG_FILESYSTEM.md) a mounted `cfg` partition is
+ * the ONLY writable copy of zones/profiles/preferences, so formatting a
+ * healthy one loses data nothing else mirrors. The route therefore refuses
+ * unless cfg is genuinely unusable (not mounted: the needs-format path this
+ * route exists for), or the caller passed the explicit override
+ * `force_healthy=1`. Recovery mode skipped the mount on purpose and is
+ * refused unconditionally, override or not (the partition still holds the
+ * config). Recovery takes precedence over the healthy check. */
+typedef enum {
+    CFG_FS_FORMAT_CONFIRM_ALLOW = 0,        /* go ahead and format */
+    CFG_FS_FORMAT_CONFIRM_REFUSE_RECOVERY,  /* recovery mode skipped the mount -- never format */
+    CFG_FS_FORMAT_CONFIRM_REFUSE_HEALTHY,   /* mounted and usable, no override -- refuse */
+} cfg_fs_confirm_decision_t;
+
+cfg_fs_confirm_decision_t cfg_fs_confirm_decide(bool mounted, bool skipped_for_recovery,
+                                                              bool force_healthy);
+
 #ifdef __cplusplus
 }
 #endif

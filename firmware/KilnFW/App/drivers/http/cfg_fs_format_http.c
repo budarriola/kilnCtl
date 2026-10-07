@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h" /* cfg_fs_skipped_for_recovery() -- recovery-mode refusal below */
+#include "cfg_fs_format_gate.h" /* cfg_fs_confirm_decide() */
 #include "cfg_fs_mount.h"
 #include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
                         * carry under OTA_HTTP_CONTEXT_FACTORY_RESET was retired 2026-09-29 */
@@ -70,12 +71,34 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
      * up-to-date config, so formatting it from here would erase every saved
      * setting for nothing. Leave recovery mode first; a genuinely damaged
      * partition then shows up as pending in normal mode. */
-    if (cfg_fs_skipped_for_recovery()) {
+    /* Optional explicit override: ?force_healthy=1 (query string; the body is
+     * unused). Anything but "1" is no override. */
+    bool force_healthy = false;
+    {
+        char query[32];
+        char val[4];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+            httpd_query_key_value(query, "force_healthy", val, sizeof(val)) == ESP_OK) {
+            force_healthy = (strcmp(val, "1") == 0);
+        }
+    }
+
+    cfg_fs_confirm_decision_t decision = cfg_fs_confirm_decide(
+        cfg_fs_get_status() == CFG_FS_STATUS_MOUNTED, cfg_fs_skipped_for_recovery(), force_healthy);
+    if (decision == CFG_FS_FORMAT_CONFIRM_REFUSE_RECOVERY) {
         ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused, recovery mode skipped the mount", ip);
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, "refused: cfg is not mounted because the board is in recovery mode; it still holds "
                                 "the saved config. Leave recovery mode (POST /api/ota/esp/recovery_exit) instead "
                                 "of formatting.");
+        return ESP_OK;
+    }
+    if (decision == CFG_FS_FORMAT_CONFIRM_REFUSE_HEALTHY) {
+        ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused, cfg is mounted and healthy (no force_healthy)", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "refused: cfg is mounted and healthy, and is the only copy of the saved zones, "
+                                "profiles and preferences; formatting would erase them. To format anyway, repeat "
+                                "the request as POST /api/cfgfs/format_confirm?force_healthy=1");
         return ESP_OK;
     }
 

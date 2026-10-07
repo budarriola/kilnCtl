@@ -346,8 +346,28 @@ static void test_too_short_to_hold_two_blocks_refuses(void)
                "fewer than two full metadata blocks read back refuses rather than guessing blank");
 }
 
+static void test_format_confirm_decision(void)
+{
+    /* args: mounted, skipped_for_recovery, force_healthy */
+    TEST_CHECK(cfg_fs_confirm_decide(true, false, false) == CFG_FS_FORMAT_CONFIRM_REFUSE_HEALTHY,
+               "healthy mounted cfg without override is refused");
+    TEST_CHECK(cfg_fs_confirm_decide(true, false, true) == CFG_FS_FORMAT_CONFIRM_ALLOW,
+               "healthy mounted cfg WITH force_healthy is allowed");
+    TEST_CHECK(cfg_fs_confirm_decide(false, false, false) == CFG_FS_FORMAT_CONFIRM_ALLOW,
+               "unmounted (needs-format) cfg is allowed without any override");
+    TEST_CHECK(cfg_fs_confirm_decide(false, false, true) == CFG_FS_FORMAT_CONFIRM_ALLOW,
+               "unmounted cfg with the override is still allowed");
+    TEST_CHECK(cfg_fs_confirm_decide(false, true, false) == CFG_FS_FORMAT_CONFIRM_REFUSE_RECOVERY,
+               "recovery-skipped mount is refused");
+    TEST_CHECK(cfg_fs_confirm_decide(false, true, true) == CFG_FS_FORMAT_CONFIRM_REFUSE_RECOVERY,
+               "recovery-skipped mount is refused even with force_healthy");
+    TEST_CHECK(cfg_fs_confirm_decide(true, true, true) == CFG_FS_FORMAT_CONFIRM_REFUSE_RECOVERY,
+               "recovery takes precedence over the healthy/override logic");
+}
+
 void run_test_cfg_fs_format_gate(void)
 {
+    test_format_confirm_decision();
     test_blank_partition_is_safe_to_format();
     test_a_few_stray_bits_still_reads_as_blank();
     test_residual_nonerased_data_without_a_filesystem_still_formats();

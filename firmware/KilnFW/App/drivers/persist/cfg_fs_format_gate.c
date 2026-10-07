@@ -260,3 +260,15 @@ void cfg_fs_format_gate_describe(const cfg_fs_format_gate_t *gate, cfg_fs_format
                  "(corrupt filesystem)");
     }
 }
+
+cfg_fs_confirm_decision_t cfg_fs_confirm_decide(bool mounted, bool skipped_for_recovery,
+                                                              bool force_healthy)
+{
+    if (skipped_for_recovery) {
+        return CFG_FS_FORMAT_CONFIRM_REFUSE_RECOVERY;
+    }
+    if (mounted && !force_healthy) {
+        return CFG_FS_FORMAT_CONFIRM_REFUSE_HEALTHY;
+    }
+    return CFG_FS_FORMAT_CONFIRM_ALLOW;
+}

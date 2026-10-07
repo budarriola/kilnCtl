@@ -1423,7 +1423,7 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
 
 
 @_core._tool()
-def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
+def cfgfs_format(confirm: bool = False, host: Optional[str] = None, force_healthy: bool = False) -> str:
     """Confirm-and-format the `cfg` LittleFS partition -- POST
     /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
     handler(), ROUTE_TIER_ADMIN). This is the operator confirmation
@@ -1439,6 +1439,15 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
     an empty filesystem. NVS stays authoritative and unaffected by this call
     on its own (see CLAUDE.md's cfg-partition dual-write section) -- this is
     strictly a `cfg`-partition-only action, not a factory_reset(scope=KILN).
+
+    HEALTHY-CFG GUARD: since the NVS dual-write close, a mounted cfg partition is
+    the ONLY copy of zones/profiles/preferences, so the firmware answers 409
+    ("cfg is mounted and healthy ...") to a format of a healthy partition. This
+    tool reports that as a refusal with the firmware's message. Only
+    ``force_healthy=True`` (default False, still requires ``confirm=True``) sends
+    the explicit override ``?force_healthy=1``; use it only when you really mean
+    to erase a working cfg partition. A partition that is not mounted (the
+    needs-format case) needs no override.
 
     Always reads GET /api/cfgfs FIRST and reports the current file count
     (never guesses). REFUSES UNLESS ``confirm=True`` -- without it, this is a
@@ -1472,11 +1481,19 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
     before_count = before.get("file_count")
 
     if not confirm:
+        healthy_note = ""
+        if before.get("mounted") is True and not force_healthy:
+            healthy_note = ("; cfg is mounted and healthy, so the firmware would refuse (409) unless "
+                            "force_healthy=True is also passed")
         return (f"DRY RUN (pass confirm=True to actually format) -- cfg partition currently holds "
-                f"{before_count} file(s) (host={resolved}); formatting would erase all of them")
+                f"{before_count} file(s) (host={resolved}); formatting would erase all of them"
+                f"{healthy_note}")
 
     try:
-        result = ota_http.format_cfgfs(resolved)
+        if force_healthy:
+            result = ota_http.format_cfgfs(resolved, force_healthy=True)
+        else:
+            result = ota_http.format_cfgfs(resolved)
     except ota_http.OtaHttpError as exc:
         from . import zones_http_client  # local import: avoid a module-load-order cycle, same convention as the other local imports in this function
         if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
@@ -1484,6 +1501,9 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
                     f"a firing or autotune run is active; cfgfs format is not available until it "
                     f"ends. Distinct from OTA's own 428 interlock (host={resolved}, "
                     f"before file_count={before_count})")
+        if exc.status == 409:
+            return (f"refused: firmware answered HTTP 409: {exc.detail} (host={resolved}, "
+                    f"before file_count={before_count}); nothing was formatted")
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved}, before file_count={before_count})"
 

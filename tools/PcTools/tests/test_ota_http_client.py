@@ -700,6 +700,38 @@ class FormatCfgfsTest(unittest.TestCase):
         # Posted exactly once -- never retried on its own behalf.
         self.assertEqual(calls["n"], 1)
 
+    def test_default_url_has_no_override_query(self):
+        captured = {}
+
+        def wrapper(req, timeout=None):
+            captured["req"] = req
+            return _fake_response(b"ok")
+
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            ota.format_cfgfs("kiln.local")
+        self.assertNotIn("force_healthy", captured["req"].full_url)
+
+    def test_force_healthy_adds_override_query(self):
+        captured = {}
+
+        def wrapper(req, timeout=None):
+            captured["req"] = req
+            return _fake_response(b"ok")
+
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=wrapper):
+            ota.format_cfgfs("kiln.local", force_healthy=True)
+        self.assertEqual(captured["req"].full_url, "http://kiln.local/api/cfgfs/format_confirm?force_healthy=1")
+
+    def test_surfaces_409_healthy_refusal(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/cfgfs/format_confirm", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(b"refused: cfg is mounted and healthy"))
+        with unittest.mock.patch.object(ota.http_auth, "urlopen", side_effect=err):
+            with self.assertRaises(ota.OtaHttpError) as ctx:
+                ota.format_cfgfs("kiln.local")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("healthy", ctx.exception.detail)
+
     def test_surfaces_500_format_failed(self):
         err = urllib.error.HTTPError(
             "http://x/api/cfgfs/format_confirm", 500, "Internal Server Error", hdrs=None,

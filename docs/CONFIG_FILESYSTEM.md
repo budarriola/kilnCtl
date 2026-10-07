@@ -712,6 +712,12 @@ quietly or reporting success.
   /api/cfgfs/format_confirm` answers `409` instead of formatting. The separate
   `firmware/KilnFW_recovery` image does not link `cfg_fs` at all and has no
   settings save routes. No mount was added to recovery.
+- Healthy-cfg format guard: `POST /api/cfgfs/format_confirm` answers `409` when cfg is
+  mounted and healthy, because cfg is the only writable copy; the explicit override is
+  `?force_healthy=1` (decision in `cfg_fs_confirm_decide()`, `cfg_fs_format_gate.c`).
+  The unmounted/needs-format path and its settings-page banner are unchanged; recovery mode
+  stays refused even with the override. MCP `cfgfs_format` reports the 409 as a refusal and
+  takes `force_healthy=False` (still needs `confirm=True`).
 - Profile delete: `nvs_erase_slot()` erases the legacy `profN` key first, then
   clears only that slot's bit and rev entry in the legacy NVS bitmap and rev
   array (read-modify-write). Writing the whole in-RAM bitmap and rev array, as
