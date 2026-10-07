@@ -543,6 +543,11 @@ void force_aux_relays_off(void)
     }
 }
 
+bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok)
+{
+    return rule->enable && rule->temp_cmp != ON_OFF_TEMP_CMP_NONE && !temp_ok;
+}
+
 /* Evaluates every claimed aux for the current segment. Same decision core
  * and actuation gate as an on/off zone (profile_executor_on_off_zone_tick()),
  * with an aux's own inputs: its tc_zone's reading for a temperature axis, the
@@ -596,14 +601,13 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
                                         s_exec.segment_index);
         const zone_runtime_t *tz = (cfg_ok && ax.tc_zone < MAX31856_CHANNEL_COUNT) ? &s_exec.zones[ax.tc_zone] : NULL;
         bool temp_ok = tz && tz->active && !tz->faulted && tz->actual_valid;
-        bool needs_temp = rule.enable && rule.temp_cmp != ON_OFF_TEMP_CMP_NONE;
         bool guard_5_6 = tz && tz->active && tz->guard_state.is_tripped &&
                          (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
                           tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
         /* No FAULTED term: this tick runs only while RUNNING, and a fault
          * leaves RUNNING through exec_enter_terminal_state(), whose
          * force_aux_relays_off() is the aux fail-safe for that path. */
-        bool failsafe = !cfg_ok || authority_blocked || (needs_temp && !temp_ok);
+        bool failsafe = !cfg_ok || authority_blocked || profile_executor_on_off_temp_unusable(&rule, temp_ok);
 
         on_off_trigger_input_t oin = {
             .failsafe_override = failsafe,

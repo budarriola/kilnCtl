@@ -9504,6 +9504,60 @@ static void test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner(vo
     s_exec.io = NULL;
 }
 
+/* BUG 1 (zone ON_OFF dead-sensor fail-safe): the zone call site folds
+ * profile_executor_on_off_temp_unusable() into failsafe_override exactly as
+ * the aux path does. NaN compares false in axis_temp(), so with invert=true
+ * the AND negates to true and, unguarded, would drive the relay ON. */
+static bool zone_dead_sensor_actuates_on(bool invert, uint8_t temp_cmp, bool temp_ok)
+{
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[2].active = true;
+    g_stub_relay_mask[2] = 0x04;
+    s_exec.io = (kiln_io_t *)0x1;
+    g_relay_write_calls = 0;
+
+    on_off_trigger_state_t decide_state;
+    on_off_trigger_state_reset(&decide_state);
+    bool actuated_on = false;
+    float actuated_held_s = 0.0f;
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+    oin.rule.temp_cmp = temp_cmp;
+    oin.rule.temp_threshold_c = 600.0f;
+    oin.rule.invert = invert;
+    oin.temp_measurement_c = temp_ok ? 500.0f : (float)NAN;
+    oin.failsafe_override = profile_executor_on_off_temp_unusable(&oin.rule, temp_ok);
+    bool bypass_hold = oin.failsafe_override;
+
+    on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
+                                                                     &oin, bypass_hold, 0, 0);
+    g_stub_relay_mask[2] = 0;
+    s_exec.io = NULL;
+    return r.actuated_on;
+}
+
+static void test_on_off_zone_invalid_sensor_fails_safe(void)
+{
+    TEST_SECTION("on/off zone: a temperature rule on an invalid sensor fails safe (OFF), invert true AND false");
+    TEST_CHECK(!zone_dead_sensor_actuates_on(true, ON_OFF_TEMP_CMP_ABOVE, false),
+               "invert=true, ABOVE, NaN reading: relay must stay OFF (NaN compares false, invert flips it)");
+    TEST_CHECK(!zone_dead_sensor_actuates_on(true, ON_OFF_TEMP_CMP_BELOW, false),
+               "invert=true, BELOW, NaN reading: relay must stay OFF");
+    TEST_CHECK(!zone_dead_sensor_actuates_on(false, ON_OFF_TEMP_CMP_ABOVE, false),
+               "invert=false, ABOVE, NaN reading: relay must stay OFF");
+    TEST_CHECK(!zone_dead_sensor_actuates_on(false, ON_OFF_TEMP_CMP_BELOW, false),
+               "invert=false, BELOW, NaN reading: relay must stay OFF");
+    /* Controls: the gate must not fire when it should not. */
+    TEST_CHECK(zone_dead_sensor_actuates_on(false, ON_OFF_TEMP_CMP_BELOW, true),
+               "control: valid 500C reading, BELOW 600 -> rule satisfied, ON");
+    TEST_CHECK(zone_dead_sensor_actuates_on(false, ON_OFF_TEMP_CMP_NONE, false),
+               "control: no temperature axis -> an invalid sensor is irrelevant, unconditional rule stays ON");
+    {
+        on_off_trigger_rule_t disabled = {0};
+        TEST_CHECK(!profile_executor_on_off_temp_unusable(&disabled, false),
+                   "control: a disabled rule never needs a reading");
+    }
+}
+
 typedef struct {
     const char *name;
     bool failsafe_override;
@@ -10627,6 +10681,7 @@ static void run_test_on_off_actuation(void)
 {
     test_on_off_zone_tick_rule_turns_relay_on_through_owner();
     test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner();
+    test_on_off_zone_invalid_sensor_fails_safe();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();

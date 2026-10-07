@@ -1813,8 +1813,15 @@ void executor_task_entry(void *arg)
                 on_off_trigger_rule_t resolved_rule =
                     profile_resolve_on_off_rule(&s_exec.profile, zi, s_exec.segment_index);
 
+                /* A rule with a temperature axis on a zone whose reading is
+                 * invalid (actual_c is NAN) must fail safe like the aux path
+                 * does: NaN compares false in axis_temp(), and with invert
+                 * that reads as "satisfied" and would command the relay ON
+                 * on a dead sensor until guard 6 trips. */
+                bool temp_ok = z->actual_valid && !isnan(z->actual_c);
                 bool run_ending_failsafe = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted ||
-                                           authority_blocked_now;
+                                           authority_blocked_now ||
+                                           profile_executor_on_off_temp_unusable(&resolved_rule, temp_ok);
                 bool guard_5_6_tripped_now = z->guard_state.is_tripped &&
                     (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
                      z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);

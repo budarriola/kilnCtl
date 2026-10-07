@@ -1228,6 +1228,12 @@ void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_inp
                                              float held_prior_s, float held_s,
                                              uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold,
                                              bool cap_denied);
+/* True when *rule needs a temperature reading (enabled, temp_cmp != NONE) and
+ * temp_ok is false. Callers fold this into failsafe_override: NaN compares
+ * false in on_off_trigger_decide()'s axis_temp(), so with rule.invert it would
+ * otherwise read as "satisfied" and command the relay ON on a dead sensor.
+ * Shared by the zone and aux on/off input producers. */
+bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 /* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same
