@@ -437,6 +437,8 @@ static void test_worst_case_fits_handler_buffer(void)
     for (size_t i = 0; i < 13; i++) {
         TEST_CHECK(cfg_fs_write_atomic(files[i], payload, sizeof(payload)) == ESP_OK, "write a real root file");
     }
+    TEST_CHECK(cfg_fs_write_atomic("profiles/prof1.json", payload, sizeof(payload)) == ESP_OK,
+               "write a profiles/ file so the subdirs[] summary renders at six-digit bytes");
 
     static const char *const names[15] = { "zones",         "kiln_cfg_store", "unit_pref",     "profiles_hidden",
                                            "zone_normals",  "ramp_assist",    "display_power", "tz",
@@ -476,6 +478,77 @@ static void test_worst_case_fits_handler_buffer(void)
     cfg_fs_deinit();
 }
 
+/* GET /api/cfgfs used to omit every file in a subdirectory: cfg_fs_list("")
+ * skips directories, so profiles/prof<id>.json never appeared anywhere.
+ * The builder now summarizes each known subdirectory (count + bytes). */
+static void test_subdirs_summarized(void)
+{
+    TEST_SECTION("cfg_fs_status: files under profiles/ are summarized in subdirs[] (count and bytes), not "
+                 "silently absent");
+    cfg_fs_deinit();
+    const char *base = "cfg_fs_status_test_subdirs";
+    {
+        /* reset_scratch() only removes .tmp and base; clear profiles/ first. */
+        char p1[600], p2[600], pd[600], pt[600];
+        snprintf(p1, sizeof(p1), "%s/profiles/prof1.json", base);
+        snprintf(p2, sizeof(p2), "%s/profiles/prof2.json", base);
+        snprintf(pd, sizeof(pd), "%s/profiles", base);
+        snprintf(pt, sizeof(pt), "%s/profiles/hidden.json", base);
+        remove(p1);
+        remove(p2);
+        remove(pt);
+        TCFS_RMDIR(pd);
+    }
+    reset_scratch(base);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char json[4608];
+    size_t len = 0;
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds with no subdirectory present");
+    TEST_CHECK(json_has(json, "\"subdirs\":[{\"name\":\"profiles\",\"file_count\":0,\"size_bytes\":0,"
+                              "\"unknown_size\":0}]"),
+               "an absent profiles/ directory reads as 0 files, not as an error");
+
+    TEST_CHECK(cfg_fs_write_atomic("zones.json", "abcdef", 6) == ESP_OK, "write a root file");
+    TEST_CHECK(cfg_fs_write_atomic("profiles/prof1.json", "0123456789", 10) == ESP_OK, "write profiles/prof1.json");
+    TEST_CHECK(cfg_fs_write_atomic("profiles/prof2.json", "abcde", 5) == ESP_OK, "write profiles/prof2.json");
+    TEST_CHECK(cfg_fs_write_atomic("profiles/hidden.json", "xyz", 3) == ESP_OK, "write profiles/hidden.json");
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds with subdirectory files");
+    TEST_CHECK(json_has(json, "\"file_count\":1,\"files\":[{\"name\":\"zones.json\",\"size_bytes\":6}]"),
+               "files[] still lists only root files (the existing contract is unchanged)");
+    TEST_CHECK(json_has(json, "\"subdirs\":[{\"name\":\"profiles\",\"file_count\":3,\"size_bytes\":18,"
+                              "\"unknown_size\":0}]"),
+               "profiles/ reports 3 files and 18 bytes");
+    cfg_fs_deinit();
+}
+
+/* nvs_permanent must name every store that is NVS-only today (2026-10-07
+ * audit, see cfg_fs_status.c). */
+static void test_nvs_permanent_lists_current_stores(void)
+{
+    TEST_SECTION("cfg_fs_status: nvs_permanent names every NVS-only store, including the ones added after the "
+                 "list was first written");
+    cfg_fs_deinit();
+    char json[4608];
+    size_t len = 0;
+    TEST_CHECK(cfg_fs_status_build_json(NULL, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build");
+    const char *perm = strstr(json, "\"nvs_permanent\":[");
+    TEST_CHECK(perm != NULL, "nvs_permanent present");
+    static const char *const want[] = { "profiles_favorites", "live_profile",          "firing_shadow",
+                                        "ct_verify_store",    "kiln_cfg_swap",         "aux_convert_journal",
+                                        "run_state_breadcrumb", "setup_wizard_progress", "pico_update_attempts",
+                                        "pico_image_manifest" };
+    for (size_t i = 0; perm && i < sizeof(want) / sizeof(want[0]); i++) {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\"%s\"", want[i]);
+        const char *hit = strstr(perm, needle);
+        const char *end = perm ? strchr(perm, ']') : NULL;
+        TEST_CHECK(hit != NULL && end != NULL && hit < end, want[i]);
+    }
+}
+
 void run_test_cfg_fs_status(void)
 {
     test_unmounted();
@@ -487,6 +560,8 @@ void run_test_cfg_fs_status(void)
     test_format_stalled_ceiling();
     test_buffer_too_small();
     test_worst_case_fits_handler_buffer();
+    test_subdirs_summarized();
+    test_nvs_permanent_lists_current_stores();
     test_item_diverged_rule();
     cfg_fs_deinit();
 }

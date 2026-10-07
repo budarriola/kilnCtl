@@ -158,8 +158,15 @@ Since `9310367b` the status path's transient scratch (the handler buffer, the tw
   previously-committed file is untouched and still what gets read — but a
   non-zero count that persists across a boot (past the point where startup
   sweeps `.tmp/` clean) is worth a look.
-- `"dual_write"` — one entry per migrated item, e.g. `"zones":
-  {"file_backed": true, "file_rev": N, "nvs_rev": N, "diverged": false}`.
+- `"files"` / `"subdirs"` — `files` lists the regular files in the cfg root
+  only (the directory listing skips subdirectories). `subdirs` summarizes each
+  known one-level subdirectory as `{"name","file_count","size_bytes",
+  "unknown_size"}`; today that is `profiles` (`prof<N>.json`, `hidden.json`).
+  A summary rather than names keeps the response inside its fixed buffer and
+  matches `/api/cfgfs/file`, which refuses names containing `/`.
+- `"dual_write"` — one row per migrated item in `dual_write.items[]`, e.g.
+  `{"name": "zones", "file_backed": true, "file_rev": N, "nvs_backed": true,
+  "nvs_rev": N, "diverged": false, "nvs_stale": false, "migration_deferred": false}`.
   `file_backed` means this item currently reads from its file rather than
   falling back to NVS. `file_rev`/`nvs_rev` are the write-sequence counters
   the two sides carry to resolve which copy is newer if they disagree.
@@ -208,6 +215,20 @@ Since `9310367b` the status path's transient scratch (the handler buffer, the tw
   third time (see `2e88e90a`'s commit message for the second time it did).
   Zone normals (table item 2) now has its bridge and its own row
   (`zone_normals`, above), so nothing is NVS-only any more.
+- `"nvs_permanent"` — stores that stay in NVS by design, so an operator does
+  not read them as pending migrations. The list is hand-maintained in
+  `cfg_fs_status.c` and mirrors every store that uses NVS with no cfg file
+  path: the original boot-ordering and safety set (`wifi_creds`,
+  `boot_guard_counter`, `watchdog_panic_disable`, `ota_record`,
+  `crash_report`, `touch_cal`, `run_state_breadcrumb`, `safety_mirror_esp`,
+  `rp2040_config_store`, `logs`, `coredump`) plus, since 2026-10-07,
+  `profiles_favorites`, `live_profile`, `firing_shadow`, `ct_verify_store`,
+  `kiln_cfg_swap`, `aux_convert_journal`, `setup_wizard_progress`,
+  `pico_update_attempts` and `pico_image_manifest`. The web-auth and TOTP
+  credential stores are also NVS-only but are deliberately not named here
+  (`check_kiln_auth_config_isolation.ps1` keeps credential names out of every
+  config-path file). `iter_tune_store` is deliberately absent pending an
+  owner ruling. `test_cfg_fs_status.c` pins the post-2026-10-07 names.
 
 ## If the filesystem fails to mount
 

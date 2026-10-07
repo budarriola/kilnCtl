@@ -1386,16 +1386,38 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     else:
         lines.append(f"tmp_entries_now={tmp_now}")
 
+    subdirs = cfgfs.get("subdirs") or []
+    for sd in subdirs:
+        unknown = sd.get("unknown_size") or 0
+        note = f" ({unknown} of unknown size)" if unknown else ""
+        lines.append(
+            f"  {sd.get('name')}/: {sd.get('file_count')} file(s), {sd.get('size_bytes')} B{note}"
+        )
+
     dual = cfgfs.get("dual_write") or {}
-    zones = dual.get("zones") or {}
-    if zones.get("file_backed"):
-        diverged_note = " !!! DIVERGED -- a prior file write failed, only NVS advanced" if zones.get("diverged") else ""
-        lines.append(f"dual_write.zones: file_rev={zones.get('file_rev')} nvs_rev={zones.get('nvs_rev')}{diverged_note}")
-    else:
-        lines.append("dual_write.zones: not file-backed yet (NVS only)")
+    items = dual.get("items") or []
+    lines.append(f"dual_write: write_mode={dual.get('write_mode')} items={len(items)}")
+    for it in items:
+        flags = []
+        if it.get("diverged"):
+            flags.append("!!! DIVERGED -- a prior file write failed, only NVS advanced")
+        if it.get("nvs_stale"):
+            flags.append("nvs_stale (file is newer than NVS)")
+        if it.get("migration_deferred"):
+            flags.append("migration_deferred")
+        if not it.get("file_backed"):
+            flags.append("not file-backed yet")
+        tail = f" [{'; '.join(flags)}]" if flags else ""
+        lines.append(
+            f"  dual_write.{it.get('name')}: file_rev={it.get('file_rev')} "
+            f"nvs_rev={it.get('nvs_rev')}{tail}"
+        )
     nvs_only = dual.get("nvs_only") or []
     if nvs_only:
         lines.append(f"still NVS-only: {', '.join(nvs_only)}")
+    nvs_permanent = dual.get("nvs_permanent") or []
+    if nvs_permanent:
+        lines.append(f"NVS by design: {', '.join(nvs_permanent)}")
 
     return "\n".join(lines)
 
