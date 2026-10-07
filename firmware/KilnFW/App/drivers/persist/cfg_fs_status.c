@@ -303,13 +303,14 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
      * judges) are NVS-only too. The
      * credential stores are deliberately NOT named here: check_kiln_auth_config_
      * isolation.ps1 forbids any config-path file from referencing them. run_state.c
-     * is the existing "run_state_breadcrumb" entry. iter_tune_store.c is NOT
-     * listed: its file-backing status is an open owner question. */
+     * is the existing "run_state_breadcrumb" entry. iter_tune_store.c,
+     * profiles_favorites.c, live_profile.c, ct_verify_store.c and
+     * setup_wizard_progress.c are NOT listed: they moved to cfg files on
+     * 2026-10-07 and report dual_write rows instead. */
     APPEND(",\"nvs_permanent\":[\"wifi_creds\",\"boot_guard_counter\",\"watchdog_panic_disable\","
           "\"ota_record\",\"crash_report\",\"touch_cal\",\"run_state_breadcrumb\",\"safety_mirror_esp\","
           "\"rp2040_config_store\",\"logs\",\"coredump\","
-          "\"profiles_favorites\",\"live_profile\",\"firing_shadow\",\"ct_verify_store\","
-          "\"kiln_cfg_swap\",\"aux_convert_journal\",\"setup_wizard_progress\","
+          "\"firing_shadow\",\"kiln_cfg_swap\",\"aux_convert_journal\","
           "\"pico_update_attempts\",\"pico_image_manifest\",\"estop_verification\",\"dualwrite_window\"]");
     APPEND("}");
 

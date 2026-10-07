@@ -222,10 +222,11 @@ Since `9310367b` the status path's transient scratch (the handler buffer, the tw
   `boot_guard_counter`, `watchdog_panic_disable`, `ota_record`,
   `crash_report`, `touch_cal`, `run_state_breadcrumb`, `safety_mirror_esp`,
   `rp2040_config_store`, `logs`, `coredump`) plus, since 2026-10-07,
-  `profiles_favorites`, `live_profile`, `firing_shadow`, `ct_verify_store`,
-  `kiln_cfg_swap`, `aux_convert_journal`, `setup_wizard_progress`,
+  `firing_shadow`, `kiln_cfg_swap`, `aux_convert_journal`,
   `pico_update_attempts`, `pico_image_manifest`, `estop_verification` and
-  `dualwrite_window`. The web-auth and TOTP
+  `dualwrite_window`. (`profiles_favorites`, `live_profile`,
+  `ct_verify_store` and `setup_wizard_progress` were listed here until they
+  moved to cfg files later the same day; see the last section.) The web-auth and TOTP
   credential stores are also NVS-only but are deliberately not named here
   (`check_kiln_auth_config_isolation.ps1` keeps credential names out of every
   config-path file). `iter_tune_store` is deliberately absent pending an

@@ -539,9 +539,8 @@ static void test_nvs_permanent_lists_current_stores(void)
     TEST_CHECK(cfg_fs_status_build_json(NULL, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build");
     const char *perm = strstr(json, "\"nvs_permanent\":[");
     TEST_CHECK(perm != NULL, "nvs_permanent present");
-    static const char *const want[] = { "profiles_favorites", "live_profile",          "firing_shadow",
-                                        "ct_verify_store",    "kiln_cfg_swap",         "aux_convert_journal",
-                                        "run_state_breadcrumb", "setup_wizard_progress", "pico_update_attempts",
+    static const char *const want[] = { "firing_shadow",       "kiln_cfg_swap",       "aux_convert_journal",
+                                        "run_state_breadcrumb", "pico_update_attempts",
                                         "pico_image_manifest", "estop_verification", "dualwrite_window" };
     for (size_t i = 0; perm && i < sizeof(want) / sizeof(want[0]); i++) {
         char needle[64];
@@ -549,6 +548,16 @@ static void test_nvs_permanent_lists_current_stores(void)
         const char *hit = strstr(perm, needle);
         const char *end = perm ? strchr(perm, ']') : NULL;
         TEST_CHECK(hit != NULL && end != NULL && hit < end, want[i]);
+    }
+    // Moved to cfg files 2026-10-07: they must NOT be reported NVS-permanent.
+    static const char *const gone[] = { "profiles_favorites", "live_profile", "ct_verify_store", "setup_wizard_progress",
+                                        "iter_tune" };
+    const char *pend = perm ? strchr(perm, ']') : NULL;
+    for (size_t i = 0; perm && pend && i < sizeof(gone) / sizeof(gone[0]); i++) {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\"%s\"", gone[i]);
+        const char *hit = strstr(perm, needle);
+        TEST_CHECK(hit == NULL || hit > pend, gone[i]);
     }
 }
 
