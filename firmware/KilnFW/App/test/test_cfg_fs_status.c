@@ -539,7 +539,7 @@ static void test_nvs_permanent_lists_current_stores(void)
     static const char *const want[] = { "profiles_favorites", "live_profile",          "firing_shadow",
                                         "ct_verify_store",    "kiln_cfg_swap",         "aux_convert_journal",
                                         "run_state_breadcrumb", "setup_wizard_progress", "pico_update_attempts",
-                                        "pico_image_manifest" };
+                                        "pico_image_manifest", "estop_verification", "dualwrite_window" };
     for (size_t i = 0; perm && i < sizeof(want) / sizeof(want[0]); i++) {
         char needle[64];
         snprintf(needle, sizeof(needle), "\"%s\"", want[i]);

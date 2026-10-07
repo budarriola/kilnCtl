@@ -28,14 +28,19 @@
  * PROFILES_CFG_FS_PATH_FMT, profiles_builtin.c's hidden.json). */
 static const char *const CFG_FS_STATUS_SUBDIRS[] = { "profiles" };
 
-/* -1 means "size unknown" -- distinguished from a real 0-byte file. */
-static long file_size_or_unknown(const char *base_dir, const char *rel_name)
+/* -1 means "size unknown" -- distinguished from a real 0-byte file.
+ * `sub_dir` is NULL for a root file, else the one-level subdirectory the
+ * file lives in; the join happens here, in the one path buffer this
+ * function already needs, so callers never hold a second path buffer on the
+ * httpd stack. */
+static long file_size_or_unknown(const char *base_dir, const char *sub_dir, const char *name)
 {
     if (!base_dir) {
         return -1;
     }
     char path[CFG_FS_STATUS_PATH_MAX];
-    int n = snprintf(path, sizeof(path), "%s/%s", base_dir, rel_name);
+    int n = sub_dir ? snprintf(path, sizeof(path), "%s/%s/%s", base_dir, sub_dir, name)
+                    : snprintf(path, sizeof(path), "%s/%s", base_dir, name);
     if (n <= 0 || (size_t)n >= sizeof(path)) {
         return -1;
     }
@@ -180,7 +185,7 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
 
     APPEND(",\"file_count\":%lu,\"files\":[", (unsigned long)file_count);
     for (size_t i = 0; i < file_count; i++) {
-        long sz = file_size_or_unknown(base_dir_for_sizes, files[i].name);
+        long sz = file_size_or_unknown(base_dir_for_sizes, NULL, files[i].name);
         if (sz >= 0) {
             APPEND("%s{\"name\":\"%s\",\"size_bytes\":%ld}", i == 0 ? "" : ",", files[i].name, sz);
         } else {
@@ -206,9 +211,7 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
         if (mounted && cfg_fs_list(CFG_FS_STATUS_SUBDIRS[d], tmp_files, CFG_FS_STATUS_MAX_FILES, &sub_count) ==
                            ESP_OK) {
             for (size_t i = 0; i < sub_count; i++) {
-                char rel[CFG_FS_MAX_NAME + 32]; /* small: this runs on the httpd stack */
-                int rn = snprintf(rel, sizeof(rel), "%s/%s", CFG_FS_STATUS_SUBDIRS[d], tmp_files[i].name);
-                long sz = (rn > 0 && (size_t)rn < sizeof(rel)) ? file_size_or_unknown(base_dir_for_sizes, rel) : -1;
+                long sz = file_size_or_unknown(base_dir_for_sizes, CFG_FS_STATUS_SUBDIRS[d], tmp_files[i].name);
                 if (sz >= 0) {
                     sub_bytes += (unsigned long)sz;
                 } else {
@@ -295,6 +298,9 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
      * (aux_conv_jrnl -- the aux_outputs config itself is a dual-write row),
      * setup_wizard_progress.c (progress_v1), plus pico_update_attempts.c
      * and pico_image_manifest.c (boot-time records in kiln_cfg). The
+     * estop_verification.c (estop_verif) and dualwrite_window.c (dwwin, the
+     * window tracker itself, which must not depend on the filesystem it
+     * judges) are NVS-only too. The
      * credential stores are deliberately NOT named here: check_kiln_auth_config_
      * isolation.ps1 forbids any config-path file from referencing them. run_state.c
      * is the existing "run_state_breadcrumb" entry. iter_tune_store.c is NOT
@@ -304,7 +310,7 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
           "\"rp2040_config_store\",\"logs\",\"coredump\","
           "\"profiles_favorites\",\"live_profile\",\"firing_shadow\",\"ct_verify_store\","
           "\"kiln_cfg_swap\",\"aux_convert_journal\",\"setup_wizard_progress\","
-          "\"pico_update_attempts\",\"pico_image_manifest\"]");
+          "\"pico_update_attempts\",\"pico_image_manifest\",\"estop_verification\",\"dualwrite_window\"]");
     APPEND("}");
 
     /* "dual_write_window" -- progress toward closing the dual-write window
