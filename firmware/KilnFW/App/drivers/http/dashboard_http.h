@@ -564,6 +564,16 @@ typedef struct {
 
 void dashboard_get_status(dashboard_status_t *out);
 
+/* Clear a Pico-latched safety trip via safety_link_send_clear_trip() -- the
+ * single path both POST /api/safety/clear_trip and the LCD Safety page use,
+ * with that function's own refusals (ESP_ERR_INVALID_STATE: no trip latched
+ * or Pico diagnostics stale). ESP_ERR_NOT_FOUND: safety link not wired up.
+ * ESP_OK only means the broadcast was handed to the UART; the caller observes
+ * the actual clear in the next DIAG (dashboard_get_status). Does NOT check
+ * auth: the web route is ROUTE_TIER_ADMIN, the LCD caller must gate on an
+ * admin LCD session itself. */
+esp_err_t dashboard_safety_clear_trip(void);
+
 /* WEB_AUTH_PLAN.md item 10's physical credential-reset gesture needs a
  * read of the E-stop bit -- SAFETY_FLAG_ESTOP is already carried on every
  * status poll (safety_link_status_t.flags, see safety_link.h) but had no
