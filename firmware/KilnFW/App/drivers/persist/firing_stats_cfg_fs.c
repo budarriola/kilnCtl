@@ -171,7 +171,7 @@ esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob
     return err;
 }
 
-// docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: deletes id's legacy
+// docs/PROFILE_SLOTS_100.md section 7 task 10: deletes id's legacy
 // "fsr_<id>" rev key and file. ERASE-FIRST (docs/CONFIG_FILESYSTEM.md "NVS
 // dual-write closed"): the NVS side goes first and is checked; if it fails the
 // file is left intact and the error returned, so a failed delete never leaves

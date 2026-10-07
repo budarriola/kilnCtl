@@ -12,7 +12,7 @@
 #include "freertos/portmacro.h" /* portMUX_TYPE -- profiles_storage_ensure()'s once-guard below */
 #include "freertos/task.h" /* vTaskDelay() -- same once-guard, the losing task's wait */
 #include "esp_heap_caps.h" /* heap_caps_malloc()/MALLOC_CAP_* -- profiles_storage_ensure()'s
-                            * PSRAM allocation (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3) */
+                            * PSRAM allocation (docs/PROFILE_SLOTS_100.md section 7 task 3) */
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -31,7 +31,7 @@
                                   * comment; profiles_edit_http.c's web delete handler already
                                   * clears a deleted slot's favorite mark, and this benchproto
                                   * path must not leave that half undone (Opus review item 1,
-                                  * PROFILE_SLOTS_100_PLAN.md section 7). */
+                                  * PROFILE_SLOTS_100.md section 7). */
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 #include "aux_outputs_cfg.h"   /* aux_outputs_cfg_get()/_enabled_mask() -- spare-relay targets (WP-4) */
@@ -49,7 +49,7 @@
                                 * read-through/dual-write bridge to the `cfg`
                                 * LittleFS partition, one file per slot. See
                                 * that header for the full policy. */
-#include "profile_executor.h" /* firing_stats_erase() -- docs/PROFILE_SLOTS_100_PLAN.md
+#include "profile_executor.h" /* firing_stats_erase() -- docs/PROFILE_SLOTS_100.md
                                  * section 7 task 10, called from nvs_erase_slot() below
                                  * so deleting a slot also prunes its firing history. */
 
@@ -196,7 +196,7 @@ _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
  * profiles_http_internal.h -- profiles_catalog_http.c/profiles_edit_http.c
  * need the type too.
  *
- * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3: profiles_state_t
+ * docs/PROFILE_SLOTS_100.md section 7 task 3: profiles_state_t
  * (dominated by profiles[PROFILES_MAX_COUNT], and growing further once task
  * 6 raises PROFILES_MAX_COUNT) is now a lazily allocated PSRAM buffer
  * instead of a .bss global -- see profiles_storage_ensure() below, the only
@@ -208,7 +208,7 @@ _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
  * sizeof(s_profiles))`, used throughout the host tests, still zeroes the
  * allocated struct in place rather than the pointer itself. */
 static profiles_state_t *s_profiles_ptr = NULL;
-/* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): the plain
+/* Review fold-in (PROFILE_SLOTS_100.md section 7): the plain
  * check-then-act above raced two callers on the first call each -- both
  * could pass the NULL check, both allocate, and the losing store leaks its
  * allocation (or worse, two callers observe two different pointers across
@@ -292,7 +292,7 @@ profiles_state_t *profiles_storage_ensure(void)
     return s_profiles_ptr;
 }
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1 -- the sanctioned way to
+/* docs/PROFILE_SLOTS_100.md section 7 task 1 -- the sanctioned way to
  * test/set/clear a bit of s_profiles.used_bitmap. Thin wrappers over the
  * generic profiles_slot_bitmap_t helpers (profiles_slot_bitmap.h); kept
  * here (not inline in the header) so this is the one place s_profiles is
@@ -662,7 +662,7 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
  * Content-Length before a single byte is read. */
 
 /* "prof" + the id's decimal digits + NUL. Asserted rather than only trusted
- * in a comment, per docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6 -- and
+ * in a comment, per docs/PROFILE_SLOTS_100.md section 7 task 6 -- and
  * asserted against PROFILES_MAX_COUNT itself rather than against a literal
  * id, so a future raise of the slot count cannot quietly outgrow either
  * bound. The "+ 2" is the two reserved ids above the user range
@@ -699,7 +699,7 @@ static esp_err_t nvs_partition_init(const char *partition)
     return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: NVS_KEY_USED used to be a
+/* docs/PROFILE_SLOTS_100.md section 7 task 6: NVS_KEY_USED used to be a
  * single uint8_t (8 bits, exactly PROFILES_MAX_COUNT's old value). Raising
  * PROFILES_MAX_COUNT to 100 needs all 4 words of profiles_slot_bitmap_t
  * persisted, not just word[0]. These two helpers are the read/write seam:
@@ -1072,7 +1072,7 @@ esp_err_t nvs_erase_slot(uint8_t id)
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): cfg file delete failed: %s", (unsigned)id, esp_err_to_name(ferr));
         return ferr;
     }
-    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: prune this id's firing
+    /* docs/PROFILE_SLOTS_100.md section 7 task 10: prune this id's firing
      * history too (erase-first as well; see firing_stats_erase()). A failure
      * there is reported but does not undo the slot delete. */
     esp_err_t serr = firing_stats_erase(id);
@@ -1707,7 +1707,7 @@ bool profiles_http_delete(uint8_t id)
     if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
         return false;
     }
-    /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
+    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
      * delete a slot the executor is currently running or has paused --
      * deleting it out from under an in-progress firing would leave
      * profile_executor_run()'s copied-at-start name/segments as the only
@@ -1722,7 +1722,7 @@ bool profiles_http_delete(uint8_t id)
         return false;
     }
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
-     * PROFILE_SLOTS_100_PLAN.md section 7): erase-then-clear left a window
+     * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
      * where a power cut between the two steps could survive with the slot
      * erased but its favorite bit still set -- an import that later lands on
      * this same id inherits that orphaned favorite (profiles_favorites.h's

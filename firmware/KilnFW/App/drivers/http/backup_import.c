@@ -3241,7 +3241,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     /* PSRAM only, no internal-DRAM fallback: at PROFILES_MAX_COUNT == 100 this
      * array is ~42.8 KB (profile_candidate_t, ~428 B each) -- a `malloc()`
      * fallback landing in internal DRAM at that size is exactly the hazard
-     * PROFILE_SLOTS_100_PLAN.md section 7 task 7 calls out (sockets reset
+     * PROFILE_SLOTS_100.md section 7 task 7 calls out (sockets reset
      * below ~11.9 KB of internal DRAM headroom on this board). Fail cleanly
      * with a logged error instead -- see the "out of memory" `err_msg` path
      * just below. Note this is NOT a "nothing changed" 400: we are past

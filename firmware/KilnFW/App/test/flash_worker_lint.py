@@ -490,7 +490,7 @@ CFG_FS_ALLOWLIST = {
     # site, same caller (iter_tune_store_set_zone()), just the cfg dual-write
     # half of the same write instead of the NVS half.
     "iter_tune_store.c",
-    # firing_stats_cfg_fs_delete() (PROFILE_SLOTS_100_PLAN.md sec 7 task 10):
+    # firing_stats_cfg_fs_delete() (PROFILE_SLOTS_100.md sec 7 task 10):
     # deletes the firing-history mirror file for a profile id being erased,
     # called only from profile_executor_firing_stats.c's firing_stats_erase(),
     # itself only reached through profiles_http.c's nvs_erase_slot() -- same

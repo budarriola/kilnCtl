@@ -60,7 +60,7 @@ class IdSpaceTests(unittest.TestCase):
         # Every id here is derived from the two constants, never a literal in
         # the gap: id 64 used to be hardcoded here and became a VALID user
         # slot the moment PROFILES_MAX_COUNT went 8 -> 100
-        # (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6).
+        # (docs/PROFILE_SLOTS_100.md section 7 task 6).
         gap_mid = (PROFILES_MAX_COUNT + PROFILES_BUILTIN_ID_BASE) // 2
         for bad in (PROFILES_MAX_COUNT, gap_mid, PROFILES_BUILTIN_ID_BASE - 1, -1, 256):
             with self.assertRaises(ValueError):

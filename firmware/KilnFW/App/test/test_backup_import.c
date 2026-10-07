@@ -133,7 +133,7 @@ esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other h
 
 // LIVE_EDIT_WORKING_SLOT_ID (== PROFILES_MAX_COUNT) -- used by the
 // live-edit-slot-id-rejected test below (task 7,
-// PROFILE_SLOTS_100_PLAN.md section 7). Header-only, no persistence
+// PROFILE_SLOTS_100.md section 7). Header-only, no persistence
 // functions linked in, so this pulls in nothing beyond profiles_types.h,
 // already a transitive dependency of every include above.
 #include "../drivers/persist/live_profile.h"
@@ -2826,7 +2826,7 @@ static void test_profile_name_at_limit_accepted(void)
     TEST_CHECK(strcmp(g_last_saved_profile.name, "ExactlyFifteenC") == 0, "the full, untruncated name was written");
 }
 
-// PROFILE_SLOTS_100_PLAN.md section 7 task 7: a backup carrying exactly
+// PROFILE_SLOTS_100.md section 7 task 7: a backup carrying exactly
 // PROFILES_MAX_COUNT profiles must import in full, and one carrying
 // PROFILES_MAX_COUNT+1 must be refused BY NAME (the explicit
 // "backup has more than %u profiles" count check a few lines above, not an

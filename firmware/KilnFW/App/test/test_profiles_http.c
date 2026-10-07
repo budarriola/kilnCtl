@@ -217,7 +217,7 @@ static nvs_stub_entry_t *nvs_stub_find(const char *partition, const char *ns, co
 
 #undef asm
 
-// docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6's bench-slot exclusion
+// docs/PROFILE_SLOTS_100.md section 7 task 6's bench-slot exclusion
 // test needs PROFILE_BENCH_SLOT_ID and the real LCD-picker deletability check.
 #include "../drivers/persist/profiles_bench_slot.h"
 #include "../drivers/ui/ui_page_profile_picker_format.h"
@@ -575,7 +575,7 @@ esp_err_t profiles_builtin_restore_all(void)
     return ESP_OK;
 }
 
-// PROFILE_SLOTS_100_PLAN.md section 7 task 8: fake for the narrow accessor
+// PROFILE_SLOTS_100.md section 7 task 8: fake for the narrow accessor
 // profiles_catalog_http.c forward-declares (rather than #including
 // profile_executor.h -- see that declaration's comment). Defaults to 0
 // ("never fired") so every existing list/exceeds_ceiling assertion in this
@@ -590,7 +590,7 @@ uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id)
 
 // ---- profile_executor.h -- fake firing_stats_erase(): profiles_http.c
 // (#included above) now calls this from nvs_erase_slot() (docs/
-// PROFILE_SLOTS_100_PLAN.md section 7 task 10). The real definition lives in
+// PROFILE_SLOTS_100.md section 7 task 10). The real definition lives in
 // profile_executor_firing_stats.c, a control-tier file with its own heavy
 // dependency set (esp_heap_caps, zones_config_accessors.h, the executor's
 // internal state) this HTTP-tier executable has no other reason to link --
@@ -608,7 +608,7 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
 }
 
 // ---- profile_executor.h -- fake profile_executor_get_status(): Opus review
-// item 2 (PROFILE_SLOTS_100_PLAN.md section 7) has profiles_http_delete()
+// item 2 (PROFILE_SLOTS_100.md section 7) has profiles_http_delete()
 // refuse to delete the slot the executor is currently running/paused on.
 // Defaults to IDLE (nothing running); tests that need a "delete refused"
 // case set g_fake_exec_state/g_fake_exec_profile_id first.
@@ -1012,7 +1012,7 @@ static void test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file(void)
 
 static void test_nvs_erase_slot_prunes_firing_stats(void)
 {
-    TEST_SECTION("nvs_erase_slot() prunes that id's firing history (task 10, PROFILE_SLOTS_100_PLAN.md sec 7)");
+    TEST_SECTION("nvs_erase_slot() prunes that id's firing history (task 10, PROFILE_SLOTS_100.md sec 7)");
     pcfg_reset_all();
 
     profile_t p = make_stored_profile();
@@ -1050,7 +1050,7 @@ static void test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot(void)
 static void test_profiles_http_delete_clears_favorite(void)
 {
     TEST_SECTION("profiles_http_delete() clears the deleted slot's favorite mark (Opus review item 1, "
-                 "PROFILE_SLOTS_100_PLAN.md sec 7) -- profiles_edit_http.c's web delete handler already "
+                 "PROFILE_SLOTS_100.md sec 7) -- profiles_edit_http.c's web delete handler already "
                  "does this; the benchproto path must not leave it undone");
     pcfg_reset_all();
 
@@ -1072,7 +1072,7 @@ static void test_profiles_http_delete_clears_favorite(void)
 static void test_profiles_http_delete_refuses_running_slot(void)
 {
     TEST_SECTION("profiles_http_delete() refuses a slot the executor is currently running or has paused "
-                 "(Opus review item 2, PROFILE_SLOTS_100_PLAN.md sec 7)");
+                 "(Opus review item 2, PROFILE_SLOTS_100.md sec 7)");
     pcfg_reset_all();
 
     profile_t p = make_stored_profile();
@@ -1100,7 +1100,7 @@ static void test_profiles_http_delete_refuses_running_slot(void)
 }
 
 // ---------------------------------------------------------------------------
-// Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): favorite-clear must
+// Review fold-in (PROFILE_SLOTS_100.md section 7): favorite-clear must
 // run BEFORE slot erase, not after. Runtime behavior is identical either way
 // on the happy path -- the bug this guards against is a power cut landing
 // BETWEEN the two steps, which no host test can simulate by actually
@@ -1129,7 +1129,7 @@ static void assert_favorite_clear_precedes_erase(const char *fn, const char *fn_
 static void test_delete_clears_favorite_before_erase_wiring(void)
 {
     TEST_SECTION("profiles_http_delete()/profile_delete_post_handler() -- favorite-clear precedes "
-                 "slot-erase in source order (review fold-in, PROFILE_SLOTS_100_PLAN.md section 7)");
+                 "slot-erase in source order (review fold-in, PROFILE_SLOTS_100.md section 7)");
 
     static const char *HTTP_C_CANDIDATES[] = {
         "../drivers/http/profiles_http.c",
@@ -1773,7 +1773,7 @@ static void test_profile_detail_json_valid_at_max_capacity(void)
 static void test_profiles_list_carries_last_run_started_unix_s(void)
 {
     TEST_SECTION("profiles_list_get_handler -- carries last_run_started_unix_s from "
-                 "profile_executor_last_run_started_unix_s() (PROFILE_SLOTS_100_PLAN.md section 7 task 8)");
+                 "profile_executor_last_run_started_unix_s() (PROFILE_SLOTS_100.md section 7 task 8)");
 
     nvs_stub_reset();
     memset(&s_profiles, 0, sizeof(s_profiles));
@@ -3189,7 +3189,7 @@ static void test_nvs_save_slot_proceeds_normally_on_an_internal_ram_stack(void)
 // profile_detail_get_handler() call.
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-// profiles_slot_bitmap_t widening (docs/PROFILE_SLOTS_100_PLAN.md section 7
+// profiles_slot_bitmap_t widening (docs/PROFILE_SLOTS_100.md section 7
 // task 1) -- two REQUIRED regression tests named by that task:
 //   1. the persisted NVS_KEY_USED byte for a fixed 8-slot fixture must stay
 //      byte-identical to the pre-widening uint8_t scalar format.
@@ -3349,7 +3349,7 @@ static void test_slot_bitmap_round_trips_high_ids(void)
     }
 }
 
-// docs/PROFILE_SLOTS_100_PLAN.md section 5's explicit task-6 regression: fill
+// docs/PROFILE_SLOTS_100.md section 5's explicit task-6 regression: fill
 // all 100 slots, list, delete slot 50, then save with requested_id ==
 // PROFILES_MAX_COUNT (the "first free slot" sentinel) and confirm the new
 // profile lands back in the one hole, slot 50.
@@ -3401,7 +3401,7 @@ static void test_profiles_http_save_fills_all_100_then_reuses_deleted_slot(void)
     profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0);
 }
 
-// docs/PROFILE_SLOTS_100_PLAN.md's "Owner decision, 2026-09-19 (post phase-A
+// docs/PROFILE_SLOTS_100.md's "Owner decision, 2026-09-19 (post phase-A
 // review)": PROFILE_BENCH_SLOT_ID (101) must be structurally invisible --
 // never in the catalogue, never favoritable, never reachable through the
 // LCD-picker ordering module -- exactly like LIVE_EDIT_WORKING_SLOT_ID (100)

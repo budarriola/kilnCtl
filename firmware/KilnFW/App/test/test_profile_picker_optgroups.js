@@ -1,4 +1,4 @@
-/* Node-only test for main_page.html's PROFILE_SLOTS_100_PLAN.md section 7
+/* Node-only test for main_page.html's PROFILE_SLOTS_100.md section 7
  * task 8 addition: <optgroup> grouping (Favorites / Recently fired / All)
  * on #profileSelect, replacing the old flat favorites-first partition.
  *

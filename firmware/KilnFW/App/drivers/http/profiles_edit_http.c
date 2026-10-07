@@ -12,7 +12,7 @@
 #include "http_form.h"
 #include "live_profile.h" /* live_edit_name_collides() -- profile_post_handler()'s dup-name refusal */
 #include "profile_executor.h" /* profile_executor_get_status() -- Opus review item 2,
-                                 * PROFILE_SLOTS_100_PLAN.md section 7: refuse to delete
+                                 * PROFILE_SLOTS_100.md section 7: refuse to delete
                                  * the slot the executor is currently running/paused on. */
 #include "profiles_builtin.h"
 #include "profiles_favorites.h"
@@ -726,7 +726,7 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }
-    /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
+    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
      * delete a slot the executor is currently running or has paused. Same
      * check as profiles_http.c's benchproto profiles_http_delete(). */
     /* Only "is this id currently running/paused" is needed here -- use the
@@ -742,7 +742,7 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
     }
 
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
-     * PROFILE_SLOTS_100_PLAN.md section 7): erase-then-clear left a window
+     * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
      * where a power cut between the two steps could survive with the slot
      * erased but its favorite bit still set -- an import that later lands on
      * this same id inherits that orphaned favorite (profiles_favorites.h's

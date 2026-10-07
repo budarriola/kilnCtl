@@ -1375,13 +1375,13 @@ var catalogEntries = null; // array from /api/profiles/builtin?all=1, hidden one
 var favoriteIds = [];      // from /api/profiles/favorites
 var selectMode = null;     // null | 'export' | 'delete'
 var selectedIds = {};      // id -> true, only while selectMode is set
-var filterQuery = '';      // PROFILE_SLOTS_100_PLAN.md section 7 task 8
+var filterQuery = '';      // PROFILE_SLOTS_100.md section 7 task 8
 
 function isFav(id) {
   return favoriteIds.some(function (x) { return String(x) === String(id); });
 }
 
-/* PROFILE_SLOTS_100_PLAN.md section 7 task 8: pure, DOM-free filter/sort
+/* PROFILE_SLOTS_100.md section 7 task 8: pure, DOM-free filter/sort
  * helpers, kept separate from renderList()/renderFavorites() so a host test
  * can exercise the matching/ordering logic without a fake DOM at all. Named
  * with a "Profiles" suffix rather than the generic "filter"/"sort" to avoid
@@ -1503,7 +1503,7 @@ function renderFavorites() {
   items.forEach(function (p) { el.appendChild(buildProfileItem(p, false)); });
 }
 
-/* PROFILE_SLOTS_100_PLAN.md section 4 item 3 / section 7 task 8. */
+/* PROFILE_SLOTS_100.md section 4 item 3 / section 7 task 8. */
 function renderRecent() {
   var section = document.getElementById('recentSection');
   var el = document.getElementById('recentList');
@@ -1652,7 +1652,7 @@ function bulkDelete(ids) {
       return fetch('/api/profile/delete', {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
       }).then(function (r) {
-        // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
+        // Review fold-in (PROFILE_SLOTS_100.md section 7): a non-OK
         // response (e.g. 409 "profile is currently running") must not be
         // reported as a success -- surface the board's own message text.
         if (r.ok) return null;
@@ -2066,7 +2066,7 @@ function deleteProfile(id) {
   fetch('/api/profile/delete', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
   }).then(function (r) {
-    // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
+    // Review fold-in (PROFILE_SLOTS_100.md section 7): a non-OK
     // response (e.g. 409 "profile is currently running") must not be
     // treated as a successful delete.
     if (r.ok) { refreshAll(); if (editingId === id) resetEditor(); return; }

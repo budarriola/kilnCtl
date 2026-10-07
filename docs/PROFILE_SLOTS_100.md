@@ -8,12 +8,12 @@ item 1 are both rejected and that section should be amended to point here.
 
 This plan is written against the tree at `8006ddd5`.
 
-**Status:** tasks 1-11 of section 7's ordered task list landed (100 user
-slots plus the live-edit slot and the hidden bench-harness slot; the widened
-bitmaps; the PSRAM-backed profile store; the grown `cfg` partition, flashed
-to the bench at `5f58ba09`; the raised `BACKUP_BODY_MAX`/PSRAM import buffer;
-web/LCD grouping; firing-stats hygiene; and docs). Only task 12, the bench
-migration to the full 100-slot geometry (section 6), remains.
+**Status: COMPLETE (2026-10-07).** All 12 tasks of section 7 landed. The last one,
+the bench `cfg` reformat to the full 0x250000 geometry, was verified read-only on
+2026-10-07: `get_cfgfs_status` reported `mounted`, `total=2424832 B` (the full
+partition; the pre-reformat figure was 524288), `used=176128 B`, 11 files
+(evidence line in `docs/BENCH_TEST_LOG.md`). Section 6 and the task list below are
+kept as the record of how it was done.
 
 ---
 
@@ -220,7 +220,8 @@ NVS is authoritative for every dual-written item, and the board came back with t
 seven files -- but the LittleFS superblock keeps the volume at its formatted 512 KiB
 geometry (`/api/cfgfs` reports `total_bytes: 524288`) on the new 0x250000 partition until
 it is reformatted via `GET /api/cfgfs/format_pending` + `POST /api/cfgfs/format_confirm`,
-which is HMAC-gated on the AP password. Nothing else on the table moves.
+which was HMAC-gated on the AP password until that scheme was retired 2026-09-29 (both
+routes are now plain ROUTE_TIER_ADMIN, `cfgfs_format` MCP tool). Nothing else on the table moves.
 
 What must be flashed: an ordinary `flash_firmware()` from a clean worktree at HEAD. That
 tool writes exactly three images (`tools/PcTools/src/kilnctrl/mcp_server_flash.py`, the
@@ -238,14 +239,14 @@ Procedure:
    `GET /api/backup/export`) -- mandatory even though nothing should be lost.
 2. Build at HEAD in a clean worktree (`tools/worktree_mint.ps1`); a green build in this
    shared dirty tree proves nothing about HEAD.
-3. `flash_firmware(kiln_fw_root=<worktree>/firmware/KilnFW, ap_password=...)`, cable
+3. `flash_firmware(kiln_fw_root=<worktree>/firmware/KilnFW)`, cable
    attached, `verify=True`. The partition-offset guard compares the CSV's `app` row
    against the board's live table; `app` is unchanged, so it passes.
 4. Confirm with `debug_check_partition_table()` that the board reports `cfg` at 0xDB0000
    size 0x250000.
 5. (Step written against the wrong premise; kept for the record.) `cfg` was already
-   mounted at boot on the bench. The remaining follow-up is the reformat to full geometry,
-   which needs the AP password and is deferred until one is available to a session.
+   mounted at boot on the bench. The follow-up reformat to full geometry is done: the
+   volume reads 2,424,832 B total (2026-10-07, see Status above).
 
 Risks, none of them caused by this change and all three in `CLAUDE.md`'s flash section: a
 dual reset trips S6a (expected -- confirm `trip_mask` 0x0020, then `safety_clear_trip()`);

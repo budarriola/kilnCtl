@@ -175,7 +175,7 @@ extern const char *PROFILES_TAG;
  * handlers and mutated by profiles_edit_http.c's post/delete handlers.
  *
  * `used_bitmap` widened uint8_t -> profiles_slot_bitmap_t (docs/
- * PROFILE_SLOTS_100_PLAN.md section 7 task 1) so an id past 7 (up to the
+ * PROFILE_SLOTS_100.md section 7 task 1) so an id past 7 (up to the
  * 128-id ceiling section 2 of that plan documents) can be addressed once
  * PROFILES_MAX_COUNT is later raised -- still 8 today, so behavior and the
  * persisted NVS byte are unchanged. Every reader/writer goes through
@@ -186,7 +186,7 @@ typedef struct {
     profiles_slot_bitmap_t used_bitmap;
 } profiles_state_t;
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3: this struct (dominated by
+/* docs/PROFILE_SLOTS_100.md section 7 task 3: this struct (dominated by
  * profiles[PROFILES_MAX_COUNT], and growing further once task 6 raises
  * PROFILES_MAX_COUNT) is lazily allocated from PSRAM rather than reserved as
  * a .bss global -- see profiles_storage_ensure()'s doc comment in

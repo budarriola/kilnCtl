@@ -305,7 +305,7 @@ if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
         # cfg: added 2026-09-07, append-only into the free tail, sized from the
         # measured user-data inventory -- see partitions.csv's own `cfg` comment
         # block and docs/FILESYSTEM_PLAN.md. Grown 2026-09-19
-        # (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 5, partitions.csv's
+        # (docs/PROFILE_SLOTS_100.md section 7 task 5, partitions.csv's
         # "cfg grown to take the entire remaining tail" comment block) from
         # 0x80000 to 0x250000 -- offset unchanged, pure grow-in-place, new end
         # lands exactly at the 16 MiB chip boundary. Pinned here so a later

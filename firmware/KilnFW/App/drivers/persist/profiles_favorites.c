@@ -29,7 +29,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_FAV_USER);
 NVS_KEY_LEN_CHECK(NVS_KEY_FAV_BUILTIN);
 
 /* Bit i = user slot i is favorited. Widened uint32_t -> profiles_slot_bitmap_t
- * (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1) so an id up to the
+ * (docs/PROFILE_SLOTS_100.md section 7 task 1) so an id up to the
  * 128-id ceiling can be addressed once PROFILES_MAX_COUNT is later raised --
  * the plan's Status section names the old `user_mask & (1u << i)` scalar
  * test in favorites_list_get_handler() as undefined behavior once `i`
@@ -77,7 +77,7 @@ static hal_status_t favorites_save(void)
     if (err != HAL_OK) {
         return err;
     }
-    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: NVS_KEY_FAV_USER used
+    /* docs/PROFILE_SLOTS_100.md section 7 task 6: NVS_KEY_FAV_USER used
      * to be a single uint32_t (word[0] only) -- now the full 4-word
      * profiles_slot_bitmap_t, so an id up to 100 (still below the 128-id
      * ceiling) can be favorited and actually persist. See

@@ -33,7 +33,7 @@
 // so the resolve logic above still has no "legitimately removed" case to
 // distinguish from "failed NVS write" -- unused still simplifies to
 // "nvs_valid == false, trust the file if present." docs/
-// PROFILE_SLOTS_100_PLAN.md section 7 task 10 (2026-09-19) adds the first
+// PROFILE_SLOTS_100.md section 7 task 10 (2026-09-19) adds the first
 // real delete path, firing_stats_cfg_fs_delete() below, invoked ONLY when
 // the owning profile SLOT itself is deleted (profile_executor.h's
 // firing_stats_erase(), called from profiles_http.c's nvs_erase_slot()) --

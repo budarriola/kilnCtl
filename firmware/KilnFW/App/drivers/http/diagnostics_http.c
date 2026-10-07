@@ -1423,7 +1423,7 @@ static uint32_t cfgfs_read_zones_nvs_rev(void)
  * BUFFER SIZE (2026-09-08 widening: per-item dual-write rows for every
  * bridge, not zones only; WIDENED AGAIN same day when relay_cycles/
  * adaptive_tune/firing_stats moved off the stale nvs_only list; 2026-09-19,
- * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6, collapsed the
+ * docs/PROFILE_SLOTS_100.md section 7 task 6, collapsed the
  * PROFILES_MAX_COUNT profile-slot rows -- 8 of them at the time -- into ONE
  * aggregate "profiles" row so raising that constant to 100 doesn't also
  * mean 100 rows here; 2026-10-04 added the zone_normals and relay_names
@@ -1605,7 +1605,7 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
         time_sync_get_tz_dualwrite_status(&file_valid, &file_rev, &nvs_valid, &nvs_rev, &diverged);
         cfgfs_add_item(items, &n_items, "tz", file_valid, file_rev, nvs_valid, nvs_rev, diverged);
     }
-    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: at PROFILES_MAX_COUNT
+    /* docs/PROFILE_SLOTS_100.md section 7 task 6: at PROFILES_MAX_COUNT
      * == 8 this used to be one row per slot (a literal profile_names[8]
      * table plus a matching loop). At 100 slots that would mean 100
      * per-slot rows, which both blows CFG_FS_STATUS_MAX_ITEMS (still 18 --

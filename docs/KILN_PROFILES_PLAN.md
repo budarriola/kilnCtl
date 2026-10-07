@@ -1291,6 +1291,12 @@ appears to need it, stop and escalate.**
 
 ## 8. Part F — work items
 
+**Still open (2026-10-07):** bench confirmation of a real two-processor swap between two
+saved kiln packages on hardware, closing items 5 (apply transaction), 8 (interrupted-swap
+recovery) and 15 (volatile Pico install). All three are in source with host tests only.
+Rename this file without `_PLAN` once that lands. Items below not marked LANDED are
+the original specs; check the code before relying on their open/closed state.
+
 Ordered so useful, low-risk work lands first. Items 1–4, 7 and 9–11 are
 independent of the unresolved section 4.1 question. Every item: **no
 `ZONES_CFG_VERSION` bump**, and every negative test that breaks a production
@@ -1441,37 +1447,18 @@ Also assert the summary string is **not truncated** against its fixed buffer
 for the longest realistic field name plus two `%.4f` values (the
 `ki_refusal_reason` `char[96]` truncation precedent).
 
-**Item 8 — Interrupted-swap boot recovery.**
-Section 4.4's five-case table in `kiln_cfg_store_init()`, after the existing
-active-slot restore (preserve that ordering), with the fail-safe
-diverged-until-proven default of section 3.4.
-*Acceptance:* each of the five markers produces exactly the stated action, in
-host tests that stage the marker directly; in every case heating is impossible
-until the comparison passes.
-*Negative test:* stage `PICO_DONE` and assert the code re-applies R rather than
-finishing with P — the test must fail if "finish the swap" is implemented.
+**Item 8 - Interrupted-swap boot recovery. LANDED, host-tested; bench-unconfirmed.**
+`kiln_cfg_swap.c`'s `kiln_cfg_swap_boot_recover()` handles all five section 4.4
+markers (NONE, STAGED discarded, PICO_OPEN and PICO_DONE both roll back to the
+pre-swap config and never "finish the swap", ESP_DONE verifies both sides then
+completes), plus a corrupt or unrecognised marker latched as unrecoverable; it runs
+from the swap worker at boot. `test_kiln_cfg_swap.c` stages each marker directly.
+Open: see "Still open" at the top of this section.
 
-**Item 9 — UI: download / upload / warnings / confirm dialog / divergence banner.**
-Extends the existing kiln-config management page (`/settings/kiln_configs`,
-`kiln_configs_page.html`, moved off the dashboard 2026-09-18). Confirm dialog per section
-7.3. Backup page gains a pointer link (**landed 2026-09-18** -- the Export and
-Restore cards on `backup_page.html` now both link to `/settings/kiln_configs`
-and state plainly what a backup does and does not cover). **Also landed
-2026-09-19:** `backup_page.html`'s whole-backup restore now covers the
-`kiln_configs[]` array the export already included (`backup_export.c`'s
-`"kiln_configs"` key) with a Merge/Mirror mode radio, a dry-run
-(`X-Kiln-Config-Dry-Run: 1`) preview that names every create/rename/delete
-before the confirm dialog is shown, and the ack-delete count for a real Mirror
-restore derived from that same preview rather than typed by hand. This is the
-whole-backup-file path (`/api/backup/import`), distinct from item 9's own
-per-slot download/upload UI on `/settings/kiln_configs`, which remains open.
-LCD line and banner per section 7.4.
-*Acceptance:* Apply cannot be pressed without the dialog; hardware-differs
-requires the explicit acknowledgement checkbox; a 404 on the new routes hides
-the new controls without breaking the existing ones; the divergence banner has
-no dismiss control; the LCD line fits without scrolling and adds no new colour.
-*Negative test:* stub the import route to 500 and assert the page shows an
-error and does not clear or reorder the existing slot list.
+**Item 9 - UI: download / upload / warnings / confirm dialog / divergence banner. LANDED.**
+`kiln_configs_page.html` (`/settings/kiln_configs`) carries `kcDownloadBtn`,
+`kcUploadBtn` and the un-dismissable `kcDivergeBanner`; `backup_page.html` links to it
+and its whole-backup restore covers `kiln_configs[]` (item 17). LCD line per section 7.4.
 
 **Item 10 — Stack and size verification.**
 Run `check_httpd_task_stack_budget.py` against the built ELF; record the
@@ -1525,17 +1512,10 @@ message naming the property, the package's value and this controller's value.
 controller) is **accepted** — an over-strict compatibility check that refuses
 legitimate packages makes the feature useless and will be worked around.
 
-**Item 11 — Docs.**
-Update `docs/CONFIG_FILESYSTEM.md` (capacity), `docs/SYSTEM_ARCHITECTURE.md`
-(the package concept and the divergence invariant), `docs/SAFETY_CASE.md` (the
-divergence fault as a named safe state), and add section 1's IN/OUT list to the
-operator-facing help text. Rename this file without the `_PLAN` suffix once
-nothing in it is open.
-*Acceptance:* `tools/check_doc_hash_citations.ps1` passes; the IN/OUT sentence
-shipped in the UI matches section 1.4 exactly.
-*Negative test:* n/a (documentation) — instead a reviewer must confirm the
-shipped UI sentence and section 1.4 agree, and the item is not closed
-otherwise.
+**Item 11 - Docs. LANDED.** `CONFIG_FILESYSTEM.md`, `SYSTEM_ARCHITECTURE.md` (package
+concept and the divergence invariant) and `SAFETY_CASE.md` (H11) cover it, and the
+kiln page's IN/OUT sentence matches section 1.4. The `_PLAN` suffix stays until the
+bench confirmation below closes.
 
 ---
 
@@ -1667,68 +1647,11 @@ magnitude: **~6000 lines including tests, across 16 items.**
 
 ---
 
-**Item 17 — Backup & Restore must cover every kiln configuration slot (OPEN).**
-
-Owner requirement, 2026-09-18: "The Backup & Restore page is intended to work
-with all kiln configs." Today it does not.
-
-*Verified behaviour before any change:* the token `kiln_config` does not appear
-anywhere in `drivers/http/backup_export.c`, `backup_import.c` or
-`backup_http_internal.h`. The export document's top-level keys are `kind`,
-`version`, `profiles`, `zones`, `timing_profiles`, `ct_map_informational_only`,
-`k_ct_v_per_a_informational_only` and `safety_tc_type`. A backup therefore
-captures only the ACTIVE configuration, by way of the live zones config, and a
-restore leaves every saved slot untouched. Slot identity, slot name and the
-selected/active slot all survive a restore only because none of them is touched
-at all -- not because they round-trip.
-
-*Interim mitigation (landed):* both cards on the backup page now say so
-explicitly, so a user cannot believe a backup is total when it is not. This
-removes the silent trap but does not satisfy the requirement.
-
-*What the restore confirmation names today:* "This overwrites saved profiles and
-every zone setting (PID/model/thermocouple type, name, wiring, calibration,
-limits, timing, guard thresholds) with the contents of this file. Wi-Fi
-credentials are not affected. Continue?" It does not mention kiln configuration
-slots, which is accurate today and must be revised in step with any change here.
-
-*Arithmetic.* `KILN_CFG_MAX_COUNT` is 10 and
-`KILN_CFG_EXPORT_JSON_MAX_LEN` is 6144 B, so a full set is ~61 KB against a
-`BACKUP_BODY_MAX` of 16384. The export side streams and never buffers the whole
-document, so it scales as-is; the import side buffers the entire body (already
-in SPIRAM, not on the httpd stack) and would need its cap raised to roughly
-131072. That is a heap bound, not an httpd stack buffer, so raising it does not
-touch the standing prohibition -- but it must be justified against SPIRAM
-budget, not waved through.
-
-*Blocking gate 1 -- no validate-only seam exists.* A multi-slot restore must
-honour the existing two-pass validate-then-commit contract. An earlier reading
-of this plan named `kiln_package_import_json()` as that seam; **that is wrong and
-is corrected here**. It validates the ENVELOPE only (`kind`, `pkg_schema`, both
-halves present, param types). It explicitly does NOT verify `pkg_hash`, the ESP
-half via `zones_config_json_validate()`, or the section 5.2a hardware
-compatibility checks. The only function performing all of those is
-`kiln_cfg_store_import_package_json()`, which validates and COMMITS in the same
-call -- it creates a slot. So pass 1 cannot currently be expressed without a new
-store-level validate-only entry point. Writing one is the first real work item.
-
-*Blocking gate 2 -- owner decision on destructive semantics.*
-`kiln_cfg_store_import_package_json()` never overwrites: it always creates a new
-slot. Restoring a 10-slot backup onto a board that already holds slots therefore
-either duplicates them or fails partway with "store full", and neither is a
-restore. The choices are (a) replace all slots, genuinely destructive and
-needing the confirmation text to name the count, (b) merge by slot id, or
-(c) refuse unless the store is empty. This is an owner decision, not an
-implementation detail, because it decides whether Restore can destroy saved kiln
-identities that the file does not contain.
-
-*Compatibility.* A backup written with a `kiln_configs` array and restored by a
-firmware that predates it is accepted and the array silently ignored, since
-unknown top-level keys are not rejected. Per this plan's own rule against
-best-effort parsing, whichever direction lands must bump
-`BACKUP_FORMAT_VERSION` and refuse loudly rather than ignore silently.
-
-*Not a dependency:* none of this requires `safety_cfg_store.c` or the
-`SAFETY_CT_CAL_BLOB_VERSION` 1->2 migration. Restoring slots never writes to the
-safety processor -- only APPLYING a config does -- so section 7.1's objection
-about widening an ESP-only surface does not apply to the restore direction.
+**Item 17 - Backup & Restore covers every kiln configuration slot. LANDED.**
+`BACKUP_FORMAT_VERSION` is 5 (older firmware refuses a `kiln_configs[]` backup loudly
+instead of ignoring the array); `backup_export.c` streams `"kiln_configs"`;
+`backup_import.c` does a validate-only pass 1 through
+`kiln_cfg_store_validate_package_json()` (the store-level seam this item called for)
+before committing, with a Merge/Mirror mode and a dry-run preview on
+`backup_page.html`. Restoring slots never writes the safety processor; only applying a
+config does.

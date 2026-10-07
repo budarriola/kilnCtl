@@ -75,7 +75,7 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite);
  * PROFILE_BUILTIN_ID_BASE+i). Either pointer may be NULL.
  *
  * `out_user` widened uint32_t* -> profiles_slot_bitmap_t* (docs/
- * PROFILE_SLOTS_100_PLAN.md section 7 task 1) -- the plan's Status section
+ * PROFILE_SLOTS_100.md section 7 task 1) -- the plan's Status section
  * names the old `user_mask & (1u << i)` scalar test as undefined behavior
  * once `i` reaches 32, which the 100-slot raise (task 6) would do.
  * `out_builtin` stays a plain uint32_t: the builtin catalogue is a fixed

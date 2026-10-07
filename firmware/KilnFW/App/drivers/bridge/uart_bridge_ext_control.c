@@ -531,7 +531,7 @@ static void profiles_handle_message(void *vargs)
                 }
                 bool ok = profiles_http_delete(del_id);
                 if (!ok) {
-                    /* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7):
+                    /* Review fold-in (PROFILE_SLOTS_100.md section 7):
                      * profiles_http_delete() returns false both for "no such
                      * profile" and "that profile is currently running/paused
                      * and refused" -- reporting the latter as "no such

@@ -5,7 +5,7 @@
  * shared by profiles_http.c's s_profiles.used_bitmap and
  * profiles_favorites.c's user-slot favorite mask.
  *
- * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1: both of those were a
+ * docs/PROFILE_SLOTS_100.md section 7 task 1: both of those were a
  * single scalar (uint8_t / uint32_t) tested with `mask & (1u << id)`, which
  * is undefined behavior the moment `id` reaches the scalar's bit width (32
  * for the favorites mask; the plan's own Status section names

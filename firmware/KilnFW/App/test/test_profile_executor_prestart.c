@@ -128,7 +128,7 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
     return ESP_OK;
 }
 
-// profile_executor_firing_stats.c's last-run cache (PROFILE_SLOTS_100_PLAN.md
+// profile_executor_firing_stats.c's last-run cache (PROFILE_SLOTS_100.md
 // review LOW, "list perf") now #includes profiles_builtin.h to size/index
 // itself; this executable does not link profiles_builtin.c (not needed for
 // anything the prestart guard reaches), so g_builtin_profile_count needs a
@@ -8426,7 +8426,7 @@ static void test_firing_stats_load_discards_unknown_size_blob(void)
     fake_kv_reset_all();
 }
 
-// ---- last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW,
+// ---- last-run-started RAM cache (PROFILE_SLOTS_100.md review LOW,
 // "list perf") -- profile_executor_last_run_started_unix_s()'s O(1)-per-
 // request fix. Each test below uses a profile id nothing else in this file
 // ever calls profile_executor_last_run_started_unix_s() for, and the three
@@ -11801,7 +11801,7 @@ static void test_fscf_history_read_uses_the_heap_not_the_httpd_stack(void)
     reset_all_fscf();
 }
 
-// Opus review item 3 (PROFILE_SLOTS_100_PLAN.md sec 7): test 10's
+// Opus review item 3 (PROFILE_SLOTS_100.md sec 7): test 10's
 // nvs_erase_slot()/firing_stats_erase() coverage in test_profiles_http.c
 // only exercises firing_stats_erase() through a FAKE (it never links the
 // real firing_stats_cfg_fs.c). This executable already mounts a real cfg_fs

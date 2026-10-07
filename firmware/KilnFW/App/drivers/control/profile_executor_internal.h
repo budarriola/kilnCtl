@@ -1126,7 +1126,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec);
 bool firing_stats_maybe_finalize(profile_firing_run_record_t *out_rec);
 void capture_run_snapshot(run_snapshot_buf_t *b);
 
-/* Last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW, "list
+/* Last-run-started RAM cache (PROFILE_SLOTS_100.md review LOW, "list
  * perf") -- see profile_executor_firing_stats.c's own section comment for
  * the full design. firing_stats_persist()/firing_stats_erase() (this same
  * file) are the only writers; profile_executor_status.c's

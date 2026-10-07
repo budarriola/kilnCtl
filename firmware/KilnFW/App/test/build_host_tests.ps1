@@ -974,7 +974,7 @@ try {
             # reached from this executable's tests, so nothing else needs
             # faking here.
             "`"$(Join-Path $driversDir 'persist/live_profile.c')`" " +
-            # docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6's bench-slot
+            # docs/PROFILE_SLOTS_100.md section 7 task 6's bench-slot
             # exclusion test needs the REAL ui_page_profile_picker_is_deletable()
             # (not a hand-rolled stand-in) -- this file is small and pure
             # (no LVGL/ESP-IDF beyond the type-only stub headers already on

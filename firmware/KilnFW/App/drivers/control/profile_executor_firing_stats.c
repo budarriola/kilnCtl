@@ -225,13 +225,13 @@ void firing_stats_snapshot(const zone_runtime_t *z, float setpoint_span_c,
     }
 }
 
-/* ---- last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW,
+/* ---- last-run-started RAM cache (PROFILE_SLOTS_100.md review LOW,
  * "list perf") ---------------------------------------------------------
  *
  * profiles_catalog_http.c's GET /api/profiles calls profile_executor_
  * last_run_started_unix_s() once per profile id -- up to PROFILES_MAX_COUNT +
  * g_builtin_profile_count times per request (36 today; ~132 once
- * PROFILES_MAX_COUNT reaches 100, docs/PROFILE_SLOTS_100_PLAN.md) -- and that
+ * PROFILES_MAX_COUNT reaches 100, docs/PROFILE_SLOTS_100.md) -- and that
  * function used to do a full firing_stats_load() (an NVS blob read, cfg-fs
  * resolve, and a 1364 B heap_caps_malloc) on EVERY call, for EVERY request,
  * on the httpd_worker task. This cache makes that O(1) NVS per request:
@@ -846,7 +846,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     free(blob);
 }
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: erases this id's
+/* docs/PROFILE_SLOTS_100.md section 7 task 10: erases this id's
  * firing-history blob ("fs_<id>", profiles_nvs/fire_stats) plus the
  * cfg-filesystem mirror and its rev key (firing_stats_cfg_fs_delete()) --
  * called from profiles_http.c's nvs_erase_slot() when a profile SLOT is
