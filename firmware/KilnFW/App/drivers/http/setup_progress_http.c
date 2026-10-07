@@ -8,6 +8,7 @@
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "esp_log.h"
 
+#include "cfg_fs_refusal_http.h" // cfg_fs_http_refuse_if_unmounted(), cfg_fs_http_persist_failed()
 #include "http_form.h"
 #include "setup_wizard_progress.h"
 #include "wifi_provision_http.h"
@@ -143,6 +144,13 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
 
 static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
 {
+    /* The progress record's only persistence target is the cfg file
+     * (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"): refuse before
+     * touching state when it is not mounted. */
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
+
     if (req->content_len <= 0 || req->content_len > SETUP_PROGRESS_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -192,8 +200,7 @@ static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
     esp_err_t err = setup_wizard_progress_set_step((uint8_t)step_num, state, note);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "setup_wizard_progress_set_step(%ld) failed: %s", step_num, esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "applied live but could not be saved");
-        return ESP_OK;
+        return cfg_fs_http_persist_failed(req);
     }
 
     httpd_resp_set_type(req, "application/json");

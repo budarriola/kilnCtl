@@ -2247,8 +2247,9 @@ static void zone_sweep_record_ct_attribution(void)
 
     esp_err_t err = ct_verify_store_save(&blob);
     if (err != ESP_OK) {
-        ESP_LOGW(ZONES_HTTP_TAG,
-                 "CT attribution verdict not persisted (err %d) -- it holds for this boot only", (int)err);
+        ESP_LOGE(ZONES_HTTP_TAG,
+                 "CT attribution verdict NOT persisted (err %d: cfg file write failed or cfg not mounted, "
+                 "see POST /api/cfgfs/format_confirm) -- it holds for this boot only", (int)err);
     }
 }
 

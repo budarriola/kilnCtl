@@ -11638,7 +11638,11 @@ static void test_ct_blob_validate_rejects_what_it_must(void)
 
 static void test_ct_store_round_trips_through_nvs(void)
 {
+    // The verdict is cfg-file-only (owner decision 2026-10-07): mount a fresh
+    // cfg and reload so the RAM copy starts empty.
     fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    (void)ct_verify_store_start();
     TEST_CHECK(!ct_verify_store_get(NULL), "ct store: nothing stored before anything is saved");
 
     ct_verify_blob_t in = ctb_base();
@@ -11658,6 +11662,85 @@ static void test_ct_store_round_trips_through_nvs(void)
     memset(&out, 0, sizeof(out));
     TEST_CHECK(ct_verify_store_get(&out) && out.zone[2].verdict == (uint8_t)ZONE_CT_VERDICT_FAIL,
                "ct store: the refused save left the good verdict standing");
+
+    // The real reboot: only the cfg file survives. start() reloads it.
+    TEST_CHECK(ct_verify_store_start() == ESP_OK, "ct store: start() after the 'reboot'");
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(ct_verify_store_get(&out) && memcmp(&in, &out, sizeof(in)) == 0,
+               "ct store: the verdict survives a restart from the cfg file alone");
+    fake_kv_reset_all();
+}
+
+static bool ct_file_exists(void)
+{
+    bool e = false;
+    return cfg_fs_exists(CT_VERIFY_CFG_FILE_PATH, &e) == ESP_OK && e;
+}
+
+static bool ct_nvs_has_verdict(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_init_partition("kiln_nvs") != HAL_OK ||
+        hal_kv_open(&h, "ct_verify", HAL_KV_MODE_READ_ONLY, "kiln_nvs") != HAL_OK) {
+        return false;
+    }
+    ct_verify_blob_t b;
+    size_t len = sizeof(b);
+    bool have = hal_kv_get_blob(&h, "verdict_v1", &b, &len) == HAL_OK;
+    hal_kv_close(&h);
+    return have;
+}
+
+static void test_ct_store_cfg_only_and_refuses_when_unmounted(void)
+{
+    fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    (void)ct_verify_store_start();
+    ct_verify_blob_t in = ctb_base();
+    TEST_CHECK(ct_verify_store_save(&in) == ESP_OK, "ct cfg: save with cfg mounted");
+    TEST_CHECK(ct_file_exists(), "ct cfg: the verdict file was written");
+    TEST_CHECK(!ct_nvs_has_verdict(), "ct cfg: nothing was written to NVS");
+    bool fv = false, nv = true, dv = true;
+    uint32_t fr = 0, nr = 0;
+    ct_verify_store_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && fr == 1 && !nv && !dv, "ct cfg: status shows file rev 1, no NVS side, not diverged");
+
+    cfg_fs_deinit();
+    in.zone[0].verdict = (uint8_t)ZONE_CT_VERDICT_FAIL;
+    TEST_CHECK(ct_verify_store_save(&in) == ESP_ERR_INVALID_STATE, "ct cfg: save refused while cfg is unmounted");
+    TEST_CHECK(!ct_nvs_has_verdict(), "ct cfg: and no NVS fallback write happened");
+    // Remount over the same files (nothing could be deleted while unmounted):
+    // the restart sees the last PERSISTED verdict, not the refused change.
+    (void)cfg_fs_init(ZH_CFG_SCRATCH, NULL);
+    (void)ct_verify_store_start();
+    {
+        ct_verify_blob_t back;
+        memset(&back, 0, sizeof(back));
+        TEST_CHECK(ct_verify_store_get(&back) && back.zone[0].verdict != (uint8_t)ZONE_CT_VERDICT_FAIL,
+                   "ct cfg: the refused change is gone after a restart; the last persisted verdict stands");
+    }
+}
+
+static void test_ct_store_legacy_nvs_migrates(void)
+{
+    fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    ct_verify_blob_t legacy = ctb_base();
+    legacy.zone[1].verdict = (uint8_t)ZONE_CT_VERDICT_FAIL;
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "ct mig: init legacy partition");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "ct_verify", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK, "ct mig: open legacy ns");
+    TEST_CHECK(hal_kv_set_blob(&h, "verdict_v1", &legacy, sizeof(legacy)) == HAL_OK, "ct mig: write legacy blob");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(!ct_file_exists(), "ct mig: precondition, no file yet");
+    TEST_CHECK(ct_verify_store_start() == ESP_OK, "ct mig: start()");
+    ct_verify_blob_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(ct_verify_store_get(&out) && memcmp(&out, &legacy, sizeof(out)) == 0,
+               "ct mig: the legacy NVS verdict is read as the fallback");
+    TEST_CHECK(ct_file_exists(), "ct mig: and was migrated into the cfg file");
+    TEST_CHECK(ct_nvs_has_verdict(), "ct mig: the NVS copy is left in place");
     fake_kv_reset_all();
 }
 
@@ -11680,6 +11763,8 @@ static void ctf_install_live_config(void)
 static void test_ct_current_fact_tracks_the_stored_verdict(void)
 {
     fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    (void)ct_verify_store_start();
     ctf_install_live_config();
 
     TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_NEVER_RUN,
@@ -16142,6 +16227,8 @@ void run_test_zones_http(void)
     test_ct_fingerprint_notices_every_field();
     test_ct_blob_validate_rejects_what_it_must();
     test_ct_store_round_trips_through_nvs();
+    test_ct_store_cfg_only_and_refuses_when_unmounted();
+    test_ct_store_legacy_nvs_migrates();
     test_ct_current_fact_tracks_the_stored_verdict();
     test_ct_stale_verdict_is_never_reported_as_the_verdict_it_was();
     test_ct_producer_summed_uncommitted_map_is_shared_not_wrong_channel();

@@ -3,11 +3,13 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "cfg_fs_status.h"
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
 #include "hal_time.h"
 #include "nvs_key_check.h"
+#include "pref_cfg_fs.h"
 
 static const char *TAG = "setup_wiz_progress";
 
@@ -322,22 +324,22 @@ static bool steps_valid(const void *steps, size_t step_stride, size_t count)
     return true;
 }
 
-esp_err_t setup_wizard_progress_start(void)
+/* Reads the legacy NVS record (every historical layout, migrated forward) into
+ * s_steps. Returns true only when s_steps now holds a decoded record. */
+static bool nvs_legacy_load(void)
 {
-    apply_defaults(); /* safe "nothing visited" state stands until proven otherwise below */
-
     hal_status_t part_err = nvs_partition_init(NVS_PARTITION);
     if (part_err != HAL_OK) {
         ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- setup wizard progress stays at defaults this boot",
                  NVS_PARTITION, hal_status_to_name(part_err));
-        return ESP_OK; /* non-fatal, same convention as touch_cal_store_load()/display_power_cfg_start() */
+        return false; /* non-fatal, same convention as touch_cal_store_load()/display_power_cfg_start() */
     }
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NVS_PARTITION);
     if (err != HAL_OK) {
         /* HAL_NOT_FOUND on a fresh board is the expected steady state. */
-        return ESP_OK;
+        return false;
     }
 
     /* Read into the widest known layout's buffer (v3-legacy, 14 steps); the
@@ -353,7 +355,7 @@ esp_err_t setup_wizard_progress_start(void)
             ESP_LOGW(TAG, "setup wizard progress read failed: %s -- defaults stay in effect this boot",
                      hal_status_to_name(err));
         }
-        return ESP_OK;
+        return false;
     }
 
     /* v5 (current, 12-step) is its OWN size now -- unlike the old v2/v4
@@ -365,12 +367,12 @@ esp_err_t setup_wizard_progress_start(void)
             steps_valid(v5->steps, sizeof(v5->steps[0]), SETUP_WIZARD_STEP_COUNT)) {
             adopt_v5(v5);
             ESP_LOGI(TAG, "setup wizard progress loaded (v%u)", (unsigned)v5->version);
-            return ESP_OK;
+            return true;
         }
         ESP_LOGW(TAG, "stored setup wizard progress blob is %u-step-sized but version/fields do not check out "
                       "(saw version %u, expected %u) -- defaulting",
                  (unsigned)SETUP_WIZARD_STEP_COUNT, (unsigned)v5->version, (unsigned)SETUP_WIZARD_PROGRESS_VERSION);
-        return ESP_OK;
+        return false;
     }
 
     /* Legacy v2 (13 steps, pre-2026-09-18) and legacy v4 (13 steps,
@@ -382,18 +384,18 @@ esp_err_t setup_wizard_progress_start(void)
         if (v4->version == 4u &&
             steps_valid(v4->steps, sizeof(v4->steps[0]), SETUP_WIZARD_LEGACY_V4_STEP_COUNT)) {
             adopt_v4_legacy_migrate(v4);
-            return ESP_OK;
+            return true;
         }
         const setup_wizard_progress_v2_legacy_t *v2 = (const setup_wizard_progress_v2_legacy_t *)&raw;
         if (v2->version == 2u &&
             steps_valid(v2->steps, sizeof(v2->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT)) {
             adopt_v2_legacy_migrate(v2);
-            return ESP_OK;
+            return true;
         }
         ESP_LOGW(TAG, "stored setup wizard progress blob is 13-step-sized but version/fields do not check out "
                       "(saw version %u, expected 4 or 2 legacy) -- defaulting",
                  (unsigned)((const setup_wizard_progress_v4_legacy_t *)&raw)->version);
-        return ESP_OK;
+        return false;
     }
 
     /* Legacy v3 blob (14 steps, 2026-09-18..2026-09-19 only) -- must be
@@ -405,20 +407,20 @@ esp_err_t setup_wizard_progress_start(void)
         if (v3->version == 3u &&
             steps_valid(v3->steps, sizeof(v3->steps[0]), SETUP_WIZARD_LEGACY_V3_STEP_COUNT)) {
             adopt_v3_legacy_migrate(v3);
-            return ESP_OK;
+            return true;
         }
         ESP_LOGW(TAG, "stored setup wizard progress blob is v3-legacy-sized but version/fields do not check out -- defaulting");
-        return ESP_OK;
+        return false;
     }
 
     if (len == sizeof(setup_wizard_progress_v1_t)) {
         const setup_wizard_progress_v1_t *v1 = (const setup_wizard_progress_v1_t *)&raw;
         if (v1->version == 1u && steps_valid(v1->steps, sizeof(v1->steps[0]), SETUP_WIZARD_LEGACY_V1V2_STEP_COUNT)) {
             adopt_v1_migrate(v1);
-            return ESP_OK;
+            return true;
         }
         ESP_LOGW(TAG, "stored setup wizard progress blob is v1-sized but version/fields do not check out -- defaulting");
-        return ESP_OK;
+        return false;
     }
 
     ESP_LOGW(TAG, "stored setup wizard progress blob is size %u (recognize v1=%u, v2/v4-legacy=%u, v3-legacy=%u, "
@@ -426,7 +428,113 @@ esp_err_t setup_wizard_progress_start(void)
              (unsigned)len, (unsigned)sizeof(setup_wizard_progress_v1_t),
              (unsigned)sizeof(setup_wizard_progress_v4_legacy_t), (unsigned)sizeof(setup_wizard_progress_v3_legacy_t),
              (unsigned)sizeof(setup_wizard_progress_blob_t));
+    return false;
+}
+
+/* Quiet read of the current-layout (v5) NVS record only, for the status poll:
+ * never touches s_steps, never logs. */
+static bool nvs_v5_read_quiet(setup_wizard_progress_blob_t *out)
+{
+    if (nvs_partition_init(NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    setup_wizard_progress_v3_legacy_t raw;
+    memset(&raw, 0, sizeof(raw));
+    size_t len = sizeof(raw);
+    hal_status_t err = hal_kv_get_blob(&h, NVS_KEY_PROGRESS, &raw, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK || len != sizeof(*out)) {
+        return false;
+    }
+    memcpy(out, &raw, sizeof(*out));
+    return out->version == SETUP_WIZARD_PROGRESS_VERSION && steps_valid(out->steps, sizeof(out->steps[0]), SETUP_WIZARD_STEP_COUNT);
+}
+
+static void steps_to_blob(setup_wizard_progress_blob_t *blob)
+{
+    memset(blob, 0, sizeof(*blob));
+    blob->version = SETUP_WIZARD_PROGRESS_VERSION;
+    for (uint8_t i = 0; i < SETUP_WIZARD_STEP_COUNT; i++) {
+        blob->steps[i].state = (uint8_t)s_steps[i].state;
+        blob->steps[i].ts = s_steps[i].ts;
+        memcpy(blob->steps[i].note, s_steps[i].note, SETUP_WIZARD_NOTE_MAX);
+    }
+}
+
+static bool cfg_blob_validate(const void *bytes, size_t len)
+{
+    if (!bytes || len != sizeof(setup_wizard_progress_blob_t)) {
+        return false;
+    }
+    const setup_wizard_progress_blob_t *b = (const setup_wizard_progress_blob_t *)bytes;
+    return b->version == SETUP_WIZARD_PROGRESS_VERSION &&
+           steps_valid(b->steps, sizeof(b->steps[0]), SETUP_WIZARD_STEP_COUNT);
+}
+
+/* rev of the cfg file as last verified on flash; the legacy NVS record has no
+ * rev and competes at 0, so any file this build wrote beats it. */
+static uint32_t s_rev;
+
+esp_err_t setup_wizard_progress_start(void)
+{
+    apply_defaults(); /* safe "nothing visited" state stands until proven otherwise below */
+    s_rev = 0;
+
+    /* Read-through (pref_cfg_fs.h): the legacy NVS record (any historical
+     * layout, migrated to v5 in RAM) is the fallback candidate; the cfg file
+     * wins on a strictly higher rev. A fallback NVS candidate is migrated into
+     * the file when cfg is mounted. Writes never go back to NVS. */
+    bool nvs_ok = nvs_legacy_load();
+    setup_wizard_progress_blob_t nvs_blob;
+    steps_to_blob(&nvs_blob);
+
+    setup_wizard_progress_blob_t resolved;
+    uint32_t rev = 0;
+    bool used_file = false;
+    if (pref_cfg_fs_resolve(SETUP_WIZARD_PROGRESS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, 0,
+                            cfg_blob_validate, &resolved, &rev, &used_file)) {
+        if (used_file) {
+            adopt_v5(&resolved);
+        }
+        s_rev = rev;
+        ESP_LOGI(TAG, "setup wizard progress loaded (source=%s, rev=%lu)", used_file ? "file" : "NVS",
+                 (unsigned long)rev);
+    } else {
+        apply_defaults();
+    }
     return ESP_OK;
+}
+
+void setup_wizard_progress_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                                uint32_t *nvs_rev, bool *diverged)
+{
+    setup_wizard_progress_blob_t f;
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw_quiet(SETUP_WIZARD_PROGRESS_FILE_PATH, sizeof(f), cfg_blob_validate, &f, &f_rev, &f_valid);
+    setup_wizard_progress_blob_t n;
+    memset(&n, 0, sizeof(n));
+    bool n_valid = nvs_v5_read_quiet(&n);
+    bool content_equal = f_valid && n_valid && memcmp(&f, &n, sizeof(f)) == 0;
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0; /* the NVS record has no rev key */
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }
 
 void setup_wizard_progress_get_all(setup_wizard_step_t out[SETUP_WIZARD_STEP_COUNT])
@@ -445,42 +553,18 @@ esp_err_t setup_wizard_progress_get_step(uint8_t step_index, setup_wizard_step_t
 
 static esp_err_t persist_all(void)
 {
-    hal_status_t part_err = nvs_partition_init(NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- setup wizard progress not persisted", NVS_PARTITION,
-                 hal_status_to_name(part_err));
-        return hal_status_to_esp_err(part_err);
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "hal_kv_open failed: %s -- setup wizard progress not persisted", hal_status_to_name(err));
-        return hal_status_to_esp_err(err);
-    }
-
+    /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
+     * no NVS write follows, and a failure is returned, never masked. The rev
+     * advances only after a verified write. */
     setup_wizard_progress_blob_t blob;
-    memset(&blob, 0, sizeof(blob));
-    blob.version = SETUP_WIZARD_PROGRESS_VERSION;
-    for (uint8_t i = 0; i < SETUP_WIZARD_STEP_COUNT; i++) {
-        blob.steps[i].state = (uint8_t)s_steps[i].state;
-        blob.steps[i].ts = s_steps[i].ts;
-        memcpy(blob.steps[i].note, s_steps[i].note, SETUP_WIZARD_NOTE_MAX);
+    steps_to_blob(&blob);
+    uint32_t new_rev = s_rev + 1;
+    esp_err_t err = pref_cfg_fs_commit(SETUP_WIZARD_PROGRESS_FILE_PATH, &blob, sizeof(blob), new_rev,
+                                       "setup wizard progress");
+    if (err == ESP_OK) {
+        s_rev = new_rev;
     }
-
-    err = hal_kv_set_blob(&h, NVS_KEY_PROGRESS, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-
-    if (err != HAL_OK) {
-        /* Non-negotiable per this task's spec: never silently discard a
-         * persist failure -- log the real esp_err_to_name() text. */
-        ESP_LOGE(TAG, "could not persist setup wizard progress: %s -- will not survive a reboot",
-                 hal_status_to_name(err));
-    }
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_state_t state, const char *note)
@@ -489,7 +573,7 @@ esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_s
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* In-RAM truth first -- live immediately regardless of whether the NVS
+    /* In-RAM truth first -- live immediately regardless of whether the cfg
      * write below succeeds, same ordering as display_power_cfg_set()/
      * touch_cal_store_save(). */
     s_steps[step_index].state = state;

@@ -32,10 +32,15 @@
 // therefore the initial value and the expected steady state on this board,
 // not an error condition.
 //
-// NVS ONLY, deliberately: no `cfg` LittleFS dual-write. This is a
-// measurement RESULT about one physical board, not a user preference --
-// copying it into the config filesystem would make it travel with a config
-// backup/restore onto a board whose clamps are somewhere else entirely.
+// PERSISTENCE (owner decision 2026-10-07, docs/CONFIG_FILESYSTEM.md): the
+// verdict lives in the cfg LittleFS file "ct_verify.bin" (pref_cfg_fs
+// rev-prefixed record) and saves go there ONLY. The earlier NVS-only rule
+// ("a measurement result must not travel with a backup") is superseded: the
+// fingerprint above is what keeps a restored verdict honest -- one carried
+// onto a board with different clamps no longer matches today's fingerprint
+// and reads STALE, never as the verdict it was. The old NVS blob (kiln_nvs,
+// namespace ct_verify) is read once at boot as a fallback and migrated into
+// the file; nothing writes it any more.
 #ifndef CT_VERIFY_STORE_H
 #define CT_VERIFY_STORE_H
 
@@ -53,6 +58,9 @@ extern "C" {
  * board's three zones. Kept as its own constant rather than including that
  * header so this module stays free of the zones config stack -- the
  * _Static_assert in ct_verify_store.c holds the two together. */
+/* cfg_fs relative path of the verdict file (kiln-scope reset names it). */
+#define CT_VERIFY_CFG_FILE_PATH "ct_verify.bin"
+
 #define CT_VERIFY_MAX_ZONES 3u
 #define CT_VERIFY_CHANNELS  3u
 
@@ -130,7 +138,7 @@ uint32_t ct_verify_fingerprint(const ct_verify_fingerprint_in_t *in);
  * blob store in this tree validates. */
 bool ct_verify_blob_validate(const void *bytes, size_t len);
 
-/* Loads the stored verdict from NVS into RAM. Non-fatal: a missing key, a
+/* Loads the stored verdict (cfg file, else the legacy NVS blob, migrated) into RAM. Non-fatal: a missing key, a
  * failed partition init or a blob that fails validation all leave the
  * in-RAM state at "no verdict", which every reader treats as NEVER RUN --
  * never as a pass. Safe to call more than once. */
@@ -141,14 +149,16 @@ bool ct_verify_store_get(ct_verify_blob_t *out);
 
 /* Replaces the stored verdict wholesale and persists it. `blob` must pass
  * ct_verify_blob_validate() or this returns ESP_ERR_INVALID_ARG and changes
- * nothing. In-RAM truth updates first, so a failed NVS write means the
- * verdict will not survive a reboot, not that it failed to take effect now.
- *
- * MUST NOT be called from a PSRAM-stacked task: the underlying NVS write
- * refuses (and panics on real hardware) -- see safety_cfg_store.c's
- * caller_stack_is_external() note. The sweep task, its only caller, has an
- * internal-RAM stack. */
+ * nothing. In-RAM truth updates first, so a failed write means the verdict
+ * will not survive a reboot, not that it failed to take effect now. The
+ * write goes to the cfg file ONLY; ESP_ERR_INVALID_STATE means cfg is not
+ * mounted (the caller must surface it, POST /api/cfgfs/format_confirm). */
 esp_err_t ct_verify_store_save(const ct_verify_blob_t *blob);
+
+/* Read-only dual-write status for GET /api/cfgfs; same contract as
+ * unit_pref_get_dualwrite_status(). Any output pointer may be NULL. */
+void ct_verify_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                          bool *diverged);
 
 /* ---- the projection everything else reads -------------------------------
  *
