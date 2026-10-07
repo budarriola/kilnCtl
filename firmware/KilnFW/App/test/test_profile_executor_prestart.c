@@ -10004,6 +10004,113 @@ static bool aux_test_start_run(char *err, size_t cap)
     return profile_executor_run(0, err, cap);
 }
 
+/* EXTRACTION A: the zone and aux call sites build on_off_trigger_input_t
+ * through ONE builder. Fed the same facts, the two wrappers must produce the
+ * same input field for field; the only permitted differences are the
+ * documented builder inputs (zone: FAULTED/zone-fault terms and the zone's
+ * failsafe_state; aux: no FAULTED term, fail-safe fixed OFF). */
+static void on_off_input_assert_equal(const on_off_trigger_input_t *a, const on_off_trigger_input_t *b,
+                                      const char *what)
+{
+    char msg[160];
+#define EQ_FIELD(f)                                                                  \
+    do {                                                                             \
+        snprintf(msg, sizeof(msg), "%s: field %s equal between zone and aux", what, #f); \
+        TEST_CHECK(a->f == b->f, msg);                                               \
+    } while (0)
+    EQ_FIELD(failsafe_override);
+    EQ_FIELD(failsafe_state_on);
+    EQ_FIELD(guard_5_6_tripped);
+    EQ_FIELD(run_running);
+    EQ_FIELD(run_paused);
+    EQ_FIELD(failsafe_on_pause);
+    EQ_FIELD(min_on_s);
+    EQ_FIELD(min_off_s);
+    EQ_FIELD(rule.enable);
+    EQ_FIELD(rule.phase_mask);
+    EQ_FIELD(rule.direction_mask);
+    EQ_FIELD(rule.temp_cmp);
+    EQ_FIELD(rule.temp_threshold_c);
+    EQ_FIELD(rule.time_start_s);
+    EQ_FIELD(rule.time_stop_s);
+    EQ_FIELD(rule.invert);
+    EQ_FIELD(current_phase_is_dwell);
+    EQ_FIELD(current_direction);
+    EQ_FIELD(temp_measurement_c);
+    EQ_FIELD(hyst_c);
+    EQ_FIELD(segment_elapsed_s);
+    EQ_FIELD(ramp_lock_held);
+    EQ_FIELD(stretched_this_tick);
+    EQ_FIELD(segment_index);
+    EQ_FIELD(dt_s);
+#undef EQ_FIELD
+}
+
+static void test_on_off_zone_and_aux_input_builders_agree(void)
+{
+    TEST_SECTION("on/off input: zone and aux producers share one builder (field-for-field equivalence)");
+    for (int variant = 0; variant < 3; variant++) {
+        profile_t pr = aux_test_profile();
+        pr.on_off_rule_count = 2;
+        pr.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_ABOVE;
+        pr.on_off_rules[0].temp_threshold_c = 123.0f;
+        pr.on_off_rules[0].invert = (variant == 1);
+        pr.on_off_rules[0].time_start_s = 4;
+        pr.on_off_rules[0].time_stop_s = 99;
+        pr.on_off_rules[1] = pr.on_off_rules[0];
+        pr.on_off_rules[1].zone_index = 0; /* zone 0 */
+        aux_test_setup(&pr);
+        g_stub_aux[0].tc_zone = 0;
+        g_stub_aux[0].min_on_s = 7;
+        g_stub_aux[0].min_off_s = 9;
+        g_stub_aux[0].hyst_c = 3.0f;
+
+        s_exec.profile = pr;
+        s_exec.state = (variant == 2) ? PROFILE_EXEC_PAUSED : PROFILE_EXEC_RUNNING;
+        s_exec.segment_index = 0;
+        s_exec.target_rate_c_per_s = (variant == 1) ? -0.5f : 0.5f;
+        s_exec.dwelling = (variant == 2);
+        s_exec.ramp_lock_held = (variant == 1);
+        s_exec.segment_elapsed_s = 12;
+        s_exec.zones[0].active = true;
+        s_exec.zones[0].actual_valid = true;
+        s_exec.zones[0].actual_c = 150.0f;
+
+        aux_output_t ax;
+        TEST_CHECK(aux_outputs_cfg_get(1, &ax), "aux entry readable");
+        bool bypass_z = false, bypass_a = false;
+        on_off_trigger_input_t zi_in =
+            profile_executor_zone_on_off_input(0, false, 7, 9, 3.0f, false, variant == 1, 0.5f, &bypass_z);
+        on_off_trigger_input_t ai_in =
+            profile_executor_aux_on_off_input(0, &ax, true, false, variant == 1, 0.5f, &bypass_a);
+        char what[32];
+        snprintf(what, sizeof(what), "variant %d", variant);
+        on_off_input_assert_equal(&zi_in, &ai_in, what);
+        TEST_CHECK(bypass_z == bypass_a, "bypass_hold agrees between zone and aux");
+    }
+    {
+        /* The documented differences stay builder inputs, not drift: a
+         * FAULTED run is a zone fail-safe term and not an aux one, and the
+         * zone's failsafe_state flows through while aux is fixed OFF. */
+        profile_t pr = aux_test_profile();
+        aux_test_setup(&pr);
+        s_exec.profile = pr;
+        s_exec.zones[0].active = true;
+        s_exec.zones[0].actual_valid = true;
+        s_exec.zones[0].actual_c = 150.0f;
+        s_exec.state = PROFILE_EXEC_FAULTED;
+        aux_output_t ax;
+        TEST_CHECK(aux_outputs_cfg_get(1, &ax), "aux entry readable");
+        bool bz = false, ba = false;
+        on_off_trigger_input_t z = profile_executor_zone_on_off_input(0, true, 7, 9, 3.0f, false, false, 0.5f, &bz);
+        on_off_trigger_input_t a = profile_executor_aux_on_off_input(0, &ax, true, false, false, 0.5f, &ba);
+        TEST_CHECK(z.failsafe_override, "zone: FAULTED run is a fail-safe term");
+        TEST_CHECK(z.failsafe_state_on, "zone: configured failsafe_state flows through");
+        TEST_CHECK(!a.failsafe_state_on, "aux: failsafe state fixed OFF");
+        TEST_CHECK(!a.failsafe_override, "aux: no FAULTED term (aux tick only runs while RUNNING)");
+    }
+}
+
 static void test_aux_start_control_run_succeeds(void)
 {
     TEST_SECTION("aux WP-3: control -- a valid aux rule on an enabled aux starts cleanly");
@@ -10682,6 +10789,7 @@ static void run_test_on_off_actuation(void)
     test_on_off_zone_tick_rule_turns_relay_on_through_owner();
     test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner();
     test_on_off_zone_invalid_sensor_fails_safe();
+    test_on_off_zone_and_aux_input_builders_agree();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();

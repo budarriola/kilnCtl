@@ -548,6 +548,111 @@ bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bo
     return rule->enable && rule->temp_cmp != ON_OFF_TEMP_CMP_NONE && !temp_ok;
 }
 
+/* The single producer of on_off_trigger_input_t for both the zone and the aux
+ * paths. Everything the two share is derived here from s_exec: direction bit
+ * from the target rate, run_running/run_paused, dwell OR quasi_dwell,
+ * ramp_lock_held, segment fields, the missing-temperature fail-safe and the
+ * hold-bypass flag. What genuinely differs is an input (on_off_input_params_t).
+ * Must be called with s_exec.lock held. */
+on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_params_t *p, bool *bypass_hold_out)
+{
+    uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
+    if (s_exec.target_rate_c_per_s > 0.0f) {
+        direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
+    } else if (s_exec.target_rate_c_per_s < 0.0f) {
+        direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
+    }
+    bool run_running = (s_exec.state == PROFILE_EXEC_RUNNING);
+    bool failsafe = p->failsafe_base || profile_executor_on_off_temp_unusable(&p->rule, p->temp_ok);
+
+    on_off_trigger_input_t oin = {
+        .failsafe_override = failsafe,
+        .failsafe_state_on = p->failsafe_state_on,
+        .guard_5_6_tripped = p->guard_5_6_tripped,
+        .run_running = run_running,
+        .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
+        .failsafe_on_pause = false, /* no per-output override field yet */
+        .min_on_s = p->min_on_s,
+        .min_off_s = p->min_off_s,
+        .rule = p->rule,
+        .current_phase_is_dwell = s_exec.dwelling || p->quasi_dwell,
+        .current_direction = direction_bit,
+        .temp_measurement_c = p->temp_c,
+        .hyst_c = p->hyst_c,
+        .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
+        .ramp_lock_held = s_exec.ramp_lock_held,
+        .stretched_this_tick = p->stretched_this_tick,
+        .segment_index = s_exec.segment_index,
+        .dt_s = p->dt_s,
+    };
+    /* Mirrors on_off_trigger_decide()'s precedence levels 1-3, so a
+     * safety-relevant transition is never held at the actuation layer. */
+    if (bypass_hold_out) {
+        *bypass_hold_out = failsafe || p->guard_5_6_tripped || !run_running;
+    }
+    return oin;
+}
+
+/* Zone call site. Authority is per zone (resolved by the caller), the
+ * fail-safe state is the zone's configured one, and a FAULTED run or faulted
+ * zone is a fail-safe term. Must be called with s_exec.lock held. */
+on_off_trigger_input_t profile_executor_zone_on_off_input(uint8_t zi, bool failsafe_state_on, uint16_t min_on_s,
+                                                           uint16_t min_off_s, float hyst_c, bool authority_blocked,
+                                                           bool stretched_this_tick, float dt_s, bool *bypass_hold_out)
+{
+    const zone_runtime_t *z = &s_exec.zones[zi];
+    on_off_input_params_t p = {
+        .failsafe_base = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted || authority_blocked,
+        .failsafe_state_on = failsafe_state_on,
+        .guard_5_6_tripped = z->guard_state.is_tripped &&
+                             (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
+                              z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
+        .min_on_s = min_on_s,
+        .min_off_s = min_off_s,
+        .hyst_c = hyst_c,
+        .rule = profile_resolve_on_off_rule(&s_exec.profile, zi, s_exec.segment_index),
+        .quasi_dwell = z->on_off_trigger_state.quasi_dwell,
+        .temp_c = z->actual_c,
+        .temp_ok = z->actual_valid && !isnan(z->actual_c),
+        .stretched_this_tick = stretched_this_tick,
+        .dt_s = dt_s,
+    };
+    return profile_executor_build_on_off_input(&p, bypass_hold_out);
+}
+
+/* Aux call site. Authority is the global relay-authority block (resolved by
+ * the caller), the fail-safe state is fixed OFF (owner decision), the
+ * temperature comes from the entry's tc_zone, and there is no FAULTED term:
+ * the aux tick runs only while RUNNING, and a fault leaves RUNNING through
+ * exec_enter_terminal_state(), whose force_aux_relays_off() is the aux
+ * fail-safe for that path. cfg_ok false (entry unreadable) is a fail-safe.
+ * Must be called with s_exec.lock held. */
+on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const aux_output_t *ax, bool cfg_ok,
+                                                          bool authority_blocked, bool stretched_this_tick,
+                                                          float dt_s, bool *bypass_hold_out)
+{
+    const zone_runtime_t *tz = (cfg_ok && ax->tc_zone < MAX31856_CHANNEL_COUNT) ? &s_exec.zones[ax->tc_zone] : NULL;
+    bool temp_ok = tz && tz->active && !tz->faulted && tz->actual_valid;
+    on_off_input_params_t p = {
+        .failsafe_base = !cfg_ok || authority_blocked,
+        .failsafe_state_on = false, /* aux fail-safe is fixed OFF (owner decision) */
+        .guard_5_6_tripped = tz && tz->active && tz->guard_state.is_tripped &&
+                             (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
+                              tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
+        .min_on_s = (ax->min_on_s > 0) ? ax->min_on_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
+        .min_off_s = (ax->min_off_s > 0) ? ax->min_off_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
+        .hyst_c = (ax->hyst_c > 0.0f) ? ax->hyst_c : AUX_HYST_C_DEFAULT,
+        .rule = profile_resolve_on_off_rule(&s_exec.profile, (uint8_t)(PROFILE_RULE_TARGET_AUX_BASE + aux_idx),
+                                            s_exec.segment_index),
+        .quasi_dwell = s_exec.aux[aux_idx].trigger.quasi_dwell,
+        .temp_c = temp_ok ? tz->actual_c : 0.0f,
+        .temp_ok = temp_ok,
+        .stretched_this_tick = stretched_this_tick,
+        .dt_s = dt_s,
+    };
+    return profile_executor_build_on_off_input(&p, bypass_hold_out);
+}
+
 /* Evaluates every claimed aux for the current segment. Same decision core
  * and actuation gate as an on/off zone (profile_executor_on_off_zone_tick()),
  * with an aux's own inputs: its tc_zone's reading for a temperature axis, the
@@ -564,13 +669,6 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
     uint8_t enabled_now = aux_outputs_cfg_enabled_mask();
     uint32_t sources = 0;
     bool authority_blocked = relay_authority_on_blocked(s_exec.safety, &sources);
-    uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
-    if (s_exec.target_rate_c_per_s > 0.0f) {
-        direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
-    } else if (s_exec.target_rate_c_per_s < 0.0f) {
-        direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
-    }
-    bool run_running = (s_exec.state == PROFILE_EXEC_RUNNING);
 
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         uint8_t bit = (uint8_t)(1u << i);
@@ -592,44 +690,10 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             memset(&ax, 0, sizeof(ax));
             ax.tc_zone = AUX_TC_ZONE_NONE;
         }
-        uint16_t min_on_s = (ax.min_on_s > 0) ? ax.min_on_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT;
-        uint16_t min_off_s = (ax.min_off_s > 0) ? ax.min_off_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT;
-        float hyst_c = (ax.hyst_c > 0.0f) ? ax.hyst_c : AUX_HYST_C_DEFAULT;
-
-        on_off_trigger_rule_t rule =
-            profile_resolve_on_off_rule(&s_exec.profile, (uint8_t)(PROFILE_RULE_TARGET_AUX_BASE + i),
-                                        s_exec.segment_index);
-        const zone_runtime_t *tz = (cfg_ok && ax.tc_zone < MAX31856_CHANNEL_COUNT) ? &s_exec.zones[ax.tc_zone] : NULL;
-        bool temp_ok = tz && tz->active && !tz->faulted && tz->actual_valid;
-        bool guard_5_6 = tz && tz->active && tz->guard_state.is_tripped &&
-                         (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
-                          tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
-        /* No FAULTED term: this tick runs only while RUNNING, and a fault
-         * leaves RUNNING through exec_enter_terminal_state(), whose
-         * force_aux_relays_off() is the aux fail-safe for that path. */
-        bool failsafe = !cfg_ok || authority_blocked || profile_executor_on_off_temp_unusable(&rule, temp_ok);
-
-        on_off_trigger_input_t oin = {
-            .failsafe_override = failsafe,
-            .failsafe_state_on = false, /* aux fail-safe is fixed OFF (owner decision) */
-            .guard_5_6_tripped = guard_5_6,
-            .run_running = run_running,
-            .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
-            .failsafe_on_pause = false,
-            .min_on_s = min_on_s,
-            .min_off_s = min_off_s,
-            .rule = rule,
-            .current_phase_is_dwell = s_exec.dwelling || s_exec.aux[i].trigger.quasi_dwell,
-            .current_direction = direction_bit,
-            .temp_measurement_c = temp_ok ? tz->actual_c : 0.0f,
-            .hyst_c = hyst_c,
-            .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
-            .ramp_lock_held = s_exec.ramp_lock_held,
-            .stretched_this_tick = stretched_this_tick,
-            .segment_index = s_exec.segment_index,
-            .dt_s = dt_s,
-        };
-        bool bypass_hold = failsafe || guard_5_6 || !run_running;
+        bool bypass_hold = false;
+        on_off_trigger_input_t oin = profile_executor_aux_on_off_input(i, &ax, cfg_ok, authority_blocked,
+                                                                       stretched_this_tick, dt_s, &bypass_hold);
+        bool failsafe = oin.failsafe_override;
         on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(
             &s_exec.aux[i].trigger, &s_exec.aux[i].actuated_on, &s_exec.aux[i].held_s, &oin, bypass_hold,
             relays_on_count, cap);
@@ -650,7 +714,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
         } else if (failsafe) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUX_FAILSAFE;
-        } else if (!rule.enable) {
+        } else if (!oin.rule.enable) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE;
         } else {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;

@@ -1234,6 +1234,31 @@ void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_inp
  * otherwise read as "satisfied" and command the relay ON on a dead sensor.
  * Shared by the zone and aux on/off input producers. */
 bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok);
+/* Inputs to the shared on/off input builder that genuinely differ between the
+ * zone and aux producers. failsafe_base is the producer's own run-ending terms
+ * (zone: FAULTED || zone fault || per-zone authority; aux: config unreadable
+ * || global authority); the builder adds the missing-temperature term. */
+typedef struct {
+    bool failsafe_base;
+    bool failsafe_state_on;
+    bool guard_5_6_tripped;
+    uint16_t min_on_s;
+    uint16_t min_off_s;
+    float hyst_c;
+    on_off_trigger_rule_t rule;
+    bool quasi_dwell;
+    float temp_c;
+    bool temp_ok;
+    bool stretched_this_tick;
+    float dt_s;
+} on_off_input_params_t;
+on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_params_t *p, bool *bypass_hold_out);
+on_off_trigger_input_t profile_executor_zone_on_off_input(uint8_t zi, bool failsafe_state_on, uint16_t min_on_s,
+                                                           uint16_t min_off_s, float hyst_c, bool authority_blocked,
+                                                           bool stretched_this_tick, float dt_s, bool *bypass_hold_out);
+on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const aux_output_t *ax, bool cfg_ok,
+                                                          bool authority_blocked, bool stretched_this_tick,
+                                                          float dt_s, bool *bypass_hold_out);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 /* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same

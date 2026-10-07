@@ -1773,12 +1773,6 @@ void executor_task_entry(void *arg)
                 zones_config_get_min_off_s(zi, &min_off_s);
                 float hyst_c = 2.0f;
                 zones_config_get_hyst_c(zi, &hyst_c);
-                uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
-                if (s_exec.target_rate_c_per_s > 0.0f) {
-                    direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
-                } else if (s_exec.target_rate_c_per_s < 0.0f) {
-                    direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
-                }
                 /* Refreshed HERE, directly, rather than by reading z->
                  * heat_blocked: for a heater zone heat_blocked is already
                  * fresh by this point in the tick because apply_relay() ran
@@ -1810,43 +1804,14 @@ void executor_task_entry(void *arg)
                  * temp_cmp NONE (its temperature axis drops out of the AND
                  * as a tautology) until a later step resolves them -- never
                  * silently mis-evaluated against the wrong reading. */
-                on_off_trigger_rule_t resolved_rule =
-                    profile_resolve_on_off_rule(&s_exec.profile, zi, s_exec.segment_index);
-
-                /* A rule with a temperature axis on a zone whose reading is
-                 * invalid (actual_c is NAN) must fail safe like the aux path
-                 * does: NaN compares false in axis_temp(), and with invert
-                 * that reads as "satisfied" and would command the relay ON
-                 * on a dead sensor until guard 6 trips. */
-                bool temp_ok = z->actual_valid && !isnan(z->actual_c);
-                bool run_ending_failsafe = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted ||
-                                           authority_blocked_now ||
-                                           profile_executor_on_off_temp_unusable(&resolved_rule, temp_ok);
-                bool guard_5_6_tripped_now = z->guard_state.is_tripped &&
-                    (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
-                     z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
-                bool run_running_now = (s_exec.state == PROFILE_EXEC_RUNNING);
-
-                on_off_trigger_input_t oin = {
-                    .failsafe_override = run_ending_failsafe,
-                    .failsafe_state_on = failsafe_on,
-                    .guard_5_6_tripped = guard_5_6_tripped_now,
-                    .run_running = run_running_now,
-                    .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
-                    .failsafe_on_pause = false, /* no per-zone override field yet -- plan step 6's UI */
-                    .min_on_s = min_on_s,
-                    .min_off_s = min_off_s,
-                    .rule = resolved_rule,
-                    .current_phase_is_dwell = s_exec.dwelling || z->on_off_trigger_state.quasi_dwell,
-                    .current_direction = direction_bit,
-                    .temp_measurement_c = z->actual_c,
-                    .hyst_c = hyst_c,
-                    .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
-                    .ramp_lock_held = s_exec.ramp_lock_held,
-                    .stretched_this_tick = stretched_this_tick,
-                    .segment_index = s_exec.segment_index,
-                    .dt_s = dt_s,
-                };
+                /* Rule lookup, direction/phase/run-state facts, the dead-sensor
+                 * fail-safe and the AND of every run-ending path are all in the
+                 * shared builder (profile_executor_relay_io.c), the same one the
+                 * aux path uses, so the two producers cannot drift. */
+                bool bypass_hold = false;
+                on_off_trigger_input_t oin = profile_executor_zone_on_off_input(
+                    zi, failsafe_on, min_on_s, min_off_s, hyst_c, authority_blocked_now,
+                    stretched_this_tick, dt_s, &bypass_hold);
                 /* Requirement 4: the actuation layer enforces min_on_s/
                  * min_off_s AGAIN, independent of on_off_trigger_decide()'s
                  * own hold timer, so a decision-core bug cannot chatter the
@@ -1860,7 +1825,6 @@ void executor_task_entry(void *arg)
                  * the same call -- see profile_executor_on_off_zone_tick()'s
                  * header comment for why this whole chain is one production
                  * function rather than inline code here. */
-                bool bypass_hold = run_ending_failsafe || guard_5_6_tripped_now || !run_running_now;
                 /* Captured BEFORE the tick call: both on_off_trigger_decide()
                  * (inside profile_executor_on_off_zone_tick(), via
                  * z->on_off_trigger_state) and the actuation-gate hold
@@ -1941,7 +1905,7 @@ void executor_task_entry(void *arg)
                         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
                     } else if (tick_result.cap_denied) {
                         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
-                    } else if (!resolved_rule.enable) {
+                    } else if (!oin.rule.enable) {
                         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE;
                     }
                 }
