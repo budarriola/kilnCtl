@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import types
 import unittest
 import unittest.mock
 
@@ -469,12 +470,29 @@ class _Ota06(_FakeOtaClient):
         return {"ok": True}
 
 
+def _safety_seams(trip_reason=0, trip_mask=0, link_up=True, received=True, enabled=True, status_raises=False):
+    """Fake safety seams for OT-G06's post-reset check. Returns (kwargs, clears)."""
+    clears = []
+
+    def status():
+        if status_raises:
+            raise OSError("no link")
+        return types.SimpleNamespace(link_up=link_up, enabled=enabled)
+
+    def diag():
+        return types.SimpleNamespace(trip_reason=trip_reason, trip_mask=trip_mask, ever_received=received)
+
+    return dict(_get_safety_status_fn=status, _get_safety_diag_fn=diag,
+                _clear_trip_fn=lambda: clears.append(1)), clears
+
+
 class Otg06Test(unittest.TestCase):
     def _ctx(self, behaviour, upd=None, **over):
         upd = upd or _FakeUpdate()
         kw = dict(update_http_client=upd, ota_http_client=_Ota06(upd, behaviour, interlock_ok=True),
                   _read_image_fn=lambda p: _image_with_build(),
                   dashboard_http_client=_FakeDashboardClient(fw_build=RUNNING_BUILD))
+        kw.update(_safety_seams()[0])
         kw.update(over)
         return _base_ctx(**kw)
 
@@ -561,6 +579,78 @@ class Otg06Test(unittest.TestCase):
         self.assertEqual(ota.resets, 1)
         self.assertEqual(r.verdict, Verdict.FAIL)
         self.assertIn("did not answer", r.reason)
+
+
+class Otg06SafetyAfterResetTest(unittest.TestCase):
+    """The dual reset can latch S6a: OT-G06 must look, clear only S6a alone,
+    and never pass over anything else."""
+
+    def _run(self, **seam_kw):
+        seams, clears = _safety_seams(**seam_kw)
+        ctx = Otg06Test._ctx(Otg06Test(), "clear", **seams)
+        return C._case_otg06(ctx), clears
+
+    def test_link_up_no_trip_passes(self):
+        r, clears = self._run()
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertEqual(clears, [])
+        self.assertIn("no trip", r.reason)
+
+    def test_s6a_alone_is_cleared_and_passes(self):
+        mask = 1 << (6 - 1)
+        self.assertEqual(mask, 0x0020)
+        r, clears = self._run(trip_reason=6, trip_mask=mask)
+        self.assertEqual(r.verdict, Verdict.PASS, r.reason)
+        self.assertEqual(clears, [1])
+        self.assertIn("was cleared", r.reason)
+
+    def test_s6a_clear_not_confirmed_fails(self):
+        r, clears = self._run(trip_reason=6, trip_mask=0x0020, enabled=False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [1])
+
+    def test_s6a_with_extra_mask_bit_fails_and_never_clears(self):
+        r, clears = self._run(trip_reason=6, trip_mask=0x0020 | 0x0001)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [])
+
+    def test_s6b_link_dead_trip_fails_and_never_clears(self):
+        # 0x0040 is bit 6 (trip_reason 7, S6b), not S6a.
+        r, clears = self._run(trip_reason=7, trip_mask=0x0040)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [])
+
+    def test_wrong_mask_for_reason_6_fails_and_never_clears(self):
+        r, clears = self._run(trip_reason=6, trip_mask=0x0040)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [])
+
+    def test_link_down_fails(self):
+        r, clears = self._run(link_up=False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [])
+
+    def test_status_unreadable_fails(self):
+        r, clears = self._run(status_raises=True)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [])
+
+    def test_no_diag_frame_fails(self):
+        r, clears = self._run(received=False)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [])
+
+    def test_trip_reason_unreadable_fails(self):
+        r, clears = self._run(trip_reason=None, trip_mask=None)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertEqual(clears, [])
+
+    def test_no_reset_sent_skips_safety_check(self):
+        # Relay energized: SKIP before the reset; safety unreadable must not turn it into FAIL.
+        seams, _ = _safety_seams(status_raises=True)
+        ctx = Otg06Test._ctx(Otg06Test(), "clear", dashboard_http_client=_FakeDashboardClient(
+            fw_build=RUNNING_BUILD, relay_energized=True), **seams)
+        self.assertEqual(C._case_otg06(ctx).verdict, Verdict.SKIP)
 
 
 class WiringTest(unittest.TestCase):

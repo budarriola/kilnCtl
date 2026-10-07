@@ -2277,7 +2277,7 @@ def _case_otg04(ctx: dict) -> CaseResult:
     return result
 
 
-def _case_otg06(ctx: dict) -> CaseResult:
+def _case_otg06_body(ctx: dict, state: dict) -> CaseResult:
     """OT-G06: a stage holding a VERIFIED copy of the RUNNING image must be
     auto-cleared on the next boot (``update_http_stale_stage_check``), not
     left to be re-applied. Needs ``ota_image_path`` = the image currently
@@ -2331,6 +2331,7 @@ def _case_otg06(ctx: dict) -> CaseResult:
         if problem:
             return CaseResult(Verdict.FAIL, reason=f"{gated.reason}; staged image NOT cleared: {problem}")
         return CaseResult(Verdict.SKIP, reason=f"{gated.reason}; stage cleared")
+    state["reset_sent"] = True
     try:
         _ota_client(ctx).sw_reset(host)
         reset_note = "sw_reset sent"
@@ -2357,6 +2358,81 @@ def _case_otg06(ctx: dict) -> CaseResult:
     return CaseResult(Verdict.INCONCLUSIVE,
                       reason=f"stage survived the reboot (boot_auto_clear={after.get('boot_auto_clear')!r}); "
                              f"stage cleared", observed=observed)
+
+
+OTG06_SAFETY_LINK_WAIT_S = 30.0
+OTG06_SAFETY_SETTLE_S = 5.0
+OTG06_SAFETY_CLEAR_WAIT_S = 10.0
+
+
+def _otg06_safety_after_reset(ctx: dict) -> "tuple[str, bool]":
+    """Safety state after OT-G06's dual reset. Returns (note, bad). Same rules
+    and seams as OT-B01: link up and no trip is fine; a trip that is exactly
+    S6a (trip_reason 6, trip_mask == 1 << (6 - 1), link up) is cleared and
+    confirmed; any other trip, a link that never comes up, or an unreadable
+    status is bad and is never cleared."""
+    srv = _srv(ctx)
+    get_status_fn = ctx.get("_get_safety_status_fn") or (lambda: srv._safety.get_status())
+    get_diag_fn = ctx.get("_get_safety_diag_fn") or (lambda: srv._safety.get_diag())
+    clear_trip_fn = ctx.get("_clear_trip_fn", lambda: _default_clear_trip_fn(ctx))
+
+    def _link_and_diag():
+        if not getattr(get_status_fn(), "link_up", False):
+            return None
+        d = get_diag_fn()
+        return d if getattr(d, "ever_received", False) else None
+
+    diag, ok = _poll_until(ctx, _link_and_diag, lambda d: True, OTG06_SAFETY_LINK_WAIT_S)
+    if not ok:
+        return "safety link not up or no DIAG frame after dual reset (status unreadable)", True
+    reason, mask = getattr(diag, "trip_reason", None), getattr(diag, "trip_mask", None)
+    if reason is None:
+        return "safety trip_reason unreadable after dual reset", True
+    if reason == 0:
+        # S6a is debounced; look a few seconds longer before recording no trip.
+        def _redo():
+            d = get_diag_fn()
+            return d if getattr(d, "ever_received", False) else None
+        d2, _ = _poll_until(ctx, _redo, lambda d: bool(getattr(d, "trip_reason", 0)), OTG06_SAFETY_SETTLE_S)
+        if d2 is None:
+            return "no DIAG frame during safety settle window after dual reset", True
+        reason, mask = getattr(d2, "trip_reason", None), getattr(d2, "trip_mask", None)
+        if reason is None:
+            return "safety trip_reason unreadable after dual reset", True
+        if reason == 0:
+            return "safety link up, no trip after dual reset", False
+    if not (reason == 6 and mask == J.safety_trip_mask_for_reason(6)):
+        return (f"safety trip after dual reset is not S6a alone (trip_reason={reason!r}, "
+                f"trip_mask={mask!r}); NOT cleared"), True
+    try:
+        clear_trip_fn()
+    except Exception as exc:
+        return f"S6a latched after dual reset; clear raised {type(exc).__name__}: {exc}", True
+    _st, cleared = _poll_until(ctx, lambda: get_status_fn(), lambda s: bool(getattr(s, "enabled", False)),
+                               OTG06_SAFETY_CLEAR_WAIT_S)
+    if not cleared:
+        return "S6a latched after dual reset; cleared but safety never re-enabled", True
+    return "S6a latched after dual reset (mask 0x%04X) and was cleared" % mask, False
+
+
+def _case_otg06(ctx: dict) -> CaseResult:
+    """OT-G06 (see ``_case_otg06_body``) plus a post-reset safety check: the
+    dual reset can latch S6a. After a reset was actually sent, the safety
+    state must read link-up with no trip, or S6a alone (cleared as OT-B01
+    does); anything else tampers the verdict to FAIL."""
+    state: dict = {}
+    result = _case_otg06_body(ctx, state)
+    if not state.get("reset_sent"):
+        return result
+    note, bad = _otg06_safety_after_reset(ctx)
+    evidence = list(result.evidence or []) + [note]
+    observed = dict(result.observed or {})
+    observed["safety_after_reset"] = note
+    if bad:
+        return CaseResult(Verdict.FAIL, reason=f"{result.reason}; {note} (prior verdict {result.verdict})",
+                          observed=observed, expected=result.expected, evidence=evidence)
+    return CaseResult(result.verdict, reason=f"{result.reason}; {note}", observed=observed,
+                      expected=result.expected, evidence=evidence)
 
 
 _CASE_FUNCS = {
