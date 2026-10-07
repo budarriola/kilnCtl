@@ -512,6 +512,13 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     return true;
 }
 
+/* Relative-tolerance gain comparison, identical to zones_http_post_parse.c's
+ * whole-page check (see the rationale there). */
+static bool gain_changed(float cur, float neu)
+{
+    return fabsf(neu - cur) > (1e-6f + 1e-5f * fabsf(cur));
+}
+
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
@@ -531,27 +538,34 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
         return false;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    /* Judged BEFORE the stores below overwrite the old values. Same relative
+     * tolerance as the whole-page POST /api/zones path
+     * (zones_http_post_parse.c's gain-change check, which carries the
+     * rationale), so both paths agree on what "the gains changed" means. */
+    const bool gains_changed = gain_changed(z->pid_kp, kp) || gain_changed(z->pid_ki, ki) ||
+                               gain_changed(z->pid_kd, kd);
     z->pid_kp = kp;
     z->pid_ki = ki;
     z->pid_kd = kd;
     /* ZONES_CFG_VERSION 12->13: invalidate the tuning-quality record (set 1
-     * -- see zone_cfg_t::tuning_valid's own doc comment) on EVERY gain
-     * change, unconditionally, regardless of caller -- autotune's own
-     * accept() path, a manual POST /api/zones/pid edit, adaptive_tune.c's
-     * blended re-tune, backup_http.c's restore, or the LCD UI/uart_bridge_
-     * ext.c path. All of them reach gains through this one setter, which is
-     * exactly why the invalidation lives HERE and not duplicated at every
-     * call site -- this repo's recurring "reset-one-side" bug class (state
-     * updated on one path of a pair and not the other) is precisely the
-     * shape a per-caller invalidation would risk. autotune_engine.c's own
-     * accept() path re-establishes a fresh record via zones_config_set_
-     * tuning_quality() immediately after this call (and after the model is
-     * also persisted), so the invalidate-then-repopulate ordering never
-     * leaves a stale-but-valid-looking record visible in between; every
-     * OTHER caller simply leaves it invalidated, since none of them have a
-     * new fit to attach. A stale quality record pinned to hand-edited gains
-     * would be worse than none -- see zone_tuning_quality_t's own comment. */
-    z->tuning_valid = 0;
+     * -- see zone_cfg_t::tuning_valid's own doc comment) when the gains
+     * ACTUALLY change, regardless of caller -- autotune's accept() path, a
+     * manual POST /api/zones/pid edit, adaptive_tune.c's blended re-tune,
+     * backup import, or the LCD UI/uart_bridge_ext.c path. All of them reach
+     * gains through this one setter, which is why the invalidation lives
+     * HERE and not at every call site (the "reset-one-side" bug class). A
+     * same-value write-back (a GET-merge-POST client re-posting the stored
+     * gains) leaves the record standing: the gains it describes are still
+     * the gains the zone runs. That is what lost bench zone 0's record
+     * (docs/BENCH_TEST_LOG.md, a same-value control_set_zone_pid write).
+     * autotune accept() re-establishes a fresh record via
+     * zones_config_set_tuning_quality() immediately after this call, so the
+     * invalidate-then-repopulate ordering never leaves a stale-but-valid-
+     * looking record visible in between. A stale quality record pinned to
+     * changed gains would be worse than none. */
+    if (gains_changed) {
+        z->tuning_valid = 0;
+    }
     /* Bumped before the NVS write, not after it: the gains are already live
      * for the next control tick at this point, so a running profile must
      * re-read them (TODO.md 6A.7) whether or not the save succeeds. Note

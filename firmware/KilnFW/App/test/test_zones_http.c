@@ -7525,11 +7525,9 @@ static void test_tuning_quality_round_trip_asymmetric_per_zone(void)
 // The invalidation this whole feature exists to get right: ANY gain change
 // through zones_config_set_pid() -- a manual PID edit is the operator-facing
 // example, but the setter cannot distinguish its callers -- must invalidate
-// a previously-written tuning-quality record. This is the reset-one-side
-// guard: comment out the invalidation line in zones_config_set_pid() and
-// this test must fail. Verified by hand (see this file's own build log) --
-// removing `z->tuning_valid = 0;` from zones_config_accessors.c leaves
-// tuning_valid at 1, and the "invalidated" TEST_CHECK below goes red.
+// a previously-written tuning-quality record (a same-value write is NOT a
+// change and keeps it). This is the reset-one-side guard: remove the
+// invalidation in zones_config_set_pid_no_save() and this test must fail.
 static void test_zones_config_set_pid_invalidates_tuning_quality(void)
 {
     TEST_SECTION("zones_config_set_pid() invalidates a zone's tuning-quality record -- "
@@ -7570,6 +7568,29 @@ static void test_zones_config_set_pid_invalidates_tuning_quality(void)
     zone_tuning_quality_t zone0_after = {0};
     TEST_CHECK(zones_config_get_tuning_quality(0, &zone0_after) && zone0_after.valid,
               "zone 0's record survives a DIFFERENT zone's gain edit -- invalidation is per-zone");
+
+    // Same-value write-back (a GET-merge-POST client re-posting the stored
+    // gains, e.g. control_set_zone_pid) must NOT clear the record; only an
+    // actual change does. Matches the whole-page POST /api/zones path.
+    TEST_CHECK(zones_config_set_pid(1, 12.0f, 0.5f, 3.0f), "zone 1 gains set to a known triple");
+    TEST_CHECK(zones_config_set_tuning_quality(1, &q), "zone 1's record re-set (fresh autotune accept)");
+    TEST_CHECK(zones_config_set_pid(1, 12.0f, 0.5f, 3.0f), "same-value set_pid on zone 1 succeeds");
+    zone_tuning_quality_t same = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &same) && same.valid,
+              "same-value set_pid keeps tuning_valid = 1");
+    TEST_CHECK(zones_config_set_pid(1, 12.0f, 0.5f, 3.5f), "set_pid changing only Kd succeeds");
+    zone_tuning_quality_t kd_changed = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &kd_changed) && !kd_changed.valid,
+              "changing any single gain (Kd only) clears tuning_valid");
+    TEST_CHECK(zones_config_set_tuning_quality(1, &q), "zone 1's record re-set once more");
+    TEST_CHECK(zones_config_set_pid_no_save(1, 12.0f, 0.5f, 3.5f), "same-value set_pid_no_save succeeds");
+    zone_tuning_quality_t ns_same = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &ns_same) && ns_same.valid,
+              "same-value set_pid_no_save keeps tuning_valid = 1");
+    TEST_CHECK(zones_config_set_pid_no_save(1, 13.0f, 0.5f, 3.5f), "set_pid_no_save changing Kp succeeds");
+    zone_tuning_quality_t ns_chg = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &ns_chg) && !ns_chg.valid,
+              "changed-value set_pid_no_save clears tuning_valid");
 
     nvs_test_enable(false);
     nvs_test_clear();

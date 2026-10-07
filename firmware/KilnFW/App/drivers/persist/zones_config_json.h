@@ -566,16 +566,17 @@ typedef struct {
      * INVALIDATION (the reset-one-side risk this whole feature exists to
      * avoid -- see zones_config_set_pid()'s own comment): every path that
      * changes pid_kp/pid_ki/pid_kd goes through zones_config_set_pid(),
-     * which sets tuning_valid = false unconditionally before saving,
-     * regardless of caller (autotune accept, a manual POST /api/zones/pid
-     * edit, adaptive_tune.c's blended re-tune, backup_http.c's restore, or
-     * the LCD UI/uart_bridge_ext.c path) -- a stale quality record pinned to
-     * hand-edited gains would be worse than none. autotune_engine.c's
-     * finalize accept() path re-establishes a fresh record via
-     * zones_config_set_tuning_quality() immediately afterward, once the new
-     * gains AND model are both already persisted, so the invalidate-then-
-     * repopulate ordering never leaves a valid-looking stale record visible
-     * in between. */
+     * which sets tuning_valid = false when the gains ACTUALLY change (same
+     * relative tolerance as the whole-page POST /api/zones path), regardless
+     * of caller (autotune accept, a manual POST /api/zones/pid edit,
+     * adaptive_tune.c's blended re-tune, backup import, or the LCD
+     * UI/uart_bridge_ext.c path). A same-value write leaves the record
+     * standing -- a stale quality record pinned to changed gains would be
+     * worse than none. autotune_engine.c's finalize accept() path
+     * re-establishes a fresh record via zones_config_set_tuning_quality()
+     * immediately afterward, once the new gains AND model are both already
+     * persisted, so the invalidate-then-repopulate ordering never leaves a
+     * valid-looking stale record visible in between. */
     uint8_t  tuning_valid;                      /* 0/1 -- same "0 means cannot answer" convention as
                                                   * every other bool-shaped uint8_t in this struct
                                                   * (relay_mask siblings), never a real C99 bool: this
