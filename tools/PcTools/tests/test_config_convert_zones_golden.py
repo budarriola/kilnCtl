@@ -97,6 +97,20 @@ def test_golden_meta_matches_python_constants(golden):
     assert struct.unpack_from("<I", meta["blob"], crc_off)[0] == crc
 
 
+def test_python_crc_matches_firmware_stamped_crc(golden):
+    """The CRC the real nvs_save() stamped (via the host esp_crc32_le() stub,
+    a C bit-loop reimplementation of reflected CRC-32 -- NOT the on-target
+    ROM routine) equals the Python CRC over the same blob with its crc field
+    zeroed, and test_zones_blob_golden.c pins that stub to the standard
+    CRC-32 check value, as this asserts for the Python side."""
+    _, meta = golden
+    crc_off, fw_crc = meta["crc32"]
+    blob = meta["blob"]
+    assert cc._crc32(b"123456789") == 0xCBF43926
+    assert cc._crc32(blob[:crc_off] + b"\x00\x00\x00\x00") == fw_crc
+    assert cc._zones_crc32(blob) == fw_crc
+
+
 def test_decode_matches_every_firmware_field(golden):
     fields, meta = golden
     version, decoded = cc.decode_zones_blob(meta["blob"])  # also verifies the firmware CRC

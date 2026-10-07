@@ -43,6 +43,7 @@
 #endif
 
 #include "esp_err.h"
+#include "esp_crc.h"
 #include "fake_kv.h"
 #include "hal_kv.h"
 
@@ -368,6 +369,16 @@ static void test_zones_blob_golden_matches_firmware_layout(void)
                "zones blob golden: nvs_save() wrote the in-RAM struct byte for byte");
     TEST_CHECK(s_zones.cfg.crc32 == zones_config_json_compute_crc(&s_zones.cfg),
                "zones blob golden: nvs_save() stamped the firmware CRC");
+
+    /* Pin the host stub of esp_crc32_le() (test/stubs/esp_crc.h, a C bit-loop, NOT the on-target ROM
+     * routine) to the standard CRC-32/ISO-HDLC check value, so the Python-side
+     * test_config_convert_zones_golden.py CRC assertion rests on a CRC the firmware code path
+     * demonstrably computes as plain CRC-32. */
+    {
+        static const uint8_t check[9] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+        TEST_CHECK(esp_crc32_le(0, check, 9) == 0xCBF43926u,
+                   "zones blob golden: esp_crc32_le(\"123456789\") is the standard CRC-32 check value");
+    }
 
     zbg_emit("version %u\n", (unsigned)ZONES_CFG_VERSION);
     zbg_emit("sizeof zones_cfg_t %u\n", (unsigned)sizeof(zones_cfg_t));

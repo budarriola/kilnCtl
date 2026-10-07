@@ -644,9 +644,15 @@ are bumped in firmware without a matching update here; negative-tested by
 bumping `PROFILE_VERSION` in a scratch copy of `profiles_http.c` and
 confirming failure, then restoring byte-exact via `git cat-file blob`.
 `bootloader_crc32` (config_store) is verified equivalent by code reading and
-the firmware host vector `crc32("123456789") == 0xCBF43926`; `esp_crc32_le`
-(the ESP-side profile/zones blobs) remains unverified against a captured
-blob.
+the firmware host vector `crc32("123456789") == 0xCBF43926`. `esp_crc32_le`
+(the ESP-side profile/zones blobs): the zones blob is now pinned to a CRC the
+firmware code path produced (`test_zones_blob_golden.c` runs the real
+`nvs_save()`; `test_config_convert_zones_golden.py` asserts the Python CRC
+matches it, and the C test pins `esp_crc32_le("123456789") == 0xCBF43926`).
+Caveat that remains: the host build's `esp_crc32_le` is a stub
+(`test/stubs/esp_crc.h`, a C reimplementation of reflected CRC-32), so this
+does not prove the on-target ESP ROM routine matches; no hardware-captured
+blob has been compared, and the profile record has round-trip tests only.
 
 **`config_store_record_t` (2026-09-23).** Unlike the two formats below, this
 one is fully supported: `firmware/SaftyFW/src/config_store.c` never lets the
@@ -687,7 +693,13 @@ Pending:
   reach them; each needs a blob of that exact version (a firmware host test
   emitting one per historical struct, or a captured one) to verify a port.
   D2 already expires the pre-v26 tail, so port only on a concrete need.
-- **`kiln_configs[]` entries.** Each embeds a `kilnctl_kiln_package`; not
-  converted inside a backup document (convert each package separately).
+- ~~**`kiln_configs[]` entries.**~~ Done 2026-10-07: `convert_document()` on a
+  backup converts each entry's `package` through `convert_kiln_package()` (to
+  the current `ZONES_CFG_VERSION`; the backup version number does not apply to
+  a package). A slot that fails (tampered hash, bad blob, too-old zones
+  version) is carried through unchanged and reported as action `failed`
+  (`report.failed`; CLI exit 2) -- never dropped; `omitted` legacy entries are
+  kept. Tests in `test_config_convert_zones_history.py`. `cfg_convert.py`
+  alone still reports `kiln_configs` as dropped (use `config_convert`).
 - **Cfg LittleFS files** (`/api/cfgfs`) duplicate the NVS stores and are not
   separate converter inputs.

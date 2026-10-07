@@ -55,8 +55,9 @@ STORES:
     firmware's own host-test vector (`bootloader_crc32("123456789") ==
     0xCBF43926`, the standard CRC-32/ISO-HDLC check value). This is a
     stronger claim than the ESP-side `esp_crc32_le()` used by
-    profile_blob/backup below, which remains an unverified stand-in --
-    never checked against a real captured hardware blob for either. This
+    profile_blob/backup below, whose evidence is the firmware HOST-test
+    vector described in the CRC note below (not a captured hardware
+    blob, for either store). This
     module mirrors `config_store_pack()`/
     `config_store_unpack_ex()` byte-for-byte for versions 1, 2 and current
     (3), including the v1->v3 and v2->v3 forward migrations
@@ -101,15 +102,23 @@ ZONES_CFG_T / KILN_PACKAGE (landed 2026-09-24, see the "zones_blob store" and
     message.
 
 CRC. profile_persisted_t's crc32 tail is esp_crc32_le() (a standard
-reflected CRC-32, poly 0xEDB88320, no init complement, no final XOR -- the
-same algorithm FreeBSD's crc32() and Python's zlib.crc32() implement). This
-module computes it with zlib.crc32(). This equivalence was NOT independently
-verified against a live board or a firmware host-test fixture in this pass
-(no captured real "profN" blob with a known-good crc32 was available) --
-round-trip tests below prove this module's own pack/unpack/crc are mutually
-consistent, not that they match real on-flash bytes byte-for-byte. Treat a
-v2+ profile_blob conversion as unverified against real hardware until a real
-captured blob is added to tools/PcTools/tests/fixtures/config_convert/.
+reflected CRC-32, poly 0xEDB88320, the same algorithm Python's zlib.crc32()
+implements). This module computes it with zlib.crc32().
+
+Evidence for the equivalence (2026-10-07), and its limit: the firmware host
+test test_zones_blob_golden.c runs the real nvs_save() over a real zones_cfg_t
+and records the CRC it stamped (fixtures/config_convert/zones_cfg_golden.txt);
+test_config_convert_zones_golden.py asserts this module's CRC reproduces that
+value and zlib.crc32's check value, and the C test pins firmware's
+esp_crc32_le() to 0xCBF43926 for "123456789". BUT the host build's
+esp_crc32_le() is a stub (test/stubs/esp_crc.h: a C bit-loop reimplementation
+of reflected CRC-32), so this proves the firmware zones code path and this
+module agree with a CRC-32 implementation, NOT that the on-target ESP ROM
+routine produces the same bytes -- no blob captured from real hardware has
+been compared. profile_blob's "profN" record is covered only by its
+round-trip tests (this module's own pack/unpack/crc are mutually consistent);
+treat v2+ profile_blob conversion as unverified against real hardware until a
+real captured blob is added to tools/PcTools/tests/fixtures/config_convert/.
 
 CRC RANGE. firmware's compute_profile_crc() (profiles_http.c:487-492, and the
 v2/v3 checks near :583/:597) computes the CRC over the WHOLE persisted
@@ -122,6 +131,7 @@ before trusting it.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import struct
 import sys
@@ -144,7 +154,7 @@ class ConfigConvertError(RuntimeError):
 class FieldOutcome:
     scope: str
     field: str
-    action: str  # "kept" | "dropped" | "defaulted" | "renamed"
+    action: str  # "kept" | "dropped" | "defaulted" | "renamed" | "failed"
     detail: str = ""
 
 
@@ -167,6 +177,13 @@ class ConversionReport:
         the target version's layout cannot express at all) counts."""
         return any(o.action == "dropped" for o in self.outcomes)
 
+    @property
+    def failed(self) -> bool:
+        """True when any part of the document could not be converted and was
+        carried through unchanged (action "failed"), e.g. one bad
+        kiln_configs[] slot inside an otherwise converted backup."""
+        return any(o.action == "failed" for o in self.outcomes)
+
     def render(self) -> str:
         lines = [f"config_convert report: store={self.store} v{self.source_version} -> v{self.target_version}"]
         if not self.outcomes:
@@ -182,6 +199,7 @@ class ConversionReport:
             "source_version": self.source_version,
             "target_version": self.target_version,
             "lossy": self.lossy,
+            "failed": self.failed,
             "outcomes": [
                 {"scope": o.scope, "field": o.field, "action": o.action, "detail": o.detail}
                 for o in self.outcomes
@@ -1479,6 +1497,54 @@ def convert_kiln_package(doc: dict, target_version: int) -> "tuple[dict, Convers
 # ---------------------------------------------------------------------------
 
 
+def _convert_backup_kiln_configs(entries: Any, report: "ConversionReport") -> list:
+    """Convert every kiln_configs[] entry of a backup document: each
+    entry's embedded `package` (a kilnctl_kiln_package) goes through
+    convert_kiln_package() to the CURRENT ZONES_CFG_VERSION (the only
+    encodable zones target; the backup's own version number is a different
+    numbering and does not apply to a package). Never drops a slot and never
+    aborts the document: a slot that cannot be converted is carried through
+    UNCHANGED and reported as action "failed" (report.failed is then true),
+    so one bad slot cannot hide behind the others or vanish from the output.
+    An "omitted" (legacy, no Pico half) entry has no package and is kept."""
+    if not isinstance(entries, list):
+        report.add("document", "kiln_configs", "failed",
+                   "kiln_configs is not a list; carried through unchanged, not converted")
+        return copy.deepcopy(entries)
+    out_entries = []
+    for i, entry in enumerate(entries):
+        label = f"kiln_configs[{i}]"
+        if not isinstance(entry, dict):
+            report.add(label, "entry", "failed", "entry is not an object; carried through unchanged")
+            out_entries.append(copy.deepcopy(entry))
+            continue
+        label += f" id={entry.get('id', '?')} {entry.get('name', '')!r}"
+        pkg = entry.get("package")
+        if pkg is None:
+            report.add(label, "package", "kept",
+                       f"no package ({entry.get('omitted', 'omitted')}); nothing to convert")
+            out_entries.append(copy.deepcopy(entry))
+            continue
+        if not isinstance(pkg, dict):
+            report.add(label, "package", "failed", "package is not an object; carried through unchanged")
+            out_entries.append(copy.deepcopy(entry))
+            continue
+        try:
+            new_pkg, pkg_report = convert_kiln_package(pkg, ZONES_CFG_VERSION)
+        except ConfigConvertError as exc:
+            report.add(label, "package", "failed", f"{exc}; slot carried through unchanged")
+            out_entries.append(copy.deepcopy(entry))
+            continue
+        for o in pkg_report.outcomes:
+            report.add(f"{label} {o.scope}", o.field, o.action, o.detail)
+        report.add(label, "package", "kept" if pkg_report.source_version == pkg_report.target_version else "renamed",
+                   f"kiln package v{pkg_report.source_version} -> v{pkg_report.target_version}")
+        new_entry = dict(entry)
+        new_entry["package"] = new_pkg
+        out_entries.append(new_entry)
+    return out_entries
+
+
 def convert_document(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
     """Convert any recognized JSON document (see detect_kind()) to
     target_version. Returns (new_doc, report)."""
@@ -1489,7 +1555,11 @@ def convert_document(doc: dict, target_version: int) -> "tuple[dict, ConversionR
         report = ConversionReport(store="backup", source_version=backup_report.source_version,
                                    target_version=backup_report.target_version)
         for o in backup_report.outcomes:
+            if o.scope == "document" and o.field == "kiln_configs" and o.outcome == "dropped":
+                continue  # replaced by the per-slot handling below, which keeps the slots
             report.add(o.scope, o.field, o.outcome, o.detail)
+        if "kiln_configs" in doc:
+            out["kiln_configs"] = _convert_backup_kiln_configs(doc["kiln_configs"], report)
         return out, report
 
     if kind == "profile_blob":
@@ -1562,12 +1632,15 @@ def main(argv: Optional[list] = None) -> int:
     else:
         sys.stdout.write(text)
 
-    if args.report or report.lossy:
+    if args.report or report.lossy or report.failed:
         print(report.render(), file=sys.stderr)
     if not args.quiet:
         status = "LOSSY" if report.lossy else "lossless"
         print(f"config_convert: {report.store} v{report.source_version} -> v{report.target_version} ({status})",
               file=sys.stderr)
+    if report.failed:
+        print("config_convert: FAILED parts were carried through unconverted (see report)", file=sys.stderr)
+        return 2
     return 0
 
 
