@@ -859,6 +859,10 @@ esp_err_t builtin_restore_post_handler(httpd_req_t *req)
  */
 esp_err_t profile_favorite_post_handler(httpd_req_t *req)
 {
+    /* cfg-only persistence (docs/CONFIG_FILESYSTEM.md): refuse before any state change. */
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     char body[65];
     if (!read_small_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
@@ -888,6 +892,9 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
     bool favorite = (fav_len <= 0) || (fav_val[0] != '0');
 
     esp_err_t err = profiles_favorites_set((uint8_t)id, favorite);
+    if (err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%ld,\"favorite\":%s,\"persisted\":%s}", id,
                      favorite ? "true" : "false", err == ESP_OK ? "true" : "false");

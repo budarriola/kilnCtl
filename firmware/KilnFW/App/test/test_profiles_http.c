@@ -119,7 +119,15 @@ static esp_err_t hal_to_esp(hal_status_t st)
 // stage into -- fake_kv_reset_all() wipes hal_kv_init_partition()'s
 // bookkeeping along with every key, so each test must redo that init, same
 // as profiles_http.c's own nvs_partition_init() would on a real boot.
+/* flash_worker_wait.c (linked for pref_cfg_fs) asks whether the flash worker
+ * started; on the host there is no worker, so answer yes at once. */
+bool uart_bridge_ext_flash_worker_started(void)
+{
+    return true;
+}
+
 static void pcfg_mount_fresh(void); /* defined with the cfg_fs section below */
+esp_err_t profiles_favorites_start(void); /* real persist/profiles_favorites.c is linked; reset its RAM masks */
 static void nvs_stub_reset(void)
 {
     pcfg_mount_fresh(); /* profile saves are cfg-file-only: every reset starts from a clean, mounted cfg */
@@ -128,6 +136,7 @@ static void nvs_stub_reset(void)
                                              * defined until profiles_http.c's own #include below */
     hal_kv_init_partition(NULL); /* the default partition, for the pre-split migration tests */
     s_kv_handle_next = 0;
+    (void)profiles_favorites_start(); /* RAM masks back to the (empty) mounted-cfg + empty-NVS state */
 }
 
 static esp_err_t nvs_open_from_partition(const char *partition, const char *ns, int mode, nvs_handle_t *out)
@@ -844,6 +853,10 @@ static void pcfg_mount_fresh(void)
         snprintf(path, sizeof(path), "%s/%s", PCFG_SCRATCH_BASE, rel);
         remove(path);
     }
+    snprintf(path, sizeof(path), "%s/.tmp/prof_fav.bin", PCFG_SCRATCH_BASE);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/prof_fav.bin", PCFG_SCRATCH_BASE);
+    remove(path);
     char tmpdir[600], profdir[600];
     snprintf(tmpdir, sizeof(tmpdir), "%s/.tmp", PCFG_SCRATCH_BASE);
     snprintf(profdir, sizeof(profdir), "%s/profiles", PCFG_SCRATCH_BASE);
@@ -1067,6 +1080,84 @@ static void test_profiles_http_delete_clears_favorite(void)
     g_fake_exec_profile_id = 0xFF;
     TEST_CHECK(profiles_http_delete(7), "profiles_http_delete succeeds");
     TEST_CHECK(!profiles_favorites_is(7), "profiles_http_delete() cleared slot 7's favorite mark");
+}
+
+static bool fav_file_exists(void)
+{
+    bool e = false;
+    return cfg_fs_exists(PROFILES_FAVORITES_FILE_PATH, &e) == ESP_OK && e;
+}
+
+static bool fav_nvs_has_keys(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, "profiles_nvs") != HAL_OK) {
+        return false;
+    }
+    uint32_t v = 0;
+    size_t len = 0;
+    bool any = hal_kv_get_u32(&h, "prof_favbi", &v) == HAL_OK || hal_kv_get_blob(&h, "prof_favusr", NULL, &len) == HAL_OK ||
+               hal_kv_get_u32(&h, "prof_favusr", &v) == HAL_OK;
+    hal_kv_close(&h);
+    return any;
+}
+
+static void test_favorites_cfg_only_storage(void)
+{
+    TEST_SECTION("profiles_favorites -- cfg file only; a save never writes the legacy NVS keys");
+    nvs_stub_reset();
+    TEST_CHECK(profiles_favorites_set(3, true) == ESP_OK, "set favorite succeeds with cfg mounted");
+    TEST_CHECK(fav_file_exists(), "favorites file written");
+    TEST_CHECK(!fav_nvs_has_keys(), "no NVS favorites key was written");
+    bool fv = false, nv = true, dv = true;
+    uint32_t fr = 0, nr = 0;
+    profiles_favorites_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && fr == 1 && !nv && !dv, "status: file valid rev 1, no NVS side, not diverged");
+    g_fake_builtin_on = true; /* the fake catalogue exposes exactly one builtin id */
+    TEST_CHECK(profiles_favorites_set(PROFILE_BUILTIN_ID_BASE, true) == ESP_OK, "builtin favorite saves too");
+    // A restart (start()) reads the file back.
+    TEST_CHECK(profiles_favorites_start() == ESP_OK, "start() succeeds");
+    TEST_CHECK(profiles_favorites_is(3) && profiles_favorites_is(PROFILE_BUILTIN_ID_BASE),
+               "both marks survive a restart from the file alone");
+    g_fake_builtin_on = false;
+}
+
+static void test_favorites_refused_when_unmounted(void)
+{
+    TEST_SECTION("profiles_favorites -- with cfg unmounted a save is REFUSED, not masked");
+    nvs_stub_reset();
+    cfg_fs_deinit();
+    esp_err_t e = profiles_favorites_set(2, true);
+    TEST_CHECK(e == ESP_ERR_INVALID_STATE, "set returns the unmounted error");
+    TEST_CHECK(!fav_nvs_has_keys(), "and nothing was written to NVS as a fallback");
+    TEST_CHECK(profiles_favorites_is(2), "the change still applies live for this boot");
+    nvs_stub_reset();
+    TEST_CHECK(!profiles_favorites_is(2), "and is gone after a restart (never persisted)");
+}
+
+static void test_favorites_legacy_nvs_migrates(void)
+{
+    TEST_SECTION("profiles_favorites -- legacy NVS masks are read at boot and migrated into the cfg file");
+    nvs_stub_reset();
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "profiles_nvs") == HAL_OK, "open legacy namespace");
+    TEST_CHECK(hal_kv_set_u32(&h, "prof_favusr", 0x05u) == HAL_OK, "legacy user mask");
+    TEST_CHECK(hal_kv_set_u32(&h, "prof_favbi", 0x01u) == HAL_OK, "legacy builtin mask");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(!fav_file_exists(), "precondition: no cfg file yet");
+    TEST_CHECK(profiles_favorites_start() == ESP_OK, "start() succeeds");
+    TEST_CHECK(profiles_favorites_is(0) && profiles_favorites_is(2) && !profiles_favorites_is(1),
+               "legacy user marks are live");
+    g_fake_builtin_on = true;
+    TEST_CHECK(profiles_favorites_is(PROFILE_BUILTIN_ID_BASE), "legacy builtin mark is live");
+    g_fake_builtin_on = false;
+    TEST_CHECK(fav_file_exists(), "start() migrated the NVS copy into the cfg file");
+    TEST_CHECK(fav_nvs_has_keys(), "the NVS copy is left in place (read fallback, never erased by start)");
+    TEST_CHECK(profiles_favorites_set(0, false) == ESP_OK, "a later save lands in the file");
+    // NVS still says slot 0 is a favorite; the file (higher rev) must win on the next boot.
+    TEST_CHECK(profiles_favorites_start() == ESP_OK, "restart");
+    TEST_CHECK(!profiles_favorites_is(0), "the file beats the stale NVS copy once it carries a newer rev");
 }
 
 static void test_profiles_http_delete_refuses_running_slot(void)
@@ -3577,6 +3668,9 @@ void run_test_profiles_http(void)
     test_nvs_erase_slot_prunes_firing_stats();
     test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot();
     test_profiles_http_delete_clears_favorite();
+    test_favorites_cfg_only_storage();
+    test_favorites_refused_when_unmounted();
+    test_favorites_legacy_nvs_migrates();
     test_profiles_http_delete_refuses_running_slot();
     test_delete_clears_favorite_before_erase_wiring();
 

@@ -44,9 +44,12 @@
  *     the entry still exists in flash (see profiles_builtin.h), so the mark
  *     is still meaningful when it is unhidden.
  *
- * Every persistence failure here is non-fatal, matching every other settings
- * module in this tree: the change applies live and is logged as "will revert
- * on reboot" rather than being refused.
+ * PERSISTENCE (owner decision 2026-10-07, docs/CONFIG_FILESYSTEM.md): the
+ * masks live in one cfg file ("prof_fav.bin", pref_cfg_fs rev-prefixed
+ * record) and saves go there ONLY. The legacy profiles_nvs keys are read once
+ * at boot as a fallback and migrated into the file; nothing writes them any
+ * more. A save while cfg is unmounted fails (the HTTP route refuses with 503
+ * first); the change still applies live and reverts on reboot.
  */
 
 #include <stdbool.h>
@@ -54,6 +57,9 @@
 
 #include "esp_err.h"
 #include "profiles_slot_bitmap.h"
+
+/* cfg_fs relative path of the favorites file (profiles-scope reset names it). */
+#define PROFILES_FAVORITES_FILE_PATH "prof_fav.bin"
 
 /* Loads the persisted favorite masks. Call once at boot, BEFORE
  * profiles_http_start() registers the read paths that report them. A missing
@@ -66,9 +72,15 @@ esp_err_t profiles_favorites_start(void);
 bool profiles_favorites_is(uint8_t id);
 
 /* Marks or unmarks `id`. Returns ESP_OK when the change was also persisted;
- * a non-OK return means the change IS live but did not reach flash. An id in
- * neither namespace returns ESP_ERR_INVALID_ARG and changes nothing. */
+ * a non-OK return (ESP_ERR_INVALID_STATE when cfg is not mounted) means the
+ * change IS live but did not reach flash. An id in neither namespace returns
+ * ESP_ERR_INVALID_ARG and changes nothing. */
 esp_err_t profiles_favorites_set(uint8_t id, bool favorite);
+
+/* Read-only dual-write status for GET /api/cfgfs; same contract as
+ * unit_pref_get_dualwrite_status(). Any output pointer may be NULL. */
+void profiles_favorites_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                             bool *diverged);
 
 /* Raw masks, for the JSON listing. Bit i of *out_user is user slot i; bit i
  * of *out_builtin is builtin catalogue index i (that is, id
