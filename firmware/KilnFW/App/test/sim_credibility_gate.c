@@ -294,6 +294,13 @@ static void ensure_coupling_fitted(void)
 // ---- simulated replay: zero-order-hold recorded duty through the real
 // heater_output.c window + G3 relay lag + G1 plant/coupling, 1 s substep,
 // sampled back out at each capture tick. Fills sim_reading[n][NZ]. ----
+// Optional opt-in three-node plant (2026-10-07 dwell-peak work). OFF by
+// default so the gate's checked-in verdict is unchanged. Enabled by the
+// optional trailing args `--three-node <bi> <phi> <sensor_bias_p>
+// [sensor_tau_s]`. The (bi, phi, bias) triple is NOT identified from any
+// capture -- see docs/audits/credibility_gate_dwell_peak_2026-10-07.md.
+static struct { bool on; float bi, phi, bias_p, sensor_tau_s, delay_scale; bool dc_comp; } g_tn = {false, 0, 0, 0, 10.0f, 1.0f, false};
+
 static void run_replay(const tick_t *ticks, int n, float sim_reading[][NZ])
 {
     ensure_coupling_fitted();
@@ -311,6 +318,7 @@ static void run_replay(const tick_t *ticks, int n, float sim_reading[][NZ])
     }
     ambient_c = (ambient_n > 0) ? (ambient_c / (float)ambient_n) : 24.0f;
 
+    memcpy(kcfg.coupling_w_per_c, g_fitted_coupling_w_per_c, sizeof(kcfg.coupling_w_per_c));
     for (int z = 0; z < NZ; z++) {
         zone_cfg_t zcfg;
         memset(&zcfg, 0, sizeof(zcfg));
@@ -322,10 +330,34 @@ static void run_replay(const tick_t *ticks, int n, float sim_reading[][NZ])
             fprintf(stderr, "sim_plant_from_zone_cfg failed for zone %d\n", z);
             exit(2);
         }
+        if (g_tn.on) {
+            sim_plant_decompose_req_t rq = { g_k_dc[z], g_tau_s[z], g_tn.bi, g_tn.phi };
+            if (!sim_plant_decompose_three_node(&rq, &pcfg)) {
+                fprintf(stderr, "sim_plant_decompose_three_node failed for zone %d\n", z);
+                exit(2);
+            }
+            pcfg.node_model = SIM_NODE_THREE;
+            pcfg.c_s_j_per_c = 1.0f;
+            pcfg.sensor_tau_s = g_tn.sensor_tau_s;
+            pcfg.sensor_bias_p = g_tn.bias_p;
+            pcfg.load_mass_mult = 1.0f;
+            pcfg.sensor_delay_s *= g_tn.delay_scale;
+            if (g_tn.dc_comp) {
+                // Keep the SENSOR-observed DC gain equal to the measured k_dc /
+                // coupling_coeff (both were measured at the thermocouple, not at
+                // the element): E gain is k by construction of the decomposition,
+                // the sensor sees rho_s of it. Scale own power and this zone's
+                // coupling row by 1/rho_s. Derived from the topology, not fit.
+                float gl = pcfg.g_el_w_per_c, gla = pcfg.g_la_w_per_c;
+                float rho_s = pcfg.sensor_bias_p + (1.0f - pcfg.sensor_bias_p) * gl / (gl + gla);
+                pcfg.heater_power_w /= rho_s;
+                for (int j = 0; j < NZ; j++) kcfg.coupling_w_per_c[z][j] = g_fitted_coupling_w_per_c[z][j] / rho_s;
+            }
+        }
+        if (getenv("KILN_GATE_SENSOR_LAG_S")) pcfg.sensor_lag_tau_s = strtof(getenv("KILN_GATE_SENSOR_LAG_S"), NULL); // diagnostic only
         kcfg.zone[z].plant = pcfg;
         kcfg.zone[z].radiative_coeff_w_per_k4 = 0.0f; // this profile stays well below cone temp
     }
-    memcpy(kcfg.coupling_w_per_c, g_fitted_coupling_w_per_c, sizeof(kcfg.coupling_w_per_c));
 
     sim_kiln_state_t kstate;
     sim_kiln_reset(&kstate, &kcfg);
@@ -461,8 +493,19 @@ static bool read_noise_floor(const char *path, int zone, int seg, float *out)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 8 && strcmp(argv[4], "--three-node") == 0) {
+        g_tn.on = true;
+        g_tn.bi = strtof(argv[5], NULL);
+        g_tn.phi = strtof(argv[6], NULL);
+        g_tn.bias_p = strtof(argv[7], NULL);
+        if (argc >= 9) g_tn.sensor_tau_s = strtof(argv[8], NULL);
+        if (argc >= 10) g_tn.delay_scale = strtof(argv[9], NULL);
+        if (argc >= 11) g_tn.dc_comp = (atoi(argv[10]) != 0);
+        argc = 4;
+    }
     if (argc != 4) {
-        fprintf(stderr, "usage: sim_credibility_gate <calibration.jsonl> <holdout.jsonl> <noise_floor.json>\n");
+        fprintf(stderr, "usage: sim_credibility_gate <calibration.jsonl> <holdout.jsonl> <noise_floor.json>"
+                        " [--three-node <bi> <phi> <sensor_bias_p> [sensor_tau_s]]\n");
         return 2;
     }
     const char *cal_path = argv[1];
@@ -495,6 +538,15 @@ int main(int argc, char **argv)
     run_replay(cal_ticks, cal_n, cal_sim);
     run_replay(hold_ticks, hold_n, hold_sim);
 
+    if (getenv("KILN_GATE_DUMP")) { // diagnostic only: z0..2 duty/rec/sim around first dwell entry, calibration capture
+        int d0 = -1;
+        for (int i = 0; i < cal_n; i++) if (cal_ticks[i].dwelling) { d0 = i; break; }
+        for (int i = (d0 > 40 ? d0 - 40 : 0); i < cal_n && i < d0 + 130; i += 5)
+            printf("DUMP i=%d dw=%d tgt=%.1f | duty %.2f %.2f %.2f | rec %.2f %.2f %.2f | sim %.2f %.2f %.2f\n", i, cal_ticks[i].dwelling, cal_ticks[i].target_c,
+                   cal_ticks[i].duty[0], cal_ticks[i].duty[1], cal_ticks[i].duty[2],
+                   cal_ticks[i].actual_c[0], cal_ticks[i].actual_c[1], cal_ticks[i].actual_c[2],
+                   cal_sim[i][0], cal_sim[i][1], cal_sim[i][2]);
+    }
     scores_t cal_s, hold_s;
     score_replay(cal_ticks, cal_n, cal_sim, &cal_s);
     score_replay(hold_ticks, hold_n, hold_sim, &hold_s);

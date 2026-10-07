@@ -106,7 +106,16 @@ void sim_plant_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float 
  * Three-node model (SCENARIO_SIMULATION.md sec 2.1). Opt-in via
  * cfg->node_model == SIM_NODE_THREE; sim_plant_step() above is completely
  * untouched and remains the SIM_NODE_LEGACY path. */
-void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s)
+/* Shared by sim_plant_three_node_step() and sim_kiln_step() (credibility-gate
+ * dwell-peak work, docs/audits/credibility_gate_dwell_peak_2026-10-07.md):
+ * computes the E/L/S deltas from one common snapshot, WITHOUT applying them,
+ * so sim_kiln_step() can compute every zone's deltas before mutating any.
+ * extra_in_w is power added to the ELEMENT balance beyond the zone's own
+ * duty*heater_power_w -- neighbour-duty coupling minus any radiative loss in
+ * sim_kiln_step(); 0 for the single-zone step, which keeps that path
+ * bit-identical to before this helper existed (adding +0.0f is exact). */
+static void three_node_deltas(const sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty,
+                              float extra_in_w, float dt_s, float *dE, float *dL, float *dS)
 {
     if (duty < 0.0f) duty = 0.0f;
     if (duty > 1.0f) duty = 1.0f;
@@ -122,18 +131,24 @@ void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *
     float g_se = g_s * cfg->sensor_bias_p;
     float g_sl = g_s * (1.0f - cfg->sensor_bias_p);
 
-    float p_in_w = duty * cfg->heater_power_w;
+    float p_in_w = duty * cfg->heater_power_w + extra_in_w;
 
-    /* Computed from the common snapshot (E, L, S) above -- order of the
-     * three lines below cannot matter because none of them reads a field
-     * already mutated by another. */
-    float dE = (p_in_w - cfg->g_el_w_per_c * (E - L) - cfg->g_ea_w_per_c * (E - Tamb)) / cfg->c_e_j_per_c * dt_s;
-    float dL = (cfg->g_el_w_per_c * (E - L) - cfg->g_la_w_per_c * (L - Tamb)) / c_l * dt_s;
-    float dS = (g_se * (E - S) + g_sl * (L - S)) / cfg->c_s_j_per_c * dt_s;
+    *dE = (p_in_w - cfg->g_el_w_per_c * (E - L) - cfg->g_ea_w_per_c * (E - Tamb)) / cfg->c_e_j_per_c * dt_s;
+    *dL = (cfg->g_el_w_per_c * (E - L) - cfg->g_la_w_per_c * (L - Tamb)) / c_l * dt_s;
+    *dS = (g_se * (E - S) + g_sl * (L - S)) / cfg->c_s_j_per_c * dt_s;
+}
 
-    state->element_c = E + dE;
-    state->load_c = L + dL;
-    state->sensor_node_c = S + dS;
+void sim_plant_three_node_step(sim_plant_state_t *state, const sim_plant_cfg_t *cfg, float duty, float dt_s)
+{
+    /* Computed from the common snapshot (E, L, S) -- order of the three
+     * balance equations cannot matter because none reads a field already
+     * mutated by another. */
+    float dE, dL, dS;
+    three_node_deltas(state, cfg, duty, 0.0f, dt_s, &dE, &dL, &dS);
+
+    state->element_c += dE;
+    state->load_c += dL;
+    state->sensor_node_c += dS;
 
     /* Existing transport-delay ring + first-order sensor lag, reused
      * unchanged, applied to the sensor NODE (S) rather than to the element,
@@ -247,6 +262,8 @@ void sim_kiln_inject_fault(sim_kiln_state_t *state, const sim_kiln_cfg_t *cfg, i
 void sim_kiln_step(sim_kiln_state_t *state, const sim_kiln_cfg_t *cfg, const float *duty, float dt_s)
 {
     float d_temp_c[SIM_KILN_MAX_ZONES] = {0};
+    float d_load_c[SIM_KILN_MAX_ZONES] = {0};
+    float d_sens_c[SIM_KILN_MAX_ZONES] = {0};
 
     /* Pass 1: every zone's dT computed from the *same* starting temperatures,
      * so the coupling term is symmetric in effect and not order-dependent. */
@@ -305,15 +322,40 @@ void sim_kiln_step(sim_kiln_state_t *state, const sim_kiln_cfg_t *cfg, const flo
             power_couple_w += cfg->coupling_w_per_c[i][j] * u_j;
         }
 
-        d_temp_c[i] = (power_in_w - power_loss_w + power_couple_w) / p->thermal_mass_j_per_c * dt_s;
+        if (p->node_model == SIM_NODE_THREE) {
+            /* Credibility-gate dwell-peak work (2026-10-07): a SIM_NODE_THREE
+             * zone runs the E/L/S balance with the same neighbour-duty
+             * coupling (and radiative loss) landing on the ELEMENT node, as
+             * the legacy branch does. g_ea/g_la replace loss_coeff, so the
+             * legacy power_loss_w linear term is NOT applied; only the
+             * radiative part is passed through as a negative extra input. */
+            float rad_w = 0.0f;
+            if (cfg->zone[i].radiative_coeff_w_per_k4 > 0.0f) {
+                double t_k3 = (double)t_i + 273.15;
+                double amb_k3 = (double)p->ambient_c + 273.15;
+                rad_w = (float)((double)cfg->zone[i].radiative_coeff_w_per_k4 *
+                                (t_k3 * t_k3 * t_k3 * t_k3 - amb_k3 * amb_k3 * amb_k3 * amb_k3));
+            }
+            three_node_deltas(&state->zone[i], p, u, power_couple_w - rad_w, dt_s,
+                              &d_temp_c[i], &d_load_c[i], &d_sens_c[i]);
+        } else {
+            d_temp_c[i] = (power_in_w - power_loss_w + power_couple_w) / p->thermal_mass_j_per_c * dt_s;
+        }
     }
 
     /* Pass 2: apply, then run each zone's sensor pipeline against whatever
      * that zone's thermocouple is actually in contact with. */
     for (int i = 0; i < cfg->zone_count; i++) {
         state->zone[i].element_c += d_temp_c[i];
+        bool three = (cfg->zone[i].plant.node_model == SIM_NODE_THREE);
+        if (three) {
+            state->zone[i].load_c += d_load_c[i];
+            state->zone[i].sensor_node_c += d_sens_c[i];
+        }
 
-        float source_c = state->zone[i].element_c;
+        /* A SIM_NODE_THREE zone's thermocouple sits on the sensor node S, not
+         * the element (same contract as sim_plant_three_node_step()). */
+        float source_c = three ? state->zone[i].sensor_node_c : state->zone[i].element_c;
         if (state->fault[i] == SIM_ZONE_FAULT_TC_DETACHED) {
             float ambient_c = cfg->zone[i].plant.ambient_c;
             source_c = ambient_c + DETACHED_TC_COUPLING * (state->zone[i].element_c - ambient_c);
