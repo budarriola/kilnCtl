@@ -206,12 +206,12 @@ somewhere in firmware — the wizard only *explains* it earlier):
 
 Setup spans days. Requirements:
 
-1. **Progress persists in NVS on the ESP**, not in `localStorage` and not in
-   the `cfg` LittleFS partition. Reason: user config is mid-migration to `cfg`
-   with NVS dual-write (`docs/CONFIG_FILESYSTEM.md`); a filesystem problem
-   during setup must not lose the record of what has already been done, and
-   the wizard's record is exactly what you want intact while diagnosing that
-   problem. One small blob, namespace/key ≤ 15 chars — `NVS_KEY_LEN_CHECK()`
+1. **Progress persists on the ESP**, not in `localStorage`. It was NVS-only
+   while user config was mid-migration to `cfg`; by owner decision 2026-10-07
+   it now lives in the `cfg` LittleFS file `setup_wiz.bin`, with the old NVS
+   blob kept as a read fallback and migrated at first boot
+   (`docs/CONFIG_FILESYSTEM.md`). A save while cfg is unmounted is refused and
+   the format prompt applies. One small blob, namespace/key ≤ 15 chars — `NVS_KEY_LEN_CHECK()`
    is mandatory (see `project_nvs_key_too_long_zone_normals`).
 2. **Blob content is deliberately thin:** `{version, per-step {state:
    pending|done|skipped, ts, note}}`. It stores *no configuration values* —

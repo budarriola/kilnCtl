@@ -553,8 +553,9 @@ follows it.
 
 Marker and migration writes that are not config saves stay as they are:
 relay_cycles' NVS-to-NVS default-partition migration, adaptive_tune's
-enable-mask migrated marker, and the iter_tune store (not a `/api/cfgfs`
-item). Each is documented in the code where it lives.
+enable-mask migrated marker. Each is documented in the code where it lives.
+The iter_tune store was an exception here until 2026-10-07 and is now closed
+like the rest (last section).
 
 ### Write failure: fail loud, never fall back to NVS
 
@@ -659,9 +660,8 @@ time_sync, relay_cycles snapshot, adaptive_tune ki baseline, hidden-builtin
 mask, relay_names, zone_normals); every `kiln_cfg_store` mutator and, through
 them, backup import; `profiles_cfg_fs_save`/`_delete`; `zones_config_cfg_fs_save`
 (zones POST, autosave, migration write-back, import); `firing_stats_cfg_fs_write`.
-`iter_tune_store.c` keeps writing NVS and silently skips its cfg write
-(deliberate exception, documented in the last section). Loads fall back
-to the legacy NVS copy.
+the iter_tune store and the four stores moved on 2026-10-07 (last section).
+Loads fall back to the legacy NVS copy.
 
 ### cfg unmounted: refuse and prompt the format (owner decision 2026-10-06)
 
@@ -732,10 +732,8 @@ quietly or reporting success.
   ended in a failed read-back. The profile retarget step's per-slot read-back
   (`profiles_http.c`, `retarget_verify_slot()`) re-reads the slot's cfg file
   through `profiles_cfg_fs_load_raw()` at the RAM rev for the same reason.
-- `iter_tune_store.c`: its cfg write stays a silent no-op when cfg is not
-  mounted. It runs from the autotune/iteration path with no request to answer,
-  and its NVS write still holds the data. This is documented at
-  `cfg_fs_save_raw()` and is intentionally not turned into an error.
+- `iter_tune_store.c`: superseded 2026-10-07, see the last section. It used to
+  keep writing NVS and skip its cfg write silently when cfg was unmounted.
 
 Tests: `test_readiness_commissioning.c` pins the item status and detail text
 (recovery variant included), `test_cfg_fs.c` pins the recovery-skip flag and
@@ -747,3 +745,40 @@ profile delete,
 read-backs, `test_zones_http.c` also covers the 503 and 500 responses of `POST /api/zones` and
 the shared helper, and `test_backup_import.c` covers the update-settings
 route's 503 and 500 responses.
+
+### Five more stores closed or moved (owner decision 2026-10-07)
+
+The owner extended the close to the remaining NVS-only stores that hold user
+data. Same pattern as the rest: the NVS copy stays readable (a read fallback,
+migrated into the cfg file at first boot, never erased by the migration), a
+save writes the cfg file only at a rev above both sides, and a save while cfg
+is unmounted is refused with an error naming the cause and pointing at
+`POST /api/cfgfs/format_confirm`. Every one reports a `dual_write` row in
+`GET /api/cfgfs` (the list is now 20 rows) and is covered by the generic cfg
+file backup (`full_board_backup.py`, `GET`/`POST /api/cfgfs/file`).
+
+| Store | cfg file | Notes |
+|---|---|---|
+| `iter_tune_store` | `iter_tune.bin` | Closed. Its save runs from the autotune path with no request to answer, so a refused save is logged loudly and the in-RAM result still applies for the run. |
+| `profiles_favorites` | `prof_fav.bin` | Moved from `profiles_nvs`. The RAM masks apply live even when the save is refused, and revert at the next boot. |
+| `live_profile` | `prof_live_rec.bin`, `prof_live_work.bin` | Moved from `profiles_nvs`. The working profile is larger than the 128 B inline limit, so `pref_cfg_fs` gained heap-backed large items (up to 2048 B) with `pref_cfg_fs_load_var()` and `pref_cfg_fs_remove()`. Fork, edit and decide refuse when cfg is unmounted, with the message in the HTTP error. `live_profile_clear()` erases NVS first, then the files, so the fallback cannot resurrect a cleared edit. |
+| `ct_verify_store` | `ct_verify.bin` | Moved from `kiln_nvs`. The CT verdict save returns `ESP_ERR_INVALID_STATE` when cfg is unmounted. |
+| `setup_wizard_progress` | `setup_wiz.bin` | Moved from `kiln_nvs`. Section 5 of `docs/SETUP_WIZARD.md` explains why the record is no longer NVS-only. |
+
+Stay in NVS by owner decision: `firing_shadow`, `run_state`, `kiln_cfg_swap`
+and the aux convert journal. They are crash and transaction state that must
+survive a cfg fault, not user data.
+
+Factory reset: the kiln scope deletes `ct_verify.bin`, `setup_wiz.bin` and
+`iter_tune.bin`; the profiles scope deletes `prof_fav.bin`,
+`prof_live_rec.bin` and `prof_live_work.bin`. The mirror check
+(`tools/check_kiln_scope_cfg_mirrors.ps1`) covers the kiln list.
+
+Rollback hazard: as for the earlier close, an older firmware reads NVS only,
+so after any post-close save it sees the pre-close values of these stores.
+
+Tests: `test_iter_tune_store.c`, `test_profiles_http.c` (favorites),
+`test_live_profile.c`, `test_zones_http.c` (CT verdict) and
+`test_setup_wizard_progress.c` each cover cfg-only storage, the refusal when
+unmounted, and the legacy NVS migration. `test_cfg_fs_status.c` pins the
+status row set. Bench-unverified.
