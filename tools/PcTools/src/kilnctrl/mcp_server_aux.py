@@ -397,5 +397,165 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
             f"firmware ack: {ack}; host={resolved})")
 
 
+BENCH_AUX_PROFILE_NAME = "BENCH_AUX_RULE"  # 14 chars; PROFILE_NAME_MAX_LEN is 15
+_BENCH_MAX_C = 100.0  # the bench is a 4 W fixture: refuse anything kiln-scale
+_BENCH_CMP = {"above": 1, "below": 2}  # on_off_temp_cmp_t
+
+
+def _rule_matches(rule: dict, want: dict) -> "list[str]":
+    bad = []
+    for k, v in want.items():
+        g = rule.get(k)
+        if k == "temp_c":
+            if not isinstance(g, (int, float)) or abs(float(g) - float(v)) > 0.011:
+                bad.append(f"rule temp_c: wanted {v!r}, board reports {g!r}")
+        elif g != v:
+            bad.append(f"rule {k}: wanted {v!r}, board reports {g!r}")
+    return bad
+
+
+@_core._tool()
+def profile_save_bench_aux_rule(
+    target_c: float,
+    threshold_c: float,
+    temp_cmp: str = "below",
+    relay: int = 4,
+    zone: int = 0,
+    ramp_c_per_hr: float = 600.0,
+    dwell_min: int = 10,
+    confirm: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Save (create or overwrite) the ONE bench profile named BENCH_AUX_RULE: a
+    single ZONE_RAMP segment on `zone` (zone_mask = 1<<zone) plus ONE on/off rule
+    that drives aux relay `relay` (wire target byte 8+relay-1) from the thermocouple
+    zone bound on that aux output, temp_source=1, `temp_cmp` "below" (relay ON while
+    the TC reads under `threshold_c`) or "above". Built so a bench agent can run
+    docs/SPARE_RELAY_ONOFF_PLAN.md sec 12 steps 3, 4, 6, 7 on the 4 W fixture with a
+    near-ambient threshold. It only SAVES; start it with profiles_start().
+
+    Never touches another profile: an existing slot is reused only when its name is
+    exactly BENCH_AUX_RULE, otherwise the firmware creates a new slot. Refused: bad
+    arguments (target/threshold above 100 C, relay not 1..4, zone not 0..2); unless
+    `confirm is True` exactly (dry run, no POST); while a profile/autotune run is
+    active; an aux relay that is not enabled, is conflicted, or has no tc_zone (run
+    control_set_aux_output first). After the POST it re-reads GET /api/profile?id=N
+    and FAILS LOUD unless name, zone_mask, the segment and the single aux rule all
+    read back exactly and every OTHER profile is unchanged. Uses the http_auth
+    admin-session seam; never prints a credential."""
+    from . import profile_edit_http_client as pehc
+    from .devices_profiles import ProfileSegment
+
+    if not _is_int(relay) or not 1 <= relay <= ahc.AUX_RELAY_COUNT:
+        return f"refused: relay={relay!r} must be an integer 1..{ahc.AUX_RELAY_COUNT}"
+    if not _is_int(zone) or not 0 <= zone <= 2:
+        return f"refused: zone={zone!r} must be an integer 0..2"
+    if not isinstance(temp_cmp, str) or temp_cmp not in _BENCH_CMP:
+        return f"refused: temp_cmp={temp_cmp!r} must be 'above' or 'below'"
+    for name, v in (("target_c", target_c), ("threshold_c", threshold_c)):
+        if (isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                or not 0.0 <= v <= _BENCH_MAX_C):
+            return f"refused: {name}={v!r} must be a finite number 0..{_BENCH_MAX_C:g} C (4 W bench fixture)"
+    if (isinstance(ramp_c_per_hr, bool) or not isinstance(ramp_c_per_hr, (int, float))
+            or not math.isfinite(ramp_c_per_hr) or ramp_c_per_hr <= 0):
+        return f"refused: ramp_c_per_hr={ramp_c_per_hr!r} must be a positive finite number"
+    if not _is_int(dwell_min) or not 0 <= dwell_min <= 600:
+        return f"refused: dwell_min={dwell_min!r} must be an integer 0..600"
+
+    resolved = _resolve_host(host)
+    running = _running_reason()
+    if running is not None:
+        return f"refused: {running} -- the bench profile is not written mid-run (host={resolved})"
+
+    try:
+        aux = ahc.get_aux_outputs(resolved)
+        listing = ahc._get_json(resolved, "/api/profiles", ahc.AUX_HTTP_TIMEOUT_S)
+    except ahc.AuxHttpError as exc:
+        return f"error: precheck read failed (host={resolved}): {exc}"
+    ent = ahc.aux_entry(aux, relay)
+    if ent is None or not ent.get("enabled"):
+        return (f"refused: relay {relay} is not an enabled aux output -- run "
+                f"control_set_aux_output({relay}, True, tc_zone={zone}, confirm=True) first (host={resolved})")
+    if ent.get("conflicted"):
+        return f"refused: relay {relay}'s aux binding is conflicted with a zone relay_mask (host={resolved})"
+    if ent.get("tc_zone") in (None, -1):
+        return (f"refused: aux relay {relay} has no tc_zone, so a temperature rule is invalid -- "
+                f"set tc_zone with control_set_aux_output first (host={resolved})")
+    if not isinstance(listing, list):
+        return f"error: GET /api/profiles was not a JSON array (host={resolved})"
+    user = [p for p in listing if isinstance(p, dict) and not p.get("builtin") and _is_int(p.get("id"))]
+    mine = next((p["id"] for p in user if p.get("name") == BENCH_AUX_PROFILE_NAME), None)
+    slot = -1 if mine is None else mine
+    others_before = {p["id"]: p for p in user if p["id"] != mine}
+
+    rule = pehc.OnOffRule(
+        zone_index=8 + relay - 1, segment_index=0, enable=True,
+        temp_cmp=_BENCH_CMP[temp_cmp], temp_source=pehc.ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE,
+        temp_threshold_c=float(threshold_c))
+    seg = ProfileSegment(float(target_c), float(ramp_c_per_hr), int(dwell_min))
+    plan = (f"profile '{BENCH_AUX_PROFILE_NAME}' ({'overwrite slot ' + str(mine) if mine is not None else 'new slot'}): "
+            f"zone {zone} -> {target_c:g} C at {ramp_c_per_hr:g} C/h, dwell {dwell_min} min; aux relay {relay} "
+            f"(rule target {rule.zone_index}) ON while TC {temp_cmp} {threshold_c:g} C")
+    if confirm is not True:
+        return f"DRY RUN (pass confirm=True, exactly, to actually write) -- would save {plan} (host={resolved})"
+
+    try:
+        ack = pehc.post_profile(resolved, slot, BENCH_AUX_PROFILE_NAME, 1 << zone, [seg], [rule])
+    except pehc.ProfileEditHttpError as exc:
+        return f"refused: POST /api/profile refused (host={resolved}): {exc}"
+    pid = ack.get("id")
+    if not _is_int(pid):
+        return f"FAILED: POST answered ok but gave no profile id: {ack!r} (host={resolved}). Do not trust this."
+    if pid in others_before:
+        return (f"FAILED: the board saved into slot {pid}, which already held a different profile "
+                f"('{others_before[pid].get('name')}') -- compare with a backup_export (host={resolved})")
+
+    try:
+        got = ahc._get_json(resolved, f"/api/profile?id={pid}", ahc.AUX_HTTP_TIMEOUT_S)
+        after = ahc._get_json(resolved, "/api/profiles", ahc.AUX_HTTP_TIMEOUT_S)
+    except ahc.AuxHttpError as exc:
+        return (f"error: POST answered ok, but the confirming re-read failed (host={resolved}): {exc} "
+                f"-- state UNKNOWN, re-check profile {pid} before trusting this")
+    bad = []
+    if not isinstance(got, dict):
+        bad.append("GET /api/profile was not an object")
+        got = {}
+    if got.get("name") != BENCH_AUX_PROFILE_NAME:
+        bad.append(f"name: {got.get('name')!r}")
+    if got.get("zone_mask") != 1 << zone:
+        bad.append(f"zone_mask: wanted {1 << zone}, board reports {got.get('zone_mask')!r}")
+    segs = got.get("segments") if isinstance(got.get("segments"), list) else []
+    if len(segs) != 1:
+        bad.append(f"segment count: wanted 1, board reports {len(segs)}")
+    else:
+        s0 = segs[0] if isinstance(segs[0], dict) else {}
+        for k, v in (("target_c", seg.target_c), ("ramp_c_per_hr", seg.ramp_c_per_hr)):
+            if not isinstance(s0.get(k), (int, float)) or abs(float(s0[k]) - v) > 0.011:
+                bad.append(f"segment {k}: wanted {v!r}, board reports {s0.get(k)!r}")
+        if s0.get("dwell_min") != seg.dwell_min:
+            bad.append(f"segment dwell_min: wanted {seg.dwell_min}, board reports {s0.get('dwell_min')!r}")
+    rules = got.get("on_off_rules") if isinstance(got.get("on_off_rules"), list) else []
+    if len(rules) != 1:
+        bad.append(f"rule count: wanted 1, board reports {len(rules)}")
+    else:
+        bad += _rule_matches(rules[0], {"zone": rule.zone_index, "segment": 0, "enable": 1, "phase_mask": 0,
+                                        "direction_mask": 0, "temp_source": 1, "temp_cmp": rule.temp_cmp,
+                                        "temp_c": rule.temp_threshold_c, "invert": 0})
+    after_user = ({p["id"]: p for p in after if isinstance(p, dict) and not p.get("builtin")
+                   and _is_int(p.get("id"))} if isinstance(after, list) else {})
+    for oid, p in others_before.items():
+        a = after_user.get(oid)
+        if (a is None or a.get("name") != p.get("name") or a.get("zone_mask") != p.get("zone_mask")
+                or a.get("segment_count") != p.get("segment_count")):
+            bad.append(f"other profile {oid} ('{p.get('name')}') changed or vanished")
+    if set(after_user) - set(others_before) - {pid}:
+        bad.append("an unexpected extra profile appeared")
+    if bad:
+        return (f"FAILED: POST answered ok but the read-back does not confirm it -- {'; '.join(bad)} "
+                f"(host={resolved}). Do not trust this as applied.")
+    return (f"ok - saved {plan}; profile id {pid} (confirmed by read-back of the profile and every other "
+            f"user profile; host={resolved}). Start with profiles_start({pid}).")
+
+
 # Bound last, on purpose: see mcp_server_control.py's trailing comment.
 from . import mcp_server as _srv  # noqa: E402

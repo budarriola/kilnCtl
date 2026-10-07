@@ -305,6 +305,8 @@ ZERO new routes:
   `confirm is True`, refuses mid-run (`system_mode_gate` 409) and refuses a
   relay that is not an enabled aux; reads the relay state back and fails loud
   if it did not change.
+- `profile_save_bench_aux_rule(...)` (added 2026-10-06, count 228 -> 229): saves the
+  one `BENCH_AUX_RULE` bench profile with an aux rule; see sec 12a.
 - Profile tools that author rules (`profile_live_*`, profile import) accept
   `aux_relay=N` and translate to the wire byte through the shared helper.
 - Update the CLAUDE.md tool count/narrative and `docs/MCP_SERVERS.md`.
@@ -473,6 +475,56 @@ jig on relay 4 terminals; the bench cannot validate anything kiln-scale.
    only, not the external supply wiring.
 8. Record in `docs/BENCH_TEST_LOG.md`; add a case to the bench suite
    (`docs/BENCH_TEST_SYSTEM_PLAN.md` style) once WP-3 lands.
+
+### 12a. Running steps 3, 4, 6, 7: `profile_save_bench_aux_rule`
+
+Steps 3/4/6/7 were SKIPPED on 2026-10-06 (BENCH_TEST_LOG, "spare-relay aux bench,
+partial") because no stored profile carried an aux rule and nothing built one.
+`profile_save_bench_aux_rule(target_c, threshold_c, temp_cmp="below", relay=4,
+zone=0, ramp_c_per_hr=600, dwell_min=10, confirm=False)` (`mcp_server_aux.py`) saves
+ONE profile named `BENCH_AUX_RULE`: one ZONE_RAMP segment on `zone` plus one rule
+(segment 0, target byte 11 = aux relay 4, `temp_source=1`, `temp_cmp` below/above,
+threshold `threshold_c`). It only saves; nothing starts. It reuses a slot only if
+that slot is already named `BENCH_AUX_RULE`, otherwise the firmware creates a new
+one, so a user profile is never overwritten; the read-back FAILS LOUD if the slot,
+segment, rule or any other profile differs. Without `confirm=True` exactly it is a
+dry run. Targets/thresholds above 100 C are refused (4 W fixture).
+
+Procedure (`docs/agent_rules/BENCH.md` applies; heat runs are pre-authorized, the
+safety obligations are not):
+
+0. Step 1 and 2 above done: `control_set_aux_output(4, True, tc_zone=0, confirm=True)`
+   (the tool refuses to save the profile unless relay 4 is an enabled, unconflicted
+   aux with a `tc_zone`). Read ambient: `thermo_read` zone 0, call it `A`.
+1. Step 3, rule fires at once: `profile_save_bench_aux_rule(target_c=A+10,
+   threshold_c=A+4, temp_cmp="below", confirm=True)`. Note the id in the result.
+   Relay 4 should be ON from segment start (TC below `A+4`) and drop once the TC
+   passes the threshold plus hysteresis. `profiles_start(<id>)`, then poll
+   `io_read` (relay shadow, bit for R4) and `thermo_read` zone 0 every few seconds
+   with timestamps. Heat obligations stay: watch `safety_get_status`, and
+   `profiles_stop()` yourself at the end (stopping the host does not stop a firing).
+2. Step 4, min on/off: from the same timestamps, no R4 ON interval shorter than
+   `min_on_s` and no OFF interval shorter than `min_off_s` (`control_get_aux_outputs`
+   gives both). On the 4 W fixture the TC may cross only once; to force several
+   transitions re-save with `temp_cmp="above"` and `threshold_c` just above the
+   current TC, or lower `min_on_s`/`min_off_s` first with `control_set_aux_output`
+   (restore them afterwards). State plainly if only one transition was seen. CT is
+   N/A unless a real load is wired through a CT channel.
+3. Step 6, trip drops relay 4: re-save with `threshold_c=A+25` (still `"below"`, so
+   R4 stays ON for the whole run), start it, confirm R4 ON via `io_read`, then use
+   the existing sanctioned bench trip path (never the E-stop jumper). Expect R4 to
+   read OFF. Then clear per procedure: `safety_get_status`, check `trip_mask ==
+   1 << (trip_reason - 1)`, `safety_clear_trip()`, `profiles_stop()`.
+4. Step 7, K4 independence: with the step-3 profile running and R4 ON, call
+   `profiles_pause()` (no heat granted) and read `io_read`; then `profiles_resume()`
+   or `profiles_stop()`. Record what R4 did. This proves only the ESP path, not the
+   external supply wiring. If R4 does not follow the rule while paused, report that as
+   the finding rather than assuming it is expected (the plan, sec 6 item 4, takes
+   phase/direction from the same executor values as the zone path).
+5. Restore: `profiles_delete(<id>)` for the `BENCH_AUX_RULE` slot only (confirm the
+   name with `profiles_get` first), `control_set_aux_output(4, False, confirm=True)`,
+   confirm `control_get_aux_outputs` shows enabled_mask 0 and `safety_get_status`
+   link up, armed, no trip. Log every step with its result in `docs/BENCH_TEST_LOG.md`.
 
 ## 13. Work packages (file ownership; no overlap between concurrent WPs)
 
