@@ -10656,6 +10656,82 @@ static void test_monitor_only_zone_does_not_drive_warm_start_pick(void)
     g_stub_zone_monitor_only[0] = false;
 }
 
+/* FIX B: an ON_OFF zone has no obligation to the shared setpoint
+ * (ON_OFF_ZONE_PLAN.md sec 1), so a valid thermocouple on the LOWEST-index
+ * ON_OFF zone must not seed the run-start baseline or the warm-start pick;
+ * both must use the first zone that actually drives the run. */
+static void on_off_baseline_setup(const profile_t *p, float z0_c, float z1_c)
+{
+    monitor_baseline_setup(p, z0_c, z1_c);
+    g_stub_zone_monitor_only[0] = false;
+    g_stub_zone_is_on_off[0] = true;
+}
+
+static void test_zone_drives_run_predicate(void)
+{
+    TEST_SECTION("profile_executor_zone_drives_run -- neither on/off nor monitor-only drives the run");
+    memset(g_stub_zone_is_on_off, 0, sizeof(g_stub_zone_is_on_off));
+    memset(g_stub_zone_monitor_only, 0, sizeof(g_stub_zone_monitor_only));
+    TEST_CHECK(profile_executor_zone_drives_run(0), "plain zone drives the run");
+    g_stub_zone_is_on_off[0] = true;
+    TEST_CHECK(!profile_executor_zone_drives_run(0), "on/off zone does not");
+    g_stub_zone_is_on_off[0] = false;
+    g_stub_zone_monitor_only[0] = true;
+    TEST_CHECK(!profile_executor_zone_drives_run(0), "monitor-only zone does not");
+    g_stub_zone_monitor_only[0] = false;
+}
+
+static void test_on_off_zone_does_not_drive_run_start_baseline(void)
+{
+    TEST_SECTION("run-start baseline -- an ON_OFF lowest zone with a valid TC must not seed target_c");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(900.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(1000.0f, 100.0f, 10);
+
+    p.on_off_rule_count = 1; /* a run refuses an on/off zone with no rule */
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_NONE;
+    on_off_baseline_setup(&p, 400.0f, 50.0f);
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "a mask with one ON_OFF and one PID zone must start");
+    TEST_CHECK(fabsf(s_exec.target_c - 50.0f) < 0.01f,
+               "target_c must seed from the driven zone (50C), not the ON_OFF zone 0 (400C)");
+    profile_executor_halt();
+    g_stub_zone_is_on_off[0] = false;
+}
+
+static void test_on_off_zone_does_not_drive_warm_start_pick(void)
+{
+    TEST_SECTION("warm-start -- a cold ON_OFF zone must not hold the 'coolest zone' pick down");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    p.on_off_rule_count = 1; /* a run refuses an on/off zone with no rule */
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_NONE;
+    on_off_baseline_setup(&p, 20.0f, 300.0f);
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "the run must start");
+    TEST_CHECK(s_exec.warm_started,
+               "the driven zone is at 300C so the run must warm-start; the cold ON_OFF zone must not veto it");
+    TEST_CHECK(fabsf(s_exec.target_c - 300.0f) < 0.01f, "entry target is the driven zone's 300C");
+    profile_executor_halt();
+    g_stub_zone_is_on_off[0] = false;
+}
+
 static void test_monitor_only_all_zones_start_refused(void)
 {
     TEST_SECTION("run start -- a mask holding only monitor-only zones is refused (fail closed, no baseline)");
@@ -10780,6 +10856,9 @@ static void run_test_aux_wp3(void)
     test_monitor_only_zone_tick_wiring();
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();
+    test_zone_drives_run_predicate();
+    test_on_off_zone_does_not_drive_run_start_baseline();
+    test_on_off_zone_does_not_drive_warm_start_pick();
     test_monitor_only_all_zones_start_refused();
     test_monitor_only_plus_off_zone_start_refused_naming_both();
 }

@@ -1234,6 +1234,7 @@ void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_inp
  * otherwise read as "satisfied" and command the relay ON on a dead sensor.
  * Shared by the zone and aux on/off input producers. */
 bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok);
+bool profile_executor_zone_drives_run(uint8_t zi);
 /* Inputs to the shared on/off input builder that genuinely differ between the
  * zone and aux producers. failsafe_base is the producer's own run-ending terms
  * (zone: FAULTED || zone fault || per-zone authority; aux: config unreadable

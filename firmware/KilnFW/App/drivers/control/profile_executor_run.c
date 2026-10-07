@@ -85,10 +85,22 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
  * or decide a warm start. All-monitor-only masks return -1; the capture then
  * yields no baseline/warm-start (fail closed) and profile_executor_run()
  * refuses such a start anyway via its n_heating_zones == 0 check. */
+/* The one predicate for "this zone's reading/state is part of the run's shared
+ * temperature drive": not an on/off zone (it has no obligation to the shared
+ * setpoint, ON_OFF_ZONE_PLAN.md sec 1) and not monitor-only (never driven,
+ * SPARE_RELAY_ONOFF_PLAN.md sec 10). Used by the baseline pick, the warm-start
+ * coolest pick and the ramp-lock loop so the three cannot disagree. Deliberately
+ * NOT used by the ramp-rate-ceiling feasibility check: an on/off zone has a
+ * ceiling it is still validated against there. */
+bool profile_executor_zone_drives_run(uint8_t zi)
+{
+    return !zone_is_on_off(zi) && !zone_is_monitor_only(zi);
+}
+
 static int8_t profile_executor_baseline_zone(uint8_t zone_mask)
 {
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        if ((zone_mask & (1u << zi)) && !zone_is_monitor_only(zi)) {
+        if ((zone_mask & (1u << zi)) && profile_executor_zone_drives_run(zi)) {
             return (int8_t)zi;
         }
     }
@@ -160,7 +172,7 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
      * other than first_active can legitimately be the coolest one. */
     for (uint8_t wzi = 0; wzi < MAX31856_CHANNEL_COUNT; wzi++) {
         if (!(zone_mask & (1u << wzi))) continue;
-        if (zone_is_monitor_only(wzi)) continue; /* never drives the warm-start pick */
+        if (!profile_executor_zone_drives_run(wzi)) continue; /* on/off and monitor-only zones never drive the warm-start pick */
         uint8_t w_tmask = 0;
         zones_config_get_thermo_mask(wzi, &w_tmask);
         bool w_valid = false;

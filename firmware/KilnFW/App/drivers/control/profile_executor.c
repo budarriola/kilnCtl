@@ -912,11 +912,11 @@ void executor_task_entry(void *arg)
              * would let a zone sitting at ambient (or with no thermocouple
              * at all) freeze the whole firing's ramp forever. Hard
              * requirement, not an optimisation. */
-            if (zone_is_on_off(zi)) continue;
             /* SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone (relay
              * converted to an aux) cannot heat, so it must not hold the
-             * firing's ramp either. */
-            if (s_exec.zones[zi].monitor_only) continue;
+             * firing's ramp either. Both exclusions are the one shared
+             * predicate. */
+            if (!profile_executor_zone_drives_run(zi)) continue;
             /* ONE-SIDED (2026-09-03, hot-start defect): only a zone that is
              * COLDER than the shared target by more than the band can hold
              * the lock. A zone that is HOTTER than target by the same
