@@ -12,7 +12,7 @@ menu "KilnCtrl Hardware Configuration"
             range 0 48
     endmenu
 
-    menu "SPI Bus (MAX31856 x3 + ILI9488 display)"
+    menu "SPI Bus (MAX31856 x3 + ST7796/ILI9488 display)"
         choice KILNCTL_SPI_HOST_CHOICE
             prompt "SPI host peripheral"
             default KILNCTL_SPI_HOST_SPI2
@@ -308,7 +308,7 @@ menu "KilnCtrl Hardware Configuration"
                 still on by default either way.
     endmenu
 
-    menu "ILI9488 Display (BIGTREETECH TFT35 SPI V2.1, J2)"
+    menu "Display (ST7796 MSP4031 fitted; ILI9488 TFT35 also supported, J2)"
         choice KILNCTL_DISPLAY_PANEL
             prompt "Panel driven by panel_spi.c"
             default KILNCTL_DISPLAY_PANEL_ST7796
@@ -358,10 +358,10 @@ menu "KilnCtrl Hardware Configuration"
                 is not the default.
 
             config KILNCTL_DISPLAY_PANEL_ILI9488
-                bool "ILI9488 (BIGTREETECH TFT35 SPI V2.1)"
+                bool "ILI9488 (BIGTREETECH TFT35 SPI V2.1) -- supported, not fitted"
 
             config KILNCTL_DISPLAY_PANEL_ST7796
-                bool "ST7796 (LCDWIKI/Elecrow MSP4031) -- UNTESTED, see STOP block"
+                bool "ST7796 (LCDWIKI/Elecrow MSP4031) -- fitted on the bench board"
 
             config KILNCTL_DISPLAY_PANEL_AUTO
                 bool "auto -- probe RDDID + touch address, empty ID table today (see help)"
@@ -440,7 +440,7 @@ menu "KilnCtrl Hardware Configuration"
             default y
             help
                 DISPLAY_ST7796_PLAN.md 3.4.1: neither panel this board has
-                ever run (ILI9488 or the anticipated ST7796/MSP4031 module)
+                ever run (the ILI9488 TFT35 or the fitted ST7796/MSP4031 module)
                 has a backlight control line reaching the main board -- the
                 module's backlight pin (module pin 8) is left open, so the
                 backlight is permanently on and screen_idle.c can only ever

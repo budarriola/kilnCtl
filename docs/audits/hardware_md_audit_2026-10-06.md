@@ -42,8 +42,10 @@ baud 115200, addresses 0x3C/0x20): all match, no change.
    fixture. **Resolved by owner decision 2026-10-06: kept at 4 MHz, rationale
    reworded** (4 MHz is ample for MAX31856 conversion rates; faster SPI is not
    needed). Help text, doc comments and docs reworded; no value changed.
-3. Kconfig menu title and `docs/ILI9488.md` still frame the TFT35/ILI9488
-   although the default panel is ST7796 (MSP4031).
+3. RESOLVED 2026-10-06 (text only): Kconfig menu titles/choice labels and
+   `firmware/KilnFW/docs/ILI9488.md` now name the ST7796 (MSP4031) as the
+   fitted panel and ILI9488 as also supported. The doc keeps its filename
+   (about 8 inbound links); no Kconfig symbol was renamed.
 4. Back-fed 3V3 on A1 (HARDWARE.md section 7) is a schematic property, unchanged
    by this audit; the USB-vs-IC5 contention warning stands unverified on the
    bench. **Owner: ignore (2026-10-06).**
