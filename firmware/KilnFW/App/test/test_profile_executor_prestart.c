@@ -10500,6 +10500,27 @@ static void test_monitor_only_all_zones_start_refused(void)
     char err[128] = {0};
     bool ok = profile_executor_run(0, err, sizeof(err));
     TEST_CHECK(!ok, "nothing in the mask is driven: the start must be refused");
+    TEST_CHECK(strstr(err, "monitor-only") != NULL && strstr(err, "control mode OFF") == NULL,
+               "the refusal must name monitor-only, not blame control mode OFF");
+    g_stub_zone_monitor_only[0] = false;
+}
+
+static void test_monitor_only_plus_off_zone_start_refused_naming_both(void)
+{
+    TEST_SECTION("run start -- one monitor-only zone plus one control-mode-OFF zone: refused, message names both");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 10);
+    monitor_baseline_setup(&p, 50.0f, 50.0f);
+    g_stub_control_mode[1] = ZONE_CONTROL_MODE_OFF;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "neither zone can heat: the start must be refused");
+    TEST_CHECK(strstr(err, "monitor-only") != NULL && strstr(err, "control mode OFF") != NULL,
+               "the refusal must name both causes");
+    TEST_CHECK(strlen(err) < sizeof(err) - 1, "the refusal must fit the 128 B HTTP err_msg untruncated");
     g_stub_zone_monitor_only[0] = false;
 }
 
@@ -10592,6 +10613,7 @@ static void run_test_aux_wp3(void)
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();
     test_monitor_only_all_zones_start_refused();
+    test_monitor_only_plus_off_zone_start_refused_naming_both();
 }
 
 static void run_test_on_off_actuation(void)

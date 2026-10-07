@@ -77,8 +77,9 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
 }
 
 /* Lowest zone in zone_mask that is NOT monitor-only, or -1 if there is none.
- * The run-start temperature baseline, the ramp-baseline/ambient apply gate
- * in profile_executor_run() and the warm-start pick all key off this: a
+ * The run-start temperature baseline and the warm-start pick both key off
+ * this (profile_executor_capture_baseline() is its only caller, and
+ * profile_executor_run() applies that capture without re-picking): a
  * monitor-only zone (HEATER with relay_mask==0, zone_is_monitor_only(), the
  * one rule) is never driven, so its reading must not seed the run's target
  * or decide a warm start. All-monitor-only masks return -1; the capture then
@@ -782,9 +783,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * legitimate -- so only the all-OFF case is refused, and the mixed case
      * gets a log line naming which zones will sit idle. */
     uint8_t n_heating_zones = 0;
+    uint8_t n_monitor_only_zones = 0;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         if (!(p.zone_mask & (1u << zi))) continue;
         if (zone_is_monitor_only(zi)) {
+            n_monitor_only_zones++;
             ESP_LOGW(PE_TAG, "zone %u is in this profile but has no heater relay (monitor-only) -- it will not heat", zi);
             continue;
         }
@@ -798,10 +801,24 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     }
     if (n_heating_zones == 0) {
         xSemaphoreGive(s_exec.lock);
+        /* Name the real cause: a monitor-only zone (relay moved to an aux
+         * output) has a control mode but no heater relay, so "control mode
+         * OFF" alone would send the operator to the wrong field. Both
+         * monitor-only strings fit the HTTP start handler's 128 B err_msg. */
         if (err_msg) {
-            snprintf(err_msg, err_cap,
-                     "every zone in this profile is set to control mode OFF -- nothing would heat. "
-                     "Pick bang-bang or PID in Settings > Zones.");
+            if (n_monitor_only_zones == 0) {
+                snprintf(err_msg, err_cap,
+                         "every zone in this profile is set to control mode OFF -- nothing would heat. "
+                         "Pick bang-bang or PID in Settings > Zones.");
+            } else if (n_monitor_only_zones == n_active_zones) {
+                snprintf(err_msg, err_cap,
+                         "every zone in this profile is monitor-only (no heater relay) -- nothing would heat. "
+                         "Assign a relay in Settings > Zones.");
+            } else {
+                snprintf(err_msg, err_cap,
+                         "no zone in this profile can heat: each is monitor-only (no heater relay) or "
+                         "control mode OFF. Fix in Settings > Zones.");
+            }
         }
         return false;
     }
@@ -917,7 +934,6 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
-    int8_t first_active = -1; /* lowest non-monitor-only zone: same pick as capture_baseline */
     uint8_t active_rank = 0;
     float baseline_target_c = p.segments[0].target_c;
     /* Warm-start (Q4): "current temperature" is the COOLEST active zone's
@@ -931,7 +947,6 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (!(p.zone_mask & (1u << zi))) continue;
         zone_runtime_t *z = &s_exec.zones[zi];
         z->active = true;
-        if (first_active < 0 && !zone_is_monitor_only(zi)) first_active = (int8_t)zi;
 
         /* OFF, not BANGBANG, as the fallback if the getter fails: "we could
          * not read this zone's control mode" must not resolve to "close the
@@ -1064,30 +1079,33 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         /* HP-02 starvation reporting starts from zero every run/resume. */
         z->relay_starved_s = 0.0f;
         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_NONE;
+    }
 
-        /* Ramp baseline: the first active zone's actual (calibrated) reading
-         * if we have one, else the segment's own target (makes ramp math a
-         * no-op rather than ramping from a fabricated zero). TODO.md 10.8:
-         * this must be the same COMBINED reading the very first control tick
-         * will compute for this zone, not just its legacy same-index channel
-         * -- otherwise a multi-thermocouple zone would start its ramp math
-         * from a different number than the tick right after it settles on.
-         *
-         * The MAX31856 SPI read itself already happened in
-         * profile_executor_capture_baseline(), BEFORE s_exec.lock was taken
-         * (see that function's doc comment) -- this just applies the
-         * snapshot exactly once, at the same zi == first_active gate the
-         * read used to run under. */
-        if ((int8_t)zi == first_active) {
-            if (baseline_valid) {
-                baseline_target_c = baseline_c;
-            }
-            warm_start_coolest_c = warm_start_coolest_captured;
-            if (ambient_valid) {
-                s_exec.ambient_c = ambient_c_captured;
-                s_exec.ambient_from_cj = true;
-            }
-        }
+    /* Ramp baseline: the baseline zone's actual (calibrated) reading if we
+     * have one, else the segment's own target (makes ramp math a no-op
+     * rather than ramping from a fabricated zero). TODO.md 10.8: this must
+     * be the same COMBINED reading the very first control tick will compute
+     * for that zone, not just its legacy same-index channel -- otherwise a
+     * multi-thermocouple zone would start its ramp math from a different
+     * number than the tick right after it settles on.
+     *
+     * The MAX31856 SPI read itself already happened in
+     * profile_executor_capture_baseline(), BEFORE s_exec.lock was taken
+     * (see that function's doc comment), and that function alone picks the
+     * baseline zone (profile_executor_baseline_zone(): lowest zone in the
+     * mask that is not monitor-only). The snapshot is applied here, once,
+     * after the zone loop, rather than at a second "zi == first_active"
+     * gate inside it: a second pick evaluated later, under the lock, could
+     * disagree with the capture's if a zone's type or relay mask changed in
+     * between, and every captured value is already invalid/NAN when the
+     * capture found no baseline zone. */
+    if (baseline_valid) {
+        baseline_target_c = baseline_c;
+    }
+    warm_start_coolest_c = warm_start_coolest_captured;
+    if (ambient_valid) {
+        s_exec.ambient_c = ambient_c_captured;
+        s_exec.ambient_from_cj = true;
     }
 
     /* Warm-start (PROFILES.md, owner request 2026-08-30): decide once, here,
