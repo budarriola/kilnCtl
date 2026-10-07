@@ -37,6 +37,7 @@
 #include "uart_task_ids.h"
 #include "update_http_internal.h"
 #include "update_policy.h"
+#include "update_fetch_heap.h"
 #include "update_release.h"
 #include "update_sign.h"
 #include "update_settings.h"
@@ -63,14 +64,12 @@ static const char *TAG = "update_fetch";
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
 #define FETCH_TX_BUF_BYTES 2048u
-#define FETCH_TX_BUF_SPIKE_BYTES 1024u       // the request buffer the WP7 spike's 25600 B was measured with
-// Current free internal heap (not the low-water mark) needed to even start: the 8192 B floor plus
-// the measured TLS residual (WP7 bench: handshake costs about 8 KB, writer stack about 4.5 KB)
-// plus slack (25600 B, measured with a 1 KB request buffer) plus the growth of the request buffer
-// to FETCH_TX_BUF_BYTES. Below FETCH_HEAP_ABORT_BELOW mid-body (read loop only) the job gives up; every hop start uses
-// FETCH_HEAP_PRECHECK_MIN.
-#define FETCH_HEAP_PRECHECK_MIN (25600u + (FETCH_TX_BUF_BYTES - FETCH_TX_BUF_SPIKE_BYTES))
-#define FETCH_HEAP_ABORT_BELOW 12288u
+// Admission and mid-body abort thresholds (FETCH_HEAP_PRECHECK_MIN 28 KB on current free internal
+// heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 12288 B) live
+// in update_fetch_heap.h with their derivation and are host-tested. Every hop start uses the full
+// admission rule; the read loop uses only the abort floor.
+// The tx buffer stays 2048 B (a JWT-signed release-assets GET line can exceed 1 KB, so 1 KB would
+// risk a truncated request); that costs 1 KB over the spike and is inside the worst-case draw.
 #define FETCH_JOB_DEADLINE_MS (20u * 60u * 1000u)
 // Per-socket-operation timeout. Cancel latency is bounded by it: the loop checks the cancel flag
 // between reads, and a read may block this long, with at most FETCH_EAGAIN_RETRIES retries after a
@@ -186,6 +185,24 @@ struct work {
 static uint32_t free_internal(void)
 {
     return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+static uint32_t largest_internal_block(void)
+{
+    return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+// Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
+static const char *heap_admit(void)
+{
+    uint32_t f = free_internal();
+    uint32_t l = largest_internal_block();
+    if (update_fetch_heap_admit(f, l) == FETCH_HEAP_OK) {
+        return NULL;
+    }
+    ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u)", (unsigned)f,
+             (unsigned)FETCH_HEAP_PRECHECK_MIN, (unsigned)l, (unsigned)FETCH_LARGEST_BLOCK_MIN);
+    return "low_heap";
 }
 
 // The start-time mode gate and the heat-side fetch_busy refusal read each other's state without a
@@ -407,8 +424,9 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so
         // gating on the mid-body abort floor alone could dip under the owner's 8192 B internal
         // floor. Gate each esp_http_client_init on the full start threshold instead.
-        if (free_internal() < FETCH_HEAP_PRECHECK_MIN) {
-            return "low_heap";
+        const char *adm = heap_admit();
+        if (adm != NULL) {
+            return adm;
         }
         update_loc_capture_init(&w->loc_cap, w->loc, sizeof(w->loc));
         esp_http_client_config_t cfg = {
@@ -476,7 +494,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     fail = "timeout";
                     break;
                 }
-                if (free_internal() < FETCH_HEAP_ABORT_BELOW) {
+                if (update_fetch_heap_abort(free_internal())) {
                     fail = "low_heap";
                     break;
                 }
@@ -595,9 +613,9 @@ static const char *run_job(work_t *w)
     if (!clock_synced()) {
         return "clock_not_synced";
     }
-    if (free_internal() < FETCH_HEAP_PRECHECK_MIN) {
-        ESP_LOGW(TAG, "refused: internal heap free %u < %u", (unsigned)free_internal(), FETCH_HEAP_PRECHECK_MIN);
-        return "low_heap";
+    const char *adm = heap_admit();
+    if (adm != NULL) {
+        return adm;
     }
     // WP9 publishes the repo under a writer mutex; copy it, never hold the pointer.
     char repo[UPDATE_SETTINGS_REPO_MAX_LEN + 1];

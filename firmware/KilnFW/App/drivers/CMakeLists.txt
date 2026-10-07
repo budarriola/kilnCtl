@@ -355,6 +355,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "update/update_signing_keys.c"
                        "update/third_party/monocypher/monocypher.c"
                        "update/third_party/monocypher/monocypher-ed25519.c"
+                       "update/update_fetch_heap.c"
                        # WP8: the board-side GitHub fetch (TLS client, two tasks, four routes).
                        "update/update_fetch.c"
                        "update/update_http.c"
