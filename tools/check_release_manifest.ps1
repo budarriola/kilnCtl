@@ -46,6 +46,16 @@ if ($ut -ne 0) { Note-Fail "test_release_manifest.py failed:`n$out" }
 elseif ($out -notmatch 'Ran (\d+) tests' -or [int]$Matches[1] -lt 15) { Note-Fail "test_release_manifest.py ran too few tests (vacuous?):`n$out" }
 else { Write-Host "ok: $($Matches[0])" }
 
+# 1b. signer (tools/sign_release.py, WP11): keys generated at test time, never committed.
+$signTest = Join-Path $repoRoot "tools\PcTools\tests\test_sign_release.py"
+$ErrorActionPreference = "Continue"
+$out = & $python -m unittest $signTest 2>&1 | Out-String
+$sgt = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($sgt -ne 0) { Note-Fail "test_sign_release.py failed:`n$out" }
+elseif ($out -notmatch 'Ran (\d+) tests' -or [int]$Matches[1] -lt 9) { Note-Fail "test_sign_release.py ran too few tests (vacuous?):`n$out" }
+else { Write-Host "ok: $($Matches[0]) (release signer)" }
+
 # 2. bad tag refused -------------------------------------------------------------
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "1.0" | Out-Null
 if ($LASTEXITCODE -ne 1) { Note-Fail "make_release.ps1 -Tag 1.0 exited $LASTEXITCODE, expected 1 (refusal)" }

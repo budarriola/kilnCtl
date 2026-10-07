@@ -45,6 +45,11 @@ errs.forEach(e => assert(api.GH_ERRORS.hasOwnProperty(e), 'error text exists for
 ['fetch_busy', 'clock_not_synced', 'task_create_failed'].forEach(e =>
   assert(api.GH_ERRORS.hasOwnProperty(e) && FETCH_C.indexOf('"' + e + '"') >= 0, 'route error ' + e + ' known to both'));
 
+// WP11: the signature refusals are named in update_sign.c (update_sig_result_name), not in update_fetch.c.
+const SIGN_C = fs.readFileSync(resolveDriverFile(DRIVERS_DIR, 'update_sign.c'), 'utf8');
+['release_unsigned', 'signature_invalid'].forEach(e =>
+  assert(api.GH_ERRORS.hasOwnProperty(e) && SIGN_C.indexOf('"' + e + '"') >= 0, 'signature error ' + e + ' known to both'));
+
 // Unknown names stay readable, never blank.
 assert(api.ghErrorText('weird_code') === 'Failed: weird_code', 'unknown error name is shown');
 assert(api.ghErrorText('') === '', 'no error is blank');

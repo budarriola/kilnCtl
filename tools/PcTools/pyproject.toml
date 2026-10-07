@@ -30,6 +30,9 @@ dependencies = [
     # tree's venv runs 2.5.2; the floor is kept at 2.0 so the declared
     # requires-python >=3.10 stays resolvable.
     "numpy>=2.0",
+    # tools/sign_release.py (release.json Ed25519 signing, GITHUB_RELEASE_UPDATE_PLAN.md WP11) and its
+    # test. Already present transitively via mcp; declared because the release tooling depends on it.
+    "cryptography>=42",
 ]
 
 [dependency-groups]

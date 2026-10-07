@@ -28,6 +28,7 @@ void run_test_update_policy(void);
 void run_test_update_stage(void);
 void run_test_update_stale_stage(void);
 void run_test_update_settings(void);
+void run_test_update_sign(void);     // WP11: Ed25519 release.json.sig verify
 void run_test_update_url(void);      // WP8: GitHub fetch URL/allowlist rules
 void run_test_update_release(void);  // WP8: release JSON parsers + asset pick
 void run_test_ota_image_crc(void);
@@ -164,6 +165,7 @@ int main(void)
     run_test_update_stage();
     run_test_update_stale_stage();
     run_test_update_settings();
+    run_test_update_sign();
     run_test_update_url();
     run_test_update_release();
     run_test_ota_image_crc();

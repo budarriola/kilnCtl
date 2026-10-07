@@ -215,9 +215,10 @@ autotune run.</p>
 <div id="ghBusyBox" class="blocker" style="display:none"></div>
 <div id="ghInfo" class="card kv">Loading&hellip;</div>
 <div id="ghUnsigned" class="blocker" style="display:none">
-  UNSIGNED: releases are not signature-checked yet. The board verifies the
-  download against the release's own sha256 manifest, which catches corruption
-  but does not prove who published it. Only use a repository you trust.
+  UNSIGNED: this release is not signature-checked (a release from another
+  repository, or this firmware has no release key built in). The board verifies
+  the download against the release's own sha256 manifest, which catches
+  corruption but does not prove who published it. Only use a repository you trust.
 </div>
 <div id="ghProgressWrap" style="display:none">
   <div class="progress-outer"><div id="ghProgressBar" class="progress-inner">0%</div></div>
@@ -893,7 +894,9 @@ var GH_ERRORS = {
   hash_failed: 'The board could not hash the download.',
   task_create_failed: 'The board could not start the download task.',
   redirect_no_location: 'GitHub sent a redirect the board could not follow.',
-  redirect_location_refused: 'GitHub redirected to a host the board does not allow.'
+  redirect_location_refused: 'GitHub redirected to a host the board does not allow.',
+  release_unsigned: 'This release has no signature and the board only installs signed releases from the default repository.',
+  signature_invalid: 'The release signature does not verify against the keys built into this firmware. Nothing was staged.'
 };
 
 var GH_VERDICTS = {

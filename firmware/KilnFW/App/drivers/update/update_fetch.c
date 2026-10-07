@@ -38,6 +38,7 @@
 #include "update_http_internal.h"
 #include "update_policy.h"
 #include "update_release.h"
+#include "update_sign.h"
 #include "update_settings.h"
 #include "update_stage.h"
 #include "update_url.h"
@@ -120,6 +121,7 @@ typedef struct {
     bool needs_typed_confirm;
     bool zones_cfg_lower;
     bool have_decision;
+    bool sig_verified; // release.json.sig verified under a compiled-in key (WP11)
 } job_status_t;
 
 typedef enum { WR_BEGIN = 1, WR_WRITE, WR_FINISH, WR_ABORT, WR_EXIT } wr_cmd_id_t;
@@ -164,6 +166,9 @@ struct work {
     update_loc_capture_t loc_cap;
     update_release_info_t info;
     update_manifest_t man;
+    bool sig_required;
+    uint8_t sig[UPDATE_SIG_LEN];
+    size_t sig_len;
     uint8_t *body;
     size_t body_len;
     size_t mem_cap;
@@ -633,11 +638,44 @@ static const char *run_job(work_t *w)
     s_c->st.app_size = w->info.app_size;
     st_unlock();
 
+    // WP11: a default-repo release must carry release.json.sig once a release key is compiled in
+    // (update_sign.h). Fetch the 64-byte signature first (it lands in the shared body buffer, so
+    // copy it out) and verify it against the exact manifest bytes before they are parsed.
+    const update_sig_keyset_t ks = update_sig_builtin_keys();
+    w->sig_required = update_sig_required(w->repo, &ks);
+    if (w->sig_required) {
+        if (w->info.sig_url[0] == '\0') {
+            return update_sig_result_name(UPDATE_SIG_MISSING);
+        }
+        st_set_stage("signature");
+        w->mem_cap = UPDATE_SIG_LEN;
+        w->body_len = 0;
+        e = http_get(w, w->info.sig_url, "application/octet-stream", &MEM_SINK);
+        if (e != NULL) {
+            return e;
+        }
+        if (w->body_len != UPDATE_SIG_LEN) {
+            return update_sig_result_name(UPDATE_SIG_INVALID);
+        }
+        memcpy(w->sig, w->body, UPDATE_SIG_LEN);
+        w->sig_len = UPDATE_SIG_LEN;
+    }
+
     st_set_stage("manifest");
     w->mem_cap = FETCH_MANIFEST_CAP;
     e = http_get(w, w->info.manifest_url, "application/octet-stream", &MEM_SINK);
     if (e != NULL) {
         return e;
+    }
+    if (w->sig_required) {
+        const update_sig_result_t sr = update_sig_check(w->repo, &ks, w->body, w->body_len, w->sig, w->sig_len);
+        if (sr != UPDATE_SIG_VERIFIED) {
+            ESP_LOGW(TAG, "release.json signature: %s", update_sig_result_name(sr));
+            return update_sig_result_name(sr);
+        }
+        st_lock();
+        s_c->st.sig_verified = true;
+        st_unlock();
     }
     re = update_release_parse_manifest((const char *)w->body, w->body_len, w->repo, w->info.tag, w->info.app_size,
                                        &w->man);
@@ -923,6 +961,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     char reason[FETCH_JSON_REASON_MAX];
     st_lock();
     const job_status_t *s = &s_c->st;
+    const bool sig_ok = s->sig_verified;
     snprintf(a, sizeof(a),
              "{\"ok\":true,\"state\":\"%s\",\"kind\":\"%s\",\"stage\":\"%s\",\"error\":\"%s\","
              "\"http_status\":%d,\"bytes_done\":%u,\"bytes_total\":%u,\"busy\":%s,",
@@ -940,15 +979,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
              s->verdict ? s->verdict : "", reason, s->allowed ? "true" : "false",
              s->needs_typed_confirm ? "true" : "false", s->zones_cfg_lower ? "true" : "false");
     st_unlock();
-    // Before any job has run the repo is the configured setting. Every v1 release is unsigned (D4
-    // default repo, D5 any other repo; signature enforcement is M3), so every status says so.
+    // Before any job has run the repo is the configured setting. A release is UNSIGNED unless its
+    // release.json.sig verified under a compiled-in key (WP11; D4 until a key is provisioned, D5
+    // for any non-default repo).
     if (repo_now[0] == '\0') {
         char cur[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
         if (update_settings_repo_copy(cur, sizeof(cur))) {
             json_safe_copy(repo_now, sizeof(repo_now), cur);
         }
     }
-    snprintf(rp, sizeof(rp), "\"repo\":\"%s\",\"unsigned\":true,", repo_now);
+    snprintf(rp, sizeof(rp), "\"repo\":\"%s\",\"unsigned\":%s,", repo_now, sig_ok ? "false" : "true");
     httpd_resp_set_type(req, "application/json");
     if (httpd_resp_send_chunk(req, a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
         httpd_resp_send_chunk(req, rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||

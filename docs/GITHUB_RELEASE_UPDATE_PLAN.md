@@ -218,7 +218,7 @@ Shared files (`App/drivers/CMakeLists.txt`, `tools/build_host_tests.ps1`, `route
   Pending: bench run of the whole page flow (check, download, Install, recovery Apply) against a real release; MCP `update_apply` is not needed (the recovery tools own apply).
 
 **M3: signing**
-- WP11 Ed25519 verify, key list, `tools/sign_release.py`.
+- WP11 Ed25519 verify, key list, `tools/sign_release.py`. **Implemented 2026-10-07; host/unit-tested and target-built, bench-untested, no key provisioned.** `tools/sign_release.py` (keygen/pubkey/sign/verify; key path from `KILNCTL_RELEASE_SIGNING_KEY`, wired into `make_release.ps1`, `release_manifest.py validate` checks the sig is 64 B). Firmware: `drivers/update/update_sign.[ch]` (pure policy: `update_sig_required`, `update_sig_check`), `update_signing_keys.c` (the compiled-in key list, EMPTY until the owner provisions a key, so enforcement is inactive and releases show UNSIGNED), vendored Monocypher 4.0.3 `crypto_ed25519_check` (ESP-IDF v6.0.2 has no Ed25519; owner approved the vendoring). `update_release.c` picks the optional `release.json.sig` asset (exactly 64 B); `update_fetch.c` fetches it and verifies the manifest bytes before parsing them, for the default repo when a key is present: missing gives `release_unsigned`, bad gives `signature_invalid`; the status `unsigned` flag is false only after a verified signature. Other repos unchanged. Key custody and treatment of pre-WP11 releases: `docs/RELEASING.md` "Release signing". Pending: owner generates and provisions the real key; bench run against a signed release.
 
 ## 13. Owner decisions
 
