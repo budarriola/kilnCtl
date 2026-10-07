@@ -233,20 +233,11 @@ menu "KilnCtrl Hardware Configuration"
                 as a _Static_assert in case sdkconfig is hand-edited.
 
                 The part itself is rated to 5 MHz, so the cap is not the
-                silicon. It is the SimFW bench fixture: its PIO/DMA MAX31856
-                slave emulation must present the first response byte before
-                the master's MISO sample point, which is one SCLK period
-                minus setup -- about 250 ns at 4 MHz, tightening to about
-                200 ns at 5 MHz. The implemented DMA-fed path takes about
-                150-215 ns at the RP2040's stock 125 MHz sysclk. That has
-                margin at 4 MHz and largely none at 5 MHz. See
-                firmware/SimFW/docs/SPI_ACCESS_AUDIT.md section 9 for the
-                derivation.
-
-                Missing that deadline does not look like a fault. The whole
-                burst shifts by one byte position and returns plausible
-                temperatures that are wrong, which is why this is enforced
-                rather than merely commented.
+                silicon. It is an owner decision (2026-10-06): 4 MHz is ample
+                for the MAX31856 conversion rates, and faster SPI is not
+                needed. (An earlier version of this text justified the cap by
+                the SimFW bench fixture, deleted 2026-08-28; that is no
+                longer the reason.)
 
                 This does not constrain the ILI9488, which is a separate
                 device on the same bus with its own clock

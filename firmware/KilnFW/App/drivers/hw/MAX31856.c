@@ -51,26 +51,21 @@ static esp_err_t max31856_hal_to_esp_err(hal_status_t status)
 #define MAX31856_SPI_INPUT_DELAY_NS 50
 
 /* 4 MHz is a ceiling, not a default. The part is rated to 5 MHz, so the limit
- * is not the silicon: it is the SimFW bench fixture, whose PIO/DMA MAX31856
- * slave emulation must have the first response byte ready by the master's MISO
- * sample point -- roughly 250 ns at 4 MHz, roughly 200 ns at 5 MHz. The
- * implemented DMA-fed path takes about 150-215 ns at the RP2040's stock 125 MHz
- * sysclk: margin at 4 MHz, essentially none at 5 MHz. Derivation is in
- * firmware/SimFW/docs/SPI_ACCESS_AUDIT.md section 9.
+ * is not the silicon: it is an owner decision (2026-10-06) -- 4 MHz is ample
+ * for the MAX31856 conversion rates and faster SPI is not needed. (The cap
+ * was originally set for the SimFW bench fixture, deleted 2026-08-28; that is
+ * no longer the reason.)
  *
- * Missing the deadline does not raise a fault. It shifts an entire register
- * burst by one byte position and yields plausible-looking wrong temperatures,
- * which is exactly why the cap is enforced here as well as by the Kconfig
- * `range` -- a hand-edited sdkconfig would otherwise slip past menuconfig.
+ * The cap is enforced here as well as by the Kconfig `range`, so a
+ * hand-edited sdkconfig cannot slip past menuconfig.
  *
- * This says nothing about DISPLAY_SPI_CLOCK_HZ. The ILI9488 shares the bus but
+ * This says nothing about DISPLAY_SPI_CLOCK_HZ. The display shares the bus but
  * is a separate spi_device_interface_config_t with its own, much higher clock;
- * it is not emulated by the fixture and is not constrained by this. */
+ * it is not constrained by this. */
 #define MAX31856_SPI_MAX_CLOCK_HZ 4000000
 _Static_assert(THERMO_SPI_CLOCK_HZ <= MAX31856_SPI_MAX_CLOCK_HZ,
-               "THERMO_SPI_CLOCK_HZ exceeds the 4 MHz cap the SimFW slave "
-               "emulation's first-byte deadline requires -- see "
-               "SimFW/docs/SPI_ACCESS_AUDIT.md section 9");
+               "THERMO_SPI_CLOCK_HZ exceeds the 4 MHz cap (owner decision "
+               "2026-10-06: 4 MHz is ample for the MAX31856)");
 
 /* One transaction is at most an address byte plus a 16-register burst. That
  * fits the SPI peripheral's FIFO with room to spare, so the bus is opened with

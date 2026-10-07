@@ -36,14 +36,17 @@ baud 115200, addresses 0x3C/0x20): all match, no change.
 
 1. Physical R15/R9 pull-ups: old docs said fitted, schematic has none. Is the
    built board populated with parts the schematic no longer has?
+   **Owner: deferred 2026-10-06, ignore for now.**
 2. Kconfig help for `KILNCTL_THERMO_SPI_CLOCK_HZ` and SaftyFW
-   `SPI_OWNER_BAUDRATE_HZ` still justify the 4 MHz cap by the deleted SimFW
-   fixture. Cap kept in code (Kconfig range, `_Static_assert`); keep or lift?
+   `SPI_OWNER_BAUDRATE_HZ` still justified the 4 MHz cap by the deleted SimFW
+   fixture. **Resolved by owner decision 2026-10-06: kept at 4 MHz, rationale
+   reworded** (4 MHz is ample for MAX31856 conversion rates; faster SPI is not
+   needed). Help text, doc comments and docs reworded; no value changed.
 3. Kconfig menu title and `docs/ILI9488.md` still frame the TFT35/ILI9488
    although the default panel is ST7796 (MSP4031).
 4. Back-fed 3V3 on A1 (HARDWARE.md section 7) is a schematic property, unchanged
    by this audit; the USB-vs-IC5 contention warning stands unverified on the
-   bench.
+   bench. **Owner: ignore (2026-10-06).**
 
 Not checked: the memory facts (R4 expander bit is not K4/heat enable, CT on
 GPIO28, E-stop jumper fitted) were consistent with `kiln_io.c`

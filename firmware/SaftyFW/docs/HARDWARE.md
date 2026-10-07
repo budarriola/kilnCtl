@@ -808,11 +808,10 @@ for the identical part — **read it, and port rather than reinvent**):
 
 - SPI **mode 1** (CPOL=0, CPHA=1). The part is rated to 5 MHz, but the master
   is **capped at 4 MHz** (`SPI_OWNER_BAUDRATE_HZ`, enforced by a
-  `_Static_assert` in `src/spi_owner.c`): the cap was originally set for the SimFW bench fixture's
-  MAX31856 slave emulation (first-byte deadline; failure mode a burst shifted
-  by one byte returning plausible wrong temperatures). SimFW and its audit
-  file were deleted 2026-08-28, so that rationale is historical; the cap is
-  retained. KilnFW holds its master to the same ceiling. The RP2040's SPI0 on
+  `_Static_assert` in `src/spi_owner.c`): the cap is an owner decision (2026-10-06): 4 MHz is ample for the
+  MAX31856 conversion rates and faster SPI is not needed. (It was originally
+  set for the SimFW bench fixture, deleted 2026-08-28; that is no longer the
+  reason.) KilnFW holds its master to the same ceiling. The RP2040's SPI0 on
   GPIO0/1/2/3 supports this natively; `CS0` is driven manually as a GPIO
   rather than by the SPI block, so a multi-byte register burst stays in one
   chip-select frame.
