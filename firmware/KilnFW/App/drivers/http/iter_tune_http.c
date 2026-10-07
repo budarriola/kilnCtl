@@ -8,6 +8,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h" // autotune_engine_reserve_zone_for_external_write()
+#include "cfg_fs_refusal_http.h" // cfg_fs_http_refuse_if_unmounted(), cfg_fs_http_persist_failed()
 #include "firing_shadow.h"   // ITER_TUNE_REDESIGN_PLAN.md step 8 -- read-only status only
 #include "iter_tune.h"
 #include "iter_tune_store.h"
@@ -150,6 +151,13 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         }
     }
 
+    // cfg is the only persistence target for the iter_tune record
+    // (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"): refuse BEFORE
+    // applying the restored gains, so a restore is never half done.
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
+
     iter_tune_store_zone_t stored;
     bool present = iter_tune_store_get_zone((uint8_t)zone, &stored);
     if (!present || (!stored.has_anchor && !stored.has_baseline)) {
@@ -242,8 +250,11 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
     autotune_engine_release_zone_for_external_write((uint8_t)zone);
 
     if (persist_err != ESP_OK) {
-        n = snprintf(json, sizeof(json),
-                     "{\"ok\":true,\"warning\":\"gains applied but persisting the OFF state failed\"}");
+        // The live gains were applied, but the persisted OFF/baseline record
+        // was not written: say so as a failure, never a success with a warning.
+        ESP_LOGE(TAG, "restore_commissioned zone=%ld: gains applied but persisting the OFF state failed (%d)", zone,
+                 (int)persist_err);
+        return cfg_fs_http_persist_failed(req);
     } else {
         n = snprintf(json, sizeof(json), "{\"ok\":true,\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f}",
                      (double)restored.kp, (double)restored.ki, (double)restored.kd);

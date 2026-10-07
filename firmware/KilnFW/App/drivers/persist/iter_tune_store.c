@@ -7,6 +7,8 @@
 #include "nvs_key_check.h"
 
 #include "cfg_fs.h"
+#include "cfg_fs_status.h"
+#include "pref_cfg_fs.h"
 
 static const char *TAG = "iter_tune_store";
 
@@ -24,27 +26,17 @@ NVS_KEY_LEN_CHECK(ITER_TUNE_NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(ITER_TUNE_NVS_KEY_BLOB);
 NVS_KEY_LEN_CHECK(ITER_TUNE_NVS_KEY_REV);
 
-// cfg LittleFS dual-write file, same "<4-byte LE rev><raw blob>" shape as
-// zones_config_cfg_fs.c/kiln_cfg_store_cfg_fs.c.
+// cfg LittleFS file: "<4-byte LE rev><raw blob>" via pref_cfg_fs.h. Since the
+// dual-write window closed (docs/CONFIG_FILESYSTEM.md) this file is the ONLY
+// place a save goes; the NVS copy above is read-only legacy, read once at
+// boot as a fallback and migrated into the file.
 /* ITER_TUNE_CFG_FILE_PATH now lives in iter_tune_store.h (kiln-scope reset names it). */
-#define ITER_TUNE_FILE_BUF_MAX (4 + sizeof(iter_tune_store_blob_t))
 
 static iter_tune_store_blob_t s_blob;
 static bool s_loaded;      // true once iter_tune_store_start() ran (even if it found nothing)
 static uint32_t s_rev;
 static bool s_schema_refused_newer;   // true if a newer-than-known version was seen and refused
 static uint8_t s_schema_refused_version;
-
-static void put_u32_le(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v & 0xFF);
-    p[1] = (uint8_t)((v >> 8) & 0xFF);
-    p[2] = (uint8_t)((v >> 16) & 0xFF);
-    p[3] = (uint8_t)((v >> 24) & 0xFF);
-}
-
-static uint32_t get_u32_le(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
 
 bool iter_tune_store_blob_validate(const void *bytes, size_t len) {
     if (bytes == NULL || len != sizeof(iter_tune_store_blob_t)) {
@@ -126,7 +118,7 @@ static bool migrate_v1_to_current(iter_tune_store_blob_t *blob) {
     return true;
 }
 
-static bool nvs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev) {
+static bool nvs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev, bool note) {
     hal_kv_handle_t h;
     if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
         return false;
@@ -140,72 +132,24 @@ static bool nvs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev) {
         return false;
     }
     if (!iter_tune_store_blob_validate(out, len)) {
-        note_schema_verdict(out, len);
+        if (note) {
+            note_schema_verdict(out, len);
+        }
         return false;
     }
     *out_rev = rev;
     return true;
 }
 
-static bool nvs_save_raw(const iter_tune_store_blob_t *in, uint32_t rev) {
-    hal_kv_handle_t h;
-    if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
-        ESP_LOGE(TAG, "nvs open failed");
-        return false;
+// pref_cfg_fs validator used at boot: the plain validator plus the loud
+// newer-than-known report for a cfg file written by a newer build. (The
+// status poll uses the plain validator so it never re-logs.)
+static bool validate_and_note(const void *bytes, size_t len) {
+    if (iter_tune_store_blob_validate(bytes, len)) {
+        return true;
     }
-    bool ok = hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, in, sizeof(*in)) == HAL_OK;
-    ok = ok && hal_kv_set_u32(&h, ITER_TUNE_NVS_KEY_REV, rev) == HAL_OK;
-    ok = ok && hal_kv_commit(&h) == HAL_OK;
-    hal_kv_close(&h);
-    if (!ok) {
-        ESP_LOGE(TAG, "nvs write failed");
-    }
-    return ok;
-}
-
-// File wins ONLY on a strictly higher rev than NVS -- same tie-break
-// convention as kiln_cfg_store_cfg_fs_resolve()/zones_config_cfg_fs.c.
-static bool cfg_fs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev) {
-    if (!cfg_fs_is_available()) {
-        return false;
-    }
-    uint8_t buf[ITER_TUNE_FILE_BUF_MAX];
-    size_t out_len = 0;
-    if (cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, buf, sizeof(buf), &out_len) != ESP_OK) {
-        return false;
-    }
-    if (out_len != 4 + sizeof(iter_tune_store_blob_t)) {
-        return false;
-    }
-    uint32_t rev = get_u32_le(buf);
-    if (!iter_tune_store_blob_validate(buf + 4, out_len - 4)) {
-        note_schema_verdict(buf + 4, out_len - 4);
-        return false;
-    }
-    memcpy(out, buf + 4, sizeof(*out));
-    *out_rev = rev;
-    return true;
-}
-
-/* Intentional silent no-op when cfg is not mounted (owner decision
- * 2026-10-06, docs/CONFIG_FILESYSTEM.md): unlike the HTTP save routes, which
- * refuse with 503 and CFG_FS_NOT_MOUNTED_TEXT, this store is written from the
- * autotune/iteration path with no request to answer, and NVS (above) still
- * holds the write, so there is nobody to surface an error to and no data is
- * lost. The not-mounted state is already visible on /api/readiness
- * ("cfg_fs" item). Do not "fix" this into an error return. */
-static void cfg_fs_save_raw(const iter_tune_store_blob_t *in, uint32_t rev) {
-    if (!cfg_fs_is_available()) {
-        return;
-    }
-    uint8_t buf[ITER_TUNE_FILE_BUF_MAX];
-    put_u32_le(buf, rev);
-    memcpy(buf + 4, in, sizeof(*in));
-    esp_err_t err = cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, buf, sizeof(buf));
-    if (err != ESP_OK) {
-        // Non-fatal: NVS is authoritative and already holds the write.
-        ESP_LOGE(TAG, "cfg_fs dual-write failed: %d", (int)err);
-    }
+    note_schema_verdict(bytes, len);
+    return false;
 }
 
 esp_err_t iter_tune_store_start(void) {
@@ -213,43 +157,22 @@ esp_err_t iter_tune_store_start(void) {
     s_schema_refused_version = 0;
 
     iter_tune_store_blob_t nvs_blob;
+    memset(&nvs_blob, 0, sizeof(nvs_blob));
     uint32_t nvs_rev = 0;
-    bool nvs_ok = nvs_load_raw(&nvs_blob, &nvs_rev);
+    bool nvs_ok = nvs_load_raw(&nvs_blob, &nvs_rev, true);
 
-    iter_tune_store_blob_t file_blob;
-    uint32_t file_rev = 0;
-    bool file_ok = cfg_fs_load_raw(&file_blob, &file_rev);
-
-    // Log a rev disagreement the same way zones_config_cfg_fs.c/
-    // kiln_cfg_store_cfg_fs.c do (step 7 review, 2026-09-23, advisory A5) --
-    // both sides being present but not agreeing is worth a boot-time
-    // breadcrumb even though the tie-break below resolves it safely either
-    // way.
-    if (file_ok && nvs_ok && file_rev != nvs_rev) {
-        ESP_LOGW(TAG, "iter_tune file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting %s (strictly higher rev wins)",
-                 (unsigned long)file_rev, (unsigned long)nvs_rev, (file_rev > nvs_rev) ? "FILE" : "NVS");
-    }
-
-    // Note (step 7 review, 2026-09-23, advisory finding 5): `nvs_ok` is also
-    // false when NVS held a blob that validate() rejected as newer-than-known
-    // (note_schema_verdict() above already flagged s_schema_refused_newer in
-    // that case) -- this branch does not distinguish that from an ordinary
-    // missing/corrupt NVS entry, so a valid older FILE still wins here and
-    // gets written back into NVS via nvs_save_raw() below, clobbering the
-    // refused-newer NVS blob. No behavior change: this is the same
-    // file-wins-and-catches-NVS-up rule as any other disagreement, just
-    // worth naming since a "refused newer" NVS blob is otherwise a boot
-    // condition worth being deliberate about overwriting.
-    if (file_ok && (!nvs_ok || file_rev > nvs_rev)) {
-        s_blob = file_blob;
-        s_rev = file_rev;
-        // File was ahead of NVS -- catch NVS up so both sides agree going
-        // forward (same repair-on-read convention kiln_cfg_store_cfg_fs
-        // uses).
-        nvs_save_raw(&s_blob, s_rev);
-    } else if (nvs_ok) {
-        s_blob = nvs_blob;
-        s_rev = nvs_rev;
+    // Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
+    // rev, otherwise the NVS candidate stands and is migrated into the file
+    // when cfg is mounted. A pre-rev legacy NVS copy reads as rev 0, so any
+    // file written by this build (rev >= 1) beats it.
+    iter_tune_store_blob_t resolved;
+    uint32_t resolved_rev = 0;
+    bool used_file = false;
+    bool have = pref_cfg_fs_resolve(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
+                                    validate_and_note, &resolved, &resolved_rev, &used_file);
+    if (have) {
+        s_blob = resolved;
+        s_rev = resolved_rev;
     } else {
         memset(&s_blob, 0, sizeof(s_blob));
         s_blob.version = ITER_TUNE_STORE_VERSION;
@@ -309,10 +232,49 @@ esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zon
     if (zone_index + 1 > s_blob.zone_count) {
         s_blob.zone_count = (uint8_t)(zone_index + 1);
     }
-    s_rev++;
-    bool nvs_ok = nvs_save_raw(&s_blob, s_rev);
-    cfg_fs_save_raw(&s_blob, s_rev);
-    return nvs_ok ? ESP_OK : ESP_FAIL;
+    // cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
+    // a refused/failed write is returned, never masked by an NVS write. The
+    // in-RAM blob keeps the new entry (live now, same contract as before);
+    // the rev only advances once the write verified, so a retry reuses it.
+    uint32_t new_rev = s_rev + 1;
+    esp_err_t err = pref_cfg_fs_commit(ITER_TUNE_CFG_FILE_PATH, &s_blob, sizeof(s_blob), new_rev, "iter_tune store");
+    if (err == ESP_OK) {
+        s_rev = new_rev;
+    }
+    return err;
+}
+
+void iter_tune_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                          bool *diverged) {
+    iter_tune_store_blob_t f;
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw_quiet(ITER_TUNE_CFG_FILE_PATH, sizeof(f), iter_tune_store_blob_validate, &f, &f_rev,
+                               &f_valid);
+
+    iter_tune_store_blob_t n;
+    memset(&n, 0, sizeof(n));
+    uint32_t n_rev = 0;
+    bool n_valid = false;
+    if (hal_kv_init_partition(ITER_TUNE_NVS_PARTITION) == HAL_OK) {
+        n_valid = nvs_load_raw(&n, &n_rev, false);
+    }
+    bool content_equal = f_valid && n_valid && memcmp(&f, &n, sizeof(f)) == 0;
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }
 
 void iter_tune_store_reset_for_test(void) {
