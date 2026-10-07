@@ -1239,20 +1239,36 @@ bool profile_executor_zone_drives_run(uint8_t zi);
  * zone and aux producers. failsafe_base is the producer's own run-ending terms
  * (zone: FAULTED || zone fault || per-zone authority; aux: config unreadable
  * || global authority); the builder adds the missing-temperature term. */
+/* Field names are deliberately NOT the same as on_off_trigger_input_t's (the
+ * src_ prefix): check_on_off_trigger_input_producers.ps1 greps for `.field =`
+ * across production code, and a params field of the same name would satisfy it
+ * from this wrapper's initialisers even if the builder never assigned the real
+ * input field. */
 typedef struct {
     bool failsafe_base;
-    bool failsafe_state_on;
-    bool guard_5_6_tripped;
-    uint16_t min_on_s;
-    uint16_t min_off_s;
-    float hyst_c;
+    bool src_failsafe_state_on;
+    bool src_guard_5_6_tripped;
+    uint16_t src_min_on_s;
+    uint16_t src_min_off_s;
+    float src_hyst_c;
     on_off_trigger_rule_t rule;
     bool quasi_dwell;
     float temp_c;
     bool temp_ok;
-    bool stretched_this_tick;
-    float dt_s;
+    bool src_stretched_this_tick;
+    float src_dt_s;
 } on_off_input_params_t;
+/* Seeds the two hold accumulators of one on/off output (decide-state held_s
+ * and the actuation gate's held_s) from relay_off_tracker for the physical
+ * relay(s) in relay_mask: time since the last ON-to-OFF transition, or
+ * ON_OFF_HOLD_SETTLED_S if that relay has not been ON since boot. Every reset
+ * site uses this instead of a bare ON_OFF_HOLD_SETTLED_S, so min_off_s still
+ * holds after a stop/restart or an aux disable/re-enable. */
+/* Aux per-run reset (trigger, actuated_on, commanded_on, rule_reason, holds
+ * seeded as above). Must be called with s_exec.lock held. */
+void profile_executor_aux_reset_runtime(uint8_t aux_idx);
+void profile_executor_on_off_seed_hold(on_off_trigger_state_t *decide_state, float *actuated_held_s,
+                                       uint8_t relay_mask);
 on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_params_t *p, bool *bypass_hold_out);
 on_off_trigger_input_t profile_executor_zone_on_off_input(uint8_t zi, bool failsafe_state_on, uint16_t min_on_s,
                                                            uint16_t min_off_s, float hyst_c, bool authority_blocked,

@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "test_common.h"
+#include "fake_time.h" /* hal_time clock that ages the relay_off_tracker timestamps */
 
 #include "esp_err.h"
 #include "esp_http_server.h" /* PID_EXPANSION_PLAN.md Phase 7d -- adaptive_tune.c's httpd_* fakes below need these types */
@@ -9504,10 +9505,12 @@ static void test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner(vo
     s_exec.io = NULL;
 }
 
-/* BUG 1 (zone ON_OFF dead-sensor fail-safe): the zone call site folds
- * profile_executor_on_off_temp_unusable() into failsafe_override exactly as
- * the aux path does. NaN compares false in axis_temp(), so with invert=true
- * the AND negates to true and, unguarded, would drive the relay ON. */
+/* BUG 1 (zone ON_OFF dead-sensor fail-safe). Drives the REAL zone producer
+ * (profile_executor_zone_on_off_input) from a dead or live zone reading, so
+ * the missing-temperature fail-safe wiring in the shared builder is what is
+ * under test, not a hand-built input. NaN compares false in axis_temp(), so
+ * with invert=true the AND negates to true and, unguarded, would drive the
+ * relay ON. */
 static bool zone_dead_sensor_actuates_on(bool invert, uint8_t temp_cmp, bool temp_ok)
 {
     memset(&s_exec, 0, sizeof(s_exec));
@@ -9516,17 +9519,31 @@ static bool zone_dead_sensor_actuates_on(bool invert, uint8_t temp_cmp, bool tem
     s_exec.io = (kiln_io_t *)0x1;
     g_relay_write_calls = 0;
 
+    profile_t pr;
+    memset(&pr, 0, sizeof(pr));
+    pr.zone_mask = 0x04;
+    pr.segment_count = 1;
+    pr.on_off_rule_count = 1;
+    pr.on_off_rules[0].segment_index = 0;
+    pr.on_off_rules[0].zone_index = 2;
+    pr.on_off_rules[0].enable = 1;
+    pr.on_off_rules[0].temp_source = 1;
+    pr.on_off_rules[0].temp_cmp = temp_cmp;
+    pr.on_off_rules[0].temp_threshold_c = 600.0f;
+    pr.on_off_rules[0].invert = invert;
+    s_exec.profile = pr;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.segment_index = 0;
+    s_exec.zones[2].actual_valid = temp_ok;
+    s_exec.zones[2].actual_c = temp_ok ? 500.0f : (float)NAN;
+
     on_off_trigger_state_t decide_state;
     on_off_trigger_state_reset(&decide_state);
     bool actuated_on = false;
     float actuated_held_s = 0.0f;
-    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
-    oin.rule.temp_cmp = temp_cmp;
-    oin.rule.temp_threshold_c = 600.0f;
-    oin.rule.invert = invert;
-    oin.temp_measurement_c = temp_ok ? 500.0f : (float)NAN;
-    oin.failsafe_override = profile_executor_on_off_temp_unusable(&oin.rule, temp_ok);
-    bool bypass_hold = oin.failsafe_override;
+    bool bypass_hold = false;
+    on_off_trigger_input_t oin =
+        profile_executor_zone_on_off_input(2, false, 0, 0, 2.0f, false, false, 1.0f, &bypass_hold);
 
     on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
                                                                      &oin, bypass_hold, 0, 0);
@@ -9773,7 +9790,18 @@ static void test_on_off_zone_tick_cap_denies_last_after_heaters(void)
     TEST_CHECK(!r.actuated_on, "must be denied -- cap already reached by (simulated) heaters");
     TEST_CHECK(r.cap_denied, "must report cap_denied so the caller logs it -- denial is not deferred");
     TEST_CHECK(!actuated_on, "actuation-layer state must be left truthfully OFF, not stuck ON");
-    TEST_CHECK(actuated_held_s == 0.0f, "held_s reset -- a later grant is not itself blocked by a stale hold");
+    TEST_CHECK(actuated_held_s == oin.dt_s,
+               "a relay that was OFF stays OFF: its OFF time keeps accumulating (a relay that never closed earns no new min_off_s)");
+
+    /* A relay that was ON and is cap-denied is opened by the caller: a real
+     * ON-to-OFF transition, so the hold restarts at 0. */
+    on_off_trigger_state_reset(&decide_state);
+    actuated_on = true;
+    actuated_held_s = 12.0f;
+    r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s, &oin, false, 2, 2);
+    TEST_CHECK(r.cap_denied && !actuated_on, "cap-denied while ON: reported OFF");
+    TEST_CHECK(actuated_held_s == 0.0f, "cap-denied while ON: hold restarts at 0 (the relay really opens)");
+    actuated_held_s = 0.0f;
 
     /* Same tick, but a slot is free -- must be granted. */
     on_off_trigger_state_reset(&decide_state);
@@ -10049,9 +10077,12 @@ static void on_off_input_assert_equal(const on_off_trigger_input_t *a, const on_
 static void test_on_off_zone_and_aux_input_builders_agree(void)
 {
     TEST_SECTION("on/off input: zone and aux producers share one builder (field-for-field equivalence)");
-    for (int variant = 0; variant < 3; variant++) {
+    /* variant 3: dead sensor (temp_ok false) -- both producers must raise the
+     * same missing-temperature fail-safe and bypass the hold. */
+    for (int variant = 0; variant < 4; variant++) {
         profile_t pr = aux_test_profile();
         pr.on_off_rule_count = 2;
+        pr.on_off_rules[0].temp_source = 1;
         pr.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_ABOVE;
         pr.on_off_rules[0].temp_threshold_c = 123.0f;
         pr.on_off_rules[0].invert = (variant == 1);
@@ -10073,7 +10104,7 @@ static void test_on_off_zone_and_aux_input_builders_agree(void)
         s_exec.ramp_lock_held = (variant == 1);
         s_exec.segment_elapsed_s = 12;
         s_exec.zones[0].active = true;
-        s_exec.zones[0].actual_valid = true;
+        s_exec.zones[0].actual_valid = (variant != 3);
         s_exec.zones[0].actual_c = 150.0f;
 
         aux_output_t ax;
@@ -10085,6 +10116,14 @@ static void test_on_off_zone_and_aux_input_builders_agree(void)
             profile_executor_aux_on_off_input(0, &ax, true, false, variant == 1, 0.5f, &bypass_a);
         char what[32];
         snprintf(what, sizeof(what), "variant %d", variant);
+        if (variant == 3) {
+            TEST_CHECK(zi_in.failsafe_override && ai_in.failsafe_override,
+                       "dead sensor: both producers raise the missing-temperature fail-safe");
+            TEST_CHECK(bypass_z && bypass_a, "dead sensor: both producers bypass the hold");
+            /* The reading itself is unused under the fail-safe and is sourced
+             * differently (zone: raw, aux: 0 when unusable); not a drift. */
+            zi_in.temp_measurement_c = ai_in.temp_measurement_c = 0.0f;
+        }
         on_off_input_assert_equal(&zi_in, &ai_in, what);
         TEST_CHECK(bypass_z == bypass_a, "bypass_hold agrees between zone and aux");
     }
@@ -10770,6 +10809,8 @@ static on_off_hold_result_t on_off_hold_sequence(on_off_trigger_state_t *st, boo
 static void test_on_off_min_off_not_applied_before_first_on_zone(void)
 {
     TEST_SECTION("on/off zone: an immediately-true rule turns ON at tick 1; min_on/min_off still hold after a real transition");
+    fake_time_reset_all();
+    relay_off_tracker_reset_all(); /* a relay never ON since boot */
     profile_t p;
     memset(&p, 0, sizeof(p));
     p.zone_mask = 0x03;
@@ -10799,6 +10840,8 @@ static void test_on_off_min_off_not_applied_before_first_on_zone(void)
 static void test_on_off_min_off_not_applied_before_first_on_aux(void)
 {
     TEST_SECTION("aux: an immediately-true rule turns ON at tick 1; min_on/min_off still hold after a real transition");
+    fake_time_reset_all();
+    relay_off_tracker_reset_all(); /* a relay never ON since boot */
     char err[128] = {0};
     profile_t p = aux_test_profile();
     aux_test_setup(&p);
@@ -10818,6 +10861,152 @@ static void test_on_off_min_off_not_applied_before_first_on_aux(void)
     TEST_CHECK(res.first_tick_on, "aux reset values: ON at tick 1");
     TEST_CHECK(res.ticks_on_before_off >= 4 && res.ticks_on_before_off <= 5, "aux reset values: min_on_s still holds");
     TEST_CHECK(res.ticks_off_before_on >= 6 && res.ticks_off_before_on <= 7, "aux reset values: min_off_s still holds");
+}
+
+/* ---- min_off_s survives every reset site (relay_off_tracker) ----
+ * The holds are reset at mid-run aux disable/re-enable and at run start. Each
+ * reset is seeded from the physical relay's last ON-to-OFF time, so a quick
+ * stop-and-restart (or a toggled-off-and-on aux) still waits out min_off_s,
+ * while a relay that has not been ON since boot turns ON at once. */
+static void min_off_test_begin(void)
+{
+    fake_time_reset_all();
+    relay_off_tracker_reset_all();
+}
+
+/* Ticks (1 s each, fake clock advanced in step) until aux relay 1 is written
+ * ON after the log position at entry; returns the tick count or -1. */
+static int aux_ticks_until_on(int max_ticks)
+{
+    int n0 = g_aux_write_log_n;
+    for (int i = 1; i <= max_ticks; i++) {
+        fake_time_advance_ms(1000);
+        aux_test_tick(1.0f);
+        if (aux_test_last_write_idx(0x01, 0x01) >= n0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool aux_min_off_start_run(void)
+{
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    g_stub_aux[0].min_on_s = 1;
+    g_stub_aux[0].min_off_s = 30;
+    char err[128] = {0};
+    return profile_executor_run(0, err, sizeof(err));
+}
+
+static void test_on_off_min_off_survives_aux_disable_reenable(void)
+{
+    TEST_SECTION("aux: a mid-run disable then re-enable while ON still waits out min_off_s");
+    min_off_test_begin();
+    TEST_CHECK(aux_min_off_start_run(), "run starts");
+    TEST_CHECK(aux_ticks_until_on(5) == 1, "first ON at tick 1");
+    for (int i = 0; i < 3; i++) {
+        fake_time_advance_ms(1000);
+        aux_test_tick(1.0f);
+    }
+    g_stub_aux[0].enabled = false;
+    fake_time_advance_ms(1000);
+    aux_test_tick(1.0f);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "disable opened the aux relay");
+    g_stub_aux[0].enabled = true;
+    int n = aux_ticks_until_on(60);
+    TEST_CHECK(n >= 28 && n <= 32, "re-enable waits about min_off_s (30 s) before closing again");
+    profile_executor_halt();
+}
+
+static void test_on_off_min_off_survives_stop_then_quick_restart(void)
+{
+    TEST_SECTION("aux: stop then restart inside min_off_s waits the remainder; after min_off_s it is immediate");
+    min_off_test_begin();
+    TEST_CHECK(aux_min_off_start_run(), "run 1 starts");
+    TEST_CHECK(aux_ticks_until_on(5) == 1, "run 1: ON at tick 1");
+    fake_time_advance_ms(2000);
+    profile_executor_halt();
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "run end opened the aux relay");
+    fake_time_advance_ms(10000);
+    TEST_CHECK(aux_min_off_start_run(), "run 2 starts 10 s after the OFF");
+    int n = aux_ticks_until_on(60);
+    TEST_CHECK(n >= 19 && n <= 21, "run 2 waits the remaining ~20 s of min_off_s");
+    fake_time_advance_ms(3000);
+    profile_executor_halt();
+    fake_time_advance_ms(31000);
+    TEST_CHECK(aux_min_off_start_run(), "run 3 starts 31 s after the OFF");
+    TEST_CHECK(aux_ticks_until_on(5) == 1, "run 3: restart after min_off_s switches ON at once");
+    profile_executor_halt();
+}
+
+static void test_on_off_min_off_first_run_after_boot_is_immediate(void)
+{
+    TEST_SECTION("aux: the first run after boot (relay never ON) switches ON at tick 1 despite min_off_s=30");
+    min_off_test_begin();
+    TEST_CHECK(aux_min_off_start_run(), "run starts");
+    TEST_CHECK(aux_ticks_until_on(5) == 1, "ON at tick 1");
+    profile_executor_halt();
+}
+
+static void test_on_off_min_off_manual_toggle_seeds_aux_hold(void)
+{
+    TEST_SECTION("aux: a manual ON/OFF write (kiln_io_owner funnel path) seeds the next reset's hold");
+    min_off_test_begin();
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    relay_off_tracker_note_write(0x01, 0x01);
+    fake_time_advance_ms(5000);
+    relay_off_tracker_note_write(0x01, 0x00);
+    fake_time_advance_ms(2000);
+    profile_executor_aux_reset_runtime(0);
+    TEST_CHECK(fabsf(s_exec.aux[0].held_s - 2.0f) < 0.01f, "aux actuation hold seeded to the 2 s since the OFF");
+    TEST_CHECK(fabsf(s_exec.aux[0].trigger.held_s - 2.0f) < 0.01f, "aux decide hold seeded the same");
+    relay_off_tracker_note_write(0x01, 0x01);
+    profile_executor_aux_reset_runtime(0);
+    TEST_CHECK(s_exec.aux[0].held_s == 0.0f, "a relay that is ON at reset seeds 0");
+    relay_off_tracker_reset_all();
+    profile_executor_aux_reset_runtime(0);
+    TEST_CHECK(s_exec.aux[0].held_s == ON_OFF_HOLD_SETTLED_S, "never ON since boot seeds settled");
+}
+
+static void test_on_off_min_off_zone_run_start_seeds_from_tracker(void)
+{
+    TEST_SECTION("on/off zone: run-start holds seed from the zone relay's last OFF (settled only if never ON)");
+    min_off_test_begin();
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(600.0f, 100.0f, 10);
+    p.on_off_rule_count = 1;
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_NONE;
+    on_off_baseline_setup(&p, 20.0f, 300.0f);
+    char err[128] = {0};
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run 1 starts");
+    zone_runtime_t *z = &s_exec.zones[0];
+    TEST_CHECK(z->on_off_actuated_held_s == ON_OFF_HOLD_SETTLED_S &&
+                   z->on_off_trigger_state.held_s == ON_OFF_HOLD_SETTLED_S,
+               "first run after boot: both holds settled");
+    uint8_t zmask = g_stub_relay_mask[0];
+    TEST_CHECK(zmask != 0, "zone 0 owns a relay in this fixture");
+    relay_off_tracker_note_write(zmask, zmask); /* zone relay closed */
+    fake_time_advance_ms(5000);
+    profile_executor_halt();                    /* run end funnels an OFF */
+    fake_time_advance_ms(3000);
+    on_off_baseline_setup(&p, 20.0f, 300.0f);
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run 2 starts");
+    z = &s_exec.zones[0];
+    TEST_CHECK(z->on_off_actuated_held_s < 20.0f && z->on_off_actuated_held_s >= 2.9f,
+               "restart: actuation hold counts from the OFF, not settled");
+    TEST_CHECK(fabsf(z->on_off_trigger_state.held_s - z->on_off_actuated_held_s) < 0.01f,
+               "restart: decide hold equals actuation hold");
+    profile_executor_halt();
+    g_stub_zone_is_on_off[0] = false;
 }
 
 static void test_monitor_only_all_zones_start_refused(void)
@@ -10949,6 +11138,11 @@ static void run_test_aux_wp3(void)
     test_on_off_zone_does_not_drive_warm_start_pick();
     test_on_off_min_off_not_applied_before_first_on_zone();
     test_on_off_min_off_not_applied_before_first_on_aux();
+    test_on_off_min_off_survives_aux_disable_reenable();
+    test_on_off_min_off_survives_stop_then_quick_restart();
+    test_on_off_min_off_first_run_after_boot_is_immediate();
+    test_on_off_min_off_manual_toggle_seeds_aux_hold();
+    test_on_off_min_off_zone_run_start_seeds_from_tracker();
     test_monitor_only_all_zones_start_refused();
     test_monitor_only_plus_off_zone_start_refused_naming_both();
 }

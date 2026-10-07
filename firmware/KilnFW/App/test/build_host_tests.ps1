@@ -794,6 +794,10 @@ try {
             "`"$(Join-Path $driversDir 'control/adaptive_tune.c')`" `"$(Join-Path $driversDir 'control/adaptive_tune_model.c')`" " +
             "`"$(Join-Path $driversDir 'control/adaptive_tune_ki.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/cone_table.c')`" `"$(Join-Path $driversDir 'control/on_off_trigger_decide.c')`" " +
+            # relay_off_tracker.c (profile_executor_relay_io.c/_run.c seed the on/off
+            # min_off_s holds from it) is pure apart from hal_time_now_us(), which
+            # fake_time.c supplies; the test advances that clock to age the tracker.
+            "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
@@ -1315,7 +1319,9 @@ try {
             "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
             "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            # kiln_io_owner.c's relay writes feed relay_off_tracker (on/off min_off_s hold).
+            "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
     # docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1):
     # kiln_io_owner.c's relay_on_blocked() now calls system_mode_gate_
     # blocks_relay(), which calls the real system_mode_gate_check() -- linked

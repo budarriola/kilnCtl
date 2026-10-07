@@ -22,6 +22,7 @@
 #include "profile_rule_target.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
+#include "relay_off_tracker.h"
 #include "sim_backend.h"
 #include "zones_config_accessors.h"
 
@@ -101,6 +102,8 @@ void apply_relay(uint8_t zi, bool want_on)
             ESP_LOGW(PE_TAG, "kiln_io_owner_command_set_relay_mask_authorized failed: %s -- relay "
                           "state for zone %u is unknown",
                      esp_err_to_name(err), zi);
+        } else {
+            relay_off_tracker_note_write(mask, want_on ? mask : 0);
         }
     }
     /* No-op unless CONFIG_KILNCTL_SIM_PLANT. Fed the POST-gate decision, not
@@ -417,6 +420,8 @@ on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
     const on_off_trigger_input_t *in, bool bypass_hold, uint8_t relays_on_count, uint8_t cap)
 {
     on_off_zone_tick_result_t result = {0};
+    bool prior_actuated_on = *actuated_on;
+    float prior_actuated_held_s = *actuated_held_s;
     bool decided_on = on_off_trigger_decide(decide_state, in);
     bool gated_on = profile_executor_on_off_actuation_gate(actuated_on, actuated_held_s, decided_on,
                                                             bypass_hold, in->min_on_s, in->min_off_s, in->dt_s);
@@ -427,7 +432,14 @@ on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
          * NEXT tick's hold-timer math would believe a relay is on that the
          * cap just forced off. */
         *actuated_on = false;
-        *actuated_held_s = 0.0f;
+        /* The hold must describe the PHYSICAL relay, like the reset-site seed
+         * (profile_executor_on_off_seed_hold). A relay that was OFF before
+         * this tick was never closed: it has simply stayed OFF, so its OFF
+         * time keeps accumulating (and a settled relay stays settled) rather
+         * than restarting a min_off_s the relay never earned. A relay that
+         * was ON before this tick is opened by the caller's apply_relay()
+         * now, a real ON-to-OFF transition, so the hold restarts at 0. */
+        *actuated_held_s = prior_actuated_on ? 0.0f : prior_actuated_held_s + in->dt_s;
         result.cap_denied = true;
         result.actuated_on = false;
         return result;
@@ -487,6 +499,8 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
         if (err != ESP_OK) {
             ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
                      esp_err_to_name(err));
+        } else {
+            relay_off_tracker_note_write(mask, want_on ? mask : 0);
         }
     }
     if (s_exec.aux[aux_idx].commanded_on != want_on) {
@@ -499,11 +513,20 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
     s_exec.aux[aux_idx].commanded_on = want_on;
 }
 
-static void aux_reset_runtime(uint8_t aux_idx)
+void profile_executor_on_off_seed_hold(on_off_trigger_state_t *decide_state, float *actuated_held_s,
+                                       uint8_t relay_mask)
+{
+    float held = relay_off_tracker_held_s(relay_mask);
+    decide_state->held_s = held;
+    *actuated_held_s = held;
+}
+
+void profile_executor_aux_reset_runtime(uint8_t aux_idx)
 {
     on_off_trigger_state_reset(&s_exec.aux[aux_idx].trigger);
     s_exec.aux[aux_idx].actuated_on = false;
-    s_exec.aux[aux_idx].held_s = ON_OFF_HOLD_SETTLED_S;
+    profile_executor_on_off_seed_hold(&s_exec.aux[aux_idx].trigger, &s_exec.aux[aux_idx].held_s,
+                                      (uint8_t)(1u << aux_idx));
     s_exec.aux[aux_idx].commanded_on = false;
     s_exec.aux[aux_idx].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
 }
@@ -528,11 +551,13 @@ void force_aux_relays_off(void)
             ok = false;
             ESP_LOGE(PE_TAG, "aux run-end OFF write failed (mask 0x%02X): %s -- will retry", (unsigned)mask,
                      esp_err_to_name(err));
+        } else {
+            relay_off_tracker_note_write(mask, 0);
         }
     }
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         if (mask & (1u << i)) {
-            aux_reset_runtime(i);
+            profile_executor_aux_reset_runtime(i);
         }
     }
     if (ok) {
@@ -567,28 +592,28 @@ on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_pa
 
     on_off_trigger_input_t oin = {
         .failsafe_override = failsafe,
-        .failsafe_state_on = p->failsafe_state_on,
-        .guard_5_6_tripped = p->guard_5_6_tripped,
+        .failsafe_state_on = p->src_failsafe_state_on,
+        .guard_5_6_tripped = p->src_guard_5_6_tripped,
         .run_running = run_running,
         .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
         .failsafe_on_pause = false, /* no per-output override field yet */
-        .min_on_s = p->min_on_s,
-        .min_off_s = p->min_off_s,
+        .min_on_s = p->src_min_on_s,
+        .min_off_s = p->src_min_off_s,
         .rule = p->rule,
         .current_phase_is_dwell = s_exec.dwelling || p->quasi_dwell,
         .current_direction = direction_bit,
         .temp_measurement_c = p->temp_c,
-        .hyst_c = p->hyst_c,
+        .hyst_c = p->src_hyst_c,
         .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
         .ramp_lock_held = s_exec.ramp_lock_held,
-        .stretched_this_tick = p->stretched_this_tick,
+        .stretched_this_tick = p->src_stretched_this_tick,
         .segment_index = s_exec.segment_index,
-        .dt_s = p->dt_s,
+        .dt_s = p->src_dt_s,
     };
     /* Mirrors on_off_trigger_decide()'s precedence levels 1-3, so a
      * safety-relevant transition is never held at the actuation layer. */
     if (bypass_hold_out) {
-        *bypass_hold_out = failsafe || p->guard_5_6_tripped || !run_running;
+        *bypass_hold_out = failsafe || p->src_guard_5_6_tripped || !run_running;
     }
     return oin;
 }
@@ -603,19 +628,19 @@ on_off_trigger_input_t profile_executor_zone_on_off_input(uint8_t zi, bool fails
     const zone_runtime_t *z = &s_exec.zones[zi];
     on_off_input_params_t p = {
         .failsafe_base = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted || authority_blocked,
-        .failsafe_state_on = failsafe_state_on,
-        .guard_5_6_tripped = z->guard_state.is_tripped &&
+        .src_failsafe_state_on = failsafe_state_on,
+        .src_guard_5_6_tripped = z->guard_state.is_tripped &&
                              (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
                               z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
-        .min_on_s = min_on_s,
-        .min_off_s = min_off_s,
-        .hyst_c = hyst_c,
+        .src_min_on_s = min_on_s,
+        .src_min_off_s = min_off_s,
+        .src_hyst_c = hyst_c,
         .rule = profile_resolve_on_off_rule(&s_exec.profile, zi, s_exec.segment_index),
         .quasi_dwell = z->on_off_trigger_state.quasi_dwell,
         .temp_c = z->actual_c,
         .temp_ok = z->actual_valid && !isnan(z->actual_c),
-        .stretched_this_tick = stretched_this_tick,
-        .dt_s = dt_s,
+        .src_stretched_this_tick = stretched_this_tick,
+        .src_dt_s = dt_s,
     };
     return profile_executor_build_on_off_input(&p, bypass_hold_out);
 }
@@ -635,20 +660,20 @@ on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const 
     bool temp_ok = tz && tz->active && !tz->faulted && tz->actual_valid;
     on_off_input_params_t p = {
         .failsafe_base = !cfg_ok || authority_blocked,
-        .failsafe_state_on = false, /* aux fail-safe is fixed OFF (owner decision) */
-        .guard_5_6_tripped = tz && tz->active && tz->guard_state.is_tripped &&
+        .src_failsafe_state_on = false, /* aux fail-safe is fixed OFF (owner decision) */
+        .src_guard_5_6_tripped = tz && tz->active && tz->guard_state.is_tripped &&
                              (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
                               tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
-        .min_on_s = (ax->min_on_s > 0) ? ax->min_on_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
-        .min_off_s = (ax->min_off_s > 0) ? ax->min_off_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
-        .hyst_c = (ax->hyst_c > 0.0f) ? ax->hyst_c : AUX_HYST_C_DEFAULT,
+        .src_min_on_s = (ax->min_on_s > 0) ? ax->min_on_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
+        .src_min_off_s = (ax->min_off_s > 0) ? ax->min_off_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
+        .src_hyst_c = (ax->hyst_c > 0.0f) ? ax->hyst_c : AUX_HYST_C_DEFAULT,
         .rule = profile_resolve_on_off_rule(&s_exec.profile, (uint8_t)(PROFILE_RULE_TARGET_AUX_BASE + aux_idx),
                                             s_exec.segment_index),
         .quasi_dwell = s_exec.aux[aux_idx].trigger.quasi_dwell,
         .temp_c = temp_ok ? tz->actual_c : 0.0f,
         .temp_ok = temp_ok,
-        .stretched_this_tick = stretched_this_tick,
-        .dt_s = dt_s,
+        .src_stretched_this_tick = stretched_this_tick,
+        .src_dt_s = dt_s,
     };
     return profile_executor_build_on_off_input(&p, bypass_hold_out);
 }
@@ -681,7 +706,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             if (s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) {
                 aux_apply_relay(i, false);
             }
-            aux_reset_runtime(i);
+            profile_executor_aux_reset_runtime(i);
             continue;
         }
         aux_output_t ax;

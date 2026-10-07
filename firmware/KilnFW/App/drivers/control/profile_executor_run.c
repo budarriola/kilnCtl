@@ -27,6 +27,7 @@
 #include "profiles_store.h"
 #include "readiness_gate.h"
 #include "relay_authority.h"
+#include "relay_off_tracker.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
 #include "system_mode_gate.h"
@@ -693,10 +694,10 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * would strand a closed relay. The handoff below folds it in and writes
      * OFF to it again. */
     for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
-        on_off_trigger_state_reset(&s_exec.aux[ai].trigger);
-        s_exec.aux[ai].actuated_on = false;
-        s_exec.aux[ai].held_s = ON_OFF_HOLD_SETTLED_S;
-        s_exec.aux[ai].commanded_on = false;
+        /* Holds seeded from the relay's own last ON-to-OFF time (relay_off_
+         * tracker), not a flat "settled": a stop followed by a quick restart
+         * must still wait out min_off_s. */
+        profile_executor_aux_reset_runtime(ai);
     }
     /* Same "starts owing nothing" reasoning as claimed_relay_mask just above,
      * for the relay/IO segment machinery: a previous run's io_segs[] state
@@ -1085,11 +1086,13 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * a second call site to keep in sync. */
         on_off_trigger_state_reset(&z->on_off_trigger_state);
         /* Actuation-layer hold state (plan step 8) mirrors the same
-         * fail-safe-shaped reset: never actuated, and OFF counts as already
-         * held long enough (ON_OFF_HOLD_SETTLED_S) so min_off_s does not delay
-         * the first ON of a run. */
+         * fail-safe-shaped reset: never actuated. Both holds are seeded from
+         * the zone relay's last ON-to-OFF time (relay_off_tracker): settled
+         * if it has not been ON since boot, so min_off_s does not delay the
+         * first ON of the first run, but still counting down after a stop
+         * followed by a quick restart. */
         z->on_off_actuated_on = false;
-        z->on_off_actuated_held_s = ON_OFF_HOLD_SETTLED_S;
+        profile_executor_on_off_seed_hold(&z->on_off_trigger_state, &z->on_off_actuated_held_s, relay_mask);
         /* HP-02 starvation reporting starts from zero every run/resume. */
         z->relay_starved_s = 0.0f;
         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_NONE;
@@ -1411,6 +1414,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                  * claim; without this the aux would stay as the operator
                  * left it until the first rule decision. */
                 s_exec.aux_off_pending = true;
+            } else {
+                relay_off_tracker_note_write(aux_take, 0);
             }
         }
     }
