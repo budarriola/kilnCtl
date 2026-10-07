@@ -45,8 +45,8 @@ below.
 
 | ESP32-S3 GPIO | Net | Direction |
 |---|---|---|
-| **GPIO4** | `DataFromSafty` | ESP **RX** — driven by U6's VOB output (push-pull CMOS, not an open collector). R15 1k to 3.3V_Main is still fitted on this net but no longer defines the idle level by itself |
-| **GPIO5** | `DataToSafty` | ESP **TX** — drives U6's VIB input |
+| **GPIO4** | `DataFromSafty` | ESP **RX** — driven by U6's VOA output, pin 2 (push-pull CMOS, not an open collector). The current schematic has no R15 (or R7/R9/R12) and no pull-up on this net; whether one is physically fitted is unverified |
+| **GPIO5** | `DataToSafty` | ESP **TX** — drives U6's VIB input, pin 3 |
 | GPIO6 | `Fault` | ESP **output** (this was always right; still through U1, unchanged) |
 
 `KilnFW`: `KILNCTL_SAFETY_TX_IO = 5`, `KILNCTL_SAFETY_RX_IO = 4`.
@@ -60,8 +60,8 @@ The barrier parts, current as of 2026-08-25:
 | Part | Driven by | Output | Therefore |
 |------|----------------|-----------------------|-----------|
 | U1 (opto) | `Fault`, main side, via R11 390R | collector = Pico `mainFault` (GP10) + R8 1k pull-up to 3.3v_Safty; emitter = GND_Safty | ESP **drives** fault into the Pico |
-| U6 (VIA/VOA) | `DataToSafty`, main side | Pico `PicoRx` (GP5) + R9 1k pull-up to 3.3v_Safty | `DataToSafty` = **ESP TX** |
-| U6 (VIB/VOB) | `PicoTx` (Pico GP4), safety side | `DataFromSafty` (ESP GPIO4), main side | `DataFromSafty` = **ESP RX** |
+| U6 (VIB -> VOB) | `DataToSafty`, main side (VIB, pin 3) | Pico `PicoRx` (GP5) at VOB, pin 6; no pull-up in the schematic | `DataToSafty` = **ESP TX** |
+| U6 (VIA -> VOA) | `PicoTx` (Pico GP4), safety side (VIA, pin 7) | `DataFromSafty` (ESP GPIO4) at VOA, pin 2, main side | `DataFromSafty` = **ESP RX** |
 
 **HISTORY — the table above described U2/U3 (the retired optocoupler pair)
 until 2026-08-25:**
@@ -263,9 +263,9 @@ Traced from `kiln.pdf` p.2. This table is authoritative for `SaftyFW`.
 | 2 | GPIO1 | `CS0` | out | MAX31856 `~CS`, active low. **10k pull-up to 3.3v_Safty** |
 | 4 | GPIO2 | `CLK` | out | SPI0 SCK |
 | 5 | GPIO3 | `MOSI` | out | SPI0 TX |
-| 6 | GPIO4 | `PicoTx` | out | UART TX, no pad inversion (`gpio_set_outover(GPIO_OVERRIDE_INVERT)` was removed 2026-08-25 along with U2/U3) → U6 VIB input → U6 VOB output → ESP GPIO4 (`DataFromSafty`) |
-| 7 | GPIO5 | `PicoRx` | in | UART RX ← U6 VOA output, driven by ESP GPIO5 (`DataToSafty`) into U6 VIA. **R9 1k pull-up**, idles high |
-| 9 | GPIO6 | `saftyRelay` | out | Q4 gate → K4 coil. **High = relay energized**. **R65 10k pull-down to RelayGND** (main schematic SSD.kicad_sch's SaftyRelay sub-sheet; R34 drawn once, instanced per channel -- this channel's instance is R65) holds the gate LOW whenever nothing is actively driving it (RP2040 reset, or the pad left high-Z) |
+| 6 | GPIO4 | `PicoTx` | out | UART TX, no pad inversion (`gpio_set_outover(GPIO_OVERRIDE_INVERT)` was removed 2026-08-25 along with U2/U3) → U6 VIA input (pin 7) → U6 VOA output (pin 2) → ESP GPIO4 (`DataFromSafty`) |
+| 7 | GPIO5 | `PicoRx` | in | UART RX ← U6 VOB output (pin 6), driven by ESP GPIO5 (`DataToSafty`) into U6 VIB (pin 3). No pull-up in the current schematic (the old R9 is gone); idle level is set by the isolator output |
+| 9 | GPIO6 | `saftyRelay` | out | Q4 gate → K4 coil. **High = relay energized**. **R65 10k pull-down to GND_Safty** (main schematic SSD.kicad_sch's SaftyRelay sub-sheet; R34 drawn once, instanced per channel -- this channel's instance is R65) holds the gate LOW whenever nothing is actively driving it (RP2040 reset, or the pad left high-Z) |
 | 10 | GPIO7 | `SDA` | i/o | I2C0 SDA, **R48 2.2k pull-up**, out to J7 pin 6. Nothing answers today |
 | 11 | GPIO8 | `SCL` | out | I2C0 SCL, **R49 2.2k pull-up**, out to J7 pin 8 |
 | 12 | GPIO9 | `estop` | in | J1 terminal. **R10 1k pull-up + C3 0.01uF**. See §5 |
@@ -558,7 +558,7 @@ that reads healthy, so no existing board changes behaviour.
 Param **`0x0212` `estop_active_level`** (u8), stored in the safety
 commissioning config as `config_store_record_t::estop_active_level`. It is a
 tail-append into the record's reserved block at offset 234 — no
-`format_version` bump, no `KILNLINK_PROTOCOL_VERSION` bump (still **12**),
+`format_version` bump, no `KILNLINK_PROTOCOL_VERSION` bump (it was 12 when this param landed; `kilnlink_version.h` now defines 16),
 and every already-committed record keeps loading exactly as before. On the
 ESP side it is appended at the very END of `SAFETY_CFG_PARAM_TABLE`
 (`safety_cfg_store.c`, store version 4 → 5), never mid-array — a mid-array
@@ -627,8 +627,8 @@ should be, and refuse to trust current readings if it is not.
 
 ## 7. Power — read this before connecting USB
 
-- **`3.3v_Safty` is generated on the main board** by IC3 (LT8631) from
-  `12v_Safty` (J19 input, SMAJ24CA TVS, its own 5 V and 3.3 V rails).
+- **`3.3v_Safty` is generated on the main board** by IC5 (MAXM17572 buck module) from
+  `12v_Safty` (J19 input, SMAJ24CA TVS; IC7, also a MAXM17572, makes `5v_Safty`).
 - **A1 pin 36 (3V3) is connected directly to `3.3v_Safty`.**
 - **A1 pins 39 (VSYS) and 40 (VBUS) are unconnected. Pin 37 (3V3_EN) is
   unconnected.**
@@ -639,7 +639,7 @@ backwards.
 
 > ⚠️ **Do not connect USB to the Pico while `12v_Safty` is applied, until this
 > has been checked on the bench.** With USB attached, VBUS powers the
-> on-module RT6150, which will try to drive 3.3 V into the same node that IC3
+> on-module RT6150, which will try to drive 3.3 V into the same node that IC5
 > is already driving. Two regulators fighting over one rail is at best noisy
 > and at worst destroys one of them.
 
@@ -768,7 +768,7 @@ it works in the deployed system rather than only on the bench.
 
 `stdio_usb` is the normal Pico workflow and it does work — but on this board it
 needs the power feed fixed first (§7), because A1's 3V3 is back-fed and USB puts
-the module's regulator in contention with IC3.
+the module's regulator in contention with IC5.
 
 **Bodge for the current board**, which is also the right fix for the next
 revision: cut the feed to A1 pin 36 (3V3) and instead feed **`5v_Safty` — already
@@ -808,12 +808,11 @@ for the identical part — **read it, and port rather than reinvent**):
 
 - SPI **mode 1** (CPOL=0, CPHA=1). The part is rated to 5 MHz, but the master
   is **capped at 4 MHz** (`SPI_OWNER_BAUDRATE_HZ`, enforced by a
-  `_Static_assert` in `src/spi_owner.c`): above that the SimFW bench fixture's
-  MAX31856 slave emulation cannot reliably meet its first-byte deadline, and
-  the failure mode is a burst shifted by one byte returning plausible wrong
-  temperatures rather than a fault — see
-  `firmware/SimFW/docs/SPI_ACCESS_AUDIT.md` §9. KilnFW holds its master to the
-  same ceiling. The RP2040's SPI0 on
+  `_Static_assert` in `src/spi_owner.c`): the cap was originally set for the SimFW bench fixture's
+  MAX31856 slave emulation (first-byte deadline; failure mode a burst shifted
+  by one byte returning plausible wrong temperatures). SimFW and its audit
+  file were deleted 2026-08-28, so that rationale is historical; the cap is
+  retained. KilnFW holds its master to the same ceiling. The RP2040's SPI0 on
   GPIO0/1/2/3 supports this natively; `CS0` is driven manually as a GPIO
   rather than by the SPI block, so a multi-byte register burst stays in one
   chip-select frame.

@@ -15,8 +15,8 @@ ground domain as the safety processor; its firmware lives at
 
 | GPIO | Signal (schematic net) | Direction | What it is |
 |------|------------------------|-----------|------------|
-| 4  | `DataFromSafty`      | in  | Safety link **RX**, driven by U6's VOB output (a push-pull CMOS output, not an open collector). Not inverted in software — U6 does not invert either. R15 1k pull-up still present but no longer what defines the idle level. |
-| 5  | `DataToSafty`        | out | Safety link **TX** (drives U6's VIB input). Not inverted — U6 is non-inverting, and the `UART_SIGNAL_TXD_INV` this pin used to carry (to cancel the old optocoupler's inversion) has been removed. |
+| 4  | `DataFromSafty`      | in  | Safety link **RX**, driven by U6's VOA output (pin 2; a push-pull CMOS output, not an open collector). Not inverted in software — U6 does not invert either. The current schematic has no pull-up on this net (the old R15 no longer exists in it); see the isolation section. |
+| 5  | `DataToSafty`        | out | Safety link **TX** (drives U6's VIB input, pin 3). Not inverted — U6 is non-inverting, and the `UART_SIGNAL_TXD_INV` this pin used to carry (to cancel the old optocoupler's inversion) has been removed. |
 | 6  | `Fault`              | out | Isolated fault line to the safety processor (drives U1's LED). |
 | 7  | `IO_Expander_IRQ`    | in  | SX1509 `~INT`, active low. |
 | 8  | `SDA`                | i/o | I2C data (SX1509, and J2/J6 pass-through). |
@@ -42,11 +42,12 @@ below.
 
 One bus (SCLK 12 / MOSI 11 / MISO 13), four chip selects: three MAX31856s across
 J6 and the display on J2. The thermocouple parts run SPI mode 1 and are **capped
-at 4 MHz** — the part is rated to 5 MHz, but the SimFW bench fixture's slave
-emulation cannot reliably meet the first-byte deadline above 4 MHz, and missing
-it silently shifts a register burst by one byte instead of faulting (see
-`firmware/SimFW/docs/SPI_ACCESS_AUDIT.md` §9). The cap is enforced by a `range`
-on `KILNCTL_THERMO_SPI_CLOCK_HZ` and a `_Static_assert` in `MAX31856.c`.
+at 4 MHz** — the part is rated to 5 MHz. The cap was set because the (since
+deleted, 2026-08-28) SimFW bench fixture's slave emulation could not reliably meet
+the first-byte deadline above 4 MHz; the rationale in the Kconfig help still
+cites `firmware/SimFW/docs/SPI_ACCESS_AUDIT.md`, which no longer exists. The cap
+itself is still enforced by a `range` on `KILNCTL_THERMO_SPI_CLOCK_HZ` and a
+`_Static_assert` in `MAX31856.c`.
 
 The ILI9488 runs mode 0 and much faster (`KILNCTL_DISPLAY_SPI_CLOCK_HZ`, 20 MHz),
 and is **not** subject to that cap: each device gets its own device config on the
@@ -261,7 +262,7 @@ SPI/I2C lines come from the Pico (A1), not the ESP32.
 
 | Pin | Signal | | Pin | Signal |
 |-----|--------|-|-----|--------|
-| 1 | (no connect) | | 2 | 5V (safety) |
+| 1 | 3.3V (safety), via R51 (0 ohm) | | 2 | 5V (safety) |
 | 3 | `thermoFault` | | 4 | `thermoDrdy` |
 | 5 | `MOSI` | | 6 | `SDA` |
 | 7 | `MISO` | | 8 | `SCL` |
@@ -282,15 +283,15 @@ still crosses through its own TCMT1109 optocoupler, U1:
 
 | Part | Driven by | Output | Meaning |
 |------|---------------|--------------------|---------|
-| U6 (VIB/VOB) | Pico `PicoTx` (GP4, safety side) | ESP GPIO4 (`DataFromSafty`) | Pico -> ESP data |
-| U6 (VIA/VOA) | ESP GPIO5 (`DataToSafty`) | Pico `PicoRx` (GP5), R9 1k pull-up | ESP -> Pico data |
+| U6 (VIA -> VOA) | Pico `PicoTx` (GP4, safety side, U6 pin 7) | ESP GPIO4 (`DataFromSafty`, U6 pin 2) | Pico -> ESP data |
+| U6 (VIB -> VOB) | ESP GPIO5 (`DataToSafty`, U6 pin 3) | Pico `PicoRx` (GP5, U6 pin 6) | ESP -> Pico data |
 | U1 (opto) | ESP GPIO6 (`Fault`) via R11 390R | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault assert |
 
 Things that follow from that change:
 
 1. **U6's channel assignment matches the ESP's direction directly** —
-   `DataToSafty` (GPIO5) is TX into VIA, `DataFromSafty` (GPIO4) is RX out of
-   VOB. (Historical note: the old optocoupler U3 was drawn mirrored relative
+   `DataToSafty` (GPIO5) is TX into VIB, `DataFromSafty` (GPIO4) is RX out of
+   VOA. (Historical note: the old optocoupler U3 was drawn mirrored relative
    to U1/U2, LED on the *safety* side instead of the *main* side, which made
    the direction easy to get backwards from the symbol alone — see "How this
    was measured, 2026-08-23" below for that now-retired part and the
@@ -305,12 +306,14 @@ Things that follow from that change:
    GPIO_OVERRIDE_INVERT)` in `SaftyFW`'s `uart_owner.c`); both of those have
    been removed. Re-adding either now would invert an already-correct signal
    and break the link.
-3. **R15 no longer defines the idle level on ESP GPIO4.** VOB is a push-pull
+3. **R15 no longer defines the idle level on ESP GPIO4.** VOA is a push-pull
    CMOS output, not an open collector, so it drives GPIO4 to a definite level
-   on its own; R15's 1k pull-up to 3.3V_Main is still fitted but is now
-   belt-and-braces only, same role as the ESP's internal pull-up. (Under the
-   old optocoupler, R15 together with U3's collector was the *only* thing
-   defining that level.)
+   on its own. (Under the old optocoupler, R15 together with U3's collector was
+   the *only* thing defining that level.) The exported main-board netlist
+   (2026-10-06) contains no R7, R9, R12 or R15 at all and no pull-up on the
+   `DataFromSafty` or `PicoRx` nets, so the earlier statement that R15/R9 are
+   "still fitted" is not backed by the schematic; whether they are still
+   physically populated is unverified (see the 2026-10-06 audit note).
 4. **GPIO6 is still an output.** The ESP asserts fault *to* the safety
    processor through U1, unchanged by any of the above. There is no hardware
    path for the Pico to signal the ESP — everything coming back does so over
@@ -373,8 +376,8 @@ The previous version of this section had the two data pins swapped, and so did
 
 Not driven by this firmware, listed so the isolated protocol has something to
 describe. GPIO0/1/2/3 = MISO/CS0/CLK/MOSI to the safety thermocouple board;
-GP4/GP5 = TX/RX across the barrier through U6 (GP4 drives U6's VIB input,
-GP5 receives U6's VOA output); GPIO6 = `saftyRelay` (Q4 -> K4 -> J10);
+GP4/GP5 = TX/RX across the barrier through U6 (GP4 drives U6's VIA input,
+GP5 receives U6's VOB output); GPIO6 = `saftyRelay` (Q4 -> K4 -> J10);
 GPIO7/8 = SDA/SCL; GPIO9 = `estop` (J1 terminal, 1k pull-up, 0.01uF);
 GPIO10 = `mainFault` in from U1; GPIO11/12 = safety `thermoFault`/`thermoDrdy`;
 ADC0/1/2 (GPIO26/27/28) = `Current1..3` from three AD8542 current-sense stages
@@ -385,16 +388,23 @@ fed by the J13/J15/J17 3.5 mm current-transformer jacks.
 10-pin JST XH on the main board: 1 `LCD_IORQ`, 2 `SDA`, 3 `SCL`, 4 `LCD_Reset`,
 5 `CS3`, 6 `CLK`, 7 `MOSI`, 8 `MISO`, 9 GND, 10 5V. The panel is a
 **BIGTREETECH TFT35 SPI V2.1** (3.5", 480x320, **ILI9488**, 3.3 V logic / 5 V
-supply, backlight apparently hardwired on with no control pin).
+supply, backlight apparently hardwired on with no control pin on J2). The
+netlist agrees: no backlight net reaches J2. For the MSP4031, a flying wire from
+ESP32-S3 GPIO15 (U4 pad 8, unconnected on the PCB) drives the backlight by LEDC
+PWM (`KILNCTL_BACKLIGHT_PWM_ENABLE`, default `y`; `KILNCTL_BACKLIGHT_GPIO`,
+default 15).
 
-> **Replacement panel.** The MSP4031 (ST7796, 4.0") is the intended successor to
-> the TFT35 described here. Its connection to J2 needs a custom harness with two
+> **Replacement panel (fitted on the bench unit).** Since 2026-09-04 the bench
+> board's J2 carries the MSP4031 (ST7796, 4.0", FT6336U capacitive touch) instead
+> of the TFT35 described here; `KILNCTL_DISPLAY_PANEL` and `KILNCTL_TOUCH_FT6336U`
+> in `App/drivers/Kconfig` now default to it (the TFT35/ILI9488/NS2009 paths
+> remain selectable). Its connection to J2 needs a custom harness with two
 > crossovers, two flying wires to the DevKit header (backlight, touch reset), and
 > **removal of R4 and R6 on the module** before touch may share this board's I2C
 > bus. All of that is specified in
 > [`DISPLAY_ST7796_WIRING.md`](DISPLAY_ST7796_WIRING.md); the design rationale is
-> in [`DISPLAY_ST7796_PLAN.md`](DISPLAY_ST7796_PLAN.md). Nothing below changes
-> until that panel is fitted.
+> in [`DISPLAY_ST7796_PLAN.md`](DISPLAY_ST7796_PLAN.md). The paragraphs below
+> describe the TFT35 and apply only when the `ILI9488` panel choice is selected.
 
 **Two unresolved discrepancies — check both against the physical connector
 before powering the panel.** Published pinouts for this module (single-source,
@@ -421,7 +431,8 @@ say the touch controller on this module is an **NS2009** (I2C), not the XPT2046
 The firmware now drives the NS2009 (App/drivers/hw/NS2009.c) on the same I2C bus
 as the SX1509 expander, polled by screen_idle_task (App/drivers/
 screen_idle.c) to auto-blank the panel after
-`CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS` of no touches (default 60s). There is
+`CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS` of no touches (Kconfig default 0, i.e.
+disabled). On the TFT35 there is
 no backlight control line (above), so a true "screen and backlight out" is
 not possible from firmware — `ILI9488_set_power(false)` (display-off +
 sleep-in) was tried first and rejected: on this panel it blanks to a bright

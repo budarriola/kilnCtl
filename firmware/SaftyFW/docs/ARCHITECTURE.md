@@ -29,7 +29,7 @@ talks to that owner rather than to the peripheral.
 |---|---|---|
 | **`kilnlink` LOG frames, task id 5, relayed by the ESP** | nothing extra | **Primary.** Works in the deployed system; the ESP already forwards every `LOG` frame to the PC |
 | **RTT over SWD** | the debug probe | **Secondary** — and the only one that works when the link is down or the Pico will not talk, which is when a log matters most |
-| **USB CDC (`stdio_usb`)** | a USB cable | **Bench only.** `HARDWARE.md` §7: A1's 3V3 is back-fed, so USB puts the module regulator in contention with IC3. Usable only with `12v_Safty` removed |
+| **USB CDC (`stdio_usb`)** | a USB cable | **Bench only.** `HARDWARE.md` §7: A1's 3V3 is back-fed, so USB puts the module regulator in contention with IC5. Usable only with `12v_Safty` removed |
 
 #### Why `stdio_usb` is not the default, on firmware grounds
 
@@ -307,7 +307,7 @@ specifically: if only the direction call fails, the output latch was
 already written LOW but the pad itself is still an INPUT (high-Z) — a
 latch write does not by itself make a pin drive anything. Q4's gate
 (HARDWARE.md's GPIO6 row, high = energized) is then held LOW not by this
-pin, but by **R65, a 10k pull-down to `RelayGND`** (main schematic,
+pin, but by **R65, a 10k pull-down to `GND_Safty`** (main schematic,
 `SSD.kicad_sch`'s SaftyRelay sub-sheet — drawn once as R34, instanced per
 relay channel; this channel's instance is R65), the same resistor that
 holds the gate low through RP2040 reset/boot before GPIO6 is configured at
