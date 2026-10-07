@@ -136,6 +136,13 @@ typedef enum {
 cfg_fs_confirm_decision_t cfg_fs_confirm_decide(bool mounted, bool skipped_for_recovery,
                                                               bool force_healthy);
 
+/* True only when the request URI's query string carries the parameter
+ * `force_healthy` with the exact value "1" (the first occurrence of the key
+ * decides). Anything else -- no query, key absent, empty/other/percent-encoded
+ * value, NULL -- is false: fail-closed, no override. Reads the URI in place so
+ * the httpd handler needs no stack copy of the query string. */
+bool cfg_fs_confirm_uri_force_healthy(const char *uri);
+
 #ifdef __cplusplus
 }
 #endif

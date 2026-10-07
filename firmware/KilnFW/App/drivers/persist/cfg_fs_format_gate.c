@@ -272,3 +272,31 @@ cfg_fs_confirm_decision_t cfg_fs_confirm_decide(bool mounted, bool skipped_for_r
     }
     return CFG_FS_FORMAT_CONFIRM_ALLOW;
 }
+
+bool cfg_fs_confirm_uri_force_healthy(const char *uri)
+{
+    if (uri == NULL) {
+        return false;
+    }
+    const char *q = strchr(uri, '?');
+    if (q == NULL) {
+        return false;
+    }
+    static const char kKey[] = "force_healthy";
+    const size_t key_len = sizeof(kKey) - 1u;
+    const char *p = q + 1;
+    while (*p != '\0' && *p != '#') {
+        const char *end = p;
+        while (*end != '\0' && *end != '&' && *end != '#') {
+            end++;
+        }
+        const char *eq = memchr(p, '=', (size_t)(end - p));
+        size_t name_len = eq ? (size_t)(eq - p) : (size_t)(end - p);
+        if (name_len == key_len && memcmp(p, kKey, key_len) == 0) {
+            /* First occurrence of the key decides; only the exact value "1" counts. */
+            return eq != NULL && (end - (eq + 1)) == 1 && eq[1] == '1';
+        }
+        p = (*end == '&') ? end + 1 : end;
+    }
+    return false;
+}

@@ -65,23 +65,19 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
         }
     }
 
+    /* Optional explicit override: ?force_healthy=1 (query string; the body is
+     * unused). Parsed in place from req->uri -- no stack copy of the query on
+     * the httpd task, whose spare stack is tight. Anything but exactly "1"
+     * is no override (fail-closed). */
+    bool force_healthy = cfg_fs_confirm_uri_force_healthy(req->uri);
+
     /* Recovery mode skipped the cfg mount on purpose (cfg_fs_mount_or_skip()),
      * not because the partition is damaged. Since the NVS dual-write close
      * (docs/CONFIG_FILESYSTEM.md) the partition holds the board's only
      * up-to-date config, so formatting it from here would erase every saved
      * setting for nothing. Leave recovery mode first; a genuinely damaged
-     * partition then shows up as pending in normal mode. */
-    /* Optional explicit override: ?force_healthy=1 (query string; the body is
-     * unused). Anything but "1" is no override. */
-    bool force_healthy = false;
-    {
-        char query[32];
-        char val[4];
-        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-            httpd_query_key_value(query, "force_healthy", val, sizeof(val)) == ESP_OK) {
-            force_healthy = (strcmp(val, "1") == 0);
-        }
-    }
+     * partition then shows up as pending in normal mode. A mounted cfg is
+     * likewise refused unless force_healthy=1 (cfg_fs_confirm_decide()). */
 
     cfg_fs_confirm_decision_t decision = cfg_fs_confirm_decide(
         cfg_fs_get_status() == CFG_FS_STATUS_MOUNTED, cfg_fs_skipped_for_recovery(), force_healthy);

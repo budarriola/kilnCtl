@@ -365,9 +365,39 @@ static void test_format_confirm_decision(void)
                "recovery takes precedence over the healthy/override logic");
 }
 
+static void test_format_confirm_uri_override_is_fail_closed(void)
+{
+    TEST_CHECK(cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthy=1"),
+               "exact force_healthy=1 is the override");
+    TEST_CHECK(cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?a=b&force_healthy=1&c=d"),
+               "override found among other parameters");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy(NULL), "NULL uri is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm"), "no query is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?"), "empty query is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthy"),
+               "key without a value is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthy="),
+               "empty value is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthy=11"),
+               "value 11 is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthy=true"),
+               "value true is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthy=%31"),
+               "percent-encoded value is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?xforce_healthy=1"),
+               "longer key name is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthyx=1"),
+               "key with a suffix is no override");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm?force_healthy=0&force_healthy=1"),
+               "first occurrence of the key decides");
+    TEST_CHECK(!cfg_fs_confirm_uri_force_healthy("/api/cfgfs/format_confirm#force_healthy=1"),
+               "fragment is not a query");
+}
+
 void run_test_cfg_fs_format_gate(void)
 {
     test_format_confirm_decision();
+    test_format_confirm_uri_override_is_fail_closed();
     test_blank_partition_is_safe_to_format();
     test_a_few_stray_bits_still_reads_as_blank();
     test_residual_nonerased_data_without_a_filesystem_still_formats();
