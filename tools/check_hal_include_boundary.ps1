@@ -270,6 +270,7 @@ $HardwareAllowlist = @(
 $EspTimerAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov.c";            Header = "esp_timer.h"; Reason = "wifi_prov family -- sole Wi-Fi driver owner, already exempt for esp_wifi.h/esp_netif.h; esp_timer_create/esp_timer_start_periodic for the AP-fallback/rescan timer objects only, no timestamp reads"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h";   Header = "esp_timer.h"; Reason = "wifi_prov family -- shared internal header (esp_timer_handle_t fields only)"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/common/dram_watch.c";        Header = "esp_timer.h"; Reason = "SK-04 internal-DRAM largest-free-block sampler -- esp_timer_create/esp_timer_start_periodic for a 2 s sampling callback only (no new task or stack); timestamps go through hal_time.h; no cross-target HAL timer abstraction exists"; ExpiresAtPhase = "n/a (out of scope: timer portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/ui/lvgl_port.c";             Header = "esp_timer.h"; Reason = "esp_timer_create/esp_timer_start_periodic for the 1ms lv_tick callback -- named explicitly in the plan's Phase 4 expected-final-entries list (lvgl_port)"; ExpiresAtPhase = "n/a (out of scope: lvgl_port, see plan)" }
 )
 
