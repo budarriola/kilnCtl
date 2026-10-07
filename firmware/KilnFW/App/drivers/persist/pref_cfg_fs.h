@@ -63,6 +63,24 @@ extern "C" {
 // (ESP_ERR_INVALID_SIZE) rather than silently truncate.
 #define PREF_CFG_FS_MAX_ITEM 128
 
+// Upper bound for the LARGE items (setup-wizard progress blob, live-edit
+// working profile). Items above PREF_CFG_FS_MAX_ITEM use a short-lived heap
+// block for the file image instead of a stack buffer; callers' own copies of
+// the item (the nvs_bytes / out_bytes arguments) are still theirs to place.
+#define PREF_CFG_FS_MAX_LARGE_ITEM 2048
+
+// Variable-length item (live-edit working profile): reads the file at
+// rel_path into out (capacity cap, <= PREF_CFG_FS_MAX_LARGE_ITEM), reporting
+// the item length (file size minus the 4-byte rev) and rev. Returns false when
+// cfg is unmounted, the file is absent, unreadable or larger than cap + 4. No
+// validation: the caller decodes/validates the bytes itself. Written back with
+// pref_cfg_fs_save()/pref_cfg_fs_commit() using the actual length.
+bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *out_len, uint32_t *out_rev);
+
+// Deletes the file at rel_path. ESP_OK when it did not exist either;
+// ESP_ERR_INVALID_STATE when cfg is not mounted.
+esp_err_t pref_cfg_fs_remove(const char *rel_path);
+
 // Matches cfg_fs_write_atomic()'s signature (cfg_fs.h) and
 // cfg_fs_write_atomic_device()'s (cfg_fs_mount.h) -- same seam
 // zones_config_cfg_fs.h uses: host tests exercise the real cfg_fs_write_atomic()
