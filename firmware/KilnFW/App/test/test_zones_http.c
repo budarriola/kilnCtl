@@ -7786,6 +7786,11 @@ static void test_zones_config_set_pid_gain_tolerance_boundaries(void)
         TEST_CHECK(!gain_edit_keeps_record(no_save, 100.0f, 0.5f, 3.0f, 100.002f, 0.5f, 3.0f),
                   "Kp +2e-3 on Kp=100 (outside 1.001e-3) clears the record");
     }
+    // NaN on either side counts as a change (a corrupt stored gain being replaced must
+    // clear the record); the old `delta > tol` form returned false here.
+    TEST_CHECK(zones_config_gain_changed(NAN, 1.0f), "stored NaN gain -> changed");
+    TEST_CHECK(zones_config_gain_changed(1.0f, NAN), "new NaN gain -> changed");
+    TEST_CHECK(!zones_config_gain_changed(0.0f, 0.0f), "0 -> 0 is not a change");
 
     nvs_test_enable(false);
     nvs_test_clear();
