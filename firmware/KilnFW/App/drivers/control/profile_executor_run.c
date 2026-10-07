@@ -76,6 +76,24 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
     }
 }
 
+/* Lowest zone in zone_mask that is NOT monitor-only, or -1 if there is none.
+ * The run-start temperature baseline, the ramp-baseline/ambient apply gate
+ * in profile_executor_run() and the warm-start pick all key off this: a
+ * monitor-only zone (HEATER with relay_mask==0, zone_is_monitor_only(), the
+ * one rule) is never driven, so its reading must not seed the run's target
+ * or decide a warm start. All-monitor-only masks return -1; the capture then
+ * yields no baseline/warm-start (fail closed) and profile_executor_run()
+ * refuses such a start anyway via its n_heating_zones == 0 check. */
+static int8_t profile_executor_baseline_zone(uint8_t zone_mask)
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if ((zone_mask & (1u << zi)) && !zone_is_monitor_only(zi)) {
+            return (int8_t)zi;
+        }
+    }
+    return -1;
+}
+
 /* Baseline thermocouple snapshot for the ramp-start/warm-start/ambient seeds
  * set further down (under s_exec.lock). Read HERE, before s_exec.lock is
  * ever taken -- CLAUDE.md's "never hold a module lock across a producer
@@ -85,7 +103,8 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
  * caller (the dashboard/LCD status readers, profiles_stop(), etc.) for that
  * whole window.
  *
- * first_active (the lowest zone index set in zone_mask) is purely a property
+ * first_active (the lowest NON-monitor-only zone index set in zone_mask, see
+ * profile_executor_baseline_zone()) is purely a property
  * of the profile being started -- it does not depend on any s_exec state
  * guarded by the lock, so it is safe to compute here, before that state
  * (s_exec.zones[]) is even touched. zones_config_get_thermo_mask()/
@@ -113,13 +132,7 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
         return;
     }
 
-    int8_t first_active = -1;
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        if (zone_mask & (1u << zi)) {
-            first_active = (int8_t)zi;
-            break;
-        }
-    }
+    int8_t first_active = profile_executor_baseline_zone(zone_mask);
     if (first_active < 0) {
         return;
     }
@@ -146,6 +159,7 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
      * other than first_active can legitimately be the coolest one. */
     for (uint8_t wzi = 0; wzi < MAX31856_CHANNEL_COUNT; wzi++) {
         if (!(zone_mask & (1u << wzi))) continue;
+        if (zone_is_monitor_only(wzi)) continue; /* never drives the warm-start pick */
         uint8_t w_tmask = 0;
         zones_config_get_thermo_mask(wzi, &w_tmask);
         bool w_valid = false;
@@ -903,7 +917,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
-    int8_t first_active = -1;
+    int8_t first_active = -1; /* lowest non-monitor-only zone: same pick as capture_baseline */
     uint8_t active_rank = 0;
     float baseline_target_c = p.segments[0].target_c;
     /* Warm-start (Q4): "current temperature" is the COOLEST active zone's
@@ -917,7 +931,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (!(p.zone_mask & (1u << zi))) continue;
         zone_runtime_t *z = &s_exec.zones[zi];
         z->active = true;
-        if (first_active < 0) first_active = (int8_t)zi;
+        if (first_active < 0 && !zone_is_monitor_only(zi)) first_active = (int8_t)zi;
 
         /* OFF, not BANGBANG, as the fallback if the getter fails: "we could
          * not read this zone's control mode" must not resolve to "close the

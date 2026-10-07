@@ -10431,6 +10431,78 @@ static void monitor_only_one_tick(int i, float zone1_c)
     aux_test_run_task_ticks(1);
 }
 
+/* Run-start baseline / warm-start pick must ignore a monitor-only zone
+ * (HEATER, relay_mask==0). Zone 0 is monitor-only and is the LOWEST zone in
+ * the mask, so a first_active that does not skip it would seed the run from
+ * a zone nothing ever drives. */
+static void monitor_baseline_setup(const profile_t *p, float z0_c, float z1_c)
+{
+    warm_start_test_setup(p, z0_c);
+    memset(g_stub_zone_monitor_only, 0, sizeof(g_stub_zone_monitor_only));
+    g_stub_zone_monitor_only[0] = true;
+    g_stub_max_temp_c[1] = 1300.0f;
+    g_stub_control_mode[1] = ZONE_CONTROL_MODE_PID;
+    g_stub_thermo_mask[1] = 0x02;
+    g_stub_max_ramp_c_per_hr[1] = 500.0f;
+    set_test_thermo_reading(1, z1_c);
+}
+
+static void test_monitor_only_zone_does_not_drive_run_start_baseline(void)
+{
+    TEST_SECTION("run-start baseline -- a monitor-only lowest zone must not seed target_c (uses the first driven zone)");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(900.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(1000.0f, 100.0f, 10);
+
+    monitor_baseline_setup(&p, 400.0f, 50.0f);
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "a mask with one monitor-only and one PID zone must start");
+    TEST_CHECK(fabsf(s_exec.target_c - 50.0f) < 0.01f,
+               "target_c must seed from the driven zone (50C), not the monitor-only zone 0 (400C)");
+    profile_executor_halt();
+    g_stub_zone_monitor_only[0] = false;
+}
+
+static void test_monitor_only_zone_does_not_drive_warm_start_pick(void)
+{
+    TEST_SECTION("warm-start -- a cold monitor-only zone must not hold the 'coolest zone' pick down");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    monitor_baseline_setup(&p, 20.0f, 300.0f);
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok, "the run must start");
+    TEST_CHECK(s_exec.warm_started,
+               "the driven zone is at 300C so the run must warm-start; the cold monitor-only zone must not veto it");
+    TEST_CHECK(fabsf(s_exec.target_c - 300.0f) < 0.01f, "entry target is the driven zone's 300C");
+    profile_executor_halt();
+    g_stub_zone_monitor_only[0] = false;
+}
+
+static void test_monitor_only_all_zones_start_refused(void)
+{
+    TEST_SECTION("run start -- a mask holding only monitor-only zones is refused (fail closed, no baseline)");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 1;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 10);
+    monitor_baseline_setup(&p, 50.0f, 50.0f);
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "nothing in the mask is driven: the start must be refused");
+    g_stub_zone_monitor_only[0] = false;
+}
+
 static void test_monitor_only_zone_tick_wiring(void)
 {
     TEST_SECTION("monitor-only zone (relay converted to an aux) through the real executor tick: no PID "
@@ -10517,6 +10589,9 @@ static void run_test_aux_wp3(void)
     test_aux_status_reports_claimed_aux();
     test_aux_off_pending_retried_by_task_loop();
     test_monitor_only_zone_tick_wiring();
+    test_monitor_only_zone_does_not_drive_run_start_baseline();
+    test_monitor_only_zone_does_not_drive_warm_start_pick();
+    test_monitor_only_all_zones_start_refused();
 }
 
 static void run_test_on_off_actuation(void)
