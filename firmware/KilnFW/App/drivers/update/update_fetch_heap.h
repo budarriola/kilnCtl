@@ -3,24 +3,40 @@
 // two live numbers (heap_caps_get_free_size / heap_caps_get_largest_free_block, MALLOC_CAP_INTERNAL).
 //
 // Owner floor: heap_internal min_free >= 8192 B. A start is admitted only when the CURRENT free
-// internal heap covers floor + worst measured fetch draw + slack, so the low-water mark cannot
-// dip under the floor, AND the largest free block can hold the biggest single internal
-// allocation (the 4 KB update_fetch_wr stack plus its TCB, the 2 KB request buffer).
+// internal heap covers floor + estimated worst fetch draw + slack, so that the fetch's own draw
+// should not take the low-water mark under the floor (see "Limits" below: not a guarantee), AND
+// the largest free block can hold the biggest single internal allocation (the 4 KB
+// update_fetch_wr stack plus its TCB, the 2 KB client buffers).
 //
 // Derivation (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 14, WP8 heap budget):
 //   floor                                 8192 B
-//   worst-case fetch draw, option D      16500 B   (13.5-16.5 KB measured/estimated: TLS residual
-//                                                   8-11 KB, writer stack 4.5 KB, 2 KB tx buffer;
-//                                                   mbedTLS buffers are PSRAM, so not counted)
+//   worst-case fetch draw, option D      16500 B   (about 16.5 KB estimated: WP7 bench handshake
+//                                                   draw 11044 B, pre_init 31683 -> sampled_min
+//                                                   20639, measured with a 2 KB rx and 1 KB tx
+//                                                   client buffer; +1024 B for the 2 KB tx buffer
+//                                                   here; plus the 4096 B writer stack with
+//                                                   TCB/heap overhead, about 4.5 KB; mbedTLS
+//                                                   buffers are PSRAM, so not counted. One hop,
+//                                                   releases/latest only, never the asset hop)
 //   slack, concurrent httpd / login KDF   3980 B
 //   -> FETCH_HEAP_PRECHECK_MIN           28672 B   (28 KB)
 // The slack is deliberately NOT larger: the board idles at 29647-31123 B free
-// (logs/sk04_sampling/2026-10-06.tsv, 30 samples), so anything above ~29.6 KB would refuse on an
-// idle board. At the idle minimum the fetch still ends with 29647 - 16500 = 13147 B headroom
-// above the low-water mark's 8192 B floor even before slack.
+// (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
+// idle board. At the idle minimum the fetch's own estimated draw ends at 29647 - 16500 = 13147 B,
+// 4955 B above the 8192 B floor.
 // Largest block at idle is 9728 B (same log), so the block floor must sit below that. The biggest
 // single internal allocation is the 4096 B update_fetch_wr stack (+ heap overhead); the 2 KB
-// request buffer and TLS pieces are smaller and separate. 6144 B = 1.5x the stack, passes at idle.
+// client buffers and TLS pieces are smaller and separate. 6144 B = 1.5x the stack, passes at idle.
+//
+// Limits (review 2026-10-07). This is an admission check, not a guarantee of the floor:
+//  - It would also have admitted the 258b80d4 bench run that dipped to min_free 8295 B if that run
+//    started near idle (31123 >= 28672). From an idle start that dip is a draw of up to about
+//    22.8 KB, some 6 KB over the 16500 B budget and unexplained; the run did not record current
+//    free before the job, so the start level is unknown. Do not read this rule as the fix for it.
+//  - The numbers are a snapshot (TOCTOU): nothing is reserved between admission and the TLS
+//    handshake, and the mid-body abort only runs between reads. The board's own transients are
+//    larger than the slack (idle low-water 16555 B against idle free 31123 B, about 14.5 KB).
+// WP8 gate (b) must log current free immediately before the job and min_free after it.
 #ifndef KILNCTL_UPDATE_FETCH_HEAP_H
 #define KILNCTL_UPDATE_FETCH_HEAP_H
 
