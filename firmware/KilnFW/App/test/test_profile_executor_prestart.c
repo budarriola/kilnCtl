@@ -10732,6 +10732,94 @@ static void test_on_off_zone_does_not_drive_warm_start_pick(void)
     g_stub_zone_is_on_off[0] = false;
 }
 
+/* MIN_OFF AT RUN START: a relay that is already OFF at run start and has had no
+ * on-period this run must turn ON at tick 1 for an immediately-true rule, and
+ * min_on / min_off must still be honoured after a real transition. */
+typedef struct {
+    bool first_tick_on;
+    int ticks_on_before_off;  /* ticks the relay stayed ON after the rule went false */
+    int ticks_off_before_on;  /* ticks it stayed OFF after the rule went true again */
+} on_off_hold_result_t;
+
+static on_off_hold_result_t on_off_hold_sequence(on_off_trigger_state_t *st, bool *actuated_on, float *held_s)
+{
+    on_off_hold_result_t res = {0};
+    on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
+    oin.min_on_s = 5;
+    oin.min_off_s = 7;
+    oin.dt_s = 1.0f;
+    on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(st, actuated_on, held_s, &oin, false, 0, 0);
+    res.first_tick_on = r.actuated_on;
+    /* rule goes false (invert): ON must persist for the rest of min_on_s */
+    oin.rule.invert = true;
+    for (int i = 1; i <= 40; i++) {
+        r = profile_executor_on_off_zone_tick(st, actuated_on, held_s, &oin, false, 0, 0);
+        if (!r.actuated_on) break;
+        res.ticks_on_before_off = i;
+    }
+    /* rule true again: OFF must persist for min_off_s after the REAL transition */
+    oin.rule.invert = false;
+    for (int i = 1; i <= 40; i++) {
+        r = profile_executor_on_off_zone_tick(st, actuated_on, held_s, &oin, false, 0, 0);
+        if (r.actuated_on) break;
+        res.ticks_off_before_on = i;
+    }
+    return res;
+}
+
+static void test_on_off_min_off_not_applied_before_first_on_zone(void)
+{
+    TEST_SECTION("on/off zone: an immediately-true rule turns ON at tick 1; min_on/min_off still hold after a real transition");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x03;
+    p.segment_count = 2;
+    p.segments[0] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[1] = zone_ramp_seg(600.0f, 100.0f, 10);
+    p.on_off_rule_count = 1;
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_NONE;
+    on_off_baseline_setup(&p, 20.0f, 300.0f);
+    char err[128] = {0};
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run with an ON_OFF zone 0 starts");
+    zone_runtime_t *z = &s_exec.zones[0];
+    on_off_hold_result_t res =
+        on_off_hold_sequence(&z->on_off_trigger_state, &z->on_off_actuated_on, &z->on_off_actuated_held_s);
+    TEST_CHECK(res.first_tick_on, "zone: min_off_s=7 does not delay the first ON of the run (ON at tick 1)");
+    TEST_CHECK(res.ticks_on_before_off >= 4 && res.ticks_on_before_off <= 5,
+               "zone: min_on_s=5 still holds the relay ON after it turned on");
+    TEST_CHECK(res.ticks_off_before_on >= 6 && res.ticks_off_before_on <= 7,
+               "zone: min_off_s=7 still holds the relay OFF after a real ON-to-OFF transition");
+    profile_executor_halt();
+    g_stub_zone_is_on_off[0] = false;
+}
+
+static void test_on_off_min_off_not_applied_before_first_on_aux(void)
+{
+    TEST_SECTION("aux: an immediately-true rule turns ON at tick 1; min_on/min_off still hold after a real transition");
+    char err[128] = {0};
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    g_stub_aux[0].min_on_s = 30;
+    g_stub_aux[0].min_off_s = 30;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run starts");
+    aux_test_tick(1.0f);
+    TEST_CHECK(aux_test_wrote(0x01, 0x01), "aux relay 1 ON at the first tick despite min_off_s=30");
+    profile_executor_halt();
+
+    /* The shared decide + gate path the aux tick runs, with the aux reset values. */
+    on_off_trigger_state_t st;
+    on_off_trigger_state_reset(&st);
+    bool act = false;
+    float held = ON_OFF_HOLD_SETTLED_S;
+    on_off_hold_result_t res = on_off_hold_sequence(&st, &act, &held);
+    TEST_CHECK(res.first_tick_on, "aux reset values: ON at tick 1");
+    TEST_CHECK(res.ticks_on_before_off >= 4 && res.ticks_on_before_off <= 5, "aux reset values: min_on_s still holds");
+    TEST_CHECK(res.ticks_off_before_on >= 6 && res.ticks_off_before_on <= 7, "aux reset values: min_off_s still holds");
+}
+
 static void test_monitor_only_all_zones_start_refused(void)
 {
     TEST_SECTION("run start -- a mask holding only monitor-only zones is refused (fail closed, no baseline)");
@@ -10859,6 +10947,8 @@ static void run_test_aux_wp3(void)
     test_zone_drives_run_predicate();
     test_on_off_zone_does_not_drive_run_start_baseline();
     test_on_off_zone_does_not_drive_warm_start_pick();
+    test_on_off_min_off_not_applied_before_first_on_zone();
+    test_on_off_min_off_not_applied_before_first_on_aux();
     test_monitor_only_all_zones_start_refused();
     test_monitor_only_plus_off_zone_start_refused_naming_both();
 }

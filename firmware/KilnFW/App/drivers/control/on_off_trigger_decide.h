@@ -162,9 +162,23 @@ typedef struct {
     bool    have_last_segment_index; /* false until the first tick ever seen */
 } on_off_trigger_state_t;
 
+// Value every hold accumulator (decide-state held_s, the actuation gate's
+// held_s) starts a run with. The min_on/min_off hold exists to stop a relay
+// CHATTERING between two transitions; a relay that has not yet had a
+// transition this run has nothing to chatter against, so at run start (and
+// at an aux/zone re-arm) the "current state" -- OFF -- counts as already held
+// long enough. Larger than any uint16_t min_on_s/min_off_s. Starting from 0
+// instead made a rule that was true from segment start wait a whole
+// min_off_s before its first ON (bench, bf9ddea2: relay 4 ON 17-44 s in).
+// min_on_s is unaffected: the first ON sets held_s to dt and the hold
+// then applies in full.
+#define ON_OFF_HOLD_SETTLED_S 65536.0f
+
 // Resets a state to its start-of-run value: quasi_dwell false, both timers
 // zero, commanded_on false (fail-safe-shaped: a zone that has never ticked
-// has never been commanded on), held_s zero, segment tracking cleared. Call
+// has never been commanded on), held_s ON_OFF_HOLD_SETTLED_S (OFF counts as
+// already held, so min_off_s never delays a run's first ON), segment tracking
+// cleared. Call
 // at profile_executor_run() (a fresh firing) and at resume-after-power-cycle
 // (plan sec 5: "Resume starts every on/off device in its fail-safe state and
 // quasi_dwell = false") -- never merely on a segment change, which is

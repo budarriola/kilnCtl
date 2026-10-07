@@ -503,7 +503,7 @@ static void aux_reset_runtime(uint8_t aux_idx)
 {
     on_off_trigger_state_reset(&s_exec.aux[aux_idx].trigger);
     s_exec.aux[aux_idx].actuated_on = false;
-    s_exec.aux[aux_idx].held_s = 0.0f;
+    s_exec.aux[aux_idx].held_s = ON_OFF_HOLD_SETTLED_S;
     s_exec.aux[aux_idx].commanded_on = false;
     s_exec.aux[aux_idx].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
 }

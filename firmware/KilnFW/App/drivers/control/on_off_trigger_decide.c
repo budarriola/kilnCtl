@@ -6,7 +6,7 @@ void on_off_trigger_state_reset(on_off_trigger_state_t *state)
     state->lock_true_s = 0.0f;
     state->lock_false_s = 0.0f;
     state->commanded_on = false;      /* fail-safe-shaped: never yet commanded */
-    state->held_s = 0.0f;
+    state->held_s = ON_OFF_HOLD_SETTLED_S; /* see the macro: no prior on-period to chatter against */
     state->last_segment_index = 0;
     state->have_last_segment_index = false;
 }

@@ -695,7 +695,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
         on_off_trigger_state_reset(&s_exec.aux[ai].trigger);
         s_exec.aux[ai].actuated_on = false;
-        s_exec.aux[ai].held_s = 0.0f;
+        s_exec.aux[ai].held_s = ON_OFF_HOLD_SETTLED_S;
         s_exec.aux[ai].commanded_on = false;
     }
     /* Same "starts owing nothing" reasoning as claimed_relay_mask just above,
@@ -1085,9 +1085,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * a second call site to keep in sync. */
         on_off_trigger_state_reset(&z->on_off_trigger_state);
         /* Actuation-layer hold state (plan step 8) mirrors the same
-         * fail-safe-shaped reset: never actuated, no held time. */
+         * fail-safe-shaped reset: never actuated, and OFF counts as already
+         * held long enough (ON_OFF_HOLD_SETTLED_S) so min_off_s does not delay
+         * the first ON of a run. */
         z->on_off_actuated_on = false;
-        z->on_off_actuated_held_s = 0.0f;
+        z->on_off_actuated_held_s = ON_OFF_HOLD_SETTLED_S;
         /* HP-02 starvation reporting starts from zero every run/resume. */
         z->relay_starved_s = 0.0f;
         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_NONE;

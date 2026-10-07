@@ -112,17 +112,14 @@ void run_test_on_off_trigger_decide(void)
         in.min_off_s = 30;
         in.rule.temp_cmp = ON_OFF_TEMP_CMP_NONE; /* tautology -> ON while enabled */
 
-        /* Starts OFF (fresh reset). held_s starts at 0, so ON is blocked
-         * until min_off_s has elapsed even though the rule wants ON from
-         * tick 1 -- documented in on_off_trigger_decide.c's comment. */
+        /* Starts OFF (fresh reset) with no prior on-period, so there is
+         * nothing to chatter against: ON at tick 1 even though min_off_s=30
+         * (ON_OFF_HOLD_SETTLED_S). */
         bool on = on_off_trigger_decide(&st, &in);
-        TEST_CHECK(!on, "fresh zone: ON is held off until min_off_s elapses");
-        on = tick_n(&st, &in, 29); /* held_s now 30 but the CHECK that ran this tick still saw 29 */
-        TEST_CHECK(!on, "still blocked one tick before min_off_s");
-        on = on_off_trigger_decide(&st, &in); /* tick 30 */
-        TEST_CHECK(on, "unblocks exactly once held_s reaches min_off_s");
+        TEST_CHECK(on, "fresh zone: an immediately-true rule turns ON at tick 1, min_off_s not applied before the first ON");
 
-        /* Now flip the rule to OFF and prove min_on_s blocks the reverse. */
+        /* min_on_s applies in full from that first ON: flip the rule to OFF
+         * and prove it blocks the reverse until 30 s have been held. */
         in.rule.enable = false; /* precedence level 6: no rule -> OFF */
         on = on_off_trigger_decide(&st, &in);
         TEST_CHECK(on, "min_on_s hold blocks the flip to OFF on the very next tick");
@@ -130,6 +127,15 @@ void run_test_on_off_trigger_decide(void)
         TEST_CHECK(on, "still held ON one tick before min_on_s elapses");
         on = on_off_trigger_decide(&st, &in);
         TEST_CHECK(!on, "flips to OFF exactly once held_s reaches min_on_s");
+
+        /* min_off_s applies in full after that REAL ON-to-OFF transition. */
+        in.rule.enable = true;
+        on = on_off_trigger_decide(&st, &in);
+        TEST_CHECK(!on, "min_off_s hold blocks the flip back to ON on the very next tick");
+        on = tick_n(&st, &in, 28);
+        TEST_CHECK(!on, "still held OFF one tick before min_off_s elapses");
+        on = on_off_trigger_decide(&st, &in);
+        TEST_CHECK(on, "flips back to ON exactly once held_s reaches min_off_s");
     }
 
     /* --- Level 5: all four axes ANDed, each axis alone. ------------------- */
