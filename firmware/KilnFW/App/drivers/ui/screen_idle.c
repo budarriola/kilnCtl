@@ -77,7 +77,7 @@ static uint32_t screen_idle_now_ms(void)
 /* THE single call site for display_power_policy_step() -- both the poll
  * task's idle-timeout tick and a touch edge (screen_idle_touch_swallow())
  * fund it through here so the edge-tracked inputs (error_prev_active,
- * touch_held/touch_held_swallow) are never computed two different ways.
+ * touch_gate) are never computed two different ways.
  * MUST be called with idle->lock already held; never takes/releases it
  * itself (same "caller's discipline" convention profile_executor_wd_
  * decide()'s doc comment describes for its own pure-step neighbor). Makes
@@ -374,10 +374,10 @@ esp_err_t screen_idle_inject_touch(screen_idle_t *idle, uint16_t x, uint16_t y, 
     // SEPARATE call (lvgl_port_inject_touch(), read back by touch_read_cb(),
     // which is the call site that owns the real swallow decision -- see
     // that function's own screen_idle_touch_swallow() call). Both paths
-    // share the one edge-tracked state in `idle` (touch_held et al.), so
+    // share the one edge-tracked state in `idle` (touch_gate), so
     // whichever of the two calls observes a press transition first computes
     // the edge; the other lands as a harmless repeat. See screen_idle.h's
-    // touch_held field comment.
+    // touch_gate field comment.
     bool swallow_unused;
     return screen_idle_touch_swallow(idle, x, y, pressed, &swallow_unused);
 }
@@ -398,7 +398,7 @@ esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y,
         // is evaluated as a fresh edge. Never itself swallowed (there is
         // nothing new to decide) -- if the press that is now releasing was
         // swallowed, the caller was already reporting RELEASED to LVGL for
-        // every poll of it (see screen_idle.h's touch_held comment), so
+        // every poll of it (see screen_idle.h's touch_gate comment), so
         // this changes nothing observable, only resets bookkeeping.
         display_power_touch_gate_release(&idle->touch_gate, screen_idle_now_ms());
         screen_idle_unlock(idle);
