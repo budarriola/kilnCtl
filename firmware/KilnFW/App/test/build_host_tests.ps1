@@ -502,29 +502,42 @@ try {
     $script:buildFailures = @()
     $script:failedExes = @()
 
-    function Invoke-HostTestExe {
-        param(
-            [Parameter(Mandatory)][string]$Name,
-            [Parameter(Mandatory)][string]$ExePath,
-            [Parameter(Mandatory)][string]$BuildCmd
-        )
-        if (Test-Path $ExePath) {
-            Remove-Item -Force $ExePath
+    # Parallel compile, serial run. KILNCTL_HOST_BUILD_JOBS (default 4; 1 = the
+    # old fully serial behaviour) bounds how many compiles run at once. Each
+    # compile is a child powershell process (host_build_worker.ps1) taking ONE
+    # heavy gate slot for its single cl invocation. Test RUNS stay serial, in
+    # original order, because host tests create fixed-name scratch dirs
+    # (cfg_fs_test_*, log_store_test_*) under the shared CWD. Every item's
+    # stdout/stderr is captured to files and printed grouped, in order.
+    # Items whose /Fo is the shared $outDir get a private obj dir so
+    # concurrent cl runs never write the same .obj.
+    $script:hostJobs = if ($env:KILNCTL_HOST_BUILD_JOBS -match '^\d+$' -and [int]$env:KILNCTL_HOST_BUILD_JOBS -ge 1) { [int]$env:KILNCTL_HOST_BUILD_JOBS } else { 4 }
+    $script:hostQueue = New-Object System.Collections.ArrayList
+    $script:hostWorker = Join-Path $testDir "host_build_worker.ps1"
+    $script:hostPsExe = (Get-Process -Id $PID).Path
+    $script:hostScratchCwd = Join-Path $outDir "host_test_scratch"
+
+    function Start-HostQueueItems {
+        $running = @($script:hostQueue | Where-Object { $_.Proc -and -not $_.Proc.HasExited }).Count
+        foreach ($it in $script:hostQueue) {
+            if ($running -ge $script:hostJobs) { break }
+            if ($it.Proc) { continue }
+            $it.Proc = Start-Process -FilePath $script:hostPsExe -PassThru -WindowStyle Hidden `
+                -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$($script:hostWorker)`"", "-CmdFile", "`"$($it.CmdFile)`"", "-Label", "kilnfw_host_tests") `
+                -RedirectStandardOutput $it.OutFile -RedirectStandardError $it.ErrFile
+            [void]$it.Proc.Handle   # cache the handle so ExitCode is readable after exit (PS 5.1 -PassThru quirk)
+            $running++
         }
-        Invoke-KilnGatedCmd -Label "kilnfw_host_tests" -Command $BuildCmd
-        $buildExit = $LASTEXITCODE
-        if ($buildExit -ne 0 -or -not (Test-Path $ExePath)) {
-            Write-Host "BUILD FAILED: $Name"
-            $script:buildFailures += $Name
-            return
-        }
+    }
+
+    function Invoke-HostTestRun {
+        param([string]$Name, [string]$ExePath)
         $script:builtExes += $Name
         # Run with CWD = a scratch dir under $outDir: host tests build cfg_fs_test_*/
         # log_store_test_*/ scratch dirs relative to CWD, which used to litter the repo
         # root. $outDir is gitignored or a temp dir, so nothing reaches the tree.
-        $scratchCwd = Join-Path $outDir "host_test_scratch"
-        New-Item -ItemType Directory -Force -Path $scratchCwd | Out-Null
-        Push-Location $scratchCwd
+        New-Item -ItemType Directory -Force -Path $script:hostScratchCwd | Out-Null
+        Push-Location $script:hostScratchCwd
         try {
             & $ExePath
             $exeExit = $LASTEXITCODE
@@ -534,6 +547,65 @@ try {
         if ($exeExit -ne 0) {
             $script:failedExes += $Name
         }
+    }
+
+    function Invoke-HostTestExe {
+        param(
+            [Parameter(Mandatory)][string]$Name,
+            [Parameter(Mandatory)][string]$ExePath,
+            [Parameter(Mandatory)][string]$BuildCmd
+        )
+        if (Test-Path $ExePath) {
+            Remove-Item -Force $ExePath
+        }
+        if ($script:hostJobs -le 1) {
+            Invoke-KilnGatedCmd -Label "kilnfw_host_tests" -Command $BuildCmd
+            $buildExit = $LASTEXITCODE
+            if ($buildExit -ne 0 -or -not (Test-Path $ExePath)) {
+                Write-Host "BUILD FAILED: $Name"
+                $script:buildFailures += $Name
+                return
+            }
+            Invoke-HostTestRun -Name $Name -ExePath $ExePath
+            return
+        }
+        $safe = [regex]::Replace($Name, '[^A-Za-z0-9]+', '_')
+        $objDir = Join-Path $outDir ("obj_" + $safe)
+        New-Item -ItemType Directory -Force -Path $objDir | Out-Null
+        $shared = '/Fo:"' + $outDir + '\\"'
+        $private = '/Fo:"' + $objDir + '\\"'
+        $cmdText = $BuildCmd.Replace($shared, $private)
+        $cmdFile = Join-Path $outDir ("job_" + $safe + ".cmd.txt")
+        [System.IO.File]::WriteAllText($cmdFile, $cmdText)
+        [void]$script:hostQueue.Add([PSCustomObject]@{
+            Name = $Name; Exe = $ExePath; CmdFile = $cmdFile; Proc = $null
+            OutFile = (Join-Path $outDir ("job_" + $safe + ".out.txt"))
+            ErrFile = (Join-Path $outDir ("job_" + $safe + ".err.txt"))
+        })
+        Start-HostQueueItems
+    }
+
+    # Wait for every queued compile in original order, print its captured
+    # output grouped, then run it (serially) if it built.
+    function Complete-HostTestQueue {
+        foreach ($it in @($script:hostQueue)) {
+            while (-not $it.Proc) { Start-HostQueueItems; if (-not $it.Proc) { Start-Sleep -Milliseconds 200 } }
+            while (-not $it.Proc.HasExited) { Start-Sleep -Milliseconds 200; Start-HostQueueItems }
+            $it.Proc.WaitForExit()
+            $code = $it.Proc.ExitCode
+            Write-Host "---- build output: $($it.Name) ----"
+            foreach ($f in @($it.OutFile, $it.ErrFile)) {
+                if (Test-Path $f) { Get-Content -LiteralPath $f | ForEach-Object { Write-Host $_ } }
+            }
+            Start-HostQueueItems
+            if ($code -ne 0 -or -not (Test-Path $it.Exe)) {
+                Write-Host "BUILD FAILED: $($it.Name)"
+                $script:buildFailures += $it.Name
+                continue
+            }
+            Invoke-HostTestRun -Name $it.Name -ExePath $it.Exe
+        }
+        $script:hostQueue.Clear()
     }
 
     Invoke-HostTestExe -Name "main" -ExePath $exe -BuildCmd $cmd
@@ -2462,6 +2534,8 @@ try {
 
     Invoke-HostTestExe -Name "kiln_cfg_swap_worker" -ExePath $exeKcsw -BuildCmd $cmdKcsw
 
+    Complete-HostTestQueue
+
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
     # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
@@ -3021,6 +3095,7 @@ try {
     # call (real profiles_http.c store feeding the real profile_executor_run()).
     # 68 -> 69: added test_recovery_switch.c's own Invoke-HostTestExe
     # (recovery_switch_at_boot_threshold() restores the boot target on SET_FAILED).
+    Complete-HostTestQueue
     $totalExpected = 69
     Write-Host ""
     if ($script:simCredibilityGateLine) {
