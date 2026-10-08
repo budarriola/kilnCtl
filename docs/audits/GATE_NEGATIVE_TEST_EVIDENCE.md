@@ -23,7 +23,7 @@ Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `chec
 
 ## Counts
 
-Gate rows: 167.
+Gate rows: 168.
 
 | Status | Rows |
 |---|---|
@@ -31,7 +31,7 @@ Gate rows: 167.
 | PARTIAL | 1 |
 | REVIEWED, NOT MUTATED | 9 |
 | NOT AUDITED | 82 |
-| NOT AUDITED (pass 12 pending) | 16 |
+| NOT AUDITED (pass 12 pending) | 17 |
 
 ## Table
 
@@ -206,3 +206,4 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/PcTools/check_zones_per_zone_field_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/PcTools/selfcheck.py` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/PcTools/tests/check_web_commission_cdp_driver.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |

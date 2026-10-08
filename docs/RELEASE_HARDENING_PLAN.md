@@ -276,7 +276,7 @@ check that the release decision will cite:
 the host-test suites, and the ones that matter for release are a subset —
 scope it to the safety, config, stack-budget and build gates first.
 
-**Step 4 status (2026-10-07): table delivered.** `docs/audits/GATE_NEGATIVE_TEST_EVIDENCE.md` has one row per discovered check (167): 59 NEGATIVE-TESTED, 1 PARTIAL, 9 REVIEWED NOT MUTATED, 82 NOT AUDITED, 16 NOT AUDITED (pass 12 pending). `tools/check_gate_negative_test_table.ps1` fails when a discovered check has no row. The remaining non-tested rows are the open audit backlog.
+**Step 4 status (2026-10-07): table delivered.** `docs/audits/GATE_NEGATIVE_TEST_EVIDENCE.md` has one row per discovered check (168): 59 NEGATIVE-TESTED, 1 PARTIAL, 9 REVIEWED NOT MUTATED, 82 NOT AUDITED, 17 NOT AUDITED (pass 12 pending). `tools/check_gate_negative_test_table.ps1` fails when a discovered check has no row. The remaining non-tested rows are the open audit backlog.
 
 **Progress.** Five passes of negative-testing have run so far:
 `docs/audits/release_gate_vacuity_audit_2026-09-16.md` (first slice),
