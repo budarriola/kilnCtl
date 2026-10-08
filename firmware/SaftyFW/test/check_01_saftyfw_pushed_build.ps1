@@ -41,6 +41,7 @@ $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_gate.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\tools\pushed_build_stamp.ps1")
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 
@@ -76,6 +77,15 @@ if (-not $haveToolchainOnPath -and -not $env:PICO_TOOLCHAIN_PATH -and -not $have
     exit 3
 }
 
+# RESULT REUSE (2026-10-07, tools/pushed_build_stamp.ps1): see the KilnFW sibling.
+Write-Host "origin/main is $originSha"
+$pushedSlot = Enter-PushedBuildSlot -Name "saftyfw" -Sha $originSha
+if ($pushedSlot.Reused) {
+    Write-PushedBuildReused -Stamp $pushedSlot.Stamp -Sha $originSha -What "SaftyFW"
+    exit 0
+}
+Write-Host "No reusable PASS stamp for $originSha -- building (this run owns the build)."
+try {
 if (-not (Test-Path $WorktreePath)) {
     Write-Host "Setting up persistent origin/main build worktree at $WorktreePath (first run) ..."
     & git -C $repoRoot worktree add --detach $WorktreePath $originSha 2>&1 | Write-Host
@@ -165,6 +175,11 @@ if (-not (Test-Path $elf)) {
     Fail "ninja reported success (exit 0) but $elf does not exist -- refusing to report PASS without a real build artifact."
 }
 
+Write-PushedBuildStamp -Path (Get-PushedBuildStampPath -Name "saftyfw") -Sha $originSha -Detail "SaftyFW.elf $((Get-Item $elf).Length) bytes"
+} finally {
+    Exit-PushedBuildSlot -Slot $pushedSlot
+}
+
 Write-Host ""
-Write-Host "PASS: origin/main (commit $originSha) builds SaftyFW target cleanly." -ForegroundColor Green
+Write-Host "PASS: origin/main (commit $originSha) builds SaftyFW target cleanly. [built]" -ForegroundColor Green
 exit 0
