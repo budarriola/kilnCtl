@@ -1,158 +1,24 @@
 # `iter_tune` redesign — tracking-quality-driven iterative tuning
 
-> **Status update, 2026-09-16: step 6 (Monte-Carlo acceptance, sec 7 A1-A8)
-> built and run; the plan STOPS HERE per its own sec 8 rule ("any miss ends
-> the plan at this line with a report, not a workaround").** Verified against
-> code, not this doc's own prior headers (steps 4/5 below were previously
-> claimed at different states than the code actually showed):
+> **Status (verified against code and audits, 2026-10-07):**
 >
-> - **Step 4** (null-experiment noise-floor artifact) is CLOSED, `602a07a8`.
-> - **Step 5** (`iter_tune.c` rewrite against the new comparator) is CLOSED,
->   `8f80a4de` plus two defect-fix passes `249ce287`/`ce55440d`.
-> - **Step 6** (Monte-Carlo run of sec 7's A1-A8): A2, A5, A6 PASS (0% worse,
->   100% terminate within budget, 0 cage violations, `check_sim_iter_tune_bars.ps1`).
->   A1 PASSES only against a deliberately pinned known-failure ceiling
->   (24/660, 3.64%, `e3458846`/`docs/audits/a1_false_accept_root_cause_2026-09-14.md`)
->   -- an honest, previously-investigated and individually-defended property
->   of this plant/scoring design, not the sec 7 2.0% design target. A3/A4
->   were checked and found **structurally unreachable** on this plant model:
->   `sim_iter_tune.c`'s own Part 0 oracle grid shows the whole reachable
->   tracking-error spread from moving kp/ki is smaller than the owner's
->   0.5 C floor at every start point tried, so "refuses every trial" is
->   correct behaviour here, not an algorithm gap -- this is a fact about the
->   model, already noted in the harness's own comments, not new this pass.
->   **A8 (profile independence) was newly built this pass (`sim_iter_tune.c`
->   Part 4, `g_profile_b`) and genuinely FAILS**: re-running the A1
->   null-experiment procedure with baseline and trial firings on two
->   different profiles that still share all 6 segment classes (differing
->   only in per-segment dwell duration) measures 45/660 (6.82%) false
->   accepts, against a 38.4-count ceiling three sampling standard deviations
->   wide around A1's own pinned rate -- roughly double, and confirmed not to
->   be sampling noise (a sanity run with the two profiles made identical
->   reproduces 30/660, inside the same ceiling). **Only the A1-half of A8 was
->   built; the A2-half (never-worse re-measured across profiles) is NOT yet
->   built** -- it needs `tune_run()` itself to take a profile per firing,
->   which this pass does not touch. Per the plan's own rule this is where
->   the plan stops and reports, not where it is worked around: A8's bar is
->   deliberately kept OUT of `check_sim_iter_tune_bars.ps1`'s exit code (the
->   same informational, non-blocking treatment the sec 6.5 credibility gate
->   got below) so a genuine, freshly-discovered doubling of the false-accept
->   rate is not quietly pinned the way A1's already-litigated number was --
->   pinning THIS number would be exactly the "workaround" sec 8 forbids.
->
-> **Status update, 2026-09-16 (later pass): A8's A2-half (never-worse
-> re-measured across profiles) is now built and gated.** `tune_run()` was
-> extended to take a separate search profile and eval profile per call
-> (`sim_iter_tune.c`, new params on `tune_run`); Part 1 and Part 3 pass
-> `g_profile`/`g_profile` for both, unchanged from before. New **Part 5**
-> reuses Part 3's mismatched-plant ensemble (220 plants, 660 zone-runs) but
-> searches on `g_profile` and evaluates the final accept/reject cost on
-> `g_profile_b`, the same never-worse floor (>0.5 C) as A2 itself. Measured
-> result: **0 worse of 660 (0.00%), 2 better, 658 unchanged** -- a clean,
-> reproducible PASS well inside the <=1% bar, unlike the A1-half's genuine
-> 6.82% miss above. This bar (`"A8 A2-half bar: ..."`, `check_sim_iter_tune_bars.ps1`)
-> IS now gated into the script's exit code, since a genuine pass carries no
-> risk of pinning a workaround. Negative-tested: sabotaging the comparison
-> (`<=` to `>=`) reproducibly FAILs (exit 1); hand-restored and confirmed via
-> md5/git-hash-object against a pristine backup (not `git show`, CRLF); a
-> full clean rebuild afterward reproduces PASS/exit 0. (A side finding from
-> the sabotage run: the original label `"A8 bar (A2 half): ..."` did not
-> match the script's `"bar:.*-> FAIL"` summary regex, so a failing A2-half
-> would print FAIL and exit 1 but never appear in the human-readable failing-
-> bar list; renamed to `"A8 A2-half bar: ..."` to match the convention used
-> by every other bar and fix the summary.)
->
-> **Closed by owner decision: the A1-half of A8's cross-profile miss (45/660,
-> 6.82%, vs a 38.4-count ceiling) is accepted as a known gap, not made
-> green.** Do not re-dispatch work to close it. Both halves of A8 are now
-> settled: the A2-half closed on its own merits above, and the A1-half
-> closed by explicit owner acceptance of the gap rather than an algorithm
-> change.
->
-> **Status update, 2026-09-10 (later pass):** steps 1, 2, 3, 4, 5 and the
-> write-surface part of 7 are now IMPLEMENTED. The status paragraph that used
-> to stand here (dated 2026-09-09) said steps 3-4 and the sec 6.5 credibility
-> gate were not attempted and blocked on G1-G4 harness work that "does not
-> exist yet" — that is stale as of this pass and was corrected here rather
-> than left to mislead the next reader. What actually landed since:
->
-> - Steps 1, 2, 5: `control/firing_score.c`, `control/firing_compare.c` and a
->   rewritten `control/iter_tune.c` (`8f80a4de`, three defect fixes in
->   `249ce287`/`ce55440d`). Numbers and two design defects the simulation
->   found in the plan's own sec 4 step schedule are in
->   `docs/audits/iter_tune_redesign_sim_2026-09-09.md`.
-> - Step 7's write-surface guard: `check_iter_tune_write_surface.ps1`
->   (`f3fcd597`) is IMPLEMENTED and negative-tested — it fails if
->   `iter_tune.c`/`.h` ever calls a setter/persistence/hardware API directly,
->   and separately fails if any production file outside `test/` calls an
->   `iter_tune_*` function at all (today, none does).
-> - Step 3, the G1-G4 sim-harness gaps: all four are IMPLEMENTED in
->   `firmware/KilnFW/App/test/sim_plant.c`/`.h` (`e0d2e006`) —
->   `sim_plant_from_zone_cfg()`, the real `heater_output.c` PWM window via
->   linking (not reimplementation), relay actuation lag, and MAX31856
->   quantisation.
-> - The sec 6.5 credibility gate: IMPLEMENTED as
->   `firmware/KilnFW/App/test/sim_credibility_gate.c` (`225d4b91`), wired into
->   `build_host_tests.ps1` as an informational (non-blocking) step. It first
->   failed outright (ramp MAE 8-10 °C against a 3 °C bar) for a reason
->   diagnosed in `docs/audits/sim_credibility_gate_real_cause_2026-09-10.md`:
->   the simulator coupled zones by conservative *exchange* (`g·(T_j−T_i)`)
->   while the firmware's own `zone_coupling_solve.c` couples by additive
->   *source-gain* (`diag(k)+coupling_coeff`) — two different model classes
->   that agree only in differential mode, and the recorded dwell operating
->   point is almost pure common mode. `d63a5591` changed `sim_kiln_step()` to
->   the firmware's own model class. **Current state as of this pass (rebuilt
->   from HEAD, `logs/coupling/noise_floor_p7_run1.jsonl` /
->   `noise_floor_p7d_run1.jsonl`): ramp MAE now PASSES on 5 of 6 zone-runs**
->   (calibration 1.481/1.710/3.367 °C, hold-out 1.489/1.335/2.780 °C against a
->   3.0 °C bar — only calibration z2 misses, at 3.367), **dwell offset misses
->   on 5 of 6** (−2.1 to −4.8 °C against ±1.5, one hold-out z0 pass at −1.412),
->   dwell-entry-peak is mixed pass/fail per segment, and the noise-floor
->   spread check fails 4 of 6 keys (simulated spread pessimistic vs. 2×
->   `noise_floor.json`). (These ramp-MAE and dwell-offset numbers predate the
->   `69118a66` sim_plant dead-time cap fix — see the 2026-09-21 addendum atop
->   `docs/audits/credibility_gate_dwell_offset_2026-09-14.md` and
->   `docs/audits/credibility_gate_scalar_adoption_2026-09-14.md` for current
->   numbers; the gate's conclusion is unchanged.) **The gate's overall verdict
->   is still `GATE FAILS`**
->   — three of its four bars are open, most acutely dwell-entry peak, which
->   the audit doc's own sec 6 says is not yet demonstrated by any variant
->   tried. Per plan sec 6.5 this means: simulation results are materially
->   credible for *tracking-error* purposes (the ramp MAE bar, which is what
->   steps 1/2/5's own validation and A1-A8 depend on) but not yet for
->   dwell-entry overshoot specifically, and the plan does not proceed past
->   this gate to treat the simulator as evidence for anything dwell-entry-peak
->   related until that bar closes.
->
-> **Still NOT done as of this status block's original pass** (see the
-> 2026-09-10 status update below sec 9 for why): the noise-floor artifact
-> (Bar 2, sec 3.1/4), and shadow mode (step 8). **Superseded for step 7:**
-> persistence + HTTP surface landed (the "iter_tune: add persistence + HTTP surface (plan step 7)" commit, see row 7 below
-> for the current, fully-closed acceptance status). Shadow mode remains
-> blocked on net-new C engineering of the same "dedicated pass" size as
-> G1-G4 was, now compounded by the still-open dwell-entry-peak credibility
-> bar above. Nothing is wired into `profile_executor.c` and the module
-> proposes nothing on hardware.
->
-> **Regression found in this pass: `d63a5591`'s coupling-model fix moved A1's
-> false-accept rate off zero.** Re-running `sim_iter_tune.exe 220` (the exact
-> harness size behind the `docs/audits/iter_tune_redesign_sim_2026-09-09.md`
-> baseline) from `HEAD` gives **660 null comparisons: 24 ACCEPT (3.64 %),
-> 21 REJECT, 615 INSUFFICIENT** — up from the recorded baseline of
-> **0 ACCEPT (0.00 %)**. This is still under A1's 5 % hard-fail line but above
-> its 2 % target bar, so A1 now reads **FAIL** where it previously PASSed. Part
-> 1 (24 zone-runs: 0 improved, 24 unchanged, 0 regressed, 24/24 converged) and
-> Part 3 (A2/A5/A6, mismatched ensemble: 660 zone-runs, 0 worse, 0 cage
-> violations, all PASS) are unchanged in shape from the baseline. Nothing in
-> `iter_tune.c`, `firing_score.c` or `firing_compare.c` changed between the
-> baseline run and this one — the only relevant change on the path is
-> `sim_plant.c`'s coupling model class (additive source-gain, landed for the
-> sec 6.5 gate above). Not root-caused or fixed in this pass — flagged here
-> per the standing instruction that a rise in false accepts means something is
-> wrong, and left for the same dedicated pass as the other open items, since
-> diagnosing it properly means understanding how the new coupling model
-> changes the null experiment's own noise characteristics, not just the
-> comparator or `iter_tune.c`'s decision logic.
+> - Steps 1-7 are **closed** (sec 8's table has each commit and gate).
+> - Step 8 (shadow mode) is **wired and awaiting >= 5 real firings** on
+>   hardware before Bar 2 is decided.
+> - Step 9 (enable trials) is **pending owner trials**; nothing proposes
+>   gains on hardware today.
+> - Sec 6.5 credibility gate **still FAILS**, most acutely dwell-entry peak.
+>   Ramp MAE passes 5 of 6 zone-runs, so the simulator is credible for
+>   tracking error but not for dwell-entry overshoot. Current numbers:
+>   `docs/audits/credibility_gate_dwell_offset_2026-09-14.md` (2026-09-21
+>   addendum) and `docs/audits/credibility_gate_scalar_adoption_2026-09-14.md`.
+> - Step 6 (sec 7 A1-A8) ran 2026-09-16 and stopped at its own line. A2, A5,
+>   A6 pass; A1 passes only against a pinned known-failure ceiling (24/660,
+>   3.64 %, `docs/audits/a1_false_accept_root_cause_2026-09-14.md`); A3/A4
+>   are structurally unreachable on this plant model; A8's A2-half passes
+>   (0/660 worse, gated in `check_sim_iter_tune_bars.ps1`); A8's A1-half
+>   (45/660, 6.82 %) is **closed by owner acceptance of the gap**. Do not
+>   re-dispatch work to close it.
 >
 > **Owner decision, 2026-09-08:**
 > *keep `iter_tune`, but redesign it* — "design it better so it does not
