@@ -244,6 +244,20 @@ _TP = [
     ("TP-M01", "Full TOTP reset round trip, opt-in via env credentials"),
 ]
 
+#: Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md section 12, steps
+#: 1-7). Unit-tested against a fake board only -- see cases_aux.py. All
+#: writes are gated by KILNCTL_AUX_BENCH_CONFIRM=1; AX-T01/K01/T02 start a
+#: bench profile (heat); AX-T02 is operator-only (a Pico trip has no injector).
+_AX = [
+    ("AX-C01", "Configure relay 4 as an aux output, read-back"),
+    ("AX-C02", "Enabling aux on a zone-owned relay is refused (400)"),
+    ("AX-C03", "Zone relay_mask containing relay 4 is refused (400)"),
+    ("AX-T01", "Aux rule toggles relay 4 (io shadow), min on/off honoured"),
+    ("AX-K01", "Relay 4 follows its rule while PAUSED (K4 independence)"),
+    ("AX-T02", "A Pico trip drops relay 4"),
+    ("AX-R01", "Restore: relay 4 aux disabled, no BENCH_AUX_RULE slot left"),
+]
+
 for cid, desc in _ST:
     register(_c(cid, "ST", desc))
 for cid, desc in _FL:
@@ -301,6 +315,13 @@ for cid, desc in _SP:
     ))
 for cid, desc in _TP:
     register(_c(cid, "TP", desc))
+_AX_HEAT = ("AX-T01", "AX-K01", "AX-T02")
+for cid, desc in _AX:
+    register(_c(
+        cid, "AX", desc, heat=cid in _AX_HEAT, operator_only=(cid == "AX-T02"),
+        depends_on=None if cid in ("AX-C01", "AX-R01") else "AX-C01",
+        est_duration_s=150 if cid in _AX_HEAT else 5,
+        heat_skip_reason="allow_heat not set; AX-T01/K01/T02 start a bench profile" if cid in _AX_HEAT else ""))
 
 #: Fixed run-order ranks for `nightly`/`full` (plan §5.2): ST first, then
 #: FL (read-only), then the fixed SK-01/03/04 subset, then SP (read-only),
@@ -323,7 +344,7 @@ _ALWAYS_LAST = "WEB-SEC-05"
 #: stale KILNCTL_WEB_PASSWORD (cases_totp.py's module docstring). It sorts
 #: after every other case, heat included, but still before WEB-SEC-05,
 #: whose lockout would otherwise refuse TP-M01's own verifying login.
-_LATE_MUTATING = frozenset({"TP-M01"})
+_LATE_MUTATING = frozenset({"TP-M01", "AX-R01"})
 
 
 def _fixed_order(ids) -> List[str]:
@@ -420,6 +441,8 @@ SUITES["web"] = list(_WEB_IDS)
 SUITES["lcd"] = list(_LCD_IDS)
 SUITES["safety"] = [c for c in REGISTRY if c.startswith("SP-")]
 SUITES["totp"] = [c for c in REGISTRY if c.startswith("TP-")]
+#: Explicit order: configure, refusals, rule/pause, trip last, restore.
+SUITES["aux"] = ["AX-C01", "AX-C02", "AX-C03", "AX-T01", "AX-K01", "AX-T02", "AX-R01"]
 # nightly/full memberships per plan §5.1 -- wave 2 implements the harness
 # ordering for the full §5.1 nightly membership; some of these ids still
 # report NOT_RUN: not_implemented until the WEB/LCD/OTA case wave(s) land

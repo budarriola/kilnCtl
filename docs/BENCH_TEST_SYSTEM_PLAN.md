@@ -309,6 +309,20 @@ case in the same run.
 | TP-R03 | OPEN-tier check | `forgot`/`reset` sent with no session, fixed wrong code/token/password literals, reset never completed | neither route answers 401/403 (400 from reset is a PASS); unreachable or 404 on either is `INCONCLUSIVE` | 5 s | no |
 | TP-M01 | Full reset round trip | `KILNCTL_TOTP_CODE`/`KILNCTL_WEB_PASSWORD_NEW` (opt-in via env, SKIP if either is unset) → forgot → reset → login with the new password | forgot 202 + `reset_token`, reset 200, and a real login with the new password succeeds — a `{"ok": true}` reset response is never trusted alone | 10 s | no |
 
+### 3.11 Suite AX — spare-relay aux outputs
+
+`cases_aux.py`, unit-tested against a fake board only. Turns `docs/SPARE_RELAY_ONOFF_PLAN.md` section 12 steps 1-7 into cases (step 8 is this suite). Relay 4 only; everything is read via the relay shadow (`io_read`), which proves the ESP path, not the supply wiring; CT is N/A. Every case that writes SKIPs unless `KILNCTL_AUX_BENCH_CONFIRM=1` is set in the environment (the TP-M01 env opt-in convention), and the heat cases also need `allow_heat`. AX-C01 records the original relay 4 entry and `enabled_mask`; each heat case stops its own firing and deletes its `BENCH_AUX_RULE` slot, an unconfirmed teardown sets `_tainted` (later AX cases SKIP); AX-R01 sorts last (like TP-M01) and fails and taints if `enabled_mask` is not back to the recorded value. AX-T02 is operator-only (no trip injector exists; the operator causes the sanctioned bench trip, never the E-stop jumper) and clears only when `trip_mask == 1 << (trip_reason - 1)`.
+
+| id | case | steps | judged by | dur | heat |
+|---|---|---|---|---|---|
+| AX-C01 | Configure relay 4 as aux | `control_set_aux_output(4, True, tc_zone=0, confirm=True)`, read back `control_get_aux_outputs` | relay 4 ENABLED, tc_zone 0, not CONFLICTED | 5 s | no |
+| AX-C02 | Aux on a zone-owned relay refused | `control_set_aux_output(1, True, ...)` | refusal (HTTP 400 / zone relay_mask) and `enabled_mask` unchanged; an accepted write is undone and FAILs | 5 s | no |
+| AX-C03 | Zone relay_mask containing relay 4 refused | injected writer only (`ctx["aux_zone_mask_post_fn"]`, no narrow tool exists) | HTTP 400; SKIP without the writer | 5 s | no |
+| AX-T01 | Rule toggles relay 4 | `profile_save_bench_aux_rule` (ambient-relative), `profiles_start`, sample relay 4 shadow every 2 s | at least one ON sample; no ON/OFF run shorter than `min_on_s`/`min_off_s`; one transition only is stated, not hidden | 150 s | yes |
+| AX-K01 | K4 independence | rule held ON, `profiles_pause`, read shadow, resume | relay 4 still ON while PAUSED (else FAIL as a finding) | 150 s | yes |
+| AX-T02 | Trip drops relay 4 | rule held ON, operator causes the bench trip | relay 4 OFF, trip reason/mask consistent, cleared | 150 s | yes (operator) |
+| AX-R01 | Restore | delete stray slots, disable relay 4 if AX-C01 enabled it | `enabled_mask` equals the recorded original | 5 s | no |
+
 ## 4. Case counts
 
 | suite | cases | of which heat | of which operator-only / blocked |
@@ -323,7 +337,8 @@ case in the same run.
 | LCD | 26 | 4 (LCD-22, LCD-23, LCD-24, LCD-25) | LCD-20 only under OT-E11 |
 | SP | 11 | 1 (SP-09) | SP-08/09 operator; SP-10 INCONCLUSIVE by design |
 | TP | 4 | 0 | TP-M01 opt-in via env credentials |
-| **total** | **213** | **13 heat-originating** | |
+| AX | 7 | 3 | AX-T02 operator; all writes opt-in via `KILNCTL_AUX_BENCH_CONFIRM=1` |
+| **total** | **220** | **16 heat-originating** | |
 
 ## 5. Routine subsets, ordering, interdependence
 
