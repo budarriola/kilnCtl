@@ -35,6 +35,13 @@ if ($usable -lt 0) { $fail += "ota_http_esp.c no longer refuses (if (!ota_http_e
 if ($begin -lt 0) { $fail += "ota_http_esp.c: esp_ota_begin(target...) call not found -- has the handler moved?" }
 if ($usable -ge 0 -and $begin -ge 0 -and $usable -gt $begin) { $fail += "ota_http_esp.c: the running-partition check must come BEFORE esp_ota_begin()" }
 
+# The predicate itself: host test test_esp_target_usable_refuses_running_partition covers behaviour, but pin the
+# comparison in source too so neutering it fails this check directly (vacuity audit 2026-10-08).
+$util = Strip-Comments (Get-Content -Raw (Join-Path $dir "ota_http_util.c"))
+$ufn = [regex]::Match($util, "bool\s+ota_http_esp_target_usable\s*\([^)]*\)\s*\{(?<b>[^{}]*)\}")
+if (-not $ufn.Success) { $fail += "ota_http_util.c: ota_http_esp_target_usable() not found" }
+elseif ($ufn.Groups['b'].Value -notmatch "return\s+target\s*!=\s*NULL\s*&&\s*target\s*!=\s*running\s*;") { $fail += "ota_http_util.c: ota_http_esp_target_usable() must return 'target != NULL && target != running;'" }
+
 $specs = @(
     @{ File = "ota_http_esp.c";  Src = $esp;  Kind = "esp";  Do = "ota_esp_do_transfer";  Ret = "return !ok;";           Buf = "s_ota_esp_chunk" },
     @{ File = "ota_http_pico.c"; Src = $pico; Kind = "pico"; Do = "ota_pico_do_stage";    Ret = "return !started_relay;"; Buf = "s_ota_pico_chunk" }

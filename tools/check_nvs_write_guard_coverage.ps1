@@ -196,6 +196,10 @@ foreach ($name in $guardedFiles) {
             $bodyText = $bodyLines -join "`n"
             $writesNvs = [regex]::IsMatch($bodyText, $writePattern)
             $hasGuardCall = [regex]::IsMatch($bodyText, $guardCallPattern)
+            # Neutered guard: a constant-false short circuit before the call keeps the name present.
+            if ($hasGuardCall -and [regex]::IsMatch($bodyText, '(?:\b0|\bfalse|!\s*1)\s*&&\s*caller_stack_is_external\s*\(')) {
+                $failures += "$name : $funcName() (guard call short-circuited by a constant-false operand)"
+            }
             if ($writesNvs -and -not $hasGuardCall -and $funcName -ne "caller_stack_is_external") {
                 $failures += "$name : $funcName()"
             }
