@@ -103,13 +103,13 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_wire_protocol_fingerprint.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/test_check_config_migration_steps.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/test_check_hal_include_boundary.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/test_check_lcd_home_nav_gated.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/test_check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-08 | `return ($viaGate -and -not $direct)` -> `return $viaGate` in check_lcd_home_nav_gated.ps1 was MISSED (assertion 7 also removed the gated callback); added assertion 7b (gate kept + direct kiln_ui_show) | CAUGHT after fix (negtest -IncludeDirty); restored |
 | `firmware/KilnFW/App/test/test_check_route_tier_coverage.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/test_check_stop_path_requires_pin.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/test_check_ui_responsive_sweep.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/test_sdkconfig_sibling_pair_guard.py` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/test_stack_budget_symbol_bounds.py` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW_recovery/main/check_recovery_apply.ps1` | NOT AUDITED | - | none (added 2026-10-05, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `firmware/KilnFW_recovery/main/check_recovery_apply.ps1` | NEGATIVE-TESTED | 10-08 | `sha_finish(io->ctx, out) == 0 ? 0 : 2` -> `? 0 : 0` in recovery_apply.c was MISSED; added fail_sha_update/fail_sha_finish test cases and mutants shafinish/shaupdate | CAUGHT after fix (`FAIL: sha_finish fails`); restored |
 | `firmware/KilnFW_recovery/main/check_recovery_boot_verify.ps1` | NOT AUDITED | - | none (added 2026-10-04, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `firmware/KilnFW_recovery/main/check_recovery_health.ps1` | NOT AUDITED | - | none (added 2026-10-03, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `firmware/KilnFW_recovery/main/check_recovery_hold.ps1` | NOT AUDITED | - | none (added 2026-10-02, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
