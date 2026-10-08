@@ -245,8 +245,9 @@ esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev)
     return err;
 }
 
-bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uint32_t nvs_rev, zones_cfg_t *out_cfg,
-                                  uint32_t *out_rev, bool *out_used_file, uint8_t *out_on_disk_version)
+static bool resolve_with_file_buf(const zones_cfg_t *nvs_cfg, bool nvs_valid, uint32_t nvs_rev, zones_cfg_t *out_cfg,
+                                     uint32_t *out_rev, bool *out_used_file, uint8_t *out_on_disk_version,
+                                     zones_cfg_t *file_cfg)
 {
     if (out_cfg) {
         memset(out_cfg, 0, sizeof(*out_cfg));
@@ -264,11 +265,10 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         return false;
     }
 
-    zones_cfg_t file_cfg;
     uint32_t file_rev = 0;
     bool file_valid = false;
     uint8_t file_on_disk_version = 0;
-    load_raw_impl(&file_cfg, &file_rev, &file_valid, &file_on_disk_version);
+    load_raw_impl(file_cfg, &file_rev, &file_valid, &file_on_disk_version);
 
     if (!file_valid) {
         /* No usable file. Fall back to the NVS candidate, and if it is
@@ -293,7 +293,7 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
          * a pre-populated file, or a refused-newer/corrupt NVS blob) -- use
          * the file outright. Not logged as a divergence: there is nothing
          * on the NVS side to disagree WITH. */
-        *out_cfg = file_cfg;
+        *out_cfg = *file_cfg;
         *out_rev = file_rev;
         *out_used_file = true;
         if (out_on_disk_version) {
@@ -305,9 +305,9 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
     /* Both sides decoded to something valid -- compare content, not just
      * rev, so two independently-arrived-at-identical configs never get
      * logged as a spurious divergence. */
-    bool differs = memcmp(&file_cfg, nvs_cfg, sizeof(file_cfg)) != 0;
+    bool differs = memcmp(file_cfg, nvs_cfg, sizeof(*file_cfg)) != 0;
     if (!differs) {
-        *out_cfg = file_cfg;
+        *out_cfg = *file_cfg;
         *out_rev = file_rev > nvs_rev ? file_rev : nvs_rev;
         *out_used_file = true;
         if (out_on_disk_version) {
@@ -348,7 +348,7 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         ESP_LOGW(ZCFG_FS_TAG,
                  "zones config file/NVS DIVERGED (file rev %lu, NVS rev %lu) -- adopting FILE (strictly higher rev)",
                  (unsigned long)file_rev, (unsigned long)nvs_rev);
-        *out_cfg = file_cfg;
+        *out_cfg = *file_cfg;
         *out_rev = file_rev;
         *out_used_file = true;
         if (out_on_disk_version) {
@@ -374,4 +374,34 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         }
     }
     return true;
+}
+
+/* The decoded file candidate is a whole zones_cfg_t (~1 KB); it lives on the
+ * heap, not this frame, because this runs on the shared 8 KB httpd stack via
+ * profile_exec_start_post_handler -> ... -> nvs_load (check_httpd_task_stack_budget).
+ * OOM is reported like any unresolvable load (false, out_cfg zeroed). */
+bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uint32_t nvs_rev, zones_cfg_t *out_cfg,
+                                  uint32_t *out_rev, bool *out_used_file, uint8_t *out_on_disk_version)
+{
+    zones_cfg_t *file_cfg = (zones_cfg_t *)persist_scratch_alloc(sizeof(*file_cfg));
+    if (!file_cfg) {
+        if (out_cfg) {
+            memset(out_cfg, 0, sizeof(*out_cfg));
+        }
+        if (out_rev) {
+            *out_rev = 0;
+        }
+        if (out_used_file) {
+            *out_used_file = false;
+        }
+        if (out_on_disk_version) {
+            *out_on_disk_version = 0;
+        }
+        ESP_LOGE(ZCFG_FS_TAG, "zones config resolve: out of memory");
+        return false;
+    }
+    bool ok = resolve_with_file_buf(nvs_cfg, nvs_valid, nvs_rev, out_cfg, out_rev, out_used_file, out_on_disk_version,
+                                    file_cfg);
+    free(file_cfg);
+    return ok;
 }

@@ -212,9 +212,9 @@ static esp_err_t nvs_load_from_with_migration_info(const char *partition, zones_
  * carries the single step from its immediate predecessor loses the config
  * entirely if two schema-bumping firmwares are installed in a row without an
  * intervening boot on the first one (see nvs_load()'s call site). */
-static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
-                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
-                                       bool *out_refused_newer)
+static esp_err_t nvs_load_from_decode_buf(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                           bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
+                                           bool *out_refused_newer, uint8_t *raw)
 {
     if (out_refused_newer) {
         *out_refused_newer = false;
@@ -250,9 +250,8 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
      * exactly the bug this pass fixes). Sized to the largest possible
      * on-flash layout, which by construction is the current one (every
      * historical struct above is smaller). */
-    uint8_t raw[sizeof(zones_cfg_t)];
-    memset(raw, 0, sizeof(raw));
-    size_t len = sizeof(raw);
+    memset(raw, 0, sizeof(zones_cfg_t));
+    size_t len = sizeof(zones_cfg_t);
     err = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len);
     hal_kv_close(&h);
     if (err == HAL_NOT_FOUND) {
@@ -334,6 +333,40 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
         }
         return ESP_OK;
     }
+}
+
+/* The raw blob buffer is a whole zones_cfg_t (~1 KB); heap, not stack, because
+ * this runs on the shared 8 KB httpd stack via profile_exec_start_post_handler
+ * -> profile_executor_run -> ... -> nvs_load (check_httpd_task_stack_budget).
+ * OOM reads as a failed load (outputs already reset to "nothing found"). */
+static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
+                                       bool *out_refused_newer)
+{
+    uint8_t *raw = (uint8_t *)persist_scratch_alloc(sizeof(zones_cfg_t));
+    if (!raw) {
+        if (out_refused_newer) {
+            *out_refused_newer = false;
+        }
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        if (out_migrated) {
+            *out_migrated = false;
+        }
+        if (out_on_disk_version) {
+            *out_on_disk_version = 0;
+        }
+        memset(out_cfg, 0, sizeof(*out_cfg));
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t e = nvs_load_from_decode_buf(partition, out_cfg, out_found, out_valid, out_migrated,
+                                           out_on_disk_version, out_refused_newer, raw);
+    free(raw);
+    return e;
 }
 
 /* One-time move of the persisted zones config out of the default partition's

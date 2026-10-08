@@ -942,7 +942,12 @@ CEILING_BYTES = {
     # unmeasuring, tripwire. Honest free at this number: 6448 B (63.0%) of the
     # declared 10240 B. Still a LOWER BOUND (NVS/LittleFS internals dispatch
     # indirectly) and still reported INDETERMINATE, never a pass.
-    "bx_flash_worker": 3792,
+    # 2026-10-08: 3792 -> 3840. profiles_handle_message grew from 3744 to 3760 B
+    # (walk total 3808 B) after unrelated profile-path commits; 16 B over. The
+    # declared stack is 10240 B (BX_WORKER_STACK), so honest free is still 6132 B
+    # (59.9%) -- the ceiling is a tripwire on growth, not a margin problem, and no
+    # stack bytes change. 3840 = measured 3808 + 32 B headroom.
+    "bx_flash_worker": 3840,
     "info_uart_bridge": 2208,
     "io_uart_bridge": 2256,
     "safety_uart_bridge": 2912,
