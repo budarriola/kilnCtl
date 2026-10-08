@@ -47,6 +47,13 @@
 # step per bump, no skipped version, version constant == last step); see plan
 # section 5.1.
 #
+# 2026-10-08: all four stores also enforce D1's "exactly one NEW step per
+# bump" (diffed against $env:KILNCTL_MIGCHK_BASELINE, default origin/main),
+# the fixture-must-be-referenced rule (cfg_blobs/<store>_v<N>.bin) and D2's
+# expiry floor (CURRENT - 8); see Get-StoreStepModel / Test-NewStepPerBump /
+# Test-FixtureRule / Test-ExpiryFloor and plan sec 5.1. The paragraph below
+# is the pre-2026-10-08 history of what had been deferred.
+#
 # What is deliberately NOT enforced for kiln-config slots and RP2040 safety
 # config specifically -- D1's "exactly one NEW step per bump" defect-catching
 # rule, the frozen-input _Static_assert/crc32-last-field discipline, the
@@ -529,6 +536,160 @@ function Test-ZonesMigrationSteps {
 }
 
 # ---------------------------------------------------------------------------
+# Plan sec 5.1 follow-up rules (2026-10-08), shared by all four stores:
+#   D1  exactly one NEW step per version bump, diffed against a baseline ref
+#   FX  a captured fixture must exist (on a bump) and be referenced by a test
+#   D2  expiry floor: nothing handled older than CURRENT - 8
+# ---------------------------------------------------------------------------
+$script:MigrationExpiryWindow = 8
+
+function Get-StoreStepModel {
+    <#
+      Normalises one store's text into @{ Version; Steps } where Steps is the
+      set of "to versions" its migration code handles (one entry per bump):
+        zones    zones_cfg_step_vA_to_vB   -> B
+        kiln     migrate_store_vA_to_vB    -> B
+        profiles convert_profile_vN        -> N+1 (converts N directly)
+        safty    CONFIG_STORE_FORMAT_VERSION_VN macro -> N+1
+      Comments are stripped so a commented-out step never counts.
+      Returns $null when the version symbol is not found.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('zones', 'kiln', 'profiles', 'safty')][string]$Store,
+        [Parameter(Mandatory = $true)][string]$VersionHeaderText,
+        [Parameter(Mandatory = $true)][string]$SourceText
+    )
+    $hdr = Remove-CComments -Text $VersionHeaderText
+    $src = Remove-CComments -Text $SourceText
+    $verRx = switch ($Store) {
+        'zones' { '#define\s+ZONES_CFG_VERSION\s+(\d+)' }
+        'kiln' { '#define\s+KILN_CFG_STORE_VERSION\s+(\d+)' }
+        'profiles' { '#define\s+PROFILE_VERSION\s+(\d+)' }
+        'safty' { '#define\s+CONFIG_STORE_FORMAT_VERSION\s+(\d+)' }
+    }
+    $m = [regex]::Match($hdr, $verRx)
+    if (-not $m.Success) { return $null }
+    $steps = New-Object System.Collections.Generic.List[int]
+    switch ($Store) {
+        'zones' { foreach ($x in [regex]::Matches($src, 'zones_cfg_step_v(\d+)_to_v(\d+)\s*\(')) { $steps.Add([int]$x.Groups[2].Value) } }
+        'kiln' { foreach ($x in [regex]::Matches($src, '\bmigrate_store_v(\d+)_to_v(\d+)\s*\(')) { $steps.Add([int]$x.Groups[2].Value) } }
+        'profiles' { foreach ($x in [regex]::Matches($src, '(?m)^\s*static\s+[\w\*\s]+\bconvert_profile_v(\d+)\s*\(')) { $steps.Add([int]$x.Groups[1].Value + 1) } }
+        'safty' { foreach ($x in [regex]::Matches($hdr, '#define\s+CONFIG_STORE_FORMAT_VERSION_V(\d+)\s+\d+u?')) { $steps.Add([int]$x.Groups[1].Value + 1) } }
+    }
+    $uniq = @($steps | Sort-Object -Unique)
+    return @{ Version = [int]$m.Groups[1].Value; Steps = $uniq }
+}
+
+function Test-NewStepPerBump {
+    <#
+      D1 "exactly one NEW step per version bump". Compares the step set of the
+      working tree (Current) against the same files at a baseline ref
+      (Baseline). Every version in (Baseline.Version, Current.Version] at or
+      above MinToVersion must gain exactly one new step; no other step may be
+      added; an unchanged version must add none. A downgrade is a failure.
+      MinToVersion is 27 for zones (the monolithic pre-v26 tail covers
+      everything below), 1 for the others.
+      Returns @{ Ok; Failures }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$StoreName,
+        [Parameter(Mandatory = $true)]$Baseline,
+        [Parameter(Mandatory = $true)]$Current,
+        [int]$MinToVersion = 1
+    )
+    $failures = New-Object System.Collections.Generic.List[string]
+    if ($Current.Version -lt $Baseline.Version) {
+        $failures.Add("${StoreName}: version went DOWN from $($Baseline.Version) to $($Current.Version) relative to the baseline ref")
+        return @{ Ok = $false; Failures = $failures }
+    }
+    $newSteps = @($Current.Steps | Where-Object { $Baseline.Steps -notcontains $_ })
+    $expected = @()
+    for ($v = $Baseline.Version + 1; $v -le $Current.Version; $v++) {
+        if ($v -ge $MinToVersion) { $expected += $v }
+    }
+    foreach ($v in $expected) {
+        $n = @($newSteps | Where-Object { $_ -eq $v }).Count
+        if ($n -ne 1) {
+            $failures.Add("${StoreName}: version bump to v$v must add exactly one NEW step, found $n (D1: one new step per bump, vs baseline v$($Baseline.Version))")
+        }
+    }
+    foreach ($v in $newSteps) {
+        if ($expected -notcontains $v) {
+            $failures.Add("${StoreName}: new step for v$v was added but the version did not bump to it (baseline v$($Baseline.Version), current v$($Current.Version)) -- an extra/early step violates D1")
+        }
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
+
+function Test-FixtureRule {
+    <#
+      "Fixture must be referenced". Fixtures are cfg_blobs/<Prefix>_v<N>.bin
+      under the test tree. Every such fixture present must be named by some
+      test source (an unread fixture is dead weight), and when RequireForBump
+      is set (the version bumped vs the baseline) the fixture for the frozen
+      predecessor <Prefix>_v<CURRENT-1>.bin must exist too.
+      Returns @{ Ok; Failures }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$StoreName,
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [Parameter(Mandatory = $true)][int]$CurrentVersion,
+        [Parameter(Mandatory = $true)][bool]$RequireForBump,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$TestTreeFileNames,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$TestTreeFileContents
+    )
+    $failures = New-Object System.Collections.Generic.List[string]
+    $present = @($TestTreeFileNames | ForEach-Object { $_ -replace '\\', '/' } |
+        Where-Object { $_ -match "^cfg_blobs/${Prefix}_v\d+\.bin$" })
+    $needed = "cfg_blobs/${Prefix}_v$($CurrentVersion - 1).bin"
+    if ($RequireForBump -and ($present -notcontains $needed)) {
+        $failures.Add("${StoreName}: version bumped to $CurrentVersion but fixture $needed is missing from the test tree")
+    }
+    $all = $TestTreeFileContents -join "`n"
+    foreach ($f in $present) {
+        $leaf = $f.Substring($f.LastIndexOf('/') + 1)
+        if ($all -notmatch [regex]::Escape($leaf)) {
+            $failures.Add("${StoreName}: fixture $leaf is not referenced by name in any test source -- it would sit unread")
+        }
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
+
+function Test-ExpiryFloor {
+    <#
+      D2 expiry floor for the non-zones stores (zones has its own constant
+      check inside Test-ZonesMigrationSteps): the oldest version this build
+      still migrates FROM must be >= CURRENT - 8 (plan sec 4.2). Steps are
+      "to versions" (see Get-StoreStepModel), so the oldest FROM is min-1.
+      Returns @{ Ok; Failures }.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$StoreName,
+        [Parameter(Mandatory = $true)]$Model
+    )
+    $failures = New-Object System.Collections.Generic.List[string]
+    $floor = $Model.Version - $script:MigrationExpiryWindow
+    if ($Model.Steps.Count -gt 0) {
+        $oldestFrom = ($Model.Steps | Measure-Object -Minimum).Minimum - 1
+        if ($oldestFrom -lt $floor) {
+            $failures.Add("${StoreName}: still migrates from v$oldestFrom, older than the expiry floor v$floor (CURRENT $($Model.Version) - $($script:MigrationExpiryWindow), plan sec 4.2) -- delete the expired step")
+        }
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
+
+function Get-BaselineFileText {
+    # File text at $Ref, '' when the path does not exist there (a brand-new
+    # file has no baseline); throws if the ref itself does not resolve.
+    param([string]$Ref, [string]$RepoRelPath, [string]$RepoRoot)
+    & git -C $RepoRoot rev-parse --verify --quiet "$Ref^{commit}" *> $null
+    if ($LASTEXITCODE -ne 0) { throw "baseline ref '$Ref' does not resolve (set KILNCTL_MIGCHK_BASELINE or fetch origin)" }
+    $out = & git -C $RepoRoot show ("${Ref}:" + ($RepoRelPath -replace '\\', '/')) 2>$null
+    if ($LASTEXITCODE -ne 0) { return '' }
+    return ($out -join "`n")
+}
+
+# ---------------------------------------------------------------------------
 # Real-tree run starts here. Everything above is reusable by the negative
 # test (dot-sourced), same pattern as check_hal_include_boundary.ps1 /
 # check_route_tier_coverage.ps1.
@@ -599,7 +760,58 @@ $saftyResult = Test-SaftyConfigStoreMigrationStep -VersionHeaderText (Get-Conten
 
 $auxResult = Test-AuxOutputsCfgVersion -SourceText (Get-Content -Raw $auxSource)
 
+# --- Plan sec 5.1 follow-up rules: D1 new-step-per-bump (vs baseline ref),
+# fixture-must-be-referenced, D2 expiry floor -- all four stores. ---
+$baselineRef = if ($env:KILNCTL_MIGCHK_BASELINE) { $env:KILNCTL_MIGCHK_BASELINE } else { "origin/main" }
+$storeSpecs = @(
+    @{ Name = "zones"; Store = "zones"; Prefix = "zones"; MinTo = 27
+       Hdr = $versionHeader; Src = $migrateFile },
+    @{ Name = "kiln-config"; Store = "kiln"; Prefix = "kiln_cfg"; MinTo = 1
+       Hdr = $kilnCfgVersionHeader; Src = $kilnCfgSource },
+    @{ Name = "fire profiles"; Store = "profiles"; Prefix = "profiles"; MinTo = 1
+       Hdr = $profilesSource; Src = $profilesSource },
+    @{ Name = "RP2040 safety config"; Store = "safty"; Prefix = "safety_cfg"; MinTo = 1
+       Hdr = $saftyVersionHeader; Src = $saftySource }
+)
+$followFailures = @()
+foreach ($sp in $storeSpecs) {
+    $hdrText = Get-Content -Raw $sp.Hdr
+    $srcText = Get-Content -Raw $sp.Src
+    $cur = Get-StoreStepModel -Store $sp.Store -VersionHeaderText $hdrText -SourceText $srcText
+    if (-not $cur) { $followFailures += "$($sp.Name): could not parse the current version"; continue }
+    $relHdr = $sp.Hdr.Substring($repoRoot.Length + 1)
+    $relSrc = $sp.Src.Substring($repoRoot.Length + 1)
+    try {
+        $baseHdrText = Get-BaselineFileText -Ref $baselineRef -RepoRelPath $relHdr -RepoRoot $repoRoot
+        $baseSrcText = Get-BaselineFileText -Ref $baselineRef -RepoRelPath $relSrc -RepoRoot $repoRoot
+    } catch {
+        $followFailures += "$($sp.Name): $($_.Exception.Message)"
+        continue
+    }
+    $base = $null
+    if ($baseHdrText -ne '') {
+        $base = Get-StoreStepModel -Store $sp.Store -VersionHeaderText $baseHdrText -SourceText $baseSrcText
+    }
+    $bumped = $false
+    if ($base) {
+        $r = Test-NewStepPerBump -StoreName $sp.Name -Baseline $base -Current $cur -MinToVersion $sp.MinTo
+        $followFailures += $r.Failures
+        $bumped = ($cur.Version -gt $base.Version)
+    }
+    # Zones' fixture-on-bump requirement is already enforced inside
+    # Test-ZonesMigrationSteps; here it only adds the orphan check.
+    $r = Test-FixtureRule -StoreName $sp.Name -Prefix $sp.Prefix -CurrentVersion $cur.Version `
+        -RequireForBump ($bumped -and $sp.Store -ne "zones") `
+        -TestTreeFileNames $testTreeFileNames -TestTreeFileContents $testTreeFileContents
+    $followFailures += $r.Failures
+    if ($sp.Store -ne "zones") {
+        $r = Test-ExpiryFloor -StoreName $sp.Name -Model $cur
+        $followFailures += $r.Failures
+    }
+}
+
 $allFailures = @()
+$allFailures += $followFailures
 $allFailures += $auxResult.Failures
 $allFailures += $zonesResult.Failures
 $allFailures += $kilnCfgResult.Failures

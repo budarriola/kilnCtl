@@ -580,9 +580,13 @@ All use comment-stripped text. Negative-tested by assertions 23-32 of
 `test_check_config_migration_steps.ps1` (40 total after the review-gap fixes: comment-stripped matching, no vacuous pass, forward declarations, RP2040 branch) and by hand against the
 real sources (each break named the store and version, then restored).
 
-**Still follow-up:** D1's "exactly one NEW step per bump" defect-catching rule
-(needs a baseline to diff against), the fixture-must-be-referenced rule, and
-D2's expiry floor, for all three stores; and the frozen-input
+**Landed 2026-10-08 (all four stores):** D1's "exactly one NEW step per bump" is diffed against a
+baseline ref (`KILNCTL_MIGCHK_BASELINE`, default `origin/main`; zones counts only steps to v27 and up);
+the fixture rule requires `cfg_blobs/<store>_v<N-1>.bin` on a bump and that every present fixture is
+named by a test source; D2's floor fails any step migrating from older than CURRENT-8. Negative-tested
+by assertions 41-61 of `test_check_config_migration_steps.ps1`.
+
+**Still follow-up:** the frozen-input
 assert/`crc32`-last-field discipline for kiln-config slots and RP2040 safety
 config, which would need scaffolding their designs do not have (length-based
 detection; raw byte-offset inputs).

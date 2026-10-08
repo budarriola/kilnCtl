@@ -512,6 +512,68 @@ Test-ChainCase 38 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText ($safty
 Test-ChainCase 39 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText $saftyHdr3 -SourceText "// if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`nif (version == CONFIG_STORE_FORMAT_VERSION_V1) { }`n") $false "CONFIG_STORE_FORMAT_VERSION_V2 is defined but.*orphaned macro" "RP2040: a commented-out branch for the immediately preceding version does not satisfy the rule."
 Test-ChainCase 40 (Test-SaftyConfigStoreMigrationStep -VersionHeaderText $saftyHdr3 -SourceText "if (version == CONFIG_STORE_FORMAT_VERSION_V2) { }`n/* if (version == CONFIG_STORE_FORMAT_VERSION_V1) { } */`n") $false "CONFIG_STORE_FORMAT_VERSION_V1 is defined but.*orphaned macro" "RP2040: a commented-out branch for an older version does not satisfy the rule."
 
+# ---------------------------------------------------------------------
+# Assertions 41-61: plan sec 5.1 follow-up rules (2026-10-08): D1 one NEW
+# step per bump vs a baseline, fixture-must-be-referenced, D2 expiry floor.
+# ---------------------------------------------------------------------
+$kBase = Get-StoreStepModel -Store kiln -VersionHeaderText $kilnHdr3 -SourceText ($kStep12 + $kStep23)
+$kHdr4 = "#define KILN_CFG_STORE_VERSION 4`n"
+$kStep34 = "static void migrate_store_v3_to_v4(const c *s, d *d) { }`n"
+$kCur4 = Get-StoreStepModel -Store kiln -VersionHeaderText $kHdr4 -SourceText ($kStep12 + $kStep23 + $kStep34)
+Test-ChainCase 41 (Test-NewStepPerBump -StoreName "kiln-config" -Baseline $kBase -Current $kCur4) $true "" "D1 kiln: bump 3->4 with exactly one new step passes."
+$kCur4None = Get-StoreStepModel -Store kiln -VersionHeaderText $kHdr4 -SourceText ($kStep12 + $kStep23)
+Test-ChainCase 42 (Test-NewStepPerBump -StoreName "kiln-config" -Baseline $kBase -Current $kCur4None) $false "bump to v4 must add exactly one NEW step, found 0" "D1 kiln: bump with no new step is caught."
+$kCur4Two = Get-StoreStepModel -Store kiln -VersionHeaderText $kHdr4 -SourceText ($kStep12 + $kStep23 + $kStep34 + "static void migrate_store_v4_to_v5(const d *s, e *d) { }`n")
+Test-ChainCase 43 (Test-NewStepPerBump -StoreName "kiln-config" -Baseline $kBase -Current $kCur4Two) $false "new step for v5 was added but the version did not bump" "D1 kiln: an extra early step beyond the bump is caught."
+$kSame = Get-StoreStepModel -Store kiln -VersionHeaderText $kilnHdr3 -SourceText ($kStep12 + $kStep23)
+Test-ChainCase 44 (Test-NewStepPerBump -StoreName "kiln-config" -Baseline $kBase -Current $kSame) $true "" "D1 kiln: unchanged version with no new step passes."
+$kDown = Get-StoreStepModel -Store kiln -VersionHeaderText "#define KILN_CFG_STORE_VERSION 2`n" -SourceText $kStep12
+Test-ChainCase 45 (Test-NewStepPerBump -StoreName "kiln-config" -Baseline $kBase -Current $kDown) $false "went DOWN" "D1 kiln: a version downgrade is caught."
+
+$pBase = Get-StoreStepModel -Store profiles -VersionHeaderText $profHdr4 -SourceText ($profBase + $profV3)
+$pHdr5 = "#define PROFILE_VERSION 5`n"
+$pCur5 = Get-StoreStepModel -Store profiles -VersionHeaderText $pHdr5 -SourceText ($profBase + $profV3 + "static void convert_profile_v4(const x *s, profile_t *o) { }`n")
+Test-ChainCase 46 (Test-NewStepPerBump -StoreName "fire profiles" -Baseline $pBase -Current $pCur5) $true "" "D1 profiles: bump 4->5 adding convert_profile_v4 passes."
+$pCur5None = Get-StoreStepModel -Store profiles -VersionHeaderText $pHdr5 -SourceText ($profBase + $profV3)
+Test-ChainCase 47 (Test-NewStepPerBump -StoreName "fire profiles" -Baseline $pBase -Current $pCur5None) $false "bump to v5 must add exactly one NEW step, found 0" "D1 profiles: bump with no new converter is caught."
+
+$sBase = Get-StoreStepModel -Store safty -VersionHeaderText $saftyHdr3 -SourceText $saftySrc
+$sHdr4 = ($saftyHdr3 -replace "VERSION 3u", "VERSION 4u")
+$sCur4 = Get-StoreStepModel -Store safty -VersionHeaderText ($sHdr4 + "#define CONFIG_STORE_FORMAT_VERSION_V3 3u`n") -SourceText $saftySrc
+Test-ChainCase 48 (Test-NewStepPerBump -StoreName "RP2040" -Baseline $sBase -Current $sCur4) $true "" "D1 RP2040: bump 3->4 adding the V3 macro passes."
+$sCur4None = Get-StoreStepModel -Store safty -VersionHeaderText $sHdr4 -SourceText $saftySrc
+Test-ChainCase 49 (Test-NewStepPerBump -StoreName "RP2040" -Baseline $sBase -Current $sCur4None) $false "bump to v4 must add exactly one NEW step, found 0" "D1 RP2040: bump with no new format macro is caught."
+
+$zBase = Get-StoreStepModel -Store zones -VersionHeaderText "#define ZONES_CFG_VERSION 26`n" -SourceText "int x;`n"
+$zCur27 = Get-StoreStepModel -Store zones -VersionHeaderText "#define ZONES_CFG_VERSION 27`n" -SourceText "void zones_cfg_step_v26_to_v27(const a *s, b *d);`n"
+Test-ChainCase 50 (Test-NewStepPerBump -StoreName "zones" -Baseline $zBase -Current $zCur27 -MinToVersion 27) $true "" "D1 zones: bump 26->27 with the first step passes."
+$zCur27None = Get-StoreStepModel -Store zones -VersionHeaderText "#define ZONES_CFG_VERSION 27`n" -SourceText "int x;`n"
+Test-ChainCase 51 (Test-NewStepPerBump -StoreName "zones" -Baseline $zBase -Current $zCur27None -MinToVersion 27) $false "bump to v27 must add exactly one NEW step, found 0" "D1 zones: bump past the tail with no step is caught."
+
+$fxNames = @("cfg_blobs/kiln_cfg_v3.bin", "x.c")
+Test-ChainCase 52 (Test-FixtureRule -StoreName "kiln-config" -Prefix kiln_cfg -CurrentVersion 4 -RequireForBump $true -TestTreeFileNames $fxNames -TestTreeFileContents @("", "reads kiln_cfg_v3.bin")) $true "" "Fixture: present and referenced on a bump passes."
+Test-ChainCase 53 (Test-FixtureRule -StoreName "kiln-config" -Prefix kiln_cfg -CurrentVersion 4 -RequireForBump $true -TestTreeFileNames @("x.c") -TestTreeFileContents @("")) $false "fixture cfg_blobs/kiln_cfg_v3.bin is missing" "Fixture: a bump without its fixture is caught."
+Test-ChainCase 54 (Test-FixtureRule -StoreName "kiln-config" -Prefix kiln_cfg -CurrentVersion 4 -RequireForBump $true -TestTreeFileNames $fxNames -TestTreeFileContents @("", "nothing")) $false "kiln_cfg_v3.bin is not referenced" "Fixture: an unreferenced fixture is caught."
+Test-ChainCase 55 (Test-FixtureRule -StoreName "kiln-config" -Prefix kiln_cfg -CurrentVersion 3 -RequireForBump $false -TestTreeFileNames @("x.c") -TestTreeFileContents @("")) $true "" "Fixture: no bump and no fixtures passes."
+Test-ChainCase 56 (Test-FixtureRule -StoreName "zones" -Prefix zones -CurrentVersion 26 -RequireForBump $false -TestTreeFileNames @("cfg_blobs/zones_v25.bin") -TestTreeFileContents @("")) $false "zones_v25.bin is not referenced" "Fixture: an orphan fixture is caught even without a bump."
+
+$d2Ok = @{ Version = 12; Steps = @(5, 6, 7, 8, 9, 10, 11, 12) }
+Test-ChainCase 57 (Test-ExpiryFloor -StoreName "kiln-config" -Model $d2Ok) $true "" "D2: oldest handled v4 at version 12 (floor 4) passes."
+$d2Bad = @{ Version = 13; Steps = @(5, 6, 7, 8, 9, 10, 11, 12, 13) }
+Test-ChainCase 58 (Test-ExpiryFloor -StoreName "kiln-config" -Model $d2Bad) $false "older than the expiry floor v5" "D2: a step older than CURRENT-8 is caught."
+$d2Prof = Get-StoreStepModel -Store profiles -VersionHeaderText "#define PROFILE_VERSION 12`n" -SourceText "static void convert_profile_v1(const a *s, profile_t *o) { }`n"
+Test-ChainCase 59 (Test-ExpiryFloor -StoreName "fire profiles" -Model $d2Prof) $false "still migrates from v1" "D2: an expired profile converter is caught."
+Test-ChainCase 60 (Test-ExpiryFloor -StoreName "RP2040" -Model $sBase) $true "" "D2: the real-shaped RP2040 model passes."
+
+# 61: the real sources must pass the whole production script (all new rules
+# run). Baseline HEAD so the test does not depend on origin being fetched.
+$env:KILNCTL_MIGCHK_BASELINE = "HEAD"
+$realOut = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "..\..\..\..\tools\check_config_migration_steps.ps1") 2>&1
+$realExit = $LASTEXITCODE
+Remove-Item Env:\KILNCTL_MIGCHK_BASELINE -ErrorAction SilentlyContinue
+if ($realExit -ne 0) { $failures += "Assertion 61 FAILED: real sources vs baseline HEAD did not PASS: $($realOut -join ' ')" }
+else { Write-Host "Assertion 61 OK: real sources PASS the new D1/fixture/D2 rules." }
+
 if ($failures.Count -gt 0) {
     Write-Host ""
     Write-Host "test_check_config_migration_steps: $($failures.Count) assertion(s) FAILED:" -ForegroundColor Red
@@ -520,5 +582,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 40 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 61 assertions passed." -ForegroundColor Green
 exit 0
