@@ -196,6 +196,10 @@ def autotune_accept(ack_unsettled: bool = False) -> str:
     if result.ok:
         return "ok - gains accepted" + (" (low-confidence: fit never genuinely settled)" if ack_unsettled else "")
     detail = f": {result.reason}" if result.reason else ""
+    if result.reason and "ack_unsettled" not in result.reason and "no completed" not in result.reason:
+        # System mode gate (owner decision 2026-10-08): accept is refused (HTTP 409) while a
+        # firing or autotune run is active; say so rather than blaming the fit.
+        return f"refused by system mode gate (409): {result.reason}"
     return f"refused - nothing to accept, or the fit never settled (see model_settled) and needs ack_unsettled=True{detail}"
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the

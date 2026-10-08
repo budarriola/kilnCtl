@@ -34,6 +34,7 @@ $allow = [ordered]@{
   "update/update_http.c"            = @("mode_gate_refuses","st_claim_begin")
   "update/update_settings_http.c"   = @("settings_post_handler")
   "control/autotune_engine.c"       = @("*")
+  "control/autotune_engine_guard.c" = @("autotune_engine_accept")
   "control/profile_executor_run.c"  = @("*")
 }
 
@@ -70,6 +71,6 @@ Get-ChildItem $drivers -Recurse -Filter *.c | % {
   if ($rel -eq "safety/system_mode_gate.c" -or $allow.Contains($rel)) { return }
   if ((Strip (Get-Content $_.FullName -Raw)) -match 'system_mode_gate_check\s*\(') { $fail += "${rel}: calls system_mode_gate_check() but is not on the allowlist" }
 }
-if ($checked -ne 23) { $fail += "checked $checked allowlist entries, expected exactly 23: update the count deliberately when the allowlist changes" }
+if ($checked -ne 24) { $fail += "checked $checked allowlist entries, expected exactly 24: update the count deliberately when the allowlist changes" }
 if ($fail) { $fail | % { Write-Host "FAIL: $_" }; exit 1 }
 Write-Host "PASS: $checked gated handlers/helpers call system_mode_gate_check()"

@@ -199,6 +199,16 @@ bool profile_executor_zone_is_active(uint8_t zone_index)
     return (zone_index < MAX31856_CHANNEL_COUNT) ? s_stub_zone_active[zone_index] : false;
 }
 
+/* Owner decision 2026-10-08: autotune_engine_accept() consults the system
+ * mode gate; these let a test pretend a firing/autotune run is active. */
+static bool s_stub_profile_running = false;
+static bool s_stub_autotune_running = false;
+void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
+{
+    if (profile_running_out) *profile_running_out = s_stub_profile_running;
+    if (autotune_running_out) *autotune_running_out = s_stub_autotune_running;
+}
+
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
     (void)safety;
@@ -3797,6 +3807,45 @@ static void test_autotune_engine_accept_gates_on_settled(void)
     s_stub_set_pid_result = false; /* restore this file's default for every other test */
 }
 
+/* Owner decision 2026-10-08: accept writes zone gains/max_ramp, so it is
+ * refused (mode gate, 409 over HTTP) while a firing or autotune run is
+ * active and nothing is written; allowed when idle. */
+static void test_autotune_engine_accept_refused_by_mode_gate_while_running(void)
+{
+    TEST_SECTION("autotune_engine_accept() is refused by the system mode gate while a run is active, "
+                 "allowed when idle");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_stub_set_pid_result = true;
+
+    for (int which = 0; which < 2; which++) {
+        s_stub_profile_running = (which == 0);
+        s_stub_autotune_running = (which == 1);
+        autotune_accept_result_t res = {0};
+        bool ok = autotune_engine_accept(NULL, &res);
+        TEST_CHECK(!ok, "accept must be refused while a firing/autotune run is active");
+        TEST_CHECK(res.refused_by_mode_gate, "refusal must be flagged as a mode-gate refusal (HTTP 409)");
+        TEST_CHECK(res.mode_reason[0] != '\0', "gate reason text must be reported");
+        TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "refused accept must not consume the result");
+    }
+    s_stub_profile_running = false;
+    s_stub_autotune_running = false;
+    autotune_accept_result_t res = {0};
+    TEST_CHECK(autotune_engine_accept(NULL, &res), "accept must succeed when idle");
+    TEST_CHECK(!res.refused_by_mode_gate, "no gate refusal when idle");
+    s_stub_set_pid_result = false;
+}
+
 /* Round-3 follow-up: the SAME gate, isolating extrapolation_converged ==
  * false (settled and tau_consistent both true) -- proves the gate was
  * genuinely EXTENDED to this flag, not left checking settled alone.
@@ -6734,6 +6783,7 @@ void run_test_autotune_engine_prestart(void)
     test_settle_detector_fires_with_dead_time_over_300s();
     test_settle_detector_ignores_two_quantum_dead_time_noise();
     test_autotune_engine_accept_gates_on_settled();
+    test_autotune_engine_accept_refused_by_mode_gate_while_running();
     test_autotune_engine_accept_gates_on_extrapolation_converged();
     test_autotune_engine_accept_gates_on_tau_consistent();
     test_autotune_engine_accept_does_not_block_a_fully_clean_fit();

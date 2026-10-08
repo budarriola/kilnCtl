@@ -295,6 +295,26 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         out->adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED;
         out->old_ceiling_c_per_hr = 0.0f;
         out->new_ceiling_c_per_hr = 0.0f;
+        out->refused_by_mode_gate = false;
+        out->mode_reason[0] = '\0';
+    }
+    /* Owner decision 2026-10-08 (docs/SYSTEM_MODE_GATE_PLAN.md): accept
+     * writes zone PID gains/max_ramp, so refuse while a firing or autotune
+     * run is active, before any mutation. Single choke point for the HTTP
+     * and UART-bridge callers. */
+    {
+        sys_mode_snapshot_t mode_snap = {0};
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(AT_TAG, "autotune_engine_accept() refused by system mode gate: %s", mode_reason);
+            if (out != NULL) {
+                out->refused_by_mode_gate = true;
+                snprintf(out->mode_reason, sizeof(out->mode_reason), "%s", mode_reason);
+            }
+            return false;
+        }
     }
     /* See autotune_begin_run_locked()'s guard comment above. */
     if (s_at.lock == NULL) {

@@ -375,3 +375,19 @@ IMPLEMENTER.md discipline before merge; no slice depends on a later one.
    wired in slice 4/5 sends this 409 via the shared
    `system_mode_gate_http_send_refusal()` sender, distinct from OTA's 428
    and (where applicable) `http_async_job_busy()`'s own 409.
+
+## Addendum 2026-10-08: autotune accept
+
+Owner decision: `POST /api/autotune/accept` (and the UART bridge
+`AUTOTUNE_CMD_ACCEPT`, and so the PcTools `autotune_accept` tool) is refused
+while a firing or autotune run is active, because accept writes zone PID gains
+and optionally `max_ramp`. The gate sits in `autotune_engine_accept()`
+(`autotune_engine_guard.c`), the single choke point, using
+`SYS_ACTION_WRITE_ZONES_CONFIG` before any mutation; the result struct carries
+`refused_by_mode_gate`/`mode_reason`, which HTTP maps to the standard 409 via
+`system_mode_gate_http_send_refusal()` and UART returns as the reply reason.
+Host test: `test_autotune_engine_accept_refused_by_mode_gate_while_running`.
+
+Route inventory: autotune/accept is now gated. The owner chose to leave these
+ungated: `ramp_assist`, `watchdog_cfg`, `rate_guard/auto`,
+`relay_cycles/restore`, `kiln_configs` save/import.

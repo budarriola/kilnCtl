@@ -19,6 +19,7 @@
 #include "profile_executor.h"
 #include "readiness_gate.h"
 #include "system_mode_gate.h"
+#include "system_mode_gate_http.h"
 #include "zones_config_accessors.h"
 
 /* autotune_state_name()/autotune_rule_name()/autotune_refusal_name() and the
@@ -450,6 +451,9 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
     autotune_accept_opts_t accept_opts = {.ack_unsettled = ack_unsettled, .adopt_ceiling = adopt_ceiling};
     autotune_accept_result_t accept_result = {0};
     if (!autotune_engine_accept(&accept_opts, &accept_result)) {
+        if (accept_result.refused_by_mode_gate) {
+            return system_mode_gate_http_send_refusal(req, accept_result.mode_reason);
+        }
         /* The specific reason (never settled / extrapolation didn't
          * converge / tau inconsistent with the corrected gain) is in the
          * ESP_LOGW autotune_engine_accept() itself already emitted -- see
