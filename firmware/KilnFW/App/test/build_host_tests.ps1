@@ -248,7 +248,7 @@ try {
         (Join-Path $driversDir "update/update_settings.c"),
         (Join-Path $driversDir "update/update_url.c"),
         (Join-Path $driversDir "update/update_release.c"),
-        (Join-Path $testDir "test_update_fetch_heap.c"),
+        (Join-Path $driversDir "update/update_fetch_heap.c"),
         (Join-Path $driversDir "ui/lcd_auth_state.c"),
         (Join-Path $driversDir "net/web_auth_session.c"),
         (Join-Path $driversDir "net/web_auth_login.c"),
