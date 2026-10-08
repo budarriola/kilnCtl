@@ -3760,6 +3760,86 @@ static esp_err_t run_export(void)
     return backup_export_get_handler(&req);
 }
 
+// Backup carries segment kinds / io_* and on_off_rules (incl. an aux target 8+).
+static void test_export_import_roundtrips_relay_io_segments_and_onoff_rules(void)
+{
+    TEST_SECTION("backup export->import: RELAY_IO segments and on/off rules (aux target) round-trip byte-identically");
+    reset_stub_state();
+    TEST_CHECK(zones_config_set_pid(0, 5.0f, 0.6f, 0.02f), "seed zone 0");
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strncpy(p.name, "IoRules", PROFILE_NAME_MAX_LEN);
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    p.segments[0].target_c = 500.0f;
+    p.segments[0].ramp_c_per_hr = 100.0f;
+    p.segments[0].dwell_min = 5;
+    p.segments[1].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    p.segments[1].dwell_min = 3;
+    p.segments[1].io_target = 9;
+    p.segments[1].io_state = 1;
+    p.segments[1].io_blocking = 1;
+    p.segments[1].io_leave_on_at_end = 1;
+    p.on_off_rule_count = 2;
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].phase_mask = 3;
+    p.on_off_rules[0].direction_mask = 1;
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = 1;
+    p.on_off_rules[0].temp_threshold_c = 123.5f;
+    p.on_off_rules[0].time_start_s = 10;
+    p.on_off_rules[0].time_stop_s = 600;
+    p.on_off_rules[0].invert = 1;
+    p.on_off_rules[1] = p.on_off_rules[0];
+    p.on_off_rules[1].zone_index = 8; /* aux relay 1 */
+    p.on_off_rules[1].segment_index = 1;
+    p.on_off_rules[1].invert = 0;
+    test_stub_profiles_set(0, &p);
+
+    TEST_CHECK(run_export() == ESP_OK, "export ok");
+    char *first = strdup(s_export_body);
+    TEST_CHECK(first != NULL, "copy export");
+    TEST_CHECK(strstr(first, "\"seg_kind\":1") != NULL, "RELAY_IO seg_kind emitted");
+    TEST_CHECK(strstr(first, "\"zone\":8,") != NULL, "aux rule target emitted");
+
+    g_profile_save_calls = 0;
+    memset(&g_last_saved_profile, 0, sizeof(g_last_saved_profile));
+    char err[256];
+    bool ok = test_backup_import_apply(first, err, sizeof(err));
+    if (!ok) printf("    refusal: %s\n", err);
+    TEST_CHECK(ok, "import accepts it");
+    TEST_CHECK(g_profile_save_calls == 1, "profile committed");
+    TEST_CHECK(g_last_saved_profile.segments[1].seg_kind == PROFILE_SEG_KIND_RELAY_IO, "seg_kind restored");
+    TEST_CHECK(g_last_saved_profile.segments[1].io_target == 9 && g_last_saved_profile.segments[1].io_state == 1 &&
+                   g_last_saved_profile.segments[1].io_blocking == 1 &&
+                   g_last_saved_profile.segments[1].io_leave_on_at_end == 1,
+               "io_* restored");
+    TEST_CHECK(g_last_saved_profile.on_off_rule_count == 2, "both rules restored");
+    TEST_CHECK(g_last_saved_profile.on_off_rules[1].zone_index == 8, "aux target restored");
+
+    /* Re-export the restored profile: bodies must be byte-identical. */
+    test_stub_profiles_set(0, &g_last_saved_profile);
+    TEST_CHECK(run_export() == ESP_OK, "re-export ok");
+    TEST_CHECK(strcmp(first, s_export_body) == 0, "re-export is byte-identical to the first export");
+    free(first);
+
+    /* Older backup: no seg_kind, io_ or on_off_rules keys -> plain ramp, zero rules. */
+    const char *old_body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[{\"id\":0,\"name\":\"Old\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":500,\"ramp_c_per_hr\":100,\"dwell_min\":5}]}],\"zones\":[]}";
+    g_profile_save_calls = 0;
+    ok = test_backup_import_apply(old_body, err, sizeof(err));
+    if (!ok) printf("    old refusal: %s\n", err);
+    TEST_CHECK(ok, "old-format import still accepted");
+    TEST_CHECK(g_last_saved_profile.segments[0].seg_kind == PROFILE_SEG_KIND_ZONE_RAMP &&
+                   g_last_saved_profile.on_off_rule_count == 0,
+               "old backup: ZONE_RAMP, zero rules");
+}
+
 static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
 {
     TEST_SECTION("backup_export_get_handler -- emits the expected top-level shape, a known profile, "
@@ -6343,6 +6423,7 @@ void run_test_backup_import(void)
     test_backup_import_rollback_tracks_pico_ceiling_back_to_restored_max();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
+    test_export_import_roundtrips_relay_io_segments_and_onoff_rules();
     test_backup_export_kiln_config_package_present();
     test_kiln_configs_absent_key_is_a_no_op();
     test_kiln_configs_present_empty_merge_is_a_no_op();

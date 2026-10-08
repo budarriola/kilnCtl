@@ -168,6 +168,11 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     # per-entry field names.
     "ct_map_informational_only", "k_ct_v_per_a_informational_only", "zone", "ct_channel",
     "k_v_per_a",
+    # Profile segment/rule vocabulary now in backup profiles[] (additive, no version bump; the
+    # drift check cannot tell a profiles[] key from a zone key). Absent on older backups.
+    "seg_kind", "io_target", "io_state", "io_blocking", "io_leave_on_at_end", "on_off_rules",
+    "segment", "enable", "phase_mask", "direction_mask", "temp_source", "temp_cmp", "temp_c",
+    "time_start_s", "time_stop_s", "invert",
     # BACKUP_FORMAT_VERSION 5 (task 9, KILN_PROFILES_PLAN.md item 17
     # follow-up): the top-level kiln_configs[] array and its per-entry
     # fields -- like the CT-map group above, cfg_convert.py deliberately

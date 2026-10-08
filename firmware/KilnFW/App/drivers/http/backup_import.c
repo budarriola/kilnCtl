@@ -943,13 +943,23 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                         (unsigned)PROFILE_MAX_SEGMENTS);
                 return false;
             }
-            double dt, dr, dd;
-            if (!backup_json_field_num(se, "target_c", &dt) || dt < bound_target_min || dt > bound_target_max) {
+            double dt = 0.0, dr = 0.0, dd;
+            double dkind = 0.0;
+            bool has_kind = false;
+            if (!backup_json_field_opt_num(se, "seg_kind", 0, 1, &dkind, &has_kind, "seg_kind", NULL, 0, seg_i)) {
+                snprintf(err_msg, err_cap, "profile entry %u, segment %u: seg_kind out of range",
+                        (unsigned)candidate_count, (unsigned)(seg_i + 1));
+                return false;
+            }
+            uint8_t kind = has_kind ? (uint8_t)dkind : PROFILE_SEG_KIND_ZONE_RAMP;
+            if (kind == PROFILE_SEG_KIND_ZONE_RAMP &&
+                (!backup_json_field_num(se, "target_c", &dt) || dt < bound_target_min || dt > bound_target_max)) {
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: target_c missing or out of range",
                         (unsigned)candidate_count, (unsigned)(seg_i + 1));
                 return false;
             }
-            if (!backup_json_field_num(se, "ramp_c_per_hr", &dr) || dr < bound_ramp_min || dr > bound_ramp_max) {
+            if (kind == PROFILE_SEG_KIND_ZONE_RAMP &&
+                (!backup_json_field_num(se, "ramp_c_per_hr", &dr) || dr < bound_ramp_min || dr > bound_ramp_max)) {
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: ramp_c_per_hr missing or out of range",
                         (unsigned)candidate_count, (unsigned)(seg_i + 1));
                 return false;
@@ -958,6 +968,41 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: dwell_min missing or out of range",
                         (unsigned)candidate_count, (unsigned)(seg_i + 1));
                 return false;
+            }
+            {
+                profile_segment_t *sg = &c->p.segments[seg_i];
+                double dio = 0.0;
+                bool hv = false;
+                sg->seg_kind = kind;
+                sg->io_target = sg->io_state = sg->io_blocking = sg->io_leave_on_at_end = 0;
+                if (!backup_json_field_opt_num(se, "io_target", 0, 255, &dio, &hv, "io_target", NULL, 0, seg_i)) {
+                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_target out of range",
+                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
+                    return false;
+                }
+                if (hv) sg->io_target = (uint8_t)dio;
+                hv = false;
+                if (!backup_json_field_opt_num(se, "io_state", 0, 1, &dio, &hv, "io_state", NULL, 0, seg_i)) {
+                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_state out of range",
+                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
+                    return false;
+                }
+                if (hv) sg->io_state = (uint8_t)dio;
+                hv = false;
+                if (!backup_json_field_opt_num(se, "io_blocking", 0, 1, &dio, &hv, "io_blocking", NULL, 0, seg_i)) {
+                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_blocking out of range",
+                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
+                    return false;
+                }
+                if (hv) sg->io_blocking = (uint8_t)dio;
+                hv = false;
+                if (!backup_json_field_opt_num(se, "io_leave_on_at_end", 0, 1, &dio, &hv, "io_leave_on_at_end", NULL, 0, seg_i)) {
+                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_leave_on_at_end out of range",
+                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
+                    return false;
+                }
+                if (hv) sg->io_leave_on_at_end = (uint8_t)dio;
+                hv = false;
             }
             c->p.segments[seg_i].target_c = (float)dt;
             c->p.segments[seg_i].ramp_c_per_hr = (float)dr;
@@ -970,12 +1015,60 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         }
         c->p.segment_count = seg_i;
 
+        /* on_off_rules (absent key = zero rules, today's behavior). Same fields/ranges as
+         * profiles_export_http.c's importer; profiles_http_save() validates targets later. */
+        {
+            const char *rules_arr = backup_json_obj_find(pe, "on_off_rules");
+            uint8_t rule_i = 0;
+            for (const char *re = backup_json_arr_first(rules_arr); re; re = backup_json_arr_next(re)) {
+                if (rule_i >= PROFILE_MAX_ON_OFF_RULES) {
+                    snprintf(err_msg, err_cap, "profile entry %u: too many on_off_rules", (unsigned)candidate_count);
+                    return false;
+                }
+                profile_on_off_rule_t *r = &c->p.on_off_rules[rule_i];
+                double dz = 0.0, dsg = 0.0, dv = 0.0;
+                bool hv = false;
+                if (!backup_json_field_num(re, "zone", &dz) || dz < 0 || dz > 255 ||
+                    !backup_json_field_num(re, "segment", &dsg) || dsg < 0 || dsg > 255) {
+                    snprintf(err_msg, err_cap, "profile entry %u, rule %u: zone/segment missing or invalid",
+                            (unsigned)candidate_count, (unsigned)(rule_i + 1));
+                    return false;
+                }
+                r->zone_index = (uint8_t)dz;
+                r->segment_index = (uint8_t)dsg;
+#define BK_RULE_NUM(dst, key, lo, hi, cast)                                                                    \
+    do {                                                                                                       \
+        dst = 0;                                                                                               \
+        hv = false;                                                                                            \
+        if (!backup_json_field_opt_num(re, key, lo, hi, &dv, &hv, key, NULL, 0, rule_i)) {                     \
+            snprintf(err_msg, err_cap, "profile entry %u, rule %u: " key " out of range",                     \
+                    (unsigned)candidate_count, (unsigned)(rule_i + 1));                                        \
+            return false;                                                                                      \
+        }                                                                                                      \
+        if (hv) dst = (cast)dv;                                                                                \
+    } while (0)
+                BK_RULE_NUM(r->enable, "enable", 0, 1, uint8_t);
+                BK_RULE_NUM(r->phase_mask, "phase_mask", 0, 255, uint8_t);
+                BK_RULE_NUM(r->direction_mask, "direction_mask", 0, 255, uint8_t);
+                BK_RULE_NUM(r->temp_source, "temp_source", 0, 3, uint8_t);
+                BK_RULE_NUM(r->temp_cmp, "temp_cmp", 0, 255, uint8_t);
+                BK_RULE_NUM(r->temp_threshold_c, "temp_c", (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX,
+                            float);
+                BK_RULE_NUM(r->time_start_s, "time_start_s", 0, 65535, uint16_t);
+                BK_RULE_NUM(r->time_stop_s, "time_stop_s", 0, 65535, uint16_t);
+                BK_RULE_NUM(r->invert, "invert", 0, 1, uint8_t);
+#undef BK_RULE_NUM
+                rule_i++;
+            }
+            c->p.on_off_rule_count = rule_i;
+        }
+
         /* Same feasibility rule profiles_http_save() enforces -- duplicated
          * here so it is caught in validation, before any profile in this
          * import has been written. */
         for (uint8_t i = 0; i < c->p.segment_count; i++) {
             float rate = c->p.segments[i].ramp_c_per_hr;
-            if (rate <= 0.0f) {
+            if (c->p.segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP || rate <= 0.0f) {
                 continue;
             }
             for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {

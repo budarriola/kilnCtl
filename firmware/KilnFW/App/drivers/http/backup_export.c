@@ -286,9 +286,27 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
         first_profile = false;
         for (uint8_t i = 0; i < p->segment_count && i < PROFILE_MAX_SEGMENTS; i++) {
             const profile_segment_t *seg = &p->segments[i];
-            backup_stream_printf(&s, "%s{\"target_c\":%.9g,\"ramp_c_per_hr\":%.9g,\"dwell_min\":%lu}",
-                                i == 0 ? "" : ",", (double)seg->target_c, (double)seg->ramp_c_per_hr,
-                                (unsigned long)seg->dwell_min);
+            /* seg_kind/io_* carried so RELAY_IO segments survive a restore (same key names as
+             * profiles_export_http.c; absent on an older backup = ZONE_RAMP, io_* 0). */
+            backup_stream_printf(&s,
+                                "%s{\"seg_kind\":%u,\"target_c\":%.9g,\"ramp_c_per_hr\":%.9g,\"dwell_min\":%lu,"
+                                "\"io_target\":%u,\"io_state\":%u,\"io_blocking\":%u,\"io_leave_on_at_end\":%u}",
+                                i == 0 ? "" : ",", seg->seg_kind, (double)seg->target_c,
+                                (double)seg->ramp_c_per_hr, (unsigned long)seg->dwell_min, seg->io_target,
+                                seg->io_state, seg->io_blocking, seg->io_leave_on_at_end);
+        }
+        /* on_off_rules: zone is the target byte (0..2 zone, 8..11 aux relay 1..4). No version bump:
+         * an absent key imports as zero rules, same as before. */
+        backup_stream_printf(&s, "],\"on_off_rules\":[");
+        for (uint8_t i = 0; i < p->on_off_rule_count && i < PROFILE_MAX_ON_OFF_RULES; i++) {
+            const profile_on_off_rule_t *r = &p->on_off_rules[i];
+            backup_stream_printf(&s,
+                                "%s{\"zone\":%u,\"segment\":%u,\"enable\":%u,\"phase_mask\":%u,"
+                                "\"direction_mask\":%u,\"temp_source\":%u,\"temp_cmp\":%u,\"temp_c\":%.9g,"
+                                "\"time_start_s\":%u,\"time_stop_s\":%u,\"invert\":%u}",
+                                i == 0 ? "" : ",", r->zone_index, r->segment_index, r->enable, r->phase_mask,
+                                r->direction_mask, r->temp_source, r->temp_cmp, (double)r->temp_threshold_c,
+                                r->time_start_s, r->time_stop_s, r->invert);
         }
         backup_stream_printf(&s, "]}");
     }
