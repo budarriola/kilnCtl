@@ -152,7 +152,13 @@ bool ct_verify_store_get(ct_verify_blob_t *out);
  * nothing. In-RAM truth updates first, so a failed write means the verdict
  * will not survive a reboot, not that it failed to take effect now. The
  * write goes to the cfg file ONLY; ESP_ERR_INVALID_STATE means cfg is not
- * mounted (the caller must surface it, POST /api/cfgfs/format_confirm). */
+ * mounted (the caller must surface it, POST /api/cfgfs/format_confirm).
+ *
+ * MUST NOT be called from a PSRAM-stacked task: the cfg LittleFS write
+ * disables the flash cache exactly like an NVS write does (and panics on real
+ * hardware) -- see hal_kv.h's write-context contract and safety_cfg_store.c's
+ * caller_stack_is_external() note. The sweep task, its only caller, has an
+ * internal-RAM stack. */
 esp_err_t ct_verify_store_save(const ct_verify_blob_t *blob);
 
 /* Read-only dual-write status for GET /api/cfgfs; same contract as

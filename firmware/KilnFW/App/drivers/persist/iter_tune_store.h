@@ -164,6 +164,11 @@ bool iter_tune_store_get_zone(uint8_t zone_index, iter_tune_store_zone_t *out);
 // notably ESP_ERR_INVALID_STATE when cfg is not mounted -- when the write did
 // not land. In-RAM truth updates first, so a failed write means the entry
 // will not survive a reboot, not that it failed to take effect now.
+//
+// MUST NOT be called from a PSRAM-stacked task: the cfg LittleFS write
+// disables the flash cache exactly like an NVS write does (and panics on real
+// hardware) -- see hal_kv.h's write-context contract and safety_cfg_store.c's
+// caller_stack_is_external() note.
 esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zone_t *in);
 
 // Read-only dual-write status for GET /api/cfgfs; same contract as

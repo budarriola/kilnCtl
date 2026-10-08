@@ -220,7 +220,10 @@ esp_err_t pref_cfg_fs_remove(const char *rel_path)
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;
     }
-    return cfg_fs_delete(rel_path);
+    /* Absent is the state the caller asked for: report it as success, as the
+     * header documents, so a clear of an already-clear store is idempotent. */
+    esp_err_t err = cfg_fs_delete(rel_path);
+    return (err == ESP_ERR_NOT_FOUND) ? ESP_OK : err;
 }
 
 static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,

@@ -485,10 +485,10 @@ CFG_FS_ALLOWLIST = {
     "pref_cfg_fs.c",
     "profiles_cfg_fs.c",
     "zones_config_cfg_fs.c",
-    # cfg_fs_save_raw()'s cfg_fs_write_atomic() call -- see ALLOWLIST's twin
-    # entry above for the httpd-task/internal-SRAM-stack reasoning; same call
-    # site, same caller (iter_tune_store_set_zone()), just the cfg dual-write
-    # half of the same write instead of the NVS half.
+    # iter_tune_store_set_zone()'s pref_cfg_fs_commit() call (the only write
+    # since the 2026-10-07 dual-write close; the NVS half is gone) -- see
+    # ALLOWLIST's twin entry above for the httpd-task/internal-SRAM-stack
+    # reasoning, same call site, same caller.
     "iter_tune_store.c",
     # firing_stats_cfg_fs_delete() (PROFILE_SLOTS_100.md sec 7 task 10):
     # deletes the firing-history mirror file for a profile id being erased,

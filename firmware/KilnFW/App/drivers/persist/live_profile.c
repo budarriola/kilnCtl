@@ -387,10 +387,12 @@ bool live_edit_check_window(const profile_t *running, const profile_t *candidate
 
 #define LIVE_FS_REC_CAP (sizeof(live_edit_persisted_t))
 
-/* The legacy NVS copy is written nowhere any more, but live_profile_clear()
- * still erases it, and that is an NVS write: refuse it from a stack the NVS
- * layer cannot write from (hal_kv.h's write-context contract; the same shared
- * hal_kv_write_safe_here() predicate flash_worker_lint.py's allowlist names). */
+/* Every save and clear here writes flash: the cfg file (a LittleFS write,
+ * which disables the cache exactly like an NVS write) and, for
+ * live_profile_clear(), the legacy NVS erase too. Refuse all three from a
+ * stack the flash layer cannot write from (hal_kv.h's write-context contract;
+ * the same shared hal_kv_write_safe_here() predicate flash_worker_lint.py's
+ * allowlist names). */
 static bool caller_stack_is_external(void)
 {
     return !hal_kv_write_safe_here();
@@ -440,6 +442,10 @@ static void fill_unmounted_err(char *err, size_t err_cap, const char *what)
 
 bool live_profile_save_record(const live_edit_record_t *rec, char *err, size_t err_cap)
 {
+    if (caller_stack_is_external()) {
+        if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
+        return false;
+    }
     uint8_t buf[sizeof(live_edit_persisted_t)];
     size_t len = live_edit_record_encode(rec, buf, sizeof(buf));
     if (len == 0) {
@@ -488,6 +494,10 @@ bool live_profile_load_record(live_edit_record_t *out)
 
 bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
 {
+    if (caller_stack_is_external()) {
+        if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
+        return false;
+    }
     uint8_t *buf = (uint8_t *)malloc(PROFILE_BLOB_MAX_SIZE);
     if (buf == NULL) {
         if (err) snprintf(err, err_cap, "live_profile: out of memory");

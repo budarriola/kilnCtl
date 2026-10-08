@@ -17,6 +17,7 @@ int g_test_count = 0;
 
 #include <string.h>
 
+#include "fake_kv.h" /* fake_kv_set_write_safe_here() */
 #include "hal_kv.h"
 #include "live_profile.h"
 #include "profile_executor_live_pickup.h"
@@ -779,6 +780,34 @@ static void test_cfg_only_storage(void)
                "clear removes both files");
 }
 
+static void test_saves_refused_from_unsafe_stack(void)
+{
+    TEST_SECTION("live_profile -- save_record/save_working/clear refuse from a stack that cannot write flash, "
+                 "and write nothing");
+    lpt_mount_fresh_cfg();
+    profile_t origin = make_test_profile();
+    live_edit_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.version = LIVE_EDIT_RECORD_VERSION;
+    rec.origin_id = 4;
+    rec.working_id = LIVE_EDIT_WORKING_SLOT_ID;
+    rec.pending = 1;
+    strncpy(rec.origin_name, "Unsafe", sizeof(rec.origin_name) - 1);
+    char err[160] = {0};
+    fake_kv_set_write_safe_here(false);
+    bool rec_ok = live_profile_save_record(&rec, err, sizeof(err));
+    bool rec_msg = strstr(err, "not write-safe") != NULL;
+    err[0] = '\0';
+    bool work_ok = live_profile_save_working(&origin, err, sizeof(err));
+    bool work_msg = strstr(err, "not write-safe") != NULL;
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(!rec_ok && rec_msg, "save_record refused from an unsafe stack");
+    TEST_CHECK(!work_ok && work_msg, "save_working refused from an unsafe stack");
+    TEST_CHECK(!lpt_file_exists(LIVE_PROFILE_RECORD_FILE_PATH), "no record file was written");
+    TEST_CHECK(!lpt_file_exists(LIVE_PROFILE_WORKING_FILE_PATH), "no working file was written");
+    TEST_CHECK(live_profile_save_record(&rec, err, sizeof(err)), "the same record saves once the stack is safe");
+}
+
 static void test_save_refused_when_cfg_unmounted(void)
 {
     TEST_SECTION("live_profile -- with cfg unmounted a fork/save is REFUSED with a message naming cfg");
@@ -993,6 +1022,7 @@ int main(void)
     test_pickup_refuses_on_hard_validate_failure();
     lpt_mount_fresh_cfg();
     test_cfg_only_storage();
+    test_saves_refused_from_unsafe_stack();
     test_save_refused_when_cfg_unmounted();
     test_legacy_nvs_migrates_to_cfg();
     lpt_mount_fresh_cfg();
