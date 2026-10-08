@@ -2,9 +2,9 @@
 
 Consolidated table for `docs/RELEASE_HARDENING_PLAN.md` section 3, acceptance step 4.
 One row per check that `tools/run_all_checks.ps1 -ListOnly` discovers (plus the guard that
-enforces this table). Source: the ten `docs/audits/release_gate_vacuity_audit_*.md` files
-(suffixes 09-16, 09-16b to 09-16g, 09-17, 09-18, 10-02). Audit pass 12
-(`release_gate_vacuity_audit_2026-10-07.md`) is running concurrently and is not reflected here.
+enforces this table). Source: the eleven `docs/audits/release_gate_vacuity_audit_*.md` files
+(suffixes 09-16, 09-16b to 09-16g, 09-17, 09-18, 10-02, and 10-07 for pass 12,
+`release_gate_vacuity_audit_2026-10-07.md`).
 
 This is an index, not new evidence: every mutation and result below is a one-line
 summary of what the named audit recorded. Read the audit for the full procedure and restore proof.
@@ -114,7 +114,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW_recovery/main/check_recovery_hold.ps1` | NOT AUDITED | - | none (added 2026-10-02, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `firmware/KilnFW_recovery/main/check_recovery_image_check.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW_recovery/main/check_recovery_lcd_policy.ps1` | NOT AUDITED | - | none (added 2026-10-03, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `firmware/KilnFW_recovery/main/check_recovery_page_crc.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW_recovery/main/check_recovery_page_crc.ps1` | NEGATIVE-TESTED | 10-07 | three real-source mutants on top of the built-in battery | all RED for the right reason; restored |
 | `firmware/KilnFW_recovery/main/check_recovery_passphrase.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW_recovery/main/check_recovery_pico_proto.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW_recovery/main/check_recovery_upload.ps1` | NOT AUDITED | - | none (added 2026-10-02, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
@@ -133,8 +133,8 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/SaftyFW/tools/check_link_impl_isolation.ps1` | NEGATIVE-TESTED | 09-16c | CRC-named function added to safety_core.c | RED; hand-restored; PASS |
 | `firmware/SaftyFW/tools/check_thermo_snapshot_producers.ps1` | NEGATIVE-TESTED | 09-16c | all three production assignments of cj_valid commented out in thermo_task.c | RED, field named; hand-restored; PASS |
 | `firmware/SaftyFW/tools/check_unused_setters.ps1` | NEGATIVE-TESTED | 09-16c | uncalled zz_audit setter declared and defined in current_sense | RED, no call site named; both files hand-restored; PASS |
-| `tools/check_app_image_size.ps1` | NOT AUDITED | - | none (added 2026-10-04, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `tools/check_aux_relay_conflict_sites.ps1` | NOT AUDITED | - | none (added 2026-10-04, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_app_image_size.ps1` | NEGATIVE-TESTED | 10-07 | image 1 B over the bound; app row shrunk below the image / grown past 0x400000; missing CSV; missing or duplicate app row | each RED with the right message; no image yet is SKIP / SKIP-FAST, so it grades nothing until build/KilnCtrl.bin exists |
+| `tools/check_aux_relay_conflict_sites.ps1` | NEGATIVE-TESTED | 10-07 | aux_conflict_mask call deleted from zones_post_apply (ordinary POST /api/zones commit); other sites, backup import, unlisted-site scan | first mutation PASSED (file-level match satisfied by the restore function): WEAK, fixed by pinning the call inside zones_post_apply; now RED; restored |
 | `tools/check_bench_test_registry.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/check_bridge_reject_reason.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/check_c_files_in_cmakelists.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] MAX31856.c entry removed from the drivers CMakeLists ; [09-16g] untracked unwired drivers/zz_audit_unwired.c created | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; file removed; PASS |
@@ -157,12 +157,12 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_html_escape_helpers.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js | RED on the right rule; restored |
 | `tools/check_iter_tune_write_surface.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/check_kiln_auth_config_isolation.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_kiln_scope_cfg_mirrors.ps1` | NOT AUDITED | - | none (added 2026-10-04, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_kiln_scope_cfg_mirrors.ps1` | NEGATIVE-TESTED | 10-07 | scope-list vs cfg-mirror drift in kiln_scope_cfg_files.c, unit_pref.[ch], kiln_package.c, cfg_fs.c | each RED, names the item; restored |
 | `tools/check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-02 | nav ungated in ui_page_home_actions.c | RED; restored |
 | `tools/check_lint_pages.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js / nav.js | RED on the right rule; restored |
 | `tools/check_mcp_facade_coverage.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] uncovered @_srv._tool() negtest function added to mcp_server_io.py; the documented plant_sim_compare example found stale ; [09-16f] ramp_assist_set_enabled KEYWORDS entry removed (replaces the stale documented example) | [09-16e] RED naming the tool; hand-restored; docstring example fixed in 09-16f ; [09-16f] RED naming the tool; hand-restored; PASS |
 | `tools/check_mcp_tool_count_doc.ps1` | NEGATIVE-TESTED | 09-16e | CLAUDE.md edited to claim 999 tools | RED, doc vs actual count; hand-restored; PASS |
-| `tools/check_monocypher_vendored.ps1` | NOT AUDITED | - | none (added 2026-10-07, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_monocypher_vendored.ps1` | NEGATIVE-TESTED | 10-07 | byte flip in a vendored file; README hash edited; README row dropped; directory deleted; extra unhashed extra.c | all RED except extra.c, which PASSED: WEAK, fixed (unhashed .c/.h/.S fails); extra.c now RED (re-run by the opus review) |
 | `tools/check_mykicad_golden_suite_runs.ps1` | NEGATIVE-TESTED | 09-16e | submodule conftest pointed at a nonexistent kiln project dir | RED (53 passed, 19 errored); hand-restored; 72 passed |
 | `tools/check_no_bench_text_in_ui.ps1` | NEGATIVE-TESTED | 10-02 | bench-wattage text added to a page title | RED naming the line; throws on a missing scan dir; restored |
 | `tools/check_no_doubled_apostrophes.ps1` | NOT AUDITED | - | none | NOT AUDITED |
@@ -173,19 +173,19 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_no_orphaned_checks.ps1` | NEGATIVE-TESTED | 09-16, 09-18 | [09-16] orphan test_zz_audit_orphan.py created (a bare check_*.ps1 is covered by the glob, a non-test) ; [09-18] wrapper rule and raw-text fallback both absolved a check wired only by a comment; sabotaged the one non-comment reference in check_saftyfw_task_count.ps1 | [09-16] RED; file deleted ; [09-18] pre-fix PASS (vacuous), one-fix PASS, both fixes RED; hand-restored; guard fixed |
 | `tools/check_nvs_key_length.ps1` | NEGATIVE-TESTED | 09-16 | 17-character NVS key literal added to adaptive_tune.h | RED, names file, line, literal; hand-restored; PASS |
 | `tools/check_nvs_write_guard_coverage.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_ota_esp_refuses_running_target.ps1` | NOT AUDITED | - | none (added 2026-10-03, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_ota_esp_refuses_running_target.ps1` | NEGATIVE-TESTED | 10-07 | guard kept as text but defeated: if (0 && !...), negation dropped, goto cleanup removed | PASSED (call located by position only): WEAK, fixed by matching the whole refusing if-block; all three now RED (re-run by the opus review); Pico mutations RED as before |
 | `tools/check_page_js_tests.ps1` | NEGATIVE-TESTED | 10-02 | delete-count filter loosened in backup_page.html | RED naming test_backup_page.js (36/37); restored |
-| `tools/check_persist_scratch_malloc_caps.ps1` | NOT AUDITED | - | none (added 2026-10-03, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_persist_scratch_malloc_caps.ps1` | NEGATIVE-TESTED | 10-07 | plain malloc in zones_http_post.c, zones_config_store.c, zone_aux_convert_http.c; an adopter file unlisted | PASSED (files not in the scan list): WEAK, fixed by listing them plus an adoption guard (floor 8); all RED (re-run by the opus review); two real plain mallocs converted |
 | `tools/check_pico_update_mutex_balance.ps1` | NEGATIVE-TESTED | 10-02 | unbalanced take/give in pico_auto_update_boot.c | RED, imbalance reported; restored byte-identical |
 | `tools/check_profiles_capacity.ps1` | NEGATIVE-TESTED | 10-02 | capacity constant changed in profiles_types.h | RED, mirror mismatch; restored |
 | `tools/check_python_zero_caller_sweep.ps1` | NEGATIVE-TESTED | 10-02 | uncalled function added to ui_test_client.py | RED, exit 1, names it; restored |
 | `tools/check_recovery_image_size.ps1` | REVIEWED, NOT MUTATED | 09-18 | screen A: Python check signals failure as return 1 with sys.exit(main()) | failure path present; no mutation |
 | `tools/check_relay_authority_paths.ps1` | NEGATIVE-TESTED | 09-16d, 09-16e, 09-16g | [09-16d] PC side: link.send(devices.io_set_relay(...)) added; the bare-call shape passed clean (rule narrower than its summary) ; [09-16e] rule widened to wrapper-presence; PC bare call, PC .send call, and firmware-side kiln_io_set_relay in profile_executor.c ; [09-16g] kiln_io_set_relay call inserted in dashboard_json.c json_escape | [09-16d] RED for the .send shape; hand-restored; rule widened in 09-16e ; [09-16e] all three RED; hand-restored; also found and fixed a live GUI relay bypass in actions.py ; [09-16g] RED at that line; hand-restored; PASS |
 | `tools/check_relay_writes_through_owner.ps1` | NEGATIVE-TESTED | 09-16 | unauthorized set_relay_mask call added in main.c | RED at that line; hand-restored; PASS |
-| `tools/check_release_manifest.ps1` | NOT AUDITED | - | none (added 2026-10-04, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `tools/check_release_version_regex.ps1` | NOT AUDITED | - | none (added 2026-10-05, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_release_manifest.ps1` | NEGATIVE-TESTED | 10-07 | size gate 0x400000 -> 0x500000; dirty-tree refusal off; sha256 compare off; draft flag off; open gates not refused; provenance refusal off; token forwarded on hop 2; semver gate off | all RED except semver gate off, which PASSED (a later gate also exits 1): WEAK, fixed by requiring the is-not-semver text; now RED |
+| `tools/check_release_version_regex.ps1` | NEGATIVE-TESTED | 10-07 | cap 32 -> 33; cap dropped; - dropped from the prerelease charset; leading-zero reject neutralised; + allowed in the prerelease charset; badtag[] edits; table renamed | all RED except the + charset, which PASSED: WEAK (minor), fixed by pinning v1.2.3-rc+1 on both sides; now RED |
 | `tools/check_route_tier_coverage.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_safe_remove_junction.ps1` | NOT AUDITED | - | none (added 2026-10-07, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_safe_remove_junction.ps1` | NEGATIVE-TESTED | 10-07 | unlink skipped in Remove-TreeSafe; no descent in Remove-ReparsePointsUnder; unlink dropped at both call sites; site pattern made blind; an unguarded $r = & git ... worktree remove site | skip-unlink and blind mutants PASSED: WEAK, fixed (unlink report required, command-line site pattern); the $r = & git site PASSED that fix too and is caught after the opus review reordered the pattern; all RED; recursive-delete mutant equivalent on this PowerShell |
 | `tools/check_safety_baud_sync.ps1` | NEGATIVE-TESTED | 09-16d | SaftyFW bootloader uart_init baud 230400 changed to 115200 | RED, two rates named; hand-restored; PASS |
 | `tools/check_safety_call_results_checked.ps1` | NEGATIVE-TESTED | 09-16 | bare (result-discarding) all-relays-off call in uart_bridge_io.c | RED, names the sabotaged line; hand-restored; PASS |
 | `tools/check_safety_trip_mask_docs.ps1` | NEGATIVE-TESTED | 09-16e | wrong, non-negated S6a trip_mask sentence added to CLAUDE.md | RED; hand-restored; PASS |

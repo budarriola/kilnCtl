@@ -62,8 +62,28 @@ $files = @(
     "firmware/KilnFW/App/drivers/persist/zones_config_cfg_fs.c",
     "firmware/KilnFW/App/drivers/persist/cfg_fs_status.c",
     "firmware/KilnFW/App/drivers/persist/firing_stats_cfg_fs.c",
-    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c"
+    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c",
+    "firmware/KilnFW/App/drivers/http/zones_http_post.c",
+    "firmware/KilnFW/App/drivers/http/zone_aux_convert_http.c",
+    "firmware/KilnFW/App/drivers/persist/zones_config_store.c"
 )
+
+# Adoption guard (vacuity audit 2026-10-07): a file that already calls persist_scratch_alloc() has opted
+# into this rule, so a regression to plain malloc there must be seen. Three such files were missing from
+# the list above and a mutation to plain malloc in them passed. Any App .c using the helper must be listed.
+$adopters = @(Get-ChildItem -Path (Join-Path $RepoRoot "firmware/KilnFW/App") -Recurse -File -Filter *.c |
+    Where-Object { ($_.FullName -replace "[^A-Za-z0-9_.:]", "/") -notmatch "/(test|build)/" -and $_.Name -ne "persist_scratch.c" } |
+    Where-Object { [regex]::IsMatch([IO.File]::ReadAllText($_.FullName), "\bpersist_scratch_alloc\s*\(") })
+if ($adopters.Count -lt 8) { Write-Host "FAIL: only $($adopters.Count) persist_scratch_alloc() adopter file(s) found under App; adoption guard went blind"; exit 1 }
+$unlisted = @()
+foreach ($ad in $adopters) {
+    $relp = $ad.FullName.Substring($RepoRoot.Length).TrimStart([char]92, [char]47).Replace([string][char]92, "/")
+    if ($files -notcontains $relp) { $unlisted += $relp }
+}
+if ($unlisted.Count -gt 0) {
+    $unlisted | ForEach-Object { Write-Host "FAIL: $_ uses persist_scratch_alloc() but is not in the `$files list of check_persist_scratch_malloc_caps.ps1" }
+    exit 1
+}
 
 # file | normalized call text | expected count | reason
 $allow = @(

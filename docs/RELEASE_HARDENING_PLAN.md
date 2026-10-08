@@ -828,6 +828,8 @@ hole is **desirable, not a blocker**, and is item 11.
 
 **Status, 2026-10-02 (eleventh pass).** `docs/audits/release_gate_vacuity_audit_2026-10-02.md`: 13 checks added or changed since 2026-09-18 negative-tested, all load-bearing; two discovery vacuities fixed (`check_no_exec_status_stack_locals.py`, `check_no_handler_direct_driver_calls.py` now fail on a missing scan directory or too few files).
 
+**Status, 2026-10-07 (twelfth pass).** `docs/audits/release_gate_vacuity_audit_2026-10-07.md`: the checks added since 2026-10-02 (`check_app_image_size`, `check_aux_relay_conflict_sites`, `check_kiln_scope_cfg_mirrors`, `check_ota_esp_refuses_running_target`, `check_persist_scratch_malloc_caps`, `check_release_manifest`, `check_release_version_regex`, `check_safe_remove_junction`, `check_monocypher_vendored`) and the `firmware/KilnFW_recovery/main/check_recovery_*.ps1` family were negative-tested. Seven were weak and are fixed and re-negative-tested: aux (call pinned inside `zones_post_apply`), ota (whole guard matched), persist_scratch (three unlisted adopter files plus an adoption guard; two real plain mallocs converted to `persist_scratch_alloc`), version_regex (`+` after a prerelease), release_manifest (semver refusal text required), safe_remove_junction (unlink report required, site pattern tightened) and monocypher (unhashed files fail).
+
 ---
 
 ## 4. BLOCKER — a safety argument that does not depend on the bench
@@ -1030,8 +1032,8 @@ consumer side was only ever exercised against a hand-built fault struct
 `firmware/KilnFW/App/test/test_zones_http.c` (drives real bytes through the
 real `nvs_load_from()`/`zones_config_json_decode_blob()`, reads back the real
 `zones_config_get_load_fault()`). Both negative-tested: each latch call was
-independently removed/altered in `zones_config_store.c` (that file's current blob,
-blob:firmware/KilnFW/App/drivers/persist/zones_config_store.c`1b485e17e0659ff95a03aab0f856b94ef3a8679f`),
+independently removed/altered in `zones_config_store.c` (the file as of commit
+`9cd3cbd8`; it has changed since, so its blob is no longer cited),
 confirmed to turn the
 `zones_http` host-test executable red, restored by hand with an empty
 `git diff` and a matching `git hash-object`, then the build directory was

@@ -57,8 +57,10 @@ elseif ($out -notmatch 'Ran (\d+) tests' -or [int]$Matches[1] -lt 9) { Note-Fail
 else { Write-Host "ok: $($Matches[0]) (release signer)" }
 
 # 2. bad tag refused -------------------------------------------------------------
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "1.0" | Out-Null
-if ($LASTEXITCODE -ne 1) { Note-Fail "make_release.ps1 -Tag 1.0 exited $LASTEXITCODE, expected 1 (refusal)" }
+# Require the semver refusal text too: a bare exit 1 is also what any later gate (dirty tree, build, ...)
+# returns, so with the semver gate removed this passed anyway (vacuity audit 2026-10-07).
+$o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "1.0" 2>&1 | Out-String
+if ($LASTEXITCODE -ne 1 -or $o -notmatch "is not semver") { Note-Fail "make_release.ps1 -Tag 1.0 exited $LASTEXITCODE without the 'is not semver' refusal, expected 1 with it:`n$o" }
 else { Write-Host "ok: non-semver tag refused" }
 
 # 2b. provenance refusal ------------------------------------------------------------

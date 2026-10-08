@@ -17,6 +17,12 @@ foreach ($r in $rows) {
     $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()
     if ($h -ne $r[1]) { Write-Host "FAIL: $($r[0]) sha256 $h != recorded $($r[1])"; $bad++ }
 }
+# A source/header file in the vendored directory that the README does not hash is unpinned code
+# (vacuity audit 2026-10-07: an extra monocypher_x.c passed).
+$listed = @($rows | ForEach-Object { $_[0] })
+foreach ($f in @(Get-ChildItem -LiteralPath $Dir -File | Where-Object { $_.Extension -in '.c', '.h', '.S', '.s' })) {
+    if ($listed -notcontains $f.Name) { Write-Host "FAIL: $($f.Name) is in the vendored directory but not in the README sha256 table"; $bad++ }
+}
 if ($bad) { exit 1 }
 Write-Host "PASS: $($rows.Count) vendored Monocypher files match upstream 4.0.3 hashes"
 exit 0

@@ -63,6 +63,7 @@ $table = @(
     ,@('v1.2.3-rc..1', $false)
     ,@('v1234567890.0.0', $false)
     ,@('v1.2.3-', $false)
+    ,@('v1.2.3-rc+1', $false)
 )
 
 $test = Get-Content -Raw -LiteralPath $testPath

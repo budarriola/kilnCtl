@@ -660,7 +660,7 @@ bool zones_config_persisted_equals_ram(void)
     /* Re-reads the cfg FILE, the only place nvs_save() writes since the
      * dual-write close (docs/CONFIG_FILESYSTEM.md, "Dual-write window:
      * closed"); the NVS blob is a frozen legacy copy no save updates. */
-    zones_cfg_t *raw = malloc(sizeof(*raw));
+    zones_cfg_t *raw = persist_scratch_alloc(sizeof(*raw));
     if (raw == NULL) {
         return false;
     }

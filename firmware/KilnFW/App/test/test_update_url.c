@@ -173,7 +173,7 @@ static void test_repo_and_builders(void)
     static const char *const badtag[] = {"",         "1.0.0",       "v1.0",      "v1.0.0+build", "v1.0.0/x",
                                          "v1.0.0 ", "V1.0.0",      "v1.0.0-a%", "v01.0.0",      "vv1.0.0",
                                          "v1.0.0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "v1.2.3-01", "v1.2.3-rc.01", "v1.2.3-.",
-                                         "v1.2.3-rc..1", "v1234567890.0.0", "v1.2.3-"};
+                                         "v1.2.3-rc..1", "v1234567890.0.0", "v1.2.3-", "v1.2.3-rc+1"};
     for (size_t i = 0; i < sizeof(badtag) / sizeof(badtag[0]); i++) {
         TEST_CHECK(!update_tag_valid(badtag[i]), badtag[i]);
     }

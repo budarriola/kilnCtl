@@ -597,7 +597,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
             char escaped[224];
             char resp[300];
         } ceiling_scratch_t;
-        ceiling_scratch_t *cs = malloc(sizeof(*cs));
+        ceiling_scratch_t *cs = persist_scratch_alloc(sizeof(*cs));
         safety_ceiling_sync_result_t ceiling_result;
         bool raise_ok;
         if (!cs) {

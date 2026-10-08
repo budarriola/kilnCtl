@@ -7,8 +7,9 @@
 #      call (Remove-Item -Recurse -Force) on a second fixture reports whether
 #      this PowerShell still follows junctions (informational: it is
 #      version-dependent, so it never fails the check).
-#   2. Static: every `git worktree remove` in a tools/ or firmware/ .ps1 must
-#      be preceded within 6 lines by Remove-ReparsePointsUnder / Remove-TreeSafe.
+#   2. Static: every `git worktree remove` COMMAND LINE (a line starting with git, & git, $x = git or
+#      $x = & git; not a message string, vacuity audit 2026-10-07) in a tools/ or firmware/ .ps1
+#      must be preceded within 6 lines by Remove-ReparsePointsUnder / Remove-TreeSafe.
 # Never touches the real .venv: everything lives under a fresh temp dir.
 $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -38,7 +39,11 @@ function New-Fixture([string]$name) {
 try {
     # --- 1a. new code ---
     $f = New-Fixture "new"
-    Remove-TreeSafe -Path $f.Worktree
+    # Windows PowerShell 5.1's Remove-Item does not follow junctions on every box, so the sentinel
+    # alone cannot prove Remove-TreeSafe unlinks first (vacuity audit 2026-10-07: skipping the unlink
+    # step still passed). Require the unlink report as well.
+    $tsOut = Remove-TreeSafe -Path $f.Worktree 6>&1 | Out-String
+    if ($tsOut -notmatch 'unlinked reparse point') { $failures.Add("Remove-TreeSafe did not unlink the junction before deleting (no 'unlinked reparse point' report)") }
     if (Test-Path -LiteralPath $f.Worktree) { $failures.Add("Remove-TreeSafe left the worktree behind") }
     foreach ($rel in @("pyvenv.cfg", "Lib\deep.txt")) {
         if (-not (Test-Path -LiteralPath (Join-Path $f.Target $rel))) {
@@ -89,9 +94,9 @@ try {
     $files = Get-ChildItem -LiteralPath (Join-Path $repoRoot "tools"), (Join-Path $repoRoot "firmware") -Recurse -Filter *.ps1 -File -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -notmatch '[\/](build|\.venv|components)[\/]' -and $_.Name -ne "check_safe_remove_junction.ps1" }
     foreach ($file in $files) {
-        $lines = Get-Content -LiteralPath $file.FullName
+        $lines = @(Get-Content -LiteralPath $file.FullName)  # @(): a one-line file must not index into a string
         for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -match '^\s*[^#\s].*git\b.*worktree\s+remove\b') {
+            if ($lines[$i] -match '^\s*(?:\$\w+\s*=\s*)?(?:&\s*)?git\b.*worktree\s+remove\b') {
                 $sites++
                 $lo = [Math]::Max(0, $i - 6)
                 $window = ($lines[$lo..$i] -join "`n")
