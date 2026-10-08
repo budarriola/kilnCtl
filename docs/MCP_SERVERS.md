@@ -880,7 +880,11 @@ rebase, at most 3 tries); `push_verify.ps1` must say LANDED; then optionally
 `-RestartMcp` (restart then status, bounded by `-McpTimeoutMin`, default 10)
 and `-RemoveWorktree` (only after LANDED). `-DryRun` does the refusals, log
 gate and fetch and changes nothing. The last stdout line is one JSON object:
-`{"sha","landed","steps","allowed_fails","dry_run","error"}`. Unit test:
+`{"sha","landed","steps","allowed_fails","known_fails","new_fails","dry_run","error"}`.
+`-AllowKnownFailures` also accepts a `FAIL <check>` that is KNOWN on origin/main (the
+main baseline, `tools/main_baseline.ps1` / `tools/main_baseline_lib.ps1`, recorded for an
+origin/main commit that is an ancestor of HEAD; mode from the log's `Run mode:` line); any
+NEW failure still refuses and is listed in `new_fails`; `-AllowFail` is unchanged. Unit test:
 `tools/check_land.ps1` (throwaway bare repo under temp).
 (`commit_guard.ps1` is a pre-commit guard and stays a manual step before the commit.)
 

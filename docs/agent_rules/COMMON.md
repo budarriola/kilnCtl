@@ -133,6 +133,20 @@ re-run ~100 static checks. Logic: `tools/checkcache_lib.ps1`; store:
   `PASS  <check> (cached <time> from <worktree>)` and is counted in the summary.
 - When adding a check: mark it only if it meets the rule above.
 
+## Known failures on main
+
+Every `run_all_checks.ps1` run ends with a "vs main baseline" section: NEW (fails
+here, passed on main), KNOWN (also fails on main), FIXED. **Read the NEW list.** It
+is the only list that is yours to fix or report. KNOWN failures need no
+re-reporting beyond one line ("N KNOWN failures, same as main"); do not
+re-investigate whether main is already fixed, the baseline says. The baseline is
+recorded by a clean run at origin/main (`tools/main_baseline.ps1 -Record` seeds it,
+`-Show` prints it) and only counts if its commit is an ancestor of your HEAD; a
+warning means it is from an older main sha. `-FailOnlyOnNew` exits 0 when every
+failure is KNOWN (it says so loudly); `tools/land.ps1 -AllowKnownFailures` accepts
+a check log whose only failures are KNOWN. `-AllowFail` is unchanged, for failures
+that are neither.
+
 ## Attribution
 
 Every subagent commit trailer in this repo is exactly:

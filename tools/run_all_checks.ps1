@@ -147,7 +147,15 @@ param(
     # defect in the tree. It is filed under its own BUSY heading with a
     # rerun-it-alone hint instead of an anonymous FAIL, but it still fails the
     # run (nothing was verified) unless -AllowBusy is passed.
-    [switch]$AllowBusy
+    [switch]$AllowBusy,
+
+    # "Known failures on main" baseline (tools/main_baseline_lib.ps1). Every run
+    # prints a "vs main baseline" section splitting failures into NEW / KNOWN /
+    # FIXED. By default the exit code is unchanged (any failure fails the run).
+    # With -FailOnlyOnNew a run whose every failure is KNOWN (also fails on the
+    # baseline of an origin/main ancestor of HEAD) exits 0, loudly. No usable
+    # baseline means nothing is KNOWN, so the exit code stays as it was.
+    [switch]$FailOnlyOnNew
 )
 
 # param() must be the first statement in the script, so this assignment --
@@ -622,10 +630,12 @@ if ($ListOnly) {
 # Check-result cache (tools/checkcache_lib.ps1): a PASS of an opt-in
 # (`# checkcache: ok`) check is reused when the tree is clean and identical.
 . (Join-Path $PSScriptRoot "checkcache_lib.ps1")
+. (Join-Path $PSScriptRoot "main_baseline_lib.ps1")
 $script:CheckCacheCtx = Initialize-CheckCache -RepoRoot $repoRoot -Fast:$Fast -NoCache:$NoCache -PcToolsPython $selfcheckPython
 
 Write-Host ""
 Write-Host "Running $($checks.Count) guard scripts from $repoRoot (parallel, throttle $MaxParallel)"
+Write-Host "Run mode: $(if ($Fast) { 'fast' } else { 'full' })"
 if ($script:CheckCacheCtx.Enabled) {
     Write-Host "Check cache: on (tree $($script:CheckCacheCtx.Tree.Substring(0,12)), $($script:CheckCacheCtx.Mode))" -ForegroundColor Cyan
 } else {
@@ -967,6 +977,50 @@ foreach ($r in $results) {
 }
 
 $cacheStored = Save-CheckCache -Ctx $script:CheckCacheCtx
+
+# Main-baseline report, recording and exit (tools/main_baseline_lib.ps1). Every
+# exit after the results are known goes through here.
+function Exit-WithBaseline {
+    param([int]$Code)
+    $mode = if ($Fast) { "fast" } else { "full" }
+    $cur = @()
+    foreach ($p in $passed) { $cur += [pscustomobject]@{ Path = $p; Status = "PASS" } }
+    foreach ($s in $skippedFast) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP-FAST" } }
+    foreach ($s in $skipped) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP" } }
+    foreach ($b in $busy) { $cur += [pscustomobject]@{ Path = $b.Path; Status = "BUSY" } }
+    foreach ($f in $failed) { $cur += [pscustomobject]@{ Path = $f.Path; Status = "FAIL" } }
+    # Only the failures that actually failed the run count against -FailOnlyOnNew.
+    $cur2 = @($cur | Where-Object {
+        ($_.Status -ne "SKIP" -or -not $AllowSkips) -and ($_.Status -ne "BUSY" -or -not $AllowBusy) })
+    $rep = $null
+    try {
+        $rep = Show-MainBaselineSection -Current $cur2 -Mode $mode -RepoRoot $repoRoot
+        if (-not $Only -and -not $Skip) {
+            $rec = Test-MainBaselineRecordable -RepoRoot $repoRoot
+            if ($rec.Ok) {
+                $fp = Get-CheckCacheFingerprint -PcToolsPython $selfcheckPython
+                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur
+                Write-Host "Recorded main baseline ($mode) for origin/main $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
+            } else {
+                Write-Host "Main baseline not recorded: $($rec.Reason)" -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "Main baseline not recorded: -Only/-Skip run is partial" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "main baseline: skipped ($($_.Exception.Message))" -ForegroundColor Yellow
+    }
+    Clear-ChecksFastEnv
+    if ($Code -ne 0 -and $FailOnlyOnNew) {
+        if ($null -ne $rep -and $rep.Found -and $rep.Cmp.New.Count -eq 0) {
+            Write-Host "" 
+            Write-Host "!!! -FailOnlyOnNew: exiting 0 although $($rep.Cmp.Known.Count) check(s) FAILED -- every failure is KNOWN on origin/main. This is NOT a clean run. !!!" -ForegroundColor Yellow
+            exit 0
+        }
+        Write-Host "-FailOnlyOnNew: exit code stays $Code (NEW failures present or no usable baseline)." -ForegroundColor Red
+    }
+    exit $Code
+}
 Write-Host ""
 if ($script:CheckCacheCtx.Hits.Count -gt 0 -or $cacheStored -gt 0) {
     $savedSec = [int](($script:CheckCacheCtx.Hits | Measure-Object DurationSec -Sum).Sum)
@@ -1014,8 +1068,7 @@ if ($failed.Count -gt 0) {
     }
     Write-Host ""
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
-    Clear-ChecksFastEnv
-    exit 1
+    Exit-WithBaseline 1
 }
 
 # A skip is never silently folded into "passed" -- the summary line always
@@ -1040,16 +1093,13 @@ if ($failed.Count -gt 0) {
 if ($busy.Count -gt 0 -and -not $AllowBusy) {
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($busy.Count) BUSY (not run), $($failed.Count) failed." -ForegroundColor Red
     Write-Host "FAILED: $($busy.Count) check(s) never got a build-gate slot -- rerun them alone (see above); -AllowBusy only for a deliberately partial run." -ForegroundColor Red
-    Clear-ChecksFastEnv
-    exit 1
+    Exit-WithBaseline 1
 }
 if ($skipped.Count -gt 0 -and -not $AllowSkips) {
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
     Write-Host "FAILED: $($skipped.Count) check(s) skipped and -AllowSkips was not passed -- a skip is not a pass." -ForegroundColor Red
-    Clear-ChecksFastEnv
-    exit 1
+    Exit-WithBaseline 1
 }
 
 Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Green
-Clear-ChecksFastEnv
-exit 0
+Exit-WithBaseline 0

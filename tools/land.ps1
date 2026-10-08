@@ -13,6 +13,7 @@
 # USAGE (run from inside the worktree whose commits are ready)
 #   powershell -ExecutionPolicy Bypass -File tools\land.ps1
 #       [-WaitPid <pid>] [-CheckLog <file>] [-AllowFail <regex>[,<regex>]]
+#       [-AllowKnownFailures]
 #       [-PostRebaseChecks <regex>] [-RestartMcp] [-RemoveWorktree] [-DryRun]
 #
 #   -WaitPid / -CheckLog  wait (bounded by -WaitTimeoutMin, default 120) for a
@@ -20,6 +21,13 @@
 #       PowerShell's `>`/Tee write) are decoded. A log with no summary line, or
 #       any `FAIL <check>` not matched by -AllowFail, or a `FAILED:` line, is a
 #       refusal. Allowed FAILs are echoed loudly and listed in the final JSON.
+#   -AllowKnownFailures   additionally accept a `FAIL <check>` that is KNOWN on
+#       origin/main: the check also failed in the main baseline (C:\wt\.mainbaseline,
+#       tools\main_baseline.ps1) recorded for an origin/main commit that is an
+#       ANCESTOR of HEAD (other lineages are ignored). Mode (fast/full) is taken
+#       from the log's text. Any NEW failure (passed or absent on main) still
+#       refuses. -AllowFail is unchanged and checked first. The final JSON lists
+#       "new_fails" and "known_fails".
 #   -PostRebaseChecks     extra regex ORed onto the fixed post-rebase set
 #       (check_mcp_tool_count_doc, check_mcp_facade_coverage); run via
 #       run_all_checks -Only. A NARROW re-confirmation only, not the full suite.
@@ -47,6 +55,7 @@ param(
     [int]$WaitPid = 0,
     [string]$CheckLog,
     [string[]]$AllowFail,
+    [switch]$AllowKnownFailures,
     [string]$PostRebaseChecks,
     [switch]$RestartMcp,
     [switch]$RemoveWorktree,
@@ -64,6 +73,8 @@ $ErrorActionPreference = "Continue"
 
 $script:steps = New-Object System.Collections.ArrayList
 $script:allowedFails = @()
+$script:knownFails = @()
+$script:newFails = @()
 $script:sha = $null
 
 function Finish([int]$code, [string]$err, [bool]$landed = $false) {
@@ -72,6 +83,8 @@ function Finish([int]$code, [string]$err, [bool]$landed = $false) {
         landed        = $landed
         steps         = @($script:steps)
         allowed_fails = @($script:allowedFails)
+        known_fails   = @($script:knownFails)
+        new_fails     = @($script:newFails)
         dry_run       = [bool]$DryRun
         error         = $(if ($err) { $err } else { $null })
     }
@@ -169,6 +182,25 @@ if ($WaitPid -gt 0 -or $CheckLog) {
         foreach ($re in $AllowFail) { if ($re -and $l -match $re) { $ok = $true; break } }
         if ($ok) { $script:allowedFails += $l } else { $blocked += $l }
     }
+    if ($AllowKnownFailures -and $blocked.Count -gt 0) {
+        . (Join-Path $PSScriptRoot "checkcache_lib.ps1")
+        . (Join-Path $PSScriptRoot "main_baseline_lib.ps1")
+        $bmode = "fast"   # the standing run; a full run prints "Run mode: full"
+        $mm = [regex]::Match($text, '(?m)^Run mode: (fast|full)')
+        if ($mm.Success) { $bmode = $mm.Groups[1].Value }
+        $sel = Select-MainBaseline -Dir (Get-MainBaselineDir) -Mode $bmode -RepoRoot $top
+        if ($null -eq $sel.Baseline) {
+            Write-Host "-AllowKnownFailures: no usable $bmode baseline: $($sel.Reason)" -ForegroundColor Yellow
+        } else {
+            if ($sel.Warning) { Write-Host "WARNING: $($sel.Warning)" -ForegroundColor Yellow }
+            $cur = @($blocked | Where-Object { $failNames -contains $_ } | ForEach-Object { [pscustomobject]@{ Path = $_; Status = "FAIL" } })
+            $cmp = Compare-MainBaseline -Current $cur -Baseline $sel.Baseline
+            $script:knownFails = @($cmp.Known)
+            foreach ($k in $script:knownFails) { Write-Host "!!! KNOWN FAIL on origin/main (-AllowKnownFailures): $k" -ForegroundColor Yellow }
+            $blocked = @($blocked | Where-Object { $script:knownFails -notcontains $_ })
+        }
+        $script:newFails = @($blocked)
+    } elseif ($blocked.Count -gt 0) { $script:newFails = @($blocked) }
     if ($failedCount -gt 0 -and $failNames.Count -eq 0) { $blocked += "summary reports $failedCount failed but no FAIL lines could be parsed" }
     foreach ($a in $script:allowedFails) { Write-Host "!!! ALLOWED FAIL (-AllowFail): $a" -ForegroundColor Yellow }
     if ($blocked.Count -gt 0) { Finish 1 ("check log has unallowed FAIL: " + ($blocked -join '; ')) }

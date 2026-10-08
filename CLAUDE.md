@@ -779,6 +779,19 @@ hits and time saved. A dirty tree, any doubt, or `-NoCache` /
 `KILNCTL_CHECKCACHE=0` means every check runs for real. Only PASS is stored.
 Rules for marking a check: `docs/agent_rules/COMMON.md` "Check result cache".
 
+**Known failures on main (2026-10-08).** Every run prints a "vs main baseline"
+section splitting failures into NEW (fails here, passed on main), KNOWN (also
+fails on main) and FIXED. A run on a clean tree with HEAD == origin/main records
+the baseline (`C:\wt\.mainbaseline\<tree>-<fast|full>.json`, plus
+`latest-<mode>.json`); `tools/main_baseline.ps1 -Record` seeds it (detached
+`-Fast` run in a minted worktree), `-Show` prints the failing checks. A baseline
+counts only if its origin/main commit is an ancestor of HEAD; the merge-base's is
+preferred, an older one is used with a warning. Exit code is unchanged by default;
+`-FailOnlyOnNew` exits 0 (loudly) when every failure is KNOWN, and
+`tools/land.ps1 -AllowKnownFailures` accepts a `-CheckLog` whose only failures are
+KNOWN. Logic: `tools/main_baseline_lib.ps1`; test: `tools/check_main_baseline.ps1`.
+Landers read the NEW list; KNOWN failures need one line, no re-reporting.
+
 A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
 five hours unnoticed before `get_heap_status` was fixed to surface it (see
 the flash/OTA section above). `exc_addr 0x0` was a red herring: the real
