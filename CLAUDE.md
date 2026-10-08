@@ -828,6 +828,18 @@ nothing about build artifacts. Never measure from a prebuilt binary whose
 provenance (what source state actually produced it) isn't established —
 rebuild first.
 
+**Negative-test with `tools/negtest.ps1`, never by hand.** Hand-edit-and-restore
+is deprecated (2026-10-08: it also left a `<` -> `<=` in `update_fetch_heap.c`
+and a 100 -> 200 in `test_update_stage.c` sitting in two worktrees).
+`negtest.ps1` applies each mutation (`-File -Find -Replace`, `-Diff`, or
+`-Mutations <json>`) in a throwaway `git worktree` under `C:\wt\negtest_*`,
+requires the unmutated baseline to pass, runs every build into a fresh `{OUT}`
+so no prebuilt binary is reused, reports CAUGHT/MISSED per mutation (exit 0/1/2,
+last stdout line JSON), always removes the copy, and fails loudly if the real
+tree's status or a mutated file changed. Presets: `kilnfw-host`, `saftyfw-host`,
+`check -PresetArg <check_*.ps1>`, `pytest`. Example:
+`powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset kilnfw-host -File firmware\KilnFW\App\drivers\update\update_fetch_heap.c -Find "free_internal < FETCH_HEAP_PRECHECK_MIN" -Replace "free_internal <= FETCH_HEAP_PRECHECK_MIN" -ExpectPattern "FAIL .*test_update_fetch_heap"`.
+
 KilnFW's `boot_guard.h` RECOVERY MODE deliberately skips starting subsystems
 (`profile_executor`, `autotune_engine`), so a task started unconditionally in
 `main_boot_early.c` must gate on `boot_guard_is_recovery_mode()` before calling

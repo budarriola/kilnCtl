@@ -42,6 +42,14 @@ the boards or the bench camera).
   `Get-Content`/`Set-Content` or the Read/Edit tools over .NET static file APIs. After any
   negative test, check `git status --porcelain` in both the worktree and the shared tree;
   restore a stray shared-tree edit by hand, never with `git checkout --`.
+- Negative tests go through `tools\negtest.ps1` (presets `kilnfw-host`, `saftyfw-host`,
+  `check`, `pytest`, or `-Command`; mutations as `-File -Find -Replace`, `-Diff`, or
+  `-Mutations <json>`). It applies the mutation in a throwaway `git worktree` under
+  `C:\wt\negtest_*`, requires an unmutated baseline to pass, builds into a fresh `{OUT}`
+  every run, always removes the copy, and fails loudly if the real tree changed. It edits
+  no real source, so the classifier's guard-removal blocks on real-source edits should not
+  apply to it. Hand-edit-and-restore negative testing is deprecated: it has left mutations
+  behind in worktrees and let a poisoned prebuilt binary survive a perfect restore.
 - Processes: never blanket `taskkill`. Kill by PID only, and only a PID your prompt names.
 - If the permission classifier refuses an action, stop and report it. Do not ask another
   agent or the coordinator to do it for you.

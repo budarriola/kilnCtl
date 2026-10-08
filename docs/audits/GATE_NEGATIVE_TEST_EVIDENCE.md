@@ -23,7 +23,7 @@ Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `chec
 
 ## Counts
 
-Gate rows: 169.
+Gate rows: 170.
 
 | Status | Rows |
 |---|---|
@@ -31,7 +31,7 @@ Gate rows: 169.
 | PARTIAL | 1 |
 | REVIEWED, NOT MUTATED | 9 |
 | NOT AUDITED | 83 |
-| NOT AUDITED (pass 12 pending) | 17 |
+| NOT AUDITED (pass 12 pending) | 18 |
 
 ## Table
 
@@ -213,5 +213,6 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_main_baseline.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested at authoring: KNOWN condition always true, ancestor filter off, temp file not cleaned on a failed write, recording without HEAD==origin/main, -FailOnlyOnNew ignoring NEW, land -AllowKnownFailures accepting NEW each RED, then restored by hand) | NOT AUDITED (pass 12 pending) |
 | `tools/check_land.ps1` | NOT AUDITED | - | none (author negative-tested each case by hand, not an audit; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `tools/check_wt_status.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested at authoring against a mutated copy via -ScriptUnderTest: cherry-landed detection disabled, dirty ignored for HAS_WORK, prune widened to HAS_WORK/ACTIVE, -WhatIf bypassed, junction-following delete each RED, then restored) | NOT AUDITED (pass 12 pending) |
+| `tools/check_negtest.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested at authoring against mutated copies of negtest.ps1 via -ScriptUnderTest: real-tree guard disabled, baseline requirement disabled, each RED, copies deleted) | NOT AUDITED (pass 12 pending) |
 | `tools/check_pushed_build_stamp.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `tools/check_agent_tail.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested automatically inside the check against mutated copies: repeat detection disabled, results-unchanged test dropped, log-staleness inverted, running-process test dropped each caught, plus manual restore of none needed; pass 12 pending) | NOT AUDITED (pass 12 pending) |
