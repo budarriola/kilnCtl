@@ -568,6 +568,17 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       reverted) — this is not a codec that merely runs, it is one whose
       tests can prove a defect.
 
+      **Drift now pinned by host tests (2026-10-07):** both sides are byte-compared
+      against this codec -- `SaftyFW/test/test_link_frame_wire.c`
+      (`test_fw_version_pack_matches_commonfw_codec`: `link_frame_pack_fw_version()`
+      vs `kilnlink_fw_version_encode()`, byte-identical over empty, 1-byte,
+      max-length (64+32) and endianness-probe inputs, plus the same undersized-buffer
+      refusal) and `KilnFW/App/test/test_safety_link_compile.c`
+      (`test_fw_version_parse_matches_commonfw_codec`: `safety_parse_fw_version()`
+      recovers every field from the codec's encoder output). A one-byte change to
+      either hand-rolled side now fails a test; the hand-rolled code itself is
+      still not replaced.
+
       **Still open, and deliberately not done in this pass:** `SaftyFW`'s
       `link_frame.c` (`link_frame_pack_fw_version()`) and `KilnFW`'s
       `safety_link.c` still hand-roll Frame C independently against

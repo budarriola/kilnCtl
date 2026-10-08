@@ -119,6 +119,7 @@ try {
         (Join-Path $commonSrcDir "kilnlink_config_page.c"),
         (Join-Path $commonSrcDir "kilnlink_set_log_level.c"),
         (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c"),
+        (Join-Path $commonSrcDir "kilnlink_fw_version.c"), # Frame C drift pin, test_link_frame_wire.c
         (Join-Path $commonSrcDir "kilnlink_inject_tc.c"),
         (Join-Path $testDir "test_kilnlink_inject_tc.c"),
         (Join-Path $hwAbstractionPicoUartDir "uart_owner_tx_policy.c"),

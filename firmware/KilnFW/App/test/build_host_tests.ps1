@@ -1417,7 +1417,7 @@ try {
                  "kilnlink_set_log_level.c", "kilnlink_set_param.c", "kilnlink_frame.c", "kilnlink_crc.c",
                  "kilnlink_param.c", "kilnlink_param_value.c", "kilnlink_ct_auto_zero_begin.c",
                  "kilnlink_get_ct_auto_zero.c", "kilnlink_ct_auto_zero_status.c",
-                 "kilnlink_stack_margin.c", "kilnlink_get_stack_margin.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
+                 "kilnlink_stack_margin.c", "kilnlink_get_stack_margin.c", "kilnlink_fw_version.c") | ForEach-Object { "`"$(Join-Path $commonSrc $_)`"" }
     $cmd14 = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$slObjDir\\`" /Fe:`"$exe14`" " +
             "`"$(Join-Path $testDir 'test_safety_link_compile.c')`" " +

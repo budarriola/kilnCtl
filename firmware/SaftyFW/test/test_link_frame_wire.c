@@ -26,6 +26,7 @@
 #include "test_common.h"
 #include "../src/tasks/link_frame.h"
 #include "kilnlink/kilnlink_frame.h"
+#include "kilnlink/kilnlink_fw_version.h" // CommonFW Frame C codec: pack is byte-compared against it
 #include "kilnlink/kilnlink_frame_a_offsets.h" // KILNLINK_FRAME_A_* -- single source of truth for
                                                 // Frame A's byte offsets/lengths (ROADMAP.md M15).
                                                 // Freestanding, no ESP-IDF-adjacent types, so unlike
@@ -939,6 +940,110 @@ static void test_fw_version_round_trip(void)
     TEST_CHECK(parsed.boot_id == 9, "boot_id survives pack->wire->parse");
 }
 
+// ---------------------------------------------------------------------------
+// Frame C drift pin (CommonFW/README.md, "Still open" note under the Frame C
+// checklist item): link_frame_pack_fw_version() hand-rolls Frame C
+// independently of CommonFW's kilnlink_fw_version_encode(). Neither is wired
+// into the other, so nothing but this test notices if one of the two
+// drifts. Byte-compare the two over representative inputs; they must agree
+// on every byte AND on the written length.
+// ---------------------------------------------------------------------------
+static void check_fw_version_pack_matches_codec(const char *label, uint16_t proto, uint16_t minc,
+                                                 uint8_t dirty, const char *commit, uint8_t commit_len,
+                                                 const char *datetime, uint8_t datetime_len,
+                                                 uint8_t boot_id, uint8_t config_version,
+                                                 uint16_t config_crc)
+{
+    kilnlink_fw_version_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.protocol_version = proto;
+    msg.min_compatible = minc;
+    msg.dirty = dirty;
+    msg.commit_len = commit_len;
+    if (commit_len > 0) {
+        memcpy(msg.commit, commit, commit_len);
+    }
+    msg.datetime_len = datetime_len;
+    if (datetime_len > 0) {
+        memcpy(msg.datetime, datetime, datetime_len);
+    }
+    msg.boot_id = boot_id;
+    msg.config_version = config_version;
+    msg.config_crc = config_crc;
+
+    uint8_t want[KILNLINK_FW_VERSION_MAX_LEN];
+    kilnlink_fw_version_status_t st = KILNLINK_FW_VERSION_ERR_BUFFER_TOO_SMALL;
+    size_t want_len = kilnlink_fw_version_encode(&msg, want, sizeof(want), &st);
+
+    uint8_t got[KILNLINK_FW_VERSION_MAX_LEN];
+    size_t got_len = link_frame_pack_fw_version(got, sizeof(got), proto, minc, dirty, commit,
+                                                 commit_len, datetime, datetime_len, boot_id,
+                                                 config_version, config_crc);
+
+    char what[160];
+    snprintf(what, sizeof(what), "%s: codec encode succeeds", label);
+    TEST_CHECK(want_len > 0 && st == KILNLINK_FW_VERSION_OK, what);
+    snprintf(what, sizeof(what), "%s: pack succeeds", label);
+    TEST_CHECK(got_len > 0, what);
+    snprintf(what, sizeof(what), "%s: pack length equals codec length (12 + commit + datetime)", label);
+    TEST_CHECK(got_len == want_len && got_len == (size_t)(12u + commit_len + datetime_len), what);
+    snprintf(what, sizeof(what), "%s: pack bytes identical to kilnlink_fw_version_encode()", label);
+    TEST_CHECK(got_len == want_len && memcmp(got, want, want_len) == 0, what);
+
+    // And the codec's own decoder must read back what pack wrote.
+    kilnlink_fw_version_t back;
+    memset(&back, 0, sizeof(back));
+    snprintf(what, sizeof(what), "%s: kilnlink_fw_version_decode() accepts the pack output", label);
+    TEST_CHECK(kilnlink_fw_version_decode(got, got_len, &back) == KILNLINK_FW_VERSION_OK &&
+                   back.protocol_version == proto && back.min_compatible == minc &&
+                   back.dirty == dirty && back.commit_len == commit_len &&
+                   back.datetime_len == datetime_len && back.boot_id == boot_id &&
+                   back.config_version == config_version && back.config_crc == config_crc &&
+                   memcmp(back.commit, commit, commit_len) == 0 &&
+                   memcmp(back.datetime, datetime, datetime_len) == 0,
+               what);
+}
+
+static void test_fw_version_pack_matches_commonfw_codec(void)
+{
+    TEST_SECTION("Frame C drift pin -- link_frame_pack_fw_version() vs kilnlink_fw_version_encode()");
+
+    char c64[KILNLINK_FW_VERSION_MAX_COMMIT_LEN];
+    char d32[KILNLINK_FW_VERSION_MAX_DATETIME_LEN];
+    for (size_t i = 0; i < sizeof(c64); i++) c64[i] = (char)('A' + (i % 26));
+    for (size_t i = 0; i < sizeof(d32); i++) d32[i] = (char)('a' + (i % 26));
+
+    check_fw_version_pack_matches_codec("typical", 7, 5, 1, "abc1234", 7, "2026-08-19T12:00:00Z", 20,
+                                         9, 2, 0xBEEFu);
+    check_fw_version_pack_matches_codec("empty strings", 7, 5, 0, "", 0, "", 0, 0, 0, 0);
+    check_fw_version_pack_matches_codec("one-byte strings", 1, 1, 1, "x", 1, "y", 1, 1, 1, 1);
+    check_fw_version_pack_matches_codec("commit only", 16, 13, 0, "deadbee", 7, "", 0, 200, 3, 0x0102u);
+    check_fw_version_pack_matches_codec("datetime only", 16, 13, 1, "", 0, "2026-10-07", 10, 201, 4,
+                                         0x0A0Bu);
+    check_fw_version_pack_matches_codec("max-length strings (64 + 32)", 0xFFFEu, 0xFFFDu, 1, c64,
+                                         KILNLINK_FW_VERSION_MAX_COMMIT_LEN, d32,
+                                         KILNLINK_FW_VERSION_MAX_DATETIME_LEN, 0xFFu, 0xFFu, 0xFFFFu);
+    check_fw_version_pack_matches_codec("endianness probe (distinct bytes in every u16)", 0x1234u,
+                                         0x5678u, 1, "c", 1, "d", 1, 0x11, 0x22, 0x9ABCu);
+    check_fw_version_pack_matches_codec("clean build", 7, 5, 0, "ab", 2, "cd", 2, 5, 6, 7);
+
+    // Output buffer one byte too small: both refuse rather than write short.
+    {
+        uint8_t small[11 + 7 + 20];
+        TEST_CHECK(link_frame_pack_fw_version(small, sizeof(small), 7, 5, 0, "abc1234", 7,
+                                               "2026-08-19T12:00:00Z", 20, 1, 1, 1) == 0,
+                   "pack refuses a buffer one byte short of 12 + commit + datetime");
+        kilnlink_fw_version_t m;
+        memset(&m, 0, sizeof(m));
+        m.commit_len = 7;
+        m.datetime_len = 20;
+        kilnlink_fw_version_status_t st = KILNLINK_FW_VERSION_OK;
+        TEST_CHECK(kilnlink_fw_version_encode(&m, small, sizeof(small), &st) == 0 &&
+                       st == KILNLINK_FW_VERSION_ERR_BUFFER_TOO_SMALL,
+                   "codec refuses the same one-byte-short buffer (same capacity contract)");
+    }
+}
+
 static void test_fw_version_negative(void)
 {
     TEST_SECTION("fw_version frame -- mirror parser rejects/degrades malformed frames");
@@ -1203,6 +1308,7 @@ void run_test_link_frame_wire(void)
     test_status_frame_v3_active_slot();
     test_fw_version_round_trip();
     test_fw_version_negative();
+    test_fw_version_pack_matches_commonfw_codec();
     test_version_compatibility_named_matrix();
     test_version_compatibility_exhaustive_sweep();
     test_telemetry_keeps_flowing_on_version_mismatch();
