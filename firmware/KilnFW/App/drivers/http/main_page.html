@@ -4517,15 +4517,18 @@ function poll() {
 }
 
 // /api/status poll cadence: 2 s while a firing or autotune is active (live
-// numbers matter), 5 s when the kiln is idle -- the same "slow down when
-// nothing is happening" idea pollHistory/pollAutotune use. The server also
-// sends an ETag, so an unchanged idle body costs a 304 (the browser hands
-// fetch() the cached body transparently; no 304 handling is needed here).
-// Unknown state (no exec status yet) stays fast.
+// numbers matter), 5 s otherwise -- the same "slow down when nothing is
+// happening" idea pollHistory/pollAutotune use. "Otherwise" includes the
+// terminal 'done'/'faulted' exec states, which persist until the next start
+// (profile_executor.c), so testing state !== 'idle' would keep a board that
+// has ever fired on the fast cadence forever. The server also sends an
+// ETag, so an unchanged body costs a 304 (the browser hands fetch() the
+// cached body transparently; no 304 handling is needed here). Unknown state
+// (no exec status yet) stays fast.
 var POLL_FAST_MS = 2000, POLL_IDLE_MS = 5000;
 function pollDelayMs() {
   var exec = lastExecStatus;
-  if (!exec || exec.state !== 'idle') return POLL_FAST_MS;
+  if (!exec || isFiringActive(exec.state)) return POLL_FAST_MS;
   if (lastAutotuneStatus && isAutotuneActive(lastAutotuneStatus.state)) return POLL_FAST_MS;
   return POLL_IDLE_MS;
 }

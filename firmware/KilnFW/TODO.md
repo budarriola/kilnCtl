@@ -654,7 +654,7 @@ Idle-state chart behavior: `docs/ARCHITECTURE_DECISIONS.md`, "Idle chart / pinne
       the rendered body and answers a matching `If-None-Match` with 304
       (`dashboard_etag_*` in `dashboard_json.c`; saves bandwidth/JS parse, not
       render cost), and `main_page.html`'s `poll()` backs off 2 s -> 5 s while
-      the exec and autotune are both idle (`pollDelayMs()`).
+      no firing or autotune is active (`pollDelayMs()`).
 - [ ] **Pixel-level appearance of the idle dots was not visually confirmed**
       — no framebuffer readback and the browser was not driven during
       verification; only the API/serving behavior was checked.
