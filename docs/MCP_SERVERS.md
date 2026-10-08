@@ -914,6 +914,8 @@ follows them), re-checking each entry just before acting, then runs `git worktre
 `tools/check_wt_status.ps1` tests it against a scratch root (`-ScriptUnderTest`
 points it at a mutated copy for negative tests); it never reads the real `C:\wt`.
 
+**`tools/agent_tail.ps1`** -- read-only view of a background subagent (added 2026-10-08): `-Id <agentId>` shows id, description (from `agent-<id>.meta.json`), last activity and the last `-N` USE/RES/TXT events from the subagent transcript under `~\.claude\projects\...\<session>\subagents\`; `-All [-SinceHours 12]` prints one row per agent. It prints `STUCK?` for (a) the last 4 commands identical after stripping digits with unchanged results, or (b) a polled log (`until grep` / `wait_for.ps1`) unwritten for 30 min while no ninja/cmake/cl/gcc/cc1/python/pytest process runs (the 5 h `nosign_tb1.log` poll). Last line is a JSON summary; it never kills anything. `tools/check_agent_tail.ps1` tests it with synthetic and a trimmed real fixture (`tools/test_fixtures/agent_tail/`) and mutates each heuristic to prove the check goes red.
+
 ## Confirm-gate flags are never coerced (2026-10-02)
 
 The facade coerces stringly-typed arguments (`"yes"`/`"1"`/`"true"` to a bool), which on 2026-10-02

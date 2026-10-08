@@ -167,3 +167,4 @@ too.
   (`-TimeoutSec`), decodes UTF-16 logs (PowerShell `*>` writes UTF-16LE, which `grep` loops
   never match) and ends with a `WAIT_RESULT {json}` line (exit 0 MET, 124 TIMEOUT, 2 ERROR).
   `tools\decode_log.ps1 <file>` prints such a log as UTF-8.
+- Check on a background subagent with `tools\agent_tail.ps1 -Id <agentId>` (or `-All`): read-only, shows its last events and prints `STUCK?` when it repeats one command with unchanged results, or polls a log unwritten for 30 min with no build/python process alive. Ends with a JSON summary line.
