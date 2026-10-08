@@ -1078,6 +1078,24 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     {
+        /* ETag = FNV-1a of the rendered body (dashboard_json.h). The body
+         * differs by caller auth level (may_see_build_identity), so the hash
+         * does too. Only a few bytes of stack; the If-None-Match value is
+         * read into a small fixed buffer and an over-long one simply never
+         * matches. Cache-Control: no-cache makes browsers revalidate every
+         * time (the cached body is substituted transparently on 304). */
+        char etag[DASHBOARD_ETAG_BUF_SIZE];
+        char inm[48];
+        dashboard_etag_format(dashboard_etag_fnv1a32(json, o), etag);
+        httpd_resp_set_hdr(req, "ETag", etag);
+        httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+        inm[0] = '\0';
+        if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK &&
+            dashboard_etag_matches(inm, etag)) {
+            free(json);
+            httpd_resp_set_status(req, "304 Not Modified");
+            return httpd_resp_send(req, NULL, 0);
+        }
         /* free() AFTER send completes -- httpd_resp_send() is synchronous
          * (copies/streams `json` before returning), so this is not a
          * use-after-free; freeing before the call would be. */

@@ -278,4 +278,19 @@ size_t dashboard_format_firing_history_json(char *json, size_t cap, uint8_t prof
                                             const profile_firing_run_record_t *records,
                                             size_t record_count);
 
+/* ETag / If-None-Match support for GET /api/status (TODO.md "Still polled"
+ * item). The ETag is a 32-bit FNV-1a hash of the fully rendered body, so it
+ * changes whenever ANY field changes (temperatures change every tick; a
+ * generation counter could not be proven to cover every field). It saves
+ * bandwidth and browser-side JSON work, not render cost. Pure functions, no
+ * httpd types, so the 304 decision is host-tested. */
+#define DASHBOARD_ETAG_BUF_SIZE 12 /* "\"xxxxxxxx\"" + NUL = 11 */
+uint32_t dashboard_etag_fnv1a32(const char *data, size_t len);
+/* Writes the quoted strong ETag for hash `h` into out[DASHBOARD_ETAG_BUF_SIZE]. */
+void dashboard_etag_format(uint32_t h, char *out);
+/* True when an If-None-Match request header value (NULL = header absent)
+ * matches `etag`: "*" matches, a comma-separated list is searched, and a
+ * weak "W/" prefix is ignored (weak comparison, RFC 9110 13.1.2). */
+bool dashboard_etag_matches(const char *if_none_match, const char *etag);
+
 #endif // DASHBOARD_JSON_H

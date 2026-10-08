@@ -1416,6 +1416,38 @@ static void test_status_aux_block_content_and_source(void)
     TEST_CHECK(o == 2 && strcmp(tiny, "{x") == 0, "failure leaves the prior document intact");
 }
 
+static void test_etag_fnv1a_known_vectors_and_format(void)
+{
+    /* FNV-1a 32-bit published vectors */
+    TEST_CHECK(dashboard_etag_fnv1a32("", 0) == 0x811c9dc5u, "fnv1a of empty is the offset basis");
+    TEST_CHECK(dashboard_etag_fnv1a32("a", 1) == 0xe40c292cu, "fnv1a(\"a\")");
+    TEST_CHECK(dashboard_etag_fnv1a32("foobar", 6) == 0xbf9cf968u, "fnv1a(\"foobar\")");
+    char e[DASHBOARD_ETAG_BUF_SIZE];
+    dashboard_etag_format(0xe40c292cu, e);
+    TEST_CHECK(strcmp(e, "\"e40c292c\"") == 0, "quoted lowercase 8-digit hex");
+    dashboard_etag_format(0x0000000fu, e);
+    TEST_CHECK(strcmp(e, "\"0000000f\"") == 0, "zero padded");
+    TEST_CHECK(dashboard_etag_fnv1a32("{\"t\":1}", 7) != dashboard_etag_fnv1a32("{\"t\":2}", 7),
+               "one changed byte changes the hash");
+}
+
+static void test_etag_if_none_match_decision(void)
+{
+    const char *et = "\"e40c292c\"";
+    TEST_CHECK(!dashboard_etag_matches(NULL, et), "no header -> full 200");
+    TEST_CHECK(!dashboard_etag_matches("", et), "empty header -> full 200");
+    TEST_CHECK(dashboard_etag_matches("\"e40c292c\"", et), "exact match -> 304");
+    TEST_CHECK(!dashboard_etag_matches("\"e40c292d\"", et), "different etag -> 200");
+    TEST_CHECK(!dashboard_etag_matches("\"e40c292\"", et), "prefix is not a match");
+    TEST_CHECK(!dashboard_etag_matches("\"e40c292c0\"", et), "longer is not a match");
+    TEST_CHECK(dashboard_etag_matches("W/\"e40c292c\"", et), "weak prefix ignored");
+    TEST_CHECK(dashboard_etag_matches("\"aaaaaaaa\", \"e40c292c\"", et), "list member match");
+    TEST_CHECK(dashboard_etag_matches("\"aaaaaaaa\",W/\"e40c292c\" ", et), "list, weak, trailing space");
+    TEST_CHECK(!dashboard_etag_matches("\"aaaaaaaa\", \"bbbbbbbb\"", et), "list without it -> 200");
+    TEST_CHECK(dashboard_etag_matches("*", et), "star matches");
+    TEST_CHECK(!dashboard_etag_matches("\"e40c292c\"", NULL), "no current etag -> 200");
+}
+
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
@@ -1434,6 +1466,8 @@ static void run_test_dashboard_json(void)
     test_diag_json_worst_case_render_fits_documented_buffer();
     test_diag_json_content_is_complete_and_correctly_valued();
     test_diag_json_mutation_field_creep_goes_red();
+    test_etag_fnv1a_known_vectors_and_format();
+    test_etag_if_none_match_decision();
 }
 
 int main(void)

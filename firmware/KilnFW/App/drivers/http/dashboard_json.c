@@ -9,6 +9,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_log.h"
 
@@ -530,4 +531,47 @@ size_t dashboard_format_firing_history_json(char *json, size_t cap, uint8_t prof
         o += (size_t)n;
     }
     return o;
+}
+
+uint32_t dashboard_etag_fnv1a32(const char *data, size_t len)
+{
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)data[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+void dashboard_etag_format(uint32_t h, char *out)
+{
+    static const char hex[] = "0123456789abcdef";
+    out[0] = '"';
+    for (int i = 0; i < 8; i++) {
+        out[1 + i] = hex[(h >> (28 - 4 * i)) & 0xFu];
+    }
+    out[9] = '"';
+    out[10] = '\0';
+}
+
+bool dashboard_etag_matches(const char *if_none_match, const char *etag)
+{
+    if (if_none_match == NULL || etag == NULL || etag[0] == '\0') {
+        return false;
+    }
+    size_t elen = strlen(etag);
+    const char *p = if_none_match;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == ',') p++;
+        if (*p == '\0') break;
+        const char *start = p;
+        while (*p && *p != ',') p++;
+        const char *end = p;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        size_t n = (size_t)(end - start);
+        if (n == 1 && start[0] == '*') return true;
+        if (n >= 2 && start[0] == 'W' && start[1] == '/') { start += 2; n -= 2; }
+        if (n == elen && memcmp(start, etag, n) == 0) return true;
+    }
+    return false;
 }
