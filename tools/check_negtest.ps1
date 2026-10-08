@@ -24,11 +24,44 @@
 # assertion can be negative-tested without touching the real script. The copy
 # must live in tools\ (it dot-sources lib_safe_remove.ps1 next to itself).
 # checkcache: ok
-param([string]$ScriptUnderTest)
+param([string]$ScriptUnderTest, [string]$Group = '')
 $ErrorActionPreference = "Continue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $ScriptUnderTest) { $ScriptUnderTest = Join-Path $here 'negtest.ps1' }
 . (Join-Path $here 'lib_safe_remove.ps1')
+
+if (-not $Group) {
+    # Parent: run each independent group in its own child (own scratch repo) concurrently.
+    # Every assertion still runs; this only overlaps the process/git-spawn latency that dominates.
+    $groups = 'A', 'A2', 'B', 'C', 'D', 'E', 'F', 'G', 'H1', 'H2', 'I'
+    $tmpd = Join-Path ([System.IO.Path]::GetTempPath()) ("negchk_par_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $tmpd -Force | Out-Null
+    $procs = @{}
+    foreach ($g in $groups) {
+        $procs[$g] = Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput (Join-Path $tmpd "$g.out") -RedirectStandardError (Join-Path $tmpd "$g.err") `
+            -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Path, '-ScriptUnderTest', $ScriptUnderTest, '-Group', $g)
+        $null = $procs[$g].Handle
+    }
+    $totalA = 0; $bad = New-Object System.Collections.Generic.List[string]
+    foreach ($g in $groups) {
+        $null = $procs[$g].Handle
+        $procs[$g].WaitForExit()
+        $txt = (Get-Content -LiteralPath (Join-Path $tmpd "$g.out") -Raw -ErrorAction SilentlyContinue)
+        $m = [regex]::Match("$txt", 'GROUP_RESULT (\d+) (\d+)')
+        if (-not $m.Success) { $bad.Add("group ${g}: no result or crashed (exit $($procs[$g].ExitCode)): $txt $(Get-Content -LiteralPath (Join-Path $tmpd "$g.err") -Raw -ErrorAction SilentlyContinue)") }
+        else { $totalA += [int]$m.Groups[1].Value }
+        foreach ($l in ("$txt" -split "`n")) { if ($l -match '^  \S' ) { $bad.Add("group ${g}:" + $l.TrimEnd()) } }
+    }
+    Remove-Item -LiteralPath $tmpd -Recurse -Force -ErrorAction SilentlyContinue
+    if ($bad.Count -gt 0) {
+        Write-Host "NEGTEST CHECK FAILED ($($bad.Count) problem(s)):" -ForegroundColor Red
+        foreach ($m in $bad) { Write-Host "  $m" -ForegroundColor Red }
+        exit 1
+    }
+    Write-Host "negtest check passed: $totalA assertions across $($groups.Count) parallel groups (caught, missed, bad find, baseline, real-tree guard, timeout, dirty, diff, mutations file, parallel, stale sweep)."
+    exit 0
+}
 
 $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("negtest_chk_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $repo = Join-Path $scratch "repo"
@@ -36,6 +69,7 @@ $copies = Join-Path $scratch "copies"
 $logs = Join-Path $scratch "logs"
 $fixtureLog = Join-Path $scratch "ran.log"
 New-Item -ItemType Directory -Path $repo, $copies, $logs -Force | Out-Null
+$env:GIT_OPTIONAL_LOCKS = '0'
 $failures = New-Object System.Collections.Generic.List[string]
 $assertions = 0
 $sw0 = [Diagnostics.Stopwatch]::StartNew()
@@ -70,7 +104,8 @@ function Run-Neg([string]$case, [string[]]$extra, $expectStatus = $null) {
     $wl = @(& git -C $script:repo worktree list 2>$null)
     Assert-True ($wl.Count -eq 1) "${case}: scratch repo still has $($wl.Count) worktrees registered"
     $want = if ($null -ne $expectStatus) { $expectStatus } else { $statusBefore }
-    Assert-True ((Status) -eq $want) "${case}: scratch repo status changed: before '$statusBefore' after '$(Status)'"
+    $statusAfter = Status
+    Assert-True ($statusAfter -eq $want) "${case}: scratch repo status changed: before '$statusBefore' after '$statusAfter'"
     return @{ Exit = $code; Json = $json; Text = $text }
 }
 function Ran { return (Test-Path -LiteralPath $script:fixtureLog) }
@@ -101,6 +136,8 @@ exit 0
 '@
     Set-Content -LiteralPath (Join-Path $repo ".gitignore") -Encoding ASCII -Value "*.log"
     G init -q -b main $repo
+    # Perf: this scratch repo is tiny and short-lived; no daemons, no gc, no optional index writes.
+    foreach ($kv in @(@('core.fsmonitor', 'false'), @('core.untrackedCache', 'false'), @('gc.auto', '0'), @('maintenance.auto', 'false'), @('core.preloadIndex', 'false'))) { & git -C $repo config $kv[0] $kv[1] 2>&1 | Out-Null }
     G -C $repo add -A
     G -C $repo commit -q -m base
     Assert-True ((& git -C $repo rev-parse HEAD 2>$null) -match '^[0-9a-f]{40}$') "fixture: scratch repo has no commit"
@@ -110,9 +147,11 @@ exit 0
     Assert-True ($LASTEXITCODE -eq 0) "fixture: the unmutated fixture test does not pass: $pre"
     Step "fixture ready"
 
+    $calc = Join-Path $repo 'calc.ps1'
     $mutA = @('-File', 'calc.ps1', '-Find', '$a + $b', '-Replace', '$a - $b')
     $mutB = @('-File', 'calc.ps1', '-Find', '-gt 10', '-Replace', '-ge 10')
 
+    if ($Group -eq 'A') {
     # ---------------------------------------------------------------- caught
     $r = Run-Neg "caught" (@('-Command', $testCmd) + $mutA + @('-ExpectPattern', 'FAIL: Add-Two'))
     Assert-True ($r.Exit -eq 0) "caught: exit $($r.Exit), expected 0`n$($r.Text)"
@@ -124,7 +163,8 @@ exit 0
     Assert-True ($r.Text -match '(?m)^CAUGHT\s') "caught: no human CAUGHT line"
     Assert-True (@(Get-Content -LiteralPath $fixtureLog).Count -eq 2) "caught: fixture should have run twice (baseline + mutation)"
     Step "caught"
-
+    }
+    if ($Group -eq 'A2') {
     # ---------------------------------------------------------------- missed
     $r = Run-Neg "missed" (@('-Command', $testCmd) + $mutB)
     Assert-True ($r.Exit -eq 1) "missed: exit $($r.Exit), expected 1`n$($r.Text)"
@@ -136,7 +176,8 @@ exit 0
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "otherfail: a failure without the expect pattern must be MISSED (exit $($r.Exit))"
     Assert-True ("$($r.Json.mutations[0].note)" -match 'another reason') "otherfail: note should say it failed for another reason"
     Step "missed"
-
+    }
+    if ($Group -eq 'B') {
     # ---------------------------------------------------------------- bad find strings
     $r = Run-Neg "nomatch" (@('-Command', $testCmd, '-File', 'calc.ps1', '-Find', 'no such text', '-Replace', 'x'))
     Assert-True ($r.Exit -eq 2 -and $r.Json.verdict -eq 'ERROR') "nomatch: exit $($r.Exit), expected 2"
@@ -151,7 +192,8 @@ exit 0
     $r = Run-Neg "usage" (@('-File', 'calc.ps1', '-Find', '-gt 10', '-Replace', '-ge 10'))
     Assert-True ($r.Exit -eq 2 -and -not (Ran)) "usage: no -Command/-Preset must be exit 2 (got $($r.Exit))"
     Step "bad find strings"
-
+    }
+    if ($Group -eq 'C') {
     # ---------------------------------------------------------------- baseline must pass
     $r = Run-Neg "baselinefail" (@('-Command', ($testCmd + ' -ForceFail')) + $mutA)
     Assert-True ($r.Exit -eq 2 -and $r.Json.verdict -eq 'ERROR') "baselinefail: exit $($r.Exit) verdict $($r.Json.verdict), expected 2/ERROR"
@@ -159,9 +201,9 @@ exit 0
     Assert-True (@($r.Json.mutations | Where-Object { $_.verdict -eq 'CAUGHT' }).Count -eq 0) "baselinefail: a CAUGHT verdict was reported on a failing baseline"
     Assert-True ($r.Json.baseline.passed -eq $false) "baselinefail: baseline.passed should be false"
     Step "baseline"
-
+    }
+    if ($Group -eq 'D') {
     # ---------------------------------------------------------------- real-tree guard
-    $calc = Join-Path $repo 'calc.ps1'
     $r = Run-Neg "guardhash" (@('-Command', ($testCmd + "; Add-Content -LiteralPath '$calc' -Value '# touched'")) + $mutA) " M calc.ps1"
     Assert-True ($r.Exit -eq 2 -and $r.Json.real_tree_unchanged -eq $false) "guardhash: editing the real tree's mutated file must be exit 2 + real_tree_unchanged=false (exit $($r.Exit))"
     Assert-True ($r.Text -match 'REAL TREE CHANGED') "guardhash: no REAL TREE CHANGED message"
@@ -171,7 +213,8 @@ exit 0
     Assert-True ($r.Exit -eq 2 -and $r.Json.real_tree_unchanged -eq $false) "guardstatus: an untracked file appearing in the real tree must be exit 2 (exit $($r.Exit))"
     Remove-Item -LiteralPath $stray -Force -ErrorAction SilentlyContinue
     Step "guard"
-
+    }
+    if ($Group -eq 'E') {
     # ---------------------------------------------------------------- timeout + cleanup after failure
     $t0 = [Diagnostics.Stopwatch]::StartNew()
     $r = Run-Neg "timeout" (@('-Command', ($testCmd + ' -SleepSec 60'), '-TimeoutMin', '0.05', '-NoBaseline') + $mutA)
@@ -179,7 +222,8 @@ exit 0
     $mutSec = [double]$r.Json.mutations[0].seconds
     Assert-True ($mutSec -gt 0 -and $mutSec -lt 30) "timeout: the timed-out mutation run took ${mutSec}s (whole run $([int]$t0.Elapsed.TotalSeconds)s); the 60s child was not killed at the 3s limit"
     Step "timeout"
-
+    }
+    if ($Group -eq 'F') {
     # ---------------------------------------------------------------- -IncludeDirty
     $tp = Join-Path $repo 'test.ps1'
     Add-Content -LiteralPath $tp -Encoding ASCII -Value 'if (Test-Big 10) { Write-Output "FAIL: Test-Big 10"; exit 1 }'
@@ -201,7 +245,8 @@ exit 0
     G -C $repo checkout -- test.ps1
     Remove-Item -LiteralPath (Join-Path $repo 'extra.ps1') -Force
     Step "include dirty"
-
+    }
+    if ($Group -eq 'G') {
     # ---------------------------------------------------------------- -Diff
     (Get-Content -LiteralPath $calc) -replace '\$a \+ \$b', '$a * $b' | Set-Content -LiteralPath $calc -Encoding ASCII
     $diffFile = Join-Path $scratch "mul.diff"
@@ -210,7 +255,8 @@ exit 0
     $r = Run-Neg "diff" @('-Command', $testCmd, '-Diff', $diffFile)
     Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "diff: a -Diff mutation should be CAUGHT (exit $($r.Exit))`n$($r.Text)"
     Step "diff"
-
+    }
+    if ($Group -in 'H1', 'H2') {
     # ---------------------------------------------------------------- -Mutations, sequential and parallel
     $mf = Join-Path $scratch "muts.json"
     Set-Content -LiteralPath $mf -Encoding UTF8 -Value (@(
@@ -218,7 +264,7 @@ exit 0
             @{ name = "boundary"; file = "calc.ps1"; find = '-gt 10'; replace = '-ge 10' },
             @{ name = "low"; edits = @(@{ file = "calc.ps1"; find = '-gt 10'; replace = '-gt 4' }) }
         ) | ConvertTo-Json -Depth 5)
-    foreach ($par in 1, 2) {
+    foreach ($par in $(if ($Group -eq 'H1') { 1 } else { 2 })) {
         $r = Run-Neg "muts_p$par" @('-Command', $testCmd, '-Mutations', $mf, '-Parallel', "$par")
         $v = @($r.Json.mutations | ForEach-Object { "$($_.name)=$($_.verdict)" }) -join ','
         Assert-True ($r.Exit -eq 1) "muts_p${par}: exit $($r.Exit), expected 1 (one MISSED)`n$($r.Text)"
@@ -226,7 +272,8 @@ exit 0
         Assert-True ($r.Json.baseline.passed -eq $true) "muts_p${par}: baseline missing or not passed"
     }
     Step "mutations file"
-
+    }
+    if ($Group -eq 'I') {
     # ---------------------------------------------------------------- stale sweep
     $dead = Start-Process -FilePath powershell.exe -ArgumentList '-NoProfile', '-Command', 'exit 0' -PassThru -WindowStyle Hidden
     $deadTicks = $dead.StartTime.ToUniversalTime().Ticks
@@ -247,12 +294,14 @@ exit 0
     G -C $repo worktree remove --force $liveCopy
     Remove-Item -LiteralPath "$liveCopy.owner.json" -Force -ErrorAction SilentlyContinue
     Step "stale sweep"
+    }
 }
 finally {
     try { & git -C $repo worktree prune 2>&1 | Out-Null } catch { }
     try { Start-Sleep -Milliseconds 300; Remove-TreeSafe -Path $scratch } catch { }
 }
 
+Write-Host "GROUP_RESULT $assertions $($failures.Count)"
 if ($failures.Count -gt 0) {
     Write-Host "NEGTEST CHECK FAILED ($($failures.Count) of $assertions assertion(s)):" -ForegroundColor Red
     foreach ($m in $failures) { Write-Host "  $m" -ForegroundColor Red }
