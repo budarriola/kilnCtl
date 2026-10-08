@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_route_tier_coverage.ps1 -- fails when a route exists in code with no
 # tier assigned in route_tier_table.h (docs/WEB_AUTH_PLAN.md section 1).
 #

@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_nvs_write_guard_coverage.ps1 -- keeps every NVS/flash write call
 # site inside this codebase's PSRAM-stack-guarded modules actually guarded.
 #

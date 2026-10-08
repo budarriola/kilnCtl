@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_cfgfs_never_gates_nvs.ps1 -- thin wrapper so run_all_checks.ps1's
 # check_*.ps1 glob discovers tools/check_cfgfs_never_gates_nvs.py
 # automatically, the same convention every other Python-backed guard script

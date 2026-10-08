@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_uri_handler_cap.ps1 -- keeps wifi_provision_http.c's
 # config.max_uri_handlers ahead of the real number of httpd_uri_t routes this
 # firmware can register in one boot.

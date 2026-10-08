@@ -770,6 +770,15 @@ A green `-Fast` run in a fresh worktree therefore says nothing about stack or
 DRAM headroom: those checks measure a `build/` ELF and are SKIP-FAST unless one
 is present.
 
+**Check result cache (2026-10-08).** `run_all_checks.ps1` reuses a prior PASS of
+a check carrying a `# checkcache: ok` marker when `git status` is clean and the
+HEAD tree hash, run mode (-Fast/full) and tool/env fingerprint match
+(`tools/check_cache.ps1`, store `C:\wt\.checkcache\`, 7-day expiry). A hit
+prints `PASS  <check> (cached <time> from <worktree>)` and the summary counts
+hits and time saved. A dirty tree, any doubt, or `-NoCache` /
+`KILNCTL_CHECKCACHE=0` means every check runs for real. Only PASS is stored.
+Rules for marking a check: `docs/agent_rules/COMMON.md` "Check result cache".
+
 A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
 five hours unnoticed before `get_heap_status` was fixed to surface it (see
 the flash/OTA section above). `exc_addr 0x0` was a red herring: the real

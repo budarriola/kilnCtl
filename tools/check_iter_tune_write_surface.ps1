@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_iter_tune_write_surface.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up tools/PcTools/scripts/iter_tune_write_surface_check.py
 # without any further wiring (same pattern as check_ct_cal_write_surface.ps1).

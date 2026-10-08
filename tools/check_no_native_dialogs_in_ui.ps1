@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_no_native_dialogs_in_ui.ps1 -- guards against a native browser
 # window.confirm()/confirm()/alert()/prompt() dialog reappearing in the served
 # web UI. Owner rule: every confirmation popup must be an in-page, cancellable,

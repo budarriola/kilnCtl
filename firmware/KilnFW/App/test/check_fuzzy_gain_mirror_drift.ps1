@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_fuzzy_gain_mirror_drift.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up fuzzy_gain_mirror_drift_check.py without any
 # further wiring. Same pattern as check_approach_rate_cap_mirror_drift.ps1

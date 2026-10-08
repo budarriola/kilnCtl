@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_stack_margin_registration.ps1 -- keeps every long-lived internal
 # FreeRTOS task registered with stack_margin.c (App/drivers), so its
 # uxTaskGetStackHighWaterMark() reading stays reachable, and keeps

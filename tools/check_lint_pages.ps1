@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_lint_pages.ps1 -- runs firmware/KilnFW/App/test/lint_pages.js as a
 # guard, not just a manual tools/verify.ps1 step.
 #

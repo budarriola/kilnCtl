@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_label_column_overflow_wrap.ps1 -- guards against a bug class that hit
 # this repo three times in one day (2026-09-01), each report from the owner
 # looking like a different bug until traced to the same rule:

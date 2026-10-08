@@ -138,6 +138,10 @@ param(
     # pass those checks.
     [switch]$AllowSkips,
 
+    # Disable the machine-wide check-result cache (tools/check_cache.ps1;
+    # KILNCTL_CHECKCACHE=0 does the same). Every check then runs for real.
+    [switch]$NoCache,
+
     # A check that could not get a build-gate slot within the gate timeout
     # (tools/build_gate.ps1, 3600 s) did NOT run: that is machine load, not a
     # defect in the tree. It is filed under its own BUSY heading with a
@@ -615,8 +619,18 @@ if ($ListOnly) {
     exit 0
 }
 
+# Check-result cache (tools/check_cache.ps1): a PASS of an opt-in
+# (`# checkcache: ok`) check is reused when the tree is clean and identical.
+. (Join-Path $PSScriptRoot "check_cache.ps1")
+$script:CheckCacheCtx = Initialize-CheckCache -RepoRoot $repoRoot -Fast:$Fast -NoCache:$NoCache -PcToolsPython $selfcheckPython
+
 Write-Host ""
 Write-Host "Running $($checks.Count) guard scripts from $repoRoot (parallel, throttle $MaxParallel)"
+if ($script:CheckCacheCtx.Enabled) {
+    Write-Host "Check cache: on (tree $($script:CheckCacheCtx.Tree.Substring(0,12)), $($script:CheckCacheCtx.Mode))" -ForegroundColor Cyan
+} else {
+    Write-Host "Check cache: off ($($script:CheckCacheCtx.Reason))" -ForegroundColor Yellow
+}
 Write-Host ""
 
 $failed = @()
@@ -721,6 +735,8 @@ function Complete-CheckResult {
 
     if ($code -eq 0) {
         Write-Host "  PASS  $($Running.Rel)" -ForegroundColor Green
+        [void](Add-CheckCacheResult -Ctx $script:CheckCacheCtx -Rel $Running.Rel -Bucket "pass" `
+            -DurationSec ([DateTime]::UtcNow - $Running.Started).TotalSeconds -OutputText $outText)
         return [pscustomobject]@{ Bucket = "pass"; Path = $Running.Rel }
     } elseif ($code -eq $SkipExitCode) {
         # SKIP-FAST is checked first: a check that prints it is asserting its
@@ -776,6 +792,14 @@ function Invoke-ChecksParallel {
         # gate queue early.
         while ($pending.Count -gt 0 -and @($running).Count -lt $MaxParallel) {
             $c = $pending.Dequeue()
+            $cRel = $c.FullName.Substring($RepoRoot.Length + 1)
+            $hit = Find-CheckCacheHit -Ctx $script:CheckCacheCtx -Rel $cRel
+            if ($hit) {
+                Write-Host "  PASS  $cRel (cached $($hit.When.ToLocalTime().ToString('yyyy-MM-dd HH:mm')) from $($hit.Worktree))" -ForegroundColor Green
+                [void]$script:CheckCacheCtx.Hits.Add($hit)
+                $results += [pscustomobject]@{ Bucket = "pass"; Path = $cRel }
+                continue
+            }
             $started = Start-CheckAsync -Check $c -RepoRoot $RepoRoot -SelfcheckPy $SelfcheckPy -SelfcheckPython $SelfcheckPython -ScratchDir $ScratchDir
             $running += $started
         }
@@ -942,7 +966,13 @@ foreach ($r in $results) {
     }
 }
 
+$cacheStored = Save-CheckCache -Ctx $script:CheckCacheCtx
 Write-Host ""
+if ($script:CheckCacheCtx.Hits.Count -gt 0 -or $cacheStored -gt 0) {
+    $savedSec = [int](($script:CheckCacheCtx.Hits | Measure-Object DurationSec -Sum).Sum)
+    Write-Host "Check cache: $($script:CheckCacheCtx.Hits.Count) of the passed checks were cached hits (about ${savedSec}s of check time saved), $cacheStored new entr$(if ($cacheStored -eq 1) {'y'} else {'ies'}) stored." -ForegroundColor Cyan
+    Write-Host ""
+}
 
 if ($skippedFast.Count -gt 0) {
     # Never fatal, regardless of -AllowSkips: each of these named its SKIP as

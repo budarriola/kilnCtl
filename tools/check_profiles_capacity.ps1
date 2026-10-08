@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_profiles_capacity.ps1 -- thin wrapper so run_all_checks.ps1's
 # check_*.ps1 glob discovers the profile-store capacity gate
 # (tools/check_profiles_capacity.py) automatically, the same convention

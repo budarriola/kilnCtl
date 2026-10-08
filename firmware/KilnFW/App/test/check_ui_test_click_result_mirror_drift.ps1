@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_ui_test_click_result_mirror_drift.ps1 -- wrapper so
 # tools/run_all_checks.ps1's check_*.ps1 glob picks up
 # ui_test_click_result_mirror_drift_check.py without any further wiring.

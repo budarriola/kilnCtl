@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_bridge_reject_reason.ps1 -- KilnFW/TODO.md section 11's "a reasonless
 # rejection is byte-identical to an empty success" item.
 #

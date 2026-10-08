@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_monocypher_vendored.ps1 -- the vendored Monocypher files under
 # firmware/KilnFW/App/drivers/update/third_party/monocypher/ must stay byte-identical to the
 # upstream release recorded in that directory's README.md (sha256 table). Re-vendor to update.

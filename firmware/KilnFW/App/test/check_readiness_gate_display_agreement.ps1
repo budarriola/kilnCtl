@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_readiness_gate_display_agreement.ps1 -- thin wrapper so
 # run_all_checks.ps1's check_*.ps1 glob picks up
 # check_readiness_gate_display_agreement.py.

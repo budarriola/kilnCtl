@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_ramp_lock_decision_mirror_drift.ps1 -- wrapper so tools/run_all_
 # checks.ps1's check_*.ps1 glob picks up ramp_lock_decision_mirror_drift_
 # check.py without any further wiring. Same pattern as check_approach_rate_

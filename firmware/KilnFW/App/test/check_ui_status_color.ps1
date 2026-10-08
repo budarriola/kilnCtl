@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_ui_status_color.ps1 -- standing guard from the 2026-09
 # colour-dependence audit (WEB_UI_RESPONSIVE.md).
 #

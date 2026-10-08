@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_safety_trip_words_sync.ps1 -- guards the hand-mirrored safety
 # trip/warn word tables against silent drift.
 #

@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_aux_relay_conflict_sites.ps1 -- mechanical guard for the aux-output /
 # zone relay-ownership invariant (docs/SPARE_RELAY_ONOFF_PLAN.md, WP-1).
 #

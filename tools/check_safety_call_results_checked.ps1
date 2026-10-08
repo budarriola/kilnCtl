@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_safety_call_results_checked.ps1 -- a named set of safety-relevant
 # calls (relay writes/all-off, heat-enable requests/releases to the safety
 # processor) must have their esp_err_t result CAPTURED into a variable at

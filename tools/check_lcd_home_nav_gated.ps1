@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_lcd_home_nav_gated.ps1 -- mechanically enforces the LCD half of the
 # 2026-09-28 owner decision: on the LCD, a user who is not logged in may only
 # VIEW the home/dashboard page. Every other page reached from the home page

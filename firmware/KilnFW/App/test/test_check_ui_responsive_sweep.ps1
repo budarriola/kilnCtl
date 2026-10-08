@@ -1,3 +1,4 @@
+# checkcache: ok
 # test_check_ui_responsive_sweep.ps1 -- negative test for
 # check_ui_responsive_sweep.ps1's classification logic.
 #

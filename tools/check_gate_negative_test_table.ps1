@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_gate_negative_test_table.ps1 -- every check that run_all_checks.ps1
 # discovers must have a row in docs/audits/GATE_NEGATIVE_TEST_EVIDENCE.md
 # (docs/RELEASE_HARDENING_PLAN.md section 3, acceptance step 4), and every

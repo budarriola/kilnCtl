@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_persist_scratch_malloc_caps.ps1 -- keeps big plain malloc()/calloc()
 # scratch out of the persist layer and the backup import path.
 #

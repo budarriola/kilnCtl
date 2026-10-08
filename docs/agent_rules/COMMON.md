@@ -102,6 +102,33 @@ pinned to a commit before this change still runs the old 2-slot gate and needs a
 gate itself in isolation set `KILNCTL_BUILD_GATE_MUTEX_PREFIX`, `KILNCTL_LIGHT_GATE_MUTEX_PREFIX`
 and `KILNCTL_BUILD_GATE_DIR` to private values.
 
+## Check result cache
+
+`tools/run_all_checks.ps1` reuses a prior PASS of a check when the content is
+provably identical, so many agents running `-Fast` on the same tree do not each
+re-run ~100 static checks. Logic: `tools/check_cache.ps1`; store:
+`C:\wt\.checkcache\` (one JSON per entry, 7-day expiry, size-capped).
+
+- **Key:** check path + git TREE hash of HEAD + run mode (-Fast/full) + env
+  fingerprint (ESP-IDF path/version, MSVC version, PcTools venv python, system
+  python/node/git/PowerShell, every `KILNCTL_*` env var except cache controls,
+  credentials and build-gate tuning).
+- **Only on a clean tree:** `git status --porcelain` empty (untracked
+  non-ignored files count as dirty). Anything doubtful is a miss. Only PASS is
+  stored; FAIL, SKIP, SKIP-FAST and BUSY never are.
+- **Opt-in:** a check is cached only if it has a `# checkcache: ok` line,
+  meaning its result is a pure function of git-tracked content plus the
+  fingerprint. Never mark a check that touches a board, network, MCP servers,
+  the clock, a `build/` output or any file outside the tree, the PcTools venv
+  packages, or the build gate. So not marked: `check_00_*` target builds,
+  host-test builds and run checks, `compile_*_backends`, all `*stack_budget*`,
+  `check_duplicate_symbols`, `check_*pushed_build*` (build origin/main), pytest/PcTools
+  suites (venv state), UI sweeps driving headless Chrome, and anything reading
+  `logs/` or ignored files.
+- `-NoCache` or `KILNCTL_CHECKCACHE=0` disables it. A hit prints
+  `PASS  <check> (cached <time> from <worktree>)` and is counted in the summary.
+- When adding a check: mark it only if it meets the rule above.
+
 ## Attribution
 
 Every subagent commit trailer in this repo is exactly:

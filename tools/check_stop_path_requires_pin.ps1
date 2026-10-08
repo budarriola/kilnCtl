@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_stop_path_requires_pin.ps1 -- mechanically enforces the LCD half of
 # the 2026-09-28 owner decision reversing docs/WEB_AUTH_PLAN.md section 9's
 # old "Stop is never gated" rule: the owner's own words were "stop needs

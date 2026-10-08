@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_heater_output_pwm_drift.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up heater_output_pwm_drift_check.py without further
 # wiring. Same shape as check_pid_fuzzy_drift.ps1: the check itself is

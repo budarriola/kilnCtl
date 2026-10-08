@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_safety_fault_hold_mirror_drift.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up safety_fault_hold_mirror_drift_check.py without any
 # further wiring. The check itself is Python (see that file's docstring), so

@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_flash_partition_map.ps1 -- FLASH_BUDGET.md section 4.3.
 #
 # Section 2 of that doc built its partition table (and the "65,536 B

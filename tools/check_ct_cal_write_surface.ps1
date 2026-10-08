@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_ct_cal_write_surface.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob (see firmware/KilnFW/App/test/check_source_path_drift.ps1's
 # own header comment for why this discovery mechanism exists) picks up

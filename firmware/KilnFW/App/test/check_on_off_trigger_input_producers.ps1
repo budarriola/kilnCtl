@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_on_off_trigger_input_producers.ps1 -- every field of
 # on_off_trigger_input_t (control/on_off_trigger_decide.h) must be assigned
 # by some PRODUCTION (non-test) source file in App/drivers, not only by a

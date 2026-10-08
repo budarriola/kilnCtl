@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_safety_trip_mask_docs.ps1 -- pins documented SAFETY_TRIP_MAIN_FAULT
 # (S6a) trip_mask constants against the firmware's own mask formula.
 #

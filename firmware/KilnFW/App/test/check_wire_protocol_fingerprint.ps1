@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_wire_protocol_fingerprint.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up wire_protocol_fingerprint_check.py without any
 # further wiring, same shape as check_frame_a_offset_drift.ps1. The check

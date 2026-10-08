@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_html_escape_helpers.ps1 -- narrow mechanical check for the drift
 # class documented in docs/audits/web_code_duplication_drift_2026-09-18.md
 # section 2.4: several of this project's HTML pages define their own local

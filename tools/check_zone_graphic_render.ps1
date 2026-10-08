@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_zone_graphic_render.ps1 -- the kiln graphic renders what the config says
 #
 # The graphic at the top of zones_page.html is a CONFIGURATION-VERIFICATION

@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_kiln_scope_cfg_mirrors.ps1 -- keeps the factory-reset "scope file
 # lists" (kKilnScopeFiles in kiln_scope_cfg_files.c, and any sibling
 # <x>_scope_cfg_files.c such as a future profiles one) in step with the cfg

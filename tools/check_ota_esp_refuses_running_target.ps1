@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_ota_esp_refuses_running_target.ps1 -- source guard for the application
 # image's POST /api/ota/esp handler (firmware/KilnFW/App/drivers/http/ota_http_esp.c).
 #
