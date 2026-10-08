@@ -88,4 +88,11 @@ the scalars.
 - Full build_host_tests.ps1 could not run: the heavy build gate timed out after 3600 s (other sessions held both slots), so the full host-test suite was NOT run for this change.
 - Default gate output vs baseline: 0 diff lines. check_sim_iter_tune_bars.ps1 exit 0.
 - run_all_checks.ps1 -Fast was started detached (log C:\wt\simcred_logs\checks.log); result not available at commit time.
+- Review follow-up (2026-10-08, rebased on `664067b7`): `check_00_kilnfw_host_tests.ps1`,
+  `check_sim_scenarios.ps1` and `check_sim_iter_tune_bars.ps1` all PASS. Negative test
+  repeated against a scratch copy of `sim_plant.c` (sensor pipeline reading the element):
+  clean 63 checks / 0 failures, mutant 2 failures (bit-identity and sensor-node checks).
+  `run_all_checks.ps1 -Fast`: 148 passed, 2 failed, both pre-existing on `origin/main`
+  (`check_release_manifest.ps1`, missing `cryptography`; `check_source_path_drift.ps1`
+  flagging `tools/run_all_checks.ps1:917`).
 
