@@ -32,6 +32,8 @@ if (-not $vcvars) {
     Write-Host "SKIP: vcvarsall.bat not found -- cannot build the host test with MSVC."
     exit 3
 }
+# vcvarsall runs ONCE here, outside the build gate; the gate then covers only cl.
+Import-KilnVcvarsEnv -Vcvars $vcvars
 
 $work = Join-Path $env:TEMP "recovery_wifi_policy_$PID"
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
@@ -47,7 +49,7 @@ function Build-And-Run {
     $test = Join-Path $dir "test_recovery_wifi_policy.c"
     Copy-Item (Join-Path $here "test_recovery_wifi_policy.c") $test
     $exe = Join-Path $dir "t.exe"
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$dir`" `"$test`" /Fe:`"$exe`" /Fo:`"$dir\\`" /Fd:`"$dir\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && cl /nologo /W3 /WX /std:c11 /I`"$dir`" `"$test`" /Fe:`"$exe`" /Fo:`"$dir\\`" /Fd:`"$dir\\`""
     $gate = Enter-KilnBuildGate -Label "recovery_wifi_policy" -Lane light
     try {
         $ErrorActionPreference = "Continue"

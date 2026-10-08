@@ -42,7 +42,7 @@ import time
 from typing import Any, Callable, Optional, Sequence
 
 from mcpkit import build_jobs
-from mcpkit.buildgate import GateWaitResult, kiln_build_gate
+from mcpkit.buildgate import GateWaitResult, child_env, kiln_build_gate
 from mcpkit.buildlock import BuildLockTimeout, build_lock
 from mcpkit.pytest_verdict import PER_TEST_TIMEOUT_S, pytest_output_problems
 
@@ -197,7 +197,9 @@ def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
 
 
 def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
-                 wait_timeout: "Optional[float]" = None, **kwargs: Any) -> str:
+                 wait_timeout: "Optional[float]" = None,
+                 gate_label: "Optional[str]" = None,
+                 gate_wait: "Optional[GateWaitResult]" = None, **kwargs: Any) -> str:
     """``_run``, but serialized against any other caller contending for the
     same ``resource_key`` (typically a build directory).
 
@@ -212,13 +214,26 @@ def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
     stuck. Defaults to 90s over whatever ``kwargs['timeout']`` is (or 900s if
     that is not set), which is generous next to how long a single build step
     typically takes to notice it should give up.
+
+    ``gate_label`` (compile steps only): after the build lock is held, take a
+    machine-wide build-gate slot (:func:`mcpkit.buildgate.kiln_build_gate`)
+    just around the subprocess and release it the moment it returns -- never
+    while waiting on the lock. A gate timeout is reported in the same
+    "FAILED (lock contention)" shape as a lock timeout.
     """
     if wait_timeout is None:
         wait_timeout = float(kwargs.get("timeout", 900)) + 90.0
     started = time.monotonic()
     try:
         with build_lock(resource_key, wait_timeout=wait_timeout):
-            return _run(tag, argv, **kwargs)
+            if gate_label is None:
+                return _run(tag, argv, **kwargs)
+            try:
+                with kiln_build_gate(gate_label, wait_result=gate_wait):
+                    kwargs["env"] = child_env(kwargs.get("env"))
+                    return _run(tag, argv, **kwargs)
+            except TimeoutError as exc:
+                return f"{tag}: FAILED (lock contention) -- {exc}"
     except BuildLockTimeout as exc:
         waited = time.monotonic() - started
         return (
@@ -294,15 +309,9 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
     if jobs > 0:
         argv += ["--parallel", str(jobs)]
     wait_result = GateWaitResult()
-    try:
-        with kiln_build_gate(tag, wait_result=wait_result):
-            report = _run_locked(tag, build_dir, argv, cwd=build_dir)
-    except TimeoutError as exc:
-        # Same "...: FAILED (lock contention)" string shape _run_locked's own
-        # BuildLockTimeout handler returns, so a caller parsing this tool's
-        # output does not need a second failure shape for the gate timing out
-        # instead of the per-directory lock (opus review A3).
-        return f"{tag}: FAILED (lock contention) -- {exc}"
+    # Lock first, slot only around the compile (inside _run_locked).
+    report = _run_locked(tag, build_dir, argv, cwd=build_dir,
+                         gate_label=tag, gate_wait=wait_result)
     if wait_result.waited_seconds > 0:
         report = f"{report}\n(gate waited {wait_result.waited_seconds:.1f}s for a heavy-build slot)"
     return configure_note + report
@@ -468,17 +477,13 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     elf_path = os.path.join(build_dir, "KilnCtrl.elf")
     elf_before = _stat_snapshot(elf_path)
     wait_result = GateWaitResult()
-    try:
-        with kiln_build_gate(f"kilnfw-{target}", wait_result=wait_result):
-            kilnfw_report = _run_locked(
-                f"kilnfw-{target}", build_dir,
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-                timeout=1800)
-    except TimeoutError as exc:
-        # Same string shape as _run_locked's own lock-contention failure --
-        # opus review A3.
-        result = f"kilnfw-{target}: FAILED (lock contention) -- {exc}"
-        return f"{saftyfw_report}\n\n{result}" if saftyfw_report else result
+    # Lock first, slot only around the compile (inside _run_locked).
+    kilnfw_report = _run_locked(
+        f"kilnfw-{target}", build_dir,
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        timeout=1800, gate_label=f"kilnfw-{target}", gate_wait=wait_result)
+    if "FAILED (lock contention)" in kilnfw_report and saftyfw_report:
+        return f"{saftyfw_report}\n\n{kilnfw_report}"
     if wait_result.waited_seconds > 0:
         kilnfw_report = (
             f"{kilnfw_report}\n(gate waited {wait_result.waited_seconds:.1f}s for a heavy-build slot)")

@@ -441,12 +441,7 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
 # The prune loop above deliberately stays OUTSIDE this lock: it is this tree's
 # lock, and every directory the prune can delete belongs to a different tree
 # and is guarded by that tree's own lock, which the prune takes separately.
-$buildGate = Enter-KilnBuildGate -Label "kilnfw_target_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
 $lock = Enter-BuildLock -Name $LockName
 try {
     if (-not (Test-Path -LiteralPath $WorktreePath)) {
@@ -1059,8 +1054,13 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     $partitionTablePath = Join-Path $WorktreePath "firmware\KilnFW\build\partition_table\partition-table.bin"
 
     Write-Host "Building KilnFW target (CCACHE_DISABLE=1) in $WorktreePath ..."
-    $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
-    $buildExit = $LASTEXITCODE
+    $buildGate = Enter-KilnBuildGate -Label "kilnfw_target_build"
+    try {
+        $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
+        $buildExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $buildGate
+    }
 
     $buildOutput | Write-Host
 
@@ -1404,9 +1404,6 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "bootloader\bootloader.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "partition_table\partition-table.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Exit-BuildLock -Lock $lock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }
 
 Write-Host ""

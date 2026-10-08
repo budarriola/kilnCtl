@@ -223,12 +223,7 @@ if ($pushedSlot.Reused) {
 }
 Write-Host "No reusable PASS stamp for $originSha -- building (this run owns the build)."
 try {
-$buildGate = Enter-KilnBuildGate -Label "kilnfw_pushed_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
 $lock = Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree"
 try {
     # CREATION IS INSIDE THE LOCK (2026-09-16). It used to sit above, outside
@@ -345,8 +340,13 @@ try {
     $elfPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.elf"
 
     Write-Host "Building KilnFW target against origin/main ($originSha) in $WorktreePath ..."
-    $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
-    $buildExit = $LASTEXITCODE
+    $buildGate = Enter-KilnBuildGate -Label "kilnfw_pushed_build"
+    try {
+        $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
+        $buildExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $buildGate
+    }
 
     $buildOutput | Write-Host
 
@@ -366,9 +366,6 @@ try {
     }
 } finally {
     Exit-BuildLock -Lock $lock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }
 # Every verification above passed (Fail exits 1 before here): record it.
 Write-PushedBuildStamp -Path (Get-PushedBuildStampPath -Name "kilnfw") -Sha $originSha -Detail "KilnCtrl.bin $((Get-Item $binPath).Length) bytes"

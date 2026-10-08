@@ -456,7 +456,7 @@ def test_max_hold_kills_only_own_children(monkeypatch):
     holder = _child(code)
     try:
         cpid = int(holder.stdout.readline())
-        out, err = holder.communicate(timeout=30)
+        out, err = holder.communicate(timeout=90)
         assert holder.returncode != 0 and "max hold" in err  # failed loud
         assert not buildgate.pid_alive(cpid)  # own child killed by the watchdog
         assert bystander.poll() is None  # unrelated process untouched

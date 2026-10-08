@@ -94,12 +94,7 @@ if (-not (Test-Path $WorktreePath)) {
     }
 }
 
-$buildGate = Enter-KilnBuildGate -Label "saftyfw_pushed_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
 $lock = Enter-BuildLock -Name "saftyfw_checkbuild_origin_worktree"
 try {
     Write-Host "Checking out origin/main ($originSha) in $WorktreePath, discarding any prior state there ..."
@@ -156,18 +151,21 @@ try {
         }
 
         Write-Host "Building SaftyFW against origin/main ($originSha) (ninja) ..."
-        ninja | Write-Host
-        if ($LASTEXITCODE -ne 0) {
-            Fail "ninja build failed (exit $LASTEXITCODE) against origin/main commit $originSha -- see output above."
+        $buildGate = Enter-KilnBuildGate -Label "saftyfw_pushed_build"
+        try {
+            ninja | Write-Host
+            $ninjaExit = $LASTEXITCODE
+        } finally {
+            Exit-KilnBuildGate -Gate $buildGate
+        }
+        if ($ninjaExit -ne 0) {
+            Fail "ninja build failed (exit $ninjaExit) against origin/main commit $originSha -- see output above."
         }
     } finally {
         Pop-Location
     }
 } finally {
     Exit-BuildLock -Lock $lock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }
 
 $elf = Join-Path $buildDir "SaftyFW.elf"

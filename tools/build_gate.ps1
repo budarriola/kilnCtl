@@ -531,6 +531,24 @@ function Import-KilnVcvarsEnv {
     $global:KilnVcvarsImported = $key
 }
 
+# Run ONE compile/link command line through cmd.exe /c under a slot taken just
+# for that command and released the moment it returns (try/finally). The
+# caller owns everything else (build lock, vcvars import, running the tests).
+# Output flows to the pipeline exactly like a bare `cmd.exe /c $Command`, and
+# $LASTEXITCODE is the command's exit code afterwards.
+function Invoke-KilnGatedCmd {
+    param([Parameter(Mandatory = $true)][string]$Command,
+          [Parameter(Mandatory = $true)][string]$Label,
+          [ValidateSet("heavy", "light")][string]$Lane = "heavy")
+    $gate = Enter-KilnBuildGate -Label $Label -Lane $Lane
+    try {
+        & cmd.exe /c $Command
+        $exit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $gate
+    }
+    $global:LASTEXITCODE = $exit
+}
 # ---- status ------------------------------------------------------------------
 
 function Format-KilnAge {

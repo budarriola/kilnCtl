@@ -136,7 +136,14 @@ param(
     # fail the suite" behavior for a machine that genuinely lacks a
     # prerequisite (no node/toolchain installed) and is not expected to ever
     # pass those checks.
-    [switch]$AllowSkips
+    [switch]$AllowSkips,
+
+    # A check that could not get a build-gate slot within the gate timeout
+    # (tools/build_gate.ps1, 3600 s) did NOT run: that is machine load, not a
+    # defect in the tree. It is filed under its own BUSY heading with a
+    # rerun-it-alone hint instead of an anonymous FAIL, but it still fails the
+    # run (nothing was verified) unless -AllowBusy is passed.
+    [switch]$AllowBusy
 )
 
 # param() must be the first statement in the script, so this assignment --
@@ -628,6 +635,7 @@ $failed = @()
 $passed = @()
 $skipped = @()
 $skippedFast = @()
+$busy = @()
 
 # Scratch dir for redirected stdout/stderr of each parallel check process.
 # Keyed by PID so two concurrent run_all_checks.ps1 invocations (different
@@ -743,6 +751,14 @@ function Complete-CheckResult {
         }
         Write-Host "  SKIP  $($Running.Rel)" -ForegroundColor Yellow
         return [pscustomobject]@{ Bucket = "skip"; Path = $Running.Rel; Reason = $reasonLine.Trim() }
+    } elseif (($script:gateWaitingRels -contains $Running.Rel) -and
+              ($outText -match 'build gate: timed out after \d+s waiting for a (heavy|light)-lane build slot')) {
+        # Load artifact, not a defect: the check never got to build. Own bucket.
+        # Only a check that itself takes the gate ($gateWaitingPaths) can be
+        # BUSY: a pytest/unit-test check whose FAILING output merely quotes the
+        # message (a gate unit test, mcpkit/buildgate.py's own tests) stays a FAIL.
+        Write-Host "  BUSY  $($Running.Rel) (build gate timeout -- not run)" -ForegroundColor Yellow
+        return [pscustomobject]@{ Bucket = "busy"; Path = $Running.Rel; Code = $code; Output = $outText }
     } else {
         Write-Host "  FAIL  $($Running.Rel) (exit $code)" -ForegroundColor Red
         return [pscustomobject]@{ Bucket = "fail"; Path = $Running.Rel; Code = $code; Output = $outText }
@@ -753,17 +769,29 @@ function Invoke-ChecksParallel {
     # PerCheckTimeoutSec > 0: a check still running after that many seconds is
     # killed (whole process tree, bounded) and filed as a FAIL, so one hung
     # child can never stall the run. 0 = no cap (phases 1 and 2).
-    param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode, [int]$PerCheckTimeoutSec = 0)
+    param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode, [int]$PerCheckTimeoutSec = 0, [string[]]$UnthrottledPaths = @())
 
     $pending = New-Object System.Collections.Generic.Queue[object]
-    foreach ($c in $ChecksToRun) { $pending.Enqueue($c) }
+    # Unthrottled (gate-queued) checks go first, so a throttled check at the
+    # head of the queue never holds them back from joining the gate queue.
+    # The count is bounded by the discovered check list (~20 today), never
+    # open-ended.
+    foreach ($c in $ChecksToRun) { if ($c.FullName -in $UnthrottledPaths) { $pending.Enqueue($c) } }
+    foreach ($c in $ChecksToRun) { if ($c.FullName -notin $UnthrottledPaths) { $pending.Enqueue($c) } }
     $running = @()
     $results = @()
 
     while ($pending.Count -gt 0 -or $running.Count -gt 0) {
-        while ($running.Count -lt $MaxParallel -and $pending.Count -gt 0) {
+        # A check that spends its life queued on the build gate (see
+        # $gateWaitingPaths) is an idle process, not load: it must not occupy
+        # one of the $MaxParallel workers, or four gate-queued builds starve
+        # every quick lint check behind them for as long as the gate is busy.
+        # Start those immediately; the gate itself bounds the real work.
+        while ($pending.Count -gt 0 -and ($pending.Peek().FullName -in $UnthrottledPaths -or @($running | Where-Object { -not $_.Unthrottled }).Count -lt $MaxParallel)) {
             $c = $pending.Dequeue()
-            $running += Start-CheckAsync -Check $c -RepoRoot $RepoRoot -SelfcheckPy $SelfcheckPy -SelfcheckPython $SelfcheckPython -ScratchDir $ScratchDir
+            $started = Start-CheckAsync -Check $c -RepoRoot $RepoRoot -SelfcheckPy $SelfcheckPy -SelfcheckPython $SelfcheckPython -ScratchDir $ScratchDir
+            $started | Add-Member -NotePropertyName Unthrottled -NotePropertyValue ($c.FullName -in $UnthrottledPaths)
+            $running += $started
         }
         Start-Sleep -Milliseconds 200
         $stillRunning = @()
@@ -883,6 +911,15 @@ $restChecks = $restChecks | Where-Object {
 # Small single-exe compiles (check_recovery_*.ps1, check_commonfw_*.ps1) use the
 # separate "light" lane (-Lane light, KILNCTL_LIGHT_GATE_SLOTS, default 4) so they
 # never queue behind a 7-18 minute heavy holder.
+# Checks that queue on the build gate (heavy or light lane) or call a
+# build_host_tests.ps1: detected from their own source, not a hand list, so a
+# new gated check is covered the moment it exists.
+$gateWaitingPaths = @($checks | Where-Object {
+    $_.Extension -eq ".ps1" -and
+    (Select-String -LiteralPath $_.FullName -Pattern 'Enter-KilnBuildGate|Join-Path \$testDir "build_host_tests\.ps1"' -Quiet)
+} | ForEach-Object { $_.FullName })
+# Same set as repo-relative paths, for Complete-CheckResult's BUSY rule.
+$script:gateWaitingRels = @($gateWaitingPaths | ForEach-Object { $_.Substring($repoRoot.Length + 1) })
 $results = @()
 if ($buildChecks.Count -gt 0) {
     Write-Host "Phase 1/3: full target builds ($($buildChecks.Count))" -ForegroundColor Cyan
@@ -891,7 +928,7 @@ if ($buildChecks.Count -gt 0) {
 }
 if ($restChecks.Count -gt 0) {
     Write-Host "Phase 2/3: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel `
+    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel -UnthrottledPaths $gateWaitingPaths `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($uiSweepChecks.Count -gt 0) {
@@ -910,6 +947,8 @@ foreach ($r in $results) {
         $passed += $r.Path
     } elseif ($r.Bucket -eq "skipfast") {
         $skippedFast += [pscustomobject]@{ Path = $r.Path; Reason = $r.Reason }
+    } elseif ($r.Bucket -eq "busy") {
+        $busy += $r
     } elseif ($r.Bucket -eq "skip") {
         $skipped += [pscustomobject]@{ Path = $r.Path; Reason = $r.Reason }
     } else {
@@ -937,6 +976,15 @@ if ($skipped.Count -gt 0) {
     foreach ($s in $skipped) {
         Write-Host "  SKIP  $($s.Path)" -ForegroundColor Yellow
         Write-Host "        $($s.Reason)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
+
+if ($busy.Count -gt 0) {
+    Write-Host "$($busy.Count) check(s) did NOT RUN -- build gate busy (load, not a tree defect; nothing was verified):" -ForegroundColor Yellow
+    foreach ($b in $busy) {
+        Write-Host "  BUSY  $($b.Path)" -ForegroundColor Yellow
+        Write-Host "        rerun alone: tools/run_all_checks.ps1 -Fast -Only '$([regex]::Escape((Split-Path -Leaf $b.Path)))'" -ForegroundColor Yellow
     }
     Write-Host ""
 }
@@ -973,6 +1021,12 @@ if ($failed.Count -gt 0) {
 # about since its first revision. Default posture: any SKIP fails the run;
 # -AllowSkips opts back into the old behavior for a machine that genuinely,
 # permanently lacks a prerequisite.
+if ($busy.Count -gt 0 -and -not $AllowBusy) {
+    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($busy.Count) BUSY (not run), $($failed.Count) failed." -ForegroundColor Red
+    Write-Host "FAILED: $($busy.Count) check(s) never got a build-gate slot -- rerun them alone (see above); -AllowBusy only for a deliberately partial run." -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 1
+}
 if ($skipped.Count -gt 0 -and -not $AllowSkips) {
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
     Write-Host "FAILED: $($skipped.Count) check(s) skipped and -AllowSkips was not passed -- a skip is not a pass." -ForegroundColor Red

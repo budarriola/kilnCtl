@@ -39,12 +39,7 @@ $ErrorActionPreference = "Stop"
 # instead of corrupting the shared build tree.
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_gate.ps1")
-$buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
 $buildLock = Enter-BuildLock -Name "saftyfw_bootloader_build"
 
 $bootloaderDir = Join-Path $PSScriptRoot "..\bootloader"
@@ -112,9 +107,15 @@ try {
     }
 
     Write-Host "Building saftyfw_bootloader (ninja) ..."
-    ninja
-    if ($LASTEXITCODE -ne 0) {
-        throw "ninja build failed with exit code $LASTEXITCODE"
+    $buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build" -Lane light
+    try {
+        ninja
+        $ninjaExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $buildGate
+    }
+    if ($ninjaExit -ne 0) {
+        throw "ninja build failed with exit code $ninjaExit"
     }
 }
 finally {
@@ -133,7 +134,4 @@ exit 0
 }
 finally {
     Exit-BuildLock -Lock $buildLock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }

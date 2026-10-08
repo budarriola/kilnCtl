@@ -78,6 +78,25 @@ mutex names) is for a single seconds-long compile over a handful of TUs --
 7-18 minute heavy holder. Never put a build that runs more than about a minute on the
 light lane.
 
+**A slot is held ONLY while a compiler is running (rewritten 2026-10-07).** The heavy cap is 4
+machine-wide. Take the build lock first, run setup (`Import-KilnVcvarsEnv`, cmake configure,
+robocopy) outside the gate, then `Enter-KilnBuildGate` around ONE compile/link command and
+`Exit-KilnBuildGate` in a `finally` the moment it returns (`Invoke-KilnGatedCmd` does this for a
+cmd line). Never hold a slot while waiting on `Enter-BuildLock`, running vcvarsall, running test
+exes, or idling; `tools/check_build_gate_usage.ps1` lints this. Python side
+(`mcpkit.buildgate`): `_run_locked(..., gate_label=...)` holds the slot only around the subprocess.
+Slot counts come from a machine-wide `C:\wt\.buildgate\config.json`
+(`{"heavy_slots":4,"light_slots":4}`; env `KILNCTL_BUILD_GATE_SLOTS`/`KILNCTL_LIGHT_GATE_SLOTS` wins
+over it, then the code default), so an old worktree's code default cannot lower the cap. Waiters queue
+FIFO by ticket file. Every holder writes `C:\wt\.buildgate\<lane>\slot<i>.json` (pid, command, phase,
+start time); `powershell -File toolsuild_gate.ps1 -Status` shows each slot with age, pid-alive and
+whether a compiler child is running. The HOLDER enforces `KILNCTL_BUILD_GATE_MAX_HOLD_SEC` (default
+2700): it kills only its own descendants, releases the slot and fails loud. A waiter never kills
+another session's process; a stale slot is for its owner (or the owner of the PC) to clear. A tree
+pinned to a commit before this change still runs the old 2-slot gate and needs a rebase. To test the
+gate itself in isolation set `KILNCTL_BUILD_GATE_MUTEX_PREFIX`, `KILNCTL_LIGHT_GATE_MUTEX_PREFIX`
+and `KILNCTL_BUILD_GATE_DIR` to private values.
+
 ## Attribution
 
 Every subagent commit trailer in this repo is exactly:

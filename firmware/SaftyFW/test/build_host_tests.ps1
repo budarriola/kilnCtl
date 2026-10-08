@@ -56,12 +56,9 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . (Join-Path $PSScriptRoot "../../../tools/build_lock.ps1")
 . (Join-Path $PSScriptRoot "../../../tools/build_gate.ps1")
 $buildLockName = "saftyfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
-$buildGate = Enter-KilnBuildGate -Label "saftyfw_host_tests"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# vcvarsall runs ONCE (outside any gate slot); the slot is then taken only around each cl invocation (Invoke-KilnGatedCmd).
+Import-KilnVcvarsEnv -Vcvars $vcvars
+# Build lock FIRST, with no gate slot held while waiting for it.
 $buildLock = Enter-BuildLock -Name $buildLockName
 try {
     $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -276,9 +273,9 @@ try {
     $rspPath = Join-Path $outDir "saftyfw_host_tests_cl.rsp"
     Set-Content -Path $rspPath -Value $rspContent -Encoding ascii -NoNewline
 
-    $cmd = "call `"$vcvars`" x64 >nul && cl @`"$rspPath`""
+    $cmd = "cl @`"$rspPath`""
 
-    cmd.exe /c $cmd
+    Invoke-KilnGatedCmd -Label "saftyfw_host_tests" -Command $cmd
     if ($LASTEXITCODE -ne 0) {
         throw "build failed"
     }
@@ -335,9 +332,9 @@ try {
     $fuzzSources = @((Join-Path $commonSrcDir "..\test\test_fuzz_payloads.c")) +
         (Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
     $fuzzSourceArgs = ($fuzzSources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $fuzzCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 /I `"$commonIncDir`" " +
+    $fuzzCmd = "cl /nologo /W4 /WX /std:c17 /I `"$commonIncDir`" " +
         "/Fo:`"$fuzzObjDir\\`" /Fe:`"$fuzzExe`" $fuzzSourceArgs"
-    cmd.exe /c $fuzzCmd
+    Invoke-KilnGatedCmd -Label "saftyfw_host_tests" -Command $fuzzCmd
     if ($LASTEXITCODE -ne 0) {
         throw "kilnlink payload fuzz build failed"
     }
@@ -364,11 +361,11 @@ try {
         (Join-Path $spiOwnerStubDir "spi_owner_stub.c")
     )
     $halSpiPicoSourceArgs = ($halSpiPicoSources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $halSpiPicoCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+    $halSpiPicoCmd = "cl /nologo /W4 /WX /std:c17 " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionPicoSpiDir`" /I `"$spiOwnerStubDir`" " +
         "/I `"$srcDir/board`" /I `"$testDir`" " +
         "/Fo:`"$halSpiPicoObjDir\\`" /Fe:`"$halSpiPicoExe`" $halSpiPicoSourceArgs"
-    cmd.exe /c $halSpiPicoCmd
+    Invoke-KilnGatedCmd -Label "saftyfw_host_tests" -Command $halSpiPicoCmd
     if ($LASTEXITCODE -ne 0) {
         throw "hal_spi_pico adapter test build failed"
     }
@@ -411,12 +408,12 @@ try {
     # arm-none-eabi target build (CMakeLists.txt does not define this macro).
     # This is the ONLY place that macro is defined in this repo -- see
     # config_store_flash.c's own comment on the #ifdef for what it gates and why.
-    $configStoreFlashCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 /D SAFTYFW_HOST_TEST_BUILD=1 " +
+    $configStoreFlashCmd = "cl /nologo /W4 /WX /std:c17 /D SAFTYFW_HOST_TEST_BUILD=1 " +
         "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" " +
         "/I `"$configStoreFlashHostStubsDir`" /I `"$testDir`" " +
         "/Fo:`"$configStoreFlashObjDir\\`" /Fe:`"$configStoreFlashExe`" $configStoreFlashSourceArgs"
-    cmd.exe /c $configStoreFlashCmd
+    Invoke-KilnGatedCmd -Label "saftyfw_host_tests" -Command $configStoreFlashCmd
     if ($LASTEXITCODE -ne 0) {
         throw "config_store_flash host test build failed"
     }
@@ -448,11 +445,11 @@ try {
         (Join-Path $commonSrcDir "kilnlink_crc.c")
     )
     $blRecoverySourceArgs = ($blRecoverySources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $blRecoveryCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+    $blRecoveryCmd = "cl /nologo /W4 /WX /std:c17 " +
         "/I `"$blRecoveryStubDir`" /I `"$bootDir`" /I `"$updateDir`" /I `"$srcDir\tasks`" " +
         "/I `"$commonIncDir`" /I `"$testDir`" " +
         "/Fo:`"$blRecoveryObjDir\\`" /Fe:`"$blRecoveryExe`" $blRecoverySourceArgs"
-    cmd.exe /c $blRecoveryCmd
+    Invoke-KilnGatedCmd -Label "saftyfw_host_tests" -Command $blRecoveryCmd
     if ($LASTEXITCODE -ne 0) {
         throw "bootloader recovery_update host test build failed"
     }
@@ -495,7 +492,4 @@ try {
     exit $blRecoveryExit
 } finally {
     Exit-BuildLock -Lock $buildLock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }
