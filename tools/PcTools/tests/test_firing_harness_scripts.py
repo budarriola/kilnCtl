@@ -9,6 +9,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -28,17 +30,37 @@ class FakeClock:
         self.t += s
 
 
+class FakePico:
+    """Records halt/resume calls; scriptable failures."""
+
+    def __init__(self, halt_ok=True, resume_ok=True, link_ok=True):
+        self.halt_ok, self.resume_ok, self.link_ok = halt_ok, resume_ok, link_ok
+        self.halts = 0
+        self.resumes = 0
+
+    def halt(self):
+        self.halts += 1
+        return self.halt_ok, "halted"
+
+    def resume(self):
+        self.resumes += 1
+        return self.resume_ok, "resumed"
+
+    def link_alive(self):
+        return self.link_ok
+
+
 def run_measure(fault_at=None, relays_off_at=None, unreadable_status=False,
-                unreadable_relays=False, poll=1.0, max_wait=60.0):
+                unreadable_relays=False, poll=1.0, pico=None, status_exc=None):
     """Board fake: FAULTED once clock >= t0+fault_at, relays off once
     clock >= t0+relays_off_at (None = never)."""
     clk = FakeClock()
     t0 = clk.t
-
-    def silence():
-        return "reset ok"
+    pico = pico or FakePico()
 
     def status():
+        if status_exc is not None and clk.t - t0 >= 5.0:
+            raise status_exc
         if unreadable_status:
             return None, None
         if fault_at is not None and clk.t - t0 >= fault_at:
@@ -50,11 +72,12 @@ def run_measure(fault_at=None, relays_off_at=None, unreadable_status=False,
             return None
         return relays_off_at is not None and clk.t - t0 >= relays_off_at
 
-    meas = sw.measure_abort(poll, max_wait, clock=clk.now, sleep=clk.sleep,
-                            silence=silence, exec_status=status,
-                            relays_all_off=relays)
+    meas = sw.measure_abort(poll, clock=clk.now, sleep=clk.sleep,
+                            halt=pico.halt, resume=pico.resume,
+                            link_alive=pico.link_alive,
+                            exec_status=status, relays_all_off=relays)
     return sw.judge_abort(meas["t0"], meas["t_faulted"], meas["t_relays_off"],
-                          poll, max_wait), meas
+                          poll, sw.max_halt_s(poll) - sw.ABORT_THRESHOLD_S), meas
 
 
 def test_abort_at_30s_passes():
@@ -105,12 +128,14 @@ def test_relays_off_before_fault_then_on_is_not_a_pass():
             return sw.PROFILE_EXEC_FAULTED, 0
         return sw.PROFILE_EXEC_RUNNING, 0
 
-    meas = sw.measure_abort(1.0, 60.0, clock=clk.now, sleep=clk.sleep,
-                            silence=lambda: "ok", exec_status=status,
+    pico = FakePico()
+    meas = sw.measure_abort(1.0, clock=clk.now, sleep=clk.sleep,
+                            halt=pico.halt, resume=pico.resume,
+                            link_alive=pico.link_alive, exec_status=status,
                             relays_all_off=lambda: clk.t - t0 < 30.0)
     assert meas["t_relays_off"] is None
     ok, report = sw.judge_abort(meas["t0"], meas["t_faulted"], meas["t_relays_off"],
-                                1.0, 60.0)
+                                1.0, 6.0)
     assert not ok
     assert any("never confirmed off" in line for line in report)
 
@@ -177,7 +202,9 @@ def _stopwatch_main(monkeypatch, argv, running=True):
     monkeypatch.setattr(sw, "measure_abort",
                         lambda *a, **k: called.append(1) or
                         {"t0": 0.0, "t_faulted": 30.5, "t_relays_off": 30.5,
-                         "fault_guard": 0, "reset_result": "x", "log": []})
+                         "fault_guard": 0, "halt_ok": True, "halt_detail": "",
+                         "halt_call_s": 0.5, "halt_duration_s": 31.0,
+                         "resume_ok": True, "resume_detail": "", "log": []})
     return called
 
 
@@ -197,6 +224,93 @@ def test_main_pass_exit_code(monkeypatch):
     called = _stopwatch_main(monkeypatch, ["--i-am-aborting-a-real-firing"])
     assert sw.main() == 0
     assert called
+
+
+# ----------------------------------------------- halt / resume safety net
+def test_pass_path_halts_then_resumes_once_and_reports_duration():
+    pico = FakePico()
+    (ok, _), meas = run_measure(fault_at=30.0, relays_off_at=30.0, pico=pico)
+    assert ok
+    assert (pico.halts, pico.resumes) == (1, 1)
+    assert meas["resume_ok"] is True
+    assert 30.0 <= meas["halt_duration_s"] <= sw.max_halt_s(1.0)
+    vok, report = sw.judge_run(meas, 1.0)
+    assert vok
+    assert any("halted for" in line for line in report)
+    assert any("S6b" in line for line in report)  # expected-trip note, no auto-clear
+
+
+def test_resume_on_exception():
+    pico = FakePico()
+    with pytest.raises(OSError):
+        run_measure(fault_at=30.0, relays_off_at=30.0, pico=pico,
+                    status_exc=OSError("link down"))
+    assert pico.resumes == 1
+
+
+def test_resume_on_keyboard_interrupt():
+    pico = FakePico()
+    with pytest.raises(KeyboardInterrupt):
+        run_measure(fault_at=30.0, relays_off_at=30.0, pico=pico,
+                    status_exc=KeyboardInterrupt())
+    assert pico.resumes == 1
+
+
+def test_resume_failure_is_fail_with_operator_message():
+    pico = FakePico(resume_ok=False)
+    emitted = []
+    clk = FakeClock()
+    meas = sw.measure_abort(1.0, clock=clk.now, sleep=clk.sleep, halt=pico.halt,
+                            resume=pico.resume, link_alive=pico.link_alive,
+                            exec_status=lambda: (sw.PROFILE_EXEC_FAULTED, 0),
+                            relays_all_off=lambda: True, emit=emitted.append)
+    assert meas["resume_ok"] is False
+    assert sw.OPERATOR_RESUME_FAILED in emitted
+    ok, report = sw.judge_run(meas, 1.0)
+    assert not ok
+    assert any("profiles_stop()" in line and "debug_reset" in line for line in report)
+
+
+def test_resume_ok_but_link_never_answers_is_fail():
+    pico = FakePico(link_ok=False)
+    (_, _), meas = run_measure(fault_at=30.0, relays_off_at=30.0, pico=pico)
+    assert meas["resume_ok"] is False
+    assert not sw.judge_run(meas, 1.0)[0]
+
+
+def test_halt_failure_is_fail_with_no_measurement():
+    pico = FakePico(halt_ok=False)
+    (_, _), meas = run_measure(fault_at=0.0, relays_off_at=0.0, pico=pico)
+    assert meas["t_faulted"] is None and meas["log"] == []
+    ok, report = sw.judge_run(meas, 1.0)
+    assert not ok
+    assert any("could not halt" in line for line in report)
+    assert pico.resumes == 1  # a partial halt is still undone
+
+
+def test_halt_is_bounded():
+    """Never faults: the polling loop must stop at max_halt_s, not run on."""
+    pico = FakePico()
+    (_, _), meas = run_measure(fault_at=None, pico=pico)
+    assert meas["halt_duration_s"] <= sw.max_halt_s(1.0) + 1.0
+    assert meas["halt_duration_s"] >= sw.max_halt_s(1.0) - 3.0
+    assert pico.resumes == 1
+    assert sw.max_halt_s(1.0) == 36.0
+
+
+def test_default_halt_names_both_cores(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sw.m, "debug_halt",
+                        lambda **k: calls.append(("halt", k)) or "halted pico",
+                        raising=False)
+    monkeypatch.setattr(sw.m, "debug_read_registers",
+                        lambda **k: calls.append(("regs", k)) or "r0=0",
+                        raising=False)
+    assert sw._halt_pico()[0] is True
+    assert calls[1][1]["target"] == "rp2040.core1" and calls[1][1]["leave_halted"]
+    monkeypatch.setattr(sw.m, "debug_halt", lambda **k: "error: halt failed",
+                        raising=False)
+    assert sw._halt_pico()[0] is False
 
 
 # --------------------------------------------------------------------- soak
