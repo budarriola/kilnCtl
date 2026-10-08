@@ -122,6 +122,10 @@ try {
     git -C $repo update-ref refs/remotes/origin/main $A
     Assert (-not (Test-MainBaselineRecordable -RepoRoot $repo).Ok) "HEAD ahead of origin/main does not record"
     git -C $repo update-ref refs/remotes/origin/main $B
+    $C = (git -C $repo commit-tree "$B^{tree}" -p $B -m advance | Out-String).Trim()
+    git -C $repo update-ref refs/remotes/origin/main $C
+    Assert ((Test-MainBaselineRecordable -RepoRoot $repo).Ok) "HEAD behind an advanced origin/main still records"
+    git -C $repo update-ref refs/remotes/origin/main $B
     Add-Content -LiteralPath (Join-Path $repo "f.txt") -Value "dirty"
     Assert (-not (Test-MainBaselineRecordable -RepoRoot $repo).Ok) "dirty tree does not record"
     git -C $repo checkout -- f.txt *>$null

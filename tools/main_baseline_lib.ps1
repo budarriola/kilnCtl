@@ -66,7 +66,7 @@ function Write-MainBaseline {
     return (Join-Path $Dir $file)
 }
 
-# Recording is allowed only for a clean tree whose HEAD == origin/main.
+# Recording is allowed only for a clean tree whose HEAD is origin/main or an ancestor of it.
 # Returns @{ Ok; Reason; Commit; Tree }.
 function Test-MainBaselineRecordable {
     param([Parameter(Mandatory = $true)][string]$RepoRoot, [string]$MainRef = "origin/main")
@@ -75,7 +75,12 @@ function Test-MainBaselineRecordable {
     if ($LASTEXITCODE -ne 0 -or -not $head) { return (& $no "cannot resolve HEAD") }
     $main = (& git -C $RepoRoot rev-parse $MainRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $main) { return (& $no "cannot resolve $MainRef") }
-    if ($head -cne $main) { return (& $no "HEAD is not $MainRef") }
+    # HEAD may be behind a ref that advanced (a fetch from another session) during
+    # the long run; any commit on main's history is a legitimate main state.
+    if ($head -cne $main) {
+        & git -C $RepoRoot merge-base --is-ancestor $head $main 2>$null
+        if ($LASTEXITCODE -ne 0) { return (& $no "HEAD is not $MainRef nor an ancestor of it") }
+    }
     $st = Get-CheckCacheTreeState -RepoRoot $RepoRoot
     if (-not $st.Clean) { return (& $no $st.Reason) }
     return [PSCustomObject]@{ Ok = $true; Reason = ""; Commit = $head; Tree = $st.Tree }
