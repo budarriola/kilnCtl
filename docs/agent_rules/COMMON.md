@@ -114,6 +114,28 @@ pinned to a commit before this change still runs the old 2-slot gate and needs a
 gate itself in isolation set `KILNCTL_BUILD_GATE_MUTEX_PREFIX`, `KILNCTL_LIGHT_GATE_MUTEX_PREFIX`
 and `KILNCTL_BUILD_GATE_DIR` to private values.
 
+**ccache in the KilnFW target checks (2026-10-08).** Each worktree gets its own cold
+`C:\wt\checkbuild_<hex>` build dir, so `check_00_kilnfw_target_build.ps1` used to compile all
+~2100 TUs in every new agent worktree (30+ min under 4-way contention): it forced
+`CCACHE_DISABLE=1` (139debb5) for fear of a stale hit masking a broken TU. A content-keyed cache
+cannot do that, so ccache is ON again, in that check, the recovery-image check and their SaftyFW
+slot build, through ONE pinned configuration in `firmware/KilnFW/App/test/lib_kilnfw_ccache.ps1`:
+shared cache `C:\wt\.ccache` (5 GB; `KILNCTL_CCACHE_DIR` overrides), `base_dir=C:\wt` +
+`hash_dir=false` so identical source at another worktree path hits, preprocessor mode (direct mode
+OFF: it can false-hit when a new header shadows one earlier in the `-I` path, demonstrated by the
+check below), no sloppiness, no ignored options, no config file; inherited `CCACHE_*` are cleared
+and `ccache -p` is asserted before every build. ccache never decides WHETHER a TU compiles (ninja
+does); it only reuses the result of byte-identical preprocessed input + flags + compiler, and a
+failed compile is never stored. `check_kilnfw_ccache_no_stale.ps1` proves this against the real
+ccache and xtensa gcc on every suite run. `KILNCTL_CCACHE_DISABLE=1` builds without it for a
+comparison. Never add sloppiness, direct/depend mode or a `ccache.conf` -- change the helper and
+that check together. The build log prints `ccache results this run: cache_miss=N
+preprocessed_cache_hit=M`. Measured 2026-10-08 on a fresh checkbuild dir under 4-5 concurrent heavy
+builds (noisy): ccache off 4849 s total; warm cache 3850 s (2423 hits, 30 misses), compile+link
+~2527 s -> ~1637 s, SaftyFW slots 376 s -> 260 s; the KilnFW `.bin` was identical to a cold build
+except build timestamps. The rest is CMake configure (KilnFW + bootloader, 1700-2600 s under
+load), which ccache cannot touch; reusing warm build dirs is the next lever.
+
 ## Check result cache
 
 `tools/run_all_checks.ps1` reuses a prior PASS of a check when the content is

@@ -721,6 +721,12 @@ this 24-core machine (when no other session holds a build gate slot -- see
 check; `-Fast` skips the three phase-1 target builds and, separately,
 `check_00_kilnfw_host_tests.ps1` (phase 2) for a caller that already ran the
 equivalent multi-minute build/host-test work itself — no other check.
+The two KilnFW target builds compile through a shared, pinned ccache
+(`C:\wt\.ccache`, `lib_kilnfw_ccache.ps1`, ON since 2026-10-08 after
+`139debb5` had disabled it), so a new worktree's cold `checkbuild_<hex>` dir
+reuses objects any tree already compiled from identical bytes instead of
+recompiling ~2100 TUs; `check_kilnfw_ccache_no_stale.ps1` proves a changed
+byte always recompiles. Detail: "Heavy builds" in `docs/agent_rules/COMMON.md`.
 (**2026-09-20 history:** the KilnFW application build briefly gained a
 build-order dependency here, once it started `EMBED_FILES`ing both SaftyFW
 slot images so the ESP can auto-update the Pico at boot

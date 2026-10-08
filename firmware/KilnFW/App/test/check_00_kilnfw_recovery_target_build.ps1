@@ -260,7 +260,23 @@ try {
     }
 
     & $IdfProfile *>&1 | Out-Null
-    $env:CCACHE_DISABLE = "1"
+    # ccache: same pinned, asserted configuration as
+    # check_00_kilnfw_target_build.ps1 (lib_kilnfw_ccache.ps1 has the
+    # staleness argument). KILNCTL_CCACHE_DISABLE=1 turns it off.
+    . (Join-Path $PSScriptRoot "lib_kilnfw_ccache.ps1")
+    if ($env:KILNCTL_CCACHE_DISABLE -eq "1") {
+        Disable-KilnfwCcache
+    } else {
+        $ccacheExe = Get-KilnfwCcacheExe
+        if (-not $ccacheExe) {
+            Fail "ccache not found after loading the ESP-IDF profile ($IdfProfile); set KILNCTL_CCACHE_DISABLE=1 to build without it."
+        }
+        Enable-KilnfwCcache
+        $ccacheProblems = @(Get-KilnfwCcacheConfigProblems -CcacheExe $ccacheExe)
+        if ($ccacheProblems.Count -gt 0) {
+            Fail ("ccache's effective configuration is not the pinned one -- refusing to build with it:`n  " + ($ccacheProblems -join "`n  "))
+        }
+    }
 
     $binPath = Join-Path $dstRoot "build\KilnFW_recovery.bin"
     $elfPath = Join-Path $dstRoot "build\KilnFW_recovery.elf"

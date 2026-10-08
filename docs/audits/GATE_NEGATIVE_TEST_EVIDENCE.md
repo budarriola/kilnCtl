@@ -23,14 +23,14 @@ Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `chec
 
 ## Counts
 
-Gate rows: 170.
+Gate rows: 171.
 
 | Status | Rows |
 |---|---|
 | NEGATIVE-TESTED | 60 |
 | PARTIAL | 1 |
 | REVIEWED, NOT MUTATED | 9 |
-| NOT AUDITED | 83 |
+| NOT AUDITED | 84 |
 | NOT AUDITED (pass 12 pending) | 18 |
 
 ## Table
@@ -63,6 +63,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_heater_output_pwm_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_httpd_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 1024 B volatile local in profile_decode_blob, real rebuild | +1024 B exactly, RED 5328 B > 4832 B; fullclean rebuild back to 4304 B |
 | `firmware/KilnFW/App/test/check_js_host_tests.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_kilnfw_ccache_no_stale.ps1` | NOT AUDITED | - | none (author's 2026-10-08 negative tests are in the script header, no audit file) | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_kilnfw_dram_bss_budget.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_kv_narrow_stack.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_label_column_overflow_wrap.ps1` | NOT AUDITED | - | none | NOT AUDITED |
