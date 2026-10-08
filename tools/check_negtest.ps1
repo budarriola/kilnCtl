@@ -27,8 +27,8 @@
 param([string]$ScriptUnderTest)
 $ErrorActionPreference = "Continue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (-not $ScriptUnderTest) { $ScriptUnderTest = Join-Path $here "negtest.ps1" }
-. (Join-Path $here "lib_safe_remove.ps1")
+if (-not $ScriptUnderTest) { $ScriptUnderTest = Join-Path $here 'negtest.ps1' }
+. (Join-Path $here 'lib_safe_remove.ps1')
 
 $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("negtest_chk_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $repo = Join-Path $scratch "repo"
@@ -77,11 +77,11 @@ function Ran { return (Test-Path -LiteralPath $script:fixtureLog) }
 
 try {
     # ---------------------------------------------------------------- fixture
-    Set-Content -LiteralPath (Join-Path $repo "calc.ps1") -Encoding ASCII -Value @'
+    Set-Content -LiteralPath (Join-Path $repo 'calc.ps1') -Encoding ASCII -Value @'
 function Add-Two($a, $b) { return $a + $b }
 function Test-Big($x) { return $x -gt 10 }
 '@
-    Set-Content -LiteralPath (Join-Path $repo "test.ps1") -Encoding ASCII -Value @'
+    Set-Content -LiteralPath (Join-Path $repo 'test.ps1') -Encoding ASCII -Value @'
 param([string]$OutDir, [switch]$ForceFail, [int]$SleepSec = 0)
 if ($env:NEGTEST_FIXTURE_LOG) { Add-Content -LiteralPath $env:NEGTEST_FIXTURE_LOG -Value "ran" }
 if (-not $OutDir -or -not (Test-Path -LiteralPath $OutDir)) { Write-Output "STALE: no out dir"; exit 3 }
@@ -161,7 +161,7 @@ exit 0
     Step "baseline"
 
     # ---------------------------------------------------------------- real-tree guard
-    $calc = Join-Path $repo "calc.ps1"
+    $calc = Join-Path $repo 'calc.ps1'
     $r = Run-Neg "guardhash" (@('-Command', ($testCmd + "; Add-Content -LiteralPath '$calc' -Value '# touched'")) + $mutA) " M calc.ps1"
     Assert-True ($r.Exit -eq 2 -and $r.Json.real_tree_unchanged -eq $false) "guardhash: editing the real tree's mutated file must be exit 2 + real_tree_unchanged=false (exit $($r.Exit))"
     Assert-True ($r.Text -match 'REAL TREE CHANGED') "guardhash: no REAL TREE CHANGED message"
@@ -175,13 +175,13 @@ exit 0
     # ---------------------------------------------------------------- timeout + cleanup after failure
     $t0 = [Diagnostics.Stopwatch]::StartNew()
     $r = Run-Neg "timeout" (@('-Command', ($testCmd + ' -SleepSec 60'), '-TimeoutMin', '0.05', '-NoBaseline') + $mutA)
-    Assert-True ($r.Exit -eq 2 -and $r.Json.mutations[0].verdict -eq 'TIMEOUT') "timeout: expected exit 2 with TIMEOUT (exit $($r.Exit), verdict $($r.Json.mutations[0].verdict))"
+    Assert-True ($r.Exit -eq 2 -and $r.Json.mutations[0].verdict -eq 'TIMEOUT') "timeout: expected exit 2 with TIMEOUT (exit $($r.Exit), verdict $($r.Json.mutations[0].verdict), error $($r.Json.error))`n$($r.Text)"
     $mutSec = [double]$r.Json.mutations[0].seconds
     Assert-True ($mutSec -gt 0 -and $mutSec -lt 30) "timeout: the timed-out mutation run took ${mutSec}s (whole run $([int]$t0.Elapsed.TotalSeconds)s); the 60s child was not killed at the 3s limit"
     Step "timeout"
 
     # ---------------------------------------------------------------- -IncludeDirty
-    $tp = Join-Path $repo "test.ps1"
+    $tp = Join-Path $repo 'test.ps1'
     Add-Content -LiteralPath $tp -Encoding ASCII -Value 'if (Test-Big 10) { Write-Output "FAIL: Test-Big 10"; exit 1 }'
     # the line above lands after `exit 0`; move it before the final verdict instead
     $lines = @(Get-Content -LiteralPath $tp)
@@ -189,7 +189,7 @@ exit 0
     $idx = [Array]::IndexOf($lines, 'Write-Output "failures: $fail"')
     $lines = $lines[0..($idx - 1)] + @($boundary, 'if (Get-Command Get-Half -ErrorAction SilentlyContinue) { if ((Get-Half 8) -ne 4) { Write-Output "FAIL: Get-Half"; exit 1 } }') + $lines[$idx..($lines.Count - 1)]
     Set-Content -LiteralPath $tp -Encoding ASCII -Value $lines
-    Set-Content -LiteralPath (Join-Path $repo "extra.ps1") -Encoding ASCII -Value 'function Get-Half($x) { return $x / 2 }'
+    Set-Content -LiteralPath (Join-Path $repo 'extra.ps1') -Encoding ASCII -Value 'function Get-Half($x) { return $x / 2 }'
     $dirty = Status
     $r = Run-Neg "dirty_tracked" (@('-Command', $testCmd, '-IncludeDirty') + $mutB + @('-ExpectPattern', 'FAIL: Test-Big 10'))
     Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "dirty_tracked: the uncommitted boundary test should catch -ge (exit $($r.Exit))`n$($r.Text)"
@@ -199,7 +199,7 @@ exit 0
     Assert-True ($r.Exit -eq 2 -and -not (Ran)) "dirty_absent: an untracked file is not at HEAD without -IncludeDirty; must be exit 2 (exit $($r.Exit))"
     Assert-True ((Status) -eq $dirty) "dirty: the caller's uncommitted changes were disturbed"
     G -C $repo checkout -- test.ps1
-    Remove-Item -LiteralPath (Join-Path $repo "extra.ps1") -Force
+    Remove-Item -LiteralPath (Join-Path $repo 'extra.ps1') -Force
     Step "include dirty"
 
     # ---------------------------------------------------------------- -Diff

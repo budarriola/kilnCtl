@@ -300,6 +300,17 @@ function Set-Mutation([string]$copy, $mut) {
 
 function Stop-Tree([int]$id) { & taskkill.exe /T /F /PID $id 2>&1 | Out-Null }
 
+function Read-SharedText([string]$path) {
+    # A killed child (timeout) can hold the log open for a moment; read with
+    # full sharing and retry instead of letting an IOException abort the run.
+    for ($i = 1; $i -le 10; $i++) {
+        try {
+            $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            try { $sr = New-Object IO.StreamReader($fs, [Text.Encoding]::Default, $true); return $sr.ReadToEnd() } finally { $fs.Dispose() }
+        } catch { if ($i -eq 10) { return "NEGTEST: could not read log ${path}: $_" }; Start-Sleep -Milliseconds 500 }
+    }
+}
+
 function Invoke-Command-InCopy($spec, [string]$copy, [string]$tag) {
     $out = Join-Path $copy ("_nt\" + $tag)
     if (Test-Path -LiteralPath $out) { throw "fresh out dir already exists: $out" }
@@ -337,7 +348,7 @@ exit 0
     $script:liveChild = $null
     $exit = if ($timedOut) { -1 } else { $p.ExitCode }
     $text = ''
-    if (Test-Path -LiteralPath $log) { $text = [IO.File]::ReadAllText($log, [Text.Encoding]::Default) }
+    if (Test-Path -LiteralPath $log) { $text = Read-SharedText $log }
     return @{ Exit = $exit; TimedOut = $timedOut; Text = $text; Log = $log; Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1) }
 }
 
