@@ -118,7 +118,8 @@ static bool swp_file_exists(void)
 static bool nvs_has_progress(void)
 {
     setup_wizard_progress_blob_t b;
-    return nvs_v5_read_quiet(&b);
+    setup_wizard_progress_v3_legacy_t raw;
+    return nvs_v5_read_quiet(&b, &raw);
 }
 
 static void test_save_goes_to_cfg_file_not_nvs(void)
@@ -169,6 +170,16 @@ static void test_legacy_nvs_record_migrates_into_cfg(void)
     setup_wizard_progress_get_step(2, &s2);
     TEST_CHECK(s2.state == SETUP_WIZ_STEP_DONE && s2.ts == 777, "the legacy NVS record is read as the fallback");
     TEST_CHECK(swp_file_exists(), "and was migrated into the cfg file");
+    {
+        bool fv = false, nv = false, div = true;
+        uint32_t fr = 9, nr = 9;
+        setup_wizard_progress_get_dualwrite_status(&fv, &fr, &nv, &nr, &div);
+        TEST_CHECK(fv && nv && fr == 0 && nr == 0 && !div,
+                   "status after migration: file and NVS both valid, same content, not diverged");
+        TEST_CHECK(setup_wizard_progress_set_step(3, SETUP_WIZ_STEP_DONE, NULL) == ESP_OK, "post-migration save");
+        setup_wizard_progress_get_dualwrite_status(&fv, &fr, &nv, &nr, &div);
+        TEST_CHECK(fv && nv && fr == 1 && div, "status after a cfg-only save: file rev 1 differs from the NVS copy");
+    }
 
     /* A later boot with NVS wiped still has the data: the file stands alone. */
     fake_kv_reset_all();
