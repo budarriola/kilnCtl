@@ -919,7 +919,12 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
                 memset(&out->profiles[id], 0, sizeof(out->profiles[id]));
                 profiles_slot_bitmap_clear(&out->used_bitmap, id);
             }
-            s_profile_rev[id] = resolved_rev;
+            /* A slot that resolved to "unused" keeps its persisted NVS rev as the
+             * floor for the next save: delete bumps that counter, so seeding 0 here
+             * let a post-reboot re-save carry a LOWER rev than the stale counter and
+             * the next boot's resolve() deleted the new file as "stale" (bench
+             * 2026-10-08, B1 soak). */
+            s_profile_rev[id] = trustworthy ? resolved_rev : nvs_rev[id];
         }
     } else {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));

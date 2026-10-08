@@ -992,6 +992,34 @@ static void test_pcfg_file_wins_when_it_has_the_higher_rev(void)
     assert_profiles_equal(&out.profiles[0], &file_side, "FILE content wins (higher rev)");
 }
 
+static void test_pcfg_unused_slot_keeps_nvs_rev_floor(void)
+{
+    TEST_SECTION("profiles cfg_fs -- an unused slot keeps its persisted NVS rev as the next-save floor");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+
+    profile_t p0 = make_stored_profile();
+    stage_legacy_slot(0, &p0, 1);
+    // Slot 2 was deleted in an earlier boot: no blob, no file, but its rev counter was bumped.
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint32_t rev_arr[PROFILES_MAX_COUNT] = {0};
+    rev_arr[0] = 1;
+    rev_arr[2] = 9;
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, rev_arr, sizeof(rev_arr));
+    nvs_commit(h);
+    nvs_close(h);
+
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "reload succeeds");
+    TEST_CHECK(!profiles_slot_bitmap_test(&out.used_bitmap, 2), "slot 2 is unused");
+    TEST_CHECK(s_profile_rev[2] == 9, "unused slot 2 keeps rev floor 9 (not 0)");
+}
+
 static void test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file(void)
 {
     TEST_SECTION("profiles cfg_fs -- DIVERGENCE: NVS with the higher rev wins and resyncs the file");
@@ -3677,6 +3705,7 @@ void run_test_profiles_http(void)
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
     test_pcfg_file_wins_when_it_has_the_higher_rev();
     test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file();
+    test_pcfg_unused_slot_keeps_nvs_rev_floor();
     test_pcfg_stale_file_after_delete_is_not_resurrected();
     test_pcfg_delete_does_not_revert_or_drop_other_file_only_slots();
     test_pcfg_partition_absent_behaves_exactly_like_before();
