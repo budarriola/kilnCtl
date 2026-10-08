@@ -13,7 +13,10 @@
 # persist/persist_scratch.h's persist_scratch_alloc() (PSRAM first, internal
 # fallback) -- the same shape backup_import.c already used.
 #
-# HOW IT PARSES. Each file listed in $files has its C comments stripped from
+# SCOPE. Every .c under firmware/KilnFW/App/drivers/persist/ (discovered, recursive) plus
+# the $extraFiles list below; the rule is meant to cover the whole persist layer.
+#
+# HOW IT PARSES. Each file in scope ($files) has its C comments stripped from
 # the whole text (string/char literals are left alone), then every
 # malloc( / calloc( / realloc( call is found and its whole argument text is
 # extracted with balanced parentheses, so a call whose arguments wrap across
@@ -52,22 +55,26 @@ param(
 $ErrorActionPreference = "Stop"
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
 
-$files = @(
-    "firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c",
-    "firmware/KilnFW/App/drivers/persist/kiln_package.c",
-    "firmware/KilnFW/App/drivers/persist/cfg_fs.c",
+# Discovery, not a hand-kept list (2026-10-08: an audit added a plain malloc in an unlisted persist
+# file and this check missed it). The rule covers the whole persist layer, so EVERY .c under
+# $persistDir is scanned and a new file is covered automatically. $extraFiles are the non-persist
+# files on the backup/import and cfgfs status paths that the same rule covers. A deliberate plain
+# malloc anywhere in scope goes in $allow below with a reason; do not narrow the discovery.
+$persistDir = "firmware/KilnFW/App/drivers/persist"
+$extraFiles = @(
     "firmware/KilnFW/App/drivers/http/backup_import.c",
     "firmware/KilnFW/App/drivers/http/diagnostics_http.c",
     "firmware/KilnFW/App/drivers/http/profiles_http.c",
-    "firmware/KilnFW/App/drivers/persist/kiln_cfg_store_cfg_fs.c",
-    "firmware/KilnFW/App/drivers/persist/zones_config_cfg_fs.c",
-    "firmware/KilnFW/App/drivers/persist/cfg_fs_status.c",
-    "firmware/KilnFW/App/drivers/persist/firing_stats_cfg_fs.c",
-    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c",
     "firmware/KilnFW/App/drivers/http/zones_http_post.c",
     "firmware/KilnFW/App/drivers/http/zone_aux_convert_http.c",
-    "firmware/KilnFW/App/drivers/persist/zones_config_store.c"
+    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c"
 )
+$persistRoot = Join-Path $RepoRoot $persistDir
+if (-not (Test-Path $persistRoot)) { Write-Host "FAIL: $persistDir not found -- moved/renamed? update this script"; exit 1 }
+$persistFound = @(Get-ChildItem -Path $persistRoot -Recurse -File -Filter *.c | Sort-Object FullName | ForEach-Object {
+    $_.FullName.Substring($RepoRoot.Length).TrimStart([char]92, [char]47).Replace([string][char]92, "/") })
+if ($persistFound.Count -lt 20) { Write-Host "FAIL: persist discovery found only $($persistFound.Count) file(s); glob went blind"; exit 1 }
+$files = $persistFound + $extraFiles
 
 # Adoption guard (vacuity audit 2026-10-07): a file that already calls persist_scratch_alloc() has opted
 # into this rule, so a regression to plain malloc there must be seen. Three such files were missing from
@@ -88,6 +95,24 @@ if ($unlisted.Count -gt 0) {
 
 # file | normalized call text | expected count | reason
 $allow = @(
+    ,@("firmware/KilnFW/App/drivers/persist/cfg_fs_mount.c", "malloc(CFG_FS_SCAN_CHUNK_BYTES)", 1,
+      "boot-time partition scan chunk (4096 B) on main_boot_early, deliberately heap-not-stack per docs/audits/boot_hang_2026-09-08.md; runs before PSRAM scratch policy matters and degrades to ESP_ERR_NO_MEM")
+    ,@("firmware/KilnFW/App/drivers/persist/cfg_fs_mount.c", "malloc(sizeof(*gate))", 1,
+      "boot-time format-gate scratch, heap-not-stack for the main-task stack budget; failure refuses auto-format, never crashes")
+    ,@("firmware/KilnFW/App/drivers/persist/live_profile.c", "malloc(cap)", 1,
+      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
+    ,@("firmware/KilnFW/App/drivers/persist/live_profile.c", "malloc(PROFILE_BLOB_MAX_SIZE)", 2,
+      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
+    ,@("firmware/KilnFW/App/drivers/persist/log_store.c", "calloc(1, sizeof(*rd))", 1,
+      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
+    ,@("firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c", "malloc(b->cap)", 1,
+      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
+    ,@("firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c", "malloc(item_size)", 1,
+      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
+    ,@("firmware/KilnFW/App/drivers/persist/profiles_scope_cfg_files.c", "malloc(PSCF_LIST_MAX * sizeof(*ents))", 1,
+      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
+    ,@("firmware/KilnFW/App/drivers/persist/setup_wizard_progress.c", "malloc(sizeof(*w))", 1,
+      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
     ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v1))", 1,
       "v1 migration buffer: bounded legacy schema struct, once-per-board migration at boot, never on the import path")
     ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v2))", 2,
