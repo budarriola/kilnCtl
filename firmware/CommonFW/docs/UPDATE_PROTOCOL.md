@@ -230,12 +230,15 @@ configured for. Measure the image before sizing anything.
 
 #### The flash nobody is using — and nobody has written down correctly
 
-The firmware is built with `CONFIG_ESPTOOLPY_FLASHSIZE_2MB`. Whatever the module
-actually has beyond 2 MB is unaddressable and has been sitting unused, which is
-also why nobody noticed it was there: nothing could reach past 2 MB to look.
+**Resolved:** `firmware/KilnFW/sdkconfig.defaults` now pins
+`CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y` (the board is an N16R8 module). At the time
+this section was written (2026-08-16) the firmware was built with
+`CONFIG_ESPTOOLPY_FLASHSIZE_2MB`, so whatever the module had beyond 2 MB was
+unaddressable and unused, and nothing could reach past 2 MB to look.
 
-**How much is beyond 2 MB is currently an open question, because this repository
-records three different modules:**
+**Historical (the build setting is now 16 MB, above; only the `esptool flash_id`
+confirmation and BOM/3D-model corrections remain open).** This repository
+recorded three different modules:
 
 | Source | Part | Flash | PSRAM |
 |---|---|---|---|

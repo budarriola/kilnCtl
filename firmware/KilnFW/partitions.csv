@@ -188,7 +188,8 @@
 #   - `nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` have NOT been read out and
 #     archived from the physical board. That is a one-time, irreversible-if-
 #     skipped bench step this pass cannot perform.
-#   - The streamed esp_ota_ops POST handler, challenge-response auth, the
+#   - The streamed esp_ota_ops POST handler, (challenge-response auth, since
+#     dropped: the recovery image is unauthenticated as of 2026-10-02), the
 #     UPDATE_* frame relay into pico_img, and the web/MCP surface are all still
 #     unbuilt -- this pass is the partition-table + rollback foundation only.
 #
