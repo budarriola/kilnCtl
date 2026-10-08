@@ -914,7 +914,7 @@ $restChecks = $restChecks | Where-Object {
 # new gated check is covered the moment it exists.
 $gateWaitingPaths = @($checks | Where-Object {
     $_.Extension -eq ".ps1" -and
-    (Select-String -LiteralPath $_.FullName -Pattern 'Enter-KilnBuildGate|Join-Path \$testDir "build_host_tests\.ps1"' -Quiet)
+    (Select-String -LiteralPath $_.FullName -Pattern 'Enter-KilnBuildGate|Join-Path \$testDir [\x22]build_host_tests\.ps1' -Quiet)
 } | ForEach-Object { $_.FullName })
 # Same set as repo-relative paths, for Complete-CheckResult's BUSY rule.
 $script:gateWaitingRels = @($gateWaitingPaths | ForEach-Object { $_.Substring($repoRoot.Length + 1) })
