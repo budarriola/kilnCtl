@@ -437,17 +437,89 @@ def test_status_shows_live_holder_free_slot_and_compiler_child(monkeypatch, tmp_
         p.wait(timeout=10)
 
 
-def test_max_hold_releases_slot_and_fails_loud(monkeypatch):
+class _FakeWatch:
+    """Injected clock/process list: wait() advances a fake clock and never sleeps."""
+    def __init__(self, names, kill_evt):
+        self.t = 0.0
+        self.names = names          # callable or list
+        self.kill_evt = kill_evt
+        self.kills = 0
+
+    def hooks(self):
+        def wait(timeout):
+            self.t += timeout
+            return False
+        def kill():
+            self.kills += 1
+            self.kill_evt.set()
+        return {"wait": wait, "now": lambda: self.t,
+                "tree_names": lambda: list(self.names() if callable(self.names) else self.names),
+                "kill": kill}
+
+
+def _run_gate_with(monkeypatch, names, *, hard="7200", soft="100"):
     _prefixes(monkeypatch, heavy=1)
-    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "0.5")
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", soft)
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC", hard)
+    import threading
+    evt = threading.Event()
+    fw = _FakeWatch(names, evt)
     msgs = []
-    with pytest.raises(RuntimeError, match=r"heavy slot 0 .*max hold"):
-        with buildgate.kiln_build_gate("overrun", log=msgs.append):
-            time.sleep(1.5)
-    assert any("MAX HOLD EXCEEDED" in m for m in msgs)
+    return fw, evt, msgs
+
+
+def test_max_hold_idle_past_soft_is_killed_and_fails_loud(monkeypatch):
+    fw, evt, msgs = _run_gate_with(monkeypatch, ["python.exe"])
+    with pytest.raises(RuntimeError, match=r"heavy slot 0 .*max hold.*KILLED BY BUILD GATE"):
+        with buildgate.kiln_build_gate("overrun", log=msgs.append, watch_hooks=fw.hooks()):
+            assert evt.wait(10)
+    assert fw.kills == 1
+    assert any("KILLED BY BUILD GATE" in m and "no live compiler" in m for m in msgs)
     assert buildgate.read_records("heavy") == []
     with buildgate.kiln_build_gate("after", timeout_seconds=2, log=lambda m: None):
         pass  # slot really is free again
+
+
+def test_max_hold_still_compiling_past_soft_is_not_killed(monkeypatch):
+    # compiler live for the first 3 polls past soft, then idle -> killed on the 4th
+    fw, evt, msgs = _run_gate_with(monkeypatch, lambda: ["ninja.exe", "cl.exe"] if fw.t < 100 + 3 * 30 else [])
+    with pytest.raises(RuntimeError, match="max hold"):
+        with buildgate.kiln_build_gate("busy", log=msgs.append, watch_hooks=fw.hooks()):
+            assert evt.wait(10)
+    keeps = [m for m in msgs if "keeping slot" in m and "still compiling" in m]
+    assert len(keeps) == 3, msgs
+    assert fw.t >= 100 + 3 * 30  # it did not die at the soft limit
+    assert fw.kills == 1
+
+
+def test_max_hold_hard_ceiling_kills_even_while_compiling(monkeypatch):
+    fw, evt, msgs = _run_gate_with(monkeypatch, ["ninja.exe", "x86_64-elf-gcc.exe"], hard="400")
+    with pytest.raises(RuntimeError, match="max hold"):
+        with buildgate.kiln_build_gate("forever", log=msgs.append, watch_hooks=fw.hooks()):
+            assert evt.wait(10)
+    assert fw.t >= 400 and fw.kills == 1
+    assert any("KILLED BY BUILD GATE" in m and "hard ceiling" in m for m in msgs)
+
+
+def test_hold_decision_pure_and_compiler_names():
+    d = buildgate.hold_decision
+    assert d(50, 100, 400, ["cl.exe"])[0] == "keep"
+    assert d(150, 100, 400, ["python.exe"])[0] == "kill"
+    for n in ("ninja.exe", "cmake.exe", "cl.exe", "cc1plus.exe", "ld.exe", "xtensa-esp32s3-elf-gcc.exe", "gcc"):
+        assert d(150, 100, 400, [n])[0] == "keep", n
+    assert d(400, 100, 400, ["cl.exe"])[0] == "kill"
+
+
+def test_hard_ceiling_config_and_clamp(monkeypatch):
+    _prefixes(monkeypatch, heavy=1)
+    monkeypatch.delenv("KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC", raising=False)
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "100")
+    monkeypatch.setattr(buildgate, "_read_config", lambda: {"max_hold_hard_sec": 5000})
+    assert buildgate.max_hold_hard_seconds() == 5000
+    monkeypatch.setattr(buildgate, "_read_config", lambda: {})
+    assert buildgate.max_hold_hard_seconds() == 7200
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "9000")
+    assert buildgate.max_hold_hard_seconds() == 9000  # never below soft
 
 
 def test_max_hold_kills_only_registered_tree_not_sibling(monkeypatch):
@@ -482,18 +554,20 @@ def test_max_hold_kills_only_registered_tree_not_sibling(monkeypatch):
 
 
 def test_max_hold_with_nothing_registered_kills_nothing(monkeypatch):
-    _prefixes(monkeypatch, heavy=1)
-    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "0.5")
+    fw, evt, msgs = _run_gate_with(monkeypatch, [])
     kid = subprocess.Popen([_PY, "-c", "import time; time.sleep(30)"])
-    msgs = []
     try:
         with pytest.raises(RuntimeError, match="max hold"):
-            with buildgate.kiln_build_gate("noreg", log=msgs.append):
-                time.sleep(1.5)
-        assert any("killing nothing" in m for m in msgs)
+            with buildgate.kiln_build_gate("noreg", log=msgs.append, watch_hooks={
+                    **{k: v for k, v in fw.hooks().items() if k != "kill"}, "kill": buildgate_kill_registered_stub(evt)}):
+                assert evt.wait(10)
         assert kid.poll() is None
     finally:
         kid.kill()
+
+
+def buildgate_kill_registered_stub(evt):
+    return lambda: evt.set()  # nothing registered: real kill would be a no-op too
 
 
 def test_unparsable_record_counts_as_held(monkeypatch):
@@ -612,4 +686,16 @@ def test_ps_max_hold_kills_children_started_after_acquire_not_older_sibling(monk
         "Stop-Process -Id $older.Id -Force -ErrorAction SilentlyContinue")
     p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
                        capture_output=True, text=True, env=os.environ.copy(), timeout=120)
+    assert "KILLED BY BUILD GATE" in p.stderr, p.stderr
     assert "RESULT newer_alive=False older_alive=True threw=True" in p.stdout, (p.stdout, p.stderr)
+
+
+def test_ps_hold_decision_pure():
+    ps_script = (
+        f". '{_GATE_PS1}'; $r = $script:KilnGateCompilerRegex; "
+        "function D($h,$n){ (Get-KilnBuildGateHoldDecision -HeldSec $h -SoftSec 100 -HardSec 400 -Names $n -CompilerRegex $r).Action }; "
+        "Write-Output ('R ' + (D 50 @('cl.exe')) + ' ' + (D 150 @('pwsh.exe')) + ' ' + (D 150 @('ninja.exe')) + ' ' "
+        "+ (D 150 @('ld.exe')) + ' ' + (D 400 @('cl.exe')))")
+    p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                       capture_output=True, text=True, timeout=60)
+    assert "R keep kill keep keep kill" in p.stdout, (p.stdout, p.stderr)

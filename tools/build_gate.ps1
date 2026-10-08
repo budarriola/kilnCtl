@@ -45,6 +45,9 @@
 # through the mutex probe (shown as "held-no-record"); it needs a rebase to
 # join the shared count and the fair queue.
 #
+# Max hold is a SOFT limit: past it a holder with a live compiler (ninja/cmake/cl/link/gcc/cc1/ld in its
+# tree) keeps the slot; it is killed when idle, or at the hard ceiling (KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC /
+# config.json max_hold_hard_sec, default 7200) regardless. Kills print 'KILLED BY BUILD GATE'.
 # Max hold: the watchdog kills only descendants started AFTER the slot was taken
 # (so a sibling process the holder started earlier survives), re-scanning until
 # none remain; Exit-KilnBuildGate then throws.
@@ -60,7 +63,9 @@
 $script:KilnGateDefaultSlots = 4
 $script:KilnGateDefaultMaxHoldSec = 2700
 $script:KilnGateTicketStaleSec = 120
-$script:KilnGateCompilerRegex = '^(cl|link|ninja|cmake|cc1|cc1plus|ccache|xtensa-.+|arm-none-eabi-.+)(\.exe)?$'
+$script:KilnGateCompilerRegex = '^(cl|link|ninja|cmake|cc1|cc1plus|ccache|gcc|g\+\+|ld|.+-gcc|.+-g\+\+|.+-ld|xtensa-.+|arm-none-eabi-.+)(\.exe)?$'
+$script:KilnGateDefaultMaxHoldHardSec = 7200
+$script:KilnGateHoldPollSec = 30
 
 function Get-KilnBuildGateDir {
     $d = $env:KILNCTL_BUILD_GATE_DIR
@@ -138,6 +143,29 @@ function Get-KilnBuildGateMaxHoldSeconds {
     $n = 0.0
     if (-not [string]::IsNullOrWhiteSpace($raw) -and [double]::TryParse($raw.Trim(), [ref]$n) -and $n -gt 0) { return $n }
     return $script:KilnGateDefaultMaxHoldSec
+}
+
+# Hard ceiling: env KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC > config.json max_hold_hard_sec > 7200; never below the soft max hold.
+function Get-KilnBuildGateMaxHoldHardSeconds {
+    $n = 0.0; $val = $null
+    $raw = $env:KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC
+    if (-not [string]::IsNullOrWhiteSpace($raw) -and [double]::TryParse($raw.Trim(), [ref]$n) -and $n -gt 0) { $val = $n }
+    if ($null -eq $val) {
+        $cfg = Get-KilnBuildGateConfig
+        if ($null -ne $cfg -and $null -ne $cfg.max_hold_hard_sec -and [double]::TryParse([string]$cfg.max_hold_hard_sec, [ref]$n) -and $n -gt 0) { $val = $n }
+    }
+    if ($null -eq $val) { $val = $script:KilnGateDefaultMaxHoldHardSec }
+    return [Math]::Max($val, (Get-KilnBuildGateMaxHoldSeconds))
+}
+
+# Pure max-hold policy (unit-tested with injected values): returns @{Action='keep'|'kill'; Reason=...}.
+function Get-KilnBuildGateHoldDecision {
+    param([double]$HeldSec, [double]$SoftSec, [double]$HardSec, [string[]]$Names, [string]$CompilerRegex)
+    if ($HeldSec -lt $SoftSec) { return @{ Action = 'keep'; Reason = 'under max hold' } }
+    if ($HeldSec -ge $HardSec) { return @{ Action = 'kill'; Reason = "hard ceiling ${HardSec}s reached (killed regardless of activity)" } }
+    $live = @($Names | Where-Object { $_ -match $CompilerRegex } | Sort-Object -Unique)
+    if ($live.Count -gt 0) { return @{ Action = 'keep'; Reason = "past max hold but still compiling ($($live -join ', '))" } }
+    return @{ Action = 'kill'; Reason = 'past max hold with no live compiler activity' }
 }
 
 function Get-KilnBuildGateTimeoutSeconds {
@@ -346,7 +374,7 @@ function Test-KilnBuildGateCovered {
 # ---- watchdog (holder-side max hold) ---------------------------------------
 
 function Start-KilnBuildGateWatchdog {
-    param([int]$Slot, [string]$Lane, [string]$Label, [double]$MaxHoldSec, [string]$RecordPath)
+    param([int]$Slot, [string]$Lane, [string]$Label, [double]$MaxHoldSec, [string]$RecordPath, [double]$HardSec = 0)
     $acquiredUtc = [DateTime]::UtcNow
     $state = [hashtable]::Synchronized(@{ Stop = $false; Expired = $false; HeldSec = 0.0 })
     # One runspace per process, reused by every gate (a host-test build takes
@@ -359,6 +387,10 @@ function Start-KilnBuildGateWatchdog {
     $rs.SessionStateProxy.SetVariable("state", $state)
     $rs.SessionStateProxy.SetVariable("ownerPid", $PID)
     $rs.SessionStateProxy.SetVariable("maxHold", $MaxHoldSec)
+    $rs.SessionStateProxy.SetVariable("hardHold", $(if ($HardSec -gt 0) { [Math]::Max($HardSec, $MaxHoldSec) } else { [Math]::Max((Get-KilnBuildGateMaxHoldHardSeconds), $MaxHoldSec) }))
+    $rs.SessionStateProxy.SetVariable("decide", ${function:Get-KilnBuildGateHoldDecision})
+    $rs.SessionStateProxy.SetVariable("compRegex", $script:KilnGateCompilerRegex)
+    $rs.SessionStateProxy.SetVariable("pollSec", $script:KilnGateHoldPollSec)
     $rs.SessionStateProxy.SetVariable("slot", $Slot)
     $rs.SessionStateProxy.SetVariable("lane", $Lane)
     $rs.SessionStateProxy.SetVariable("label", $Label)
@@ -370,9 +402,29 @@ function Start-KilnBuildGateWatchdog {
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         while (-not $state.Stop -and $sw.Elapsed.TotalSeconds -lt $maxHold) { Start-Sleep -Milliseconds 200 }
         if ($state.Stop) { return }
+        # Past the soft max hold: kill only if the holder's tree has no live
+        # compiler activity, or the hard ceiling is reached.
+        $reason = ''
+        while ($true) {
+            $names = @()
+            try {
+                $m2 = @{}; $n2 = @{}
+                foreach ($p in (Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name)) { $m2[[int]$p.ProcessId] = [int]$p.ParentProcessId; $n2[[int]$p.ProcessId] = [string]$p.Name }
+                $q2 = New-Object System.Collections.Queue; $q2.Enqueue([int]$ownerPid); $seen2 = @{}
+                while ($q2.Count -gt 0) { $c2 = $q2.Dequeue(); foreach ($k in @($m2.Keys)) { if ($m2[$k] -eq $c2 -and -not $seen2.ContainsKey($k)) { $seen2[$k] = $true; $names += $n2[$k]; $q2.Enqueue($k) } } }
+            } catch { }
+            $held = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
+            $d = & $decide -HeldSec $held -SoftSec $maxHold -HardSec $hardHold -Names $names -CompilerRegex $compRegex
+            if ($d.Action -eq 'kill') { $reason = $d.Reason; break }
+            [Console]::Error.WriteLine("build gate: $lane slot $slot ('$label') held ${held}s > max hold ${maxHold}s: $($d.Reason); keeping slot (hard ceiling ${hardHold}s)")
+            $until = [Math]::Min($pollSec, [Math]::Max(1, $hardHold - $held))
+            $w = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $state.Stop -and $w.Elapsed.TotalSeconds -lt $until) { Start-Sleep -Milliseconds 200 }
+            if ($state.Stop) { return }
+        }
         $state.HeldSec = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
         $state.Expired = $true
-        [Console]::Error.WriteLine("build gate: MAX HOLD EXCEEDED -- $lane slot $slot ('$label') held $($state.HeldSec)s > limit ${maxHold}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); killing the build processes this holder started since taking the slot, and releasing it")
+        [Console]::Error.WriteLine("build gate: KILLED BY BUILD GATE -- $lane slot $slot ('$label') held $($state.HeldSec)s: $reason; killing the build processes this holder started since taking the slot, and releasing it")
         # Kill only OUR descendants started since the slot was taken (never
         # anyone else's, never an older sibling), deepest first, re-scanning
         # until none remain.
@@ -566,7 +618,7 @@ function Exit-KilnBuildGate {
     [Console]::Error.WriteLine("build gate: released $($Gate.Lane) slot $($Gate.SlotIndex) for '$($Gate.Label)' (held $([Math]::Round($heldSec))s)")
     if ($releaseError) { throw $releaseError }
     if ($expired) {
-        throw "build gate: $($Gate.Lane) slot $($Gate.SlotIndex) held by '$($Gate.Label)' for $([Math]::Round($heldSec))s, over the max hold of $($Gate.MaxHold)s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); build children killed, slot released"
+        throw "build gate: $($Gate.Lane) slot $($Gate.SlotIndex) held by '$($Gate.Label)' for $([Math]::Round($heldSec))s, over the max hold of $($Gate.MaxHold)s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); KILLED BY BUILD GATE, build children killed, slot released"
     }
 }
 

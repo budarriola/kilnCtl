@@ -52,8 +52,11 @@ from typing import Iterator
 DEFAULT_SLOTS = 4
 DEFAULT_MAX_HOLD_SEC = 2700.0
 _TICKET_STALE_SEC = 120.0
+DEFAULT_MAX_HOLD_HARD_SEC = 7200.0
+HOLD_POLL_SEC = 30.0
 _COMPILER_RE = re.compile(
-    r"^(cl|link|ninja|cmake|cc1|cc1plus|ccache|xtensa-.+|arm-none-eabi-.+)(\.exe)?$", re.I)
+    r"^(cl|link|ninja|cmake|cc1|cc1plus|ccache|gcc|g\+\+|ld|.+-gcc|.+-g\+\+|.+-ld|xtensa-.+|arm-none-eabi-.+)(\.exe)?$",
+    re.I)
 
 _WAIT_OBJECT_0 = 0x00000000
 _WAIT_ABANDONED_0 = 0x00000080
@@ -156,6 +159,62 @@ def max_hold_seconds() -> float:
     except ValueError:
         pass
     return DEFAULT_MAX_HOLD_SEC
+
+
+def max_hold_hard_seconds() -> float:
+    """Absolute ceiling: env KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC > config.json
+    ``max_hold_hard_sec`` > 7200. Never below the soft max hold."""
+    val = None
+    try:
+        v = float(os.environ.get("KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC", "").strip())
+        if v > 0:
+            val = v
+    except ValueError:
+        pass
+    if val is None:
+        try:
+            v = float((_read_config() or {}).get("max_hold_hard_sec", 0))
+            if v > 0:
+                val = v
+        except (TypeError, ValueError):
+            pass
+    return max(val if val is not None else DEFAULT_MAX_HOLD_HARD_SEC, max_hold_seconds())
+
+
+def hold_decision(held_sec: float, soft: float, hard: float, names: "list[str]") -> "tuple[str, str]":
+    """Pure max-hold policy. Returns (action, reason); action is keep|kill."""
+    if held_sec < soft:
+        return "keep", "under max hold"
+    if held_sec >= hard:
+        return "kill", f"hard ceiling {hard:.0f}s reached (killed regardless of activity)"
+    live = [n for n in names if _COMPILER_RE.match(n)]
+    if live:
+        return "keep", f"past max hold but still compiling ({', '.join(sorted(set(live)))})"
+    return "kill", "past max hold with no live compiler activity"
+
+
+def _hold_watch(*, soft, hard, wait, now, tree_names, kill, log, lane, slot, label, expired,
+                poll=HOLD_POLL_SEC) -> None:
+    """Watchdog loop. ``wait(t)`` returns True when the gate was released;
+    ``now()`` is a monotonic clock; ``tree_names()`` the exe names in the
+    holder's process tree; ``kill()`` kills the holder's build. All injectable."""
+    t0 = now()
+    if wait(soft):
+        return
+    while True:
+        held = now() - t0
+        action, reason = hold_decision(held, soft, hard, tree_names())
+        if action == "kill":
+            expired["flag"] = True
+            expired["held"] = held
+            log(f"build gate: KILLED BY BUILD GATE -- {lane} slot {slot} ('{label}') held {held:.1f}s: "
+                f"{reason}; killing the holder's build and releasing the slot")
+            kill()
+            return
+        log(f"build gate: {lane} slot {slot} ('{label}') held {held:.0f}s > max hold {soft:.0f}s: "
+            f"{reason}; keeping slot (hard ceiling {hard:.0f}s)")
+        if wait(max(1.0, min(poll, hard - held))):
+            return
 
 
 _DEFAULT_MUTEX_PREFIX = "Global\\kilnctl_build_slot_"
@@ -541,6 +600,7 @@ def kiln_build_gate(
     lane: str = "heavy",
     phase: str = "compile",
     max_hold_seconds_override: "float | None" = None,
+    watch_hooks: "dict | None" = None,
 ) -> Iterator[None]:
     """Hold one machine-wide build slot for the ``with`` block.
 
@@ -652,18 +712,24 @@ def kiln_build_gate(
     watchdog: "threading.Thread | None" = None
     held_for = 0.0
 
-    def _watch() -> None:
-        if stop.wait(limit):
-            return
-        expired["flag"] = True
-        expired["held"] = time.monotonic() - acquired_at
-        pids = sorted(state["pids"])
-        log(f"build gate: MAX HOLD EXCEEDED -- {lane} slot {held_index} ('{label}') held "
-            f"{expired['held']:.1f}s > limit {limit}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); "
-            + (f"killing registered compile process tree(s) {pids} and releasing the slot" if pids else
-               "NO compile process registered, killing nothing; releasing the slot"))
-        for pid in pids:
+    hard = max(max_hold_hard_seconds(), limit)
+
+    def _tree_names() -> "list[str]":
+        snap = process_snapshot()
+        roots = {os.getpid(), *state["pids"]}
+        names = [n for r in roots for _, n in descendants(r, snap)]
+        names += [snap[p][1] for p in state["pids"] if p in snap]
+        return names
+
+    def _kill_registered() -> None:
+        for pid in sorted(state["pids"]):
             _kill_tree(pid)
+
+    def _watch() -> None:
+        kw = dict(soft=limit, hard=hard, wait=stop.wait, now=time.monotonic, tree_names=_tree_names,
+                  kill=_kill_registered, log=log, lane=lane, slot=held_index, label=label, expired=expired)
+        kw.update(watch_hooks or {})
+        _hold_watch(**kw)
 
     release_error: "str | None" = None
     try:
@@ -696,7 +762,7 @@ def kiln_build_gate(
     if expired["flag"]:
         raise RuntimeError(
             f"build gate: {lane} slot {held_index} held by '{label}' for {held_for:.0f}s, over the max hold "
-            f"of {limit}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); registered build process tree killed, slot released")
+            f"of {limit}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); KILLED BY BUILD GATE, registered build process tree killed, slot released")
 
 
 def register_compile_pid(pid: int) -> bool:

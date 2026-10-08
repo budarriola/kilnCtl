@@ -94,7 +94,11 @@ the file is unreadable. Waiters queue FIFO by ticket file. Every holder writes
 `C:\wt\.buildgate\<lane>\slot<i>.json` (pid, command, phase, start time; an unparsable record counts
 as held); `powershell -File tools\build_gate.ps1 -Status` shows each slot with age, pid-alive and
 whether a compiler child is running. The HOLDER enforces `KILNCTL_BUILD_GATE_MAX_HOLD_SEC` (default
-2700): it kills only its own compile processes (Python: pids registered via `register_compile_pid`;
+2700) only against IDLE holds: past it a holder whose process tree still has a live ninja/cmake/cl/link/gcc/cc1/ld
+keeps its slot (each decision is logged), and is killed only once idle or at the hard ceiling
+`KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC` / config.json `max_hold_hard_sec` (default 7200), regardless of activity.
+Every kill prints `KILLED BY BUILD GATE` to the holder's stderr; if a build log goes silent without an EXIT line,
+look for it. A kill takes only its own compile processes (Python: pids registered via `register_compile_pid`;
 PowerShell: descendants created after the slot was taken), releases the slot and fails loud. A waiter
 never kills another session's process; a stale slot is for its owner to clear. Host-test builds gate
 each `cl` compile separately (not one slot for the whole batch). A tree
