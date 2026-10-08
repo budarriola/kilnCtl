@@ -1,6 +1,7 @@
 #include "setup_wizard_progress.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cfg_fs_status.h"
@@ -432,8 +433,9 @@ static bool nvs_legacy_load(void)
 }
 
 /* Quiet read of the current-layout (v5) NVS record only, for the status poll:
- * never touches s_steps, never logs. */
-static bool nvs_v5_read_quiet(setup_wizard_progress_blob_t *out)
+ * never touches s_steps, never logs. `raw` is caller-provided scratch (heap in
+ * the status poll, which runs on the httpd task). */
+static bool nvs_v5_read_quiet(setup_wizard_progress_blob_t *out, setup_wizard_progress_v3_legacy_t *raw)
 {
     if (nvs_partition_init(NVS_PARTITION) != HAL_OK) {
         return false;
@@ -442,15 +444,14 @@ static bool nvs_v5_read_quiet(setup_wizard_progress_blob_t *out)
     if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NVS_PARTITION) != HAL_OK) {
         return false;
     }
-    setup_wizard_progress_v3_legacy_t raw;
-    memset(&raw, 0, sizeof(raw));
-    size_t len = sizeof(raw);
-    hal_status_t err = hal_kv_get_blob(&h, NVS_KEY_PROGRESS, &raw, &len);
+    memset(raw, 0, sizeof(*raw));
+    size_t len = sizeof(*raw);
+    hal_status_t err = hal_kv_get_blob(&h, NVS_KEY_PROGRESS, raw, &len);
     hal_kv_close(&h);
     if (err != HAL_OK || len != sizeof(*out)) {
         return false;
     }
-    memcpy(out, &raw, sizeof(*out));
+    memcpy(out, raw, sizeof(*out));
     return out->version == SETUP_WIZARD_PROGRESS_VERSION && steps_valid(out->steps, sizeof(out->steps[0]), SETUP_WIZARD_STEP_COUNT);
 }
 
@@ -512,14 +513,25 @@ esp_err_t setup_wizard_progress_start(void)
 void setup_wizard_progress_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
                                                 uint32_t *nvs_rev, bool *diverged)
 {
-    setup_wizard_progress_blob_t f;
+    /* Heap, not stack: this runs on the httpd task (GET /api/cfgfs), and the
+     * two blobs plus the legacy-sized read scratch are ~1.5 KB. */
+    struct {
+        setup_wizard_progress_blob_t f;
+        setup_wizard_progress_blob_t n;
+        setup_wizard_progress_v3_legacy_t raw;
+    } *w = malloc(sizeof(*w));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw_quiet(SETUP_WIZARD_PROGRESS_FILE_PATH, sizeof(f), cfg_blob_validate, &f, &f_rev, &f_valid);
-    setup_wizard_progress_blob_t n;
-    memset(&n, 0, sizeof(n));
-    bool n_valid = nvs_v5_read_quiet(&n);
-    bool content_equal = f_valid && n_valid && memcmp(&f, &n, sizeof(f)) == 0;
+    bool n_valid = false;
+    bool content_equal = false;
+    if (w != NULL) {
+        pref_cfg_fs_load_raw_quiet(SETUP_WIZARD_PROGRESS_FILE_PATH, sizeof(w->f), cfg_blob_validate, &w->f, &f_rev,
+                                   &f_valid);
+        memset(&w->n, 0, sizeof(w->n));
+        n_valid = nvs_v5_read_quiet(&w->n, &w->raw);
+        content_equal = f_valid && n_valid && memcmp(&w->f, &w->n, sizeof(w->f)) == 0;
+        free(w);
+    }
     if (file_valid) {
         *file_valid = f_valid;
     }
