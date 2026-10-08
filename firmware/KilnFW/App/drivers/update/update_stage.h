@@ -97,10 +97,20 @@ typedef enum {
     UPDATE_STAGE_ERR_HEADER,      // header write/readback failed
     UPDATE_STAGE_ERR_STATE,       // call out of sequence
     UPDATE_STAGE_ERR_WRONG_PROJECT, // app descriptor project_name is not UPDATE_STAGE_EXPECTED_PROJECT
+    UPDATE_STAGE_ERR_POLICY,        // the install gate (update_stage_set_gate) refused the resolved version
 } update_stage_err_t;
+
+// Optional install gate, called once per upload from the first write that completes the image head,
+// AFTER the project-identity check and with the final semver (the caller's, or the image's own with a
+// leading v stripped) and commit. Return UPDATE_STAGE_OK to proceed or UPDATE_STAGE_ERR_POLICY to refuse
+// (the upload fails like any other and the stage stays blank). NULL = no gate (the GitHub fetch path
+// decides before it downloads).
+typedef update_stage_err_t (*update_stage_gate_fn)(void *ctx, const char *semver, const char *commit);
 
 typedef struct {
     update_stage_io_t io;
+    update_stage_gate_fn gate;
+    void *gate_ctx;
     update_stage_phase_t phase;
     uint8_t *scratch;
     size_t scratch_len;
@@ -153,6 +163,8 @@ uint32_t update_stage_capacity(const update_stage_t *st);
 update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratch, size_t scratch_len,
                                              uint32_t total_len, const char *semver, const char *commit,
                                              stage_source_t source);
+// Install a gate for the upload just begun (call after a successful update_stage_upload_begin).
+void update_stage_set_gate(update_stage_t *st, update_stage_gate_fn gate, void *ctx);
 update_stage_err_t update_stage_upload_write(update_stage_t *st, const uint8_t *data, size_t len);
 update_stage_err_t update_stage_upload_finish(update_stage_t *st);
 // Ends a failed/cancelled upload. The header was erased at begin, so the stage

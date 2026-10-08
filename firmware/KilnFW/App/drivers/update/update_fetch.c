@@ -300,6 +300,16 @@ static void running_identity(update_identity_t *r, const update_identity_t *cand
     }
 }
 
+void update_fetch_running_identity(update_identity_t *r, const char *cand_commit)
+{
+    update_identity_t c;
+    memset(&c, 0, sizeof(c));
+    if (cand_commit != NULL) {
+        strlcpy(c.commit, cand_commit, sizeof(c.commit));
+    }
+    running_identity(r, &c);
+}
+
 // ---- flash writer task -----------------------------------------------------------------------
 static void wr_task(void *arg)
 {

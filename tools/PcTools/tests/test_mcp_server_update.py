@@ -81,7 +81,10 @@ class FakeBoard:
             if self.needs_ack and not req.has_header("X-ota-ack-no-safety"):
                 raise self._http_error(req, 428, {"ok": False, "error": "safety_not_answering"})
             if self.refuse:
-                raise self._http_error(req, self.refuse[0], {"ok": False, "error": self.refuse[1]})
+                body = {"ok": False, "error": self.refuse[1]}
+                if len(self.refuse) > 2:
+                    body.update(self.refuse[2])
+                raise self._http_error(req, self.refuse[0], body)
             if self.drop_reply:
                 raise urllib.error.URLError("connection reset")
             data = req.data
@@ -152,6 +155,60 @@ class ClientTest(_Base):
             uhc.upload_stage("h", _image())
         self.assertEqual(cm.exception.status, 409)
         self.assertEqual(uhc.error_name(cm.exception), "update_in_progress")
+
+
+class DowngradeGateTest(_Base):
+    def test_override_headers_sent_only_when_asked(self):
+        uhc.upload_stage("h", _image(), version="1.0.0")
+        req = self.board.posts()[0]
+        for h in ("X-stage-force", "X-stage-allow-downgrade", "X-stage-confirm"):
+            self.assertFalse(req.has_header(h), h)
+        uhc.upload_stage("h", _image(), version="1.0.0", force=True, allow_downgrade=True,
+                         confirm_downgrade="1.0.0")
+        req = self.board.posts()[1]
+        self.assertEqual(req.get_header("X-stage-force"), "1")
+        self.assertEqual(req.get_header("X-stage-allow-downgrade"), "1")
+        self.assertEqual(req.get_header("X-stage-confirm"), "1.0.0")
+
+    def test_tool_passes_overrides_through(self):
+        path = self.write_image(_image())
+        out = msu.update_stage_upload(path, version="1.0.0", confirm=True, allow_downgrade=True,
+                                      confirm_downgrade="1.0.0", force=True)
+        self.assertTrue(out.startswith("ok"), out)
+        req = self.board.posts()[0]
+        self.assertEqual(req.get_header("X-stage-allow-downgrade"), "1")
+        self.assertEqual(req.get_header("X-stage-confirm"), "1.0.0")
+        self.assertEqual(req.get_header("X-stage-force"), "1")
+
+    def test_truthy_overrides_are_not_sent(self):
+        path = self.write_image(_image())
+        msu.update_stage_upload(path, version="1.0.0", confirm=True, force="yes", allow_downgrade=1)  # type: ignore[arg-type]
+        req = self.board.posts()[0]
+        self.assertFalse(req.has_header("X-stage-force"))
+        self.assertFalse(req.has_header("X-stage-allow-downgrade"))
+
+    def test_allow_downgrade_without_typed_confirm_refused_locally(self):
+        out = msu.update_stage_upload(self.write_image(_image()), confirm=True, allow_downgrade=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertIn("confirm_downgrade", out)
+        self.assertEqual(self.board.posts(), [])
+
+    def test_gate_409_reports_hazard_and_override(self):
+        self.board.refuse = (409, "downgrade_refused",
+                             {"reason": "candidate is older than the running version; downgrade refused",
+                              "needs_typed_confirm": True})
+        out = msu.update_stage_upload(self.write_image(_image()), version="0.9.0", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("downgrade_refused", out)
+        self.assertIn("older than the running version", out)
+        self.assertIn("control_get_zones", out)
+        self.assertIn("allow_downgrade=True", out)
+
+    def test_needs_force_409_reported(self):
+        self.board.refuse = (409, "needs_force", {"reason": "already up to date"})
+        out = msu.update_stage_upload(self.write_image(_image()), version="1.0.0", confirm=True)
+        self.assertIn("force=True", out)
+        self.assertIn("already up to date", out)
 
 
 class StatusTest(_Base):

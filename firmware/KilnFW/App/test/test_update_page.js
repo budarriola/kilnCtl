@@ -102,5 +102,13 @@ const ghPart = SRC.slice(SRC.indexOf('Update from GitHub (WP10'), SRC.indexOf('U
 assert(ghPart.indexOf('kcOtaAuthedFetch(') >= 0 && !/[^a-zA-Z]fetch\(/.test(ghPart.replace(/kcOtaAuthedFetch\(/g, '')),
   'GitHub card uses only kcOtaAuthedFetch');
 
+// Hand-upload downgrade gate (plan section 6): the page can pass the overrides and explains a 409.
+['stageForce', 'stageDown', 'stageTyped', 'stageTypedWrap'].forEach(id => assert(SRC.indexOf('id="' + id + '"') >= 0, 'element ' + id));
+['X-Stage-Force', 'X-Stage-Allow-Downgrade', 'X-Stage-Confirm'].forEach(h => assert(SRC.indexOf("'" + h + "'") >= 0, 'upload sends ' + h));
+assert(SRC.indexOf('stageRefusalText(e)') >= 0, 'upload failure goes through stageRefusalText');
+const UH = fs.readFileSync(resolveDriverFile(DRIVERS_DIR, 'update_http.c'), 'utf8');
+['X-Stage-Force', 'X-Stage-Allow-Downgrade', 'X-Stage-Confirm'].forEach(h => assert(UH.indexOf('"' + h + '"') >= 0, 'firmware reads ' + h));
+assert(/update_stage_set_gate\(&s_stage, policy_gate/.test(UH), 'upload handler installs the policy gate');
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);

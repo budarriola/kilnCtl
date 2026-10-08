@@ -205,6 +205,69 @@ update_decision_t update_policy_decide_typed(const update_identity_t *running, c
     return r;
 }
 
+static void cpy_field(char *dst, const char *src, size_t cap)
+{
+    size_t n = flen(src, cap - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+update_decision_t update_policy_decide_upload(const update_identity_t *running, const update_upload_request_t *req)
+{
+    if (running == NULL || req == NULL) {
+        return make(UPDATE_VERDICT_REFUSE_MALFORMED, false, "missing version information");
+    }
+    const char *ver = req->version != NULL ? req->version : "";
+    const char *confirm = req->confirm != NULL ? req->confirm : "";
+    if (ver[0] == '\0') {
+        // Unknown candidate: the policy cannot tell if it is a downgrade, so it needs the explicit override.
+        if (req->force && req->allow_downgrade && strcmp(confirm, "unversioned") == 0) {
+            update_decision_t d = make(UPDATE_VERDICT_ALLOW_DOWNGRADE, true,
+                                       "no version declared; allowed by override; read back zones before heating");
+            d.needs_typed_confirm = true;
+            d.semver_cmp = UPDATE_SEMVER_CMP_UNKNOWN;
+            return d;
+        }
+        update_decision_t d = make(UPDATE_VERDICT_REFUSE_NEEDS_FORCE, false,
+                                   "no version declared; may be a downgrade (config rollback hazard). Needs force, "
+                                   "allow_downgrade and confirm_downgrade=unversioned");
+        d.needs_typed_confirm = true;
+        d.semver_cmp = UPDATE_SEMVER_CMP_UNKNOWN;
+        return d;
+    }
+    static const char placeholder_psha[] = "0000000000000000000000000000000000000000000000000000000000000000";
+    update_identity_t run = *running;
+    update_identity_t cand;
+    memset(&cand, 0, sizeof(cand));
+    cpy_field(run.partitions_sha256, placeholder_psha, sizeof(run.partitions_sha256));
+    cpy_field(cand.partitions_sha256, placeholder_psha, sizeof(cand.partitions_sha256));
+    cpy_field(cand.version, ver, sizeof(cand.version));
+    if (req->commit != NULL && update_policy_commit_valid(req->commit)) {
+        cpy_field(cand.commit, req->commit, sizeof(cand.commit));
+    }
+    cand.zones_cfg_version = req->zones_cfg_version ? req->zones_cfg_version : running->zones_cfg_version;
+    cand.kilnlink_version = req->kilnlink_version ? req->kilnlink_version : running->kilnlink_version;
+    cand.uart_version = req->uart_version ? req->uart_version : running->uart_version;
+    // Typed confirm: equal to the version, ignoring one leading v on either side.
+    const char *cv = confirm[0] == 'v' ? confirm + 1 : confirm;
+    const char *vv = ver[0] == 'v' ? ver + 1 : ver;
+    const bool typed_ok = cv[0] != '\0' && strcmp(cv, vv) == 0;
+    update_policy_flags_t flags = {
+        .allow_prerelease = true,
+        .allow_downgrade = req->allow_downgrade && typed_ok,
+        .force = req->force,
+    };
+    update_decision_t d = update_policy_decide_typed(&run, &cand, &flags, typed_ok);
+    if (d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && req->allow_downgrade && !typed_ok) {
+        d.needs_typed_confirm = true;
+        d.reason = "downgrade or lower config schema refused (config rollback hazard); needs allow_downgrade and "
+                   "confirm_downgrade equal to the version";
+    } else if (d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE) {
+        d.needs_typed_confirm = true;
+    }
+    return d;
+}
+
 const char *update_verdict_name(update_verdict_t v)
 {
     switch (v) {

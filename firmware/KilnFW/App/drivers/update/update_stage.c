@@ -151,6 +151,8 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
     memcpy(st->semver, sv, sizeof(st->semver));
     memcpy(st->commit, cm, sizeof(st->commit));
     st->semver_given = given;
+    st->gate = NULL;
+    st->gate_ctx = NULL;
     st->head_len = 0;
     st->head_flushed = false;
     st->cache_valid = false;
@@ -253,7 +255,21 @@ static update_stage_err_t flush_head(update_stage_t *st)
             return UPDATE_STAGE_ERR_BAD_VERSION;
         }
     }
+    if (st->gate != NULL) {
+        update_stage_err_t g = st->gate(st->gate_ctx, st->semver, st->commit);
+        if (g != UPDATE_STAGE_OK) {
+            return UPDATE_STAGE_ERR_POLICY;
+        }
+    }
     return put(st, st->head, UPDATE_STAGE_HEAD_LEN);
+}
+
+void update_stage_set_gate(update_stage_t *st, update_stage_gate_fn gate, void *ctx)
+{
+    if (st != NULL) {
+        st->gate = gate;
+        st->gate_ctx = ctx;
+    }
 }
 
 update_stage_err_t update_stage_upload_write(update_stage_t *st, const uint8_t *data, size_t len)
@@ -517,6 +533,7 @@ const char *update_stage_err_name(update_stage_err_t e)
     case UPDATE_STAGE_ERR_HEADER: return "header_write_failed";
     case UPDATE_STAGE_ERR_STATE: return "out_of_sequence";
     case UPDATE_STAGE_ERR_WRONG_PROJECT: return "wrong_project";
+    case UPDATE_STAGE_ERR_POLICY: return "policy_refused";
     }
     return "unknown";
 }

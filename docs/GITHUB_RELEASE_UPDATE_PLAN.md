@@ -93,7 +93,7 @@ Current `app` is 0x210000 size 0x800000, `recovery` at 0xA10000. New layout; eve
   and uploads stay unblocked); only then does it take the same refusal order and claim as `POST /api/update/stage/clear`, re-read the header, require
   it byte-identical to the one hashed, and clear. Commit is not used (optional, all zero for a hand upload). Boot-scoped result is `boot_auto_clear` /
   `boot_auto_cleared` in `GET /api/update/stage`. Bench case owed: interrupt a real apply after set_boot (power cut between set_boot and the header
-  erase). Downgrade gate (section 6) is NOT in the stager: still pending, owned by WP6 / `update_policy`. Pending MCP tools and bench cases are
+  erase). The section 6 downgrade gate now runs on hand uploads (done: the stager calls it after the version is resolved, before any image byte is written). Pending MCP tools and bench cases are
   listed under WP5 in section 12.
 
 ## 5. Integrity, signing and threat model (stated plainly)
@@ -115,6 +115,8 @@ Compare the tag and commit of the running image (`build_info.h`, `esp_app_desc`)
 schema versions in `compat` with what the board reports. Newer with schema >= current: allowed with confirm. Same commit: "up to date", reinstall
 needs `force`. Older, or schema lower: refused (409 naming the rollback hazard); override only with `allow_downgrade` and a typed confirm, and the
 result tells the user to read back `control_get_zones` before heating. The page offers a backup export first. Dirty builds are never released.
+
+**Done for hand uploads:** `update_http.c` installs a gate in the stager that calls `update_policy_decide_upload`; same commit needs the `X-Stage-Force` header, older or lower-schema is 409 `downgrade_refused` (names the hazard), and the only override is `X-Stage-Allow-Downgrade` plus a typed `X-Stage-Confirm` equal to the version. `ota_page.html`, `update_http_client.upload_stage` and `update_stage_upload` pass the overrides. Known limit: the header sector is erased at begin, so a refused upload still blanks the previously staged image.
 
 ## 7. Release assets and manifest (WP1 produces, M2 reads)
 

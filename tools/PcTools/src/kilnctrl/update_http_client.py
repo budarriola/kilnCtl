@@ -142,14 +142,22 @@ def validate_upload_args(image: bytes, version: str = "", commit: str = "") -> O
 
 
 def upload_stage(host: str, image: bytes, version: str = "", commit: str = "",
-                 timeout: float = UPDATE_UPLOAD_TIMEOUT_S, ack_no_safety: bool = False) -> dict:
+                 timeout: float = UPDATE_UPLOAD_TIMEOUT_S, ack_no_safety: bool = False,
+                 force: bool = False, allow_downgrade: bool = False, confirm_downgrade: str = "") -> dict:
     """POST /api/update/stage with `image` as the raw body. Optional
     ``X-Stage-Version`` / ``X-Stage-Commit`` headers; when the version is
     omitted the board reads it from the image's esp_app_desc. Raises
     UpdateHttpError (never retries; a refused upload may already have erased
     a previously good stage). ``ack_no_safety=True`` adds ``X-Ota-Ack-No-Safety: 1``,
     the operator acknowledgement that lets the board proceed while the safety
-    processor is not answering (otherwise HTTP 428). Returns the board's reply body."""
+    processor is not answering (otherwise HTTP 428). Returns the board's reply body.
+
+    The board applies the downgrade gate (docs/GITHUB_RELEASE_UPDATE_PLAN.md
+    section 6) before writing any image byte: a same-commit image needs
+    ``force``; an older version or a lower config schema is refused with HTTP
+    409 ``downgrade_refused`` unless ``allow_downgrade`` is set AND
+    ``confirm_downgrade`` equals the image's version (typed confirm). They go
+    out as ``X-Stage-Force`` / ``X-Stage-Allow-Downgrade`` / ``X-Stage-Confirm``."""
     problem = validate_upload_args(image, version, commit)
     if problem:
         raise UpdateHttpError(f"refusing to upload: {problem}")
@@ -161,7 +169,24 @@ def upload_stage(host: str, image: bytes, version: str = "", commit: str = "",
         req.add_header("X-Stage-Commit", commit)
     if ack_no_safety:
         req.add_header("X-Ota-Ack-No-Safety", "1")
+    if force:
+        req.add_header("X-Stage-Force", "1")
+    if allow_downgrade:
+        req.add_header("X-Stage-Allow-Downgrade", "1")
+    if confirm_downgrade:
+        req.add_header("X-Stage-Confirm", confirm_downgrade)
     return _request(req, STAGE_PATH, timeout)
+
+
+def refusal_reason(exc: "UpdateHttpError") -> str:
+    """The board's gate ``reason`` text from a 409 body, else ''."""
+    try:
+        body = json.loads(exc.detail)
+    except Exception:
+        return ""
+    if isinstance(body, dict) and isinstance(body.get("reason"), str):
+        return body["reason"]
+    return ""
 
 
 def clear_stage(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S, ack_no_safety: bool = False) -> dict:

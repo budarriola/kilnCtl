@@ -833,6 +833,76 @@ static void test_bad_arguments(void)
     }
 }
 
+typedef struct {
+    int calls;
+    char semver[STAGE_SEMVER_FIELD_LEN + 1];
+    update_stage_err_t verdict;
+} gate_rec_t;
+
+static update_stage_err_t rec_gate(void *ctx, const char *semver, const char *commit)
+{
+    gate_rec_t *r = ctx;
+    (void)commit;
+    r->calls++;
+    strncpy(r->semver, semver, STAGE_SEMVER_FIELD_LEN);
+    r->semver[STAGE_SEMVER_FIELD_LEN] = '\0';
+    return r->verdict;
+}
+
+static update_stage_err_t upload_gated(size_t len, size_t chunk, const char *semver, update_stage_gate_fn gate, void *ctx)
+{
+    update_stage_err_t e = update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), (uint32_t)len, semver, NULL,
+                                                      STAGE_SOURCE_UPLOAD);
+    if (e != UPDATE_STAGE_OK) {
+        return e;
+    }
+    update_stage_set_gate(&g_st, gate, ctx);
+    for (size_t off = 0; off < len; off += chunk) {
+        size_t n = len - off < chunk ? len - off : chunk;
+        e = update_stage_upload_write(&g_st, g_img + off, n);
+        if (e != UPDATE_STAGE_OK) {
+            return e;
+        }
+    }
+    return update_stage_upload_finish(&g_st);
+}
+
+// The install gate (downgrade policy hook) runs once, after the project check, with the resolved version.
+static void test_install_gate(void)
+{
+    TEST_SECTION("update_stage -- install gate (downgrade policy hook)");
+    reset_board();
+    gate_rec_t r = { 0, "", UPDATE_STAGE_OK };
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK, "gate OK: staged");
+    TEST_CHECK(r.calls == 1 && strcmp(r.semver, "1.2.3") == 0, "gate called once with the image's own version, v stripped");
+    TEST_CHECK(is_staged(), "staged after an allowing gate");
+
+    reset_board();
+    r.calls = 0;
+    r.verdict = UPDATE_STAGE_ERR_POLICY;
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(upload_gated(30000, 7, "v9.9.9", rec_gate, &r) == UPDATE_STAGE_ERR_POLICY, "gate refusal surfaces as policy");
+    TEST_CHECK(r.calls == 1 && strcmp(r.semver, "9.9.9") == 0, "gate saw the declared version once, even with 7-byte writes");
+    TEST_CHECK(!is_staged() && g_st.phase == UPDATE_STAGE_IDLE && !g_fl.sha_open, "refused: nothing staged, idle, hash closed");
+    TEST_CHECK(g_fl.mem[STAGE_IMAGE_OFFSET] == 0xFF, "refused: no image byte written");
+    TEST_CHECK(strcmp(update_stage_err_name(UPDATE_STAGE_ERR_POLICY), "policy_refused") == 0, "error name");
+
+    // The project check still comes first: a wrong project never reaches the gate.
+    r.calls = 0;
+    make_image(30000, "v1.2.3");
+    memset(g_img + 80, 0, 32);
+    memcpy(g_img + 80, "OtherProject", 12);
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_ERR_WRONG_PROJECT && r.calls == 0,
+               "wrong project refused before the gate");
+
+    // A later ungated upload is unaffected (begin clears the gate).
+    r.calls = 0;
+    make_image(30000, "v1.2.3");
+    update_stage_set_gate(&g_st, rec_gate, &r);
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_OK && r.calls == 0, "begin clears a stale gate");
+}
+
 void run_test_update_stage(void)
 {
     test_sha_reference();
@@ -841,6 +911,7 @@ void run_test_update_stage(void)
     test_size_limits();
     test_bad_images();
     test_wrong_project_refused();
+    test_install_gate();
     test_interrupted_and_blank();
     test_http_buffer_is_the_shared_internal_chunk();
     test_status_never_trusts_a_header_alone();

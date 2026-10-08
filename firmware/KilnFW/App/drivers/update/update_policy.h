@@ -101,6 +101,26 @@ update_decision_t update_policy_decide(const update_identity_t *running, const u
 update_decision_t update_policy_decide_typed(const update_identity_t *running, const update_identity_t *candidate,
                                              const update_policy_flags_t *flags, bool typed_confirm_ok);
 
+// Hand-upload (POST /api/update/stage) front door onto the same policy. The raw image carries no
+// manifest, so the caller supplies what the uploader declared: X-Stage-Version / X-Stage-Commit and
+// optional schema versions (0 = not declared, taken as equal to the board's, i.e. unchecked), plus the
+// override flags. The partition-table hash cannot be checked for an upload (not in the image) and
+// prerelease versions are allowed (no channel), and the dirty/floor rules do not apply. The typed
+// confirm is `confirm` equal to `version` exactly; allow_downgrade only counts with it. A missing
+// version is treated as unknown and needs force plus confirm == "unversioned". Signing plays no part.
+typedef struct {
+    const char *version;   // as declared; NULL/"" = none
+    const char *commit;    // as declared; NULL/"" = none (non-40-hex is ignored)
+    uint32_t zones_cfg_version; // 0 = not declared
+    uint32_t kilnlink_version;
+    uint32_t uart_version;
+    bool force;
+    bool allow_downgrade;
+    const char *confirm;   // typed confirm text, NULL/"" = none
+} update_upload_request_t;
+
+update_decision_t update_policy_decide_upload(const update_identity_t *running, const update_upload_request_t *req);
+
 const char *update_verdict_name(update_verdict_t v);
 
 // True for a 40-char lowercase-hex commit id.

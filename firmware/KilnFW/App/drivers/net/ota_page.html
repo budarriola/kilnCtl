@@ -186,6 +186,15 @@ done by the recovery image: <b>Install</b> below reboots the board into it.</p>
 <div id="stagePicker">
   <label for="stageFile">New application image (KilnCtrl.bin)</label>
   <input type="file" id="stageFile" accept=".bin">
+  <div class="note">
+    <label><input type="checkbox" id="stageForce"> Force (reinstall the same version)</label><br>
+    <label><input type="checkbox" id="stageDown"> Allow downgrade or lower config schema (rollback hazard: after
+    it, read back the zones before heating)</label>
+    <div id="stageTypedWrap" style="display:none">
+      <label for="stageTyped">Type the image version to confirm</label>
+      <input type="text" id="stageTyped" maxlength="31" autocomplete="off" autocapitalize="off" spellcheck="false">
+    </div>
+  </div>
   <div>
     <button id="stageUploadBtn" type="button" class="primary">Upload to stage</button>
     <button id="stageClearBtn" type="button" class="danger">Clear stage</button>
@@ -756,12 +765,27 @@ function loadStageStatus() {
 /* 401 mid-upload: open the shared login modal (via an authed GET) and replay once.
  * 428 (safety processor not answering): ask, then replay once with the ack header,
  * the same contract as app.js's kcFetchWithSafetyAck. */
-function stageXhrUpload(bytes, ack, relogged) {
-  return stageXhrOnce(bytes, ack).catch(function (e) {
+/* 409 from the downgrade gate: {"error","reason","needs_typed_confirm"}. Say why, and how to override. */
+function stageRefusalText(e) {
+  var b = null;
+  try { b = JSON.parse(e.message); } catch (x) { /* not JSON */ }
+  if (!b || typeof b.reason !== 'string') return e.message;
+  var t = b.reason;
+  if (b.error === 'downgrade_refused') {
+    t += ' To override: tick "Allow downgrade", type the image version, upload again. Export a backup first, and ' +
+         'read back the zones before heating.';
+  } else if (b.error === 'needs_force') {
+    t += ' To override: tick "Force" (and type the version if asked), upload again.';
+  }
+  return t;
+}
+
+function stageXhrUpload(bytes, ack, relogged, ov) {
+  return stageXhrOnce(bytes, ack, ov).catch(function (e) {
     if (e.status === 401 && !relogged) {
       return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
         if (!r.ok) throw e;
-        return stageXhrUpload(bytes, ack, true);
+        return stageXhrUpload(bytes, ack, true, ov);
       });
     }
     if (e.status === 428 && !ack) {
@@ -769,14 +793,14 @@ function stageXhrUpload(bytes, ack, relogged) {
         'Staging does not touch the running firmware, but the board refuses by default ' +
         'while the safety processor is not answering. Continue anyway?').then(function (ok) {
         if (!ok) throw e;
-        return stageXhrUpload(bytes, true, relogged);
+        return stageXhrUpload(bytes, true, relogged, ov);
       });
     }
     throw e;
   });
 }
 
-function stageXhrOnce(bytes, ack) {
+function stageXhrOnce(bytes, ack, ov) {
   return new Promise(function (resolve, reject) {
     var xhr = new XMLHttpRequest();
     var wrap = document.getElementById('stageProgressWrap');
@@ -784,6 +808,9 @@ function stageXhrOnce(bytes, ack) {
     xhr.open('POST', '/api/update/stage');
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     if (ack) xhr.setRequestHeader('X-Ota-Ack-No-Safety', '1');
+    if (ov && ov.force) xhr.setRequestHeader('X-Stage-Force', '1');
+    if (ov && ov.down) xhr.setRequestHeader('X-Stage-Allow-Downgrade', '1');
+    if (ov && ov.typed) xhr.setRequestHeader('X-Stage-Confirm', ov.typed);
     xhr.upload.onprogress = function (ev) {
       if (!ev.lengthComputable) return;
       var pct = Math.round(100 * ev.loaded / ev.total);
@@ -823,14 +850,18 @@ document.getElementById('stageUploadBtn').addEventListener('click', function () 
       if (!ok) { msg.textContent = ''; return null; }
       btn.disabled = true;
       msg.textContent = 'Uploading ' + bytes.length + ' bytes… (the board answers nothing else until this ends)';
-      return stageXhrUpload(bytes).then(function () {
+      var ov = { force: document.getElementById('stageForce').checked,
+                 down: document.getElementById('stageDown').checked,
+                 typed: document.getElementById('stageTyped').value.trim() };
+      return stageXhrUpload(bytes, false, false, ov).then(function () {
         msg.textContent = 'Upload finished; verifying on the board…';
         return loadStageStatus();
       }).then(function () { msg.textContent = 'Upload finished. See the status card for the verified state.'; });
     });
   }).catch(function (e) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'Stage upload failed: ' + e.message;
+    msg.textContent = 'Stage upload failed: ' + stageRefusalText(e);
+    if (e.status === 409) document.getElementById('stageTypedWrap').style.display = '';
     loadStageStatus();
   }).then(function () {
     btn.disabled = false;

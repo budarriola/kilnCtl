@@ -268,6 +268,89 @@ static void test_unknown_running_force_needs_typed(void)
     TEST_CHECK(update_policy_decide_typed(NULL, &c, &f, false).verdict == UPDATE_VERDICT_REFUSE_MALFORMED, "NULL running");
 }
 
+static update_decision_t up(const update_identity_t *r, const char *ver, const char *commit, uint32_t zones, bool force,
+                            bool down, const char *confirm)
+{
+    update_upload_request_t q;
+    memset(&q, 0, sizeof(q));
+    q.version = ver;
+    q.commit = commit;
+    q.zones_cfg_version = zones;
+    q.force = force;
+    q.allow_downgrade = down;
+    q.confirm = confirm;
+    return update_policy_decide_upload(r, &q);
+}
+
+static void test_upload_gate(void)
+{
+    TEST_SECTION("update_policy -- hand upload (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6)");
+    update_identity_t r = ident("v1.2.0", COMMIT_A);
+    update_decision_t d = up(&r, "1.3.0", COMMIT_B, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_UPGRADE && d.allowed, "newer upload allowed");
+    d = up(&r, "1.2.0-rc.1", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && !d.allowed && d.needs_typed_confirm,
+               "prerelease of the running version is older: refused");
+    d = up(&r, "1.3.0-rc.1", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.allowed, "a newer prerelease is allowed (no channel on a hand upload)");
+
+    d = up(&r, "1.2.0", COMMIT_A, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_UP_TO_DATE && !d.allowed, "same version + commit without force refused");
+    d = up(&r, "v1.2.0", COMMIT_A, 0, true, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_REINSTALL && d.allowed, "same commit with force allowed");
+    d = up(&r, "1.2.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE && !d.allowed, "same version, no commit: needs force");
+
+    d = up(&r, "1.1.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && !d.allowed && strstr(d.reason, "downgrade") != NULL,
+               "older version refused, reason names the downgrade");
+    d = up(&r, "1.1.0", NULL, 0, true, false, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE, "force alone does not override a downgrade");
+    d = up(&r, "1.1.0", NULL, 0, false, true, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && d.needs_typed_confirm,
+               "allow_downgrade without the typed confirm refused");
+    d = up(&r, "1.1.0", NULL, 0, false, true, "1.0.9");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE, "wrong typed confirm refused");
+    d = up(&r, "1.1.0", NULL, 0, false, false, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE, "typed confirm without allow_downgrade refused");
+    d = up(&r, "1.1.0", NULL, 0, false, true, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE && d.allowed && d.needs_typed_confirm,
+               "allow_downgrade + typed confirm allowed");
+    d = up(&r, "v1.1.0", NULL, 0, false, true, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE, "leading v is ignored in the typed confirm");
+
+    d = up(&r, "1.3.0", NULL, 25, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && d.zones_cfg_lower,
+               "lower zones_cfg schema refused even if newer");
+    d = up(&r, "1.3.0", NULL, 25, false, true, "1.3.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE && d.zones_cfg_lower,
+               "lower schema overridden with typed confirm, flagged");
+    d = up(&r, "1.3.0", NULL, 27, false, false, NULL);
+    TEST_CHECK(d.allowed && d.schema_newer, "higher schema is a normal upgrade");
+
+    d = up(&r, "", NULL, 0, false, false, NULL);
+    TEST_CHECK(!d.allowed && d.needs_typed_confirm, "no version declared: refused");
+    d = up(&r, NULL, NULL, 0, true, false, NULL);
+    TEST_CHECK(!d.allowed, "no version + force alone refused");
+    d = up(&r, "", NULL, 0, true, true, "unversioned");
+    TEST_CHECK(d.allowed, "no version + force + allow_downgrade + typed unversioned allowed");
+
+    update_identity_t dev = ident("", COMMIT_A);
+    d = up(&dev, "1.0.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE, "dev running build: needs force");
+    d = up(&dev, "1.0.0", NULL, 0, true, false, NULL);
+    TEST_CHECK(!d.allowed && d.needs_typed_confirm, "dev running build: force without typed confirm refused");
+    d = up(&dev, "1.0.0", NULL, 0, true, false, "1.0.0");
+    TEST_CHECK(d.allowed, "dev running build: force + typed confirm allowed");
+
+    update_identity_t nop = ident("v1.2.0", COMMIT_A);
+    nop.partitions_sha256[0] = '\0';
+    TEST_CHECK(up(&nop, "1.3.0", NULL, 0, false, false, NULL).allowed, "empty board partition hash does not block an upload");
+    TEST_CHECK(up(NULL, "1.3.0", NULL, 0, false, false, NULL).verdict == UPDATE_VERDICT_REFUSE_MALFORMED, "NULL running");
+    TEST_CHECK(up(&r, "not-a-version", NULL, 0, false, false, NULL).verdict == UPDATE_VERDICT_REFUSE_MALFORMED,
+               "garbage version malformed");
+}
+
 void run_test_update_policy(void)
 {
     test_upgrade();
@@ -277,4 +360,5 @@ void run_test_update_policy(void)
     test_malformed();
     test_helpers();
     test_unknown_running_force_needs_typed();
+    test_upload_gate();
 }

@@ -25,6 +25,7 @@
 #include "system_mode_gate_http.h"
 #include "update_fetch.h"
 #include "update_http_internal.h"
+#include "update_policy.h"
 #include "update_stage.h"
 #include "update_stale_stage.h"
 #include "wifi_provision_http.h"
@@ -128,7 +129,8 @@ static const char *http_status_for(update_stage_err_t e)
 {
     switch (e) {
     case UPDATE_STAGE_OK: return "200 OK";
-    case UPDATE_STAGE_ERR_BUSY: return "409 Conflict";
+    case UPDATE_STAGE_ERR_BUSY:
+    case UPDATE_STAGE_ERR_POLICY: return "409 Conflict";
     case UPDATE_STAGE_ERR_OVERSIZE: return "413 Payload Too Large";
     case UPDATE_STAGE_ERR_FLASH:
     case UPDATE_STAGE_ERR_HASH:
@@ -186,6 +188,80 @@ static bool claim_refuses(httpd_req_t *req, const char *what, const char *ip)
     return false;
 }
 
+// Optional request header as text; false when absent, true (and dst NUL-terminated) when present and fits.
+static bool hdr_text(httpd_req_t *req, const char *name, char *dst, size_t cap)
+{
+    dst[0] = '\0';
+    size_t n = httpd_req_get_hdr_value_len(req, name);
+    if (n == 0 || n >= cap) {
+        return false;
+    }
+    return httpd_req_get_hdr_value_str(req, name, dst, cap) == ESP_OK;
+}
+
+static bool hdr_flag(httpd_req_t *req, const char *name)
+{
+    char v[8];
+    return hdr_text(req, name, v, sizeof(v)) && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0);
+}
+
+static uint32_t hdr_u32(httpd_req_t *req, const char *name)
+{
+    char v[12];
+    return hdr_text(req, name, v, sizeof(v)) ? (uint32_t)strtoul(v, NULL, 10) : 0u;
+}
+
+// Downgrade gate (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6) for the hand upload, applied once
+// the image head is in (so a version taken from the image's own app descriptor is covered too), before any
+// image byte is written. On refusal the 409 is sent here and UPDATE_STAGE_ERR_POLICY returned. The raw image has no manifest, so the policy
+// sees what the uploader declared in X-Stage-Version / X-Stage-Commit / X-Stage-Zones-Cfg /
+// X-Stage-Kilnlink / X-Stage-Uart; overrides are X-Stage-Force, X-Stage-Allow-Downgrade and
+// X-Stage-Confirm (typed: equal to the version). The project-identity check is not part of this.
+typedef struct {
+    httpd_req_t *req;
+    const char *ip;
+} policy_gate_ctx_t;
+
+static update_stage_err_t policy_gate(void *vctx, const char *semver, const char *commit)
+{
+    const policy_gate_ctx_t *gc = vctx;
+    httpd_req_t *req = gc->req;
+    const char *ip = gc->ip;
+    char confirm[STAGE_SEMVER_FIELD_LEN + 1];
+    (void)hdr_text(req, "X-Stage-Confirm", confirm, sizeof(confirm));
+    update_upload_request_t ur = {
+        .version = semver,
+        .commit = commit,
+        .zones_cfg_version = hdr_u32(req, "X-Stage-Zones-Cfg"),
+        .kilnlink_version = hdr_u32(req, "X-Stage-Kilnlink"),
+        .uart_version = hdr_u32(req, "X-Stage-Uart"),
+        .force = hdr_flag(req, "X-Stage-Force"),
+        .allow_downgrade = hdr_flag(req, "X-Stage-Allow-Downgrade"),
+        .confirm = confirm,
+    };
+    update_identity_t run;
+    update_fetch_running_identity(&run, commit);
+    update_decision_t d = update_policy_decide_upload(&run, &ur);
+    ESP_LOGW(TAG, "stage upload from %s: policy %s (%s)", ip, update_verdict_name(d.verdict), d.reason ? d.reason : "");
+    if (d.allowed) {
+        return UPDATE_STAGE_OK;
+    }
+    const char *name = d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE ? "downgrade_refused"
+                       : (d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE || d.verdict == UPDATE_VERDICT_UP_TO_DATE)
+                           ? "needs_force"
+                           : update_verdict_name(d.verdict);
+    char json[320];
+    snprintf(json, sizeof(json),
+             "{\"ok\":false,\"error\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\","
+             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s}",
+             name, update_verdict_name(d.verdict), d.reason ? d.reason : "", d.needs_typed_confirm ? "true" : "false",
+             d.zones_cfg_lower ? "true" : "false");
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    (void)httpd_resp_sendstr(req, json);
+    return UPDATE_STAGE_ERR_POLICY;
+}
+
 static esp_err_t stage_upload_post_handler(httpd_req_t *req)
 {
     char ip[46];
@@ -238,6 +314,12 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             }
         }
 
+        policy_gate_ctx_t gate_ctx = { .req = req, .ip = ip };
+        bool response_sent = false;
+        if (!failed_mid_body) {
+            update_stage_set_gate(&s_stage, policy_gate, &gate_ctx);
+        }
+
         size_t remaining = failed_mid_body ? 0 : req->content_len;
         while (!failed_mid_body && remaining > 0) {
             size_t want = remaining < buf_cap ? remaining : buf_cap;
@@ -256,7 +338,10 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             e = update_stage_upload_write(&s_stage, buf, (size_t)r);
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: write failed: %s", ip, update_stage_err_name(e));
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                response_sent = (e == UPDATE_STAGE_ERR_POLICY); // policy_gate() already sent the 409
+                if (!response_sent) {
+                    (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                }
                 failed_mid_body = true;
                 break;
             }
@@ -278,6 +363,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
         } else {
             update_stage_upload_abort(&s_stage); // idempotent
         }
+        update_stage_set_gate(&s_stage, NULL, NULL); // gate_ctx is on this stack frame
         ota_http_update_end();
     }
 

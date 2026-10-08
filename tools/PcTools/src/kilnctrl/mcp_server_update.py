@@ -83,7 +83,9 @@ def update_status(host: Optional[str] = None) -> str:
 
 @_core._tool()
 def update_stage_upload(image_path: str, version: str = "", commit: str = "", confirm: bool = False,
-                        host: Optional[str] = None, ack_no_safety: bool = False) -> str:
+                        host: Optional[str] = None, ack_no_safety: bool = False,
+                        force: bool = False, allow_downgrade: bool = False,
+                        confirm_downgrade: str = "") -> str:
     """Upload an ESP application image (KilnCtrl.bin, which embeds both
     processors' firmware) into the `stage` partition (POST /api/update/stage,
     ROUTE_TIER_ADMIN). Staging only: the running application and the `app`
@@ -115,7 +117,18 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     Pass ``ack_no_safety=True`` (exactly True, still behind ``confirm=True``) to
     send ``X-Ota-Ack-No-Safety: 1`` and proceed anyway; it is never sent
     otherwise. A 409 (firing, hot zone, another update running) is final and
-    cannot be acknowledged away."""
+    cannot be acknowledged away.
+
+    Downgrade gate (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6), applied by
+    the board before any image byte is written: an image with the running
+    commit needs ``force=True``; an older version or a lower config schema is
+    refused with 409 ``downgrade_refused`` (the reply names the rollback
+    hazard: an older firmware runs on default PID gains after a zones_cfg
+    schema bump, so read back control_get_zones before heating). The only
+    override is ``allow_downgrade=True`` together with ``confirm_downgrade``
+    equal to the image's version (typed confirm); the flags must be exactly
+    True and still sit behind ``confirm=True``. A refused upload may already
+    have erased the previous stage."""
     if not isinstance(image_path, str) or not os.path.isabs(image_path):
         return "REFUSED: image_path must be an absolute path"
     try:
@@ -126,6 +139,11 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     problem = uhc.validate_upload_args(image, version, commit)
     if problem:
         return f"REFUSED: {problem}"
+    if not isinstance(confirm_downgrade, str):
+        return "REFUSED: confirm_downgrade must be a string (the image version)"
+    if allow_downgrade is True and not confirm_downgrade:
+        return ("REFUSED: allow_downgrade needs confirm_downgrade set to the image version "
+                "(typed confirm); after a downgrade read back control_get_zones before heating")
     local_sha = uhc.sha256_hex(image)
     resolved = _resolve_host(host)
     try:
@@ -145,7 +163,9 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
         warn = (f" NOTE: the previously staged image ({before.get('semver')}, "
                 f"sha256={before.get('sha256')}) was erased by this upload.")
     try:
-        reply = uhc.upload_stage(resolved, image, version, commit, ack_no_safety=(ack_no_safety is True))
+        reply = uhc.upload_stage(resolved, image, version, commit, ack_no_safety=(ack_no_safety is True),
+                                 force=(force is True), allow_downgrade=(allow_downgrade is True),
+                                 confirm_downgrade=confirm_downgrade)
     except uhc.UpdateHttpError as exc:
         if exc.status is None:
             return (f"UNKNOWN: the upload reply was lost or the board was unreachable ({exc}); "
@@ -164,6 +184,12 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
                     "version=\"x.y.z\" (e.g. \"1.4.0\"; an optional leading v is stripped) "
                     "that you choose for this image; a previously staged image may have been "
                     f"erased (host={resolved})")
+        if exc.status == 409 and name in ("downgrade_refused", "needs_force"):
+            return (f"FAILED: board refused the upload by the downgrade gate: {name} -- "
+                    f"{uhc.refusal_reason(exc)}. Override only with allow_downgrade=True plus "
+                    "confirm_downgrade=<image version> (downgrade) or force=True (same commit); "
+                    "after any downgrade read back control_get_zones before heating. "
+                    f"A previously staged image may have been erased (host={resolved})")
         return (f"FAILED: board refused the upload: HTTP {exc.status} {name or exc.detail!r}; "
                 f"a previously staged image may have been erased (host={resolved})")
     try:
