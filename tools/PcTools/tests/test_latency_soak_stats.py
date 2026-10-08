@@ -109,14 +109,50 @@ class RunSoakTest(unittest.TestCase):
         n = len(ls.SURFACES)
         self.assertEqual(len(samples), n * len({s.tick for s in samples}))
         self.assertGreaterEqual(len({s.tick for s in samples}), 2)
-        self.assertEqual(len(calls), len(samples) + 1)  # + unrecorded warm-up
+        self.assertEqual(len(calls), len(samples) + n)  # + one unrecorded warm-up pass
         self.assertTrue(all(p.startswith("/api/") for _, p in calls))
 
     def test_at_least_one_tick_and_error_status_recorded(self):
-        samples = ls.run_soak("h", duration_s=0, fetch=lambda h, p, t: (5.0, 401, "HTTP 401"),
+        samples = ls.run_soak("h", duration_s=0, fetch=lambda h, p, t: (5.0, 500, "HTTP 500"),
                               clock=lambda: 0.0, sleep=lambda s: None)
         self.assertEqual(len(samples), len(ls.SURFACES))
         self.assertFalse(any(s.ok for s in samples))
+
+    def test_warmup_401_aborts_before_any_tick(self):
+        calls = []
+
+        def fetch(h, p, t):
+            calls.append(p)
+            return (5.0, 401, "HTTP 401") if p == "/api/zones" else (5.0, 200, "")
+
+        with self.assertRaises(ls.SoakAborted):
+            ls.run_soak("h", duration_s=60, fetch=fetch, clock=lambda: 0.0, sleep=lambda s: None)
+        self.assertEqual(calls[-1], "/api/zones")  # stopped at the first 401, no ticks
+
+    def test_real_fetch_login_failure_is_fast_401_not_stall(self):
+        import unittest.mock as m
+
+        def boom(req, timeout):
+            raise ls.http_auth.HttpAuthError("POST /api/auth/login was refused")
+
+        with m.patch.object(ls.http_auth, "urlopen", boom):
+            lat, status, err = ls.real_fetch("h", "/api/zones", 1.0)
+        self.assertEqual(status, 401)
+        self.assertNotIn("refused", err)
+        from kilnctrl.latency_soak_stats import is_stalled
+        self.assertFalse(is_stalled(Sample(0, "zones", lat, False, status, err), 1000.0))
+
+    def test_real_fetch_timeout_is_no_answer(self):
+        import socket
+        import unittest.mock as m
+
+        def slow(req, timeout):
+            raise socket.timeout("timed out")
+
+        with m.patch.object(ls.http_auth, "urlopen", slow):
+            _, status, err = ls.real_fetch("h", "/api/status", 1.0)
+        self.assertIsNone(status)
+        self.assertTrue(err)
 
     def test_real_fetch_only_issues_get(self):
         seen = []
@@ -144,6 +180,44 @@ class RunSoakTest(unittest.TestCase):
         for name, path in ls.SURFACES:
             self.assertTrue(path.startswith("/api/"), name)
         self.assertEqual(len({n for n, _ in ls.SURFACES}), len(ls.SURFACES))
+
+    def test_every_surface_is_a_registered_get_route(self):
+        import re
+        table = os.path.join(os.path.dirname(__file__), "..", "..", "..", "firmware", "KilnFW",
+                             "App", "drivers", "http", "route_tier_table.h")
+        with open(table, encoding="utf-8") as fh:
+            gets = set(re.findall(r'ROUTE_TIER\("([^"]+)",\s*HTTP_GET,', fh.read()))
+        self.assertGreater(len(gets), 50)
+        for name, path in ls.SURFACES:
+            self.assertIn(path, gets, name)
+
+
+class McpSoakToolTest(unittest.TestCase):
+    def setUp(self):
+        from kilnctrl import mcp_server_latency_soak as T
+        self.T = T
+
+    def test_bad_args_refused_before_any_request(self):
+        import unittest.mock as m
+        with m.patch.object(self.T._ls, "run_soak", side_effect=AssertionError("ran")):
+            self.assertTrue(self.T.latency_soak(duration_s=10, interval_s=0, host="h").startswith("error"))
+            self.assertTrue(self.T.latency_soak(duration_s=10, min_surfaces=0, host="h").startswith("error"))
+            self.assertTrue(self.T.latency_soak(duration_s=300, host="h").startswith("error"))
+            self.assertTrue(self.T.latency_soak_start(duration_s=1e9, host="h").startswith("error"))
+
+    def test_all_failed_run_reports_error_so_job_reads_failed(self):
+        import unittest.mock as m
+        dead = [Sample(0, n, 8000.0, False, None, "timeout") for n, _ in ls.SURFACES]
+        with m.patch.object(self.T._ls, "run_soak", return_value=dead):
+            self.assertTrue(self.T._run("h", 10, 5, 1000, 3).startswith("error: no surface"))
+        ok = [Sample(0, n, 8.0, True, 200) for n, _ in ls.SURFACES]
+        with m.patch.object(self.T._ls, "run_soak", return_value=ok):
+            self.assertFalse(self.T._run("h", 10, 5, 1000, 3).startswith("error"))
+
+    def test_warmup_abort_reported_as_error(self):
+        import unittest.mock as m
+        with m.patch.object(self.T._ls, "run_soak", side_effect=ls.SoakAborted("x")):
+            self.assertEqual(self.T._run("h", 10, 5, 1000, 3), "error: x")
 
 
 if __name__ == "__main__":

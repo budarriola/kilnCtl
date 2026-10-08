@@ -8,9 +8,13 @@ Written for the one-off 2026-08 multi-surface stall that was never reproduced
 (KilnFW TODO): leave it running while the bench does ordinary work and read the
 clustered-stall list afterwards.
 
-Only GET requests are ever issued -- no POST, no body. Admin-tier routes go
-through http_auth.urlopen, which logs in from KILNCTL_WEB_USERNAME /
-KILNCTL_WEB_PASSWORD on a 401; credentials are never printed here. Each tick
+Every surface request is a GET with no body. The one non-GET the soak can cause
+is http_auth.urlopen's own login (POST /api/auth/login, from KILNCTL_WEB_USERNAME
+/ KILNCTL_WEB_PASSWORD) when an admin-tier route answers 401 -- once in the
+unrecorded warm-up, and again only if the session expires mid-soak (that one
+sample then includes the login round trip). Credentials are never printed here;
+a failed login is recorded as an HTTP 401 error, not a stall, since the board
+did answer. Each tick
 polls the surfaces sequentially (so the soak itself adds at most one in-flight
 request to the board), and the tick is the clustering window.
 
@@ -51,6 +55,10 @@ DEFAULT_MIN_SURFACES = 3
 Fetch = Callable[[str, str, float], "Tuple[float, Optional[int], str]"]
 
 
+class SoakAborted(RuntimeError):
+    """The soak refused to start (see :func:`run_soak`)."""
+
+
 def real_fetch(host: str, path: str, timeout: float) -> "Tuple[float, Optional[int], str]":
     req = urllib.request.Request(f"http://{host}{path}", method="GET")
     t0 = time.perf_counter()
@@ -62,6 +70,12 @@ def real_fetch(host: str, path: str, timeout: float) -> "Tuple[float, Optional[i
             status = resp.status
     except urllib.error.HTTPError as exc:
         status, err = exc.code, f"HTTP {exc.code}"
+    except http_auth.HttpAuthError:
+        # The board answered 401 and the login could not answer it (no
+        # credential in the env, or login refused/failed). A fast answer is an
+        # error, not a stall; a slow one still trips the latency threshold.
+        # The exception text is deliberately not recorded.
+        status, err = 401, "HTTP 401 (login failed)"
     except Exception as exc:  # noqa: BLE001 - timeout/unreachable/auth-missing
         err = type(exc).__name__
     return (time.perf_counter() - t0) * 1000.0, status, err
@@ -73,12 +87,19 @@ def run_soak(host: str, duration_s: float = DEFAULT_DURATION_S,
              clock: Callable[[], float] = time.monotonic,
              sleep: Callable[[float], None] = time.sleep) -> "List[Sample]":
     """Poll every surface once per tick until ``duration_s`` elapses (always at
-    least one tick). Returns the samples; clock/sleep/fetch are injectable."""
+    least one tick). Returns the samples; clock/sleep/fetch are injectable.
+    Raises :class:`SoakAborted` if a warm-up request still answers 401."""
     samples: List[Sample] = []
-    # Warm-up (not recorded): lets http_auth log in once so the login round trip
-    # does not pollute the first tick's latency.
-    for _, path in surfaces[:1]:
-        fetch(host, path, timeout_s)
+    # Warm-up (not recorded): one pass over every surface, so http_auth logs in
+    # on the first admin-tier 401 here and the login round trip does not
+    # pollute tick 0's latency.
+    for name, path in surfaces:
+        if fetch(host, path, timeout_s)[1] == 401:
+            # Every later tick would retry the login once per admin surface
+            # and could walk the board into its failed-login lockout.
+            raise SoakAborted(f"warm-up GET {path} ({name}) answered 401 and the login did not "
+                              f"fix it; check that KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD are "
+                              f"set and valid. Not soaking.")
     start = clock()
     tick = 0
     while True:
@@ -103,7 +124,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--stall-ms", type=float, default=DEFAULT_STALL_MS)
     ap.add_argument("--min-surfaces", type=int, default=DEFAULT_MIN_SURFACES)
     a = ap.parse_args(argv)
-    samples = run_soak(a.host, a.duration_s, a.interval_s, a.timeout_s)
+    try:
+        samples = run_soak(a.host, a.duration_s, a.interval_s, a.timeout_s)
+    except SoakAborted as exc:
+        print(f"error: {exc}")
+        return 2
     print(format_report(samples, a.stall_ms, a.min_surfaces, f"latency soak host={a.host} (GET only)"))
     return 0
 
