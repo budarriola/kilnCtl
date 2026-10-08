@@ -457,7 +457,10 @@ gesture's own reset-token gap (it clears the secret but not outstanding
 `totp_config_enrolled()` and the admin record at token-use time, so a stale
 token cannot outlive a disenrollment either way.
 
-**Pending:** live-board verification that the credential wipe actually
-clears TOTP end-to-end (`web_auth_backend_clear_all_credentials()` is
-ESP-only, no host test -- verified so far only by target-build compilation
-and code inspection).
+**Host coverage (2026-10-07):** the wipe's TOTP half is now `totp_wipe_disenroll()` in
+`totp_http_core.h`, called by `web_auth_backend_clear_all_credentials()`; `test_totp_http_core.c`
+runs it against the real `totp_config` on the fake KV and asserts secret ABSENT, enrolled=false,
+counter cleared, reset tokens and pending secret dropped, and `totp_enroll_allowed(false)`.
+
+**Pending:** live-board verification only (the vtable wiring in `security_backend_web_auth.c` is
+ESP-only and checked by target build + inspection).

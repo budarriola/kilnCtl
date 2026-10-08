@@ -38,6 +38,7 @@
 #include "auth_totp_http.h" // auth_totp_http_clear_reset_tokens()
 #include "security_http.h"  // security_totp_pending_clear()
 #include "totp_config.h"    // totp_config_clear()
+#include "totp_http_core.h" // totp_wipe_disenroll()
 
 // SECURITY_HTTP_USERNAME_MAX (security_http_core.h) and
 // WEB_AUTH_USERNAME_MAX_LEN (web_auth_store.h) are two views of the SAME
@@ -374,10 +375,8 @@ static security_err_t web_auth_backend_clear_all_credentials(void)
     // handlers already make; run both unconditionally (best-effort, same
     // as the gesture's web_ok && totp_ok shape) rather than short-
     // circuiting on the web clear's result.
-    bool totp_ok = totp_config_clear();
-    auth_totp_http_clear_reset_tokens();
-    security_totp_pending_clear(); // hygiene: never leave a stale pending
-                                    // enrollment secret behind either
+    bool totp_ok = totp_wipe_disenroll(totp_config_clear, auth_totp_http_clear_reset_tokens,
+                                       security_totp_pending_clear);
 
     bool ok = web_ok && totp_ok;
     if (!ok) {
