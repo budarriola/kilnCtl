@@ -71,6 +71,9 @@ param(
 # native call is checked through $LASTEXITCODE.
 $ErrorActionPreference = "Continue"
 
+# `powershell -File` passes "a,b" as ONE string: split commas so several regexes work.
+$AllowFail = @($AllowFail | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+
 $script:steps = New-Object System.Collections.ArrayList
 $script:allowedFails = @()
 $script:knownFails = @()
@@ -91,6 +94,13 @@ function Finish([int]$code, [string]$err, [bool]$landed = $false) {
     if ($err) { Write-Host "REFUSED/FAILED: $err" -ForegroundColor Red }
     Write-Output ($o | ConvertTo-Json -Compress)
     exit $code
+}
+function Test-WorktreeRegistered([string]$root, [string]$wt) {
+    $want = ($wt -replace '\\', '/').TrimEnd('/')
+    foreach ($l in @(git -C $root worktree list --porcelain 2>$null)) {
+        if ($l -like 'worktree *' -and (($l.Substring(9) -replace '\\', '/').TrimEnd('/') -ieq $want)) { return $true }
+    }
+    return $false
 }
 function Step([string]$s) { [void]$script:steps.Add($s); Write-Host "[step] $s" -ForegroundColor Cyan }
 
@@ -130,7 +140,9 @@ Set-Location $top
 
 $gitDir = (git rev-parse --absolute-git-dir 2>$null) -replace '/', '\'
 $commonDir = (git rev-parse --git-common-dir 2>$null)
-$commonDir = [System.IO.Path]::GetFullPath((Join-Path $top ($commonDir -replace '/', '\'))).TrimEnd('\')
+$commonDir = ($commonDir -replace '/', '\')
+if (-not [System.IO.Path]::IsPathRooted($commonDir)) { $commonDir = Join-Path $top $commonDir }
+$commonDir = [System.IO.Path]::GetFullPath($commonDir).TrimEnd('\')
 $isLinked = ($gitDir.TrimEnd('\') -ne $commonDir)
 if (-not $isLinked -and -not $AllowStandaloneClone) {
     Finish 1 "this is the main/shared tree (not a linked worktree); mint one with tools\worktree_mint.ps1 and land from there"
@@ -287,9 +299,29 @@ if ($RemoveWorktree) {
     if (-not $isLinked) { Write-Host "NOTE: not a linked worktree; -RemoveWorktree ignored." -ForegroundColor Yellow }
     else {
         Step "remove worktree"
+        # ROOT CAUSE (2026-10-08): Set-Location only changes PowerShell's location, NOT the
+        # process working directory ([Environment]::CurrentDirectory). land.ps1 is started
+        # with the worktree as its cwd, so the process (and every child it spawns, incl. the
+        # worktree_mint -Remove child) kept an OS directory handle on the worktree: git
+        # deleted the contents and unregistered it, then RemoveDirectory failed, leaving an
+        # empty unregistered dir (and a second -Remove then failed "not a git worktree").
         Set-Location $mainRoot
+        [Environment]::CurrentDirectory = $mainRoot
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "worktree_mint.ps1") -Remove -Path $top
-        if ($LASTEXITCODE -ne 0 -and -not $optFail) { $optFail = "worktree_mint -Remove failed for $top (landed anyway)" }
+        $rmRc = $LASTEXITCODE
+        $stillReg = Test-WorktreeRegistered $mainRoot $top
+        if ($rmRc -ne 0 -or (Test-Path -LiteralPath $top) -or $stillReg) {
+            Write-Host "worktree_mint -Remove left '$top' behind (exit $rmRc); falling back" -ForegroundColor Yellow
+            . (Join-Path $PSScriptRoot "lib_safe_remove.ps1")
+            if (Test-Path -LiteralPath $top) { [void](Remove-ReparsePointsUnder -Path $top) }
+            git -C $mainRoot worktree remove --force $top *>$null
+            if (Test-Path -LiteralPath $top) { Remove-TreeSafe -Path $top }
+            git -C $mainRoot worktree prune *>$null
+            $stillReg = Test-WorktreeRegistered $mainRoot $top
+            if ((Test-Path -LiteralPath $top) -or $stillReg) {
+                if (-not $optFail) { $optFail = "worktree removal failed for $top even after fallback (landed anyway): a process still holds it (shell cwd inside it?)" }
+            } else { Write-Host "fallback removal succeeded: $top" -ForegroundColor Green }
+        }
     }
 }
 

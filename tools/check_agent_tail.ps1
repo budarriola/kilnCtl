@@ -84,6 +84,8 @@ function Run-Cases([string]$script, [string]$label) {
     $r.dead = Run-Tool $script $proj @('-Id', 'deadlog000000001', '-ProcessSnapshot', 'explorer')
     $r.progress = Run-Tool $script $proj @('-Id', 'progress0000001', '-ProcessSnapshot', 'explorer')
     $r.deadbuild = Run-Tool $script $proj @('-Id', 'deadbuild0000001', '-ProcessSnapshot', 'ninja,explorer')
+    $r.mcponly = Run-Tool $script $proj @('-Id', 'deadbuild0000001', '-ProcessSnapshot', "python::C:\Python\python.exe -m kilnctrl.mcp_server --port 8767 --root $tmp,python::python tools/mykicadMcp/kicad_mcp_server.py --port 8766,pdf-mcp,explorer")
+    $r.pytest = Run-Tool $script $proj @('-Id', 'deadbuild0000001', '-ProcessSnapshot', 'python::python -m pytest tools/PcTools/tests -x,explorer')
     $r.real = Run-Tool $script $proj @('-Id', 'acab7c75e525e6c62', '-ProcessSnapshot', 'explorer')
     $r.all = Run-Tool $script $proj @('-All', '-ProcessSnapshot', 'explorer')
     $r.missing = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -ProjectsDir $proj -Id nosuchagent 2>&1 | Out-Null; $missingCode = $LASTEXITCODE
@@ -92,6 +94,8 @@ function Run-Cases([string]$script, [string]$label) {
     Assert-True (-not $r.healthy.Stuck) "$label healthy: must not be flagged"
     Assert-True ($r.repeat.Stuck -and $r.repeat.Out -match '\(a\)') "$label repeat: (a) must flag"
     Assert-True ($r.dead.Stuck -and $r.dead.Out -match '\(b\)') "$label dead log: (b) must flag"
+    Assert-True ($r.mcponly.Stuck -and $r.mcponly.Out -match '\(b\)') "$label dead log with only MCP-server python: (b) must flag"
+    Assert-True (-not $r.pytest.Stuck) "$label dead log with pytest python running: must not flag"
     Assert-True (-not $r.progress.Stuck) "$label progress (same cmd, advancing results): must not flag"
     Assert-True (-not $r.deadbuild.Stuck) "$label dead log with ninja running: must not flag"
     Assert-True ($r.real.Stuck -and $r.real.Out -match '\(b\)') "$label real fixture: must flag (b)"
@@ -99,6 +103,7 @@ function Run-Cases([string]$script, [string]$label) {
     Assert-True ($r.real.Out -match ' USE ' -and $r.real.Out -match ' RES ' -and $r.real.Out -match ' TXT ') "$label real fixture: USE/RES/TXT lines"
     Assert-True ($r.real.Json -and $r.real.Json.stuck_count -eq 1 -and $r.real.Json.agents[0].stuck -eq $true) "$label real fixture: JSON summary stuck"
     Assert-True ($r.all.Json -and $r.all.Json.count -eq 6 -and $r.all.Json.stuck_count -eq 4) "$label -All: 6 agents, 4 stuck (got $($r.all.Json.count)/$($r.all.Json.stuck_count))"
+    Assert-True ($r.all.Json -and $r.all.Json.elapsed_s -lt 10) "$label -All: elapsed_s under 10 (got $($r.all.Json.elapsed_s))"
     Assert-True ($r.all.Out -match 'STUCK\?') "$label -All: table carries STUCK?"
     Assert-True ($missingCode -eq 1) "$label unknown id exits 1 (got $missingCode)"
     Assert-True ($usageCode -eq 2) "$label no args exits 2 (got $usageCode)"
@@ -113,6 +118,7 @@ try {
             @{ name = '(a) repeat detection disabled'; from = '$norm.Count -eq 1'; to = '$norm.Count -eq 99'; expect = 'repeat' },
             @{ name = '(a) result-unchanged test dropped'; from = '$ru.Count -eq 1'; to = '$true'; expect = 'progress' },
             @{ name = '(b) staleness test inverted'; from = '$ageLog -gt $StaleMin'; to = '$ageLog -lt $StaleMin'; expect = 'dead' },
+            @{ name = '(b) MCP exclusion dropped'; from = 'if (Test-McpCmd $p.Cmd) { continue }'; to = ''; expect = 'mcponly' },
             @{ name = '(b) running-process test dropped'; from = '$bp.Count -eq 0'; to = '$true'; expect = 'dead build' }
         )
         foreach ($m in $muts) {
@@ -136,7 +142,7 @@ if ($failures.Count) {
     $failures | ForEach-Object { Write-Host "  - $_" }
     exit 1
 }
-Write-Host "PASS: agent_tail ($n assertions, 4 mutations caught)"
+Write-Host "PASS: agent_tail ($n assertions, 5 mutations caught)"
 exit 0
 
 

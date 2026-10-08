@@ -150,6 +150,29 @@ try {
     $r = Run-Land $c @("-ChecksScript", (Stub "exit 1"))
     Assert ($r.Code -eq 1 -and $r.Json.error -match 'post-rebase checks failed') "refused"
     Assert ((OriginHead) -eq $before) "nothing pushed"
+
+    Write-Host "case: -RemoveWorktree from a linked worktree whose process cwd is inside it"
+    $mainc = New-Clone "c_wtmain"
+    $wt = Join-Path $tmp "c_wt_linked"
+    git -C $mainc worktree add -b wtbranch $wt *>$null
+    Commit-File $wt "wt.txt" "x" "wt"
+    $r = Run-Land $wt @("-RemoveWorktree", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true -and -not $r.Json.error) "landed and removal reported ok (out: $($r.Out.Trim() -replace '\s+',' '))"
+    Assert (-not (Test-Path -LiteralPath $wt)) "worktree directory is gone (no empty remnant)"
+    Assert (-not ((git -C $mainc worktree list --porcelain) -match 'c_wt_linked')) "worktree unregistered"
+
+    Write-Host "case: two comma-separated -AllowFail regexes; no GetFullPath noise"
+    $c = New-Clone "c_two"
+    Commit-File $c "two.txt" "x" "two"
+    "  FAIL  tools/check_x.ps1 (exit 1)`r`n  FAIL  tools/check_y.ps1 (exit 1)`r`n2 of 4 checks FAILED:`r`n2 passed, 0 skipped (0 due to -Fast), 2 failed." | Set-Content -LiteralPath $log -Encoding Unicode
+    $r = Run-Land $c @("-CheckLog", $log, "-AllowFail", "check_x,check_y", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true -and $r.Json.allowed_fails.Count -eq 2) "comma-separated -AllowFail accepts both"
+    Assert ($r.Out -notmatch 'GetFullPath') "no GetFullPath exception in output"
+    $wt2 = Join-Path $tmp "c_wt_two"
+    git -C $c worktree add -b wtb2 $wt2 *>$null
+    Commit-File $wt2 "wt2.txt" "x" "wt2"
+    $r = Run-Land $wt2 @("-ChecksScript", $okStub)
+    Assert ($r.Out -notmatch 'GetFullPath') "linked worktree: no GetFullPath exception"
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

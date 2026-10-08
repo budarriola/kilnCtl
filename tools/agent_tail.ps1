@@ -51,9 +51,29 @@ function ResultText($c) {
     }
     return ''
 }
+function Read-TailLines([string]$path, [int]$n) {
+    # Seek near the end (never read the whole transcript); drop the possibly partial first line.
+    $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $want = 1MB; $text = ''
+        while ($true) {
+            $start = [math]::Max(0, $fs.Length - $want)
+            [void]$fs.Seek($start, 'Begin')
+            $buf = New-Object byte[] ($fs.Length - $start)
+            $got = 0
+            while ($got -lt $buf.Length) { $r = $fs.Read($buf, $got, $buf.Length - $got); if ($r -le 0) { break }; $got += $r }
+            $text = [Text.Encoding]::UTF8.GetString($buf, 0, $got)
+            $lines = @($text -split "`r?`n")
+            if ($start -gt 0 -and $lines.Count) { $lines = @($lines | Select-Object -Skip 1) }
+            if ($start -eq 0 -or $lines.Count -ge $n -or $want -ge 32MB) { break }
+            $want *= 4
+        }
+        @($lines | Where-Object { $_ } | Select-Object -Last $n)
+    } finally { $fs.Dispose() }
+}
 function Get-Events([string]$path) {
     $ev = New-Object System.Collections.ArrayList
-    foreach ($line in (Get-Content -LiteralPath $path -Tail 500 -Encoding UTF8)) {
+    foreach ($line in (Read-TailLines $path 120)) {
         if (-not $line.StartsWith('{')) { continue }
         try { $o = $line | ConvertFrom-Json } catch { continue }
         if (-not $o.timestamp -or -not $o.message) { continue }
@@ -89,10 +109,60 @@ function Get-PolledLogs([string]$cmd) {
     if ($m2.Success) { $out += $m2.Groups[1].Value }
     $out | Select-Object -Unique
 }
-function Get-BuildProcs {
-    $pat = '^(ninja|cmake|cl|cc1|cc1plus|cc1obj|pytest|python[\d.]*|pythonw)$|-gcc$|-g\+\+$'
-    $names = if ($null -ne $ProcessSnapshot) { $ProcessSnapshot } else { (Get-Process | Select-Object -ExpandProperty ProcessName) }
-    @($names | Where-Object { $_ -match $pat } | Select-Object -Unique)
+function Test-McpCmd([string]$c) {
+    # long-lived MCP servers (python on 8766/8767, kicad/kilnctrl servers, pdf-mcp) are never build activity
+    $c -match '(?i)mcp[_-]?server|kicad_mcp|pdf-mcp|mcp_servers|kilnctrl[._-]*(mcp|server)|\bmcp\b|--port[ =]?876[67]|:876[67]\b'
+}
+function Test-BuildCmd([string]$c) {
+    $c -match '(?i)idf\.py|pytest|\bbuild_[\w.-]+|run_all_checks|\bcmake\b|\bninja\b|esp-idf|idf_tools|export\.ps1'
+}
+$script:ProcCache = $null
+function Get-BuildProcs([string]$logPath) {
+    # Returns the processes that count as live build activity for the polled log.
+    # -ProcessSnapshot entries are "name" or "name::command line".
+    $procs = @()
+    if ($null -ne $script:ProcCache) { $procs = $script:ProcCache }
+    elseif ($null -ne $ProcessSnapshot) {
+        foreach ($e in $ProcessSnapshot) {
+            $k = $e -split '::', 2
+            $procs += [pscustomobject]@{ Name = $k[0]; Cmd = $(if ($k.Count -gt 1) { $k[1] } else { '' }); Pid = 0; Ppid = 0 }
+        }
+    } else {
+        try {
+            $procs = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+                    [pscustomobject]@{ Name = ($_.Name -replace '\.exe$', ''); Cmd = [string]$_.CommandLine; Pid = [int]$_.ProcessId; Ppid = [int]$_.ParentProcessId } })
+        } catch {
+            $procs = @(Get-Process | ForEach-Object { [pscustomobject]@{ Name = $_.ProcessName; Cmd = ''; Pid = 0; Ppid = 0 } })
+        }
+    }
+    $script:ProcCache = $procs
+    $dirs = @()
+    if ($logPath) {
+        $d = Split-Path -Parent $logPath
+        if ($d) { $dirs += $d }
+        if ($logPath -match '^([A-Za-z]:\wt\[^\]+)') { $dirs += $Matches[1] }
+    }
+    $norm = { param($x) ($x -replace '/', '\').ToLowerInvariant() }
+    $dirsN = @($dirs | ForEach-Object { & $norm $_ } | Select-Object -Unique)
+    $byPid = @{}; foreach ($p in $procs) { if ($p.Pid) { $byPid[$p.Pid] = $p } }
+    $mentionsDir = { param($c) $cn = & $norm $c; foreach ($dn in $dirsN) { if ($dn -and $cn.Contains($dn)) { return $true } }; $false }
+    $hits = @()
+    foreach ($p in $procs) {
+        $n = $p.Name
+        if ($n -match '^(ninja|cmake|cl|cc1|cc1plus|cc1obj|pytest)$|-gcc$|-g\+\+$') { $hits += $n; continue }
+        if ($n -notmatch '^(python[\d.]*|pythonw|py)$') { continue }
+        if (Test-McpCmd $p.Cmd) { continue }
+        if (Test-BuildCmd $p.Cmd) { $hits += $n; continue }
+        if (& $mentionsDir $p.Cmd) { $hits += $n; continue }
+        # parent chain mentions the build or the polled worktree
+        $cur = $p; $depth = 0
+        while ($cur -and $cur.Ppid -and $byPid.ContainsKey($cur.Ppid) -and $depth -lt 8) {
+            $cur = $byPid[$cur.Ppid]; $depth++
+            if (Test-McpCmd $cur.Cmd) { break }
+            if ((Test-BuildCmd $cur.Cmd) -or (& $mentionsDir $cur.Cmd)) { $hits += $n; break }
+        }
+    }
+    @($hits | Select-Object -Unique)
 }
 
 function Analyze([string]$path) {
@@ -139,9 +209,9 @@ function Analyze([string]$path) {
             $lw = (Get-Item -LiteralPath $lp).LastWriteTime
             $ageLog = ((Get-Date) - $lw).TotalMinutes
             if ($ageLog -gt $StaleMin) {
-                $bp = Get-BuildProcs
+                $bp = Get-BuildProcs $lp
                 if ($bp.Count -eq 0) {
-                    $reasons += ("(b) polling {0}, last written {1:N0} min ago, no build/python process running" -f $lp, $ageLog)
+                    $reasons += ("(b) polling {0}, last written {1:N0} min ago, no build/test process running" -f $lp, $ageLog)
                 }
             }
         }
@@ -162,7 +232,9 @@ if ($All) {
     if ($files.Count -eq 0) { Write-Host "agent $Id not found under $ProjectsDir"; Out-Json @{ error = 'not found'; id = $Id }; exit 1 }
 }
 
+$swT = [Diagnostics.Stopwatch]::StartNew()
 $rows = @($files | ForEach-Object { Analyze $_.FullName })
+$swT.Stop()
 if (-not $All) {
     $r = $rows[0]
     Write-Host ("agent {0}" -f $r.Id)
@@ -181,6 +253,7 @@ if (-not $All) {
 $sum = @{
     agents = @($rows | ForEach-Object { @{ id = $_.Id; description = $_.Desc; last_utc = $_.Last.ToString('o'); age_min = $_.AgeMin; stuck = ($_.Reasons.Count -gt 0); reasons = @($_.Reasons); last_command = (Clip $_.LastCmd 120) } })
     count = $rows.Count
+    elapsed_s = [math]::Round($swT.Elapsed.TotalSeconds, 2)
     stuck_count = @($rows | Where-Object { $_.Reasons.Count }).Count
 }
 Out-Json $sum
