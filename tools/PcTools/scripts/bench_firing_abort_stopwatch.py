@@ -53,6 +53,16 @@ reports state/fault_reason and /api/status already reports relays[]/age_ms
 (io_read()/profiles_get_exec_status() below use the UART bridge equivalents
 of those, so this works over the same link a real firing runs on).
 
+KNOWN PREMISE GAP (review 2026-10-07): debug_reset(peer="pico") runs in
+mode "run", so the Pico reboots and resumes telemetry within a few seconds.
+That was enough for the 1.5 s ceiling (LINK_PROTOCOL.md sec 8 records the
+fault "self-cleared ... once the Pico rebooted and resumed sending") but it
+is very unlikely to hold the link silent for 30 s. Expect this script to
+FAIL ("never reached FAULTED") as written; that is a fail-closed outcome,
+never a false PASS, but it spends the firing. Holding the link down for
+30 s (Pico halt, or a physical disconnect) is an owner decision, since it
+also takes the independent safety processor out of the loop mid-firing.
+
 SAFETY: this silences the safety processor's telemetry on a board that MUST
 have a real firing running, by design -- that is the whole point of the
 test. It refuses to run at all unless profiles_get_exec_status() already
@@ -200,7 +210,13 @@ def measure_abort(poll_period, max_wait, *, clock=time.time, sleep=time.sleep,
             t_faulted = now
             fault_guard = guard
         relays_off = relays_all_off()
-        if t_relays_off is None and relays_off:
+        # Only a reading taken at or after FAULTED counts: relays read off
+        # earlier (a time-proportioned off-phase, or the 1.5 s link-fault
+        # relay-on refusal) say nothing about the abort dropping them, and
+        # would otherwise leave a stale t_relays_off that PASSes even if the
+        # relays came back on after the fault. `is True` so an unreadable
+        # (None) reading never counts as off.
+        if t_relays_off is None and t_faulted is not None and relays_off is True:
             t_relays_off = now
         elapsed = now - t0
         line = (f"  t+{elapsed:6.1f}s  exec_state={state}  relays_off={relays_off}"

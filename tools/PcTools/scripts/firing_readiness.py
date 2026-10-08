@@ -10,7 +10,9 @@ Sequence (stops at the first failing step; later steps are recorded as
      no present-and-unacknowledged record. An unreadable report is a FAIL,
      never a pass.
   2. soak                 -- stability_soak.py --firing-in-progress (exit 0 =
-     PASS). Needs a firing already RUNNING; it refuses (rc 2) otherwise.
+     PASS). It does NOT refuse an idle board under that flag (it warns and
+     soaks anyway); a missing firing is caught by step 3's own RUNNING check,
+     which FAILs, so it can never reach an overall PASS.
   3. stopwatch            -- bench_firing_abort_stopwatch.py
      --i-am-aborting-a-real-firing. DESTRUCTIVE BY DESIGN: it silences the
      safety link and aborts the firing, which is why it runs last and only
@@ -18,6 +20,13 @@ Sequence (stops at the first failing step; later steps are recorded as
 
 Because step 3 aborts the firing, this script refuses to run unless
 --i-am-aborting-a-real-firing is passed (the same ack the stopwatch demands).
+
+THIS SCRIPT DOES NOT STOP THE FIRING. Only a passing step 3 is known to have
+faulted it. On any other outcome (a failed or timed-out step, a skipped
+stopwatch, a stopwatch that never saw FAULTED) the firing may still be
+RUNNING; killing this script or the host does not stop it either. Check
+profiles_get_exec_status() and call profiles_stop() if it is still running.
+The verdict JSON says so in "firing_may_still_be_running".
 
 Verdict file: <repo>/logs/firing_readiness/<UTC timestamp>.json (gitignored):
   {"verdict": "PASS"|"FAIL", "started": ..., "steps": [{"name", "status":
@@ -62,6 +71,9 @@ def check_crash_absent(host: "str | None", get_crash_report=None) -> "tuple[bool
         return False, f"crash_report unreadable: {exc}"
     if not isinstance(report, dict):
         return False, f"crash_report returned a non-object: {report!r}"
+    if not isinstance(report.get("present"), bool):
+        # {} or an error object must not read as "no crash on record".
+        return False, f"crash_report has no boolean 'present' field: {report!r}"
     if report.get("present") and not report.get("acknowledged", False):
         return False, "UNACKNOWLEDGED crash report present"
     return True, "no unacknowledged crash report"
@@ -74,6 +86,8 @@ def run_script(argv: "list[str]", timeout: "float | None") -> "tuple[int, str]":
                               text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return 124, f"timed out after {timeout}s"
+    except Exception as exc:  # noqa: BLE001 -- any launch failure is a FAIL, never a crash with no verdict
+        return 125, f"could not run {argv[0]}: {exc}"
     tail = "\n".join((proc.stdout + proc.stderr).strip().splitlines()[-20:])
     return proc.returncode, tail
 
@@ -118,7 +132,13 @@ def run_readiness(args, *, crash_check=check_crash_absent, runner=run_script,
                            "--i-am-aborting-a-real-firing"], 300)
         record("abort_stopwatch", rc == 0, tail, rc)
 
-    verdict["verdict"] = "FAIL" if failed else "PASS"
+    # PASS only when every expected step actually ran and passed; a skipped
+    # or missing step can never contribute to a PASS.
+    expected = ["crash_report_absent", "soak_firing_in_progress", "abort_stopwatch"]
+    all_passed = ([s["name"] for s in steps] == expected
+                  and all(s["status"] == "PASS" for s in steps))
+    verdict["verdict"] = "PASS" if (all_passed and not failed) else "FAIL"
+    verdict["firing_may_still_be_running"] = verdict["verdict"] != "PASS"
     verdict["finished"] = now()
     return verdict
 
@@ -148,6 +168,10 @@ def main(argv: "list[str] | None" = None) -> int:
     for s in verdict["steps"]:
         print(f"  {s['status']:7s} {s['name']}: {s['detail'].splitlines()[-1] if s['detail'] else ''}")
     print(f"{verdict['verdict']}: {path}")
+    if verdict.get("firing_may_still_be_running", True):
+        print("WARNING: the firing was NOT confirmed aborted and may still be "
+              "RUNNING. Check profiles_get_exec_status() and call "
+              "profiles_stop() if so; stopping this script does not stop it.")
     return 0 if verdict["verdict"] == "PASS" else 1
 
 

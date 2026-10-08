@@ -93,6 +93,28 @@ def test_relays_never_confirmed_off_fails():
     assert any("never confirmed off" in line for line in report)
 
 
+def test_relays_off_before_fault_then_on_is_not_a_pass():
+    """Relays read off during the pre-abort window (PWM off-phase or the
+    1.5 s link-fault refusal) and back ON after FAULTED must FAIL: only a
+    reading at or after FAULTED confirms the abort dropped them."""
+    clk = FakeClock()
+    t0 = clk.t
+
+    def status():
+        if clk.t - t0 >= 30.0:
+            return sw.PROFILE_EXEC_FAULTED, 0
+        return sw.PROFILE_EXEC_RUNNING, 0
+
+    meas = sw.measure_abort(1.0, 60.0, clock=clk.now, sleep=clk.sleep,
+                            silence=lambda: "ok", exec_status=status,
+                            relays_all_off=lambda: clk.t - t0 < 30.0)
+    assert meas["t_relays_off"] is None
+    ok, report = sw.judge_abort(meas["t0"], meas["t_faulted"], meas["t_relays_off"],
+                                1.0, 60.0)
+    assert not ok
+    assert any("never confirmed off" in line for line in report)
+
+
 def test_unreadable_status_is_not_a_pass():
     (ok, _), meas = run_measure(unreadable_status=True, relays_off_at=0.0)
     assert not ok

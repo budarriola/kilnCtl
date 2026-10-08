@@ -96,3 +96,40 @@ def test_main_writes_verdict_json_and_exit_codes(tmp_path, monkeypatch):
         files = list(out.glob("*.json"))
         assert len(files) == 1
         assert json.loads(files[0].read_text())["verdict"] == verdict
+
+
+def test_crash_check_missing_present_field_is_fail():
+    assert not fr.check_crash_absent("h", get_crash_report=lambda h: {})[0]
+    assert not fr.check_crash_absent(
+        "h", get_crash_report=lambda h: {"error": "busy"})[0]
+
+
+def test_runner_launch_failure_is_fail(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("no python")
+    monkeypatch.setattr(fr.subprocess, "run", boom)
+    rc, detail = fr.run_script(["x.py"], 5)
+    assert rc != 0 and "could not run" in detail
+
+
+def test_runner_timeout_is_fail(monkeypatch):
+    def slow(*a, **k):
+        raise fr.subprocess.TimeoutExpired(cmd="x", timeout=5)
+    monkeypatch.setattr(fr.subprocess, "run", slow)
+    rc, _ = fr.run_script(["x.py"], 5)
+    assert rc != 0
+
+
+def test_firing_flag_set_unless_pass():
+    v = fr.run_readiness(args(), crash_check=OK, runner=Runner([0, 0]))
+    assert v["firing_may_still_be_running"] is False
+    v = fr.run_readiness(args(), crash_check=OK, runner=Runner([0, 1]))
+    assert v["firing_may_still_be_running"] is True
+
+
+def test_main_warns_firing_may_still_run(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(fr, "run_readiness", lambda a: {
+        "verdict": "FAIL", "started": "x", "steps": [],
+        "firing_may_still_be_running": True})
+    assert fr.main(["--i-am-aborting-a-real-firing", "--out-dir", str(tmp_path)]) == 1
+    assert "profiles_stop()" in capsys.readouterr().out
