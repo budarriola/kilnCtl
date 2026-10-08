@@ -681,6 +681,8 @@ panel — it only feeds the legacy resistive NS2009 path; the live knob is the
 `KILNCTL_TOUCH_CAP_*` family. See `firmware/KilnFW/docs/PROJECT_STATUS.md`
 "Hardware present on this bench unit" for the full explanation.
 
+UTF-16 logs: PowerShell `*>` writes UTF-16LE, so `grep`/`until` loops silently never match. Wait with `tools/wait_for.ps1` (bounded, encoding-aware, `WAIT_RESULT {json}`; from Bash: `powershell -ExecutionPolicy Bypass -File tools/wait_for.ps1 -TimeoutSec 600 -LogFile x.log -Pattern DONE`) and read a log with `tools/decode_log.ps1 x.log`.
+
 Run `tools/run_all_checks.ps1` with `-ExecutionPolicy Bypass`. Without it the
 script fails to load, and the Bash tool still reports exit 0 for the wrapper
 — an unbypassed run looks like a pass when nothing ran. Separately, SaftyFW

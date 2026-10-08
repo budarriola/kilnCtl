@@ -131,3 +131,7 @@ too.
 - Poll a background build yourself with a blocking foreground command until it finishes.
   Do not hand back, or repeat, a "still waiting on my background build" report turn after
   turn.
+- Wait with `tools\wait_for.ps1`, never a hand-written `until` loop. It is bounded
+  (`-TimeoutSec`), decodes UTF-16 logs (PowerShell `*>` writes UTF-16LE, which `grep` loops
+  never match) and ends with a `WAIT_RESULT {json}` line (exit 0 MET, 124 TIMEOUT, 2 ERROR).
+  `tools\decode_log.ps1 <file>` prints such a log as UTF-8.

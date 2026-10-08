@@ -200,6 +200,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_uart_version_independence.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] UART_PROTOCOL_VERSION re-derived from KILNLINK_PROTOCOL_VERSION ; [09-16g] alias to KILNLINK_PROTOCOL_VERSION again | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; hand-restored; PASS |
 | `tools/check_uri_handler_cap.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] max_uri_handlers lowered below the real route count ; [09-16g] max_uri_handlers set to 1 | [09-16d] RED, both counts named; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; hand-restored; PASS |
 | `tools/check_volatile_ceiling_write_callers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_wait_for.ps1` | NEGATIVE-TESTED | 10-08 | UTF-16 detection disabled; -Any made behave as -All; TIMEOUT exit 124 changed to 1; PID-exit never recorded; -File test path broken; incremental carry dropped | each RED (named case FAIL, exit 1); hand-restored; PASS |
 | `tools/check_web_gzip_parity.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/check_wifi_ram_storage_mirror.ps1` | NEGATIVE-TESTED | 10-02 | mirrored constant edited in wifi_prov.c | RED; restored |
 | `tools/check_zone_graphic_render.ps1` | NOT AUDITED | - | none | NOT AUDITED |
