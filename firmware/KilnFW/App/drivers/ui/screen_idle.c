@@ -400,7 +400,7 @@ esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y,
         // swallowed, the caller was already reporting RELEASED to LVGL for
         // every poll of it (see screen_idle.h's touch_held comment), so
         // this changes nothing observable, only resets bookkeeping.
-        idle->touch_held = false;
+        display_power_touch_gate_release(&idle->touch_gate, screen_idle_now_ms());
         screen_idle_unlock(idle);
         return ESP_OK;
     }
@@ -408,16 +408,18 @@ esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y,
     uint32_t now_ms = screen_idle_now_ms();
     bool was_wake = !idle->screen_on;
 
-    if (!idle->touch_held) {
+    if (display_power_touch_gate_press(&idle->touch_gate, now_ms)) {
         // Press EDGE: exactly one display_power_policy_step() call with
-        // touch_event=true per the header's calling contract.
-        idle->touch_held = true;
-        idle->touch_held_swallow = screen_idle_run_policy_locked(idle, now_ms, true);
+        // touch_event=true per the header's calling contract. A re-press
+        // right after a swallowed touch's release (controller dropout) is
+        // NOT an edge -- see display_power_touch_gate_t.
+        display_power_touch_gate_record(&idle->touch_gate,
+                                        screen_idle_run_policy_locked(idle, now_ms, true));
     }
     // Repeat within the same held press: return the edge's cached verdict,
     // do NOT re-run the policy (would violate "exactly one call per edge").
 
-    *out_swallow = idle->touch_held_swallow;
+    *out_swallow = idle->touch_gate.held_swallow;
     screen_idle_unlock(idle);
 
     if (was_wake) ESP_LOGI(TAG, "screen woken");

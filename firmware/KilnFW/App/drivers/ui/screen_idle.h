@@ -90,8 +90,7 @@ typedef struct {
      * for the rest of that one press/release gesture so a drag reads
      * consistently (never re-decided mid-gesture, never dropped for the
      * NEXT separate press once this one releases). */
-    bool touch_held;
-    bool touch_held_swallow;
+    display_power_touch_gate_t touch_gate; /* press-edge + release-debounce tracker (display_power_policy.h) */
 
     /* error_active is a LEVEL (dashboard_get_status()'s cached diag_state);
      * display_power_policy_step() needs the ENTERED-this-tick EDGE (see

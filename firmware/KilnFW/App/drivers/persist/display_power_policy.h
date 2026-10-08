@@ -132,6 +132,41 @@ typedef struct {
 // the calling contract (once per touch edge, once per idle-poll tick).
 display_power_result_t display_power_policy_step(const display_power_input_t *in);
 
+
+// ---------------------------------------------------------------------------
+// Touch gate: press-edge tracking with a release debounce (2026-10-07).
+//
+// A physical touch controller can drop a sample or two mid-touch (a failed
+// I2C read, a single not-pressed frame). Each such dropout looked like a
+// release, so the very next pressed sample was a "new" press edge: for a
+// touch that woke the screen, the screen was already ON by then, so the
+// policy passed this re-press through to LVGL and a wake tap acted on the
+// widget underneath. The gate treats a re-press within
+// DISPLAY_POWER_TOUCH_REPRESS_MS of the release of a SWALLOWED touch as a
+// continuation of that same touch (still swallowed, policy not re-run).
+// Pure: no locking, the caller (screen_idle.c) holds its own lock.
+#define DISPLAY_POWER_TOUCH_REPRESS_MS 250u
+
+typedef struct {
+    bool held;            // a press is currently down (edge already taken)
+    bool held_swallow;    // verdict of the current / most recent touch
+    bool have_release;    // last_release_ms is meaningful
+    uint32_t last_release_ms;
+} display_power_touch_gate_t;
+
+// A pressed sample. Returns true iff this is a genuine NEW press edge that
+// the caller must feed to display_power_policy_step() with touch_event=true
+// (and then store its verdict with display_power_touch_gate_record()).
+// Returns false for a held repeat or a debounced re-press; the caller then
+// reports gate->held_swallow.
+bool display_power_touch_gate_press(display_power_touch_gate_t *gate, uint32_t now_ms);
+
+// Store the policy's swallow verdict for the edge just taken.
+void display_power_touch_gate_record(display_power_touch_gate_t *gate, bool swallow);
+
+// A release sample.
+void display_power_touch_gate_release(display_power_touch_gate_t *gate, uint32_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

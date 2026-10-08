@@ -1688,11 +1688,18 @@ invisible on the page the operator watches.
 - [ ] **LCD home layout not verified on hardware.** Chart filling to the
       Start button, the hidden trip strip, and no-scroll at 480x320 were all
       built after the board was disconnected. Needs a look on the bench.
-- [ ] **Owner reports some LCD back buttons don't work; not reproduced.**
-      Every `back_page`/`prev_cb`/`next_cb` target was checked against
-      `kiln_ui.c`'s registry and all resolve, and every topbar is raised
-      after its content exists. If still seen on hardware, suspect touch
-      calibration/hit-test drift rather than page-registry wiring.
+- [x] **Owner reports some LCD back buttons don't work** -- CLOSED
+      2026-10-07: tested on 2663925c, all back buttons pass (config,
+      temperature, diagnostics, network, network_manage, profiles,
+      profile_detail, profile_segments, profile_builder_zones); the first
+      tap after screen blank is a wake swallow (`touch_get_state`
+      `last_swallow_reason=wake`), which is the likely source of the report.
+      One wake tap still navigated: a touch-controller dropout mid-touch
+      read as a release, so the next sample was a "new" press on the
+      now-awake screen; fixed by the release debounce in
+      `display_power_touch_gate_*` (display_power_policy.c). Still
+      unverified on hardware: profile_builder_segment, profile_builder_review,
+      live_decide, edit_firing back buttons.
 
 - [x] **`UART_TASK_ID_WIFI` (11) sometimes doesn't register at boot** — DONE
       2026-09-07. Root-caused, not a race and not Wi-Fi-provisioning
