@@ -1,14 +1,14 @@
-# check_check_cache.ps1 -- unit test for tools/check_cache.ps1 (the machine-wide
+# check_check_cache.ps1 -- unit test for tools/checkcache_lib.ps1 (the machine-wide
 # check-result cache used by run_all_checks.ps1). Runs against a throwaway git
 # repo and a throwaway cache directory; touches neither the real tree nor the
 # real C:\wt\.checkcache.
 #
 # Each numbered case below was negative-tested by hand when this was written:
-# the matching line in check_cache.ps1 was broken, this script went RED, and
+# the matching line in checkcache_lib.ps1 was broken, this script went RED, and
 # the line was restored by hand (see the commit message for the list).
 $ErrorActionPreference = "Stop"
 $here = $PSScriptRoot
-. (Join-Path $here "check_cache.ps1")
+. (Join-Path $here "checkcache_lib.ps1")
 
 $fails = New-Object System.Collections.Generic.List[string]
 function Assert-That {
@@ -29,10 +29,11 @@ try {
     Remove-Item Env:\KILNCTL_FPTEST_PROBE -ErrorAction SilentlyContinue
 
     function Tgit { $ErrorActionPreference = "Continue"; & git -C $repo -c user.email=t@t -c user.name=t -c commit.gpgsign=false @args 2>&1 | Out-Null; if ($LASTEXITCODE -ne 0) { throw "git $args failed" } }
+    $rel0 = "check_ok.ps1"; $rel1 = "check_excluded.ps1"
     Tgit init -q
     Set-Content -LiteralPath (Join-Path $repo ".gitignore") -Value "ignored_out/"
-    Set-Content -LiteralPath (Join-Path $repo "check_ok.ps1") -Value "# checkcache: ok`nexit 0"
-    Set-Content -LiteralPath (Join-Path $repo "check_excluded.ps1") -Value "# touches the board`nexit 0"
+    Set-Content -LiteralPath (Join-Path $repo $rel0) -Value "# checkcache: ok`nexit 0"
+    Set-Content -LiteralPath (Join-Path $repo $rel1) -Value "# touches the board`nexit 0"
     Set-Content -LiteralPath (Join-Path $repo "data.txt") -Value "v1"
     Tgit add -A
     Tgit commit -q -m one
@@ -171,7 +172,7 @@ try {
     Assert-That (-not (Test-Path -LiteralPath (Join-Path $cacheDir "$k4.json"))) "corrupt entry is removed so it can be rewritten"
     # concurrent writers: N processes race the same key; exactly one file, valid JSON, no temps
     $cd = Join-Path $work "race"; New-Item -ItemType Directory -Path $cd -Force | Out-Null
-    $lib = Join-Path $here "check_cache.ps1"
+    $lib = Join-Path $here "checkcache_lib.ps1"
     $procs = 1..6 | ForEach-Object {
         $cmd = ". '$lib'; `$e = [ordered]@{ schema = 1; key = 'racekey'; result = 'PASS'; who = $_ }; [void](Write-CheckCacheEntry -Dir '$cd' -Key 'racekey' -Entry `$e)"
         Start-Process powershell -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd) -PassThru -WindowStyle Hidden

@@ -773,7 +773,7 @@ is present.
 **Check result cache (2026-10-08).** `run_all_checks.ps1` reuses a prior PASS of
 a check carrying a `# checkcache: ok` marker when `git status` is clean and the
 HEAD tree hash, run mode (-Fast/full) and tool/env fingerprint match
-(`tools/check_cache.ps1`, store `C:\wt\.checkcache\`, 7-day expiry). A hit
+(`tools/checkcache_lib.ps1`, store `C:\wt\.checkcache\`, 7-day expiry). A hit
 prints `PASS  <check> (cached <time> from <worktree>)` and the summary counts
 hits and time saved. A dirty tree, any doubt, or `-NoCache` /
 `KILNCTL_CHECKCACHE=0` means every check runs for real. Only PASS is stored.

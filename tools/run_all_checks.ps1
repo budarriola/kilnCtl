@@ -138,7 +138,7 @@ param(
     # pass those checks.
     [switch]$AllowSkips,
 
-    # Disable the machine-wide check-result cache (tools/check_cache.ps1;
+    # Disable the machine-wide check-result cache (tools/checkcache_lib.ps1;
     # KILNCTL_CHECKCACHE=0 does the same). Every check then runs for real.
     [switch]$NoCache,
 
@@ -619,9 +619,9 @@ if ($ListOnly) {
     exit 0
 }
 
-# Check-result cache (tools/check_cache.ps1): a PASS of an opt-in
+# Check-result cache (tools/checkcache_lib.ps1): a PASS of an opt-in
 # (`# checkcache: ok`) check is reused when the tree is clean and identical.
-. (Join-Path $PSScriptRoot "check_cache.ps1")
+. (Join-Path $PSScriptRoot "checkcache_lib.ps1")
 $script:CheckCacheCtx = Initialize-CheckCache -RepoRoot $repoRoot -Fast:$Fast -NoCache:$NoCache -PcToolsPython $selfcheckPython
 
 Write-Host ""

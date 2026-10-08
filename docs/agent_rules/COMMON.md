@@ -106,7 +106,7 @@ and `KILNCTL_BUILD_GATE_DIR` to private values.
 
 `tools/run_all_checks.ps1` reuses a prior PASS of a check when the content is
 provably identical, so many agents running `-Fast` on the same tree do not each
-re-run ~100 static checks. Logic: `tools/check_cache.ps1`; store:
+re-run ~100 static checks. Logic: `tools/checkcache_lib.ps1`; store:
 `C:\wt\.checkcache\` (one JSON per entry, 7-day expiry, size-capped).
 
 - **Key:** check path + git TREE hash of HEAD + run mode (-Fast/full) + env

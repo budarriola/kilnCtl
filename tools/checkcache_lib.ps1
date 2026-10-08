@@ -1,4 +1,4 @@
-# check_cache.ps1 -- machine-wide, per-content cache of check PASS results for
+# checkcache_lib.ps1 -- machine-wide, per-content cache of check PASS results for
 # tools/run_all_checks.ps1. Dot-source it; it defines functions only.
 #
 # PROBLEM (2026-10-07): many agent sessions each run `run_all_checks.ps1 -Fast`
