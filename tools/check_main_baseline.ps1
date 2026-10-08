@@ -129,11 +129,12 @@ try {
     # ---------------------------------------------------------------- 5
     Write-Host "case: run_all_checks -FailOnlyOnNew (scratch repo)"
     $sc = Join-Path $tmp "scratch"
+    function ScTool([string]$n) { Join-Path (Join-Path $sc "tools") $n }
     git init -b main $sc *>$null
     New-Item -ItemType Directory -Path (Join-Path $sc "tools") | Out-Null
     Copy-Item (Join-Path $tools "run_all_checks.ps1"), (Join-Path $tools "lib_pctools_python.ps1"), (Join-Path $tools "checkcache_lib.ps1"), (Join-Path $tools "main_baseline_lib.ps1") (Join-Path $sc "tools")
-    Set-Content -LiteralPath (Join-Path $sc "tools\check_ok.ps1") -Value "exit 0" -Encoding ascii
-    Set-Content -LiteralPath (Join-Path $sc "tools\check_known.ps1") -Value "Write-Host 'boom'; exit 1" -Encoding ascii
+    Set-Content -LiteralPath (ScTool "check_ok.ps1") -Value "exit 0" -Encoding ascii
+    Set-Content -LiteralPath (ScTool "check_known.ps1") -Value "Write-Host 'boom'; exit 1" -Encoding ascii
     git -C $sc add -A *>$null; git -C $sc commit -m base *>$null
     git -C $sc update-ref refs/remotes/origin/main (Rev $sc HEAD)
     function Run-Checks([string[]]$more) {
@@ -153,7 +154,7 @@ try {
     $r = Run-Checks @("-Only", "check_known")
     Assert ($r.Out -match 'Main baseline not recorded: -Only') "a filtered run does not record"
 
-    Set-Content -LiteralPath (Join-Path $sc "tools\check_new.ps1") -Value "exit 1" -Encoding ascii
+    Set-Content -LiteralPath (ScTool "check_new.ps1") -Value "exit 1" -Encoding ascii
     git -C $sc add -A *>$null; git -C $sc commit -m addnew *>$null
     $r = Run-Checks @()
     Assert ($r.Code -eq 1 -and $r.Out -match '(?m)^\s+NEW\s+tools\\check_new\.ps1' -and $r.Out -match '(?m)^\s+KNOWN\s+tools\\check_known\.ps1') "NEW and KNOWN listed"
@@ -166,13 +167,13 @@ try {
     Assert ($r.Code -eq 1) "default exit code unchanged: a KNOWN failure still fails"
     $r = Run-Checks @("-FailOnlyOnNew")
     Assert ($r.Code -eq 0 -and $r.Out -match 'NOT a clean run') "-FailOnlyOnNew exits 0 loudly when every failure is KNOWN"
-    Set-Content -LiteralPath (Join-Path $sc "tools\check_known.ps1") -Value "exit 0" -Encoding ascii
+    Set-Content -LiteralPath (ScTool "check_known.ps1") -Value "exit 0" -Encoding ascii
     git -C $sc add -A *>$null; git -C $sc commit -m fix *>$null
     $r = Run-Checks @()
     Assert ($r.Code -eq 0 -and $r.Out -match '(?m)^\s+FIXED\s+tools\\check_known\.ps1') "FIXED listed, green run exits 0"
     # No usable baseline: nothing is KNOWN, so -FailOnlyOnNew cannot excuse anything.
     Remove-Item -LiteralPath $bdir -Recurse -Force
-    Set-Content -LiteralPath (Join-Path $sc "tools\check_known.ps1") -Value "exit 1" -Encoding ascii
+    Set-Content -LiteralPath (ScTool "check_known.ps1") -Value "exit 1" -Encoding ascii
     git -C $sc add -A *>$null; git -C $sc commit -m rebreak *>$null
     $r = Run-Checks @("-FailOnlyOnNew")
     Assert ($r.Code -eq 1 -and $r.Out -match 'No usable baseline') "-FailOnlyOnNew with no baseline keeps the failing exit code"
