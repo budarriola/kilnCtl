@@ -139,10 +139,36 @@ if ($sourceFiles.Count -eq 0) {
     throw "check_on_off_trigger_input_producers: found ZERO production .c files under $driversDir -- wrong directory, or the check would pass vacuously."
 }
 
+. (Join-Path $PSScriptRoot "lib_typed_field_producers.ps1")
 $scanText = ""
+$typedInit = ""
+$typedVars = @()
+$ruleInit = ""
+$ruleCode = ""
+$ruleVars = @()
+$typedCode = ""
 foreach ($f in $sourceFiles) {
-    $scanText += ((Get-CodeOnlyLines -Path $f.FullName) -join "`n") + "`n"
+    $fileText = ((Get-CodeOnlyLines -Path $f.FullName) -join "`n") + "`n"
+    $scanText += $fileText
+    # Only files that reference the struct type can produce its fields; a
+    # same-named field of an unrelated struct elsewhere must not count.
+    if ($fileText -match 'on_off_trigger_input_t') {
+        $t = Get-TypedProducerText -CodeText $fileText -TypeName 'on_off_trigger_input_t'
+        $typedInit += $t.Init
+        $typedCode += $fileText
+        $typedVars += $t.Vars
+    }
+    # The embedded rule struct is produced as its own type (e.g.
+    # profile_resolve_on_off_rule()'s `on_off_trigger_rule_t resolved = {...}`).
+    if ($fileText -match 'on_off_trigger_rule_t') {
+        $t = Get-TypedProducerText -CodeText $fileText -TypeName 'on_off_trigger_rule_t'
+        $ruleInit += $t.Init
+        $ruleCode += $fileText
+        $ruleVars += $t.Vars
+    }
 }
+$typedVars = @($typedVars | Select-Object -Unique)
+$ruleVars = @($ruleVars | Select-Object -Unique)
 
 if ($scanText -notmatch 'on_off_trigger_input_t') {
     throw "check_on_off_trigger_input_producers: no production file even references on_off_trigger_input_t -- this check is looking at the wrong tree and would pass vacuously."
@@ -151,9 +177,11 @@ if ($scanText -notmatch 'on_off_trigger_input_t') {
 $missing = @()
 foreach ($field in $fields) {
     $escaped = [regex]::Escape($field)
-    $assigned = ($scanText -match "\.\s*$escaped\s*=") -or
-                ($scanText -match "->\s*$escaped\s*=") -or
-                ($scanText -match "\[\s*$escaped\s*\]")
+    if ($ruleFields -contains $field -and $inputFields -notcontains $field) {
+        $assigned = Test-FieldProducedInText -InitText $ruleInit -Vars $ruleVars -Field $field -CodeText $ruleCode
+    } else {
+        $assigned = Test-FieldProducedInText -InitText $typedInit -Vars $typedVars -Field $field -CodeText $typedCode
+    }
     if (-not $assigned) {
         $missing += $field
     }

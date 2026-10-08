@@ -70,9 +70,9 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_littlefs_component_pinned.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_main_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16, 09-16b | [09-16] --stack-bytes 100 override against a real ELF (compare arithmetic only) ; [09-16b] 2048 B then 4096 B volatile local injected in profile_encode_current_blob, real idf.py rebuild | [09-16] RED, names the worst path ; [09-16b] measured +2048 B exactly, then RED at 7728 B > 6144 B; forced fullclean rebuild back to 3632 B |
 | `firmware/KilnFW/App/test/check_no_duplicate_commissioning_impl.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_on_off_trigger_input_producers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_on_off_trigger_input_producers.ps1` | NEGATIVE-TESTED | - | scoped scan to on_off_trigger_input_t/rule_t initializers and typed vars (shared lib_typed_field_producers.ps1); tools/negtest.ps1 deleted `.min_off_s = p->src_min_off_s,` (previously masked by unrelated `e.min_off_s =`) and `.temp_measurement_c`, each RED; baseline PASS, real tree unchanged | NEGATIVE-TESTED |
 | `firmware/KilnFW/App/test/check_partition_labels_vs_firmware.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_pid_fuzzy_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_pid_fuzzy_drift.ps1` | NEGATIVE-TESTED | - | absolute 1e-4 tolerance replaced by per-gain relative 1e-5; tools/negtest.ps1 changed fuzzy_band_probe.py rate-STEADY cell (1.0,0.0,0.0)->(1.0,0.5,0.0) (ki delta 7.5e-5, previously MISSED), RED; baseline PASS (worst rel diff 1.4e-7) | NEGATIVE-TESTED |
 | `firmware/KilnFW/App/test/check_power_diag_flag_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | safety_link.h POWER_FLAG_ANY_CHANNEL_CLIPPED 0x02 changed to 0x04 | RED, names both values; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_profile_executor_wd_input_producers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_ramp_lock_decision_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | fabsf() wrapped around the ramp-lock subtraction; also > changed to >= | RED (fail-closed extraction error, not a semantic diff); hand-restored; PASS |
@@ -91,7 +91,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_stop_bar_body_padding.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_stub_signature_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_system_uart_bridge_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 512 B volatile local in cfg_fs.c sweep_tmp, real rebuild | +512 B exactly, RED 2448 B > 1936 B; fullclean rebuild back to baseline |
-| `firmware/KilnFW/App/test/check_thermal_guard_cfg_producers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_thermal_guard_cfg_producers.ps1` | NEGATIVE-TESTED | - | scoped scan to thermal_guard_cfg_t initializers/typed vars; tools/negtest.ps1 deleted `.cross_zone_period_s = cross_zone_period_s,` in profile_executor_run.c (previously masked by backup_import.c `tp->cross_zone_period_s =`), RED; baseline PASS, real tree unchanged | NEGATIVE-TESTED |
 | `firmware/KilnFW/App/test/check_thermal_guard_input_producers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_uart_log_bridge_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 256 B volatile local in uart_protocol.c frame_and_send, real rebuild | +256 B exactly, RED 1456 B > 1200 B; fullclean rebuild back to baseline |
 | `firmware/KilnFW/App/test/check_ui_budget_asserts.ps1` | NEGATIVE-TESTED | 09-16f | _Static_assert in ui_page_temperature.c wrapped in a comment | RED, names the missing assertion; hand-restored; PASS |

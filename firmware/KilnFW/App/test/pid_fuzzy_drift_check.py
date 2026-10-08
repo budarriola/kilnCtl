@@ -73,7 +73,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _drivers_layout import DriverFileError, resolve_driver_file  # noqa: E402
 
-TOLERANCE = 1e-4  # absolute, on gains that are themselves O(1e-2..1e0)
+# Per-gain RELATIVE tolerance (against the larger of the two values) plus a
+# tiny absolute floor. An absolute 1e-4 was blind on ki, whose base is ~3e-4:
+# a whole rate-class change shifting ki by 7.5e-5 (25%) passed. float32 (C)
+# vs float64 (Python) rounding is ~6e-8 relative, so 1e-5 has wide margin.
+REL_TOLERANCE = 1e-5
+ABS_FLOOR = 1e-9
+TOLERANCE = REL_TOLERANCE  # kept for the report line
 
 TEST_DIR = Path(__file__).resolve().parent
 HARNESS_SRC = TEST_DIR / "pid_fuzzy_drift_harness.c"
@@ -240,19 +246,21 @@ def main(argv=None):
                     return 1
                 continue
             diff = abs(cv - pv)
-            worst = max(worst, diff)
-            if diff > TOLERANCE:
+            scale = max(abs(cv), abs(pv))
+            rel = diff / scale if scale > 0 else 0.0
+            worst = max(worst, rel)
+            if diff > ABS_FLOOR and rel > REL_TOLERANCE:
                 sys.stderr.write(
                     f"PID_FUZZY DRIFT CHECK: FAILED at vector #{i}\n"
                     f"  inputs: error_c={error_c} error_rate={error_rate} "
                     f"error_band_c={eb} rate_band_c_per_s={rb} "
                     f"base=({base_kp},{base_ki},{base_kd}) strength_pct={strength}\n"
-                    f"  C {name}={cv!r}, Python {name}={pv!r}, |diff|={diff!r} > tolerance {TOLERANCE}\n"
+                    f"  C {name}={cv!r}, Python {name}={pv!r}, |diff|={diff!r} rel={rel!r} > rel tolerance {REL_TOLERANCE}\n"
                 )
                 return 1
 
     print(f"PID_FUZZY DRIFT CHECK: {len(vectors)} vectors agreed within tolerance "
-          f"(worst |diff| = {worst!r}, tolerance = {TOLERANCE}).")
+          f"(worst relative diff = {worst!r}, rel tolerance = {REL_TOLERANCE}).")
     return 0
 
 

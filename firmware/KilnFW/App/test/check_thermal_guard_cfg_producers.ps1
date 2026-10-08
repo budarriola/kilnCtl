@@ -124,10 +124,24 @@ if ($sourceFiles.Count -eq 0) {
     throw "check_thermal_guard_cfg_producers: found ZERO production .c files under $driversDir -- wrong directory, or the check would pass vacuously."
 }
 
+. (Join-Path $PSScriptRoot "lib_typed_field_producers.ps1")
 $scanText = ""
+$typedInit = ""
+$typedVars = @()
+$typedCode = ""
 foreach ($f in $sourceFiles) {
-    $scanText += ((Get-CodeOnlyLines -Path $f.FullName) -join "`n") + "`n"
+    $fileText = ((Get-CodeOnlyLines -Path $f.FullName) -join "`n") + "`n"
+    $scanText += $fileText
+    # Only files that reference the struct type can produce its fields; a
+    # same-named field of an unrelated struct elsewhere must not count.
+    if ($fileText -match 'thermal_guard_cfg_t') {
+        $t = Get-TypedProducerText -CodeText $fileText -TypeName 'thermal_guard_cfg_t'
+        $typedInit += $t.Init
+        $typedCode += $fileText
+        $typedVars += $t.Vars
+    }
 }
+$typedVars = @($typedVars | Select-Object -Unique)
 
 if ($scanText -notmatch 'thermal_guard_cfg_t') {
     throw "check_thermal_guard_cfg_producers: no production file even references thermal_guard_cfg_t -- this check is looking at the wrong tree and would pass vacuously."
@@ -136,9 +150,7 @@ if ($scanText -notmatch 'thermal_guard_cfg_t') {
 $missing = @()
 foreach ($field in $fields) {
     $escaped = [regex]::Escape($field)
-    $assigned = ($scanText -match "\.\s*$escaped\s*=") -or
-                ($scanText -match "->\s*$escaped\s*=") -or
-                ($scanText -match "\[\s*$escaped\s*\]")
+    $assigned = Test-FieldProducedInText -InitText $typedInit -Vars $typedVars -Field $field -CodeText $typedCode -ChainMembers @()
     if (-not $assigned) {
         $missing += $field
     }
