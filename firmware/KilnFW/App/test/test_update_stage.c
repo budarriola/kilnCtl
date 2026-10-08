@@ -533,7 +533,7 @@ static void test_interrupted_and_blank(void)
                "progress reported");
     TEST_CHECK(g_fl.read_ops == reads && g_fl.mut_ops == muts, "busy status touched no flash");
     TEST_CHECK(update_stage_clear(&g_st) == UPDATE_STAGE_ERR_BUSY, "clear refused while uploading");
-    TEST_CHECK(update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 100, NULL, NULL, STAGE_SOURCE_UPLOAD) ==
+    TEST_CHECK(update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 200, NULL, NULL, STAGE_SOURCE_UPLOAD) ==
                    UPDATE_STAGE_ERR_BUSY,
                "second begin refused while uploading");
     TEST_CHECK(g_fl.mut_ops == muts, "refusals touched no flash");
