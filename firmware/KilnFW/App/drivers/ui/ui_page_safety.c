@@ -77,6 +77,11 @@ static ui_safety_view_t s_view = { .tripped_live = false, .diag_unknown = true }
  * stack only because it is cheap to keep; the 1 KB dashboard_status_t is on
  * the stack, same as every other live LCD page. */
 static char s_text[340];
+/* Back-button target, read by ui_topbar's nav_cb at click time (the topbar
+ * keeps this pointer, not a copy). Set by ui_page_safety_open() on every
+ * entry; defaults to "home" so a path that skips the setter can never leak
+ * an unauthenticated viewer into the gated config hub. LVGL task only. */
+static char s_back_page[8] = "home";
 
 static lv_obj_t *build_row(lv_obj_t *parent, lv_color_t accent, bool dot_long)
 {
@@ -233,6 +238,12 @@ static void btn_clicked_cb(lv_event_t *e)
     ui_lcd_lock_run_gated("Enter admin PIN to clear trip", LCD_PIN_ROLE_ADMIN, clear_action, NULL);
 }
 
+void ui_page_safety_open(bool from_config)
+{
+    snprintf(s_back_page, sizeof(s_back_page), "%s", from_config ? "config" : "home");
+    kiln_ui_show("safety");
+}
+
 lv_obj_t *ui_page_safety_build(void)
 {
     lv_obj_t *scr = lv_obj_create(NULL);
@@ -246,7 +257,7 @@ lv_obj_t *ui_page_safety_build(void)
 
     ui_topbar_create(scr, &(ui_topbar_cfg_t){
         .title = "Safety",
-        .back_page = "config",
+        .back_page = s_back_page,
         .show_home = true,
     }, &s_topbar);
 

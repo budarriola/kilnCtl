@@ -1,6 +1,8 @@
 #ifndef UI_PAGE_SAFETY_H
 #define UI_PAGE_SAFETY_H
 
+#include <stdbool.h>
+
 #include "lvgl.h"
 
 #ifdef __cplusplus
@@ -13,6 +15,13 @@ extern "C" {
  * whether the button is offered is derived from live safety state on every
  * refresh -- see ui_page_safety_logic.h. */
 lv_obj_t *ui_page_safety_build(void);
+
+/* Show the Safety page. from_config selects where its Back button goes:
+ * true only from the (PIN-gated) config hub; false from the home trip strip,
+ * which is reachable WITHOUT a login. A page an unauthenticated viewer can
+ * open must never link onward to a gated page (2026-09-28 owner decision:
+ * dashboards only without login), so from the strip Back returns "home". */
+void ui_page_safety_open(bool from_config);
 
 #ifdef __cplusplus
 }

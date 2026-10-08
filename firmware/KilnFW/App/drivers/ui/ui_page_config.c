@@ -7,6 +7,7 @@
 #include "kiln_ui.h"
 #include "lvgl_port.h" /* lvgl_port_touch_cal_support() -- gates the Touch Calibration cell */
 #include "ui_page_profiles.h"
+#include "ui_page_safety.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
@@ -88,7 +89,7 @@ static void diagnostics_nav_cb(lv_event_t *e)
 static void safety_nav_cb(lv_event_t *e)
 {
     (void)e;
-    kiln_ui_show("safety");
+    ui_page_safety_open(true); /* hub is PIN-gated: Back may return here */
 }
 
 static void profiles_nav_cb(lv_event_t *e)

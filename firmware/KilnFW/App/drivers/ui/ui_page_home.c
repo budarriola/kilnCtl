@@ -184,6 +184,7 @@
 
 #include "ui_page_home_internal.h"
 #include "ui_page_profile_picker.h" /* ui_page_profile_picker_set_pick_cb() -- UI_PLAN.md 6.1 */
+#include "ui_page_safety.h" /* ui_page_safety_open() -- trip strip tap */
 
 const char *UI_HOME_TAG = "ui_page_home";
 
@@ -221,7 +222,7 @@ static void trip_strip_clicked_cb(lv_event_t *e)
 {
     (void)e;
     if (s_ui_home_trip_strip_is_safety) {
-        kiln_ui_show("safety");
+        ui_page_safety_open(false); /* ungated entry: Back must go home, not to the hub */
     }
 }
 
