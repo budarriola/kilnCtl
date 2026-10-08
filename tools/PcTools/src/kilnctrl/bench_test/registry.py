@@ -221,7 +221,7 @@ _WEB_IDS = [
     "WEB-LOG-01", "WEB-LOG-02", "WEB-LOG-03",
     "WEB-X-01", "WEB-X-02", "WEB-X-03",
 ]
-_LCD_IDS = [f"LCD-{i:02d}" for i in range(1, 26)]
+_LCD_IDS = [f"LCD-{i:02d}" for i in range(1, 27)]
 _SP = [
     ("SP-01", "Commissioning read-back"), ("SP-02", "Status and diag consistency"),
     ("SP-03", "Link stats over a firing"), ("SP-04", "Trip / clear"),

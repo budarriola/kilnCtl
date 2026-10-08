@@ -24,7 +24,11 @@ from . import judgments as J
 from . import lcd_sampler
 from .registry import CaseResult, Verdict, get_case
 from ..protocol import THERMO_CHANNEL_ALL
-from ..devices_touch import TOUCH_POWER_STATE_ERROR_HOLD, TOUCH_POWER_STATE_ON
+from ..devices_touch import (
+    TOUCH_POWER_STATE_ERROR_HOLD,
+    TOUCH_POWER_STATE_ON,
+    TOUCH_SWALLOW_REASON_WAKE,
+)
 from ..ui_test_client import _ENTER_PIN_RETRY_POLL_S
 
 import logging
@@ -5455,6 +5459,314 @@ def _case_lcd25(ctx: dict) -> CaseResult:
     return _lcd_edit_run(ctx, "LCD-25", _lcd24_plan, _lcd25_body)
 
 
+# ---------------------------------------------------------------------------
+# LCD-26 -- Back-button walk. Every LCD page reachable from home is entered by
+# a real touch_inject tap and left again by a real touch_inject tap on its
+# topbar Back icon; the landed page (ui.get_current_page()) must be the
+# page's documented parent. Coordinates are the source-derived geometry in
+# docs/COMMISSIONING_LCD_RUNBOOK.md "Tap geometry derived from source" (Table
+# 1 topbar icons at y=21, Table 2 config hub grid), bench-proven 2026-10-07;
+# the three data-dependent entries (Manage networks, the first profile row,
+# Segments) are resolved from list_tap_targets() by name/position instead.
+#
+# Never taps anything that starts a profile/firing/autotune or writes config:
+# no Start, no Pause, no Edit/Delete, no builder Next, no connect/forget. The
+# profiles "Add" icon only opens the builder's first page (zones), which is
+# left again with Back without saving anything.
+#
+# Wake handling: before EVERY tap `touch.get_state()` is read; a blanked
+# panel (or a power_state other than ON) gets a wake tap first and the case
+# demands last_swallow_reason == wake (and a grown swallow_count when the
+# firmware reports one) before it believes the panel is awake. A tap that
+# then fails to move the page while swallow_count grew is a swallowed tap,
+# retried once -- never judged as a broken Back button. A Back tap that
+# lands on the wrong page FAILs only when no swallow evidence exists.
+# ---------------------------------------------------------------------------
+
+_LCD26_ICON_Y = 21
+#: Topbar Back centre x by page (runbook Table 1; Back is the leftmost icon).
+_LCD26_BACK_X = {
+    "config": 454,
+    "temperature": 414,
+    "network": 414,
+    "network_manage": 414,
+    "diagnostics": 334,
+    "profiles": 294,
+    "profile_detail": 414,
+    "profile_segments": 334,
+    "profile_builder_zones": 414,
+    "safety": None,  # resolved from the page's own "back" tap target
+}
+_LCD26_GEAR = (454, _LCD26_ICON_Y)
+_LCD26_PROFILES_ADD = (454, _LCD26_ICON_Y)
+#: Config hub cell centres (runbook Table 2).
+_LCD26_HUB = {
+    "profiles": (119, 80),
+    "temperature": (345, 80),
+    "network": (119, 156),
+    "diagnostics": (345, 156),
+}
+_LCD26_TAP_SETTLE_S = 0.3
+_LCD26_MAX_TAP_ATTEMPTS = 2
+
+
+def _lcd26_touch_state(touch):
+    try:
+        return touch.get_state()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _lcd26_awake(state) -> "Optional[bool]":
+    if state is None:
+        return None
+    on = _power_state_is_on(state)
+    if on is None:
+        return bool(getattr(state, "screen_on", False))
+    return bool(on) and bool(getattr(state, "screen_on", True))
+
+
+def _lcd26_ensure_awake(env: dict) -> "tuple[bool, dict]":
+    """Wake the panel when touch_get_state says it is not on. Returns
+    (awake, info); awake False means a wake could not be confirmed."""
+    touch, sleep = env["touch"], env["sleep"]
+    info: Dict[str, Any] = {}
+    state = _lcd26_touch_state(touch)
+    awake = _lcd26_awake(state)
+    if awake is None or awake:
+        # unreadable state: proceed; the swallow check after the tap still guards
+        return True, info
+    before = getattr(state, "swallow_count", None)
+    for attempt in range(1, _ERROR_HOLD_DISMISS_MAX_ATTEMPTS + 2):
+        x, y = _WAKE_TOUCH_XY
+        try:
+            touch.inject(x, y, True)
+            touch.inject(x, y, False)
+        except Exception as exc:  # noqa: BLE001
+            info["wake_error"] = type(exc).__name__
+            return False, info
+        info["wake_taps"] = attempt
+        deadline = time.monotonic() + _WAKE_SCREEN_ON_TIMEOUT_S
+        while True:
+            sleep(_WAKE_SCREEN_ON_POLL_S)
+            state = _lcd26_touch_state(touch)
+            if _lcd26_awake(state):
+                reason = getattr(state, "last_swallow_reason", None)
+                count = getattr(state, "swallow_count", None)
+                info["wake_swallow_reason"] = reason
+                if reason is not None and reason != TOUCH_SWALLOW_REASON_WAKE:
+                    # woke, but the last swallow was not the wake tap: not the
+                    # expected signature, so do not trust it
+                    info["wake_reason_unexpected"] = True
+                    return False, info
+                if before is not None and count is not None and count <= before:
+                    info["wake_count_not_grown"] = True
+                    return False, info
+                return True, info
+            if time.monotonic() >= deadline:
+                break
+    return False, info
+
+
+def _lcd26_step(env: dict, label: str, xy: "tuple[int, int]", expect: str, kind: str) -> str:
+    """One tap. kind is 'enter' or 'back'. Returns 'ok' | 'miss' | 'swallowed'
+    | 'wake_unconfirmed' | 'error' and appends a record to env['steps']."""
+    touch, ui, sleep = env["touch"], env["ui"], env["sleep"]
+    rec: Dict[str, Any] = {"label": label, "kind": kind, "xy": list(xy), "expect": expect}
+    env["steps"].append(rec)
+    status = "miss"
+    for attempt in range(1, _LCD26_MAX_TAP_ATTEMPTS + 1):
+        awake, info = _lcd26_ensure_awake(env)
+        if info:
+            rec.setdefault("wake", []).append(info)
+        if not awake:
+            rec["status"] = status = "wake_unconfirmed"
+            return status
+        state = _lcd26_touch_state(touch)
+        before = getattr(state, "swallow_count", None)
+        try:
+            press = touch.inject(xy[0], xy[1], True)
+            release = touch.inject(xy[0], xy[1], False)
+        except Exception as exc:  # noqa: BLE001
+            rec["status"] = status = "error"
+            rec["error"] = type(exc).__name__
+            return status
+        if not (getattr(press, "ok", True) and getattr(release, "ok", True)):
+            rec["status"] = status = "error"
+            rec["error"] = "touch_inject refused"
+            return status
+        sleep(_LCD26_TAP_SETTLE_S)
+        try:
+            page, _ = _wait_for_page(ui, expect)
+        except Exception as exc:  # noqa: BLE001
+            rec["status"] = status = "error"
+            rec["error"] = type(exc).__name__
+            return status
+        rec["landed"] = page
+        rec["attempts"] = attempt
+        if page == expect:
+            rec["status"] = status = "ok"
+            return status
+        after = getattr(_lcd26_touch_state(touch), "swallow_count", None)
+        if before is not None and after is not None and after > before:
+            status = "swallowed"
+            rec.setdefault("swallowed_attempts", []).append(attempt)
+            continue
+        status = "miss"
+        break
+    rec["status"] = status
+    return status
+
+
+def _lcd26_target(env: dict, pred) -> "Optional[dict]":
+    try:
+        tap, _ = _list_tap_targets_resolving_busy(env["ui"])
+    except Exception:  # noqa: BLE001
+        return None
+    for t in tap.get("targets", []):
+        if not t.get("hidden") and pred(t):
+            return t
+    return None
+
+
+def _lcd26_record(env: dict, status: str, kind: str, label: str, expect: str) -> bool:
+    """Fold a step status into the verdict lists. True when the walk may continue."""
+    if status == "ok":
+        return True
+    if kind == "back" and status == "miss":
+        env["fails"].append(f"{label}: landed on {env['steps'][-1].get('landed')!r}, expected {expect!r}")
+    else:
+        env["inconclusive"].append(f"{label}: {status}")
+    return False
+
+
+def _lcd26_to_config(env: dict) -> bool:
+    ui = env["ui"]
+    try:
+        if ui.get_current_page() == "config":
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    _navigate_home(ui)
+    return _lcd26_record(
+        env, _lcd26_step(env, "recover home->config", _LCD26_GEAR, "config", "enter"),
+        "enter", "recover home->config", "config",
+    )
+
+
+def _lcd26_back(env: dict, page: str, parent: str) -> bool:
+    x = _LCD26_BACK_X.get(page)
+    if x is None:
+        t = _lcd26_target(env, lambda t: t.get("name") == "back")
+        if t is None:
+            env["inconclusive"].append(f"{page}: no back tap target to locate Back")
+            return False
+        xy = (int(t["cx"]), int(t["cy"]))
+    else:
+        xy = (x, _LCD26_ICON_Y)
+    lab = f"{page} back"
+    return _lcd26_record(env, _lcd26_step(env, lab, xy, parent, "back"), "back", lab, parent)
+
+
+def _lcd26_enter(env: dict, xy: "tuple[int, int]", page: str) -> bool:
+    lab = f"enter {page}"
+    return _lcd26_record(env, _lcd26_step(env, lab, xy, page, "enter"), "enter", lab, page)
+
+
+def _lcd26_branch_simple(env: dict, page: str) -> None:
+    if _lcd26_to_config(env) and _lcd26_enter(env, _LCD26_HUB[page], page):
+        _lcd26_back(env, page, "config")
+
+
+def _lcd26_branch_network(env: dict) -> None:
+    if not (_lcd26_to_config(env) and _lcd26_enter(env, _LCD26_HUB["network"], "network")):
+        return
+    t = _lcd26_target(env, lambda t: t.get("name") == "Manage networks")
+    if t is None:
+        env["inconclusive"].append("network_manage: no 'Manage networks' tap target")
+    elif _lcd26_enter(env, (int(t["cx"]), int(t["cy"])), "network_manage"):
+        if not _lcd26_back(env, "network_manage", "network"):
+            return
+    _lcd26_back(env, "network", "config")
+
+
+def _lcd26_branch_profiles(env: dict) -> None:
+    if not (_lcd26_to_config(env) and _lcd26_enter(env, _LCD26_HUB["profiles"], "profiles")):
+        return
+    try:
+        tap, _ = _list_tap_targets_resolving_busy(env["ui"])
+        rows = _profile_rows_by_position(tap.get("targets", []))
+    except Exception:  # noqa: BLE001
+        rows = []
+    if not rows:
+        env["inconclusive"].append("profile_detail: no profile row on the profiles page")
+    elif _lcd26_enter(env, (int(rows[0]["cx"]), int(rows[0]["cy"])), "profile_detail"):
+        seg = _lcd26_target(env, lambda t: t.get("name") == "Segments")
+        if seg is None:
+            env["inconclusive"].append("profile_segments: no 'Segments' tap target")
+        elif _lcd26_enter(env, (int(seg["cx"]), int(seg["cy"])), "profile_segments"):
+            if not _lcd26_back(env, "profile_segments", "profile_detail"):
+                return
+        if not _lcd26_back(env, "profile_detail", "profiles"):
+            return
+    else:
+        return
+    if _lcd26_enter(env, _LCD26_PROFILES_ADD, "profile_builder_zones"):
+        if not _lcd26_back(env, "profile_builder_zones", "profiles"):
+            return
+    else:
+        return
+    _lcd26_back(env, "profiles", "config")
+
+
+def _lcd26_branch_safety(env: dict) -> None:
+    """Only when the config hub offers a cell named exactly 'safety' (the LCD
+    Safety page may not be in the running build)."""
+    if not _lcd26_to_config(env):
+        return
+    t = _lcd26_target(env, lambda t: str(t.get("name", "")).strip().lower() == "safety")
+    if t is None:
+        env["skipped"].append("safety: page not offered on the config hub of this build")
+        return
+    if _lcd26_enter(env, (int(t["cx"]), int(t["cy"])), "safety"):
+        _lcd26_back(env, "safety", "config")
+
+
+def _case_lcd26(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
+    srv = _srv(ctx)
+    touch = getattr(srv, "_touch", None)
+    if touch is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no touch client: cannot inject Back taps")
+    ui = srv._ui_test
+    env: Dict[str, Any] = {
+        "touch": touch, "ui": ui, "sleep": ctx.get("_sleep", time.sleep),
+        "steps": [], "fails": [], "inconclusive": [], "skipped": [],
+    }
+    try:
+        _lcd26_branch_simple(env, "temperature")
+        _lcd26_branch_simple(env, "diagnostics")
+        _lcd26_branch_network(env)
+        _lcd26_branch_profiles(env)
+        _lcd26_branch_safety(env)
+        # config's own Back (config -> home) last
+        if _lcd26_to_config(env):
+            _lcd26_back(env, "config", "home")
+    finally:
+        nav = _navigate_home(ui)
+    observed: Dict[str, Any] = {
+        "steps": env["steps"], "skipped": env["skipped"],
+        "back_verified": [s["label"] for s in env["steps"] if s["kind"] == "back" and s.get("status") == "ok"],
+    }
+    if not nav["ok"]:
+        observed["navigate_home"] = nav
+    if env["fails"]:
+        return CaseResult(Verdict.FAIL, reason="; ".join(env["fails"]), observed=observed)
+    if env["inconclusive"]:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="; ".join(env["inconclusive"]), observed=observed)
+    return CaseResult(Verdict.PASS, observed=observed)
+
+
 _CASE_FUNCS = {
     "LCD-01": _case_lcd01,
     "LCD-02": _case_lcd02,
@@ -5470,6 +5782,7 @@ _CASE_FUNCS = {
     "LCD-23": _case_lcd23,
     "LCD-24": _case_lcd24,
     "LCD-25": _case_lcd25,
+    "LCD-26": _case_lcd26,
 }
 
 for _cid, _fn in _CASE_FUNCS.items():
