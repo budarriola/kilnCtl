@@ -1497,6 +1497,11 @@ def convert_kiln_package(doc: dict, target_version: int) -> "tuple[dict, Convers
 # ---------------------------------------------------------------------------
 
 
+# First BACKUP_FORMAT_VERSION carrying the top-level kiln_configs[] array
+# (cfg_convert.py's drift list, "BACKUP_FORMAT_VERSION 5 (task 9 ...)").
+KILN_CONFIGS_MIN_BACKUP_VERSION = 5
+
+
 def _convert_backup_kiln_configs(entries: Any, report: "ConversionReport") -> list:
     """Convert every kiln_configs[] entry of a backup document: each
     entry's embedded `package` (a kilnctl_kiln_package) goes through
@@ -1554,11 +1559,16 @@ def convert_document(doc: dict, target_version: int) -> "tuple[dict, ConversionR
         out, backup_report = backup_cfg_convert.convert(loaded, target_version)
         report = ConversionReport(store="backup", source_version=backup_report.source_version,
                                    target_version=backup_report.target_version)
+        # kiln_configs[] exists from BACKUP_FORMAT_VERSION 5 on; a target below
+        # that predates the array, so cfg_convert's "dropped" outcome stands and
+        # the slots stay out of the output (an older firmware never reads them).
+        carry_kiln_configs = "kiln_configs" in doc and target_version >= KILN_CONFIGS_MIN_BACKUP_VERSION
         for o in backup_report.outcomes:
-            if o.scope == "document" and o.field == "kiln_configs" and o.outcome == "dropped":
+            if (carry_kiln_configs and o.scope == "document" and o.field == "kiln_configs"
+                    and o.outcome == "dropped"):
                 continue  # replaced by the per-slot handling below, which keeps the slots
             report.add(o.scope, o.field, o.outcome, o.detail)
-        if "kiln_configs" in doc:
+        if carry_kiln_configs:
             out["kiln_configs"] = _convert_backup_kiln_configs(doc["kiln_configs"], report)
         return out, report
 

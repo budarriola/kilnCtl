@@ -202,7 +202,7 @@ def _pkg_doc(blob: bytes, pico=None, name="slot"):
 
 
 def _backup_with(entries):
-    return {"kind": "kilnctl_backup", "version": 4, "profiles": [], "zones": [], "kiln_configs": entries}
+    return {"kind": "kilnctl_backup", "version": 5, "profiles": [], "zones": [], "kiln_configs": entries}
 
 
 def test_backup_kiln_configs_two_packages_both_converted(cur):
@@ -212,7 +212,7 @@ def test_backup_kiln_configs_two_packages_both_converted(cur):
         {"id": 1, "name": "a", "is_active": True, "package": _pkg_doc(old21, name="a")},
         {"id": 2, "name": "b", "is_active": False, "package": _pkg_doc(old24, name="b")},
     ])
-    out, report = cc.convert_document(doc, 4)
+    out, report = cc.convert_document(doc, 5)
     assert not report.failed
     assert len(out["kiln_configs"]) == 2
     for entry, want_src in zip(out["kiln_configs"], (21, 24)):
@@ -236,7 +236,7 @@ def test_backup_kiln_configs_bad_slot_reported_and_kept_not_dropped(cur):
         {"id": 2, "name": "bad", "package": bad},
         {"id": 3, "name": "legacy", "omitted": "no_pico_half"},
     ])
-    out, report = cc.convert_document(doc, 4)
+    out, report = cc.convert_document(doc, 5)
     assert report.failed
     assert len(out["kiln_configs"]) == 3  # nothing dropped
     assert bytes.fromhex(out["kiln_configs"][0]["package"]["esp_blob_hex"])[0] == cc.ZONES_CFG_VERSION
@@ -253,8 +253,18 @@ def test_backup_kiln_configs_main_exits_nonzero_on_failed_slot(cur, tmp_path):
     src = tmp_path / "b.json"
     src.write_text(__import__("json").dumps(_backup_with([{"id": 1, "name": "x", "package": bad}])))
     dst = tmp_path / "o.json"
-    assert cc.main([str(src), "--to-version", "4", "-o", str(dst), "--quiet"]) == 2
+    assert cc.main([str(src), "--to-version", "5", "-o", str(dst), "--quiet"]) == 2
     assert dst.exists()  # output still written; the failed slot is in it unchanged
+
+
+def test_backup_kiln_configs_dropped_for_target_older_than_v5(cur):
+    """A v4 target predates kiln_configs[]: the slots are reported dropped and
+    left out, never re-added to a document an older firmware reads."""
+    doc = _backup_with([{"id": 1, "name": "a", "package": _pkg_doc(_downgrade(cur, 24), name="a")}])
+    out, report = cc.convert_document(doc, 4)
+    assert "kiln_configs" not in out
+    assert any(o.field == "kiln_configs" and o.action == "dropped" for o in report.outcomes)
+    assert not report.failed
 
 
 # ---- mirror of the firmware's frozen structs -------------------------------
