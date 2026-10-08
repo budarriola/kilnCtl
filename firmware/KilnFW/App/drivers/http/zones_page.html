@@ -3139,9 +3139,11 @@ document.getElementById('auxOutputs').addEventListener('input', function (e) {
   div.querySelector('.aux-cycles').textContent = auxCyclesText(
     parseFloat(div.querySelector('.aux-minon').value), parseFloat(div.querySelector('.aux-minoff').value));
 });
-loadAuxOutputs();
-
-loadCurrent();
+/* Initial loads wait for DOMContentLoaded: app.js is <script defer>, so window.kcEscapeHtml
+   does not exist yet while this inline script runs, and a fast /api reply would render first. */
+function initialLoad() { loadAuxOutputs(); loadCurrent(); }
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', initialLoad);
+else initialLoad();
 
 function populateAutotuneZones() {
   var sel = document.getElementById('atZone');
