@@ -309,12 +309,14 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    proving the exact return-code contract `uart_bridge_system.c`'s mapping
    depends on (`FACTORY_RESET_ERR_MODE_GATE_REFUSED`, never
    `ESP_ERR_INVALID_STATE`).
-6. **Deferred, not landed this pass** — `check_uri_handler_cap.ps1`-style
-   mechanical check (or extend an existing one) confirming every route in a
-   to-be-decided "gated action" allowlist actually calls
-   `system_mode_gate_check()` before doing its mutation, so this doesn't
-   silently rot the way the recovery banner did before `d89256fe`'s audit
-   caught it.
+6. **LANDED, 2026-10-08** -- `tools/check_system_mode_gate_call_sites.ps1`: explicit
+   allowlist (19 files, 23 entries) of the handlers/helpers that must contain a
+   `system_mode_gate_check()` call (zones POST/PID, kiln_cfg apply, backup_import,
+   iter_tune restore, adaptive_tune enable/revert, factory_reset, cfgfs format, recovery boot,
+   aux outputs, zone aux convert, UART zones write, relay choke point, update stage write and
+   settings, start profile/autotune). Fails if an entry disappears, loses its call, the entry
+   count changes, or an unlisted driver file adds a call. Presence-in-function only; "gate
+   first" ordering stays with the handler host tests. Negative-tested with `negtest.ps1`.
 7. **LANDED, 2026-09-28** — PcTools' `factory_default_then_load_preset()`
    (`mcp_server_ui_test.py`) used to "confirm" a factory reset by calling
    `get_fw_version()`, a plain UART query the always-alive INFO task answers
