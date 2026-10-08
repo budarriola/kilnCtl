@@ -210,4 +210,5 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `tools/check_build_gate_usage.ps1` | NOT AUDITED | - | none (added 2026-10-07; negative-tested by fixtures at authoring: sleep in pair, test exe in pair, missing Exit, gate before lock each RED) | NOT AUDITED (pass 12 pending) |
 | `tools/check_land.ps1` | NOT AUDITED | - | none (author negative-tested each case by hand, not an audit; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_wt_status.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested at authoring against a mutated copy via -ScriptUnderTest: cherry-landed detection disabled, dirty ignored for HAS_WORK, prune widened to HAS_WORK/ACTIVE, -WhatIf bypassed, junction-following delete each RED, then restored) | NOT AUDITED (pass 12 pending) |
 | `tools/check_pushed_build_stamp.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |

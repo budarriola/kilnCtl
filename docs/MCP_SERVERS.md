@@ -738,7 +738,7 @@ name from the `ERASABLE_DATA_PARTITIONS` allowlist -- `nvs`, `kiln_nvs`,
 unless the named partition is both in that allowlist and actually present in
 `partitions.csv`, and unless `confirm_erase=True` is also passed.
 
-## Git workflow guards (`tools/worktree_mint.ps1`, `tools/push_verify.ps1`, `tools/commit_guard.ps1`)
+## Git workflow guards (`tools/worktree_mint.ps1`, `tools/push_verify.ps1`, `tools/commit_guard.ps1`, `tools/wt_status.ps1`)
 
 Three small PowerShell tools under `tools/` close three recurring, expensive
 failure modes seen repeatedly in this project's development workflow (each
@@ -887,6 +887,33 @@ gate and fetch and changes nothing. The last stdout line is one JSON object:
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\land.ps1 -CheckLog C:\wt\x\run.log -AllowFail check_release_manifest -RemoveWorktree
 ```
+
+**`tools/wt_status.ps1`** -- report on, and safely prune, `C:\wt` (added
+2026-10-08). `C:\wt` accumulates hundreds of directories (worktrees, orphan dirs,
+`*_logs`, loose files). Report mode (default) lists every directory: registered in
+`git worktree list`?, branch or HEAD sha, commits ahead of origin/main (each marked
+`[on-main]` or `[unlanded]` by `git cherry` patch-id, because many commits land under
+rebased shas), tracked-modified and untracked counts, idle time (newest file mtime,
+skipping `build\` and `.git`), and live processes whose command line references the
+path (`-Size` adds sizes). Classes: ACTIVE (a process, or a file under 15 min old),
+HAS_WORK (unlanded commits or dirty), STALE_CLEAN (registered, all landed, clean, idle
+over 2 h, no process), ORPHAN_DIR (unregistered, no process, idle over 2 h), UNKNOWN
+(anything unsure: locked, `.kicad_*` inside, a `.git` in an unregistered dir, ...).
+Dot-dirs (`.buildgate`, `.checkcache`), unregistered `*_logs` dirs and loose files are
+listed as helpers and never pruned.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1                 # report
+powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1 -Prune -WhatIf  # preview
+powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1 -Prune          # delete
+```
+
+`-Prune` deletes only STALE_CLEAN (through `worktree_mint.ps1`'s remove mode) and
+ORPHAN_DIR (through `lib_safe_remove.ps1`, which unlinks junctions as links and never
+follows them), re-checking each entry just before acting, then runs `git worktree prune`.
+`tools/check_wt_status.ps1` tests it against a scratch root (`-ScriptUnderTest`
+points it at a mutated copy for negative tests); it never reads the real `C:\wt`.
+
 ## Confirm-gate flags are never coerced (2026-10-02)
 
 The facade coerces stringly-typed arguments (`"yes"`/`"1"`/`"true"` to a bool), which on 2026-10-02

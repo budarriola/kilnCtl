@@ -527,6 +527,16 @@ modifications — those need owner review, not deletion, and reverting them
 to investigate is exactly the mistake to avoid (other sessions' uncommitted
 work lives in this same shared tree).
 
+`tools/wt_status.ps1` applies these rules mechanically to `C:\wt`: a report of
+every directory (registered or not, branch/HEAD, commits ahead of origin/main
+each marked on-main or unlanded by `git cherry` patch-id, dirty and untracked
+counts, idle time, live processes under the path) classed ACTIVE / HAS_WORK /
+STALE_CLEAN / ORPHAN_DIR / UNKNOWN, with helpers (`.buildgate`, `.checkcache`,
+`*_logs`, loose files) listed and never pruned. `-Prune` (preview with
+`-WhatIf` first) deletes only STALE_CLEAN and ORPHAN_DIR entries,
+junction-safe, then runs `git worktree prune`. Run it instead of cleaning
+`C:\wt` by hand; tests are `tools/check_wt_status.ps1`.
+
 ## Project Structure
 
 The tree is split into hardware and software halves. See `docs/REPO_LAYOUT.md`
