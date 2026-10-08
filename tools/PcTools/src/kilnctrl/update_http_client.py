@@ -175,7 +175,7 @@ def clear_stage(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S, ack_no_safet
 
 def get_fetch_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
     """GET /api/update/fetch. Keys: state (idle/checking/downloading/done/failed),
-    kind, stage, error, http_status, bytes_done, bytes_total, busy, repo, unsigned,
+    kind, stage, error, http_status, bytes_done, bytes_total, busy, repo,
     tag, prerelease, app_size, running, commit, sha256, verdict, reason, allowed,
     needs_typed_confirm, zones_cfg_lower."""
     req = urllib.request.Request(_url(host, FETCH_PATH), method="GET")

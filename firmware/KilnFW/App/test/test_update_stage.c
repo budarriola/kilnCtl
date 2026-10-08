@@ -284,6 +284,9 @@ static void make_image(size_t len, const char *app_version)
     if (app_version) {
         memcpy(g_img + 48, app_version, strlen(app_version));
     }
+    // project_name[32] at offset 80 (esp_app_desc_t +0x30): the stager requires "KilnCtrl".
+    memset(g_img + 80, 0, 32);
+    memcpy(g_img + 80, "KilnCtrl", 8);
 }
 
 static update_stage_err_t upload(size_t len, size_t chunk, const char *semver, const char *commit)
@@ -460,6 +463,53 @@ static void test_bad_images(void)
     }
     TEST_CHECK(e == UPDATE_STAGE_ERR_BAD_IMAGE, "refusal also fires when the head arrives 7 bytes at a time");
     TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE, "idle again");
+}
+
+// Owner decision 2026-10-07: release signing removed; an image is accepted when it is for this project.
+static void test_wrong_project_refused(void)
+{
+    TEST_SECTION("update_stage -- project identity (replaces release signing)");
+    reset_board();
+    make_image(30000, "v1.0.0");
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_OK, "KilnCtrl image staged");
+    TEST_CHECK(is_staged(), "baseline staged");
+
+    // Negative: another project's name is refused, nothing staged, no image byte written.
+    make_image(30000, "v1.0.0");
+    memset(g_img + 80, 0, 32);
+    memcpy(g_img + 80, "OtherProject", 12);
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_WRONG_PROJECT, "wrong project_name refused");
+    TEST_CHECK(!is_staged(), "wrong-project upload leaves nothing staged");
+    TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE && !g_fl.sha_open, "idle and hash closed after wrong-project refusal");
+    TEST_CHECK(strcmp(update_stage_err_name(UPDATE_STAGE_ERR_WRONG_PROJECT), "wrong_project") == 0, "error name");
+
+    // A prefix or an extension of the right name is not the right name.
+    make_image(30000, "v1.0.0");
+    memset(g_img + 80, 0, 32);
+    memcpy(g_img + 80, "KilnCtr", 7);
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_WRONG_PROJECT, "prefix of the name refused");
+    make_image(30000, "v1.0.0");
+    memset(g_img + 80, 0, 32);
+    memcpy(g_img + 80, "KilnCtrlX", 9);
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_WRONG_PROJECT, "extended name refused");
+    make_image(30000, "v1.0.0");
+    memset(g_img + 80, 0, 32); // empty name
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_WRONG_PROJECT, "empty name refused");
+
+    // Same refusal when the head arrives in tiny writes (the fetch path streams like this).
+    make_image(30000, "v1.0.0");
+    memset(g_img + 80, 0, 32);
+    memcpy(g_img + 80, "OtherProject", 12);
+    update_stage_err_t e = update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 30000, NULL, NULL, STAGE_SOURCE_UPLOAD);
+    for (size_t off = 0; e == UPDATE_STAGE_OK && off < 30000; off += 5) {
+        size_t n = 30000 - off < 5 ? 30000 - off : 5;
+        e = update_stage_upload_write(&g_st, g_img + off, n);
+    }
+    TEST_CHECK(e == UPDATE_STAGE_ERR_WRONG_PROJECT, "wrong project refused with a 5-byte-at-a-time head");
+
+    // Restored: the right name stages again.
+    make_image(30000, "v1.0.0");
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_OK, "right name stages again");
 }
 
 static void test_interrupted_and_blank(void)
@@ -790,6 +840,7 @@ void run_test_update_stage(void)
     test_semver_and_commit_args();
     test_size_limits();
     test_bad_images();
+    test_wrong_project_refused();
     test_interrupted_and_blank();
     test_http_buffer_is_the_shared_internal_chunk();
     test_status_never_trusts_a_header_alone();

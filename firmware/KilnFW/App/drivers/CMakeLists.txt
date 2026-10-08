@@ -351,12 +351,6 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # WP8: pure URL/allowlist and release-JSON rules (host-tested).
                        "update/update_url.c"
                        "update/update_release.c"
-                       # WP11: Ed25519 release.json.sig verify (vendored Monocypher, see
-                       # update/third_party/monocypher/README.md) and the compiled-in key list.
-                       "update/update_sign.c"
-                       "update/update_signing_keys.c"
-                       "update/third_party/monocypher/monocypher.c"
-                       "update/third_party/monocypher/monocypher-ed25519.c"
                        "update/update_fetch_heap.c"
                        # WP8: the board-side GitHub fetch (TLS client, two tasks, four routes).
                        "update/update_fetch.c"

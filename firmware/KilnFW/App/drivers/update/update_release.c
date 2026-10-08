@@ -335,7 +335,7 @@ typedef struct {
     uint32_t max_app_size;
     char app_name[UPDATE_TAG_MAX + 16];
     update_release_info_t *out;
-    bool have_app, have_manifest, have_sig;
+    bool have_app, have_manifest;
 } api_ctx_t;
 
 typedef struct {
@@ -406,11 +406,10 @@ static update_rel_err_t asset_elem(cur_t *c, int depth, void *vctx)
     }
     bool is_app = strcmp(a.name, x->app_name) == 0;
     bool is_manifest = strcmp(a.name, "release.json") == 0;
-    bool is_sig = strcmp(a.name, UPDATE_SIG_ASSET_NAME) == 0;
-    if (!is_app && !is_manifest && !is_sig) {
+    if (!is_app && !is_manifest) {
         return UPDATE_REL_OK;
     }
-    if ((is_app && x->have_app) || (is_manifest && x->have_manifest) || (is_sig && x->have_sig)) {
+    if ((is_app && x->have_app) || (is_manifest && x->have_manifest)) {
         return UPDATE_REL_E_DUP_ASSET;
     }
     if (!a.url_ok || !update_asset_url_matches(a.url, x->repo, x->tag, a.name)) {
@@ -419,15 +418,7 @@ static update_rel_err_t asset_elem(cur_t *c, int depth, void *vctx)
     if (!a.size_ok || a.size == 0) {
         return UPDATE_REL_E_BAD_SIZE;
     }
-    if (is_sig) {
-        // The detached Ed25519 signature is exactly 64 raw bytes (update_sign.h).
-        if (a.size != UPDATE_SIG_LEN) {
-            return UPDATE_REL_E_BAD_SIZE;
-        }
-        snprintf(x->out->sig_url, sizeof(x->out->sig_url), "%s", a.url);
-        x->out->sig_size = a.size;
-        x->have_sig = true;
-    } else if (is_app) {
+    if (is_app) {
         if (a.size > x->max_app_size) {
             return UPDATE_REL_E_BAD_SIZE;
         }

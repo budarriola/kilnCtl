@@ -183,11 +183,6 @@ route.</p>
 not change what is running and does not reboot. Installing a staged image is
 done by the recovery image: <b>Install</b> below reboots the board into it.</p>
 <div id="stageInfo" class="card kv">Loading&hellip;</div>
-<div id="stageUnsigned" class="blocker" style="display:none">
-  UNSIGNED: this image is verified by its sha256 only, which catches
-  corruption but does not prove who published it. Install only an image you
-  built or obtained from a source you trust.
-</div>
 <div id="stagePicker">
   <label for="stageFile">New application image (KilnCtrl.bin)</label>
   <input type="file" id="stageFile" accept=".bin">
@@ -214,12 +209,6 @@ installed until you press Install above. Not possible during a firing or an
 autotune run.</p>
 <div id="ghBusyBox" class="blocker" style="display:none"></div>
 <div id="ghInfo" class="card kv">Loading&hellip;</div>
-<div id="ghUnsigned" class="blocker" style="display:none">
-  UNSIGNED: this release is not signature-checked (a release from another
-  repository, or this firmware has no release key built in). The board verifies
-  the download against the release's own sha256 manifest, which catches
-  corruption but does not prove who published it. Only use a repository you trust.
-</div>
 <div id="ghProgressWrap" style="display:none">
   <div class="progress-outer"><div id="ghProgressBar" class="progress-inner">0%</div></div>
 </div>
@@ -239,8 +228,7 @@ autotune run.</p>
 
 <h2>Update source repository</h2>
 <p>The GitHub repository (<code>owner/name</code>) this board checks for
-releases. Leave it at the default unless you publish your own builds. A
-release from any other repository is shown as UNSIGNED. Cannot be changed
+releases. Leave it at the default unless you publish your own builds. Cannot be changed
 while a firing or autotune is running.</p>
 <div id="repoInfo" class="card kv">Loading&hellip;</div>
 <div>
@@ -747,7 +735,6 @@ function renderStageInfo(s) {
   }
   row('Capacity', s.capacity + ' bytes');
   box.innerHTML = rows.join('');
-  document.getElementById('stageUnsigned').style.display = (s.staged && s.header === 'ok') ? '' : 'none';
   document.getElementById('stageInstallBtn').disabled = !stageInstallable(s);
 }
 
@@ -895,8 +882,7 @@ var GH_ERRORS = {
   task_create_failed: 'The board could not start the download task.',
   redirect_no_location: 'GitHub sent a redirect the board could not follow.',
   redirect_location_refused: 'GitHub redirected to a host the board does not allow.',
-  release_unsigned: 'This release has no signature and the board only installs signed releases from the default repository.',
-  signature_invalid: 'The release signature does not verify against the keys built into this firmware. Nothing was staged.'
+  wrong_project: 'This image was built for a different project, not KilnCtrl. Nothing was staged.'
 };
 
 var GH_VERDICTS = {
@@ -999,7 +985,6 @@ function renderGh(s) {
     if (s.zones_cfg_lower) row('Warning', 'This release has an older zones config version: installing it can reset PID gains to defaults.');
   }
   document.getElementById('ghInfo').innerHTML = rows.join('');
-  document.getElementById('ghUnsigned').style.display = s.unsigned ? '' : 'none';
   var busy = !!s.busy;
   var opts = ghOpts();
   document.getElementById('ghCheckBtn').disabled = busy;
@@ -1077,7 +1062,7 @@ document.getElementById('ghDownloadBtn').addEventListener('click', function () {
     return;
   }
   window.kcConfirm('Download ' + s.tag + ' (' + s.app_size + ' bytes) into the stage? ' +
-    'Any previously staged image is erased. This image is UNSIGNED. Nothing is installed.').then(function (ok) {
+    'Any previously staged image is erased. Nothing is installed.').then(function (ok) {
     if (!ok) return;
     return ghStart('/api/update/download' + ghDownloadQuery(opts), 'Starting download…');
   });

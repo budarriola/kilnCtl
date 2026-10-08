@@ -227,6 +227,18 @@ static update_stage_err_t flush_head(update_stage_t *st)
     if (rd_u32(st->head + UPDATE_STAGE_APP_DESC_OFFSET) != UPDATE_STAGE_APP_DESC_MAGIC) {
         return UPDATE_STAGE_ERR_BAD_IMAGE;
     }
+    // Project identity: an image built for another project is refused before any flash write.
+    // project_name is NUL-padded; require the exact name, not a prefix.
+    {
+        const char *name = (const char *)(st->head + UPDATE_STAGE_APP_DESC_PROJECT_OFFSET);
+        size_t n = 0;
+        while (n < UPDATE_STAGE_APP_DESC_PROJECT_LEN && name[n] != '\0') {
+            n++;
+        }
+        if (n != strlen(UPDATE_STAGE_EXPECTED_PROJECT) || memcmp(name, UPDATE_STAGE_EXPECTED_PROJECT, n) != 0) {
+            return UPDATE_STAGE_ERR_WRONG_PROJECT;
+        }
+    }
     if (!st->semver_given) {
         char v[STAGE_SEMVER_FIELD_LEN + 1];
         memcpy(v, st->head + UPDATE_STAGE_APP_DESC_VERSION_OFFSET, STAGE_SEMVER_FIELD_LEN);
@@ -504,6 +516,7 @@ const char *update_stage_err_name(update_stage_err_t e)
     case UPDATE_STAGE_ERR_READBACK: return "readback_mismatch";
     case UPDATE_STAGE_ERR_HEADER: return "header_write_failed";
     case UPDATE_STAGE_ERR_STATE: return "out_of_sequence";
+    case UPDATE_STAGE_ERR_WRONG_PROJECT: return "wrong_project";
     }
     return "unknown";
 }

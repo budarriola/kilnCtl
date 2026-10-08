@@ -163,7 +163,6 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_lint_pages.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js / nav.js | RED on the right rule; restored |
 | `tools/check_mcp_facade_coverage.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] uncovered @_srv._tool() negtest function added to mcp_server_io.py; the documented plant_sim_compare example found stale ; [09-16f] ramp_assist_set_enabled KEYWORDS entry removed (replaces the stale documented example) | [09-16e] RED naming the tool; hand-restored; docstring example fixed in 09-16f ; [09-16f] RED naming the tool; hand-restored; PASS |
 | `tools/check_mcp_tool_count_doc.ps1` | NEGATIVE-TESTED | 09-16e | CLAUDE.md edited to claim 999 tools | RED, doc vs actual count; hand-restored; PASS |
-| `tools/check_monocypher_vendored.ps1` | NEGATIVE-TESTED | 10-07 | byte flip in a vendored file; README hash edited; README row dropped; directory deleted; extra unhashed extra.c | all RED except extra.c, which PASSED: WEAK, fixed (unhashed .c/.h/.S fails); extra.c now RED (re-run by the opus review) |
 | `tools/check_mykicad_golden_suite_runs.ps1` | NEGATIVE-TESTED | 09-16e | submodule conftest pointed at a nonexistent kiln project dir | RED (53 passed, 19 errored); hand-restored; 72 passed |
 | `tools/check_no_bench_text_in_ui.ps1` | NEGATIVE-TESTED | 10-02 | bench-wattage text added to a page title | RED naming the line; throws on a missing scan dir; restored |
 | `tools/check_no_doubled_apostrophes.ps1` | NOT AUDITED | - | none | NOT AUDITED |

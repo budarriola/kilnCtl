@@ -30,7 +30,6 @@ Written to `logs/release/<tag>/` and uploaded:
   build_date, `compat` (`zones_cfg_version`, `kilnlink_version`, `uart_version`,
   `partitions_sha256` of `firmware/KilnFW/partitions.csv`), `images[]` with size and sha256
 - `SHA256SUMS`
-- `release.json.sig` optional detached Ed25519 signature (64 bytes) over the exact bytes of `release.json`; see "Release signing"
 
 `zones_cfg_version`, `kilnlink_version` and `uart_version` are parsed from
 `zones_config_json.h`, `kilnlink_version.h` and `uart_task_ids.h` at release time (all three are mandatory and must be positive: the generator refuses if one cannot be read, since the update policy treats zero as malformed), never
@@ -155,40 +154,7 @@ review: pass a hand-written notes file for a real release.
 
 ## Release signing
 
-Plan: `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP11. `tools/sign_release.py` signs `release.json`
-(Ed25519, RFC 8032); the board verifies it against public keys compiled into the firmware
-(`firmware/KilnFW/App/drivers/update/update_signing_keys.c`, verifier: vendored Monocypher, see
-`drivers/update/third_party/monocypher/README.md`).
-
-**What the board does.** For the default repo (`budarriola/kilnCtl`) and only when the firmware has at
-least one key built in, a release with no `release.json.sig` is refused with `release_unsigned` and one
-whose signature fails every key with `signature_invalid`; nothing is staged. Any other repo is unchanged
-and is always shown UNSIGNED (D5). **The shipped key list is empty**, so until the owner provisions a key
-nothing can be verified and enforcement is inactive: every release, signed or not, is shown UNSIGNED (D4).
-
-**Pre-WP11 releases.** `v1.0.0-pre.1` (and any release cut before signing) has no `release.json.sig`. Firmware
-without a key (today's) stages it as before. Firmware built with a release key refuses it as `release_unsigned`:
-to move such a board forward, cut a new signed release (or stage by upload, which is not signature-checked).
-The unsigned release cannot be retro-signed by anyone but the key holder; run `sign_release.py sign` on its
-downloaded `release.json` and upload `release.json.sig` to that release if it must stay installable.
-
-**Key custody (owner step, not done by tooling).**
-
-1. On an offline machine: `python tools/sign_release.py keygen --out <path outside the repo>\kilnctl_release.pem`.
-   It refuses to overwrite and prints the public key as a C array. The PEM has no passphrase: keep it on
-   offline or encrypted storage with a backup. Never commit it; never put a test key in the firmware.
-2. Paste the printed entry into `k_release_keys` in `update_signing_keys.c` (uncomment the array and make
-   `update_sig_builtin_keys()` return it), rebuild and flash. Only then is enforcement active.
-3. Releasing: set `KILNCTL_RELEASE_SIGNING_KEY` to the PEM path (User scope or session) and run
-   `make_release.ps1` as usual; it writes `release.json.sig` into `logs\release\<tag>\` and uploads it.
-   Without the variable a default-repo `-Publish` prints a warning and ships UNSIGNED.
-4. Rotation: add the new public key as a second entry, ship that firmware, then sign with the new key; a
-   release signed by either key verifies. Drop the old entry in a later firmware.
-5. Loss or leak of the private key: no remote revocation exists. Build and JTAG-flash firmware with a new key
-   list; boards already running the old list keep trusting the old key until reflashed.
-
-Check a signature by hand: `python tools/sign_release.py verify --manifest release.json --sig release.json.sig --pub <hex>`.
-`tools/check_monocypher_vendored.ps1` keeps the vendored verifier byte-identical to upstream 4.0.3.
+Release signing: REMOVED by owner decision 2026-10-07. Do not reintroduce. A release is accepted when it is for the correct project (project-identity check, `firmware/KilnFW/App/drivers/update/update_stage.c:230-241`).
 
 ## Token setup
 

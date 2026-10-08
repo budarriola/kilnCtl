@@ -40,12 +40,18 @@ extern "C" {
 #endif
 
 #define UPDATE_STAGE_ERASE_UNIT 65536u   // erase-ahead granularity (multiple of the 4 KB sector)
-#define UPDATE_STAGE_HEAD_LEN 80u        // image bytes buffered before the first flash write
+#define UPDATE_STAGE_HEAD_LEN 112u       // image bytes buffered before the first flash write (through app_desc project_name)
 #define UPDATE_STAGE_ESP32S3_CHIP_ID 9u
 #define UPDATE_STAGE_ESP_IMAGE_MAGIC 0xE9u
 #define UPDATE_STAGE_APP_DESC_OFFSET 32u // image header (24) + first segment header (8)
 #define UPDATE_STAGE_APP_DESC_MAGIC 0xABCD5432u
 #define UPDATE_STAGE_APP_DESC_VERSION_OFFSET 48u // magic(4)+secure_version(4)+reserv1(8)+version[32]
+#define UPDATE_STAGE_APP_DESC_PROJECT_OFFSET 80u // image offset of esp_app_desc_t.project_name[32] (32 + 0x30)
+#define UPDATE_STAGE_APP_DESC_PROJECT_LEN 32u
+// The only project this stager accepts (CMake project(KilnCtrl)); the recovery image's own check
+// uses the same name (RIC_EXPECTED_PROJECT). This is the project-identity gate for every staged
+// image, uploaded or fetched from a release.
+#define UPDATE_STAGE_EXPECTED_PROJECT "KilnCtrl"
 #define UPDATE_STAGE_SCRATCH_MIN 256u
 
 typedef struct {
@@ -90,6 +96,7 @@ typedef enum {
     UPDATE_STAGE_ERR_READBACK,    // image re-read from flash does not match what was streamed
     UPDATE_STAGE_ERR_HEADER,      // header write/readback failed
     UPDATE_STAGE_ERR_STATE,       // call out of sequence
+    UPDATE_STAGE_ERR_WRONG_PROJECT, // app descriptor project_name is not UPDATE_STAGE_EXPECTED_PROJECT
 } update_stage_err_t;
 
 typedef struct {

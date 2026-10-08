@@ -273,24 +273,6 @@ if ($LASTEXITCODE -ne 0) { Fail "release_manifest.py generate failed (see above)
 & $python (Join-Path $PSScriptRoot "release_manifest.py") validate $outDir
 if ($LASTEXITCODE -ne 0) { Fail "release_manifest.py validate failed." }
 
-# ---------------------------------------------------------------- signing (WP11, optional)
-# KILNCTL_RELEASE_SIGNING_KEY = path to an Ed25519 PKCS#8 PEM kept OUTSIDE the repo. When set,
-# release.json.sig (64 bytes over the exact release.json bytes) is written next to it and uploaded.
-# Unset: the release is UNSIGNED. Firmware with a release key built in refuses an unsigned release
-# from the default repo (docs/RELEASING.md "Release signing").
-$signKey = [Environment]::GetEnvironmentVariable("KILNCTL_RELEASE_SIGNING_KEY")
-if (-not $signKey) { $signKey = [Environment]::GetEnvironmentVariable("KILNCTL_RELEASE_SIGNING_KEY", "User") }
-if ($signKey) {
-    if (-not (Test-Path -LiteralPath $signKey)) { Fail "KILNCTL_RELEASE_SIGNING_KEY names a missing file." }
-    & $python (Join-Path $PSScriptRoot "sign_release.py") sign --manifest (Join-Path $outDir "release.json") --key $signKey
-    if ($LASTEXITCODE -ne 0) { Fail "sign_release.py sign failed." }
-    & $python (Join-Path $PSScriptRoot "release_manifest.py") validate $outDir
-    if ($LASTEXITCODE -ne 0) { Fail "release_manifest.py validate failed after signing." }
-} elseif ($Publish -and $Repo -ieq "budarriola/kilnCtl") {
-    Write-Host "WARNING: KILNCTL_RELEASE_SIGNING_KEY is not set; publishing an UNSIGNED release to the default repo." -ForegroundColor Yellow
-    Write-Host "         Firmware that has a release key built in will refuse it (release_unsigned)." -ForegroundColor Yellow
-}
-
 # ---------------------------------------------------------------- report / publish
 $manifest = Get-Content -LiteralPath (Join-Path $outDir "release.json") -Raw | ConvertFrom-Json
 Write-Host ""

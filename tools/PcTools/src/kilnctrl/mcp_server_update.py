@@ -12,8 +12,9 @@ update_settings_http.c, tools from WP10): update_check runs the board's own
 release check (a TLS job on the board; nothing is stored),
 update_stage_release downloads the release into the stage,
 update_fetch_status/update_fetch_cancel read and stop the board's fetch job,
-update_get_settings/update_set_settings read and set the repo. Every release
-is UNSIGNED in v1 (plan D4/D5).
+update_get_settings/update_set_settings read and set the repo. Release
+signing was removed (owner decision 2026-10-07); the board accepts an image only
+when it is for this project (esp_app_desc project_name).
 
 There is deliberately NO ``update_apply``: installing a staged image is the
 recovery image's ``POST /api/recovery/apply_staged`` (WP5, wrapped by the
@@ -68,8 +69,8 @@ def update_status(host: Optional[str] = None) -> str:
     matching sha256), its version/commit/length/sha256/source, any upload
     in flight (phase, bytes), and the stage capacity. A board still on the
     pre-WP2 partition table has no stage and answers 404 (reported as an
-    error). An image from a manual upload is UNSIGNED: sha256 catches
-    corruption, it does not authenticate the publisher (plan decision D4).
+    error). The board refuses an image whose project name is not
+    KilnCtrl (wrong_project); sha256 catches corruption.
     Nothing here installs anything; the apply step (recovery image, WP5) has
     no tool yet."""
     resolved = _resolve_host(host)
@@ -106,8 +107,8 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     staged with a verified header, the image length equals the file size and
     the board's sha256 equals the one computed locally; anything else is
     FAILED, never trusted from the POST reply alone. A reply lost mid-upload
-    is UNKNOWN (read update_status). The staged image is UNSIGNED (sha256
-    only).
+    is UNKNOWN (read update_status). The board refuses a wrong-project
+    image.
 
     HTTP 428 means the board's OTA interlock sees the safety processor not
     answering: the upload is refused unless the operator acknowledges it.
@@ -182,7 +183,7 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     if problems:
         return (f"FAILED: POST replied {reply!r} but the read-back disagrees: {'; '.join(problems)} "
                 f"(host={resolved}). Do not trust this stage.")
-    return (f"ok - staged and verified by read-back: {_fmt_status(after)}; UNSIGNED (sha256 only); "
+    return (f"ok - staged and verified by read-back: {_fmt_status(after)}; "
             f"nothing installed.{warn} (host={resolved})")
 
 
@@ -286,8 +287,8 @@ def update_check(wait_s: float = 60.0, host: Optional[str] = None, allow_prerele
     needs force / refused) and the release sha256. The board does the TLS work
     itself; nothing is stored and the stage is untouched. Refused by the board
     (409) during a firing or autotune, while another job runs, or until its clock
-    has synced from the internet. The release is UNSIGNED in v1 (sha256 from the
-    release's own manifest only). ``wait_s`` bounds how long this call polls the
+    has synced from the internet. The release's sha256 comes from its
+    own manifest. ``wait_s`` bounds how long this call polls the
     job; a check normally takes a few seconds. ``allow_prerelease=True`` makes the
     board read the releases list and pick the highest-semver non-draft release, so a
     GitHub pre-release is found (plain /releases/latest never returns one)."""
@@ -306,7 +307,7 @@ def update_check(wait_s: float = 60.0, host: Optional[str] = None, allow_prerele
         return f"UNKNOWN: {err}: {_fmt_fetch(st)}; read update_fetch_status (host={resolved})"
     if st.get("state") != "done":
         return f"FAILED: check did not finish ok: {_fmt_fetch(st)} (host={resolved})"
-    return f"ok - {_fmt_fetch(st)}; UNSIGNED (host={resolved})"
+    return f"ok - {_fmt_fetch(st)}; (host={resolved})"
 
 
 @_core._tool()
@@ -332,7 +333,7 @@ def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, 
     is sent with ``force`` alone for that reason). Success is claimed only after a read-back of
     GET /api/update/stage shows a verified header with source github whose
     sha256 equals the one the board reported for the release; anything else is
-    FAILED. The staged image is UNSIGNED. A 409 (firing, hot zone, clock not
+    FAILED. A 409 (firing, hot zone, clock not
     synced, another job) is final; a 428 (safety processor not answering) is
     refused unless ``ack_no_safety=True``, still behind ``confirm=True``."""
     resolved = _resolve_host(host)
@@ -385,15 +386,14 @@ def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, 
         return (f"FAILED: the job reported done but the read-back disagrees: {'; '.join(problems)} "
                 f"(host={resolved}). Do not trust this stage.")
     return (f"ok - release {st.get('tag')} staged and verified by read-back: {_fmt_status(after)}; "
-            f"UNSIGNED (sha256 from the release manifest only); nothing installed.{warn} (host={resolved})")
+            f"nothing installed.{warn} (host={resolved})")
 
 
 @_core._tool()
 def update_get_settings(host: Optional[str] = None) -> str:
     """READ-ONLY. Report the GitHub repository the board checks for releases
     (GET /api/update/settings, ROUTE_TIER_ADMIN): the current owner/name, the
-    compiled-in default, and whether the current value is the default. A
-    non-default repository's releases are always UNSIGNED (plan D5)."""
+    compiled-in default, and whether the current value is the default."""
     resolved = _resolve_host(host)
     try:
         st = uhc.get_settings(resolved)
@@ -412,8 +412,7 @@ def update_set_settings(repo: str, confirm: bool = False, host: Optional[str] = 
     only reports the current value and what would change. The board refuses
     (409) during a firing or autotune. After the POST it re-reads the setting
     and FAILS unless it equals the requested value (or the default for an empty
-    request). Needs no typed confirmation (plan D5); releases from a
-    non-default repository are always shown UNSIGNED."""
+    request). Needs no typed confirmation (plan D5)."""
     if not isinstance(repo, str):
         return "REFUSED: repo must be a string"
     resolved = _resolve_host(host)
@@ -443,15 +442,14 @@ def update_fetch_status(host: Optional[str] = None) -> str:
     """READ-ONLY. Report the board's GitHub fetch job (GET /api/update/fetch,
     ROUTE_TIER_ADMIN): state (idle/checking/downloading/done/failed), stage,
     error and http_status, byte progress, and the last release it looked at
-    (tag, size, sha256, policy verdict/allowed/needs_typed_confirm). Every
-    release is UNSIGNED in v1 (sha256 only). Never starts a job."""
+    (tag, size, sha256, policy verdict/allowed/needs_typed_confirm). Never starts a job."""
     resolved = _resolve_host(host)
     try:
         st = uhc.get_fetch_status(resolved)
     except uhc.UpdateHttpError as exc:
         return f"error: could not read GET {uhc.FETCH_PATH} (host={resolved}): {exc}"
     extra = f", http_status={st.get('http_status')}" if st.get("error") else ""
-    return f"ok - {_fmt_fetch(st)}, busy={st.get('busy')}{extra}; UNSIGNED (host={resolved})"
+    return f"ok - {_fmt_fetch(st)}, busy={st.get('busy')}{extra}; (host={resolved})"
 
 
 @_core._tool()

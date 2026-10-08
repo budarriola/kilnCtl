@@ -313,10 +313,6 @@ def validate(directory, max_app_size=DEFAULT_MAX_APP_SIZE):
     for need in sorted(listed | {"release.json"}):
         if need not in seen:
             errs.append("SHA256SUMS does not cover %s" % need)
-    # Optional detached Ed25519 signature of release.json (tools/sign_release.py, WP11): 64 bytes.
-    sigp = os.path.join(directory, "release.json.sig")
-    if os.path.isfile(sigp) and os.path.getsize(sigp) != 64:
-        errs.append("release.json.sig is %d bytes, expected 64" % os.path.getsize(sigp))
     return errs
 
 

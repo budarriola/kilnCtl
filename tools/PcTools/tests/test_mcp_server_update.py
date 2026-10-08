@@ -186,7 +186,7 @@ class UploadToolTest(_Base):
         path = self.write_image(_image(8192))
         out = msu.update_stage_upload(path, version="1.4.0", confirm=True)
         self.assertTrue(out.startswith("ok - staged and verified"), out)
-        self.assertIn("UNSIGNED", out)
+        self.assertNotIn("UNSIGNED", out)
         self.assertEqual(self.board.staged["semver"], "1.4.0")
 
     def test_sha_mismatch_on_readback_fails_loud(self):
@@ -374,10 +374,10 @@ class GhBoard(FakeBoard):
         if self.job is not None and self.polls_busy > 0:
             self.polls_busy -= 1
             return {"ok": True, "state": "downloading", "kind": self.job, "busy": True, "repo": self.repo,
-                    "bytes_done": 10, "bytes_total": 100, "unsigned": True}
+                    "bytes_done": 10, "bytes_total": 100}
         if self.job is None:
-            return {"ok": True, "state": "idle", "kind": "none", "busy": False, "repo": self.repo, "unsigned": True}
-        d = {"ok": True, "state": "done", "kind": self.job, "busy": False, "repo": self.repo, "unsigned": True,
+            return {"ok": True, "state": "idle", "kind": "none", "busy": False, "repo": self.repo}
+        d = {"ok": True, "state": "done", "kind": self.job, "busy": False, "repo": self.repo,
              "tag": "v1.0.1", "prerelease": False, "app_size": self.release_len, "running": "1.0.0",
              "sha256": self.release_sha, "verdict": self.verdict[0], "allowed": self.verdict[1],
              "needs_typed_confirm": False, "zones_cfg_lower": False}
@@ -439,7 +439,7 @@ class GhCheckTest(GhBase):
         self.board.polls_busy = 2
         out = msu.update_check()
         self.assertTrue(out.startswith("ok"), out)
-        for s in ("v1.0.1", "allow_upgrade", "UNSIGNED", self.board.release_sha):
+        for s in ("v1.0.1", "allow_upgrade", self.board.release_sha):
             self.assertIn(s, out)
         self.assertIsNone(self.board.staged)
 
@@ -474,7 +474,7 @@ class GhStageReleaseTest(GhBase):
         self.board.polls_busy = 1
         out = msu.update_stage_release(confirm=True)
         self.assertTrue(out.startswith("ok - release v1.0.1 staged and verified"), out)
-        self.assertIn("UNSIGNED", out)
+        self.assertNotIn("UNSIGNED", out)
         self.assertEqual(len(self.board.posts()), 1)
 
     def test_query_carries_flags_and_typed_tag(self):

@@ -22,7 +22,6 @@
 #include <stdint.h>
 
 #include "update_policy.h"
-#include "update_sign.h"
 #include "update_url.h"
 
 #ifdef __cplusplus
@@ -64,8 +63,6 @@ typedef struct {
     uint32_t app_size;
     char manifest_url[UPDATE_URL_MAX];
     uint32_t manifest_size;
-    char sig_url[UPDATE_URL_MAX]; // release.json.sig, empty when the release has none
-    uint32_t sig_size;
 } update_release_info_t;
 
 typedef struct {

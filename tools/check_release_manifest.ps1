@@ -40,16 +40,6 @@ if ($ut -ne 0) { Note-Fail "test_release_manifest.py failed:`n$out" }
 elseif ($out -notmatch 'Ran (\d+) tests' -or [int]$Matches[1] -lt 15) { Note-Fail "test_release_manifest.py ran too few tests (vacuous?):`n$out" }
 else { Write-Host "ok: $($Matches[0])" }
 
-# 1b. signer (tools/sign_release.py, WP11): keys generated at test time, never committed.
-$signTest = Join-Path $repoRoot "tools\PcTools\tests\test_sign_release.py"
-$ErrorActionPreference = "Continue"
-$out = & $python -m unittest $signTest 2>&1 | Out-String
-$sgt = $LASTEXITCODE
-$ErrorActionPreference = "Stop"
-if ($sgt -ne 0) { Note-Fail "test_sign_release.py failed:`n$out" }
-elseif ($out -notmatch 'Ran (\d+) tests' -or [int]$Matches[1] -lt 9) { Note-Fail "test_sign_release.py ran too few tests (vacuous?):`n$out" }
-else { Write-Host "ok: $($Matches[0]) (release signer)" }
-
 # 2. bad tag refused -------------------------------------------------------------
 # Require the semver refusal text too: a bare exit 1 is also what any later gate (dirty tree, build, ...)
 # returns, so with the semver gate removed this passed anyway (vacuity audit 2026-10-07).

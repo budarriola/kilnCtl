@@ -1,3 +1,0 @@
-# Vendored upstream files: keep them byte-identical to Monocypher 4.0.3 (LF), no autocrlf
-# conversion on checkout, so tools/check_monocypher_vendored.ps1 holds in a fresh clone.
-* -text
