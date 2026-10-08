@@ -2816,6 +2816,22 @@ try {
 
     Invoke-HostTestExe -Name "firing_compare_alloc" -ExePath $exeFca -BuildCmd $cmdFca
 
+    # ---- test_recovery_switch.c: its own SEPARATE executable -----------------
+    # recovery_switch_at_boot_threshold() restores the boot target to the
+    # running partition when selecting recovery fails (otadata may already be
+    # erased). #includes recovery_switch.c and boot_partition_verify.c with
+    # fake esp_ota_*/esp_image_verify(); test_ota_http.c fakes
+    # recovery_switch_*() itself, so this cannot share that executable.
+    # /I stubs_recovery_switch first, for its private esp_image_format.h.
+    $exeRsw = Join-Path $outDir "kilnctl_host_tests_recovery_switch.exe"
+    $rswObjDir = Join-Path $outDir "rsw"
+    New-Item -ItemType Directory -Force -Path $rswObjDir | Out-Null
+    $rswStubDir = Join-Path $testDir "stubs_recovery_switch"
+    $cmdRsw = "cl /I`"$rswStubDir`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$rswObjDir\\`" /Fe:`"$exeRsw`" `"$(Join-Path $testDir 'test_recovery_switch.c')`""
+
+    Invoke-HostTestExe -Name "recovery_switch" -ExePath $exeRsw -BuildCmd $cmdRsw
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -3005,7 +3021,9 @@ try {
     # safety-config writer guard (docs/HTTP_POST_OWNER_MIGRATION.md A2).
     # 67 -> 68: added test_profile_executor_store_link.c's own Invoke-HostTestExe
     # call (real profiles_http.c store feeding the real profile_executor_run()).
-    $totalExpected = 68
+    # 68 -> 69: added test_recovery_switch.c's own Invoke-HostTestExe
+    # (recovery_switch_at_boot_threshold() restores the boot target on SET_FAILED).
+    $totalExpected = 69
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
