@@ -281,146 +281,216 @@ if (Test-Path '.gitmodules') {
         }
 }
 
+# PASS 1: collect every candidate citation, in document order, with no git
+# calls. (Previously this loop spawned one `git cat-file` process per citation
+# -- ~2,900 spawns -- which ran for 30+ minutes on a loaded machine.)
+$citations = New-Object System.Collections.Generic.List[object]
 foreach ($file in $files) {
     if (-not (Test-Path $file)) { continue }
     $lineNum = 0
-    Get-Content -LiteralPath $file -Encoding UTF8 | ForEach-Object {
+    foreach ($line in [System.IO.File]::ReadAllLines((Join-Path $repoRoot $file), [System.Text.Encoding]::UTF8)) {
         $lineNum++
-        $line = $_
-        $matches_ = [regex]::Matches($line, $hashPattern)
-        foreach ($m in $matches_) {
-            $isFabricatedMarker = $m.Groups[1].Success
-            $subName = $m.Groups[2].Value
-            $blobPath = $m.Groups[3].Value
-            $hash = $m.Groups[4].Value
-            if ($isFabricatedMarker) {
-                # Marked as an illustrative/not-a-citation token -- see header.
-                $excludedFabricated++
-                continue
-            }
+        foreach ($m in [regex]::Matches($line, $hashPattern)) {
+            $citations.Add([PSCustomObject]@{
+                File = $file
+                Line = $lineNum
+                Text = $line
+                Fabricated = $m.Groups[1].Success
+                SubName = $m.Groups[2].Value
+                BlobPath = $m.Groups[3].Value
+                Hash = $m.Groups[4].Value
+                Result = $null
+            })
+        }
+    }
+}
 
-            $totalCitations++
-            $uniqueChecked[$hash] = $true
+# Resolves a list of revision expressions in ONE git process. Returns, per
+# input and in order, the `git cat-file --batch-check` output line.
+function Invoke-BatchCheck {
+    param([string[]]$Exprs, [string]$RepoDir)
+    if (-not $Exprs -or $Exprs.Count -eq 0) { return @() }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'git'
+    $repoArg = ''
+    if ($RepoDir) { $repoArg = '-C "' + $RepoDir + '" ' }
+    $psi.Arguments = $repoArg + 'cat-file --batch-check'
+    $psi.UseShellExecute = $false
+    # Set-Location does not move the .NET process cwd; pin it so relative -C
+    # paths and the repo git sees are the ones this script resolved.
+    $psi.WorkingDirectory = (Get-Location).ProviderPath
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $p = [System.Diagnostics.Process]::Start($psi)
+    # Raw UTF-8 bytes, no BOM (PowerShell's pipe to a native exe prepends one,
+    # which corrupts the first line). Write stdin from a thread-free path by
+    # draining stdout asynchronously so a large batch cannot deadlock.
+    $stdoutTask = $p.StandardOutput.ReadToEndAsync()
+    $stderrTask = $p.StandardError.ReadToEndAsync()
+    # The process's stdin writer may emit a UTF-8 BOM, which git reads as part
+    # of the FIRST line only. Lead with a sacrificial "HEAD" line and drop its
+    # answer, so every real expression is read exactly as written.
+    $p.StandardInput.Write(('HEAD' + [char]10 + ($Exprs -join [string][char]10) + [char]10))
+    $p.StandardInput.Close()
+    $p.WaitForExit()
+    $out = @($stdoutTask.Result -split "`r?`n" | Where-Object { $_ -ne '' })
+    $out = @($out | Select-Object -Skip 1)
+    if ($out.Count -ne $Exprs.Count) {
+        throw "git cat-file --batch-check returned $($out.Count) lines for $($Exprs.Count) inputs (repo: '$RepoDir')"
+    }
+    return $out
+}
+function Test-IsCommitLine { param([string]$L) return ($L -match ' commit \d+$') }
 
-            $isKnownFalsePositive = $KnownNonHashFalsePositives | Where-Object {
-                $_.File -eq $file -and $_.Hash -eq $hash
-            }
-            if ($isKnownFalsePositive) { continue }
+# Stage which citations need which lookup. Fabricated-marked and known
+# false-positive tokens are never looked up.
+$parentIdx = New-Object System.Collections.Generic.List[int]
+$blobIdx = New-Object System.Collections.Generic.List[int]
+$subIdx = @{}   # sub path -> list of citation indexes
+for ($i = 0; $i -lt $citations.Count; $i++) {
+    $c = $citations[$i]
+    if ($c.Fabricated) { continue }
+    $f = $c.File; $h = $c.Hash
+    if ($KnownNonHashFalsePositives | Where-Object { $_.File -eq $f -and $_.Hash -eq $h }) { continue }
+    if ($c.SubName) {
+        $p = $submodulesByName[$c.SubName.ToLowerInvariant()]
+        if ($p) {
+            if (-not $subIdx.ContainsKey($p)) { $subIdx[$p] = New-Object System.Collections.Generic.List[int] }
+            $subIdx[$p].Add($i)
+        }
+    } elseif ($c.BlobPath) {
+        $blobIdx.Add($i)
+    } else {
+        $parentIdx.Add($i)
+    }
+}
 
-            if ($subName) {
-                # Explicitly declared as a submodule citation -- see header,
-                # "SUBMODULE HASHES". Only the named submodule is tried; no
-                # fallback to the parent repo or any other submodule.
-                $subPath = $submodulesByName[$subName.ToLowerInvariant()]
-                if (-not $subPath) {
-                    $declaredPath = $declaredSubmodulesByName[$subName.ToLowerInvariant()]
-                    if ($declaredPath) {
-                        # .gitmodules declares this submodule, but it is not
-                        # checked out here, so there is no history to resolve
-                        # the hash against and this ONE citation cannot be
-                        # graded either way. Skip it and keep grading every
-                        # other citation -- see header. Note this branch is
-                        # reachable only for a name .gitmodules itself
-                        # declares: an unknown name still falls through to
-                        # the failure below, and a submodule that IS present
-                        # never reaches here at all.
-                        $skippedUninitialized += [PSCustomObject]@{
-                            File = $file
-                            Line = $lineNum
-                            Hash = $hash
-                            Sub  = $subName
-                            Path = $declaredPath
-                        }
-                        continue
-                    }
-                    # Unknown name -- list every DECLARED submodule, not just
-                    # the initialized ones, so the hint is useful in a clean
-                    # worktree (where the initialized set is typically empty).
-                    $known = ($declaredSubmodulesByName.Keys | Sort-Object) -join ', '
-                    if (-not $known) { $known = '(none declared in .gitmodules)' }
-                    $failures += [PSCustomObject]@{
-                        File = $file
-                        Line = $lineNum
-                        Hash = $hash
-                        Text = $line.Trim()
-                        Reason = "unknown sub: name '$subName' (declared submodules: $known)"
-                    }
-                    continue
-                }
-                & git -C $subPath cat-file -e "$hash^{commit}" 2>$null 1>$null
-                if ($LASTEXITCODE -eq 0) {
-                    if (-not $resolvedInSubmodule.ContainsKey($subName)) { $resolvedInSubmodule[$subName] = 0 }
-                    $resolvedInSubmodule[$subName]++
-                    continue
-                }
-                $failures += [PSCustomObject]@{
+# PASS 2: one git process per repository (parent: commits and blob paths; one
+# per initialized submodule). Order is preserved, so line N answers input N.
+$lines = @(Invoke-BatchCheck -Exprs @($parentIdx | ForEach-Object { "$($citations[$_].Hash)^{commit}" }))
+for ($k = 0; $k -lt $parentIdx.Count; $k++) { $citations[$parentIdx[$k]].Result = (Test-IsCommitLine $lines[$k]) }
+
+$lines = @(Invoke-BatchCheck -Exprs @($blobIdx | ForEach-Object { "HEAD:$($citations[$_].BlobPath)" }))
+for ($k = 0; $k -lt $blobIdx.Count; $k++) {
+    # "<oid> <type> <size>" when the path exists at HEAD; the old
+    # per-citation code only required existence, then compared against
+    # rev-parse HEAD:<path>.
+    if ($lines[$k] -match '^([0-9a-f]{40}) \w+ \d+$') { $citations[$blobIdx[$k]].Result = $Matches[1] }
+    else { $citations[$blobIdx[$k]].Result = '' }
+}
+
+foreach ($p in $subIdx.Keys) {
+    $idxs = $subIdx[$p]
+    $lines = @(Invoke-BatchCheck -Exprs @($idxs | ForEach-Object { "$($citations[$_].Hash)^{commit}" }) -RepoDir $p)
+    for ($k = 0; $k -lt $idxs.Count; $k++) { $citations[$idxs[$k]].Result = (Test-IsCommitLine $lines[$k]) }
+}
+
+# PASS 3: grade in document order (same verdicts and message text as the
+# original per-citation loop).
+foreach ($c in $citations) {
+    $file = $c.File; $lineNum = $c.Line; $line = $c.Text
+    $subName = $c.SubName; $blobPath = $c.BlobPath; $hash = $c.Hash
+    if ($c.Fabricated) {
+        # Marked as an illustrative/not-a-citation token -- see header.
+        $excludedFabricated++
+        continue
+    }
+
+    $totalCitations++
+    $uniqueChecked[$hash] = $true
+
+    $isKnownFalsePositive = $KnownNonHashFalsePositives | Where-Object {
+        $_.File -eq $file -and $_.Hash -eq $hash
+    }
+    if ($isKnownFalsePositive) { continue }
+
+    if ($subName) {
+        # Explicitly declared as a submodule citation -- see header,
+        # "SUBMODULE HASHES". Only the named submodule is tried; no fallback
+        # to the parent repo or any other submodule.
+        $subPath = $submodulesByName[$subName.ToLowerInvariant()]
+        if (-not $subPath) {
+            $declaredPath = $declaredSubmodulesByName[$subName.ToLowerInvariant()]
+            if ($declaredPath) {
+                # Declared in .gitmodules but not checked out: this ONE
+                # citation cannot be graded either way (see header). An
+                # unknown name still falls through to the failure below.
+                $skippedUninitialized += [PSCustomObject]@{
                     File = $file
                     Line = $lineNum
                     Hash = $hash
-                    Text = $line.Trim()
-                    Reason = "declared sub:$subName but does not resolve in $subPath"
+                    Sub  = $subName
+                    Path = $declaredPath
                 }
                 continue
             }
-
-            if ($blobPath) {
-                # Explicitly declared as a BLOB citation -- see header,
-                # "BLOB HASHES". Standing practice in this repo is
-                # hand-restore-and-verify: a file is edited back to its
-                # pre-sabotage content by hand, then `git hash-object` is run
-                # on it and compared against `git rev-parse HEAD:<path>` to
-                # prove the restoration is byte-exact. That produced hash is
-                # a real, meaningful thing to cite -- it is just a BLOB hash,
-                # not a commit hash, and `cat-file -e <hash>^{commit}` can
-                # never resolve it no matter how correct it is (a blob is not
-                # a commit). A `blob:<path>` tag immediately before the
-                # backtick (no whitespace, matching the sub: convention)
-                # marks this and is graded by recomputing the blob id HEAD
-                # actually has at <path> and checking the cited hash is a
-                # prefix of it -- this is a STRICTER check than mere
-                # existence: it confirms the citation matches the ACTUAL
-                # committed content at that path, not just that some blob
-                # with that id exists somewhere in the object database.
-                & git cat-file -e "HEAD:$blobPath" 2>$null 1>$null
-                if ($LASTEXITCODE -ne 0) {
-                    $failures += [PSCustomObject]@{
-                        File = $file
-                        Line = $lineNum
-                        Hash = $hash
-                        Text = $line.Trim()
-                        Reason = "declared blob:$blobPath but that path does not exist at HEAD"
-                    }
-                    continue
-                }
-                $actualBlob = (& git rev-parse "HEAD:$blobPath" 2>$null).Trim()
-                if ($actualBlob -and $actualBlob.StartsWith($hash, [System.StringComparison]::Ordinal)) {
-                    $resolvedInBlob++
-                    continue
-                }
-                $failures += [PSCustomObject]@{
-                    File = $file
-                    Line = $lineNum
-                    Hash = $hash
-                    Text = $line.Trim()
-                    Reason = "declared blob:$blobPath but HEAD's blob there is $actualBlob, which does not start with the cited hash"
-                }
-                continue
-            }
-
-            # No sub: or blob: tag -- parent-repo resolution only (the default case,
-            # covering the overwhelming majority of citations). No implicit
-            # submodule fallback: see header, "SUBMODULE HASHES".
-            & git cat-file -e "$hash^{commit}" 2>$null 1>$null
-            if ($LASTEXITCODE -eq 0) { $resolvedInParent++; continue }
-
+            $known = ($declaredSubmodulesByName.Keys | Sort-Object) -join ', '
+            if (-not $known) { $known = '(none declared in .gitmodules)' }
             $failures += [PSCustomObject]@{
                 File = $file
                 Line = $lineNum
                 Hash = $hash
                 Text = $line.Trim()
-                Reason = 'does not resolve in the parent repo (add sub:<name> if this cites a submodule commit)'
+                Reason = "unknown sub: name '$subName' (declared submodules: $known)"
             }
+            continue
         }
+        if ($c.Result) {
+            if (-not $resolvedInSubmodule.ContainsKey($subName)) { $resolvedInSubmodule[$subName] = 0 }
+            $resolvedInSubmodule[$subName]++
+            continue
+        }
+        $failures += [PSCustomObject]@{
+            File = $file
+            Line = $lineNum
+            Hash = $hash
+            Text = $line.Trim()
+            Reason = "declared sub:$subName but does not resolve in $subPath"
+        }
+        continue
+    }
+
+    if ($blobPath) {
+        # Explicitly declared as a BLOB citation -- see header, "BLOB HASHES".
+        # Graded by checking the cited hash is a prefix of HEAD's blob id at
+        # that exact path (stricter than mere existence).
+        if ($null -eq $c.Result -or $c.Result -eq '') {
+            $failures += [PSCustomObject]@{
+                File = $file
+                Line = $lineNum
+                Hash = $hash
+                Text = $line.Trim()
+                Reason = "declared blob:$blobPath but that path does not exist at HEAD"
+            }
+            continue
+        }
+        $actualBlob = $c.Result
+        if ($actualBlob.StartsWith($hash, [System.StringComparison]::Ordinal)) {
+            $resolvedInBlob++
+            continue
+        }
+        $failures += [PSCustomObject]@{
+            File = $file
+            Line = $lineNum
+            Hash = $hash
+            Text = $line.Trim()
+            Reason = "declared blob:$blobPath but HEAD's blob there is $actualBlob, which does not start with the cited hash"
+        }
+        continue
+    }
+
+    # No sub: or blob: tag -- parent-repo resolution only. No implicit
+    # submodule fallback: see header, "SUBMODULE HASHES".
+    if ($c.Result) { $resolvedInParent++; continue }
+
+    $failures += [PSCustomObject]@{
+        File = $file
+        Line = $lineNum
+        Hash = $hash
+        Text = $line.Trim()
+        Reason = 'does not resolve in the parent repo (add sub:<name> if this cites a submodule commit)'
     }
 }
 

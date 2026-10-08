@@ -8,12 +8,13 @@ confidence gate) and the adaptive arms plus sec 7 gates in
 `docs/audits/adaptive_fuzzy_section8_campaign_2026-09-16.md` (gate 1 FAIL,
 run inert), `adaptive_fuzzy_section8_dwell_fix_2026-09-16.md` (gate 1 still
 FAIL, second cause), `adaptive_fuzzy_section8_cell_mix_rebuild_2026-09-16.md`
-(**gate 1 PASS, gate 2 PASS, gate 3 FAIL**; integrity PASS). **Open, owner
-only:** (a) the keep/remove decision on fuzzy (no verdict has been rendered);
-(b) whether to amend gate 3, which as written fires on any limit-cycle
-crossing and cannot separate a fuzzy-induced cycle from ordinary adaptive-PID
-dwell settling (3 of 7 pinned cells now differ from the control arm, 4 of 7
-are identical). No board was flashed and no heating run was performed.
+(**gate 1 PASS, gate 2 PASS, gate 3 FAIL**; integrity PASS). **Owner decision, 2026-10-07 (closes the former
+open items):** adaptive fuzzy stays in the code at strength 0; there is no removal and no gate-3 rework
+(gate 3 is not amended). It is revisited after real firings, using
+`firing_shadow` data. Nothing is open on this plan. (Prior context: gate 3 as
+written fires on any limit-cycle crossing and cannot separate a fuzzy-induced
+cycle from ordinary adaptive-PID dwell settling; 3 of 7 pinned cells differ from
+the control arm, 4 of 7 are identical.) No board was flashed and no heating run was performed.
 
 ## 0. Why this document exists
 
