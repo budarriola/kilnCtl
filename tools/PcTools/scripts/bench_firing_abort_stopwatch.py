@@ -42,11 +42,13 @@ Event pair measured:
     t2 = first poll at or after t1 at which io_read() reports every relay
          (1-4) commanded off.
 
-Pass criterion: t1 - t0 in [30.0, 30.0 + POLL_PERIOD_S + slack] seconds
-(SAFETY_LINK_FIRING_ABORT_SILENCE_MS is a hard >= comparison against
-age_ms, itself only as fresh as the watchdog task's own
-WATCHDOG_CHECK_PERIOD_MS poll -- see profile_executor.c's own comment beside
-safety_link_silent_30s). t2 should follow t1 within one more poll period
+Pass criterion: t1 - t0 in [30.0, 30.0 + FW_WATCHDOG_PERIOD_S + POLL_PERIOD_S
++ slack + halt call duration] seconds (SAFETY_LINK_FIRING_ABORT_SILENCE_MS is a
+hard >= comparison against age_ms, evaluated only once per
+WATCHDOG_CHECK_PERIOD_MS = 2000 ms in profile_executor.c's watchdog task, so
+a correct firmware may fault up to 2 s after the threshold; this script's own
+poll period then adds up to one more period before it sees it).
+t2 should follow t1 within one more poll period
 (the fault branch calls kiln_io_all_relays_off() the same tick it faults).
 No firmware timestamp had to be added for this: /api/profile_exec already
 reports state/fault_reason and /api/status already reports relays[]/age_ms
@@ -63,10 +65,15 @@ halted explicitly as well), and resumed with debug_resume(peer="pico"). Never a
 memory write, never a flash, no raw OpenOCD.
 
 Halt bound: the Pico stays halted only until the abort is proven (FAULTED then
-relays off) or max_halt_s() = threshold + poll period + 5 s has elapsed,
+relays off) or max_halt_s() = threshold + firmware watchdog period + poll
+period + 5 s has elapsed,
 whichever comes first. The resume runs in a `finally`, so it also happens on an
-exception, KeyboardInterrupt or a timeout. The resume is confirmed by the
-resume tool reporting no core still halted AND safety_get_status answering; if
+exception, KeyboardInterrupt or a timeout; a Ctrl-C during the resume itself
+is held until the resume attempts finish, then re-raised. The resume is
+confirmed by the resume tool reporting no core still halted AND the ESP's
+safety-link status reading link_up with a fresh (< 1.5 s) frame -- NOT merely
+safety_get_status answering, which reads the ESP's cache and answers
+successfully with link_up=0 while the Pico is still halted. If
 it cannot be confirmed the run FAILS loudly with an operator instruction (the
 safety processor may still be halted: power-cycle it or debug_reset the pico,
 and call profiles_stop()). The halt duration is reported.
@@ -75,8 +82,10 @@ HAZARD: while the Pico is halted the independent safety processor is OUT OF THE
 LOOP -- nothing but the ESP's own fault path is protecting the firing. That
 ESP path is exactly what is under test. After the resume the Pico sees a long
 link gap, so an S6b (link dead) and/or S6a trip is the EXPECTED aftermath.
-This script never clears it; clear it by the usual rules (docs/MCP_SERVERS.md
-flash section: verify trip_reason/trip_mask, then safety_clear_trip()).
+This script never clears it. Standing rule: a trip is cleared only when it is
+S6a (verify trip_reason/trip_mask first, docs/MCP_SERVERS.md flash section) or
+S6b after a recovery-image dwell. An S6b from this halt is NOT the recovery
+dwell case: report it rather than clearing it.
 
 SAFETY: this silences the safety processor's telemetry on a board that MUST
 have a real firing running, by design -- that is the whole point of the
@@ -117,6 +126,20 @@ ABORT_THRESHOLD_S = 30.0
 #: changed constant without editing this file.
 DEFAULT_POLL_PERIOD_S = 1.0
 
+#: WATCHDOG_CHECK_PERIOD_MS (profile_executor.c:82, 2000u): the firmware only
+#: evaluates the 30 s silence check once per this period, so a correct
+#: firmware can fault up to this long after the threshold. Distinct from this
+#: script's own poll period above.
+FW_WATCHDOG_PERIOD_S = 2.0
+
+#: Freshness for the post-resume link check (the 1.5 s link_up age class):
+#: the ESP's cached status must show link_up AND a frame younger than this.
+LINK_FRESH_MS = 1500
+
+#: Resume attempts (RESUME_RETRY_PAUSE_S apart) before giving up.
+RESUME_ATTEMPTS = 3
+RESUME_RETRY_PAUSE_S = 1.0
+
 #: Extra seconds of halt beyond threshold + one poll before giving up. The
 #: Pico is halted (safety processor out of the loop) for at most
 #: ABORT_THRESHOLD_S + poll_period + HALT_MARGIN_S.
@@ -135,7 +158,7 @@ OPERATOR_RESUME_FAILED = (
 
 def max_halt_s(poll_period):
     """Hard bound on how long the Pico may stay halted."""
-    return ABORT_THRESHOLD_S + poll_period + HALT_MARGIN_S
+    return ABORT_THRESHOLD_S + FW_WATCHDOG_PERIOD_S + poll_period + HALT_MARGIN_S
 
 
 _FAULT_RE = re.compile(r"fault_guard=(\d+)")
@@ -236,33 +259,68 @@ def _resume_pico():
 
 
 def _link_alive() -> bool:
-    return not _is_error(m.safety_get_status())
+    """True only when the ESP actually hears the Pico again: link_up set and
+    the last frame fresher than LINK_FRESH_MS. safety_get_status() answering
+    is NOT enough -- it reads the ESP's cache and succeeds (link_up=0, growing
+    age) while the Pico is still halted."""
+    try:
+        st = m._safety.get_status()
+    except Exception:  # noqa: BLE001
+        return False
+    return (st.link_up is True and not st.never_received
+            and st.age_ms < LINK_FRESH_MS)
 
 
 def _resume_and_confirm(resume, link_alive, clock, sleep):
-    """Resume the Pico (one retry) and confirm. Never raises. (ok, detail)."""
+    """Resume the Pico (bounded retries) and confirm.
+
+    Returns (ok, detail, t_resumed, interrupt). Never raises: a
+    KeyboardInterrupt during a resume attempt is held (that attempt counts as
+    failed and the next one still runs -- on Windows the Ctrl-C also kills the
+    OpenOCD child, so stopping there would leave the Pico halted) and handed
+    back as ``interrupt`` for the caller to re-raise once the resume is done.
+    ``t_resumed`` is when the resume tool reported success (None if never).
+    """
     detail = ""
     resumed = False
-    for _ in range(2):
+    interrupt = None
+    t_resumed = None
+    for attempt in range(RESUME_ATTEMPTS):
+        if attempt:
+            try:
+                sleep(RESUME_RETRY_PAUSE_S)
+            except KeyboardInterrupt as exc:
+                interrupt = interrupt or exc
         try:
             resumed, detail = resume()
+        except KeyboardInterrupt as exc:
+            interrupt = interrupt or exc
+            resumed, detail = False, "resume interrupted (Ctrl-C)"
         except Exception as exc:  # noqa: BLE001
             resumed, detail = False, f"resume raised {exc!r}"
         if resumed:
+            t_resumed = clock()
             break
     if not resumed:
-        return False, f"resume failed: {detail}"
+        return (False, f"resume failed after {RESUME_ATTEMPTS} attempts: {detail}",
+                None, interrupt)
     deadline = clock() + RESUME_CONFIRM_S
     while True:
         try:
             if link_alive():
-                return True, detail
+                return True, detail, t_resumed, interrupt
+        except KeyboardInterrupt as exc:
+            interrupt = interrupt or exc
         except Exception:  # noqa: BLE001
             pass
         if clock() >= deadline:
-            return False, ("resume reported ok but safety_get_status never "
-                           f"answered: {detail}")
-        sleep(1.0)
+            return (False, ("resume reported ok but the ESP never saw a fresh "
+                            f"link_up frame from the Pico: {detail}"),
+                    t_resumed, interrupt)
+        try:
+            sleep(1.0)
+        except KeyboardInterrupt as exc:
+            interrupt = interrupt or exc
 
 
 def measure_abort(poll_period, *, clock=time.time, sleep=time.sleep,
@@ -281,7 +339,6 @@ def measure_abort(poll_period, *, clock=time.time, sleep=time.sleep,
             "halt_call_s": 0.0, "halt_duration_s": None,
             "resume_ok": None, "resume_detail": "", "log": []}
     halt_attempted = False
-    t_halted = None
     try:
         t0 = clock()
         meas["t0"] = t0
@@ -321,19 +378,26 @@ def measure_abort(poll_period, *, clock=time.time, sleep=time.sleep,
                 emit(line)
             if meas["t_faulted"] is not None and meas["t_relays_off"] is not None:
                 break
-            sleep(poll_period)
+            # Never sleep past the bound just because of the poll cadence.
+            sleep(max(0.0, min(poll_period, deadline - clock())))
         return meas
     finally:
         if halt_attempted:
-            ok, detail = _resume_and_confirm(resume, link_alive, clock, sleep)
+            ok, detail, t_resumed, interrupt = _resume_and_confirm(
+                resume, link_alive, clock, sleep)
             meas["resume_ok"] = ok
             meas["resume_detail"] = detail
-            if t_halted is not None:
-                meas["halt_duration_s"] = clock() - t_halted
+            # Conservative (upper) halt duration: from before the halt call
+            # (the Pico stopped somewhere inside it) to when the resume tool
+            # reported success -- not to the end of the link-confirm wait.
+            t_end = t_resumed if t_resumed is not None else clock()
+            meas["halt_duration_s"] = t_end - meas["t0"]
             if emit:
                 emit(f"  resume pico -> ok={ok} {detail}")
                 if not ok:
                     emit(OPERATOR_RESUME_FAILED)
+            if interrupt is not None:
+                raise interrupt
 
 
 def judge_run(meas, poll_period):
@@ -356,8 +420,10 @@ def judge_run(meas, poll_period):
         ok = False
     else:
         out.append("Pico resumed and confirmed. Expect an S6b (link dead) and/or "
-                   "S6a trip: do NOT auto-clear; follow the docs/MCP_SERVERS.md "
-                   "flash section (check trip_reason/trip_mask first).")
+                   "S6a trip: this script never clears it. Clear only an S6a "
+                   "(check trip_reason/trip_mask first, docs/MCP_SERVERS.md "
+                   "flash section); an S6b from this halt is not the "
+                   "recovery-dwell case, so report it instead of clearing.")
     return ok, out
 
 
@@ -372,9 +438,11 @@ def judge_abort(t0, t_faulted, t_relays_off, poll_period, max_wait,
         return False, out
 
     abort_latency_s = t_faulted - t0
-    # +1s transport/exec slack, plus the halt call's own duration (t0 is taken
-    # before it; the Pico actually went silent somewhere inside it).
-    upper_bound = ABORT_THRESHOLD_S + poll_period + 1.0 + halt_call_s
+    # Firmware watchdog period (the 30 s check runs only every 2 s), this
+    # script's poll period, +1s transport/exec slack, plus the halt call's own
+    # duration (t0 is taken before it; the Pico went silent somewhere inside).
+    upper_bound = (ABORT_THRESHOLD_S + FW_WATCHDOG_PERIOD_S + poll_period
+                   + 1.0 + halt_call_s)
     ok = ABORT_THRESHOLD_S <= abort_latency_s <= upper_bound
 
     out.append(f"\nAbort latency (silence -> FAULTED): {abort_latency_s:.2f}s "

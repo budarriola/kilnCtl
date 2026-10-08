@@ -295,7 +295,7 @@ def test_halt_is_bounded():
     assert meas["halt_duration_s"] <= sw.max_halt_s(1.0) + 1.0
     assert meas["halt_duration_s"] >= sw.max_halt_s(1.0) - 3.0
     assert pico.resumes == 1
-    assert sw.max_halt_s(1.0) == 36.0
+    assert sw.max_halt_s(1.0) == 38.0  # 30 + 2 fw watchdog + 1 poll + 5
 
 
 def test_default_halt_names_both_cores(monkeypatch):
@@ -311,6 +311,91 @@ def test_default_halt_names_both_cores(monkeypatch):
     monkeypatch.setattr(sw.m, "debug_halt", lambda **k: "error: halt failed",
                         raising=False)
     assert sw._halt_pico()[0] is False
+
+
+def test_abort_within_firmware_watchdog_period_passes():
+    """The firmware evaluates the 30 s check only every 2 s
+    (WATCHDOG_CHECK_PERIOD_MS), so a fault seen at 32.5 s with an instant halt
+    call is correct firmware, not a FAIL."""
+    ok, report = sw.judge_abort(0.0, 32.5, 32.5, 1.0, 7.0, halt_call_s=0.0)
+    assert ok, report
+    ok, _ = sw.judge_abort(0.0, 34.5, 34.5, 1.0, 7.0, halt_call_s=0.0)
+    assert not ok
+
+
+def test_sleep_never_overshoots_halt_bound():
+    """A long poll period must not keep the Pico halted past max_halt_s."""
+    pico = FakePico()
+    (_, _), meas = run_measure(fault_at=None, pico=pico, poll=10.0)
+    assert meas["halt_duration_s"] <= sw.max_halt_s(10.0)
+
+
+class _Status:
+    def __init__(self, link_up, age_ms, never=False):
+        self.link_up, self.age_ms, self.never_received = link_up, age_ms, never
+
+
+def test_link_alive_needs_fresh_link_up_not_just_an_answer(monkeypatch):
+    """safety_get_status answers from the ESP cache with link_up=0 while the
+    Pico is halted; that must NOT count as the Pico being back."""
+    def use(st):
+        monkeypatch.setattr(sw.m, "_safety",
+                            types.SimpleNamespace(get_status=lambda: st))
+    use(_Status(False, 40000))
+    assert sw._link_alive() is False
+    use(_Status(True, 5000))  # stale frame
+    assert sw._link_alive() is False
+    use(_Status(True, 0xFFFF, never=True))
+    assert sw._link_alive() is False
+    use(_Status(True, 120))
+    assert sw._link_alive() is True
+
+    def boom():
+        raise OSError("uart")
+    monkeypatch.setattr(sw.m, "_safety", types.SimpleNamespace(get_status=boom))
+    assert sw._link_alive() is False
+
+
+class _InterruptOncePico(FakePico):
+    """First resume attempt is Ctrl-C'd (OpenOCD child killed with it)."""
+
+    def resume(self):
+        self.resumes += 1
+        if self.resumes == 1:
+            raise KeyboardInterrupt()
+        return True, "resumed"
+
+
+def test_keyboard_interrupt_during_resume_still_resumes_then_reraises():
+    pico = _InterruptOncePico()
+    clk = FakeClock()
+    with pytest.raises(KeyboardInterrupt):  # held, then re-raised
+        sw.measure_abort(1.0, clock=clk.now, sleep=clk.sleep,
+                         halt=pico.halt, resume=pico.resume,
+                         link_alive=pico.link_alive,
+                         exec_status=lambda: (sw.PROFILE_EXEC_FAULTED, 0),
+                         relays_all_off=lambda: True)
+    assert pico.resumes == 2  # retried after the interrupted attempt
+
+
+def test_keyboard_interrupt_during_resume_records_resume_ok():
+    pico = _InterruptOncePico()
+    clk = FakeClock()
+    captured = []
+    with pytest.raises(KeyboardInterrupt):
+        sw.measure_abort(1.0, clock=clk.now, sleep=clk.sleep, halt=pico.halt,
+                         resume=pico.resume, link_alive=pico.link_alive,
+                         exec_status=lambda: (sw.PROFILE_EXEC_FAULTED, 0),
+                         relays_all_off=lambda: True, emit=captured.append)
+    assert any("resume pico -> ok=True" in line for line in captured)
+    assert sw.OPERATOR_RESUME_FAILED not in captured
+
+
+def test_resume_retries_are_bounded():
+    pico = FakePico(resume_ok=False)
+    (_, _), meas = run_measure(fault_at=30.0, relays_off_at=30.0, pico=pico)
+    assert pico.resumes == sw.RESUME_ATTEMPTS >= 2
+    assert meas["resume_ok"] is False
 
 
 # --------------------------------------------------------------------- soak
