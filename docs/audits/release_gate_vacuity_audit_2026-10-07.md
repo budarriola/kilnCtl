@@ -70,3 +70,13 @@ audit targets but fell out of the persist-scratch coverage fix:
 `check_app_image_size` and the host-test builds in the recovery family grade
 nothing on a machine that has not built the artifact (`SKIP`/`SKIP-FAST`), so a
 green `-Fast` run in a fresh worktree says nothing about them.
+
+## Addendum 2026-10-08: host-test negative tests (owner-approved)
+
+`check_00_kilnfw_host_tests.ps1` stays NOT AUDITED as a gate row (the table is per check). These mutations of newly added host tests were run in a throwaway worktree at origin/main (`build_host_tests.ps1`, fresh `-OutDir` each time), restored by hand, then a forced full rebuild passed (68/68, exit 0). Nothing was committed from the mutations.
+
+| Mutation | Result | Failing line |
+|---|---|---|
+| `live_profile.c`: `caller_stack_is_external()` refusal disabled in `live_profile_save_record()` and `live_profile_save_working()` (97350016) | RED | `test_live_profile.c:804-807` (test_saves_refused_from_unsafe_stack) |
+| `ui_page_safety_logic.c`: `has_admin` check gating Clear Trip disabled (3b2c0c79) | RED | `test_ui_page_safety_logic.c:41` (live trip + non-admin refused) |
+| `ui_page_safety_logic.c`: staleness bound `>=` shifted to `>` | RED | `test_ui_page_safety_logic.c:28` (stale TRIPPED is a silent link) |
