@@ -75,18 +75,11 @@ if (-not $SlotBBin) { $SlotBBin = Join-Path $repoRoot "firmware\SaftyFW\build\Sa
 # worktree checkout has no venv of its own (gitignored, per-clone), so this
 # falls back to `python` on PATH there with tools\PcTools\src inserted onto
 # sys.path directly rather than hard-failing.
-$venvPython = Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"
-$venvCfg = Join-Path $repoRoot "tools\PcTools\.venv\pyvenv.cfg"
-if ((Test-Path $venvPython) -and (Test-Path $venvCfg)) {
-    $python = $venvPython
-} else {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
-    if (-not $cmd) {
-        Write-Host "SKIP: no venv python at $venvPython and no python/python3 on PATH"
-        exit 3
-    }
-    $python = $cmd.Source
+. (Join-Path $repoRoot "tools\lib_pctools_python.ps1")
+$python = Resolve-PcToolsPython -RepoRoot $repoRoot
+if (-not $python) {
+    Write-Host "SKIP: no PcTools python (worktree venv, KILNCTL_PCTOOLS_PYTHON, main tree venv) and no python/python3 on PATH"
+    exit 3
 }
 
 $pyScript = @'

@@ -183,15 +183,9 @@ function Gate([string]$msg) {
     if ($DevDryRun) { Write-Host "WARNING (DevDryRun): $msg" -ForegroundColor Yellow } else { Fail $msg }
 }
 
-$python = $null
-foreach ($cand in @((Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"))) {
-    if (Test-Path -LiteralPath $cand) { $python = $cand }
-}
-if (-not $python) {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { Fail "no python (tools\PcTools\.venv or PATH); release_manifest.py needs one." }
-    $python = $cmd.Source
-}
+. (Join-Path $PSScriptRoot "lib_pctools_python.ps1")
+$python = Resolve-PcToolsPython -RepoRoot $repoRoot
+if (-not $python) { Fail "no python (tools\PcTools\.venv, KILNCTL_PCTOOLS_PYTHON, main tree venv or PATH); release_manifest.py needs one." }
 if ($NotesFile -and -not (Test-Path -LiteralPath $NotesFile -PathType Leaf)) { Fail "-NotesFile $NotesFile does not exist." }
 if ($NotesFile -and ((Get-Item -LiteralPath $NotesFile).Length -eq 0)) { Fail "-NotesFile $NotesFile is empty." }
 if (-not $GatesFile) { $GatesFile = Join-Path $repoRoot "docs\release_gates.json" }

@@ -25,16 +25,10 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $failures = New-Object System.Collections.Generic.List[string]
 function Note-Fail([string]$m) { $failures.Add($m); Write-Host "FAIL: $m" -ForegroundColor Red }
 
-$python = $null
-$venvPython = Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"
-if ((Test-Path $venvPython) -and (Test-Path (Join-Path $repoRoot "tools\PcTools\.venv\pyvenv.cfg"))) {
-    $python = $venvPython
-} else {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
-    if (-not $cmd) { Write-Host "FAIL: no venv python and no python on PATH"; exit 1 }
-    $python = $cmd.Source
-}
+# Shared resolver: worktree venv -> KILNCTL_PCTOOLS_PYTHON -> main tree venv -> PATH.
+. (Join-Path $PSScriptRoot "lib_pctools_python.ps1")
+$python = Resolve-PcToolsPython -RepoRoot $repoRoot
+if (-not $python) { Write-Host "FAIL: no PcTools python (worktree venv, KILNCTL_PCTOOLS_PYTHON, main tree venv) and no python on PATH"; exit 1 }
 
 # 1. unit tests ------------------------------------------------------------------
 $testFile = Join-Path $repoRoot "tools\PcTools\tests\test_release_manifest.py"

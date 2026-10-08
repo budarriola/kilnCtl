@@ -497,21 +497,9 @@ $selfcheckPy = Join-Path $pcToolsDir "selfcheck.py"
 # `git rev-parse --git-common-dir`). selfcheck.py is always run from the
 # worktree's own tools\PcTools with PYTHONPATH=src (see Start-CheckAsync),
 # so a borrowed interpreter still tests THIS tree's code, not the main tree's.
-function Resolve-PcToolsPython {
-    param([string]$PcToolsDir, [string]$RepoRoot)
-    $own = Join-Path $PcToolsDir ".venv\Scripts\python.exe"
-    if (Test-Path $own) { return $own }
-    $envPy = $env:KILNCTL_PCTOOLS_PYTHON
-    if (-not [string]::IsNullOrWhiteSpace($envPy) -and (Test-Path $envPy)) { return $envPy }
-    $common = (& git -C $RepoRoot rev-parse --path-format=absolute --git-common-dir 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $common) {
-        $mainRoot = Split-Path -Parent ([string]($common | Select-Object -First 1)).Trim()
-        $mainPy = Join-Path $mainRoot "tools\PcTools\.venv\Scripts\python.exe"
-        if (Test-Path $mainPy) { return $mainPy }
-    }
-    return $own
-}
-$selfcheckPython = Resolve-PcToolsPython -PcToolsDir $pcToolsDir -RepoRoot $repoRoot
+. (Join-Path $PSScriptRoot "lib_pctools_python.ps1")
+$selfcheckPython = Resolve-PcToolsPython -RepoRoot $repoRoot -NoPathFallback
+if (-not $selfcheckPython) { $selfcheckPython = Join-Path $pcToolsDir ".venv\Scripts\python.exe" }
 if ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython)) {
     # A synthetic entry: the main loop below special-cases .py files to run
     # under $selfcheckPython instead of `powershell -File`.
