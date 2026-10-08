@@ -87,42 +87,11 @@ def _lane_dir(lane: str) -> Path:
     return gate_dir() / lane
 
 
-def _read_config() -> "dict | None":
-    path = gate_dir() / "config.json"
-    try:
-        if not path.exists():
-            gate_dir().mkdir(parents=True, exist_ok=True)
-            path.write_text('{"heavy_slots": 4, "light_slots": 4}\n')
-        return json.loads(path.read_text())
-    except Exception:
-        return None
-
-
-def _configured_slot_count(lane: str = "heavy") -> int:
-    env_name = "KILNCTL_LIGHT_GATE_SLOTS" if lane == "light" else "KILNCTL_BUILD_GATE_SLOTS"
-    raw = os.environ.get(env_name)
-    if raw is not None and raw.strip():
-        try:
-            return int(raw.strip())
-        except ValueError:
-            print(f"build gate: {env_name}={raw!r} is not an integer, ignoring", file=sys.stderr)
-    cfg = _read_config()
-    if cfg is not None:
-        try:
-            n = int(cfg.get("light_slots" if lane == "light" else "heavy_slots"))
-            if n >= 0:
-                return n
-        except (TypeError, ValueError):
-            pass
-    return DEFAULT_SLOTS
-
-
-def gate_dir() -> Path:
-    return Path(os.environ.get("KILNCTL_BUILD_GATE_DIR") or r"C:\wt\.buildgate")
-
-
-def _lane_dir(lane: str) -> Path:
-    return gate_dir() / lane
+def _atomic_write(path: Path, text: str) -> None:
+    """Write via temp file + os.replace so a reader never sees a torn file."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:6]}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
 
 
 def _read_config() -> "dict | None":
@@ -130,29 +99,42 @@ def _read_config() -> "dict | None":
     try:
         if not path.exists():
             gate_dir().mkdir(parents=True, exist_ok=True)
-            path.write_text('{"heavy_slots": 4, "light_slots": 4}\n')
+            _atomic_write(path, '{"heavy_slots": 4, "light_slots": 4}\n')
         return json.loads(path.read_text())
     except Exception:
         return None
 
 
 def _configured_slot_count(lane: str = "heavy") -> int:
+    """Machine-wide config is AUTHORITATIVE; the env var may only LOWER it
+    (clamped to <= config), and heavy never accepts < 1 (no disabling the
+    gate from a worktree). Unreadable config falls back to DEFAULT_SLOTS."""
+    key = "light_slots" if lane == "light" else "heavy_slots"
+    limit = DEFAULT_SLOTS
+    cfg = _read_config()
+    if cfg is not None:
+        try:
+            n = int(cfg.get(key))
+            if n >= (0 if lane == "light" else 1):
+                limit = n
+        except (TypeError, ValueError):
+            pass
     env_name = "KILNCTL_LIGHT_GATE_SLOTS" if lane == "light" else "KILNCTL_BUILD_GATE_SLOTS"
     raw = os.environ.get(env_name)
     if raw is not None and raw.strip():
         try:
-            return int(raw.strip())
+            n = int(raw.strip())
+            if n < (0 if lane == "light" else 1):
+                print(f"build gate: {env_name}={raw!r} below the minimum for the {lane} lane, ignoring",
+                      file=sys.stderr)
+            elif n > limit:
+                print(f"build gate: {env_name}={n} exceeds machine-wide config ({limit}); using {limit}",
+                      file=sys.stderr)
+            else:
+                return n
         except ValueError:
             print(f"build gate: {env_name}={raw!r} is not an integer, ignoring", file=sys.stderr)
-    cfg = _read_config()
-    if cfg is not None:
-        try:
-            n = int(cfg.get("light_slots" if lane == "light" else "heavy_slots"))
-            if n >= 0:
-                return n
-        except (TypeError, ValueError):
-            pass
-    return DEFAULT_SLOTS
+    return limit
 
 
 def _slot_count(lane: str = "heavy") -> int:
@@ -375,6 +357,27 @@ def descendants(root: int, snapshot: "dict[int, tuple[int, str]] | None" = None)
     return order
 
 
+def _kill_pid(pid: int) -> None:
+    h = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
+    if h:
+        try:
+            _kernel32.TerminateProcess(h, 1)
+        finally:
+            _kernel32.CloseHandle(h)
+
+
+def _kill_tree(root: int) -> None:
+    """Kill ``root`` and all its descendants, re-scanning until none remain."""
+    for _ in range(10):
+        kids = descendants(root)
+        if not kids:
+            break
+        for pid, _n in kids:
+            _kill_pid(pid)
+        time.sleep(0.2)
+    _kill_pid(root)
+
+
 def _kill_descendants(root: int) -> None:
     for pid, _ in descendants(root):
         h = _kernel32.OpenProcess(_PROCESS_TERMINATE, False, pid)
@@ -402,7 +405,7 @@ def _write_record(lane: str, slot: int, label: str, phase: str) -> None:
         "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
         "worktree": os.getcwd(),
     }
-    _record_path(lane, slot).write_text(json.dumps(rec, separators=(",", ":")))
+    _atomic_write(_record_path(lane, slot), json.dumps(rec, separators=(",", ":")))
 
 
 def _remove_record(lane: str, slot: int) -> None:
@@ -430,6 +433,10 @@ def read_records(lane: str = "heavy") -> "list[dict]":
                 "worktree": str(r.get("worktree", "")),
             })
         except Exception:
+            m = re.match(r"slot(\d+)\.json$", f.name)
+            if m:  # unparsable record: treat as held, never as free
+                out.append({"slot": int(m.group(1)), "pid": 0, "alive": True, "cmd": "<unparsable record>",
+                            "label": "", "phase": "", "started_epoch": f.stat().st_mtime, "worktree": ""})
             continue
     return out
 
@@ -447,7 +454,7 @@ def _new_ticket(lane: str, label: str) -> str:
     d = _queue_dir(lane)
     d.mkdir(parents=True, exist_ok=True)
     name = f"{int(time.time() * 1000):015d}-{os.getpid()}-{uuid.uuid4().hex[:8]}.ticket"
-    (d / name).write_text(_ticket_body(lane, label))
+    _atomic_write(d / name, _ticket_body(lane, label))
     return name
 
 
@@ -602,7 +609,7 @@ def kiln_build_gate(
                     if tpath.exists():
                         os.utime(tpath)
                     else:
-                        tpath.write_text(_ticket_body(lane, label))
+                        _atomic_write(tpath, _ticket_body(lane, label))
                 except OSError:
                     pass
                 rank = live.index(ticket) if ticket in live else len(live)
@@ -636,50 +643,70 @@ def kiln_build_gate(
         if ticket is not None:
             _remove_ticket(lane, ticket)
 
-    if abandoned:
-        log(f"build gate: WARNING -- {lane} slot {held_index} was ABANDONED by a dead process; "
-            f"reclaimed it for '{label}'")
     limit = max_hold_seconds_override if max_hold_seconds_override else max_hold_seconds()
-    try:
-        _write_record(lane, held_index, label, phase)
-    except Exception as exc:
-        log(f"build gate: WARNING -- could not write holder record: {exc}")
-    state = {"lane": lane, "slot": held_index, "depth": 1}
+    state = {"lane": lane, "slot": held_index, "depth": 1, "pids": set()}
     _tls.held = state
     stop = threading.Event()
     expired = {"flag": False, "held": 0.0}
     acquired_at = time.monotonic()
+    watchdog: "threading.Thread | None" = None
+    held_for = 0.0
 
     def _watch() -> None:
         if stop.wait(limit):
             return
         expired["flag"] = True
         expired["held"] = time.monotonic() - acquired_at
+        pids = sorted(state["pids"])
         log(f"build gate: MAX HOLD EXCEEDED -- {lane} slot {held_index} ('{label}') held "
-            f"{expired['held']:.1f}s > limit {limit}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); killing this "
-            f"holder's own build children and releasing the slot")
-        _kill_descendants(os.getpid())
+            f"{expired['held']:.1f}s > limit {limit}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); "
+            + (f"killing registered compile process tree(s) {pids} and releasing the slot" if pids else
+               "NO compile process registered, killing nothing; releasing the slot"))
+        for pid in pids:
+            _kill_tree(pid)
 
-    watchdog = threading.Thread(target=_watch, name="build-gate-watchdog", daemon=True)
-    watchdog.start()
+    release_error: "str | None" = None
     try:
+        if abandoned:
+            log(f"build gate: WARNING -- {lane} slot {held_index} was ABANDONED by a dead process; "
+                f"reclaimed it for '{label}'")
+        try:
+            _write_record(lane, held_index, label, phase)
+        except Exception as exc:
+            log(f"build gate: WARNING -- could not write holder record: {exc}")
+        watchdog = threading.Thread(target=_watch, name="build-gate-watchdog", daemon=True)
+        watchdog.start()
         yield
     finally:
         stop.set()
-        watchdog.join(timeout=5)
+        if watchdog is not None:
+            watchdog.join(timeout=60 if expired["flag"] else 5)  # let an in-flight kill finish
         _remove_record(lane, held_index)
         _tls.held = None
         if not held.release():
-            log(f"build gate: WARNING -- ReleaseMutex failed for slot {held_index} "
-                f"('{label}'): {ctypes.get_last_error()}")
+            release_error = (f"build gate: ReleaseMutex failed for {lane} slot {held_index} "
+                             f"('{label}'): {ctypes.get_last_error()}")
+            log(release_error)
         for m in mutexes:
             m.close()
         held_for = time.monotonic() - acquired_at
         log(f"build gate: released {lane} slot {held_index} for '{label}' (held {held_for:.0f}s)")
+    if release_error:
+        raise OSError(release_error)
     if expired["flag"]:
         raise RuntimeError(
             f"build gate: {lane} slot {held_index} held by '{label}' for {held_for:.0f}s, over the max hold "
-            f"of {limit}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); build children killed, slot released")
+            f"of {limit}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); registered build process tree killed, slot released")
+
+
+def register_compile_pid(pid: int) -> bool:
+    """Tell the held gate (this thread's) which process is the compile, so a
+    max-hold expiry kills only that tree. Returns False when no gate is held."""
+    held = getattr(_tls, "held", None)
+    if held is None or "pids" not in held:
+        return False
+    held["pids"].add(int(pid))
+    return True
 
 
 # ---- status ------------------------------------------------------------------

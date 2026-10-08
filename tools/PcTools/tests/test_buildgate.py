@@ -107,10 +107,13 @@ def test_wait_any_times_out_when_both_slots_are_held():
             m.close()
 
 
-def test_slots_zero_disables_the_gate_without_touching_a_mutex(monkeypatch):
+def test_light_lane_zero_disables_but_heavy_zero_is_ignored(monkeypatch):
+    monkeypatch.setenv("KILNCTL_LIGHT_GATE_SLOTS", "0")
     monkeypatch.setenv("KILNCTL_BUILD_GATE_SLOTS", "0")
+    assert buildgate._slot_count("light") == 0
+    assert buildgate._slot_count("heavy") == 4  # heavy 0 refused, config wins
     ran = False
-    with buildgate.kiln_build_gate("test-disabled"):
+    with buildgate.kiln_build_gate("test-disabled", lane="light"):
         ran = True
     assert ran
 
@@ -215,7 +218,7 @@ def test_powershell_light_lane_acquires_while_both_heavy_slots_are_held(monkeypa
 
     ps = shutil.which("powershell")
     if ps is None:
-        pytest.skip("powershell not available")
+        pytest.fail("powershell not available -- parity tests must not skip")
     _private_prefixes(monkeypatch)
     gate_ps1 = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
@@ -238,7 +241,7 @@ def test_default_names_and_slot_counts_agree_between_python_and_powershell(monke
 
     ps = shutil.which("powershell")
     if ps is None:
-        pytest.skip("powershell not available")
+        pytest.fail("powershell not available -- parity tests must not skip")
     for name in ("KILNCTL_BUILD_GATE_MUTEX_PREFIX", "KILNCTL_LIGHT_GATE_MUTEX_PREFIX",
                  "KILNCTL_BUILD_GATE_SLOTS", "KILNCTL_LIGHT_GATE_SLOTS"):
         monkeypatch.delenv(name, raising=False)
@@ -303,7 +306,7 @@ _HOLD_CODE = (
     "    print('HELD', flush=True)\n    time.sleep(60)\n")
 
 
-def test_config_json_sets_slot_count_and_env_overrides(monkeypatch, tmp_path):
+def test_config_is_authoritative_env_can_only_lower(monkeypatch, tmp_path):
     monkeypatch.delenv("KILNCTL_BUILD_GATE_SLOTS", raising=False)
     gd = tmp_path / "gate"
     gd.mkdir()
@@ -311,7 +314,9 @@ def test_config_json_sets_slot_count_and_env_overrides(monkeypatch, tmp_path):
     assert buildgate._slot_count("heavy") == 3
     assert buildgate._slot_count("light") == 1
     monkeypatch.setenv("KILNCTL_BUILD_GATE_SLOTS", "2")
-    assert buildgate._slot_count("heavy") == 2
+    assert buildgate._slot_count("heavy") == 2  # lowering allowed
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_SLOTS", "8")
+    assert buildgate._slot_count("heavy") == 3  # raising refused: clamped to config
 
 
 def test_config_json_created_with_defaults_when_missing(monkeypatch, tmp_path):
@@ -445,23 +450,60 @@ def test_max_hold_releases_slot_and_fails_loud(monkeypatch):
         pass  # slot really is free again
 
 
-def test_max_hold_kills_only_own_children(monkeypatch):
+def test_max_hold_kills_only_registered_tree_not_sibling(monkeypatch):
     _prefixes(monkeypatch, heavy=1)
     monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "1.5")
     bystander = subprocess.Popen([_PY, "-c", "import time; time.sleep(30)"])
     code = ("import subprocess,sys,time\nfrom mcpkit import buildgate as b\n"
-            "with b.kiln_build_gate('overrun2', log=lambda m: None):\n"
+            "c = s = None\n"
+            "try:\n"
+            "  with b.kiln_build_gate('overrun2', log=lambda m: None):\n"
             "    c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
-            "    print(c.pid, flush=True)\n    time.sleep(5)\n")
+            "    s = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+            "    b.register_compile_pid(c.pid)\n"
+            "    print(c.pid, s.pid, flush=True)\n    time.sleep(5)\n"
+            "except RuntimeError as e:\n"
+            "  for _ in range(50):\n"
+            "    if not b.pid_alive(c.pid): break\n"
+            "    time.sleep(0.1)\n"
+            "  print('RESULT', b.pid_alive(c.pid), b.pid_alive(s.pid), 'max hold' in str(e), flush=True)\n"
+            "  b._kill_pid(s.pid)\n")
     holder = _child(code)
+    sibling = 0
     try:
-        cpid = int(holder.stdout.readline())
+        cpid, sibling = (int(x) for x in holder.stdout.readline().split())
         out, err = holder.communicate(timeout=90)
-        assert holder.returncode != 0 and "max hold" in err  # failed loud
-        assert not buildgate.pid_alive(cpid)  # own child killed by the watchdog
+        assert "RESULT False True True" in out, (out, err)  # compile killed, sibling alive, failed loud
         assert bystander.poll() is None  # unrelated process untouched
     finally:
         bystander.kill()
+        if sibling:
+            buildgate._kill_pid(sibling)
+
+
+def test_max_hold_with_nothing_registered_kills_nothing(monkeypatch):
+    _prefixes(monkeypatch, heavy=1)
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "0.5")
+    kid = subprocess.Popen([_PY, "-c", "import time; time.sleep(30)"])
+    msgs = []
+    try:
+        with pytest.raises(RuntimeError, match="max hold"):
+            with buildgate.kiln_build_gate("noreg", log=msgs.append):
+                time.sleep(1.5)
+        assert any("killing nothing" in m for m in msgs)
+        assert kid.poll() is None
+    finally:
+        kid.kill()
+
+
+def test_unparsable_record_counts_as_held(monkeypatch):
+    _prefixes(monkeypatch, heavy=1)
+    d = buildgate._lane_dir("heavy")
+    d.mkdir(parents=True)
+    (d / "slot0.json").write_text("{not json")
+    recs = buildgate.read_records("heavy")
+    assert len(recs) == 1 and recs[0]["slot"] == 0 and recs[0]["alive"]
+
 
 def test_waiters_never_kill_holder_and_all_get_through(monkeypatch):
     _prefixes(monkeypatch, heavy=1)
@@ -513,7 +555,6 @@ def test_dead_waiter_ticket_is_pruned(monkeypatch):
     assert list(buildgate._queue_dir("heavy").glob("*.ticket")) == []
 
 
-@pytest.mark.skipif(shutil.which("powershell") is None, reason="powershell not available")
 def test_parity_ps_and_python_agree_on_config_status_and_records(monkeypatch, tmp_path):
     _prefixes(monkeypatch, heavy=2)
     monkeypatch.delenv("KILNCTL_BUILD_GATE_SLOTS")
@@ -554,3 +595,21 @@ def test_parity_ps_and_python_agree_on_config_status_and_records(monkeypatch, tm
     rec = json.loads([l for l in out.splitlines() if l.startswith("REC=")][0][4:])
     assert set(rec) == py_keys
 
+
+
+def test_ps_max_hold_kills_children_started_after_acquire_not_older_sibling(monkeypatch):
+    _prefixes(monkeypatch, heavy=1)
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "2")
+    ps_script = (
+        f". '{_GATE_PS1}'; "
+        "$older = Start-Process -PassThru -WindowStyle Hidden ping -ArgumentList '-n','40','127.0.0.1'; "
+        "Start-Sleep -Seconds 2; "
+        "$g = Enter-KilnBuildGate -Label 'ps-overrun' -TimeoutSeconds 5; "
+        "$newer = Start-Process -PassThru -WindowStyle Hidden ping -ArgumentList '-n','40','127.0.0.1'; "
+        "Start-Sleep -Seconds 6; "
+        "$msg = ''; try { Exit-KilnBuildGate -Gate $g } catch { $msg = $_.Exception.Message }; "
+        "Write-Output ('RESULT newer_alive=' + (-not $newer.HasExited) + ' older_alive=' + (-not $older.HasExited) + ' threw=' + ($msg -match 'max hold')); "
+        "Stop-Process -Id $older.Id -Force -ErrorAction SilentlyContinue")
+    p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                       capture_output=True, text=True, env=os.environ.copy(), timeout=120)
+    assert "RESULT newer_alive=False older_alive=True threw=True" in p.stdout, (p.stdout, p.stderr)

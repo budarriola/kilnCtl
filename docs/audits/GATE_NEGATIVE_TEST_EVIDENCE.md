@@ -207,3 +207,5 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/PcTools/selfcheck.py` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/PcTools/tests/check_web_commission_cdp_driver.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_build_gate_usage.ps1` | NOT AUDITED | - | none (added 2026-10-07; negative-tested by fixtures at authoring: sleep in pair, test exe in pair, missing Exit, gate before lock each RED) | NOT AUDITED (pass 12 pending) |
+| `tools/check_pushed_build_stamp.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |

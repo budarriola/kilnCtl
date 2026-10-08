@@ -40,12 +40,13 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_gate.ps1")
 # Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
-$buildLock = Enter-BuildLock -Name "saftyfw_bootloader_build"
+$buildLock = $null
 
 $bootloaderDir = Join-Path $PSScriptRoot "..\bootloader"
 $buildDir = Join-Path $bootloaderDir "build"
 
 try {
+$buildLock = Enter-BuildLock -Name "saftyfw_bootloader_build"
 
 if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
     Write-Host "No $buildDir\CMakeCache.txt -- first-time configure (cmake -G Ninja -B build .) ..."
@@ -107,7 +108,7 @@ try {
     }
 
     Write-Host "Building saftyfw_bootloader (ninja) ..."
-    $buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build" -Lane light
+    $buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build" -Lane heavy
     try {
         ninja
         $ninjaExit = $LASTEXITCODE
@@ -133,5 +134,5 @@ exit 0
 
 }
 finally {
-    Exit-BuildLock -Lock $buildLock
+    if ($null -ne $buildLock) { Exit-BuildLock -Lock $buildLock }
 }

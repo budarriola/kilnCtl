@@ -167,23 +167,38 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
     started = time.monotonic()
     if env is None:
         env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+    proc = None
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             argv,
             cwd=cwd or repo_root(),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            timeout=timeout,
             env=env,
             # No shell: these argument lists contain absolute Windows paths with
             # spaces, and a shell would be one more quoting layer to get wrong.
             shell=False,
         )
+        # If a build-gate slot is held by this thread, tell it which process
+        # is the compile so a max-hold expiry kills only this tree.
+        try:
+            from .buildgate import register_compile_pid
+            register_compile_pid(proc.pid)
+        except Exception:  # pragma: no cover - registration is best effort
+            pass
+        out, err = proc.communicate(timeout=timeout)
+        completed = subprocess.CompletedProcess(argv, proc.returncode, out, err)
     except FileNotFoundError:
         return f"{tag}: error: {argv[0]} not found on PATH"
     except subprocess.TimeoutExpired as exc:
-        partial = (exc.stdout or "") + (exc.stderr or "")
+        proc.kill()
+        try:
+            out, err = proc.communicate(timeout=10)
+        except Exception:  # pragma: no cover
+            out, err = exc.stdout, exc.stderr
+        partial = (out or "") + (err or "")
         if isinstance(partial, bytes):  # pragma: no cover - text=True keeps it str
             partial = partial.decode("utf-8", "replace")
         return _summarize(tag, argv, None, partial, time.monotonic() - started)

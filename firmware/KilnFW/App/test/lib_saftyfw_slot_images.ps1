@@ -95,7 +95,8 @@ function Ensure-SaftyfwSlotImages([string]$KilnfwWorktreePath) {
         Push-Location $SaftyfwBuildDir
         try {
             Write-Host "Building SaftyFW_slotA/SaftyFW_slotB (ninja) ..."
-            ninja SaftyFW_slotA SaftyFW_slotB 2>&1 | Write-Host
+            if (-not (Get-Command Invoke-KilnGatedCmd -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1") }
+            Invoke-KilnGatedCmd -Command "ninja SaftyFW_slotA SaftyFW_slotB 2>&1" -Label "saftyfw_slot_images" | Write-Host
             if ($LASTEXITCODE -ne 0) {
                 Fail "ninja build of SaftyFW_slotA/SaftyFW_slotB failed (exit $LASTEXITCODE) -- see output above. KilnFW's own build cannot proceed without these two images (App/drivers/CMakeLists.txt's EMBED_FILES guard)."
             }

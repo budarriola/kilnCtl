@@ -772,8 +772,7 @@ function Invoke-ChecksParallel {
     param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode, [int]$PerCheckTimeoutSec = 0, [string[]]$UnthrottledPaths = @())
 
     $pending = New-Object System.Collections.Generic.Queue[object]
-    # Unthrottled (gate-queued) checks go first, so a throttled check at the
-    # head of the queue never holds them back from joining the gate queue.
+    # Gate-using checks go first so they join the gate queue early.
     # The count is bounded by the discovered check list (~20 today), never
     # open-ended.
     foreach ($c in $ChecksToRun) { if ($c.FullName -in $UnthrottledPaths) { $pending.Enqueue($c) } }
@@ -782,15 +781,14 @@ function Invoke-ChecksParallel {
     $results = @()
 
     while ($pending.Count -gt 0 -or $running.Count -gt 0) {
-        # A check that spends its life queued on the build gate (see
-        # $gateWaitingPaths) is an idle process, not load: it must not occupy
-        # one of the $MaxParallel workers, or four gate-queued builds starve
-        # every quick lint check behind them for as long as the gate is busy.
-        # Start those immediately; the gate itself bounds the real work.
-        while ($pending.Count -gt 0 -and ($pending.Peek().FullName -in $UnthrottledPaths -or @($running | Where-Object { -not $_.Unthrottled }).Count -lt $MaxParallel)) {
+        # Gate-using checks are NOT exempt from $MaxParallel: a slot is held only
+        # around the compile now, so such a check spends most of its life doing
+        # real work (setup, link, running test exes) outside any slot. They are
+        # merely queued FIRST (see $UnthrottledPaths above) so they join the
+        # gate queue early.
+        while ($pending.Count -gt 0 -and @($running).Count -lt $MaxParallel) {
             $c = $pending.Dequeue()
             $started = Start-CheckAsync -Check $c -RepoRoot $RepoRoot -SelfcheckPy $SelfcheckPy -SelfcheckPython $SelfcheckPython -ScratchDir $ScratchDir
-            $started | Add-Member -NotePropertyName Unthrottled -NotePropertyValue ($c.FullName -in $UnthrottledPaths)
             $running += $started
         }
         Start-Sleep -Milliseconds 200

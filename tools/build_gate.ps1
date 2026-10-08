@@ -12,7 +12,7 @@
 #      tests, polling/sleeping, or around a child that also takes a slot.
 #      Order for a caller: setup (Import-KilnVcvarsEnv) -> Enter-BuildLock ->
 #      Enter-KilnBuildGate around ONE compile -> Exit-KilnBuildGate at once.
-#      tools/check_build_gate.ps1 lints callers for this.
+#      tools/check_build_gate_usage.ps1 lints callers for this.
 #   2. Re-entrant: the same process (global state) or a child process (env
 #      KILNCTL_BUILD_GATE_HELD, verified against the holder's record) that
 #      asks again while a slot is held gets a no-op handle, never a second slot.
@@ -33,15 +33,21 @@
 #
 # SLOT COUNTS ARE MACHINE-WIDE, not per-tree (2026-10-07 root cause: 58
 # worktrees carried an old default of 2, so their waiters never opened slots
-# 2-3). Resolution order: env (KILNCTL_BUILD_GATE_SLOTS / KILNCTL_LIGHT_GATE_SLOTS,
-# 0 disables that lane) > <dir>\config.json {"heavy_slots":N,"light_slots":N}
-# (created with the defaults on first use) > code default 4/4. Whatever the
+# 2-3). <dir>\config.json {"heavy_slots":N,"light_slots":N} (created with the
+# defaults on first use) is AUTHORITATIVE; code default 4/4 only when it is
+# unreadable. KILNCTL_BUILD_GATE_SLOTS / KILNCTL_LIGHT_GATE_SLOTS may only
+# LOWER the count (clamped to <= config); heavy < 1 is refused (the heavy gate
+# cannot be disabled from a worktree), light 0 is allowed. Whatever the
 # count, a waiter also opens every slot index that has a live record (so a
 # count lowered while higher slots are busy cannot hide a holder). A tree pinned
 # to an OLD commit still runs its own old gate (default 2 slots, no records, no
 # tickets): it contends only for slots 0-1 and is invisible to -Status except
 # through the mutex probe (shown as "held-no-record"); it needs a rebase to
 # join the shared count and the fair queue.
+#
+# Max hold: the watchdog kills only descendants started AFTER the slot was taken
+# (so a sibling process the holder started earlier survives), re-scanning until
+# none remain; Exit-KilnBuildGate then throws.
 #
 # Dir: KILNCTL_BUILD_GATE_DIR (default C:\wt\.buildgate). Test-only mutex name
 # prefixes: KILNCTL_BUILD_GATE_MUTEX_PREFIX / KILNCTL_LIGHT_GATE_MUTEX_PREFIX
@@ -67,6 +73,14 @@ function Get-KilnBuildGateLaneDir {
     return (Join-Path (Get-KilnBuildGateDir) $Lane)
 }
 
+# Write via temp file + atomic replace so a reader never sees a torn file.
+function Write-KilnBuildGateFile {
+    param([string]$Path, [string]$Text)
+    $tmp = "$Path.$PID.$([guid]::NewGuid().ToString('N').Substring(0, 6)).tmp"
+    [IO.File]::WriteAllText($tmp, $Text)
+    try { Move-Item -LiteralPath $tmp -Destination $Path -Force -ErrorAction Stop } catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }
+}
+
 function Get-KilnBuildGateConfigPath { return (Join-Path (Get-KilnBuildGateDir) "config.json") }
 
 function Get-KilnBuildGateConfig {
@@ -75,7 +89,7 @@ function Get-KilnBuildGateConfig {
         if (-not (Test-Path -LiteralPath $path)) {
             $dir = Get-KilnBuildGateDir
             if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-            [IO.File]::WriteAllText($path, '{"heavy_slots": 4, "light_slots": 4}' + "`n")
+            Write-KilnBuildGateFile -Path $path -Text ('{"heavy_slots": 4, "light_slots": 4}' + "`n")
         }
         return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json)
     } catch {
@@ -85,20 +99,27 @@ function Get-KilnBuildGateConfig {
 
 function Get-KilnBuildGateSlotCount {
     param([ValidateSet("heavy", "light")][string]$Lane = "heavy")
-    $envName = if ($Lane -eq "light") { "KILNCTL_LIGHT_GATE_SLOTS" } else { "KILNCTL_BUILD_GATE_SLOTS" }
-    $raw = [Environment]::GetEnvironmentVariable($envName)
-    if (-not [string]::IsNullOrWhiteSpace($raw)) {
-        $n = 0
-        if ([int]::TryParse($raw.Trim(), [ref]$n)) { return $n }
-        [Console]::Error.WriteLine("build gate: $envName='$raw' is not an integer, ignoring")
-    }
+    $min = if ($Lane -eq "light") { 0 } else { 1 }
+    $limit = $script:KilnGateDefaultSlots
     $cfg = Get-KilnBuildGateConfig
     if ($null -ne $cfg) {
         $val = if ($Lane -eq "light") { $cfg.light_slots } else { $cfg.heavy_slots }
         $n = 0
-        if ($null -ne $val -and [int]::TryParse("$val", [ref]$n) -and $n -ge 0) { return $n }
+        if ($null -ne $val -and [int]::TryParse("$val", [ref]$n) -and $n -ge $min) { $limit = $n }
     }
-    return $script:KilnGateDefaultSlots
+    $envName = if ($Lane -eq "light") { "KILNCTL_LIGHT_GATE_SLOTS" } else { "KILNCTL_BUILD_GATE_SLOTS" }
+    $raw = [Environment]::GetEnvironmentVariable($envName)
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        $n = 0
+        if (-not [int]::TryParse($raw.Trim(), [ref]$n)) {
+            [Console]::Error.WriteLine("build gate: $envName='$raw' is not an integer, ignoring")
+        } elseif ($n -lt $min) {
+            [Console]::Error.WriteLine("build gate: $envName='$raw' is below the minimum for the $Lane lane, ignoring")
+        } elseif ($n -gt $limit) {
+            [Console]::Error.WriteLine("build gate: $envName=$n exceeds machine-wide config ($limit); using $limit")
+        } else { return $n }
+    }
+    return $limit
 }
 
 # Slots to open: the configured count, widened to cover any slot with a live record.
@@ -218,7 +239,7 @@ function Write-KilnBuildGateRecord {
         started_utc   = $now.ToString("o")
         worktree      = (Get-Location).Path
     }
-    [IO.File]::WriteAllText((Get-KilnBuildGateRecordPath -Lane $Lane -Slot $Slot), ($rec | ConvertTo-Json -Compress))
+    Write-KilnBuildGateFile -Path (Get-KilnBuildGateRecordPath -Lane $Lane -Slot $Slot) -Text ($rec | ConvertTo-Json -Compress)
 }
 
 function Remove-KilnBuildGateRecord {
@@ -246,7 +267,12 @@ function Get-KilnBuildGateRecords {
                 Cmd = [string]$r.cmdline; Label = [string]$r.label; Phase = [string]$r.phase
                 StartedEpoch = [double]$r.started_epoch; Worktree = [string]$r.worktree
             }
-        } catch { }
+        } catch {
+            if ($f.Name -match '^slot(\d+)\.json$') {   # unparsable record: treat as held, never free
+                $out += [PSCustomObject]@{ Slot = [int]$Matches[1]; Pid = 0; Alive = $true; Cmd = "<unparsable record>"; Label = ""; Phase = ""
+                    StartedEpoch = [double]([DateTimeOffset]$f.LastWriteTimeUtc).ToUnixTimeSeconds(); Worktree = "" }
+            }
+        }
     }
     return $out
 }
@@ -265,7 +291,7 @@ function New-KilnBuildGateTicket {
     $ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $name = "{0:D15}-{1}-{2}.ticket" -f $ms, $PID, ([guid]::NewGuid().ToString("N").Substring(0, 8))
     $body = [ordered]@{ pid = $PID; proc_start = (Get-KilnProcessStartEpoch -ProcessId $PID); label = $Label; lane = $Lane } | ConvertTo-Json -Compress
-    [IO.File]::WriteAllText((Join-Path $dir $name), $body)
+    Write-KilnBuildGateFile -Path (Join-Path $dir $name) -Text $body
     return $name
 }
 
@@ -321,9 +347,15 @@ function Test-KilnBuildGateCovered {
 
 function Start-KilnBuildGateWatchdog {
     param([int]$Slot, [string]$Lane, [string]$Label, [double]$MaxHoldSec, [string]$RecordPath)
+    $acquiredUtc = [DateTime]::UtcNow
     $state = [hashtable]::Synchronized(@{ Stop = $false; Expired = $false; HeldSec = 0.0 })
-    $rs = [runspacefactory]::CreateRunspace()
-    $rs.Open()
+    # One runspace per process, reused by every gate (a host-test build takes
+    # hundreds of short gates; opening a runspace each time was the cost).
+    if ($null -eq $global:KilnGateWatchdogRunspace -or $global:KilnGateWatchdogRunspace.RunspaceStateInfo.State -ne 'Opened') {
+        $global:KilnGateWatchdogRunspace = [runspacefactory]::CreateRunspace()
+        $global:KilnGateWatchdogRunspace.Open()
+    }
+    $rs = $global:KilnGateWatchdogRunspace
     $rs.SessionStateProxy.SetVariable("state", $state)
     $rs.SessionStateProxy.SetVariable("ownerPid", $PID)
     $rs.SessionStateProxy.SetVariable("maxHold", $MaxHoldSec)
@@ -331,6 +363,7 @@ function Start-KilnBuildGateWatchdog {
     $rs.SessionStateProxy.SetVariable("lane", $Lane)
     $rs.SessionStateProxy.SetVariable("label", $Label)
     $rs.SessionStateProxy.SetVariable("recordPath", $RecordPath)
+    $rs.SessionStateProxy.SetVariable("acquiredUtc", $acquiredUtc)
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
     [void]$ps.AddScript({
@@ -339,15 +372,25 @@ function Start-KilnBuildGateWatchdog {
         if ($state.Stop) { return }
         $state.HeldSec = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
         $state.Expired = $true
-        [Console]::Error.WriteLine("build gate: MAX HOLD EXCEEDED -- $lane slot $slot ('$label') held $($state.HeldSec)s > limit ${maxHold}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); killing this holder's own build children and releasing the slot")
-        # Kill only OUR descendants (never anyone else's), deepest first.
-        $map = @{}
-        foreach ($p in (Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId)) { $map[[int]$p.ProcessId] = [int]$p.ParentProcessId }
-        $order = New-Object System.Collections.ArrayList
-        $q = New-Object System.Collections.Queue; $q.Enqueue([int]$ownerPid)
-        while ($q.Count -gt 0) { $c = $q.Dequeue(); foreach ($k in @($map.Keys)) { if ($map[$k] -eq $c) { [void]$order.Add($k); $q.Enqueue($k) } } }
-        $order.Reverse()
-        foreach ($d in $order) { try { Stop-Process -Id $d -Force -ErrorAction Stop } catch { } }
+        [Console]::Error.WriteLine("build gate: MAX HOLD EXCEEDED -- $lane slot $slot ('$label') held $($state.HeldSec)s > limit ${maxHold}s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); killing the build processes this holder started since taking the slot, and releasing it")
+        # Kill only OUR descendants started since the slot was taken (never
+        # anyone else's, never an older sibling), deepest first, re-scanning
+        # until none remain.
+        $cut = $acquiredUtc.AddSeconds(-1)
+        for ($pass = 0; $pass -lt 10; $pass++) {
+            $map = @{}; $born = @{}
+            foreach ($p in (Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate)) {
+                $map[[int]$p.ProcessId] = [int]$p.ParentProcessId
+                $born[[int]$p.ProcessId] = $p.CreationDate
+            }
+            $order = New-Object System.Collections.ArrayList
+            $q = New-Object System.Collections.Queue; $q.Enqueue([int]$ownerPid)
+            while ($q.Count -gt 0) { $c = $q.Dequeue(); foreach ($k in @($map.Keys)) { if ($map[$k] -eq $c) { $q.Enqueue($k); if ($born[$k] -and $born[$k].ToUniversalTime() -ge $cut) { [void]$order.Add($k) } } } }
+            if ($order.Count -eq 0) { break }
+            $order.Reverse()
+            foreach ($d in $order) { try { Stop-Process -Id $d -Force -ErrorAction Stop } catch { } }
+            Start-Sleep -Milliseconds 200
+        }
         # If the owner never gets to Exit-KilnBuildGate (hung in PowerShell
         # itself), exiting the process makes the kernel release the mutex.
         $grace = [System.Diagnostics.Stopwatch]::StartNew()
@@ -367,7 +410,7 @@ function Stop-KilnBuildGateWatchdog {
     if ($null -eq $Watchdog) { return }
     $Watchdog.State.Stop = $true
     try { [void]$Watchdog.Ps.EndInvoke($Watchdog.Handle) } catch { }
-    try { $Watchdog.Ps.Dispose(); $Watchdog.Runspace.Dispose() } catch { }
+    try { $Watchdog.Ps.Dispose() } catch { }   # the runspace is shared and stays open
 }
 
 # ---- acquire / release ------------------------------------------------------
@@ -384,6 +427,8 @@ function Open-KilnBuildGateMutexes {
 function New-KilnBuildGateHeld {
     param($Mutexes, [int]$Index, [string]$Label, [string]$Lane, [string]$Phase, [bool]$Abandoned)
     for ($j = 0; $j -lt $Mutexes.Count; $j++) { if ($j -ne $Index) { $Mutexes[$j].Dispose() } }
+    $gate = $null
+    try {
     if ($Abandoned) {
         [Console]::Error.WriteLine("build gate: WARNING -- $Lane slot $Index was ABANDONED by a dead process; reclaimed it for '$Label'")
     }
@@ -399,6 +444,16 @@ function New-KilnBuildGateHeld {
     $gate.Watchdog = Start-KilnBuildGateWatchdog -Slot $Index -Lane $Lane -Label $Label -MaxHoldSec $maxHold -RecordPath $recPath
     $env:KILNCTL_BUILD_GATE_HELD = "$Lane|$Index|$PID"
     $global:KilnBuildGateHeld = $gate
+    } catch {
+        # Interrupted (e.g. Ctrl-C) between acquiring and handing the gate back:
+        # never leave the slot held with nobody to release it.
+        if ($null -ne $gate -and $null -ne $gate.Watchdog) { Stop-KilnBuildGateWatchdog -Watchdog $gate.Watchdog }
+        Remove-KilnBuildGateRecord -Lane $Lane -Slot $Index
+        try { $Mutexes[$Index].ReleaseMutex() } catch { }
+        $Mutexes[$Index].Dispose()
+        $global:KilnBuildGateHeld = $null
+        throw
+    }
     return $gate
 }
 
@@ -453,7 +508,7 @@ function Enter-KilnBuildGate {
         while ($sw.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             $live = @(Get-KilnBuildGateLiveTickets -Lane $Lane)
             if (-not (Test-Path -LiteralPath $ticketPath)) {
-                [IO.File]::WriteAllText($ticketPath, (@{ pid = $PID; proc_start = (Get-KilnProcessStartEpoch -ProcessId $PID); label = $Label; lane = $Lane } | ConvertTo-Json -Compress))
+                Write-KilnBuildGateFile -Path $ticketPath -Text (@{ pid = $PID; proc_start = (Get-KilnProcessStartEpoch -ProcessId $PID); label = $Label; lane = $Lane } | ConvertTo-Json -Compress)
             } else {
                 (Get-Item -LiteralPath $ticketPath).LastWriteTimeUtc = [DateTime]::UtcNow
             }
@@ -498,15 +553,18 @@ function Exit-KilnBuildGate {
         Stop-KilnBuildGateWatchdog -Watchdog $Gate.Watchdog
     }
     Remove-KilnBuildGateRecord -Lane $Gate.Lane -Slot $Gate.SlotIndex
+    $releaseError = $null
     try {
         $Gate.Mutex.ReleaseMutex()
     } catch {
-        [Console]::Error.WriteLine("build gate: WARNING -- ReleaseMutex failed for $($Gate.Lane) slot $($Gate.SlotIndex) ('$($Gate.Label)'): $_")
+        $releaseError = "build gate: ReleaseMutex failed for $($Gate.Lane) slot $($Gate.SlotIndex) ('$($Gate.Label)'): $_"
+        [Console]::Error.WriteLine($releaseError)
     }
     $Gate.Mutex.Dispose()
     $env:KILNCTL_BUILD_GATE_HELD = $Gate.PrevEnv
     $global:KilnBuildGateHeld = $null
     [Console]::Error.WriteLine("build gate: released $($Gate.Lane) slot $($Gate.SlotIndex) for '$($Gate.Label)' (held $([Math]::Round($heldSec))s)")
+    if ($releaseError) { throw $releaseError }
     if ($expired) {
         throw "build gate: $($Gate.Lane) slot $($Gate.SlotIndex) held by '$($Gate.Label)' for $([Math]::Round($heldSec))s, over the max hold of $($Gate.MaxHold)s (KILNCTL_BUILD_GATE_MAX_HOLD_SEC); build children killed, slot released"
     }
