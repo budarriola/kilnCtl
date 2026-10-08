@@ -66,21 +66,38 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+@pytest.fixture(scope="session")
+def _private_build_gate_dir(tmp_path_factory):
+    return tmp_path_factory.mktemp("buildgate")
+
+
 @pytest.fixture(autouse=True)
-def _no_machine_wide_build_gate(monkeypatch):
-    """Keep unit tests off the machine-wide heavy-build gate.
+def _no_machine_wide_build_gate(monkeypatch, _private_build_gate_dir):
+    """Keep unit tests off the machine-wide build gate.
 
     ``workbench.build_kilnfw``/``build_saftyfw`` wrap their (monkeypatched)
     toolchain call in ``mcpkit.buildgate.kiln_build_gate``, a Windows named-
     mutex pool shared by EVERY session on the machine, waited on for up to
     3600 s. A test that stubs only ``_run_locked`` therefore still blocks for
-    as long as other sessions hold both slots -- a detached full-suite run
+    as long as other sessions hold every slot -- a detached full-suite run
     sat at 28% in ``test_build_kilnfw_saftyfw_order`` with no output until
-    something reaped it. Slot count 0 disables the gate; tests that exercise
-    the gate itself (test_buildgate.py) set their own env after this runs.
+    something reaped it.
+
+    ``KILNCTL_BUILD_GATE_SLOTS=0`` cannot be used for this: the heavy lane
+    refuses a count below 1 (``_configured_slot_count``, no disabling the gate
+    from a worktree). Instead every test gets a private gate: its own
+    ``KILNCTL_BUILD_GATE_DIR`` (config.json, records, tickets) and its own
+    per-process session-local mutex names, so it never waits on, or shows up in,
+    another session's real build slots. Tests that exercise the gate itself
+    (test_buildgate.py) set their own env after this runs.
     """
-    monkeypatch.setenv("KILNCTL_BUILD_GATE_SLOTS", "0")
-    monkeypatch.setenv("KILNCTL_LIGHT_GATE_SLOTS", "0")
+    tag = f"pytest_{os.getpid()}"
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_DIR", str(_private_build_gate_dir))
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MUTEX_PREFIX", f"Local\\kilnctl_{tag}_heavy_")
+    monkeypatch.setenv("KILNCTL_LIGHT_GATE_MUTEX_PREFIX", f"Local\\kilnctl_{tag}_light_")
+    monkeypatch.delenv("KILNCTL_BUILD_GATE_SLOTS", raising=False)
+    monkeypatch.delenv("KILNCTL_LIGHT_GATE_SLOTS", raising=False)
+    monkeypatch.delenv("KILNCTL_BUILD_GATE_HELD", raising=False)
 
 
 @pytest.fixture(autouse=True)
