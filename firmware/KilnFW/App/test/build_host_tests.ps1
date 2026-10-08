@@ -436,8 +436,11 @@ try {
     # exactly the directory tools/drivers_reorg/plan_moves.ps1 splits into layer
     # subdirs, whose /I entries land in this same file.
     $hostTestsRsp = Join-Path $outDir "host_tests_common_flags.rsp"
+    $clMpN = if ($env:KILNCTL_HOST_CL_MP -match '^\d+$' -and [int]$env:KILNCTL_HOST_CL_MP -ge 1) { [int]$env:KILNCTL_HOST_CL_MP } else { [Math]::Max(2, [int][Math]::Floor([Environment]::ProcessorCount / 3)) }
+    # /MP: parallel compile of the sources within ONE cl invocation (separate executables still build one at a time, each under its own gate slot). Needs /Fo to be a directory (it is); none of /Gm /Yc /E /EP /P /showIncludes is used here.
     $hostTestsRspLines = @(
         "/nologo"
+        "/MP$clMpN"
         "/W3"
         # C4013 "undefined; assuming extern returning int" -- the MSVC spelling
         # of -Werror=implicit-function-declaration. Promoted to an ERROR

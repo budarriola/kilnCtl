@@ -265,7 +265,9 @@ try {
     # had no host-test consumer in this build until now, so this was latent
     # rather than already fixed elsewhere. Matches the fuzz build's own
     # /std:c17 below.
-    $rspContent = "/nologo /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
+    $clMpN = if ($env:KILNCTL_HOST_CL_MP -match '^\d+$' -and [int]$env:KILNCTL_HOST_CL_MP -ge 1) { [int]$env:KILNCTL_HOST_CL_MP } else { [Math]::Max(2, [int][Math]::Floor([Environment]::ProcessorCount / 3)) }
+    # /MP: parallel compile of the sources within ONE cl invocation (separate executables still build one at a time, each under its own gate slot). Needs /Fo to be a directory (it is); none of /Gm /Yc /E /EP /P /showIncludes is used here.
+    $rspContent = "/nologo /MP$clMpN /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" /I `"$hwAbstractionPicoSpiDir`" " +
         "/I `"$hardwareGpioMinStubDir`" " +
         "/I `"$spiOwnerStubDir`" " +
@@ -333,7 +335,7 @@ try {
     $fuzzSources = @((Join-Path $commonSrcDir "..\test\test_fuzz_payloads.c")) +
         (Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
     $fuzzSourceArgs = ($fuzzSources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $fuzzCmd = "cl /nologo /W4 /WX /std:c17 /I `"$commonIncDir`" " +
+    $fuzzCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 /I `"$commonIncDir`" " +
         "/Fo:`"$fuzzObjDir\\`" /Fe:`"$fuzzExe`" $fuzzSourceArgs"
     Invoke-KilnGatedCmd -Label "saftyfw_host_tests" -Command $fuzzCmd
     if ($LASTEXITCODE -ne 0) {
@@ -362,7 +364,7 @@ try {
         (Join-Path $spiOwnerStubDir "spi_owner_stub.c")
     )
     $halSpiPicoSourceArgs = ($halSpiPicoSources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $halSpiPicoCmd = "cl /nologo /W4 /WX /std:c17 " +
+    $halSpiPicoCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionPicoSpiDir`" /I `"$spiOwnerStubDir`" " +
         "/I `"$srcDir/board`" /I `"$testDir`" " +
         "/Fo:`"$halSpiPicoObjDir\\`" /Fe:`"$halSpiPicoExe`" $halSpiPicoSourceArgs"
@@ -409,7 +411,7 @@ try {
     # arm-none-eabi target build (CMakeLists.txt does not define this macro).
     # This is the ONLY place that macro is defined in this repo -- see
     # config_store_flash.c's own comment on the #ifdef for what it gates and why.
-    $configStoreFlashCmd = "cl /nologo /W4 /WX /std:c17 /D SAFTYFW_HOST_TEST_BUILD=1 " +
+    $configStoreFlashCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 /D SAFTYFW_HOST_TEST_BUILD=1 " +
         "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" " +
         "/I `"$configStoreFlashHostStubsDir`" /I `"$testDir`" " +
@@ -446,7 +448,7 @@ try {
         (Join-Path $commonSrcDir "kilnlink_crc.c")
     )
     $blRecoverySourceArgs = ($blRecoverySources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $blRecoveryCmd = "cl /nologo /W4 /WX /std:c17 " +
+    $blRecoveryCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
         "/I `"$blRecoveryStubDir`" /I `"$bootDir`" /I `"$updateDir`" /I `"$srcDir\tasks`" " +
         "/I `"$commonIncDir`" /I `"$testDir`" " +
         "/Fo:`"$blRecoveryObjDir\\`" /Fe:`"$blRecoveryExe`" $blRecoverySourceArgs"
