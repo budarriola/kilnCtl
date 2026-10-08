@@ -80,22 +80,22 @@ invocation against that worktree either -- see docs/MCP_SERVERS.md's
 "Building from a clean worktree for `kiln_fw_root`" section.
 
 The gate has two lanes (2026-10-05). The **heavy** lane (default,
-`KILNCTL_BUILD_GATE_SLOTS`, 4 slots since 2026-10-07, was 2) is for host-test and target builds. The **light**
-lane (`Enter-KilnBuildGate -Lane light`, `KILNCTL_LIGHT_GATE_SLOTS`, default 4, separate
+`KILNCTL_BUILD_GATE_SLOTS`, machine config 8 slots since 2026-10-08 per owner decision, code default 4, was 2) is for host-test and target builds. The **light**
+lane (`Enter-KilnBuildGate -Lane light`, `KILNCTL_LIGHT_GATE_SLOTS`, machine config 8, code default 4, separate
 mutex names) is for a single seconds-long compile over a handful of TUs --
 `check_recovery_*.ps1` and `check_commonfw_*.ps1` today -- so those never queue behind a
 7-18 minute heavy holder. Never put a build that runs more than about a minute on the
 light lane.
 
-**A slot is held ONLY while a compiler is running (rewritten 2026-10-07).** The heavy cap is 4
-machine-wide. Take the build lock first, run setup (`Import-KilnVcvarsEnv`, cmake configure,
+**A slot is held ONLY while a compiler is running (rewritten 2026-10-07).** The heavy cap is 8
+machine-wide (`C:\wt\.buildgate\config.json` `{"heavy_slots":8,"light_slots":8}`, 2026-10-08; the tracked code default stays 4). Take the build lock first, run setup (`Import-KilnVcvarsEnv`, cmake configure,
 robocopy) outside the gate, then `Enter-KilnBuildGate` around ONE compile/link command and
 `Exit-KilnBuildGate` in a `finally` the moment it returns (`Invoke-KilnGatedCmd` does this for a
 cmd line). Never hold a slot while waiting on `Enter-BuildLock`, running vcvarsall, running test
 exes, or idling; `tools/check_build_gate_usage.ps1` lints this. Python side
 (`mcpkit.buildgate`): `_run_locked(..., gate_label=...)` holds the slot only around the subprocess.
 Slot counts come from a machine-wide `C:\wt\.buildgate\config.json`
-(`{"heavy_slots":4,"light_slots":4}`) which is AUTHORITATIVE: env `KILNCTL_BUILD_GATE_SLOTS`/
+(`{"heavy_slots":8,"light_slots":8}` today) which is AUTHORITATIVE: env `KILNCTL_BUILD_GATE_SLOTS`/
 `KILNCTL_LIGHT_GATE_SLOTS` can only LOWER the count (values above config are clamped; heavy < 1 is
 refused, so a worktree cannot disable the gate), and a tree's code default is only the fallback when
 the file is unreadable. Waiters queue FIFO by ticket file. Every holder writes
@@ -113,6 +113,8 @@ each `cl` compile separately (not one slot for the whole batch). A tree
 pinned to a commit before this change still runs the old 2-slot gate and needs a rebase. To test the
 gate itself in isolation set `KILNCTL_BUILD_GATE_MUTEX_PREFIX`, `KILNCTL_LIGHT_GATE_MUTEX_PREFIX`
 and `KILNCTL_BUILD_GATE_DIR` to private values.
+
+**CMake configure is slow on this machine (2026-10-08):** each Windows process spawn costs about 2.5 s, so configure steps dominate small builds. Likely Defender real-time scanning; adding exclusions needs admin and has not been done. Unverified cause.
 
 **ccache in the KilnFW target checks (2026-10-08).** Each worktree gets its own cold
 `C:\wt\checkbuild_<hex>` build dir, so `check_00_kilnfw_target_build.ps1` used to compile all
