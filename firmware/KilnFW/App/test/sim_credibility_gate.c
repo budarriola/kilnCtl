@@ -297,7 +297,7 @@ static void ensure_coupling_fitted(void)
 // Optional opt-in three-node plant (2026-10-07 dwell-peak work). OFF by
 // default so the gate's checked-in verdict is unchanged. Enabled by the
 // optional trailing args `--three-node <bi> <phi> <sensor_bias_p>
-// [sensor_tau_s]`. The (bi, phi, bias) triple is NOT identified from any
+// [sensor_tau_s [delay_scale [dc_comp]]]`. The (bi, phi, bias) triple is NOT identified from any
 // capture -- see docs/audits/credibility_gate_dwell_peak_2026-10-07.md.
 static struct { bool on; float bi, phi, bias_p, sensor_tau_s, delay_scale; bool dc_comp; } g_tn = {false, 0, 0, 0, 10.0f, 1.0f, false};
 
@@ -505,7 +505,7 @@ int main(int argc, char **argv)
     }
     if (argc != 4) {
         fprintf(stderr, "usage: sim_credibility_gate <calibration.jsonl> <holdout.jsonl> <noise_floor.json>"
-                        " [--three-node <bi> <phi> <sensor_bias_p> [sensor_tau_s]]\n");
+                        " [--three-node <bi> <phi> <sensor_bias_p> [sensor_tau_s [delay_scale [dc_comp]]]]\n");
         return 2;
     }
     const char *cal_path = argv[1];
