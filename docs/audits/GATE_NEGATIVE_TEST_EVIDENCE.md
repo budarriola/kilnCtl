@@ -30,8 +30,8 @@ Gate rows: 169.
 | NEGATIVE-TESTED | 59 |
 | PARTIAL | 1 |
 | REVIEWED, NOT MUTATED | 9 |
-| NOT AUDITED | 82 |
-| NOT AUDITED (pass 12 pending) | 18 |
+| NOT AUDITED | 83 |
+| NOT AUDITED (pass 12 pending) | 17 |
 
 ## Table
 
@@ -209,5 +209,5 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/PcTools/tests/check_web_commission_cdp_driver.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `tools/check_build_gate_usage.ps1` | NOT AUDITED | - | none (added 2026-10-07; negative-tested by fixtures at authoring: sleep in pair, test exe in pair, missing Exit, gate before lock each RED) | NOT AUDITED (pass 12 pending) |
-| `tools/check_land.ps1` | NOT AUDITED (pass 12 pending) | - | none (author negative-tested each case by hand 2026-10-07, not an audit) | NOT AUDITED (pass 12 pending) |
+| `tools/check_land.ps1` | NOT AUDITED | - | none (author negative-tested each case by hand, not an audit; pass 12 pending) | NOT AUDITED (pass 12 pending) |
 | `tools/check_pushed_build_stamp.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
