@@ -67,6 +67,23 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture(autouse=True)
+def _no_machine_wide_build_gate(monkeypatch):
+    """Keep unit tests off the machine-wide heavy-build gate.
+
+    ``workbench.build_kilnfw``/``build_saftyfw`` wrap their (monkeypatched)
+    toolchain call in ``mcpkit.buildgate.kiln_build_gate``, a Windows named-
+    mutex pool shared by EVERY session on the machine, waited on for up to
+    3600 s. A test that stubs only ``_run_locked`` therefore still blocks for
+    as long as other sessions hold both slots -- a detached full-suite run
+    sat at 28% in ``test_build_kilnfw_saftyfw_order`` with no output until
+    something reaped it. Slot count 0 disables the gate; tests that exercise
+    the gate itself (test_buildgate.py) set their own env after this runs.
+    """
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_SLOTS", "0")
+    monkeypatch.setenv("KILNCTL_LIGHT_GATE_SLOTS", "0")
+
+
+@pytest.fixture(autouse=True)
 def _no_stale_banner_leakage(monkeypatch):
     """Isolate tests from mcp_server.py's inline per-tool-call staleness
     banner (docs/audits/mcp_staleness_banner_2026-09-14.md).
