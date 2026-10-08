@@ -27,11 +27,11 @@ Gate rows: 171.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 60 |
+| NEGATIVE-TESTED | 97 |
 | PARTIAL | 1 |
 | REVIEWED, NOT MUTATED | 9 |
-| NOT AUDITED | 84 |
-| NOT AUDITED (pass 12 pending) | 18 |
+| NOT AUDITED | 71 |
+| NOT AUDITED (pass 12 pending) | 0 |
 
 ## Table
 
@@ -136,29 +136,29 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/SaftyFW/tools/check_unused_setters.ps1` | NEGATIVE-TESTED | 09-16c | uncalled zz_audit setter declared and defined in current_sense | RED, no call site named; both files hand-restored; PASS |
 | `tools/check_app_image_size.ps1` | NEGATIVE-TESTED | 10-07 | image 1 B over the bound; app row shrunk below the image / grown past 0x400000; missing CSV; missing or duplicate app row | each RED with the right message; no image yet is SKIP / SKIP-FAST, so it grades nothing until build/KilnCtrl.bin exists |
 | `tools/check_aux_relay_conflict_sites.ps1` | NEGATIVE-TESTED | 10-07 | aux_conflict_mask call deleted from zones_post_apply (ordinary POST /api/zones commit); other sites, backup import, unlisted-site scan | first mutation PASSED (file-level match satisfied by the restore function): WEAK, fixed by pinning the call inside zones_post_apply; now RED; restored |
-| `tools/check_bench_test_registry.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_bridge_reject_reason.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_bench_test_registry.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | registry.py: added bogus case id ZZ-77 absent from the plan doc | RED (exit 1); check returned to PASS on restore |
+| `tools/check_bridge_reject_reason.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | uart_bridge.c: bridge_reply_unsupported passes NULL reason | RED (BRIDGE REJECT REASON CHECK FAILED); check returned to PASS on restore |
 | `tools/check_c_files_in_cmakelists.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] MAX31856.c entry removed from the drivers CMakeLists ; [09-16g] untracked unwired drivers/zz_audit_unwired.c created | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; file removed; PASS |
 | `tools/check_ceiling_sync_init_order.ps1` | NEGATIVE-TESTED | 10-02 | (a) real ceiling_sync_init call deleted; (b) moved after safety_link_start in main_control_bringup.c | both RED (first try renamed a commented-out call and falsely passed: a bad mutation, not a weakness); restored |
 | `tools/check_cfgfs_never_gates_nvs.ps1` | REVIEWED, NOT MUTATED | 09-18 | screen A: Python check signals failure as return 1 with sys.exit(main()) | failure path present; no mutation |
-| `tools/check_coil_power_w_sentinel_guard.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_coil_power_w_sentinel_guard.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | zones_current_sweep_engine.c: sentinel guard `> 0.0f` weakened to `>= 0.0f` | RED (SENTINEL GUARD CHECK: FAILED); check returned to PASS on restore |
 | `tools/check_config_convert_mirror.ps1` | NEGATIVE-TESTED | 10-02 | version constant changed in zones_config_json.h and profiles_types.h | RED names the constant; restored |
-| `tools/check_config_migration_steps.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_ct_cal_write_surface.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_disclosure_gate_call_sites.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_doc_citations.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_config_migration_steps.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | zones_config_json.h: ZONES_CFG_VERSION 26 -> 27 with no step | RED (3 problems); check returned to PASS on restore |
+| `tools/check_ct_cal_write_surface.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | safety.py: reintroduced `def set_ct_cal(` | RED (CT_CAL WRITE SURFACE CHECK: FAILED); check returned to PASS on restore |
+| `tools/check_disclosure_gate_call_sites.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | wifi_provision_http.c and readiness_http.c: `may_disclose = true` (two mutations) | RED both; check returned to PASS on restore |
+| `tools/check_doc_citations.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | RELEASE_HARDENING_PLAN.md: added citation zones_config_json.h:999999 (past EOF) | RED (exit 1); check returned to PASS on restore |
 | `tools/check_doc_hash_citations.ps1` | REVIEWED, NOT MUTATED | 09-16 | read in full, not sabotaged (a planted bad hash would trip the audit itself) | judged sound; 09-16d later fixed 11 false positives in a doc, not the checker |
 | `tools/check_check_cache.ps1` | NEGATIVE-TESTED | check-cache (10-08) | per assertion group: dirty-tree test disabled; tree hash dropped from key and entry check; fingerprint env lines dropped; marker check removed (store and lookup); non-PASS filter removed (store and lookup); expiry window widened; atomic first-writer-wins Move replaced by overwrite | each RED naming the right assertion(s); restored by hand; PASS |
 | `tools/check_duplicate_symbols.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f, 09-16g | [09-16e] baseline only against a fresh build (263 objects, none duplicated) ; [09-16f] same external symbol appended to screen_idle.c and telemetry_log.c, real build (link fails, objects inspected) ; [09-16g] duplicate symbol in hal_status.c and hal_esp_common.c after fixing the component source-root map (264 to 265 objects) | [09-16e] FAIL path not exercised in this pass ; [09-16f] RED naming the symbol; hand-restored; fullclean rebuild PASS 263 objects; found hal_status.c.obj misclassified stale ; [09-16g] RED naming both objects (run in the isolated build dir); hand-restored; rebuild PASS |
-| `tools/check_flash_partition_offset_guard.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_flash_partition_offset_guard.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | mcp_server_flash.py: guard call result assignment replaced by None | RED (call site gone); check returned to PASS on restore |
 | `tools/check_gate_negative_test_table.ps1` | NEGATIVE-TESTED | table (10-07) | one gate row removed from the table; a stray row for a nonexistent check added | RED naming the missing / stale row; both restored by hand; PASS |
 | `tools/check_hal_include_boundary.ps1` | REVIEWED, NOT MUTATED | 09-18 | screen B read: hard throw on missing dir, 200-file floor, throw on unreadable file | cited as the strongest anti-vacuity model; no mutation |
 | `tools/check_heartbeat_contract.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] heartbeat thread start call commented out in link_hub.py ; [09-16g] heartbeat producer start commented out | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; hand-restored; PASS |
 | `tools/check_heat_enable_wiring.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] both heat_enable_acquire_since call sites commented out ; [09-16g] three heat_enable_release calls commented out | [09-16d] RED; both hand-restored; PASS (re-tested in 09-16g, release side) ; [09-16g] RED; hand-restored; PASS |
-| `tools/check_host_embed_symbols_defined.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_host_embed_symbols_defined.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | test_zones_http.c: removed tuning_recommendations_json_start definition | RED (HOST EMBED SYMBOLS CHECK FAILED); check returned to PASS on restore |
 | `tools/check_html_escape_helpers.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js | RED on the right rule; restored |
-| `tools/check_iter_tune_write_surface.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/check_kiln_auth_config_isolation.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_iter_tune_write_surface.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c calls iter_tune_enable; iter_tune.c calls nvs_set_blob (two mutations; a first try with undeclared iter_tune_reset stayed GREEN by design, name list is parsed from the header) | RED both; check returned to PASS on restore |
+| `tools/check_kiln_auth_config_isolation.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added identifier `web_auth` (a first try with web_auth_zz is GREEN by design, word-boundary match) | RED; check returned to PASS on restore |
 | `tools/check_kiln_scope_cfg_mirrors.ps1` | NEGATIVE-TESTED | 10-07 | scope-list vs cfg-mirror drift in kiln_scope_cfg_files.c, unit_pref.[ch], kiln_package.c, cfg_fs.c | each RED, names the item; restored |
 | `tools/check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-02 | nav ungated in ui_page_home_actions.c | RED; restored |
 | `tools/check_lint_pages.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js / nav.js | RED on the right rule; restored |
@@ -166,14 +166,14 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_mcp_tool_count_doc.ps1` | NEGATIVE-TESTED | 09-16e | CLAUDE.md edited to claim 999 tools | RED, doc vs actual count; hand-restored; PASS |
 | `tools/check_mykicad_golden_suite_runs.ps1` | NEGATIVE-TESTED | 09-16e | submodule conftest pointed at a nonexistent kiln project dir | RED (53 passed, 19 errored); hand-restored; 72 passed |
 | `tools/check_no_bench_text_in_ui.ps1` | NEGATIVE-TESTED | 10-02 | bench-wattage text added to a page title | RED naming the line; throws on a missing scan dir; restored |
-| `tools/check_no_doubled_apostrophes.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_no_doubled_apostrophes.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | RELEASE_HARDENING_PLAN.md: added `doesn''t` | RED (exit 1); check returned to PASS on restore |
 | `tools/check_no_duplicate_crc.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] working 0x1021 CRC-16 function appended to wifi_provision_http.c ; [09-16g] tracked file with 0x1021 polynomial staged | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; unstaged and removed; PASS |
 | `tools/check_no_exec_status_stack_locals.ps1` | NEGATIVE-TESTED | 10-02 | profile_exec_status_t automatic variable added in dashboard_exec_http.c and ui_page_home_actions.c | RED naming file and line; also found vacuous on a missing scan dir and fixed (hard fail + 150-file floor) |
 | `tools/check_no_handler_direct_driver_calls.ps1` | NEGATIVE-TESTED | 10-02 | direct driver call inserted in dashboard_http.c and wifi_prov.c | RED naming the call; also found vacuous on a missing scan dir and fixed (hard fail + 30-file floor) |
 | `tools/check_no_native_dialogs_in_ui.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js / nav.js | RED on the right rule; restored |
 | `tools/check_no_orphaned_checks.ps1` | NEGATIVE-TESTED | 09-16, 09-18 | [09-16] orphan test_zz_audit_orphan.py created (a bare check_*.ps1 is covered by the glob, a non-test) ; [09-18] wrapper rule and raw-text fallback both absolved a check wired only by a comment; sabotaged the one non-comment reference in check_saftyfw_task_count.ps1 | [09-16] RED; file deleted ; [09-18] pre-fix PASS (vacuous), one-fix PASS, both fixes RED; hand-restored; guard fixed |
 | `tools/check_nvs_key_length.ps1` | NEGATIVE-TESTED | 09-16 | 17-character NVS key literal added to adaptive_tune.h | RED, names file, line, literal; hand-restored; PASS |
-| `tools/check_nvs_write_guard_coverage.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_nvs_write_guard_coverage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | kiln_cfg_store.c quarantine_clear: guard `if (caller_stack_is_external())` -> `if (0)` (a first try in relay_cycles.c persist_snapshot was GREEN: that function writes via cfg-fs, not NVS) | RED; check returned to PASS on restore |
 | `tools/check_ota_esp_refuses_running_target.ps1` | NEGATIVE-TESTED | 10-07 | guard kept as text but defeated: if (0 && !...), negation dropped, goto cleanup removed | PASSED (call located by position only): WEAK, fixed by matching the whole refusing if-block; all three now RED (re-run by the opus review); Pico mutations RED as before |
 | `tools/check_page_js_tests.ps1` | NEGATIVE-TESTED | 10-02 | delete-count filter loosened in backup_page.html | RED naming test_backup_page.js (36/37); restored |
 | `tools/check_persist_scratch_malloc_caps.ps1` | NEGATIVE-TESTED | 10-07 | plain malloc in zones_http_post.c, zones_config_store.c, zone_aux_convert_http.c; an adopter file unlisted | PASSED (files not in the scan list): WEAK, fixed by listing them plus an adoption guard (floor 8); all RED (re-run by the opus review); two real plain mallocs converted |
@@ -185,35 +185,35 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_relay_writes_through_owner.ps1` | NEGATIVE-TESTED | 09-16 | unauthorized set_relay_mask call added in main.c | RED at that line; hand-restored; PASS |
 | `tools/check_release_manifest.ps1` | NEGATIVE-TESTED | 10-07 | size gate 0x400000 -> 0x500000; dirty-tree refusal off; sha256 compare off; draft flag off; open gates not refused; provenance refusal off; token forwarded on hop 2; semver gate off | all RED except semver gate off, which PASSED (a later gate also exits 1): WEAK, fixed by requiring the is-not-semver text; now RED |
 | `tools/check_release_version_regex.ps1` | NEGATIVE-TESTED | 10-07 | cap 32 -> 33; cap dropped; - dropped from the prerelease charset; leading-zero reject neutralised; + allowed in the prerelease charset; badtag[] edits; table renamed | all RED except the + charset, which PASSED: WEAK (minor), fixed by pinning v1.2.3-rc+1 on both sides; now RED |
-| `tools/check_route_tier_coverage.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_route_tier_coverage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added `.uri = "/api/zz_new_route"` with no tier row | RED; check returned to PASS on restore |
 | `tools/check_safe_remove_junction.ps1` | NEGATIVE-TESTED | 10-07 | unlink skipped in Remove-TreeSafe; no descent in Remove-ReparsePointsUnder; unlink dropped at both call sites; site pattern made blind; an unguarded $r = & git ... worktree remove site | skip-unlink and blind mutants PASSED: WEAK, fixed (unlink report required, command-line site pattern); the $r = & git site PASSED that fix too and is caught after the opus review reordered the pattern; all RED; recursive-delete mutant equivalent on this PowerShell |
 | `tools/check_safety_baud_sync.ps1` | NEGATIVE-TESTED | 09-16d | SaftyFW bootloader uart_init baud 230400 changed to 115200 | RED, two rates named; hand-restored; PASS |
 | `tools/check_safety_call_results_checked.ps1` | NEGATIVE-TESTED | 09-16 | bare (result-discarding) all-relays-off call in uart_bridge_io.c | RED, names the sabotaged line; hand-restored; PASS |
 | `tools/check_safety_trip_mask_docs.ps1` | NEGATIVE-TESTED | 09-16e | wrong, non-negated S6a trip_mask sentence added to CLAUDE.md | RED; hand-restored; PASS |
-| `tools/check_safety_trip_words_sync.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_safety_trip_words_sync.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | safety_page.html: S4 warn word text changed in the JS mirror | RED; check returned to PASS on restore |
 | `tools/check_skip_fast_classification.ps1` | NEGATIVE-TESTED | 10-02 | SKIP-FAST literal matched by run_all_checks.ps1 broken | RED, dummy SKIP-FAST counted as a plain skip; restored |
 | `tools/check_stack_margin_baseline.ps1` | REVIEWED, NOT MUTATED | 09-18 | screen A: Python check signals failure as return 1 with sys.exit(main()) | failure path present; no mutation |
 | `tools/check_stack_margin_registration.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] create-vs-register sub-check only: unrecognized xTaskCreatePinnedToCore added in kiln_io_owner.c ; [09-16f] four remaining sub-checks: required name renamed, duplicate registration added, cap lowered 48 to 20, stack_margin.h included from a HAL backend | [09-16e] RED; hand-restored; other four sub-checks tested in 09-16f ; [09-16f] all four RED; each hand-restored; PASS |
-| `tools/check_stack_task_table_consistency.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_stack_task_table_consistency.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | removed backlight_pwm from $requiredNames; added ghost CEILING_BYTES entry (two mutations) | RED both; check returned to PASS on restore |
 | `tools/check_stop_path_requires_pin.ps1` | NEGATIVE-TESTED | 10-02 | stop path ungated in ui_page_home_actions.c | RED; restored |
 | `tools/check_test_c_files_wired.ps1` | NEGATIVE-TESTED | 09-16e, 09-16g | [09-16e] untracked orphan test_negtest_orphan_zzz.c created ; [09-16g] untracked zz_audit_orphan.c created | [09-16e] RED; file deleted (re-tested in 09-16g) ; [09-16g] RED; removed; PASS |
 | `tools/check_test_has_assertions.ps1` | NEGATIVE-TESTED | 09-16, 09-16e | [09-16] read in full (negative-tested later in 09-16e) ; [09-16e] dispatched assertion-free test function appended to test_adaptive_tune.c | [09-16] see 09-16e ; [09-16e] RED, names the function; hand-restored; fresh host-test rebuild 47/47 |
 | `tools/check_uart_version_independence.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] UART_PROTOCOL_VERSION re-derived from KILNLINK_PROTOCOL_VERSION ; [09-16g] alias to KILNLINK_PROTOCOL_VERSION again | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; hand-restored; PASS |
 | `tools/check_uri_handler_cap.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] max_uri_handlers lowered below the real route count ; [09-16g] max_uri_handlers set to 1 | [09-16d] RED, both counts named; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; hand-restored; PASS |
-| `tools/check_volatile_ceiling_write_callers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_volatile_ceiling_write_callers.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added a call to safety_cfg_write_set_and_confirm_f32_volatile | RED; check returned to PASS on restore |
 | `tools/check_wait_for.ps1` | NEGATIVE-TESTED | 10-08 | UTF-16 detection disabled; -Any made behave as -All; TIMEOUT exit 124 changed to 1; PID-exit never recorded; -File test path broken; incremental carry dropped | each RED (named case FAIL, exit 1); hand-restored; PASS |
-| `tools/check_web_gzip_parity.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_web_gzip_parity.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | fabricated .gz from HEAD sources, then changed zones_page.html relative to its gz | RED (exit 1, mismatch); check returned to PASS on restore |
 | `tools/check_wifi_ram_storage_mirror.ps1` | NEGATIVE-TESTED | 10-02 | mirrored constant edited in wifi_prov.c | RED; restored |
-| `tools/check_zone_graphic_render.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `tools/check_zone_graphic_render.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | zones_page.html: renamed kg-port; moved zone label x 345 -> 346 (two mutations) | RED both; check returned to PASS on restore |
 | `tools/PcTools/check_zones_per_zone_field_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/PcTools/selfcheck.py` | NOT AUDITED | - | none | NOT AUDITED |
 | `tools/PcTools/tests/check_web_commission_cdp_driver.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `tools/check_build_gate_usage.ps1` | NOT AUDITED | - | none (added 2026-10-07; negative-tested by fixtures at authoring: sleep in pair, test exe in pair, missing Exit, gate before lock each RED) | NOT AUDITED (pass 12 pending) |
-| `tools/check_main_baseline.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested at authoring: KNOWN condition always true, ancestor filter off, temp file not cleaned on a failed write, recording without HEAD==origin/main, -FailOnlyOnNew ignoring NEW, land -AllowKnownFailures accepting NEW each RED, then restored by hand) | NOT AUDITED (pass 12 pending) |
-| `tools/check_land.ps1` | NOT AUDITED | - | none (author negative-tested each case by hand, not an audit; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `tools/check_wt_status.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested at authoring against a mutated copy via -ScriptUnderTest: cherry-landed detection disabled, dirty ignored for HAS_WORK, prune widened to HAS_WORK/ACTIVE, -WhatIf bypassed, junction-following delete each RED, then restored) | NOT AUDITED (pass 12 pending) |
-| `tools/check_negtest.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested at authoring against mutated copies of negtest.ps1 via -ScriptUnderTest: real-tree guard disabled, baseline requirement disabled, each RED, copies deleted) | NOT AUDITED (pass 12 pending) |
-| `tools/check_pushed_build_stamp.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `tools/check_agent_tail.ps1` | NOT AUDITED | - | none (added 2026-10-08; negative-tested automatically inside the check against mutated copies: repeat detection disabled, results-unchanged test dropped, log-staleness inverted, running-process test dropped each caught, plus manual restore of none needed; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/check_build_gate_usage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | check_commonfw_ctest.ps1: Start-Sleep inserted between gate enter and exit | RED; check returned to PASS on restore |
+| `tools/check_main_baseline.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | main_baseline_lib.ps1: other-lineage ancestor rule disabled | RED; check returned to PASS on restore |
+| `tools/check_land.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | land.ps1: post-rebase check failure no longer finishes non-zero | RED; check returned to PASS on restore |
+| `tools/check_wt_status.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | wt_status.ps1: HAS_WORK classification disabled | RED; check returned to PASS on restore |
+| `tools/check_negtest.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | negtest.ps1: MISSED verdict never counted | RED; check returned to PASS on restore |
+| `tools/check_pushed_build_stamp.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | pushed_build_stamp.ps1: sha mismatch test replaced by $false | RED; check returned to PASS on restore |
+| `tools/check_agent_tail.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | agent_tail.ps1: dead-log heuristic off; repeat heuristic off (two mutations) | RED both; check returned to PASS on restore |
 | `tools/check_system_mode_gate_call_sites.ps1` | NEGATIVE-TESTED | - | none (added 2026-10-08; tools/negtest.ps1 -Preset check removed the zones_post_handler gate call, RED naming it; baseline PASS, real tree unchanged) | NEGATIVE-TESTED |
