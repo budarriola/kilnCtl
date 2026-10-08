@@ -2,7 +2,7 @@
 
 **Status: RUN COMPLETE. Verdict: UNINTERPRETABLE per the plan's own registered
 rule.** This is not a keep/remove decision on adaptive fuzzy. It is proof that
-the campaign specified in `docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md` sections
+the campaign specified in `docs/ADAPTIVE_FUZZY_EVALUATION.md` sections
 7-9 does not yet produce data those sections can be adjudicated on, and a
 description of why, so a follow-on session does not have to re-derive it.
 

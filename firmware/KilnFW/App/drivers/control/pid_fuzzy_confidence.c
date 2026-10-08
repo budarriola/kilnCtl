@@ -1,5 +1,5 @@
 // pid_fuzzy_confidence.c -- see pid_fuzzy_confidence.h for the design
-// rationale (docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3). Pure C, no
+// rationale (docs/ADAPTIVE_FUZZY_EVALUATION.md sec 3). Pure C, no
 // FreeRTOS/ESP-IDF/logging/I-O -- host-testable like pid.c/pid_fuzzy.c.
 
 #include "pid_fuzzy_confidence.h"

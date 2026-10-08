@@ -3680,7 +3680,7 @@ static void reset_fuzzy_gain_test_state(void)
      * to prove the no-model path. */
     memset(g_stub_model_k_dc, 0, sizeof(g_stub_model_k_dc));
     memset(g_stub_model_tau_s, 0, sizeof(g_stub_model_tau_s));
-    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: adaptive_tune_zones[] is a
+    /* ADAPTIVE_FUZZY_EVALUATION.md sec 3: adaptive_tune_zones[] is a
      * real, linked-in global (not a per-test fixture) -- default every test
      * to confidence_c=0 (the gate's own bootstrap-at-zero posture) unless it
      * explicitly opts into full authority below, same reasoning as the
@@ -3765,7 +3765,7 @@ static void test_fuzzy_prepare_gains_matches_pid_fuzzy_adjust_directly(void)
                "test setup sanity: this k_dc/tau_s pair must actually derive a model band, or this "
                "test is not exercising what it claims to");
 
-    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: PID_FUZZY_CONFIDENCE_S_MAX_PCT
+    /* ADAPTIVE_FUZZY_EVALUATION.md sec 3: PID_FUZZY_CONFIDENCE_S_MAX_PCT
      * (50) is a hard ceiling the gate applies even at full L/tau cap and max
      * confidence -- grant_full_fuzzy_confidence() above buys this test full
      * confidence, not an exemption from that ceiling. min(configured=100,
@@ -4059,7 +4059,7 @@ static void test_fuzzy_prepare_gains_uses_zone_commanded_setpoint_when_capped(vo
     g_stub_model_tau_s[0] = 0.0f;
 }
 
-/* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3, N3: end-to-end demonstration that
+/* ADAPTIVE_FUZZY_EVALUATION.md sec 3, N3: end-to-end demonstration that
  * the confidence gate is actually WIRED and ACTIVE through the real
  * pid_fuzzy_prepare_gains() (not the pure pid_fuzzy_confidence.c unit tests,
  * which never touch a zone_runtime_t/adaptive_tune_zones[] at all) -- the

@@ -404,7 +404,7 @@ typedef struct {
     float ff_dead_time_s;
     bool  ff_enabled;
 
-    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3, N3: the in-firing error
+    /* ADAPTIVE_FUZZY_EVALUATION.md sec 3, N3: the in-firing error
      * zero-crossing oscillation backstop's per-zone state. Reset at every
      * firing start (profile_executor_run.c, alongside pid_reset()/
      * fuzzy_prev_effective_ki above) -- NOT persisted across firings, unlike

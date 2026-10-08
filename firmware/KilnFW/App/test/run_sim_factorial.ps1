@@ -46,7 +46,7 @@ try {
     [System.IO.File]::WriteAllText($rsp, ($rspLines -join "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 
     $exe = Join-Path $OutDir "kilnctl_sim_factorial_driver.exe"
-    # The last eight entries below arrived with ADAPTIVE_FUZZY_EVALUATION_PLAN.md
+    # The last eight entries below arrived with ADAPTIVE_FUZZY_EVALUATION.md
     # sec 5's two adaptive arms: sim_factorial_driver.c now #includes
     # adaptive_tune.c/_model.c/_ki.c directly into its own TU (same one-TU
     # convention sim_scenarios_adaptive.c and test_adaptive_tune.c use, so

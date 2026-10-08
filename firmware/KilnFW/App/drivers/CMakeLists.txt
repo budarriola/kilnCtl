@@ -628,7 +628,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/board_temps_http.c"
                        "control/pid.c"
                        "control/pid_fuzzy.c"
-                       # ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the confidence
+                       # ADAPTIVE_FUZZY_EVALUATION.md sec 3: the confidence
                        # gate (L/tau authority cap, c/4 schedule, oscillation
                        # backstop) -- pure, host-testable, no globals, same as
                        # pid_fuzzy.c itself.

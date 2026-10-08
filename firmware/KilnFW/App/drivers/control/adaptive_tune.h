@@ -266,7 +266,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean);
 bool adaptive_tune_set_enabled(uint8_t zone_index, bool enabled);
 bool adaptive_tune_get_enabled(uint8_t zone_index);
 
-// ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the fuzzy confidence gate's
+// ADAPTIVE_FUZZY_EVALUATION.md sec 3: the fuzzy confidence gate's
 // cross-firing "c" counter. adaptive_tune_get_fuzzy_confidence_c() is read
 // once per tick by pid_fuzzy_prepare_gains() (profile_executor_pid_tick.c);
 // an out-of-range zone_index reads back 0 (fail safe -- never a made-up

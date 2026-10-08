@@ -21,7 +21,7 @@
 extern "C" {
 #endif
 
-/* Raised 64 -> 128 (ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 6.1): at dt=1s the
+/* Raised 64 -> 128 (ADAPTIVE_FUZZY_EVALUATION.md sec 6.1): at dt=1s the
  * old 64-step capacity silently truncated any sensor_delay_s > 63s (e.g. the
  * kiln-scaled 76.9s dead time collapsed to 64s), which produced a
  * byte-identical row against an unrelated 64.0s cell and looked like proof

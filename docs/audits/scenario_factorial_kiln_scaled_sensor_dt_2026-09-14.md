@@ -2,7 +2,7 @@
 
 ## Scope
 
-This is the plan's §6 remainder (`docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md`,
+This is the plan's §6 remainder (`docs/ADAPTIVE_FUZZY_EVALUATION.md`,
 committed `5387ff52`). §6.1 (raise `SIM_PLANT_DELAY_MAX_STEPS` 64→128, add the
 loud `delay_truncated` refusal) is already done and committed as `69118a66`
 and is unchanged here. This dispatch wires the actual kiln-scaled values the

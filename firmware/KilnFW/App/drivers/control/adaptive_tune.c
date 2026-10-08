@@ -73,7 +73,7 @@
                              (re-derivable) treatment this item gets. */
 #include "profile_executor.h"
 
-#include "pid_fuzzy_confidence.h" // PID_FUZZY_CONFIDENCE_MAX_C -- ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3
+#include "pid_fuzzy_confidence.h" // PID_FUZZY_CONFIDENCE_MAX_C -- ADAPTIVE_FUZZY_EVALUATION.md sec 3
 #include "zones_config_accessors.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
                          // this file now writes the opt-in flag here too (U2) and reads/writes
                          // gains directly for adaptive_tune_revert() (U1)
@@ -674,7 +674,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         }
         if (skip_reason) {
             reset_run_status_locked(z, skip_reason);
-            // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: a run this module
+            // ADAPTIVE_FUZZY_EVALUATION.md sec 3: a run this module
             // could not use as training data (disabled, on/off, inactive,
             // faulted/dirty, or too many excluded samples) is not evidence
             // the plant model is still good -- floor the confidence counter
@@ -747,7 +747,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             baseline_newly_latched = true;
         }
 
-        // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: cross-firing confidence
+        // ADAPTIVE_FUZZY_EVALUATION.md sec 3: cross-firing confidence
         // counter. DISCLOSED SIMPLIFICATION (see fuzzy_confidence_c's own
         // comment, adaptive_tune_internal.h) -- this is a scope-limited
         // proxy for the plan's full forward-checked-residual signal, using
@@ -1060,7 +1060,7 @@ bool adaptive_tune_get_enabled(uint8_t zone_index)
     return en;
 }
 
-// ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: see adaptive_tune.h's own comment
+// ADAPTIVE_FUZZY_EVALUATION.md sec 3: see adaptive_tune.h's own comment
 // on these two. Short, non-blocking, lock-protected reads/writes of a single
 // uint8_t -- no producer or blocking call happens under the lock here, same
 // discipline as adaptive_tune_get_enabled() above.

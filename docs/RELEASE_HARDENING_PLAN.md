@@ -1516,7 +1516,7 @@ The fuzzy layer has no demonstrated benefit under matched conditions on this
 bench — that scope qualifier is load-bearing and travels with the finding.
 Fixed-gain fuzzy at strength 50 measured as net harmful; the adaptive variant,
 which is the one the owner has repeatedly said is intended, has not been
-evaluated at all, and `docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md` specifies the
+evaluated at all, and `docs/ADAPTIVE_FUZZY_EVALUATION.md` specifies the
 run that would decide it. `fuzzy_strength_pct` is 0.0 on the live board, so it
 is inert today. The release position writes itself: **it ships at zero strength
 unless and until the adaptive evaluation shows benefit on the installed kiln**,
