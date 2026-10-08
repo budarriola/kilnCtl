@@ -40,15 +40,21 @@ $ErrorActionPreference = "Stop"
 $testDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $commonDir = Split-Path -Parent $testDir
 
-# Build gate: LIGHT lane. This compiles small, self-contained CommonFW C host
-# tests, not an ESP-IDF or full host-test build, so it must not queue behind
-# multi-minute heavy builds. That is only valid while the build stays serial:
-# the --build call below passes --parallel 1 so CMAKE_BUILD_PARALLEL_LEVEL or a
-# Ninja generator cannot fan it out. Gates only the --build call, not the cheap
-# configure or the ctest run.
+# Build gate: HEAVY lane. The build is parallel (Ninja, -j), so it is no longer
+# the single serial compile the light lane assumes. The MSVC environment is
+# imported ONCE, before the gate (Import-KilnVcvarsEnv), and the slot is held
+# only around the --build call, not the configure or the ctest run.
 . (Join-Path $testDir "..\..\..\tools\build_gate.ps1")
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+# PROFILE (2026-10-08, this machine): the Visual Studio generator took ~68 s to
+# configure and ~1206 s to build serially (msbuild spawns several processes per
+# target and Defender scans each one); ctest itself is ~79 s serial. Ninja + cl
+# with a parallel build and `ctest -j` removes most of it. The build dir stays
+# fresh and $PID-keyed on purpose: a dropped or misconfigured target in
+# CMakeLists.txt must still be caught the way a clean clone would catch it.
+$jobs = [Math]::Max(2, [Math]::Min(8, [Environment]::ProcessorCount))
 
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     Write-Host "SKIP: no ``cmake`` on PATH -- cannot build CommonFW's host tests."
@@ -64,7 +70,13 @@ $buildDir = Join-Path $env:TEMP ("commonfw_ctest_" + $PID)
 try {
     if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
 
-    $cfg = & cmake -S $commonDir -B $buildDir 2>&1
+    $cfgArgs = @("-S", $commonDir, "-B", $buildDir)
+    $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+    if ((Get-Command ninja -ErrorAction SilentlyContinue) -and (Test-Path $vcvars)) {
+        Import-KilnVcvarsEnv -Vcvars $vcvars
+        $cfgArgs += @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_C_COMPILER=cl")
+    }
+    $cfg = & cmake @cfgArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
         # No usable C toolchain is a legitimate SKIP (a machine without MSVC
         # or gcc), but any other configure failure is a real defect -- same
@@ -79,9 +91,9 @@ try {
 
     # No -target: build everything CMakeLists.txt declares (both libraries
     # plus every host-test executable), not just one.
-    $gate = Enter-KilnBuildGate -Label "commonfw_ctest" -Lane light
+    $gate = Enter-KilnBuildGate -Label "commonfw_ctest" -Lane heavy
     try {
-        $bld = & cmake --build $buildDir --config Debug --parallel 1 2>&1
+        $bld = & cmake --build $buildDir --config Debug --parallel $jobs 2>&1
         $bldExit = $LASTEXITCODE
     } finally {
         Exit-KilnBuildGate -Gate $gate
@@ -110,7 +122,7 @@ try {
     # doesn't need file redirection, just a non-terminating error action.
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $ctestOut = & ctest --test-dir $buildDir --output-on-failure --timeout 60 -C Debug 2>&1
+    $ctestOut = & ctest --test-dir $buildDir --output-on-failure --timeout 60 -C Debug -j $jobs 2>&1
     $ctestExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEap
     $ctestOut | ForEach-Object { Write-Host $_ }
