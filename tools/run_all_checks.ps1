@@ -872,7 +872,7 @@ $restChecks = $restChecks | Where-Object {
 
 # Each of the three phase-1 target-build checks (and the two
 # build_host_tests.ps1 scripts) now enters tools/build_gate.ps1's
-# machine-wide heavy-build gate (KILNCTL_BUILD_GATE_SLOTS, default 2) before
+# machine-wide heavy-build gate (KILNCTL_BUILD_GATE_SLOTS, default 4) before
 # its actual idf.py/ninja/cmake step, so "run concurrently" above is now
 # "launch concurrently" -- the three builds may still serialize (or run two
 # at a time) against that gate rather than all three hitting ninja's default

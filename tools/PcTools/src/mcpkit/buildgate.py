@@ -60,7 +60,7 @@ class GateWaitResult:
 
 def _slot_count(lane: str = "heavy") -> int:
     env_name, default = (
-        ("KILNCTL_LIGHT_GATE_SLOTS", 4) if lane == "light" else ("KILNCTL_BUILD_GATE_SLOTS", 2))
+        ("KILNCTL_LIGHT_GATE_SLOTS", 4) if lane == "light" else ("KILNCTL_BUILD_GATE_SLOTS", 4))
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
         return default

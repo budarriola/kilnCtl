@@ -34,7 +34,8 @@
 #   }
 #
 # KILNCTL_BUILD_GATE_SLOTS: number of heavy builds allowed machine-wide at
-# once. Default 2. Set to 0 to disable the gate entirely -- this is meant
+# once. Default 4 (owner decision 2026-10-07: raised from 2 because agents were
+# waiting 1-2 h for a heavy slot; the light lane is unchanged). Set to 0 to disable the gate entirely -- this is meant
 # ONLY for a machine known to run a single session at a time; on a shared
 # machine running multiple agent sessions, leaving it enabled is the whole
 # point.
@@ -79,7 +80,7 @@ function Get-KilnBuildGateSlotCount {
         $default = 4
     } else {
         $envName = "KILNCTL_BUILD_GATE_SLOTS"
-        $default = 2
+        $default = 4
     }
     $raw = [Environment]::GetEnvironmentVariable($envName)
     if ([string]::IsNullOrWhiteSpace($raw)) {

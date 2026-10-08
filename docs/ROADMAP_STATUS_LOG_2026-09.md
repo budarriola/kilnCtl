@@ -473,7 +473,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 >   `e51f8b36`): `tools/build_gate.ps1`
 >   (`Enter-KilnBuildGate`/`Exit-KilnBuildGate`) and its Python mirror
 >   `tools/PcTools/src/mcpkit/buildgate.py` cap heavy builds (ESP-IDF target
->   builds, MSVC host-test builds) at `KILNCTL_BUILD_GATE_SLOTS` (default 2)
+>   builds, MSVC host-test builds) at `KILNCTL_BUILD_GATE_SLOTS` (default 2 then; 4 since 2026-10-07)
 >   across every session on the machine at once, via named kernel mutexes
 >   (`Global\kilnctl_build_slot_<i>`) rather than a semaphore, so a killed
 >   agent can't strand a slot. Answers the five hard freezes (Kernel-Power 41)

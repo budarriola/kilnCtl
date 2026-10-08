@@ -259,5 +259,5 @@ def test_default_names_and_slot_counts_agree_between_python_and_powershell(monke
         assert f"{lane} slots={buildgate._slot_count(lane)}" in lines
         for i in (0, 1):
             assert f"{lane} name{i}={buildgate._mutex_name(i, lane)}" in lines
-    assert buildgate._slot_count("heavy") == 2 and buildgate._slot_count("light") == 4
+    assert buildgate._slot_count("heavy") == 4 and buildgate._slot_count("light") == 4
     assert buildgate._mutex_name(0, "heavy") != buildgate._mutex_name(0, "light")
