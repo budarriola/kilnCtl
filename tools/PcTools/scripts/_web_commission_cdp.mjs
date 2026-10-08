@@ -749,6 +749,10 @@ async function main() {
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-extensions',
+    // Startup-cost trims: no component updater / sync / background network
+    // chatter competing for the CPU during the first seconds of a launch.
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--metrics-recording-only', '--disable-breakpad',
     '--hide-scrollbars',
     `--user-data-dir=${userDataDir}`,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -841,11 +845,14 @@ async function main() {
     // the profile dir open, and rm() on a held/AV-scanned dir can block
     // indefinitely -- so it also gets an explicit outer deadline.
     killTreeSync(chrome.pid);
+    // Profile-dir removal is handed to a detached node so the driver exits as
+    // soon as Chrome is dead. Awaiting rm() here cost up to the full 5s cap on
+    // every run (AV/indexer holding the just-killed profile; measured
+    // 2026-10-08), x7 runs in check_web_commission_cdp_driver.ps1, which is what
+    // pushed that check past its 180s wrapper timeout on a loaded machine.
     try {
-      await Promise.race([
-        rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }),
-        new Promise((resolve) => setTimeout(resolve, 5000)),
-      ]);
+      const rmScript = "require('fs').rm(process.argv[1],{recursive:true,force:true,maxRetries:10,retryDelay:500},()=>{})";
+      spawn(process.execPath, ['-e', rmScript, userDataDir], { detached: true, stdio: 'ignore' }).unref();
     } catch { /* best effort */ }
   }
 }
