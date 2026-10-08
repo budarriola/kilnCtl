@@ -863,6 +863,30 @@ powershell -ExecutionPolicy Bypass -File tools\commit_guard.ps1 -Path CLAUDE.md 
     # exceed the declared budget, regardless of -Confirm
 ```
 
+**`tools/land.ps1`** -- the whole landing sequence in one command, composing the
+three guards above rather than reimplementing them. Run it from inside the
+worktree whose commits are ready (never the shared main tree; refused). It
+refuses on tracked modifications or no commits ahead of `origin/main`;
+optionally waits (`-WaitPid`, `-CheckLog`, bounded, UTF-16-aware) for a
+`run_all_checks` run and refuses on any `FAIL`/`FAILED:`/BUSY not matched by
+`-AllowFail <regex>` (allowed FAILs are echoed loudly and listed in the result);
+runs `git fetch` + `git rebase origin/main` (a conflict or Windows "unable to
+unlink" error aborts the rebase, lists the files and exits nonzero, never
+leaving a half-rebased tree); re-runs a NARROW post-rebase set via
+`run_all_checks -Only` (`check_mcp_tool_count_doc`, `check_mcp_facade_coverage`
+plus `-PostRebaseChecks <regex>`; not the full suite); `git push origin
+HEAD:main` (never force; a non-fast-forward rejection loops back to the
+rebase, at most 3 tries); `push_verify.ps1` must say LANDED; then optionally
+`-RestartMcp` (restart then status, bounded by `-McpTimeoutMin`, default 10)
+and `-RemoveWorktree` (only after LANDED). `-DryRun` does the refusals, log
+gate and fetch and changes nothing. The last stdout line is one JSON object:
+`{"sha","landed","steps","allowed_fails","dry_run","error"}`. Unit test:
+`tools/check_land.ps1` (throwaway bare repo under temp).
+(`commit_guard.ps1` is a pre-commit guard and stays a manual step before the commit.)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\land.ps1 -CheckLog C:\wt\x\run.log -AllowFail check_release_manifest -RemoveWorktree
+```
 ## Confirm-gate flags are never coerced (2026-10-02)
 
 The facade coerces stringly-typed arguments (`"yes"`/`"1"`/`"true"` to a bool), which on 2026-10-02

@@ -502,7 +502,7 @@ Three git-workflow guards live under `tools/`: `worktree_mint.ps1` (mint/remove
 a short, uniquely-named worktree at `origin/main` under `C:\wt\`),
 `push_verify.ps1` (verify a commit actually landed on `origin/main`, direction-
 and `$?`-safe), and `commit_guard.ps1` (refuse a commit whose working copy
-differs from `origin/main` until every difference is confirmed as your own).
+differs from `origin/main` until every difference is confirmed as your own), plus `tools/land.ps1` (the whole landing sequence -- check-log gate, rebase, narrow re-check, push, push_verify LANDED, optional MCP restart/worktree removal -- in one command; finish with `tools\land.ps1`).
 Full detail: **docs/MCP_SERVERS.md**'s "Git workflow guards" section.
 
 **What is safe to delete during cleanup.** Many parallel sessions build and

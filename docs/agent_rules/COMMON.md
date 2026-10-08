@@ -33,6 +33,7 @@ the boards or the bench camera).
 - Never delete worktrees you did not create, anything with uncommitted changes, anything
   modified in the last few minutes, `firmware/KilnFW/elf_archive/`, `logs/coupling/*`, or
   a tracked file with local modifications.
+- Landing: finish with `powershell -ExecutionPolicy Bypass -File tools\land.ps1` from your worktree (add `-CheckLog <file> [-AllowFail <regex>]`, `-RestartMcp`, `-RemoveWorktree`, `-DryRun` as needed). It rebases, re-checks narrowly, pushes without force, and requires push_verify LANDED; see docs/MCP_SERVERS.md "Git workflow guards".
 - Never touch any `.kicad_*` file (reading is fine). Never commit `.claude/worktrees/`.
 - In PowerShell, .NET file APIs (`[IO.File]::ReadAllText`/`WriteAllText`, etc.) with a
   relative path resolve against the .NET process's current directory, not PowerShell's
