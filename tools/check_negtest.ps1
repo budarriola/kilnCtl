@@ -43,14 +43,28 @@ if (-not $Group) {
             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Path, '-ScriptUnderTest', $ScriptUnderTest, '-Group', $g)
         $null = $procs[$g].Handle
     }
+    # Per-group minimum assertion counts (recorded from a green run); a group that
+    # silently skips its body would report far fewer.
+    $minAssert = @{ 'A' = 14; 'A2' = 15; 'B' = 26; 'C' = 10; 'D' = 13; 'E' = 8; 'F' = 18; 'G' = 7; 'H1' = 9; 'H2' = 9; 'I' = 5 }
+    $groupTimeoutMs = 15 * 60 * 1000
     $totalA = 0; $bad = New-Object System.Collections.Generic.List[string]
     foreach ($g in $groups) {
         $null = $procs[$g].Handle
-        $procs[$g].WaitForExit()
+        if (-not $procs[$g].WaitForExit($groupTimeoutMs)) {
+            & taskkill.exe /T /F /PID $procs[$g].Id 2>&1 | Out-Null
+            $bad.Add("group ${g}: timed out after 15 min and was killed")
+            continue
+        }
         $txt = (Get-Content -LiteralPath (Join-Path $tmpd "$g.out") -Raw -ErrorAction SilentlyContinue)
         $m = [regex]::Match("$txt", 'GROUP_RESULT (\d+) (\d+)')
         if (-not $m.Success) { $bad.Add("group ${g}: no result or crashed (exit $($procs[$g].ExitCode)): $txt $(Get-Content -LiteralPath (Join-Path $tmpd "$g.err") -Raw -ErrorAction SilentlyContinue)") }
-        else { $totalA += [int]$m.Groups[1].Value }
+        else {
+            $n = [int]$m.Groups[1].Value; $f = [int]$m.Groups[2].Value
+            $totalA += $n; Write-Host "group ${g}: $n assertions"
+            if ($f -ne 0) { $bad.Add("group ${g}: GROUP_RESULT reports $f failure(s)") }
+            if ($procs[$g].ExitCode -ne 0) { $bad.Add("group ${g}: child exit code $($procs[$g].ExitCode)") }
+            if ($n -lt $minAssert[$g]) { $bad.Add("group ${g}: only $n assertions ran, minimum $($minAssert[$g])") }
+        }
         foreach ($l in ("$txt" -split "`n")) { if ($l -match '^  \S' ) { $bad.Add("group ${g}:" + $l.TrimEnd()) } }
     }
     Remove-Item -LiteralPath $tmpd -Recurse -Force -ErrorAction SilentlyContinue

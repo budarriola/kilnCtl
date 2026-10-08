@@ -208,12 +208,14 @@ function Set-EditInFile([string]$path, $edit) {
 
 function Remove-Copy([string]$repo, [string]$copy) {
     $ok = $false
-    for ($try = 1; $try -le 4 -and -not $ok; $try++) {
+    $maxTry = 4
+    if ($script:lastTimedOut) { $maxTry = 12 }   # ~30 s+ budget after a TIMEOUT kill
+    for ($try = 1; $try -le $maxTry -and -not $ok; $try++) {
         try { Remove-ReparsePointsUnder -Path $copy | Out-Null } catch { Write-Line "negtest: unlink pass: $($_.Exception.Message)" Yellow }
         if (Test-Path -LiteralPath $copy) { Invoke-Git -C $repo worktree remove --force --force $copy | Out-Null }
         if (Test-Path -LiteralPath $copy) { try { Remove-TreeSafe -Path $copy } catch { } }
         $ok = -not (Test-Path -LiteralPath $copy)
-        if (-not $ok) { Start-Sleep -Seconds $try }
+        if (-not $ok) { Start-Sleep -Seconds ([math]::Min($try, 4)) }
     }
     Invoke-Git -C $repo worktree prune | Out-Null
     if ($ok) { Remove-Item -LiteralPath "$copy.owner.json" -Force -ErrorAction SilentlyContinue }
@@ -300,6 +302,50 @@ function Set-Mutation([string]$copy, $mut) {
 
 function Stop-Tree([int]$id) { & taskkill.exe /T /F /PID $id 2>&1 | Out-Null }
 
+# Win32 Job Object: kill is atomic for every descendant (taskkill /T only kills a
+# snapshot of the tree; a grandchild spawned after the snapshot escapes and keeps
+# its cwd inside the copy, so the copy cannot be removed).
+if (-not ('NegJob' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class NegJob {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObject(IntPtr a, string name);
+    [DllImport("kernel32.dll")] static extern bool SetInformationJobObject(IntPtr h, int cls, IntPtr info, int len);
+    [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+    [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    public static IntPtr Create() {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) return IntPtr.Zero;
+        // JOBOBJECT_EXTENDED_LIMIT_INFORMATION: LimitFlags at offset 16, total size 144 (x64) / 112 (x86)
+        int size = IntPtr.Size == 8 ? 144 : 112;
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        try {
+            for (int i = 0; i < size; i++) Marshal.WriteByte(buf, i, 0);
+            Marshal.WriteInt32(buf, 16, 0x2000); // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if (!SetInformationJobObject(job, 9, buf, size)) { CloseHandle(job); return IntPtr.Zero; }
+        } finally { Marshal.FreeHGlobal(buf); }
+        return job;
+    }
+    public static bool Assign(IntPtr job, IntPtr proc) { return AssignProcessToJobObject(job, proc); }
+    public static bool Kill(IntPtr job) { return TerminateJobObject(job, 1); }
+    public static void Close(IntPtr job) { CloseHandle(job); }
+}
+"@
+}
+
+function Stop-CopyProcesses([string]$copy) {
+    # Belt and braces after the job kill: anything whose command line names the copy.
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $left = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+                $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.IndexOf($copy, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+        foreach ($l in $left) { & taskkill.exe /T /F /PID $l.ProcessId 2>&1 | Out-Null }
+        if ($left.Count -gt 0) { Start-Sleep -Milliseconds 500 }
+    } while ($left.Count -gt 0 -and (Get-Date) -lt $deadline)
+}
+
 function Read-SharedText([string]$path) {
     # A killed child (timeout) can hold the log open for a moment; read with
     # full sharing and retry instead of letting an IOException abort the run.
@@ -339,13 +385,18 @@ exit 0
     $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -NoNewWindow -PassThru -WorkingDirectory $copy `
         -ArgumentList "/d /s /c `"powershell -NoProfile -ExecutionPolicy Bypass -File `"$wrapper`" > `"$log`" 2>&1`""
     $null = $p.Handle   # PS 5.1: cache the handle or ExitCode reads back null
+    $job = [NegJob]::Create()
+    if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; falling back to taskkill" Yellow } }
     $script:liveChild = $p
     $limitMs = [long]($spec.timeout_min * 60000)
     $timedOut = $false
     while (-not $p.WaitForExit(500)) {
-        if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; Stop-Tree $p.Id; $p.WaitForExit(10000) | Out-Null; break }
+        if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p.Id; $p.WaitForExit(10000) | Out-Null; break }
     }
+    if ($timedOut) { Stop-CopyProcesses $copy }
+    if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null; [NegJob]::Close($job) }
     $script:liveChild = $null
+    if ($timedOut) { $script:lastTimedOut = $true }
     $exit = if ($timedOut) { -1 } else { $p.ExitCode }
     $text = ''
     if (Test-Path -LiteralPath $log) { $text = Read-SharedText $log }
