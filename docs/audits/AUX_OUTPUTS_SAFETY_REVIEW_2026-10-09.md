@@ -101,7 +101,7 @@ Yes, apart from F1 (PAUSED) and a narrow retry gap.
 
 ### F7 (LOW): misleading handoff comment
 
-**Fixed in SHAHERE.**
+**Fixed in 8073e66f.**
 
 The comment at `control/profile_executor_run.c:1399-1421` says a failed handoff OFF is retried by the `aux_off_pending` branch. That branch only runs when the state is not RUNNING. In practice the first `profile_executor_aux_tick()` rewrites every claimed aux on the next tick, so the behaviour is safe.
 
@@ -124,7 +124,7 @@ It cannot mask a fault:
 
 ### F5 (LOW): monitor-only zone is not a cross-zone peer
 
-**Fixed in SHAHERE.**
+**Fixed in 8073e66f.**
 
 `peer_is_on_off = zone_guard_exempt` (`control/profile_executor.c:1743`) drops the monitor zone from the far side of guard 8 for every other zone (`control/thermal_guard.c:563-580`). This matches plan section 10.
 
@@ -163,7 +163,7 @@ Fix: apply the RAM update only after `ESP_OK`, or restore the previous entry and
 
 ### F6 (LOW): rollback leaves aux rules silently inert
 
-**Fixed in SHAHERE.**
+**Fixed in 8073e66f.**
 
 `persist/profile_rule_target.h:11-12` states this. After a rollback to firmware that predates aux, the freed zone runs as an ordinary HEATER with an empty relay mask. It gets PID and guards 1-4, but nothing can heat it, so it is likely to trip a heat-rise guard. That fails safe, but it can be confusing. I could not determine how a specific older build behaves without that build.
 
