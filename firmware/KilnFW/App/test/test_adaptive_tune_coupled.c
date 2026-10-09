@@ -298,7 +298,7 @@ static void test_coupling_cell_per_run_move_is_bounded_by_abs_cap(void)
 }
 
 // A4 review follow-up B (2026-09-28): zones_config_get_coupling() always
-// masks an on/off zone's COLUMN to 0.0 (docs/ON_OFF_ZONE_PLAN.md sec 1), but
+// masks an on/off zone's COLUMN to 0.0 (docs/ON_OFF_ZONE.md sec 1), but
 // that 0.0 is a live-control-loop mask, not "no prior on record" -- the real
 // coefficient measured before the zone was retyped is still sitting in flash.
 // Before this fix, adaptive_tune_refine_coupled_locked() read that masked 0.0

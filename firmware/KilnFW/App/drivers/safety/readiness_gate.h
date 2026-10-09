@@ -93,7 +93,7 @@ typedef enum {
      * Pico's version, so the four link-independent/link-surfacing
      * conditions above take priority. */
     READINESS_GATE_BLOCK_PICO_UPDATE,
-    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision 2, verbatim:
+    /* docs/CT_ATTRIBUTION_VERIFICATION.md, owner decision 2, verbatim:
      * "FAIL blocks both the wizard step and the firing interlock.
      * INCONCLUSIVE blocks only the wizard step and never the firing
      * interlock." A FAIL means a current transformer is not on the conductor

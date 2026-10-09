@@ -1129,7 +1129,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * exists to prevent cheaply, up front, instead of hours in. Checked here,
      * not only in the tick, for the same "refuse before any heating starts"
      * convention as every other check in this function. */
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1/step 1: refuse an on/off zone BEFORE
+    /* docs/ON_OFF_ZONE.md sec 1/step 1: refuse an on/off zone BEFORE
      * the thermo_mask check just below, same "refuse before any heating"
      * convention as every other check in this function -- a TC-equipped
      * on/off zone (legal per plan sec 2) must get THIS message, not sail

@@ -229,7 +229,7 @@ typedef struct {
     uint8_t      peer_count;
     uint8_t      peer_index_self;
     /* peer_is_on_off[i] true means that channel belongs to a ZONE_TYPE_
-     * ON_OFF zone (docs/ON_OFF_ZONE_PLAN.md sec 1, guard 8/cross-zone row):
+     * ON_OFF zone (docs/ON_OFF_ZONE.md sec 1, guard 8/cross-zone row):
      * an on/off device's channel is not comparable to a heater's, so it must
      * be excluded from the OTHER side of every cross-zone comparison too, not
      * just skipped when it is the zone being ticked (see on_off_zone below).
@@ -237,7 +237,7 @@ typedef struct {
      * as comparable, bit-identical to before this field existed. */
     const bool  *peer_is_on_off;
     /* True when THIS zone (the one thermal_guard_tick() is being called for)
-     * is ZONE_TYPE_ON_OFF (docs/ON_OFF_ZONE_PLAN.md sec 1's guard table).
+     * is ZONE_TYPE_ON_OFF (docs/ON_OFF_ZONE.md sec 1's guard table).
      * Guards 1 (heating-failed), 2 (wrong-direction), 3 (runaway) and 4
      * (drift) all read a signature that a correctly-operating on/off device
      * (a vent commanding duty 1.0 for hours with a flat or FALLING reading)

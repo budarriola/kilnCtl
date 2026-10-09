@@ -396,7 +396,7 @@ bool zones_config_json_validate(const zones_cfg_t *cand, const char **err_reason
             *err_reason = "zone relay_type out of range";
             return false;
         }
-        /* docs/ON_OFF_ZONE_PLAN.md step 6: the UI is the first writer of
+        /* docs/ON_OFF_ZONE.md step 6: the UI is the first writer of
          * these five fields, so this is their first validation too. Same
          * "refused, never clamped" discipline as every other field here --
          * zone_type/failsafe_state are boolean-ish (0/1), 0 is always legal

@@ -306,7 +306,7 @@ static void test_negative_dwell_min_is_still_rejected(void)
 }
 
 // ---------------------------------------------------------------------------
-// docs/ON_OFF_ZONE_PLAN.md plan step 5 -- export/import compatibility for
+// docs/ON_OFF_ZONE.md plan step 5 -- export/import compatibility for
 // the new "on_off_rules" top-level key. See import_post_handler()'s own
 // comment (profiles_export_http.c) for the full both-directions writeup;
 // these two tests exercise it against the real production import path.

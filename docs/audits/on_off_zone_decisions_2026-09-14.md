@@ -2,7 +2,7 @@
 
 > **Superseded in part, 2026-10-04:** D1 (do not decouple an on/off device from the zone array) was overturned by the owner requirement recorded in `docs/SPARE_RELAY_ONOFF_PLAN.md`: spare relays bind to on/off devices through a separate aux-outputs store, with no zone-array widening. The rest of this document is unchanged.
 
-**Purpose.** `docs/ON_OFF_ZONE_PLAN.md` is carried on `ROADMAP.md` as an L-sized
+**Purpose.** `docs/ON_OFF_ZONE.md` is carried on `ROADMAP.md` as an L-sized
 item "blocked on four owner questions". It is not. **Steps 1–8 are shipped and
 host-tested; the only open work is one supervised bench session (step 9).** The
 four questions at the bottom of that plan were written *before* step 1 and three

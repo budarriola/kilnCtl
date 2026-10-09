@@ -225,7 +225,7 @@ extern "C" {
 #define ZONE_PROGRESS_BAND_C_MAX 20.0f
 #define ZONE_PROGRESS_BAND_C_DEFAULT 3.0f
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3: on/off zone hysteresis and minimum on/off
+/* docs/ON_OFF_ZONE.md sec 3: on/off zone hysteresis and minimum on/off
  * dwell -- step 1 (ZONES_CFG_VERSION 22->23) added the storage
  * (zone_cfg_t::hyst_c/min_on_s/min_off_s) but no reader/writer yet; step 6
  * (this UI pass) is the first thing that actually lets an operator set
@@ -833,7 +833,7 @@ typedef struct {
      * convert_versioned_blob_to_current()'s entry memset, which is already
      * today's real, correct behaviour for every existing board. */
     float progress_band_c;
-    /* ---- ZONES_CFG_VERSION 22->23 (2026-09-07, docs/ON_OFF_ZONE_PLAN.md
+    /* ---- ZONES_CFG_VERSION 22->23 (2026-09-07, docs/ON_OFF_ZONE.md
      * step 1, two owner decisions: "extend the existing mechanism" -- this
      * is a NEW tail-append, not a reuse of PROFILE_SEG_KIND_RELAY_IO, which
      * is a one-shot per-segment timeline event on a non-zone output and

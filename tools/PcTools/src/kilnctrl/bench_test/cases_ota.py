@@ -633,7 +633,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
 def _case_ote01(ctx: dict) -> CaseResult:
     """OT-E01: a push of a valid ESP image to POST /api/ota/esp on the
     APPLICATION image must be REFUSED -- the single-slot design
-    (docs/OTA_SINGLE_SLOT_PLAN.md) runs the app from the only OTA slot, so
+    (docs/OTA_SINGLE_SLOT.md) runs the app from the only OTA slot, so
     the "next" partition is the running one. Pass: HTTP 409
     (`refusal_form` http_409; elapsed is informational: the firmware drains the body first), or -- because the firmware may close the
     socket while the client is still uploading -- a connection reset with

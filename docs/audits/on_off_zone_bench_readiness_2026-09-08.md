@@ -1,7 +1,7 @@
 # On/off zone bench-readiness pack — 2026-09-08
 
 Step 9 (real device, owner present) is the only unexercised step of
-`docs/ON_OFF_ZONE_PLAN.md`. Code-complete through relay actuation:
+`docs/ON_OFF_ZONE.md`. Code-complete through relay actuation:
 `d58492c9` (typing + guard exclusions), `3d740f78` (trigger core),
 `dd1d6ada` (rule storage), `b46c120c`/`172e3081` (UI), `bf1db47f`
 (actuation). This pack is the checklist for that one bench session — slots
@@ -116,7 +116,7 @@ real heating/venting load for this first pass.
 | Step | Expected | Why |
 |---|---|---|
 | Config save | `zone_type=1` accepted; PID gains, coupling row, autotune controls hidden for that zone in the zones page | `zones_page.html:830` zoneType hint + `.heaterOnly` toggling |
-| Autotune attempted on the zone (should NOT be attempted, but if someone tries) | Refused immediately with `"zone %u is an on/off device, not a heater — autotune has nothing to identify"` | `autotune_engine.c` (`zone_is_on_off()` check, ahead of the `thermo_mask==0` check — same file/shape per `ON_OFF_ZONE_PLAN.md` line 97-98) |
+| Autotune attempted on the zone (should NOT be attempted, but if someone tries) | Refused immediately with `"zone %u is an on/off device, not a heater — autotune has nothing to identify"` | `autotune_engine.c` (`zone_is_on_off()` check, ahead of the `thermo_mask==0` check — same file/shape per `ON_OFF_ZONE.md` line 97-98) |
 | Coupling matrix | Target zone's row AND column both read zero, at every `GET`, even after an autotune coupling pass elsewhere | `zones_config_accessors.c:481-487` zeroes both at read time, "belt and braces" |
 | Guards 1 (heating-failed), 2 (wrong-direction), 3 (runaway), 4 (drift), 9 (cross-zone) | **Never trip on this zone**, even with duty effectively 1.0 for hours and a flat or falling reading — this was the design's central finding (a working vent looks exactly like guard 1's trip signature) | `thermal_guard.h:190-215`; negative-tested in `test_thermal_guard.c` per the plan's step-1 entry |
 | Guards 5 (max/min temp), 6 (sensor validity), 7 (frozen sensor) | **Still active** if the zone has a TC — these protect the sensor/chamber regardless of what the relay drives | `thermal_guard.h:205` comment, explicit carve-out |

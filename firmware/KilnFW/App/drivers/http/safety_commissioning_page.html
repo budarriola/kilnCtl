@@ -680,7 +680,7 @@ var GROUPS = [
       // to come back, current_sense.c:288 -- once each, deliberately. Do NOT
       // "fix" k_ct_v_per_a to also carry gain: it would cancel against that
       // divider and turn this into an offset control. See
-      // docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md.)
+      // docs/CT_ATTRIBUTION_VERIFICATION.md.)
       //
       // NOT "power estimate only", despite what these rows used to claim.
       // (CURRENT_SENSE.md section 5's table said the same and was corrected
@@ -1339,7 +1339,7 @@ function wireCtAutoZeroButtons() {
 // badge) reflects the just-applied values. Separate from the page's big
 // "Save all" pass on purpose: A_fs/zero_mv are not Pico param ids at all
 // (fieldInputHtml's 'ct_cal' comment), so they cannot ride that pass.
-// The operator-entered scale trim, docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md
+// The operator-entered scale trim, docs/CT_ATTRIBUTION_VERIFICATION.md
 // owner decision 3: "The circuit has a fixed gain but clamp ratios change.
 // Allow the user to enter clamp ratio and offset/gain tuneing to get more
 // accurate." A_fs above IS the clamp ratio; these two are the correction on

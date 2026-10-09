@@ -456,7 +456,7 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv,
                                         safety_ct_cal_source_t source, float *out_k_ct_v_per_a,
                                         uint16_t *out_zero_counts, esp_err_t *out_nvs_err);
 
-/* Operator-entered per-channel TRIM (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md).
+/* Operator-entered per-channel TRIM (docs/CT_ATTRIBUTION_VERIFICATION.md).
  * Stored in the same ESP-local record as the pair above, which is what took
  * SAFETY_CT_CAL_BLOB_VERSION from 1 to 2.
  *

@@ -290,7 +290,7 @@ esp_err_t nvs_save_slot_locked(uint8_t id); /* caller holds profiles_save_lock()
  * rationale. */
 bool profile_exceeds_zone_ceiling(const profile_t *p, char *note, size_t note_cap);
 
-/* docs/ON_OFF_ZONE_PLAN.md plan step 5 -- rejects a candidate profile whose
+/* docs/ON_OFF_ZONE.md plan step 5 -- rejects a candidate profile whose
  * on/off rules reference a nonexistent segment or a zone not typed
  * ZONE_TYPE_ON_OFF (the dangerous direction: a HEATER zone driven by on/off
  * logic), or whose numeric fields are out of bounds. Called by

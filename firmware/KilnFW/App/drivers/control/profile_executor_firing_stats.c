@@ -24,7 +24,7 @@
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- keeps esp_err_to_name() below meaningful */
 #include "nvs_key_check.h"
 #include "zones_config_accessors.h" /* zone_is_on_off() -- on/off zones have no target_c and no
-                                      * meaningful IAE; skip them here, see ON_OFF_ZONE_PLAN.md
+                                      * meaningful IAE; skip them here, see ON_OFF_ZONE.md
                                       * sec 1 "Firing stats / IAE" row */
 #include "firing_stats_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA.md
                                      section 5 item 7 */
@@ -445,7 +445,7 @@ static void firing_stats_build_record(profile_firing_run_record_t *rec)
         // An on/off zone has no target_c, no PID and no meaningful IAE --
         // report it as inactive here so no thermal-model statistic is ever
         // derived from it downstream (adaptive_tune, comparators). See
-        // ON_OFF_ZONE_PLAN.md sec 1 "Firing stats / IAE" row.
+        // ON_OFF_ZONE.md sec 1 "Firing stats / IAE" row.
         zr->active = z->active && !zone_is_on_off(zi) && !z->monitor_only;
         if (!zr->active) continue;
         firing_stats_snapshot(z, span, &zr->stats);

@@ -1037,7 +1037,7 @@ void run_test_thermal_guard(void)
         TEST_CHECK(!tripped, "progress_band_c=10 puts an 8 C error inside the band, so no rise is demanded");
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1: guard 1's key finding. Duty commanded
+    /* docs/ON_OFF_ZONE.md sec 1: guard 1's key finding. Duty commanded
      * at 1.0 for 10x the progress window while the reading stays perfectly
      * FLAT is exactly a healthy vent's signature -- and today's guard 1
      * (in.on_off_zone left false, the pre-this-pass behaviour) trips it as

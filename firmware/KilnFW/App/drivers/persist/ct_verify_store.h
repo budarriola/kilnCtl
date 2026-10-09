@@ -1,6 +1,6 @@
 // ct_verify_store -- the persisted CT ATTRIBUTION VERDICT and the
 // configuration fingerprint that keeps it honest.
-// docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, storage section.
+// docs/CT_ATTRIBUTION_VERIFICATION.md, storage section.
 //
 // WHAT THIS STORES, AND WHY IT IS NOT IN THE WIZARD PROGRESS BLOB. The
 // setup wizard's progress blob is tri-state (pending/done/skipped) and has

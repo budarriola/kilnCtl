@@ -468,7 +468,7 @@ _ZONE_FIELD_FORM_KEY = {
     # round-trip against a board with a non-default relay_type set.
     # zones_http_post_parse.c: snprintf(key, ..., "z%u_relaytype", i).
     "relay_type": "relaytype",
-    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE_PLAN.md step 6, 2026-09-08):
+    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE.md step 6, 2026-09-08):
     # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s, added alongside the
     # on/off zone UI pass. zones_http_post_parse.c: snprintf(key, ...,
     # "z%u_zonetype"/"z%u_failsafe"/"z%u_hystc"/"z%u_minons"/"z%u_minoffs",
@@ -682,7 +682,7 @@ _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     # a top-level literal -- so it correctly does not appear in the POST
     # field table either.
     "relay_types",
-    # docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23, 2026-09-08):
+    # docs/ON_OFF_ZONE.md step 6 (ZONES_CFG_VERSION 22->23, 2026-09-08):
     # the resolved on/off hysteresis/min-on-off-seconds DEFAULTS, emitted
     # top-level purely so zones_page.html's placeholder text can't drift
     # from the firmware default (see zones_http_get.c's own comment on the
@@ -918,7 +918,7 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # counterpart is needed here, same as approach_rate_cap_c_per_hr's own
     # note just above.
     "error_band_c", "rate_band_c_per_s",
-    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE_PLAN.md step 6, 2026-09-08):
+    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE.md step 6, 2026-09-08):
     # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s. Found missing from
     # this set by bench_test's HP-03 (an on/off-zone preset naming zone_type
     # raised ZonesHttpUnknownFieldError) -- the same silent-drop-turned-

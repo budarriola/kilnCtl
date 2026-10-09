@@ -127,7 +127,7 @@ typedef struct {
                                   * Meaningful only for a RELAY_IO segment with io_blocking == 0. */
 } profile_segment_t;
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3/7 (plan step 5) -- one per (profile,
+/* docs/ON_OFF_ZONE.md sec 3/7 (plan step 5) -- one per (profile,
  * segment, on/off zone) rule. Storage lives with the PROFILE, not the zone
  * (zone_cfg_t only holds the device's physical properties -- type,
  * fail-safe state, hysteresis, min on/off times): the same vent is used

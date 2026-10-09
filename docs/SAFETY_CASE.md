@@ -478,7 +478,7 @@ here; none is copied from an unverified summary.
     commanded off"; an on/off zone's channel cannot express that signature
     (it may be driving a vent/damper/fan with no rise-while-off relationship
     to its own duty at all), so guard 3 is disabled outright for this zone
-    type (`docs/ON_OFF_ZONE_PLAN.md` sec 1's guard table, guard 3 row). No
+    type (`docs/ON_OFF_ZONE.md` sec 1's guard table, guard 3 row). No
     replacement runs on the ESP. The only welded-contactor coverage that
     could apply to this output is CT-based (S14/S15 on the Pico) or physical
     contactor feedback, both out of scope for this feature and, per item 4
@@ -499,7 +499,7 @@ here; none is copied from an unverified summary.
     (`profile_executor_start.c`/`profile_executor_run.c`'s existing
     `zone_needs_ceiling()` check). For a `ZONE_TYPE_ON_OFF` zone with **no
     thermocouple assigned** (`thermo_mask == 0`, legal only for this zone
-    type per `docs/ON_OFF_ZONE_PLAN.md` sec 2), `max_temp_c == 0` does
+    type per `docs/ON_OFF_ZONE.md` sec 2), `max_temp_c == 0` does
     **not** block the run — there is no measured channel for a ceiling to
     apply to, so treating an unmeasured fan/damper the same as an unmeasured
     heater would refuse a legitimate, harmless configuration for no safety

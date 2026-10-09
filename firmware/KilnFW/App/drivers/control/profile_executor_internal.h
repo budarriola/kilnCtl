@@ -592,7 +592,7 @@ typedef struct {
     char     fault_reason[96];
     thermal_guard_trip_t fault_guard;
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 3/4 -- on_off_trigger_decide.h's
+    /* docs/ON_OFF_ZONE.md sec 3/4 -- on_off_trigger_decide.h's
      * feature-local per-zone state (quasi_dwell timers, commanded_on, hold
      * timer). Deliberately NOT read by, or derived from, any other field in
      * this struct (see that header's top comment on why quasi_dwell must
@@ -603,7 +603,7 @@ typedef struct {
      * from anything derived from it. */
     on_off_trigger_state_t on_off_trigger_state;
 
-    /* Plan step 8 (docs/ON_OFF_ZONE_PLAN.md sec 3/6): ACTUATION-layer
+    /* Plan step 8 (docs/ON_OFF_ZONE.md sec 3/6): ACTUATION-layer
      * min_on_s/min_off_s enforcement, deliberately separate state from
      * on_off_trigger_state.commanded_on/held_s above. Requirement: "a
      * decision-core bug cannot chatter a physical relay" -- if
@@ -1174,7 +1174,7 @@ bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bo
                                             bool bypass_hold, uint16_t min_on_s, uint16_t min_off_s,
                                             float dt_s);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 6: whether an on/off zone's already-gated ON
+/* docs/ON_OFF_ZONE.md sec 6: whether an on/off zone's already-gated ON
  * verdict must be suppressed by max_simultaneous_relays THIS tick.
  * relays_on_count is how many relays the tick has already committed to ON
  * before this zone is considered -- the caller seeds it from the (already
@@ -1186,7 +1186,7 @@ bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bo
  * logged rather than deferred." */
 bool profile_executor_on_off_cap_denies(uint8_t relays_on_count, uint8_t cap);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3/4/6/8 -- the ENTIRE per-zone, per-tick
+/* docs/ON_OFF_ZONE.md sec 3/4/6/8 -- the ENTIRE per-zone, per-tick
  * on/off decision chain as one production function: on_off_trigger_decide()
  * (precedence, hysteresis, quasi-dwell) -> profile_executor_on_off_
  * actuation_gate() (independent actuation-layer min_on_s/min_off_s hold,
@@ -1573,7 +1573,7 @@ void history_unpack(const history_slot_t *slot, profile_history_entry_t *out);
 /* ---- run() feasibility/warm-start helpers (profile_executor_start.c) ----- */
 bool profile_zones_have_ceiling(const profile_t *p, uint8_t *out_missing_zone);
 
-/* docs/ON_OFF_ZONE_PLAN.md plan step 5, sec 3 -- looks up the stored
+/* docs/ON_OFF_ZONE.md plan step 5, sec 3 -- looks up the stored
  * profile_on_off_rule_t (if any) for (zone_index, segment_index) in `p` and
  * translates it into on_off_trigger_decide.h's on_off_trigger_rule_t, the
  * exact shape that module's `.rule` input field expects. Pure function

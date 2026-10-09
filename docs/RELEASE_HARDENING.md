@@ -8,7 +8,7 @@
 >
 > This plan starts once `docs/KILN_PROFILES_PLAN.md` is finished. It does not
 > re-plan anything that plan, `docs/SETUP_WIZARD.md`,
-> `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`, `docs/ON_OFF_ZONE_PLAN.md`
+> `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`, `docs/ON_OFF_ZONE.md`
 > or `docs/ITER_TUNE_REDESIGN_PLAN.md` already owns; where release depends on
 > one of those, it is named as a dependency rather than duplicated.
 

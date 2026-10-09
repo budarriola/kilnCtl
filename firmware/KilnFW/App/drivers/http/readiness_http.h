@@ -572,7 +572,7 @@ static inline readiness_status_t readiness_ct_leak_alarm_status(bool active)
  * of one extra confirmation click on a board that has never seen line
  * voltage is far smaller than the cost of this item going quiet exactly when
  * it starts to matter. */
-/* ---- CT attribution (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md) ----------
+/* ---- CT attribution (docs/CT_ATTRIBUTION_VERIFICATION.md) ----------
  *
  * The one fact the `ct_attribution` item and the firing interlock share.
  * Six values rather than a bool because the OWNER'S RULE distinguishes them,

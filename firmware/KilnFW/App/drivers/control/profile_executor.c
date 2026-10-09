@@ -850,7 +850,7 @@ void executor_task_entry(void *arg)
         const float *ch_raw_c = pre_lock_snap.raw_c;
         const bool *ch_sensor_ok = pre_lock_snap.ok;
         float raw_c[MAX31856_CHANNEL_COUNT];    /* per ZONE: this zone's combined raw reading */
-        bool zone_on_off[MAX31856_CHANNEL_COUNT]; /* per ZONE: docs/ON_OFF_ZONE_PLAN.md sec 1 --
+        bool zone_on_off[MAX31856_CHANNEL_COUNT]; /* per ZONE: docs/ON_OFF_ZONE.md sec 1 --
                                                     * snapshotted once per tick, same "one consistent
                                                     * picture" reasoning as raw_c/sensor_ok, and handed to
                                                     * thermal_guard_tick() both as this zone's own
@@ -922,7 +922,7 @@ void executor_task_entry(void *arg)
         uint8_t lagging = 0;
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (!s_exec.zones[zi].active || s_exec.zones[zi].faulted) continue;
-            /* docs/ON_OFF_ZONE_PLAN.md sec 1: an on/off zone has no actual_c
+            /* docs/ON_OFF_ZONE.md sec 1: an on/off zone has no actual_c
              * obligation to a shared setpoint -- leaving it in this loop
              * would let a zone sitting at ambient (or with no thermocouple
              * at all) freeze the whole firing's ramp forever. Hard
@@ -1405,7 +1405,7 @@ void executor_task_entry(void *arg)
                  * decision path further down (apply_relay() is never called
                  * for an on/off zone from the heater apply loop), so the
                  * dashboard showed a zone calling for full heat that could
-                 * never heat, with nothing else set. docs/ON_OFF_ZONE_PLAN.md
+                 * never heat, with nothing else set. docs/ON_OFF_ZONE.md
                  * sec 3: an on/off zone's relay follows its rules and the
                  * failsafe, never a PID output. Report duty 0 and leave
                  * heater_state alone; the on/off path keeps its own
@@ -1531,7 +1531,7 @@ void executor_task_entry(void *arg)
 
         /* --- Apply relays + guards, per active zone -------------------------- */
         bool run_faulted_this_tick = false;
-        /* docs/ON_OFF_ZONE_PLAN.md sec 6: an on/off zone counts toward
+        /* docs/ON_OFF_ZONE.md sec 6: an on/off zone counts toward
          * max_simultaneous_relays (a contactor coil draws the same current
          * whatever it switches) but is suppressed LAST -- only after every
          * heater has already been considered by the pass-1 load-cap loop
@@ -1750,7 +1750,7 @@ void executor_task_entry(void *arg)
                 .peer_ok = sensor_ok,
                 .peer_count = MAX31856_CHANNEL_COUNT,
                 .peer_index_self = zi,
-                /* docs/ON_OFF_ZONE_PLAN.md sec 1: guards 1/2/3/4/9 disabled
+                /* docs/ON_OFF_ZONE.md sec 1: guards 1/2/3/4/9 disabled
                  * for an on/off zone (thermal_guard.c gates each block on
                  * this), guards 5/6/7/8 unaffected. peer_is_on_off excludes
                  * every on/off zone from the OTHER side of guard 9 too, for
@@ -1764,7 +1764,7 @@ void executor_task_entry(void *arg)
                 }
             }
 
-            /* docs/ON_OFF_ZONE_PLAN.md sec 3/4/6/8 -- WIRED. Computes this
+            /* docs/ON_OFF_ZONE.md sec 3/4/6/8 -- WIRED. Computes this
              * tick's verdict for an on/off zone through the pure on_off_
              * trigger_decide() core, gates it through the actuation-layer
              * min_on_s/min_off_s hold (profile_executor_on_off_actuation_

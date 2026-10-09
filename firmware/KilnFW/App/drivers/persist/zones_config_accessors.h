@@ -1015,7 +1015,7 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
 
 /* RAW sibling of the getter above: same bounds and shape, but skips the
  * on/off row/column zeroing zones_config_get_coupling() applies (docs/
- * ON_OFF_ZONE_PLAN.md sec 1). backup_export.c uses this one so a currently
+ * ON_OFF_ZONE.md sec 1). backup_export.c uses this one so a currently
  * on/off zone's previously-measured coupling cells round-trip through a
  * backup instead of being read back as 0.0 and re-committed as a real,
  * permanent zero on import -- see the .c file's own comment (bench A4,
@@ -1231,7 +1231,7 @@ bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
 
 bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode_t mode);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 1: "is this zone a heat source at all" --
+/* docs/ON_OFF_ZONE.md sec 1: "is this zone a heat source at all" --
  * deliberately NOT a zone_control_mode_t value (see that plan section for
  * why overloading mode would be wrong). ZONE_TYPE_HEATER == 0 is the
  * migration default for every existing zone (ZONES_CFG_VERSION 22->23) and
@@ -1253,7 +1253,7 @@ bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type);
 
 bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 1's "one rule governs everything" predicate:
+/* docs/ON_OFF_ZONE.md sec 1's "one rule governs everything" predicate:
  * true iff `zone_index` is a valid, configured ZONE_TYPE_ON_OFF zone. False
  * (never true) for an out-of-range index -- callers that already validate
  * zone_index elsewhere get the same "no such zone, so no such on/off zone"
@@ -1270,7 +1270,7 @@ bool zone_is_on_off(uint8_t zone_index);
  * (fail-closed: an unreadable zone is still supervised as a heater). */
 bool zone_is_monitor_only(uint8_t zone_index);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 2's zone_needs_ceiling(zi) predicate: a HEATER
+/* docs/ON_OFF_ZONE.md sec 2's zone_needs_ceiling(zi) predicate: a HEATER
  * zone always needs a max_temp_c ceiling (the existing, unchanged "0 means
  * uncommissioned, refuse to start" rule); a ZONE_TYPE_ON_OFF zone needs one
  * only if it actually has a thermocouple assigned (thermo_mask != 0) -- an
@@ -1283,7 +1283,7 @@ bool zone_is_monitor_only(uint8_t zone_index);
  * check. */
 bool zone_needs_ceiling(uint8_t zone_index);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 5's per-zone fail-safe state: 0 = OFF
+/* docs/ON_OFF_ZONE.md sec 5's per-zone fail-safe state: 0 = OFF
  * (migration/zero-init default), nonzero = ON. First real reader is
  * on_off_trigger_decide.h's precedence levels 1-3 (control/
  * on_off_trigger_report.c). Fail-closed convention: an out-of-range
@@ -1307,7 +1307,7 @@ bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state);
 
 bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3's temperature hysteresis: stored value 0
+/* docs/ON_OFF_ZONE.md sec 3's temperature hysteresis: stored value 0
  * means "not configured" and the caller substitutes the plan's 2.0 C
  * default -- same "0 substituted with a firmware default" convention
  * thermal_guard_cfg_t's fields already use, so a fresh/migrated zone reads
@@ -1329,7 +1329,7 @@ bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c);
 
 bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3's minimum on/off dwell: stored 0 means
+/* docs/ON_OFF_ZONE.md sec 3's minimum on/off dwell: stored 0 means
  * "not configured", substituted with the plan's 30 s default. Out-of-range
  * zone_index: returns false, *out_s left at the 30 s default -- same
  * reasoning as zones_config_get_hyst_c() above (the safe default is the

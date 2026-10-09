@@ -67,7 +67,7 @@ typedef struct {
     bool  monitor_only; /* SPARE_RELAY_ONOFF_PLAN.md sec 10: zone_runtime_t.monitor_only */
 } mirror_zone_t;
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 1: stand-in for the real zones_config_
+/* docs/ON_OFF_ZONE.md sec 1: stand-in for the real zones_config_
  * accessors.c predicate of the same name (this file cannot link that module
  * without pulling in all of NVS -- same reasoning sensor_ok/actual_c are
  * caller-supplied fields on mirror_zone_t rather than real accessor calls).
@@ -272,7 +272,7 @@ void run_test_ramp_lock_onesided(void)
                                             "the !sensor_ok clause was left exactly as-is");
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1: an on/off zone sitting at ambient (or
+    /* docs/ON_OFF_ZONE.md sec 1: an on/off zone sitting at ambient (or
      * with no thermocouple at all -- sensor_ok=false here models that) with
      * an active, real ramp lagging must NOT freeze the schedule. z1 is on/
      * off and would hold the lock forever under the old rule (invalid

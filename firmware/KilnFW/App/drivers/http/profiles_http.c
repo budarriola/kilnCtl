@@ -118,7 +118,7 @@ NVS_KEY_LEN_CHECK(PROFILES_NVS_PARTITION);
  * mistake zones_http.c's ZONES_CFG_VERSION 6->7 comment already documents by
  * name for zone_cfg_t.
  *
- * 3 -> 4 (docs/ON_OFF_ZONE_PLAN.md plan step 5): profile_t itself grew a
+ * 3 -> 4 (docs/ON_OFF_ZONE.md plan step 5): profile_t itself grew a
  * tail -- on_off_rule_count + on_off_rules[PROFILE_MAX_ON_OFF_RULES]
  * (profiles_types.h). This is the SAFE case the comments above warn is
  * rare: profile_segment_t's own shape is UNCHANGED, so the new fields land

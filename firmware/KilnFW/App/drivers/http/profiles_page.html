@@ -429,7 +429,7 @@ var relayOwnedMask = 0;
 var relayCount = 4;
 var IO_DIGITAL_COUNT = 7; // KILN_IO_DIGITAL_COUNT (kiln_io.h); no live count in /api/zones today
 
-// docs/ON_OFF_ZONE_PLAN.md plan step 5's editor pass: zone_type comes back
+// docs/ON_OFF_ZONE.md plan step 5's editor pass: zone_type comes back
 // on every zone in /api/zones (zones_http_get.c, ZONES_CFG_VERSION 22's
 // zone_type/failsafe_state/hyst_c/min_on_s/min_off_s block, "always
 // emitted" -- see that file's own comment) -- the same array the zone
@@ -968,7 +968,7 @@ document.getElementById('addSegBtn').addEventListener('click', function () {
   loadZones().then(function () { container.appendChild(segmentRow({})); renderSegPreview(); refreshOoUi(); });
 });
 
-// ---- On/off device rules (docs/ON_OFF_ZONE_PLAN.md plan step 5) ----------
+// ---- On/off device rules (docs/ON_OFF_ZONE.md plan step 5) ----------
 // The backend (profile_on_off_rule_t/validate_on_off_rules()/
 // profile_resolve_on_off_rule()) has carried this since plan step 5; this
 // editor is the piece that was still missing. One rule = one (segment,

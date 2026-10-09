@@ -1545,7 +1545,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '</details>' +
     '</details>';
 
-  /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type (ZONES_CFG_VERSION 22->23,
+  /* docs/ON_OFF_ZONE.md step 6: zone_type (ZONES_CFG_VERSION 22->23,
    * zone_cfg_t::zone_type/failsafe_state/hyst_c/min_on_s/min_off_s -- storage
    * landed in step 1, unused by any consumer until this pass). Requirement 2
    * ("make the consequences visible") is met by onoffWarnHtml below, which
@@ -2102,7 +2102,7 @@ function applyAllGroupFrames() {
   for (var k = 0; k < thermoCount; k++) applyGroupFrames(k);
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md step 6: shows/hides the same .heaterOnly/
+/* docs/ON_OFF_ZONE.md step 6: shows/hides the same .heaterOnly/
  * .onoffPanel/.onoffWarn elements zoneBlock() sets an initial inline style
  * for at render time -- kept as ONE function so "what a live edit does" and
  * "what a fresh load shows" cannot drift apart (the exact class of bug
@@ -2141,7 +2141,7 @@ document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
   if (e.target.classList.contains('zonetype')) toggleZoneTypeUi(e.target.closest('.zone'));
   if (e.target.classList.contains('failsafestate')) {
-    /* Owner decision (ON_OFF_ZONE_PLAN.md sec 5/owner decisions): fail-safe
+    /* Owner decision (ON_OFF_ZONE.md sec 5/owner decisions): fail-safe
      * ON is confirm-gated because it energises a coil when things go wrong.
      * Revert to OFF if the operator declines -- this must be an actual
      * block, not a cosmetic warning, so a negative test removing this
@@ -2719,7 +2719,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_thermo_mask=' + thermoMask);
     params.push('z' + i + '_ct_mask=' + ctMask);
 
-    /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/
+    /* docs/ON_OFF_ZONE.md step 6: zone_type/failsafe_state/hyst_c/
        min_on_s/min_off_s are TOPOLOGY/device properties, same as relay_type
        just above -- never part of any inheritance group, always this zone's
        own div. */
@@ -3151,7 +3151,7 @@ function populateAutotuneZones() {
   var prev = sel.value;
   sel.innerHTML = '';
   for (var i = 0; i < thermoCount; i++) {
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1: "an on/off zone must never be excited
+    /* docs/ON_OFF_ZONE.md sec 1: "an on/off zone must never be excited
      * as the perturbing zone nor fitted as the responding zone" -- excluded
      * from the offer entirely rather than relying on the firmware's own
      * prestart refusal to be the only thing stopping an operator from

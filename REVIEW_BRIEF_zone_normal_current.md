@@ -165,7 +165,7 @@ other things:
   `ct_verify_store.c`, `readiness_http.c`/`.h`, `zones_page.html`,
   `config_params.c` (SaftyFW), and the two planning docs
   (`firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`,
-  `docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md`) end to end, cross-checking each
+  `docs/CT_ATTRIBUTION_VERIFICATION.md`) end to end, cross-checking each
   claim above against the actual code rather than the comments alone.
 
 ## What I deliberately did not change

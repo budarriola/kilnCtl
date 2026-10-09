@@ -403,7 +403,7 @@ function computeStepState(step, storedStep, readinessByKey) {
   // of problems. Steps that legitimately declare no readinessKeys (0
   // and 11, "Welcome / preflight" and "Authentication (optional)" as of
   // the 2026-09-19 step-count reduction to 12 -- step 8 has
-  // 'ct_attribution' with docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, which is
+  // 'ct_attribution' with docs/CT_ATTRIBUTION_VERIFICATION.md, which is
   // exactly what lets this file's existing regression machinery refuse a
   // stale 'done' there; see the comment above WIZARD_STEPS) are unaffected:
   // this can only be true for a step that named keys and got none of them back.
@@ -790,7 +790,7 @@ function submitZonesConfig(data, liveZones, extraParams) {
 
 /* ---- Step 4 (zone type). Requirement 1: the consequence text below is
  * copied VERBATIM (byte-for-byte) from zones_page.html's zoneBlock()
- * ".onoffWarn" paragraph (docs/ON_OFF_ZONE_PLAN.md step 6, commit
+ * ".onoffWarn" paragraph (docs/ON_OFF_ZONE.md step 6, commit
  * 172e3081) -- reused, not reworded, so an operator who later opens
  * /settings/zones sees the exact same sentence rather than a second,
  * differently-phrased account of the same consequence. Only the
@@ -1250,7 +1250,7 @@ function autotunePrecheck(zone) {
 // WIZARD_STEPS). Reuses GET /api/autotune/matrix verbatim, same as the old
 // step 11 did; ON_OFF zones are excluded from the pair count for the same
 // reason the old step excluded them from its review rows (their coupling
-// row/column is zeroed by construction -- ON_OFF_ZONE_PLAN.md).
+// row/column is zeroed by construction -- ON_OFF_ZONE.md).
 function couplingSummaryHtml(matrix, zones) {
   if (!matrix || !matrix.cells) {
     return '<p class="hint">Cross-zone coupling: no data yet (populated by autotune). ' +

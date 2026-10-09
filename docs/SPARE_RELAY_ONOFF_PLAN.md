@@ -10,7 +10,7 @@ fan, water feed) must bind any relay that no heating zone uses, WITHOUT
 consuming one of the 3 thermocouple-backed zone slots.
 
 Background read: `docs/audits/on_off_spare_relay_binding_2026-09-14.md`
-(why widening zones[] is L), `docs/ON_OFF_ZONE_PLAN.md` (the evaluator and
+(why widening zones[] is L), `docs/ON_OFF_ZONE.md` (the evaluator and
 rules this plan reuses), `docs/CONFIG_MIGRATION_CHAIN.md`,
 `docs/CONFIG_FILESYSTEM.md`.
 
@@ -176,7 +176,7 @@ conditional on ESP config.
   runs on it; the zones' guards are untouched. Aux never relaxes
   `max_temp_c`.
 - Load cap: aux counts toward `max_simultaneous_relays` (coil/supply current,
-  same reasoning as ON_OFF_ZONE_PLAN sec 6) and is the LAST victim after
+  same reasoning as ON_OFF_ZONE sec 6) and is the LAST victim after
   heaters. Run start refuses if heaters' needs plus aux count make the cap
   structurally unsatisfiable (extend the existing on/off count check).
 - Executor stray-relay check (`profile_executor_relay_io.c` ~line 1027:
@@ -211,7 +211,7 @@ Executor (`control/profile_executor.c`, `profile_executor_relay_io.c`):
 
 1. New `s_exec.aux[KILN_IO_RELAY_COUNT]`: `on_off_trigger_state_t`,
    `actuated_on`, `held_s`. Reset in `profile_executor_run()` exactly where
-   zone on/off state resets (a resume re-zeros, per ON_OFF_ZONE_PLAN sec 5;
+   zone on/off state resets (a resume re-zeros, per ON_OFF_ZONE sec 5;
    never persist quasi_dwell).
 2. After the zone loop each tick, `for each enabled aux`: resolve rule ->
    build `on_off_trigger_input_t` (shared builder extracted from the zone
@@ -568,7 +568,7 @@ earlier one merges.
   `backup_import.c` hooks merge.
 - **WP-8 DONE (docs 2026-10-06; bench steps 2/3/4/6/7 PASS 2026-10-06, BENCH_TEST_LOG; never run on a board: step 5 zone-relay_mask-contains-4 refusal, zone-guard-trip-keeps-R4, the convert).** Original scope: `docs/SAFETY_CASE.md` rows (aux relay: no welded
   detection; aux not behind K4 wiring note; no guard change),
-  `docs/ON_OFF_ZONE_PLAN.md` cross-link, `docs/CONFIG_FILESYSTEM.md`,
+  `docs/ON_OFF_ZONE.md` cross-link, `docs/CONFIG_FILESYSTEM.md`,
   `docs/CONFIG_MIGRATION_CHAIN.md` governed-store row, `ROADMAP.md` row
   (mark D1 overturned, link here), supersede note on the two 2026-09-14
   audits, bench session sec 12. Owns those docs.

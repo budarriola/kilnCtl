@@ -1318,7 +1318,7 @@ static void test_cache_stale_cleared_by_direct_refetch_not_only_maybe_refetch(vo
 }
 
 // ---------------------------------------------------------------------------
-// docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md -- safety_ct_cal_blob_t v1 -> v2.
+// docs/CT_ATTRIBUTION_VERIFICATION.md -- safety_ct_cal_blob_t v1 -> v2.
 // ---------------------------------------------------------------------------
 
 // Stages a v1 CT-calibration blob (the FROZEN pre-trim layout) on flash,
@@ -1475,7 +1475,7 @@ static void test_ct_cal_trim_roundtrips_and_survives_a_reboot(void)
 
 static void test_ct_cal_trim_refuses_out_of_range_rather_than_clamping(void)
 {
-    TEST_SECTION("safety_cfg_store_set_ct_cal_trim -- CT_ATTRIBUTION_VERIFICATION_PLAN.md: "
+    TEST_SECTION("safety_cfg_store_set_ct_cal_trim -- CT_ATTRIBUTION_VERIFICATION.md: "
                  "'do not clamp a bad trim into a plausible-looking one'");
 
     fake_kv_reset_all();

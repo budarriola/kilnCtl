@@ -294,7 +294,7 @@ static struct {
      * path-specific masks (unresolved_zone_mask / summed_unmeasured_mask),
      * which between them cover the same ground but only one topology each. */
     uint8_t measured_zone_mask;
-    /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): every
+    /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION.md): every
      * zone's per-channel averages, kept because per_ch_avg_a is alive only
      * for the length of ONE zone_sweep_run_all_zones() iteration while the
      * verdict is only written once, after the whole run finishes. Held here
@@ -1936,7 +1936,7 @@ static void zone_sweep_task(void *arg)
          * ESP-local, no link traffic, runs after the push above purely to
          * keep every sweep-completion side effect together in one place. */
         zone_sweep_check_nameplate_all();
-        /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): last,
+        /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION.md): last,
          * and only on a run that completed every zone. It reads the derived
          * map, the conflict mask and the committed calibration that the two
          * pushes above have just finished writing, so it must run after
@@ -1983,7 +1983,7 @@ static void zone_sweep_task(void *arg)
 }
 
 /* ---- CT ATTRIBUTION VERIFICATION: the producer half -----------------------
- * docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md. The VERDICT is computed by the
+ * docs/CT_ATTRIBUTION_VERIFICATION.md. The VERDICT is computed by the
  * pure engine (zone_sweep_verify_ct_attribution(), zones_current_sweep_
  * engine.c); the STORE is dependency-free (ct_verify_store.c). This section
  * is the only place that knows both, and it lives here because gathering

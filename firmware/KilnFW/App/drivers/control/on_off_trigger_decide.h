@@ -1,4 +1,4 @@
-// on_off_trigger_decide -- the pure decision core of docs/ON_OFF_ZONE_PLAN.md
+// on_off_trigger_decide -- the pure decision core of docs/ON_OFF_ZONE.md
 // sections 3 (trigger model) and 4 (quasi-dwell), pulled out the same way
 // link_watchdog_decide.h/.c pulls the PC-link watchdog's decision out of
 // uart_bridge.c: no FreeRTOS, no kiln_io, no locks, no profile_executor.c
@@ -12,7 +12,7 @@
 // this is intentionally dead code from the board's point of view until that
 // step lands, exactly like plan steps 4/7 describe.
 //
-// QUASI_DWELL IS FEATURE-LOCAL. docs/ON_OFF_ZONE_PLAN.md sec 4 is explicit
+// QUASI_DWELL IS FEATURE-LOCAL. docs/ON_OFF_ZONE.md sec 4 is explicit
 // that `quasi_dwell` and its two timers must never be fed back into
 // s_exec.dwelling, firing stats, or dwell credit -- this project has four
 // documented "reset one side of a pair" bugs already (uart_bridge.c's
@@ -34,7 +34,7 @@
 extern "C" {
 #endif
 
-// docs/ON_OFF_ZONE_PLAN.md sec 4's two thresholds. 120 s entry = 4x
+// docs/ON_OFF_ZONE.md sec 4's two thresholds. 120 s entry = 4x
 // EXEC_SUSTAINED_LAG_S (profile_executor_internal.h); 30 s exit is
 // deliberately 4x FASTER than entry -- see that section's rationale for why
 // the asymmetry is load-bearing, not a typo.

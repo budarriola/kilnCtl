@@ -204,7 +204,7 @@ Open:
       segment choosing whether its relay is left in its last state at run end
       (default off). `PROFILE_VERSION` 2->3. DONE -- `PROFILE_SEG_KIND_RELAY_IO`
       (`persist/profiles_types.h`: `io_blocking`, `io_leave_on_at_end`) already
-      implements this verbatim; on/off zones (docs/ON_OFF_ZONE_PLAN.md) are a
+      implements this verbatim; on/off zones (docs/ON_OFF_ZONE.md) are a
       distinct, later feature and explicitly say so in that plan's own intro.
 - [x] **Delete the rules engine** afterwards, never before -- otherwise there
       is a window with no way to drive a non-zone relay. `rules_task`'s own

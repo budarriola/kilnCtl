@@ -772,7 +772,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 10a4. CT attribution. docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md: proof
+    /* 10a4. CT attribution. docs/CT_ATTRIBUTION_VERIFICATION.md: proof
      * that each current clamp sits on the conductor the configuration names,
      * which is what the over-current guard's whole meaning rests on. Same
      * shape as the two items above -- one verdict, computed once by

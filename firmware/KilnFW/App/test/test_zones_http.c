@@ -5856,7 +5856,7 @@ static void test_post_relay_type_optional_range_and_preserve(void)
               "omitting z0_relaytype preserves the currently-stored value (Contactor), not a silent reset to SSR");
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/min_on_s/
+/* docs/ON_OFF_ZONE.md step 6: zone_type/failsafe_state/hyst_c/min_on_s/
  * min_off_s -- same optional/range-checked/omit-preserves shape as
  * z0_relaytype above, this is the first pass that lets a POST touch these
  * five fields at all (step 1 only added storage). */
@@ -5864,7 +5864,7 @@ static void test_post_on_off_fields_optional_range_and_preserve(void)
 {
     TEST_SECTION("parse_zone_fields -- z0_zonetype/z0_failsafe/z0_hystc/z0_minons/z0_minoffs: "
                  "accepted in range, out-of-range refused, omitted preserves the stored value "
-                 "(ON_OFF_ZONE_PLAN.md step 6)");
+                 "(ON_OFF_ZONE.md step 6)");
 
     char body_ok[700];
     snprintf(body_ok, sizeof(body_ok),
@@ -6943,7 +6943,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->tuning_rise_inf_c = ZONE_MAX_TEMP_C_MAX;
         z->tuning_seq = 0xFFFFFFFFu;
         z->adaptive_tune_enabled = 255;
-        /* docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23):
+        /* docs/ON_OFF_ZONE.md step 6 (ZONES_CFG_VERSION 22->23):
          * zone_type/failsafe_state render as small integers/booleans
          * ("false" is the wider literal, same reasoning as the tuning_*
          * booleans above), hyst_c/min_on_s/min_off_s at their documented
@@ -7333,7 +7333,7 @@ static void test_coupling_row_whole_setter_round_trip_and_bounds(void)
     nvs_test_clear();
 }
 
-// docs/ON_OFF_ZONE_PLAN.md sec 1 "belt and braces": an on/off zone's
+// docs/ON_OFF_ZONE.md sec 1 "belt and braces": an on/off zone's
 // coupling row AND column must both read zero, at every read, regardless of
 // what is actually stored -- and a caller may not write a nonzero cell
 // against an on/off zone's row or column either.
@@ -9377,7 +9377,7 @@ static void test_nvs_load_from_v21_blob_defaults_progress_band_c_to_default(void
 }
 
 // ---------------------------------------------------------------------------
-// docs/ON_OFF_ZONE_PLAN.md step 1 (ZONES_CFG_VERSION 22->23): zone_type/
+// docs/ON_OFF_ZONE.md step 1 (ZONES_CFG_VERSION 22->23): zone_type/
 // failsafe_state/hyst_c/min_on_s/min_off_s, tail-appended after
 // progress_band_c. Same shape as the progress_band_c tests just above.
 
@@ -9437,7 +9437,7 @@ static void test_zone_type_accessor_get_set_and_range(void)
 // Fail-safe default OFF: a zero-initialized zone_cfg_t (fresh save, partial
 // form, a migrated blob) must never report zone_type == ON_OFF or
 // failsafe_state == ON. This is the non-negotiable from docs/
-// ON_OFF_ZONE_PLAN.md sec 5 -- checked directly against the real struct
+// ON_OFF_ZONE.md sec 5 -- checked directly against the real struct
 // layout, not a mirror.
 static void test_zero_initialized_zone_cfg_is_heater_and_failsafe_off(void)
 {
@@ -9823,7 +9823,7 @@ static void test_decode_zones_blob_refuses_a_v24_blob_with_a_corrupted_crc(void)
     TEST_CHECK(out.thermo_count == 0, "a refused blob leaves *out zeroed, never a half-migrated struct");
 }
 
-// docs/ON_OFF_ZONE_PLAN.md sec 1/sec 2 predicates.
+// docs/ON_OFF_ZONE.md sec 1/sec 2 predicates.
 static void test_zone_is_on_off_and_zone_needs_ceiling(void)
 {
     TEST_SECTION("zone_is_on_off()/zone_needs_ceiling() -- the predicates every guard/ramp-lock/"
@@ -11572,7 +11572,7 @@ static void test_zone_sweep_derive_ct_channel_refuses_nan(void)
 }
 
 // ---------------------------------------------------------------------------
-// CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md,
+// CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION.md,
 // "Testing"). These exercise zone_sweep_verify_ct_attribution(), the
 // three-state verdict, which is a DIFFERENT decision from
 // zone_sweep_derive_ct_channel() above: that one answers "did something
@@ -11601,7 +11601,7 @@ static zone_ct_verify_in_t ctv_base(void)
 
 
 // ---- the PERSISTED verdict and its configuration fingerprint --------------
-// docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, storage section + case 7.
+// docs/CT_ATTRIBUTION_VERIFICATION.md, storage section + case 7.
 //
 // The fingerprint is the single expression of the verdict<->configuration
 // contract (CLAUDE.md's "reset one side of a pair" class). A verdict that

@@ -79,7 +79,7 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
 
 /* The one predicate for "this zone's reading/state is part of the run's shared
  * temperature drive": not an on/off zone (it has no obligation to the shared
- * setpoint, ON_OFF_ZONE_PLAN.md sec 1) and not monitor-only (never driven,
+ * setpoint, ON_OFF_ZONE.md sec 1) and not monitor-only (never driven,
  * SPARE_RELAY_ONOFF_PLAN.md sec 10). Used by the baseline pick, the warm-start
  * coolest pick and the ramp-lock loop so the three cannot disagree. Deliberately
  * NOT used by the ramp-rate-ceiling feasibility check: an on/off zone has a
@@ -840,7 +840,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 6: "If the cap is reached by on/off zones
+    /* docs/ON_OFF_ZONE.md sec 6: "If the cap is reached by on/off zones
      * alone, that is a configuration error; refuse at run start rather than
      * discovering it mid-firing." An on/off zone counts toward
      * max_simultaneous_relays exactly like a heater (a contactor coil draws
@@ -905,7 +905,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 
     /* HP-02 bench bug (2026-09-25..27, ESP 0fb8ad98): an on/off-typed zone
      * (ZONE_TYPE_ON_OFF, left behind by HP-03/HP-07's zone_type override)
-     * in a profile carrying no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md
+     * in a profile carrying no on/off rule for it. docs/ON_OFF_ZONE.md
      * sec 3 rule 6 holds such a zone's relay OFF for the whole firing, and
      * the tick loop never applies its PID/bang-bang decision (the on/off
      * path owns its apply_relay() call) -- so the bench saw duty 1.00,
@@ -1083,7 +1083,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             .progress_band_c = progress_band_c,
         };
         thermal_guard_reset(&z->guard_state);
-        /* docs/ON_OFF_ZONE_PLAN.md sec 5: "Resume starts every on/off device
+        /* docs/ON_OFF_ZONE.md sec 5: "Resume starts every on/off device
          * in its fail-safe state and quasi_dwell = false" -- profile_
          * executor_run() is the single entry point for both a fresh run and
          * the warm-start/resume path, so resetting here covers both without

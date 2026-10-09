@@ -798,7 +798,7 @@ static void assert_profiles_equal(const profile_t *a, const profile_t *b, const 
         snprintf(msg, sizeof(msg), "%s: segment %u dwell_min preserved", ctx, i);
         TEST_CHECK(a->segments[i].dwell_min == b->segments[i].dwell_min, msg);
     }
-    // docs/ON_OFF_ZONE_PLAN.md plan step 5 -- every existing caller of this
+    // docs/ON_OFF_ZONE.md plan step 5 -- every existing caller of this
     // helper now also proves the on/off rule tail round-trips (or, for a
     // profile that never had any, stays at 0 -- this is what makes every
     // v1/v2/v3 migration test in this file double as a "rules-free profile
@@ -2506,7 +2506,7 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
               "all 8 user-slot entries must be present in the listing, none dropped");
 }
 
-// Opus review pass (docs/ON_OFF_ZONE_PLAN.md step 5b) -- profile_detail_
+// Opus review pass (docs/ON_OFF_ZONE.md step 5b) -- profile_detail_
 // get_handler()'s PROFILE_DETAIL_JSON_CAP budgeted PROFILE_MAX_ON_OFF_RULES
 // at 128 bytes/rule, but a rule object with a real temp_source key measures
 // 182 bytes worst case; combined with 12 worst-case segments and a 512-byte
@@ -2690,7 +2690,7 @@ static void test_v2_blob_migrates_distinct_multi_segment_values(void)
 }
 
 // ---------------------------------------------------------------------------
-// Test 4c -- docs/ON_OFF_ZONE_PLAN.md plan step 5, PROFILE_VERSION 3->4: a
+// Test 4c -- docs/ON_OFF_ZONE.md plan step 5, PROFILE_VERSION 3->4: a
 // real v3 blob (current segment shape, crc32 tail, NO on/off rules -- what
 // every board saved between the relay/IO pass and this one) migrates and
 // gets the documented migration default: on_off_rule_count == 0, every rule

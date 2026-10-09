@@ -1236,7 +1236,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
         return true;
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1's "Executor watchdog inputs" row:
+    /* docs/ON_OFF_ZONE.md sec 1's "Executor watchdog inputs" row:
      * PROFILE_EXEC_FAULTED fires when every active HEATER zone is faulted,
      * regardless of on/off zone state -- an on/off zone (a vent, a fan) is
      * not a heat source, so a run whose only unfaulted zone is one of these

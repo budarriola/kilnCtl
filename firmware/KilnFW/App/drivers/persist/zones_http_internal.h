@@ -471,7 +471,7 @@ zone_kct_derive_t zone_sweep_derive_k_ct(float measured_total_a, float expected_
                                          float k_old, float *out_k);
 const char *zone_kct_derive_str(zone_kct_derive_t r);
 
-/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md)
+/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION.md)
  * Defined in zones_current_sweep_engine.c. Pure: every input is a plain number
  * the caller gathers, so the whole verdict is host-testable off-target and so
  * the fitted question keeps its single owner (config_store_ct_channel_fitted()

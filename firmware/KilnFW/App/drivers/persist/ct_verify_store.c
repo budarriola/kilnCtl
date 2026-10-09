@@ -23,7 +23,7 @@ static const char *TAG = "ct_verify_store";
  * namespace is its own (`ct_verify`) rather than the shared `kiln_cfg`
  * because this is a measurement result about one board, not a preference --
  * an erase of the verdict must not be able to take a preference with it.
- * docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, "Schema and storage cost". */
+ * docs/CT_ATTRIBUTION_VERIFICATION.md, "Schema and storage cost". */
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "ct_verify"
 #define NVS_KEY_VERDICT    "verdict_v1"

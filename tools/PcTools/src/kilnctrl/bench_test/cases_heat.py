@@ -705,7 +705,7 @@ def _starved_zones(zone_diag_samples: List[Dict[str, Any]]) -> Dict[int, str]:
 def _on_off_typed_zones(snapshot: dict, zone_mask: int) -> List[int]:
     """Zones in `zone_mask` whose GET /api/zones `zone_type` is not 0
     (heater). The bench profile has no on/off rules, so such a zone can
-    never heat under it (docs/ON_OFF_ZONE_PLAN.md sec 3 rule 6) -- the
+    never heat under it (docs/ON_OFF_ZONE.md sec 3 rule 6) -- the
     HP-02 bench failure's actual root cause was zone 2 left at zone_type 1
     by an earlier HP-03/HP-07 run whose restore was never read back."""
     found = []

@@ -1203,7 +1203,7 @@ static esp_err_t ct_cal_post_locked(httpd_req_t *req)
 /* POST /api/safety/commissioning/ct_trim                                 */
 /* ---------------------------------------------------------------------- */
 
-/* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision 3: the operator
+/* docs/CT_ATTRIBUTION_VERIFICATION.md, owner decision 3: the operator
  * enters the clamp ratio (A_fs, the handler above) and, separately, the
  * offset/gain trim that corrects what the board actually reads against a
  * reference meter. Body: "ch=<0-2>&trim_offset_a=<v>&trim_gain=<v>".

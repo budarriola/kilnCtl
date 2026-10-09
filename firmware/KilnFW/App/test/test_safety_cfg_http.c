@@ -372,7 +372,7 @@ bool safety_cfg_store_set_ct_cal_input(size_t ch, float a_fs, float zero_mv, saf
     return true;
 }
 
-// The operator-entered scale trim (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md,
+// The operator-entered scale trim (docs/CT_ATTRIBUTION_VERIFICATION.md,
 // owner decision 3). Its own statics rather than the ct_cal set above,
 // because the real store keeps the trim outside the has_value gate: the
 // getter answers for EVERY in-range channel, including one that was never

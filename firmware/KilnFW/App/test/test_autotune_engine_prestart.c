@@ -734,7 +734,7 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     return true;
 }
 
-// docs/ON_OFF_ZONE_PLAN.md step 1: same shape as s_stub_thermo_mask above --
+// docs/ON_OFF_ZONE.md step 1: same shape as s_stub_thermo_mask above --
 // false (HEATER) by default so every existing test in this file is
 // unaffected; test_run_refuses_on_off_zone() below sets this true to
 // exercise autotune_begin_run_locked()'s new prestart refusal.
@@ -3150,7 +3150,7 @@ static void test_run_refuses_zone_with_no_thermo_mask(void)
     TEST_CHECK(ok, "control: with a thermo_mask assigned, the identical setup must succeed");
 }
 
-// docs/ON_OFF_ZONE_PLAN.md step 1: an on/off zone must refuse autotune at
+// docs/ON_OFF_ZONE.md step 1: an on/off zone must refuse autotune at
 // prestart, the same shape/place as the thermo_mask==0 refusal just above --
 // and BEFORE it, so a TC-equipped on/off zone gets this message rather than
 // passing the thermo_mask check only to fail later on a flat trace.

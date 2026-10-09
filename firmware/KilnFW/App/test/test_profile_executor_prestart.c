@@ -1351,7 +1351,7 @@ bool zones_config_get_thermo_mask(uint8_t zone_index, uint8_t *out_mask)
     return zone_index < MAX31856_CHANNEL_COUNT && g_stub_thermo_mask[zone_index] != 0;
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md step 1: same shape as g_stub_thermo_mask above --
+/* docs/ON_OFF_ZONE.md step 1: same shape as g_stub_thermo_mask above --
  * every zone defaults to HEATER (false) so every pre-existing test in this
  * file is bit-identical to before this field existed; step-2-shaped bit-
  * identical proof this file doesn't otherwise carry. */
@@ -1369,7 +1369,7 @@ bool zone_is_monitor_only(uint8_t zone_index)
     return zone_index < MAX31856_CHANNEL_COUNT && g_stub_zone_monitor_only[zone_index];
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3/7 -- on_off_trigger_decide's report-only
+/* docs/ON_OFF_ZONE.md sec 3/7 -- on_off_trigger_decide's report-only
  * wiring in profile_executor.c reads these every tick for an on/off zone.
  * Fixed, defaults-shaped fakes (never true/nonzero) so every pre-existing
  * test in this file, which never types a zone on/off, is unaffected; a
@@ -2061,7 +2061,7 @@ static void test_escalate_guard_trip_on_off_zone_excluded_from_all_faulted(void)
     TEST_SECTION("escalate_guard_trip() per-zone trip, continue-on-trip policy -- "
                  "an on/off zone (a vent/fan, not a heat source) must not count toward "
                  "'the run is still alive', and must not itself block the FAULTED "
-                 "aggregation either (docs/ON_OFF_ZONE_PLAN.md sec 1, executor watchdog inputs row)");
+                 "aggregation either (docs/ON_OFF_ZONE.md sec 1, executor watchdog inputs row)");
     reset_relay_claim_test_state();
     g_continue_on_zone_trip = true;
     s_exec.zones[0].active = true; /* heater */
@@ -2733,7 +2733,7 @@ static void test_run_refuses_when_update_claims_after_early_check(void)
 }
 // HP-02 (bench, 2026-09-25..27, ESP 0fb8ad98): zone 2 had been left typed
 // on/off (zone_type 1) by an earlier HP-03/HP-07 preset, and the 3-zone
-// profile carried no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md sec 3 rule 6
+// profile carried no on/off rule for it. docs/ON_OFF_ZONE.md sec 3 rule 6
 // holds such a zone's relay OFF for the whole firing while (pre-fix) pass 1
 // still ran its PID and reported duty 1.00 -- a zone that could never heat,
 // with nothing naming why. profile_executor_run() now refuses that
@@ -9344,7 +9344,7 @@ static void run_test_exec_mode_state_check(void)
 }
 
 // ---------------------------------------------------------------------------
-// docs/ON_OFF_ZONE_PLAN.md plan step 5 -- profile_resolve_on_off_rule(),
+// docs/ON_OFF_ZONE.md plan step 5 -- profile_resolve_on_off_rule(),
 // the pure lookup profile_executor.c's per-tick wiring calls to feed
 // on_off_trigger_decide()'s real .rule field. Called directly against a
 // hand-built profile_t; no s_exec/tick machinery needed (see this function's
@@ -9417,7 +9417,7 @@ static void test_resolve_on_off_rule_reserved_temp_source_drops_temp_axis(void)
               "evaluate against the wrong reading");
 }
 
-// docs/ON_OFF_ZONE_PLAN.md plan step 5: a rules-free profile (on_off_rule_count == 0,
+// docs/ON_OFF_ZONE.md plan step 5: a rules-free profile (on_off_rule_count == 0,
 // the migration default for every pre-existing profile) must behave byte-identically to
 // before this field existed -- profile_resolve_on_off_rule() must never fabricate a match.
 static void test_resolve_on_off_rule_rules_free_profile_never_matches(void)
@@ -9445,7 +9445,7 @@ static void run_test_profile_resolve_on_off_rule(void)
 }
 
 // ---------------------------------------------------------------------------
-// docs/ON_OFF_ZONE_PLAN.md plan step 8 -- actual relay actuation.
+// docs/ON_OFF_ZONE.md plan step 8 -- actual relay actuation.
 // UNEXERCISED ON HARDWARE: these tests drive the real production functions
 // (on_off_trigger_decide() -> profile_executor_on_off_actuation_gate() ->
 // profile_executor_on_off_cap_denies(), wrapped as one production function
@@ -10968,7 +10968,7 @@ static void test_monitor_only_zone_does_not_drive_warm_start_pick(void)
 }
 
 /* FIX B: an ON_OFF zone has no obligation to the shared setpoint
- * (ON_OFF_ZONE_PLAN.md sec 1), so a valid thermocouple on the LOWEST-index
+ * (ON_OFF_ZONE.md sec 1), so a valid thermocouple on the LOWEST-index
  * ON_OFF zone must not seed the run-start baseline or the warm-start pick;
  * both must use the first zone that actually drives the run. */
 static void on_off_baseline_setup(const profile_t *p, float z0_c, float z1_c)
@@ -11806,10 +11806,10 @@ void run_test_profile_executor_prestart(void)
     // production path.
     run_test_exec_handle_mode_state_violation();
 
-    // docs/ON_OFF_ZONE_PLAN.md plan step 5 -- profile_resolve_on_off_rule().
+    // docs/ON_OFF_ZONE.md plan step 5 -- profile_resolve_on_off_rule().
     run_test_profile_resolve_on_off_rule();
 
-    // docs/ON_OFF_ZONE_PLAN.md plan step 8 -- actual relay actuation.
+    // docs/ON_OFF_ZONE.md plan step 8 -- actual relay actuation.
     run_test_on_off_actuation();
 }
 

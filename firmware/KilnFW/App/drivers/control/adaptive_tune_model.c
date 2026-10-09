@@ -557,7 +557,7 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
             // A4 review follow-up B (2026-09-28): zones_config_get_coupling()
             // (the getter prior_row was just filled from, above) always masks
             // an on/off zone's COLUMN to 0.0f -- "this zone injects no heat
-            // into anyone" (docs/ON_OFF_ZONE_PLAN.md sec 1). That masked 0.0
+            // into anyone" (docs/ON_OFF_ZONE.md sec 1). That masked 0.0
             // is not "no prior", it's "control ignores this cell entirely",
             // and this loop's own near-zero branch below treats prior==0 as
             // "no confident prior yet" and blends 0.15*fit through

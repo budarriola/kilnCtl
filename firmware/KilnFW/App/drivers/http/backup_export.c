@@ -462,7 +462,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
             zones_config_get_fuzzy_strength_pct(zi, &fuzzy_strength_pct);
             /* zones_config_get_coupling_raw(), not zones_config_get_coupling():
              * the latter zeroes any row/column touching an on/off zone
-             * (docs/ON_OFF_ZONE_PLAN.md sec 1's belt-and-braces control-loop
+             * (docs/ON_OFF_ZONE.md sec 1's belt-and-braces control-loop
              * guard) -- reading through it here exported 0.0 for a
              * currently on/off zone's real, previously-measured coupling
              * cells, and a later import then committed that 0.0 as the new

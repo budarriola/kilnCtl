@@ -216,7 +216,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * threshold" periods; which guard applies depends on which way the
      * error points.
      *
-     * ON_OFF_ZONE_PLAN.md sec 1: disabled entirely for an on/off zone. A
+     * ON_OFF_ZONE.md sec 1: disabled entirely for an on/off zone. A
      * correctly working vent commands duty 1.0 for hours and produces no
      * rise at all (often a fall) -- guard 1's whole trip condition ("duty
      * high, temperature flat") is also a healthy vent's normal operating
@@ -402,7 +402,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     }
 
     /* --- Guard 3: runaway with heat off (welded contact) -------------------
-     * ON_OFF_ZONE_PLAN.md sec 1: disabled for an on/off zone -- this guard
+     * ON_OFF_ZONE.md sec 1: disabled for an on/off zone -- this guard
      * infers a welded output from "temperature rising while commanded off",
      * which an on/off channel's relay cannot express (its whole job may BE
      * cooling while on). Welded-contactor detection for this output is a
@@ -526,7 +526,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * the idle-arming backstop above ever mattering: idle_elapsed_s still
      * accumulates (harmless, unread by anything else), but nothing below
      * reads settled_or_timed_out when no_setpoint is set. */
-    /* ON_OFF_ZONE_PLAN.md sec 1: disabled for an on/off zone, same reasoning
+    /* ON_OFF_ZONE.md sec 1: disabled for an on/off zone, same reasoning
      * as in->no_setpoint just above -- "drifted from setpoint" has no
      * meaning for a device with no setpoint to drift from. */
     if (!in->no_setpoint && !in->on_off_zone) {
@@ -566,7 +566,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         for (uint8_t i = 0; i < in->peer_count; i++) {
             if (i == in->peer_index_self) continue;
             if (in->peer_ok && !in->peer_ok[i]) continue; /* untrustworthy reading -- guard 6's problem, not this one */
-            /* ON_OFF_ZONE_PLAN.md sec 1: exclude an on/off zone from the
+            /* ON_OFF_ZONE.md sec 1: exclude an on/off zone from the
              * OTHER side of this comparison too -- a vent reading 200C below
              * its heater neighbours is the design working, not a fault. */
             if (in->peer_is_on_off && in->peer_is_on_off[i]) continue;

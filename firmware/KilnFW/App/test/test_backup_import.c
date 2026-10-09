@@ -1191,7 +1191,7 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     }
     memcpy(out_row, s_writes[zone_index].coupling_coeff, sizeof(s_writes[zone_index].coupling_coeff));
     /* Mirror zones_config_accessors.c's own on/off belt-and-braces mask
-     * (docs/ON_OFF_ZONE_PLAN.md sec 1) so this stub's behavior matches
+     * (docs/ON_OFF_ZONE.md sec 1) so this stub's behavior matches
      * production closely enough to reproduce the bench A4 (2026-09-28)
      * backup-export bug: a currently on/off zone reads its whole row as
      * zero, and any OTHER zone reads a zero in the column of an on/off
@@ -4443,7 +4443,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
 // Root cause: backup_export.c read the matrix through
 // zones_config_get_coupling(), which deliberately zeroes any row/column
 // touching an on/off zone as a live-control-loop guard (docs/
-// ON_OFF_ZONE_PLAN.md sec 1) -- exporting through that masking getter
+// ON_OFF_ZONE.md sec 1) -- exporting through that masking getter
 // permanently lost the real stored value the moment it was written back by
 // import via zones_config_set_coupling_cell() (which has no on/off
 // awareness at all). Fix: export now reads zones_config_get_coupling_raw(),

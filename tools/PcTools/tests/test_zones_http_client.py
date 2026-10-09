@@ -554,7 +554,7 @@ class BuildPostBodyTest(unittest.TestCase):
     # ---- on/off zone preset fields (HP-03: preset build failed loudly on
     # zone_type -- correctly, per the "consumer without producer" guard, but
     # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s are legitimate
-    # always-POST-writable per-zone fields (docs/ON_OFF_ZONE_PLAN.md) that
+    # always-POST-writable per-zone fields (docs/ON_OFF_ZONE.md) that
     # were simply never added to the override allowlist) ----
 
     def test_preset_overlay_carries_zone_type(self):

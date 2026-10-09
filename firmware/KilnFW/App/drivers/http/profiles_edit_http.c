@@ -196,7 +196,7 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
         seg->dwell_min = (uint32_t)dwell;
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md plan step 5 API surface -- indexed field
+    /* docs/ON_OFF_ZONE.md plan step 5 API surface -- indexed field
      * family "rule0_zone=3&rule0_segment=2&..." matching how segments are
      * already encoded above. A rule slot is present iff "rule%u_zone" is
      * present; presence stops at the first gap (no sparse holes over the
@@ -271,7 +271,7 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
          * so without this field a rule%u_temp_cmp posted from the editor was
          * silently ignored at run time (temp_source stayed 0 = none, the
          * memset()'d default above). Only 0 (none)/1 (this zone's TC) are
-         * wired by the executor as of ON_OFF_ZONE_PLAN.md plan step 5 --
+         * wired by the executor as of ON_OFF_ZONE.md plan step 5 --
          * 2 (named zone)/3 (executor setpoint) are reserved encoding space,
          * so the client only ever needs to send 0 or 1 today; a value out of
          * 0-3 collapses to 0 here (validate_on_off_rules() re-checks the

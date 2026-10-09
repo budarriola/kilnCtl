@@ -692,7 +692,7 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     }
     const zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     memcpy(out_row, z->coupling_coeff, sizeof(z->coupling_coeff));
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1, belt and braces: zero this zone's
+    /* docs/ON_OFF_ZONE.md sec 1, belt and braces: zero this zone's
      * WHOLE row if it is itself ZONE_TYPE_ON_OFF ("no neighbour's heat is
      * corrected for on this zone" -- it has no setpoint to correct), and
      * zero any COLUMN whose neighbor is on/off even when zone_index itself
@@ -729,7 +729,7 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
  * this: a zone that is CURRENTLY on/off still has real, previously-measured
  * coupling cells sitting in flash (from before it was retyped, or measured
  * while it was still a heater), and zones_config_get_coupling()'s
- * belt-and-braces mask (docs/ON_OFF_ZONE_PLAN.md sec 1) is a live-control-
+ * belt-and-braces mask (docs/ON_OFF_ZONE.md sec 1) is a live-control-
  * loop guard, not a storage truncation -- reading through it for a backup
  * silently exported 0.0 for every cell touching an on/off zone (as either
  * row or column), and a subsequent import then committed that 0.0 via
@@ -787,7 +787,7 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
     if (!row || zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1: refuse a nonzero row for an on/off
+    /* docs/ON_OFF_ZONE.md sec 1: refuse a nonzero row for an on/off
      * zone outright -- it has no setpoint to correct, so a caller asking to
      * store real coupling data for one is asking to store something that
      * cannot mean anything, not something this store should silently zero
@@ -1148,7 +1148,7 @@ bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
     return nvs_save() == ESP_OK;
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 1's predicate -- see zones_config_accessors.h
+/* docs/ON_OFF_ZONE.md sec 1's predicate -- see zones_config_accessors.h
  * for the fail-closed convention on an out-of-range zone_index (false here,
  * i.e. "not on/off", matching zones_config_get_zone_type()'s own false
  * return for the same case). */
@@ -1181,7 +1181,7 @@ bool zone_is_monitor_only(uint8_t zone_index)
     return mask == 0;
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 2's zone_needs_ceiling(zi) predicate -- see
+/* docs/ON_OFF_ZONE.md sec 2's zone_needs_ceiling(zi) predicate -- see
  * zones_config_accessors.h for the fail-closed convention on an out-of-range
  * zone_index (true here, i.e. "needs a ceiling", the safer default). */
 bool zone_needs_ceiling(uint8_t zone_index)

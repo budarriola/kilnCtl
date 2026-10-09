@@ -91,7 +91,7 @@ static void set_fully_ready(void)
      * Pico's firmware version matches (or the boot-time glue has not
      * flagged an unrecoverable mismatch). */
     s_fake_facts.pico_update_blocked = false;
-    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md's new item. PASS is the only
+    /* docs/CT_ATTRIBUTION_VERIFICATION.md's new item. PASS is the only
      * fact that reads READY_OK; on the actual bench fixture the reachable
      * value is INCONCLUSIVE, which deliberately does NOT block a start --
      * test_ct_attribution_non_fail_verdicts_do_not_block() below is the half
@@ -213,7 +213,7 @@ static void test_pico_update_blocked_alone_refuses(void)
 
 static void test_ct_attribution_fail_alone_refuses(void)
 {
-    /* docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, owner decision: "a FAIL
+    /* docs/CT_ATTRIBUTION_VERIFICATION.md, owner decision: "a FAIL
      * blocks both the step and firing". A FAIL means a current clamp is not
      * on the conductor the configuration names, so the over-current guard is
      * aimed at the wrong zone -- it reads as armed and healthy while

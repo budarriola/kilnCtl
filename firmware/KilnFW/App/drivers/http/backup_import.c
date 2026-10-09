@@ -2559,7 +2559,7 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                 /* _raw, not the masking zones_config_get_coupling(): this
                  * value is written straight back to storage below, and the
                  * masked getter reads 0.0 for any cell touching an on/off
-                 * zone (docs/ON_OFF_ZONE_PLAN.md sec 1) -- an import that
+                 * zone (docs/ON_OFF_ZONE.md sec 1) -- an import that
                  * supplies only tau/dead_time for such a cell would then
                  * commit that 0.0 over the real stored coefficient, the same
                  * loss the export-side fix (bench A4, 2026-09-28) closed. */

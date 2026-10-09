@@ -13,7 +13,7 @@ Extending that wire format would be a firmware change (new bytes in
 PROFILES_CMD_SAVE's payload, parsed by the bridge, on top of the existing
 segment loop) -- out of scope for a PC-only fix. The already-existing,
 already-ADMIN-tier HTTP form endpoint (profiles_parse_profile_fields()'s
-"rule%u_zone"/"rule%u_segment"/... family, ON_OFF_ZONE_PLAN.md plan step 5)
+"rule%u_zone"/"rule%u_segment"/... family, ON_OFF_ZONE.md plan step 5)
 covers exactly this need without touching firmware, so this module is a thin
 wrapper around it -- same "stdlib urllib.request, no framework" convention as
 zones_http_client.py/ota_http_client.py.
@@ -88,7 +88,7 @@ ON_OFF_TEMP_CMP_BELOW = 2
 
 #: temp_source encoding (profiles_types.h profile_on_off_rule_t.temp_source).
 #: Only 0/1 are wired by profile_resolve_on_off_rule() as of
-#: ON_OFF_ZONE_PLAN.md plan step 5.
+#: ON_OFF_ZONE.md plan step 5.
 ON_OFF_TEMP_SOURCE_NONE = 0
 ON_OFF_TEMP_SOURCE_MEASURED_THIS_ZONE = 1
 

@@ -351,7 +351,7 @@ typedef struct {
 typedef enum {
     PROFILE_EXEC_RELAY_DENIED_NONE = 0,
     /* The zone is typed ZONE_TYPE_ON_OFF and the profile has no enabled
-     * on/off rule for it in the current segment, so docs/ON_OFF_ZONE_PLAN.md
+     * on/off rule for it in the current segment, so docs/ON_OFF_ZONE.md
      * sec 3 rule 6 holds the relay OFF -- regardless of what its (unused)
      * control mode's duty says. profile_executor_run() refuses a profile
      * where this would hold for EVERY segment; this reports the per-segment

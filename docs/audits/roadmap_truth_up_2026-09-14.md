@@ -126,7 +126,7 @@ correct. No firmware was flashed, no heating run was performed, and no
      tests) still say the **old** filenames and are left as an outstanding
      item for whichever session next touches that directory, or for the
      owner to do in one pass.
-   - `ON_OFF_ZONE_PLAN.md` left untouched (one open step, per instruction).
+   - `ON_OFF_ZONE.md` left untouched (one open step, per instruction).
 
 10. **Duplicate ROADMAP rows consolidated to one each:**
     - CT commissioning: three rows (the detailed M-size row, and two

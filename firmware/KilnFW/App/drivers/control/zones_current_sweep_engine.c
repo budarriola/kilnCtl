@@ -275,7 +275,7 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * provenance. */
 /* ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT (1.0f): see ct_noise_floor.h. */
 
-/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md)
+/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION.md)
  *
  * The verdict is deliberately SEPARATE from zone_sweep_derive_ct_channel()
  * above. That function's job is coarse and unchanged: "did anything conduct,

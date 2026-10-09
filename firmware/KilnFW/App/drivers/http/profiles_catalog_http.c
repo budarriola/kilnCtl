@@ -507,7 +507,7 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
                s->io_leave_on_at_end, profile_feasibility_verdict_str(per_seg[i]));
     }
     APPEND("],\"on_off_rules\":[");
-    /* docs/ON_OFF_ZONE_PLAN.md plan step 5 API surface -- echoes exactly the
+    /* docs/ON_OFF_ZONE.md plan step 5 API surface -- echoes exactly the
      * fields profiles_edit_http.c's rule%u_* parser accepts, same round-trip
      * discipline the segment loop above already follows. "temp_source"
      * added alongside the profiles_page.html editor pass: without it, a

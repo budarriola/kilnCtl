@@ -189,7 +189,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         }
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/
+    /* docs/ON_OFF_ZONE.md step 6: zone_type/failsafe_state/hyst_c/
      * min_on_s/min_off_s (ZONES_CFG_VERSION 22->23 storage, unused by any
      * consumer until this UI pass). OPTIONAL, same reasoning as z%u_relaytype
      * above -- every pre-existing client (pc_tools/MCP, older test bodies)
