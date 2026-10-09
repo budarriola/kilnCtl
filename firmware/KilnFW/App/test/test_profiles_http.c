@@ -1288,6 +1288,19 @@ static void test_pcfg_longer_rev_array_is_known_tail_ignored(void)
     profiles_slot_bitmap_set(&s_profiles.used_bitmap, 3);
     TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save into slot 3 works");
     TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete of slot 3 works");
+    {
+        nvs_handle_t rh;
+        nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &rh);
+        uint32_t back[PROFILES_MAX_COUNT + 8];
+        memset(back, 0xEE, sizeof(back));
+        size_t bl = sizeof(back);
+        TEST_CHECK(nvs_get_blob(rh, NVS_KEY_PROFILE_REV, back, &bl) == ESP_OK && bl == sizeof(big),
+                   "rev array keeps its full (longer) length after delete");
+        nvs_close(rh);
+        TEST_CHECK(memcmp(&back[PROFILES_MAX_COUNT], &big[PROFILES_MAX_COUNT], 8 * sizeof(uint32_t)) == 0,
+                   "tail floors from newer firmware preserved verbatim after delete");
+        TEST_CHECK(back[3] > 9, "slot 3 floor bumped");
+    }
 }
 
 static void test_pcfg_truncated_rev_blob_not_known_lengths(void)
@@ -1346,6 +1359,27 @@ static void test_pcfg_junk_rev_blob_is_repaired_once(void)
     profiles_cfg_fs_load_raw(3, &fp, &file_rev, &valid);
     TEST_CHECK(valid && file_rev == 6, "slot 3 file written at max+1, above any stale value");
     TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete works (also exercises firing_stats_erase after the change)");
+}
+
+static void test_pcfg_junk_rev_repair_deferred_without_cfg(void)
+{
+    TEST_SECTION("junk rev blob with cfg NOT mounted: repair deferred, stays fail-closed, prof_rev untouched");
+    pcfg_reset_all();
+    TEST_CHECK(!cfg_fs_is_available(), "cfg not mounted");
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    pcfg_set_rev_blob(junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(s_profile_rev_unknown[3], "slot 3 still rev-unknown (fail closed)");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(junk), "rev blob not rewritten with zeros");
 }
 
 static void test_pcfg_files_only_junk_rev_is_repaired(void)
@@ -4154,6 +4188,7 @@ void run_test_profiles_http(void)
     test_pcfg_legacy_32_byte_rev_array_is_known();
     test_pcfg_non_multiple_of_4_rev_blob_stays_unknown();
     test_pcfg_longer_rev_array_is_known_tail_ignored();
+    test_pcfg_junk_rev_repair_deferred_without_cfg();
     test_pcfg_truncated_rev_blob_not_known_lengths();
     test_pcfg_junk_rev_blob_is_repaired_once();
     test_pcfg_files_only_junk_rev_is_repaired();

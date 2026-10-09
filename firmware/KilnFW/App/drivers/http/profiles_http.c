@@ -849,14 +849,27 @@ static bool rev_repair_junk(const char *partition, const profiles_slot_bitmap_t 
                       "DRAM_PSRAM_PLAN.md section 7.2.");
         return false; /* fail closed, same as a failed repair */
     }
+    (void)used;
+    if (!cfg_fs_is_available()) {
+        /* Without cfg mounted no file revs are visible: any rebuild would write
+         * floors of 0 and a later cfg-mounted boot would let stale files win. */
+        ESP_LOGW(PROFILES_TAG, "prof_rev junk repair deferred: cfg not mounted (fail closed)");
+        return false;
+    }
+    bool has_file[PROFILES_MAX_COUNT];
     uint32_t maxrev = 0;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profile_t fp;
+        uint32_t frev = 0;
+        bool fvalid = false;
+        profiles_cfg_fs_load_raw(id, &fp, &frev, &fvalid);
+        has_file[id] = fvalid;
         if (s_profile_rev[id] > maxrev) {
             maxrev = s_profile_rev[id];
         }
     }
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        if (!profiles_slot_bitmap_test(used, id) && s_profile_rev[id] < maxrev) {
+        if (!has_file[id] && s_profile_rev[id] < maxrev) {
             s_profile_rev[id] = maxrev;
         }
     }
@@ -1231,22 +1244,37 @@ esp_err_t nvs_erase_slot(uint8_t id)
         kv_err = used_bitmap_save(&h, &nvs_used);
     }
     if (kv_err == HAL_OK) {
-        uint32_t *nvs_rev = persist_scratch_alloc(sizeof(s_profile_rev));
+        /* A longer-than-ours array (newer firmware, more slots) is rewritten at
+         * its FULL original length: the tail floors are preserved verbatim so a
+         * downgrade then re-upgrade does not lose them. */
+        size_t full_len = 0;
+        hal_status_t lst = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, NULL, &full_len);
+        if (lst != HAL_OK || full_len < sizeof(s_profile_rev) || full_len > REV_LONGER_MAX_BYTES ||
+            (full_len % sizeof(uint32_t)) != 0) {
+            full_len = sizeof(s_profile_rev);
+        }
+        uint32_t *nvs_rev = persist_scratch_alloc(full_len);
         if (nvs_rev == NULL) {
             kv_err = HAL_NO_MEM;
         } else {
-            memset(nvs_rev, 0, sizeof(s_profile_rev));
+            memset(nvs_rev, 0, full_len);
             rev_state_t rst = rev_read(&h, nvs_rev);
             if (rst != REV_KNOWN) {
                 /* Unreadable/junk: writing zeros for the other slots would erase
                  * their floors. Refuse the rev-array write (and so the erase). */
                 kv_err = HAL_IO;
             }
+            if (kv_err == HAL_OK && full_len > sizeof(s_profile_rev)) {
+                size_t rl = full_len;
+                if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rl) != HAL_OK || rl != full_len) {
+                    kv_err = HAL_IO;
+                }
+            }
             if (kv_err == HAL_OK) {
                 /* A legacy short array was zero-initialised above: slots past its old
                  * count never existed, so the full-width write is zero-extended. */
                 nvs_rev[id] = new_rev;
-                kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, sizeof(s_profile_rev));
+                kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, full_len);
             }
             free(nvs_rev);
         }
@@ -1922,8 +1950,7 @@ void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *
                     s->n_profile = s->decoded;
                 }
             }
-            size_t rev_len = sizeof(s->revs);
-            if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, s->revs, &rev_len) == HAL_OK) {
+            if (rev_read(&h, s->revs) == REV_KNOWN) {
                 n_rev = s->revs[id];
             }
             hal_kv_close(&h);
