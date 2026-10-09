@@ -40,6 +40,8 @@ already parsed in `flush_head()`, where the gate runs (`update_stage.c:263`). Co
 
 ### M2. Recovery-image Wi-Fi reset and "forget last network" resurrect the legacy default-partition credential (reset-one-side)
 
+**Fixed in 8c591550** (one-shot migration in the app; recovery image left unchanged, its reset needs no legacy erase once migration erases the legacy keys).
+
 - Where: `firmware/KilnFW_recovery/main/recovery_http.c:75` `WIFI_RESET_KEYS` and `:713-740` (wifi_reset);
   `firmware/KilnFW/App/drivers/net/wifi_prov_nvs.c:523` (`adopt`) and `:570-590` `nvs_load_saved_nets()`.
 - Related: `95070c9a` added `erase_legacy_default_wifi` only to `factory_reset.c` (scopes `wifi`/`all`).
