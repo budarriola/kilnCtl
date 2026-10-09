@@ -312,6 +312,12 @@ static esp_err_t nvs_load_from_decode_buf(const char *partition, zones_cfg_t *ou
             *out_found = true;
         }
         return ESP_OK;
+    case ZONES_DECODE_OOM:
+        /* Not judged: no fault latch, nothing found/valid, the load fails. */
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg blob from '%s': out of memory while converting -- load fails, "
+                      "flash data left untouched",
+                 partition);
+        return ESP_ERR_NO_MEM;
     case ZONES_DECODE_CORRUPT:
     default:
         /* Genuine corruption (too short, wrong length for the claimed
@@ -524,6 +530,19 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
                                                         &migrated_from_nvs, &on_disk_version_before,
                                                         &nvs_refused_as_newer);
+    if (err == ESP_ERR_NO_MEM) {
+        /* Decode OOM: could not judge the NVS bytes. Do not resolve (the file would
+         * be compared against nothing), keep the rev floor, fail the load. */
+        s_zones_cfg_rev = zones_cfg_rev_load();
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return err;
+    }
 
     /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
      * against the `cfg` file on top of whatever nvs_load_from() just
@@ -540,6 +559,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * OOM is a clean load failure: config zeroed, nothing found/valid. */
     zones_cfg_t *resolved = persist_scratch_alloc(sizeof(*resolved));
     if (!resolved) {
+        s_zones_cfg_rev = nvs_rev; /* rev floor: a later save must not restamp rev 1 */
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -554,6 +574,21 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     uint8_t file_on_disk_version = 0;
     bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                     &used_file, &file_on_disk_version);
+    if (file_on_disk_version == ZONES_CFG_RESOLVE_OOM_VERSION && !trustworthy && !used_file) {
+        /* Resolve could not allocate: keep the rev floor and fail the load so the
+         * legacy NVS copy is not adopted as valid (a later save would overwrite
+         * the newer authoritative file). */
+        s_zones_cfg_rev = nvs_rev;
+        free(resolved);
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return ESP_ERR_NO_MEM;
+    }
     s_zones_cfg_rev = resolved_rev;
     /* cfg is MOUNTED on the bench board as of 2026-09-21 (7 files, confirmed
      * via GET /api/cfgfs -- CLAUDE.md's "512K LittleFS cfg partition"), so
@@ -565,7 +600,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * the NVS candidate BEFORE it is overwritten below: `s_zones.cfg` still
      * holds whatever nvs_load_from_with_migration_info() just decoded (or
      * the zeroed default, if !nvs_valid), and `resolved` is a struct this
-     * function already owns on the stack -- no new large local needed. If
+     * function already owns on the heap (persist_scratch) -- no large local. If
      * the two don't already agree, NVS (and, redundantly but harmlessly,
      * the file itself, since zones_config_cfg_fs_save() re-stamps a fresh
      * CRC) needs a write-back once this boot's winner is adopted, same as
@@ -707,39 +742,70 @@ bool zones_config_persisted_equals_ram(void)
      * dual-write close (docs/CONFIG_FILESYSTEM.md, "Dual-write window:
      * closed"); the NVS blob is a frozen legacy copy no save updates. */
     zones_cfg_t *raw = persist_scratch_alloc(sizeof(*raw));
-    if (raw == NULL) {
+    zones_cfg_t *snap = persist_scratch_alloc(sizeof(*snap));
+    if (raw == NULL || snap == NULL) {
+        free(raw);
+        free(snap);
         return false;
     }
     memset(raw, 0, sizeof(*raw));
+    /* Snapshot RAM under the zones lock (copy only), then stamp the copy exactly as
+     * nvs_save() stamps what it writes, so the compare is against what a save would
+     * have put in the file, not a live struct a writer can be mid-edit on. */
+    zones_cfg_lock();
+    memcpy(snap, &s_zones.cfg, sizeof(*snap));
+    zones_cfg_unlock();
+    snap->version = ZONES_CFG_VERSION;
+    snap->crc32 = zones_config_json_compute_crc(snap);
     uint32_t rev = 0;
     bool valid = false;
     zones_config_cfg_fs_load_raw(raw, &rev, &valid);
-    bool ok = valid && memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0;
+    bool ok = valid && memcmp(raw, snap, sizeof(*snap)) == 0;
     free(raw);
+    free(snap);
     return ok;
 }
 
 esp_err_t nvs_save(void)
 {
+    /* Persist a SNAPSHOT, never the live struct: copy s_zones.cfg and read the rev under
+     * zones_cfg_lock() (portMUX: copy only, no I/O/alloc/log inside), stamp version/CRC
+     * on the copy (last, after every other field is final -- see
+     * zones_config_json_compute_crc()/zones_cfg_t::crc32's comments), and write the copy.
+     * Every save re-stamps; there is no path that writes the blob without it. */
+    zones_cfg_t *snap = persist_scratch_alloc(sizeof(*snap));
+    if (snap == NULL) {
+        ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: no memory for the snapshot");
+        return ESP_ERR_NO_MEM;
+    }
+    zones_cfg_lock();
     s_zones.cfg.version = ZONES_CFG_VERSION;
-    /* Stamped last, after every other field is final for this write -- see
-     * zones_config_json_compute_crc()/zones_cfg_t::crc32's comments. Any in-RAM edit that
-     * lands here (a setter, a POST commit, an import) gets a fresh, correct
-     * CRC every time this function runs; there is no path that writes the
-     * blob without also re-stamping it. */
-    s_zones.cfg.crc32 = zones_config_json_compute_crc(&s_zones.cfg);
-
-    /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
-     * NVS is no longer written, and a failed file write is this function's
-     * return value -- it is never masked by a fallback NVS write. The rev
-     * only advances after a verified write, so a retry reuses the same rev.
-     * zones_config_cfg_fs_save() logs the failure. ESP_ERR_INVALID_STATE
-     * (no `cfg` partition mounted) is now a real failure too: there is no
-     * other store to fall back to. */
+    memcpy(snap, &s_zones.cfg, sizeof(*snap));
     uint32_t new_zones_rev = s_zones_cfg_rev + 1;
-    esp_err_t err = zones_config_cfg_fs_save(&s_zones.cfg, new_zones_rev);
+    zones_cfg_unlock();
+    snap->crc32 = zones_config_json_compute_crc(snap);
+    /* Mirror the stamp into RAM (one scalar) ONLY if RAM still equals the snapshot (L5): a setter
+     * that edited s_zones.cfg since the snapshot would otherwise be left with new fields under
+     * this snapshot's CRC. On a mismatch RAM keeps its own (older) CRC and that setter's own
+     * save stamps it. Compare is memcmp with the snapshot's crc field temporarily set to RAM's. */
+    zones_cfg_lock();
+    {
+        uint32_t stamped = snap->crc32;
+        snap->crc32 = s_zones.cfg.crc32;
+        bool unchanged = memcmp(snap, &s_zones.cfg, sizeof(*snap)) == 0;
+        snap->crc32 = stamped;
+        if (unchanged) {
+            s_zones.cfg.crc32 = stamped;
+        }
+    }
+    zones_cfg_unlock();
+
+    esp_err_t err = zones_config_cfg_fs_save(snap, new_zones_rev);
+    free(snap);
     if (err == ESP_OK) {
+        zones_cfg_lock();
         s_zones_cfg_rev = new_zones_rev;
+        zones_cfg_unlock();
     } else {
         ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: %s -- NVS is no longer written, the change "
                                  "lives in RAM until reboot",

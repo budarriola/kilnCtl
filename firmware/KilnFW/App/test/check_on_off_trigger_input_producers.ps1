@@ -147,6 +147,8 @@ $ruleInit = ""
 $ruleCode = ""
 $ruleVars = @()
 $typedCode = ""
+$typedFiles = @()
+$ruleFiles = @()
 foreach ($f in $sourceFiles) {
     $fileText = ((Get-CodeOnlyLines -Path $f.FullName) -join "`n") + "`n"
     $scanText += $fileText
@@ -157,6 +159,7 @@ foreach ($f in $sourceFiles) {
         $typedInit += $t.Init
         $typedCode += $fileText
         $typedVars += $t.Vars
+        $typedFiles += [pscustomobject]@{ Init = $t.Init; Vars = $t.Vars; Code = $fileText }
     }
     # The embedded rule struct is produced as its own type (e.g.
     # profile_resolve_on_off_rule()'s `on_off_trigger_rule_t resolved = {...}`).
@@ -165,6 +168,7 @@ foreach ($f in $sourceFiles) {
         $ruleInit += $t.Init
         $ruleCode += $fileText
         $ruleVars += $t.Vars
+        $ruleFiles += [pscustomobject]@{ Init = $t.Init; Vars = $t.Vars; Code = $fileText }
     }
 }
 $typedVars = @($typedVars | Select-Object -Unique)
@@ -178,9 +182,9 @@ $missing = @()
 foreach ($field in $fields) {
     $escaped = [regex]::Escape($field)
     if ($ruleFields -contains $field -and $inputFields -notcontains $field) {
-        $assigned = Test-FieldProducedInText -InitText $ruleInit -Vars $ruleVars -Field $field -CodeText $ruleCode
+        $assigned = Test-FieldProducedInFiles -Files $ruleFiles -Field $field
     } else {
-        $assigned = Test-FieldProducedInText -InitText $typedInit -Vars $typedVars -Field $field -CodeText $typedCode
+        $assigned = Test-FieldProducedInFiles -Files $typedFiles -Field $field
     }
     if (-not $assigned) {
         $missing += $field

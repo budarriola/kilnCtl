@@ -278,7 +278,7 @@ static update_decision_t up_ex(const update_identity_t *r, const char *ver, cons
     q.commit = commit;
     q.have_image_id = have_id;
     if (r != NULL) {
-        update_image_id_make(&q.image_id, zones ? zones : r->zones_cfg_version, r->kilnlink_version, r->uart_version);
+        update_image_id_make(&q.image_id, zones ? zones : r->zones_cfg_version, r->kilnlink_version, r->uart_version, "abc1234");
     }
     q.zones_cfg_version = hdr_zones;
     q.force = force;
@@ -392,19 +392,21 @@ static void test_upload_identity_record(void)
     TEST_CHECK(!d.allowed, "header claiming the board's schema cannot mask a lower embedded one");
     // Record codec.
     update_image_id_t id, got;
-    update_image_id_make(&id, 26, 16, 13);
+    update_image_id_make(&id, 26, 16, 13, "abc1234");
     uint8_t buf[64];
     memset(buf, 0xEE, sizeof(buf));
     memcpy(buf + 8, &id, sizeof(id)); // host is little-endian
     TEST_CHECK(update_image_id_find(buf, sizeof(buf), 0, &got) && got.zones_cfg_version == 26 && got.kilnlink_version == 16 &&
                    got.uart_version == 13,
                "record found at a 4-byte aligned offset");
+    TEST_CHECK(strcmp(got.commit, "abc1234") == 0, "M1: the record carries the build commit");
+    TEST_CHECK(UPDATE_IMAGE_ID_SIZE == sizeof(update_image_id_t), "M1: UPDATE_IMAGE_ID_SIZE matches the struct");
     TEST_CHECK(!update_image_id_find(buf, sizeof(buf), 12, &got), "scan start past the record finds nothing");
     buf[12] ^= 1;
     TEST_CHECK(!update_image_id_find(buf, sizeof(buf), 0, &got), "a record with a bad check word is ignored");
     buf[12] ^= 1;
     memset(buf + 12, 0, 4);
-    update_image_id_make(&id, 0, 16, 13);
+    update_image_id_make(&id, 0, 16, 13, "abc1234");
     memcpy(buf + 8, &id, sizeof(id));
     TEST_CHECK(!update_image_id_find(buf, sizeof(buf), 0, &got), "a record with a zero version is ignored");
 

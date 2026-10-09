@@ -722,6 +722,18 @@ void executor_task_entry(void *arg)
             thermo_channels_read(s_exec.thermo_bus, &pre_lock_snap);
         }
 
+        /* F1/F2: fresh Pico TRIPPED report, read outside s_exec.lock (same
+         * rule as the watchdog's safety_link_get_status()). */
+        bool pre_lock_pico_tripped = false;
+        if (s_exec.safety) {
+            safety_link_status_t pre_st;
+            if (safety_link_get_status(s_exec.safety, &pre_st) == ESP_OK) {
+                pre_lock_pico_tripped = pre_st.diag_ever_received &&
+                                        !safety_link_is_stale(pre_st.age_ms, SAFETY_LINK_STALE_MS) &&
+                                        pre_st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+            }
+        }
+
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
         s_exec.last_tick_tick = now; /* guard 9 -- updated every iteration regardless of run state */
@@ -736,7 +748,7 @@ void executor_task_entry(void *arg)
              * it, or it never started) costs nothing extra here. */
             io_segs_force_all_off(false);
             /* Spare-relay WP-3: retry a run-end aux OFF whose write failed.
-             * Never while PAUSED (a pause holds aux at its last state) and a
+             * Never while PAUSED (a pause holds aux at its last state while no fault is asserted -- see profile_executor_aux_fault_drop()) and a
              * no-op once the write has landed, so it cannot fight a later
              * manual toggle. */
             if (s_exec.aux_off_pending && s_exec.state != PROFILE_EXEC_PAUSED) {
@@ -751,6 +763,9 @@ void executor_task_entry(void *arg)
              * free rather than a release frame per tick. PAUSED lands here too, which is what a pause is
              * supposed to mean -- see profile_executor_pause(). */
             heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_PROFILE);
+            /* F1/F2: aux outputs drop on any safety fault even while paused
+             * or idle; never assume K4 covers them (wiring varies). */
+            profile_executor_aux_fault_drop(pre_lock_pico_tripped);
             /* PID_EXPANSION_PLAN.md Phase 7a: the moment a run first lands
              * in DONE or FAULTED, persist its firing stats -- this is the
              * "run completion" write, not waiting on the operator to press
@@ -840,7 +855,7 @@ void executor_task_entry(void *arg)
                                                     * picture" reasoning as raw_c/sensor_ok, and handed to
                                                     * thermal_guard_tick() both as this zone's own
                                                     * on_off_zone flag and as every OTHER zone's
-                                                    * peer_is_on_off[] so guard 9/cross-zone excludes an
+                                                    * peer_is_on_off[] so guard 8/cross-zone excludes an
                                                     * on/off zone from both sides of the comparison. */
         bool zone_guard_exempt[MAX31856_CHANNEL_COUNT]; /* on/off OR monitor-only: guards 1/2/3/4/cross-zone are
                                                     * not meaningful for it (no heat commanded, or no

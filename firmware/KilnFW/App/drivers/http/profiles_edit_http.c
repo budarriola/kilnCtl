@@ -730,7 +730,7 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
      * delete a slot the executor is currently running or has paused. Same
      * check as profiles_http.c's benchproto profiles_http_delete(). */
     /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1384-byte
+     * narrow accessor profile_executor.h recommends over a 1464-byte
      * profile_exec_status_t stack local on the httpd task. */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id) && active_id == id) {
@@ -750,6 +750,11 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
      * A failed save is logged inside the module and does not fail the
      * delete. */
     (void)profiles_favorites_set((uint8_t)id, false);
+    /* Prune firing history before the slot is touched so a failure leaves the
+     * slot in place and the delete retryable (see profiles_http_delete()). */
+    if (firing_stats_erase((uint8_t)id) != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     profiles_slot_clear(id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);

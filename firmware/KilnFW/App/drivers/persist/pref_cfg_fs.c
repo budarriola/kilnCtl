@@ -143,6 +143,43 @@ void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg
     load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, true);
 }
 
+bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
+                                        uint8_t current_version, uint8_t *out_version)
+{
+    if (!rel_path || item_size == 0 || version_offset >= item_size || !cfg_fs_is_available()) {
+        return false;
+    }
+    /* Only the header is needed; a bounded read of a larger file would fail
+     * cfg_fs_read()'s size check, so read into a buffer sized for the
+     * largest supported file. */
+    size_t cap = 4 + PREF_CFG_FS_MAX_LARGE_ITEM + 64;
+    uint8_t *buf = (uint8_t *)persist_scratch_alloc(cap);
+    if (!buf) {
+        return false;
+    }
+    size_t len = 0;
+    esp_err_t err = cfg_fs_read(rel_path, buf, cap, &len);
+    bool newer = false;
+    if (err == ESP_ERR_INVALID_SIZE) {
+        /* The file exists but is bigger than anything this build can write
+         * (pref_cfg_fs_save() refuses items over PREF_CFG_FS_MAX_LARGE_ITEM), so
+         * it can only come from newer firmware. Count it as NEWER so resolve()
+         * never overwrites it. The version byte is unreadable here: report 0xFF
+         * ("unknown, newer"). */
+        newer = true;
+        if (out_version) {
+            *out_version = 0xFF;
+        }
+    } else if (err == ESP_OK && len != 4 + item_size && len > 4 + version_offset && buf[4 + version_offset] > current_version) {
+        newer = true;
+        if (out_version) {
+            *out_version = buf[4 + version_offset];
+        }
+    }
+    free(buf);
+    return newer;
+}
+
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev)
 {
     if (!rel_path || !bytes || item_size == 0) {

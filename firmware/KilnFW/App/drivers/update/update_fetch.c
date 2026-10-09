@@ -41,6 +41,7 @@
 #include "update_release.h"
 #include "update_settings.h"
 #include "update_stage.h"
+#include "update_wr_arb.h"
 #include "update_url.h"
 #include "zones_config_json.h"
 
@@ -58,7 +59,8 @@ static const char *TAG = "update_fetch";
 #define FETCH_LIST_PER_PAGE 5u               // releases list size when pre-releases are allowed
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
-#define FETCH_SCRATCH_LEN (16u * 1024u)      // stager scratch; PSRAM
+#define FETCH_SCRATCH_LEN FETCH_HEAP_SCRATCH_BYTES // stager scratch; INTERNAL RAM (MED-1), see update_fetch_heap.h
+#define FETCH_WR_TIMEOUT_MS 30000u           // bounded wait for one flash-writer op (64 KiB erase+write is well under 1 s)
 // The request buffer: a signed release-assets URL carries a JWT query, so the GET line alone can be
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
@@ -130,6 +132,7 @@ typedef struct {
     uint32_t total;
     const char *semver;
     const char *commit;
+    const update_identity_t *want; // WR_BEGIN: manifest identity for update_stage_manifest_gate
     update_stage_err_t res;
 } wr_cmd_t;
 
@@ -143,6 +146,8 @@ typedef struct {
     TaskHandle_t wr_task;     // stack-margin slot
     SemaphoreHandle_t wr_req;
     SemaphoreHandle_t wr_done;
+    volatile update_wr_arb_t wr_arb; // guarded by s_wr_mux; see update_wr_arb.h
+    volatile bool wr_wedged;  // a writer op timed out: its task/buffers are abandoned until reboot
     wr_cmd_t wr;
 } fetch_ctx_t;
 
@@ -173,7 +178,7 @@ struct work {
     bool stage_begun;
     bool stage_done;
     uint8_t chunk[FETCH_CHUNK_LEN];
-    uint8_t scratch[FETCH_SCRATCH_LEN];
+    uint8_t *scratch;                 // FETCH_SCRATCH_LEN bytes, MALLOC_CAP_INTERNAL, freed with the job
 };
 
 // ---- small helpers ---------------------------------------------------------------------------
@@ -278,13 +283,30 @@ static void json_safe_copy(char *dst, size_t cap, const char *src)
 // The linker places .rodata_custom_desc directly after esp_app_desc_t (first DROM segment), so a hand
 // upload's stager reads the schema versions out of the image head (update_image_id_find) instead of
 // trusting headers. Needs `used`: nothing references it.
+// v1 record (20 bytes, no commit) FIRST at offset 288, then the v2 record at 308 (ends 344 =
+// UPDATE_STAGE_HEAD_LEN): boards running the v1-only gate (735875b6..dcd67f54) scan for the v1 magic in
+// their 320-byte head and would refuse every image without one (review 7 L4).
+typedef struct {
+    uint32_t v1_magic, v1_zones, v1_kilnlink, v1_uart, v1_check;
+    update_image_id_t v2;
+} image_id_pair_t;
+_Static_assert(sizeof(image_id_pair_t) == UPDATE_IMAGE_ID_V1_SIZE + UPDATE_IMAGE_ID_SIZE, "no padding");
+
 __attribute__((section(".rodata_custom_desc"), used, aligned(4)))
-const update_image_id_t g_update_image_id = {
-    .magic = UPDATE_IMAGE_ID_MAGIC,
-    .zones_cfg_version = ZONES_CFG_VERSION,
-    .kilnlink_version = KILNLINK_PROTOCOL_VERSION,
-    .uart_version = UART_PROTOCOL_VERSION,
-    .check = UPDATE_IMAGE_ID_MAGIC ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
+const image_id_pair_t g_update_image_id = {
+    .v1_magic = UPDATE_IMAGE_ID_MAGIC_V1,
+    .v1_zones = ZONES_CFG_VERSION,
+    .v1_kilnlink = KILNLINK_PROTOCOL_VERSION,
+    .v1_uart = UART_PROTOCOL_VERSION,
+    .v1_check = UPDATE_IMAGE_ID_MAGIC_V1 ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
+    .v2 = {
+        .magic = UPDATE_IMAGE_ID_MAGIC,
+        .zones_cfg_version = ZONES_CFG_VERSION,
+        .kilnlink_version = KILNLINK_PROTOCOL_VERSION,
+        .uart_version = UART_PROTOCOL_VERSION,
+        .commit = FW_GIT_COMMIT,
+        .check = UPDATE_IMAGE_ID_MAGIC ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
+    },
 };
 
 // ---- running identity ------------------------------------------------------------------------
@@ -324,6 +346,8 @@ void update_fetch_running_identity(update_identity_t *r, const char *cand_commit
 }
 
 // ---- flash writer task -----------------------------------------------------------------------
+static portMUX_TYPE s_wr_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static void wr_task(void *arg)
 {
     (void)arg;
@@ -336,6 +360,11 @@ static void wr_task(void *arg)
         case WR_BEGIN:
             c->res = update_stage_upload_begin(st, (uint8_t *)c->data, c->len, c->total, c->semver, c->commit,
                                                STAGE_SOURCE_GITHUB);
+            if (c->res == UPDATE_STAGE_OK) {
+                // Cross-check the image against release.json (plan section 5): schema record and
+                // descriptor version must equal the manifest's, or the stage stays blank.
+                update_stage_set_gate(st, update_stage_manifest_gate, (void *)c->want);
+            }
             break;
         case WR_WRITE: c->res = update_stage_upload_write(st, c->data, c->len); break;
         case WR_FINISH: c->res = update_stage_upload_finish(st); break;
@@ -346,12 +375,36 @@ static void wr_task(void *arg)
             vTaskDelete(NULL);
             return;
         }
+        // Review 5 L1: one critical section decides whether the caller already timed out, so a finish in
+        // the same tick as the timeout is either collected by the caller or undone here, never both
+        // skipped.
+        portENTER_CRITICAL(&s_wr_mux);
+        const bool abandoned = update_wr_arb_writer_done(&s_c->wr_arb);
+        portEXIT_CRITICAL(&s_wr_mux);
+        if (abandoned) {
+            // Review 3 LOW-1: this op was abandoned (the job already reported FAILED). Never let it leave
+            // a valid stage behind: undo a late finish (clear) or begin/write (abort). The abort is scoped
+            // to the fetch's own upload (review 5 L3) so it cannot kill a newer hand upload.
+            if (c->cmd == WR_FINISH && c->res == UPDATE_STAGE_OK) {
+                (void)update_stage_clear(st);
+            } else if (c->cmd == WR_BEGIN || c->cmd == WR_WRITE) {
+                update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB);
+            }
+        }
         xSemaphoreGive(s_c->wr_done);
     }
 }
 
+bool update_fetch_writer_wedged(void)
+{
+    return s_c != NULL && s_c->wr_wedged;
+}
+
 static bool wr_start(void)
 {
+    if (s_c->wr_wedged) {
+        return false; // a previous writer op never returned; reboot to recover
+    }
     s_c->wr_req = xSemaphoreCreateBinary();
     s_c->wr_done = xSemaphoreCreateBinary();
     if (s_c->wr_req == NULL || s_c->wr_done == NULL) {
@@ -386,14 +439,33 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
     s_c->wr.total = total;
     s_c->wr.semver = semver;
     s_c->wr.commit = commit;
+    if (s_c->wr_wedged) {
+        return UPDATE_STAGE_ERR_FLASH;
+    }
+    portENTER_CRITICAL(&s_wr_mux);
+    update_wr_arb_issue(&s_c->wr_arb);
+    portEXIT_CRITICAL(&s_wr_mux);
     xSemaphoreGive(s_c->wr_req);
-    xSemaphoreTake(s_c->wr_done, portMAX_DELAY);
+    if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) != pdTRUE) {
+        portENTER_CRITICAL(&s_wr_mux);
+        const bool wedged = update_wr_arb_caller_timeout(&s_c->wr_arb);
+        portEXIT_CRITICAL(&s_wr_mux);
+        if (wedged) {
+            // Wedged flash op. Never race the writer: abandon its task, semaphores and the buffers it may
+            // still touch (see fetch_task), fail the job and let the caller release the update claim.
+            s_c->wr_wedged = true;
+            ESP_LOGE(TAG, "flash writer op %d timed out after %u ms", (int)cmd, (unsigned)FETCH_WR_TIMEOUT_MS);
+            return UPDATE_STAGE_ERR_FLASH;
+        }
+        // Review 5 L1: the writer finished in the same instant; its give is (about to be) posted.
+        (void)xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000));
+    }
     return s_c->wr.res;
 }
 
 static void wr_stop(void)
 {
-    if (s_c->wr_req == NULL) {
+    if (s_c->wr_req == NULL || s_c->wr_wedged) {
         return;
     }
     (void)wr_call(WR_EXIT, NULL, 0, 0, NULL, NULL);
@@ -585,6 +657,9 @@ static const char *stage_begin(work_t *w, int64_t clen)
         return "size_mismatch";
     }
     if (!wr_start()) {
+        if (s_c->wr_wedged) {
+            return "writer_wedged_reboot_required";
+        }
         return "no_memory";
     }
     w->sha = psa_hash_operation_init();
@@ -592,7 +667,8 @@ static const char *stage_begin(work_t *w, int64_t clen)
         return "hash_failed";
     }
     w->sha_active = true;
-    update_stage_err_t e = wr_call(WR_BEGIN, w->scratch, sizeof(w->scratch), w->info.app_size,
+    s_c->wr.want = &w->man.identity;
+    update_stage_err_t e = wr_call(WR_BEGIN, w->scratch, FETCH_SCRATCH_LEN, w->info.app_size,
                                    w->man.identity.version, w->man.identity.commit);
     if (e != UPDATE_STAGE_OK) {
         return update_stage_err_name(e);
@@ -757,12 +833,15 @@ static void fetch_task(void *arg)
     const job_params_t p = s_c->params;
     work_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *body = heap_caps_malloc(FETCH_API_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // The stager scratch is internal on purpose (MED-1); one 2 KiB block per job, in the admission budget.
+    uint8_t *scratch = heap_caps_malloc(FETCH_SCRATCH_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const char *err = NULL;
-    if (w == NULL || body == NULL) {
+    if (w == NULL || body == NULL || scratch == NULL) {
         err = "no_memory";
     } else {
         w->p = p;
         w->body = body;
+        w->scratch = scratch;
         err = run_job(w);
         if (w->sha_active) {
             psa_hash_abort(&w->sha);
@@ -772,8 +851,15 @@ static void fetch_task(void *arg)
         }
         wr_stop();
     }
-    heap_caps_free(body);
-    heap_caps_free(w);
+    if (s_c->wr_wedged) {
+        // The writer may still be reading these; abandon them (a reboot recovers) rather than race it.
+        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
+        err = "writer_wedged_reboot_required";
+    } else {
+        heap_caps_free(scratch);
+        heap_caps_free(body);
+        heap_caps_free(w);
+    }
     st_lock();
     s_c->st.error = err != NULL ? err : "";
     s_c->st.state = err != NULL ? FS_FAILED : FS_DONE;

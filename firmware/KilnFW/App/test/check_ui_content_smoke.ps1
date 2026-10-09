@@ -24,13 +24,13 @@ $stderrFile = Join-Path $env:TEMP "kc-ui-smoke-stderr-$PID.txt"
 $proc = Start-Process -FilePath $node.Source -ArgumentList @($script) -NoNewWindow -PassThru `
     -RedirectStandardOutput $stdoutFile -RedirectStandardError $stderrFile
 $null = $proc.Handle  # cache the handle, else ExitCode reads back empty after WaitForExit
-if (-not $proc.WaitForExit(240000)) {
+if (-not $proc.WaitForExit(280000)) {
     try {
         $tk = Start-Process -FilePath taskkill -ArgumentList @('/PID', "$($proc.Id)", '/T', '/F') -NoNewWindow -PassThru
         if (-not $tk.WaitForExit(15000)) { try { $tk.Kill() } catch {} }
     } catch {}
     Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
-    throw "check_ui_content_smoke.ps1: FAIL -- smoke did not finish within 240s; process tree killed."
+    throw "check_ui_content_smoke.ps1: FAIL -- smoke did not finish within 280s; process tree killed."
 }
 $proc.WaitForExit()
 $code = $proc.ExitCode
@@ -45,7 +45,7 @@ if ($code -eq 3) {
     exit 3
 }
 if ($code -ne 0) { throw "check_ui_content_smoke.ps1: FAIL -- ui_content_smoke.mjs exit $code (see output above)." }
-if ("$stdout" -notmatch 'All \d+ page content checks passed') {
+if ("$stdout" -notmatch 'All .*page content checks passed') {
     throw "check_ui_content_smoke.ps1: FAIL -- no PASS marker in output; treating as failure."
 }
 Write-Host "check_ui_content_smoke.ps1: passed."

@@ -1321,6 +1321,174 @@ static void test_nvs_load_store_migrates_v1_blob_at_full_size(void)
     fake_kv_reset_all();
 }
 
+// ---------------------------------------------------------------------------
+// FROZEN-INPUT migration fixtures (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
+// follow-up). Unlike build_v1_blob()/build_v2_blob() above, which fill the
+// CURRENT private struct definitions, these are literal byte images of what
+// real old firmware wrote, so a later edit to kiln_cfg_entry_v1_t/_v2_t
+// cannot silently move the test along with the code under test.
+//
+// COMMITTED FIXTURES -- NEVER REGENERATE THEM from the structs or from a
+// build. If a layout assert below fails, the migration code broke, not the
+// fixture.
+//
+// Layout source (git history of kiln_cfg_store.[ch]): v1 = commit 9bd29cff
+// (kiln config slots on the cfg filesystem; 8 slots, 512 B blob ceiling,
+// size 4396); v2 = the same store after the blob ceiling grew to
+// ZONES_CONFIG_BLOB_MAX_SIZE 896 (8 slots, size 7468), frozen as
+// kiln_cfg_store_blob_v2_t by beb2c84e (v3: 10 slots + Pico half).
+// Both: u8 version @0, i32 active_id @4, i32 next_id @8, then entries from
+// @12; entry = u8 in_use @0, i32 id @4, char name[24] @8, u16 blob_len @32,
+// blob @34, padded to a multiple of 4 (v1 548 B, v2 932 B). All little
+// endian. Unlisted bytes are zero.
+// ---------------------------------------------------------------------------
+static const uint8_t k_frozen_v1[4396] = {
+    [0]=0x01,
+    [4]=0x02,[5]=0x00,[6]=0x00,[7]=0x00,
+    [8]=0x03,[9]=0x00,[10]=0x00,[11]=0x00,
+    [12]=0x01,
+    [16]=0x01,[17]=0x00,[18]=0x00,[19]=0x00,
+    [20]='F',[21]='i',[22]='r',[23]='e',[24]=' ',[25]='A',
+    [44]=0x06,[45]=0x00,
+    [46]=0xA1,[47]=0xA2,[48]=0xA3,[49]=0xA4,[50]=0xA5,[51]=0xA6,
+    [1108]=0x01,
+    [1112]=0x02,[1113]=0x00,[1114]=0x00,[1115]=0x00,
+    [1116]='G',[1117]='l',[1118]='a',[1119]='z',[1120]='e',
+    [1140]=0x03,[1141]=0x00,
+    [1142]=0xC1,[1143]=0xC2,[1144]=0xC3
+};
+static const uint8_t k_frozen_v2[7468] = {
+    [0]=0x02,
+    [4]=0x08,[5]=0x00,[6]=0x00,[7]=0x00,
+    [8]=0x09,[9]=0x00,[10]=0x00,[11]=0x00,
+    [12]=0x01,
+    [16]=0x01,[17]=0x00,[18]=0x00,[19]=0x00,
+    [20]='F',[21]='i',[22]='r',[23]='e',[24]=' ',[25]='A',
+    [44]=0x06,[45]=0x00,
+    [46]=0xA1,[47]=0xA2,[48]=0xA3,[49]=0xA4,[50]=0xA5,[51]=0xA6,
+    [6536]=0x01,
+    [6540]=0x08,[6541]=0x00,[6542]=0x00,[6543]=0x00,
+    [6544]='K',[6545]='i',[6546]='l',[6547]='n',[6548]=' ',[6549]='L',[6550]='a',[6551]='s',[6552]='t',
+    [6568]=0x04,[6569]=0x00,
+    [6570]=0xE1,[6571]=0xE2,[6572]=0xE3,[6573]=0xE4
+};
+
+static void read_stored_store_blob(uint8_t *out, size_t cap, size_t *len_out)
+{
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    size_t n = cap;
+    hal_kv_get_blob(&h, NVS_KEY_STORE, out, &n);
+    hal_kv_close(&h);
+    *len_out = n;
+}
+
+static void stage_raw_store_blob(const void *data, size_t len)
+{
+    reset_state();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    hal_kv_handle_t h;
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    hal_kv_set_blob(&h, NVS_KEY_STORE, data, len);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+// Checks the migrated s_store against the fixture's known contents, then that
+// the re-serialized v3 blob is stable (reload + re-save yields identical bytes).
+static void check_frozen_migration(bool from_v1)
+{
+    static uint8_t first[sizeof(kiln_cfg_store_blob_t)];
+    static uint8_t second[sizeof(kiln_cfg_store_blob_t)];
+    size_t n1 = 0, n2 = 0;
+
+    TEST_CHECK(s_store.version == KILN_CFG_STORE_VERSION, "frozen: migrated store is v3");
+    TEST_CHECK(s_store.entries[0].in_use == 1 && s_store.entries[0].id == 1 &&
+                   strcmp(s_store.entries[0].name, "Fire A") == 0 && s_store.entries[0].blob_len == 6 &&
+                   s_store.entries[0].blob[0] == 0xA1 && s_store.entries[0].blob[5] == 0xA6 &&
+                   s_store.entries[0].blob[6] == 0,
+               "frozen: entry 0 fields and blob bytes migrated exactly");
+    TEST_CHECK(s_store.entries[0].pico_populated == 0 && s_store.entries[0].pkg_hash == 0 &&
+                   s_store.entries[0].pkg_schema == 0,
+               "frozen: no Pico half or package identity fabricated");
+    if (from_v1) {
+        TEST_CHECK(s_store.active_id == 2 && s_store.next_id == 3, "frozen v1: active_id/next_id carried");
+        TEST_CHECK(s_store.entries[2].in_use == 1 && s_store.entries[2].id == 2 &&
+                       strcmp(s_store.entries[2].name, "Glaze") == 0 && s_store.entries[2].blob_len == 3 &&
+                       s_store.entries[2].blob[0] == 0xC1 && s_store.entries[2].blob[2] == 0xC3,
+                   "frozen v1: entry 2 migrated exactly");
+        TEST_CHECK(s_store.entries[1].in_use == 0 && s_store.entries[7].in_use == 0,
+                   "frozen v1: untouched slots stay empty");
+    } else {
+        TEST_CHECK(s_store.active_id == 8 && s_store.next_id == 9, "frozen v2: active_id/next_id carried");
+        TEST_CHECK(s_store.entries[7].in_use == 1 && s_store.entries[7].id == 8 &&
+                       strcmp(s_store.entries[7].name, "Kiln Last") == 0 && s_store.entries[7].blob_len == 4 &&
+                       s_store.entries[7].blob[0] == 0xE1 && s_store.entries[7].blob[3] == 0xE4,
+                   "frozen v2: entry 7 migrated exactly");
+        TEST_CHECK(s_store.entries[1].in_use == 0, "frozen v2: untouched slots stay empty");
+    }
+    TEST_CHECK(s_store.entries[8].in_use == 0 && s_store.entries[9].in_use == 0,
+               "frozen: the two v3-added slots are empty");
+
+    // The migration rewrites the v3 store to the cfg file only (NVS is no
+    // longer written), so serialize the migrated store ourselves into the NVS
+    // slot, reload it on the fast path, and require the bytes to be stable.
+    n1 = sizeof(s_store);
+    memcpy(first, &s_store, n1);
+    TEST_CHECK(first[0] == KILN_CFG_STORE_VERSION, "frozen: migrated store serializes as v3");
+    stage_raw_store_blob(first, n1);
+    memset(&s_store, 0, sizeof(s_store));
+    TEST_CHECK(nvs_load_store(), "frozen: the re-serialized v3 blob loads on the fast path");
+    n2 = sizeof(s_store);
+    memcpy(second, &s_store, n2);
+    TEST_CHECK(n2 == n1 && memcmp(first, second, n1) == 0, "frozen: re-serialized v3 blob is byte-stable");
+}
+
+static void test_frozen_v1_v2_blobs_migrate_to_v3(void)
+{
+    TEST_SECTION("frozen byte-exact v1 and v2 blobs migrate to the expected v3 values, re-serialization stable");
+    TEST_CHECK(sizeof(kiln_cfg_store_blob_v1_t) == sizeof(k_frozen_v1), "frozen v1 fixture size equals v1 struct");
+    TEST_CHECK(sizeof(kiln_cfg_store_blob_v2_t) == sizeof(k_frozen_v2), "frozen v2 fixture size equals v2 struct");
+
+    stage_raw_store_blob(k_frozen_v1, sizeof(k_frozen_v1));
+    TEST_CHECK(nvs_load_store(), "frozen v1 loads");
+    check_frozen_migration(true);
+
+    stage_raw_store_blob(k_frozen_v2, sizeof(k_frozen_v2));
+    TEST_CHECK(nvs_load_store(), "frozen v2 loads");
+    check_frozen_migration(false);
+
+    fake_kv_reset_all();
+}
+
+// NEGATIVE: one corrupted byte (the version byte) in each frozen blob must be
+// rejected and reported as quarantine, not migrated.
+static void test_frozen_blobs_with_corrupted_byte_rejected(void)
+{
+    TEST_SECTION("NEGATIVE -- one corrupted byte in each frozen blob is rejected and quarantined");
+    static uint8_t bad1[sizeof(k_frozen_v1)];
+    static uint8_t bad2[sizeof(k_frozen_v2)];
+    memcpy(bad1, k_frozen_v1, sizeof(bad1));
+    memcpy(bad2, k_frozen_v2, sizeof(bad2));
+    bad1[0] ^= 0x5A;
+    bad2[0] ^= 0x5A;
+    char reason[160];
+
+    stage_raw_store_blob(bad1, sizeof(bad1));
+    TEST_CHECK(!nvs_load_store(), "corrupted frozen v1 is not loaded");
+    TEST_CHECK(kiln_cfg_store_is_quarantined(reason, sizeof(reason)), "corrupted frozen v1 reports quarantine");
+    TEST_CHECK(s_store.entries[0].in_use == 0, "corrupted frozen v1 leaves defaults, nothing migrated");
+
+    stage_raw_store_blob(bad2, sizeof(bad2));
+    TEST_CHECK(!nvs_load_store(), "corrupted frozen v2 is not loaded");
+    TEST_CHECK(kiln_cfg_store_is_quarantined(reason, sizeof(reason)), "corrupted frozen v2 reports quarantine");
+    TEST_CHECK(s_store.entries[0].in_use == 0, "corrupted frozen v2 leaves defaults, nothing migrated");
+
+    fake_kv_reset_all();
+}
+
+
 static void test_nvs_load_store_second_call_does_not_see_first_calls_data(void)
 {
     // NOTE on what this test does and does NOT prove: it does not, and
@@ -4026,6 +4194,8 @@ void run_test_kiln_cfg_store(void)
     test_nvs_load_store_migrates_v1_blob_at_full_size();
     test_nvs_load_store_migrates_v2_blob_at_full_size();
     test_v2_blob_never_blindly_reinterpreted_as_v3();
+    test_frozen_v1_v2_blobs_migrate_to_v3();
+    test_frozen_blobs_with_corrupted_byte_rejected();
     test_nvs_load_store_second_call_does_not_see_first_calls_data();
     test_nvs_load_store_v1_migration_malloc_failure_leaves_defaults();
     test_nvs_load_store_current_version_full_size_happy_path();

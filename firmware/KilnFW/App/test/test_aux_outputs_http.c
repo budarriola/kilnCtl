@@ -257,6 +257,21 @@ static void test_claim(void)
     }
 }
 
+static void test_set_disable_drives_relay_off(void)
+{
+    TEST_SECTION("review 4 M1: disabling an enabled aux output drives its relay OFF");
+    reset_fakes();
+    f_cur[3].enabled = 1;
+    TEST_CHECK(do_set("relay=3&enabled=0") == 200, "disable accepted");
+    TEST_CHECK(f_relay_calls == 1 && f_relay_arg == 3 && !f_relay_on, "relay 3 driven OFF on disable");
+    reset_fakes();
+    TEST_CHECK(do_set("relay=3&enabled=0") == 200, "disable of an already-disabled entry accepted");
+    TEST_CHECK(f_relay_calls == 0, "no relay write when it was not enabled");
+    reset_fakes();
+    f_cur[3].enabled = 1;
+    TEST_CHECK(do_set("relay=3&enabled=1") == 200 && f_relay_calls == 0, "an enabled=1 write never drives the relay");
+}
+
 static void test_manual(void)
 {
     TEST_SECTION("aux manual toggle: gate, validation, enabled-only, result mapping");
@@ -338,6 +353,7 @@ void run_test_aux_outputs_http(void)
     test_set_field_validation();
     test_set_zone_conflict();
     test_set_store_errors();
+    test_set_disable_drives_relay_off();
     test_manual();
     test_claim();
     test_format();

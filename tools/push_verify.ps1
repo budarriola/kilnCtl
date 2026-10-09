@@ -25,7 +25,7 @@
 # correctly-ordered ancestry check, after a fresh `git fetch`.
 #
 # USAGE
-#   powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/main]
+#   powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/dev]
 #
 # OUTPUT: exactly one unambiguous verdict line, prefixed "VERDICT: ", plus
 # supporting detail above it. On "no", also names the local branch(es) the
@@ -43,7 +43,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Commit,
 
-    [string]$Branch = "origin/main"
+    [string]$Branch = "origin/dev"
 )
 
 # See worktree_mint.ps1's header for why this is "Continue", not "Stop":

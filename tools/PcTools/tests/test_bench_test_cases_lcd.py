@@ -1248,7 +1248,7 @@ class ClickThenPageTest(unittest.TestCase):
         # LCD-22 deliberately does NOT route "Edit" through _click_then_page:
         # on a PIN-locked panel Edit raises the keypad while the page still
         # reads "home", so a retry would tap the keypad. It clicks Edit once.
-        self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics"})
+        self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics", "Segments"})
         unsafe = ("start", "stop", "confirm", "pin", "toggle", "cancel", "ack", "reset", "clear", "ok")
         for title in literals:
             words = re.findall(r"[a-z]+", title.lower())
@@ -4321,7 +4321,7 @@ class WebSec04ThenLcd19Test(unittest.TestCase):
         os.environ[CW._LCD_PIN_ENV] = "1234"
         try:
             sec = _SharedBoardSecClient()
-            ctx = {"sec_client": sec}
+            ctx = {"suite": "web", "sec_client": sec}
 
             sec04_result = CW._case_web_sec04(ctx)
             self.assertEqual(sec04_result.verdict, Verdict.PASS)

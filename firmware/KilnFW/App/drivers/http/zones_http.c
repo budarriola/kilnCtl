@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/portmacro.h" /* portMUX_TYPE -- s_zones_cfg_mux */
 
 #include "MAX31856.h"
 #include "autotune_engine.h"
@@ -412,6 +413,26 @@ bool s_zones_config_valid = false;
  * looked," since a missed edit is simply picked up on the next tick. */
 uint32_t s_config_generation = 1;
 
+static portMUX_TYPE s_zones_cfg_mux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t s_zones_cfg_lock_acquires = 0;
+void zones_cfg_lock(void)
+{
+    portENTER_CRITICAL(&s_zones_cfg_mux);
+    s_zones_cfg_lock_acquires++;
+}
+#ifdef KILNCTL_ZONES_UNLOCK_TEST_HOOK /* host zones-cfg test only; compiled out of the target (review 7 L5) */
+void (*s_zones_cfg_unlock_test_hook)(void) = NULL; /* host-test seam: runs after the critical section is left */
+#endif
+void zones_cfg_unlock(void)
+{
+    portEXIT_CRITICAL(&s_zones_cfg_mux);
+#ifdef KILNCTL_ZONES_UNLOCK_TEST_HOOK
+    if (s_zones_cfg_unlock_test_hook != NULL) {
+        s_zones_cfg_unlock_test_hook();
+    }
+#endif
+}
+
 /* ---- Hardware access for Tasks 1/2/3 (2026-08-27+2) ----------------------
  * zones_http_start() itself takes no hardware pointers (pure config CRUD --
  * see its own comment); the current sweep, the CT-mapping check, and the
@@ -734,8 +755,10 @@ esp_err_t zones_http_start(void)
          * whatever stale copy the old default-partition namespace still
          * holds -- destroying the very data nvs_load_from() had just gone out
          * of its way to leave untouched. */
+        /* Migrate only on a clean "nothing there": an nvs_load() error (e.g. OOM,
+         * found=false) must not run the migration and save a stale pre-split copy. */
         bool found_in_kiln_nvs = (err == ESP_OK && found);
-        if (!found_in_kiln_nvs) {
+        if (err == ESP_OK && !found_in_kiln_nvs) {
             /* Nothing usable in kiln_nvs yet -- see if the old default
              * partition has a pre-split copy worth carrying forward.
              * migrate_from_default_partition() sets s_zones_config_valid
@@ -761,7 +784,9 @@ esp_err_t zones_http_start(void)
      * the counter's contract ("advances whenever the stored config was
      * replaced") holds unconditionally rather than only for the paths a
      * consumer happens to be watching today. */
+    zones_cfg_lock();
     s_config_generation++;
+    zones_cfg_unlock();
 
     /* 2026-08-21, TODO.md owner-report item 1 -- the actual fix for the
      * gap: apply the persisted per-channel thermocouple type to the real

@@ -29,6 +29,17 @@ NVS_KEY_LEN_CHECK(FIRING_STATS_NVS_NAMESPACE);
 // same as "fs_%u" in profile_executor_firing_stats.c).
 
 static firing_stats_cfg_fs_write_fn_t s_write_fn = cfg_fs_write_atomic;
+static firing_stats_cfg_fs_delete_fn_t s_delete_fn = cfg_fs_delete;
+
+void firing_stats_cfg_fs_set_delete_fn(firing_stats_cfg_fs_delete_fn_t fn)
+{
+    s_delete_fn = fn ? fn : cfg_fs_delete;
+}
+
+void firing_stats_cfg_fs_reset_delete_fn_for_test(void)
+{
+    s_delete_fn = cfg_fs_delete;
+}
 
 void firing_stats_cfg_fs_set_write_fn(firing_stats_cfg_fs_write_fn_t fn)
 {
@@ -171,12 +182,15 @@ esp_err_t firing_stats_cfg_fs_save(uint8_t id, const profile_firing_history_blob
     return err;
 }
 
-// docs/PROFILE_SLOTS_100.md section 7 task 10: deletes id's legacy
-// "fsr_<id>" rev key and file. ERASE-FIRST (docs/CONFIG_FILESYSTEM.md "NVS
-// dual-write closed"): the NVS side goes first and is checked; if it fails the
-// file is left intact and the error returned, so a failed delete never leaves
-// a stale NVS history that the NVS fallback would resurrect. NOT_FOUND on
-// either half is success. cfg_fs unmounted degrades the file half to a no-op.
+// docs/PROFILE_SLOTS_100.md section 7 task 10: deletes id's legacy "fsr_<id>"
+// rev key and its cfg file. NVS-FIRST, FILE-LAST: callers erase the legacy
+// "fs_<id>" blob before calling this. resolve() re-migrates whichever copy
+// survives a partial failure (a leftover NVS blob is copied back into a file; a
+// leftover file with empty NVS is adopted), so the order only decides which
+// single copy can survive: here the file, whose delete failure is returned (the
+// history stays, loudly, and a retry finishes the erase). A failed NVS step
+// returns before the file is touched. NOT_FOUND on either half is success.
+// cfg_fs unmounted degrades the file half to a no-op.
 esp_err_t firing_stats_cfg_fs_delete(uint8_t id)
 {
     char key[16];
@@ -200,16 +214,14 @@ esp_err_t firing_stats_cfg_fs_delete(uint8_t id)
         ESP_LOGW(FSCF_TAG, "fs%u rev key delete: commit failed: %s", id, hal_status_to_name(commit_err));
         return hal_status_to_esp_err(commit_err);
     }
-
-    if (!cfg_fs_is_available()) {
-        return ESP_OK;
-    }
-    char path[40];
-    firing_stats_cfg_fs_path(id, path, sizeof(path));
-    esp_err_t file_err = cfg_fs_delete(path);
-    if (file_err != ESP_OK && file_err != ESP_ERR_NOT_FOUND) {
-        ESP_LOGW(FSCF_TAG, "fs%u file delete failed: %s", id, esp_err_to_name(file_err));
-        return file_err;
+    if (cfg_fs_is_available()) {
+        char path[40];
+        firing_stats_cfg_fs_path(id, path, sizeof(path));
+        esp_err_t file_err = s_delete_fn(path);
+        if (file_err != ESP_OK && file_err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(FSCF_TAG, "fs%u file delete failed: %s", id, esp_err_to_name(file_err));
+            return file_err;
+        }
     }
     return ESP_OK;
 }
@@ -286,14 +298,14 @@ bool firing_stats_cfg_fs_resolve(uint8_t id, const profile_firing_history_blob_t
     }
 
     if (!nvs_valid) {
-        // File decodes fine but NVS has nothing -- there is no delete path
-        // for this item (history is only ever appended-to), so this can
-        // only mean a prior save's file write landed and its NVS write
-        // failed. Trust the file -- discarding it here would be exactly
-        // the "silently discard firing history" outcome this item's brief
-        // forbids.
-        ESP_LOGW(FSCF_TAG, "fs%u file/NVS DIVERGED (file rev %lu valid, NVS unused) -- adopting FILE (no delete "
-                           "path exists for this item, so this must be a prior failed NVS write)",
+        // File decodes fine but NVS has nothing. firing_stats_erase() deletes
+        // the NVS blob first and the file LAST, so a surviving file with empty NVS
+        // is at worst a half-finished erase whose file delete failed (reported to
+        // the caller); it is otherwise a save whose NVS half never landed (saves are file-only now). Trust the file -- discarding it
+        // here would be exactly the "silently discard firing history"
+        // outcome this item's brief forbids.
+        ESP_LOGW(FSCF_TAG, "fs%u file/NVS DIVERGED (file rev %lu valid, NVS unused) -- adopting FILE (erase deletes the "
+                           "file last; this is a save whose NVS half never landed or an erase whose file delete failed)",
                  id, (unsigned long)file_rev);
         *out_blob = *file_blob;
         *out_rev = file_rev;

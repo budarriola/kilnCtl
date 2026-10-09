@@ -658,7 +658,7 @@ def _verify_flash_landed(
                 f"after {_VERIFY_POLL_ATTEMPTS} attempts ({last_exc}). This is a "
                 "verification FAILURE, not a bring-up timeout: the board that just "
                 "served HTTP has stopped. Check the board is booting (serial/JTAG), "
-                "and if it is stuck consider ota_rollback_esp() / a reflash. Pass "
+                "and if it is stuck consider recovery_status() / a reflash (flash_firmware() for the app, flash_recovery() for the recovery image). Pass "
                 "verify=False only if you intend to skip this check entirely."
             )
         return (
@@ -777,7 +777,7 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
                              reset_boot_guard: bool = True) -> str:
     """Called from flash_firmware()'s _post_flash() ONLY after
     _verify_flash_landed() returned "" -- i.e. full, unambiguous, verified
-    success (running partition is 'factory' AND its build timestamp matches
+    success (running partition is the single-slot 'app' partition AND its build timestamp matches
     the .bin just flashed). Never called on a raise, a WARNING, or
     verify=False -- see boot_guard_reset_counter()'s header comment
     (firmware/KilnFW/App/drivers/persist/boot_guard.h) for why: a board just
@@ -1087,7 +1087,7 @@ def flash_firmware(
     "my change vanished" failure mode CLAUDE.md's flash_firmware section
     warns about -- this check is what makes that fail at the tool instead of
     costing a debugging session). On a mismatch the error names the actual
-    running partition/build and tells you to call ota_rollback_esp() first.
+    running partition/build and names the app (single-slot) or recovery image that is actually running.
 
     `verify=False` is the escape hatch for bring-up when the board's HTTP
     stack is not expected to be up yet (e.g. Wi-Fi not provisioned) -- skips
@@ -2120,7 +2120,10 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
             return f"error: board at {resolved} did not report fw_build in /api/status"
     path, message = elf_archive.find_kiln_elf_for_build(fw_build)
     if path is None:
-        return f"error: {message}"
+        rpath, rmessage = elf_archive.find_recovery_elf_for_build(fw_build)
+        if rpath is not None:
+            return rmessage
+        return f"error: {message}; {rmessage}"
     return message
 
 
@@ -2158,11 +2161,11 @@ def find_crash_elf_for_coredump(coredump_path: str) -> str:
         situation -- do not retry with a substitute ELF chosen by hand."""
     if not os.path.isfile(coredump_path):
         return f"error: coredump file does not exist: {coredump_path!r}"
-    candidates = elf_archive.list_all_kiln_elf_paths()
+    candidates = elf_archive.list_all_kiln_elf_paths() + elf_archive.list_recovery_elf_paths()
     if not candidates:
         return (
-            "error: the KilnFW ELF archive currently has zero candidate ELFs "
-            f"(checked {elf_archive.kiln_archive_dir()}) -- nothing to search, "
+            "error: the KilnFW and recovery ELF archives currently have zero candidate ELFs "
+            f"(checked {elf_archive.kiln_archive_dir()} and {elf_archive.recovery_archive_dir()}) -- nothing to search, "
             "not a verdict about this coredump"
         )
     try:
@@ -2269,7 +2272,7 @@ def read_esp_coredump(host: Optional[str] = None, out_path: Optional[str] = None
     if fw_build:
         fast_path_elf, _msg = elf_archive.find_kiln_elf_for_build(fw_build)
 
-    candidates = elf_archive.list_all_kiln_elf_paths()
+    candidates = elf_archive.list_all_kiln_elf_paths() + elf_archive.list_recovery_elf_paths()
     if fast_path_elf is not None:
         # Try the likely candidate first (fast, and the common case), but
         # keep it in the full candidate list too so find_matching_archived_elf

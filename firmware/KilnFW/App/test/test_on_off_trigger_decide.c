@@ -71,8 +71,8 @@ void run_test_on_off_trigger_decide(void)
         TEST_CHECK(!on, "guard 5/6 trip forces fail-safe state (OFF here) over a firing rule");
     }
 
-    /* --- Precedence 3: run not RUNNING. PAUSE holds last state unless
-     * failsafe_on_pause; IDLE/FAULTED goes fail-safe. --------------------- */
+    /* --- Precedence 3: run not RUNNING. PAUSE holds last state;
+     * IDLE/FAULTED goes fail-safe. --------------------- */
     {
         on_off_trigger_state_t st;
         on_off_trigger_state_reset(&st);
@@ -83,19 +83,13 @@ void run_test_on_off_trigger_decide(void)
         bool on = tick_n(&st, &in, 40); /* clear min_off_s hold first */
         TEST_CHECK(on, "tautology rule commands ON once RUNNING and hold has cleared");
 
-        /* PAUSE without failsafe_on_pause: holds ON. */
+        /* PAUSE: holds ON. */
         in.run_running = false;
         in.run_paused = true;
-        in.failsafe_on_pause = false;
         on = on_off_trigger_decide(&st, &in);
-        TEST_CHECK(on, "PAUSE without failsafe_on_pause holds the last commanded state (ON)");
+        TEST_CHECK(on, "PAUSE holds the last commanded state (ON)");
 
-        /* PAUSE with failsafe_on_pause: goes to fail-safe (OFF by default). */
-        in.failsafe_on_pause = true;
         in.failsafe_state_on = false;
-        on = on_off_trigger_decide(&st, &in);
-        TEST_CHECK(!on, "PAUSE with failsafe_on_pause goes to fail-safe state");
-
         /* IDLE (!run_running, !run_paused): fail-safe regardless. */
         in.run_paused = false;
         on = on_off_trigger_decide(&st, &in);

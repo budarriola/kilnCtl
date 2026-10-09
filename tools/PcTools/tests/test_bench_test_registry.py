@@ -124,7 +124,10 @@ class SuiteTest(unittest.TestCase):
         runs -- never leave anything, heat cases included, behind it."""
         ids = R.SUITES["full"]
         self.assertIn("WEB-SEC-05", ids)
-        self.assertEqual(ids[-1], "WEB-SEC-05")
+        # Only its post-run aliases (depends_on WEB-SEC-05, e.g. WEB-LOG-03) may trail it.
+        tail = ids[ids.index("WEB-SEC-05"):]
+        for cid in tail[1:]:
+            self.assertEqual(R.get_case(cid).depends_on, "WEB-SEC-05")
 
     def test_nightly_suite_excludes_web_sec_05(self):
         """Owner decision: nightly never runs the lockout case at all."""
@@ -163,7 +166,7 @@ class SuiteTest(unittest.TestCase):
         # SP-04 and LCD-04 are OT-B01's observers and deliberately sit
         # inside the OTA block (right after OT-B01), so they are not part of
         # the "everything else runs before the OTA block" set.
-        _ot_observers = ("SP-04", "LCD-04")
+        _ot_observers = ("SP-04", "LCD-04", "WEB-SAF-03", "WEB-RDY-04", "WEB-WIZ-11", "WEB-SET-04")
         non_ot_ids = [c for c in ids if not c.startswith("OT-") and c not in _ot_observers]
         self.assertLess(max(idx[c] for c in non_ot_ids), min(idx[c] for c in ot_ids))
         # SK-02's own dependency wiring, and each SP observer sits right
@@ -199,12 +202,20 @@ class SuiteTest(unittest.TestCase):
             "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
             "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
             "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
+            "WEB-PROF-10", "WEB-STIM-02", "WEB-ZONE-04", "WEB-ZONE-07", "WEB-ZONE-13",
+            "WEB-ZONE-11",
             "WEB-BAK-02", "WEB-BAK-03",
             "WEB-KCFG-02", "WEB-KCFG-03",
             "WEB-DASH-13",
             "WEB-DIAG-07", "WEB-DIAG-08",
+            "WEB-SAF-02", "WEB-SAF-03", "WEB-SAF-04",
+            "WEB-COMM-02", "WEB-COMM-03", "WEB-COMM-04", "WEB-COMM-05", "WEB-COMM-06", "WEB-COMM-07",
+            "WEB-RDY-02", "WEB-RDY-03", "WEB-RDY-04",
+            "WEB-WIZ-02", "WEB-WIZ-03", "WEB-WIZ-04", "WEB-WIZ-05", "WEB-WIZ-06", "WEB-WIZ-07",
+            "WEB-WIZ-08", "WEB-WIZ-09", "WEB-WIZ-10", "WEB-WIZ-11",
+            "WEB-SET-02", "WEB-SET-03", "WEB-SET-04", "WEB-DISP-02", "WEB-DISP-03", "WEB-DISP-04",
             "WEB-OTA-01", "WEB-OTA-02",
-            "WEB-SEC-03",
+            "WEB-SEC-03", "WEB-LOG-02",
             "WEB-X-01", "WEB-X-02",
             "LCD-02", "LCD-03", "LCD-04", "LCD-09", "LCD-14", "LCD-16",
             "OT-B01", "OT-E01", "OT-E02", "OT-E03", "OT-E12",
@@ -223,6 +234,59 @@ class HeatFlagTest(unittest.TestCase):
         touch Wi-Fi."""
         for cid in R.SUITES["smoke"]:
             self.assertFalse(R.get_case(cid).heat, f"{cid} must not be heat=True in the smoke suite")
+
+
+# Ratchet: ids registered without a judge function. Frozen from origin/dev;
+# implementing a case may remove it from here but a NEW judge-less id fails.
+_KNOWN_UNIMPLEMENTED = frozenset({
+    "LCD-05",
+    "LCD-06",
+    "LCD-07",
+    "LCD-10",
+    "LCD-11",
+    "LCD-12",
+    "LCD-13",
+    "LCD-15",
+    "LCD-17",
+    "LCD-18",
+    "LCD-20",
+    "OT-B02",
+    "OT-E11",
+    "WEB-ZONE-11",
+})
+
+
+def _judgeless_ids():
+    return {cid for cid, spec in R.REGISTRY.items() if spec.judge is None}
+
+
+def _new_unimplemented(known=_KNOWN_UNIMPLEMENTED):
+    """Judge-less ids not in the frozen list (must be empty)."""
+    return sorted(_judgeless_ids() - set(known))
+
+
+def _suite_ids_missing(suite_ids):
+    return sorted(set(suite_ids) - set(R.REGISTRY))
+
+
+class RatchetTest(unittest.TestCase):
+    def test_no_new_judgeless_ids(self):
+        self.assertEqual(_new_unimplemented(), [])
+
+    def test_nightly_and_full_ids_exist_in_registry(self):
+        for name in ("nightly", "full"):
+            self.assertEqual(_suite_ids_missing(R.SUITES[name]), [], name)
+
+    def test_negative_fake_judgeless_id_is_caught(self):
+        R.REGISTRY["ZZ-FAKE"] = R.CaseSpec(id="ZZ-FAKE", area="ZZ", description="fake")
+        try:
+            self.assertEqual(_new_unimplemented(), ["ZZ-FAKE"])
+        finally:
+            del R.REGISTRY["ZZ-FAKE"]
+        self.assertEqual(_new_unimplemented(), [])
+
+    def test_negative_bogus_nightly_id_is_caught(self):
+        self.assertEqual(_suite_ids_missing(list(R.SUITES["nightly"]) + ["ZZ-BOGUS"]), ["ZZ-BOGUS"])
 
 
 if __name__ == "__main__":

@@ -1648,7 +1648,7 @@ magnitude: **~6000 lines including tests, across 16 items.**
 ---
 
 **Item 17 - Backup & Restore covers every kiln configuration slot. LANDED.**
-`BACKUP_FORMAT_VERSION` is 5 (older firmware refuses a `kiln_configs[]` backup loudly
+`BACKUP_FORMAT_VERSION` is 6 (5 -> 6 added profile seg_kind/io_*/on_off_rules; v5 files still import) (older firmware refuses a `kiln_configs[]` backup loudly
 instead of ignoring the array); `backup_export.c` streams `"kiln_configs"`;
 `backup_import.c` does a validate-only pass 1 through
 `kiln_cfg_store_validate_package_json()` (the store-level seam this item called for)

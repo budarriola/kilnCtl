@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "persist_scratch.h"
 #include "profiles_http_internal.h" /* profile_decode_blob(), profile_encode_current_blob(),
                                       * PROFILE_BLOB_MAX_SIZE -- the exact same encode/decode
                                       * this file's NVS sibling (profiles_http.c) uses, so a
@@ -66,8 +67,11 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid)
+void profiles_cfg_fs_load_raw_ex(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid, bool *out_error)
 {
+    if (out_error) {
+        *out_error = false;
+    }
     if (out_profile) {
         memset(out_profile, 0, sizeof(*out_profile));
     }
@@ -87,10 +91,25 @@ void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_
     char path[40];
     profiles_cfg_fs_path(id, path, sizeof(path));
 
-    uint8_t raw[PCFG_FILE_BUF_MAX];
+    /* Heap, not stack: this runs on the boot path (review 5 L4). An allocation failure is NOT "file
+     * absent" (review 7 L3): it is reported through *out_error so resolve() never overwrites or frees
+     * a slot whose file it could not even look at. */
+    struct load_raw_scratch {
+        uint8_t raw[PCFG_FILE_BUF_MAX];
+        profile_t cand;
+    } *ls = persist_scratch_alloc(sizeof(*ls));
+    if (ls == NULL) {
+        ESP_LOGE(PCFG_FS_TAG, "prof%u load: no memory for scratch -- file state UNKNOWN (error)", id);
+        if (out_error) {
+            *out_error = true;
+        }
+        return;
+    }
+    uint8_t *raw = ls->raw;
     size_t len = 0;
-    esp_err_t err = cfg_fs_read(path, raw, sizeof(raw), &len);
+    esp_err_t err = cfg_fs_read(path, raw, sizeof(ls->raw), &len);
     if (err != ESP_OK) {
+        free(ls);
         /* Absent (never migrated/never saved), oversized, or unreadable --
          * none of these are "found but bad" on their own; the caller's
          * resolve() decides whether that's worth a divergence warning. */
@@ -99,22 +118,30 @@ void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_
     if (len < 5) { /* rev prefix + at least a 1-byte version */
         ESP_LOGW(PCFG_FS_TAG, "prof%u file is %u bytes, too short to hold a rev + blob -- ignoring", id,
                  (unsigned)len);
+        free(ls);
         return;
     }
 
     uint32_t rev = get_u32_le(raw);
     const char *reason = "";
-    profile_t cand;
-    profile_decode_result_t result = profile_decode_blob(raw + 4, len - 4, &cand, &reason);
+    profile_t *cand = &ls->cand;
+    profile_decode_result_t result = profile_decode_blob(raw + 4, len - 4, cand, &reason);
     if (result != PROFILE_DECODE_OK) {
         ESP_LOGW(PCFG_FS_TAG, "prof%u file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides", id,
                  (unsigned long)rev, reason);
+        free(ls);
         return;
     }
 
-    *out_profile = cand;
+    *out_profile = *cand;
+    free(ls);
     *out_rev = rev;
     *out_valid = true;
+}
+
+void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid)
+{
+    profiles_cfg_fs_load_raw_ex(id, out_profile, out_rev, out_valid, NULL);
 }
 
 esp_err_t profiles_cfg_fs_save(uint8_t id, const profile_t *profile, uint32_t rev)
@@ -157,9 +184,12 @@ esp_err_t profiles_cfg_fs_delete(uint8_t id)
     return (err == ESP_ERR_NOT_FOUND) ? ESP_OK : err;
 }
 
-bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
-                              profile_t *out_profile, uint32_t *out_rev, bool *out_used_file)
+bool profiles_cfg_fs_resolve_ex(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
+                                 profile_t *out_profile, uint32_t *out_rev, bool *out_used_file, bool *out_error)
 {
+    if (out_error) {
+        *out_error = false;
+    }
     if (out_profile) {
         memset(out_profile, 0, sizeof(*out_profile));
     }
@@ -176,7 +206,16 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
     profile_t file_profile;
     uint32_t file_rev = 0;
     bool file_valid = false;
-    profiles_cfg_fs_load_raw(id, &file_profile, &file_rev, &file_valid);
+    bool load_err = false;
+    profiles_cfg_fs_load_raw_ex(id, &file_profile, &file_rev, &file_valid, &load_err);
+    if (load_err) {
+        /* Fail closed (review 7 L3): the file was not examined, so neither adopt NVS over it, write,
+         * delete, nor report the slot as free-by-decision. The caller must treat the slot as unknown. */
+        if (out_error) {
+            *out_error = true;
+        }
+        return false;
+    }
 
     if (!file_valid) {
         if (!nvs_valid) {
@@ -184,10 +223,11 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
         }
         /* File missing/corrupt, NVS has a real profile -- adopt NVS and
          * lazily migrate a fresh file, same as zones_config_cfg_fs.c. */
+        uint32_t mig_rev = nvs_rev > 0 ? nvs_rev : 1; /* a file at rev 0 would look "never saved" */
         *out_profile = *nvs_profile;
-        *out_rev = nvs_rev;
+        *out_rev = mig_rev;
         *out_used_file = false;
-        esp_err_t werr = profiles_cfg_fs_save(id, nvs_profile, nvs_rev);
+        esp_err_t werr = profiles_cfg_fs_save(id, nvs_profile, mig_rev);
         if (werr != ESP_OK && werr != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(PCFG_FS_TAG, "could not migrate prof%u to file: %s", id, esp_err_to_name(werr));
         }
@@ -201,7 +241,9 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
          * the file was written (file is a stale leftover). nvs_rev here is
          * profiles_http.c's persisted per-slot rev counter, which is bumped
          * on delete too -- so it still tells the two apart. */
-        if (file_rev > nvs_rev) {
+        /* nvs_rev == 0 means this slot was never deleted (a real delete always
+         * persists rev >= 1), so the file is live, not stale. */
+        if (file_rev > nvs_rev || nvs_rev == 0) {
             ESP_LOGW(PCFG_FS_TAG,
                      "prof%u file/NVS DIVERGED (file rev %lu valid, NVS unused at rev %lu) -- adopting FILE "
                      "(higher rev, looks like a failed NVS write)",
@@ -264,4 +306,10 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
         }
     }
     return true;
+}
+
+bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
+                              profile_t *out_profile, uint32_t *out_rev, bool *out_used_file)
+{
+    return profiles_cfg_fs_resolve_ex(id, nvs_profile, nvs_valid, nvs_rev, out_profile, out_rev, out_used_file, NULL);
 }

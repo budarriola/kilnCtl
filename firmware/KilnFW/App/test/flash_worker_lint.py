@@ -421,6 +421,15 @@ ALLOWLIST = {
     # write_fn/delete_fn indirection story; this file's only cfg_fs-surface
     # call site is THROUGH that wrapper, never the bare cfg_fs_delete().
     "profiles_http.c",
+    # Legacy default-partition kiln_cfg key erase (erase_keys()). Callers:
+    # factory_reset.c's execute_scope_job() (pattern 1 by transitivity -- that
+    # job runs ON the flash worker, internal-SRAM stack, same reasoning as
+    # kiln_scope_cfg_files.c above) and relay_cycles.c's one-time legacy
+    # migration, which runs in relay_cycles_init() from app_main's own task
+    # before other tasks exist (pattern 3, same argument relay_cycles.c's own
+    # allowlist entry makes). Per-FILE allowlist: any new caller needs its own
+    # justification here.
+    "legacy_default_nvs.c",
 }
 
 # ---- cfg_fs (LittleFS-backed) write/delete/format surface -------------

@@ -240,9 +240,11 @@ size_t append_zone_status_json(char *json, size_t cap, size_t o, const profile_e
         for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
             if (!st->aux[ai].claimed) continue;
             n = snprintf(json + o, cap - o,
-                         "%s{\"relay\":%u,\"commanded_on\":%s,\"actuated_on\":%s,\"rule_reason\":%u}",
+                         "%s{\"relay\":%u,\"commanded_on\":%s,\"actuated_on\":%s,\"rule_reason\":%u,"
+                         "\"on_time_s\":%lu,\"switch_count\":%lu}",
                          aux_first ? "" : ",", (unsigned)ai + 1u, st->aux[ai].commanded_on ? "true" : "false",
-                         st->aux[ai].actuated_on ? "true" : "false", (unsigned)st->aux[ai].rule_reason);
+                         st->aux[ai].actuated_on ? "true" : "false", (unsigned)st->aux[ai].rule_reason, (unsigned long)st->aux[ai].on_time_s,
+                         (unsigned long)st->aux[ai].switch_count);
             if (n < 0 || (size_t)n >= cap - o) goto truncated;
             o += (size_t)n;
             aux_first = false;

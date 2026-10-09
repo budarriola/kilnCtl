@@ -282,7 +282,7 @@ static const char *on_off_axis_reason(const on_off_trigger_input_t *in, bool on_
         return "guard5_6_trip";
     }
     if (!in->run_running) {
-        return (in->run_paused && !in->failsafe_on_pause) ? "paused_hold_last" : "run_not_active_failsafe";
+        return in->run_paused ? "paused_hold_last" : "run_not_active_failsafe";
     }
     if (!in->rule.enable) {
         return "no_rule_for_segment";
@@ -478,10 +478,10 @@ void force_all_relays_off(void)
  * relays' kiln_io_owner write path and the global relay_authority gate.
  *
  * Must be called with s_exec.lock held. */
-void aux_apply_relay(uint8_t aux_idx, bool want_on)
+bool aux_apply_relay(uint8_t aux_idx, bool want_on)
 {
     if (aux_idx >= AUX_OUTPUTS_COUNT) {
-        return;
+        return false;
     }
     uint8_t mask = (uint8_t)(1u << aux_idx);
     /* Claimed in BOTH directions and before the authority gate, same
@@ -494,14 +494,25 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
                  (unsigned)sources);
         want_on = false;
     }
+    static uint8_t s_write_fail_logged_mask; /* review 4 L1: log a failing write once, not every retry tick */
+    bool write_ok = true; /* no io bound (host/sim) counts as ok: nothing can fail */
     if (s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
         if (err != ESP_OK) {
-            ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
-                     esp_err_to_name(err));
+            write_ok = false;
+            if (!(s_write_fail_logged_mask & mask)) {
+                ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
+                         esp_err_to_name(err));
+                s_write_fail_logged_mask |= mask;
+            }
         } else {
+            s_write_fail_logged_mask &= (uint8_t)~mask;
             relay_off_tracker_note_write(mask, want_on ? mask : 0);
         }
+    }
+    /* Review 4 L1: a failed write is not a transition and commanded_on keeps its last confirmed value. */
+    if (!write_ok) {
+        return false;
     }
     if (s_exec.aux[aux_idx].commanded_on != want_on) {
         ESP_LOGI(PE_TAG, "aux relay %u -> %s", (unsigned)aux_idx + 1u, want_on ? "ON" : "OFF");
@@ -509,8 +520,12 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
          * zone relays (heater_output.c note_transition()): an aux relay
          * switching is a contact cycle like any other. */
         relay_cycles_add(mask, 1u);
+        /* switch_count is the dashboard's "it switched" figure: a failed write (state unknown) must
+         * not report a switch that never happened (review L3). */
+        if (want_on && write_ok) s_exec.aux[aux_idx].switch_count++;
     }
     s_exec.aux[aux_idx].commanded_on = want_on;
+    return write_ok;
 }
 
 void profile_executor_on_off_seed_hold(on_off_trigger_state_t *decide_state, float *actuated_held_s,
@@ -568,6 +583,92 @@ void force_aux_relays_off(void)
     }
 }
 
+/* Audit AUX_OUTPUTS_SAFETY_REVIEW_2026-10-09 F1/F2. Called every executor
+ * tick while NOT RUNNING, with s_exec.lock held. When a safety fault is
+ * asserted (relay_authority_on_blocked(), or a fresh Pico TRIPPED report passed
+ * in as pico_tripped), every aux output that is on is driven OFF:
+ *  - PAUSED (F1): a pause otherwise holds the last commanded aux state; that
+ *    hold only lasts while nothing is faulted. Goes through aux_apply_relay()
+ *    so switch_count/on_time bookkeeping stays coherent.
+ *  - IDLE/DONE/FAULTED (F2): a manually switched-on aux is dropped too. There
+ *    is no separate manual-on memory (the relay itself is the state), so it
+ *    stays OFF after the fault clears; the operator must switch it on again.
+ * Firmware does this for every wiring: aux outputs are NOT assumed to sit
+ * behind K4, so K4 / the heat claim release is never what protects them. */
+void profile_executor_aux_fault_drop(bool pico_tripped)
+{
+    static uint8_t s_last_logged_on_mask;
+    static uint8_t s_fail_logged_mask;
+    uint32_t sources = 0;
+    bool blocked = relay_authority_on_blocked(s_exec.safety, &sources) || pico_tripped;
+    if (!blocked) {
+        s_last_logged_on_mask = 0;
+        return;
+    }
+    /* Review 4 M1: candidates are every non-zone relay, not only enabled/claimed
+     * aux ones: a disabled-while-ON aux or a raw dashboard spare-relay write
+     * leaves the shadow ON with no config bit. */
+    uint8_t zone_union = 0;
+    uint8_t zone_count = zones_config_get_thermo_count();
+    for (uint8_t zi = 0; zi < zone_count; zi++) {
+        uint8_t zm = 0;
+        if (zones_config_get_relay_mask(zi, &zm)) zone_union |= zm;
+    }
+    uint8_t cand = (uint8_t)(((1u << AUX_OUTPUTS_COUNT) - 1u) & ~zone_union);
+    cand |= s_exec.aux_claim_mask;
+    uint8_t shadow = s_exec.io ? kiln_io_get_relay_shadow(s_exec.io) : 0;
+    uint8_t on_mask = 0;
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(cand & bit)) continue;
+        if ((shadow & bit) || s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) on_mask |= bit;
+    }
+    if (on_mask == 0) {
+        s_last_logged_on_mask = 0;
+        return;
+    }
+    /* Log when the set of aux outputs being dropped changes, not every tick
+     * while an OFF write keeps failing (review LOW-2). */
+    if (on_mask != s_last_logged_on_mask) {
+        ESP_LOGW(PE_TAG, "safety fault while not running (sources 0x%02X, pico_tripped=%d): dropping aux mask 0x%02X",
+                 (unsigned)sources, (int)pico_tripped, (unsigned)on_mask);
+        s_last_logged_on_mask = on_mask;
+    }
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(on_mask & bit)) continue;
+        bool off_ok = true;
+        if (s_exec.aux_claim_mask & bit) {
+            off_ok = aux_apply_relay(i, false);
+        } else if (s_exec.io) {
+            /* manual (unclaimed) aux: plain authorized OFF write */
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, 0);
+            if (err == ESP_OK) {
+                relay_off_tracker_note_write(bit, 0);
+                relay_cycles_add(bit, 1u);
+                s_exec.aux[i].commanded_on = false;
+            } else {
+                off_ok = false;
+                if (!(s_fail_logged_mask & bit)) {
+                    ESP_LOGE(PE_TAG, "aux relay %u fault-drop OFF write failed: %s -- retrying each tick",
+                             (unsigned)i + 1u, esp_err_to_name(err));
+                }
+            }
+        }
+        if (off_ok) {
+            s_fail_logged_mask &= (uint8_t)~bit;
+            s_exec.aux[i].actuated_on = false;
+        } else {
+            /* relay may still be energised: keep actuated_on so the dashboard
+             * does not claim OFF, and retry next tick. */
+            if (!(s_fail_logged_mask & bit)) {
+                ESP_LOGE(PE_TAG, "aux relay %u fault-drop OFF not confirmed", (unsigned)i + 1u);
+            }
+            s_fail_logged_mask |= bit;
+        }
+    }
+}
+
 bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok)
 {
     return rule->enable && rule->temp_cmp != ON_OFF_TEMP_CMP_NONE && !temp_ok;
@@ -596,7 +697,6 @@ on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_pa
         .guard_5_6_tripped = p->src_guard_5_6_tripped,
         .run_running = run_running,
         .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
-        .failsafe_on_pause = false, /* no per-output override field yet */
         .min_on_s = p->src_min_on_s,
         .min_off_s = p->src_min_off_s,
         .rule = p->rule,
@@ -745,6 +845,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
         }
         aux_apply_relay(i, r.actuated_on);
+        if (s_exec.aux[i].commanded_on && dt_s > 0.0f) s_exec.aux[i].on_time_s += dt_s;
     }
 }
 

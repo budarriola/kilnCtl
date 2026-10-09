@@ -970,6 +970,8 @@ typedef struct {
         float held_s;
         bool commanded_on; /* last level actually written (post authority gate) */
         uint8_t rule_reason; /* profile_exec_relay_denied_t, latest tick; status JSON only */
+        float on_time_s;     /* seconds commanded ON this run; zeroed at run start only, not persisted */
+        uint32_t switch_count; /* off->on commanded transitions this run; zeroed at run start only */
     } aux[AUX_OUTPUTS_COUNT];
 
     /* TODO relay/IO segments (owner's request, see profiles_http.h's
@@ -1287,8 +1289,9 @@ void force_all_relays_off(void);
  * current segment; relays_on_count/cap are the load-cap bookkeeping the zone
  * loop already did (aux is suppressed last). All must be called with
  * s_exec.lock held. */
-void aux_apply_relay(uint8_t aux_idx, bool want_on);
+bool aux_apply_relay(uint8_t aux_idx, bool want_on);
 void force_aux_relays_off(void);
+void profile_executor_aux_fault_drop(bool pico_tripped); /* F1/F2: not-RUNNING fault drop, lock held */
 void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap);
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);

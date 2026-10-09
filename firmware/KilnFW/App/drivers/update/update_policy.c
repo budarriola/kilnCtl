@@ -219,18 +219,28 @@ uint32_t update_image_id_check(const update_image_id_t *id)
     return id->magic ^ id->zones_cfg_version ^ id->kilnlink_version ^ id->uart_version ^ 0xA5A5A5A5u;
 }
 
-void update_image_id_make(update_image_id_t *id, uint32_t zones, uint32_t kl, uint32_t uart)
+void update_image_id_make(update_image_id_t *id, uint32_t zones, uint32_t kl, uint32_t uart, const char *commit)
 {
+    memset(id, 0, sizeof(*id));
     id->magic = UPDATE_IMAGE_ID_MAGIC;
     id->zones_cfg_version = zones;
     id->kilnlink_version = kl;
     id->uart_version = uart;
+    if (commit != NULL) {
+        memcpy(id->commit, commit, strnlen(commit, UPDATE_IMAGE_ID_COMMIT_LEN - 1u));
+    }
     id->check = update_image_id_check(id);
 }
 
 static uint32_t rd32le(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static bool id_valid(const update_image_id_t *id)
+{
+    return id->check == update_image_id_check(id) && id->zones_cfg_version != 0 && id->kilnlink_version != 0 &&
+           id->uart_version != 0;
 }
 
 bool update_image_id_find(const uint8_t *head, size_t len, size_t from, update_image_id_t *out)
@@ -247,9 +257,27 @@ bool update_image_id_find(const uint8_t *head, size_t len, size_t from, update_i
         id.zones_cfg_version = rd32le(head + o + 4);
         id.kilnlink_version = rd32le(head + o + 8);
         id.uart_version = rd32le(head + o + 12);
+        memcpy(id.commit, head + o + 16, UPDATE_IMAGE_ID_COMMIT_LEN);
+        id.commit[UPDATE_IMAGE_ID_COMMIT_LEN - 1u] = '\0';
+        id.check = rd32le(head + o + 32);
+        if (id_valid(&id)) {
+            *out = id;
+            return true;
+        }
+    }
+    // Legacy v1 fallback: no commit, so the caller must not commit-check it.
+    for (size_t o = from; o + UPDATE_IMAGE_ID_V1_SIZE <= len; o += 4) {
+        if (rd32le(head + o) != UPDATE_IMAGE_ID_MAGIC_V1) {
+            continue;
+        }
+        update_image_id_t id;
+        memset(&id, 0, sizeof(id));
+        id.magic = rd32le(head + o);
+        id.zones_cfg_version = rd32le(head + o + 4);
+        id.kilnlink_version = rd32le(head + o + 8);
+        id.uart_version = rd32le(head + o + 12);
         id.check = rd32le(head + o + 16);
-        if (id.check == update_image_id_check(&id) && id.zones_cfg_version != 0 && id.kilnlink_version != 0 &&
-            id.uart_version != 0) {
+        if (id_valid(&id)) {
             *out = id;
             return true;
         }

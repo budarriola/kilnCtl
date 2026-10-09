@@ -37,7 +37,8 @@ function OriginHead { (git -C $origin rev-parse main).Trim() }
 function Run-Land([string]$dir, [string[]]$more) {
     Push-Location $dir
     try {
-        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone @more 2>&1 | Out-String
+        $tgt = if ($more -contains "-Target") { @() } else { @("-Target", "main") }
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone @tgt @more 2>&1 | Out-String
         $code = $LASTEXITCODE
     } finally { Pop-Location }
     $line = ($out -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
@@ -142,6 +143,43 @@ try {
     "5 passed, 0 skipped (0 due to -Fast), 0 failed." | Set-Content -LiteralPath $log -Encoding Unicode
     $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "green log lands"
+
+    Write-Host "case: log held open by a writer (FileShare.ReadWrite) is still read; exclusive lock fails fast"
+    $c = New-Clone "c_log3"
+    Commit-File $c "log3.txt" "x" "log3"
+    $hold = New-Object System.IO.FileStream($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    try {
+        $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
+        Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "log held open with ReadWrite share lands"
+    } finally { $hold.Dispose() }
+    $c = New-Clone "c_log4"
+    Commit-File $c "log4.txt" "x" "log4"
+    $hold = New-Object System.IO.FileStream($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $t0 = Get-Date
+        $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "5", "-ChecksScript", $okStub)
+        Assert ($r.Code -eq 1 -and $r.Json.error -match 'cannot read check log' -and $r.Json.error -match 'run\.log') "exclusively locked log fails fast naming file"
+        Assert (((Get-Date) - $t0).TotalSeconds -lt 120) "fail-fast well before the wait deadline"
+    } finally { $hold.Dispose() }
+
+    Write-Host "case: default target is dev; main untouched; -Target main still works"
+    git -C $origin branch dev main *>$null
+    $c = New-Clone "c_dev"
+    git -C $c fetch origin *>$null
+    git -C $c checkout -b work origin/dev *>$null
+    Commit-File $c "dev.txt" "x" "devcommit"
+    $mainBefore = OriginHead
+    $r = Run-Land $c @("-Target", "dev", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "land to dev succeeds (no check log needed)"
+    Assert ((OriginHead) -eq $mainBefore) "origin/main not advanced by a dev land"
+    Assert ((git -C $origin rev-parse dev).Trim() -eq $r.Json.sha) "origin/dev advanced to the landed sha"
+    $c = New-Clone "c_dev2"
+    git -C $c fetch origin *>$null
+    git -C $c checkout -b work origin/dev *>$null
+    Commit-File $c "dev2.txt" "x" "dev2"
+    Push-Location $c
+    try { $dout = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone -DryRun 2>&1 | Out-String } finally { Pop-Location }
+    Assert ($dout -match 'rebase onto origin/dev') "default target (no -Target) is dev"
 
     Write-Host "case: failing post-rebase check blocks push"
     $c = New-Clone "c_post"

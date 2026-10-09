@@ -96,7 +96,7 @@ WP2), which is now also the actual `app` partition size in `partitions.csv`.
 6. `ota_matrix_run` passes on the image (ESP via recovery, Pico auto-update, rollback).
 7. Readiness all ok on the bench board after flashing the release image (hardware-gated
    items listed in the notes).
-8. `KilnCtrl.bin` <= 0x400000 and `.dram0.bss` <= 101000 B.
+8. `KilnCtrl.bin` <= 0x400000 and `.dram0.bss` <= 101000 B. `make_release.ps1` enforces both on the built ELF (the DRAM step runs `check_kilnfw_dram_bss_budget.py`; a failure or an unmeasured SKIP refuses).
 9. Release notes list schema versions and any rollback hazard versus the previous release.
 
 `make_release.ps1` enforces mechanically what it can prove (clean tree, origin/main, free

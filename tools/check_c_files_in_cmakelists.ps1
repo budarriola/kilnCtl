@@ -129,6 +129,7 @@ function Get-RealCFiles {
 # header. RelPath is compared case-insensitively against the repo-root-
 # relative path of every file this check considers missing. ---
 $allowlist = @(
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/profiles_validate.c"; Reason = "textually #included by profiles_http.c (and test_backup_import.c); compiling it separately would duplicate the symbols" }
     # Example shape (not real): @{ RelPath = "firmware/KilnFW/App/drivers/foo.c"; Reason = "..." }
 )
 

@@ -155,6 +155,21 @@ if ($null -eq $capValue) {
     throw "check_uri_handler_cap.ps1: no 'config.max_uri_handlers = <N>;' assignment found in $capFile -- has it been renamed or restructured? Update this script's pattern."
 }
 
+# ROUTE_TIER_REVIEW_2026-10-09 LOW-2: http_auth_http.c's KILN_HTTP_MAX_ROUTES
+# (the wrapper table) must be >= max_uri_handlers, else routes the httpd
+# would accept are refused by the wrapper.
+$authFile = Resolve-DriverFile -DriversDir $driversDir -BaseName "http_auth_http.c"
+$maxRoutes = $null
+foreach ($line in (Get-CodeOnlyLines -Path $authFile)) {
+    if ($line -match '^\s*#\s*define\s+KILN_HTTP_MAX_ROUTES\s+(\d+)') { $maxRoutes = [int]$Matches[1]; break }
+}
+if ($null -eq $maxRoutes) {
+    throw "check_uri_handler_cap.ps1: no '#define KILN_HTTP_MAX_ROUTES <N>' found in $authFile -- update this script's pattern."
+}
+if ($maxRoutes -lt $capValue -or $maxRoutes -lt $totalRoutes) {
+    throw "URI HANDLER CAP CHECK FAILED: KILN_HTTP_MAX_ROUTES ($maxRoutes in $authFile) must be >= max_uri_handlers ($capValue) and >= registered routes ($totalRoutes)."
+}
+
 Write-Host "URI handler cap check: $totalRoutes route(s) registered across $($perFile.Count) file(s) under drivers/, cap (max_uri_handlers) = $capValue."
 
 if ($capValue -lt $totalRoutes) {

@@ -127,10 +127,10 @@ bool on_off_trigger_decide(on_off_trigger_state_t *state, const on_off_trigger_i
         desired = in->failsafe_state_on;
     } else if (!in->run_running) {
         /* level 3: run not RUNNING */
-        if (in->run_paused && !in->failsafe_on_pause) {
+        if (in->run_paused) {
             desired = state->commanded_on; /* PAUSE: hold last commanded state */
         } else {
-            desired = in->failsafe_state_on; /* IDLE/DONE/FAULTED/halt, or PAUSE with failsafe_on_pause set */
+            desired = in->failsafe_state_on; /* IDLE/DONE/FAULTED/halt */
         }
     } else {
         bool rule_result = evaluate_rule(in, state->commanded_on);

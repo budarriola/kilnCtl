@@ -298,3 +298,18 @@ def test_aux_outputs_passes_through_every_direction():
     doc.pop("aux_outputs", None)
     out, _report = cfg_convert.convert(doc, 4)
     assert "aux_outputs" not in out
+
+
+def test_additive_top_level_prefs_pass_through():
+    base = json.loads((FIXTURES / "v1_synthesized.json").read_text(encoding="utf-8"))
+    extra = {"relay_cycles": {"hw_relays": 4, "c0": 1}, "unit": 1, "ramp_assist": True,
+             "display_power": {"brightness_percent": 50}, "hidden_builtin_profiles": ["a"],
+             "tz": "UTC0", "relay_names": [{"relay": 1, "name": "x", "type": 2}]}
+    doc = dict(base)
+    doc.update(extra)
+    for target in (1, 3, 4, int(doc["version"])):
+        out, _report = cfg_convert.convert(doc, target)
+        for k, v in extra.items():
+            assert out[k] == v, (k, target)
+    out, _report = cfg_convert.convert(dict(base), 4)
+    assert not any(k in out for k in extra)

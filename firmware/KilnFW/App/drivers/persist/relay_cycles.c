@@ -1,4 +1,5 @@
 #include "relay_cycles.h"
+#include "legacy_default_nvs.h"
 
 #include <string.h>
 
@@ -257,6 +258,32 @@ static void migrate_from_default_partition(void)
     hal_kv_close(&hw);
     if (err == HAL_OK) {
         ESP_LOGI(TAG, "migrated relay cycle counts from default NVS partition to '%s'", KILN_NVS_PARTITION);
+        /* Read the copy back before touching the old one: a write that lied
+         * must not cost the only good copy. Once verified, erase the old
+         * default-partition copy so a later kiln_nvs erase (factory reset)
+         * cannot re-seed stale counts from it. */
+        hal_kv_handle_t vh;
+        relay_cycles_blob_t back;
+        size_t back_len = sizeof(back);
+        bool verified = false;
+        if (hal_kv_open(&vh, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            verified = hal_kv_get_blob(&vh, NVS_KEY_CYCLES, &back, &back_len) == HAL_OK &&
+                       back_len == sizeof(old_blob) && memcmp(&back, &old_blob, sizeof(old_blob)) == 0;
+            hal_kv_close(&vh);
+        }
+        if (!verified) {
+            ESP_LOGW(TAG, "relay cycle migration read-back did not match -- keeping the old default-partition copy");
+        } else {
+            /* ACCEPTED TRADE-OFF (DEV_FIRMWARE_REVIEW_2 finding 8): erasing the old default-partition copy
+             * removes what a rollback to PRE-SPLIT firmware would read, so after such a rollback the relay
+             * cycle counts restart from 0. Kept deliberately: the copy was read back and memcmp-verified
+             * above (no data lost on this firmware), and leaving it behind let factory reset / stale
+             * copies resurrect old counts. See docs/CONFIG_FILESYSTEM.md. */
+            esp_err_t eerr = legacy_default_nvs_erase_relay_cycles();
+            if (eerr != ESP_OK) {
+                ESP_LOGE(TAG, "could not erase the old default-partition relay cycle copy: %s", esp_err_to_name(eerr));
+            }
+        }
     } else {
         ESP_LOGW(TAG, "relay cycle count migration to '%s' failed: %s", KILN_NVS_PARTITION, hal_status_to_name(err));
     }
@@ -961,7 +988,6 @@ bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_t
  * refused wholesale (all-or-nothing) rather than clamped, since a
  * wildly-out-of-range value is much more likely a corrupt/truncated backup
  * field than a real relay with that many operations. */
-#define RELAY_CYCLES_RESTORE_MAX_COUNT 100000000u /* 100M -- far past any rated life in this file's own table */
 
 bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
                                relay_cycles_restore_result_t *out_result)

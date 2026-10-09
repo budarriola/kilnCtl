@@ -418,7 +418,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
     /* GET /api/ota/challenge -- the nonce-issuing route this row used to
      * classify OPEN -- no longer exists (removed with the AP-password HMAC
      * scheme, 2026-09-29, WEB_AUTH_PLAN.md item 2b). */
-    ROUTE_TIER("/api/ota/esp/status", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/ota/esp/status", HTTP_GET, ROUTE_TIER_ADMIN),
 
     /* Network writes */
     ROUTE_TIER("/provision", HTTP_POST, ROUTE_TIER_ADMIN),

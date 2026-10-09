@@ -126,6 +126,7 @@ def _ambient_c(ctx: dict) -> Optional[float]:
         return None
 
 
+_EXEC_STATE_NAMES = {0: "idle", 1: "running", 2: "paused", 3: "done", 4: "faulted"}  # profile_exec_state_t
 _EXEC_RE = re.compile(r"state=(\w+)\s+profile=#(-?\d+)")
 
 
@@ -137,14 +138,25 @@ def _exec(ctx: dict) -> Optional["tuple[str, int]"]:
         if isinstance(text, tuple):
             return text
         m = _EXEC_RE.search(text)
-        return (m.group(1).lower(), int(m.group(2))) if m else None
+        if not m:
+            return None
+        tok = m.group(1).lower()
+        if tok.isdigit():
+            # The MCP text prints the raw profile_exec_state_t int ("state=1"), not its name.
+            tok = _EXEC_STATE_NAMES.get(int(tok), "")
+        if tok not in _EXEC_STATE_NAMES.values():
+            return None  # unparseable state -> unreadable, which every caller treats as a FAIL
+        return (tok, int(m.group(2)))
     except Exception:  # noqa: BLE001
         return None
 
 
 def _slot_exists(ctx: dict) -> Optional[bool]:
     try:
-        return BENCH_PROFILE_NAME in _srv(ctx).profiles_list()
+        out = _srv(ctx).profiles_list()
+        if isinstance(out, str) and out.lstrip().lower().startswith(("error", "refused")):
+            return None
+        return BENCH_PROFILE_NAME in out
     except Exception:  # noqa: BLE001
         return None
 
@@ -292,18 +304,20 @@ def _preflight(ctx: dict) -> Optional[CaseResult]:
 
 # -- cases -------------------------------------------------------------------
 
-def _fw_post_aux(ctx: dict, relay: int, enabled: bool, tc_zone: Optional[int]) -> "tuple[Optional[int], bool]":
+def _fw_post_aux(ctx: dict, relay: int, enabled: bool, tc_zone: Optional[int]) -> "tuple[Optional[int], bool, str]":
     """POST /api/aux_outputs straight through the HTTP client (no MCP precheck).
-    Returns (http_status_or_None, board_said_ok). ``ctx["aux_post_fn"]`` is the test seam."""
+    Returns (http_status_or_None, board_said_ok, refusal_detail). ``ctx["aux_post_fn"]`` is the
+    test seam and may return a 2-tuple (detail then "") or a 3-tuple."""
     fn = ctx.get("aux_post_fn")
     if fn is not None:
-        return fn(relay, enabled, tc_zone)
+        r = fn(relay, enabled, tc_zone)
+        return (r[0], r[1], r[2] if len(r) > 2 else "")
     from .. import aux_http_client as ahc
     from ..mcp_server_aux import _resolve_host
     try:
-        return 200, bool(ahc.post_aux_output(_resolve_host(ctx.get("host")), relay, enabled, tc_zone))
+        return 200, bool(ahc.post_aux_output(_resolve_host(ctx.get("host")), relay, enabled, tc_zone)), ""
     except ahc.AuxHttpError as exc:
-        return exc.status, False
+        return exc.status, False, f"{exc} {exc.detail}"
 
 
 def _restore(ctx: dict) -> List[str]:
@@ -335,10 +349,39 @@ def _restore(ctx: dict) -> List[str]:
     return problems
 
 
+def _delete_bench_slot(ctx: dict, pid: int) -> Optional[str]:
+    """Delete slot ``pid`` only if it still holds BENCH_AUX_RULE; always drop it from the tracked list."""
+    srv = _srv(ctx)
+    ctx["_aux_profile_ids"] = [p for p in ctx.get("_aux_profile_ids", []) if p != pid]
+    try:
+        info = srv.profiles_get(pid)
+    except Exception as exc:  # noqa: BLE001
+        return f"profiles_get({pid}): {exc}"
+    if not isinstance(info, str) or info.lstrip().lower().startswith(("error", "refused")):
+        return f"profiles_get({pid}): {str(info)[:80]}"
+    if info.lstrip().lower().startswith("no such"):
+        return None  # already gone
+    if BENCH_PROFILE_NAME not in info:
+        return f"slot {pid} no longer holds {BENCH_PROFILE_NAME}; not deleted"
+    out = srv.profiles_delete(pid)
+    if isinstance(out, str) and out.startswith(("error", "refused")):
+        return f"profiles_delete({pid}): {out[:80]}"
+    return None
+
+
 def aux_teardown_hook(ctx: dict) -> None:
     """Runner teardown: restore relay 4 if AX-C01 mutated it and AX-R01 never ran/finished."""
     if ctx.get("_aux_dirty") and _restore(ctx):
         ctx["_tainted"] = True
+    # Saved BENCH_AUX_RULE slots must not outlive an aborted run (later runs would skip at _slot_exists).
+    errors = []
+    for pid in list(ctx.get("_aux_profile_ids", [])):
+        err = _delete_bench_slot(ctx, pid)
+        if err:
+            errors.append(err)
+    if errors:
+        ctx["_tainted"] = True
+        raise RuntimeError("; ".join(errors))
 
 
 def _case_ax_c01(ctx: dict) -> CaseResult:
@@ -375,7 +418,7 @@ def _case_ax_c02(ctx: dict) -> CaseResult:
     before = _aux_state(ctx)
     out = _srv(ctx).control_set_aux_output(relay=1, enabled=True, tc_zone=0, confirm=True)
     pre = judge_conflict_refusal(out, before.get("enabled_mask"), _aux_state(ctx).get("enabled_mask"))
-    status, fw_ok = _fw_post_aux(ctx, 1, True, 0)
+    status, fw_ok, detail = _fw_post_aux(ctx, 1, True, 0)
     after = _aux_state(ctx)
     changed = after.get("relays", {}).get(1, {}).get("enabled") and not before.get("relays", {}).get(1, {}).get("enabled")
     if changed or fw_ok or pre.verdict == Verdict.FAIL and "changed" in pre.reason:
@@ -383,12 +426,14 @@ def _case_ax_c02(ctx: dict) -> CaseResult:
         if not _is_ok(undo) and _aux_state(ctx).get("relays", {}).get(1, {}).get("enabled"):
             ctx["_tainted"] = True
             return CaseResult(Verdict.FAIL, reason="relay 1 aux write was accepted and could not be disabled -- run tainted")
-    obs = {"precheck": pre.verdict, "firmware_status": status, "firmware_ok": fw_ok}
-    if status != 400:
-        return CaseResult(Verdict.FAIL, reason=f"firmware answered {status} (ok={fw_ok}) to aux on a zone-owned relay, "
-                          "expected 400", observed=obs)
+    obs = {"precheck": pre.verdict, "firmware_status": status, "firmware_ok": fw_ok, "firmware_detail": detail}
+    # aux_outputs_http_core.c: enabling aux on a zone-claimed relay is a CONFLICT (409,
+    # "claimed by a zone relay_mask"); 400 is reserved for field-range validation.
+    if status != 409 or "zone relay_mask" not in detail:
+        return CaseResult(Verdict.FAIL, reason=f"firmware answered {status} (ok={fw_ok}, detail={detail[:80]!r}) to aux on a "
+                          "zone-owned relay, expected 409 'claimed by a zone relay_mask'", observed=obs)
     if after.get("enabled_mask") != before.get("enabled_mask"):
-        return CaseResult(Verdict.FAIL, reason="enabled_mask changed despite firmware 400", observed=obs)
+        return CaseResult(Verdict.FAIL, reason="enabled_mask changed despite firmware 409", observed=obs)
     if pre.verdict != Verdict.PASS:
         return CaseResult(Verdict.FAIL, reason=f"MCP precheck sub-check: {pre.reason}", observed=obs)
     return CaseResult(Verdict.PASS, observed=obs)
@@ -545,9 +590,9 @@ def _case_ax_r01(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     problems = []
     for pid in list(ctx.get("_aux_profile_ids", [])):
-        out = srv.profiles_delete(pid)
-        if isinstance(out, str) and out.startswith(("error", "refused")):
-            problems.append(f"profiles_delete({pid}): {out[:80]}")
+        err = _delete_bench_slot(ctx, pid)
+        if err:
+            problems.append(err)
     problems += _restore(ctx)
     if problems:
         ctx["_tainted"] = True

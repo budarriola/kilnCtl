@@ -126,6 +126,15 @@ static uint8_t *buf_get(size_t *cap)
     return ota_http_esp_chunk_buf(cap);
 }
 
+// Review 3 LOW-1: a BUSY stage with a wedged fetch writer stays busy until reboot; say so.
+static const char *stage_err_name_w(update_stage_err_t e)
+{
+    if (e == UPDATE_STAGE_ERR_BUSY && update_fetch_writer_wedged()) {
+        return "writer_wedged_reboot_required";
+    }
+    return update_stage_err_name(e);
+}
+
 static const char *http_status_for(update_stage_err_t e)
 {
     switch (e) {
@@ -185,6 +194,14 @@ static bool claim_refuses(httpd_req_t *req, const char *what, const char *ip)
     if (!ota_http_update_try_begin(OTA_HTTP_CONTEXT_ESP)) {
         ESP_LOGW(TAG, "%s from %s: refused, an update is already in progress", what, ip);
         (void)send_error_json(req, "409 Conflict", "update_in_progress");
+        return true;
+    }
+    // Claim-first ordering: heat starts test ota_http_heat_blocked_by_update(), which reads the claim, so
+    // once it is held no run can start. A run that started between the pre-claim mode-gate check and the
+    // claim is caught here by re-checking the mode gate under the claim; the claim is released on refusal.
+    // (The OTA interlock cannot be re-run here: it refuses while ANY claim, including ours, is held.)
+    if (mode_gate_refuses(req, what, ip)) {
+        ota_http_update_end();
         return true;
     }
     return false;
@@ -341,7 +358,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: refused: %s (%u bytes)", ip, update_stage_err_name(e),
                          (unsigned)req->content_len);
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 failed_mid_body = true;
             }
         }
@@ -372,7 +389,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
                 ESP_LOGW(TAG, "stage upload from %s: write failed: %s", ip, update_stage_err_name(e));
                 response_sent = (e == UPDATE_STAGE_ERR_POLICY); // policy_gate() already sent the 409
                 if (!response_sent) {
-                    (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                    (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 }
                 failed_mid_body = true;
                 break;
@@ -384,7 +401,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             e = update_stage_upload_finish(&s_stage);
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: finish failed: %s", ip, update_stage_err_name(e));
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 failed_mid_body = true;
             } else {
                 ESP_LOGW(TAG, "stage upload from %s: %u bytes staged and verified", ip,
@@ -418,7 +435,7 @@ static esp_err_t stage_clear_post_handler(httpd_req_t *req)
     ota_http_update_end();
     if (e != UPDATE_STAGE_OK) {
         ESP_LOGW(TAG, "stage clear from %s: failed: %s", ip, update_stage_err_name(e));
-        return send_error_json(req, http_status_for(e), update_stage_err_name(e));
+        return send_error_json(req, http_status_for(e), stage_err_name_w(e));
     }
     ESP_LOGW(TAG, "stage clear from %s: stage header erased", ip);
     httpd_resp_set_type(req, "application/json");
@@ -432,8 +449,10 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     update_stage_info_t info = { 0 };
     update_stage_err_t e = update_stage_get_status(&s_stage, buf, buf_cap, &info);
     if (e != UPDATE_STAGE_OK && e != UPDATE_STAGE_ERR_BUSY && info.reason == NULL) {
-        return send_error_json(req, http_status_for(e), update_stage_err_name(e));
+        return send_error_json(req, http_status_for(e), stage_err_name_w(e));
     }
+    const bool wedged = update_fetch_writer_wedged();
+    info.reason = update_stage_status_reason(&info, wedged);
 
     char sha_hex[2 * STAGE_SHA256_LEN + 1] = "";
     const bool hdr_ok = (info.hdr_status == STAGE_HDR_OK);
@@ -442,12 +461,12 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     }
     // semver is validated charset (digits, '.', '-', '+', alnum) and commit is
     // lowercase hex, by stage_header_decode(); no escaping needed.
-    char json[576];
+    char json[608];
     int n = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"phase\":\"%s\",\"busy\":%s,\"bytes_done\":%u,\"bytes_total\":%u,"
                      "\"staged\":%s,\"reason\":\"%s\",\"header\":\"%s\",\"capacity\":%u,"
                      "\"image_length\":%u,\"state\":\"%s\",\"semver\":\"%s\",\"commit\":\"%s\","
-                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s}",
+                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s,\"fetch_writer_wedged\":%s}",
                      update_stage_phase_name(info.phase), info.busy ? "true" : "false",
                      (unsigned)info.bytes_done, (unsigned)info.bytes_total, info.staged ? "true" : "false",
                      info.reason ? info.reason : "", stage_hdr_status_name(info.hdr_status),
@@ -455,7 +474,7 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
                      hdr_ok ? stage_state_name(info.state) : "", hdr_ok ? info.semver : "",
                      hdr_ok ? info.commit : "", sha_hex, hdr_ok ? (unsigned)info.source : 0u,
                      update_stale_result_name(s_last_auto_clear),
-                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false");
+                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false", wedged ? "true" : "false");
     return ota_http_send_json_clamped(req, json, n, sizeof(json));
 }
 

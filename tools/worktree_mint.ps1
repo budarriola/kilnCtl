@@ -1,11 +1,11 @@
 # worktree_mint.ps1 -- mint or remove a short-lived, collision-proof git
-# worktree at origin/main under C:\wt\.
+# worktree at origin/dev (default; -Base overrides) under C:\wt\.
 #
 # WHY THIS EXISTS. The shared main tree at C:\Users\...\kilnCtl normally
 # carries somewhere around a hundred dirty tracked paths belonging to other
 # concurrent sessions (see CLAUDE.md's "concurrent sessions" notes), so
 # nearly all real work has to happen in a separate worktree checked out at
-# origin/main. Two constraints have bitten repeatedly enough to be written
+# origin/dev (or -Base <ref>). Two constraints have bitten repeatedly enough to be written
 # down as project memory:
 #
 #   - SHORT PATH. SaftyFW host-test builds overflow the MSVC command line
@@ -24,7 +24,7 @@
 # USAGE
 #   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature
 #       Fetches origin, creates C:\wt\myfeature_<6-char-random> checked out
-#       at origin/main (detached), and prints the path on its own line
+#       at -Base (default origin/dev; e.g. -Base origin/main) detached, and prints the path on its own line
 #       prefixed "WORKTREE: " so a caller can grep it out reliably.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature -NoSubmodules
@@ -67,7 +67,8 @@ param(
     [switch]$Force,
     [string]$WtRoot = "C:\wt",
     [switch]$RunSetup,
-    [switch]$NoSubmodules
+    [switch]$NoSubmodules,
+    [string]$Base = "origin/dev"
 )
 
 # SUBMODULES A FRESH WORKTREE NEEDS (2026-09-19). `git worktree add` does NOT
@@ -178,11 +179,13 @@ if (-not (Test-Path $WtRoot)) {
     New-Item -ItemType Directory -Path $WtRoot -Force | Out-Null
 }
 
-git fetch origin main *>$null
+git fetch origin *>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: git fetch origin main failed." -ForegroundColor Red
+    Write-Host "ERROR: git fetch origin failed." -ForegroundColor Red
     exit 1
 }
+
+if (-not $Remove) { git -C $repoRoot rev-parse --verify --quiet "$Base^{commit}" *>$null; if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: -Base ref '$Base' does not resolve to a commit." -ForegroundColor Red; exit 1 } }
 
 # Try a handful of times in the (very unlikely) event of a suffix collision
 # against another concurrent mint.
@@ -206,7 +209,7 @@ if (Test-Path $target) {
     exit 1
 }
 
-git -C $repoRoot worktree add --detach $target origin/main *>$null
+git -C $repoRoot worktree add --detach $target $Base *>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: git worktree add failed for '$target'." -ForegroundColor Red
     exit 1

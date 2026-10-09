@@ -26,6 +26,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import judgments as J
+from . import windows
 from .cases_smoke import _http_get_json, _srv, wait_for_trip_clear as _wait_for_trip_clear
 from .registry import CaseResult, Verdict, get_case
 
@@ -596,6 +597,10 @@ def _hp_run(ctx: dict, zone_mask: int, timeout_s: float = 480.0, poll_s: float =
         while now() < deadline:
             st = srv._profiles.get_exec_status()
             state = st.state_name
+            if zone_mask == 0b001:
+                windows.fire_window(ctx, "hp01_tick")
+                if state == "running":
+                    windows.fire_window(ctx, "hp01_running", once=True)
             result["energized_samples"].append((state, _read_energized(ctx)))
             result["zone_diag_samples"].append(_zone_diag_snapshot(ctx))
             currents.sample()
@@ -780,8 +785,10 @@ def _case_hp04(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     sleep = ctx.get("_sleep", time.sleep)
     now = ctx.get("_now", time.monotonic)
+    paused_seen = False
     try:
         sleep(60)
+        windows.fire_window(ctx, "hp04_states")  # running sample, before the pause
         pause_result = srv._profiles.pause()
         if not pause_result.ok:
             return CaseResult(Verdict.FAIL, reason=f"profiles.pause refused: {getattr(pause_result, 'reason', '')}")
@@ -798,10 +805,14 @@ def _case_hp04(ctx: dict) -> CaseResult:
             "duties_while_paused": duties_while_paused,
             "pause_ui_targets": pause_ui_targets,
         }
+        paused_seen = True
+        windows.fire_window(ctx, "hp04_paused", once=True)
+        windows.fire_window(ctx, "hp04_states")  # paused sample
         sleep(60)
         resume_result = srv._profiles.resume()
         if not resume_result.ok:
             return CaseResult(Verdict.FAIL, reason=f"profiles.resume refused: {getattr(resume_result, 'reason', '')}")
+        windows.fire_window(ctx, "hp04_states")  # after resume
         deadline = now() + 420.0
         final_state = "running"
         while now() < deadline:
@@ -812,6 +823,8 @@ def _case_hp04(ctx: dict) -> CaseResult:
             sleep(2)
         return J.judge_pause_resume(paused_state, duties_while_paused, final_state)
     finally:
+        if paused_seen:
+            windows.fire_window(ctx, "hp04_states")  # last sample before cleanup
         _cleanup_bench_profile(ctx)
 
 

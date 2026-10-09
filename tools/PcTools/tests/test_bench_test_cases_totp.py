@@ -384,8 +384,10 @@ class ReviewFollowUpTest(unittest.TestCase):
     def test_tp_m01_sorts_late_in_full(self):
         from kilnctrl.bench_test.registry import SUITES
         full = SUITES["full"]
-        self.assertEqual(full[-1], "WEB-SEC-05")
-        self.assertEqual(full[-2], "TP-M01")
+        # WEB-LOG-03 is a result-only alias of WEB-SEC-05 (depends_on) and
+        # deliberately trails it; WEB-SEC-05 stays last among board-touching cases.
+        self.assertEqual(full[-2:], ["WEB-SEC-05", "WEB-LOG-03"])
+        self.assertEqual(full[-3], "TP-M01")
 
 
 if __name__ == "__main__":

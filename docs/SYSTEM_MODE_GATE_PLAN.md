@@ -1,9 +1,9 @@
 # System-mode command gate — design (Phase 6)
 
-**Status: DESIGN DOC ONLY, no code. Owner-approved for a design pass,
-2026-09-25.** Source: `firmware/KilnFW/TODO.md` section 10.14, "Phase 6"
-(added mid-Phase-1, user request). Do not implement ahead of an owner
-decision on the open questions below.
+**Status: IMPLEMENTED (slices 1-7 landed, see §3.6; code is
+`system_mode_gate_check()` in `firmware/KilnFW/App/drivers/safety/system_mode_gate.c`).
+Originally a design doc, owner-approved for a design pass, 2026-09-25.** Source: `firmware/KilnFW/TODO.md` section 10.14, "Phase 6"
+(added mid-Phase-1, user request). The open questions below are resolved; see their LANDED notes.
 
 ## 1. Problem statement
 

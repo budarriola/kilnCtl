@@ -51,6 +51,8 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "profiles_slot_bitmap.h"
+#include "aux_outputs_cfg.h"
+#include "MAX31856.h"
 
 /* ---- shared JSON escaping --------------------------------------------------
  * Opus review of 5dd23944, finding 3: the per-file copies of this helper
@@ -265,6 +267,9 @@ size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t c
  * static) only because test_profiles_cfg_fs.c inspects it directly to set up
  * fixtures without going through the full NVS load path. */
 extern uint32_t s_profile_rev[PROFILES_MAX_COUNT];
+/* true = the slot's rev floor could not be established this boot (NVS load failed and the
+ * rev array was unreadable, slot has no file): saves/deletes to it are refused. */
+extern bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
 
 /* ---- profiles_http.c -------------------------------------------------------
  * NVS persistence primitives -- profiles_catalog_http.c never calls these
@@ -296,6 +301,24 @@ bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err
  * point). See its definition in profiles_http.c for the owner's IO-target
  * design rule. */
 bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *err_msg, size_t err_cap);
+
+/* The zone/aux configuration the two validators above read. NULL (the default for
+ * validate_io_segment()/validate_on_off_rules()) means the LIVE config. Backup import's pass 1
+ * passes the config the import WILL produce (candidate zone_type/relay_mask, the post-import aux
+ * entries) so a profile that only becomes valid once the same backup's zones and aux outputs
+ * have landed is accepted, and one that never will be is refused before anything is written.
+ * Implementation: profiles_validate.c (textually included by profiles_http.c). */
+typedef struct {
+    uint8_t zone_count;                              /* zones scanned for relay ownership */
+    uint8_t zone_type[MAX31856_CHANNEL_COUNT];       /* zone_type_t values */
+    uint8_t zone_relay_mask[MAX31856_CHANNEL_COUNT]; /* bit N-1 = relay N */
+    aux_output_t aux[AUX_OUTPUTS_COUNT];             /* effective (read-side) aux view, index = relay-1 */
+} profile_validate_state_t;
+
+bool validate_io_segment_in_state(const profile_segment_t *seg, uint8_t seg_num, const profile_validate_state_t *st,
+                                  char *err_msg, size_t err_cap);
+bool validate_on_off_rules_in_state(const profile_t *candidate, const profile_validate_state_t *st, char *err_msg,
+                                    size_t err_cap);
 
 /* Widened non-`static` (docs/LIVE_PROFILE_EDIT_PLAN.md section 8 item 1) so
  * the live-edit handler decodes the identical x-www-form-urlencoded shape

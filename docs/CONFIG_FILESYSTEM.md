@@ -271,6 +271,7 @@ Of 24 inventoried runtime-changeable items:
 | 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`; `/api/cfgfs` row `zone_normals`) | `208de3d4` |
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`; `/api/cfgfs` row `relay_names`) | `288dc91c` |
 | - | Aux outputs (spare-relay on/off; not one of the 24) | dual-write (`aux_out.dat` via `pref_cfg_fs`; NVS key `aux_out_cfg`, rev key `aux_out_rev`, both in `kiln_nvs`; `/api/cfgfs` row `aux_outputs`; `persist/aux_outputs_cfg.c`; NVS authoritative). Factory reset: the `kiln` and `all` scopes erase `kiln_nvs` and `kiln_scope_cfg_files.c` lists `aux_out.dat`, so aux returns to all-disabled. In the backup export/import as the top-level `aux_outputs` array (omitted when the store is quarantined; an absent key on import keeps the board's aux configuration). `docs/SPARE_RELAY_ONOFF_PLAN.md` | `1f70c419` |
+| - | Relay cycle counters (`relay_cycles.dat`) | Backup: exported as top-level `relay_cycles` `{"hw_relays","c0".."c4"}`; import is raise-only (never lowers a live count), refuses a mismatched `hw_relays`, absent key preserves. Not backed up, by decision (2026-10-09, `docs/audits/BACKUP_CFGFS_COVERAGE_AUDIT_2026-10-09.md`): `iter_tune.bin`, `ki_base.dat` (re-learned by tuning), firing_stats history. | - |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
 | 6 | Hidden-builtin profile mask | dual-write, `/cfg/profiles/hidden.json` (NVS key `prof_bihid` + rev `prof_bihid_rev`; `/api/cfgfs` row `profiles_hidden`) | `2749be53` |
@@ -555,6 +556,10 @@ follows it.
 Marker and migration writes that are not config saves stay as they are:
 relay_cycles' NVS-to-NVS default-partition migration, adaptive_tune's
 enable-mask migrated marker. Each is documented in the code where it lives.
+Accepted trade-off (2026-10-09, `docs/audits/DEV_FIRMWARE_REVIEW_2_2026-10-09.md` finding 8): after
+the relay_cycles migration copy to `kiln_nvs` is read back and verified, the old default-partition
+`relay_cyc` key is erased, so a rollback to pre-split firmware sees no legacy copy and its relay cycle
+counts restart from 0. The current firmware loses nothing.
 The iter_tune store was an exception here until 2026-10-07 and is now closed
 like the rest (last section).
 

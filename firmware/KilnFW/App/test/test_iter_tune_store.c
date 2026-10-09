@@ -474,46 +474,135 @@ static void test_newer_version_refused_and_reported(void)
     TEST_CHECK(!iter_tune_store_schema_refused(NULL), "a truncated blob is corruption, not a version refusal");
 }
 
-// Step 7 review, 2026-09-23, MED finding 3: locks in and documents the
-// current, accepted limitation that note_schema_verdict() only ever fires
-// when the on-disk blob is EXACTLY sizeof(iter_tune_store_blob_t) -- a
-// future size-CHANGING version (larger or smaller than today's blob) is
-// rejected earlier, by hal_kv_get_blob()'s own `*out_len < len` size check
-// (fake_kv.c's do_get(), the same shape the real ESP NVS backend uses), and
-// never reaches note_schema_verdict() at all. This is NOT the desired
-// long-term behaviour -- see iter_tune_store.c's note_schema_verdict()
-// comment and docs/CONFIG_MIGRATION_CHAIN_PLAN.md's iter_tune row for the
-// same caveat -- but it is today's real, verified behaviour, and this test
-// exists so a future fix (or a future size-changing version that silently
-// regresses this) is a deliberate, visible decision rather than a surprise.
-static void test_larger_blob_size_change_not_reported_current_limitation(void)
+// A size-CHANGING newer-version NVS blob (larger than today's struct) must be
+// reported as "newer", not folded into corruption, and must NOT be erased or
+// overwritten (downgrade-then-upgrade keeps its tuning).
+static void tit_seed_raw(const uint8_t *bytes, size_t n)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
+               "hal_kv open for raw fixture");
+    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, bytes, n) == HAL_OK, "raw blob written directly");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static size_t tit_raw_len(void)
+{
+    hal_kv_handle_t h;
+    size_t len = 0;
+    if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
+        return 0;
+    }
+    if (hal_kv_get_blob(&h, ITER_TUNE_NVS_KEY_BLOB, NULL, &len) != HAL_OK) {
+        len = 0;
+    }
+    hal_kv_close(&h);
+    return len;
+}
+
+static void test_larger_newer_blob_reported_newer_and_preserved(void)
 {
     tit_reset_all();
     hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
 
-    // A hypothetical, larger "v3" blob: same first two bytes (version,
-    // zone_count) as every real schema this file has shipped, but padded out
-    // with extra trailing bytes a real size-changing version would add.
     uint8_t oversized[sizeof(iter_tune_store_blob_t) + 8];
     memset(oversized, 0, sizeof(oversized));
     oversized[0] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1); // newer-than-known
-    oversized[1] = 0; // zone_count
-
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
-               "hal_kv open for oversized-blob fixture");
-    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, oversized, sizeof(oversized)) == HAL_OK,
-               "oversized blob written directly");
-    hal_kv_commit(&h);
-    hal_kv_close(&h);
+    tit_seed_raw(oversized, sizeof(oversized));
 
     iter_tune_store_reset_for_test();
-    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates an oversized blob without crashing");
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates an oversized newer blob without crashing");
     TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "oversized blob is never trusted (falls back to defaults)");
-    TEST_CHECK(!iter_tune_store_schema_refused(NULL),
-               "CURRENT LIMITATION: a size-changing newer version is NOT reported as a schema refusal "
-               "(it is indistinguishable from ordinary corruption today) -- see iter_tune_store.c's "
-               "note_schema_verdict() comment");
+    uint8_t v = 0;
+    TEST_CHECK(iter_tune_store_schema_refused(&v) && v == (uint8_t)(ITER_TUNE_STORE_VERSION + 1),
+               "a size-changing newer version is reported as newer, not corruption");
+    TEST_CHECK(tit_raw_len() == sizeof(oversized), "the newer blob is preserved, not erased or rewritten");
+}
+
+// Negative: a CURRENT-version blob of the wrong size, or with bad contents,
+// is still corruption (no newer verdict).
+static void test_current_version_wrong_size_still_corruption(void)
+{
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    uint8_t oversized[sizeof(iter_tune_store_blob_t) + 8];
+    memset(oversized, 0, sizeof(oversized));
+    oversized[0] = ITER_TUNE_STORE_VERSION;
+    tit_seed_raw(oversized, sizeof(oversized));
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates a wrong-size current blob");
+    TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "wrong-size current blob is not trusted");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "wrong-size current-version blob is corruption, not newer");
+
+    // Right size, current version, invalid contents (zone_count too large).
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+    iter_tune_store_blob_t bad = {0};
+    bad.version = ITER_TUNE_STORE_VERSION;
+    bad.zone_count = (uint8_t)(ITER_TUNE_STORE_MAX_ZONES + 1);
+    tit_seed_raw((const uint8_t *)&bad, sizeof(bad));
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates an invalid current-version blob");
+    TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "invalid current-version blob is not trusted");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "invalid current-version blob is corruption, not newer");
+}
+
+// cfg-file twin of the NVS oversized-blob fix: a size-changing NEWER file is
+// reported newer and preserved byte-identical; a current-version wrong-size
+// file stays plain corruption (no report).
+static void test_cfg_wrong_size_newer_vs_corrupt(void)
+{
+    tit_scratch_clean();
+    TIT_MKDIR(TIT_SCRATCH_BASE);
+    TEST_CHECK(cfg_fs_init(TIT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts for wrong-size cfg test");
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    uint8_t big[4 + sizeof(iter_tune_store_blob_t) + 8];
+    memset(big, 0, sizeof(big));
+    big[0] = 7; // rev
+    big[4] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1);
+    big[sizeof(big) - 1] = 0xAB;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "newer file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates larger newer cfg file");
+    uint8_t rv = 0;
+    TEST_CHECK(iter_tune_store_schema_refused(&rv) && rv == (uint8_t)(ITER_TUNE_STORE_VERSION + 1),
+               "larger newer cfg file reported as NEWER");
+    uint8_t back[sizeof(big) + 16];
+    size_t got = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, back, sizeof(back), &got) == ESP_OK && got == sizeof(big) &&
+                   memcmp(back, big, sizeof(big)) == 0,
+               "newer cfg file preserved byte-identical");
+
+    // Current-version wrong size: corruption, not a newer report.
+    big[4] = ITER_TUNE_STORE_VERSION;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "wrong-size file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates wrong-size current-version file");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "current-version wrong-size file is corruption, not newer");
+
+    // A newer file larger than the probe buffer (cfg_fs_read fails INVALID_SIZE)
+    // must still count as NEWER and stay untouched.
+    static uint8_t huge[4 + PREF_CFG_FS_MAX_LARGE_ITEM + 64 + 100];
+    memset(huge, 0, sizeof(huge));
+    huge[0] = 9;
+    huge[4] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1);
+    huge[sizeof(huge) - 1] = 0xCD;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, huge, sizeof(huge)) == ESP_OK, "over-cap newer file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates over-cap newer cfg file");
+    TEST_CHECK(iter_tune_store_schema_refused(NULL), "over-cap newer cfg file reported as NEWER");
+    static uint8_t hback[sizeof(huge) + 16];
+    got = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, hback, sizeof(hback), &got) == ESP_OK && got == sizeof(huge) &&
+                   memcmp(hback, huge, sizeof(huge)) == 0,
+               "over-cap newer cfg file preserved byte-identical");
+
+    cfg_fs_deinit();
+    tit_scratch_clean();
 }
 
 static void test_cfg_fs_dual_write_tie_break(void)
@@ -576,12 +665,14 @@ void run_test_iter_tune_store(void)
 {
     test_blob_validate();
     test_cfg_round_trip();
+    test_cfg_wrong_size_newer_vs_corrupt();
     test_set_zone_refused_when_unmounted();
     test_nvs_copy_migrates_into_cfg_at_start();
     test_nvs_fallback_serves_when_unmounted();
     test_nvs_wrong_version_and_truncated();
     test_v1_old_layout_migrates();
     test_newer_version_refused_and_reported();
-    test_larger_blob_size_change_not_reported_current_limitation();
+    test_larger_newer_blob_reported_newer_and_preserved();
+    test_current_version_wrong_size_still_corruption();
     test_cfg_fs_dual_write_tie_break();
 }

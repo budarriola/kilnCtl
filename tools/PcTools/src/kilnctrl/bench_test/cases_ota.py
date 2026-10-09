@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from .. import web_auth_setup_http_client as _wac
 from . import judgments as J
+from . import windows
 from .registry import CaseResult, Verdict, get_case
 
 
@@ -468,6 +469,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
             observed=data,
         )
 
+    windows.fire_window(ctx, "otb01_before_reset", once=True)
     try:
         sw_reset_fn()
     except Exception as exc:
@@ -595,6 +597,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
         link_up and trip_reason == 6 and trip_mask == (1 << (6 - 1))
     )
     if clear_allowed:
+        windows.fire_window(ctx, "otb01_tripped", once=True)
         try:
             clear_trip_fn()
         except Exception as exc:
@@ -611,6 +614,8 @@ def _case_otb01(ctx: dict) -> CaseResult:
             sleep(1.0)
         if clear_ok is None:
             clear_ok = False
+        elif clear_ok:
+            windows.fire_window(ctx, "otb01_cleared", once=True)
         try:
             readiness_trip_ok = readiness_trip_ok_fn()
         except Exception as exc:
@@ -2435,8 +2440,39 @@ def _case_otg06(ctx: dict) -> CaseResult:
                       expected=result.expected, evidence=evidence)
 
 
+
+def _case_otb02(ctx: dict) -> CaseResult:
+    """OT-B02: summarize the OT-* results of the run in progress. Reads
+    ``ctx["_run_results"]`` (the runner's live results dict); never re-runs
+    anything. FAIL if any OT case is FAIL/ERROR. Otherwise PASS only if at
+    least one OT case PASSed and none is INCONCLUSIVE (SKIP/NOT_RUN rows are
+    not counted); any INCONCLUSIVE row, or no PASS row at all (all
+    NOT_RUN/SKIP, or a mix with INCONCLUSIVE), gives INCONCLUSIVE; a ctx with no results is an ERROR (reported
+    as FAIL, the runner's mapping for a case error)."""
+    results = ctx.get("_run_results")
+    if not isinstance(results, dict):
+        return CaseResult(Verdict.FAIL, reason="ERROR: no run results in ctx")
+    rows = {cid: str(getattr(r, "verdict", r)) for cid, r in results.items()
+            if cid.startswith("OT-") and cid != "OT-B02"}
+    if not rows:
+        return CaseResult(Verdict.FAIL, reason="ERROR: no OT-* results in ctx")
+    table = [f"{cid}: {v}" for cid, v in sorted(rows.items())]
+    bad = sorted(c for c, v in rows.items() if v in ("FAIL", "ERROR"))
+    observed = {"table": table}
+    if bad:
+        return CaseResult(Verdict.FAIL, reason="OT failures: " + ", ".join(bad),
+                          observed=observed, evidence=table)
+    inconc = sorted(c for c, v in rows.items() if v == "INCONCLUSIVE")
+    if inconc or not any(v == "PASS" for v in rows.values()):
+        why = ("INCONCLUSIVE OT cases: " + ", ".join(inconc)) if inconc else "no OT case ran"
+        return CaseResult(Verdict.INCONCLUSIVE, reason=why,
+                          observed=observed, evidence=table)
+    return CaseResult(Verdict.PASS, reason=f"{len(rows)} OT cases, none FAIL/ERROR/INCONCLUSIVE",
+                      observed=observed, evidence=table)
+
 _CASE_FUNCS = {
     "OT-B01": _case_otb01,
+    "OT-B02": _case_otb02,
     "OT-E01": _case_ote01,
     "OT-E02": _case_ote02,
     "OT-E03": _case_ote03,

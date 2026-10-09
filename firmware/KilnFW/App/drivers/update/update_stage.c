@@ -32,6 +32,21 @@ static bool claim(update_stage_t *st, update_stage_phase_t phase)
     return won;
 }
 
+// Same as claim(), but records the upload's owner inside the same locked section (review 7 L2): the
+// owned abort must never see the new phase with the previous upload's source.
+static bool claim_upload(update_stage_t *st, stage_source_t source)
+{
+    bool won = false;
+    lk(st);
+    if (st->phase == UPDATE_STAGE_IDLE) {
+        st->phase = UPDATE_STAGE_UPLOADING;
+        st->source = source;
+        won = true;
+    }
+    ul(st);
+    return won;
+}
+
 static void set_phase(update_stage_t *st, update_stage_phase_t phase)
 {
     lk(st);
@@ -139,7 +154,7 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
         memcpy(cm, commit, STAGE_COMMIT_HEX_LEN);
     }
 
-    if (!claim(st, UPDATE_STAGE_UPLOADING)) {
+    if (!claim_upload(st, source)) {
         return UPDATE_STAGE_ERR_BUSY;
     }
     st->scratch = scratch;
@@ -148,7 +163,6 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
     st->received = 0;
     st->written = 0;
     st->erased_upto = 0;
-    st->source = source;
     memcpy(st->semver, sv, sizeof(st->semver));
     memcpy(st->commit, cm, sizeof(st->commit));
     st->semver_given = given;
@@ -166,22 +180,15 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
             return e;
         }
     }
-    // From here the stage reads as blank until upload_finish writes a header.
-    if (st->io.erase(st->io.ctx, 0, STAGE_HEADER_SECTOR) != 0) {
-        set_phase(st, UPDATE_STAGE_IDLE);
-        return UPDATE_STAGE_ERR_FLASH;
-    }
-    if (st->io.sha_start(st->io.ctx) != 0) {
-        set_phase(st, UPDATE_STAGE_IDLE);
-        return UPDATE_STAGE_ERR_HASH;
-    }
+    // The header sector is NOT erased here: flush_head erases it only after the
+    // identity/version/policy checks pass, so a refused upload leaves the stage intact.
     return UPDATE_STAGE_OK;
 }
 
 static update_stage_err_t fail(update_stage_t *st, update_stage_err_t e)
 {
     sha_abort(st);
-    set_phase(st, UPDATE_STAGE_IDLE); // header already erased: stage stays blank
+    set_phase(st, UPDATE_STAGE_IDLE); // stage blank only if flush_head already erased the header
     return e;
 }
 
@@ -272,6 +279,15 @@ static update_stage_err_t flush_head(update_stage_t *st)
             return UPDATE_STAGE_ERR_POLICY;
         }
     }
+    // Checks passed: from here the stage reads as blank until upload_finish writes a header.
+    if (st->io.erase(st->io.ctx, 0, STAGE_HEADER_SECTOR) != 0) {
+        return UPDATE_STAGE_ERR_FLASH;
+    }
+    st->cache_valid = false;
+    st->bad_valid = false;
+    if (st->io.sha_start(st->io.ctx) != 0) {
+        return UPDATE_STAGE_ERR_HASH;
+    }
     return put(st, st->head, UPDATE_STAGE_HEAD_LEN);
 }
 
@@ -356,6 +372,45 @@ static update_stage_err_t hash_from_flash(update_stage_t *st, uint32_t length, u
     return UPDATE_STAGE_OK;
 }
 
+update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, const char *commit,
+                                              const update_image_id_t *id)
+{
+    (void)semver;
+    (void)commit; // the stager's declared commit IS the manifest's: comparing it proves nothing (review 5 M1)
+    const update_identity_t *want = ctx;
+    if (want == NULL || id == NULL) {
+        return UPDATE_STAGE_ERR_POLICY;
+    }
+    // Review 3 LOW-6 / review 5 M1: when the manifest carries a commit, the commit embedded in the IMAGE
+    // must be a prefix of it (the build embeds the short hash). An image with no usable commit
+    // ("", "unknown", non-hex, under 7 chars) fails closed.
+    // Review 8 L2: a legacy v1 record carries no commit, so when the manifest declares one the binding cannot be
+    // proven: fail closed ("image_id_v1_no_commit"). A manifest with no commit still accepts v1.
+    if (want->commit[0] != '\0' && id->magic == UPDATE_IMAGE_ID_MAGIC_V1) {
+        return UPDATE_STAGE_ERR_POLICY; // image_id_v1_no_commit
+    }
+    if (want->commit[0] != '\0') {
+        const size_t n = strnlen(id->commit, UPDATE_IMAGE_ID_COMMIT_LEN);
+        if (n < 7u || n > STAGE_COMMIT_HEX_LEN) {
+            return UPDATE_STAGE_ERR_POLICY;
+        }
+        for (size_t i = 0; i < n; i++) {
+            char a = id->commit[i];
+            char b = want->commit[i];
+            a = (a >= 'A' && a <= 'F') ? (char)(a + 32) : a;
+            b = (b >= 'A' && b <= 'F') ? (char)(b + 32) : b;
+            if (!((a >= '0' && a <= '9') || (a >= 'a' && a <= 'f')) || a != b) {
+                return UPDATE_STAGE_ERR_POLICY;
+            }
+        }
+    }
+    if (id->zones_cfg_version != want->zones_cfg_version || id->kilnlink_version != want->kilnlink_version ||
+        id->uart_version != want->uart_version) {
+        return UPDATE_STAGE_ERR_POLICY;
+    }
+    return UPDATE_STAGE_OK;
+}
+
 update_stage_err_t update_stage_upload_finish(update_stage_t *st)
 {
     if (st == NULL) {
@@ -423,6 +478,38 @@ void update_stage_upload_abort(update_stage_t *st)
     }
 }
 
+bool update_stage_upload_abort_owned(update_stage_t *st, stage_source_t source)
+{
+    if (st == NULL) {
+        return false;
+    }
+    // Owner test, hash abort and IDLE transition in ONE locked section (review 7 L2). sha_abort takes no
+    // stage lock, so calling it here cannot deadlock.
+    bool aborted = false;
+    lk(st);
+    if (st->source == source && (st->phase == UPDATE_STAGE_UPLOADING || st->phase == UPDATE_STAGE_VERIFYING)) {
+        sha_abort(st);
+        st->phase = UPDATE_STAGE_IDLE;
+        aborted = true;
+    }
+    ul(st);
+    return aborted;
+}
+
+const char *update_stage_status_reason(const update_stage_info_t *info, bool writer_wedged)
+{
+    if (info == NULL) {
+        return "";
+    }
+    // Review 7 L1: while the wedged op hangs the stage is UPLOADING/VERIFYING and reads "busy"; that busy is
+    // the wedge when the GitHub fetch owns it. A real fault reason (sha_mismatch, ...) is never masked.
+    if (writer_wedged && !info->staged && info->reason != NULL &&
+        (strcmp(info->reason, "blank") == 0 || (strcmp(info->reason, "busy") == 0 && info->source == STAGE_SOURCE_GITHUB))) {
+        return "writer_wedged_reboot_required";
+    }
+    return info->reason;
+}
+
 update_stage_err_t update_stage_clear(update_stage_t *st)
 {
     if (st == NULL || !io_ok(&st->io)) {
@@ -451,6 +538,7 @@ update_stage_err_t update_stage_get_status(update_stage_t *st, uint8_t *scratch,
         out->phase = st->phase;
         out->bytes_done = st->received;
         out->bytes_total = st->total;
+        out->source = st->source;
         ul(st);
         out->busy = true;
         out->reason = "busy";

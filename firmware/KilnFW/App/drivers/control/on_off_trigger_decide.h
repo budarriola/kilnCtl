@@ -99,7 +99,6 @@ typedef struct {
     // --- Precedence 3: run state (plan sec 3 level 3).
     bool run_running;            /* PROFILE_EXEC_RUNNING */
     bool run_paused;             /* PROFILE_EXEC_PAUSED */
-    bool failsafe_on_pause;      /* zone_cfg_t-derived: true = go fail-safe on PAUSE too */
 
     // --- Precedence 4: minimum on/off dwell (plan sec 3's hysteresis
     // section, "Minimum on/off time"). 0 substituted with the plan's 30 s

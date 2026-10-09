@@ -134,6 +134,8 @@ static void fill_worst_case_status(profile_exec_status_t *st)
         st->aux[ai].commanded_on = false; /* "false" is the widest bool */
         st->aux[ai].actuated_on = false;
         st->aux[ai].rule_reason = 255;
+        st->aux[ai].on_time_s = 0xFFFFFFFFu;
+        st->aux[ai].switch_count = 0xFFFFFFFFu;
     }
 }
 
@@ -418,7 +420,7 @@ static void test_exec_status_json_carries_aux_array(void)
     int aux_objects = 0;
     for (const char *p = json; (p = strstr(p, "\"relay\":")) != NULL; p += 8) aux_objects++;
     TEST_CHECK(aux_objects == 4, "all 4 claimed aux must be present");
-    TEST_CHECK(strstr(json, "\"relay\":4,\"commanded_on\":false,\"actuated_on\":false,\"rule_reason\":255}]") != NULL,
+    TEST_CHECK(strstr(json, "\"relay\":4,\"commanded_on\":false,\"actuated_on\":false,\"rule_reason\":255,\"on_time_s\":4294967295,\"switch_count\":4294967295}]") != NULL,
               "the last aux object must be intact and close the array");
 
     /* Mixed: only aux 2 (index 1) claimed, ON, reason NONE. */
@@ -426,13 +428,15 @@ static void test_exec_status_json_carries_aux_array(void)
     st.aux[1].claimed = true;
     st.aux[1].commanded_on = true;
     st.aux[1].actuated_on = true;
+    st.aux[1].on_time_s = 42;
+    st.aux[1].switch_count = 2;
     o = (size_t)snprintf(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, "{");
     o = append_zone_status_json(json, DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE, o, &st, false);
     json[o++] = '}';
     json[o] = '\0';
     TEST_CHECK(json_looks_complete(json), "single-aux render must be complete JSON");
     TEST_CHECK(strstr(json, "\"aux\":[{\"relay\":2,\"commanded_on\":true,\"actuated_on\":true,"
-                            "\"rule_reason\":0}]") != NULL,
+                            "\"rule_reason\":0,\"on_time_s\":42,\"switch_count\":2}]") != NULL,
               "only the claimed aux is listed, 1-based relay number, true values");
 
     /* Nothing claimed: empty array. */
@@ -908,6 +912,7 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
         }
     }
 
+    STATUS_APPEND(",\"recovery_mode\":%s", "false");
     STATUS_APPEND(",\"safety_build_known\":%s", "true");
     {
         char commit_raw[65], commit_esc[65 * 2 + 1];

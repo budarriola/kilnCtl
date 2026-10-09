@@ -272,7 +272,7 @@ class Dash13Test(unittest.TestCase):
             ]},
             post_responses={"/api/unit_pref": (200, {"ok": True})},
         )
-        ctx = {"http_get_json": fake.get, "http_post_json": fake.post}
+        ctx = {"suite": "web", "http_get_json": fake.get, "http_post_json": fake.post}
         result = C._case_dash13(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
 
@@ -285,7 +285,7 @@ class Dash13Test(unittest.TestCase):
             ]},
             post_responses={"/api/unit_pref": (200, {"ok": True})},
         )
-        ctx = {"http_get_json": fake.get, "http_post_json": fake.post}
+        ctx = {"suite": "web", "http_get_json": fake.get, "http_post_json": fake.post}
         result = C._case_dash13(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("write", result.reason)
@@ -301,7 +301,7 @@ class Dash13Test(unittest.TestCase):
             ]},
             post_responses={"/api/unit_pref": (200, {"ok": True})},
         )
-        ctx = {"http_get_json": fake.get, "http_post_json": fake.post}
+        ctx = {"suite": "web", "http_get_json": fake.get, "http_post_json": fake.post}
         result = C._case_dash13(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("restore", result.reason)
@@ -320,14 +320,14 @@ class Dash13Test(unittest.TestCase):
                 raise RuntimeError("simulated transport failure")
             return 200, {"ok": True}
 
-        ctx = {"http_get_json": _get, "http_post_json": _post}
+        ctx = {"suite": "web", "http_get_json": _get, "http_post_json": _post}
         with self.assertRaises(RuntimeError):
             C._case_dash13(ctx)
         # restore POST attempted despite the exception
         self.assertEqual(len(calls), 2)
 
     def test_initial_get_failure_fails(self):
-        ctx = {"http_get_json": lambda path: (500, None), "http_post_json": lambda path, fields: (200, {"ok": True})}
+        ctx = {"suite": "web", "http_get_json": lambda path: (500, None), "http_post_json": lambda path, fields: (200, {"ok": True})}
         result = C._case_dash13(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
@@ -342,7 +342,7 @@ class Diag07Test(unittest.TestCase):
             ]},
             post_responses={"/api/watchdog_cfg": (200, {"ok": True})},
         )
-        ctx = {"http_get_json": fake.get, "http_post_json": fake.post}
+        ctx = {"suite": "web", "http_get_json": fake.get, "http_post_json": fake.post}
         result = C._case_diag07(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         # POST form field is "disabled", not the JSON field "panic_disabled"
@@ -359,7 +359,7 @@ class Diag08Test(unittest.TestCase):
             ]},
             post_responses={"/api/ramp_assist": (200, {"ok": True})},
         )
-        ctx = {"http_get_json": fake.get, "http_post_json": fake.post}
+        ctx = {"suite": "web", "http_get_json": fake.get, "http_post_json": fake.post}
         result = C._case_diag08(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
 
@@ -526,7 +526,7 @@ class WebSec04Test(unittest.TestCase):
 
     def test_skips_naming_the_variable_when_unset(self):
         client = FakeSec04Client(admin_pin_set=True)
-        result = C._case_web_sec04({"sec_client": client})
+        result = C._case_web_sec04({"suite": "web", "sec_client": client})
         self.assertEqual(result.verdict, Verdict.SKIP)
         self.assertIn(C._LCD_PIN_ENV, result.reason)
         self.assertEqual(client.set_lcd_pin_calls, [])
@@ -538,7 +538,7 @@ class WebSec04Test(unittest.TestCase):
         # is exercised, never a set_lcd_pin call.
         os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(admin_pin_set=True, lcd_enabled=False)
-        ctx = {"sec_client": client}
+        ctx = {"suite": "web", "sec_client": client}
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(client.set_lcd_pin_calls, [])
@@ -547,7 +547,7 @@ class WebSec04Test(unittest.TestCase):
     def test_happy_path_passes_and_restores(self):
         os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(admin_pin_set=False, lcd_enabled=False)
-        ctx = {"sec_client": client}
+        ctx = {"suite": "web", "sec_client": client}
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(client.set_lcd_pin_calls, [("admin", self._PIN)])
@@ -562,7 +562,7 @@ class WebSec04Test(unittest.TestCase):
     def test_ctx_literal_pin_used_without_env_var(self):
         # ctx["lcd_admin_pin"] takes priority over the environment.
         client = FakeSec04Client(admin_pin_set=False, lcd_enabled=False)
-        ctx = {"sec_client": client, "lcd_admin_pin": self._PIN}
+        ctx = {"suite": "web", "sec_client": client, "lcd_admin_pin": self._PIN}
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(client.set_lcd_pin_calls, [("admin", self._PIN)])
@@ -570,7 +570,7 @@ class WebSec04Test(unittest.TestCase):
     def test_set_lcd_pin_not_confirmed_fails_and_never_enables(self):
         os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(set_lcd_pin_ok=False)
-        ctx = {"sec_client": client}
+        ctx = {"suite": "web", "sec_client": client}
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         # never enabled (True) -- the only set_policy call is the finally
@@ -581,7 +581,7 @@ class WebSec04Test(unittest.TestCase):
     def test_enable_not_confirmed_fails(self):
         os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(enable_ok=False)
-        ctx = {"sec_client": client}
+        ctx = {"suite": "web", "sec_client": client}
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertNotIn("_lcd_pin", ctx)
@@ -589,7 +589,7 @@ class WebSec04Test(unittest.TestCase):
     def test_restore_failure_fails_even_if_everything_else_passed(self):
         os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(restore_ok=False)
-        ctx = {"sec_client": client}
+        ctx = {"suite": "web", "sec_client": client}
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("restore", result.reason)
@@ -601,7 +601,7 @@ class WebSec04Test(unittest.TestCase):
         class BrokenClient:
             def get_config(self):
                 return 500, None
-        result = C._case_web_sec04({"sec_client": BrokenClient()})
+        result = C._case_web_sec04({"suite": "web", "sec_client": BrokenClient()})
         self.assertEqual(result.verdict, Verdict.FAIL)
 
 
@@ -637,7 +637,7 @@ class WebSec04PinFormatAndLeakTest(unittest.TestCase):
         ]
         for kw in variants:
             with self.subTest(**kw):
-                result = C._case_web_sec04({"sec_client": FakeSec04Client(**kw)})
+                result = C._case_web_sec04({"suite": "web", "sec_client": FakeSec04Client(**kw)})
                 self._assert_no_leak(result, self._PIN, wrong)
 
     def test_leak_check_is_not_vacuous(self):
@@ -652,7 +652,7 @@ class WebSec04PinFormatAndLeakTest(unittest.TestCase):
             with self.subTest(bad=bad):
                 os.environ[C._LCD_PIN_ENV] = bad
                 client = FakeSec04Client(admin_pin_set=False)
-                ctx = {"sec_client": client}
+                ctx = {"suite": "web", "sec_client": client}
                 result = C._case_web_sec04(ctx)
                 self.assertEqual(result.verdict, Verdict.FAIL)
                 self.assertIn(C._LCD_PIN_ENV, result.reason)
@@ -664,7 +664,7 @@ class WebSec04PinFormatAndLeakTest(unittest.TestCase):
     def test_never_timeout_passes_through_restore(self):
         os.environ[C._LCD_PIN_ENV] = self._PIN
         client = FakeSec04Client(web_timeout_min=-1, lcd_timeout_min=-1)
-        result = C._case_web_sec04({"sec_client": client})
+        result = C._case_web_sec04({"suite": "web", "sec_client": client})
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(client._cfg["web_timeout_min"], -1)
         self.assertEqual(client._cfg["lcd_timeout_min"], -1)
@@ -682,7 +682,7 @@ class WebSec03Test(unittest.TestCase):
 
     def test_happy_path_passes_and_restores(self):
         client = FakeSecClient()
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         # enabled then restored to original (False)
@@ -691,7 +691,7 @@ class WebSec03Test(unittest.TestCase):
 
     def test_password_not_stored_fails_and_never_enables(self):
         client = FakeSecClient(pw_ok=False)
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("set_web_password", result.reason)
@@ -706,7 +706,7 @@ class WebSec03Test(unittest.TestCase):
         get_status_location stands in for the observed (non-followed)
         status directly."""
         client = FakeSecClient(admin_page_status=302, admin_page_location="/login?return=/settings/zones")
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("settings/zones", result.reason)
@@ -715,14 +715,14 @@ class WebSec03Test(unittest.TestCase):
         """A 401 on the shell itself (the pre-handler exemption missing)
         fails too -- only a plain 200 counts."""
         client = FakeSecClient(admin_page_status=401, admin_page_location=None)
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("settings/zones", result.reason)
 
     def test_api_route_not_gated_fails_even_with_page_gated(self):
         client = FakeSecClient(api_status=200)
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("api/zones", result.reason)
@@ -732,7 +732,7 @@ class WebSec03Test(unittest.TestCase):
         be empty, even on the happy path -- this is the evidence the live
         bench failure lacked."""
         client = FakeSecClientWithBody()
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(result.observed.get("dashboard_status"), 200)
@@ -742,7 +742,7 @@ class WebSec03Test(unittest.TestCase):
         """The live bug: a single-worker httpd can still be busy right after
         set_policy(web_enabled=1); the probe must retry before failing."""
         client = FakeSecClientWithBody(dashboard_bodies=[(503, "busy"), (503, "busy"), (200, "<html>ok</html>")])
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         with mock.patch.object(C, "time") as fake_time:
             result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
@@ -752,7 +752,7 @@ class WebSec03Test(unittest.TestCase):
 
     def test_dashboard_probe_exhausts_retries_and_fails_with_evidence(self):
         client = FakeSecClientWithBody(dashboard_bodies=[(503, "busy1"), (503, "busy2"), (503, "busy3")])
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         with mock.patch.object(C, "time") as fake_time:
             result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
@@ -767,7 +767,7 @@ class WebSec03Test(unittest.TestCase):
         status-only fallback in _probe_dashboard."""
         client = FakeSecClient()
         self.assertFalse(hasattr(client, "get_status_body"))
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(result.observed.get("dashboard_status"), 200)
@@ -777,7 +777,7 @@ class WebSec03Test(unittest.TestCase):
         """finally-discipline: a raising login() must not prevent the
         restore set_policy(False) call from running."""
         client = FakeSecClient(login_raises=True)
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         with self.assertRaises(RuntimeError):
             C._case_web_sec03(ctx)
         self.assertIn(False, client.set_policy_calls)
@@ -785,7 +785,7 @@ class WebSec03Test(unittest.TestCase):
 
     def test_restore_failure_fails_even_if_everything_else_passed(self):
         client = FakeSecClient(restore_ok=False)
-        ctx = {"sec_client": client, "web_username": "admin", "web_password": "secret"}
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
         result = C._case_web_sec03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("restore", result.reason)
@@ -816,7 +816,7 @@ class WebZone14Test(unittest.TestCase):
             get_queues={"/api/zones": [(200, first), (200, second if second is not None else first)]},
             post_responses={},
         )
-        ctx = {"http_get_json": fake.get, "http_post_json": fake.post}
+        ctx = {"suite": "web", "http_get_json": fake.get, "http_post_json": fake.post}
         return C._case_web_zone14(ctx), fake
 
     def test_healthy_config_passes_and_never_posts(self):

@@ -915,12 +915,13 @@ static bool convert_versioned_blob_to_current_impl(uint8_t version, const void *
     }
 }
 
-static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
+static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out, bool *out_oom)
 {
     void *scratch = persist_scratch_alloc(sizeof(zones_cfg_t));
     if (!scratch) {
         memset(out, 0, sizeof(*out));
-        return false; /* OOM reads as a failed conversion (clean load failure) */
+        *out_oom = true; /* distinct from a failed conversion: the bytes were never judged */
+        return false;
     }
     bool ok = convert_versioned_blob_to_current_impl(version, blob, out, scratch);
     free(scratch);
@@ -1144,8 +1145,13 @@ zones_decode_result_t zones_config_json_decode_blob(const void *blob, size_t len
                 return ZONES_DECODE_CORRUPT;
             }
         }
-        if (!convert_versioned_blob_to_current(version, blob, out)) {
+        bool convert_oom = false;
+        if (!convert_versioned_blob_to_current(version, blob, out, &convert_oom)) {
             memset(out, 0, sizeof(*out));
+            if (convert_oom) {
+                *reason = "out of memory converting the stored version -- not judged";
+                return ZONES_DECODE_OOM;
+            }
             *reason = "unable to convert stored version to the current layout";
             return ZONES_DECODE_CORRUPT;
         }

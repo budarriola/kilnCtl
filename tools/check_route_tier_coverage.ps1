@@ -186,10 +186,30 @@ function Invoke-RouteTierCoverageScan {
         }
     }
 
+    # Reverse direction (ROUTE_TIER_REVIEW_2026-10-09 LOW-1): a table row
+    # with no registered route is stale and must be deleted.
+    $registeredKeys = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($r in $allRoutes) {
+        if ($null -ne $r.Method) { [void]$registeredKeys.Add("$($r.Method) $($r.Uri)") }
+    }
+    # A route whose method could not be parsed is already reported in Missing (fail-closed); its URI's
+    # table rows must not ALSO be reported stale (DEV_TOOLS_REVIEW_2026-10-09 LOW-4), since that would
+    # point the reader at deleting a row that is in fact needed.
+    $unparsedUris = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($r in $allRoutes) {
+        if ($null -eq $r.Method) { [void]$unparsedUris.Add($r.Uri) }
+    }
+    $stale = New-Object System.Collections.Generic.List[string]
+    foreach ($k in $tieredKeys.Keys) {
+        $keyUri = $k.Substring($k.IndexOf(' ') + 1)
+        if (-not $registeredKeys.Contains($k) -and -not $unparsedUris.Contains($keyUri)) { $stale.Add($k) }
+    }
+
     return [PSCustomObject]@{
         TotalRoutes  = $allRoutes.Count
         TotalTiered  = $tieredKeys.Count
         Missing      = $missing
+        Stale        = $stale
     }
 }
 
@@ -215,6 +235,12 @@ if ($MyInvocation.InvocationName -ne '.') {
         throw "$($result.Missing.Count) route(s) have no ROUTE_TIER(...) entry in $TableFile. Add one for each route named above before merging -- an unclassified route must never ship."
     }
 
-    Write-Host "Route tier coverage check passed: every registered route has a tier."
+    if ($result.Stale.Count -gt 0) {
+        Write-Host "ROUTE TIER COVERAGE CHECK FAILED: $($result.Stale.Count) stale ROUTE_TIER row(s) with no registered route:" -ForegroundColor Red
+        foreach ($k in ($result.Stale | Sort-Object)) { Write-Host "    $k" -ForegroundColor Red }
+        throw "$($result.Stale.Count) stale row(s) in $TableFile name no registered route. Delete them (route_tier_table.h file header)."
+    }
+
+    Write-Host "Route tier coverage check passed: every registered route has a tier and no table row is stale."
     exit 0
 }

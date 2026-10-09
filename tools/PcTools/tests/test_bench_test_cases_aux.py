@@ -50,6 +50,7 @@ class FakeSrv:
         self.refuse_r1 = True
         self.trip_reason = 0
         self.delete_fails = False
+        self.slot_names = {}
 
     @property
     def r4(self):
@@ -67,7 +68,9 @@ class FakeSrv:
         return "\n".join(names) or "no saved profiles"
 
     def profiles_get_exec_status(self):
-        return f"state={self.exec_state} profile=#{self.exec_pid} 'x' segment=0/2"
+        # Real MCP text prints the raw int enum, not the name.
+        n = {"idle": 0, "running": 1, "paused": 2, "done": 3, "faulted": 4}[self.exec_state]
+        return f"state={n} profile=#{self.exec_pid} 'x' segment=0/2"
 
     def control_set_aux_output(self, relay, enabled, tc_zone=None, confirm=False, **kw):
         self.calls.append(("set_aux", relay, enabled, confirm))
@@ -132,6 +135,11 @@ class FakeSrv:
         self.exec_state = "running"
         return "ok"
 
+    def profiles_get(self, pid):
+        if pid in self.saved or (pid == 7 and self.preexisting_slot):
+            return f"#{pid} {self.slot_names.get(pid, 'BENCH_AUX_RULE')!r} zone_mask=0x1"
+        return f"no such profile #{pid}"
+
     def profiles_delete(self, pid):
         self.calls.append(("delete", pid))
         if self.delete_fails:
@@ -165,7 +173,7 @@ def _ctx(srv, **kw):
     ctx = {"srv": srv, "aux_confirm": True, "allow_heat": True, "sleep_fn": lambda s: None,
            "aux_window_s": 6.0, "aux_idle_fn": lambda: srv.exec_idle,
            "aux_relay_fn": lambda r: srv.relay4_shadow,
-           "aux_post_fn": lambda relay, en, tc: (400, False)}
+           "aux_post_fn": lambda relay, en, tc: (409, False, "HTTP 409 that relay is claimed by a zone relay_mask -- remove it")}
     ctx.update(kw)
     return ctx
 
@@ -453,10 +461,37 @@ class Finding4FirmwareRefusalTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
         self.assertIn("firmware", r.reason)
 
-    def test_firmware_400_and_precheck_pass(self):
+    def test_firmware_409_zone_conflict_and_precheck_pass(self):
         r = C._case_ax_c02(_ctx(FakeSrv()))
         self.assertEqual(r.verdict, Verdict.PASS)
-        self.assertEqual(r.observed["firmware_status"], 400)
+        self.assertEqual(r.observed["firmware_status"], 409)
+
+    def test_teardown_hook_deletes_saved_profiles(self):
+        srv = FakeSrv()
+        srv.saved[7] = {}
+        ctx = _ctx(srv, _aux_profile_ids=[7])
+        C.aux_teardown_hook(ctx)
+        self.assertNotIn(7, srv.saved)
+        self.assertEqual(ctx["_aux_profile_ids"], [])
+
+    def test_slot_exists_error_text_is_unreadable(self):
+        srv = FakeSrv()
+        srv.profiles_list = lambda: "error: link down"
+        self.assertIsNone(C._slot_exists({"srv": srv}))
+
+    def test_409_for_wrong_reason_fails(self):
+        r = C._case_ax_c02(_ctx(FakeSrv(), aux_post_fn=lambda relay, en, tc: (409, False, "a firing is active")))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_plain_400_fails(self):
+        r = C._case_ax_c02(_ctx(FakeSrv(), aux_post_fn=lambda relay, en, tc: (400, False, "hyst_c out of range")))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_exec_numeric_state_parsed_and_garbage_rejected(self):
+        ctx = {"srv": type("S", (), {"profiles_get_exec_status": lambda self: "state=1 profile=#3 'x'"})()}
+        self.assertEqual(C._exec(ctx), ("running", 3))
+        ctx = {"srv": type("S", (), {"profiles_get_exec_status": lambda self: "state=9 profile=#3 'x'"})()}
+        self.assertIsNone(C._exec(ctx))
 
     def test_precheck_not_refusing_fails_separately(self):
         srv = FakeSrv()
@@ -579,6 +614,45 @@ class Finding8TeardownTest(unittest.TestCase):
         srv = FakeSrv()
         C._teardown(_ctx(srv), 7)
         self.assertNotIn(("stop",), srv.calls)
+
+
+class TeardownListTest(unittest.TestCase):
+    def test_r01_prunes_deleted_ids_so_hook_is_clean(self):
+        srv = FakeSrv()
+        srv.saved[7] = {}
+        ctx = _ctx(srv, _aux_profile_ids=[7], _aux_orig={"enabled_mask": 0})
+        C._restore = lambda c, _o=C._restore: []
+        try:
+            C._case_ax_r01(ctx)
+        finally:
+            C._restore = _ORIG_RESTORE
+        self.assertEqual(ctx["_aux_profile_ids"], [])
+        C.aux_teardown_hook(ctx)
+        self.assertEqual(srv.calls.count(("delete", 7)), 1)
+        self.assertFalse(ctx.get("_tainted"))
+
+    def test_hook_collects_errors_and_continues(self):
+        srv = FakeSrv()
+        srv.saved.update({1: {}, 2: {}})
+        srv.delete_fails = True
+        ctx = _ctx(srv, _aux_profile_ids=[1, 2])
+        with self.assertRaises(RuntimeError) as cm:
+            C.aux_teardown_hook(ctx)
+        self.assertIn("profiles_delete(1)", str(cm.exception))
+        self.assertIn("profiles_delete(2)", str(cm.exception))
+        self.assertTrue(ctx["_tainted"])
+
+    def test_hook_does_not_delete_foreign_slot(self):
+        srv = FakeSrv()
+        srv.saved[3] = {}
+        srv.slot_names[3] = "USER_FIRING"
+        ctx = _ctx(srv, _aux_profile_ids=[3])
+        with self.assertRaises(RuntimeError):
+            C.aux_teardown_hook(ctx)
+        self.assertNotIn(("delete", 3), srv.calls)
+
+
+_ORIG_RESTORE = C._restore
 
 
 if __name__ == "__main__":

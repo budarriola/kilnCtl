@@ -276,6 +276,32 @@ class RunnerLifecycleTest(unittest.TestCase):
             self.assertIn("allow_heat not set; OT-E07/E08/G04 start their own heat", outcome.results[cid].reason)
         self.assertIs(runner.ctx.get("ota_allow_heat"), False)
 
+    def test_run_start_probe_stores_baseline_before_first_case(self):
+        import dataclasses
+        seen = {}
+        def judge(ctx):
+            seen["v"] = ctx.get("_k")
+            return R.CaseResult(R.Verdict.PASS)
+        self._saved_specs.setdefault("ST-05", R.REGISTRY["ST-05"])
+        R.REGISTRY["ST-05"] = dataclasses.replace(R.REGISTRY["ST-05"], judge=judge,
+                                                  run_start_probe=("_k", lambda ctx: 42))
+        BenchTestRunner(self.ctx, logs_root=self.tmpdir).run(suite="smoke", cases=["ST-05"])
+        self.assertEqual(seen["v"], 42)
+
+    def test_run_start_probe_failure_leaves_key_unset(self):
+        import dataclasses
+        seen = {}
+        def judge(ctx):
+            seen["v"] = ctx.get("_k", "unset")
+            return R.CaseResult(R.Verdict.PASS)
+        def boom(ctx):
+            raise RuntimeError("x")
+        self._saved_specs.setdefault("ST-05", R.REGISTRY["ST-05"])
+        R.REGISTRY["ST-05"] = dataclasses.replace(R.REGISTRY["ST-05"], judge=judge, run_start_probe=("_k", boom))
+        out = BenchTestRunner(self.ctx, logs_root=self.tmpdir).run(suite="smoke", cases=["ST-05"])
+        self.assertEqual(seen["v"], "unset")
+        self.assertEqual(out.results["ST-05"].verdict, R.Verdict.PASS)
+
     def test_case_raising_becomes_a_fail_not_a_crash(self):
         def _boom(ctx):
             raise RuntimeError("synthetic case blowup")
@@ -286,12 +312,15 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertIn("synthetic case blowup", outcome.results["ST-05"].reason)
 
     def test_not_implemented_case_reports_not_run(self):
-        # SP-10 (CT / S9 / S14 / S15) has judge=None in wave 0.
-        self.assertIsNone(R.get_case("SP-10").judge)
+        # Pick a genuinely judge-less case from the registry itself so this
+        # does not break each time a case gains a judge.
+        cid = next((c for c, spec in R.REGISTRY.items() if spec.judge is None and not spec.depends_on), None)
+        if cid is None:
+            self.skipTest("every registered case has a judge")
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
-        outcome = runner.run(suite="safety", cases=["SP-10"])
-        self.assertEqual(outcome.results["SP-10"].verdict, R.Verdict.NOT_RUN)
-        self.assertEqual(outcome.results["SP-10"].reason, "not_implemented")
+        outcome = runner.run(suite="full", cases=[cid])
+        self.assertEqual(outcome.results[cid].verdict, R.Verdict.NOT_RUN)
+        self.assertEqual(outcome.results[cid].reason, "not_implemented")
 
     def test_full_suite_cases_filter_crosses_suite_boundary_for_a_dependency(self):
         """LCD-19 (suite `lcd`) `depends_on` WEB-SEC-04 (suite `web`) -- the
@@ -364,6 +393,36 @@ class RunnerLifecycleTest(unittest.TestCase):
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
         runner.teardown()
         self.assertTrue(self.fake_srv.profiles_stop_called)
+
+    def test_teardown_stops_a_paused_run(self):
+        self.fake_srv.exec_status = _FakeExecStatus("paused")
+        self.ctx["teardown_idle_poll_s"] = 0
+        BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertTrue(self.fake_srv.profiles_stop_called)
+
+    def test_teardown_reports_executor_not_idle(self):
+        self.fake_srv.exec_status = _FakeExecStatus("running")  # stop does not take effect
+        self.ctx["teardown_idle_poll_s"] = 0
+        after = BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertIn("not confirmed idle", after["teardown_executor"])
+        self.assertTrue(self.ctx["_tainted"])
+
+    def test_teardown_skips_restore_hooks_when_executor_not_idle(self):
+        ran = []
+        self.fake_srv.exec_status = _FakeExecStatus("running")  # stop does not take effect
+        self.ctx["teardown_idle_poll_s"] = 0
+        self.ctx["teardown_hooks"] = [lambda ctx: ran.append(1)]
+        after = BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertEqual(ran, [])
+        self.assertIn("not run", after["teardown_hooks_skipped"])
+
+    def test_teardown_hook_error_reported(self):
+        def boom(ctx):
+            raise RuntimeError("restore failed")
+        self.ctx["teardown_hooks"] = [boom]
+        after = BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertIn("restore failed", after["teardown_hook_errors"][0])
+        self.assertTrue(self.ctx["_tainted"])
 
 
 class _FwSrv(_FakeSrv):

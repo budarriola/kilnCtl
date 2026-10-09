@@ -128,6 +128,20 @@ void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_va
 void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                                 void *out_bytes, uint32_t *out_rev, bool *out_valid);
 
+// Newer-schema probe for a file whose length does NOT match the caller's
+// current struct (a size-changing newer-firmware blob is otherwise
+// indistinguishable from corruption: load_raw/resolve reject any wrong-size
+// file before the validator runs). Returns true only when the file exists, its
+// length differs from 4 + item_size, is long enough to hold the version byte,
+// and that byte (at item offset `version_offset`) is above `current_version`;
+// *out_version then holds it. Read-only: never writes or erases. A wrong-size
+// file at current-or-older version, an exact-size file, an absent file or an
+// unmounted cfg all return false (corruption/normal paths unchanged).
+// Callers that get true must not let pref_cfg_fs_resolve() run, since its
+// NVS->file migration would overwrite the newer file.
+bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
+                                        uint8_t current_version, uint8_t *out_version);
+
 // Core of the read-through policy. `nvs_bytes`/`nvs_valid`/`nvs_rev` are
 // whatever the caller's existing NVS load already produced this boot --
 // never read or written by this function, a pure decision given these

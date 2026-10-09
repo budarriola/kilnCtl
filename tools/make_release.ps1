@@ -34,6 +34,11 @@
 # generated: git log --oneline <previous semver tag merged into HEAD>..HEAD, or the last 50
 # commits if there is none. The body is also written to logs\release\<tag>.notes.md for review.
 #
+# Bench evidence: after the app binary is located, `release_gates.py bench-evidence --app-bin` requires a
+# full, passing, <= 7 day old run of suites ota, lcd, safety on exactly that build. Treated like an open
+# gate: -Publish of a STABLE tag refuses without it unless -AllowOpenGates; dry runs and pre-release tags
+# print the result as a WARNING. -BenchLogsDir overrides the logs location.
+#
 # -Publish (token from env KILNCTL_GITHUB_TOKEN, never printed): POST a DRAFT release
 # with target_commitish = the commit, upload every asset, re-download each one and
 # compare sha256, and only then PATCH draft=false. Any mismatch leaves the draft in
@@ -51,7 +56,9 @@ param(
     [string]$NotesFile,
     [string]$GatesFile,
     [switch]$AllowOpenGates,
-    [switch]$LoadFunctionsOnly
+    [string]$BenchLogsDir,       # bench_test run logs (default <repo>\logs\bench_test; gitignored, so pass the main tree's in a release worktree)
+    [switch]$LoadFunctionsOnly,
+    [int]$DramCeilingBytes = 0   # test override for the .dram0.bss gate (0 = checker default)
 )
 
 $ErrorActionPreference = "Stop"
@@ -168,6 +175,15 @@ function Invoke-ReleasePublish {
     Write-Host "published $Tag : https://github.com/$Repo/releases/tag/$Tag"
 }
 
+function Test-DramBssBudget([string]$Python, [string]$Elf, [int]$Ceiling = 0) {
+    # Reuses the standing checker (no second parser). Exit 0 = pass; 1 = over; 3 = unmeasured SKIP -- both refuse.
+    $checker = Join-Path $repoRoot "firmware\KilnFW\App\test\check_kilnfw_dram_bss_budget.py"
+    $a = @($checker, "--elf", $Elf)
+    if ($Ceiling -gt 0) { $a += @("--ceiling-bytes", "$Ceiling") }
+    & $Python @a
+    if ($LASTEXITCODE -ne 0) { Fail ".dram0.bss budget check failed or could not measure (exit $LASTEXITCODE) on $Elf; a release needs a measured pass." }
+}
+
 if ($LoadFunctionsOnly) { return }
 
 # ---------------------------------------------------------------- gates
@@ -254,6 +270,7 @@ foreach ($p in @($appBin, $elf, $RecoveryBin)) {
 }
 $appSize = (Get-Item -LiteralPath $appBin).Length
 if ($appSize -gt $MaxAppSize) { Fail "KilnCtrl.bin is $appSize bytes, over the $MaxAppSize (0x400000) gate (planned post-split app size, GITHUB_RELEASE_UPDATE_PLAN.md WP2)." }
+Test-DramBssBudget $python $elf $DramCeilingBytes
 
 $outDir = Join-Path $repoRoot "logs\release\$Tag"
 if (Test-Path -LiteralPath $outDir) { Fail "$outDir already exists; remove it (or pick a new tag) so no stale asset is published." }

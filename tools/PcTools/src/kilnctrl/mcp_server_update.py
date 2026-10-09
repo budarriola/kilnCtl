@@ -59,6 +59,11 @@ def _fmt_status(st: dict) -> str:
         parts.append(f"sha256={st.get('sha256')}")
         parts.append(f"source={_SOURCES.get(st.get('source'), st.get('source'))}")
     parts.append(f"capacity={st.get('capacity')}")
+    if st.get("fetch_writer_wedged"):
+        parts.append("fetch_writer_wedged=True (WARNING: the board's flash writer is wedged; reboot required "
+                     "before another update can run)")
+    elif "fetch_writer_wedged" in st:
+        parts.append("fetch_writer_wedged=False")
     return ", ".join(parts)
 
 
@@ -102,9 +107,11 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     one.
 
     With confirm: refuses while the board reports an upload already in
-    flight; the result notes when a previously staged image was erased (an
-    upload erases the previous stage first; a failed upload never leaves a
-    half-valid stage, but a previously good one is gone). After the POST it
+    flight; the result notes when a previously staged image may be replaced (the
+    board erases the previous stage only after the image head passes the
+    project, version and downgrade-gate checks, so an upload refused by
+    those leaves the old stage byte-identical; a later failure never leaves
+    a half-valid stage, but a previously good one is gone). After the POST it
     re-reads GET /api/update/stage and only reports ok when the board says
     staged with a verified header, the image length equals the file size and
     the board's sha256 equals the one computed locally; anything else is
@@ -184,8 +191,8 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
             return (f"FAILED: board refused the upload: HTTP 400 bad_version -- {why}. "
                     "Nothing was invented on your behalf. Retry with an explicit "
                     "version=\"x.y.z\" (e.g. \"1.4.0\"; an optional leading v is stripped) "
-                    "that you choose for this image; a previously staged image may have been "
-                    f"erased (host={resolved})")
+                    "that you choose for this image; the previously staged image is untouched "
+                    f"(host={resolved})")
         if exc.status == 409 and name in ("downgrade_refused", "needs_force"):
             body = uhc.refusal_body(exc)
             cand = body.get("candidate_version") or "?"
@@ -198,7 +205,7 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
                 hint = "Override with force=True (no typed confirm needed)."
             return (f"FAILED: board refused the upload by the downgrade gate: {name} -- "
                     f"{uhc.refusal_reason(exc)} (candidate {cand}, running {run}). {hint} "
-                    f"The previous stage may have been erased (host={resolved})")
+                    f"The previously staged image is untouched (host={resolved})")
         if exc.status == 409 and name == "version_mismatch":
             return ("FAILED: the declared version differs from the version inside the image; omit version= "
                     f"or pass the image's own (host={resolved})")
@@ -487,6 +494,15 @@ def update_fetch_status(host: Optional[str] = None) -> str:
     except uhc.UpdateHttpError as exc:
         return f"error: could not read GET {uhc.FETCH_PATH} (host={resolved}): {exc}"
     extra = f", http_status={st.get('http_status')}" if st.get("error") else ""
+    # The wedge flag lives on the stage route (review 7 L1); best-effort read, never fails this tool.
+    try:
+        stg = uhc.get_stage_status(resolved)
+    except uhc.UpdateHttpError:
+        stg = {}
+    if stg.get("fetch_writer_wedged"):
+        extra += ", fetch_writer_wedged=True (WARNING: flash writer wedged; reboot required)"
+    elif "fetch_writer_wedged" in stg:
+        extra += ", fetch_writer_wedged=False"
     return f"ok - {_fmt_fetch(st)}, busy={st.get('busy')}{extra}; (host={resolved})"
 
 

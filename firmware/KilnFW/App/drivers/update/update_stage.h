@@ -8,8 +8,11 @@
 //
 // On-flash order, chosen so that a power cut or a failed upload can only ever
 // leave "nothing staged", never a half-valid stage:
-//   1. upload_begin  : checks size/args, then erases the header sector.
-//                      From here the stage reads BLANK (not staged).
+//   1. upload_begin  : checks size/args only; flash is untouched, so a refused
+//                      upload keeps the previous stage. The first
+//                      UPDATE_STAGE_HEAD_LEN bytes are buffered; once they pass
+//                      the image/project/version/gate checks the header sector
+//                      is erased. From there the stage reads BLANK (not staged).
 //   2. upload_write  : image bytes go to STAGE_IMAGE_OFFSET.., erased ahead in
 //                      UPDATE_STAGE_ERASE_UNIT blocks, hashed as they arrive.
 //   3. upload_finish : re-reads the whole image from flash, hashes it again
@@ -41,7 +44,7 @@ extern "C" {
 #endif
 
 #define UPDATE_STAGE_ERASE_UNIT 65536u   // erase-ahead granularity (multiple of the 4 KB sector)
-#define UPDATE_STAGE_HEAD_LEN 320u       // image bytes buffered before the first flash write (through app_desc and the identity record after it)
+#define UPDATE_STAGE_HEAD_LEN 344u       // image bytes buffered before the first flash write (through app_desc and the identity record after it)
 #define UPDATE_STAGE_APP_DESC_SIZE 256u
 #define UPDATE_STAGE_IMAGE_ID_FROM (UPDATE_STAGE_APP_DESC_OFFSET + UPDATE_STAGE_APP_DESC_SIZE) // identity record scan start
 #define UPDATE_STAGE_ESP32S3_CHIP_ID 9u
@@ -169,13 +172,26 @@ uint32_t update_stage_capacity(const update_stage_t *st);
 update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratch, size_t scratch_len,
                                              uint32_t total_len, const char *semver, const char *commit,
                                              stage_source_t source);
+// Manifest cross-check gate for the GitHub fetch (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 5). `ctx` is a
+// const update_identity_t * (release.json's identity). Refuses with UPDATE_STAGE_ERR_POLICY unless the image
+// carries an identity record whose zones_cfg/kilnlink/uart versions equal the manifest's. The semver check
+// (descriptor vs manifest version) is already done by flush_head for any stager that has a gate and a
+// declared version. Install with update_stage_set_gate(st, update_stage_manifest_gate, &identity).
+update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, const char *commit,
+                                              const update_image_id_t *id);
 // Install a gate for the upload just begun (call after a successful update_stage_upload_begin).
 void update_stage_set_gate(update_stage_t *st, update_stage_gate_fn gate, void *ctx);
 update_stage_err_t update_stage_upload_write(update_stage_t *st, const uint8_t *data, size_t len);
 update_stage_err_t update_stage_upload_finish(update_stage_t *st);
-// Ends a failed/cancelled upload. The header was erased at begin, so the stage
-// stays blank; safe to call when no upload is active.
+// Ends a failed/cancelled upload. If the header was already erased (checks
+// passed), the stage stays blank; safe to call when no upload is active.
 void update_stage_upload_abort(update_stage_t *st);
+// Review 5 L3: abort only when the current upload was begun with `source` (an abandoned fetch writer must
+// not kill a newer hand upload). true = aborted something.
+bool update_stage_upload_abort_owned(update_stage_t *st, stage_source_t source);
+// Review 5 L2: the reason the status route reports. A wedged fetch writer replaces the benign
+// "blank" reason of a stage that is not staged, and "busy" when the GitHub fetch owns the busy phase (L1 of review 7); a valid stage or a real fault reason is never masked.
+const char *update_stage_status_reason(const update_stage_info_t *info, bool writer_wedged);
 
 // Erases the header sector (the image area is left; without a header it is
 // unreachable). Idempotent.

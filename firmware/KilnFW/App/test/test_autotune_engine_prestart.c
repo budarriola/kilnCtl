@@ -153,9 +153,15 @@ esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t 
     return ESP_OK;
 }
 
+static int s_heat_zone_claim_begin_calls;
+static bool s_test_update_claim_after_heat_claim = false; /* MED-1 (review 3) */
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap) reason_out[0] = '\0';
+    if (s_test_update_claim_after_heat_claim && s_heat_zone_claim_begin_calls > 0) {
+        if (reason_out && reason_cap) snprintf(reason_out, reason_cap, "update in progress");
+        return true;
+    }
     return false;
 }
 
@@ -3295,6 +3301,38 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_heat_zone_claim_refused = false;
 }
 
+// MED-1 (review 3): update claim taken after the early check -> refused at commit, claims released.
+static void test_run_refuses_when_update_claims_after_early_check(void)
+{
+    TEST_SECTION("autotune_engine_run() -- update claim taken after the early check refuses at commit and releases claims");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false;
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+
+    s_test_update_claim_after_heat_claim = true;
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_test_update_claim_after_heat_claim = false;
+    TEST_CHECK(!ok, "an update claim taken after the early check must refuse the autotune start");
+    TEST_CHECK(strstr(errbuf, "update") != NULL, "the refusal names the update");
+    TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
+}
 // Review of 933a7eec: autotune start peeks profile_executor_zone_is_active()
 // and profile start peeks autotune_engine_is_active_on_zone(), but each peek
 // runs BEFORE the caller's own module lock, so two starts on the same zone
@@ -6954,6 +6992,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_refuses_on_off_zone();
     test_run_refuses_monitor_only_zone();
     test_run_refuses_at_atomic_heat_claim_gate();
+    test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_at_atomic_zone_claim_gate();
 
     // Heat-enable (K4) wiring -- each starts from its own

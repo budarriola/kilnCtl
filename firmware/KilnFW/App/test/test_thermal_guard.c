@@ -1183,7 +1183,7 @@ void run_test_thermal_guard(void)
         }
     }
 
-    /* Guard 9/cross-zone: an on/off zone excluded from BOTH sides -- as the
+    /* Guard 8/cross-zone: an on/off zone excluded from BOTH sides -- as the
      * zone being ticked (peer readings ignored), and as a PEER of another
      * (heater) zone's own tick. */
     {
@@ -1202,7 +1202,7 @@ void run_test_thermal_guard(void)
         in.peer_index_self = 0;
         bool tripped = false;
         for (int i = 0; i < 10 && !tripped; i++) tripped = thermal_guard_tick(&s, &cfg, &in);
-        TEST_CHECK(!tripped, "on_off_zone as the zone being ticked: guard 9 does not evaluate at all");
+        TEST_CHECK(!tripped, "on_off_zone as the zone being ticked: guard 8 does not evaluate at all");
 
         /* Now the OTHER side: a HEATER zone's own tick must not see this
          * on/off zone as a comparable peer either. */
@@ -1218,7 +1218,7 @@ void run_test_thermal_guard(void)
         in.peer_index_self = 0;
         tripped = false;
         for (int i = 0; i < 10 && !tripped; i++) tripped = thermal_guard_tick(&s, &cfg, &in);
-        TEST_CHECK(!tripped, "a HEATER zone's own tick excludes an on/off PEER from guard 9's comparison -- "
+        TEST_CHECK(!tripped, "a HEATER zone's own tick excludes an on/off PEER from guard 8's comparison -- "
                              "a vent reading 480C different is the design working, not a fault");
     }
 

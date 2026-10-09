@@ -320,9 +320,16 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     return OTA_INTERLOCK_OK;
 }
 
+static int g_heat_zone_claim_begin_calls;
+/* MED-1 (review 3): models an update claim taken AFTER the early check: blocks only once the heat claim has been published. */
+static bool s_test_update_claim_after_heat_claim = false;
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap) reason_out[0] = '\0';
+    if (s_test_update_claim_after_heat_claim && g_heat_zone_claim_begin_calls > 0) {
+        if (reason_out && reason_cap) snprintf(reason_out, reason_cap, "update in progress");
+        return true;
+    }
     return false;
 }
 
@@ -2681,6 +2688,41 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_heat_zone_claim_refused = false;
 }
 
+// MED-1 (review 3): an update claim taken between the early check and the heat
+// claim publish must be caught by the recheck after the claim; claims released.
+static void test_run_refuses_when_update_claims_after_early_check(void)
+{
+    TEST_SECTION("profile_executor_run() -- update claim taken after the early check refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_update_claim_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_update_claim_after_heat_claim = false;
+    TEST_CHECK(!ok, "an update claim taken after the early check must refuse the start");
+    TEST_CHECK(strstr(err, "update") != NULL, "the refusal names the update");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
 // HP-02 (bench, 2026-09-25..27, ESP 0fb8ad98): zone 2 had been left typed
 // on/off (zone_type 1) by an earlier HP-03/HP-07 preset, and the 3-zone
 // profile carried no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md sec 3 rule 6
@@ -9416,7 +9458,6 @@ static on_off_trigger_input_t make_healthy_running_unconditional_on_oin(void)
         .guard_5_6_tripped = false,
         .run_running = true,
         .run_paused = false,
-        .failsafe_on_pause = false,
         .min_on_s = 0,
         .min_off_s = 0,
         .rule = {
@@ -9581,21 +9622,19 @@ typedef struct {
     bool guard_5_6_tripped;
     bool run_running;
     bool run_paused;
-    bool failsafe_on_pause;
 } run_ending_case_t;
 
 static void test_on_off_zone_tick_every_run_ending_path_applies_failsafe(void)
 {
     TEST_SECTION("on/off zone: EVERY run-ending path -- fault/abort/safety-trip/authority-block "
-                 "(failsafe_override), guard 5/6 trip, halt/IDLE/DONE, and PAUSE with failsafe_on_pause -- "
+                 "(failsafe_override), guard 5/6 trip, halt/IDLE/DONE -- "
                  "drives the configured fail-safe state, bypassing the actuation-layer hold entirely "
                  "(min_on_s/min_off_s=9999 must not matter)");
     run_ending_case_t cases[] = {
-        { "global FAULTED (fault escalation / abort)", true,  false, true,  false, false },
-        { "authority-block (safety trip / relay_authority_zone_blocked)", true, false, true, false, false },
-        { "guard 5/6 trip (MAX_TEMP/MIN_TEMP)",         false, true,  true,  false, false },
-        { "run IDLE/DONE (halt)",                       false, false, false, false, false },
-        { "run PAUSED with failsafe_on_pause set",      false, false, false, true,  true  },
+        { "global FAULTED (fault escalation / abort)", true,  false, true,  false },
+        { "authority-block (safety trip / relay_authority_zone_blocked)", true, false, true, false },
+        { "guard 5/6 trip (MAX_TEMP/MIN_TEMP)",         false, true,  true,  false },
+        { "run IDLE/DONE (halt)",                       false, false, false, false },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         on_off_trigger_state_t decide_state;
@@ -9612,7 +9651,6 @@ static void test_on_off_zone_tick_every_run_ending_path_applies_failsafe(void)
         oin.guard_5_6_tripped = cases[i].guard_5_6_tripped;
         oin.run_running = cases[i].run_running;
         oin.run_paused = cases[i].run_paused;
-        oin.failsafe_on_pause = cases[i].failsafe_on_pause;
         oin.min_on_s = 9999;
         oin.min_off_s = 9999; /* huge hold -- must still be bypassed on every one of these paths */
 
@@ -9629,7 +9667,7 @@ static void test_on_off_zone_tick_every_run_ending_path_applies_failsafe(void)
 
 static void test_on_off_zone_tick_plain_pause_without_override_holds_last_state(void)
 {
-    TEST_SECTION("on/off zone: PAUSE WITHOUT failsafe_on_pause holds the last commanded state -- this is "
+    TEST_SECTION("on/off zone: PAUSE holds the last commanded state -- this is "
                  "the one run-ending-shaped transition that is deliberately NOT a fail-safe path (plan sec 3 "
                  "level 3), distinguishing it from every case in the enumeration above");
     on_off_trigger_state_t decide_state;
@@ -9641,11 +9679,10 @@ static void test_on_off_zone_tick_plain_pause_without_override_holds_last_state(
     on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
     oin.run_running = false;
     oin.run_paused = true;
-    oin.failsafe_on_pause = false; /* the distinguishing bit */
     bool bypass_hold = !oin.run_running; /* run not RUNNING -> still bypass the hold */
     on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
                                                                      &oin, bypass_hold, 0, 0);
-    TEST_CHECK(r.actuated_on, "plain PAUSE (no failsafe_on_pause) must HOLD the last commanded state (ON), "
+    TEST_CHECK(r.actuated_on, "plain PAUSE must HOLD the last commanded state (ON), "
                              "not force fail-safe");
 }
 
@@ -10051,7 +10088,6 @@ static void on_off_input_assert_equal(const on_off_trigger_input_t *a, const on_
     EQ_FIELD(guard_5_6_tripped);
     EQ_FIELD(run_running);
     EQ_FIELD(run_paused);
-    EQ_FIELD(failsafe_on_pause);
     EQ_FIELD(min_on_s);
     EQ_FIELD(min_off_s);
     EQ_FIELD(rule.enable);
@@ -10072,6 +10108,134 @@ static void on_off_input_assert_equal(const on_off_trigger_input_t *a, const on_
     EQ_FIELD(segment_index);
     EQ_FIELD(dt_s);
 #undef EQ_FIELD
+}
+
+/* Audit AUX_OUTPUTS_SAFETY_REVIEW_2026-10-09 F1/F2: not-RUNNING aux fault drop. */
+static char s_aux_fd_dummy_io;
+static void aux_fd_setup(profile_exec_state_t st, bool aux_on_shadow, bool claimed)
+{
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    if (!s_exec.io) s_exec.io = (kiln_io_t *)&s_aux_fd_dummy_io;
+    s_exec.state = st;
+    s_exec.aux_claim_mask = claimed ? 0x01 : 0;
+    s_exec.aux[0].commanded_on = claimed;
+    s_exec.aux[0].actuated_on = claimed;
+    g_stub_relay_shadow = aux_on_shadow ? 0x01 : 0;
+    g_aux_write_log_n = 0;
+}
+
+static void test_paused_aux_on_fault_drops_aux_within_one_tick(void)
+{
+    TEST_SECTION("F1: PAUSED + aux ON + fault -> aux OFF in one tick");
+    aux_fd_setup(PROFILE_EXEC_PAUSED, true, true);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "OFF written to aux mask 0x01");
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "commanded_on cleared");
+    s_test_relay_authority_blocked = false;
+}
+
+static void test_paused_aux_on_no_fault_stays_on(void)
+{
+    TEST_SECTION("F1: PAUSED + aux ON + no fault -> aux stays ON");
+    aux_fd_setup(PROFILE_EXEC_PAUSED, true, true);
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_aux_write_log_n == 0, "no write while nothing is faulted");
+    TEST_CHECK(s_exec.aux[0].commanded_on, "commanded_on kept");
+}
+
+static void test_idle_manual_aux_dropped_by_pico_trip_and_stays_off(void)
+{
+    TEST_SECTION("F2: idle manual aux ON + Pico trip -> OFF, stays OFF after trip clears");
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    profile_executor_aux_fault_drop(true);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "manual aux OFF written on trip");
+    g_stub_relay_shadow = 0; /* the write landed */
+    g_aux_write_log_n = 0;
+    profile_executor_aux_fault_drop(false); /* trip cleared */
+    TEST_CHECK(g_aux_write_log_n == 0, "nothing rewritten (no ON) after the trip clears");
+    TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, "no remembered ON state");
+}
+
+static void test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries(void)
+{
+    TEST_SECTION("LOW-2: failed aux OFF write keeps actuated_on and retries next tick");
+    for (int claimed = 0; claimed <= 1; claimed++) {
+        aux_fd_setup(PROFILE_EXEC_IDLE, true, claimed != 0);
+        s_exec.aux[0].actuated_on = true;
+        s_exec.aux[0].commanded_on = true;
+        s_test_relay_authority_blocked = true;
+        s_test_relay_authority_blocked_sources = 1;
+        g_relay_write_fail = true;
+        profile_executor_aux_fault_drop(false);
+        TEST_CHECK(s_exec.aux[0].actuated_on, "actuated_on stays true after a failed OFF write");
+        g_aux_write_log_n = 0;
+        profile_executor_aux_fault_drop(false);
+        TEST_CHECK(aux_test_wrote(0x01, 0x00), "OFF retried on the next tick");
+        TEST_CHECK(s_exec.aux[0].actuated_on, "still actuated_on while writes keep failing");
+        g_relay_write_fail = false;
+        g_aux_write_log_n = 0;
+        profile_executor_aux_fault_drop(false);
+        TEST_CHECK(aux_test_wrote(0x01, 0x00), "OFF retried and succeeds");
+        TEST_CHECK(!s_exec.aux[0].actuated_on && !s_exec.aux[0].commanded_on, "cleared only after success");
+        s_test_relay_authority_blocked = false;
+    }
+}
+
+static void test_aux_fault_drop_covers_disabled_and_raw_spare_relays(void)
+{
+    TEST_SECTION("review 4 M1: fault-drop covers a disabled-while-ON aux and a raw spare-relay ON");
+    /* (a) aux relay 1 ON, then enabled=0, unclaimed, idle fault */
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    g_stub_aux[0].enabled = 0;
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "disabled aux still ON in the shadow is driven OFF on a fault");
+    /* (b) a spare relay (bit 3) switched on via the raw dashboard path, no aux config at all */
+    aux_fd_setup(PROFILE_EXEC_IDLE, false, false);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    g_stub_relay_shadow = 0x08;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(aux_test_wrote(0x08, 0x00), "raw spare relay ON is driven OFF on a fault");
+    /* (c) a zone-owned relay is not touched by the aux fault-drop */
+    aux_fd_setup(PROFILE_EXEC_IDLE, false, false);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    g_stub_thermo_count = 1;
+    g_stub_relay_mask[0] = 0x01;
+    g_stub_relay_shadow = 0x01;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_aux_write_log_n == 0, "zone relay is left to the zone path");
+    g_stub_thermo_count = 0;
+    g_stub_relay_mask[0] = 0;
+    s_test_relay_authority_blocked = false;
+}
+
+static void test_aux_apply_relay_failed_write_is_not_a_transition(void)
+{
+    TEST_SECTION("review 4 L1: failed aux write -> no cycle, commanded_on kept, failure logged once");
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, true);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    g_relay_write_fail = true;
+    g_relay_cycles_calls = 0;
+    esp_log_test_capture_reset();
+    for (int i = 0; i < 5; i++) profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_relay_cycles_calls == 0, "no contact cycle counted for a failed OFF write");
+    TEST_CHECK(s_exec.aux[0].commanded_on, "commanded_on not changed by a failed write");
+    int n = 0;
+    for (int i = 0; i < g_esp_log_capture_count; i++) {
+        if (strstr(g_esp_log_capture[i], "write failed")) n++;
+    }
+    TEST_CHECK(n <= 1, "write-failed warning is rate-limited across retry ticks");
+    g_relay_write_fail = false;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_relay_cycles_calls == 1 && !s_exec.aux[0].commanded_on, "successful OFF counts one cycle");
+    s_test_relay_authority_blocked = false;
 }
 
 static void test_on_off_zone_and_aux_input_builders_agree(void)
@@ -10505,6 +10669,76 @@ static void test_aux_relay_io_refusal_is_logged(void)
     bool ok = profile_executor_run(0, err, sizeof(err));
     TEST_CHECK(!ok, "run refused");
     TEST_CHECK(esp_log_test_capture_contains("RELAY_IO targets relay"), "refusal logged by name");
+}
+
+static void test_aux_on_time_and_switch_count(void)
+{
+    TEST_SECTION("aux: per-run on_time_s and switch_count; never-switched 0/0; second run resets");
+    char err[192];
+    profile_t p = aux_test_profile();
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW;
+    p.on_off_rules[0].temp_threshold_c = 100.0f;
+    aux_test_setup(&p);
+    g_stub_aux[0].tc_zone = 0;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run starts");
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].faulted = false;
+    TEST_CHECK(s_exec.aux[0].switch_count == 0 && s_exec.aux[0].on_time_s == 0.0f, "fresh run reads 0/0");
+    TEST_CHECK(s_exec.aux[1].switch_count == 0 && s_exec.aux[1].on_time_s == 0.0f, "never-switched aux 2 reads 0/0");
+    float expect = 0.0f;
+    float temps[] = {50.0f, 50.0f, 50.0f, 150.0f, 150.0f, 150.0f, 50.0f, 50.0f, 50.0f};
+    for (unsigned i = 0; i < sizeof(temps) / sizeof(temps[0]); i++) {
+        s_exec.zones[0].actual_c = temps[i];
+        aux_test_tick(2.0f);
+        if (s_exec.aux[0].commanded_on) expect += 2.0f;
+    }
+    TEST_CHECK(s_exec.aux[0].commanded_on, "aux is ON at the end");
+    TEST_CHECK(s_exec.aux[0].switch_count == 2, "two off->on transitions counted");
+    TEST_CHECK(expect > 0.0f && s_exec.aux[0].on_time_s == expect, "on_time_s equals the commanded-ON tick time");
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.aux[0].switch_count == 2 && st.aux[0].on_time_s == (uint32_t)expect, "status snapshot carries both");
+    TEST_CHECK(s_exec.aux[1].switch_count == 0 && s_exec.aux[1].on_time_s == 0.0f, "unclaimed aux still 0/0");
+    profile_executor_halt();
+
+    aux_test_setup(&p);
+    g_stub_aux[0].tc_zone = 0;
+    s_exec.aux[0].switch_count = 5; /* stale values the run start must clear */
+    s_exec.aux[0].on_time_s = 9.0f;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "second run starts");
+    TEST_CHECK(s_exec.aux[0].switch_count == 0 && s_exec.aux[0].on_time_s == 0.0f, "second run resets both counters");
+    profile_executor_halt();
+}
+
+static void test_aux_switch_count_ignores_failed_write(void)
+{
+    TEST_SECTION("aux: switch_count counts only transitions whose relay write succeeded (review L3)");
+    char err[192];
+    profile_t p = aux_test_profile();
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW;
+    p.on_off_rules[0].temp_threshold_c = 100.0f;
+    aux_test_setup(&p);
+    g_stub_aux[0].tc_zone = 0;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run starts");
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].faulted = false;
+    s_exec.zones[0].actual_c = 150.0f; /* rule BELOW 100 -> aux OFF */
+    aux_test_tick(2.0f);
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "aux starts OFF");
+    g_relay_write_fail = true;
+    s_exec.zones[0].actual_c = 50.0f; /* -> wants ON, but the write fails */
+    aux_test_tick(2.0f);
+    g_relay_write_fail = false;
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "commanded_on only follows a write that succeeded (review 4 L1)");
+    TEST_CHECK(s_exec.aux[0].switch_count == 0, "failed write does not count as a switch");
+    s_exec.zones[0].actual_c = 150.0f;
+    aux_test_tick(2.0f);
+    s_exec.zones[0].actual_c = 50.0f;
+    aux_test_tick(2.0f);
+    TEST_CHECK(s_exec.aux[0].switch_count == 1, "a later successful OFF->ON counts exactly once");
+    profile_executor_halt();
 }
 
 static void test_aux_contact_cycles_are_counted(void)
@@ -11127,6 +11361,8 @@ static void run_test_aux_wp3(void)
     test_aux_start_refused_when_cap_unsatisfiable();
     test_aux_relay_io_refusal_is_logged();
     test_aux_contact_cycles_are_counted();
+    test_aux_on_time_and_switch_count();
+    test_aux_switch_count_ignores_failed_write();
     test_aux_handoff_write_failure_sets_pending();
     test_aux_status_reports_claimed_aux();
     test_aux_off_pending_retried_by_task_loop();
@@ -11153,6 +11389,12 @@ static void run_test_on_off_actuation(void)
     test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner();
     test_on_off_zone_invalid_sensor_fails_safe();
     test_on_off_zone_and_aux_input_builders_agree();
+    test_paused_aux_on_fault_drops_aux_within_one_tick();
+    test_paused_aux_on_no_fault_stays_on();
+    test_idle_manual_aux_dropped_by_pico_trip_and_stays_off();
+    test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries();
+    test_aux_fault_drop_covers_disabled_and_raw_spare_relays();
+    test_aux_apply_relay_failed_write_is_not_a_transition();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();
@@ -11350,6 +11592,7 @@ void run_test_profile_executor_prestart(void)
     test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
+    test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();
@@ -11847,6 +12090,37 @@ static void test_firing_stats_erase_deletes_file_and_nvs(void)
                "the history read path finds nothing for the erased id either");
 }
 
+static esp_err_t fscf_failing_delete_fn(const char *rel_path)
+{
+    (void)rel_path;
+    return ESP_FAIL;
+}
+
+static void test_firing_stats_erase_file_delete_failure_after_legacy_blob_erase(void)
+{
+    TEST_SECTION("firing_stats_erase() -- F10: the legacy NVS blob goes FIRST, the file LAST; a failed file delete leaves only the file");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    profile_firing_run_record_t rec = make_fscf_record(14, 5000, 4000);
+    firing_stats_persist(&rec);
+    stage_legacy_fscf(14, 100, 10, 1);
+
+    firing_stats_cfg_fs_set_delete_fn(fscf_failing_delete_fn);
+    TEST_CHECK(firing_stats_erase(14) != ESP_OK, "the erase reports the file-delete failure");
+    firing_stats_cfg_fs_reset_delete_fn_for_test();
+
+    hal_kv_handle_t h;
+    size_t len = 0;
+    TEST_CHECK(hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, FIRING_STATS_NVS_PARTITION) == HAL_OK,
+               "open NVS");
+    TEST_CHECK(hal_kv_get_blob(&h, "fs_14", NULL, &len) == HAL_NOT_FOUND, "the legacy fs_14 blob was erased BEFORE the file (so a failed NVS erase can never be re-migrated into a fresh file)");
+    hal_kv_close(&h);
+    char path[64];
+    firing_stats_cfg_fs_path(14, path, sizeof(path));
+    bool exists = false;
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && exists, "the file is still there (its delete failed, error reported)");
+}
+
 static void test_firing_stats_erase_never_fired_id_is_a_safe_no_op(void)
 {
     TEST_SECTION("firing_stats_erase() -- NOT_FOUND-as-success: erasing an id that was never persisted "
@@ -12050,6 +12324,7 @@ int main(void)
     test_fscf_negative_no_file_write_means_file_never_catches_up();
     test_fscf_history_read_uses_the_heap_not_the_httpd_stack();
     test_firing_stats_erase_deletes_file_and_nvs();
+    test_firing_stats_erase_file_delete_failure_after_legacy_blob_erase();
     test_firing_stats_erase_never_fired_id_is_a_safe_no_op();
     test_firing_stats_erase_degrades_when_cfg_fs_unmounted();
     reset_all_fscf();

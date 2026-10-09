@@ -179,6 +179,23 @@ def get_cfgfs_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> di
         raise DashboardHttpError(f"GET /api/cfgfs response was not valid JSON: {body_text!r}") from exc
 
 
+def get_cfgfs_format_pending(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
+    """GET /api/cfgfs/format_pending (cfg_fs_format_http.c:
+    format_pending_get_handler()) and return ``{"pending": bool, "reason": str}``.
+    GET /api/cfgfs never carries this flag; only this route does."""
+    req = urllib.request.Request(_url(host, "/api/cfgfs/format_pending"), method="GET")
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            body_text = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        status, detail = _http_error_detail(exc)
+        raise DashboardHttpError(f"GET /api/cfgfs/format_pending failed: {detail}", status, detail) from exc
+    try:
+        return json.loads(body_text)
+    except Exception as exc:
+        raise DashboardHttpError(f"GET /api/cfgfs/format_pending response was not valid JSON: {body_text!r}") from exc
+
+
 def get_diagnostics_timing(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     """GET /api/diagnostics/timing (diagnostics_http.c:
     diagnostics_timing_get_handler) -- HW_ABSTRACTION.md "Still open": display

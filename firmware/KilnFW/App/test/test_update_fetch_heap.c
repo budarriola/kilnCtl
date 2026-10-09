@@ -6,12 +6,16 @@
 static void test_admit(void)
 {
     TEST_SECTION("update_fetch_heap -- admission");
-    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN == 28672u, "precheck is 28 KB");
+    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN == 30836u, "precheck is floor+worst draw+4 KB margin");
+    TEST_CHECK(FETCH_HEAP_SCRATCH_BYTES <= 4096u, "stager scratch is at most 4 KiB (MED-1)");
+    TEST_CHECK(FETCH_HEAP_WORST_DRAW_BYTES >= 16500u + FETCH_HEAP_SCRATCH_BYTES, "scratch is counted in the worst draw");
     // The derivation: floor + worst draw leaves the owner floor intact.
+    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_WORST_DRAW_BYTES >= FETCH_HEAP_FLOOR_BYTES + 4096u,
+               "LOW-5: after the worst draw, floor plus 4096 B concurrent margin remain");
     TEST_CHECK(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_WORST_DRAW_BYTES >= FETCH_HEAP_FLOOR_BYTES,
                "admitted free minus worst draw stays at or above 8192");
     // Idle bench numbers (logs/sk04_sampling/2026-10-06.tsv) must pass.
-    TEST_CHECK(update_fetch_heap_admit(29647u, 9728u) == FETCH_HEAP_OK, "idle minimum admitted");
+    TEST_CHECK(update_fetch_heap_admit(29647u, 9728u) == FETCH_HEAP_LOW_FREE, "idle minimum refused (LOW-5: margin below KDF headroom)");
     TEST_CHECK(update_fetch_heap_admit(31123u, 9728u) == FETCH_HEAP_OK, "idle maximum admitted");
     TEST_CHECK(update_fetch_heap_admit(FETCH_HEAP_PRECHECK_MIN, FETCH_LARGEST_BLOCK_MIN) == FETCH_HEAP_OK,
                "exact thresholds admitted");
@@ -20,8 +24,8 @@ static void test_admit(void)
                "free one byte short refused");
     TEST_CHECK(update_fetch_heap_admit(31123u, FETCH_LARGEST_BLOCK_MIN - 1u) == FETCH_HEAP_LOW_BLOCK,
                "largest block one byte short refused");
-    TEST_CHECK(update_fetch_heap_admit(26624u, 9728u) == FETCH_HEAP_LOW_FREE,
-               "the old 26624 B threshold no longer admits");
+    TEST_CHECK(update_fetch_heap_admit(28672u, 9728u) == FETCH_HEAP_LOW_FREE,
+               "the old 28672 B threshold no longer admits");
     TEST_CHECK(update_fetch_heap_admit(8295u, 4096u) == FETCH_HEAP_LOW_FREE, "post-stage dip refused");
     TEST_CHECK(update_fetch_heap_admit(0u, 0u) == FETCH_HEAP_LOW_FREE, "zero refused");
 }

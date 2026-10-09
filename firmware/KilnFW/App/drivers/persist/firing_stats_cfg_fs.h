@@ -70,6 +70,9 @@ typedef esp_err_t (*firing_stats_cfg_fs_write_fn_t)(const char *rel_path, const 
 void firing_stats_cfg_fs_set_write_fn(firing_stats_cfg_fs_write_fn_t fn);
 void firing_stats_cfg_fs_reset_write_fn_for_test(void);
 firing_stats_cfg_fs_write_fn_t firing_stats_cfg_fs_get_write_fn(void);
+typedef esp_err_t (*firing_stats_cfg_fs_delete_fn_t)(const char *rel_path);
+void firing_stats_cfg_fs_set_delete_fn(firing_stats_cfg_fs_delete_fn_t fn);
+void firing_stats_cfg_fs_reset_delete_fn_for_test(void);
 
 /* cfg_fs directory and per-id path format (one place; profiles_scope_cfg_files.c
  * reads these to sweep every history file on a profiles-scope factory reset). */

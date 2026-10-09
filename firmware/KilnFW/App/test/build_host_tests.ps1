@@ -644,7 +644,7 @@ try {
     # separate .c files (like zones_config_json.c below), not textually
     # included -- neither defines anything test_zones_http.c's #includes
     # already define, so there is no multiple-definition risk.
-    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 " +
+    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_ZONES_UNLOCK_TEST_HOOK " +
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +
@@ -1028,7 +1028,7 @@ try {
     # <stdatomic.h> -- same MSVC requirement test_live_profile.c/
     # test_profile_executor_live_pickup.c already needed for the same reason
     # (see this file's own comment above them).
-    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
+    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
@@ -1199,6 +1199,7 @@ try {
             "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
             # PICO_AUTO_UPDATE_PLAN.md G1: ota_http_pico.c (#included into
             # test_ota_http.c above) now records what it staged, so a later
             # boot can re-use the image. Linked in for REAL rather than faked,
@@ -1644,7 +1645,8 @@ try {
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`""
     # 2026-09-08: flash_worker_wait.c linked in -- relay_cycles_init() now
     # calls flash_worker_wait_default() before its migrate-on-load
     # pref_cfg_fs_resolve() write (same boot-ordering fix as adaptive_tune.c's
@@ -2513,6 +2515,7 @@ try {
     $cmd51 = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$wifiProvObjDir\\`" /Fe:`"$exe51`" `"$(Join-Path $testDir 'test_wifi_prov.c')`" " +
             "`"$(Join-Path $driversDir 'common/startup_faults.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 

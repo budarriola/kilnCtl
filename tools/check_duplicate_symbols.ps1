@@ -100,10 +100,11 @@
 # before; exit 3 makes run_all_checks.ps1 report it as SKIPPED, not PASS.
 #
 # Usage: powershell -File tools\check_duplicate_symbols.ps1
+#   Test hooks: KILNCTL_DUPSYM_NM overrides nm; KILNCTL_DUPSYM_BUILD_DIR overrides the build directory (tools/test_check_duplicate_symbols.ps1).
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$buildDir = Join-Path $repoRoot "firmware\KilnFW\build"
+$buildDir = if ($env:KILNCTL_DUPSYM_BUILD_DIR) { $env:KILNCTL_DUPSYM_BUILD_DIR } else { Join-Path $repoRoot "firmware\KilnFW\build" }
 
 $componentDirs = @(
     "esp-idf\App\CMakeFiles\__idf_App.dir",
@@ -170,6 +171,65 @@ foreach ($sourceRoot in ($allSourceRoots | Select-Object -Unique)) {
     $sourceBasenamesByRoot[$sourceRoot] = $names
 }
 
+# Objects this tree's own build actually produces: the `build <obj>:` outputs in
+# build.ninja. A shared/reused build dir can hold .c.obj files from another
+# worktree's path (kilnlink's obj dirs encode the absolute source path) or from
+# older configurations; those match a basename in the source tree but are not
+# produced by THIS tree's build, so they are not part of any real link. Absent
+# build.ninja (non-ninja or unconfigured dir) the filter is skipped.
+$ninjaOutputs = $null
+$ninjaFile = Join-Path $buildDir "build.ninja"
+$manifestFile = Join-Path $buildDir "obj_manifest.txt"   # published by check_00_kilnfw_target_build.ps1
+
+# Every .c.obj actually on disk under our components, relative to build/ (lowercased, '/').
+$diskRel = @()
+foreach ($c in $componentDirs) {
+    $full = Join-Path $buildDir $c
+    if (Test-Path $full) {
+        foreach ($o in (Get-ChildItem -Path $full -Recurse -File -Filter "*.c.obj" -ErrorAction SilentlyContinue)) {
+            $diskRel += ($o.FullName.Substring($buildDir.Length + 1) -replace '\\', '/').ToLowerInvariant()
+        }
+    }
+}
+
+# Two possible manifests of "what this build produces". A stale local build.ninja (an old configure) must not
+# silently outrank the manifest published next to the ELF being checked, and vice versa: score each source by how
+# many on-disk objects it covers, take the higher (tie: the newer file). If sources exist but NONE covers any
+# on-disk object, fail loud -- filtering by a source that matches nothing would drop every object and pass vacuously.
+$manifestSources = @()
+if (Test-Path -LiteralPath $ninjaFile) {
+    $lines = @()
+    foreach ($m in [regex]::Matches((Get-Content -Raw -LiteralPath $ninjaFile), '(?m)^build\s+(\S+?\.c\.obj)(?:\s|:)')) {
+        $lines += (($m.Groups[1].Value -replace '\$:', ':') -replace '\\', '/')
+    }
+    $manifestSources += [pscustomobject]@{ Name = "build.ninja"; Lines = $lines; Time = (Get-Item -LiteralPath $ninjaFile).LastWriteTimeUtc }
+}
+if (Test-Path -LiteralPath $manifestFile) {
+    $lines = @(Get-Content -LiteralPath $manifestFile | Where-Object { $_ } | ForEach-Object { $_ -replace '\\', '/' })
+    $manifestSources += [pscustomobject]@{ Name = "obj_manifest.txt"; Lines = $lines; Time = (Get-Item -LiteralPath $manifestFile).LastWriteTimeUtc }
+}
+if ($manifestSources.Count -gt 0 -and $diskRel.Count -gt 0) {
+    foreach ($src in $manifestSources) {
+        $set = @{}
+        foreach ($o in $src.Lines) { $set[$o.ToLowerInvariant()] = $true }
+        $src | Add-Member -NotePropertyName Set -NotePropertyValue $set
+        $src | Add-Member -NotePropertyName Covered -NotePropertyValue @($diskRel | Where-Object { $set.ContainsKey($_) }).Count
+    }
+    $best = $manifestSources | Sort-Object -Property @{ Expression = "Covered"; Descending = $true }, @{ Expression = "Time"; Descending = $true } | Select-Object -First 1
+    if ($best.Covered -eq 0) {
+        Write-Host "DUPLICATE SYMBOL CHECK FAILED: no object manifest matches this build directory." -ForegroundColor Red
+        foreach ($src in $manifestSources) { Write-Host "        $($src.Name): covers 0 of $($diskRel.Count) on-disk .c.obj file(s)" -ForegroundColor Red }
+        Write-Host "      Refusing to filter by a manifest that matches nothing (would silently check nothing). Re-run build_kilnfw." -ForegroundColor Red
+        exit 1
+    }
+    foreach ($src in $manifestSources) {
+        if ($src -ne $best) {
+            Write-Host "NOTE: $($src.Name) covers $($src.Covered) of $($diskRel.Count) on-disk objects; using $($best.Name) ($($best.Covered))." -ForegroundColor Yellow
+        }
+    }
+    $ninjaOutputs = $best.Set
+}
+$notOursObjFiles = @()
 $objFiles = @()
 $staleObjFiles = @()
 foreach ($c in $componentDirs) {
@@ -191,6 +251,11 @@ foreach ($c in $componentDirs) {
                     }
                 }
             }
+            $relObj = ($obj.FullName.Substring($buildDir.Length + 1) -replace '\\', '/').ToLowerInvariant()
+            if ($ninjaOutputs -and -not $ninjaOutputs.ContainsKey($relObj)) {
+                $notOursObjFiles += $obj
+                continue
+            }
             if ($haveAnyKnownNames -and -not $foundInAnyRoot) {
                 $staleObjFiles += [pscustomobject]@{ Obj = $obj; ExpectedBaseName = $expectedBaseName; SourceRoot = ($sourceRoots -join ", ") }
             } else {
@@ -198,6 +263,11 @@ foreach ($c in $componentDirs) {
             }
         }
     }
+}
+
+if ($notOursObjFiles.Count -gt 0) {
+    Write-Host "NOTE: ignoring $($notOursObjFiles.Count) .c.obj file(s) in build/ that this tree's build manifest (build.ninja / obj_manifest.txt) does not produce (left by another worktree path or an older configuration):" -ForegroundColor Yellow
+    foreach ($n in $notOursObjFiles) { Write-Host "        $($n.FullName.Substring($buildDir.Length + 1))" }
 }
 
 if ($staleObjFiles.Count -gt 0) {
@@ -218,11 +288,12 @@ if ($objFiles.Count -eq 0) {
 # tools install (under the user's .espressif directory) is versioned and its
 # exact folder name changes across toolchain updates.
 $nmCandidates = Get-ChildItem -Path "$env:USERPROFILE\.espressif\tools\xtensa-esp-elf" -Recurse -File -Filter "xtensa-esp32s3-elf-nm.exe" -ErrorAction SilentlyContinue
-if (-not $nmCandidates -or $nmCandidates.Count -eq 0) {
+if ((-not $nmCandidates -or $nmCandidates.Count -eq 0) -and -not $env:KILNCTL_DUPSYM_NM) {
     Write-Host "SKIP: could not locate xtensa-esp32s3-elf-nm.exe under $env:USERPROFILE\.espressif\tools\xtensa-esp-elf -- is the ESP-IDF toolchain installed?" -ForegroundColor Yellow
     exit 3
 }
 $nm = ($nmCandidates | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+if ($env:KILNCTL_DUPSYM_NM) { $nm = $env:KILNCTL_DUPSYM_NM }   # test hook: fake nm for scratch objects
 
 # Allowlist of individually justified duplicate external symbols. See
 # header. Empty today -- a real allowlist entry, if one is ever needed,

@@ -1,5 +1,6 @@
 #include "iter_tune_store.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -9,6 +10,7 @@
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
 #include "pref_cfg_fs.h"
+#include "persist_scratch.h"
 
 static const char *TAG = "iter_tune_store";
 
@@ -74,25 +76,9 @@ bool iter_tune_store_blob_validate(const void *bytes, size_t len) {
 // examined) -- version and zone_count are the first two bytes of every
 // schema this file has ever shipped and must never move.
 //
-// KNOWN LIMITATION (step 7 review, 2026-09-23, finding 3): a future
-// size-CHANGING version (e.g. a v3 whose blob is a different length than
-// today's 100 bytes) is NEVER reported by this function -- the caller's own
-// length check (hal_kv_get_blob's `len` out-param for NVS, or the cfg_fs
-// file-length check) already rejects it before note_schema_verdict() is even
-// reached with a size that could match `sizeof(iter_tune_store_blob_t)`.
-// Such a boot instead falls silently into the ordinary "nothing persisted"
-// bucket, exactly like plain corruption, rather than getting the loud
-// newer-than-known banner. This is accepted for now (test_larger_blob_size_change_not_reported_current_limitation()
-// in test_iter_tune_store.c locks in and documents this exact gap) rather
-// than adding a NULL/small-buffer NVS size-probe read ahead of any real v3;
-// see docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1's iter_tune row and
-// docs/ITER_TUNE_REDESIGN_PLAN.md step 7 for the same note. Revisit this
-// when a size-changing version is actually designed.
-static void note_schema_verdict(const void *bytes, size_t len) {
-    if (bytes == NULL || len != sizeof(iter_tune_store_blob_t)) {
-        return;
-    }
-    uint8_t version = ((const uint8_t *)bytes)[0];
+// A size-CHANGING newer version is handled separately for the NVS path by
+// note_oversized_nvs_blob() (the fixed-size read fails first).
+static void note_version_byte(uint8_t version) {
     if (version > ITER_TUNE_STORE_VERSION) {
         s_schema_refused_newer = true;
         s_schema_refused_version = version;
@@ -102,6 +88,13 @@ static void note_schema_verdict(const void *bytes, size_t len) {
                  "build wrote",
                  (unsigned)version, (unsigned)ITER_TUNE_STORE_VERSION);
     }
+}
+
+static void note_schema_verdict(const void *bytes, size_t len) {
+    if (bytes == NULL || len != sizeof(iter_tune_store_blob_t)) {
+        return;
+    }
+    note_version_byte(((const uint8_t *)bytes)[0]);
 }
 
 // v1 -> v2 is byte-compatible (see this file's header comment): v1's
@@ -118,6 +111,34 @@ static bool migrate_v1_to_current(iter_tune_store_blob_t *blob) {
     return true;
 }
 
+// The stored NVS blob is a different size than this build's struct, so the
+// fixed-size read above failed (HAL_INVALID_SIZE). Read the header version
+// byte of the real blob (version is byte 0 of every schema, never moves) so a
+// size-CHANGING newer-firmware blob is reported as "newer", not as
+// corruption. Read-only: never erases or rewrites the blob, so a
+// downgrade-then-upgrade keeps its tuning. A blob at version <= current with
+// the wrong size stays plain corruption (no report).
+#define ITER_TUNE_NVS_PROBE_MAX 4096u
+static void note_oversized_nvs_blob(void) {
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
+        return;
+    }
+    size_t real_len = 0;
+    if (hal_kv_get_blob(&h, ITER_TUNE_NVS_KEY_BLOB, NULL, &real_len) == HAL_OK && real_len >= 1 &&
+        real_len <= ITER_TUNE_NVS_PROBE_MAX) {
+        uint8_t *buf = (uint8_t *)persist_scratch_alloc(real_len);
+        if (buf != NULL) {
+            size_t got = real_len;
+            if (hal_kv_get_blob(&h, ITER_TUNE_NVS_KEY_BLOB, buf, &got) == HAL_OK && got >= 1) {
+                note_version_byte(buf[0]);
+            }
+            free(buf);
+        }
+    }
+    hal_kv_close(&h);
+}
+
 static bool nvs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev, bool note) {
     hal_kv_handle_t h;
     if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
@@ -129,6 +150,9 @@ static bool nvs_load_raw(iter_tune_store_blob_t *out, uint32_t *out_rev, bool no
     hal_kv_get_u32(&h, ITER_TUNE_NVS_KEY_REV, &rev);
     hal_kv_close(&h);
     if (rc != HAL_OK) {
+        if (note && rc == HAL_INVALID_SIZE) {
+            note_oversized_nvs_blob();
+        }
         return false;
     }
     if (!iter_tune_store_blob_validate(out, len)) {
@@ -168,8 +192,24 @@ esp_err_t iter_tune_store_start(void) {
     iter_tune_store_blob_t resolved;
     uint32_t resolved_rev = 0;
     bool used_file = false;
-    bool have = pref_cfg_fs_resolve(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
-                                    validate_and_note, &resolved, &resolved_rev, &used_file);
+    // A size-changing newer-firmware cfg file fails the length check and would
+    // read as corruption -- and resolve() would then overwrite it with the NVS
+    // copy. Probe first: report NEWER and keep the file untouched (NVS, if
+    // valid, serves this boot without being migrated).
+    bool have;
+    uint8_t newer_ver = 0;
+    if (pref_cfg_fs_probe_newer_wrong_size(ITER_TUNE_CFG_FILE_PATH, sizeof(nvs_blob), 0, ITER_TUNE_STORE_VERSION,
+                                           &newer_ver)) {
+        note_version_byte(newer_ver);
+        have = nvs_ok;
+        if (nvs_ok) {
+            resolved = nvs_blob;
+            resolved_rev = nvs_rev;
+        }
+    } else {
+        have = pref_cfg_fs_resolve(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
+                                   validate_and_note, &resolved, &resolved_rev, &used_file);
+    }
     if (have) {
         s_blob = resolved;
         s_rev = resolved_rev;

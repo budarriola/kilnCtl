@@ -875,9 +875,11 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
                          "worker for the established pattern.");
         return ESP_ERR_INVALID_STATE;
     }
-    // ERASE-FIRST: the legacy "fs_<id>" NVS blob goes first and is checked; on
-    // failure nothing else is touched (the file stays) and the error is
-    // returned, so the NVS fallback can never resurrect a half-deleted history.
+    // NVS-FIRST, FILE-LAST: the legacy "fs_<id>" blob goes first and is checked;
+    // erasing the file first would let a failed blob erase be re-migrated into a
+    // fresh file at the next resolve, resurrecting old history. On failure
+    // nothing later is touched and the error is returned. Then the rev key and
+    // the file (firing_stats_cfg_fs_delete()).
     char key[16];
     snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
     hal_kv_handle_t h;
@@ -902,7 +904,6 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
                  hal_status_to_name(err));
         return hal_status_to_esp_err(err);
     }
-
     esp_err_t file_err = firing_stats_cfg_fs_delete(profile_id);
     if (file_err != ESP_OK) {
         ESP_LOGW(PE_TAG, "firing_stats_erase(%u): cfg-fs delete failed: %s", (unsigned)profile_id,

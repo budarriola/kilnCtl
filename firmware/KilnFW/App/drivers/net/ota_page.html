@@ -121,30 +121,6 @@ route.</p>
      merely disabled) until loadInterlock() confirms idle, and re-hidden the
      moment a later poll finds the kiln no longer idle. -->
 
-<!-- UPDATE_PROTOCOL.md sec 6a: "GUI states the order -- ESP first -- when
-     both need updating." Both processors have no shared queue this page can
-     read back (the Pico has no A/B slot/pending-update concept at all, see
-     renderPicoInfo()'s own comment), so "both need updating" is read
-     directly off operator intent: a file chosen in BOTH pickers at once.
-     Hidden until both are chosen; re-hidden the moment either picker is
-     cleared or a file is picked in only one -- see updateOrderHintFilesChanged()
-     below. -->
-<div id="updateOrderHint" class="card" style="display:none">
-  Both an ESP and a Pico image are selected. Update the <b>ESP first</b>,
-  confirm it booted the new image, and only then push the Pico image --
-  the safety link the Pico update relies on comes up as part of the ESP's
-  own boot, so relaying to the Pico first (or mid-ESP-reboot) risks the
-  relay running over a link that is about to drop.
-</div>
-
-<div id="espPicker" style="display:none">
-  <label for="espFile">New ESP image (.bin)</label>
-  <input type="file" id="espFile" accept=".bin">
-  <div>
-    <button id="espUpdateBtn" type="button" class="primary">Update ESP</button>
-    <button id="espRollbackBtn" type="button" class="danger">Roll back ESP to previous image</button>
-  </div>
-</div>
 <!-- Only shown when GET /api/ota/esp/status reports recovery_mode:true --
      see renderEspInfo() below. POST /api/ota/esp/recovery_exit is
      authenticated the same way as every other mutating OTA route
@@ -294,7 +270,6 @@ function readFileBytes(fileInput) {
  * Named blocker shown right at the top, refreshed on a slow timer so an
  * operator watching this page sees the kiln become idle without reloading. */
 function setPickersVisible(visible) {
-  document.getElementById('espPicker').style.display = visible ? '' : 'none';
   document.getElementById('picoPicker').style.display = visible ? '' : 'none';
   document.getElementById('stagePicker').style.display = visible ? '' : 'none';
 }
@@ -390,7 +365,7 @@ function renderEspInfo(s) {
   // other than via an actual reboot, but it CAN flip true->false the moment
   // the board self-clears and the operator reboots it themselves (from this
   // very button) or via the background self-confirm task -- so this box is
-  // re-hidden every poll, same as espPicker's idle-dependent visibility
+  // re-hidden every poll, same as the pickers' idle-dependent visibility
   // above, not just shown once.
   document.getElementById('recoveryExitBox').style.display = s.recovery_mode ? '' : 'none';
 
@@ -398,14 +373,28 @@ function renderEspInfo(s) {
 }
 
 function pollEspStatus() {
-  fetch('/api/ota/esp/status').then(function (r) { return r.json(); }).then(function (s) {
+  fetch('/api/ota/esp/status').then(function (r) {
+    // /api/ota/esp/status is ADMIN (46616a4e). After a post-OTA reboot the RAM
+    // sessions are gone, so a 401 is expected: the board ANSWERED, i.e. it is
+    // back up -- it just needs a fresh login. Say so and stop polling; never
+    // feed an error body to r.json()/renderEspInfo() or retry in a loop.
+    if (r.status === 401) {
+      var e401 = new Error('unauthorized');
+      e401.status = 401;
+      throw e401;
+    }
+    if (!r.ok) { throw new Error('HTTP ' + r.status); }
+    return r.json();
+  }).then(function (s) {
     var phase = renderEspInfo(s);
     if (phase === 'writing' || phase === 'verifying' || phase === 'finalizing') {
       setTimeout(pollEspStatus, 1000);
     }
   }).catch(function (authErr) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-    document.getElementById('espInfo').textContent = 'Could not load ESP status.';
+    document.getElementById('espInfo').textContent = (authErr && authErr.status === 401)
+      ? 'ESP is up (it answered) but your session ended -- reload and log in again to see status.'
+      : 'Could not load ESP status.';
   });
 }
 
@@ -482,46 +471,6 @@ function pollPicoStatus() {
 }
 
 /* ---- Button wiring -------------------------------------------------------- */
-document.getElementById('espUpdateBtn').addEventListener('click', function () {
-  var msg = document.getElementById('espMsg');
-  msg.textContent = 'Reading file…';
-  readFileBytes(document.getElementById('espFile')).then(function (bytes) {
-    msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
-    return pushImage('/api/ota/esp', bytes);
-  }).then(function (body) {
-    msg.textContent = 'ESP update accepted: ' + body.bytes + ' bytes written to ' + body.partition +
-      ', version ' + body.version + '. Reboot the board to run it (stays PENDING_VERIFY until confirmed).';
-    pollEspStatus();
-  }).catch(function (e) {
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'ESP update failed: ' + e.message;
-  });
-});
-
-document.getElementById('espRollbackBtn').addEventListener('click', function () {
-  var msg = document.getElementById('espMsg');
-  window.kcConfirm('Roll back the ESP to its previous image and reboot now?').then(function (ok) {
-    if (!ok) throw { __kcHandled: true };
-    msg.textContent = 'Requesting rollback…';
-    return window.kcOtaAuthedFetch('/api/ota/esp/rollback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: new Uint8Array(0),
-    });
-  }).then(function (r) {
-    return r.text().then(function (text) {
-      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
-      return JSON.parse(text);
-    });
-  }).then(function (body) {
-    msg.textContent = 'Rollback accepted (was running ' + body.version_before + ') -- board is rebooting now.';
-  }).catch(function (e) {
-    if (e && e.__kcHandled) return;
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'Rollback failed: ' + e.message;
-  });
-});
-
 // opus-review finding 3: POST /api/ota/pico/rollback used to block for up
 // to ~6.3s (App/drivers/http/ota_http.c's own comment on ota_pico_rollback_task()
 // explains why -- one httpd worker, a multi-second send-burst/reply-window
@@ -708,15 +657,6 @@ function pollSafetyBuildInfo() {
   }).catch(function () {});
 }
 
-/* ---- Update-order hint (UPDATE_PROTOCOL.md sec 6a) ------------------------ */
-function updateOrderHintFilesChanged() {
-  var espChosen = !!(document.getElementById('espFile').files || []).length;
-  var picoChosen = !!(document.getElementById('picoFile').files || []).length;
-  document.getElementById('updateOrderHint').style.display = (espChosen && picoChosen) ? '' : 'none';
-}
-document.getElementById('espFile').addEventListener('change', updateOrderHintFilesChanged);
-document.getElementById('picoFile').addEventListener('change', updateOrderHintFilesChanged);
-
 /* ---- Stage (WP6, docs/GITHUB_RELEASE_UPDATE_PLAN.md) ----------------------
  * GET /api/update/stage, POST /api/update/stage (raw body), POST
  * /api/update/stage/clear -- update_http.c, all ROUTE_TIER_ADMIN. An upload
@@ -743,6 +683,8 @@ function renderStageInfo(s) {
     row('Staged', 'no' + (s.reason ? ' (' + s.reason + ')' : ''));
   }
   row('Capacity', s.capacity + ' bytes');
+  var wedge = stageWedgeNote(s);
+  if (wedge) row('Warning', wedge);
   box.innerHTML = rows.join('');
   document.getElementById('stageInstallBtn').disabled = !stageInstallable(s);
 }
@@ -919,7 +861,8 @@ var GH_ERRORS = {
   task_create_failed: 'The board could not start the download task.',
   redirect_no_location: 'GitHub sent a redirect the board could not follow.',
   redirect_location_refused: 'GitHub redirected to a host the board does not allow.',
-  wrong_project: 'This image was built for a different project, not KilnCtrl. Nothing was staged.'
+  wrong_project: 'This image was built for a different project, not KilnCtrl. Nothing was staged.',
+  writer_wedged_reboot_required: 'The board stopped writing the download and must be restarted before another update can run.'
 };
 
 var GH_VERDICTS = {
@@ -988,6 +931,13 @@ function ghRefusalText(status, text) {
   if (body && typeof body.error === 'string') return ghErrorText(body.error);
   if (status === 409 || status === 428) return text ? String(text).trim() : 'Refused (HTTP ' + status + ').';
   return text ? String(text).trim() : ('HTTP ' + status);
+}
+/* Review 7 L1: a wedged fetch writer is shown as a reboot notice whatever the stage phase reads. */
+function stageWedgeNote(s) {
+  if (s && (s.fetch_writer_wedged === true || s.reason === 'writer_wedged_reboot_required')) {
+    return GH_ERRORS.writer_wedged_reboot_required;
+  }
+  return '';
 }
 /* UPDATE_CARD_PURE_END */
 
@@ -1189,6 +1139,8 @@ document.getElementById('repoSaveBtn').addEventListener('click', function () {
 document.getElementById('repoResetBtn').addEventListener('click', function () { saveRepo(''); });
 
 /* ---- Boot ------------------------------------------------------------------ */
+/* Deferred: app.js is <script defer>, so window.kc* helpers do not exist while this inline script runs. */
+function bootPage() {
 loadInterlock();
 setInterval(loadInterlock, 15000);
 pollEspStatus();
@@ -1198,6 +1150,9 @@ setInterval(pollSafetyBuildInfo, 3000);
 loadStageStatus();
 loadRepo();
 loadGh();
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPage);
+else bootPage();
 
 (function () {
   var btn = document.getElementById('themeBtn');

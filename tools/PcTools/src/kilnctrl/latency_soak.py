@@ -36,7 +36,7 @@ SURFACES: "Tuple[Tuple[str, str], ...]" = (
     ("status", "/api/status"),               # OPEN: dashboard
     ("profile_exec", "/api/profile_exec"),   # OPEN: executor state
     ("readiness", "/api/readiness"),         # OPEN
-    ("ota_status", "/api/ota/esp/status"),   # OPEN: OTA/partition state
+    ("ota_status", "/api/ota/esp/status"),   # ADMIN: OTA/partition state
     ("profiles", "/api/profiles"),           # USER: profile list
     ("zones", "/api/zones"),                 # ADMIN
     ("control", "/api/control"),             # ADMIN

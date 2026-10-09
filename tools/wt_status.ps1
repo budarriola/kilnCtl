@@ -46,7 +46,7 @@
 param(
     [string]$Root = "C:\wt",
     [string]$Repo,
-    [string]$Base = "origin/main",
+    [string]$Base = "origin/dev",
     [switch]$Size,
     [switch]$Prune,
     [switch]$WhatIf,

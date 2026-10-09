@@ -15,6 +15,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "boot_guard.h"
 
 #include "lvgl_port.h"
 #include "dashboard_json.h"
@@ -868,6 +869,9 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
      * safety_config_crc stay unconditional -- only the two build-identity
      * strings and the dirty flag are gated (see the may_see_build_identity
      * comment above). */
+    /* 2026-10-09 route tier review LOW-3: recovery_mode lives here (OPEN,
+     * dashboard) so GET /api/ota/esp/status can be ADMIN. Fixed for the boot. */
+    APPEND(",\"recovery_mode\":%s", boot_guard_is_recovery_mode() ? "true" : "false");
     APPEND(",\"safety_build_known\":%s", ds->safety_build_known ? "true" : "false");
     if (ds->safety_build_known) {
         APPEND(",\"safety_config_version\":%u", (unsigned)ds->safety_config_version);

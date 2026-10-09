@@ -190,6 +190,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
  * still relies on. */
 static int s_ceiling_writer_calls = 0;
 static float s_ceiling_writer_last_target_c = 0.0f;
+static int s_ceiling_writer_bumps_generation = 0; /* simulates a concurrent writer during the blocking ceiling write */
 
 bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
                                           char *reason_out, size_t reason_cap,
@@ -199,6 +200,9 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
     (void)param_id;
     s_ceiling_writer_calls++;
     s_ceiling_writer_last_target_c = value;
+    if (s_ceiling_writer_bumps_generation) {
+        s_config_generation++;
+    }
     if (reason_out && reason_cap > 0) {
         reason_out[0] = '\0';
     }
@@ -1768,6 +1772,63 @@ static uint8_t s_test_aux_mask = 0;
 static uint8_t test_aux_provider(void)
 {
     return s_test_aux_mask;
+}
+
+static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(void)
+{
+    TEST_SECTION("POST /api/zones -- a concurrent writer bumping the config generation between the "
+                 "snapshot and the commit makes the submit refuse 409 instead of overwriting it");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+
+    /* control: no concurrent writer -> commits */
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "control: undisturbed submit commits");
+
+    seed_two_zone_pid_baseline();
+    s_zones.cfg.zones[0].max_temp_c = 100.0f; /* below the body's max, so the commit path raises the Pico ceiling */
+    s_zones.cfg.zones[1].max_temp_c = 100.0f;
+    uint32_t gen_before = s_config_generation;
+    zones_cfg_t before = s_zones.cfg;
+    s_ceiling_writer_calls = 0;
+    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs (unknown Pico ceiling -> always raises) */
+    s_ceiling_writer_bumps_generation = 1;
+    run_zones_post(body);
+    s_ceiling_writer_bumps_generation = 0;
+    s_hw_safety = NULL;
+    TEST_CHECK(s_ceiling_writer_calls >= 1, "test setup: the ceiling write ran (the blocking window)");
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "lost-update answered 409");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_changed_concurrently") != NULL, "refusal names the cause");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched by the refused submit");
+    TEST_CHECK(s_config_generation == gen_before + 1, "only the concurrent writer's bump advanced the generation");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+}
+
+static void test_zones_cfg_lock_covers_commit_and_setters(void)
+{
+    TEST_SECTION("zones config lock -- the POST commit and every field setter's mutate-and-bump take "
+                 "zones_cfg_lock() (review L2; host tests are single-threaded, so this proves the lock "
+                 "is TAKEN around the write, not real mutual exclusion)");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    /* nvs_save() snapshots RAM under the same lock (LOW-4), so measure its own acquisitions
+     * first and expect the commit's single acquisition on top of that. */
+    uint32_t s0 = s_zones_cfg_lock_acquires;
+    (void)nvs_save();
+    uint32_t save_acq = s_zones_cfg_lock_acquires - s0;
+    TEST_CHECK(save_acq >= 1, "nvs_save takes the zones lock to snapshot");
+    uint32_t a0 = s_zones_cfg_lock_acquires;
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "submit commits");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1 + save_acq, "the successful commit took the lock once, plus its save's snapshot");
+
+    a0 = s_zones_cfg_lock_acquires;
+    TEST_CHECK(zones_config_set_max_ramp_no_save(0, 100.0f), "setter succeeds");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1, "a field setter takes the lock around mutate+bump");
+    uint32_t g = s_config_generation;
+    TEST_CHECK(!zones_config_set_max_ramp_no_save(0, -1.0f), "rejected setter");
+    TEST_CHECK(s_config_generation == g && s_zones_cfg_lock_acquires == a0 + 1,
+               "a rejected setter neither locks nor bumps");
 }
 
 static void test_zones_post_refuses_relay_claimed_by_aux(void)
@@ -16338,7 +16399,9 @@ void run_test_zones_http(void)
     test_zones_post_http_sync_claim();
     test_zones_post_refused_when_cfg_unmounted();
     test_cfg_fs_refusal_helper();
+    test_zones_cfg_lock_covers_commit_and_setters();
     test_zones_post_refuses_relay_claimed_by_aux();
+    test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
     test_zones_post_refused_while_async_job_busy();
 }
 
