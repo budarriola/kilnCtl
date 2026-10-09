@@ -32,8 +32,9 @@ reset.
   records) and `security_backend_web_auth.c` (the setter, wired into
   `main_network_http.c`'s bringup and into `CMakeLists.txt` for the real
   target, not just host tests). The nine previously OTA-authenticated routes
-  are ordinary ADMIN rows in the tier table; the AP-password fallback for
-  those nine while auth is disabled is implemented in `ota_http.c`.
+  are ordinary ADMIN rows in the tier table. (The AP-password fallback for
+  those nine was retired 2026-09-29, item 2b: with web auth off they are as
+  open as every other ADMIN route.)
 - **Session primitives** (item 4): `web_auth_session.c`/`.h`,
   `http_session_iface.c`/`.h`.
 - **LCD PIN entry, keypad, and the LCD half of the inactivity lock**
@@ -1290,12 +1291,10 @@ returns ALLOW immediately, before any session lookup. The same for
 off is exactly as open as the board is today.** That is the point of the
 default, and it is why the setup wizard must ask.
 
-**One named exception: the nine OTA-family routes are never ungated.** With web
-auth off they fall back to today's AP-password challenge rather than becoming
-open, because anything else would loosen the only routes that are authenticated
-today. Full reasoning in item 2b. "Exactly as open as today" therefore means
-precisely that — today's board already requires a credential for OTA, factory
-reset, `sw_reset` and the `cfgfs` format, and so does this one.
+**No exceptions (2026-09-29, item 2b):** the former AP-password/HMAC fallback
+for the nine OTA-family routes is retired, so with web auth off they are as
+open as every other ADMIN route. `http_auth_check()` (`http_auth_enforce.c`)
+returns ALLOW on `!web_enabled` for every tier.
 
 **"No credential set" is not an error state.** It is the shipped default. A
 board with auth off and no credential is fully functional. Enabling auth is
@@ -1545,19 +1544,10 @@ by hand, confirm GREEN, and force a full rebuild.
    `zones_cfg` rollback hazard, with the opposite default: zones falls back to
    firmware defaults, credentials must not.
 
-   **Ordering hazard, created by item 2b and resolved here.** Folding OTA into
-   administrator auth means an OTA route is now gated by the very record an OTA
-   must preserve. If an unreadable credential record refused the OTA routes the
-   way it refuses a web login, a rollback past a credential-schema bump would
-   remove the means of repair: the operator could no longer OTA forward to the
-   firmware that understands the record, leaving only the physical gesture or
-   JTAG. So the two rules differ deliberately — **a web login is refused when
-   the record is unreadable; the nine OTA-family routes instead fall back to
-   the AP-password challenge** (item 2b's auth-off path), which needs no
-   credential record at all. Refusing a web login costs nothing that is not
-   recoverable; refusing OTA removes the repair path. The
-   `boot_button_ota_bypass_active()` physical-presence window remains beneath
-   both as the last resort.
+   **Superseded 2026-09-29:** the OTA routes no longer fall back to an
+   AP-password challenge (item 2b). The repair path after an unreadable
+   record is the physical reset gesture (item 10), JTAG, or the
+   `boot_button_ota_bypass_active()` physical-presence window.
 3. **Config backup / export.** Credentials are **not** in the file. State it on
    the backup page in one line — "Backup does not include usernames,
    passwords or the LCD PIN. Those stay on this board." — so an operator
