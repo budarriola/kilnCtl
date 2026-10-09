@@ -7,6 +7,8 @@
 #include "MAX31856.h"
 #include "cfg_fs_status.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "ota_image_crc.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
@@ -46,6 +48,27 @@ static uint8_t s_enabled_mask = 0;
 static uint8_t s_conflict_mask = 0;
 static bool s_quarantined = false;
 static uint32_t s_rev = 0;
+
+/* s_lock guards the RAM globals above (short critical sections only, never
+ * across flash I/O or another module's calls). s_set_lock serializes whole
+ * set() calls so the unlocked save in the middle cannot interleave with another
+ * writer. Created in start() (idempotent); NULL (prestart) = no locking, never a
+ * hang. Lock order: s_set_lock -> s_lock. */
+static SemaphoreHandle_t s_lock = NULL;
+static SemaphoreHandle_t s_set_lock = NULL;
+
+static void ao_lock(SemaphoreHandle_t l)
+{
+    if (l) {
+        (void)xSemaphoreTake(l, portMAX_DELAY);
+    }
+}
+static void ao_unlock(SemaphoreHandle_t l)
+{
+    if (l) {
+        (void)xSemaphoreGive(l);
+    }
+}
 
 static uint32_t blob_checksum(const aux_outputs_blob_t *b)
 {
@@ -113,8 +136,13 @@ static void apply_defaults(void)
 
 esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
 {
-    apply_defaults();
-
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_set_lock) {
+        s_set_lock = xSemaphoreCreateMutex();
+    }
+    /* All NVS / cfg-fs I/O below runs into locals; s_lock is taken only to publish. */
     aux_outputs_blob_t nvs_blob;
     memset(&nvs_blob, 0, sizeof(nvs_blob));
     bool nvs_valid = false;
@@ -164,6 +192,8 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
                                           aux_validate, &resolved, &resolved_rev, &used_file);
+    ao_lock(s_lock);
+    apply_defaults();
     if (nvs_newer) {
         s_quarantined = true;
     } else if (have_value) {
@@ -191,6 +221,7 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
                      (unsigned)s_conflict_mask);
         }
     }
+    ao_unlock(s_lock);
     return ESP_OK;
 }
 
@@ -199,10 +230,13 @@ bool aux_outputs_cfg_get(uint8_t relay, aux_output_t *out)
     if (relay < 1 || relay > AUX_OUTPUTS_COUNT || out == NULL) {
         return false;
     }
-    const aux_output_entry_t *e = &s_entries[relay - 1];
+    ao_lock(s_lock);
+    const aux_output_entry_t e_copy = s_entries[relay - 1];
+    const aux_output_entry_t *e = &e_copy;
     uint8_t bit = (uint8_t)(1u << (relay - 1));
     out->enabled = (s_enabled_mask & bit) != 0;
     out->conflicted = (s_conflict_mask & bit) != 0;
+    ao_unlock(s_lock);
     out->tc_zone = e->tc_zone_plus1 == 0 ? (uint8_t)AUX_TC_ZONE_NONE : (uint8_t)(e->tc_zone_plus1 - 1u);
     out->hyst_c = e->hyst_c == 0.0f ? AUX_HYST_C_DEFAULT : e->hyst_c;
     out->min_on_s = e->min_on_s == 0 ? (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT : e->min_on_s;
@@ -215,32 +249,53 @@ bool aux_outputs_cfg_get_raw(uint8_t relay, aux_output_entry_t *out)
     if (relay < 1 || relay > AUX_OUTPUTS_COUNT || out == NULL) {
         return false;
     }
+    ao_lock(s_lock);
     *out = s_entries[relay - 1];
+    ao_unlock(s_lock);
     return true;
 }
 
 bool aux_outputs_cfg_verify_persisted(void)
 {
-    if (nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
-        return false;
-    }
-    hal_kv_handle_t h;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
-        return false;
-    }
+    /* Re-reads the cfg FILE, the only place a save lands since the dual-write
+     * close (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"). Reading
+     * NVS here would compare RAM against a copy no save ever updates again. */
     aux_outputs_blob_t blob;
     memset(&blob, 0, sizeof(blob));
-    size_t len = sizeof(blob);
-    bool ok = hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && aux_validate(&blob, len) &&
-              blob.version == AUX_OUTPUTS_CFG_VERSION && memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
-    hal_kv_close(&h);
-    return ok;
+    uint32_t rev = 0;
+    bool valid = false;
+    ao_lock(s_set_lock); /* no set() in flight: RAM and file are consistent */
+    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(blob), aux_validate, &blob, &rev, &valid);
+    ao_lock(s_lock);
+    bool same = valid && rev == s_rev && blob.version == AUX_OUTPUTS_CFG_VERSION &&
+                memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
+    ao_unlock(s_lock);
+    ao_unlock(s_set_lock);
+    return same;
 }
 
-uint8_t aux_outputs_cfg_enabled_mask(void) { return s_enabled_mask; }
-uint8_t aux_outputs_cfg_conflict_mask(void) { return s_conflict_mask; }
-bool aux_outputs_cfg_conflict(void) { return s_conflict_mask != 0; }
-bool aux_outputs_cfg_quarantined(void) { return s_quarantined; }
+uint8_t aux_outputs_cfg_enabled_mask(void)
+{
+    ao_lock(s_lock);
+    uint8_t v = s_enabled_mask;
+    ao_unlock(s_lock);
+    return v;
+}
+uint8_t aux_outputs_cfg_conflict_mask(void)
+{
+    ao_lock(s_lock);
+    uint8_t v = s_conflict_mask;
+    ao_unlock(s_lock);
+    return v;
+}
+bool aux_outputs_cfg_conflict(void) { return aux_outputs_cfg_conflict_mask() != 0; }
+bool aux_outputs_cfg_quarantined(void)
+{
+    ao_lock(s_lock);
+    bool v = s_quarantined;
+    ao_unlock(s_lock);
+    return v;
+}
 
 bool aux_outputs_cfg_entry_valid(const aux_output_entry_t *entry)
 {
@@ -252,63 +307,49 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
     if (relay < 1 || relay > AUX_OUTPUTS_COUNT || entry == NULL || !entry_valid(entry)) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_quarantined) {
-        return ESP_ERR_INVALID_STATE;
-    }
     uint8_t bit = (uint8_t)(1u << (relay - 1));
     if (entry->enabled && aux_outputs_relay_conflict(zones_relay_union, bit)) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* The OTHER entries' persisted state is carried through unchanged (a
-     * start()-time conflicted one stays persisted as enabled and stays forced
-     * off in RAM until its own set()). */
+    ao_lock(s_set_lock); /* one writer at a time; readers are not blocked by the save */
+
+    /* Snapshot under the short lock. The OTHER entries' persisted state is
+     * carried through unchanged (a start()-time conflicted one stays persisted
+     * as enabled and stays forced off in RAM until its own set()). */
     aux_outputs_blob_t blob;
     memset(&blob, 0, sizeof(blob));
     blob.version = AUX_OUTPUTS_CFG_VERSION;
+    ao_lock(s_lock);
+    bool quarantined = s_quarantined;
     memcpy(blob.entries, s_entries, sizeof(s_entries));
+    uint32_t new_rev = s_rev + 1;
+    ao_unlock(s_lock);
+    if (quarantined) {
+        ao_unlock(s_set_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     blob.entries[relay - 1] = *entry;
     blob.crc32 = blob_checksum(&blob);
 
-    /* In-RAM truth first. */
-    s_entries[relay - 1] = *entry;
-    s_conflict_mask = (uint8_t)(s_conflict_mask & ~bit);
-    if (entry->enabled) {
-        s_enabled_mask |= bit;
-    } else {
-        s_enabled_mask = (uint8_t)(s_enabled_mask & ~bit);
-    }
-
-    uint32_t new_rev = s_rev + 1;
-    esp_err_t file_err = pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "aux outputs file write failed: %s -- NVS remains the source of truth",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        return hal_status_to_esp_err(part_err);
-    }
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_AUX_OUT, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_AUX_OUT_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "could not persist aux outputs: %s -- will not survive a reboot", hal_status_to_name(err));
-    } else {
+    /* Save OUTSIDE s_lock (flash I/O). RAM is committed only on success: a
+     * failed save leaves RAM exactly as it was (F3). cfg file ONLY --
+     * docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed". */
+    esp_err_t err = pref_cfg_fs_commit(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), new_rev, "aux outputs");
+    if (err == ESP_OK) {
+        ao_lock(s_lock);
+        s_entries[relay - 1] = *entry;
+        s_conflict_mask = (uint8_t)(s_conflict_mask & ~bit);
+        if (entry->enabled) {
+            s_enabled_mask |= bit;
+        } else {
+            s_enabled_mask = (uint8_t)(s_enabled_mask & ~bit);
+        }
         s_rev = new_rev;
+        ao_unlock(s_lock);
     }
-    return hal_status_to_esp_err(err);
+    ao_unlock(s_set_lock);
+    return err;
 }
 
 #define NVS_KEY_AUX_JRNL "aux_conv_jrnl"

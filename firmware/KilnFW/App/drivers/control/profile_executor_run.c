@@ -27,6 +27,7 @@
 #include "profiles_store.h"
 #include "readiness_gate.h"
 #include "relay_authority.h"
+#include "relay_off_tracker.h"
 #include "safety_trip_words.h"
 #include "sim_backend.h"
 #include "system_mode_gate.h"
@@ -76,19 +77,33 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
     }
 }
 
-/* Lowest zone in zone_mask that is NOT monitor-only, or -1 if there is none.
- * The run-start temperature baseline and the warm-start pick both key off
- * this (profile_executor_capture_baseline() is its only caller, and
- * profile_executor_run() applies that capture without re-picking): a
+/* The one predicate for "this zone's reading/state is part of the run's shared
+ * temperature drive": not an on/off zone (it has no obligation to the shared
+ * setpoint, ON_OFF_ZONE_PLAN.md sec 1) and not monitor-only (never driven,
+ * SPARE_RELAY_ONOFF_PLAN.md sec 10). Used by the baseline pick, the warm-start
+ * coolest pick and the ramp-lock loop so the three cannot disagree. Deliberately
+ * NOT used by the ramp-rate-ceiling feasibility check: an on/off zone has a
+ * ceiling it is still validated against there. */
+bool profile_executor_zone_drives_run(uint8_t zi)
+{
+    return !zone_is_on_off(zi) && !zone_is_monitor_only(zi);
+}
+
+/* Lowest zone in zone_mask that drives the run
+ * (profile_executor_zone_drives_run(): neither on/off nor monitor-only), or
+ * -1 if there is none. The run-start temperature baseline and the warm-start
+ * pick both key off this (profile_executor_capture_baseline() is its only
+ * caller, and profile_executor_run() applies that capture without
+ * re-picking): an on/off zone has no obligation to the shared setpoint and a
  * monitor-only zone (HEATER with relay_mask==0, zone_is_monitor_only(), the
- * one rule) is never driven, so its reading must not seed the run's target
- * or decide a warm start. All-monitor-only masks return -1; the capture then
- * yields no baseline/warm-start (fail closed) and profile_executor_run()
- * refuses such a start anyway via its n_heating_zones == 0 check. */
+ * one rule) is never driven, so neither reading may seed the run's target or
+ * decide a warm start. A mask with no such zone returns -1; the capture then
+ * yields no baseline/warm-start (fail closed). An all-monitor-only mask is
+ * refused at start anyway via the n_heating_zones == 0 check. */
 static int8_t profile_executor_baseline_zone(uint8_t zone_mask)
 {
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        if ((zone_mask & (1u << zi)) && !zone_is_monitor_only(zi)) {
+        if ((zone_mask & (1u << zi)) && profile_executor_zone_drives_run(zi)) {
             return (int8_t)zi;
         }
     }
@@ -104,8 +119,8 @@ static int8_t profile_executor_baseline_zone(uint8_t zone_mask)
  * caller (the dashboard/LCD status readers, profiles_stop(), etc.) for that
  * whole window.
  *
- * first_active (the lowest NON-monitor-only zone index set in zone_mask, see
- * profile_executor_baseline_zone()) is purely a property
+ * first_active (the lowest zone index set in zone_mask that drives the run,
+ * see profile_executor_baseline_zone()) is purely a property
  * of the profile being started -- it does not depend on any s_exec state
  * guarded by the lock, so it is safe to compute here, before that state
  * (s_exec.zones[]) is even touched. zones_config_get_thermo_mask()/
@@ -160,7 +175,7 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
      * other than first_active can legitimately be the coolest one. */
     for (uint8_t wzi = 0; wzi < MAX31856_CHANNEL_COUNT; wzi++) {
         if (!(zone_mask & (1u << wzi))) continue;
-        if (zone_is_monitor_only(wzi)) continue; /* never drives the warm-start pick */
+        if (!profile_executor_zone_drives_run(wzi)) continue; /* on/off and monitor-only zones never drive the warm-start pick */
         uint8_t w_tmask = 0;
         zones_config_get_thermo_mask(wzi, &w_tmask);
         bool w_valid = false;
@@ -681,10 +696,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * would strand a closed relay. The handoff below folds it in and writes
      * OFF to it again. */
     for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
-        on_off_trigger_state_reset(&s_exec.aux[ai].trigger);
-        s_exec.aux[ai].actuated_on = false;
-        s_exec.aux[ai].held_s = 0.0f;
-        s_exec.aux[ai].commanded_on = false;
+        /* Holds seeded from the relay's own last ON-to-OFF time (relay_off_
+         * tracker), not a flat "settled": a stop followed by a quick restart
+         * must still wait out min_off_s. */
+        profile_executor_aux_reset_runtime(ai);
+        s_exec.aux[ai].on_time_s = 0.0f;
+        s_exec.aux[ai].switch_count = 0;
     }
     /* Same "starts owing nothing" reasoning as claimed_relay_mask just above,
      * for the relay/IO segment machinery: a previous run's io_segs[] state
@@ -978,7 +995,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         };
         pid_reset(&z->pid_state);
         z->fuzzy_prev_effective_ki = 0.0f;
-        /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3, N3: a limit cycle from a
+        /* ADAPTIVE_FUZZY_EVALUATION.md sec 3, N3: a limit cycle from a
          * PREVIOUS firing must never carry a stale trip into this one --
          * the "reset one side of a pair" class this project has hit before
          * (see pid_fuzzy_oscillation_state_t's own header comment). */
@@ -1073,9 +1090,13 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * a second call site to keep in sync. */
         on_off_trigger_state_reset(&z->on_off_trigger_state);
         /* Actuation-layer hold state (plan step 8) mirrors the same
-         * fail-safe-shaped reset: never actuated, no held time. */
+         * fail-safe-shaped reset: never actuated. Both holds are seeded from
+         * the zone relay's last ON-to-OFF time (relay_off_tracker): settled
+         * if it has not been ON since boot, so min_off_s does not delay the
+         * first ON of the first run, but still counting down after a stop
+         * followed by a quick restart. */
         z->on_off_actuated_on = false;
-        z->on_off_actuated_held_s = 0.0f;
+        profile_executor_on_off_seed_hold(&z->on_off_trigger_state, &z->on_off_actuated_held_s, relay_mask);
         /* HP-02 starvation reporting starts from zero every run/resume. */
         z->relay_starved_s = 0.0f;
         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_NONE;
@@ -1093,7 +1114,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * profile_executor_capture_baseline(), BEFORE s_exec.lock was taken
      * (see that function's doc comment), and that function alone picks the
      * baseline zone (profile_executor_baseline_zone(): lowest zone in the
-     * mask that is not monitor-only). The snapshot is applied here, once,
+     * mask that is neither on/off nor monitor-only). The snapshot is applied here, once,
      * after the zone loop, rather than at a second "zi == first_active"
      * gate inside it: a second pick evaluated later, under the lock, could
      * disagree with the capture's if a zone's type or relay mask changed in
@@ -1312,6 +1333,19 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* Update-in-flight, second look (review 3 MED-1): the early check at the
+     * top of this function precedes slow baseline reads, so an update claim
+     * could be taken after it. Re-test now that the heat claim is published.
+     * Pairs with update_http.c claim_refuses(): that side takes the update
+     * claim and THEN re-reads the heat run state; this side publishes the
+     * heat claim and THEN re-reads the update claim -- at least one refuses. */
+    if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        xSemaphoreGive(s_exec.lock);
+        return false;
+    }
+
     /* Restore-in-flight, second look (A4 review follow-up A, reviewer fix):
      * the gate check at the top of this function reads the flag long before
      * this commit (baseline SPI reads, config reads in between), so a restore
@@ -1397,6 +1431,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                  * claim; without this the aux would stay as the operator
                  * left it until the first rule decision. */
                 s_exec.aux_off_pending = true;
+            } else {
+                relay_off_tracker_note_write(aux_take, 0);
             }
         }
     }

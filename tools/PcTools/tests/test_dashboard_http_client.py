@@ -388,6 +388,16 @@ class FacadeDiscoverabilityTest(unittest.TestCase):
         self.assertNotIn("get_heap_status", published)
 
 
+def _cfgfs_item(name, file_rev=5, nvs_rev=5, file_backed=True, diverged=False, nvs_stale=False,
+                migration_deferred=False):
+    """One dual_write.items[] row exactly as cfg_fs_status.c's
+    cfg_fs_status_build_json_ex() emits it (keys and order: name, file_backed,
+    file_rev, nvs_backed, nvs_rev, diverged, nvs_stale, migration_deferred)."""
+    return {"name": name, "file_backed": file_backed, "file_rev": file_rev, "nvs_backed": True,
+            "nvs_rev": nvs_rev, "diverged": diverged, "nvs_stale": nvs_stale,
+            "migration_deferred": migration_deferred}
+
+
 def _sample_cfgfs(**overrides) -> dict:
     """A realistic GET /api/cfgfs body (cfg_fs_status.c's shape), mounted
     with a couple of files and a healthy (non-diverged) dual-write."""
@@ -401,9 +411,15 @@ def _sample_cfgfs(**overrides) -> dict:
             {"name": "prefs.json", "size_bytes": 96},
         ],
         "tmp_entries_now": 0,
+        "subdirs": [{"name": "profiles", "file_count": 3, "size_bytes": 1800, "unknown_size": 0}],
         "dual_write": {
-            "zones": {"file_backed": True, "file_rev": 5, "nvs_rev": 5, "diverged": False},
-            "nvs_only": ["prefs", "profiles", "kilncfg_slots", "adaptive_tune", "relay_cycles"],
+            "write_mode": "cfg_only",
+            "items": [
+                _cfgfs_item("zones", file_rev=5, nvs_rev=5),
+                _cfgfs_item("unit_pref", file_rev=2, nvs_rev=2),
+            ],
+            "nvs_only": [],
+            "nvs_permanent": ["wifi_creds", "profiles_favorites", "aux_convert_journal"],
         },
     }
     body.update(overrides)
@@ -419,13 +435,13 @@ class GetCfgfsStatusClientTest(unittest.TestCase):
             cfgfs = dh.get_cfgfs_status("10.0.0.5")
         self.assertTrue(cfgfs["mounted"])
         self.assertEqual(cfgfs["file_count"], 2)
-        self.assertEqual(cfgfs["dual_write"]["zones"]["file_rev"], 5)
+        self.assertEqual(cfgfs["dual_write"]["items"][0]["file_rev"], 5)
 
     def test_unmounted_body_parses_too(self):
         body = json.dumps({
             "mounted": False, "status": "unmounted", "reason": "not mounted this boot",
             "capacity": {"known": False}, "file_count": 0, "files": [], "tmp_entries_now": 0,
-            "dual_write": {"zones": {"file_backed": False}, "nvs_only": ["prefs"]},
+            "dual_write": {"write_mode": "cfg_only", "items": [], "nvs_only": [], "nvs_permanent": []},
         }).encode("utf-8")
         with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
             cfgfs = dh.get_cfgfs_status("10.0.0.5")
@@ -457,18 +473,39 @@ class GetCfgfsStatusMcpToolTest(unittest.TestCase):
         self.assertIn("free=520192", result)
         self.assertIn("zones.json", result)
         self.assertIn("640 B", result)
-        self.assertIn("file_rev=5", result)
+        self.assertIn("dual_write.zones: file_rev=5 nvs_rev=5", result)
+        self.assertIn("dual_write.unit_pref: file_rev=2 nvs_rev=2", result)
+        self.assertNotIn("not file-backed yet", result)
         self.assertNotIn("DIVERGED", result)
+        self.assertIn("profiles/: 3 file(s), 1800 B", result)
+        self.assertIn("NVS by design: wifi_creds, profiles_favorites, aux_convert_journal", result)
 
     def test_diverged_dual_write_is_flagged(self):
         from kilnctrl import mcp_server as m
 
         cfgfs = _sample_cfgfs()
-        cfgfs["dual_write"]["zones"] = {"file_backed": True, "file_rev": 5, "nvs_rev": 6, "diverged": True}
+        cfgfs["dual_write"]["items"][0] = _cfgfs_item("zones", file_rev=5, nvs_rev=6, diverged=True)
         body = json.dumps(cfgfs).encode("utf-8")
         with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
             result = m.get_cfgfs_status(host="10.0.0.5")
-        self.assertIn("DIVERGED", result)
+        self.assertIn("dual_write.zones: file_rev=5 nvs_rev=6 [!!! DIVERGED", result)
+        self.assertNotIn("dual_write.unit_pref: file_rev=2 nvs_rev=2 [", result)
+
+    def test_stale_deferred_and_unbacked_rows_are_flagged(self):
+        from kilnctrl import mcp_server as m
+
+        cfgfs = _sample_cfgfs()
+        cfgfs["dual_write"]["items"] = [
+            _cfgfs_item("firing_stats", file_rev=9, nvs_rev=4, nvs_stale=True),
+            _cfgfs_item("relay_cycles", migration_deferred=True),
+            _cfgfs_item("tz", file_backed=False),
+        ]
+        body = json.dumps(cfgfs).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            result = m.get_cfgfs_status(host="10.0.0.5")
+        self.assertIn("dual_write.firing_stats: file_rev=9 nvs_rev=4 [nvs_stale", result)
+        self.assertIn("dual_write.relay_cycles: file_rev=5 nvs_rev=5 [migration_deferred]", result)
+        self.assertIn("dual_write.tz: file_rev=5 nvs_rev=5 [not file-backed yet]", result)
 
     def test_unmounted_reports_reason_and_unknown_capacity(self):
         from kilnctrl import mcp_server as m
@@ -476,7 +513,8 @@ class GetCfgfsStatusMcpToolTest(unittest.TestCase):
         body = json.dumps({
             "mounted": False, "status": "unavailable", "reason": "mount was attempted and failed",
             "capacity": {"known": False}, "file_count": 0, "files": [], "tmp_entries_now": 0,
-            "dual_write": {"zones": {"file_backed": False}, "nvs_only": ["prefs"]},
+            "dual_write": {"write_mode": "cfg_only", "items": [
+                _cfgfs_item("zones", file_backed=False)], "nvs_only": ["prefs"], "nvs_permanent": []},
         }).encode("utf-8")
         with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
             result = m.get_cfgfs_status(host="10.0.0.5")

@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: 100 user slots (ids
+/* docs/PROFILE_SLOTS_100.md section 7 task 6: 100 user slots (ids
  * 0..99), id 100 is the reserved live-edit slot (LIVE_EDIT_WORKING_SLOT_ID,
  * live_profile.h, defined as PROFILES_MAX_COUNT so it tracks this value
  * automatically), and id 101 is the hidden bench-harness slot

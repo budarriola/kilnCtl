@@ -3,7 +3,7 @@
 // SCOPE: drives the 263 cells sim_factorial_design.c generates through five
 // arms and emits one TSV row per (cell, arm) -- three SINGLE-FIRING arms
 // (A_PID, A_FUZZY50, A_STATIC_MATCHED) plus, since
-// docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 5, two ADAPTIVE arms
+// docs/ADAPTIVE_FUZZY_EVALUATION.md sec 5, two ADAPTIVE arms
 // (A_PID_AT, A_FUZZY_AT) each run as a CHAIN OF NINE sequential firings
 // with adaptation state carried across them (one row per firing, arm column
 // "A_PID_AT_F1".."A_FUZZY_AT_F9"), plus a per-cell/arm fuzzy rule-cell
@@ -65,7 +65,7 @@
 #include <string.h>
 
 // =====================================================================
-// ADAPTIVE-ARM SUPPORT (docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 5)
+// ADAPTIVE-ARM SUPPORT (docs/ADAPTIVE_FUZZY_EVALUATION.md sec 5)
 //
 // Everything between here and the END marker exists only for A_PID_AT /
 // A_FUZZY_AT. It is a trimmed, single-zone copy of sim_scenarios_adaptive.c's
@@ -875,7 +875,7 @@ static void print_cell_row(const sim_factorial_cell_t *cell, const char *arm_lab
 
 /* ==================================================================
  * Plan sec 7's registered gate constants. These are REGISTERED IN
- * ADVANCE (ADAPTIVE_FUZZY_EVALUATION_PLAN.md, commit 5387ff52) and must
+ * ADVANCE (ADAPTIVE_FUZZY_EVALUATION.md, commit 5387ff52) and must
  * not be re-tuned because a run comes out inconveniently. If one of them
  * is believed wrong, say so in the report and leave the number alone.
  * ================================================================== */

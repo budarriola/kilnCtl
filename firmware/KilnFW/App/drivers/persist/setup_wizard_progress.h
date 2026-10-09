@@ -13,13 +13,17 @@
 // class, four confirmed instances -- see MEMORY.md
 // project_reset_one_side_bug_class).
 //
-// PERSISTENCE: lives in NVS ONLY, deliberately NOT on the `cfg` LittleFS
-// partition and NOT dual-written there the way display_power_cfg.c/
-// unit_pref.c are -- docs/SETUP_WIZARD.md section 5 point 1: user
-// config is mid-migration to `cfg` with NVS dual-write
-// (docs/CONFIG_FILESYSTEM.md), and this record is exactly what must stay
-// intact while diagnosing a filesystem problem, so it deliberately does not
-// ride on that same migration.
+// PERSISTENCE (owner decision 2026-10-07, docs/CONFIG_FILESYSTEM.md): the
+// record lives in ONE cfg LittleFS file (SETUP_WIZARD_PROGRESS_FILE_PATH,
+// pref_cfg_fs rev-prefixed record). Saves go there ONLY. The legacy NVS record
+// (namespace setup_wiz, every historical layout) is read at boot as a
+// fallback, migrated forward in RAM and copied into the file; nothing writes it
+// any more. This reverses the earlier "NVS only, deliberately" stance
+// (docs/SETUP_WIZARD.md section 5 point 1): that rested on the cfg migration
+// being mid-flight, and it is finished. While cfg is unmounted a save fails
+// (the HTTP route refuses with 503 and the readiness cfg item names the cause);
+// the step still applies live and reverts on reboot. The record holds no
+// config value, so losing it costs only "which steps were visited".
 //
 // AUTHORITY: `/api/readiness` is authoritative over this store. A step
 // recorded here as done, whose corresponding readiness item reports
@@ -70,6 +74,9 @@ extern "C" {
 // bench board). setup_wizard_step_count_mirror_drift_check.py pins these two
 // counts against each other so this cannot happen again silently.
 #define SETUP_WIZARD_STEP_COUNT 12
+
+/* cfg_fs relative path of the progress file (kiln-scope factory reset names it). */
+#define SETUP_WIZARD_PROGRESS_FILE_PATH "setup_wiz.bin"
 
 typedef enum {
     SETUP_WIZ_STEP_PENDING = 0,
@@ -159,8 +166,8 @@ static inline setup_wizard_effective_state_t setup_wizard_progress_effective_sta
     }
 }
 
-// Loads the persisted record from NVS (migrating an older-version blob if
-// found). Never fails the boot: on any problem (partition absent, never
+// Loads the persisted record: the cfg file, else the legacy NVS record
+// (migrating an older-version blob if found). Never fails the boot: on any problem (partition absent, never
 // written, corrupt/wrong-size/unrecognized-version blob), every step is
 // left at {PENDING, 0, ""} -- the safe "nothing visited yet" state -- and
 // ESP_OK is still returned, same convention as touch_cal_store_load()/
@@ -183,11 +190,18 @@ esp_err_t setup_wizard_progress_get_step(uint8_t step_index, setup_wizard_step_t
 // this is how "unknown-step rejection" is enforced, since there is no other
 // gate between an HTTP POST body and this call.
 //
-// In-RAM state updates first regardless of whether the NVS write below
+// In-RAM state updates first regardless of whether the cfg write below
 // succeeds (same ordering as display_power_cfg_set()/unit_pref_set()); a
-// persist failure is logged via esp_err_to_name() and returned, never
-// silently discarded, but the live value already took effect for this boot.
+// persist failure (ESP_ERR_INVALID_STATE when cfg is not mounted) is logged
+// loudly and returned, never silently discarded, but the live value already
+// took effect for this boot.
 esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_state_t state, const char *note);
+
+// Read-only dual-write status for GET /api/cfgfs; same contract as
+// unit_pref_get_dualwrite_status(). The NVS side is the legacy v5-layout record
+// only. Any output pointer may be NULL.
+void setup_wizard_progress_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
+                                                uint32_t *nvs_rev, bool *diverged);
 
 #ifdef __cplusplus
 }

@@ -74,6 +74,7 @@
 #include "thermo_owner.h"
 #include "zones_config_accessors.h"
 #include "safety_cfg_store.h"
+#include "kilnlink/kilnlink_fw_version.h" /* Frame C drift pin: CommonFW codec as reference */
 
 MAX31856Class *MAX31856_bus_channel(MAX31856BusClass *bus, uint8_t channel)
 { (void)bus; (void)channel; return NULL; }
@@ -1311,6 +1312,83 @@ static void test_fw_version_oversized_commit_len_is_capped(void)
     TEST_CHECK(memcmp(datetime, datetime_in, 4) == 0, "datetime bytes are the real ones, not read from "
                "the middle of the over-long commit string");
     TEST_CHECK(config_version == 2, "fields after the oversized commit still decode correctly");
+}
+
+// Frame C drift pin, ESP side (CommonFW/README.md "Still open" note under the
+// Frame C checklist item): safety_parse_fw_version() hand-rolls the parse of
+// Frame C independently of CommonFW's kilnlink_fw_version_decode(). Feed it
+// the output of the CommonFW ENCODER (the reference layout) and require it to
+// recover every field, so a drift in either side's offsets turns this red.
+static void check_fw_version_codec_encode_parses(const char *label, uint16_t proto, uint16_t minc,
+                                                  uint8_t dirty, const char *commit, uint8_t commit_len,
+                                                  const char *datetime, uint8_t datetime_len,
+                                                  uint8_t boot_id, uint8_t config_version,
+                                                  uint16_t config_crc)
+{
+    kilnlink_fw_version_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.protocol_version = proto;
+    msg.min_compatible = minc;
+    msg.dirty = dirty;
+    msg.commit_len = commit_len;
+    if (commit_len > 0) memcpy(msg.commit, commit, commit_len);
+    msg.datetime_len = datetime_len;
+    if (datetime_len > 0) memcpy(msg.datetime, datetime, datetime_len);
+    msg.boot_id = boot_id;
+    msg.config_version = config_version;
+    msg.config_crc = config_crc;
+
+    uint8_t wire[KILNLINK_FW_VERSION_MAX_LEN];
+    kilnlink_fw_version_status_t st = KILNLINK_FW_VERSION_ERR_BUFFER_TOO_SMALL;
+    size_t len = kilnlink_fw_version_encode(&msg, wire, sizeof(wire), &st);
+    char what[160];
+    snprintf(what, sizeof(what), "%s: codec encode succeeds", label);
+    TEST_CHECK(len > 0 && st == KILNLINK_FW_VERSION_OK, what);
+    if (len == 0) return;
+
+    uint16_t o_proto = 0, o_minc = 0, o_crc = 0;
+    uint8_t o_boot = 0, o_cv = 0, o_clen = 0, o_dlen = 0;
+    bool o_have_boot = false, o_dirty = !dirty, o_have_build = false;
+    uint8_t o_commit[64], o_datetime[32];
+    memset(o_commit, 0, sizeof(o_commit));
+    memset(o_datetime, 0, sizeof(o_datetime));
+    bool ok = safety_parse_fw_version(wire, (uint8_t)len, &o_proto, &o_minc, &o_boot, &o_have_boot,
+                                       &o_dirty, o_commit, &o_clen, o_datetime, &o_dlen, &o_cv,
+                                       &o_crc, &o_have_build);
+    snprintf(what, sizeof(what), "%s: safety_parse_fw_version accepts the codec's bytes", label);
+    TEST_CHECK(ok && o_have_boot && o_have_build, what);
+    snprintf(what, sizeof(what), "%s: protocol/min_compatible/dirty match", label);
+    TEST_CHECK(o_proto == proto && o_minc == minc && o_dirty == (dirty != 0), what);
+    snprintf(what, sizeof(what), "%s: commit and datetime bytes and lengths match", label);
+    TEST_CHECK(o_clen == commit_len && o_dlen == datetime_len &&
+                   memcmp(o_commit, commit, commit_len) == 0 &&
+                   memcmp(o_datetime, datetime, datetime_len) == 0,
+               what);
+    snprintf(what, sizeof(what), "%s: boot_id/config_version/config_crc match", label);
+    TEST_CHECK(o_boot == boot_id && o_cv == config_version && o_crc == config_crc, what);
+}
+
+static void test_fw_version_parse_matches_commonfw_codec(void)
+{
+    TEST_SECTION("Frame C drift pin -- safety_parse_fw_version() vs kilnlink_fw_version_encode()");
+
+    char c64[KILNLINK_FW_VERSION_MAX_COMMIT_LEN];
+    char d32[KILNLINK_FW_VERSION_MAX_DATETIME_LEN];
+    for (size_t i = 0; i < sizeof(c64); i++) c64[i] = (char)('A' + (i % 26));
+    for (size_t i = 0; i < sizeof(d32); i++) d32[i] = (char)('a' + (i % 26));
+
+    check_fw_version_codec_encode_parses("typical", 7, 5, 1, "abc1234", 7, "2026-08-19T12:00:00Z", 20,
+                                          9, 2, 0xBEEFu);
+    check_fw_version_codec_encode_parses("empty strings", 7, 5, 0, "", 0, "", 0, 0, 0, 0);
+    check_fw_version_codec_encode_parses("one-byte strings", 1, 1, 1, "x", 1, "y", 1, 1, 1, 1);
+    check_fw_version_codec_encode_parses("commit only", 16, 13, 0, "deadbee", 7, "", 0, 200, 3, 0x0102u);
+    check_fw_version_codec_encode_parses("datetime only", 16, 13, 1, "", 0, "2026-10-07", 10, 201, 4,
+                                          0x0A0Bu);
+    check_fw_version_codec_encode_parses("max-length strings (64 + 32)", 0xFFFEu, 0xFFFDu, 1, c64,
+                                          KILNLINK_FW_VERSION_MAX_COMMIT_LEN, d32,
+                                          KILNLINK_FW_VERSION_MAX_DATETIME_LEN, 0xFFu, 0xFFu, 0xFFFFu);
+    check_fw_version_codec_encode_parses("endianness probe", 0x1234u, 0x5678u, 1, "c", 1, "d", 1,
+                                          0x11, 0x22, 0x9ABCu);
 }
 
 static void test_versions_compatible_is_two_sided(void)
@@ -2893,6 +2971,7 @@ int main(void)
     test_fw_version_known_and_dirty_roundtrips();
     test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown();
     test_fw_version_max_length_commit_and_datetime_no_truncation();
+    test_fw_version_parse_matches_commonfw_codec();
     test_fw_version_oversized_commit_len_is_capped();
     test_versions_compatible_is_two_sided();
     test_rollback_result_late_frame_is_stashed_not_dropped();

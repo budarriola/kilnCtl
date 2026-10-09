@@ -29,6 +29,7 @@ void run_test_update_stage(void);
 void run_test_update_stale_stage(void);
 void run_test_update_settings(void);
 void run_test_update_url(void);      // WP8: GitHub fetch URL/allowlist rules
+void run_test_update_fetch_heap(void);
 void run_test_update_release(void);  // WP8: release JSON parsers + asset pick
 void run_test_ota_image_crc(void);
 void run_test_ota_esp_image_header(void);
@@ -95,6 +96,7 @@ void run_test_ramp_assist_cfg(void);
 void run_test_ui_page_home_graph(void);
 void run_test_ui_page_home_rail(void);
 void run_test_ui_profile_list_order(void);
+void run_test_ui_page_safety_logic(void);
 void run_test_ui_page_temperature_safety(void);
 void run_test_ui_page_profile_picker_format(void);
 void run_test_max31856_codec(void);
@@ -166,6 +168,7 @@ int main(void)
     run_test_update_settings();
     run_test_update_url();
     run_test_update_release();
+    run_test_update_fetch_heap();
     run_test_ota_image_crc();
     run_test_ota_esp_image_header();
     run_test_auth_reset_gesture();
@@ -225,6 +228,7 @@ int main(void)
     run_test_ui_page_home_graph();
     run_test_ui_page_home_rail();
     run_test_ui_profile_list_order();
+    run_test_ui_page_safety_logic();
     run_test_ui_page_temperature_safety();
     run_test_ui_page_profile_picker_format();
     run_test_max31856_codec();

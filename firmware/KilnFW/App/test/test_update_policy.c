@@ -268,6 +268,189 @@ static void test_unknown_running_force_needs_typed(void)
     TEST_CHECK(update_policy_decide_typed(NULL, &c, &f, false).verdict == UPDATE_VERDICT_REFUSE_MALFORMED, "NULL running");
 }
 
+// zones == 0: the image's record carries the running board's schema; else its zones_cfg is `zones`.
+static update_decision_t up_ex(const update_identity_t *r, const char *ver, const char *commit, uint32_t zones,
+                               bool have_id, uint32_t hdr_zones, bool force, bool down, const char *confirm)
+{
+    update_upload_request_t q;
+    memset(&q, 0, sizeof(q));
+    q.version = ver;
+    q.commit = commit;
+    q.have_image_id = have_id;
+    if (r != NULL) {
+        update_image_id_make(&q.image_id, zones ? zones : r->zones_cfg_version, r->kilnlink_version, r->uart_version, "abc1234");
+    }
+    q.zones_cfg_version = hdr_zones;
+    q.force = force;
+    q.allow_downgrade = down;
+    q.confirm = confirm;
+    return update_policy_decide_upload(r, &q);
+}
+
+static update_decision_t up(const update_identity_t *r, const char *ver, const char *commit, uint32_t zones, bool force,
+                            bool down, const char *confirm)
+{
+    return up_ex(r, ver, commit, zones, true, 0, force, down, confirm);
+}
+
+static void test_upload_gate(void)
+{
+    TEST_SECTION("update_policy -- hand upload (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6)");
+    update_identity_t r = ident("v1.2.0", COMMIT_A);
+    update_decision_t d = up(&r, "1.3.0", COMMIT_B, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_UPGRADE && d.allowed, "newer upload allowed");
+    d = up(&r, "1.2.0-rc.1", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && !d.allowed && d.needs_typed_confirm,
+               "prerelease of the running version is older: refused");
+    d = up(&r, "1.3.0-rc.1", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.allowed, "a newer prerelease is allowed (no channel on a hand upload)");
+
+    d = up(&r, "1.2.0", COMMIT_A, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_UP_TO_DATE && !d.allowed, "same version + commit without force refused");
+    d = up(&r, "v1.2.0", COMMIT_A, 0, true, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_REINSTALL && d.allowed, "same commit with force allowed");
+    d = up(&r, "1.2.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE && !d.allowed, "same version, no commit: needs force");
+
+    d = up(&r, "1.1.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && !d.allowed && strstr(d.reason, "downgrade") != NULL,
+               "older version refused, reason names the downgrade");
+    d = up(&r, "1.1.0", NULL, 0, true, false, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE, "force alone does not override a downgrade");
+    d = up(&r, "1.1.0", NULL, 0, false, true, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && d.needs_typed_confirm,
+               "allow_downgrade without the typed confirm refused");
+    d = up(&r, "1.1.0", NULL, 0, false, true, "1.0.9");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE, "wrong typed confirm refused");
+    d = up(&r, "1.1.0", NULL, 0, false, false, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE, "typed confirm without allow_downgrade refused");
+    d = up(&r, "1.1.0", NULL, 0, false, true, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE && d.allowed && d.needs_typed_confirm,
+               "allow_downgrade + typed confirm allowed");
+    d = up(&r, "v1.1.0", NULL, 0, false, true, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE, "leading v is ignored in the typed confirm");
+
+    d = up(&r, "1.3.0", NULL, 25, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && d.zones_cfg_lower,
+               "lower zones_cfg schema refused even if newer");
+    d = up(&r, "1.3.0", NULL, 25, false, true, "1.3.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_ALLOW_DOWNGRADE && d.zones_cfg_lower,
+               "lower schema overridden with typed confirm, flagged");
+    d = up(&r, "1.3.0", NULL, 27, false, false, NULL);
+    TEST_CHECK(d.allowed && d.schema_newer, "higher schema is a normal upgrade");
+
+    d = up(&r, "", NULL, 0, true, true, "unversioned");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_MALFORMED, "no version is malformed (the stager never passes one)");
+    d = up(&r, NULL, NULL, 0, true, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_MALFORMED, "NULL version malformed");
+
+    update_identity_t dev = ident("", COMMIT_A);
+    d = up(&dev, "1.0.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE, "dev running build: needs force");
+    d = up(&dev, "1.0.0", NULL, 0, true, false, NULL);
+    TEST_CHECK(!d.allowed && d.needs_typed_confirm, "dev running build: force without typed confirm refused");
+    d = up(&dev, "1.0.0", NULL, 0, true, false, "1.0.0");
+    TEST_CHECK(d.allowed, "dev running build: force + typed confirm allowed");
+
+    update_identity_t nop = ident("v1.2.0", COMMIT_A);
+    nop.partitions_sha256[0] = '\0';
+    TEST_CHECK(up(&nop, "1.3.0", NULL, 0, false, false, NULL).allowed, "empty board partition hash does not block an upload");
+    TEST_CHECK(up(NULL, "1.3.0", NULL, 0, false, false, NULL).verdict == UPDATE_VERDICT_REFUSE_MALFORMED, "NULL running");
+    TEST_CHECK(up(&r, "not-a-version", NULL, 0, false, false, NULL).verdict == UPDATE_VERDICT_REFUSE_MALFORMED,
+               "garbage version malformed");
+}
+
+static void test_upload_identity_record(void)
+{
+    TEST_SECTION("update_policy -- embedded identity record (F1), headers advisory, typed-confirm flag (F5), helper (F7)");
+    update_identity_t r = ident("v1.2.0", COMMIT_A);
+    update_decision_t d;
+    // F1: a lower embedded zones_cfg_version is a refused downgrade even though the version is newer and no header was sent.
+    d = up_ex(&r, "1.3.0", NULL, 25, true, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE && d.zones_cfg_lower && d.needs_typed_confirm,
+               "F1: lower embedded schema refused with no header at all");
+    d = up_ex(&r, "1.3.0", NULL, 25, true, 0, true, true, "1.3.0");
+    TEST_CHECK(d.allowed && d.zones_cfg_lower, "F1: lower embedded schema overridden by allow_downgrade + typed confirm");
+    // Missing record: unknown schema needs force AND the typed confirm.
+    d = up_ex(&r, "1.3.0", NULL, 0, false, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE && !d.allowed && d.needs_typed_confirm,
+               "F1: no record, no overrides: refused, typed confirm flagged");
+    d = up_ex(&r, "1.3.0", NULL, 0, false, 0, true, false, NULL);
+    TEST_CHECK(!d.allowed && d.needs_typed_confirm, "F1: no record, force only: refused");
+    d = up_ex(&r, "1.3.0", NULL, 0, false, 0, false, false, "1.3.0");
+    TEST_CHECK(!d.allowed, "F1: no record, confirm only: refused");
+    d = up_ex(&r, "1.3.0", NULL, 0, false, 0, true, false, "v1.3.0");
+    TEST_CHECK(d.allowed, "F1: no record + force + typed confirm: allowed");
+    d = up_ex(&r, "1.1.0", NULL, 0, false, 0, true, false, "1.1.0");
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE, "F1: no record + force + confirm still refuses an older version");
+    // Headers are advisory but must agree with the record.
+    d = up_ex(&r, "1.3.0", NULL, 0, true, r.zones_cfg_version, false, false, NULL);
+    TEST_CHECK(d.allowed, "header equal to the record: fine");
+    d = up_ex(&r, "1.3.0", NULL, 0, true, r.zones_cfg_version + 1, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_MALFORMED && !d.allowed, "header disagreeing with the record refused");
+    d = up_ex(&r, "1.3.0", NULL, 25, true, r.zones_cfg_version, false, false, NULL);
+    TEST_CHECK(!d.allowed, "header claiming the board's schema cannot mask a lower embedded one");
+    // Record codec.
+    update_image_id_t id, got;
+    update_image_id_make(&id, 26, 16, 13, "abc1234");
+    uint8_t buf[64];
+    memset(buf, 0xEE, sizeof(buf));
+    memcpy(buf + 8, &id, sizeof(id)); // host is little-endian
+    TEST_CHECK(update_image_id_find(buf, sizeof(buf), 0, &got) && got.zones_cfg_version == 26 && got.kilnlink_version == 16 &&
+                   got.uart_version == 13,
+               "record found at a 4-byte aligned offset");
+    TEST_CHECK(strcmp(got.commit, "abc1234") == 0, "M1: the record carries the build commit");
+    TEST_CHECK(UPDATE_IMAGE_ID_SIZE == sizeof(update_image_id_t), "M1: UPDATE_IMAGE_ID_SIZE matches the struct");
+    TEST_CHECK(!update_image_id_find(buf, sizeof(buf), 12, &got), "scan start past the record finds nothing");
+    buf[12] ^= 1;
+    TEST_CHECK(!update_image_id_find(buf, sizeof(buf), 0, &got), "a record with a bad check word is ignored");
+    buf[12] ^= 1;
+    memset(buf + 12, 0, 4);
+    update_image_id_make(&id, 0, 16, 13, "abc1234");
+    memcpy(buf + 8, &id, sizeof(id));
+    TEST_CHECK(!update_image_id_find(buf, sizeof(buf), 0, &got), "a record with a zero version is ignored");
+
+    // F5: needs_typed_confirm wherever force alone will not pass; false where it will.
+    update_identity_t dev = ident("", COMMIT_A);
+    d = up(&dev, "1.0.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE && d.needs_typed_confirm,
+               "F5: unknown running version refused without force still flags the typed confirm");
+    d = up(&r, "1.2.0", NULL, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE && !d.needs_typed_confirm,
+               "F5: same version, unknown commit: force alone passes, so no typed confirm");
+    TEST_CHECK(strstr(d.reason, "commit unknown") != NULL && strstr(d.reason, "different commit") == NULL,
+               "F5: unknown commit is not reported as a different commit");
+    d = up(&r, "1.2.0", COMMIT_B, 0, false, false, NULL);
+    TEST_CHECK(strstr(d.reason, "different commit") != NULL, "F5: a known other commit is reported as different");
+    d = up(&dev, "1.0.0", NULL, 0, true, false, NULL);
+    TEST_CHECK(strstr(d.reason, "tag") == NULL && strstr(d.reason, "version") != NULL, "F5: upload path says version, not tag");
+    d = up(&r, "1.2.0", COMMIT_A, 0, false, false, NULL);
+    TEST_CHECK(d.verdict == UPDATE_VERDICT_UP_TO_DATE && !d.needs_typed_confirm, "F5: up-to-date: no typed confirm");
+
+    // F6: strict header number parse.
+    uint32_t hv = 99;
+    TEST_CHECK(update_policy_parse_hdr_u32("26", &hv) && hv == 26, "hdr u32: plain number");
+    TEST_CHECK(!update_policy_parse_hdr_u32("26x", &hv) && hv == 0, "hdr u32: trailing junk rejected");
+    TEST_CHECK(!update_policy_parse_hdr_u32("abc", &hv), "hdr u32: letters rejected, not read as 0");
+    TEST_CHECK(!update_policy_parse_hdr_u32("-1", &hv), "hdr u32: sign rejected");
+    TEST_CHECK(!update_policy_parse_hdr_u32(" 5", &hv), "hdr u32: leading space rejected");
+    TEST_CHECK(!update_policy_parse_hdr_u32("", &hv), "hdr u32: empty rejected");
+    TEST_CHECK(!update_policy_parse_hdr_u32("0", &hv), "hdr u32: zero rejected");
+    TEST_CHECK(!update_policy_parse_hdr_u32("4294967295", &hv), "hdr u32: out of range rejected");
+    TEST_CHECK(!update_policy_parse_hdr_u32("99999999999999999999", &hv), "hdr u32: overflow rejected");
+    TEST_CHECK(!update_policy_parse_hdr_u32(NULL, &hv), "hdr u32: NULL rejected");
+
+    // F7: one typed-confirm rule.
+    TEST_CHECK(update_policy_typed_confirm_ok("1.2.3", "1.2.3"), "typed: equal");
+    TEST_CHECK(update_policy_typed_confirm_ok("v1.2.3", "1.2.3"), "typed: leading v on confirm");
+    TEST_CHECK(update_policy_typed_confirm_ok("1.2.3", "v1.2.3"), "typed: leading v on version");
+    TEST_CHECK(!update_policy_typed_confirm_ok("vv1.2.3", "1.2.3"), "typed: only one v stripped");
+    TEST_CHECK(!update_policy_typed_confirm_ok("", ""), "typed: empty never matches");
+    TEST_CHECK(!update_policy_typed_confirm_ok("v", "v"), "typed: bare v never matches");
+    TEST_CHECK(!update_policy_typed_confirm_ok(NULL, "1.2.3"), "typed: NULL confirm");
+    TEST_CHECK(!update_policy_typed_confirm_ok("1.2.4", "1.2.3"), "typed: different");
+}
+
 void run_test_update_policy(void)
 {
     test_upgrade();
@@ -277,4 +460,6 @@ void run_test_update_policy(void)
     test_malformed();
     test_helpers();
     test_unknown_running_force_needs_typed();
+    test_upload_gate();
+    test_upload_identity_record();
 }

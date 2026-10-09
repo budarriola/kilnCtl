@@ -123,7 +123,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { writeFile, mkdtemp, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -729,6 +729,7 @@ async function main() {
   const chromePath = findChrome();
   if (!chromePath) throw new Error('no Chrome/Edge binary found (set KC_SWEEP_CHROME)');
 
+  sweepStaleProfileDirs();
   const userDataDir = await mkdtemp(path.join(os.tmpdir(), 'kc-web-commission-'));
   // An explicit --port is probed (EADDRINUSE falls back to ephemeral). With no
   // --port, Chrome binds port 0 itself and reports it in DevToolsActivePort:
@@ -749,6 +750,10 @@ async function main() {
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-extensions',
+    // Startup-cost trims: no component updater / sync / background network
+    // chatter competing for the CPU during the first seconds of a launch.
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--metrics-recording-only', '--disable-breakpad',
     '--hide-scrollbars',
     `--user-data-dir=${userDataDir}`,
   ], { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -841,13 +846,36 @@ async function main() {
     // the profile dir open, and rm() on a held/AV-scanned dir can block
     // indefinitely -- so it also gets an explicit outer deadline.
     killTreeSync(chrome.pid);
+    // Profile-dir removal is handed to a detached node so the driver exits as
+    // soon as Chrome is dead. Awaiting rm() here cost up to the full 5s cap on
+    // every run (AV/indexer holding the just-killed profile; measured
+    // 2026-10-08), x7 runs in check_web_commission_cdp_driver.ps1, which is what
+    // pushed that check past its 180s wrapper timeout on a loaded machine.
     try {
-      await Promise.race([
-        rm(userDataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }),
-        new Promise((resolve) => setTimeout(resolve, 5000)),
-      ]);
+      // Hard deadline: a non-unref'd timer exits even if rm() hangs on a held
+      // handle (these used to leak forever); the rm callback exits early.
+      const rmScript = "setTimeout(()=>process.exit(0),30000);require('fs').rm(process.argv[1],{recursive:true,force:true,maxRetries:10,retryDelay:500},()=>process.exit(0))";
+      spawn(process.execPath, ['-e', rmScript, userDataDir], { detached: true, stdio: 'ignore' }).unref();
     } catch { /* best effort */ }
   }
+}
+
+// Best-effort sweep of leftover kc-web-commission-* dirs older than 1 h
+// (a previous run's detached rm can lose to AV/indexer). Bounded to ~2 s.
+function sweepStaleProfileDirs() {
+  const deadline = Date.now() + 2000;
+  try {
+    const tmp = os.tmpdir();
+    for (const name of readdirSync(tmp)) {
+      if (Date.now() > deadline) break;
+      if (!name.startsWith('kc-web-commission-')) continue;
+      const p = path.join(tmp, name);
+      try {
+        if (Date.now() - statSync(p).mtimeMs < 3600 * 1000) continue;
+        rmSync(p, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
+      } catch { /* best effort */ }
+    }
+  } catch { /* best effort */ }
 }
 
 main().then(() => process.exit(0), (err) => {

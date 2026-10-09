@@ -52,7 +52,7 @@ function Get-SaftyfwSlotSourceTime([string[]] $roots) {
     return $newest
 }
 
-function Ensure-SaftyfwSlotImages([string]$KilnfwWorktreePath) {
+function Ensure-SaftyfwSlotImages([string]$KilnfwWorktreePath, [string]$CcacheExe = "") {
     $SaftyfwWorktreeDir = Join-Path $KilnfwWorktreePath "firmware\SaftyFW"
     $SaftyfwBuildDir = Join-Path $SaftyfwWorktreeDir "build"
     $slotABin = Join-Path $SaftyfwBuildDir "SaftyFW_slotA.bin"
@@ -85,7 +85,14 @@ function Ensure-SaftyfwSlotImages([string]$KilnfwWorktreePath) {
         Push-Location $SaftyfwWorktreeDir
         try {
             Write-Host "Configuring SaftyFW (cmake -G Ninja -B build .) in $SaftyfwWorktreeDir for the embedded slot images ..."
-            cmake -G Ninja -B build . 2>&1 | Write-Host
+            # -CcacheExe (check_00_kilnfw_target_build.ps1 only, after
+            # lib_kilnfw_ccache.ps1's Enable-KilnfwCcache has set and asserted
+            # the environment): compile through that ccache. Otherwise the
+            # launcher is set explicitly EMPTY, so a build directory is never
+            # left launching ccache under a caller that did not configure it.
+            $launcher = ""
+            if ($CcacheExe) { $launcher = $CcacheExe -replace '\\', '/' }
+            cmake -G Ninja -B build . "-DCMAKE_C_COMPILER_LAUNCHER=$launcher" "-DCMAKE_CXX_COMPILER_LAUNCHER=$launcher" 2>&1 | Write-Host
             if ($LASTEXITCODE -ne 0) {
                 Fail "cmake configure of $SaftyfwWorktreeDir failed (exit $LASTEXITCODE) while building the SaftyFW slot images App/drivers/CMakeLists.txt's EMBED_FILES guard requires."
             }
@@ -95,7 +102,8 @@ function Ensure-SaftyfwSlotImages([string]$KilnfwWorktreePath) {
         Push-Location $SaftyfwBuildDir
         try {
             Write-Host "Building SaftyFW_slotA/SaftyFW_slotB (ninja) ..."
-            ninja SaftyFW_slotA SaftyFW_slotB 2>&1 | Write-Host
+            if (-not (Get-Command Invoke-KilnGatedCmd -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1") }
+            Invoke-KilnGatedCmd -Command "ninja SaftyFW_slotA SaftyFW_slotB 2>&1" -Label "saftyfw_slot_images" | Write-Host
             if ($LASTEXITCODE -ne 0) {
                 Fail "ninja build of SaftyFW_slotA/SaftyFW_slotB failed (exit $LASTEXITCODE) -- see output above. KilnFW's own build cannot proceed without these two images (App/drivers/CMakeLists.txt's EMBED_FILES guard)."
             }

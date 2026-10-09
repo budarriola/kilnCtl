@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_cfgfs_nvs_only_drift.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up cfgfs_nvs_only_drift_check.py without any
 # further wiring (same pattern as check_power_diag_flag_mirror_drift.ps1).

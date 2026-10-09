@@ -25,10 +25,17 @@ from . import cases_lcd as _cases_lcd  # noqa: F401 - import wires LCD-01/08/21 
 from . import cases_heat as _cases_heat  # noqa: F401 - import wires judge functions into REGISTRY
 from . import cases_safety as _cases_safety  # noqa: F401 - import wires judge functions into REGISTRY
 from . import cases_fl as _cases_fl  # noqa: F401 - import wires judge functions into REGISTRY
+from . import cases_web_dash as _cases_web_dash  # noqa: F401 - WEB-DASH-02..12 judges
 from . import cases_web_rw as _cases_web_rw  # noqa: F401 - import wires WEB read/write round-trip judge functions into REGISTRY
+from . import cases_web_diag as _cases_web_diag  # noqa: F401 - import wires WEB-DIAG/OTA judges into REGISTRY
+from . import cases_web_misc as _cases_web_misc  # noqa: F401 - import wires WEB-WIFI/SEC/BAK/KCFG/LOG/X judges into REGISTRY
+from . import cases_web_safety as _cases_web_safety  # noqa: F401 - import wires WEB-SAF/COMM/RDY/WIZ/SET/DISP judge functions into REGISTRY
 from . import cases_ota as _cases_ota  # noqa: F401 - import wires OTA judge functions into REGISTRY
 from . import cases_autotune as _cases_autotune  # noqa: F401 - import wires AT-01..05 judge functions into REGISTRY
+from . import cases_aux as _cases_aux  # noqa: F401 - import wires AX-C01..R01 judge functions into REGISTRY
 from . import cases_totp as _cases_totp  # noqa: F401 - import wires TP-R01..M01 judge functions into REGISTRY
+from . import cases_static as _cases_static  # noqa: F401 - import wires ST-01..04 judge functions into REGISTRY
+from . import cases_web_prof as _cases_web_prof  # noqa: F401 - import wires WEB-PROF/STIM/ZONE judge functions into REGISTRY
 from .runner import BenchTestRunner, run_suite
 
 __all__ = [

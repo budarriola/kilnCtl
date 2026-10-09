@@ -68,6 +68,27 @@ static void ra_cfg_fs_reset(void)
 // cycle (s_ramp_assist_enabled's RAM state) while leaving the stubbed NVS
 // blob (the flash stand-in) exactly as it was.
 // ---------------------------------------------------------------------------
+static void ra_mount_scratch(void)
+{
+    ra_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(RA_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+}
+
+/* Stages the value+rev a LEGACY (pre dual-write-close) firmware left in NVS:
+ * ramp_assist_cfg.c no longer has any NVS writer. */
+static void ra_stage_legacy_nvs(uint8_t raw, uint32_t rev)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "stage: open the legacy namespace");
+    hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, raw);
+    hal_kv_set_u32(&h, NVS_KEY_RAMP_ASSIST_REV, rev);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
 static void simulate_reboot(void)
 {
     s_ramp_assist_enabled = true; // deliberately the WRONG value -- proves ramp_assist_cfg_start()
@@ -92,8 +113,7 @@ static void test_default_is_disabled_on_empty_nvs(void)
 
 static void test_persistence_round_trip(void)
 {
-    fake_kv_reset_all();
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    ra_mount_scratch();
     simulate_reboot();
 
     ramp_assist_cfg_start();
@@ -121,6 +141,22 @@ static void test_persistence_round_trip(void)
     ramp_assist_cfg_start();
     TEST_CHECK(!ramp_assist_cfg_enabled(),
                "the re-disabled value also survives a simulated reboot, not just the enabled one");
+    cfg_fs_deinit();
+}
+
+static void test_set_without_cfg_partition_fails_loud(void)
+{
+    TEST_SECTION("ramp_assist_cfg_set_enabled: no cfg partition mounted -- fails loud, nothing falls back to NVS");
+    ra_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+    ramp_assist_cfg_start();
+
+    TEST_CHECK(ramp_assist_cfg_set_enabled(true) != ESP_OK, "set_enabled() reports the failed cfg write");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "no NVS write was made as a fallback");
 }
 
 static void test_corrupted_value_falls_back_to_safe_default(void)
@@ -130,8 +166,6 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
     simulate_reboot();
 
     ramp_assist_cfg_start();
-    esp_err_t err = ramp_assist_cfg_set_enabled(true);
-    TEST_CHECK(err == ESP_OK, "precondition: enabled=true is persisted");
 
     // Corrupt the persisted byte directly to something out of range for this
     // module's 0/1 encoding -- simulates a bit flip that survives the u8
@@ -142,13 +176,8 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
     // something rather than being dead code). Written through the real
     // hal_kv_set_u8()/hal_kv_commit() round trip, same as
     // test_boot_guard.c's/test_watchdog_cfg.c's blob-corruption approach.
-    hal_kv_handle_t corrupt_h;
-    TEST_CHECK(hal_kv_open(&corrupt_h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
-               "precondition: the ramp_assist namespace opens");
-    TEST_CHECK(hal_kv_set_u8(&corrupt_h, NVS_KEY_RAMP_ASSIST, 0xAA) == HAL_OK
-                   && hal_kv_commit(&corrupt_h) == HAL_OK,
-               "precondition: an out-of-range byte (neither 0 nor 1) is written back");
-    hal_kv_close(&corrupt_h);
+    // A legacy NVS copy holding an out-of-range byte (no cfg file).
+    ra_stage_legacy_nvs(0xAA, 1);
 
     simulate_reboot();
     ramp_assist_cfg_start();
@@ -167,7 +196,7 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
 // what follows exercises the file mounted and actually in play.
 // ---------------------------------------------------------------------
 
-static void test_dual_write_lands_on_both_file_and_nvs(void)
+static void test_save_lands_in_cfg_file_only(void)
 {
     ra_cfg_fs_reset();
     fake_kv_reset_all();
@@ -186,11 +215,8 @@ static void test_dual_write_lands_on_both_file_and_nvs(void)
     TEST_CHECK(file_valid && file_raw == 1, "the file was actually written and decodes to enabled=true");
 
     hal_kv_handle_t h;
-    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    uint8_t nvs_raw = 0;
-    hal_kv_get_u8(&h, NVS_KEY_RAMP_ASSIST, &nvs_raw);
-    hal_kv_close(&h);
-    TEST_CHECK(nvs_raw == 1, "NVS also holds enabled=true -- both sides written, not just one");
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "NVS was never written -- the dual-write window is closed");
     TEST_CHECK(file_rev == s_ramp_assist_rev, "file rev matches the in-RAM rev this save just bumped to");
 
     cfg_fs_deinit();
@@ -224,7 +250,7 @@ static void test_nvs_fallback_when_file_absent(void)
     // Write with cfg_fs NOT mounted (partition absent this boot) -- only NVS
     // gets the value, matching every board today.
     TEST_CHECK(cfg_fs_get_status() != CFG_FS_STATUS_MOUNTED, "precondition: cfg_fs is not mounted yet");
-    ramp_assist_cfg_set_enabled(true);
+    ra_stage_legacy_nvs(1, 1); // legacy NVS-only board
 
     // NOW mount cfg_fs (simulates the partition becoming available on a
     // later boot / firmware update) and reboot -- the file is empty, so the
@@ -310,6 +336,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     hal_kv_handle_t h;
     hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
     hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, 0);
+    hal_kv_set_u32(&h, NVS_KEY_RAMP_ASSIST_REV, 1); // legacy rev key: matches the file's rev, bytes differ
     hal_kv_commit(&h);
     hal_kv_close(&h);
 
@@ -350,7 +377,7 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     ramp_assist_cfg_start();
-    ramp_assist_cfg_set_enabled(true);
+    ra_stage_legacy_nvs(1, 1);
 
     // A base_dir that cannot be listed at all -- cfg_fs_init() returns
     // ESP_FAIL / status UNAVAILABLE (cfg_fs.h's documented mount-failed
@@ -397,10 +424,12 @@ static void test_interrupted_write_leaves_old_file_intact(void)
     pref_cfg_fs_set_write_fn(ra_always_fail_write);
 
     esp_err_t err = ramp_assist_cfg_set_enabled(false);
-    // NVS is authoritative and still succeeds even though the file write
-    // failed -- this module's documented "file write failure is logged and
-    // swallowed" policy.
-    TEST_CHECK(err == ESP_OK, "set_enabled() still succeeds overall: NVS write is authoritative");
+    // The cfg file is the only store now, so a failed write is returned to
+    // the caller (fail loud) and nothing falls back to NVS.
+    TEST_CHECK(err != ESP_OK, "set_enabled() reports the failed cfg write");
+    TEST_CHECK(ramp_assist_cfg_enabled() == false,
+               "the in-RAM value still took effect this boot (documented in-RAM-first policy); only the "
+               "persistence failed, and the caller was told");
 
     pref_cfg_fs_reset_write_fn_for_test();
 
@@ -474,7 +503,7 @@ static void test_ra_start_read_error_without_file_returns_error(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     ramp_assist_cfg_start();
-    TEST_CHECK(ramp_assist_cfg_set_enabled(true) == ESP_OK, "precondition: enabled persisted to NVS");
+    ra_stage_legacy_nvs(1, 1); // precondition: enabled in the legacy NVS copy
     TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_RAMP_ASSIST),
                "precondition: the committed value is corrupted (reads return HAL_IO)");
 
@@ -510,8 +539,9 @@ void run_test_ramp_assist_cfg(void)
 {
     test_default_is_disabled_on_empty_nvs();
     test_persistence_round_trip();
+    test_set_without_cfg_partition_fails_loud();
     test_corrupted_value_falls_back_to_safe_default();
-    test_dual_write_lands_on_both_file_and_nvs();
+    test_save_lands_in_cfg_file_only();
     test_file_preferred_when_both_valid_and_equal();
     test_nvs_fallback_when_file_absent();
     test_divergence_tie_break_higher_rev_wins();

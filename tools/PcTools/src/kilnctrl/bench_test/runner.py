@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from .registry import REGISTRY, CaseResult, Verdict, get_case, suite_case_ids
 from . import board_lock
+from . import windows
 from . import report as report_mod
 
 
@@ -369,8 +370,29 @@ class BenchTestRunner:
             ok, exec_status = _safe_call(srv._profiles.get_exec_status)
             # An abandoned worker must never issue a mutating call: check the
             # stall flag immediately before each one.
-            if ok and exec_status.state_name == "running" and not stalled.is_set():
+            if ok and exec_status.state_name in ("running", "paused") and not stalled.is_set():
                 _safe_call(srv.profiles_stop)
+                # Poll (bounded) until the executor actually reads idle before restore hooks run.
+                for _ in range(int(ctx.get("teardown_idle_polls", 10))):
+                    ok2, st2 = _safe_call(srv._profiles.get_exec_status)
+                    if ok2 and st2.state_name == "idle":
+                        break
+                    (ctx.get("sleep_fn") or time.sleep)(float(ctx.get("teardown_idle_poll_s", 0.5)))
+                else:
+                    board_after["teardown_executor"] = "executor not confirmed idle after stop"
+                    ctx["_tainted"] = True
+            # Suite-registered restore hooks (e.g. AX relay-4 aux entry) run even
+            # when the run aborted between the mutating case and its restore case.
+            skip_hooks = "teardown_executor" in board_after
+            if skip_hooks and ctx.get("teardown_hooks"):
+                board_after["teardown_hooks_skipped"] = "executor not confirmed idle; restore hooks not run"
+                self._runner_log("teardown: executor not confirmed idle, skipping restore hooks")
+            for hook in ([] if skip_hooks else list(ctx.get("teardown_hooks") or [])):
+                if not stalled.is_set():
+                    hok, herr = _safe_call(hook, ctx)
+                    if not hok:
+                        board_after.setdefault("teardown_hook_errors", []).append(str(herr))
+                        ctx["_tainted"] = True
             ok, at_status = _safe_call(srv._autotune.get_status)
             if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling")                     and not stalled.is_set():
                 _safe_call(srv.autotune_abort)
@@ -413,6 +435,7 @@ class BenchTestRunner:
         # and again below in report_mod.run_dir_path() for `outcome.run_dir`
         # always agrees.
         self.ctx["run_dir"] = report_mod.run_dir_path(self.logs_root, run_id)
+        self.ctx["suite"] = suite
         # Made available to case functions via ctx["allow_heat"] --
         # `spec.heat` gates a whole case (skipped outright above when
         # False), but LCD-19 is not `heat`-flagged (its other sub-checks --
@@ -427,6 +450,7 @@ class BenchTestRunner:
         # heat stays opt-in for LCD-19 even though allow_heat=True is the
         # default for everything else.
         self.ctx["allow_heat"] = allow_heat
+        self.ctx["suite"] = suite
         self.ctx["lcd19_allow_heat"] = lcd_stop_heat
         # LCD-22/23/24 (Edit firing live edit) ARE spec.heat-marked, so a False
         # allow_heat skips it outright, but allow_heat defaults True, so it
@@ -487,6 +511,20 @@ class BenchTestRunner:
                 lock.release()
         return outcome
 
+    def _run_start_probes(self, requested) -> None:
+        """Take read-only start-of-run baselines (CaseSpec.run_start_probe).
+        A failing probe leaves its key unset and never affects a verdict."""
+        for cid in requested:
+            probe = get_case(cid).run_start_probe
+            if probe is None:
+                continue
+            key, fn = probe
+            ok, val = _safe_call(fn, self.ctx)
+            if ok and val is not None:
+                self.ctx[key] = val
+            else:
+                self._log(f"run-start probe for {cid} yielded no baseline")
+
     def _run_locked(self, *, suite: str, requested: List[str], run_id: str, started: float,
                      dry_run: bool, allow_heat: bool) -> RunOutcome:
         """The actual preflight/execute/teardown/report body, run only once
@@ -497,7 +535,14 @@ class BenchTestRunner:
         self._log(f"preflight: {'OK' if preflight_ok else 'FAILED - ' + preflight_reason}")
 
         results: Dict[str, CaseResult] = {}
+        # Read-only view for summary cases (OT-B02): the live results dict.
+        self.ctx["_run_results"] = results
+        # Same dict object, for alias judges (WEB-LOG-03): plan section 2 rule 7.
+        self.ctx["_results"] = results
+        windows.register_probes(self.ctx, requested, get_case)
         executed: List[str] = []
+        if preflight_ok:
+            self._run_start_probes(requested)
 
         if not preflight_ok:
             for cid in requested:

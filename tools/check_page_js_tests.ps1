@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_page_js_tests.ps1 -- runs every plain-node page test under
 # firmware/KilnFW/App/test/*.js as a standing check, not just something a
 # session has to remember to run by hand.

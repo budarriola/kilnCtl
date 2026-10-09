@@ -60,7 +60,7 @@ typedef struct {
     ILI9488Class *display;
     NS2009Class *touch; /* NULL if the touch controller never came up */
 
-    /* Guards last_activity_tick/screen_on/policy_state/touch_held(_swallow)/
+    /* Guards last_activity_tick/screen_on/policy_state/touch_gate/
      * error_prev_active against the poll task and the UART bridge's INJECT
      * handler (via lvgl_port.c's touch_read_cb, screen_idle_touch_swallow())
      * touching them from two different tasks. */
@@ -85,13 +85,14 @@ typedef struct {
      * (matching touch_read_cb's existing per-poll delivery), but
      * display_power_policy_step() must see touch_event=true on exactly the
      * first poll of a NEW press (the header's own calling contract) -- so
-     * touch_held distinguishes "this is the edge" from "this is a held
-     * repeat", and touch_held_swallow is the edge's swallow decision, held
+     * touch_gate.held distinguishes "this is the edge" from "this is a held
+     * repeat", and touch_gate.held_swallow is the edge's swallow decision, held
      * for the rest of that one press/release gesture so a drag reads
      * consistently (never re-decided mid-gesture, never dropped for the
-     * NEXT separate press once this one releases). */
-    bool touch_held;
-    bool touch_held_swallow;
+     * NEXT separate press once this one releases, except that a re-press
+     * within DISPLAY_POWER_TOUCH_REPRESS_MS of a SWALLOWED touch's release
+     * is treated as the same touch -- a controller dropout, not a new tap). */
+    display_power_touch_gate_t touch_gate; /* press-edge + release-debounce tracker (display_power_policy.h) */
 
     /* error_active is a LEVEL (dashboard_get_status()'s cached diag_state);
      * display_power_policy_step() needs the ENTERED-this-tick EDGE (see
@@ -208,7 +209,7 @@ esp_err_t screen_idle_inject_touch(screen_idle_t *idle, uint16_t x, uint16_t y, 
 /* THE touch-swallow decision (rule 3/4/5) -- called from lvgl_port.c's
  * touch_read_cb() for BOTH the physical-NS2009 path and the LVGL-side
  * injected-touch path, on every poll a press reads down (not just the
- * press edge -- see this header's touch_held field comment for why the
+ * press edge -- see this header's touch_gate field comment for why the
  * caller does not need to pre-filter that itself). Does everything
  * screen_idle_inject_touch() does (marks activity, wakes a blanked
  * screen_on) PLUS runs display_power_policy_step() on the press edge and
@@ -222,7 +223,7 @@ esp_err_t screen_idle_inject_touch(screen_idle_t *idle, uint16_t x, uint16_t y, 
  * screen_idle_inject_touch(); x/y are not used for the decision (matches
  * that function too) and exist only for symmetry/future use.
  * `*out_swallow` is left false on a lock timeout or when `pressed` is
- * false (a release is never itself swallowed -- see the touch_held field
+ * false (a release is never itself swallowed -- see the touch_gate field
  * comment: a swallowed release simply continues reporting RELEASED,
  * which is what the caller was already going to do). */
 esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y, bool pressed,

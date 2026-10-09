@@ -93,11 +93,10 @@
 #define THERMO_FAULT1_IO       CONFIG_KILNCTL_THERMO_FAULT1_IO
 #define THERMO_FAULT2_IO       CONFIG_KILNCTL_THERMO_FAULT2_IO
 /* Capped at 4 MHz by Kconfig `range`, re-checked by a _Static_assert in
- * MAX31856.c. The part is rated to 5 MHz; the cap comes from the SimFW bench
- * fixture's slave-emulation first-byte deadline, and overrunning it silently
- * shifts a burst by one byte instead of faulting. Reasoning in MAX31856.c and
- * SimFW/docs/SPI_ACCESS_AUDIT.md section 9. Unrelated to DISPLAY_SPI_CLOCK_HZ,
- * which shares the bus but not this constraint. */
+ * MAX31856.c. The part is rated to 5 MHz; the cap is an owner decision
+ * (2026-10-06): 4 MHz is ample for the MAX31856 and faster SPI is not needed.
+ * Reasoning in MAX31856.c. Unrelated to DISPLAY_SPI_CLOCK_HZ, which shares the
+ * bus but not this constraint. */
 #define THERMO_SPI_CLOCK_HZ    CONFIG_KILNCTL_THERMO_SPI_CLOCK_HZ
 /* Expander pins carrying ~DRDY for channels 0/1/2. */
 #define THERMO_DRDY0_EXP_PIN   8

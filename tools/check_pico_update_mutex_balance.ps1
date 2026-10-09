@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_pico_update_mutex_balance.ps1 -- thin wrapper so run_all_checks.ps1's
 # check_*.ps1 glob discovers tools/check_pico_update_mutex_balance.py
 # automatically, the same convention every other Python-backed guard script

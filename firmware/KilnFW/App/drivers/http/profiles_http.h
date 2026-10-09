@@ -59,6 +59,12 @@ void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
 void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *file_rev, bool *nvs_valid,
                                          uint32_t *nvs_rev, bool *diverged);
 
+/* Raised by the zone-to-aux conversion around its multi-write sequence. While
+ * set, profile saves (HTTP and LCD) refuse at once with a "busy" error instead
+ * of queueing behind the conversion's hold on the save mutex. */
+void profiles_http_set_convert_busy(bool busy);
+bool profiles_http_convert_busy(void);
+
 #ifdef __cplusplus
 }
 #endif

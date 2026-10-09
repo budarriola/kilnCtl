@@ -306,12 +306,12 @@ a sourcing ambiguity like the ESP32-S3 module's flash was. TODO.md item 10.1.
 Sheet `/SaftyProcessor/SaftyRelay/` (`SSD.kicad_sch`), `kiln.pdf` p.3.
 
 - **K4 = EE2-12NUH**, 12 V coil from `12v_Safty`, contacts out to **J10**
-  (Phoenix 1935174, 3-pin NC/COM/NO).
+  (Phoenix 1935174, 3-pin; pin 1 NO / pin 2 COM / pin 3 NC per the table below, schematic evidence only).
 - Coil low-side switched by **Q4 (BSS138P)** from `saftyRelay` (GPIO6).
   **GPIO6 high = coil energized.** D8 (SS16FP) is the flyback.
 - R66/R67 (the "shorting resistors" alternative) are marked **DNP** — K4 is
   the populated option.
-- Contacts 3 and 5 are marked unconnected; 8/9/10 go to J10.
+- Contact pins 3, 4 and 5 are unconnected (netlist-confirmed); 8/9/10 go to J10 pins 1/2/3.
 
 The schematic carries this note next to K4:
 
@@ -404,7 +404,7 @@ as independent evidence, never as redundant copies of each other.
 
 ## 5. E-stop (GPIO9)
 
-J1 (Phoenix 1935161, 2-pin) → GPIO9, with **R10 1k pull-up to 3.3v_Safty** and
+J1 (Phoenix 1935161, 2-pin; pin 1 `GND_Safty`, pin 2 the `estop` net) → GPIO9, with **R10 1k pull-up to 3.3v_Safty** and
 **C3 0.01uF** to ground (a ~10 µs RC — noise filtering only, not debounce).
 
 Because of the pull-up, the only fail-safe wiring is a **normally-closed**
@@ -808,11 +808,10 @@ for the identical part — **read it, and port rather than reinvent**):
 
 - SPI **mode 1** (CPOL=0, CPHA=1). The part is rated to 5 MHz, but the master
   is **capped at 4 MHz** (`SPI_OWNER_BAUDRATE_HZ`, enforced by a
-  `_Static_assert` in `src/spi_owner.c`): the cap was originally set for the SimFW bench fixture's
-  MAX31856 slave emulation (first-byte deadline; failure mode a burst shifted
-  by one byte returning plausible wrong temperatures). SimFW and its audit
-  file were deleted 2026-08-28, so that rationale is historical; the cap is
-  retained. KilnFW holds its master to the same ceiling. The RP2040's SPI0 on
+  `_Static_assert` in `src/spi_owner.c`): the cap is an owner decision (2026-10-06): 4 MHz is ample for the
+  MAX31856 conversion rates and faster SPI is not needed. (It was originally
+  set for the SimFW bench fixture, deleted 2026-08-28; that is no longer the
+  reason.) KilnFW holds its master to the same ceiling. The RP2040's SPI0 on
   GPIO0/1/2/3 supports this natively; `CS0` is driven manually as a GPIO
   rather than by the SPI block, so a multi-byte register burst stays in one
   chip-select frame.
@@ -870,8 +869,8 @@ code.** Summary of what is on the board, per channel (channel 1 designators):
 | R72 / R78 / R84 | 100R 1W | burden — **DNP** ⇒ a **voltage-output CT** is required |
 | R90 | 1M | input bleed / DC return to GND_Safty |
 | R43 | 10k | rectifier input resistor |
-| C44 | 4.7 pF | input filter |
-| D12, D13 | BZX84C3V3 ×2, back-to-back | bidirectional input clamp |
+| C44 | 4.7 pF | shunt cap from the U8A summing node (after R43) to GND_Safty |
+| D12, D13 | BZX84C3V3 ×2, back-to-back | bidirectional clamp on the U8A summing node (after R43, **not** on the jack) |
 | U8A | AD8542 (dual) | inverting precision half-wave rectifier |
 | D14, D15 | SS16FP | the rectifier's two diodes |
 | R46 | 7.15k | rectifier feedback ⇒ **gain = 7.15k/10k = 0.715** |
@@ -892,6 +891,14 @@ The three headline consequences:
    open-circuit CT secondary across D12/D13 — the clamp survives it, but the
    reading is garbage. The CT is not on the BOM; it is an operator-supplied
    part and its V/A figure is a **calibration constant, never a derived one**.
+
+**Netlist trace of the fitted channel (2026-10-07):** J17 tip (pin 2; sleeve and ring both
+`GND_Safty`, TIP_SWITCH unconnected) → R45 10k → U9 pin 2 summing node (R115 1M tip-to-GND
+bleed, C50 4.7 pF and D20/D21 clamp from that node to GND, D22/D23 rectifier diodes, R89 1M ∥ C73
+1 µF hold) → U9B buffer (pin 7 tied to pin 6) → `Current3` → A1 pin 34 (GPIO28/ADC2). R50 7.15k
+runs from the summing node to the `Current3` buffer output (feedback taken after D22/the hold node).
+Channels 1 and 2 are the same with J13/U8/R46 → GPIO26 and J15/U7/R47 → GPIO27. No current-sense
+net reaches the ESP.
 
 **2026-09-05: a CT is now fitted and confirmed working**, on `Current3`
 (GPIO28/ADC2, above) only — Current1/Current2 remain unpopulated. It is a

@@ -221,7 +221,7 @@ PROD_ONLY_STMT_RES = [
     # required difference" as the no-model case, so this one-line `if` is
     # dropped entirely rather than given a fake mirror equivalent.
     re.compile(r"^if \(harvest_freeze\) strength_pct = 0$"),
-    # ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the confidence gate (cap_L from
+    # ADAPTIVE_FUZZY_EVALUATION.md sec 3: the confidence gate (cap_L from
     # this zone's identified L/tau, multiplied with the cross-firing model-
     # quality counter) and the N3 in-firing oscillation backstop. Both are
     # production-only -- the mirror has no zone_runtime_t/adaptive_tune/

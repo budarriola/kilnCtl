@@ -24,6 +24,7 @@
 typedef struct httpd_handle_obj *httpd_handle_t;
 typedef struct httpd_req {
     int dummy;
+    int method; /* real httpd_req_t::method (HTTP_GET == 0): the request line's method */
     long long content_len; /* matches real esp_http_server's httpd_req_t::content_len (size_t) closely
                              * enough for req->content_len comparisons/casts in backup_http.c -- signed
                              * so a test can also express "no body" as <= 0 the same way real code checks. */
@@ -40,9 +41,14 @@ typedef struct httpd_req {
     httpd_handle_t handle;
 } httpd_req_t;
 
+#ifndef ESP_ERR_HTTPD_RESULT_TRUNC
+#define ESP_ERR_HTTPD_RESULT_TRUNC 0xB003 /* value is irrelevant to the host tests */
+#endif
+
 typedef enum {
     HTTP_GET = 0,
     HTTP_POST = 1,
+    HTTP_HEAD = 2,
 } httpd_method_t;
 
 typedef enum {

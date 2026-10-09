@@ -14,6 +14,7 @@
 
 #include "cfg_fs_mount.h" /* cfg_fs_confirm_format_device() -- "all" scope formats the `cfg`
                             * LittleFS partition too, see reset_scope_t's format_cfg_fs field */
+#include "legacy_default_nvs.h" /* legacy pre-split copies in the default nvs partition */
 #include "kiln_scope_cfg_files.h" /* kiln_scope_cfg_files_delete() -- "kiln" scope cfg cleanup */
 #include "profiles_scope_cfg_files.h" /* profiles_scope_cfg_files_delete() -- "profiles" scope cfg cleanup */
 #include "hal_esp_common.h"
@@ -117,6 +118,15 @@ typedef struct {
      * (profiles_scope_cfg_files.h). hidden.json is handled by the
      * restore_builtin_profiles branch. */
     bool delete_profiles_cfg_files;
+
+    /* Erase the legacy pre-split copies in the DEFAULT `nvs` partition that
+     * the boot-time migrations would otherwise copy back into the just-erased
+     * kiln_nvs/profiles_nvs (legacy_default_nvs.h). Those migrations leave the
+     * old copy in place, and no scope may erase the default partition
+     * wholesale (kiln_auth/TOTP/Wi-Fi driver share it). */
+    bool erase_legacy_default_kiln;
+    bool erase_legacy_default_profiles;
+    bool erase_legacy_default_wifi; /* default partition "wifi_cfg" namespace */
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -125,10 +135,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly, false, false, false, false },
-    { "kiln", kKilnOnly, false, false, true, false },
-    { "profiles", kProfilesOnly, true, false, false, true },
-    { "all", kAll, true, true, false, false },
+    { "wifi", kWifiOnly, false, false, false, false, false, false, true },
+    { "kiln", kKilnOnly, false, false, true, false, true, false, false },
+    { "profiles", kProfilesOnly, true, false, false, true, false, true, false },
+    { "all", kAll, true, true, false, false, true, true, true },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -230,6 +240,38 @@ static void execute_scope_job(void *arg)
          * erase below does NOT reach; delete it unconditionally so a stale
          * file cannot win the next boot's resolve. */
         (void)profiles_builtin_discard_file();
+    }
+
+    /* Legacy default-partition copies first (erase-first): if this fails the
+     * reset reports failure, and the fallback must not be left able to
+     * resurrect old data. Attempted even after an earlier failure. */
+    if (scope->erase_legacy_default_kiln) {
+        esp_err_t lerr = legacy_default_nvs_erase_kiln();
+        if (lerr != ESP_OK) {
+            ESP_LOGE(TAG, "legacy default-partition kiln erase failed: %s", esp_err_to_name(lerr));
+            if (first_err == ESP_OK) {
+                first_err = lerr;
+            }
+        }
+    }
+    if (scope->erase_legacy_default_profiles) {
+        esp_err_t lerr = legacy_default_nvs_erase_profiles();
+        if (lerr != ESP_OK) {
+            ESP_LOGE(TAG, "legacy default-partition profiles erase failed: %s", esp_err_to_name(lerr));
+            if (first_err == ESP_OK) {
+                first_err = lerr;
+            }
+        }
+    }
+
+    if (scope->erase_legacy_default_wifi) {
+        esp_err_t lerr = legacy_default_nvs_erase_wifi();
+        if (lerr != ESP_OK) {
+            ESP_LOGE(TAG, "legacy default-partition wifi erase failed: %s", esp_err_to_name(lerr));
+            if (first_err == ESP_OK) {
+                first_err = lerr;
+            }
+        }
     }
 
     for (size_t i = 0; scope->partitions[i] != NULL; i++) {

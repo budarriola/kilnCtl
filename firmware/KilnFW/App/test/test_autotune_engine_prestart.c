@@ -153,9 +153,15 @@ esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t 
     return ESP_OK;
 }
 
+static int s_heat_zone_claim_begin_calls;
+static bool s_test_update_claim_after_heat_claim = false; /* MED-1 (review 3) */
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap) reason_out[0] = '\0';
+    if (s_test_update_claim_after_heat_claim && s_heat_zone_claim_begin_calls > 0) {
+        if (reason_out && reason_cap) snprintf(reason_out, reason_cap, "update in progress");
+        return true;
+    }
     return false;
 }
 
@@ -197,6 +203,23 @@ static bool s_stub_zone_active[MAX31856_CHANNEL_COUNT];
 bool profile_executor_zone_is_active(uint8_t zone_index)
 {
     return (zone_index < MAX31856_CHANNEL_COUNT) ? s_stub_zone_active[zone_index] : false;
+}
+
+/* Owner decision 2026-10-08: autotune_engine_accept() consults the system
+ * mode gate; these let a test pretend a firing/autotune run is active. */
+static bool s_stub_profile_running = false;
+static bool s_stub_autotune_running = false;
+/* TOCTOU hook: when >= 0, the Nth call (0-based) and later report a profile
+ * running, simulating a start landing between the gate snapshot and writes. */
+static int s_stub_heat_flip_at_call = -1;
+static int s_stub_heat_calls = 0;
+void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
+{
+    if (s_stub_heat_flip_at_call >= 0 && s_stub_heat_calls++ >= s_stub_heat_flip_at_call) {
+        s_stub_profile_running = true;
+    }
+    if (profile_running_out) *profile_running_out = s_stub_profile_running;
+    if (autotune_running_out) *autotune_running_out = s_stub_autotune_running;
 }
 
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
@@ -613,9 +636,13 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
     return ESP_OK;
 }
 
+/* Total of every zones_config_set_* stub call, so a refused accept can be
+ * proven to have written NOTHING (not just set_pid/set_max_ramp). */
+static int s_zones_write_total = 0;
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s)
 {
+    s_zones_write_total++;
     if (zone_index >= MAX31856_CHANNEL_COUNT || neighbor_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
@@ -756,6 +783,7 @@ bool zones_current_sweep_is_active(void)
 static bool s_stub_set_model_result = false;
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
+    s_zones_write_total++;
     (void)zone_index; (void)k_dc; (void)tau_s; (void)dead_time_s;
     return s_stub_set_model_result;
 }
@@ -773,6 +801,7 @@ static float s_stub_set_model_fit_context_temp_c = 0.0f;
 static float s_stub_set_model_fit_context_ambient_c = 0.0f;
 bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
 {
+    s_zones_write_total++;
     s_stub_set_model_fit_context_call_count++;
     s_stub_set_model_fit_context_zone = zone_index;
     s_stub_set_model_fit_context_temp_c = fit_temp_c;
@@ -801,6 +830,7 @@ bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc
 }
 bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
 {
+    s_zones_write_total++;
     s_stub_set_autotune_baseline_k_dc_call_count++;
     s_stub_set_autotune_baseline_k_dc_zone = zone_index;
     s_stub_set_autotune_baseline_k_dc_value = k_dc;
@@ -822,6 +852,7 @@ static uint8_t s_stub_set_coupling_diag_k_dc_zone = 0xFF;
 static float s_stub_set_coupling_diag_k_dc_value = 0.0f;
 bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
 {
+    s_zones_write_total++;
     s_stub_set_coupling_diag_k_dc_call_count++;
     s_stub_set_coupling_diag_k_dc_zone = zone_index;
     s_stub_set_coupling_diag_k_dc_value = k_dc;
@@ -841,6 +872,7 @@ static int s_stub_tuning_quality_call_count = 0;
 static bool s_stub_set_tuning_quality_result = true;
 bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
 {
+    s_zones_write_total++;
     s_stub_tuning_quality_zone = zone_index;
     if (q) {
         s_stub_tuning_quality_written = *q;
@@ -869,9 +901,18 @@ static bool s_stub_set_pid_result = false;
  * unaffected. */
 static bool s_probe_reserve_during_set_pid = false;
 static bool s_probe_reserve_during_set_pid_result = true;
+/* Fake zone gain store + call count: a stand-in for "what zones config now
+ * holds", so a refused accept() can be proven to have written nothing. */
+static float s_fake_zone_kp = 0.0f, s_fake_zone_ki = 0.0f, s_fake_zone_kd = 0.0f;
+static float s_fake_zone_max_ramp = 0.0f;
+static int s_fake_set_pid_call_count = 0;
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
-    (void)kp; (void)ki; (void)kd;
+    s_zones_write_total++;
+    s_fake_set_pid_call_count++;
+    if (s_stub_set_pid_result) {
+        s_fake_zone_kp = kp; s_fake_zone_ki = ki; s_fake_zone_kd = kd;
+    }
     if (s_probe_reserve_during_set_pid) {
         s_probe_reserve_during_set_pid_result = autotune_engine_reserve_zone_for_external_write(zone_index);
     }
@@ -893,9 +934,13 @@ static uint8_t s_stub_set_max_ramp_zone = 0xFF;
 static float s_stub_set_max_ramp_value = -1.0f;
 bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
 {
+    s_zones_write_total++;
     s_stub_set_max_ramp_call_count++;
     s_stub_set_max_ramp_zone = zone_index;
     s_stub_set_max_ramp_value = c_per_hr;
+    if (s_stub_set_max_ramp_result) {
+        s_fake_zone_max_ramp = c_per_hr;
+    }
     return s_stub_set_max_ramp_result;
 }
 
@@ -3256,6 +3301,38 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_heat_zone_claim_refused = false;
 }
 
+// MED-1 (review 3): update claim taken after the early check -> refused at commit, claims released.
+static void test_run_refuses_when_update_claims_after_early_check(void)
+{
+    TEST_SECTION("autotune_engine_run() -- update claim taken after the early check refuses at commit and releases claims");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false;
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+
+    s_test_update_claim_after_heat_claim = true;
+    char errbuf[96] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_test_update_claim_after_heat_claim = false;
+    TEST_CHECK(!ok, "an update claim taken after the early check must refuse the autotune start");
+    TEST_CHECK(strstr(errbuf, "update") != NULL, "the refusal names the update");
+    TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
+}
 // Review of 933a7eec: autotune start peeks profile_executor_zone_is_active()
 // and profile start peeks autotune_engine_is_active_on_zone(), but each peek
 // runs BEFORE the caller's own module lock, so two starts on the same zone
@@ -3795,6 +3872,113 @@ static void test_autotune_engine_accept_gates_on_settled(void)
     TEST_CHECK(accepted, "the SAME unsettled result must be accepted once ack_unsettled=true");
     TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_IDLE, "a successful accept resets the engine to IDLE");
     s_stub_set_pid_result = false; /* restore this file's default for every other test */
+}
+
+/* Owner decision 2026-10-08: accept writes zone gains/max_ramp, so it is
+ * refused (mode gate, 409 over HTTP) while a firing or autotune run is
+ * active and nothing is written; allowed when idle. */
+static void test_autotune_engine_accept_refused_by_mode_gate_while_running(void)
+{
+    TEST_SECTION("autotune_engine_accept() is refused by the system mode gate while a run is active, "
+                 "allowed when idle");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_stub_set_pid_result = true;
+    bool saved_set_model_result = s_stub_set_model_result;
+    s_stub_set_model_result = true;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 500.0f; /* so adopt_ceiling has a max_ramp to write */
+
+    /* Seed known gains/max_ramp; a refused accept must leave them bit-identical. */
+    const float seed_kp = 1.25f, seed_ki = 0.0625f, seed_kd = 3.5f, seed_ramp = 200.0f;
+    s_fake_zone_kp = seed_kp; s_fake_zone_ki = seed_ki; s_fake_zone_kd = seed_kd;
+    s_fake_zone_max_ramp = seed_ramp;
+    s_fake_set_pid_call_count = 0;
+    int ramp_calls_before = s_stub_set_max_ramp_call_count;
+    s_zones_write_total = 0;
+    autotune_accept_opts_t adopt = {.adopt_ceiling = true};
+
+    for (int which = 0; which < 2; which++) {
+        s_stub_profile_running = (which == 0);
+        s_stub_autotune_running = (which == 1);
+        autotune_accept_result_t res = {0};
+        bool ok = autotune_engine_accept(&adopt, &res);
+        TEST_CHECK(!ok, "accept must be refused while a firing/autotune run is active");
+        TEST_CHECK(res.refused_by_mode_gate, "refusal must be flagged as a mode-gate refusal (HTTP 409)");
+        TEST_CHECK(res.mode_reason[0] != '\0', "gate reason text must be reported");
+        TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "refused accept must not consume the result");
+        TEST_CHECK(s_fake_set_pid_call_count == 0, "refused accept must not call the zones-config PID write");
+        TEST_CHECK(s_zones_write_total == 0, "refused accept must call NO zones_config_set_* writer");
+        TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before,
+                   "refused accept must not call the zones-config max_ramp write");
+        TEST_CHECK(memcmp(&s_fake_zone_kp, &seed_kp, sizeof(float)) == 0 &&
+                   memcmp(&s_fake_zone_ki, &seed_ki, sizeof(float)) == 0 &&
+                   memcmp(&s_fake_zone_kd, &seed_kd, sizeof(float)) == 0,
+                   "zone PID gains must be bit-identical after a refused accept");
+        TEST_CHECK(memcmp(&s_fake_zone_max_ramp, &seed_ramp, sizeof(float)) == 0,
+                   "zone max_ramp must be bit-identical after a refused accept");
+    }
+    s_stub_profile_running = false;
+    s_stub_autotune_running = false;
+    autotune_accept_result_t res = {0};
+    TEST_CHECK(autotune_engine_accept(&adopt, &res), "accept must succeed when idle");
+    TEST_CHECK(!res.refused_by_mode_gate, "no gate refusal when idle");
+    TEST_CHECK(s_fake_set_pid_call_count == 1, "idle accept must write the PID gains exactly once");
+    TEST_CHECK(s_fake_zone_kp != seed_kp || s_fake_zone_ki != seed_ki || s_fake_zone_kd != seed_kd,
+               "idle accept must change the stored gains");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before + 1 &&
+               s_fake_zone_max_ramp == 500.0f, "idle accept with adopt_ceiling must write max_ramp once");
+    s_stub_set_model_result = saved_set_model_result;
+    s_stub_set_pid_result = false;
+}
+
+/* Review finding 1b: a profile start landing AFTER the first gate check but
+ * before the writes must still be refused, with nothing written. */
+static void test_autotune_engine_accept_rechecks_gate_before_writes(void)
+{
+    TEST_SECTION("autotune_engine_accept() re-checks the mode gate after reserving, before any write");
+    memset(&s_at, 0, sizeof(s_at));
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 0;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 500.0f;
+    s_stub_set_pid_result = true;
+    s_stub_profile_running = false;
+    s_stub_autotune_running = false;
+    s_fake_set_pid_call_count = 0;
+    int ramp_calls_before = s_stub_set_max_ramp_call_count;
+    s_zones_write_total = 0;
+    s_stub_heat_calls = 0;
+    s_stub_heat_flip_at_call = 1; /* first check passes, the re-check sees the start */
+    autotune_accept_result_t res = {0};
+    bool ok = autotune_engine_accept(&(autotune_accept_opts_t){.adopt_ceiling = true}, &res);
+    s_stub_heat_flip_at_call = -1;
+    s_stub_profile_running = false;
+    TEST_CHECK(!ok, "accept must be refused when a run starts after the first gate check");
+    TEST_CHECK(res.refused_by_mode_gate && res.mode_reason[0] != '\0', "flagged as a mode-gate refusal");
+    TEST_CHECK(s_fake_set_pid_call_count == 0, "set_pid must be called 0 times");
+    TEST_CHECK(s_zones_write_total == 0, "no zones_config_set_* writer may be called");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before, "set_max_ramp must be called 0 times");
+    TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "result not consumed");
+    TEST_CHECK(!s_at.external_write_reserved, "reservation must be released on the refusal");
+    s_stub_set_pid_result = false;
 }
 
 /* Round-3 follow-up: the SAME gate, isolating extrapolation_converged ==
@@ -6734,6 +6918,8 @@ void run_test_autotune_engine_prestart(void)
     test_settle_detector_fires_with_dead_time_over_300s();
     test_settle_detector_ignores_two_quantum_dead_time_noise();
     test_autotune_engine_accept_gates_on_settled();
+    test_autotune_engine_accept_refused_by_mode_gate_while_running();
+    test_autotune_engine_accept_rechecks_gate_before_writes();
     test_autotune_engine_accept_gates_on_extrapolation_converged();
     test_autotune_engine_accept_gates_on_tau_consistent();
     test_autotune_engine_accept_does_not_block_a_fully_clean_fit();
@@ -6806,6 +6992,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_refuses_on_off_zone();
     test_run_refuses_monitor_only_zone();
     test_run_refuses_at_atomic_heat_claim_gate();
+    test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_at_atomic_zone_claim_gate();
 
     // Heat-enable (K4) wiring -- each starts from its own

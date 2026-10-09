@@ -79,9 +79,13 @@
  * `{"relay":4,"commanded_on":false,"actuated_on":false,"rule_reason":255}`
  * = 71B worst case each, plus 1B of separator = 72B x 4 = 288B, plus the
  * `,"aux":[` / `]` framing (9B) = 297B. The fixed part was raised 960 -> 1344
- * (+384B) to carry it with headroom; the buffer is a PSRAM heap allocation
+ * (+384B) to carry it with headroom (and later 1344 -> 1920, see below: the real value is the
+ * #define, 1920 + MAX31856_CHANNEL_COUNT * 1024); the buffer is a PSRAM heap allocation
  * (dashboard_exec_http.c), never a task-stack buffer. */
-#define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (1344 + MAX31856_CHANNEL_COUNT * 1024)
+#define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (1920 + MAX31856_CHANNEL_COUNT * 1024)
+
+/* Aux on_time_s/switch_count (uint32, 10B each) add 49B per object, 4 x = ~200B;
+ * the fixed part was raised 1344 -> 1920 to carry them. */
 
 /* ROADMAP.md M15 B4 (2026-09-04) raised the /api/control per-zone budget
  * from 448 to 900 -- dashboard_http.c's control_status_get_handler() doc
@@ -277,5 +281,20 @@ int dashboard_format_autotune_status_json(char *json, size_t cap, const autotune
 size_t dashboard_format_firing_history_json(char *json, size_t cap, uint8_t profile_id,
                                             const profile_firing_run_record_t *records,
                                             size_t record_count);
+
+/* ETag / If-None-Match support for GET /api/status (TODO.md "Still polled"
+ * item). The ETag is a 32-bit FNV-1a hash of the fully rendered body, so it
+ * changes whenever ANY field changes (temperatures change every tick; a
+ * generation counter could not be proven to cover every field). It saves
+ * bandwidth and browser-side JSON work, not render cost. Pure functions, no
+ * httpd types, so the 304 decision is host-tested. */
+#define DASHBOARD_ETAG_BUF_SIZE 12 /* "\"xxxxxxxx\"" + NUL = 11 */
+uint32_t dashboard_etag_fnv1a32(const char *data, size_t len);
+/* Writes the quoted strong ETag for hash `h` into out[DASHBOARD_ETAG_BUF_SIZE]. */
+void dashboard_etag_format(uint32_t h, char *out);
+/* True when an If-None-Match request header value (NULL = header absent)
+ * matches `etag`: "*" matches, a comma-separated list is searched, and a
+ * weak "W/" prefix is ignored (weak comparison, RFC 9110 13.1.2). */
+bool dashboard_etag_matches(const char *if_none_match, const char *etag);
 
 #endif // DASHBOARD_JSON_H

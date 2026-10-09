@@ -6,6 +6,7 @@
 #include <stdbool.h>
 
 #include "esp_http_server.h"
+#include "update_policy.h"
 #include "update_stage.h"
 
 #ifdef __cplusplus
@@ -23,6 +24,13 @@ bool update_http_mode_gate_refuses(httpd_req_t *req, const char *what, const cha
 // (response already sent) when refused. On false the claim is HELD: the caller releases it with
 // ota_http_update_end().
 bool update_http_gate_refuses(httpd_req_t *req, const char *what, const char *ip);
+
+// The running image's identity for the policy (update_fetch.c's running_identity()); cand_commit
+// is the candidate's commit, used to expand the build's short commit id. NULL/"" = unknown.
+// True once a GitHub-fetch flash-writer op timed out: stage upload/clear may stay BUSY until reboot.
+bool update_fetch_writer_wedged(void);
+
+void update_fetch_running_identity(update_identity_t *r, const char *cand_commit);
 
 #ifdef __cplusplus
 }

@@ -276,6 +276,8 @@ check that the release decision will cite:
 the host-test suites, and the ones that matter for release are a subset —
 scope it to the safety, config, stack-budget and build gates first.
 
+**Step 4 status (2026-10-07): table delivered.** `docs/audits/GATE_NEGATIVE_TEST_EVIDENCE.md` has one row per discovered check (168): 59 NEGATIVE-TESTED, 1 PARTIAL, 9 REVIEWED NOT MUTATED, 82 NOT AUDITED, 17 NOT AUDITED (pass 12 pending). `tools/check_gate_negative_test_table.ps1` fails when a discovered check has no row. The remaining non-tested rows are the open audit backlog.
+
 **Progress.** Five passes of negative-testing have run so far:
 `docs/audits/release_gate_vacuity_audit_2026-09-16.md` (first slice),
 `docs/audits/release_gate_vacuity_audit_2026-09-16b.md` (six mirror-drift
@@ -826,6 +828,8 @@ hole is **desirable, not a blocker**, and is item 11.
 
 **Status, 2026-10-02 (eleventh pass).** `docs/audits/release_gate_vacuity_audit_2026-10-02.md`: 13 checks added or changed since 2026-09-18 negative-tested, all load-bearing; two discovery vacuities fixed (`check_no_exec_status_stack_locals.py`, `check_no_handler_direct_driver_calls.py` now fail on a missing scan directory or too few files).
 
+**Status, 2026-10-07 (twelfth pass).** `docs/audits/release_gate_vacuity_audit_2026-10-07.md`: the checks added since 2026-10-02 (`check_app_image_size`, `check_aux_relay_conflict_sites`, `check_kiln_scope_cfg_mirrors`, `check_ota_esp_refuses_running_target`, `check_persist_scratch_malloc_caps`, `check_release_manifest`, `check_release_version_regex`, `check_safe_remove_junction`, `check_monocypher_vendored`) and the `firmware/KilnFW_recovery/main/check_recovery_*.ps1` family were negative-tested. Seven were weak and are fixed and re-negative-tested: aux (call pinned inside `zones_post_apply`), ota (whole guard matched), persist_scratch (three unlisted adopter files plus an adoption guard; two real plain mallocs converted to `persist_scratch_alloc`), version_regex (`+` after a prerelease), release_manifest (semver refusal text required), safe_remove_junction (unlink report required, site pattern tightened) and monocypher (unhashed files fail; that check was deleted with release signing, owner decision 2026-10-07).
+
 ---
 
 ## 4. BLOCKER — a safety argument that does not depend on the bench
@@ -1028,8 +1032,8 @@ consumer side was only ever exercised against a hand-built fault struct
 `firmware/KilnFW/App/test/test_zones_http.c` (drives real bytes through the
 real `nvs_load_from()`/`zones_config_json_decode_blob()`, reads back the real
 `zones_config_get_load_fault()`). Both negative-tested: each latch call was
-independently removed/altered in `zones_config_store.c` (that file's current blob,
-blob:firmware/KilnFW/App/drivers/persist/zones_config_store.c`23f99255fec4ce28d4888a66a327c12c3078c8bd`),
+independently removed/altered in `zones_config_store.c` (the file as of commit
+`9cd3cbd8`; it has changed since, so its blob is no longer cited),
 confirmed to turn the
 `zones_http` host-test executable red, restored by hand with an empty
 `git diff` and a matching `git hash-object`, then the build directory was
@@ -1512,7 +1516,7 @@ The fuzzy layer has no demonstrated benefit under matched conditions on this
 bench — that scope qualifier is load-bearing and travels with the finding.
 Fixed-gain fuzzy at strength 50 measured as net harmful; the adaptive variant,
 which is the one the owner has repeatedly said is intended, has not been
-evaluated at all, and `docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md` specifies the
+evaluated at all, and `docs/ADAPTIVE_FUZZY_EVALUATION.md` specifies the
 run that would decide it. `fuzzy_strength_pct` is 0.0 on the live board, so it
 is inert today. The release position writes itself: **it ships at zero strength
 unless and until the adaptive evaluation shows benefit on the installed kiln**,

@@ -1,5 +1,11 @@
 # kilnCtl
 
+> **WARNING: read the [Liability waiver and safety disclaimer](#liability-waiver-and-safety-disclaimer)
+> before you build, flash, wire, or power anything from this repository.**
+> This is an unfinished, experimental controller for an appliance that runs above
+> 1000 °C on mains power. Even where it is believed to be stable, assume it **will**
+> start a fire that burns your house down with everyone inside it.
+
 A kiln controller: three KiCad boards, two independent firmwares, and the PC
 tooling that drives both.
 
@@ -71,7 +77,7 @@ The rationale for the split, and what broke during it, is
 | Board | What it is |
 |---|---|
 | `hardware/mainBoard` | ESP32-S3 controller, SSR drivers, current sense, isolated link, safety RP2040 |
-| `hardware/ThermocoupleBoard` | 5-channel MAX31856 daughterboard |
+| `hardware/ThermocoupleBoard` | 3-channel MAX31856 daughterboard |
 | `hardware/SaftyThermocoupleBoard` | The safety processor's own thermocouple front end |
 
 `Thermocouple.kicad_sch` appears in more than one project as a copy of the same
@@ -108,3 +114,67 @@ Programming, debug and console for the RP2040 all go through a Raspberry Pi
 Debug Probe: SWD to the DEBUG pads, and the probe's UART bridge on GP16/GP17.
 The Pico's own USB is deliberately not used. Wiring is
 [firmware/SaftyFW/docs/HARDWARE.md](firmware/SaftyFW/docs/HARDWARE.md) §7b.
+
+## Liability waiver and safety disclaimer
+
+**This project is a work in progress. It is not finished, not certified, and not
+safe.** Everything in this repository (schematics, PCB layouts, firmware for both
+processors, PC tools, documentation, release images, and any advice in issues or
+discussions) is an experimental, hobbyist development effort that is still
+changing daily.
+
+**Even where a part of it is believed to be stable, it is not.** Code that has
+passed every test in this repository, every bench run, and every review can still
+fail in the field. Treat every release, including those marked "stable", as a
+pre-release prototype.
+
+**Assume it will burn your house down with everyone inside.** A kiln is a
+resistive heater that reaches well above 1000 °C, draws tens of amps from mains
+power, and is often left unattended for many hours. A controller fault, a
+firmware bug, a stuck or welded relay, a failed thermocouple, a wiring mistake, a
+bad update, a power glitch, or a single misread value can leave the elements
+energized with nothing to stop them. The likely result is a fire that destroys the
+building and kills or seriously injures the people and animals inside it.
+Electrocution, burns, toxic fumes, and damage to the kiln, its contents and
+nearby property are also likely. Plan as if these outcomes will happen, not as if
+they might.
+
+**The safety processor does not make this safe.** The RP2040 safety processor, its
+trip guards, the E-stop path, the pilot relay, and every other protective feature
+described here are part of the same unfinished, unverified design. They have not
+been independently evaluated and must not be relied on to prevent fire, injury or
+death. This design does not replace a certified, independent over-temperature
+cutoff, a correctly rated contactor, proper overcurrent protection, a
+non-combustible installation, working smoke and fire detection, and a person
+physically present and watching the kiln.
+
+**No certification.** Nothing here has been tested, listed or approved by UL, CSA,
+CE, TÜV, or any other safety or standards body, and nothing here complies with
+any electrical, building or fire code. Installing it may break local law, void
+your insurance, and void the kiln manufacturer's warranty. Mains wiring must be
+done by a licensed electrician where your jurisdiction requires it.
+
+**No warranty.** This project is provided "AS IS" and "AS AVAILABLE", without
+warranty of any kind, express or implied. That includes, without limitation, any
+warranty of merchantability, fitness for a particular purpose, safety, accuracy,
+reliability, non-infringement, or that it will work at all.
+
+**No liability.** To the fullest extent permitted by law, the authors,
+contributors, copyright holders, and anyone who distributes this project are not
+liable for any claim, damage, injury, death, loss of property, loss of data, loss
+of income, or other loss of any kind, whether direct, indirect, incidental,
+special, consequential, or punitive, and whether based on contract, tort
+(including negligence), strict liability, or any other theory. This holds even if
+they were told such loss was possible, and it applies to any use of this project,
+any inability to use it, and any failure of it.
+
+**You accept all risk.** By building, flashing, installing, operating, modifying,
+or distributing anything from this repository, you agree that you do so entirely
+at your own risk, that you are solely responsible for the safety of your
+installation and of everyone and everything near it, and that you will indemnify
+and hold harmless the authors and contributors against any claim arising from
+your use. If you do not accept these terms, do not use this project.
+
+**Not advice.** Nothing in this repository is professional, electrical,
+engineering, or legal advice. If any part of this waiver cannot be enforced where
+you live, the rest of it still applies.

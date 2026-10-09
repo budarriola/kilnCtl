@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "PcTools", "src"))
-from mcpkit.buildgate import kiln_build_gate  # noqa: E402
+from mcpkit.buildgate import child_env, kiln_build_gate  # noqa: E402
 from mcpkit.pytest_verdict import PER_TEST_TIMEOUT_S, pytest_output_problems  # noqa: E402
 
 
@@ -186,7 +186,12 @@ def _run_gate(gate: Gate) -> GateResult:
     env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
     env.update(gate.extra_env or {})
     try:
+        # Heavy gates are a bare compile subprocess (no build lock, no setup),
+        # so the slot covers exactly the compile; child_env() marks it held so
+        # a nested gate in the child is re-entrant.
         with kiln_build_gate(gate.name) if gate.heavy else contextlib.nullcontext():
+            if gate.heavy:
+                env = child_env(env)
             completed = subprocess.run(
                 argv, cwd=cwd or ROOT, capture_output=True, text=True, errors="replace",
                 timeout=gate.timeout, env=env, shell=False,

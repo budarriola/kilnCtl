@@ -85,7 +85,10 @@ serialization (whether or not that module is named `*_owner`)?
   architectural change needed here either** — this already matches the
   target shape. Left untouched per this pass's scope.
 
-- **UI_TEST** (`uart_bridge_ui_test.c:70`, out of scope this pass by
+- **UI_TEST** -- RESOLVED same day by `72c957b1` (both commands now dispatch the walk
+  through `lvgl_port_collect_tap_targets()` onto `lvgl_port_task`, bounded wait; busy
+  reported distinctly by `232e668f`). Text below is the original finding, kept as history.
+  (`uart_bridge_ui_test.c:70`, out of scope this pass by
   instruction — bench LCD rerun dependency): this is the one subsystem where
   the TOUCH-class bug is still live. `UI_TEST_CMD_LIST_TAP_TARGETS` calls
   `kiln_ui_collect_tap_targets()` and `UI_TEST_CMD_CLICK_BY_NAME` calls

@@ -43,6 +43,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "http_origin_check.h"
 #include "recovery_apply.h"
 #include "recovery_apply_esp.h"
 #include "recovery_health_policy.h"
@@ -237,6 +238,34 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
 }
 
 // GET / -- the embedded self-contained recovery page.
+// MED-1: refuse cross-origin state-changing requests (same rule as the
+// application's kiln_http_prehandler()). Each route's real handler rides in
+// user_ctx; the guard runs first, before the body is read.
+static size_t origin_hdr_len(void *c, const char *name)
+{
+    return httpd_req_get_hdr_value_len((httpd_req_t *)c, name);
+}
+static int origin_hdr_str(void *c, const char *name, char *buf, size_t cap)
+{
+    esp_err_t e = httpd_req_get_hdr_value_str((httpd_req_t *)c, name, buf, cap);
+    return e == ESP_OK ? 0 : (e == ESP_ERR_HTTPD_RESULT_TRUNC ? 1 : -1);
+}
+
+static esp_err_t origin_guard(httpd_req_t *req)
+{
+    esp_err_t (*real)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
+    if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
+        if (http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str)) {
+            ESP_LOGW(TAG, "cross-origin refused: method=%d uri=%s", (int)req->method, req->uri);
+            httpd_resp_set_status(req, "403 Forbidden");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"error\":\"cross_origin\"}", HTTPD_RESP_USE_STRLEN);
+            return ESP_FAIL; // close: do not purge an unread (possibly huge) body
+        }
+    }
+    return real(req);
+}
+
 static esp_err_t root_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -1012,7 +1041,10 @@ esp_err_t recovery_http_start(void)
     unsigned registered = 0;
     if (start_rc == ESP_OK) {
         for (size_t i = 0; i < expected; i++) {
-            esp_err_t rr = httpd_register_uri_handler(server, &routes[i]);
+            httpd_uri_t wrapped = routes[i];
+            wrapped.user_ctx = (void *)routes[i].handler;
+            wrapped.handler = origin_guard;
+            esp_err_t rr = httpd_register_uri_handler(server, &wrapped);
             if (rr == ESP_OK) {
                 registered++;
             } else {

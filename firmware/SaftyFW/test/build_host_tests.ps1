@@ -56,12 +56,9 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . (Join-Path $PSScriptRoot "../../../tools/build_lock.ps1")
 . (Join-Path $PSScriptRoot "../../../tools/build_gate.ps1")
 $buildLockName = "saftyfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
-$buildGate = Enter-KilnBuildGate -Label "saftyfw_host_tests"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# vcvarsall runs ONCE (outside any gate slot); the slot is then taken only around each cl invocation (Invoke-KilnGatedCmd).
+Import-KilnVcvarsEnv -Vcvars $vcvars
+# Build lock FIRST, with no gate slot held while waiting for it.
 $buildLock = Enter-BuildLock -Name $buildLockName
 try {
     $exe = Join-Path $outDir "saftyfw_host_tests.exe"
@@ -122,6 +119,7 @@ try {
         (Join-Path $commonSrcDir "kilnlink_config_page.c"),
         (Join-Path $commonSrcDir "kilnlink_set_log_level.c"),
         (Join-Path $commonSrcDir "kilnlink_commit_config_rejected.c"),
+        (Join-Path $commonSrcDir "kilnlink_fw_version.c"), # Frame C drift pin, test_link_frame_wire.c
         (Join-Path $commonSrcDir "kilnlink_inject_tc.c"),
         (Join-Path $testDir "test_kilnlink_inject_tc.c"),
         (Join-Path $hwAbstractionPicoUartDir "uart_owner_tx_policy.c"),
@@ -267,24 +265,78 @@ try {
     # had no host-test consumer in this build until now, so this was latent
     # rather than already fixed elsewhere. Matches the fuzz build's own
     # /std:c17 below.
-    $rspContent = "/nologo /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
+    $clMpN = if ($env:KILNCTL_HOST_CL_MP -match '^\d+$' -and [int]$env:KILNCTL_HOST_CL_MP -ge 1) { [int]$env:KILNCTL_HOST_CL_MP } else { [Math]::Max(2, [int][Math]::Floor([Environment]::ProcessorCount / 3)) }
+    # /MP: parallel compile of the sources within ONE cl invocation (separate executables still build one at a time, each under its own gate slot). Needs /Fo to be a directory (it is); none of /Gm /Yc /E /EP /P /showIncludes is used here.
+    $rspContent = "/nologo /MP$clMpN /W4 /WX /EHsc /std:c17 /I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$updateDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$freertosMinStubDir`" /I `"$hwAbstractionPicoSpiDir`" " +
         "/I `"$hardwareGpioMinStubDir`" " +
         "/I `"$spiOwnerStubDir`" " +
-        "/Fo:`"$outDir\\`" /Fe:`"$exe`" " +
+        "/Fo:`"$outDir\obj_main\\`" /Fe:`"$exe`" " +
         (($sources | ForEach-Object { '"' + $_ + '"' }) -join " ")
     $rspPath = Join-Path $outDir "saftyfw_host_tests_cl.rsp"
     Set-Content -Path $rspPath -Value $rspContent -Encoding ascii -NoNewline
 
-    $cmd = "call `"$vcvars`" x64 >nul && cl @`"$rspPath`""
+    $cmd = "cl @`"$rspPath`""
 
-    cmd.exe /c $cmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "build failed"
+    # Parallel compile, serial run (mirrors KilnFW/App/test/build_host_tests.ps1).
+    # KILNCTL_HOST_BUILD_JOBS (default 4; 1 = serial compiles) bounds concurrent
+    # compiles; each is a child process (KilnFW's host_build_worker.ps1) holding
+    # ONE heavy gate slot. Every executable has a private obj dir. Test RUNS stay
+    # serial and in original order; build output is printed grouped.
+    $hostJobs = if ($env:KILNCTL_HOST_BUILD_JOBS -match '^\d+$' -and [int]$env:KILNCTL_HOST_BUILD_JOBS -ge 1) { [int]$env:KILNCTL_HOST_BUILD_JOBS } else { 4 }
+    $hostQueue = New-Object System.Collections.ArrayList
+    $hostWorker = Join-Path $testDir "..\..\KilnFW\App\test\host_build_worker.ps1"
+    $hostPsExe = (Get-Process -Id $PID).Path
+    function Add-HostBuild {
+        param([string]$Name, [string]$ExePath, [string]$BuildCmd)
+        if (Test-Path $ExePath) { Remove-Item -Force $ExePath }
+        $safe = [regex]::Replace($Name, '[^A-Za-z0-9]+', '_')
+        $cmdFile = Join-Path $outDir ("job_" + $safe + ".cmd.txt")
+        [System.IO.File]::WriteAllText($cmdFile, $BuildCmd)
+        [void]$hostQueue.Add([PSCustomObject]@{
+            Name = $Name; Exe = $ExePath; CmdFile = $cmdFile; Proc = $null
+            OutFile = (Join-Path $outDir ("job_" + $safe + ".out.txt"))
+            ErrFile = (Join-Path $outDir ("job_" + $safe + ".err.txt"))
+        })
     }
-
-    & $exe
-    $mainExit = $LASTEXITCODE
+    function Start-HostQueueItems {
+        $running = @($hostQueue | Where-Object { $_.Proc -and -not $_.Proc.HasExited }).Count
+        foreach ($it in $hostQueue) {
+            if ($running -ge $hostJobs) { break }
+            if ($it.Proc) { continue }
+            $it.Proc = Start-Process -FilePath $hostPsExe -PassThru -WindowStyle Hidden `
+                -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$hostWorker`"", "-CmdFile", "`"$($it.CmdFile)`"", "-Label", "saftyfw_host_tests") `
+                -RedirectStandardOutput $it.OutFile -RedirectStandardError $it.ErrFile
+            [void]$it.Proc.Handle   # cache handle so ExitCode is readable (PS 5.1 -PassThru quirk)
+            $running++
+        }
+    }
+    $exitCodes = @{}
+    $buildFailures = @()
+    function Complete-HostBuilds {
+        Start-HostQueueItems
+        foreach ($it in @($hostQueue)) {
+            while (-not $it.Proc) { Start-HostQueueItems; if (-not $it.Proc) { Start-Sleep -Milliseconds 200 } }
+            while (-not $it.Proc.HasExited) { Start-Sleep -Milliseconds 200; Start-HostQueueItems }
+            $it.Proc.WaitForExit()
+            $code = $it.Proc.ExitCode
+            Write-Host "---- build output: $($it.Name) ----"
+            foreach ($f in @($it.OutFile, $it.ErrFile)) {
+                if (Test-Path $f) { Get-Content -LiteralPath $f | ForEach-Object { Write-Host $_ } }
+            }
+            Start-HostQueueItems
+            if ($code -ne 0 -or -not (Test-Path $it.Exe)) {
+                Write-Host "BUILD FAILED: $($it.Name)"
+                $script:buildFailures += $it.Name
+                continue
+            }
+            & $it.Exe
+            $script:exitCodes[$it.Name] = $LASTEXITCODE
+        }
+        $hostQueue.Clear()
+    }
+    New-Item -ItemType Directory -Force -Path (Join-Path $outDir "obj_main") | Out-Null
+    Add-HostBuild -Name "saftyfw_host_tests.exe" -ExePath $exe -BuildCmd $cmd
 
     # GUARD_TEST_MATRIX.md "Fuzz over every decoder": firmware/CommonFW/test/
     # test_fuzz_payloads.c drives every kilnlink payload decoder (context/
@@ -335,18 +387,9 @@ try {
     $fuzzSources = @((Join-Path $commonSrcDir "..\test\test_fuzz_payloads.c")) +
         (Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
     $fuzzSourceArgs = ($fuzzSources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $fuzzCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 /I `"$commonIncDir`" " +
+    $fuzzCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 /I `"$commonIncDir`" " +
         "/Fo:`"$fuzzObjDir\\`" /Fe:`"$fuzzExe`" $fuzzSourceArgs"
-    cmd.exe /c $fuzzCmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "kilnlink payload fuzz build failed"
-    }
-    & $fuzzExe
-    $fuzzExit = $LASTEXITCODE
-
-    if ($fuzzExit -ne 0) {
-        throw "kilnlink payload fuzz FAILED (exit $fuzzExit) -- see output above for which decoder and case; rerun with KILNLINK_FUZZ_SEED set to the seed printed above to reproduce"
-    }
+    Add-HostBuild -Name "kilnlink_fuzz_payloads.exe" -ExePath $fuzzExe -BuildCmd $fuzzCmd
 
     # hal_spi_pico.c's own adapter-logic test -- a SEPARATE executable (see
     # this script's earlier comment on why it cannot share test_main.c's exe:
@@ -364,16 +407,11 @@ try {
         (Join-Path $spiOwnerStubDir "spi_owner_stub.c")
     )
     $halSpiPicoSourceArgs = ($halSpiPicoSources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $halSpiPicoCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+    $halSpiPicoCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionPicoSpiDir`" /I `"$spiOwnerStubDir`" " +
         "/I `"$srcDir/board`" /I `"$testDir`" " +
         "/Fo:`"$halSpiPicoObjDir\\`" /Fe:`"$halSpiPicoExe`" $halSpiPicoSourceArgs"
-    cmd.exe /c $halSpiPicoCmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "hal_spi_pico adapter test build failed"
-    }
-    & $halSpiPicoExe
-    $halSpiPicoExit = $LASTEXITCODE
+    Add-HostBuild -Name "hal_spi_pico_tests.exe" -ExePath $halSpiPicoExe -BuildCmd $halSpiPicoCmd
 
     # config_store_flash.c's own host tests (Phase 3 item 2 hal_flash rebase) --
     # a SEPARATE executable for the same reason hal_spi_pico_tests.exe is above:
@@ -411,17 +449,12 @@ try {
     # arm-none-eabi target build (CMakeLists.txt does not define this macro).
     # This is the ONLY place that macro is defined in this repo -- see
     # config_store_flash.c's own comment on the #ifdef for what it gates and why.
-    $configStoreFlashCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 /D SAFTYFW_HOST_TEST_BUILD=1 " +
+    $configStoreFlashCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 /D SAFTYFW_HOST_TEST_BUILD=1 " +
         "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$bootDir`" /I `"$commonIncDir`" " +
         "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" " +
         "/I `"$configStoreFlashHostStubsDir`" /I `"$testDir`" " +
         "/Fo:`"$configStoreFlashObjDir\\`" /Fe:`"$configStoreFlashExe`" $configStoreFlashSourceArgs"
-    cmd.exe /c $configStoreFlashCmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "config_store_flash host test build failed"
-    }
-    & $configStoreFlashExe
-    $configStoreFlashExit = $LASTEXITCODE
+    Add-HostBuild -Name "config_store_flash_tests.exe" -ExePath $configStoreFlashExe -BuildCmd $configStoreFlashCmd
 
     # bootloader/recovery_update.c's own host test -- a SEPARATE executable: it
     # #includes the real recovery_update.c (to reach its static dispatch/status
@@ -448,16 +481,22 @@ try {
         (Join-Path $commonSrcDir "kilnlink_crc.c")
     )
     $blRecoverySourceArgs = ($blRecoverySources | ForEach-Object { '"' + $_ + '"' }) -join " "
-    $blRecoveryCmd = "call `"$vcvars`" x64 >nul && cl /nologo /W4 /WX /std:c17 " +
+    $blRecoveryCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
         "/I `"$blRecoveryStubDir`" /I `"$bootDir`" /I `"$updateDir`" /I `"$srcDir\tasks`" " +
         "/I `"$commonIncDir`" /I `"$testDir`" " +
         "/Fo:`"$blRecoveryObjDir\\`" /Fe:`"$blRecoveryExe`" $blRecoverySourceArgs"
-    cmd.exe /c $blRecoveryCmd
-    if ($LASTEXITCODE -ne 0) {
-        throw "bootloader recovery_update host test build failed"
+    Add-HostBuild -Name "bootloader_recovery_update_tests.exe" -ExePath $blRecoveryExe -BuildCmd $blRecoveryCmd
+
+    Complete-HostBuilds
+    if ($buildFailures.Count -gt 0) {
+        Write-Host "SAFTYFW HOST TESTS: BUILD FAILED -- $($buildFailures -join ', ')"
+        exit 1
     }
-    & $blRecoveryExe
-    $blRecoveryExit = $LASTEXITCODE
+    $mainExit = $exitCodes["saftyfw_host_tests.exe"]
+    $fuzzExit = $exitCodes["kilnlink_fuzz_payloads.exe"]
+    $halSpiPicoExit = $exitCodes["hal_spi_pico_tests.exe"]
+    $configStoreFlashExit = $exitCodes["config_store_flash_tests.exe"]
+    $blRecoveryExit = $exitCodes["bootloader_recovery_update_tests.exe"]
 
     # Each executable above prints its own "all passed"/"ALL PASS" line on
     # success, so whichever one happens to run last leaves that string as the
@@ -495,7 +534,4 @@ try {
     exit $blRecoveryExit
 } finally {
     Exit-BuildLock -Lock $buildLock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }

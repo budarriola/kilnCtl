@@ -325,30 +325,11 @@ def _trend_direction(t_values: "list[float]", values: "list[float]", floor_per_h
     return "flat", slope_per_hour
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--duration", type=float, default=3600, help="total soak length in seconds (default 3600 = 1h)")
-    ap.add_argument("--interval", type=float, default=60, help="seconds between samples (default 60)")
-    ap.add_argument("--out", type=str, default=None, help="CSV output path (default: stability_soak_<ts>.csv in cwd)")
-    ap.add_argument("--host", type=str, default=None, help="dashboard HTTP host (default: autodetect via wifi status)")
-    ap.add_argument("--firing-in-progress", action="store_true",
-                     help="acknowledge a firing is active and soak through it anyway (the more valuable run); "
-                          "without this flag the script refuses to start if a firing is detected")
-    ap.add_argument("--max-samples", type=int, default=None, help="stop after N samples regardless of --duration (for smoke tests)")
-    args = ap.parse_args()
-
-    print(m.connect())
-    host = _ota_resolve_host(args.host)
-    print(f"dashboard host: {host}")
-
-    try:
-        exec_status = m._profiles.get_exec_status()
-    except Exception as exc:  # noqa: BLE001
-        print(f"error: could not read profile executor state before starting: {exc}", file=sys.stderr)
-        return 2
-
+def preflight_mode(exec_status, firing_in_progress: bool) -> "tuple[int | None, str]":
+    """Decide whether the soak may start. Returns (rc, mode): rc is an exit
+    code to return immediately (2 = refuse) or None to proceed."""
     firing_now = _is_firing(exec_status)
-    if firing_now and not args.firing_in_progress:
+    if firing_now and not firing_in_progress:
         print(
             f"error: a firing is in progress (exec_state={exec_status.state_name!r}) -- "
             f"refusing to start an IDLE-mode soak against a live firing. Pass "
@@ -356,54 +337,18 @@ def main() -> int:
             f"more valuable run, and is supported -- it is just never the silent default).",
             file=sys.stderr,
         )
-        return 2
-    if args.firing_in_progress and not firing_now:
+        return 2, "idle"
+    if firing_in_progress and not firing_now:
         print(
             "WARNING: --firing-in-progress was passed but no firing is currently active "
             f"(exec_state={exec_status.state_name!r}). Proceeding, but this run will be "
             "labelled 'firing-in-progress' in the CSV/report even though it captured an idle board.",
         )
-    mode = "firing-in-progress" if args.firing_in_progress else "idle"
-    print(f"soak mode: {mode}")
+    return None, ("firing-in-progress" if firing_in_progress else "idle")
 
-    out_path = Path(args.out) if args.out else Path(f"stability_soak_{time.strftime('%Y%m%d_%H%M%S')}.csv")
-    print(f"writing: {out_path}")
 
-    baseline = Baseline()
-    t0 = time.monotonic()
-    rows: list[dict] = []
-    all_problems: list[str] = []
-
-    with out_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        f.flush()
-
-        n = 0
-        while True:
-            sample = sample_once(host, baseline, t0)
-            rows.append(sample.row)
-            writer.writerow(sample.row)
-            f.flush()
-            n += 1
-            if sample.problems:
-                for p in sample.problems:
-                    print(f"  [t={sample.row['t_s']}s] PROBLEM: {p}")
-                    all_problems.append(f"t={sample.row['t_s']}s: {p}")
-            else:
-                print(f"  [t={sample.row['t_s']}s] ok "
-                      f"(heap_internal.free={sample.row.get('heap_internal_free')} B, "
-                      f"link_up={sample.row.get('link_up')}, "
-                      f"stack={sample.row.get('stack_worst_level')})")
-
-            if args.max_samples is not None and n >= args.max_samples:
-                break
-            elapsed = time.monotonic() - t0
-            if elapsed >= args.duration:
-                break
-            time.sleep(min(args.interval, max(0.0, args.duration - elapsed)))
-
-    # --- final PASS/FAIL + trends ---
+def summarize_and_verdict(rows, all_problems, mode, t0, out_path) -> int:
+    """Final PASS/FAIL + trends over the collected rows. Returns the exit code."""
     def col(name: str) -> "list[float]":
         out = []
         for r in rows:
@@ -498,6 +443,73 @@ def main() -> int:
         return 1
     print("RESULT: PASS")
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--duration", type=float, default=3600, help="total soak length in seconds (default 3600 = 1h)")
+    ap.add_argument("--interval", type=float, default=60, help="seconds between samples (default 60)")
+    ap.add_argument("--out", type=str, default=None, help="CSV output path (default: stability_soak_<ts>.csv in cwd)")
+    ap.add_argument("--host", type=str, default=None, help="dashboard HTTP host (default: autodetect via wifi status)")
+    ap.add_argument("--firing-in-progress", action="store_true",
+                     help="acknowledge a firing is active and soak through it anyway (the more valuable run); "
+                          "without this flag the script refuses to start if a firing is detected")
+    ap.add_argument("--max-samples", type=int, default=None, help="stop after N samples regardless of --duration (for smoke tests)")
+    args = ap.parse_args()
+
+    print(m.connect())
+    host = _ota_resolve_host(args.host)
+    print(f"dashboard host: {host}")
+
+    try:
+        exec_status = m._profiles.get_exec_status()
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: could not read profile executor state before starting: {exc}", file=sys.stderr)
+        return 2
+
+    rc, mode = preflight_mode(exec_status, args.firing_in_progress)
+    if rc is not None:
+        return rc
+    print(f"soak mode: {mode}")
+
+    out_path = Path(args.out) if args.out else Path(f"stability_soak_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    print(f"writing: {out_path}")
+
+    baseline = Baseline()
+    t0 = time.monotonic()
+    rows: list[dict] = []
+    all_problems: list[str] = []
+
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        f.flush()
+
+        n = 0
+        while True:
+            sample = sample_once(host, baseline, t0)
+            rows.append(sample.row)
+            writer.writerow(sample.row)
+            f.flush()
+            n += 1
+            if sample.problems:
+                for p in sample.problems:
+                    print(f"  [t={sample.row['t_s']}s] PROBLEM: {p}")
+                    all_problems.append(f"t={sample.row['t_s']}s: {p}")
+            else:
+                print(f"  [t={sample.row['t_s']}s] ok "
+                      f"(heap_internal.free={sample.row.get('heap_internal_free')} B, "
+                      f"link_up={sample.row.get('link_up')}, "
+                      f"stack={sample.row.get('stack_worst_level')})")
+
+            if args.max_samples is not None and n >= args.max_samples:
+                break
+            elapsed = time.monotonic() - t0
+            if elapsed >= args.duration:
+                break
+            time.sleep(min(args.interval, max(0.0, args.duration - elapsed)))
+
+    return summarize_and_verdict(rows, all_problems, mode, t0, out_path)
 
 
 if __name__ == "__main__":

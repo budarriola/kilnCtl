@@ -46,6 +46,7 @@ typedef enum {
     LIVE_DECIDE_NOTHING_PENDING, /* HTTP 409 */
     LIVE_DECIDE_BAD_REQUEST,     /* HTTP 400 -- name collision, missing name/confirm, save refused */
     LIVE_DECIDE_FORBIDDEN,       /* HTTP 403 -- overwrite of a builtin origin */
+    LIVE_DECIDE_BUSY,            /* HTTP 409 -- a zone conversion is running; retry */
     LIVE_DECIDE_SERVER_ERROR,    /* HTTP 500 -- out of memory, working copy unreadable, clear failed */
 } profiles_live_decide_result_t;
 

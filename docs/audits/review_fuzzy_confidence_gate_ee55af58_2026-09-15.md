@@ -1,7 +1,7 @@
 # Adversarial review: `ee55af58`, the fuzzy confidence gate (2026-09-15)
 
 Scope: commit `ee55af58` ("adaptive fuzzy: sec 3 confidence gate"), which
-implements `docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md` (`5387ff52`) section 3
+implements `docs/ADAPTIVE_FUZZY_EVALUATION.md` (`5387ff52`) section 3
 only. Reviewed against that plan, against the fixed-arm verdict the feature
 must overturn (`scenario_factorial_results_2026-09-14.md` + the opus review
 `e2245b8d`), and against this repo's own standing bug classes.

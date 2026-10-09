@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_recovery_page_crc.ps1 -- standing wrapper so tools/run_all_checks.ps1
 # runs tools/PcTools/tests/test_recovery_page_crc.py: the recovery page's
 # pure-JS CRC32 (executed under node) must match Python's zlib, and the page

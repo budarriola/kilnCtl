@@ -1,7 +1,7 @@
 // ct_verify_store -- see ct_verify_store.h for what this stores and why the
 // fingerprint, not a remembered-to-clear flag, is what keeps it honest.
 //
-// This file deliberately depends on NOTHING but hal_kv and the C library. The
+// This file deliberately depends on NOTHING but hal_kv, pref_cfg_fs and the C library. The
 // fingerprint INPUTS are gathered elsewhere (zone_sweep_collect_ct_fingerprint_in(),
 // zones_current_sweep_task.c) precisely so that this module stays linkable
 // into any host-test executable without dragging the safety config cache,
@@ -10,10 +10,12 @@
 
 #include <string.h>
 
+#include "cfg_fs_status.h"
 #include "esp_log.h"
 #include "hal_kv.h"
 #include "hal_status.h"
 #include "nvs_key_check.h"
+#include "pref_cfg_fs.h"
 
 static const char *TAG = "ct_verify_store";
 
@@ -34,6 +36,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_VERDICT);
  * cap fails the build instead of the plan. */
 _Static_assert(sizeof(ct_verify_blob_t) <= 64,
                "ct_verify blob must stay under the plan's 64-byte NVS budget");
+_Static_assert(sizeof(ct_verify_blob_t) <= PREF_CFG_FS_MAX_ITEM, "ct_verify blob must fit pref_cfg_fs");
 /* The header keeps its own channel/zone counts so it does not have to pull in
  * the zones config stack; this is where the two are held together. */
 _Static_assert(CT_VERIFY_CHANNELS == 3u, "ct_verify channels must match ZONE_CT_CHANNEL_COUNT");
@@ -43,6 +46,8 @@ _Static_assert(CT_VERIFY_MAX_ZONES == 3u, "ct_verify zones must match this board
  * as "no verdict" -- never as a pass. */
 static bool s_have;
 static ct_verify_blob_t s_blob;
+/* rev of the cfg file as last verified on flash; the legacy NVS blob has none (rev 0). */
+static uint32_t s_rev;
 
 /* ---- fingerprint ------------------------------------------------------ */
 
@@ -184,55 +189,77 @@ bool ct_verify_blob_validate(const void *bytes, size_t len)
 
 /* ---- NVS -------------------------------------------------------------- */
 
-esp_err_t ct_verify_store_start(void)
+/* Reads the legacy NVS blob. quiet suppresses the logs (status polls). */
+static bool nvs_load(ct_verify_blob_t *out, bool quiet)
 {
-    s_have = false;
-    memset(&s_blob, 0, sizeof(s_blob));
-
     hal_status_t part_err = hal_kv_init_partition(KILN_NVS_PARTITION);
     if (part_err != HAL_OK) {
-        ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- no stored CT verdict this boot",
-                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return ESP_OK; /* non-fatal: "no verdict" is the safe state, not an error */
+        if (!quiet) {
+            ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- no legacy CT verdict this boot",
+                     KILN_NVS_PARTITION, hal_status_to_name(part_err));
+        }
+        return false;
     }
-
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
     if (err == HAL_NOT_FOUND) {
-        /* Never verified on this board. The expected state until the operator
-         * runs the CT mapping step -- not a warning. */
-        return ESP_OK;
+        /* Never verified on this board: the expected state, not a warning. */
+        return false;
     }
     if (err != HAL_OK) {
-        ESP_LOGW(TAG, "nvs_open failed: %s -- no stored CT verdict this boot", hal_status_to_name(err));
-        return ESP_OK;
+        if (!quiet) {
+            ESP_LOGW(TAG, "nvs_open failed: %s -- no legacy CT verdict this boot", hal_status_to_name(err));
+        }
+        return false;
     }
-
     ct_verify_blob_t blob;
     memset(&blob, 0, sizeof(blob));
     size_t len = sizeof(blob);
     hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_VERDICT, &blob, &len);
+    hal_kv_close(&h);
     if (rerr == HAL_OK) {
         if (ct_verify_blob_validate(&blob, len)) {
-            s_blob = blob;
-            s_have = true;
-        } else {
-            /* Wrong size, unknown version, or an out-of-range field. Refused
-             * outright rather than partially trusted: the only field anyone
-             * acts on is the verdict, and a half-understood verdict that
-             * happens to read PASS is exactly the defect this store exists to
-             * prevent. Same rule display_power_cfg.c applies to its blob. */
+            *out = blob;
+            return true;
+        }
+        /* Wrong size, unknown version, or an out-of-range field. Refused
+         * outright rather than partially trusted: the only field anyone acts
+         * on is the verdict, and a half-understood verdict that happens to
+         * read PASS is exactly the defect this store exists to prevent. */
+        if (!quiet) {
             ESP_LOGW(TAG, "stored CT verdict blob is size %u (expected %u) / version %u -- ignoring it",
                      (unsigned)len, (unsigned)sizeof(blob), (unsigned)blob.version);
         }
-    } else if (rerr != HAL_NOT_FOUND) {
+    } else if (rerr != HAL_NOT_FOUND && !quiet) {
         ESP_LOGW(TAG, "CT verdict read failed: %s -- treating as never verified", hal_status_to_name(rerr));
     }
-    hal_kv_close(&h);
+    return false;
+}
 
-    if (s_have) {
-        ESP_LOGI(TAG, "CT attribution verdict loaded: %u zones, fingerprint 0x%08lX",
-                 (unsigned)s_blob.zone_count, (unsigned long)s_blob.fingerprint);
+esp_err_t ct_verify_store_start(void)
+{
+    s_have = false;
+    s_rev = 0;
+    memset(&s_blob, 0, sizeof(s_blob));
+
+    ct_verify_blob_t nvs_blob;
+    memset(&nvs_blob, 0, sizeof(nvs_blob));
+    bool nvs_ok = nvs_load(&nvs_blob, false);
+
+    /* Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
+     * rev; otherwise the legacy NVS blob stands and, when cfg is mounted, is
+     * migrated into the file. Non-fatal throughout: "no verdict" is the safe
+     * state. */
+    ct_verify_blob_t resolved;
+    uint32_t rev = 0;
+    bool used_file = false;
+    if (pref_cfg_fs_resolve(CT_VERIFY_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, 0,
+                            ct_verify_blob_validate, &resolved, &rev, &used_file)) {
+        s_blob = resolved;
+        s_rev = rev;
+        s_have = true;
+        ESP_LOGI(TAG, "CT attribution verdict loaded: %u zones, fingerprint 0x%08lX (source=%s)",
+                 (unsigned)s_blob.zone_count, (unsigned long)s_blob.fingerprint, used_file ? "file" : "NVS");
     }
     return ESP_OK;
 }
@@ -255,33 +282,49 @@ esp_err_t ct_verify_store_save(const ct_verify_blob_t *blob)
     }
 
     /* In-RAM truth first, the same ordering display_power_cfg_set() uses: a
-     * failed NVS write must mean "this verdict will not survive a reboot",
-     * not "this verdict did not happen". The readiness item reads RAM. */
+     * failed write must mean "this verdict will not survive a reboot", not
+     * "this verdict did not happen". The readiness item reads RAM. */
     s_blob = *blob;
     s_have = true;
 
-    hal_status_t part_err = hal_kv_init_partition(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- CT verdict not persisted",
-                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return ESP_FAIL;
+    /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
+     * no NVS write follows, and a failure is returned, never masked. The rev
+     * advances only after a verified write. */
+    uint32_t new_rev = s_rev + 1;
+    esp_err_t err = pref_cfg_fs_commit(CT_VERIFY_CFG_FILE_PATH, &s_blob, sizeof(s_blob), new_rev, "CT verdict");
+    if (err != ESP_OK) {
+        return err;
     }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGW(TAG, "nvs_open (rw) failed: %s -- CT verdict not persisted", hal_status_to_name(err));
-        return ESP_FAIL;
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_VERDICT, &s_blob, sizeof(s_blob));
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGW(TAG, "CT verdict write failed: %s -- it stands for this boot only",
-                 hal_status_to_name(err));
-        return ESP_FAIL;
-    }
+    s_rev = new_rev;
     return ESP_OK;
+}
+
+void ct_verify_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                          bool *diverged)
+{
+    ct_verify_blob_t f;
+    memset(&f, 0, sizeof(f));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw_quiet(CT_VERIFY_CFG_FILE_PATH, sizeof(f), ct_verify_blob_validate, &f, &f_rev, &f_valid);
+
+    ct_verify_blob_t n;
+    memset(&n, 0, sizeof(n));
+    bool n_valid = nvs_load(&n, true);
+    bool content_equal = f_valid && n_valid && memcmp(&f, &n, sizeof(f)) == 0;
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0; /* the NVS blob has no rev key */
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }

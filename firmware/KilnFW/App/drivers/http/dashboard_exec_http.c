@@ -868,14 +868,25 @@ esp_err_t profile_exec_ack_last_run_post_handler(httpd_req_t *req)
  * it is not proof the Pico accepted it; the caller must watch the next
  * /api/status poll for the trip to actually clear, same as everywhere else
  * this driver observes Pico state via telemetry rather than an ACK. */
-esp_err_t safety_clear_trip_post_handler(httpd_req_t *req)
+/* The ONE clear-trip path, shared by this route and the LCD Safety page
+ * (ui_page_safety.c): no second copy of the refusals. ESP_ERR_INVALID_STATE
+ * is safety_link_send_clear_trip()'s own refusal (no trip latched / stale
+ * DIAG); ESP_ERR_NOT_FOUND here means the safety link was never wired up. */
+esp_err_t dashboard_safety_clear_trip(void)
 {
     if (!s_dash.safety) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    return safety_link_send_clear_trip(s_dash.safety);
+}
+
+esp_err_t safety_clear_trip_post_handler(httpd_req_t *req)
+{
+    esp_err_t err = dashboard_safety_clear_trip();
+    if (err == ESP_ERR_NOT_FOUND) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "safety link not wired up");
         return ESP_OK;
     }
-
-    esp_err_t err = safety_link_send_clear_trip(s_dash.safety);
     if (err == ESP_ERR_INVALID_STATE) {
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");

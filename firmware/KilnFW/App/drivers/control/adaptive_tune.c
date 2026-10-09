@@ -73,7 +73,7 @@
                              (re-derivable) treatment this item gets. */
 #include "profile_executor.h"
 
-#include "pid_fuzzy_confidence.h" // PID_FUZZY_CONFIDENCE_MAX_C -- ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3
+#include "pid_fuzzy_confidence.h" // PID_FUZZY_CONFIDENCE_MAX_C -- ADAPTIVE_FUZZY_EVALUATION.md sec 3
 #include "zones_config_accessors.h" // zones_config_get/set_adaptive_tune_enabled/get_pid/set_pid/get_model/set_model --
                          // this file now writes the opt-in flag here too (U2) and reads/writes
                          // gains directly for adaptive_tune_revert() (U1)
@@ -614,38 +614,15 @@ static bool kibase_file_validate(const void *bytes, size_t len)
     return (b->mask & (uint8_t)~valid_mask) == 0;
 }
 
-// FILE FIRST (best-effort, failure logged and swallowed), THEN NVS
-// (authoritative) -- same ordering every other pref_cfg_fs item uses. The
-// rev key is written in the SAME NVS transaction as the blob, same reason
-// relay_cycles.c's persist_snapshot() does it that way.
+// cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"): no
+// NVS write follows, and a failed write is reported through job->result. The
+// rev counter still advances on failure (a gap is harmless, a reused rev is not).
 static void save_kibase_job(void *arg)
 {
     kibase_job_t *job = (kibase_job_t *)arg;
     uint32_t rev = ++s_kibase_rev;
-
-    esp_err_t file_err =
-        pref_cfg_fs_save(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &job->blob, sizeof(job->blob), rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(ADAPTIVE_TUNE_TAG, "ki-baseline file write failed: %s -- NVS remains the source of "
-                                    "truth this boot", esp_err_to_name(file_err));
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err =
-        hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION);
-    if (err != HAL_OK) {
-        job->result = hal_status_to_esp_err(err);
-        return;
-    }
-    err = hal_kv_set_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, &job->blob, sizeof(job->blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV, rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    job->result = hal_status_to_esp_err(err);
+    job->result = pref_cfg_fs_commit(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &job->blob, sizeof(job->blob), rev,
+                                     "adaptive-tune ki baseline");
 }
 
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
@@ -697,7 +674,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         }
         if (skip_reason) {
             reset_run_status_locked(z, skip_reason);
-            // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: a run this module
+            // ADAPTIVE_FUZZY_EVALUATION.md sec 3: a run this module
             // could not use as training data (disabled, on/off, inactive,
             // faulted/dirty, or too many excluded samples) is not evidence
             // the plant model is still good -- floor the confidence counter
@@ -770,7 +747,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             baseline_newly_latched = true;
         }
 
-        // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: cross-firing confidence
+        // ADAPTIVE_FUZZY_EVALUATION.md sec 3: cross-firing confidence
         // counter. DISCLOSED SIMPLIFICATION (see fuzzy_confidence_c's own
         // comment, adaptive_tune_internal.h) -- this is a scope-limited
         // proxy for the plan's full forward-checked-residual signal, using
@@ -1083,7 +1060,7 @@ bool adaptive_tune_get_enabled(uint8_t zone_index)
     return en;
 }
 
-// ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: see adaptive_tune.h's own comment
+// ADAPTIVE_FUZZY_EVALUATION.md sec 3: see adaptive_tune.h's own comment
 // on these two. Short, non-blocking, lock-protected reads/writes of a single
 // uint8_t -- no producer or blocking call happens under the lock here, same
 // discipline as adaptive_tune_get_enabled() above.
@@ -1191,7 +1168,7 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     // never nested the other way, same order every other call site in this
     // module keeps.
     /* Only state (RUNNING/PAUSED) is needed here -- use the narrow accessor
-     * profile_executor.h recommends rather than a 1384-byte profile_exec_
+     * profile_executor.h recommends rather than a 1464-byte profile_exec_
      * status_t stack local. This is reachable from the httpd task
      * (adaptive_tune_http.c's revert POST handler calls straight into this
      * function on its own 8192-byte stack). */

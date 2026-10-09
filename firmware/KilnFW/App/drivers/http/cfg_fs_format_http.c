@@ -6,6 +6,8 @@
 
 #include "esp_log.h"
 
+#include "cfg_fs.h" /* cfg_fs_skipped_for_recovery() -- recovery-mode refusal below */
+#include "cfg_fs_format_gate.h" /* cfg_fs_confirm_decide() */
 #include "cfg_fs_mount.h"
 #include "ota_http.h" /* interlocks -- the challenge/response auth this used to also
                         * carry under OTA_HTTP_CONTEXT_FACTORY_RESET was retired 2026-09-29 */
@@ -61,6 +63,39 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
             ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused by system mode gate: %s", ip, mode_reason);
             return system_mode_gate_http_send_refusal(req, mode_reason);
         }
+    }
+
+    /* Optional explicit override: ?force_healthy=1 (query string; the body is
+     * unused). Parsed in place from req->uri -- no stack copy of the query on
+     * the httpd task, whose spare stack is tight. Anything but exactly "1"
+     * is no override (fail-closed). */
+    bool force_healthy = cfg_fs_confirm_uri_force_healthy(req->uri);
+
+    /* Recovery mode skipped the cfg mount on purpose (cfg_fs_mount_or_skip()),
+     * not because the partition is damaged. Since the NVS dual-write close
+     * (docs/CONFIG_FILESYSTEM.md) the partition holds the board's only
+     * up-to-date config, so formatting it from here would erase every saved
+     * setting for nothing. Leave recovery mode first; a genuinely damaged
+     * partition then shows up as pending in normal mode. A mounted cfg is
+     * likewise refused unless force_healthy=1 (cfg_fs_confirm_decide()). */
+
+    cfg_fs_confirm_decision_t decision = cfg_fs_confirm_decide(
+        cfg_fs_get_status() == CFG_FS_STATUS_MOUNTED, cfg_fs_skipped_for_recovery(), force_healthy);
+    if (decision == CFG_FS_FORMAT_CONFIRM_REFUSE_RECOVERY) {
+        ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused, recovery mode skipped the mount", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "refused: cfg is not mounted because the board is in recovery mode; it still holds "
+                                "the saved config. Leave recovery mode (POST /api/ota/esp/recovery_exit) instead "
+                                "of formatting.");
+        return ESP_OK;
+    }
+    if (decision == CFG_FS_FORMAT_CONFIRM_REFUSE_HEALTHY) {
+        ESP_LOGW(TAG, "cfg_fs format_confirm from %s: refused, cfg is mounted and healthy (no force_healthy)", ip);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "refused: cfg is mounted and healthy, and is the only copy of the saved zones, "
+                                "profiles and preferences; formatting would erase them. To format anyway, repeat "
+                                "the request as POST /api/cfgfs/format_confirm?force_healthy=1");
+        return ESP_OK;
     }
 
     ESP_LOGW(TAG, "cfg_fs format_confirm from %s: authenticated, formatting cfg partition now", ip);

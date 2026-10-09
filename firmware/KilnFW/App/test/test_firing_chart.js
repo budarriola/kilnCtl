@@ -84,6 +84,17 @@ function runColorGuard(src) {
   assert(!threw, 'real SERIES_COLORS palette does not collide with CH_COLORS (no throw)');
 })();
 
+// chColor() is the one mapping every zone swatch and chart line uses; pin it
+// to the real palette, including the modulo wrap for channel >= 6.
+(function testChColorMapsChannelsToPalette() {
+  const ctx = vm.createContext({ console });
+  new vm.Script(COLOR_GUARD_SRC, { filename: 'main_page.html (chColor slice)' }).runInContext(ctx);
+  const at = (n) => vm.runInContext('chColor(' + n + ')', ctx);
+  assert(at(0) === '#e63' && at(1) === '#3a9' && at(5) === '#0bb',
+    'chColor(0/1/5) returns the matching CH_COLORS entries');
+  assert(at(6) === '#e63' && at(7) === '#3a9', 'chColor wraps modulo the palette length');
+})();
+
 // Negative test: mutate SERIES_COLORS.duty to literally the bug that was
 // reported ('#3a9', CH_COLORS[1]) and prove the guard throws. This is the
 // exact defect from the owner's report reproduced as a fixture.

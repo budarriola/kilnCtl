@@ -1,11 +1,13 @@
 // See pref_cfg_fs.h for the full design/rationale.
 #include "pref_cfg_fs.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "persist_scratch.h"
 
 static const char *PREF_FS_TAG = "pref_cfg_fs";
 
@@ -39,6 +41,35 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Scratch for "<4B rev><item>". Items up to PREF_CFG_FS_MAX_ITEM use the
+ * caller's stack (the pre-existing behaviour, no heap); larger items (the
+ * setup-wizard blob, the live-edit working profile) take a short-lived heap
+ * block so no httpd-task stack ever carries a multi-hundred-byte buffer. */
+typedef struct {
+    uint8_t stack[4 + PREF_CFG_FS_MAX_ITEM];
+    uint8_t *p;
+    size_t cap;
+} raw_buf_t;
+
+static bool raw_buf_get(raw_buf_t *b, size_t item_size)
+{
+    b->cap = 4 + item_size;
+    if (item_size <= PREF_CFG_FS_MAX_ITEM) {
+        b->p = b->stack;
+        return true;
+    }
+    b->p = (uint8_t *)persist_scratch_alloc(b->cap);
+    return b->p != NULL;
+}
+
+static void raw_buf_put(raw_buf_t *b)
+{
+    if (b->p != b->stack) {
+        free(b->p);
+    }
+    b->p = NULL;
+}
+
 static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                           void *out_bytes, uint32_t *out_rev, bool *out_valid, bool quiet)
 {
@@ -51,17 +82,22 @@ static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_va
     if (out_valid) {
         *out_valid = false;
     }
-    if (!rel_path || !out_bytes || !out_rev || !out_valid || item_size == 0 || item_size > PREF_CFG_FS_MAX_ITEM) {
+    if (!rel_path || !out_bytes || !out_rev || !out_valid || item_size == 0 || item_size > PREF_CFG_FS_MAX_LARGE_ITEM) {
         return;
     }
     if (!cfg_fs_is_available()) {
         return;
     }
 
-    uint8_t raw[4 + PREF_CFG_FS_MAX_ITEM];
+    raw_buf_t rb;
+    if (!raw_buf_get(&rb, item_size)) {
+        return;
+    }
+    uint8_t *raw = rb.p;
     size_t len = 0;
-    esp_err_t err = cfg_fs_read(rel_path, raw, sizeof(raw), &len);
+    esp_err_t err = cfg_fs_read(rel_path, raw, rb.cap, &len);
     if (err != ESP_OK) {
+        raw_buf_put(&rb);
         // ESP_ERR_NOT_FOUND (never migrated yet) is the normal state on
         // every board today -- not logged, same convention as
         // zones_config_cfg_fs_load_raw(). Any other read failure is quiet
@@ -74,6 +110,7 @@ static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_va
             ESP_LOGW(PREF_FS_TAG, "%s is %u bytes, expected %u (4-byte rev + %u-byte item) -- ignoring", rel_path,
                      (unsigned)len, (unsigned)(4 + item_size), (unsigned)item_size);
         }
+        raw_buf_put(&rb);
         return;
     }
 
@@ -84,12 +121,14 @@ static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_va
             ESP_LOGW(PREF_FS_TAG, "%s (rev %lu) REJECTED by validator -- ignoring file, NVS candidate decides",
                      rel_path, (unsigned long)rev);
         }
+        raw_buf_put(&rb);
         return;
     }
 
     memcpy(out_bytes, item_bytes, item_size);
     *out_rev = rev;
     *out_valid = true;
+    raw_buf_put(&rb);
 }
 
 void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
@@ -104,50 +143,131 @@ void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg
     load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, true);
 }
 
+bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
+                                        uint8_t current_version, uint8_t *out_version)
+{
+    if (!rel_path || item_size == 0 || version_offset >= item_size || !cfg_fs_is_available()) {
+        return false;
+    }
+    /* Only the header is needed; a bounded read of a larger file would fail
+     * cfg_fs_read()'s size check, so read into a buffer sized for the
+     * largest supported file. */
+    size_t cap = 4 + PREF_CFG_FS_MAX_LARGE_ITEM + 64;
+    uint8_t *buf = (uint8_t *)persist_scratch_alloc(cap);
+    if (!buf) {
+        return false;
+    }
+    size_t len = 0;
+    esp_err_t err = cfg_fs_read(rel_path, buf, cap, &len);
+    bool newer = false;
+    if (err == ESP_ERR_INVALID_SIZE) {
+        /* The file exists but is bigger than anything this build can write
+         * (pref_cfg_fs_save() refuses items over PREF_CFG_FS_MAX_LARGE_ITEM), so
+         * it can only come from newer firmware. Count it as NEWER so resolve()
+         * never overwrites it. The version byte is unreadable here: report 0xFF
+         * ("unknown, newer"). */
+        newer = true;
+        if (out_version) {
+            *out_version = 0xFF;
+        }
+    } else if (err == ESP_OK && len != 4 + item_size && len > 4 + version_offset && buf[4 + version_offset] > current_version) {
+        newer = true;
+        if (out_version) {
+            *out_version = buf[4 + version_offset];
+        }
+    }
+    free(buf);
+    return newer;
+}
+
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev)
 {
     if (!rel_path || !bytes || item_size == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (item_size > PREF_CFG_FS_MAX_ITEM) {
-        ESP_LOGE(PREF_FS_TAG, "%s item is %u bytes, exceeds PREF_CFG_FS_MAX_ITEM (%u) -- refusing to write",
-                 rel_path, (unsigned)item_size, (unsigned)PREF_CFG_FS_MAX_ITEM);
+    if (item_size > PREF_CFG_FS_MAX_LARGE_ITEM) {
+        ESP_LOGE(PREF_FS_TAG, "%s item is %u bytes, exceeds PREF_CFG_FS_MAX_LARGE_ITEM (%u) -- refusing to write",
+                 rel_path, (unsigned)item_size, (unsigned)PREF_CFG_FS_MAX_LARGE_ITEM);
         return ESP_ERR_INVALID_SIZE;
     }
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    uint8_t raw[4 + PREF_CFG_FS_MAX_ITEM];
-    put_u32_le(raw, rev);
-    memcpy(raw + 4, bytes, item_size);
+    raw_buf_t rb;
+    if (!raw_buf_get(&rb, item_size)) {
+        return ESP_ERR_NO_MEM;
+    }
+    put_u32_le(rb.p, rev);
+    memcpy(rb.p + 4, bytes, item_size);
 
-    esp_err_t err = s_write_fn(rel_path, raw, 4 + item_size);
+    esp_err_t err = s_write_fn(rel_path, rb.p, 4 + item_size);
+    raw_buf_put(&rb);
     if (err != ESP_OK) {
         ESP_LOGW(PREF_FS_TAG, "%s write (rev %lu) failed: %s", rel_path, (unsigned long)rev, esp_err_to_name(err));
     }
     return err;
 }
 
-bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,
-                          uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes, uint32_t *out_rev,
-                          bool *out_used_file)
+esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev,
+                             const char *what)
 {
-    if (out_bytes) {
-        memset(out_bytes, 0, item_size);
+    esp_err_t err = pref_cfg_fs_save(rel_path, bytes, item_size, rev);
+    if (err != ESP_OK) {
+        ESP_LOGE(PREF_FS_TAG, "%s NOT persisted: cfg write of %s (rev %lu) failed: %s -- NVS is no longer written, "
+                              "the value lives in RAM until reboot",
+                 what ? what : "setting", rel_path ? rel_path : "?", (unsigned long)rev, esp_err_to_name(err));
+    }
+    return err;
+}
+
+bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *out_len, uint32_t *out_rev)
+{
+    if (out_len) {
+        *out_len = 0;
     }
     if (out_rev) {
         *out_rev = 0;
     }
-    if (out_used_file) {
-        *out_used_file = false;
-    }
-    if (!rel_path || !nvs_bytes || !out_bytes || !out_rev || !out_used_file || item_size == 0 ||
-        item_size > PREF_CFG_FS_MAX_ITEM) {
+    if (!rel_path || !out || !out_len || !out_rev || cap == 0 || cap > PREF_CFG_FS_MAX_LARGE_ITEM ||
+        !cfg_fs_is_available()) {
         return false;
     }
+    raw_buf_t rb;
+    if (!raw_buf_get(&rb, cap)) {
+        return false;
+    }
+    size_t len = 0;
+    esp_err_t err = cfg_fs_read(rel_path, rb.p, rb.cap, &len);
+    if (err != ESP_OK || len < 4 + 1) {
+        raw_buf_put(&rb);
+        return false;
+    }
+    *out_rev = get_u32_le(rb.p);
+    *out_len = len - 4;
+    memcpy(out, rb.p + 4, len - 4);
+    raw_buf_put(&rb);
+    return true;
+}
 
-    uint8_t file_bytes[PREF_CFG_FS_MAX_ITEM];
+esp_err_t pref_cfg_fs_remove(const char *rel_path)
+{
+    if (!rel_path) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!cfg_fs_is_available()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Absent is the state the caller asked for: report it as success, as the
+     * header documents, so a clear of an already-clear store is idempotent. */
+    esp_err_t err = cfg_fs_delete(rel_path);
+    return (err == ESP_ERR_NOT_FOUND) ? ESP_OK : err;
+}
+
+static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,
+                              uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes,
+                              uint32_t *out_rev, bool *out_used_file, uint8_t *file_bytes)
+{
     uint32_t file_rev = 0;
     bool file_valid = false;
     pref_cfg_fs_load_raw(rel_path, item_size, validate, file_bytes, &file_rev, &file_valid);
@@ -220,4 +340,39 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
         }
     }
     return true;
+}
+
+
+bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,
+                          uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes, uint32_t *out_rev,
+                          bool *out_used_file)
+{
+    if (out_bytes) {
+        memset(out_bytes, 0, item_size);
+    }
+    if (out_rev) {
+        *out_rev = 0;
+    }
+    if (out_used_file) {
+        *out_used_file = false;
+    }
+    if (!rel_path || !nvs_bytes || !out_bytes || !out_rev || !out_used_file || item_size == 0 ||
+        item_size > PREF_CFG_FS_MAX_LARGE_ITEM) {
+        return false;
+    }
+
+    uint8_t file_stack[PREF_CFG_FS_MAX_ITEM];
+    uint8_t *file_bytes = file_stack;
+    if (item_size > PREF_CFG_FS_MAX_ITEM) {
+        file_bytes = (uint8_t *)persist_scratch_alloc(item_size);
+        if (!file_bytes) {
+            return false;
+        }
+    }
+    bool ok = resolve_with_file(rel_path, nvs_bytes, item_size, nvs_valid, nvs_rev, validate, out_bytes, out_rev,
+                                out_used_file, file_bytes);
+    if (file_bytes != file_stack) {
+        free(file_bytes);
+    }
+    return ok;
 }

@@ -81,7 +81,10 @@ class FakeBoard:
             if self.needs_ack and not req.has_header("X-ota-ack-no-safety"):
                 raise self._http_error(req, 428, {"ok": False, "error": "safety_not_answering"})
             if self.refuse:
-                raise self._http_error(req, self.refuse[0], {"ok": False, "error": self.refuse[1]})
+                body = {"ok": False, "error": self.refuse[1]}
+                if len(self.refuse) > 2:
+                    body.update(self.refuse[2])
+                raise self._http_error(req, self.refuse[0], body)
             if self.drop_reply:
                 raise urllib.error.URLError("connection reset")
             data = req.data
@@ -154,6 +157,97 @@ class ClientTest(_Base):
         self.assertEqual(uhc.error_name(cm.exception), "update_in_progress")
 
 
+class DowngradeGateTest(_Base):
+    def test_override_headers_sent_only_when_asked(self):
+        uhc.upload_stage("h", _image(), version="1.0.0")
+        req = self.board.posts()[0]
+        for h in ("X-stage-force", "X-stage-allow-downgrade", "X-stage-confirm"):
+            self.assertFalse(req.has_header(h), h)
+        uhc.upload_stage("h", _image(), version="1.0.0", force=True, allow_downgrade=True,
+                         confirm_downgrade="1.0.0")
+        req = self.board.posts()[1]
+        self.assertEqual(req.get_header("X-stage-force"), "1")
+        self.assertEqual(req.get_header("X-stage-allow-downgrade"), "1")
+        self.assertEqual(req.get_header("X-stage-confirm"), "1.0.0")
+
+    def test_tool_passes_overrides_through(self):
+        path = self.write_image(_image())
+        out = msu.update_stage_upload(path, version="1.0.0", confirm=True, allow_downgrade=True,
+                                      confirm_downgrade="1.0.0", force=True)
+        self.assertTrue(out.startswith("ok"), out)
+        req = self.board.posts()[0]
+        self.assertEqual(req.get_header("X-stage-allow-downgrade"), "1")
+        self.assertEqual(req.get_header("X-stage-confirm"), "1.0.0")
+        self.assertEqual(req.get_header("X-stage-force"), "1")
+
+    def test_truthy_overrides_are_not_sent(self):
+        path = self.write_image(_image())
+        msu.update_stage_upload(path, version="1.0.0", confirm=True, force="yes", allow_downgrade=1)  # type: ignore[arg-type]
+        req = self.board.posts()[0]
+        self.assertFalse(req.has_header("X-stage-force"))
+        self.assertFalse(req.has_header("X-stage-allow-downgrade"))
+
+    def test_allow_downgrade_without_typed_confirm_refused_locally(self):
+        out = msu.update_stage_upload(self.write_image(_image()), confirm=True, allow_downgrade=True)
+        self.assertTrue(out.startswith("REFUSED"), out)
+        self.assertIn("confirm_downgrade", out)
+        self.assertEqual(self.board.posts(), [])
+
+    def test_gate_409_reports_hazard_and_override(self):
+        self.board.refuse = (409, "downgrade_refused",
+                             {"reason": "candidate is older than the running version; downgrade refused",
+                              "needs_typed_confirm": True})
+        out = msu.update_stage_upload(self.write_image(_image()), version="0.9.0", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("downgrade_refused", out)
+        self.assertIn("older than the running version", out)
+        self.assertIn("control_get_zones", out)
+        self.assertIn("allow_downgrade=True", out)
+
+    def test_needs_force_409_reported(self):
+        self.board.refuse = (409, "needs_force", {"reason": "already up to date"})
+        out = msu.update_stage_upload(self.write_image(_image()), version="1.0.0", confirm=True)
+        self.assertIn("force=True", out)
+        self.assertIn("already up to date", out)
+
+    def test_needs_force_with_typed_confirm_names_versions(self):
+        self.board.refuse = (409, "needs_force",
+                             {"reason": "image carries no schema identity record", "needs_typed_confirm": True,
+                              "candidate_version": "1.3.0", "running_version": "1.2.0"})
+        out = msu.update_stage_upload(self.write_image(_image()), version="1.3.0", confirm=True)
+        self.assertIn("confirm_downgrade=1.3.0", out)
+        self.assertIn("candidate 1.3.0, running 1.2.0", out)
+        self.assertIn("force=True", out)
+
+    def test_version_mismatch_409_reported(self):
+        self.board.refuse = (409, "version_mismatch", {})
+        out = msu.update_stage_upload(self.write_image(_image()), version="99.0.0", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("differs from the version inside the image", out)
+
+
+class WedgeShownTest(_Base):
+    """Review 7 L1: fetch_writer_wedged is surfaced by update_status and update_fetch_status."""
+
+    _STAGE = {"phase": "uploading", "busy": True, "staged": False, "header": "blank",
+              "reason": "writer_wedged_reboot_required", "capacity": 1, "fetch_writer_wedged": True}
+
+    def test_update_status_shows_wedge(self):
+        with unittest.mock.patch.object(uhc, "get_stage_status", return_value=dict(self._STAGE)):
+            out = msu.update_status()
+        self.assertIn("fetch_writer_wedged=True", out)
+        self.assertIn("reboot required", out)
+        with unittest.mock.patch.object(uhc, "get_stage_status",
+                                        return_value=dict(self._STAGE, fetch_writer_wedged=False)):
+            self.assertIn("fetch_writer_wedged=False", msu.update_status())
+
+    def test_update_fetch_status_shows_wedge(self):
+        fetch = {"state": "failed", "kind": "download", "repo": "a/b", "busy": False}
+        with unittest.mock.patch.object(uhc, "get_fetch_status", return_value=fetch),                 unittest.mock.patch.object(uhc, "get_stage_status", return_value=dict(self._STAGE)):
+            out = msu.update_fetch_status()
+        self.assertIn("fetch_writer_wedged=True", out)
+
+
 class StatusTest(_Base):
     def test_status_reports_blank_then_staged(self):
         self.assertIn("staged=False", msu.update_status())
@@ -186,7 +280,7 @@ class UploadToolTest(_Base):
         path = self.write_image(_image(8192))
         out = msu.update_stage_upload(path, version="1.4.0", confirm=True)
         self.assertTrue(out.startswith("ok - staged and verified"), out)
-        self.assertIn("UNSIGNED", out)
+        self.assertNotIn("UNSIGNED", out)
         self.assertEqual(self.board.staged["semver"], "1.4.0")
 
     def test_sha_mismatch_on_readback_fails_loud(self):
@@ -374,10 +468,10 @@ class GhBoard(FakeBoard):
         if self.job is not None and self.polls_busy > 0:
             self.polls_busy -= 1
             return {"ok": True, "state": "downloading", "kind": self.job, "busy": True, "repo": self.repo,
-                    "bytes_done": 10, "bytes_total": 100, "unsigned": True}
+                    "bytes_done": 10, "bytes_total": 100}
         if self.job is None:
-            return {"ok": True, "state": "idle", "kind": "none", "busy": False, "repo": self.repo, "unsigned": True}
-        d = {"ok": True, "state": "done", "kind": self.job, "busy": False, "repo": self.repo, "unsigned": True,
+            return {"ok": True, "state": "idle", "kind": "none", "busy": False, "repo": self.repo}
+        d = {"ok": True, "state": "done", "kind": self.job, "busy": False, "repo": self.repo,
              "tag": "v1.0.1", "prerelease": False, "app_size": self.release_len, "running": "1.0.0",
              "sha256": self.release_sha, "verdict": self.verdict[0], "allowed": self.verdict[1],
              "needs_typed_confirm": False, "zones_cfg_lower": False}
@@ -439,7 +533,7 @@ class GhCheckTest(GhBase):
         self.board.polls_busy = 2
         out = msu.update_check()
         self.assertTrue(out.startswith("ok"), out)
-        for s in ("v1.0.1", "allow_upgrade", "UNSIGNED", self.board.release_sha):
+        for s in ("v1.0.1", "allow_upgrade", self.board.release_sha):
             self.assertIn(s, out)
         self.assertIsNone(self.board.staged)
 
@@ -474,7 +568,7 @@ class GhStageReleaseTest(GhBase):
         self.board.polls_busy = 1
         out = msu.update_stage_release(confirm=True)
         self.assertTrue(out.startswith("ok - release v1.0.1 staged and verified"), out)
-        self.assertIn("UNSIGNED", out)
+        self.assertNotIn("UNSIGNED", out)
         self.assertEqual(len(self.board.posts()), 1)
 
     def test_query_carries_flags_and_typed_tag(self):

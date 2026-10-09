@@ -203,6 +203,20 @@ extern zones_relay_names_state_t s_relay_names;
 extern bool s_zones_config_valid;
 extern uint32_t s_config_generation;
 
+/* Short critical section serialising every s_zones.cfg writer's
+ * mutate-and-bump (zones_config_accessors.c, the whole-page POST commit and the
+ * other whole-struct writers) against the POST commit's generation re-check
+ * (review L2, docs/audits/DEV_FIRMWARE_REVIEW_2026-10-09.md). Never hold it
+ * across a producer call, flash write, log line or allocation: take it only
+ * around the memory writes. s_zones_cfg_lock_acquires counts acquisitions
+ * (host-test observable). */
+void zones_cfg_lock(void);
+void zones_cfg_unlock(void);
+extern uint32_t s_zones_cfg_lock_acquires;
+#ifdef KILNCTL_ZONES_UNLOCK_TEST_HOOK
+extern void (*s_zones_cfg_unlock_test_hook)(void); /* host tests only: absent from production (review 7 L5) */
+#endif
+
 /* ---- shared hardware handles (owned by zones_http.c) ------------------- */
 
 extern kiln_io_t *s_hw_io;
@@ -215,9 +229,9 @@ esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
 esp_err_t nvs_save(void);
 
-/* true = the zones blob re-read from NVS right now equals the in-RAM config byte for byte. For a
+/* true = the zones blob re-read from the cfg file right now equals the in-RAM config byte for byte. For a
  * caller that must know a write really landed (a RAM-only read-back cannot see a failed save). */
-bool zones_config_nvs_equals_ram(void);
+bool zones_config_persisted_equals_ram(void);
 
 /* RELAY_LIFE_BUDGET.md: pushes s_zones.cfg.zones[zone_index]'s
  * relay_type out to relay_cycles_set_type() for every relay named in that

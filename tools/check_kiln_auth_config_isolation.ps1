@@ -147,7 +147,7 @@ function Get-CodeOnlyLines {
     return $result
 }
 
-$sourceFiles = Get-ChildItem -Path $driversDir -Filter "*.c" -File -Recurse
+$sourceFiles = Get-ChildItem -Path $driversDir -Include "*.c","*.h" -File -Recurse
 
 # Blindness floor, same shape as check_uri_handler_cap.ps1's 80-route floor:
 # if this ever counts fewer than 50 .c files, the tree has moved or the

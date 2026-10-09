@@ -1,7 +1,10 @@
 // Host tests for iter_tune_store.c (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8
 // row 7): round-trip, wrong-version reject, truncated-blob reject, and the
-// cfg LittleFS dual-write tie-break, same conventions test_kiln_cfg_store.c
-// uses for its own store.
+// cfg LittleFS read-through, same conventions test_kiln_cfg_store.c uses for
+// its own store. Since the dual-write window closed (owner decision
+// 2026-10-07) saves go to the cfg file ONLY: the NVS copy is a read-only
+// legacy fallback, so these tests also prove NVS-to-cfg migration at start
+// and that a save is REFUSED, not silently dropped, while cfg is unmounted.
 #ifdef _WIN32
 #include <direct.h>
 #define TIT_MKDIR(p) _mkdir(p)
@@ -29,6 +32,50 @@
 #include "../drivers/persist/iter_tune_store.c"
 
 #define TIT_SCRATCH_BASE "cfg_fs_test_iter_tune_store"
+
+// The store no longer owns a file codec (pref_cfg_fs does); the tests that
+// hand-build or inspect a file keep their own copy of the documented
+// "<4-byte LE rev><raw blob>" layout.
+#define ITER_TUNE_FILE_BUF_MAX (4 + sizeof(iter_tune_store_blob_t))
+
+static void put_u32_le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)(v & 0xFFu);
+    p[1] = (uint8_t)((v >> 8) & 0xFFu);
+    p[2] = (uint8_t)((v >> 16) & 0xFFu);
+    p[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static uint32_t get_u32_le(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+// Seeds the legacy NVS copy (blob + rev) the way the pre-close dual-write
+// code left it on a real board.
+static void seed_nvs(const iter_tune_store_blob_t *blob, uint32_t rev)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
+               "hal_kv open to seed the legacy NVS copy");
+    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, blob, sizeof(*blob)) == HAL_OK, "legacy blob seeded");
+    TEST_CHECK(hal_kv_set_u32(&h, ITER_TUNE_NVS_KEY_REV, rev) == HAL_OK, "legacy rev seeded");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static bool nvs_has_blob(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    iter_tune_store_blob_t raw = {0};
+    size_t len = sizeof(raw);
+    bool ok = hal_kv_get_blob(&h, ITER_TUNE_NVS_KEY_BLOB, &raw, &len) == HAL_OK;
+    hal_kv_close(&h);
+    return ok;
+}
 
 // Same "delete known filenames before rmdir" fix class as
 // test_kiln_cfg_store.c's reset_state_cfg_fs() -- TIT_RMDIR only succeeds
@@ -93,8 +140,11 @@ static void test_blob_validate(void)
     TEST_CHECK(!iter_tune_store_blob_validate(NULL, sizeof(blob)), "NULL rejected");
 }
 
-static void test_nvs_round_trip(void)
+static void test_cfg_round_trip(void)
 {
+    tit_scratch_clean();
+    TIT_MKDIR(TIT_SCRATCH_BASE);
+    TEST_CHECK(cfg_fs_init(TIT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts for the round trip");
     tit_reset_all();
     hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
 
@@ -106,14 +156,9 @@ static void test_nvs_round_trip(void)
 
     iter_tune_store_zone_t out;
     TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 10.0f, "zone 0 reads back after set");
+    TEST_CHECK(!nvs_has_blob(), "the save went to the cfg file ONLY -- no NVS blob was written");
 
-    // Simulate a reboot: reset in-RAM state only, reload from the (fake) NVS
-    // backing store. NOTE (step 7 review, 2026-09-23, finding 4, updated):
-    // this is a same-version persistence round trip, not a schema migration
-    // -- the migration case (an on-disk v1 blob) is exercised separately by
-    // test_v1_old_layout_migrates() below, which also covers ITER_TUNE_STORE_
-    // VERSION 2's byte-compatible v1->v2 forward migration and its refusal
-    // counterpart.
+    // Simulate a reboot: reset in-RAM state only; the file is the sole source.
     iter_tune_store_reset_for_test();
     TEST_CHECK(iter_tune_store_start() == ESP_OK, "start reloads persisted store");
     TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 10.0f &&
@@ -123,6 +168,93 @@ static void test_nvs_round_trip(void)
     TEST_CHECK(iter_tune_store_set_zone(ITER_TUNE_STORE_MAX_ZONES, &z0) == ESP_ERR_INVALID_ARG,
                "out-of-range zone_index rejected");
     TEST_CHECK(iter_tune_store_set_zone(0, NULL) == ESP_ERR_INVALID_ARG, "NULL zone rejected");
+
+    cfg_fs_deinit();
+    tit_scratch_clean();
+}
+
+// Owner decision 2026-10-07: with cfg unmounted a save is REFUSED (an error
+// the HTTP route turns into a 503), never silently dropped and never parked
+// in NVS.
+static void test_set_zone_refused_when_unmounted(void)
+{
+    tit_scratch_clean();
+    TEST_CHECK(!cfg_fs_is_available(), "cfg_fs is unmounted for the refusal test");
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start succeeds with cfg unmounted");
+
+    iter_tune_store_zone_t z0 = make_zone(10.0f);
+    uint32_t rev_before = s_rev;
+    TEST_CHECK(iter_tune_store_set_zone(0, &z0) == ESP_ERR_INVALID_STATE,
+               "set_zone is refused with ESP_ERR_INVALID_STATE while cfg is unmounted");
+    TEST_CHECK(s_rev == rev_before, "the rev does not advance on a refused save");
+    TEST_CHECK(!nvs_has_blob(), "the refused save did NOT fall back to writing NVS");
+
+    // The change is live in RAM (documented) but a reboot forgets it.
+    iter_tune_store_zone_t out;
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 10.0f, "refused save still applies live");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start after the refused save");
+    TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "a refused save does not survive a reboot");
+}
+
+// First boot after the close: the legacy NVS copy is adopted and migrated
+// into the file, then the file serves the next boot without NVS.
+static void test_nvs_copy_migrates_into_cfg_at_start(void)
+{
+    tit_scratch_clean();
+    TIT_MKDIR(TIT_SCRATCH_BASE);
+    TEST_CHECK(cfg_fs_init(TIT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts for the migration test");
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    iter_tune_store_blob_t legacy = {0};
+    legacy.version = ITER_TUNE_STORE_VERSION;
+    legacy.zone_count = 1;
+    legacy.zone[0] = make_zone(21.0f);
+    seed_nvs(&legacy, 4u);
+
+    uint8_t filebuf[ITER_TUNE_FILE_BUF_MAX];
+    size_t file_len = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, filebuf, sizeof(filebuf), &file_len) != ESP_OK,
+               "no cfg file exists before the first boot");
+
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start adopts the legacy NVS copy");
+    iter_tune_store_zone_t out;
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 21.0f, "legacy zone is served");
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, filebuf, sizeof(filebuf), &file_len) == ESP_OK &&
+                   file_len == sizeof(filebuf) && get_u32_le(filebuf) == 4u,
+               "the NVS copy was migrated into the cfg file at its own rev");
+
+    // Drop the NVS copy entirely: the file alone must now carry the store.
+    fake_kv_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start with only the migrated file");
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 21.0f, "file alone serves the migrated zone");
+
+    cfg_fs_deinit();
+    tit_scratch_clean();
+}
+
+// Unmounted first boot after the close: NVS still serves the read (fallback),
+// and nothing is migrated anywhere.
+static void test_nvs_fallback_serves_when_unmounted(void)
+{
+    tit_scratch_clean();
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+    iter_tune_store_blob_t legacy = {0};
+    legacy.version = ITER_TUNE_STORE_VERSION;
+    legacy.zone_count = 1;
+    legacy.zone[0] = make_zone(33.0f);
+    seed_nvs(&legacy, 2u);
+
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start with cfg unmounted and a legacy NVS copy");
+    iter_tune_store_zone_t out;
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 33.0f,
+               "NVS stays readable as the fallback when cfg is unmounted");
 }
 
 static void test_nvs_wrong_version_and_truncated(void)
@@ -240,8 +372,8 @@ static void test_v1_old_layout_migrates(void)
                "v1 zone content survives migration unchanged");
     TEST_CHECK(s_blob.version == ITER_TUNE_STORE_VERSION, "in-RAM blob re-tagged to the current version");
 
-    // The on-disk copies must NOT have been touched by a bare load: still v1,
-    // still rev 3, in both NVS and the cfg file.
+    // The on-disk copies must NOT have been re-tagged by a bare load: still
+    // v1, still rev 3, in both NVS and the cfg file.
     uint8_t raw_version = 0;
     uint32_t raw_rev = 0;
     read_raw_nvs(&raw_version, &raw_rev);
@@ -264,14 +396,16 @@ static void test_v1_old_layout_migrates(void)
     iter_tune_store_zone_t z1 = make_zone(16.0f);
     TEST_CHECK(iter_tune_store_set_zone(1, &z1) == ESP_OK, "a real write after migration succeeds");
 
+    // The real write goes to the cfg file ONLY: the legacy NVS copy is left
+    // exactly as it was (still v1, still rev 3).
     read_raw_nvs(&raw_version, &raw_rev);
-    TEST_CHECK(raw_version == ITER_TUNE_STORE_VERSION, "a real write re-tags the on-disk NVS blob to v2");
-    TEST_CHECK(raw_rev == 4u, "a real write bumps the rev exactly once");
+    TEST_CHECK(raw_version == ITER_TUNE_STORE_VERSION_V1 && raw_rev == 3u,
+               "a real write no longer touches the legacy NVS copy");
 
     TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, filebuf_after, sizeof(filebuf_after), &file_len) == ESP_OK,
                "raw cfg file read back after a real write");
     TEST_CHECK(file_len == sizeof(filebuf_after) && get_u32_le(filebuf_after) == 4u,
-               "a real write bumps the cfg file rev to match NVS");
+               "a real write bumps the cfg file rev exactly once");
     TEST_CHECK(((iter_tune_store_blob_t *)(filebuf_after + 4))->version == ITER_TUNE_STORE_VERSION,
                "a real write re-tags the cfg file blob to v2 too");
 
@@ -340,46 +474,135 @@ static void test_newer_version_refused_and_reported(void)
     TEST_CHECK(!iter_tune_store_schema_refused(NULL), "a truncated blob is corruption, not a version refusal");
 }
 
-// Step 7 review, 2026-09-23, MED finding 3: locks in and documents the
-// current, accepted limitation that note_schema_verdict() only ever fires
-// when the on-disk blob is EXACTLY sizeof(iter_tune_store_blob_t) -- a
-// future size-CHANGING version (larger or smaller than today's blob) is
-// rejected earlier, by hal_kv_get_blob()'s own `*out_len < len` size check
-// (fake_kv.c's do_get(), the same shape the real ESP NVS backend uses), and
-// never reaches note_schema_verdict() at all. This is NOT the desired
-// long-term behaviour -- see iter_tune_store.c's note_schema_verdict()
-// comment and docs/CONFIG_MIGRATION_CHAIN_PLAN.md's iter_tune row for the
-// same caveat -- but it is today's real, verified behaviour, and this test
-// exists so a future fix (or a future size-changing version that silently
-// regresses this) is a deliberate, visible decision rather than a surprise.
-static void test_larger_blob_size_change_not_reported_current_limitation(void)
+// A size-CHANGING newer-version NVS blob (larger than today's struct) must be
+// reported as "newer", not folded into corruption, and must NOT be erased or
+// overwritten (downgrade-then-upgrade keeps its tuning).
+static void tit_seed_raw(const uint8_t *bytes, size_t n)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
+               "hal_kv open for raw fixture");
+    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, bytes, n) == HAL_OK, "raw blob written directly");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static size_t tit_raw_len(void)
+{
+    hal_kv_handle_t h;
+    size_t len = 0;
+    if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
+        return 0;
+    }
+    if (hal_kv_get_blob(&h, ITER_TUNE_NVS_KEY_BLOB, NULL, &len) != HAL_OK) {
+        len = 0;
+    }
+    hal_kv_close(&h);
+    return len;
+}
+
+static void test_larger_newer_blob_reported_newer_and_preserved(void)
 {
     tit_reset_all();
     hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
 
-    // A hypothetical, larger "v3" blob: same first two bytes (version,
-    // zone_count) as every real schema this file has shipped, but padded out
-    // with extra trailing bytes a real size-changing version would add.
     uint8_t oversized[sizeof(iter_tune_store_blob_t) + 8];
     memset(oversized, 0, sizeof(oversized));
     oversized[0] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1); // newer-than-known
-    oversized[1] = 0; // zone_count
-
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ITER_TUNE_NVS_PARTITION) == HAL_OK,
-               "hal_kv open for oversized-blob fixture");
-    TEST_CHECK(hal_kv_set_blob(&h, ITER_TUNE_NVS_KEY_BLOB, oversized, sizeof(oversized)) == HAL_OK,
-               "oversized blob written directly");
-    hal_kv_commit(&h);
-    hal_kv_close(&h);
+    tit_seed_raw(oversized, sizeof(oversized));
 
     iter_tune_store_reset_for_test();
-    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates an oversized blob without crashing");
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates an oversized newer blob without crashing");
     TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "oversized blob is never trusted (falls back to defaults)");
-    TEST_CHECK(!iter_tune_store_schema_refused(NULL),
-               "CURRENT LIMITATION: a size-changing newer version is NOT reported as a schema refusal "
-               "(it is indistinguishable from ordinary corruption today) -- see iter_tune_store.c's "
-               "note_schema_verdict() comment");
+    uint8_t v = 0;
+    TEST_CHECK(iter_tune_store_schema_refused(&v) && v == (uint8_t)(ITER_TUNE_STORE_VERSION + 1),
+               "a size-changing newer version is reported as newer, not corruption");
+    TEST_CHECK(tit_raw_len() == sizeof(oversized), "the newer blob is preserved, not erased or rewritten");
+}
+
+// Negative: a CURRENT-version blob of the wrong size, or with bad contents,
+// is still corruption (no newer verdict).
+static void test_current_version_wrong_size_still_corruption(void)
+{
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    uint8_t oversized[sizeof(iter_tune_store_blob_t) + 8];
+    memset(oversized, 0, sizeof(oversized));
+    oversized[0] = ITER_TUNE_STORE_VERSION;
+    tit_seed_raw(oversized, sizeof(oversized));
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates a wrong-size current blob");
+    TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "wrong-size current blob is not trusted");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "wrong-size current-version blob is corruption, not newer");
+
+    // Right size, current version, invalid contents (zone_count too large).
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+    iter_tune_store_blob_t bad = {0};
+    bad.version = ITER_TUNE_STORE_VERSION;
+    bad.zone_count = (uint8_t)(ITER_TUNE_STORE_MAX_ZONES + 1);
+    tit_seed_raw((const uint8_t *)&bad, sizeof(bad));
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates an invalid current-version blob");
+    TEST_CHECK(!iter_tune_store_get_zone(0, NULL), "invalid current-version blob is not trusted");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "invalid current-version blob is corruption, not newer");
+}
+
+// cfg-file twin of the NVS oversized-blob fix: a size-changing NEWER file is
+// reported newer and preserved byte-identical; a current-version wrong-size
+// file stays plain corruption (no report).
+static void test_cfg_wrong_size_newer_vs_corrupt(void)
+{
+    tit_scratch_clean();
+    TIT_MKDIR(TIT_SCRATCH_BASE);
+    TEST_CHECK(cfg_fs_init(TIT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts for wrong-size cfg test");
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    uint8_t big[4 + sizeof(iter_tune_store_blob_t) + 8];
+    memset(big, 0, sizeof(big));
+    big[0] = 7; // rev
+    big[4] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1);
+    big[sizeof(big) - 1] = 0xAB;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "newer file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates larger newer cfg file");
+    uint8_t rv = 0;
+    TEST_CHECK(iter_tune_store_schema_refused(&rv) && rv == (uint8_t)(ITER_TUNE_STORE_VERSION + 1),
+               "larger newer cfg file reported as NEWER");
+    uint8_t back[sizeof(big) + 16];
+    size_t got = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, back, sizeof(back), &got) == ESP_OK && got == sizeof(big) &&
+                   memcmp(back, big, sizeof(big)) == 0,
+               "newer cfg file preserved byte-identical");
+
+    // Current-version wrong size: corruption, not a newer report.
+    big[4] = ITER_TUNE_STORE_VERSION;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "wrong-size file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates wrong-size current-version file");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "current-version wrong-size file is corruption, not newer");
+
+    // A newer file larger than the probe buffer (cfg_fs_read fails INVALID_SIZE)
+    // must still count as NEWER and stay untouched.
+    static uint8_t huge[4 + PREF_CFG_FS_MAX_LARGE_ITEM + 64 + 100];
+    memset(huge, 0, sizeof(huge));
+    huge[0] = 9;
+    huge[4] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1);
+    huge[sizeof(huge) - 1] = 0xCD;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, huge, sizeof(huge)) == ESP_OK, "over-cap newer file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates over-cap newer cfg file");
+    TEST_CHECK(iter_tune_store_schema_refused(NULL), "over-cap newer cfg file reported as NEWER");
+    static uint8_t hback[sizeof(huge) + 16];
+    got = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, hback, sizeof(hback), &got) == ESP_OK && got == sizeof(huge) &&
+                   memcmp(hback, huge, sizeof(huge)) == 0,
+               "over-cap newer cfg file preserved byte-identical");
+
+    cfg_fs_deinit();
+    tit_scratch_clean();
 }
 
 static void test_cfg_fs_dual_write_tie_break(void)
@@ -393,14 +616,29 @@ static void test_cfg_fs_dual_write_tie_break(void)
     hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
 
     iter_tune_store_zone_t z = make_zone(7.0f);
-    TEST_CHECK(iter_tune_store_set_zone(0, &z) == ESP_OK, "set_zone dual-writes to cfg_fs too");
+    TEST_CHECK(iter_tune_store_set_zone(0, &z) == ESP_OK, "set_zone writes the cfg file");
 
-    // Reload from scratch: both NVS and the cfg file agree (same rev) --
-    // must still read back correctly regardless of which side wins.
     iter_tune_store_reset_for_test();
-    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start resolves NVS/cfg_fs agreement");
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start reloads from the cfg file");
     iter_tune_store_zone_t out;
     TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 7.0f, "resolved zone matches");
+
+    // A legacy NVS copy at a rev ABOVE the file (a stale file, e.g. restored
+    // from an old backup) must win and overwrite the file.
+    iter_tune_store_blob_t nvs_ahead = {0};
+    nvs_ahead.version = ITER_TUNE_STORE_VERSION;
+    nvs_ahead.zone_count = 1;
+    nvs_ahead.zone[0] = make_zone(55.0f);
+    seed_nvs(&nvs_ahead, 500u);
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start resolves the NVS-ahead case");
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 55.0f,
+               "a legacy NVS copy at a higher rev beats a stale file");
+    uint8_t chk[ITER_TUNE_FILE_BUF_MAX];
+    size_t chk_len = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, chk, sizeof(chk), &chk_len) == ESP_OK &&
+                   get_u32_le(chk) == 500u,
+               "the winning NVS copy was resynced into the file");
 
     // Now make the FILE strictly ahead of NVS by writing a higher-rev file
     // directly, and confirm the file wins per the documented tie-break.
@@ -426,10 +664,15 @@ static void test_cfg_fs_dual_write_tie_break(void)
 void run_test_iter_tune_store(void)
 {
     test_blob_validate();
-    test_nvs_round_trip();
+    test_cfg_round_trip();
+    test_cfg_wrong_size_newer_vs_corrupt();
+    test_set_zone_refused_when_unmounted();
+    test_nvs_copy_migrates_into_cfg_at_start();
+    test_nvs_fallback_serves_when_unmounted();
     test_nvs_wrong_version_and_truncated();
     test_v1_old_layout_migrates();
     test_newer_version_refused_and_reported();
-    test_larger_blob_size_change_not_reported_current_limitation();
+    test_larger_newer_blob_reported_newer_and_preserved();
+    test_current_version_wrong_size_still_corruption();
     test_cfg_fs_dual_write_tie_break();
 }

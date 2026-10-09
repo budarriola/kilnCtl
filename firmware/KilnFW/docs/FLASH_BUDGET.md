@@ -77,7 +77,7 @@ without further reclamation.
 `ota_0`/`ota_1`/`factory` -> `app`/`recovery` redesign and `cfg`, the LittleFS
 partition that now occupies the "unallocated tail" row above -- `cfg` was
 grown to take the entire remaining tail 2026-09-19
-(docs/PROFILE_SLOTS_100_PLAN.md section 7 task 5), `0xDB0000`, size
+(docs/PROFILE_SLOTS_100.md section 7 task 5), `0xDB0000`, size
 `0x250000` (2.31 MiB), per `partitions.csv`'s own comment block. A full
 re-measurement against the current table is a separate task, not done here.
 

@@ -55,6 +55,27 @@ static void up_cfg_fs_reset(void)
 // cycle (RAM state) while leaving the stubbed NVS blob (the flash stand-in)
 // exactly as it was.
 // ---------------------------------------------------------------------------
+static void up_mount_scratch(void)
+{
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+}
+
+/* Stages the value+rev a LEGACY (pre dual-write-close) firmware left in NVS:
+ * unit_pref.c no longer has any NVS writer, so legacy-board tests write it. */
+static void up_stage_legacy_nvs(uint8_t raw, uint32_t rev)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "stage: open the legacy namespace");
+    hal_kv_set_u8(&h, NVS_KEY_UNIT_PREF, raw);
+    hal_kv_set_u32(&h, NVS_KEY_UNIT_PREF_REV, rev);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
 static void simulate_reboot(void)
 {
     s_unit_pref = UNIT_PREF_FAHRENHEIT; // deliberately the WRONG value -- proves unit_pref_start()
@@ -75,8 +96,7 @@ static void test_default_is_celsius_on_empty_nvs(void)
 
 static void test_persistence_round_trip(void)
 {
-    fake_kv_reset_all();
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    up_mount_scratch();
     simulate_reboot();
     unit_pref_start();
 
@@ -91,6 +111,23 @@ static void test_persistence_round_trip(void)
     simulate_reboot();
     unit_pref_start();
     TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "flipping back also survives a reboot");
+    cfg_fs_deinit();
+}
+
+static void test_set_without_cfg_partition_fails_loud(void)
+{
+    TEST_SECTION("unit_pref_set: no cfg partition mounted -- the save fails loud, nothing falls back to NVS");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    simulate_reboot();
+    unit_pref_start();
+
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) != ESP_OK, "set() reports the failed cfg write");
+
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "no NVS write was made as a fallback");
 }
 
 static void test_set_refuses_invalid_value(void)
@@ -112,14 +149,7 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     unit_pref_start();
-    unit_pref_set(UNIT_PREF_FAHRENHEIT);
-
-    hal_kv_handle_t h;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
-               "precondition: the unit_pref namespace opens");
-    TEST_CHECK(hal_kv_set_u8(&h, NVS_KEY_UNIT_PREF, 0xAA) == HAL_OK && hal_kv_commit(&h) == HAL_OK,
-               "precondition: an out-of-range byte is written back");
-    hal_kv_close(&h);
+    up_stage_legacy_nvs(0xAA, 1); // a legacy NVS copy holding an out-of-range byte, no cfg file
 
     simulate_reboot();
     unit_pref_start();
@@ -132,7 +162,7 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
 // step 3). Everything above already proves the partition-absent path.
 // ---------------------------------------------------------------------
 
-static void test_dual_write_lands_on_both_file_and_nvs(void)
+static void test_save_lands_in_cfg_file_only(void)
 {
     up_cfg_fs_reset();
     fake_kv_reset_all();
@@ -151,11 +181,8 @@ static void test_dual_write_lands_on_both_file_and_nvs(void)
     TEST_CHECK(file_valid && file_raw == (uint8_t)UNIT_PREF_FAHRENHEIT, "the file decodes to Fahrenheit");
 
     hal_kv_handle_t h;
-    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    uint8_t nvs_raw = 0;
-    hal_kv_get_u8(&h, NVS_KEY_UNIT_PREF, &nvs_raw);
-    hal_kv_close(&h);
-    TEST_CHECK(nvs_raw == (uint8_t)UNIT_PREF_FAHRENHEIT, "NVS also holds Fahrenheit -- both sides written");
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "NVS was never written -- the dual-write window is closed");
     TEST_CHECK(file_rev == s_unit_pref_rev, "file rev matches the in-RAM rev this save just bumped to");
 
     cfg_fs_deinit();
@@ -168,7 +195,7 @@ static void test_nvs_fallback_when_file_absent_then_migrates(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     unit_pref_start();
-    unit_pref_set(UNIT_PREF_FAHRENHEIT); // NVS-only, cfg_fs not mounted yet
+    up_stage_legacy_nvs((uint8_t)UNIT_PREF_FAHRENHEIT, 1); // legacy NVS-only board, cfg_fs not mounted yet
 
     TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts on a later boot");
     simulate_reboot();
@@ -281,7 +308,7 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     unit_pref_start();
-    unit_pref_set(UNIT_PREF_FAHRENHEIT);
+    up_stage_legacy_nvs((uint8_t)UNIT_PREF_FAHRENHEIT, 1);
 
     esp_err_t mount_err = cfg_fs_init("this_directory_does_not_exist_at_all", NULL);
     TEST_CHECK(mount_err != ESP_OK, "cfg_fs_init() against a nonexistent base dir fails, as documented");
@@ -351,7 +378,7 @@ static void test_start_read_error_without_file_returns_error(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
     unit_pref_start();
-    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "precondition: Fahrenheit persisted to NVS");
+    up_stage_legacy_nvs((uint8_t)UNIT_PREF_FAHRENHEIT, 1); // precondition: Fahrenheit in the legacy NVS copy
     TEST_CHECK(fake_kv_script_corrupt_key(KILN_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_UNIT_PREF),
                "precondition: the committed value is corrupted (reads return HAL_IO)");
 
@@ -390,7 +417,8 @@ void run_test_unit_pref(void)
     test_persistence_round_trip();
     test_set_refuses_invalid_value();
     test_corrupted_value_falls_back_to_safe_default();
-    test_dual_write_lands_on_both_file_and_nvs();
+    test_set_without_cfg_partition_fails_loud();
+    test_save_lands_in_cfg_file_only();
     test_nvs_fallback_when_file_absent_then_migrates();
     test_divergence_tie_break_higher_rev_wins();
     test_dualwrite_status_reports_divergence();

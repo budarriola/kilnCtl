@@ -72,14 +72,14 @@ $proc = Start-Process -FilePath $node.Source -ArgumentList @($testScript) `
 # dozen concurrent headless Chrome from sibling agents). Generous enough
 # to cover honest slow-but-progressing work, not so generous that a real
 # hang holds up run_all_checks.ps1 for long.
-$finished = $proc.WaitForExit(180000)
+$finished = $proc.WaitForExit(300000)
 if (-not $finished) {
     Stop-ProcessTreeBounded -ProcessId $proc.Id
     $partial = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }
     Remove-Item -Path $stdoutFile, $stderrFile -Force -ErrorAction SilentlyContinue
     if ($partial) { Write-Host $partial }
     # A hang is a FAIL, not a SKIP (2026-10-04); see check_ui_responsive_sweep.ps1.
-    throw "check_web_commission_cdp_driver.ps1: FAIL -- test did not finish within 180s; node/Chrome process tree killed. The harness hung."
+    throw "check_web_commission_cdp_driver.ps1: FAIL -- test did not finish within 300s; node/Chrome process tree killed. The harness hung."
 }
 
 $stdout = if (Test-Path $stdoutFile) { Get-Content -Raw $stdoutFile } else { "" }

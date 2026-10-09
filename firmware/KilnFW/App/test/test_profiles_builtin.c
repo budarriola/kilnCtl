@@ -222,9 +222,9 @@ static void pb_set_nvs(uint32_t mask, uint32_t rev)
     hal_kv_close(&h);
 }
 
-static void test_hidden_save_writes_file_and_nvs(void)
+static void test_hidden_save_writes_file_only(void)
 {
-    TEST_SECTION("hidden mask: set_hidden() with cfg_fs mounted writes BOTH the file and NVS at the same rev");
+    TEST_SECTION("hidden mask: set_hidden() with cfg_fs mounted writes the file only; NVS is never written");
     pb_fresh();
     TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
     pb_reboot();
@@ -236,8 +236,8 @@ static void test_hidden_save_writes_file_and_nvs(void)
     pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
     TEST_CHECK(f_valid && f_mask == (1u << 3), "the file decodes to the new mask");
     uint32_t n_mask = 0, n_rev = 0;
-    TEST_CHECK(pb_nvs_mask(&n_mask, &n_rev) && n_mask == (1u << 3), "NVS also holds the new mask");
-    TEST_CHECK(f_rev == 1 && n_rev == 1 && s_hidden_rev == 1, "file rev, NVS rev and in-RAM rev all agree at 1");
+    TEST_CHECK(!pb_nvs_mask(&n_mask, &n_rev), "NVS holds no mask -- the dual-write window is closed");
+    TEST_CHECK(f_rev == 1 && s_hidden_rev == 1, "file rev and in-RAM rev agree at 1");
     cfg_fs_deinit();
 }
 
@@ -283,27 +283,27 @@ static void test_hidden_higher_rev_wins_over_file(void)
     cfg_fs_deinit();
 }
 
-static void test_hidden_unmounted_leaves_nvs_path_working(void)
+static void test_hidden_unmounted_fails_loud_and_loads_legacy(void)
 {
-    TEST_SECTION("hidden mask: cfg_fs unmounted -> NVS-only save/boot round trip is unchanged");
+    TEST_SECTION("hidden mask: cfg_fs unmounted -> a legacy NVS mask still loads; a save fails loud, no NVS fallback");
     pb_fresh();
     TEST_CHECK(!cfg_fs_is_available(), "precondition: cfg_fs not mounted");
-    pb_reboot();
-    profiles_builtin_start();
-    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 4, true) == ESP_OK,
-               "set_hidden succeeds with no filesystem");
+    pb_set_nvs(1u << 4, 1); /* legacy NVS-only board */
     pb_reboot();
     TEST_CHECK(profiles_builtin_start() == ESP_OK, "start() succeeds");
-    TEST_CHECK(s_hidden_mask == (1u << 4), "mask survived the simulated reboot via NVS alone");
-    TEST_CHECK(profiles_builtin_restore_all() == ESP_OK, "restore_all succeeds");
-    pb_reboot();
-    profiles_builtin_start();
-    TEST_CHECK(s_hidden_mask == 0, "restore_all persisted via NVS alone");
+    TEST_CHECK(s_hidden_mask == (1u << 4), "the legacy mask loads via NVS alone");
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 5, true) != ESP_OK,
+               "set_hidden reports the failed cfg write");
+    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 5), "applied live anyway");
+    uint32_t n_mask = 0, n_rev = 0;
+    TEST_CHECK(pb_nvs_mask(&n_mask, &n_rev) && n_mask == (1u << 4) && n_rev == 1,
+               "the NVS copy was NOT touched by the failed save");
+    TEST_CHECK(profiles_builtin_restore_all() != ESP_OK, "restore_all fails loud too");
 
     TEST_CHECK(cfg_fs_init("this_directory_does_not_exist_at_all", NULL) != ESP_OK, "a failed mount is reported");
     pb_reboot();
     profiles_builtin_start();
-    TEST_CHECK(s_hidden_mask == 0, "mount-failed boot still resolves from NVS");
+    TEST_CHECK(s_hidden_mask == (1u << 4), "mount-failed boot still resolves from NVS");
     cfg_fs_deinit();
 }
 
@@ -311,9 +311,7 @@ static void test_hidden_nvs_migrates_to_file_and_status(void)
 {
     TEST_SECTION("hidden mask: NVS-only value migrates to the file when cfg_fs mounts later; status reports it");
     pb_fresh();
-    pb_reboot();
-    profiles_builtin_start();
-    profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 6, true); /* NVS only */
+    pb_set_nvs(1u << 6, 1); /* legacy NVS only */
     TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts on a later boot");
     pb_reboot();
     profiles_builtin_start();
@@ -332,21 +330,33 @@ static void test_hidden_nvs_migrates_to_file_and_status(void)
     cfg_fs_deinit();
 }
 
-static void test_hidden_nvs_write_failure_file_wins_next_boot(void)
+static esp_err_t pb_failing_write_fn(const char *rel_path, const void *data, size_t len)
 {
-    TEST_SECTION("hidden mask: NVS write fails but the file write succeeded -> file (rev+1) wins next boot");
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
+static void test_hidden_cfg_write_failure_is_loud_and_rev_unadvanced(void)
+{
+    TEST_SECTION("hidden mask: a failed cfg write is reported, applied live, rev unadvanced, nothing falls back to NVS");
     pb_fresh();
     TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     pb_reboot();
     profiles_builtin_start();
-    fake_kv_script_next_write_status(HAL_IO);
+    uint32_t rev_before = s_hidden_rev;
+    pref_cfg_fs_set_write_fn(pb_failing_write_fn);
     TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) != ESP_OK,
-               "set_hidden reports the NVS failure");
+               "set_hidden reports the cfg write failure");
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "applied live");
+    TEST_CHECK(s_hidden_rev == rev_before, "rev did not advance without a verified write");
+    uint32_t n_mask = 0, n_rev = 0;
+    TEST_CHECK(!pb_nvs_mask(&n_mask, &n_rev), "nothing fell back to NVS");
     pb_reboot();
     TEST_CHECK(profiles_builtin_start() == ESP_OK, "next boot resolves cleanly");
-    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "file at rev 1 beat the empty NVS");
-    TEST_CHECK(s_hidden_rev == 1, "rev came from the file");
+    TEST_CHECK(!profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "the unsaved change is gone after a reboot");
     cfg_fs_deinit();
 }
 
@@ -394,12 +404,12 @@ void run_test_profiles_builtin(void)
     test_cone_label_real_cone_unaffected();
     test_exactly_the_ten_named_entries_are_unrated();
     test_every_rising_segment_has_bounded_positive_ramp();
-    test_hidden_save_writes_file_and_nvs();
+    test_hidden_save_writes_file_only();
     test_hidden_boot_resolves_from_file_when_nvs_empty();
     test_hidden_higher_rev_wins_over_file();
-    test_hidden_unmounted_leaves_nvs_path_working();
+    test_hidden_unmounted_fails_loud_and_loads_legacy();
     test_hidden_nvs_migrates_to_file_and_status();
-    test_hidden_nvs_write_failure_file_wins_next_boot();
+    test_hidden_cfg_write_failure_is_loud_and_rev_unadvanced();
     test_hidden_factory_reset_discards_stale_file();
     test_hidden_nvs_read_error_but_file_resolved_is_ok();
 }

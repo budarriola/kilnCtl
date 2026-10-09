@@ -64,6 +64,34 @@ static void ts_cfg_fs_reset(void)
     pref_cfg_fs_reset_write_fn_for_test();
 }
 
+/* Stages the TZ+rev a LEGACY (pre dual-write-close) firmware left in NVS:
+ * time_sync.c no longer has any NVS writer for it. */
+static void ts_stage_legacy_nvs(const char *tz, uint32_t rev)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "stage: open the legacy namespace");
+    hal_kv_set_str(&h, NVS_KEY_TZ, tz);
+    hal_kv_set_u32(&h, NVS_KEY_TZ_REV, rev);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static bool ts_nvs_namespace_absent(void)
+{
+    hal_kv_handle_t h;
+    return hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND;
+}
+
+/* fresh fake NVS + freshly mounted cfg scratch */
+static void ts_fresh_mounted(void)
+{
+    ts_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(TS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+}
+
 // ---------------------------------------------------------------------
 // time_sync.c: NVS load/dual-write/tie-break coverage
 // (docs/FILESYSTEM_USER_DATA_PLAN.md item 14 close-out).
@@ -82,32 +110,35 @@ static void test_ts_default_is_utc_on_empty_nvs(void)
     TEST_CHECK(strcmp(st.tz, TIME_SYNC_TZ_DEFAULT) == 0, "empty NVS: TZ defaults to UTC0");
 }
 
-static void test_ts_partition_absent_nvs_only_round_trip(void)
+static void test_ts_partition_absent_fails_loud_and_loads_legacy(void)
 {
-    TEST_SECTION("time_sync: partition absent (no cfg mount) -- NVS-only set/load round trip");
+    TEST_SECTION("time_sync: no cfg mount -- a legacy NVS TZ still loads, set_tz fails loud, no NVS fallback");
     ts_cfg_fs_reset();
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
+    ts_stage_legacy_nvs("PST8PDT,M3.2.0,M11.1.0", 1);
     time_sync_start();
-
-    TEST_CHECK(time_sync_set_tz("PST8PDT,M3.2.0,M11.1.0") == ESP_OK, "set_tz succeeds with no cfg_fs mounted");
     time_sync_status_t st;
     time_sync_get_status(&st);
-    TEST_CHECK(strcmp(st.tz, "PST8PDT,M3.2.0,M11.1.0") == 0, "live TZ updates immediately");
+    TEST_CHECK(strcmp(st.tz, "PST8PDT,M3.2.0,M11.1.0") == 0, "the legacy NVS-only board still loads its TZ");
 
-    time_sync_start(); // simulated reboot -- resets all in-RAM state, NVS (fake_kv) untouched
+    TEST_CHECK(time_sync_set_tz("EST5EDT,M3.2.0,M11.1.0") != ESP_OK,
+               "set_tz reports the failed cfg write (nowhere to persist)");
     time_sync_get_status(&st);
-    TEST_CHECK(strcmp(st.tz, "PST8PDT,M3.2.0,M11.1.0") == 0, "the value survives a simulated reboot via NVS alone");
+    TEST_CHECK(strcmp(st.tz, "EST5EDT,M3.2.0,M11.1.0") == 0, "the live TZ still updates immediately");
+
+    time_sync_start(); // simulated reboot
+    time_sync_get_status(&st);
+    TEST_CHECK(strcmp(st.tz, "PST8PDT,M3.2.0,M11.1.0") == 0,
+               "after a reboot the unsaved value is gone and the NVS copy was NOT overwritten");
 }
 
 static void test_ts_set_refuses_invalid_tz(void)
 {
     TEST_SECTION("time_sync: set_tz refuses an invalid TZ string, in-RAM value untouched");
-    ts_cfg_fs_reset();
-    fake_kv_reset_all();
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    ts_fresh_mounted();
     time_sync_start();
-    time_sync_set_tz("EST5EDT");
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "valid set persists");
 
     esp_err_t err = time_sync_set_tz("America/Chicago"); // IANA name, not POSIX -- Finding 2's case
     TEST_CHECK(err == ESP_ERR_INVALID_ARG, "an IANA zone name is refused");
@@ -116,13 +147,10 @@ static void test_ts_set_refuses_invalid_tz(void)
     TEST_CHECK(strcmp(st.tz, "EST5EDT") == 0, "refused set: live TZ unchanged");
 }
 
-static void test_ts_dual_write_lands_on_both_file_and_nvs(void)
+static void test_ts_save_lands_in_cfg_file_only(void)
 {
-    TEST_SECTION("time_sync: cfg_fs mounted -- set_tz dual-writes file and NVS");
-    ts_cfg_fs_reset();
-    fake_kv_reset_all();
-    hal_kv_init_partition(KILN_NVS_PARTITION);
-    TEST_CHECK(cfg_fs_init(TS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+    TEST_SECTION("time_sync: cfg_fs mounted -- set_tz writes the file only, NVS untouched");
+    ts_fresh_mounted();
     time_sync_start();
 
     TEST_CHECK(time_sync_set_tz("EST5EDT,M3.2.0,M11.1.0") == ESP_OK, "set_tz succeeds with cfg_fs mounted");
@@ -134,13 +162,7 @@ static void test_ts_dual_write_lands_on_both_file_and_nvs(void)
     TEST_CHECK(file_valid && strcmp((char *)file_item, "EST5EDT,M3.2.0,M11.1.0") == 0,
                "the file decodes to the just-set TZ string");
 
-    hal_kv_handle_t h;
-    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-    char nvs_tz[TIME_SYNC_TZ_MAX_LEN + 1] = { 0 };
-    size_t len = sizeof(nvs_tz);
-    hal_kv_get_str(&h, NVS_KEY_TZ, nvs_tz, &len);
-    hal_kv_close(&h);
-    TEST_CHECK(strcmp(nvs_tz, "EST5EDT,M3.2.0,M11.1.0") == 0, "NVS also holds the same TZ -- both sides written");
+    TEST_CHECK(ts_nvs_namespace_absent(), "NVS was never written -- the dual-write window is closed");
     TEST_CHECK(file_rev == s_tz_rev, "file rev matches the in-RAM rev this save just bumped to");
 
     cfg_fs_deinit();
@@ -152,8 +174,7 @@ static void test_ts_nvs_fallback_then_migrates(void)
     ts_cfg_fs_reset();
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
-    time_sync_start();
-    time_sync_set_tz("PST8PDT,M3.2.0,M11.1.0"); // NVS-only, cfg_fs not mounted yet
+    ts_stage_legacy_nvs("PST8PDT,M3.2.0,M11.1.0", 1); // legacy NVS-only board, cfg_fs not mounted yet
 
     TEST_CHECK(cfg_fs_init(TS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts on a later boot");
     esp_err_t err = time_sync_start();
@@ -177,7 +198,7 @@ static void test_ts_divergence_tie_break_higher_rev_wins(void)
     hal_kv_init_partition(KILN_NVS_PARTITION);
     TEST_CHECK(cfg_fs_init(TS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     time_sync_start();
-    time_sync_set_tz("EST5EDT"); // file+NVS both rev 1
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "file written at rev 1");
 
     // NVS advances further (rev 5) with different content -- simulates a
     // later write whose file-side companion failed.
@@ -211,8 +232,7 @@ static void test_ts_mount_failed_falls_through_to_nvs_only(void)
     ts_cfg_fs_reset();
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
-    time_sync_start();
-    time_sync_set_tz("EST5EDT,M3.2.0,M11.1.0");
+    ts_stage_legacy_nvs("EST5EDT,M3.2.0,M11.1.0", 1);
 
     esp_err_t mount_err = cfg_fs_init("this_directory_does_not_exist_at_all", NULL);
     TEST_CHECK(mount_err != ESP_OK, "cfg_fs_init() against a nonexistent base dir fails, as documented");
@@ -237,9 +257,7 @@ static void test_ts_mount_failed_falls_through_to_nvs_only(void)
 static void test_ts_sntp_init_failure_returns_error_and_tz_still_applied(void)
 {
     TEST_SECTION("time_sync_start: esp_netif_sntp_init failure returns the error; stored TZ still applied");
-    ts_cfg_fs_reset();
-    fake_kv_reset_all();
-    hal_kv_init_partition(KILN_NVS_PARTITION);
+    ts_fresh_mounted();
     time_sync_start();
     TEST_CHECK(time_sync_set_tz("EST5EDT,M3.2.0,M11.1.0") == ESP_OK, "precondition: a TZ is persisted");
 
@@ -411,9 +429,9 @@ static void run_test_time_sync(void)
 
     // ---- time_sync.c: NVS load / cfg_fs dual-write coverage -----------------
     test_ts_default_is_utc_on_empty_nvs();
-    test_ts_partition_absent_nvs_only_round_trip();
+    test_ts_partition_absent_fails_loud_and_loads_legacy();
     test_ts_set_refuses_invalid_tz();
-    test_ts_dual_write_lands_on_both_file_and_nvs();
+    test_ts_save_lands_in_cfg_file_only();
     test_ts_nvs_fallback_then_migrates();
     test_ts_divergence_tie_break_higher_rev_wins();
     test_ts_mount_failed_falls_through_to_nvs_only();

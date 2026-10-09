@@ -469,11 +469,53 @@ static void test_poll(void)
     TEST_CHECK(pr.state == EDIT_FIRING_POLL_ENDED, "firing end detected");
 }
 
+#ifdef _WIN32
+#include <direct.h>
+#define CFGM_MKDIR(p) _mkdir(p)
+#define CFGM_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define CFGM_MKDIR(p) mkdir((p), 0755)
+#define CFGM_RMDIR(p) rmdir(p)
+#endif
+#include "cfg_fs.h"
+
+/* flash_worker_wait.c (linked for pref_cfg_fs) asks whether the flash worker
+ * started; on the host there is no worker, so answer yes at once. */
+bool uart_bridge_ext_flash_worker_started(void)
+{
+    return true;
+}
+
+/* The live-edit record and working profile are cfg-only (owner decision
+ * 2026-10-07): the fork/save paths need a mounted cfg scratch directory. */
+static void mount_fresh_cfg_scratch(void)
+{
+    static const char *const scratch = "cfg_fs_test_ui_edit_firing_apply";
+    static const char *const files[] = {"prof_live_rec.bin", "prof_live_work.bin"};
+    cfg_fs_deinit();
+    for (size_t i = 0; i < 2; i++) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s/.tmp/%s", scratch, files[i]);
+        remove(path);
+        snprintf(path, sizeof(path), "%s/%s", scratch, files[i]);
+        remove(path);
+    }
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", scratch);
+    CFGM_RMDIR(tmp);
+    CFGM_RMDIR(scratch);
+    CFGM_MKDIR(scratch);
+    (void)cfg_fs_init(scratch, NULL);
+}
+
 int main(void)
 {
     // fake_kv.c needs every partition initialized before hal_kv_open();
     // "profiles_nvs" is live_profile.c's private LIVE_PROFILE_NVS_PARTITION.
     hal_kv_init_partition("profiles_nvs");
+    mount_fresh_cfg_scratch();
 
     test_seg_editable();
     test_step_clamps();

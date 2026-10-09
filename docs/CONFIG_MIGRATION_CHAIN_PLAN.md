@@ -30,9 +30,22 @@ byte a future release can bump):
 | ESP fire profiles | `PROFILE_VERSION` (`firmware/KilnFW/App/drivers/http/profiles_http.c`) | 4; monolithic per-version branches |
 | RP2040 safety config | `CONFIG_STORE_FORMAT_VERSION` (`firmware/SaftyFW/src/config_store.h`) | 3 as of the CT-channel-mask pass — corrected from this table's earlier "2, one v1->v2 branch"; `config_store_unpack_ex()` now carries two inline branches (`CONFIG_STORE_FORMAT_VERSION_V1`, `_V2`), not one |
 | ESP aux outputs (spare-relay on/off) | `AUX_OUTPUTS_CFG_VERSION` (`firmware/KilnFW/App/drivers/persist/aux_outputs_cfg.c`) | 1; no converter (nothing older). A newer-than-known blob is quarantined (every aux reads disabled, `set()` refuses); a corrupt or short one falls back to all-disabled. `tools/check_config_migration_steps.ps1` covers it (`Test-AuxOutputsCfgVersion`, 2026-10-06): symbol present, blob sizeof pinned, and a bump past 1 needs `aux_outputs_migrate_v<CURRENT-1>`. `docs/SPARE_RELAY_ONOFF_PLAN.md` |
-| ESP iterative-tuning persistence | `ITER_TUNE_STORE_VERSION` (`firmware/KilnFW/App/drivers/persist/iter_tune_store.h`) | 2 as of the step 7 acceptance-gap-2 pass, 2026-09-23 (revised in the same day's code review, finding 1); v1->v2 is byte-compatible (v1's always-zero reserved byte becomes v2's `carry_count`), migrated forward by `iter_tune_store_start()` **IN RAM ONLY** -- the on-disk NVS/cfg_fs bytes are deliberately left tagged v1 until the next REAL write (`iter_tune_store_set_zone()`), which always persists the current, already-migrated in-RAM blob and is therefore the first moment the on-disk copy becomes v2. A version NEWER than this build's `ITER_TUNE_STORE_VERSION` is refused (never partially trusted) and reported via `iter_tune_store_schema_refused()`, surfaced on `GET /api/iter_tune/status` as `schema_refused_version`, rather than silently folded into the same bucket as a truncated/corrupt blob -- except a size-CHANGING future version, which is NOT currently distinguished from ordinary corruption (documented limitation, `note_schema_verdict()` in `iter_tune_store.c`, locked in by `test_larger_blob_size_change_not_reported_current_limitation()`). Independent of ZONES_CFG_VERSION -- rollback behaviour: older firmware that predates this store simply never opens the "iter_tune" NVS namespace or reads iter_tune.bin, so both copies are silently ignored, not migrated or deleted. Firmware new enough to have this store but older than the v2 pass (i.e. v1 firmware) reading it back after a v2-firmware boot: **lossless as long as no real write happened on v2 firmware** (the on-disk bytes are still v1); a rollback AFTER the first real v2-firmware write to this store loses that write and everything since (v1's own validate() only accepts version==1, so it reads the v2-tagged blob as nothing persisted) -- the same, ordinary, accepted rollback exposure every other store in this tree that isn't governed by ZONES_CFG_VERSION already has. |
+| ESP iterative-tuning persistence | `ITER_TUNE_STORE_VERSION` (`firmware/KilnFW/App/drivers/persist/iter_tune_store.h`) | 2 as of the step 7 acceptance-gap-2 pass, 2026-09-23 (revised in the same day's code review, finding 1); v1->v2 is byte-compatible (v1's always-zero reserved byte becomes v2's `carry_count`), migrated forward by `iter_tune_store_start()` **IN RAM ONLY** -- the on-disk NVS/cfg_fs bytes are deliberately left tagged v1 until the next REAL write (`iter_tune_store_set_zone()`), which always persists the current, already-migrated in-RAM blob and is therefore the first moment the on-disk copy becomes v2. A version NEWER than this build's `ITER_TUNE_STORE_VERSION` is refused (never partially trusted) and reported via `iter_tune_store_schema_refused()`, surfaced on `GET /api/iter_tune/status` as `schema_refused_version`, rather than silently folded into the same bucket as a truncated/corrupt blob -- except a size-CHANGING future version, which is NOT currently distinguished from ordinary corruption (documented limitation, `note_schema_verdict()` in `iter_tune_store.c`, locked in by `test_larger_blob_size_change_not_reported_current_limitation()`). `tools/check_config_migration_steps.ps1` covers it (`Test-IterTuneStoreMigrationStep` plus the D1 baseline rule, 2026-10-09): a bump needs a new `ITER_TUNE_STORE_VERSION_V<old>` macro. Independent of ZONES_CFG_VERSION -- rollback behaviour: older firmware that predates this store simply never opens the "iter_tune" NVS namespace or reads iter_tune.bin, so both copies are silently ignored, not migrated or deleted. Firmware new enough to have this store but older than the v2 pass (i.e. v1 firmware) reading it back after a v2-firmware boot: **lossless as long as no real write happened on v2 firmware** (the on-disk bytes are still v1); a rollback AFTER the first real v2-firmware write to this store loses that write and everything since (v1's own validate() only accepts version==1, so it reads the v2-tagged blob as nothing persisted) -- the same, ordinary, accepted rollback exposure every other store in this tree that isn't governed by ZONES_CFG_VERSION already has. |
 
 Not governed, and why:
+
+- **Discard-on-mismatch versioned blobs (excluded 2026-10-09).** Each compares
+  its version with strict equality and treats any other value as
+  absent/unreadable; none has a converter, so there is no step to count:
+  `RELAY_NAMES_CFG_VERSION` (2) and `ZONE_NORMALS_CFG_VERSION` (3)
+  (`zones_http_internal.h`; `cand.version != ...` returns false in
+  `zones_config_store.c`), `CT_VERIFY_BLOB_VERSION` (1) (`ct_verify_store.c`,
+  `b->version != ...` returns false), `LIVE_EDIT_RECORD_VERSION` (1)
+  (`live_profile.c`: "Discard, never migrate"), `WEB_AUTH_STORE_VERSION` (1)
+  (`web_auth_store.c`: mismatch fails closed as UNREADABLE, never
+  reinterpreted), and `OTA_RECORD_VERSION` (3) (`ota_record.c` only stamps it
+  on a freshly built per-event history record; no tuning to preserve). If any
+  gains a converter it moves into the governed table above.
 
 - **Wi-Fi credentials, boot-guard counter, OTA record, crash report, touch
   calibration.** `docs/CONFIG_FILESYSTEM.md` lists these as permanently NVS-
@@ -580,9 +593,13 @@ All use comment-stripped text. Negative-tested by assertions 23-32 of
 `test_check_config_migration_steps.ps1` (40 total after the review-gap fixes: comment-stripped matching, no vacuous pass, forward declarations, RP2040 branch) and by hand against the
 real sources (each break named the store and version, then restored).
 
-**Still follow-up:** D1's "exactly one NEW step per bump" defect-catching rule
-(needs a baseline to diff against), the fixture-must-be-referenced rule, and
-D2's expiry floor, for all three stores; and the frozen-input
+**Landed 2026-10-08 (all four stores):** D1's "exactly one NEW step per bump" is diffed against a
+baseline ref (`KILNCTL_MIGCHK_BASELINE`, default `origin/main`; zones counts only steps to v27 and up);
+the fixture rule requires `cfg_blobs/<store>_v<N-1>.bin` on a bump and that every present fixture is
+named by a test source; D2's floor fails any step migrating from older than CURRENT-8. Negative-tested
+by assertions 41-61 of `test_check_config_migration_steps.ps1`.
+
+**Still follow-up:** the frozen-input
 assert/`crc32`-last-field discipline for kiln-config slots and RP2040 safety
 config, which would need scaffolding their designs do not have (length-based
 detection; raw byte-offset inputs).
@@ -644,9 +661,15 @@ are bumped in firmware without a matching update here; negative-tested by
 bumping `PROFILE_VERSION` in a scratch copy of `profiles_http.c` and
 confirming failure, then restoring byte-exact via `git cat-file blob`.
 `bootloader_crc32` (config_store) is verified equivalent by code reading and
-the firmware host vector `crc32("123456789") == 0xCBF43926`; `esp_crc32_le`
-(the ESP-side profile/zones blobs) remains unverified against a captured
-blob.
+the firmware host vector `crc32("123456789") == 0xCBF43926`. `esp_crc32_le`
+(the ESP-side profile/zones blobs): the zones blob is now pinned to a CRC the
+firmware code path produced (`test_zones_blob_golden.c` runs the real
+`nvs_save()`; `test_config_convert_zones_golden.py` asserts the Python CRC
+matches it, and the C test pins `esp_crc32_le("123456789") == 0xCBF43926`).
+Caveat that remains: the host build's `esp_crc32_le` is a stub
+(`test/stubs/esp_crc.h`, a C reimplementation of reflected CRC-32), so this
+does not prove the on-target ESP ROM routine matches; no hardware-captured
+blob has been compared, and the profile record has round-trip tests only.
 
 **`config_store_record_t` (2026-09-23).** Unlike the two formats below, this
 one is fully supported: `firmware/SaftyFW/src/config_store.c` never lets the
@@ -687,7 +710,13 @@ Pending:
   reach them; each needs a blob of that exact version (a firmware host test
   emitting one per historical struct, or a captured one) to verify a port.
   D2 already expires the pre-v26 tail, so port only on a concrete need.
-- **`kiln_configs[]` entries.** Each embeds a `kilnctl_kiln_package`; not
-  converted inside a backup document (convert each package separately).
+- ~~**`kiln_configs[]` entries.**~~ Done 2026-10-07: `convert_document()` on a
+  backup converts each entry's `package` through `convert_kiln_package()` (to
+  the current `ZONES_CFG_VERSION`; the backup version number does not apply to
+  a package). A slot that fails (tampered hash, bad blob, too-old zones
+  version) is carried through unchanged and reported as action `failed`
+  (`report.failed`; CLI exit 2) -- never dropped; `omitted` legacy entries are
+  kept. Tests in `test_config_convert_zones_history.py`. `cfg_convert.py`
+  alone still reports `kiln_configs` as dropped (use `config_convert`).
 - **Cfg LittleFS files** (`/api/cfgfs`) duplicate the NVS stores and are not
   separate converter inputs.

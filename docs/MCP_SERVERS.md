@@ -153,7 +153,7 @@ tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
 
 ### Decision 2 — a search facade instead of 221 published tools
 
-`kilnctrl` registers 229 tools (228 before `profile_save_bench_aux_rule` was added 2026-10-06 (`mcp_server_aux.py`; confirm-gated, read-back-verified writer of the single `BENCH_AUX_RULE` bench profile carrying an aux on/off rule, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a); 227 before `control_convert_onoff_zone_to_aux` was added 2026-10-06 (`mcp_server_aux.py`; wraps the firmware `move_zone_to_aux` field on `POST /api/zones`); 221 before `update_check`/`update_fetch_status`/`update_get_settings` (read-only) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated) were added 2026-10-06 (`mcp_server_update.py`, WP10 of `docs/GITHUB_RELEASE_UPDATE_PLAN.md`; `update_stage_release` and `update_set_settings` are verified by read-back, every release is UNSIGNED); 220 before `control_set_relay_type` was added 2026-10-06 (`mcp_server_control.py`; POST key `relay<N>_type`, N 1-based, enum 0-6 unset/damper/outlet/valve/fan/light/other; `control_get_zones` also prints `relay_types`); 217 before `control_get_aux_outputs`/`control_set_aux_output`/`control_set_aux_manual` were added 2026-10-05 (`mcp_server_aux.py`); 214 before `bench_test_start`/`bench_test_job_status`/`ota_matrix_start` were added 2026-10-05; 212 before `recovery_apply_status`/`recovery_apply_staged` were added 2026-10-05; 209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+`kilnctrl` registers 231 tools (229 before `latency_soak`/`latency_soak_start` were added 2026-10-07 (`mcp_server_latency_soak.py`; read-only GET soak, see `latency_soak.py`); 228 before `profile_save_bench_aux_rule` was added 2026-10-06 (`mcp_server_aux.py`; confirm-gated, read-back-verified writer of the single `BENCH_AUX_RULE` bench profile carrying an aux on/off rule, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a); 227 before `control_convert_onoff_zone_to_aux` was added 2026-10-06 (`mcp_server_aux.py`; wraps the firmware `move_zone_to_aux` field on `POST /api/zones`); 221 before `update_check`/`update_fetch_status`/`update_get_settings` (read-only) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated) were added 2026-10-06 (`mcp_server_update.py`, WP10 of `docs/GITHUB_RELEASE_UPDATE_PLAN.md`; `update_stage_release` and `update_set_settings` are verified by read-back; release signing was removed 2026-10-07, the board accepts an image only for the correct project); 220 before `control_set_relay_type` was added 2026-10-06 (`mcp_server_control.py`; POST key `relay<N>_type`, N 1-based, enum 0-6 unset/damper/outlet/valve/fan/light/other; `control_get_zones` also prints `relay_types`); 217 before `control_get_aux_outputs`/`control_set_aux_output`/`control_set_aux_manual` were added 2026-10-05 (`mcp_server_aux.py`); 214 before `bench_test_start`/`bench_test_job_status`/`ota_matrix_start` were added 2026-10-05; 212 before `recovery_apply_status`/`recovery_apply_staged` were added 2026-10-05; 209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
 2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
 retirement note further down this file) and `kicad` 86. Published as MCP
 schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
@@ -241,6 +241,7 @@ KiCad server has no equivalent -- there is nothing to compile there:
 | `build_kilnfw(target, jobs, skip_saftyfw)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N`. **2026-09-20:** for a `build`/`reconfigure` target it now builds SaftyFW first (via `build_saftyfw()`) and aborts before starting the KilnFW build if that fails, reporting both build reports -- the KilnFW application build `EMBED_FILES`s both SaftyFW slot images (`docs/PICO_AUTO_UPDATE_PLAN.md`) and needs a fresh pair present in `firmware/SaftyFW/build/`. Pass `skip_saftyfw=True` to opt out (e.g. a caller that just ran `build_saftyfw()` itself); `fullclean` and other non-build targets never trigger it. |
 | `build_kilnfw_start(target, jobs, skip_saftyfw, kiln_fw_root)` | kilnctrl | **2026-10-04:** runs `build_kilnfw` on a background thread (`mcpkit/build_jobs.py`) and returns a job id immediately. A full build (SaftyFW first) can exceed the client's 300 s idle watchdog, which dropped the result while the build finished unseen. Same gate/lock as `build_kilnfw`; the synchronous tool is unchanged. |
 | `build_job_status(job_id, wait_s)` | kilnctrl | RUNNING/OK/FAILED, artifact sizes and ages (`KilnCtrl.bin/.elf`, SaftyFW slot bins) and the full report once finished. `wait_s` blocks up to 120 s. Results persist to `<tmp>/kilnctl-builds/job-<id>.json` so they survive a registry eviction or server restart; a job running at restart reports unknown. |
+| (build step timeout) | kilnctrl | `build_kilnfw`/`build_kilnfw_start` no longer use a fixed 1800 s cap. The idf.py/ninja step is killed only when stdout/stderr has not grown for `KILNCTL_BUILD_STALL_S` (default 900 s), or at an absolute ceiling `KILNCTL_BUILD_CEILING_S` (default 10800 s, clamped to 60 s under the build gate's hard max-hold, `DEFAULT_MAX_HOLD_HARD_SEC` = 7200 s, which would otherwise kill first with no `KILLED:` reason; so the effective default is 7140 s, and the lock wait is that plus 90 s). Both kill paths kill the whole process tree (`buildgate._kill_tree`), not just the PowerShell wrapper, and join the drain threads before the lock and slot are released. A kill is reported as `KILLED: stalled: no build output for N s ...` or `KILLED: absolute ceiling ...` in the report `build_job_status` returns. Tests: `tools/PcTools/tests/test_workbench_stall_timeout.py`. |
 | `build_saftyfw(jobs, saftyfw_root)` | kilnctrl | ninja in `firmware/SaftyFW/build` (or `<saftyfw_root>/build`); auto-configures from scratch via `mcpkit.pico_sdk.resolve_pico_sdk_path()` if no `CMakeCache.txt` exists yet -- see "Building from a clean worktree" below |
 | `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
 | `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
@@ -738,7 +739,7 @@ name from the `ERASABLE_DATA_PARTITIONS` allowlist -- `nvs`, `kiln_nvs`,
 unless the named partition is both in that allowlist and actually present in
 `partitions.csv`, and unless `confirm_erase=True` is also passed.
 
-## Git workflow guards (`tools/worktree_mint.ps1`, `tools/push_verify.ps1`, `tools/commit_guard.ps1`)
+## Git workflow guards (`tools/worktree_mint.ps1`, `tools/push_verify.ps1`, `tools/commit_guard.ps1`, `tools/wt_status.ps1`)
 
 Three small PowerShell tools under `tools/` close three recurring, expensive
 failure modes seen repeatedly in this project's development workflow (each
@@ -748,7 +749,7 @@ repository's current state, so none is wired into `run_all_checks.ps1` --
 they are invoked by hand at the workflow moment they apply.
 
 **`tools/worktree_mint.ps1`** -- mint or remove a short-lived worktree at
-`origin/main` under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
+`origin/dev` (default; `-Base <ref>` overrides, e.g. `-Base origin/main` for the coordinator) under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
 concurrent session on this machine, and two constraints have bitten
 repeatedly: the path must be SHORT (a nested `.claude/worktrees/...` path
 overflows the MSVC command line building SaftyFW host tests) and the name
@@ -756,7 +757,7 @@ must be UNIQUE (generic names collide between live sessions).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature
-    # fetches origin, creates C:\wt\myfeature_<random> at origin/main,
+    # fetches origin, creates C:\wt\myfeature_<random> at origin/dev (or -Base),
     # refuses rather than reusing an existing directory, prints
     # "WORKTREE: <path>"
 
@@ -823,7 +824,7 @@ needed no equivalent change: it already runs `cmake .` (an unconditional
 reconfigure) on every invocation, never trusting a cached configure across runs.
 
 **`tools/push_verify.ps1`** -- verify a commit actually landed on
-`origin/main`, in one unambiguous verdict line. This project has produced
+`origin/dev` (default; `-Branch origin/main` for main), in one unambiguous verdict line. This project has produced
 four false "landed" reports from two specific causes: (1) running the
 ancestry check backwards -- `git merge-base --is-ancestor origin/main HEAD`
 asks "is origin/main an ancestor of my branch", which succeeds even for a
@@ -835,7 +836,7 @@ progress banner does that on a successful push. This script uses the correct
 argument order and reads only `$LASTEXITCODE`, never `$?`, never push output.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/main]
+powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/dev]
     # prints "VERDICT: LANDED -- ..." or "VERDICT: NOT LANDED -- ...",
     # and on NOT LANDED also names the local branch(es) the commit IS
     # reachable from, if any (the actual common root cause)
@@ -849,7 +850,7 @@ copy silently reverts everyone else's changes to that file. This has
 happened twice for real here: a stale doc commit reverted 113 lines of
 another session's work, and a bare `--amend` pushed a 1067-line revert of
 live work. The script compares `git hash-object <path>` against
-`git rev-parse origin/main:<path>` for each path about to be committed, shows
+`git rev-parse origin/dev:<path>` (`-Branch` overrides) for each path about to be committed, shows
 the diff, reports insertion/deletion counts, and refuses by default until
 the caller passes `-Confirm`. An optional `-ExpectedMaxLines` per path flags
 any path whose actual insertion+deletion count exceeds what the caller
@@ -862,6 +863,76 @@ powershell -ExecutionPolicy Bypass -File tools\commit_guard.ps1 -Path CLAUDE.md 
     # unchanged/new vs origin/main; also refuses if actual changed lines
     # exceed the declared budget, regardless of -Confirm
 ```
+
+**`tools/land.ps1`** -- the whole landing sequence in one command, composing the
+three guards above rather than reimplementing them. Run it from inside the
+worktree whose commits are ready (never the shared main tree; refused). It
+refuses on tracked modifications or no commits ahead of the target branch;
+optionally waits (`-WaitPid`, `-CheckLog`, bounded, UTF-16-aware) for a
+`run_all_checks` run and refuses on any `FAIL`/`FAILED:`/BUSY not matched by
+`-AllowFail <regex>` (allowed FAILs are echoed loudly and listed in the result);
+runs `git fetch` + `git rebase origin/main` (a conflict or Windows "unable to
+unlink" error aborts the rebase, lists the files and exits nonzero, never
+leaving a half-rebased tree); re-runs a NARROW post-rebase set via
+`run_all_checks -Only` (`check_mcp_tool_count_doc`, `check_mcp_facade_coverage`
+plus `-PostRebaseChecks <regex>`; not the full suite); `git push origin
+HEAD:main` (never force; a non-fast-forward rejection loops back to the
+rebase, at most 3 tries); `push_verify.ps1` must say LANDED; then optionally
+`-RestartMcp` (restart then status, bounded by `-McpTimeoutMin`, default 10)
+and `-RemoveWorktree` (only after LANDED). `-DryRun` does the refusals, log
+gate and fetch and changes nothing. The last stdout line is one JSON object:
+`{"sha","landed","steps","allowed_fails","known_fails","new_fails","dry_run","error"}`.
+`-AllowKnownFailures` also accepts a `FAIL <check>` that is KNOWN on origin/main (the
+main baseline, `tools/main_baseline.ps1` / `tools/main_baseline_lib.ps1`, recorded for an
+origin/main commit that must be the merge-base of HEAD with origin/main, else nothing is KNOWN; a
+check failing with a different failure signature than on main is CHANGED = NEW; mode from the log's `Run mode:` line); any
+NEW failure still refuses and is listed in `new_fails`; `-AllowFail` is unchanged. Unit test:
+`tools/check_land.ps1` (throwaway bare repo under temp).
+(`commit_guard.ps1` is a pre-commit guard and stays a manual step before the commit.)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\land.ps1 -CheckLog C:\wt\x\run.log -AllowFail check_release_manifest -RemoveWorktree
+```
+
+**dev/main flow and `tools/dev_promote.ps1`** (added 2026-10-09). Agents rebase onto
+`origin/dev`, run targeted tests only, and `land.ps1` pushes to dev (`-Target dev` is the
+default; `-Target main` remains for the coordinator; the check-log gate is optional for dev).
+Only the coordinator promotes: after one full `run_all_checks` on the dev tip,
+`dev_promote.ps1 -Commit <dev commit> [-Push]` builds `commit-tree X^{tree} -p origin/main`
+with the message `Promote dev <X full sha>: <dev commit subjects since the previous promote>`,
+verifies tree == X's tree and a single parent, and recognises a previous promote only if it is real: single parent, subject names a dev SHA D that is on origin/dev, and its tree equals D's tree (a lookalike subject is an offender), and pushes to main as a plain fast-forward
+(no tag). It refuses when X is not on origin/dev, when X is not ahead of the previous promote,
+and when origin/main holds commits that are neither in dev nor earlier promote commits (a
+direct push to main): it names them and says to merge main into dev first. Unit test:
+`tools/check_dev_promote.ps1` (throwaway bare repo under temp).
+
+**`tools/wt_status.ps1`** -- report on, and safely prune, `C:\wt` (added
+2026-10-08). `C:\wt` accumulates hundreds of directories (worktrees, orphan dirs,
+`*_logs`, loose files). Report mode (default) lists every directory: registered in
+`git worktree list`?, branch or HEAD sha, commits ahead of origin/dev (`-Base` overrides) (each marked
+`[on-main]` or `[unlanded]` by `git cherry` patch-id, because many commits land under
+rebased shas), tracked-modified and untracked counts, idle time (newest file mtime,
+skipping `build\` and `.git`), and live processes whose command line references the
+path (`-Size` adds sizes). Classes: ACTIVE (a process, or a file under 15 min old),
+HAS_WORK (unlanded commits or dirty), STALE_CLEAN (registered, all landed, clean, idle
+over 2 h, no process), ORPHAN_DIR (unregistered, no process, idle over 2 h), UNKNOWN
+(anything unsure: locked, `.kicad_*` inside, a `.git` in an unregistered dir, ...).
+Dot-dirs (`.buildgate`, `.checkcache`), unregistered `*_logs` dirs and loose files are
+listed as helpers and never pruned.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1                 # report
+powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1 -Prune -WhatIf  # preview
+powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1 -Prune          # delete
+```
+
+`-Prune` deletes only STALE_CLEAN (through `worktree_mint.ps1`'s remove mode) and
+ORPHAN_DIR (through `lib_safe_remove.ps1`, which unlinks junctions as links and never
+follows them), re-checking each entry just before acting, then runs `git worktree prune`.
+`tools/check_wt_status.ps1` tests it against a scratch root (`-ScriptUnderTest`
+points it at a mutated copy for negative tests); it never reads the real `C:\wt`.
+
+**`tools/agent_tail.ps1`** -- read-only view of a background subagent (added 2026-10-08): `-Id <agentId>` shows id, description (from `agent-<id>.meta.json`), last activity and the last `-N` USE/RES/TXT events from the subagent transcript under `~\.claude\projects\...\<session>\subagents\`; `-All [-SinceHours 12]` prints one row per agent. It prints `STUCK?` for (a) the last 4 commands identical after stripping digits with unchanged results, or (b) a polled log (`until grep` / `wait_for.ps1`) unwritten for 30 min while no ninja/cmake/cl/gcc/cc1/python/pytest process runs (the 5 h `nosign_tb1.log` poll). Last line is a JSON summary; it never kills anything. `tools/check_agent_tail.ps1` tests it with synthetic and a trimmed real fixture (`tools/test_fixtures/agent_tail/`) and mutates each heuristic to prove the check goes red.
 
 ## Confirm-gate flags are never coerced (2026-10-02)
 

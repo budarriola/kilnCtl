@@ -107,3 +107,48 @@ def test_note_says_slot_embedded_without_record(tmp_path):
     app.write_bytes(b"\x00" * 77 + slot)
     note = msf._pico_image_provenance_note(str(app))
     assert "IS embedded at app offset 77" in note
+
+
+def test_compiled_off_string_is_informational(tmp_path):
+    p = tmp_path / "KilnCtrl.bin"
+    p.write_bytes(b"\x00" * 50 + msf._PICO_AUTO_UPDATE_OFF_LITERAL + b": x\x00" + b"\x00" * 50)
+    note = msf._pico_image_provenance_note(str(p))
+    assert "compiled OFF" in note
+    assert "PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=0" in note
+    assert "intentionally absent" in note
+    assert "no embedded SaftyFW identity record found" not in note
+
+
+def test_record_wins_over_compiled_off_string(tmp_path):
+    p = tmp_path / "KilnCtrl.bin"
+    p.write_bytes(msf._PICO_AUTO_UPDATE_OFF_LITERAL + b"\x00" + _make_record("abc1234"))
+    note = msf._pico_image_provenance_note(str(p))
+    assert "commit=abc1234" in note
+    assert "intentionally absent" not in note
+
+
+def test_neither_record_nor_off_string_warns(tmp_path):
+    p = tmp_path / "KilnCtrl.bin"
+    p.write_bytes(b"\x00" * 200)
+    note = msf._pico_image_provenance_note(str(p))
+    assert "no embedded SaftyFW identity record found" in note
+    assert "intentionally absent" not in note
+
+
+def test_missing_sibling_build_dir_is_stated(tmp_path):
+    (tmp_path / "KilnFW" / "build").mkdir(parents=True)
+    app = tmp_path / "KilnFW" / "build" / "KilnCtrl.bin"
+    app.write_bytes(b"\x00" * 200)
+    note = msf._pico_image_provenance_note(str(app))
+    assert "cross-check skipped" in note
+    assert "not found at" in note
+    assert "SaftyFW_slotA.bin" in note
+    assert "not located" not in note
+
+
+def test_off_literal_constant_matches_firmware_source():
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[3] / msf._PICO_AUTO_UPDATE_BOOT_SRC
+    assert src.is_file(), src
+    assert msf._PICO_AUTO_UPDATE_OFF_LITERAL.decode() in src.read_text(encoding="utf-8")
+    assert msf._pico_off_literal_from_source(str(src.parent)) == msf._PICO_AUTO_UPDATE_OFF_LITERAL

@@ -45,7 +45,7 @@ typedef enum {
     THERMAL_GUARD_TRIP_MIN_TEMP,       /* guard 6 */
     THERMAL_GUARD_TRIP_SENSOR_INVALID, /* guard 7 */
     THERMAL_GUARD_TRIP_FROZEN,         /* guard 8 */
-    THERMAL_GUARD_TRIP_CROSS_ZONE,     /* guard 9 */
+    THERMAL_GUARD_TRIP_CROSS_ZONE,     /* guard 8 (enum value 9) */
     THERMAL_GUARD_TRIP_RELAY_STALLED,  /* guards 1/2's relay-cycling discriminator --
                                         * see thermal_guard_input_t.relay_min_swing_c */
 } thermal_guard_trip_t;
@@ -229,7 +229,7 @@ typedef struct {
     uint8_t      peer_count;
     uint8_t      peer_index_self;
     /* peer_is_on_off[i] true means that channel belongs to a ZONE_TYPE_
-     * ON_OFF zone (docs/ON_OFF_ZONE_PLAN.md sec 1, guard 9/cross-zone row):
+     * ON_OFF zone (docs/ON_OFF_ZONE_PLAN.md sec 1, guard 8/cross-zone row):
      * an on/off device's channel is not comparable to a heater's, so it must
      * be excluded from the OTHER side of every cross-zone comparison too, not
      * just skipped when it is the zone being ticked (see on_off_zone below).

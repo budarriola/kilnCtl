@@ -141,6 +141,7 @@ def _case_st05(ctx: dict) -> CaseResult:
 def _case_fl01(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     report_text = srv.debug_check_partition_table(host=ctx.get("host"))
+    ctx["_fl01_partitions"] = report_text  # for WEB-DIAG-03
     return J.judge_partition_table_match(report_text)
 
 
@@ -225,13 +226,15 @@ def _case_fl07(ctx: dict) -> CaseResult:
 
     try:
         data = dashboard_http_client.get_cfgfs_status(host)
+        pending_data = dashboard_http_client.get_cfgfs_format_pending(host)
     except Exception as exc:  # noqa: BLE001
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason=f"GET /api/cfgfs failed: {exc} (record-only, plan §7 decision 6)",
+            reason=f"GET /api/cfgfs or /api/cfgfs/format_pending failed: {exc} (record-only, plan §7 decision 6)",
             observed=dict(tables, cfgfs="error: " + str(exc)),
         )
-    result = J.judge_cfgfs_state(data)
+    ctx["_fl07_cfgfs"] = data  # for WEB-DIAG-04
+    result = J.judge_cfgfs_state(data, pending_data)
     if result.observed is not None:
         result.observed = dict(result.observed, **tables)
     return result

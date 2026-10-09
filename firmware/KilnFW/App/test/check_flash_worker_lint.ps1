@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_flash_worker_lint.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob (see check_js_host_tests.ps1's own header comment for why
 # that discovery mechanism exists) picks up flash_worker_lint.py without any

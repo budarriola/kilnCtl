@@ -63,6 +63,24 @@ extern "C" {
 // (ESP_ERR_INVALID_SIZE) rather than silently truncate.
 #define PREF_CFG_FS_MAX_ITEM 128
 
+// Upper bound for the LARGE items (setup-wizard progress blob, live-edit
+// working profile). Items above PREF_CFG_FS_MAX_ITEM use a short-lived heap
+// block for the file image instead of a stack buffer; callers' own copies of
+// the item (the nvs_bytes / out_bytes arguments) are still theirs to place.
+#define PREF_CFG_FS_MAX_LARGE_ITEM 2048
+
+// Variable-length item (live-edit working profile): reads the file at
+// rel_path into out (capacity cap, <= PREF_CFG_FS_MAX_LARGE_ITEM), reporting
+// the item length (file size minus the 4-byte rev) and rev. Returns false when
+// cfg is unmounted, the file is absent, unreadable or larger than cap + 4. No
+// validation: the caller decodes/validates the bytes itself. Written back with
+// pref_cfg_fs_save()/pref_cfg_fs_commit() using the actual length.
+bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *out_len, uint32_t *out_rev);
+
+// Deletes the file at rel_path. ESP_OK when it did not exist either;
+// ESP_ERR_INVALID_STATE when cfg is not mounted.
+esp_err_t pref_cfg_fs_remove(const char *rel_path);
+
 // Matches cfg_fs_write_atomic()'s signature (cfg_fs.h) and
 // cfg_fs_write_atomic_device()'s (cfg_fs_mount.h) -- same seam
 // zones_config_cfg_fs.h uses: host tests exercise the real cfg_fs_write_atomic()
@@ -110,6 +128,20 @@ void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_va
 void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                                 void *out_bytes, uint32_t *out_rev, bool *out_valid);
 
+// Newer-schema probe for a file whose length does NOT match the caller's
+// current struct (a size-changing newer-firmware blob is otherwise
+// indistinguishable from corruption: load_raw/resolve reject any wrong-size
+// file before the validator runs). Returns true only when the file exists, its
+// length differs from 4 + item_size, is long enough to hold the version byte,
+// and that byte (at item offset `version_offset`) is above `current_version`;
+// *out_version then holds it. Read-only: never writes or erases. A wrong-size
+// file at current-or-older version, an exact-size file, an absent file or an
+// unmounted cfg all return false (corruption/normal paths unchanged).
+// Callers that get true must not let pref_cfg_fs_resolve() run, since its
+// NVS->file migration would overwrite the newer file.
+bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
+                                        uint8_t current_version, uint8_t *out_version);
+
 // Core of the read-through policy. `nvs_bytes`/`nvs_valid`/`nvs_rev` are
 // whatever the caller's existing NVS load already produced this boot --
 // never read or written by this function, a pure decision given these
@@ -138,6 +170,19 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
 // docs/FILESYSTEM_USER_DATA_PLAN.md). ESP_ERR_INVALID_SIZE if item_size
 // exceeds PREF_CFG_FS_MAX_ITEM.
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev);
+
+// The persistence step of every preference setter since the dual-write window
+// closed (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"): the cfg file
+// is the ONLY place a save goes -- no NVS write follows it, and a failure here
+// is never papered over by one. pref_cfg_fs_save() (cfg_fs_write_atomic()'s
+// temp-file/rename/read-back-verify underneath) plus a loud ESP_LOGE naming
+// `what` on any failure, INCLUDING ESP_ERR_INVALID_STATE (cfg not mounted):
+// before the close that code was an expected non-error because NVS carried the
+// save; now it means the setting was NOT persisted. The caller must return the
+// error to its own caller and must NOT advance its in-RAM rev counter on
+// failure.
+esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev,
+                             const char *what);
 
 #ifdef __cplusplus
 }

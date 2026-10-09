@@ -442,7 +442,7 @@ void pid_fuzzy_prepare_gains(zone_runtime_t *z, uint8_t zi, bool harvest_freeze,
      * comment (profile_executor_internal.h). */
     if (harvest_freeze) strength_pct = 0;
 
-    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the confidence gate. Central
+    /* ADAPTIVE_FUZZY_EVALUATION.md sec 3: the confidence gate. Central
      * design point (sec 1.4) -- cap_L is keyed on L/tau (dead time / tau)
      * ALONE, from this zone's identified plant (ff_dead_time_s/ff_tau_s,
      * the same feedforward model cached at run start / zone_load_model()

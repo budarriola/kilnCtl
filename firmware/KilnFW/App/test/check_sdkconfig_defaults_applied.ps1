@@ -9,13 +9,13 @@
 # correct in sdkconfig.defaults, and still be completely inert on the
 # running board, silently, with no build error and no test failure.
 #
-# This script closes that hole for the specific keys this plan deliberately
-# changes. It does NOT assert sdkconfig.defaults and sdkconfig match on
-# every key -- most keys legitimately differ (menuconfig-derived toggles,
-# per-board settings never pinned in defaults). It asserts only that the
-# handful of keys a plan document changed on purpose have actually reached
-# the generated sdkconfig, because those are exactly the changes someone
-# will believe are live when they are not.
+# This script closes that hole for every key sdkconfig.defaults pins. It does
+# NOT assert the generated sdkconfig has only those keys -- most keys
+# legitimately differ (menuconfig-derived toggles, Kconfig defaults never
+# pinned). It asserts that each pinned key has reached the generated sdkconfig
+# with the pinned value, because those are exactly the changes someone will
+# believe are live when they are not. $watchedKeys below is only a guard that
+# defaults still pins the keys a plan depends on.
 #
 # Add a line to $watchedKeys whenever a future phase of DRAM_PSRAM_STATUS.md
 # (or any other plan) deliberately changes a value in sdkconfig.defaults
@@ -100,6 +100,25 @@ foreach ($key in $watchedKeys) {
     }
 }
 
+# Compare EVERY key sdkconfig.defaults pins (CONFIG_X=v and "# CONFIG_X is not
+# set"), not just $watchedKeys. 2026-10-07: the main-tree sdkconfig drifted on
+# the MBEDTLS dependents (DYNAMIC_FREE_CA_CERT / DYNAMIC_FREE_CONFIG_DATA) that
+# the hand list did not name. A pinned key is a deliberate choice, so any
+# disagreement with the generated file is the inert-change case. $watchedKeys
+# stays as the "defaults must still pin these" regression guard above.
+$compareKeys = New-Object System.Collections.Generic.List[string]
+foreach ($key in $watchedKeys) { $compareKeys.Add($key) }
+foreach ($line in $defaultsLines) {
+    $t = $line.Trim()
+    $k = $null
+    if ($t -match '^(CONFIG_[A-Za-z0-9_]+)=(.+)$') { $k = $Matches[1]; $v = $Matches[2].Trim() }
+    elseif ($t -match '^# (CONFIG_[A-Za-z0-9_]+) is not set$') { $k = $Matches[1]; $v = '(not set)' }
+    if ($k) {
+        $defaultsValues[$k] = $v
+        if (-not $compareKeys.Contains($k)) { $compareKeys.Add($k) }
+    }
+}
+
 if ($missingFromDefaults.Count -gt 0) {
     Write-Host "CHECK FAILED: watched key(s) missing from $DefaultsPath :" -ForegroundColor Red
     foreach ($k in $missingFromDefaults) { Write-Host "  $k" -ForegroundColor Red }
@@ -113,7 +132,7 @@ if (-not (Test-Path $SdkconfigPath)) {
     Write-Host "  confirm the watched keys actually reached the generated config." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "sdkconfig.defaults values for watched keys (unverified against a build):"
-    foreach ($key in $watchedKeys) {
+    foreach ($key in $compareKeys) {
         Write-Host "  $key = $($defaultsValues[$key])"
     }
     exit 0
@@ -122,7 +141,7 @@ if (-not (Test-Path $SdkconfigPath)) {
 $sdkconfigLines = Get-Content -Path $SdkconfigPath
 
 $mismatches = @()
-foreach ($key in $watchedKeys) {
+foreach ($key in $compareKeys) {
     $liveValue = Get-ConfigValue -Lines $sdkconfigLines -Key $key
     $wantValue = $defaultsValues[$key]
     if ($null -eq $liveValue) {
@@ -133,15 +152,15 @@ foreach ($key in $watchedKeys) {
 }
 
 if ($mismatches.Count -gt 0) {
-    Write-Host "CHECK FAILED: sdkconfig.defaults and the generated sdkconfig disagree on a watched key:" -ForegroundColor Red
+    Write-Host "CHECK FAILED: sdkconfig.defaults and the generated sdkconfig disagree on a pinned key:" -ForegroundColor Red
     foreach ($m in $mismatches) {
         Write-Host "  $m" -ForegroundColor Red
     }
-    throw "$($mismatches.Count) watched-key mismatch(es) between $DefaultsPath and $SdkconfigPath -- ESP-IDF's Kconfig defaults policy keeps the generated value over sdkconfig.defaults, so this plan step is not actually applied. See DRAM_PSRAM_STATUS.md section 5."
+    throw "$($mismatches.Count) pinned-key mismatch(es) between $DefaultsPath and $SdkconfigPath -- ESP-IDF's Kconfig defaults policy keeps the generated value over sdkconfig.defaults, so this plan step is not actually applied. See DRAM_PSRAM_STATUS.md section 5."
 }
 
-Write-Host "sdkconfig-defaults-applied check passed: $($watchedKeys.Count) watched key(s) agree between sdkconfig.defaults and the generated sdkconfig:"
-foreach ($key in $watchedKeys) {
+Write-Host "sdkconfig-defaults-applied check passed: $($compareKeys.Count) pinned key(s) agree between sdkconfig.defaults and the generated sdkconfig:"
+foreach ($key in $compareKeys) {
     Write-Host "  $key = $($defaultsValues[$key])"
 }
 exit 0

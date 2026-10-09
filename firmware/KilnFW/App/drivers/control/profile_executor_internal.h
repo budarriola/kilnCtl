@@ -404,7 +404,7 @@ typedef struct {
     float ff_dead_time_s;
     bool  ff_enabled;
 
-    /* ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3, N3: the in-firing error
+    /* ADAPTIVE_FUZZY_EVALUATION.md sec 3, N3: the in-firing error
      * zero-crossing oscillation backstop's per-zone state. Reset at every
      * firing start (profile_executor_run.c, alongside pid_reset()/
      * fuzzy_prev_effective_ki above) -- NOT persisted across firings, unlike
@@ -970,6 +970,8 @@ typedef struct {
         float held_s;
         bool commanded_on; /* last level actually written (post authority gate) */
         uint8_t rule_reason; /* profile_exec_relay_denied_t, latest tick; status JSON only */
+        float on_time_s;     /* seconds commanded ON this run; zeroed at run start only, not persisted */
+        uint32_t switch_count; /* off->on commanded transitions this run; zeroed at run start only */
     } aux[AUX_OUTPUTS_COUNT];
 
     /* TODO relay/IO segments (owner's request, see profiles_http.h's
@@ -1126,7 +1128,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec);
 bool firing_stats_maybe_finalize(profile_firing_run_record_t *out_rec);
 void capture_run_snapshot(run_snapshot_buf_t *b);
 
-/* Last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW, "list
+/* Last-run-started RAM cache (PROFILE_SLOTS_100.md review LOW, "list
  * perf") -- see profile_executor_firing_stats.c's own section comment for
  * the full design. firing_stats_persist()/firing_stats_erase() (this same
  * file) are the only writers; profile_executor_status.c's
@@ -1228,6 +1230,54 @@ void profile_executor_on_off_log_transition(uint8_t zi, const on_off_trigger_inp
                                              float held_prior_s, float held_s,
                                              uint16_t min_on_s, uint16_t min_off_s, bool bypass_hold,
                                              bool cap_denied);
+/* True when *rule needs a temperature reading (enabled, temp_cmp != NONE) and
+ * temp_ok is false. Callers fold this into failsafe_override: NaN compares
+ * false in on_off_trigger_decide()'s axis_temp(), so with rule.invert it would
+ * otherwise read as "satisfied" and command the relay ON on a dead sensor.
+ * Shared by the zone and aux on/off input producers. */
+bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok);
+bool profile_executor_zone_drives_run(uint8_t zi);
+/* Inputs to the shared on/off input builder that genuinely differ between the
+ * zone and aux producers. failsafe_base is the producer's own run-ending terms
+ * (zone: FAULTED || zone fault || per-zone authority; aux: config unreadable
+ * || global authority); the builder adds the missing-temperature term. */
+/* Field names are deliberately NOT the same as on_off_trigger_input_t's (the
+ * src_ prefix): check_on_off_trigger_input_producers.ps1 greps for `.field =`
+ * across production code, and a params field of the same name would satisfy it
+ * from this wrapper's initialisers even if the builder never assigned the real
+ * input field. */
+typedef struct {
+    bool failsafe_base;
+    bool src_failsafe_state_on;
+    bool src_guard_5_6_tripped;
+    uint16_t src_min_on_s;
+    uint16_t src_min_off_s;
+    float src_hyst_c;
+    on_off_trigger_rule_t rule;
+    bool quasi_dwell;
+    float temp_c;
+    bool temp_ok;
+    bool src_stretched_this_tick;
+    float src_dt_s;
+} on_off_input_params_t;
+/* Seeds the two hold accumulators of one on/off output (decide-state held_s
+ * and the actuation gate's held_s) from relay_off_tracker for the physical
+ * relay(s) in relay_mask: time since the last ON-to-OFF transition, or
+ * ON_OFF_HOLD_SETTLED_S if that relay has not been ON since boot. Every reset
+ * site uses this instead of a bare ON_OFF_HOLD_SETTLED_S, so min_off_s still
+ * holds after a stop/restart or an aux disable/re-enable. */
+/* Aux per-run reset (trigger, actuated_on, commanded_on, rule_reason, holds
+ * seeded as above). Must be called with s_exec.lock held. */
+void profile_executor_aux_reset_runtime(uint8_t aux_idx);
+void profile_executor_on_off_seed_hold(on_off_trigger_state_t *decide_state, float *actuated_held_s,
+                                       uint8_t relay_mask);
+on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_params_t *p, bool *bypass_hold_out);
+on_off_trigger_input_t profile_executor_zone_on_off_input(uint8_t zi, bool failsafe_state_on, uint16_t min_on_s,
+                                                           uint16_t min_off_s, float hyst_c, bool authority_blocked,
+                                                           bool stretched_this_tick, float dt_s, bool *bypass_hold_out);
+on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const aux_output_t *ax, bool cfg_ok,
+                                                          bool authority_blocked, bool stretched_this_tick,
+                                                          float dt_s, bool *bypass_hold_out);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 /* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same
@@ -1239,8 +1289,9 @@ void force_all_relays_off(void);
  * current segment; relays_on_count/cap are the load-cap bookkeeping the zone
  * loop already did (aux is suppressed last). All must be called with
  * s_exec.lock held. */
-void aux_apply_relay(uint8_t aux_idx, bool want_on);
+bool aux_apply_relay(uint8_t aux_idx, bool want_on);
 void force_aux_relays_off(void);
+void profile_executor_aux_fault_drop(bool pico_tripped); /* F1/F2: not-RUNNING fault drop, lock held */
 void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap);
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);

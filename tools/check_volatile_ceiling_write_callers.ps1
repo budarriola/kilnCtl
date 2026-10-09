@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_volatile_ceiling_write_callers.ps1 -- safety_cfg_write_set_and_confirm_f32_volatile()
 # may be called ONLY from the call sites on the allowlist below.
 #

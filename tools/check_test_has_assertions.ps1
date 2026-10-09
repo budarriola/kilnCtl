@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_test_has_assertions.ps1 -- every test function actually EXECUTED by
 # a host-test suite must contain at least one assertion, and that assertion
 # must not be comparing two literal values the test itself just wrote (which

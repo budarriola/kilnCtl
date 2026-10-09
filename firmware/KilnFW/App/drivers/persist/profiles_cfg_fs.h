@@ -105,6 +105,11 @@ void profiles_cfg_fs_path(uint8_t id, char *out, size_t out_cap);
  * *out_rev 0). */
 void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid);
 
+/* Same, plus *out_error (may be NULL): true when the file could not be examined at all (scratch
+ * allocation failed). That is NOT "absent" -- *out_valid is false but the caller must not act on it
+ * (no migrate-over, no slot-free). Review 7 L3. */
+void profiles_cfg_fs_load_raw_ex(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid, bool *out_error);
+
 /* Writes slot `id`'s file at `rev`. No-op returning ESP_ERR_INVALID_STATE if
  * cfg_fs never mounted. `profile` must already be a valid, current-version
  * struct -- this function does not validate it. */
@@ -143,6 +148,12 @@ esp_err_t profiles_cfg_fs_delete(uint8_t id);
  * already made is not rolled back over a write/delete failure. */
 bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
                               profile_t *out_profile, uint32_t *out_rev, bool *out_used_file);
+
+/* resolve() with an error channel: *out_error true => the slot's file could not be examined; nothing
+ * was written or deleted, the return is false, and the caller MUST treat the slot as unknown (refuse
+ * saves/deletes), not as free. profiles_cfg_fs_resolve() is this with out_error == NULL. */
+bool profiles_cfg_fs_resolve_ex(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
+                                 profile_t *out_profile, uint32_t *out_rev, bool *out_used_file, bool *out_error);
 
 #ifdef __cplusplus
 }

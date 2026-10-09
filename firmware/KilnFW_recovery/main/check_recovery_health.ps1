@@ -33,6 +33,8 @@ if (-not $vcvars) {
     Write-Host "SKIP: vcvarsall.bat not found -- cannot build the host test with MSVC."
     exit 3
 }
+# vcvarsall runs ONCE here, outside the build gate; the gate then covers only cl.
+Import-KilnVcvarsEnv -Vcvars $vcvars
 
 $work = Join-Path $env:TEMP "recovery_health_$PID"
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
@@ -55,7 +57,7 @@ function Build-And-Run {
     $test = Join-Path $dir "test_recovery_health.c"
     Copy-Item (Join-Path $here "test_recovery_health.c") $test
     $exe = Join-Path $dir "t.exe"
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$dir`" `"$test`" /Fe:`"$exe`" /Fo:`"$dir\\`" /Fd:`"$dir\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && cl /nologo /W3 /WX /std:c11 /I`"$dir`" `"$test`" /Fe:`"$exe`" /Fo:`"$dir\\`" /Fd:`"$dir\\`""
     $gate = Enter-KilnBuildGate -Label "recovery_health" -Lane light
     try {
         $ErrorActionPreference = "Continue"
@@ -122,7 +124,7 @@ try {
     Test-Mutant -File "recovery_wifi.c" -Needle "s_error = `"wifi_init_fail`";" -Replacement "(void)0;" -Tag "noerr_wifiinit"
     Test-Mutant -File "recovery_wifi.c" -Needle "s_error = `"event_register_fail`";" -Replacement "(void)0;" -Tag "noerr_evreg"
     # H2: http result checked, route results counted, main retries/restarts/gates.
-    Test-Mutant -File "recovery_http.c" -Needle "esp_err_t rr = httpd_register_uri_handler(server, &routes[i]);" -Replacement "httpd_register_uri_handler(server, &routes[i]); esp_err_t rr = ESP_OK;" -Tag "ignoreregister"
+    Test-Mutant -File "recovery_http.c" -Needle "esp_err_t rr = httpd_register_uri_handler(server, &wrapped);" -Replacement "httpd_register_uri_handler(server, &wrapped); esp_err_t rr = ESP_OK;" -Tag "ignoreregister"
     Test-Mutant -File "recovery_http.c" -Needle "        // No LCD banner here: the caller retries" -Replacement "        recovery_lcd_set_error(`"HTTP FAILED`", s_http_last_error);`n        // No LCD banner here: the caller retries" -Tag "perattemptbanner"
     Test-Mutant -File "recovery_main.c" -Needle "        recovery_lcd_clear_error();`n" -Replacement "" -Tag "nosuccessclear"
     Test-Mutant -File "recovery_health_policy.h" -Needle "return restarts_so_far < RHEALTH_HTTP_MAX_RESTARTS;" -Replacement "return true;" -Tag "unboundedrestart"

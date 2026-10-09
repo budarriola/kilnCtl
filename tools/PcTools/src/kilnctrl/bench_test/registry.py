@@ -12,7 +12,7 @@ wave 0's slice of it.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 class Verdict:
@@ -71,6 +71,15 @@ class CaseSpec:
     depends_on: Optional[str] = None
     est_duration_s: float = 5.0
     operator_only: bool = False
+    #: Optional (window name, probe fn) -- see bench_test/windows.py.
+    window_probe: Optional[Tuple[str, Callable[[dict], dict]]] = None
+    #: Further (window, fn) probes for an observer that reads several windows.
+    extra_window_probes: Tuple[Tuple[str, Callable[[dict], dict]], ...] = ()
+    #: Optional (ctx key, fn): the runner calls fn(ctx) once after a passing
+    #: preflight, before the first case, and stores the result in
+    #: ctx[key] as a start-of-run baseline. fn must be READ-ONLY; an
+    #: exception leaves the key unset (judge falls back to its own path).
+    run_start_probe: Optional[Tuple[str, Callable[[dict], Any]]] = None
 
 
 def _c(id: str, area: str, description: str, **kw) -> CaseSpec:
@@ -221,7 +230,7 @@ _WEB_IDS = [
     "WEB-LOG-01", "WEB-LOG-02", "WEB-LOG-03",
     "WEB-X-01", "WEB-X-02", "WEB-X-03",
 ]
-_LCD_IDS = [f"LCD-{i:02d}" for i in range(1, 26)]
+_LCD_IDS = [f"LCD-{i:02d}" for i in range(1, 27)]
 _SP = [
     ("SP-01", "Commissioning read-back"), ("SP-02", "Status and diag consistency"),
     ("SP-03", "Link stats over a firing"), ("SP-04", "Trip / clear"),
@@ -242,6 +251,20 @@ _TP = [
     ("TP-R02", "POST /api/auth/forgot with a wrong code still answers 202/503/429"),
     ("TP-R03", "forgot/reset never require an admin session (OPEN tier)"),
     ("TP-M01", "Full TOTP reset round trip, opt-in via env credentials"),
+]
+
+#: Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md section 12, steps
+#: 1-7). Unit-tested against a fake board only -- see cases_aux.py. All
+#: writes are gated by KILNCTL_AUX_BENCH_CONFIRM=1; AX-T01/K01/T02 start a
+#: bench profile (heat); AX-T02 is operator-only (a Pico trip has no injector).
+_AX = [
+    ("AX-C01", "Configure relay 4 as an aux output, read-back"),
+    ("AX-C02", "Enabling aux on a zone-owned relay is refused (400)"),
+    ("AX-C03", "Zone relay_mask containing relay 4 is refused (400)"),
+    ("AX-T01", "Aux rule toggles relay 4 (io shadow), min on/off honoured"),
+    ("AX-K01", "Relay 4 follows its rule while PAUSED (K4 independence)"),
+    ("AX-T02", "A Pico trip drops relay 4"),
+    ("AX-R01", "Restore: relay 4 aux disabled, no BENCH_AUX_RULE slot left"),
 ]
 
 for cid, desc in _ST:
@@ -301,6 +324,13 @@ for cid, desc in _SP:
     ))
 for cid, desc in _TP:
     register(_c(cid, "TP", desc))
+_AX_HEAT = ("AX-T01", "AX-K01", "AX-T02")
+for cid, desc in _AX:
+    register(_c(
+        cid, "AX", desc, heat=cid in _AX_HEAT, operator_only=(cid == "AX-T02"),
+        depends_on=None if cid in ("AX-C01", "AX-R01") else "AX-C01",
+        est_duration_s=150 if cid in _AX_HEAT else 5,
+        heat_skip_reason="allow_heat not set; AX-T01/K01/T02 start a bench profile" if cid in _AX_HEAT else ""))
 
 #: Fixed run-order ranks for `nightly`/`full` (plan §5.2): ST first, then
 #: FL (read-only), then the fixed SK-01/03/04 subset, then SP (read-only),
@@ -318,12 +348,28 @@ _ORDER_RANK = {"ST": 0, "FL": 1, "SK": 2, "SP": 3}
 #: new general rule -- exactly one case gets this treatment.
 _ALWAYS_LAST = "WEB-SEC-05"
 
+# Observers follow their hosts (docs/BENCH_TEST_WEB_JUDGES_PLAN.md section 3 item 6).
+get_case("WEB-DASH-03").depends_on = "HP-01"
+get_case("WEB-DASH-09").depends_on = "HP-01"
+get_case("WEB-OTA-02").depends_on = "HP-01"
+get_case("WEB-DASH-06").depends_on = "HP-04"
+# WEB-ZONE observers follow the autotune / firing hosts they read.
+get_case("WEB-ZONE-06").depends_on = "AT-03"
+get_case("WEB-ZONE-08").depends_on = "AT-05"
+get_case("WEB-ZONE-11").depends_on = "HP-01"
+for _cid, _dep in (("WEB-SAF-03", "OT-B01"), ("WEB-RDY-04", "OT-B01"), ("WEB-WIZ-11", "OT-B01"),
+                   ("WEB-SET-04", "OT-B01"), ("WEB-COMM-04", "HP-01"),
+                   ("WEB-WIZ-07", "WEB-COMM-03"), ("WEB-WIZ-09", "WEB-ZONE-05")):
+    get_case(_cid).depends_on = _dep
+# Post-run alias of the pinned-last lockout case (_ALWAYS_LAST).
+get_case("WEB-LOG-03").depends_on = "WEB-SEC-05"
+
 #: TP-M01 (when its env credentials are set) changes the admin password and
 #: does not restore it, so every later re-login in the same run would use a
 #: stale KILNCTL_WEB_PASSWORD (cases_totp.py's module docstring). It sorts
 #: after every other case, heat included, but still before WEB-SEC-05,
 #: whose lockout would otherwise refuse TP-M01's own verifying login.
-_LATE_MUTATING = frozenset({"TP-M01"})
+_LATE_MUTATING = frozenset({"TP-M01", "AX-R01"})
 
 
 def _fixed_order(ids) -> List[str]:
@@ -413,13 +459,15 @@ SUITES["smoke"] = [
 SUITES["static"] = ["ST-01", "ST-02", "ST-03", "ST-04", "ST-05"]
 SUITES["flash"] = [c for c in REGISTRY if c.startswith("FL-")]
 SUITES["stack"] = [c for c in REGISTRY if c.startswith("SK-")]
-SUITES["ota"] = [c for c in REGISTRY if c.startswith("OT-")]
+SUITES["ota"] = [c for c in REGISTRY if c.startswith("OT-") and c != "OT-B02"] + ["OT-B02"]  # summary runs last
 SUITES["autotune"] = [c for c in REGISTRY if c.startswith("AT-")]
 SUITES["heat"] = [c for c in REGISTRY if c.startswith("HP-")]
 SUITES["web"] = list(_WEB_IDS)
 SUITES["lcd"] = list(_LCD_IDS)
 SUITES["safety"] = [c for c in REGISTRY if c.startswith("SP-")]
 SUITES["totp"] = [c for c in REGISTRY if c.startswith("TP-")]
+#: Explicit order: configure, refusals, rule/pause, trip last, restore.
+SUITES["aux"] = ["AX-C01", "AX-C02", "AX-C03", "AX-T01", "AX-K01", "AX-T02", "AX-R01"]
 # nightly/full memberships per plan §5.1 -- wave 2 implements the harness
 # ordering for the full §5.1 nightly membership; some of these ids still
 # report NOT_RUN: not_implemented until the WEB/LCD/OTA case wave(s) land
@@ -462,30 +510,41 @@ _NIGHTLY_ORDER: List[str] = [
     # WEB-DASH-13 is not in the plan's own §5.1 nightly bullet list but is
     # the same read/write-round-trip shape and is implemented in this wave,
     # so it rides along with the other WEB-DASH round trips.
-    "WEB-DASH-03", "WEB-DASH-06", "WEB-DASH-07", "WEB-DASH-09", "WEB-DASH-13",
+    "WEB-DASH-07", "WEB-DASH-13",
     "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
     "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
     "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
+    "WEB-PROF-10", "WEB-STIM-02", "WEB-ZONE-04", "WEB-ZONE-07", "WEB-ZONE-13",
     "WEB-BAK-02", "WEB-BAK-03",
     "WEB-KCFG-02", "WEB-KCFG-03",
     "WEB-DIAG-07", "WEB-DIAG-08",
-    # WEB-OTA-01 and WEB-X-01 are already in `_WEB_SMOKE_IDS` above (both
-    # end in "-01", same as every WEB render case) -- only WEB-OTA-02 and
-    # WEB-X-02 are new to nightly.
-    "WEB-OTA-02",
-    "WEB-X-02",
+    # docs/BENCH_TEST_WEB_JUDGES_PLAN.md 4.4/4.5. WIZ-07 observes COMM-03,
+    # WIZ-09 observes ZONE-05 (earlier in this list); the OT-B01 / HP-01
+    # observers (SAF-03, RDY-04, WIZ-11, SET-04, COMM-04) follow their hosts below.
+    "WEB-SAF-02", "WEB-SAF-04",
+    "WEB-COMM-02", "WEB-COMM-03", "WEB-COMM-05", "WEB-COMM-06", "WEB-COMM-07",
+    "WEB-RDY-02", "WEB-RDY-03",
+    "WEB-WIZ-02", "WEB-WIZ-03", "WEB-WIZ-04", "WEB-WIZ-05", "WEB-WIZ-06",
+    "WEB-WIZ-07", "WEB-WIZ-08", "WEB-WIZ-09", "WEB-WIZ-10",
+    "WEB-SET-02", "WEB-SET-03", "WEB-DISP-02", "WEB-DISP-03", "WEB-DISP-04",
+    # WEB-OTA-02, WEB-X-02 and the DASH observers moved below (observers
+    # follow their hosts; WEB-X-02 joins the auth-on group) --
+    # docs/BENCH_TEST_WEB_JUDGES_PLAN.md section 3 item 6.
     # Only the LCD captures with no dependency can run here; LCD-02
     # (depends_on HP-01), LCD-03 (HP-04) and LCD-04 (OT-B01) are observers
     # and must follow the case they read, same as the SP observers.
     "LCD-09", "LCD-14", "LCD-16",
-    "HP-01", "SP-06", "LCD-02",
+    # WEB-DASH-09 directly after HP-01, before HP-02: a new run clears the
+    # history ring.
+    "HP-01", "SP-06", "LCD-02", "WEB-DASH-09", "WEB-DASH-03", "WEB-OTA-02", "WEB-ZONE-11", "WEB-COMM-04",
     "HP-02", "SP-03",
-    "HP-04", "LCD-03", "HP-05", "HP-06", "HP-08",
+    "HP-04", "LCD-03", "WEB-DASH-06", "HP-05", "HP-06", "HP-08",
     "SK-02",
-    "WEB-SEC-03",
+    "WEB-SEC-03", "WEB-LOG-02", "WEB-X-02",
     # SP-04 is a pure observer of OT-B01's already-collected trip/clear data
     # (cases_safety._case_sp04, depends_on="OT-B01"), so it follows it directly.
     "OT-B01", "SP-04", "LCD-04",
+    "WEB-SAF-03", "WEB-RDY-04", "WEB-WIZ-11", "WEB-SET-04",
     "OT-E01", "OT-E02", "OT-E03", "OT-E12",
 ]
 assert len(_NIGHTLY_ORDER) == len(set(_NIGHTLY_ORDER)), "duplicate id in _NIGHTLY_ORDER"
@@ -502,8 +561,12 @@ def _enforce_always_last() -> None:
     project_login_lockout_saturation_accepted). Anything that appends a new
     suite below this call must call it again."""
     for name, ids in SUITES.items():
-        if _ALWAYS_LAST in ids and ids[-1] != _ALWAYS_LAST:
-            SUITES[name] = [c for c in ids if c != _ALWAYS_LAST] + [_ALWAYS_LAST]
+        if _ALWAYS_LAST in ids:
+            # Post-run aliases of the pinned-last case (WEB-LOG-03) trail it.
+            aliases = [c for c in ids if REGISTRY[c].depends_on == _ALWAYS_LAST]
+            tail = [_ALWAYS_LAST] + aliases
+            if ids[-len(tail):] != tail:
+                SUITES[name] = [c for c in ids if c not in tail] + tail
 
 
 _enforce_always_last()

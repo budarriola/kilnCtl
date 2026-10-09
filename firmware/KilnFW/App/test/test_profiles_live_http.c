@@ -1071,6 +1071,47 @@ static void test_registration_no_server(void)
     g_fake_no_server = false;
 }
 
+#ifdef _WIN32
+#include <direct.h>
+#define CFGM_MKDIR(p) _mkdir(p)
+#define CFGM_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define CFGM_MKDIR(p) mkdir((p), 0755)
+#define CFGM_RMDIR(p) rmdir(p)
+#endif
+#include "cfg_fs.h"
+
+/* flash_worker_wait.c (linked for pref_cfg_fs) asks whether the flash worker
+ * started; on the host there is no worker, so answer yes at once. */
+bool uart_bridge_ext_flash_worker_started(void)
+{
+    return true;
+}
+
+/* The live-edit record and working profile are cfg-only (owner decision
+ * 2026-10-07): the fork/save paths need a mounted cfg scratch directory. */
+static void mount_fresh_cfg_scratch(void)
+{
+    static const char *const scratch = "cfg_fs_test_profiles_live_http";
+    static const char *const files[] = {"prof_live_rec.bin", "prof_live_work.bin"};
+    cfg_fs_deinit();
+    for (size_t i = 0; i < 2; i++) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s/.tmp/%s", scratch, files[i]);
+        remove(path);
+        snprintf(path, sizeof(path), "%s/%s", scratch, files[i]);
+        remove(path);
+    }
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", scratch);
+    CFGM_RMDIR(tmp);
+    CFGM_RMDIR(scratch);
+    CFGM_MKDIR(scratch);
+    (void)cfg_fs_init(scratch, NULL);
+}
+
 int main(void)
 {
     // fake_kv.c requires every partition to be explicitly initialized before
@@ -1078,6 +1119,7 @@ int main(void)
     // main() documents. LIVE_PROFILE_NVS_PARTITION's literal is duplicated
     // here since that macro is private to live_profile.c.
     hal_kv_init_partition("profiles_nvs");
+    mount_fresh_cfg_scratch();
     // The host stub's xSemaphoreTake() defaults to pdFALSE (timeout); the
     // decide lock (created here exactly as profiles_live_http_start() does)
     // must be takeable for every other test.

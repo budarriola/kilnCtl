@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_uart_version_independence.ps1 -- SaftyFW/TODO.md's "Shared ids
 # split out of uart_task_ids.h; PC-link ids left behind" item.
 #

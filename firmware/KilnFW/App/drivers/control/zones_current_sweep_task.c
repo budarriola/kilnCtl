@@ -2247,8 +2247,9 @@ static void zone_sweep_record_ct_attribution(void)
 
     esp_err_t err = ct_verify_store_save(&blob);
     if (err != ESP_OK) {
-        ESP_LOGW(ZONES_HTTP_TAG,
-                 "CT attribution verdict not persisted (err %d) -- it holds for this boot only", (int)err);
+        ESP_LOGE(ZONES_HTTP_TAG,
+                 "CT attribution verdict NOT persisted (err %d: cfg file write failed or cfg not mounted, "
+                 "see POST /api/cfgfs/format_confirm) -- it holds for this boot only", (int)err);
     }
 }
 
@@ -2272,7 +2273,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
 
     /* Only state (RUNNING/PAUSED) is needed here -- profile_executor_get_
      * active_id() is the narrow sibling of profile_executor_get_status()
-     * profile_executor.h recommends for exactly this, avoiding a 1384-byte
+     * profile_executor.h recommends for exactly this, avoiding a 1464-byte
      * profile_exec_status_t stack local. This runs on the httpd task
      * (zones_http.c's sweep_start_post_handler()), same 8192-byte stack as
      * every other handler in this file's audit trail. */

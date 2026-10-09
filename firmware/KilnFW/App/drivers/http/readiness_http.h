@@ -403,32 +403,46 @@ static inline readiness_status_t readiness_recovery_mode_status(bool recovery_mo
 }
 
 /* Pure decision for the "Config filesystem (cfg_fs)" item (cfg_fs.h,
- * docs/FILESYSTEM_USER_DATA_PLAN.md): user config (zones, kiln_cfg_store,
- * profiles, and the pref-backed items) is now file-backed on the `cfg`
- * LittleFS partition with NVS as the dual-write mirror. A mount failure
- * (CFG_FS_STATUS_UNAVAILABLE) or an init that was simply never reached
- * (CFG_FS_STATUS_UNMOUNTED, at the point this item is evaluated -- boot has
- * long since called cfg_fs_init()) means every *_cfg_fs.c bridge falls back
- * to reading/writing its NVS copy alone, per each bridge's own documented
- * fallback contract -- degraded, not broken: the board keeps loading and
- * saving config, just without the file-backed copy or the divergence
- * checking that copy enables.
+ * docs/CONFIG_FILESYSTEM.md): user config (zones, kiln_cfg_store, profiles,
+ * and the pref-backed items) lives only on the `cfg` LittleFS partition; NVS
+ * is a read-only legacy source. When cfg is not mounted every save route
+ * refuses with 503 (CFG_FS_NOT_MOUNTED_TEXT, cfg_fs_refusal_http.h), so the
+ * board cannot take config changes at all.
  *
- * Chosen NON-BLOCKING (READY_DELIBERATELY_OFF rather than READY_NOT_DONE):
- * unlike a live trip or recovery mode, there is nothing here that stops a
- * firing, and the operator has no action that fixes it from the readiness
- * page (a failed LittleFS mount is not cleared by re-clicking anything --
- * see cfg_fs_format_http.h for the one recovery path, a deliberate reformat,
- * which is a destructive action this page should never nudge anyone toward
- * as if it were a routine checklist step). Following the same idiom the
- * "Thermocouple calibration offsets" item above already uses for "nothing
- * is missing and no red cross is warranted, but the operator should still be
- * able to see it": DELIBERATELY_OFF, not a bare OK, so the detail string
- * stays visible on the page instead of the item disappearing into an
- * indistinguishable green light. */
+ * Owner decision 2026-10-06 ("Refuse, and prompt the format"): the item is
+ * NOT_DONE when unmounted, with a detail pointing at
+ * POST /api/cfgfs/format_confirm, so the checklist shows the operator what to
+ * do. It stays non-gating for a firing (READY_NOT_DONE only blocks for the
+ * four gate items recovery_mode, safety_trip, crash_report and
+ * estop_verified): a firing runs from the config already loaded in RAM and
+ * the missing mount only stops further saves. */
 static inline readiness_status_t readiness_cfg_fs_status(bool mounted)
 {
-    return mounted ? READY_OK : READY_DELIBERATELY_OFF;
+    return mounted ? READY_OK : READY_NOT_DONE;
+}
+
+/* Detail line for the cfg_fs item, pure so a host test can pin the text
+ * (readiness_http.c itself cannot be host-compiled). The unmounted variants
+ * must name POST /api/cfgfs/format_confirm: that is the operator's remedy,
+ * and the same one CFG_FS_NOT_MOUNTED_TEXT points at -- EXCEPT in recovery
+ * mode (`recovery_skipped`, cfg_fs_skipped_for_recovery()): there the mount
+ * was skipped on purpose and the partition still holds the board's only
+ * saved config, so the detail must point at leaving recovery mode and never
+ * at a format (same rule as CFG_FS_RECOVERY_SKIPPED_TEXT). */
+static inline const char *readiness_cfg_fs_detail(bool mounted, bool format_pending, bool recovery_skipped)
+{
+    if (mounted) {
+        return "cfg filesystem mounted -- config is saved to flash";
+    }
+    if (recovery_skipped) {
+        return "cfg filesystem not mounted in recovery mode -- saves are refused; leave recovery mode "
+               "(POST /api/ota/esp/recovery_exit), do not format";
+    }
+    if (format_pending) {
+        return "cfg filesystem awaiting format confirmation -- saves are refused until you confirm: "
+               "POST /api/cfgfs/format_confirm";
+    }
+    return "cfg filesystem not mounted -- saves are refused; confirm format via POST /api/cfgfs/format_confirm";
 }
 
 /* SAFETY_POLL_PERIOD_MS default (settings.h) is 500 ms, and

@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_cfg_convert_field_mirror_drift.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up cfg_convert_field_mirror_drift_check.py without any
 # further wiring. See that script's own docstring for what it compares (the

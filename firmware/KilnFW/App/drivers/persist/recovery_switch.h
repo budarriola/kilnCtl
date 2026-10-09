@@ -44,7 +44,9 @@ bool recovery_switch_restore_running(void);
 
 /* boot_guard threshold path: if boot_guard_is_recovery_mode(), decide with
  * boot_guard_decide_recovery_route(); on SWITCH_PARTITION select recovery and
- * reboot (does not return on success). On an invalid/absent recovery image or
+ * reboot (does not return on success). If the select fails with SET_FAILED
+ * (otadata may already be erased), it calls recovery_switch_restore_running()
+ * once and returns. On an invalid/absent recovery image or
  * the old layout it logs loudly and returns, leaving the existing degraded
  * in-app recovery mode in force. Returns immediately when not at threshold. */
 void recovery_switch_at_boot_threshold(void);

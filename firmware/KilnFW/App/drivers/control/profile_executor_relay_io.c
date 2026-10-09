@@ -22,6 +22,7 @@
 #include "profile_rule_target.h"
 #include "relay_authority.h"
 #include "relay_cycles.h"
+#include "relay_off_tracker.h"
 #include "sim_backend.h"
 #include "zones_config_accessors.h"
 
@@ -101,6 +102,8 @@ void apply_relay(uint8_t zi, bool want_on)
             ESP_LOGW(PE_TAG, "kiln_io_owner_command_set_relay_mask_authorized failed: %s -- relay "
                           "state for zone %u is unknown",
                      esp_err_to_name(err), zi);
+        } else {
+            relay_off_tracker_note_write(mask, want_on ? mask : 0);
         }
     }
     /* No-op unless CONFIG_KILNCTL_SIM_PLANT. Fed the POST-gate decision, not
@@ -279,7 +282,7 @@ static const char *on_off_axis_reason(const on_off_trigger_input_t *in, bool on_
         return "guard5_6_trip";
     }
     if (!in->run_running) {
-        return (in->run_paused && !in->failsafe_on_pause) ? "paused_hold_last" : "run_not_active_failsafe";
+        return in->run_paused ? "paused_hold_last" : "run_not_active_failsafe";
     }
     if (!in->rule.enable) {
         return "no_rule_for_segment";
@@ -417,6 +420,8 @@ on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
     const on_off_trigger_input_t *in, bool bypass_hold, uint8_t relays_on_count, uint8_t cap)
 {
     on_off_zone_tick_result_t result = {0};
+    bool prior_actuated_on = *actuated_on;
+    float prior_actuated_held_s = *actuated_held_s;
     bool decided_on = on_off_trigger_decide(decide_state, in);
     bool gated_on = profile_executor_on_off_actuation_gate(actuated_on, actuated_held_s, decided_on,
                                                             bypass_hold, in->min_on_s, in->min_off_s, in->dt_s);
@@ -427,7 +432,14 @@ on_off_zone_tick_result_t profile_executor_on_off_zone_tick(
          * NEXT tick's hold-timer math would believe a relay is on that the
          * cap just forced off. */
         *actuated_on = false;
-        *actuated_held_s = 0.0f;
+        /* The hold must describe the PHYSICAL relay, like the reset-site seed
+         * (profile_executor_on_off_seed_hold). A relay that was OFF before
+         * this tick was never closed: it has simply stayed OFF, so its OFF
+         * time keeps accumulating (and a settled relay stays settled) rather
+         * than restarting a min_off_s the relay never earned. A relay that
+         * was ON before this tick is opened by the caller's apply_relay()
+         * now, a real ON-to-OFF transition, so the hold restarts at 0. */
+        *actuated_held_s = prior_actuated_on ? 0.0f : prior_actuated_held_s + in->dt_s;
         result.cap_denied = true;
         result.actuated_on = false;
         return result;
@@ -466,10 +478,10 @@ void force_all_relays_off(void)
  * relays' kiln_io_owner write path and the global relay_authority gate.
  *
  * Must be called with s_exec.lock held. */
-void aux_apply_relay(uint8_t aux_idx, bool want_on)
+bool aux_apply_relay(uint8_t aux_idx, bool want_on)
 {
     if (aux_idx >= AUX_OUTPUTS_COUNT) {
-        return;
+        return false;
     }
     uint8_t mask = (uint8_t)(1u << aux_idx);
     /* Claimed in BOTH directions and before the authority gate, same
@@ -482,12 +494,25 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
                  (unsigned)sources);
         want_on = false;
     }
+    static uint8_t s_write_fail_logged_mask; /* review 4 L1: log a failing write once, not every retry tick */
+    bool write_ok = true; /* no io bound (host/sim) counts as ok: nothing can fail */
     if (s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
         if (err != ESP_OK) {
-            ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
-                     esp_err_to_name(err));
+            write_ok = false;
+            if (!(s_write_fail_logged_mask & mask)) {
+                ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
+                         esp_err_to_name(err));
+                s_write_fail_logged_mask |= mask;
+            }
+        } else {
+            s_write_fail_logged_mask &= (uint8_t)~mask;
+            relay_off_tracker_note_write(mask, want_on ? mask : 0);
         }
+    }
+    /* Review 4 L1: a failed write is not a transition and commanded_on keeps its last confirmed value. */
+    if (!write_ok) {
+        return false;
     }
     if (s_exec.aux[aux_idx].commanded_on != want_on) {
         ESP_LOGI(PE_TAG, "aux relay %u -> %s", (unsigned)aux_idx + 1u, want_on ? "ON" : "OFF");
@@ -495,15 +520,28 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
          * zone relays (heater_output.c note_transition()): an aux relay
          * switching is a contact cycle like any other. */
         relay_cycles_add(mask, 1u);
+        /* switch_count is the dashboard's "it switched" figure: a failed write (state unknown) must
+         * not report a switch that never happened (review L3). */
+        if (want_on && write_ok) s_exec.aux[aux_idx].switch_count++;
     }
     s_exec.aux[aux_idx].commanded_on = want_on;
+    return write_ok;
 }
 
-static void aux_reset_runtime(uint8_t aux_idx)
+void profile_executor_on_off_seed_hold(on_off_trigger_state_t *decide_state, float *actuated_held_s,
+                                       uint8_t relay_mask)
+{
+    float held = relay_off_tracker_held_s(relay_mask);
+    decide_state->held_s = held;
+    *actuated_held_s = held;
+}
+
+void profile_executor_aux_reset_runtime(uint8_t aux_idx)
 {
     on_off_trigger_state_reset(&s_exec.aux[aux_idx].trigger);
     s_exec.aux[aux_idx].actuated_on = false;
-    s_exec.aux[aux_idx].held_s = 0.0f;
+    profile_executor_on_off_seed_hold(&s_exec.aux[aux_idx].trigger, &s_exec.aux[aux_idx].held_s,
+                                      (uint8_t)(1u << aux_idx));
     s_exec.aux[aux_idx].commanded_on = false;
     s_exec.aux[aux_idx].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
 }
@@ -528,11 +566,13 @@ void force_aux_relays_off(void)
             ok = false;
             ESP_LOGE(PE_TAG, "aux run-end OFF write failed (mask 0x%02X): %s -- will retry", (unsigned)mask,
                      esp_err_to_name(err));
+        } else {
+            relay_off_tracker_note_write(mask, 0);
         }
     }
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         if (mask & (1u << i)) {
-            aux_reset_runtime(i);
+            profile_executor_aux_reset_runtime(i);
         }
     }
     if (ok) {
@@ -541,6 +581,201 @@ void force_aux_relays_off(void)
     } else {
         s_exec.aux_off_pending = true;
     }
+}
+
+/* Audit AUX_OUTPUTS_SAFETY_REVIEW_2026-10-09 F1/F2. Called every executor
+ * tick while NOT RUNNING, with s_exec.lock held. When a safety fault is
+ * asserted (relay_authority_on_blocked(), or a fresh Pico TRIPPED report passed
+ * in as pico_tripped), every aux output that is on is driven OFF:
+ *  - PAUSED (F1): a pause otherwise holds the last commanded aux state; that
+ *    hold only lasts while nothing is faulted. Goes through aux_apply_relay()
+ *    so switch_count/on_time bookkeeping stays coherent.
+ *  - IDLE/DONE/FAULTED (F2): a manually switched-on aux is dropped too. There
+ *    is no separate manual-on memory (the relay itself is the state), so it
+ *    stays OFF after the fault clears; the operator must switch it on again.
+ * Firmware does this for every wiring: aux outputs are NOT assumed to sit
+ * behind K4, so K4 / the heat claim release is never what protects them. */
+void profile_executor_aux_fault_drop(bool pico_tripped)
+{
+    static uint8_t s_last_logged_on_mask;
+    static uint8_t s_fail_logged_mask;
+    uint32_t sources = 0;
+    bool blocked = relay_authority_on_blocked(s_exec.safety, &sources) || pico_tripped;
+    if (!blocked) {
+        s_last_logged_on_mask = 0;
+        return;
+    }
+    /* Review 4 M1: candidates are every non-zone relay, not only enabled/claimed
+     * aux ones: a disabled-while-ON aux or a raw dashboard spare-relay write
+     * leaves the shadow ON with no config bit. */
+    uint8_t zone_union = 0;
+    uint8_t zone_count = zones_config_get_thermo_count();
+    for (uint8_t zi = 0; zi < zone_count; zi++) {
+        uint8_t zm = 0;
+        if (zones_config_get_relay_mask(zi, &zm)) zone_union |= zm;
+    }
+    uint8_t cand = (uint8_t)(((1u << AUX_OUTPUTS_COUNT) - 1u) & ~zone_union);
+    cand |= s_exec.aux_claim_mask;
+    uint8_t shadow = s_exec.io ? kiln_io_get_relay_shadow(s_exec.io) : 0;
+    uint8_t on_mask = 0;
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(cand & bit)) continue;
+        if ((shadow & bit) || s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) on_mask |= bit;
+    }
+    if (on_mask == 0) {
+        s_last_logged_on_mask = 0;
+        return;
+    }
+    /* Log when the set of aux outputs being dropped changes, not every tick
+     * while an OFF write keeps failing (review LOW-2). */
+    if (on_mask != s_last_logged_on_mask) {
+        ESP_LOGW(PE_TAG, "safety fault while not running (sources 0x%02X, pico_tripped=%d): dropping aux mask 0x%02X",
+                 (unsigned)sources, (int)pico_tripped, (unsigned)on_mask);
+        s_last_logged_on_mask = on_mask;
+    }
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(on_mask & bit)) continue;
+        bool off_ok = true;
+        if (s_exec.aux_claim_mask & bit) {
+            off_ok = aux_apply_relay(i, false);
+        } else if (s_exec.io) {
+            /* manual (unclaimed) aux: plain authorized OFF write */
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, 0);
+            if (err == ESP_OK) {
+                relay_off_tracker_note_write(bit, 0);
+                relay_cycles_add(bit, 1u);
+                s_exec.aux[i].commanded_on = false;
+            } else {
+                off_ok = false;
+                if (!(s_fail_logged_mask & bit)) {
+                    ESP_LOGE(PE_TAG, "aux relay %u fault-drop OFF write failed: %s -- retrying each tick",
+                             (unsigned)i + 1u, esp_err_to_name(err));
+                }
+            }
+        }
+        if (off_ok) {
+            s_fail_logged_mask &= (uint8_t)~bit;
+            s_exec.aux[i].actuated_on = false;
+        } else {
+            /* relay may still be energised: keep actuated_on so the dashboard
+             * does not claim OFF, and retry next tick. */
+            if (!(s_fail_logged_mask & bit)) {
+                ESP_LOGE(PE_TAG, "aux relay %u fault-drop OFF not confirmed", (unsigned)i + 1u);
+            }
+            s_fail_logged_mask |= bit;
+        }
+    }
+}
+
+bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok)
+{
+    return rule->enable && rule->temp_cmp != ON_OFF_TEMP_CMP_NONE && !temp_ok;
+}
+
+/* The single producer of on_off_trigger_input_t for both the zone and the aux
+ * paths. Everything the two share is derived here from s_exec: direction bit
+ * from the target rate, run_running/run_paused, dwell OR quasi_dwell,
+ * ramp_lock_held, segment fields, the missing-temperature fail-safe and the
+ * hold-bypass flag. What genuinely differs is an input (on_off_input_params_t).
+ * Must be called with s_exec.lock held. */
+on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_params_t *p, bool *bypass_hold_out)
+{
+    uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
+    if (s_exec.target_rate_c_per_s > 0.0f) {
+        direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
+    } else if (s_exec.target_rate_c_per_s < 0.0f) {
+        direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
+    }
+    bool run_running = (s_exec.state == PROFILE_EXEC_RUNNING);
+    bool failsafe = p->failsafe_base || profile_executor_on_off_temp_unusable(&p->rule, p->temp_ok);
+
+    on_off_trigger_input_t oin = {
+        .failsafe_override = failsafe,
+        .failsafe_state_on = p->src_failsafe_state_on,
+        .guard_5_6_tripped = p->src_guard_5_6_tripped,
+        .run_running = run_running,
+        .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
+        .min_on_s = p->src_min_on_s,
+        .min_off_s = p->src_min_off_s,
+        .rule = p->rule,
+        .current_phase_is_dwell = s_exec.dwelling || p->quasi_dwell,
+        .current_direction = direction_bit,
+        .temp_measurement_c = p->temp_c,
+        .hyst_c = p->src_hyst_c,
+        .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
+        .ramp_lock_held = s_exec.ramp_lock_held,
+        .stretched_this_tick = p->src_stretched_this_tick,
+        .segment_index = s_exec.segment_index,
+        .dt_s = p->src_dt_s,
+    };
+    /* Mirrors on_off_trigger_decide()'s precedence levels 1-3, so a
+     * safety-relevant transition is never held at the actuation layer. */
+    if (bypass_hold_out) {
+        *bypass_hold_out = failsafe || p->src_guard_5_6_tripped || !run_running;
+    }
+    return oin;
+}
+
+/* Zone call site. Authority is per zone (resolved by the caller), the
+ * fail-safe state is the zone's configured one, and a FAULTED run or faulted
+ * zone is a fail-safe term. Must be called with s_exec.lock held. */
+on_off_trigger_input_t profile_executor_zone_on_off_input(uint8_t zi, bool failsafe_state_on, uint16_t min_on_s,
+                                                           uint16_t min_off_s, float hyst_c, bool authority_blocked,
+                                                           bool stretched_this_tick, float dt_s, bool *bypass_hold_out)
+{
+    const zone_runtime_t *z = &s_exec.zones[zi];
+    on_off_input_params_t p = {
+        .failsafe_base = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted || authority_blocked,
+        .src_failsafe_state_on = failsafe_state_on,
+        .src_guard_5_6_tripped = z->guard_state.is_tripped &&
+                             (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
+                              z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
+        .src_min_on_s = min_on_s,
+        .src_min_off_s = min_off_s,
+        .src_hyst_c = hyst_c,
+        .rule = profile_resolve_on_off_rule(&s_exec.profile, zi, s_exec.segment_index),
+        .quasi_dwell = z->on_off_trigger_state.quasi_dwell,
+        .temp_c = z->actual_c,
+        .temp_ok = z->actual_valid && !isnan(z->actual_c),
+        .src_stretched_this_tick = stretched_this_tick,
+        .src_dt_s = dt_s,
+    };
+    return profile_executor_build_on_off_input(&p, bypass_hold_out);
+}
+
+/* Aux call site. Authority is the global relay-authority block (resolved by
+ * the caller), the fail-safe state is fixed OFF (owner decision), the
+ * temperature comes from the entry's tc_zone, and there is no FAULTED term:
+ * the aux tick runs only while RUNNING, and a fault leaves RUNNING through
+ * exec_enter_terminal_state(), whose force_aux_relays_off() is the aux
+ * fail-safe for that path. cfg_ok false (entry unreadable) is a fail-safe.
+ * Must be called with s_exec.lock held. */
+on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const aux_output_t *ax, bool cfg_ok,
+                                                          bool authority_blocked, bool stretched_this_tick,
+                                                          float dt_s, bool *bypass_hold_out)
+{
+    const zone_runtime_t *tz = (cfg_ok && ax->tc_zone < MAX31856_CHANNEL_COUNT) ? &s_exec.zones[ax->tc_zone] : NULL;
+    bool temp_ok = tz && tz->active && !tz->faulted && tz->actual_valid;
+    on_off_input_params_t p = {
+        .failsafe_base = !cfg_ok || authority_blocked,
+        .src_failsafe_state_on = false, /* aux fail-safe is fixed OFF (owner decision) */
+        .src_guard_5_6_tripped = tz && tz->active && tz->guard_state.is_tripped &&
+                             (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
+                              tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP),
+        .src_min_on_s = (ax->min_on_s > 0) ? ax->min_on_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
+        .src_min_off_s = (ax->min_off_s > 0) ? ax->min_off_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT,
+        .src_hyst_c = (ax->hyst_c > 0.0f) ? ax->hyst_c : AUX_HYST_C_DEFAULT,
+        .rule = profile_resolve_on_off_rule(&s_exec.profile, (uint8_t)(PROFILE_RULE_TARGET_AUX_BASE + aux_idx),
+                                            s_exec.segment_index),
+        .quasi_dwell = s_exec.aux[aux_idx].trigger.quasi_dwell,
+        .temp_c = temp_ok ? tz->actual_c : 0.0f,
+        .temp_ok = temp_ok,
+        .src_stretched_this_tick = stretched_this_tick,
+        .src_dt_s = dt_s,
+    };
+    return profile_executor_build_on_off_input(&p, bypass_hold_out);
 }
 
 /* Evaluates every claimed aux for the current segment. Same decision core
@@ -559,13 +794,6 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
     uint8_t enabled_now = aux_outputs_cfg_enabled_mask();
     uint32_t sources = 0;
     bool authority_blocked = relay_authority_on_blocked(s_exec.safety, &sources);
-    uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
-    if (s_exec.target_rate_c_per_s > 0.0f) {
-        direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
-    } else if (s_exec.target_rate_c_per_s < 0.0f) {
-        direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
-    }
-    bool run_running = (s_exec.state == PROFILE_EXEC_RUNNING);
 
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         uint8_t bit = (uint8_t)(1u << i);
@@ -578,7 +806,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             if (s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) {
                 aux_apply_relay(i, false);
             }
-            aux_reset_runtime(i);
+            profile_executor_aux_reset_runtime(i);
             continue;
         }
         aux_output_t ax;
@@ -587,45 +815,10 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             memset(&ax, 0, sizeof(ax));
             ax.tc_zone = AUX_TC_ZONE_NONE;
         }
-        uint16_t min_on_s = (ax.min_on_s > 0) ? ax.min_on_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT;
-        uint16_t min_off_s = (ax.min_off_s > 0) ? ax.min_off_s : (uint16_t)AUX_MIN_ON_OFF_S_DEFAULT;
-        float hyst_c = (ax.hyst_c > 0.0f) ? ax.hyst_c : AUX_HYST_C_DEFAULT;
-
-        on_off_trigger_rule_t rule =
-            profile_resolve_on_off_rule(&s_exec.profile, (uint8_t)(PROFILE_RULE_TARGET_AUX_BASE + i),
-                                        s_exec.segment_index);
-        const zone_runtime_t *tz = (cfg_ok && ax.tc_zone < MAX31856_CHANNEL_COUNT) ? &s_exec.zones[ax.tc_zone] : NULL;
-        bool temp_ok = tz && tz->active && !tz->faulted && tz->actual_valid;
-        bool needs_temp = rule.enable && rule.temp_cmp != ON_OFF_TEMP_CMP_NONE;
-        bool guard_5_6 = tz && tz->active && tz->guard_state.is_tripped &&
-                         (tz->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
-                          tz->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
-        /* No FAULTED term: this tick runs only while RUNNING, and a fault
-         * leaves RUNNING through exec_enter_terminal_state(), whose
-         * force_aux_relays_off() is the aux fail-safe for that path. */
-        bool failsafe = !cfg_ok || authority_blocked || (needs_temp && !temp_ok);
-
-        on_off_trigger_input_t oin = {
-            .failsafe_override = failsafe,
-            .failsafe_state_on = false, /* aux fail-safe is fixed OFF (owner decision) */
-            .guard_5_6_tripped = guard_5_6,
-            .run_running = run_running,
-            .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
-            .failsafe_on_pause = false,
-            .min_on_s = min_on_s,
-            .min_off_s = min_off_s,
-            .rule = rule,
-            .current_phase_is_dwell = s_exec.dwelling || s_exec.aux[i].trigger.quasi_dwell,
-            .current_direction = direction_bit,
-            .temp_measurement_c = temp_ok ? tz->actual_c : 0.0f,
-            .hyst_c = hyst_c,
-            .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
-            .ramp_lock_held = s_exec.ramp_lock_held,
-            .stretched_this_tick = stretched_this_tick,
-            .segment_index = s_exec.segment_index,
-            .dt_s = dt_s,
-        };
-        bool bypass_hold = failsafe || guard_5_6 || !run_running;
+        bool bypass_hold = false;
+        on_off_trigger_input_t oin = profile_executor_aux_on_off_input(i, &ax, cfg_ok, authority_blocked,
+                                                                       stretched_this_tick, dt_s, &bypass_hold);
+        bool failsafe = oin.failsafe_override;
         on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(
             &s_exec.aux[i].trigger, &s_exec.aux[i].actuated_on, &s_exec.aux[i].held_s, &oin, bypass_hold,
             relays_on_count, cap);
@@ -646,12 +839,13 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
         } else if (failsafe) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUX_FAILSAFE;
-        } else if (!rule.enable) {
+        } else if (!oin.rule.enable) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE;
         } else {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
         }
         aux_apply_relay(i, r.actuated_on);
+        if (s_exec.aux[i].commanded_on && dt_s > 0.0f) s_exec.aux[i].on_time_s += dt_s;
     }
 }
 

@@ -39,7 +39,7 @@ MOVE/KEEP table (24 items).
 
 LittleFS at `0xDB0000` on the ESP32-S3's 16 MB flash, added as an
 append-only row in `firmware/KilnFW/partitions.csv` — no existing partition
-moved or resized. **Grown 2026-09-19** (`docs/PROFILE_SLOTS_100_PLAN.md`
+moved or resized. **Grown 2026-09-19** (`docs/PROFILE_SLOTS_100.md`
 section 7 task 5) from its original 512 KiB to `0x250000` (2.31 MiB), taking
 the entire remaining flash tail, to hold the 100-profile-slot table a future
 task (plan task 6, gated on plan task 1) will need; `check_flash_partition_map.ps1`
@@ -158,8 +158,15 @@ Since `9310367b` the status path's transient scratch (the handler buffer, the tw
   previously-committed file is untouched and still what gets read — but a
   non-zero count that persists across a boot (past the point where startup
   sweeps `.tmp/` clean) is worth a look.
-- `"dual_write"` — one entry per migrated item, e.g. `"zones":
-  {"file_backed": true, "file_rev": N, "nvs_rev": N, "diverged": false}`.
+- `"files"` / `"subdirs"` — `files` lists the regular files in the cfg root
+  only (the directory listing skips subdirectories). `subdirs` summarizes each
+  known one-level subdirectory as `{"name","file_count","size_bytes",
+  "unknown_size"}`; today that is `profiles` (`prof<N>.json`, `hidden.json`).
+  A summary rather than names keeps the response inside its fixed buffer and
+  matches `/api/cfgfs/file`, which refuses names containing `/`.
+- `"dual_write"` — one row per migrated item in `dual_write.items[]`, e.g.
+  `{"name": "zones", "file_backed": true, "file_rev": N, "nvs_backed": true,
+  "nvs_rev": N, "diverged": false, "nvs_stale": false, "migration_deferred": false}`.
   `file_backed` means this item currently reads from its file rather than
   falling back to NVS. `file_rev`/`nvs_rev` are the write-sequence counters
   the two sides carry to resolve which copy is newer if they disagree.
@@ -208,12 +215,28 @@ Since `9310367b` the status path's transient scratch (the handler buffer, the tw
   third time (see `2e88e90a`'s commit message for the second time it did).
   Zone normals (table item 2) now has its bridge and its own row
   (`zone_normals`, above), so nothing is NVS-only any more.
+- `"nvs_permanent"` — stores that stay in NVS by design, so an operator does
+  not read them as pending migrations. The list is hand-maintained in
+  `cfg_fs_status.c` and mirrors every store that uses NVS with no cfg file
+  path: the original boot-ordering and safety set (`wifi_creds`,
+  `boot_guard_counter`, `watchdog_panic_disable`, `ota_record`,
+  `crash_report`, `touch_cal`, `run_state_breadcrumb`, `safety_mirror_esp`,
+  `rp2040_config_store`, `logs`, `coredump`) plus, since 2026-10-07,
+  `firing_shadow`, `kiln_cfg_swap`, `aux_convert_journal`,
+  `pico_update_attempts`, `pico_image_manifest`, `estop_verification` and
+  `dualwrite_window`. (`profiles_favorites`, `live_profile`,
+  `ct_verify_store` and `setup_wizard_progress` were listed here until they
+  moved to cfg files later the same day; see the last section.) The web-auth and TOTP
+  credential stores are also NVS-only but are deliberately not named here
+  (`check_kiln_auth_config_isolation.ps1` keeps credential names out of every
+  config-path file). `iter_tune_store` is deliberately absent pending an
+  owner ruling. `test_cfg_fs_status.c` pins the post-2026-10-07 names.
 
 ## If the filesystem fails to mount
 
-Nothing to do at the board — every item falls back to its NVS copy and the
-board runs on firmware defaults for anything genuinely file-only (nothing
-is file-only yet; see above). A persistent mount failure (as opposed to
+Saves are refused until cfg mounts (owner decision 2026-10-06, see "cfg
+unmounted: refuse and prompt the format" below). Loads still fall back to the
+legacy NVS copy, so the board boots and runs on the last values it had. A persistent mount failure (as opposed to
 "not yet formatted") is reported via `/api/cfgfs`'s `status` field; when the failure is the ask-first gate refusing to format,
 the LCD/web dashboard banner described above (`/api/status`) shows it too.
 No safety decision
@@ -238,6 +261,8 @@ mirror behind would let the file win the next boot and undo the reset.
 
 ## State of the migration, 2026-09-07
 
+**Update 2026-10-06:** the "dual-write" label in this table is historical. Every item marked dual-write below is now cfg-only on save, with NVS kept as a read-only legacy source (see "NVS dual-write close" at the end of this document).
+
 Of 24 inventoried runtime-changeable items:
 
 | # | Item | Status | Commit |
@@ -246,6 +271,7 @@ Of 24 inventoried runtime-changeable items:
 | 2 | Zone normals | dual-write (`zone_normals.dat` via `pref_cfg_fs`; `/api/cfgfs` row `zone_normals`) | `208de3d4` |
 | 3 | Relay names | dual-write (`relay_names.dat` via `pref_cfg_fs`; `/api/cfgfs` row `relay_names`) | `288dc91c` |
 | - | Aux outputs (spare-relay on/off; not one of the 24) | dual-write (`aux_out.dat` via `pref_cfg_fs`; NVS key `aux_out_cfg`, rev key `aux_out_rev`, both in `kiln_nvs`; `/api/cfgfs` row `aux_outputs`; `persist/aux_outputs_cfg.c`; NVS authoritative). Factory reset: the `kiln` and `all` scopes erase `kiln_nvs` and `kiln_scope_cfg_files.c` lists `aux_out.dat`, so aux returns to all-disabled. In the backup export/import as the top-level `aux_outputs` array (omitted when the store is quarantined; an absent key on import keeps the board's aux configuration). `docs/SPARE_RELAY_ONOFF_PLAN.md` | `1f70c419` |
+| - | Relay cycle counters (`relay_cycles.dat`) | Backup: exported as top-level `relay_cycles` `{"hw_relays","c0".."c4"}`; import is raise-only (never lowers a live count), refuses a mismatched `hw_relays`, absent key preserves. Not backed up, by decision (2026-10-09, `docs/audits/BACKUP_CFGFS_COVERAGE_AUDIT_2026-10-09.md`): `iter_tune.bin`, `ki_base.dat` (re-learned by tuning), firing_stats history. | - |
 | 4 | Relay cycle counters | dual-write | `762bb29e` bridge, `2e88e90a` /api/cfgfs reporting |
 | 5 | User fire profile slots 0-7 | dual-write | `530dc2f7` |
 | 6 | Hidden-builtin profile mask | dual-write, `/cfg/profiles/hidden.json` (NVS key `prof_bihid` + rev `prof_bihid_rev`; `/api/cfgfs` row `profiles_hidden`) | `2749be53` |
@@ -301,7 +327,10 @@ and 1 (23) is on the separate `logs` track.
   board is next reflashed and this note is updated with what actually
   happened. See `docs/RELEASE_HARDENING_PLAN.md` section 10 for the
   decision this drove (parked, not finished, pending bench time).
-- **Dual-write window.** Every migrated item currently writes both the
+- **Dual-write window (closing, see "NVS dual-write close" at the end of this
+  document).** Superseded: the paragraph below describes the window as it was
+  before the owner decision of 2026-10-05; saves are now cfg-file-only. Every
+  migrated item used to write both the
   file and its NVS copy; reads prefer the file. This closes — NVS writers
   removed — only once, on the bench board: 20 consecutive clean boots with
   no mount failure/fallback/defaults-banner, one complete firing run
@@ -498,3 +527,264 @@ on the board with no NVS writer removed:
 The board's own counter reads `consecutive_clean_boots` 24 (target 20),
 `firing_complete:true`, `restore_verified:true`, `window_may_close:true`.
 This is a report only; removing the NVS writers remains an owner decision.
+
+## NVS dual-write close (owner decision 2026-10-05)
+
+The three preconditions in "Open items" were met on the bench (the evidence
+section above, plus the backup round-trip drift fix on origin/main and a
+fresh soak), so the dual-write window closes: every item that `/api/cfgfs`
+lists (15 rows) is saved to the `cfg` partition only. This section is the
+plan; it was written before the code was finished and the implementation
+follows it.
+
+### Read order (unchanged in shape, NVS stays readable)
+
+1. The cfg file wins when it is valid.
+2. If the file is missing or invalid and a valid legacy NVS copy exists, the
+   item loads from NVS and is then migrated once: a verified write into cfg
+   (`cfg_fs_write_atomic` already reads the file back). A board upgrading
+   from older firmware therefore keeps its settings and ends up file-backed
+   after its first boot.
+3. If both exist and differ, the strictly higher rev wins. At equal revs with
+   different bytes NVS wins, because the only writer that can produce that
+   state is a legacy or rolled-back firmware that wrote NVS without touching
+   the file (`pref_cfg_fs_resolve()`, unchanged).
+4. After the close a save writes the file at rev `max(nvs_rev, file_rev) + 1`
+   and never touches the NVS copy, so the NVS rev stays old and the file rev
+   is strictly higher.
+
+Marker and migration writes that are not config saves stay as they are:
+relay_cycles' NVS-to-NVS default-partition migration, adaptive_tune's
+enable-mask migrated marker. Each is documented in the code where it lives.
+Accepted trade-off (2026-10-09, `docs/audits/DEV_FIRMWARE_REVIEW_2_2026-10-09.md` finding 8): after
+the relay_cycles migration copy to `kiln_nvs` is read back and verified, the old default-partition
+`relay_cyc` key is erased, so a rollback to pre-split firmware sees no legacy copy and its relay cycle
+counts restart from 0. The current firmware loses nothing.
+The iter_tune store was an exception here until 2026-10-07 and is now closed
+like the rest (last section).
+
+### Write failure: fail loud, never fall back to NVS
+
+A failed cfg write (partition not mounted, `cfg_fs_write_atomic` or its
+read-back verify failing, injected failure in tests) is returned to the
+caller as an error and logged as "NOT persisted ... NVS is no longer
+written". The in-RAM value takes effect first, exactly as before, so a
+running firing is not interrupted by a storage fault, but the caller (HTTP
+handler, backup import, LCD page) is told the save did not stick and the rev
+only advances after a verified write. Nothing silently writes the NVS copy
+instead; that would recreate the stale-NVS problem below in the opposite
+direction. A board with no cfg partition mounted (recovery mode, mount
+failure) therefore cannot persist these settings until cfg mounts; this is
+deliberate, and the owner confirmed it on 2026-10-06 (see the last section).
+
+### What `/api/cfgfs` and readiness report afterwards
+
+- `dual_write.write_mode` is `"cfg_only"`.
+- A per-item row gains `nvs_stale`: true when the legacy NVS copy is valid,
+  its content differs from the file, and the file rev is strictly higher.
+  This is the expected state of any item saved after the upgrade and is not a
+  fault. `diverged` keeps its meaning for the dangerous cases only: equal
+  revs or an NVS rev ahead of the file, with different content. The two
+  flags are mutually exclusive (`cfg_fs_status_item_nvs_stale()`).
+- The profiles and firing_stats aggregate rows are reclassified per slot and
+  per id the same way.
+- The `dualwrite_window` counters (clean boots, firing complete, restore
+  verified) stay as a historical record; the window they gate is closed.
+- Readiness item `cfg_fs` is now `not_done` when cfg is unmounted (see the last section).
+
+### Rollback hazard
+
+An older firmware reads NVS only, so after any post-close save it sees the
+values from before the upgrade (or from the last save made by a pre-close
+firmware), not the current ones. This is the same class as the `zones_cfg`
+schema-bump hazard in CLAUDE.md's `ota_rollback_esp()` note: flash is left
+alone, reflashing the newer firmware restores everything, but a firing
+started right after a rollback runs on stale values. After any rollback,
+read back `control_get_zones` and the other settings before heating. The
+legacy NVS copies are deliberately left in place for this reason (an older
+image still boots with something sane) and are only erased by the delete
+paths below.
+
+### Delete design change: erase NVS first, checked, then the file
+
+Previously a delete removed the file and left the NVS copy, which was safe
+only because every save rewrote both. With NVS no longer written, deleting
+only the file would resurrect the stale NVS copy through read step 2. So a
+delete now erases the legacy NVS keys first and checks the result; if that
+fails the delete fails loud with the file left intact; only then is the cfg
+file deleted. There are no tombstones: after the erase the item is simply
+absent in both stores, which already means "defaults". The profiles delete
+also persists its rev bump, and `kiln_cfg_store_quarantine_clear` erases the
+legacy NVS blob and rev key explicitly so a cleared quarantine does not
+re-trigger from the old NVS copy.
+
+### Tests
+
+Host tests cover: a cfg-only save (NVS untouched), legacy NVS-only load plus
+migration into cfg, cfg write failure (error returned, rev unadvanced, no NVS
+fallback, file intact), delete not resurrecting, `nvs_stale` versus
+`diverged`, and the backup export/import round trip. The key ones were
+negative-tested.
+
+### Results and review pass (2026-10-06)
+
+Mutators report failure. Every public `kiln_cfg_store` mutator (save,
+clone, apply-id, delete, rename via the new `kiln_cfg_store_rename_ex`,
+`set_active_id_raw`) now returns false when the cfg file write fails, rolls
+its RAM change back, and puts `KILN_CFG_PERSIST_FAIL_TEXT` in the reason.
+`kiln_cfg_http.c` answers such a failure with HTTP 500 (400 stays for
+ordinary refusals) and `backup_import.c` appends the reason to its error.
+`kiln_cfg_store_quarantine_clear` refuses from a PSRAM-stacked caller before
+its legacy NVS erase, like every other write path in the file.
+
+Verification:
+
+- Host tests (`check_00_kilnfw_host_tests`, clean build each run): pass.
+  New `test_cfg_fs_all_mutators_report_persist_failure`; the unmounted,
+  mount-failed, tie-break, stale-delete and nvs_fallback tests were updated
+  to the fail-loud behaviour.
+- Negative test: an NVS write injected into `update_settings.c`'s save path
+  made `test_update_settings` fail, and, after adding an NVS-absent
+  assertion to the update-settings round trip in `test_backup_import.c`,
+  `test_backup_import` fails too. The source was restored by hand, compared
+  byte-identical, and a clean rebuild passed.
+- Target build: `.dram0.bss` 100200 B against the 101000 ceiling (800 B
+  headroom, same as origin/main; `zones_config_store.c`'s verify buffer moved
+  from a static to `persist_scratch_alloc()` to keep it there). Stack budget
+  checks pass: httpd honest free 3240 B (39.6% of 8192 B), executor 3132 B
+  (51.0% of 6144 B). `check_uri_handler_cap`: 171 routes against a cap of
+  175. The `/api/cfgfs` 4608 B buffer is part of a `persist_scratch_alloc()`
+  allocation, not a stack buffer.
+- `flash_worker_lint.py`: seven stale `ALLOWLIST` entries (the converted
+  preference files) removed; lint clean.
+
+Behaviour when the cfg partition is NOT mounted (owner decision 2026-10-06,
+last section): these paths refuse to save and return an error rather than falling
+back to NVS: `pref_cfg_fs_save`/`pref_cfg_fs_commit` (unit_pref,
+update_settings, aux_outputs_cfg, display_power_cfg, ramp_assist_cfg,
+time_sync, relay_cycles snapshot, adaptive_tune ki baseline, hidden-builtin
+mask, relay_names, zone_normals); every `kiln_cfg_store` mutator and, through
+them, backup import; `profiles_cfg_fs_save`/`_delete`; `zones_config_cfg_fs_save`
+(zones POST, autosave, migration write-back, import); `firing_stats_cfg_fs_write`.
+the iter_tune store and the four stores moved on 2026-10-07 (last section).
+Loads fall back to the legacy NVS copy.
+
+### cfg unmounted: refuse and prompt the format (owner decision 2026-10-06)
+
+Decision: "Refuse, and prompt the format." Saves stay refused while cfg is not
+mounted, and every surface now says why and what to do instead of failing
+quietly or reporting success.
+
+- One shared message, `CFG_FS_NOT_MOUNTED_TEXT` in `persist/cfg_fs.h`:
+  "settings storage (cfg) not mounted - confirm format via POST
+  /api/cfgfs/format_confirm". It is a string literal so handlers can
+  concatenate it into JSON without a stack buffer.
+- Shared HTTP helper, `common/cfg_fs_refusal_http.h` (header-only):
+  `cfg_fs_http_refuse_if_unmounted(req)` is a pre-check at the top of each save
+  handler, before any RAM mutation, and answers `503` with
+  `{"ok":false,"error":"<text>"}`. `cfg_fs_http_persist_failed(req)` is the
+  post-failure response: `503` with the same text when cfg is unmounted, `500`
+  `{"ok":false,"error":"could not be saved to flash"}` when it is mounted but
+  the write failed. Neither is ever a success body.
+- Save routes using it: unit preference, update settings, `settings/tz`,
+  `settings/display_power`, ramp assist, relay cycles reset and restore, the
+  profile save, delete, builtin hide and builtin restore routes, `POST
+  /api/zones` (pre-check, and a failed zones or relay-names save is now a 500
+  instead of `ok`), `POST /api/aux_outputs` (the aux core maps
+  `ESP_ERR_INVALID_STATE` to a 409 "zone conflict", so it needs the pre-check),
+  the four `kiln_cfg_http.c` mutators (save, clone, delete, rename; a persist
+  failure with cfg unmounted is a 503 instead of a 500), and the backup import
+  job (a real import is refused with 503 before anything is applied; a dry run
+  still works because it writes nothing).
+- `GET /api/readiness` item `cfg_fs` is `not_done` (was `deliberately_off`)
+  when cfg is unmounted, with a detail naming `POST /api/cfgfs/format_confirm`,
+  and a variant saying "awaiting format confirmation" when the ask-first gate
+  refused to auto-format. It stays non-gating for a firing: only the four gate
+  items (recovery_mode, safety_trip, crash_report, estop_verified) block one,
+  because a firing runs from the config already in RAM.
+- LCD: the one existing path is the home-page strip shown while the format
+  confirmation is pending; its text now reads "SAVES REFUSED: CONFIG FS NEEDS
+  FORMAT CONFIRM -- see web Settings". No new page. The web banner says the
+  same. A plain unmounted board with no pending confirmation has no LCD
+  message; the readiness item and the 503 bodies carry it.
+- Recovery mode: `cfg_fs_mount_or_skip(true, ...)` deliberately never mounts
+  cfg (recovery must work with the partition erased), so saves are refused
+  there too. Because the partition then still holds the board's only
+  up-to-date config, recovery mode must never advise a format:
+  `cfg_fs_skipped_for_recovery()` records the skip, the 503 body uses
+  `CFG_FS_RECOVERY_SKIPPED_TEXT` ("... not mounted in recovery mode - leave
+  recovery mode (POST /api/ota/esp/recovery_exit) to save settings; do not
+  format"), the readiness `cfg_fs` detail says the same, and `POST
+  /api/cfgfs/format_confirm` answers `409` instead of formatting. The separate
+  `firmware/KilnFW_recovery` image does not link `cfg_fs` at all and has no
+  settings save routes. No mount was added to recovery.
+- Healthy-cfg format guard: `POST /api/cfgfs/format_confirm` answers `409` when cfg is
+  mounted and healthy, because cfg is the only writable copy; the explicit override is
+  `?force_healthy=1` (decision in `cfg_fs_confirm_decide()`, `cfg_fs_format_gate.c`).
+  The unmounted/needs-format path and its settings-page banner are unchanged; recovery mode
+  stays refused even with the override. MCP `cfgfs_format` reports the 409 as a refusal and
+  takes `force_healthy=False` (still needs `confirm=True`).
+- Profile delete: `nvs_erase_slot()` erases the legacy `profN` key first, then
+  clears only that slot's bit and rev entry in the legacy NVS bitmap and rev
+  array (read-modify-write). Writing the whole in-RAM bitmap and rev array, as
+  the dual-write code did, made every other slot saved after the close look
+  like an equal-rev divergence (the stale NVS copy won at the next boot) and
+  deleted the file of any slot created after the close.
+- Persisted read-backs: `zones_config_persisted_equals_ram()` (formerly
+  `zones_config_nvs_equals_ram()`) and `aux_outputs_cfg_verify_persisted()`
+  re-read the cfg file, not NVS. The zone-to-aux conversion's final read-back
+  (`zone_aux_convert_http.c`, `op_verify_persisted()`) calls both; read
+  against NVS, which no save updates any more, every conversion would have
+  ended in a failed read-back. The profile retarget step's per-slot read-back
+  (`profiles_http.c`, `retarget_verify_slot()`) re-reads the slot's cfg file
+  through `profiles_cfg_fs_load_raw()` at the RAM rev for the same reason.
+- `iter_tune_store.c`: superseded 2026-10-07, see the last section. It used to
+  keep writing NVS and skip its cfg write silently when cfg was unmounted.
+
+Tests: `test_readiness_commissioning.c` pins the item status and detail text
+(recovery variant included), `test_cfg_fs.c` pins the recovery-skip flag and
+text, `test_profiles_http.c`
+(`test_pcfg_delete_does_not_revert_or_drop_other_file_only_slots`) covers the
+profile delete,
+`test_zones_http.c` (`test_zones_persisted_equals_ram_reads_the_cfg_file`) and
+`test_aux_outputs_store.c` (`test_raw_verify_and_journal`) cover the
+read-backs, `test_zones_http.c` also covers the 503 and 500 responses of `POST /api/zones` and
+the shared helper, and `test_backup_import.c` covers the update-settings
+route's 503 and 500 responses.
+
+### Five more stores closed or moved (owner decision 2026-10-07)
+
+The owner extended the close to the remaining NVS-only stores that hold user
+data. Same pattern as the rest: the NVS copy stays readable (a read fallback,
+migrated into the cfg file at first boot, never erased by the migration), a
+save writes the cfg file only at a rev above both sides, and a save while cfg
+is unmounted is refused with an error naming the cause and pointing at
+`POST /api/cfgfs/format_confirm`. Every one reports a `dual_write` row in
+`GET /api/cfgfs` (the list is now 20 rows) and is covered by the generic cfg
+file backup (`full_board_backup.py`, `GET`/`POST /api/cfgfs/file`).
+
+| Store | cfg file | Notes |
+|---|---|---|
+| `iter_tune_store` | `iter_tune.bin` | Closed. Its save runs from the autotune path with no request to answer, so a refused save is logged loudly and the in-RAM result still applies for the run. |
+| `profiles_favorites` | `prof_fav.bin` | Moved from `profiles_nvs`. The RAM masks apply live even when the save is refused, and revert at the next boot. |
+| `live_profile` | `prof_live_rec.bin`, `prof_live_work.bin` | Moved from `profiles_nvs`. The working profile is larger than the 128 B inline limit, so `pref_cfg_fs` gained heap-backed large items (up to 2048 B) with `pref_cfg_fs_load_var()` and `pref_cfg_fs_remove()`. Fork, edit and decide refuse when cfg is unmounted, with the message in the HTTP error. `live_profile_clear()` erases NVS first, then the files, so the fallback cannot resurrect a cleared edit. |
+| `ct_verify_store` | `ct_verify.bin` | Moved from `kiln_nvs`. The CT verdict save returns `ESP_ERR_INVALID_STATE` when cfg is unmounted. |
+| `setup_wizard_progress` | `setup_wiz.bin` | Moved from `kiln_nvs`. Section 5 of `docs/SETUP_WIZARD.md` explains why the record is no longer NVS-only. |
+
+Stay in NVS by owner decision: `firing_shadow`, `run_state`, `kiln_cfg_swap`
+and the aux convert journal. They are crash and transaction state that must
+survive a cfg fault, not user data.
+
+Factory reset: the kiln scope deletes `ct_verify.bin`, `setup_wiz.bin` and
+`iter_tune.bin`; the profiles scope deletes `prof_fav.bin`,
+`prof_live_rec.bin` and `prof_live_work.bin`. The mirror check
+(`tools/check_kiln_scope_cfg_mirrors.ps1`) covers the kiln list.
+
+Rollback hazard: as for the earlier close, an older firmware reads NVS only,
+so after any post-close save it sees the pre-close values of these stores.
+
+Tests: `test_iter_tune_store.c`, `test_profiles_http.c` (favorites),
+`test_live_profile.c`, `test_zones_http.c` (CT verdict) and
+`test_setup_wizard_progress.c` each cover cfg-only storage, the refusal when
+unmounted, and the legacy NVS migration. `test_cfg_fs_status.c` pins the
+status row set. Bench-unverified.

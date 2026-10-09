@@ -225,13 +225,13 @@ void firing_stats_snapshot(const zone_runtime_t *z, float setpoint_span_c,
     }
 }
 
-/* ---- last-run-started RAM cache (PROFILE_SLOTS_100_PLAN.md review LOW,
+/* ---- last-run-started RAM cache (PROFILE_SLOTS_100.md review LOW,
  * "list perf") ---------------------------------------------------------
  *
  * profiles_catalog_http.c's GET /api/profiles calls profile_executor_
  * last_run_started_unix_s() once per profile id -- up to PROFILES_MAX_COUNT +
  * g_builtin_profile_count times per request (36 today; ~132 once
- * PROFILES_MAX_COUNT reaches 100, docs/PROFILE_SLOTS_100_PLAN.md) -- and that
+ * PROFILES_MAX_COUNT reaches 100, docs/PROFILE_SLOTS_100.md) -- and that
  * function used to do a full firing_stats_load() (an NVS blob read, cfg-fs
  * resolve, and a 1364 B heap_caps_malloc) on EVERY call, for EVERY request,
  * on the httpd_worker task. This cache makes that O(1) NVS per request:
@@ -632,9 +632,12 @@ bool firing_stats_load(uint8_t profile_id, profile_firing_history_blob_t *out)
  * this same file, static) and firing_stats_cfg_fs_load_raw() are both pure
  * reads, no resolve/resync call anywhere in this function, matching every
  * sibling *_get_dualwrite_status(). */
-void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
-                                        bool *diverged)
+void firing_stats_get_dualwrite_status_ex(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                           bool *diverged, bool *nvs_stale)
 {
+    if (nvs_stale) {
+        *nvs_stale = false;
+    }
     if (file_valid) {
         *file_valid = false;
     }
@@ -651,7 +654,7 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
         *diverged = false;
     }
 
-    bool any_file_valid = false, any_nvs_valid = false, any_diverged = false;
+    bool any_file_valid = false, any_nvs_valid = false, any_diverged = false, any_stale = false;
     uint32_t max_file_rev = 0, max_nvs_rev = 0;
 
     /* 2026-10-04: now PSRAM first via persist_scratch_alloc(): this read-only
@@ -689,7 +692,14 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
 
         bool content_equal = f_valid && n_valid && memcmp(f_blob, n_blob, sizeof(*f_blob)) == 0;
         if (cfg_fs_status_item_diverged(f_valid, n_valid, content_equal)) {
-            any_diverged = true;
+            // Saves are cfg-file-only since the dual-write close, so a file
+            // with a strictly higher rev and different content is the legacy
+            // NVS copy going stale, not a divergence (cfg_fs_status.h).
+            if (cfg_fs_status_item_nvs_stale(true, f_rev, n_rev)) {
+                any_stale = true;
+            } else {
+                any_diverged = true;
+            }
         }
         if (f_valid) {
             any_file_valid = true;
@@ -722,6 +732,15 @@ void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
     if (diverged) {
         *diverged = any_diverged;
     }
+    if (nvs_stale) {
+        *nvs_stale = any_stale;
+    }
+}
+
+void firing_stats_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged)
+{
+    firing_stats_get_dualwrite_status_ex(file_valid, file_rev, nvs_valid, nvs_rev, diverged, NULL);
 }
 
 /* Persists rec as the newest entry for its own profile_id -- read-modify-
@@ -799,72 +818,35 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
     blob->runs[0] = *rec;
     blob->count = keep + 1;
 
-    // cfg-filesystem dual-write (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
-    // item 7): FILE FIRST (best-effort, failure logged and swallowed -- NVS
-    // below remains the persistence guarantee exactly as before this pass),
-    // THEN NVS (authoritative) -- same ordering every other *_cfg_fs bridge
-    // in this codebase uses. Rev is read-then-incremented here (not cached
-    // in RAM) since this function can run from either the executor's own
-    // task or an operator's halt() on a different task, with no shared
-    // in-memory state between them -- reading NVS's own rev key is the
-    // cheap, always-correct source of truth for "what rev came before this
-    // save."
-    uint32_t new_rev = firing_stats_cfg_fs_read_rev(rec->profile_id) + 1;
+    // FILE ONLY (docs/CONFIG_FILESYSTEM.md "NVS dual-write closed"): the
+    // verified cfg-file write is the only persistence. A failure is logged
+    // loudly and this run's history is NOT recorded (no cache update). Rev is
+    // max(file rev, legacy NVS rev) + 1, read fresh (this function can run
+    // from the executor task or an operator halt() on another task, so no
+    // shared RAM copy), so a board upgraded from dual-write firmware keeps
+    // the file strictly above its stale NVS blob.
+    uint32_t cur_rev = firing_stats_cfg_fs_read_file_rev(rec->profile_id);
+    uint32_t nvs_rev = firing_stats_cfg_fs_read_rev(rec->profile_id);
+    uint32_t new_rev = (cur_rev > nvs_rev ? cur_rev : nvs_rev) + 1;
     esp_err_t file_err = firing_stats_cfg_fs_save(rec->profile_id, blob, new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(PE_TAG, "firing_stats_persist(%u): file write failed: %s -- NVS remains the source "
-                         "of truth this boot", (unsigned)rec->profile_id, esp_err_to_name(file_err));
-    }
-
-    char key[16];
-    snprintf(key, sizeof(key), "fs_%u", (unsigned)rec->profile_id);
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE,
-                                    FIRING_STATS_NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): hal_kv_open failed: %s", (unsigned)rec->profile_id,
-                 hal_status_to_name(err));
-        free(blob);
-        return;
-    }
-    err = hal_kv_set_blob(&h, key, blob, sizeof(*blob));
-    if (err != HAL_OK) {
-        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
-                 hal_status_to_name(err));
-        hal_kv_close(&h);
-        free(blob);
-        return;
-    }
-    err = hal_kv_commit(&h);
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): write failed: %s", (unsigned)rec->profile_id,
-                 hal_status_to_name(err));
+    if (file_err != ESP_OK) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): cfg file write failed: %s -- this run's history was not saved",
+                 (unsigned)rec->profile_id, esp_err_to_name(file_err));
         free(blob);
         return;
     }
     ESP_LOGI(PE_TAG, "firing stats persisted for profile %u (%s), %u/%u history entries",
              (unsigned)rec->profile_id, rec->profile_name, (unsigned)blob->count,
              (unsigned)PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH);
-    // The NVS blob commit above just succeeded (this point is unreachable on
-    // any earlier failure return), so this run is now genuinely the newest
-    // one on disk -- update the last-run cache to match before anything else
-    // can observe a stale value. See this file's "last-run-started RAM
-    // cache" section above.
+    // The verified file write just succeeded (every earlier failure returned),
+    // so this run is now genuinely the newest one on disk -- update the
+    // last-run cache to match. See this file's "last-run-started RAM cache"
+    // section above.
     firing_stats_cache_store(rec->profile_id, rec->run_started_unix_s);
-    // Rev key write happens AFTER the blob's own NVS commit succeeds -- if
-    // this fails, the next load's nvs_rev is stale-low, which just means a
-    // FUTURE divergence check might slightly under-trust NVS; the blob
-    // itself (already committed above) is never at risk.
-    esp_err_t rev_err = firing_stats_cfg_fs_write_rev(rec->profile_id, new_rev);
-    if (rev_err != ESP_OK) {
-        ESP_LOGW(PE_TAG, "firing_stats_persist(%u): rev key write failed: %s", (unsigned)rec->profile_id,
-                 esp_err_to_name(rev_err));
-    }
     free(blob);
 }
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: erases this id's
+/* docs/PROFILE_SLOTS_100.md section 7 task 10: erases this id's
  * firing-history blob ("fs_<id>", profiles_nvs/fire_stats) plus the
  * cfg-filesystem mirror and its rev key (firing_stats_cfg_fs_delete()) --
  * called from profiles_http.c's nvs_erase_slot() when a profile SLOT is
@@ -882,7 +864,7 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
  * already guards before reaching here, but a future caller on a
  * PSRAM-stacked task must not be able to bypass this by skipping that
  * caller's own check. */
-void firing_stats_erase(uint8_t profile_id)
+esp_err_t firing_stats_erase(uint8_t profile_id)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PE_TAG, "firing_stats_erase: REFUSING -- calling task's stack is in external "
@@ -891,8 +873,13 @@ void firing_stats_erase(uint8_t profile_id)
                          "through a task with an internal-SRAM stack instead -- see "
                          "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
                          "worker for the established pattern.");
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
+    // NVS-FIRST, FILE-LAST: the legacy "fs_<id>" blob goes first and is checked;
+    // erasing the file first would let a failed blob erase be re-migrated into a
+    // fresh file at the next resolve, resurrecting old history. On failure
+    // nothing later is touched and the error is returned. Then the rev key and
+    // the file (firing_stats_cfg_fs_delete()).
     char key[16];
     snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
     hal_kv_handle_t h;
@@ -901,34 +888,36 @@ void firing_stats_erase(uint8_t profile_id)
     if (err != HAL_OK) {
         ESP_LOGW(PE_TAG, "firing_stats_erase(%u): hal_kv_open failed: %s", (unsigned)profile_id,
                  hal_status_to_name(err));
-    } else {
-        hal_status_t erase_err = hal_kv_erase_key(&h, key);
-        if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
-            ESP_LOGW(PE_TAG, "firing_stats_erase(%u): erase failed: %s", (unsigned)profile_id,
-                     hal_status_to_name(erase_err));
-        } else {
-            err = hal_kv_commit(&h);
-            if (err != HAL_OK) {
-                ESP_LOGW(PE_TAG, "firing_stats_erase(%u): commit failed: %s", (unsigned)profile_id,
-                         hal_status_to_name(err));
-            }
-        }
-        hal_kv_close(&h);
+        return hal_status_to_esp_err(err);
     }
-
+    hal_status_t erase_err = hal_kv_erase_key(&h, key);
+    if (erase_err != HAL_OK && erase_err != HAL_NOT_FOUND) {
+        ESP_LOGW(PE_TAG, "firing_stats_erase(%u): erase failed: %s", (unsigned)profile_id,
+                 hal_status_to_name(erase_err));
+        hal_kv_close(&h);
+        return hal_status_to_esp_err(erase_err);
+    }
+    err = hal_kv_commit(&h);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        ESP_LOGW(PE_TAG, "firing_stats_erase(%u): commit failed: %s", (unsigned)profile_id,
+                 hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
+    }
     esp_err_t file_err = firing_stats_cfg_fs_delete(profile_id);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+    if (file_err != ESP_OK) {
         ESP_LOGW(PE_TAG, "firing_stats_erase(%u): cfg-fs delete failed: %s", (unsigned)profile_id,
                  esp_err_to_name(file_err));
+        return file_err;
     }
 
-    // This id's history is gone (or was already empty) on both sides above,
-    // best-effort or not -- 0 ("never fired") is the correct cached value
-    // either way, matching what a fresh firing_stats_load() would now report.
-    // Unconditional, not gated on the erase/delete results above, for the
-    // same "best-effort, never blocks the caller" reasoning as the rest of
-    // this function -- see this file's "last-run-started RAM cache" section.
+    // The legacy NVS keys and the file are both gone (or were already empty),
+    // so 0 ("never fired") is the correct cached value, matching what a fresh
+    // firing_stats_load() would now report. Reached only on full success: every
+    // failure above returned early and left the cache alone. See this file's
+    // "last-run-started RAM cache" section.
     firing_stats_cache_store(profile_id, 0);
+    return ESP_OK;
 }
 
 /* Called from the tick loop's non-RUNNING branch (DONE/FAULTED) and from

@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_safety_cfg_param_table_mirror_drift.ps1 -- wrapper so tools/
 # run_all_checks.ps1's check_*.ps1 glob picks up safety_cfg_param_table_
 # mirror_drift_check.py without any further wiring. Same "find python, run

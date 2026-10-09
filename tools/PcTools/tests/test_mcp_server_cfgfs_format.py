@@ -83,6 +83,48 @@ class ConfirmedFormatTest(_Base):
         self.assertIn("409", result)
         self.assertNotIn("HTTP 428", result)
 
+    def test_healthy_cfg_409_is_reported_as_refusal_with_firmware_message(self):
+        msg = ("refused: cfg is mounted and healthy, and is the only copy of the saved zones; "
+               "To format anyway, repeat the request as POST /api/cfgfs/format_confirm?force_healthy=1")
+        err = ota_http.OtaHttpError("refused", status=409, detail=msg)
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs", side_effect=err) as format_mock:
+            result = msi.cfgfs_format(confirm=True)
+        self.assertTrue(result.startswith("refused:"))
+        self.assertIn("mounted and healthy", result)
+        self.assertIn("nothing was formatted", result)
+        self.assertNotIn("system_mode_gate", result)
+        # Default call must NOT carry the override.
+        format_mock.assert_called_once_with("10.0.0.5")
+
+    def test_force_healthy_false_never_sends_override(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status",
+                                         side_effect=[_BEFORE, _AFTER]), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs",
+                                         return_value={"ok": True, "status_code": 200, "detail": "ok"}) as m:
+            msi.cfgfs_format(confirm=True, force_healthy=False)
+        self.assertNotIn("force_healthy", m.call_args.kwargs)
+
+    def test_force_healthy_true_passes_override(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status",
+                                         side_effect=[_BEFORE, _AFTER]), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs",
+                                         return_value={"ok": True, "status_code": 200, "detail": "ok"}) as m:
+            result = msi.cfgfs_format(confirm=True, force_healthy=True)
+        m.assert_called_once_with("10.0.0.5", force_healthy=True)
+        self.assertIn("ok - cfg partition formatted", result)
+
+    def test_force_healthy_without_confirm_is_still_dry_run(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs") as m:
+            result = msi.cfgfs_format(confirm=False, force_healthy=True)
+        self.assertIn("DRY RUN", result)
+        m.assert_not_called()
+
     def test_readback_failure_after_post_does_not_claim_success(self):
         """The POST succeeded but the confirming re-read failed -- must be
         reported as an unverified after-state, never a plain 'ok'."""

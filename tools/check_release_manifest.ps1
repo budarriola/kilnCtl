@@ -25,16 +25,10 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $failures = New-Object System.Collections.Generic.List[string]
 function Note-Fail([string]$m) { $failures.Add($m); Write-Host "FAIL: $m" -ForegroundColor Red }
 
-$python = $null
-$venvPython = Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"
-if ((Test-Path $venvPython) -and (Test-Path (Join-Path $repoRoot "tools\PcTools\.venv\pyvenv.cfg"))) {
-    $python = $venvPython
-} else {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
-    if (-not $cmd) { Write-Host "FAIL: no venv python and no python on PATH"; exit 1 }
-    $python = $cmd.Source
-}
+# Shared resolver: worktree venv -> KILNCTL_PCTOOLS_PYTHON -> main tree venv -> PATH.
+. (Join-Path $PSScriptRoot "lib_pctools_python.ps1")
+$python = Resolve-PcToolsPython -RepoRoot $repoRoot
+if (-not $python) { Write-Host "FAIL: no PcTools python (worktree venv, KILNCTL_PCTOOLS_PYTHON, main tree venv) and no python on PATH"; exit 1 }
 
 # 1. unit tests ------------------------------------------------------------------
 $testFile = Join-Path $repoRoot "tools\PcTools\tests\test_release_manifest.py"
@@ -47,8 +41,10 @@ elseif ($out -notmatch 'Ran (\d+) tests' -or [int]$Matches[1] -lt 15) { Note-Fai
 else { Write-Host "ok: $($Matches[0])" }
 
 # 2. bad tag refused -------------------------------------------------------------
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "1.0" | Out-Null
-if ($LASTEXITCODE -ne 1) { Note-Fail "make_release.ps1 -Tag 1.0 exited $LASTEXITCODE, expected 1 (refusal)" }
+# Require the semver refusal text too: a bare exit 1 is also what any later gate (dirty tree, build, ...)
+# returns, so with the semver gate removed this passed anyway (vacuity audit 2026-10-07).
+$o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "make_release.ps1") -Tag "1.0" 2>&1 | Out-String
+if ($LASTEXITCODE -ne 1 -or $o -notmatch "is not semver") { Note-Fail "make_release.ps1 -Tag 1.0 exited $LASTEXITCODE without the 'is not semver' refusal, expected 1 with it:`n$o" }
 else { Write-Host "ok: non-semver tag refused" }
 
 # 2b. provenance refusal ------------------------------------------------------------
@@ -94,6 +90,17 @@ $ErrorActionPreference = "Stop"
 if ($rc -ne 1 -or $o -notmatch "-NotesFile .* does not exist") { Note-Fail "missing -NotesFile was not refused (exit $rc)" }
 else { Write-Host "ok: missing -NotesFile refused" }
 
+# 2b2. the .dram0.bss gate must refuse (exit 1, REFUSED) when the checker cannot measure/passes nothing ----
+$ErrorActionPreference = "Continue"
+$bogusElf = Join-Path ([System.IO.Path]::GetTempPath()) ("no_such_" + [guid]::NewGuid().ToString("N") + ".elf")
+$cmd = ". '$(Join-Path $PSScriptRoot "make_release.ps1")' -LoadFunctionsOnly; Test-DramBssBudget '$python' '$bogusElf' 0; Write-Host REACHED_AFTER_GATE"
+$o = & powershell -NoProfile -ExecutionPolicy Bypass -Command $cmd 2>&1 | Out-String
+$rc = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($rc -ne 1 -or $o -notmatch "dram0.bss budget check failed" -or $o -match "REACHED_AFTER_GATE") { Note-Fail "Test-DramBssBudget did not refuse an unmeasurable ELF (exit $rc):`n
+$o" }
+else { Write-Host "ok: .dram0.bss gate refuses an unmeasurable ELF" }
+
 # 2c. real Get-AssetToFile against a local redirect server ------------------------
 . (Join-Path $PSScriptRoot "make_release.ps1") -LoadFunctionsOnly
 $srvPy = Join-Path ([System.IO.Path]::GetTempPath()) ("relsrv_" + [guid]::NewGuid().ToString("N") + ".py")
@@ -122,14 +129,23 @@ srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 print(srv.server_address[1], flush=True)
 srv.serve_forever()
 '@ | Set-Content -LiteralPath $srvPy -Encoding ascii
-$srv = Start-Process -FilePath $python -ArgumentList @($srvPy) -RedirectStandardOutput $srvOut -PassThru -WindowStyle Hidden
+$srvErr = $srvOut + '.err'
+$srv = Start-Process -FilePath $python -ArgumentList @($srvPy) -RedirectStandardOutput $srvOut -RedirectStandardError $srvErr -PassThru -WindowStyle Hidden
 try {
     $port = $null
-    for ($i = 0; $i -lt 100 -and -not $port; $i++) {
+    # Deadline-based, not an iteration count: under heavy parallel load python startup alone
+    # can exceed 10 s. Give up early only if the server process itself died.
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 120 -and -not $port) {
         Start-Sleep -Milliseconds 100
         if (Test-Path $srvOut) { $line = (Get-Content -LiteralPath $srvOut -ErrorAction SilentlyContinue | Select-Object -First 1); if ($line -match '^\d+$') { $port = $line } }
+        if (-not $port -and $srv.HasExited) { break }
     }
-    if (-not $port) { Note-Fail "local redirect server did not start" }
+    if (-not $port) {
+        $why = if ($srv.HasExited) { "server exited (code $($srv.ExitCode))" } else { "timed out after 120 s waiting for its port" }
+        $se = if (Test-Path $srvErr) { (Get-Content -LiteralPath $srvErr -Raw -ErrorAction SilentlyContinue) } else { "" }
+        Note-Fail "local redirect server did not start: $why; stderr: $se"
+    }
     else {
         $dl = Join-Path ([System.IO.Path]::GetTempPath()) ("reldl_" + [guid]::NewGuid().ToString("N"))
         try {

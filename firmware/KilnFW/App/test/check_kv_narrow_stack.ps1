@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_kv_narrow_stack.ps1 -- guards ota_page.html's ".kv" fix (owner
 # report: "the RP2040 (safety processor) section of the fw update looks
 # smashed on the phone").

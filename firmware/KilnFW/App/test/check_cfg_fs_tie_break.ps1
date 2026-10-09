@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_cfg_fs_tie_break.ps1 -- pins the ONE invariant the cfg-filesystem
 # dual-write bridges share: the divergence tie-break between the file copy
 # and the NVS copy must give the file the win only on a STRICTLY higher rev.

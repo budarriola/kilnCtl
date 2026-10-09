@@ -87,6 +87,40 @@ static void reset_all(void)
     zone_normals_load(); /* resets the in-RAM record and rev counter to blank */
 }
 
+/* Stages what a LEGACY (pre dual-write-close) firmware left in NVS: a valid
+ * blob with one measured normal plus its rev key. Nothing writes these keys
+ * any more. */
+static void stage_legacy_nvs(uint8_t zone, float amps, uint32_t rev)
+{
+    zone_normals_cfg_t z;
+    memset(&z, 0, sizeof(z));
+    z.version = ZONE_NORMALS_CFG_VERSION;
+    z.normal_current_a[zone] = amps;
+    z.measured_mask = (uint8_t)(1u << zone);
+    z.crc32 = 0;
+    z.crc32 = esp_crc32_le(0, (const uint8_t *)&z, sizeof(z));
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK,
+               "stage: open NVS");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_ZONE_NORMALS, &z, sizeof(z)) == HAL_OK, "stage: blob");
+    TEST_CHECK(hal_kv_set_u32(&h, NVS_KEY_ZONE_NORMALS_REV, rev) == HAL_OK, "stage: rev");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "stage: commit");
+    hal_kv_close(&h);
+}
+
+static bool nvs_normals_absent(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
+        return true;
+    }
+    uint8_t blob[sizeof(zone_normals_cfg_t)];
+    size_t len = sizeof(blob);
+    hal_status_t g = hal_kv_get_blob(&h, NVS_KEY_ZONE_NORMALS, blob, &len);
+    hal_kv_close(&h);
+    return g != HAL_OK;
+}
+
 static bool normal_of(uint8_t zone, float *amps)
 {
     bool measured = false;
@@ -95,18 +129,23 @@ static bool normal_of(uint8_t zone, float *amps)
 
 static void test_unmounted_uses_nvs_only(void)
 {
-    TEST_SECTION("zone normals cfg_fs: cfg_fs unmounted -- save/load behave exactly like NVS-only");
+    TEST_SECTION("zone normals cfg_fs: cfg_fs unmounted -- a legacy NVS copy still loads, a save fails loud");
     reset_all();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted");
-    TEST_CHECK(zone_normals_set(1, 7.5f), "zone_normals_set succeeds with no `cfg` partition");
+    stage_legacy_nvs(1, 7.5f, 1);
     zone_normals_load();
     float a = 0;
-    TEST_CHECK(normal_of(1, &a) && a == 7.5f, "value reloaded from NVS alone");
+    TEST_CHECK(normal_of(1, &a) && a == 7.5f, "legacy value loaded from NVS alone");
+    TEST_CHECK(!zone_normals_set(2, 4.0f), "zone_normals_set fails loud with no `cfg` partition");
+    zone_normals_load();
+    TEST_CHECK(normal_of(1, &a) && a == 7.5f, "the NVS copy was not overwritten by the failed save");
+    float b2 = 0;
+    TEST_CHECK(!normal_of(2, &b2), "the failed save did not leak into NVS");
 }
 
-static void test_save_writes_both(void)
+static void test_save_writes_file_only(void)
 {
-    TEST_SECTION("zone normals cfg_fs: save writes the file and NVS");
+    TEST_SECTION("zone normals cfg_fs: save writes the file only; NVS is never written");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     zone_normals_load();
@@ -116,15 +155,7 @@ static void test_save_writes_both(void)
     bool ok = false;
     pref_cfg_fs_load_raw(ZONE_NORMALS_FILE_PATH, sizeof(raw), NULL, &raw, &rev, &ok);
     TEST_CHECK(ok && rev == 1 && raw.normal_current_a[0] == 3.25f, "file holds rev 1 with the saved normal");
-    hal_kv_handle_t h;
-    uint8_t blob[sizeof(zone_normals_cfg_t)];
-    size_t len = sizeof(blob);
-    uint32_t nrev = 0;
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK, "open NVS");
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_ZONE_NORMALS, blob, &len) == HAL_OK && len == sizeof(blob),
-               "NVS blob present");
-    TEST_CHECK(hal_kv_get_u32(&h, NVS_KEY_ZONE_NORMALS_REV, &nrev) == HAL_OK && nrev == 1, "NVS rev is 1");
-    hal_kv_close(&h);
+    TEST_CHECK(nvs_normals_absent(), "NVS blob absent -- the dual-write window is closed");
 }
 
 static void test_nvs_empty_file_present_resolves_from_file(void)
@@ -133,7 +164,7 @@ static void test_nvs_empty_file_present_resolves_from_file(void)
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     zone_normals_load();
-    TEST_CHECK(zone_normals_set(2, 11.0f), "save dual-writes");
+    TEST_CHECK(zone_normals_set(2, 11.0f), "save writes the file");
     fake_kv_reset_all(); /* NVS wiped, file survives */
     hal_kv_init_partition(KILN_NVS_PARTITION);
     zone_normals_load();
@@ -151,22 +182,20 @@ static esp_err_t failing_write_fn(const char *p, const void *d, size_t n)
 
 static void test_both_present_higher_rev_wins(void)
 {
-    TEST_SECTION("zone normals cfg_fs: both present and diverged -- higher rev wins, loser resynced");
+    TEST_SECTION("zone normals cfg_fs: legacy NVS copy with a higher rev wins and is migrated into the file");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     zone_normals_load();
-    TEST_CHECK(zone_normals_set(0, 1.0f), "rev 1 on both sides");
-    pref_cfg_fs_set_write_fn(failing_write_fn);
-    TEST_CHECK(zone_normals_set(0, 2.0f), "rev 2 lands in NVS only; file write fails but save still OK");
-    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(zone_normals_set(0, 1.0f), "rev 1 in the file");
+    stage_legacy_nvs(0, 2.0f, 7);
     zone_normals_load();
     float a = 0;
-    TEST_CHECK(normal_of(0, &a) && a == 2.0f, "NVS (rev 2) beats the stale file (rev 1)");
+    TEST_CHECK(normal_of(0, &a) && a == 2.0f, "NVS (rev 7) beats the file (rev 1)");
     zone_normals_cfg_t raw;
     uint32_t rev = 0;
     bool ok = false;
     pref_cfg_fs_load_raw(ZONE_NORMALS_FILE_PATH, sizeof(raw), NULL, &raw, &rev, &ok);
-    TEST_CHECK(ok && rev == 2 && raw.normal_current_a[0] == 2.0f, "file resynced to rev 2");
+    TEST_CHECK(ok && rev >= 7 && raw.normal_current_a[0] == 2.0f, "file migrated at the NVS rev");
 }
 
 static void test_future_version_file_rejected(void)
@@ -191,15 +220,17 @@ static void test_future_version_file_rejected(void)
     TEST_CHECK(!normal_of(0, &a), "zone 0 stays unmeasured: stale-version file not adopted, NVS empty");
 }
 
-static void test_nvs_failure_does_not_advance_rev(void)
+static void test_cfg_failure_does_not_advance_rev(void)
 {
-    TEST_SECTION("zone normals cfg_fs: NVS write failure leaves the RAM rev unadvanced");
+    TEST_SECTION("zone normals cfg_fs: a cfg write failure is reported and leaves the RAM rev unadvanced");
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     zone_normals_load();
     TEST_CHECK(zone_normals_set(0, 1.0f), "rev 1 saved");
-    fake_kv_script_next_write_status(HAL_IO);
-    TEST_CHECK(!zone_normals_set(0, 2.0f), "save reports failure when NVS write fails");
+    pref_cfg_fs_set_write_fn(failing_write_fn);
+    TEST_CHECK(!zone_normals_set(0, 2.0f), "save reports failure when the cfg write fails");
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(nvs_normals_absent(), "nothing fell back to NVS");
     TEST_CHECK(zone_normals_set(0, 3.0f), "next save succeeds");
     zone_normals_cfg_t raw;
     uint32_t rev = 0;
@@ -214,7 +245,7 @@ static void test_kiln_reset_leaves_blank(void)
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     zone_normals_load();
-    TEST_CHECK(zone_normals_set(1, 6.0f), "save dual-writes");
+    TEST_CHECK(zone_normals_set(1, 6.0f), "save writes the file");
     fake_kv_reset_all(); /* what erasing kiln_nvs does */
     hal_kv_init_partition(KILN_NVS_PARTITION);
     TEST_CHECK(kiln_scope_cfg_files_delete(NULL) == ESP_OK, "kiln-scope cfg delete succeeds");
@@ -332,12 +363,10 @@ static void test_dualwrite_status_row(void)
     zone_normals_load();
     TEST_CHECK(zone_normals_set(0, 1.0f) && zone_normals_set(0, 2.0f) && zone_normals_set(1, 3.0f), "three saves");
     zone_normals_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
-    TEST_CHECK(fv && nv && fr == 3 && nr == 3 && !dv, "both sides valid at rev 3, same content, not diverged");
+    TEST_CHECK(fv && !nv && fr == 3 && nr == 0 && !dv, "file valid at rev 3, no NVS copy, not diverged");
 
-    /* NVS ahead with different content: file write fails on save 4. */
-    pref_cfg_fs_set_write_fn(failing_write_fn);
-    TEST_CHECK(zone_normals_set(2, 9.0f), "rev 4 lands in NVS only");
-    pref_cfg_fs_reset_write_fn_for_test();
+    /* A legacy NVS copy ahead of the file with different content: diverged. */
+    stage_legacy_nvs(2, 9.0f, 4);
     zone_normals_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
     TEST_CHECK(fv && nv && fr == 3 && nr == 4 && dv, "file rev 3 vs NVS rev 4 with differing content: diverged");
 
@@ -358,11 +387,11 @@ static void test_dualwrite_status_row(void)
 void run_test_zone_normals_cfg_fs(void)
 {
     test_unmounted_uses_nvs_only();
-    test_save_writes_both();
+    test_save_writes_file_only();
     test_nvs_empty_file_present_resolves_from_file();
     test_both_present_higher_rev_wins();
     test_future_version_file_rejected();
-    test_nvs_failure_does_not_advance_rev();
+    test_cfg_failure_does_not_advance_rev();
     test_kiln_reset_leaves_blank();
     test_kiln_scope_deletes_every_listed_file();
     test_profiles_scope_deletes_slot_and_stats_files();

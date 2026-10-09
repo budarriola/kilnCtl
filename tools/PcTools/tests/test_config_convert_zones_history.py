@@ -190,6 +190,83 @@ def test_kiln_package_with_old_blob_converts(cur):
     assert int(out["pkg_hash"], 16) == cc._kiln_pkg_compute_hash(1, new_blob, pico)
 
 
+# ---- kiln_configs[] inside a backup document -------------------------------
+
+def _pkg_doc(blob: bytes, pico=None, name="slot"):
+    pico = pico if pico is not None else []
+    return {
+        "kind": "kilnctl_kiln_package", "pkg_schema": 1, "name": name, "esp_blob_hex": blob.hex(),
+        "esp_blob_len": len(blob), "pico": pico, "source_board_id": "x",
+        "pkg_hash": f"0x{cc._kiln_pkg_compute_hash(1, blob, pico):08x}",
+    }
+
+
+def _backup_with(entries):
+    return {"kind": "kilnctl_backup", "version": 5, "profiles": [], "zones": [], "kiln_configs": entries}
+
+
+def test_backup_kiln_configs_two_packages_both_converted(cur):
+    old21 = _downgrade(cur, 21)
+    old24 = _downgrade(cur, 24)
+    doc = _backup_with([
+        {"id": 1, "name": "a", "is_active": True, "package": _pkg_doc(old21, name="a")},
+        {"id": 2, "name": "b", "is_active": False, "package": _pkg_doc(old24, name="b")},
+    ])
+    out, report = cc.convert_document(doc, 5)
+    assert not report.failed
+    assert len(out["kiln_configs"]) == 2
+    for entry, want_src in zip(out["kiln_configs"], (21, 24)):
+        blob = bytes.fromhex(entry["package"]["esp_blob_hex"])
+        assert len(blob) == 896 and blob[0] == cc.ZONES_CFG_VERSION
+        assert int(entry["package"]["pkg_hash"], 16) == cc._kiln_pkg_compute_hash(1, blob, [])
+        assert entry["is_active"] in (True, False)
+    # the unconverted input is untouched (no aliasing)
+    assert doc["kiln_configs"][0]["package"]["esp_blob_hex"] == old21.hex()
+    detail = " ".join(o.detail for o in report.outcomes if o.field == "package")
+    assert "v21 -> v" in detail and "v24 -> v" in detail
+    assert not any(o.field == "kiln_configs" and o.action == "dropped" for o in report.outcomes)
+
+
+def test_backup_kiln_configs_bad_slot_reported_and_kept_not_dropped(cur):
+    good = _pkg_doc(_downgrade(cur, 24), name="good")
+    bad = _pkg_doc(_downgrade(cur, 24), name="bad")
+    bad["pkg_hash"] = "0xdeadbeef"  # tampered: fails its own integrity check
+    doc = _backup_with([
+        {"id": 1, "name": "good", "package": good},
+        {"id": 2, "name": "bad", "package": bad},
+        {"id": 3, "name": "legacy", "omitted": "no_pico_half"},
+    ])
+    out, report = cc.convert_document(doc, 5)
+    assert report.failed
+    assert len(out["kiln_configs"]) == 3  # nothing dropped
+    assert bytes.fromhex(out["kiln_configs"][0]["package"]["esp_blob_hex"])[0] == cc.ZONES_CFG_VERSION
+    assert out["kiln_configs"][1] == doc["kiln_configs"][1]  # failed slot carried through unchanged
+    assert out["kiln_configs"][2] == doc["kiln_configs"][2]
+    failed = [o for o in report.outcomes if o.action == "failed"]
+    assert len(failed) == 1 and "kiln_configs[1]" in failed[0].scope and "pkg_hash" in failed[0].detail
+    assert report.as_dict()["failed"] is True
+
+
+def test_backup_kiln_configs_main_exits_nonzero_on_failed_slot(cur, tmp_path):
+    bad = _pkg_doc(_downgrade(cur, 24))
+    bad["pkg_hash"] = "0x1"
+    src = tmp_path / "b.json"
+    src.write_text(__import__("json").dumps(_backup_with([{"id": 1, "name": "x", "package": bad}])))
+    dst = tmp_path / "o.json"
+    assert cc.main([str(src), "--to-version", "5", "-o", str(dst), "--quiet"]) == 2
+    assert dst.exists()  # output still written; the failed slot is in it unchanged
+
+
+def test_backup_kiln_configs_dropped_for_target_older_than_v5(cur):
+    """A v4 target predates kiln_configs[]: the slots are reported dropped and
+    left out, never re-added to a document an older firmware reads."""
+    doc = _backup_with([{"id": 1, "name": "a", "package": _pkg_doc(_downgrade(cur, 24), name="a")}])
+    out, report = cc.convert_document(doc, 4)
+    assert "kiln_configs" not in out
+    assert any(o.field == "kiln_configs" and o.action == "dropped" for o in report.outcomes)
+    assert not report.failed
+
+
 # ---- mirror of the firmware's frozen structs -------------------------------
 
 def test_mirror_frozen_sizes_and_offsets_match_header():

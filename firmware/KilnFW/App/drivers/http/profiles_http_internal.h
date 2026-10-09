@@ -51,6 +51,8 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "profiles_slot_bitmap.h"
+#include "aux_outputs_cfg.h"
+#include "MAX31856.h"
 
 /* ---- shared JSON escaping --------------------------------------------------
  * Opus review of 5dd23944, finding 3: the per-file copies of this helper
@@ -175,7 +177,7 @@ extern const char *PROFILES_TAG;
  * handlers and mutated by profiles_edit_http.c's post/delete handlers.
  *
  * `used_bitmap` widened uint8_t -> profiles_slot_bitmap_t (docs/
- * PROFILE_SLOTS_100_PLAN.md section 7 task 1) so an id past 7 (up to the
+ * PROFILE_SLOTS_100.md section 7 task 1) so an id past 7 (up to the
  * 128-id ceiling section 2 of that plan documents) can be addressed once
  * PROFILES_MAX_COUNT is later raised -- still 8 today, so behavior and the
  * persisted NVS byte are unchanged. Every reader/writer goes through
@@ -186,7 +188,7 @@ typedef struct {
     profiles_slot_bitmap_t used_bitmap;
 } profiles_state_t;
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3: this struct (dominated by
+/* docs/PROFILE_SLOTS_100.md section 7 task 3: this struct (dominated by
  * profiles[PROFILES_MAX_COUNT], and growing further once task 6 raises
  * PROFILES_MAX_COUNT) is lazily allocated from PSRAM rather than reserved as
  * a .bss global -- see profiles_storage_ensure()'s doc comment in
@@ -265,12 +267,20 @@ size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t c
  * static) only because test_profiles_cfg_fs.c inspects it directly to set up
  * fixtures without going through the full NVS load path. */
 extern uint32_t s_profile_rev[PROFILES_MAX_COUNT];
+/* true = the slot's rev floor could not be established this boot (NVS load failed and the
+ * rev array was unreadable, slot has no file): saves/deletes to it are refused. */
+extern bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
 
 /* ---- profiles_http.c -------------------------------------------------------
  * NVS persistence primitives -- profiles_catalog_http.c never calls these
  * (read-only), profiles_edit_http.c's post/delete/builtin-hide handlers do. */
 esp_err_t nvs_save_slot(uint8_t id);
 esp_err_t nvs_erase_slot(uint8_t id);
+/* Save mutex: bracket RAM assignment + nvs_save_slot_locked() in one section. */
+void profiles_save_lock(void);
+void profiles_save_unlock(void);
+esp_err_t nvs_erase_slot_locked(uint8_t id); /* caller holds profiles_save_lock(); no stats prune */
+esp_err_t nvs_save_slot_locked(uint8_t id); /* caller holds profiles_save_lock() */
 
 /* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY
  * configured max_temp_c of one of its zone_mask zones -- advisory-only
@@ -296,6 +306,24 @@ bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err
  * point). See its definition in profiles_http.c for the owner's IO-target
  * design rule. */
 bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *err_msg, size_t err_cap);
+
+/* The zone/aux configuration the two validators above read. NULL (the default for
+ * validate_io_segment()/validate_on_off_rules()) means the LIVE config. Backup import's pass 1
+ * passes the config the import WILL produce (candidate zone_type/relay_mask, the post-import aux
+ * entries) so a profile that only becomes valid once the same backup's zones and aux outputs
+ * have landed is accepted, and one that never will be is refused before anything is written.
+ * Implementation: profiles_validate.c (textually included by profiles_http.c). */
+typedef struct {
+    uint8_t zone_count;                              /* zones scanned for relay ownership */
+    uint8_t zone_type[MAX31856_CHANNEL_COUNT];       /* zone_type_t values */
+    uint8_t zone_relay_mask[MAX31856_CHANNEL_COUNT]; /* bit N-1 = relay N */
+    aux_output_t aux[AUX_OUTPUTS_COUNT];             /* effective (read-side) aux view, index = relay-1 */
+} profile_validate_state_t;
+
+bool validate_io_segment_in_state(const profile_segment_t *seg, uint8_t seg_num, const profile_validate_state_t *st,
+                                  char *err_msg, size_t err_cap);
+bool validate_on_off_rules_in_state(const profile_t *candidate, const profile_validate_state_t *st, char *err_msg,
+                                    size_t err_cap);
 
 /* Widened non-`static` (docs/LIVE_PROFILE_EDIT_PLAN.md section 8 item 1) so
  * the live-edit handler decodes the identical x-www-form-urlencoded shape

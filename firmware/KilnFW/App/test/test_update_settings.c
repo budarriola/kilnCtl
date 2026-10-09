@@ -54,11 +54,28 @@ static void tus_cfg_fs_reset(void)
     pref_cfg_fs_reset_write_fn_for_test();
 }
 
-static void tus_boot(void)
+/* Fresh NVS, fresh scratch `cfg` mount: the normal board. Saves go to the
+ * cfg file only (docs/CONFIG_FILESYSTEM.md, NVS dual-write close). */
+static void tus_boot_unmounted(void)
 {
+    tus_cfg_fs_reset();
     fake_kv_reset_all();
     hal_kv_init_partition("kiln_nvs");
     update_settings_reset_ram_for_test();
+}
+
+static void tus_boot(void)
+{
+    tus_boot_unmounted();
+    TEST_CHECK(cfg_fs_init(TUS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+}
+
+static esp_err_t tus_failing_write(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
 }
 
 static void tus_reboot(void)
@@ -197,30 +214,31 @@ static void test_repo_copy(void)
     TEST_CHECK(!update_settings_repo_copy(out, 0), "zero capacity is refused");
 }
 
-static uint32_t tus_nvs_rev(void)
+/* The cfg file's rev (0 when no valid file): a write is observed through it. */
+static uint32_t tus_file_rev(void)
 {
-    bool nv = false;
+    bool fv = false;
     uint32_t rev = 0;
-    update_settings_get_dualwrite_status(NULL, NULL, &nv, &rev, NULL);
-    return nv ? rev : 0u;
+    update_settings_get_dualwrite_status(&fv, &rev, NULL, NULL, NULL);
+    return fv ? rev : 0u;
 }
 
 static void test_default_canonicalised_and_unchanged_skip(void)
 {
     tus_boot();
     update_settings_start();
-    // fake_kv only counts reads, so a write is observed through the NVS rev instead.
-    uint32_t c0 = tus_nvs_rev();
+    // A write is observed through the cfg file's rev.
+    uint32_t c0 = tus_file_rev();
     TEST_CHECK(update_settings_set(UPDATE_SETTINGS_DEFAULT_REPO) == ESP_OK, "set(default) on a stock board succeeds");
-    TEST_CHECK(tus_nvs_rev() == c0, "set(default) on a stock board writes nothing (canonical empty)");
+    TEST_CHECK(tus_file_rev() == c0, "set(default) on a stock board writes nothing (canonical empty)");
     TEST_CHECK(update_settings_set("") == ESP_OK, "set(empty) on a stock board succeeds");
-    TEST_CHECK(tus_nvs_rev() == c0, "set(empty) on a stock board writes nothing");
+    TEST_CHECK(tus_file_rev() == c0, "set(empty) on a stock board writes nothing");
 
     TEST_CHECK(update_settings_set("same/value") == ESP_OK, "first set writes");
-    uint32_t c1 = tus_nvs_rev();
-    TEST_CHECK(c1 > c0, "the first set touched NVS");
+    uint32_t c1 = tus_file_rev();
+    TEST_CHECK(c1 > c0, "the first set wrote the cfg file");
     TEST_CHECK(update_settings_set("same/value") == ESP_OK, "an identical set succeeds");
-    TEST_CHECK(tus_nvs_rev() == c1, "an identical set writes nothing (no flash wear, no rev bump)");
+    TEST_CHECK(tus_file_rev() == c1, "an identical set writes nothing (no flash wear, no rev bump)");
 
     // Setting the default spelled out over a custom value stores "unset", reads back as default.
     TEST_CHECK(update_settings_set(UPDATE_SETTINGS_DEFAULT_REPO) == ESP_OK, "set(default) over a custom value");
@@ -228,11 +246,10 @@ static void test_default_canonicalised_and_unchanged_skip(void)
     TEST_CHECK(update_settings_repo_is_default(), "after a reboot the default is in use");
     tus_blob_t blob;
     memset(&blob, 0xAB, sizeof(blob));
-    hal_kv_handle_t h;
-    hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, "kiln_nvs");
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_get_blob(&h, "update_repo", &blob, &len) == HAL_OK && len == sizeof(blob), "blob present");
-    hal_kv_close(&h);
+    uint32_t frev = 0;
+    bool fok = false;
+    pref_cfg_fs_load_raw(UPDATE_SETTINGS_FILE_PATH, sizeof(blob), NULL, &blob, &frev, &fok);
+    TEST_CHECK(fok, "cfg file present");
     TEST_CHECK(blob.repo[0] == '\0', "the stored blob holds empty for the default, not the default string");
 }
 
@@ -240,9 +257,11 @@ static void test_persist_failure_retries_on_same_value(void)
 {
     tus_boot();
     update_settings_start();
-    fake_kv_script_next_write_status(HAL_IO);
-    TEST_CHECK(update_settings_set("flaky/write") != ESP_OK, "a failed NVS write is reported, not swallowed");
+    pref_cfg_fs_set_write_fn(tus_failing_write);
+    TEST_CHECK(update_settings_set("flaky/write") != ESP_OK, "a failed cfg write is reported, not swallowed");
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(strcmp(update_settings_repo(), "flaky/write") == 0, "RAM took the value regardless");
+    TEST_CHECK(tus_file_rev() == 0, "the failed write advanced no rev and left no file");
     // Same value again must retry the persist, not hit the unchanged-skip.
     TEST_CHECK(update_settings_set("flaky/write") == ESP_OK, "retrying the same value after a failure persists it");
     tus_reboot();
@@ -251,9 +270,7 @@ static void test_persist_failure_retries_on_same_value(void)
 
 static void test_dualwrite_status(void)
 {
-    tus_cfg_fs_reset();
     tus_boot();
-    TEST_CHECK(cfg_fs_init(TUS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
     update_settings_start();
     bool fv = true, nv = true, dv = true;
     uint32_t fr = 7, nr = 7;
@@ -261,18 +278,17 @@ static void test_dualwrite_status(void)
     TEST_CHECK(!fv && !nv && !dv, "nothing written yet: neither side valid, not diverged");
     update_settings_set("dual/status");
     update_settings_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
-    TEST_CHECK(fv && nv, "after a set both sides are valid");
-    TEST_CHECK(fr == nr && fr >= 1, "revs agree");
-    TEST_CHECK(!dv, "identical content: not diverged");
+    TEST_CHECK(fv && !nv, "after a set only the cfg file is valid: NVS is no longer written");
+    TEST_CHECK(fr >= 1 && nr == 0, "file rev advanced, no NVS rev");
+    TEST_CHECK(!dv, "one side only: not diverged");
     tus_blob_t other;
     memset(&other, 0, sizeof(other));
     other.version = 1;
     strcpy(other.repo, "other/content");
     tus_put_nvs_blob(&other, sizeof(other), 5);
     update_settings_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
-    TEST_CHECK(dv, "both valid with different content: diverged");
+    TEST_CHECK(fv && nv && dv, "a legacy NVS copy with different content beside the file: diverged");
     update_settings_get_dualwrite_status(NULL, NULL, NULL, NULL, NULL);
-    cfg_fs_deinit();
 }
 
 static void test_corrupt_storage_falls_back_to_default(void)
@@ -322,18 +338,20 @@ static void test_corrupt_storage_falls_back_to_default(void)
     TEST_CHECK(strcmp(update_settings_repo(), "a/b") == 0, "control: a well-formed blob loads");
 }
 
-static void test_dual_write_and_divergence(void)
+static void test_cfg_only_and_legacy_precedence(void)
 {
-    tus_cfg_fs_reset();
     tus_boot();
-    TEST_CHECK(cfg_fs_init(TUS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+    TEST_CHECK(cfg_fs_is_available(), "cfg_fs is mounted");
     update_settings_start();
     TEST_CHECK(update_settings_set("dual/write") == ESP_OK, "set() succeeds with cfg_fs mounted");
     bool exists = false;
     cfg_fs_exists(UPDATE_SETTINGS_FILE_PATH, &exists);
-    TEST_CHECK(exists, "the cfg file was written alongside NVS");
+    TEST_CHECK(exists, "the cfg file was written");
+    bool nv = true;
+    update_settings_get_dualwrite_status(NULL, NULL, &nv, NULL, NULL);
+    TEST_CHECK(!nv, "NVS was NOT written: the dual-write window is closed");
 
-    // NVS gets a newer value behind the file's back: higher rev wins and the file is resynced.
+    // A legacy NVS copy with a higher rev behind the file's back: it wins and the file is resynced.
     tus_blob_t newer;
     memset(&newer, 0, sizeof(newer));
     newer.version = 1;
@@ -341,29 +359,46 @@ static void test_dual_write_and_divergence(void)
     tus_put_nvs_blob(&newer, sizeof(newer), 9);
     tus_reboot();
     TEST_CHECK(strcmp(update_settings_repo(), "newer/nvs") == 0, "higher-rev NVS wins over the older file");
+    TEST_CHECK(tus_file_rev() == 9, "the file was resynced at the NVS rev");
 
-    // File-only value (NVS wiped, as after a lost NVS partition): the file is adopted.
+    // NVS wiped: the (resynced) file carries the value alone.
+    fake_kv_reset_all();
+    hal_kv_init_partition("kiln_nvs");
     tus_reboot();
-    hal_kv_handle_t h;
-    hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "kiln_nvs");
-    hal_kv_erase_key(&h, "update_repo");
-    hal_kv_erase_key(&h, "upd_repo_rev");
-    hal_kv_commit(&h);
-    hal_kv_close(&h);
-    tus_reboot();
-    TEST_CHECK(strcmp(update_settings_repo(), "newer/nvs") == 0, "NVS empty: the (resynced) file value is adopted");
-    cfg_fs_deinit();
+    TEST_CHECK(strcmp(update_settings_repo(), "newer/nvs") == 0, "NVS empty: the file value is adopted");
 }
 
-static void test_mount_failed_is_nvs_only(void)
+static void test_legacy_nvs_migrates_to_file(void)
 {
-    tus_cfg_fs_reset();
     tus_boot();
+    tus_blob_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.version = 1;
+    strcpy(legacy.repo, "legacy/upgrade");
+    tus_put_nvs_blob(&legacy, sizeof(legacy), 3);
     update_settings_start();
-    update_settings_set("nvs/only");
-    TEST_CHECK(cfg_fs_init("this_directory_does_not_exist_at_all", NULL) != ESP_OK, "mount fails as documented");
+    TEST_CHECK(strcmp(update_settings_repo(), "legacy/upgrade") == 0, "legacy NVS-only setting loads");
+    TEST_CHECK(tus_file_rev() == 3, "and is migrated into the cfg file at the NVS rev");
+    fake_kv_reset_all();
+    hal_kv_init_partition("kiln_nvs");
     tus_reboot();
-    TEST_CHECK(strcmp(update_settings_repo(), "nvs/only") == 0, "unmounted cfg: NVS value still loads");
+    TEST_CHECK(strcmp(update_settings_repo(), "legacy/upgrade") == 0, "the migrated file survives without NVS");
+}
+
+static void test_unmounted_loads_legacy_and_set_fails(void)
+{
+    tus_boot_unmounted();
+    tus_blob_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.version = 1;
+    strcpy(legacy.repo, "nvs/only");
+    tus_put_nvs_blob(&legacy, sizeof(legacy), 2);
+    TEST_CHECK(cfg_fs_init("this_directory_does_not_exist_at_all", NULL) != ESP_OK, "mount fails as documented");
+    update_settings_start();
+    TEST_CHECK(strcmp(update_settings_repo(), "nvs/only") == 0, "unmounted cfg: the legacy NVS value still loads");
+    TEST_CHECK(update_settings_set("new/value") != ESP_OK, "unmounted cfg: set fails loud, no NVS fallback");
+    tus_reboot();
+    TEST_CHECK(strcmp(update_settings_repo(), "nvs/only") == 0, "the failed set left the legacy NVS value alone");
     cfg_fs_deinit();
 }
 
@@ -379,8 +414,9 @@ void run_test_update_settings(void)
     test_persist_failure_retries_on_same_value();
     test_dualwrite_status();
     test_corrupt_storage_falls_back_to_default();
-    test_dual_write_and_divergence();
-    test_mount_failed_is_nvs_only();
+    test_cfg_only_and_legacy_precedence();
+    test_legacy_nvs_migrates_to_file();
+    test_unmounted_loads_legacy_and_set_fails();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

@@ -1312,7 +1312,7 @@ function profileOptionLabel(p, isFav) {
          ' (' + zoneListText(p.zone_mask) + ')';
 }
 
-// PROFILE_SLOTS_100_PLAN.md section 4 / section 7 task 8: <optgroup>
+// PROFILE_SLOTS_100.md section 4 / section 7 task 8: <optgroup>
 // grouping for #profileSelect, replacing the flat favorites-first partition
 // above with three named groups -- Favorites, Recently fired, All -- so the
 // grouping reason is visible even without the star (an <optgroup> label
@@ -2153,8 +2153,8 @@ function renderCfgFsFormatPending(data) {
   el.innerHTML = '<div class="banner interrupted">' +
     '<h3>CONFIG FILESYSTEM NEEDS FORMAT CONFIRMATION</h3>' +
     '<div class="row"><span>The config filesystem did not mount and was not auto-formatted because it ' +
-    'may contain data' + (reason ? ' (' + window.kcEscapeHtml(reason) + ')' : '') + '. Settings fall back ' +
-    'to the values stored in NVS.</span></div>' +
+    'may contain data' + (reason ? ' (' + window.kcEscapeHtml(reason) + ')' : '') + '. Settings changes ' +
+    'are refused (503) until you confirm the format.</span></div>' +
     '<div class="row"><span>To clear</span><span>Review and confirm on the Settings page.</span></div>' +
     '</div>';
 }
@@ -4513,7 +4513,24 @@ function poll() {
     // comment) -- a no-op whenever no popup is open.
     refreshPidPopupLive();
   });
-  setTimeout(poll, 2000);
+  setTimeout(poll, pollDelayMs());
+}
+
+// /api/status poll cadence: 2 s while a firing or autotune is active (live
+// numbers matter), 5 s otherwise -- the same "slow down when nothing is
+// happening" idea pollHistory/pollAutotune use. "Otherwise" includes the
+// terminal 'done'/'faulted' exec states, which persist until the next start
+// (profile_executor.c), so testing state !== 'idle' would keep a board that
+// has ever fired on the fast cadence forever. The server also sends an
+// ETag, so an unchanged body costs a 304 (the browser hands fetch() the
+// cached body transparently; no 304 handling is needed here). Unknown state
+// (no exec status yet) stays fast.
+var POLL_FAST_MS = 2000, POLL_IDLE_MS = 5000;
+function pollDelayMs() {
+  var exec = lastExecStatus;
+  if (!exec || isFiringActive(exec.state)) return POLL_FAST_MS;
+  if (lastAutotuneStatus && isAutotuneActive(lastAutotuneStatus.state)) return POLL_FAST_MS;
+  return POLL_IDLE_MS;
 }
 
 // Idle-preview: previewing the plan for whatever's picked (but not started)
@@ -4564,6 +4581,8 @@ function reloadAfterLoginPickers() {
 window.addEventListener('kc-login', reloadAfterLoginPickers);
 window.addEventListener('kc-logout', hideAuxDash);
 
+/* Deferred: app.js is <script defer>, so window.kc* helpers do not exist while this inline script runs. */
+function bootPage() {
 loadAuxDash();
 loadZones().then(function () {
   loadProfileList().then(function () {
@@ -4582,6 +4601,9 @@ loadZones().then(function () {
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
 pollAutotune();
 setInterval(pollAutotune, 10000); // matches AUTOTUNE_ENGINE_SAMPLE_PERIOD_S -- the trace can't move faster than that
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPage);
+else bootPage();
 window.addEventListener('resize', function () { if (wasIdle) { drawIdleDots(lastChannelsData); } else { pollHistory(); } });
 
 // UI_PLAN.md item 7: re-render immediately on a °C/°F toggle instead of

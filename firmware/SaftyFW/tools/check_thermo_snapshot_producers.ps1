@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_thermo_snapshot_producers.ps1 -- every field of thermo_snapshot_t
 # must actually be assigned by SOME production (non-test) source file under
 # src/, not only by a test.

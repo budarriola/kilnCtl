@@ -157,6 +157,15 @@ static void core_set_locked(const aux_http_ops_t *ops, const char *body, aux_htt
         reply_set(reply, 500, "applied live but could not be saved");
         return;
     }
+    /* Review 4 M1: disabling an aux output must not leave its relay energised (the manual route
+     * only reaches enabled relays, and the executor's own claim is gone). Best effort for the
+     * "owned/running" refusals; a hard write failure is reported. */
+    if (!e.enabled && cur.enabled) {
+        if (ops->set_relay((uint8_t)relay, false) == AUX_RELAY_ERR_IO_FAIL) {
+            reply_set(reply, 500, "saved, but the relay OFF write failed -- relay state is unknown");
+            return;
+        }
+    }
     reply_set(reply, 200, "{\"ok\":true}");
 }
 

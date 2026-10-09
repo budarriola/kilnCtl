@@ -125,6 +125,7 @@ bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_ca
     return false;
 }
 bool watchdog_cfg_panic_disabled(void) { return false; }
+bool boot_guard_is_recovery_mode(void) { return false; }
 const char *unit_pref_suffix(unit_pref_t pref) { (void)pref; return "C"; }
 size_t safety_cfg_store_param_count(void) { return 0; }
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)

@@ -56,10 +56,9 @@ transaction, which removes a whole class of latency question from the guard
 path.
 
 Clock: the part's limit is 5 MHz, but 4 MHz is an enforced **ceiling** on both
-masters (`SPI_OWNER_BAUDRATE_HZ` here, `THERMO_SPI_CLOCK_HZ` in KilnFW) because
-the SimFW bench fixture's slave emulation misses its first-byte deadline above
-that, silently shifting a burst by one byte — see
-`firmware/SimFW/docs/SPI_ACCESS_AUDIT.md` §9. Use **4 MHz** in **SPI mode 1**
+masters (`SPI_OWNER_BAUDRATE_HZ` here, `THERMO_SPI_CLOCK_HZ` in KilnFW) by
+owner decision (2026-10-06): 4 MHz is ample for the MAX31856 conversion
+rates and faster SPI is not needed. Use **4 MHz** in **SPI mode 1**
 (CPHA must be 1).
 
 ---

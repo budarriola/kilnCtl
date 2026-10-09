@@ -57,6 +57,7 @@ import zlib
 from typing import Any, Dict, Optional, Tuple
 
 from . import cases_web
+from . import board_lock
 from . import judgments as J
 from .. import http_auth
 from .registry import CaseResult, Verdict, get_case
@@ -137,6 +138,7 @@ def _http_post_raw_authed(host: str, path: str, fields: Dict[str, Any],
                            timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
     """Authenticated POST counterpart to :func:`_http_get_raw_authed` -- see
     that function's docstring."""
+    _check_write_allowed(path, fields)
     url = f"http://{host}{path}"
     body = urllib.parse.urlencode(fields).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
@@ -173,7 +175,33 @@ def _get_json(ctx: dict, path: str) -> "Tuple[Optional[int], Optional[dict]]":
     return status, _parse_json(text)
 
 
+#: Wi-Fi provisioning and credential-clearing writes no WEB case may ever make
+#: (plan doc BENCH_TEST_WEB_JUDGES_PLAN section 3 item 5; BENCH_TEST_SYSTEM_PLAN
+#: section 6 rule 4). Path suffixes are matched on the query-stripped path; the
+#: field entry is (name, value) matched against form fields / a JSON body.
+_WIFI_WRITE_DENYLIST = {
+    "path_suffixes": ("/provision", "/forget", "/ip_config"),
+    "fields": (("cmd", "clear_credentials"),),
+}
+
+
+class ForbiddenWrite(RuntimeError):
+    """Raised by every WEB POST seam for a deny-listed Wi-Fi/credential write."""
+
+
+def _check_write_allowed(path: str, fields: Any) -> None:
+    bare = path.split("?", 1)[0].rstrip("/")
+    for suffix in _WIFI_WRITE_DENYLIST["path_suffixes"]:
+        if bare.endswith(suffix):
+            raise ForbiddenWrite(f"POST {path} is on the Wi-Fi/credential write deny-list")
+    if isinstance(fields, dict):
+        for name, value in _WIFI_WRITE_DENYLIST["fields"]:
+            if str(fields.get(name)) == value:
+                raise ForbiddenWrite(f"POST {path} with {name}={value} is on the credential write deny-list")
+
+
 def _post_json(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[int], Optional[dict]]":
+    _check_write_allowed(path, fields)
     fn = ctx.get("http_post_json")
     if fn is not None:
         return fn(path, fields)
@@ -184,6 +212,61 @@ def _post_json(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[
     return status, _parse_json(text)
 
 
+def _get_text(ctx: dict, path: str) -> "Tuple[Optional[int], Optional[str]]":
+    """Authed text GET (e.g. /api/history.csv). Fake: ctx["http_get_text"]."""
+    fn = ctx.get("http_get_text")
+    if fn is not None:
+        return fn(path)
+    host = ctx.get("host")
+    if not host:
+        return None, None
+    return _http_get_raw_authed(host, path)
+
+
+def _post_raw(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[int], Optional[str]]":
+    """Authed form POST returning the raw reply text (plain ``ok`` replies).
+    Fake: ctx["http_post_raw"]."""
+    _check_write_allowed(path, fields)
+    fn = ctx.get("http_post_raw")
+    if fn is not None:
+        return fn(path, fields)
+    host = ctx.get("host")
+    if not host:
+        return None, None
+    return _http_post_raw_authed(host, path, fields)
+
+
+def _http_post_json_body_authed(host: str, path: str, body: Any,
+                                timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
+    url = f"http://{host}{path}"
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST",
+                                  headers={"Content-Type": "application/json"})
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else None
+        except Exception:  # noqa: BLE001
+            detail = None
+        return exc.code, detail
+    except (urllib.error.URLError, OSError, http_auth.HttpAuthError) as exc:
+        return None, str(exc)
+
+
+def _post_json_body(ctx: dict, path: str, body: Any) -> "Tuple[Optional[int], Optional[str]]":
+    """Authed JSON-body POST (/api/profile/import). Fake: ctx["http_post_json_body"]."""
+    _check_write_allowed(path, body)
+    fn = ctx.get("http_post_json_body")
+    if fn is not None:
+        return fn(path, body)
+    host = ctx.get("host")
+    if not host:
+        return None, None
+    return _http_post_json_body_authed(host, path, body)
+
+
 # ---------------------------------------------------------------------------
 # WEB-DASH-13 / WEB-DIAG-07 / WEB-DIAG-08 -- simple GET-current /
 # POST-test-value / GET-verify / restore-in-finally / GET-verify round trips.
@@ -191,6 +274,9 @@ def _post_json(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[
 
 def _bool_toggle_case(ctx: dict, get_path: str, post_path: str, get_field: str,
                        post_form_field: str) -> CaseResult:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     status0, body0 = _get_json(ctx, get_path)
     if status0 != 200 or body0 is None or get_field not in body0:
         return CaseResult(
@@ -224,6 +310,9 @@ def _case_dash13(ctx: dict) -> CaseResult:
     """WEB-DASH-13: ``POST /api/unit_pref F`` then ``/api/status``
     ``temp_unit`` F, restore C (plan doc section 3.7's own wording for this
     case)."""
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     status0, body0 = _get_json(ctx, "/api/status")
     if status0 != 200 or body0 is None or body0.get("temp_unit") not in ("C", "F"):
         return CaseResult(
@@ -278,6 +367,17 @@ def _case_diag08(ctx: dict) -> CaseResult:
 _NoRedirectHandler = cases_web._NoRedirect
 
 
+def _cookie_attr_flags(set_cookie_rest: str) -> Dict[str, Any]:
+    """Attribute flags of a Set-Cookie header (the part after ``name=``).
+    The value is dropped here and never stored or logged. Firmware sends
+    ``kiln_sid=<hex>; HttpOnly; SameSite=Strict; Path=/``
+    (web_auth_login_http.c:556)."""
+    attrs = [a.strip() for a in set_cookie_rest.split(";")[1:]]
+    low = [a.lower() for a in attrs]
+    same = next((a.split("=", 1)[1] for a in attrs if a.lower().startswith("samesite=") and "=" in a), None)
+    return {"httponly": "httponly" in low, "secure": "secure" in low, "samesite": same}
+
+
 class _SecHttpClient:
     """Thin, real-HTTP implementation of the seam ``_case_web_sec03`` needs.
     Tests inject a fake object with the same method names via
@@ -291,6 +391,10 @@ class _SecHttpClient:
         # _NoRedirectHandler above. Tests patch ``client._opener.open``
         # rather than ``urllib.request.urlopen``.
         self._opener = urllib.request.build_opener(_NoRedirectHandler)
+        #: Attribute flags of the last login's kiln_sid Set-Cookie, e.g.
+        #: {"httponly": True, "samesite": "Strict", "secure": False}. Never the
+        #: cookie value. None until a login returned a kiln_sid cookie.
+        self.last_login_set_cookie: "Optional[Dict[str, Any]]" = None
 
     def _get(self, path: str, cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str], Any]":
         url = f"http://{self.host}{path}"
@@ -375,11 +479,13 @@ class _SecHttpClient:
             "username": username, "password": password,
         })
         cookie = None
+        self.last_login_set_cookie = None
         if headers is not None:
             for raw in (headers.get_all("Set-Cookie") or []) if hasattr(headers, "get_all") else []:
                 name, _, rest = raw.partition("=")
                 if name.strip() == "kiln_sid":
                     cookie = rest.split(";", 1)[0].strip()
+                    self.last_login_set_cookie = _cookie_attr_flags(rest)
                     break
         return status, cookie
 
@@ -475,6 +581,9 @@ def _probe_dashboard(client: Any) -> "Tuple[Optional[int], Optional[str]]":
 
 
 def _case_web_sec03(ctx: dict) -> CaseResult:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     client = _sec_client(ctx)
     username = ctx.get("web_username") or os.environ.get("KILNCTL_WEB_USERNAME")
     password = ctx.get("web_password") or os.environ.get("KILNCTL_WEB_PASSWORD")
@@ -758,6 +867,9 @@ def seed_lcd_pin(ctx: dict) -> Dict[str, Any]:
 
 
 def _case_web_sec04(ctx: dict) -> CaseResult:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     try:
         resolved = _resolve_lcd_pin(ctx)
     except LcdPinSeedError as exc:

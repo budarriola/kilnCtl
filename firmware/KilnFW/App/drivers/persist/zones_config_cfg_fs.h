@@ -120,6 +120,11 @@ zones_cfg_fs_write_fn_t zones_config_cfg_fs_get_write_fn(void);
  * 0 whenever the NVS candidate is the one adopted instead (*out_used_file ==
  * false); callers that only care about the NVS side already have their own
  * on-disk version from nvs_load_from_with_migration_info(). */
+/* *out_on_disk_version is set to this on a scratch-allocation failure (return
+ * false, *out_rev == nvs_rev, out_cfg zeroed): "could not decide", not "decided
+ * the file is untrustworthy". nvs_load() fails the load instead of proceeding. */
+#define ZONES_CFG_RESOLVE_OOM_VERSION 0xFFu
+
 bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uint32_t nvs_rev, zones_cfg_t *out_cfg,
                                   uint32_t *out_rev, bool *out_used_file, uint8_t *out_on_disk_version);
 

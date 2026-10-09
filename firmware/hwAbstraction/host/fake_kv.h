@@ -70,7 +70,7 @@ extern "C" {
 #define FAKE_KV_MAX_PARTITIONS         4
 #define FAKE_KV_MAX_NAMESPACES_PER_PART 4
 /* 4 -> 12 (2026-09-06 flash-safety review) -> 128 (2026-09-19, docs/
- * PROFILE_SLOTS_100_PLAN.md task 6 widened PROFILES_MAX_COUNT 8 -> 100):
+ * PROFILE_SLOTS_100.md task 6 widened PROFILES_MAX_COUNT 8 -> 100):
  * profiles_http.c's "kiln_cfg" namespace is the worst known caller. At
  * PROFILES_MAX_COUNT=8 it held 9 live keys at once ("prof_used" plus up to
  * 8 "profN" slot keys), which sat exactly at the then-cap of 4 -- any test

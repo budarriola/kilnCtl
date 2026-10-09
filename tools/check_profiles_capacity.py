@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """check_profiles_capacity.py -- build-time capacity gate for the profile
-store, docs/PROFILE_SLOTS_100_PLAN.md section 5 task 4.
+store, docs/PROFILE_SLOTS_100.md section 5 task 4.
 
 WHAT THIS CLOSES. The 100-slot plan grows PROFILES_MAX_COUNT and the `cfg`
 partition in separate, later commits (tasks 5 and 6). This check exists so
@@ -30,7 +30,7 @@ The builtin catalogue count is likewise counted directly out of
 profiles_builtin_table.inc's real entries. The remaining per-item byte costs
 (profile blob ~429 B, NVS's own ~1.25x page/entry-rounding overhead, cfg's
 ~1.29x block-rounding and its 2x GC-headroom rule) are the same worst-case
-unit figures docs/PROFILE_SLOTS_100_PLAN.md section 3 derives and documents;
+unit figures docs/PROFILE_SLOTS_100.md section 3 derives and documents;
 they are reproduced here, not re-derived, because the exact on-flash NVS/
 LittleFS encoding is not economical to recompute from Python at build time.
 If the plan's section 3 figures are ever revised, update the constants below

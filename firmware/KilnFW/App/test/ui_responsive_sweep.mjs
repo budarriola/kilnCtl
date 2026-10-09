@@ -416,7 +416,7 @@ const ZONES_BASE_FIXTURE = `
 // leave in place.
 // main_page.html's recovery-mode banner (app.js's buildRecoveryBanner()/
 // setRecoveryBanner()) defaults to [hidden] under this static server --
-// pollRecoveryMode()'s fetch('/api/ota/esp/status') 404s here (this server
+// pollRecoveryMode()'s fetch('/api/status') 404s here (this server
 // implements no /api/* routes, see file header) and its .catch()
 // deliberately leaves the banner in its last-known state rather than
 // hiding it, so the untouched page already covers the hidden case. The

@@ -42,7 +42,7 @@ import time
 from typing import Any, Callable, Optional, Sequence
 
 from mcpkit import build_jobs
-from mcpkit.buildgate import GateWaitResult, kiln_build_gate
+from mcpkit.buildgate import GateWaitResult, child_env, kiln_build_gate
 from mcpkit.buildlock import BuildLockTimeout, build_lock
 from mcpkit.pytest_verdict import PER_TEST_TIMEOUT_S, pytest_output_problems
 
@@ -83,7 +83,8 @@ def _log_path(tag: str) -> str:
 
 def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
                elapsed: float,
-               output_check: "Optional[Callable[[str], list[str]]]" = None) -> str:
+               output_check: "Optional[Callable[[str], list[str]]]" = None,
+               kill_reason: Optional[str] = None) -> str:
     """Exit status, the lines that explain it, and where the rest lives."""
     path = _log_path(tag)
     try:
@@ -108,6 +109,8 @@ def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
         status = f"FAILED (exit {rc}, but output check failed)"
         shown = [f"OUTPUT CHECK FAILED: {p}" for p in problems] + shown
     head = f"{tag}: {status} in {elapsed:.1f}s ({len(lines)} log lines)"
+    if kill_reason:
+        head = f"{head}\nKILLED: {kill_reason}"
     body = "\n".join(shown) if shown else "(no output)"
     result = f"{head}\nfull log: {where}\n--\n{body}"
     if rc != 0:
@@ -162,28 +165,54 @@ def _contention_note(output: str) -> "Optional[str]":
 
 def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
          timeout: int = 900, env: "Optional[dict[str, str]]" = None,
-         output_check: "Optional[Callable[[str], list[str]]]" = None) -> str:
+         output_check: "Optional[Callable[[str], list[str]]]" = None,
+         stall_seconds: Optional[float] = None,
+         poll_seconds: float = 1.0) -> str:
+    """Run ``argv``; ``timeout`` is the absolute ceiling.
+
+    With ``stall_seconds`` set, the child is also killed when neither stdout
+    nor stderr has grown for that long (a progress-based timeout, like
+    tools/build_lock.ps1's -StallSeconds), and the kill reason is reported.
+    """
     argv = list(argv)
     started = time.monotonic()
     if env is None:
         env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+    proc = None
     try:
-        completed = subprocess.run(
+        proc = subprocess.Popen(
             argv,
             cwd=cwd or repo_root(),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             errors="replace",
-            timeout=timeout,
             env=env,
             # No shell: these argument lists contain absolute Windows paths with
             # spaces, and a shell would be one more quoting layer to get wrong.
             shell=False,
         )
+        # If a build-gate slot is held by this thread, tell it which process
+        # is the compile so a max-hold expiry kills only this tree.
+        try:
+            from .buildgate import register_compile_pid
+            register_compile_pid(proc.pid)
+        except Exception:  # pragma: no cover - registration is best effort
+            pass
+        if stall_seconds is not None:
+            return _watch_stall(tag, argv, proc, started, timeout, stall_seconds,
+                                poll_seconds, output_check)
+        out, err = proc.communicate(timeout=timeout)
+        completed = subprocess.CompletedProcess(argv, proc.returncode, out, err)
     except FileNotFoundError:
         return f"{tag}: error: {argv[0]} not found on PATH"
     except subprocess.TimeoutExpired as exc:
-        partial = (exc.stdout or "") + (exc.stderr or "")
+        _kill_proc_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=10)
+        except Exception:  # pragma: no cover
+            out, err = exc.stdout, exc.stderr
+        partial = (out or "") + (err or "")
         if isinstance(partial, bytes):  # pragma: no cover - text=True keeps it str
             partial = partial.decode("utf-8", "replace")
         return _summarize(tag, argv, None, partial, time.monotonic() - started)
@@ -192,12 +221,98 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
                       output_check=output_check)
 
 
+def _kill_proc_tree(proc: "subprocess.Popen") -> None:
+    """Kill ``proc`` and every descendant (idf.py, ninja, compilers).
+
+    ``proc.kill()`` alone ends only the PowerShell wrapper on Windows and
+    leaves the build running, orphaned, after the lock/slot are released.
+    Reuses buildgate's tree-kill; falls back to ``proc.kill()``.
+    """
+    try:
+        from .buildgate import _kill_tree
+        _kill_tree(proc.pid)
+    except Exception:  # pragma: no cover - non-Windows / helper failure
+        pass
+    try:
+        proc.kill()
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _watch_stall(tag: str, argv: "Sequence[str]", proc: "subprocess.Popen", started: float,
+                 ceiling: float, stall_seconds: float, poll_seconds: float,
+                 output_check: "Optional[Callable[[str], list[str]]]") -> str:
+    """Drain ``proc``'s pipes on threads; kill on stall or on the ceiling."""
+    import threading
+    chunks: "list[str]" = []
+    state = {"last": time.monotonic()}
+    lock = threading.Lock()
+
+    def drain(stream: Any) -> None:
+        for line in iter(stream.readline, ""):
+            with lock:
+                chunks.append(line)
+                state["last"] = time.monotonic()
+
+    threads = [threading.Thread(target=drain, args=(s,), daemon=True)
+               for s in (proc.stdout, proc.stderr)]
+    for t in threads:
+        t.start()
+    reason: Optional[str] = None
+    while proc.poll() is None:
+        now = time.monotonic()
+        with lock:
+            idle = now - state["last"]
+        if now - started > ceiling:
+            reason = f"absolute ceiling of {ceiling:.0f}s exceeded (build was still running)"
+        elif idle > stall_seconds:
+            reason = (f"stalled: no build output for {idle:.0f}s "
+                      f"(stall limit {stall_seconds:.0f}s, ran {now - started:.0f}s total)")
+        if reason:
+            _kill_proc_tree(proc)
+            break
+        time.sleep(poll_seconds)
+    try:
+        proc.wait(timeout=10)
+    except Exception:  # pragma: no cover
+        pass
+    for t in threads:
+        t.join(timeout=10)
+    with lock:
+        output = "".join(chunks)
+    rc = None if reason else proc.returncode
+    return _summarize(tag, argv, rc, output, time.monotonic() - started,
+                      output_check=output_check, kill_reason=reason)
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+        return value if value > 0 else default
+    except ValueError:
+        return default
+
+
+def _build_ceiling_seconds() -> float:
+    """Absolute build ceiling, clamped under the gate's hard max-hold.
+
+    The gate kills a slot holder at ``max_hold_hard_seconds()`` (default
+    7200 s) with no KILLED: reason, so a larger ceiling is unreachable.
+    Stay 60 s under it so our own kill (with a reason) fires first.
+    """
+    from .buildgate import max_hold_hard_seconds
+    return max(60.0, min(_env_seconds("KILNCTL_BUILD_CEILING_S", 10800),
+                         max_hold_hard_seconds() - 60.0))
+
+
 def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
     return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, *extra]
 
 
 def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
-                 wait_timeout: "Optional[float]" = None, **kwargs: Any) -> str:
+                 wait_timeout: "Optional[float]" = None,
+                 gate_label: "Optional[str]" = None,
+                 gate_wait: "Optional[GateWaitResult]" = None, **kwargs: Any) -> str:
     """``_run``, but serialized against any other caller contending for the
     same ``resource_key`` (typically a build directory).
 
@@ -212,13 +327,26 @@ def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
     stuck. Defaults to 90s over whatever ``kwargs['timeout']`` is (or 900s if
     that is not set), which is generous next to how long a single build step
     typically takes to notice it should give up.
+
+    ``gate_label`` (compile steps only): after the build lock is held, take a
+    machine-wide build-gate slot (:func:`mcpkit.buildgate.kiln_build_gate`)
+    just around the subprocess and release it the moment it returns -- never
+    while waiting on the lock. A gate timeout is reported in the same
+    "FAILED (lock contention)" shape as a lock timeout.
     """
     if wait_timeout is None:
         wait_timeout = float(kwargs.get("timeout", 900)) + 90.0
     started = time.monotonic()
     try:
         with build_lock(resource_key, wait_timeout=wait_timeout):
-            return _run(tag, argv, **kwargs)
+            if gate_label is None:
+                return _run(tag, argv, **kwargs)
+            try:
+                with kiln_build_gate(gate_label, wait_result=gate_wait):
+                    kwargs["env"] = child_env(kwargs.get("env"))
+                    return _run(tag, argv, **kwargs)
+            except TimeoutError as exc:
+                return f"{tag}: FAILED (lock contention) -- {exc}"
     except BuildLockTimeout as exc:
         waited = time.monotonic() - started
         return (
@@ -294,15 +422,9 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
     if jobs > 0:
         argv += ["--parallel", str(jobs)]
     wait_result = GateWaitResult()
-    try:
-        with kiln_build_gate(tag, wait_result=wait_result):
-            report = _run_locked(tag, build_dir, argv, cwd=build_dir)
-    except TimeoutError as exc:
-        # Same "...: FAILED (lock contention)" string shape _run_locked's own
-        # BuildLockTimeout handler returns, so a caller parsing this tool's
-        # output does not need a second failure shape for the gate timing out
-        # instead of the per-directory lock (opus review A3).
-        return f"{tag}: FAILED (lock contention) -- {exc}"
+    # Lock first, slot only around the compile (inside _run_locked).
+    report = _run_locked(tag, build_dir, argv, cwd=build_dir,
+                         gate_label=tag, gate_wait=wait_result)
     if wait_result.waited_seconds > 0:
         report = f"{report}\n(gate waited {wait_result.waited_seconds:.1f}s for a heavy-build slot)"
     return configure_note + report
@@ -468,17 +590,15 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     elf_path = os.path.join(build_dir, "KilnCtrl.elf")
     elf_before = _stat_snapshot(elf_path)
     wait_result = GateWaitResult()
-    try:
-        with kiln_build_gate(f"kilnfw-{target}", wait_result=wait_result):
-            kilnfw_report = _run_locked(
-                f"kilnfw-{target}", build_dir,
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-                timeout=1800)
-    except TimeoutError as exc:
-        # Same string shape as _run_locked's own lock-contention failure --
-        # opus review A3.
-        result = f"kilnfw-{target}: FAILED (lock contention) -- {exc}"
-        return f"{saftyfw_report}\n\n{result}" if saftyfw_report else result
+    # Lock first, slot only around the compile (inside _run_locked).
+    kilnfw_report = _run_locked(
+        f"kilnfw-{target}", build_dir,
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        timeout=_build_ceiling_seconds(),
+        stall_seconds=_env_seconds("KILNCTL_BUILD_STALL_S", 900),
+        gate_label=f"kilnfw-{target}", gate_wait=wait_result)
+    if "FAILED (lock contention)" in kilnfw_report and saftyfw_report:
+        return f"{saftyfw_report}\n\n{kilnfw_report}"
     if wait_result.waited_seconds > 0:
         kilnfw_report = (
             f"{kilnfw_report}\n(gate waited {wait_result.waited_seconds:.1f}s for a heavy-build slot)")

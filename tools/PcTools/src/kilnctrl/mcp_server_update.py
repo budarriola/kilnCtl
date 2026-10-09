@@ -12,8 +12,9 @@ update_settings_http.c, tools from WP10): update_check runs the board's own
 release check (a TLS job on the board; nothing is stored),
 update_stage_release downloads the release into the stage,
 update_fetch_status/update_fetch_cancel read and stop the board's fetch job,
-update_get_settings/update_set_settings read and set the repo. Every release
-is UNSIGNED in v1 (plan D4/D5).
+update_get_settings/update_set_settings read and set the repo. Release
+signing was removed (owner decision 2026-10-07); the board accepts an image only
+when it is for this project (esp_app_desc project_name).
 
 There is deliberately NO ``update_apply``: installing a staged image is the
 recovery image's ``POST /api/recovery/apply_staged`` (WP5, wrapped by the
@@ -58,6 +59,11 @@ def _fmt_status(st: dict) -> str:
         parts.append(f"sha256={st.get('sha256')}")
         parts.append(f"source={_SOURCES.get(st.get('source'), st.get('source'))}")
     parts.append(f"capacity={st.get('capacity')}")
+    if st.get("fetch_writer_wedged"):
+        parts.append("fetch_writer_wedged=True (WARNING: the board's flash writer is wedged; reboot required "
+                     "before another update can run)")
+    elif "fetch_writer_wedged" in st:
+        parts.append("fetch_writer_wedged=False")
     return ", ".join(parts)
 
 
@@ -68,8 +74,8 @@ def update_status(host: Optional[str] = None) -> str:
     matching sha256), its version/commit/length/sha256/source, any upload
     in flight (phase, bytes), and the stage capacity. A board still on the
     pre-WP2 partition table has no stage and answers 404 (reported as an
-    error). An image from a manual upload is UNSIGNED: sha256 catches
-    corruption, it does not authenticate the publisher (plan decision D4).
+    error). The board refuses an image whose project name is not
+    KilnCtrl (wrong_project); sha256 catches corruption.
     Nothing here installs anything; the apply step (recovery image, WP5) has
     no tool yet."""
     resolved = _resolve_host(host)
@@ -82,7 +88,9 @@ def update_status(host: Optional[str] = None) -> str:
 
 @_core._tool()
 def update_stage_upload(image_path: str, version: str = "", commit: str = "", confirm: bool = False,
-                        host: Optional[str] = None, ack_no_safety: bool = False) -> str:
+                        host: Optional[str] = None, ack_no_safety: bool = False,
+                        force: bool = False, allow_downgrade: bool = False,
+                        confirm_downgrade: str = "") -> str:
     """Upload an ESP application image (KilnCtrl.bin, which embeds both
     processors' firmware) into the `stage` partition (POST /api/update/stage,
     ROUTE_TIER_ADMIN). Staging only: the running application and the `app`
@@ -99,22 +107,37 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     one.
 
     With confirm: refuses while the board reports an upload already in
-    flight; the result notes when a previously staged image was erased (an
-    upload erases the previous stage first; a failed upload never leaves a
-    half-valid stage, but a previously good one is gone). After the POST it
+    flight; the result notes when a previously staged image may be replaced (the
+    board erases the previous stage only after the image head passes the
+    project, version and downgrade-gate checks, so an upload refused by
+    those leaves the old stage byte-identical; a later failure never leaves
+    a half-valid stage, but a previously good one is gone). After the POST it
     re-reads GET /api/update/stage and only reports ok when the board says
     staged with a verified header, the image length equals the file size and
     the board's sha256 equals the one computed locally; anything else is
     FAILED, never trusted from the POST reply alone. A reply lost mid-upload
-    is UNKNOWN (read update_status). The staged image is UNSIGNED (sha256
-    only).
+    is UNKNOWN (read update_status). The board refuses a wrong-project
+    image.
 
     HTTP 428 means the board's OTA interlock sees the safety processor not
     answering: the upload is refused unless the operator acknowledges it.
     Pass ``ack_no_safety=True`` (exactly True, still behind ``confirm=True``) to
     send ``X-Ota-Ack-No-Safety: 1`` and proceed anyway; it is never sent
     otherwise. A 409 (firing, hot zone, another update running) is final and
-    cannot be acknowledged away."""
+    cannot be acknowledged away.
+
+    Downgrade gate (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6), applied by
+    the board before any image byte is written: an image with the running
+    commit needs ``force=True``; an older version or a lower config schema is
+    refused with 409 ``downgrade_refused`` (the reply names the rollback
+    hazard: an older firmware runs on default PID gains after a zones_cfg
+    schema bump, so read back control_get_zones before heating). The only
+    override is ``allow_downgrade=True`` together with ``confirm_downgrade``
+    equal to the image's version (typed confirm). An image without the
+    embedded schema identity record also needs ``force=True`` plus the typed
+    confirm; a declared ``version`` must equal the image's own. The flags must be exactly
+    True and still sit behind ``confirm=True``. A refused upload may already
+    have erased the previous stage."""
     if not isinstance(image_path, str) or not os.path.isabs(image_path):
         return "REFUSED: image_path must be an absolute path"
     try:
@@ -125,6 +148,11 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     problem = uhc.validate_upload_args(image, version, commit)
     if problem:
         return f"REFUSED: {problem}"
+    if not isinstance(confirm_downgrade, str):
+        return "REFUSED: confirm_downgrade must be a string (the image version)"
+    if allow_downgrade is True and not confirm_downgrade:
+        return ("REFUSED: allow_downgrade needs confirm_downgrade set to the image version "
+                "(typed confirm); after a downgrade read back control_get_zones before heating")
     local_sha = uhc.sha256_hex(image)
     resolved = _resolve_host(host)
     try:
@@ -144,7 +172,9 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
         warn = (f" NOTE: the previously staged image ({before.get('semver')}, "
                 f"sha256={before.get('sha256')}) was erased by this upload.")
     try:
-        reply = uhc.upload_stage(resolved, image, version, commit, ack_no_safety=(ack_no_safety is True))
+        reply = uhc.upload_stage(resolved, image, version, commit, ack_no_safety=(ack_no_safety is True),
+                                 force=(force is True), allow_downgrade=(allow_downgrade is True),
+                                 confirm_downgrade=confirm_downgrade)
     except uhc.UpdateHttpError as exc:
         if exc.status is None:
             return (f"UNKNOWN: the upload reply was lost or the board was unreachable ({exc}); "
@@ -161,8 +191,24 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
             return (f"FAILED: board refused the upload: HTTP 400 bad_version -- {why}. "
                     "Nothing was invented on your behalf. Retry with an explicit "
                     "version=\"x.y.z\" (e.g. \"1.4.0\"; an optional leading v is stripped) "
-                    "that you choose for this image; a previously staged image may have been "
-                    f"erased (host={resolved})")
+                    "that you choose for this image; the previously staged image is untouched "
+                    f"(host={resolved})")
+        if exc.status == 409 and name in ("downgrade_refused", "needs_force"):
+            body = uhc.refusal_body(exc)
+            cand = body.get("candidate_version") or "?"
+            run = body.get("running_version") or "?"
+            if body.get("needs_typed_confirm") is True:
+                hint = (f"Override needs the typed confirm: confirm_downgrade={cand}, plus force=True "
+                        "(unknown schema / unknown running version) or allow_downgrade=True (downgrade); "
+                        "after any downgrade read back control_get_zones before heating.")
+            else:
+                hint = "Override with force=True (no typed confirm needed)."
+            return (f"FAILED: board refused the upload by the downgrade gate: {name} -- "
+                    f"{uhc.refusal_reason(exc)} (candidate {cand}, running {run}). {hint} "
+                    f"The previously staged image is untouched (host={resolved})")
+        if exc.status == 409 and name == "version_mismatch":
+            return ("FAILED: the declared version differs from the version inside the image; omit version= "
+                    f"or pass the image's own (host={resolved})")
         return (f"FAILED: board refused the upload: HTTP {exc.status} {name or exc.detail!r}; "
                 f"a previously staged image may have been erased (host={resolved})")
     try:
@@ -182,7 +228,7 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     if problems:
         return (f"FAILED: POST replied {reply!r} but the read-back disagrees: {'; '.join(problems)} "
                 f"(host={resolved}). Do not trust this stage.")
-    return (f"ok - staged and verified by read-back: {_fmt_status(after)}; UNSIGNED (sha256 only); "
+    return (f"ok - staged and verified by read-back: {_fmt_status(after)}; "
             f"nothing installed.{warn} (host={resolved})")
 
 
@@ -286,8 +332,8 @@ def update_check(wait_s: float = 60.0, host: Optional[str] = None, allow_prerele
     needs force / refused) and the release sha256. The board does the TLS work
     itself; nothing is stored and the stage is untouched. Refused by the board
     (409) during a firing or autotune, while another job runs, or until its clock
-    has synced from the internet. The release is UNSIGNED in v1 (sha256 from the
-    release's own manifest only). ``wait_s`` bounds how long this call polls the
+    has synced from the internet. The release's sha256 comes from its
+    own manifest. ``wait_s`` bounds how long this call polls the
     job; a check normally takes a few seconds. ``allow_prerelease=True`` makes the
     board read the releases list and pick the highest-semver non-draft release, so a
     GitHub pre-release is found (plain /releases/latest never returns one)."""
@@ -306,7 +352,7 @@ def update_check(wait_s: float = 60.0, host: Optional[str] = None, allow_prerele
         return f"UNKNOWN: {err}: {_fmt_fetch(st)}; read update_fetch_status (host={resolved})"
     if st.get("state") != "done":
         return f"FAILED: check did not finish ok: {_fmt_fetch(st)} (host={resolved})"
-    return f"ok - {_fmt_fetch(st)}; UNSIGNED (host={resolved})"
+    return f"ok - {_fmt_fetch(st)}; (host={resolved})"
 
 
 @_core._tool()
@@ -332,7 +378,7 @@ def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, 
     is sent with ``force`` alone for that reason). Success is claimed only after a read-back of
     GET /api/update/stage shows a verified header with source github whose
     sha256 equals the one the board reported for the release; anything else is
-    FAILED. The staged image is UNSIGNED. A 409 (firing, hot zone, clock not
+    FAILED. A 409 (firing, hot zone, clock not
     synced, another job) is final; a 428 (safety processor not answering) is
     refused unless ``ack_no_safety=True``, still behind ``confirm=True``."""
     resolved = _resolve_host(host)
@@ -385,15 +431,14 @@ def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, 
         return (f"FAILED: the job reported done but the read-back disagrees: {'; '.join(problems)} "
                 f"(host={resolved}). Do not trust this stage.")
     return (f"ok - release {st.get('tag')} staged and verified by read-back: {_fmt_status(after)}; "
-            f"UNSIGNED (sha256 from the release manifest only); nothing installed.{warn} (host={resolved})")
+            f"nothing installed.{warn} (host={resolved})")
 
 
 @_core._tool()
 def update_get_settings(host: Optional[str] = None) -> str:
     """READ-ONLY. Report the GitHub repository the board checks for releases
     (GET /api/update/settings, ROUTE_TIER_ADMIN): the current owner/name, the
-    compiled-in default, and whether the current value is the default. A
-    non-default repository's releases are always UNSIGNED (plan D5)."""
+    compiled-in default, and whether the current value is the default."""
     resolved = _resolve_host(host)
     try:
         st = uhc.get_settings(resolved)
@@ -412,8 +457,7 @@ def update_set_settings(repo: str, confirm: bool = False, host: Optional[str] = 
     only reports the current value and what would change. The board refuses
     (409) during a firing or autotune. After the POST it re-reads the setting
     and FAILS unless it equals the requested value (or the default for an empty
-    request). Needs no typed confirmation (plan D5); releases from a
-    non-default repository are always shown UNSIGNED."""
+    request). Needs no typed confirmation (plan D5)."""
     if not isinstance(repo, str):
         return "REFUSED: repo must be a string"
     resolved = _resolve_host(host)
@@ -443,15 +487,23 @@ def update_fetch_status(host: Optional[str] = None) -> str:
     """READ-ONLY. Report the board's GitHub fetch job (GET /api/update/fetch,
     ROUTE_TIER_ADMIN): state (idle/checking/downloading/done/failed), stage,
     error and http_status, byte progress, and the last release it looked at
-    (tag, size, sha256, policy verdict/allowed/needs_typed_confirm). Every
-    release is UNSIGNED in v1 (sha256 only). Never starts a job."""
+    (tag, size, sha256, policy verdict/allowed/needs_typed_confirm). Never starts a job."""
     resolved = _resolve_host(host)
     try:
         st = uhc.get_fetch_status(resolved)
     except uhc.UpdateHttpError as exc:
         return f"error: could not read GET {uhc.FETCH_PATH} (host={resolved}): {exc}"
     extra = f", http_status={st.get('http_status')}" if st.get("error") else ""
-    return f"ok - {_fmt_fetch(st)}, busy={st.get('busy')}{extra}; UNSIGNED (host={resolved})"
+    # The wedge flag lives on the stage route (review 7 L1); best-effort read, never fails this tool.
+    try:
+        stg = uhc.get_stage_status(resolved)
+    except uhc.UpdateHttpError:
+        stg = {}
+    if stg.get("fetch_writer_wedged"):
+        extra += ", fetch_writer_wedged=True (WARNING: flash writer wedged; reboot required)"
+    elif "fetch_writer_wedged" in stg:
+        extra += ", fetch_writer_wedged=False"
+    return f"ok - {_fmt_fetch(st)}, busy={st.get('busy')}{extra}; (host={resolved})"
 
 
 @_core._tool()

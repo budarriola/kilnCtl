@@ -8,8 +8,10 @@
 
 #include "esp_log.h"
 #include "hal_esp_common.h"
+#include "cfg_fs_status.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "pref_cfg_fs.h"
 #include "profiles_builtin.h"
 #include "profiles_types.h"
 
@@ -29,7 +31,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_FAV_USER);
 NVS_KEY_LEN_CHECK(NVS_KEY_FAV_BUILTIN);
 
 /* Bit i = user slot i is favorited. Widened uint32_t -> profiles_slot_bitmap_t
- * (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1) so an id up to the
+ * (docs/PROFILE_SLOTS_100.md section 7 task 1) so an id up to the
  * 128-id ceiling can be addressed once PROFILES_MAX_COUNT is later raised --
  * the plan's Status section names the old `user_mask & (1u << i)` scalar
  * test in favorites_list_get_handler() as undefined behavior once `i`
@@ -43,6 +45,26 @@ static profiles_slot_bitmap_t s_fav_user;
  * hidden mask -- not affected by the user-slot count, so this one stays a
  * plain uint32_t. */
 static uint32_t s_fav_builtin;
+/* rev of the cfg file as last verified on flash (0 = never written). The NVS
+ * copy carries no rev of its own, so it always competes at rev 0 and any
+ * file this build wrote (rev >= 1) beats it. */
+static uint32_t s_fav_rev;
+
+/* The cfg file's item: both masks in one 20-byte record, so a save is one
+ * atomic file write (profiles_favorites.h). */
+typedef struct {
+    profiles_slot_bitmap_t user;
+    uint32_t builtin;
+} fav_item_t;
+_Static_assert(sizeof(fav_item_t) <= PREF_CFG_FS_MAX_ITEM, "favorites item must fit pref_cfg_fs");
+
+/* Any mask is acceptable content (an empty mask is the shipped default), so
+ * validation is the exact-size check pref_cfg_fs already does before calling
+ * this; it exists to satisfy the helper's contract. */
+static bool fav_item_validate(const void *bytes, size_t len)
+{
+    return bytes != NULL && len == sizeof(fav_item_t);
+}
 
 /* Resolves an id in either namespace. Returns false for an id that names no
  * profile at all. `*out_is_user` tells the caller which namespace the id
@@ -68,29 +90,6 @@ static bool fav_locate(uint8_t id, bool *out_is_user, uint32_t *out_builtin_bit)
         return true;
     }
     return false;
-}
-
-static hal_status_t favorites_save(void)
-{
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
-    }
-    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: NVS_KEY_FAV_USER used
-     * to be a single uint32_t (word[0] only) -- now the full 4-word
-     * profiles_slot_bitmap_t, so an id up to 100 (still below the 128-id
-     * ceiling) can be favorited and actually persist. See
-     * favorites_load_user_mask() below for the migration-read side. */
-    err = hal_kv_set_blob(&h, NVS_KEY_FAV_USER, &s_fav_user, sizeof(s_fav_user));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_FAV_BUILTIN, s_fav_builtin);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    return err;
 }
 
 /* Reads NVS_KEY_FAV_USER, accepting EITHER the new 16-byte
@@ -140,47 +139,82 @@ static hal_status_t favorites_load_key(hal_kv_handle_t *h, const char *key, uint
     return err;
 }
 
+/* Reads the legacy NVS copy. *found is true only when at least one of the two
+ * keys exists (a never-written namespace is "nothing favorited", not a
+ * candidate to migrate). */
+static hal_status_t favorites_read_nvs(profiles_slot_bitmap_t *user, uint32_t *builtin, bool *found)
+{
+    *found = false;
+    profiles_slot_bitmap_from_u32(user, 0);
+    *builtin = 0;
+    hal_status_t perr = hal_kv_init_partition(PROFILES_NVS_PARTITION);
+    if (perr != HAL_OK) {
+        return perr;
+    }
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION);
+    if (err == HAL_NOT_FOUND) {
+        return HAL_OK;
+    }
+    if (err != HAL_OK) {
+        return err;
+    }
+    size_t probe = 0;
+    bool have_user = hal_kv_get_blob(&h, NVS_KEY_FAV_USER, NULL, &probe) == HAL_OK;
+    uint32_t legacy_probe = 0;
+    if (!have_user && hal_kv_get_u32(&h, NVS_KEY_FAV_USER, &legacy_probe) == HAL_OK) {
+        have_user = true;
+    }
+    uint32_t b_probe = 0;
+    bool have_builtin = hal_kv_get_u32(&h, NVS_KEY_FAV_BUILTIN, &b_probe) == HAL_OK;
+    err = favorites_load_user_mask(&h, user);
+    if (err == HAL_OK) {
+        err = favorites_load_key(&h, NVS_KEY_FAV_BUILTIN, builtin);
+    }
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        profiles_slot_bitmap_from_u32(user, 0);
+        *builtin = 0;
+        return err;
+    }
+    *found = have_user || have_builtin;
+    return HAL_OK;
+}
+
 esp_err_t profiles_favorites_start(void)
 {
     profiles_slot_bitmap_from_u32(&s_fav_user, 0);
     s_fav_builtin = 0;
+    s_fav_rev = 0;
 
-    /* Calling this when profiles_http.c or profiles_builtin.c has already
-     * initialized the same partition is a harmless no-op returning HAL_OK,
-     * so this module does not have to assume either of them ran first. */
-    hal_status_t part_err = hal_kv_init_partition(PROFILES_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGE(TAG, "NVS init for '%s' failed: %s -- favorites will not persist", PROFILES_NVS_PARTITION,
-                 hal_status_to_name(part_err));
-        return hal_status_to_esp_err(part_err);
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION);
-    if (err == HAL_NOT_FOUND) {
-        /* Namespace has never been written on this partition -- not an
-         * error, just "nothing configured yet". */
-        ESP_LOGI(TAG, "no favorites saved yet");
-        return ESP_OK;
-    }
-    if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
+    /* Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
+     * rev; otherwise the legacy NVS copy stands and, when cfg is mounted, is
+     * migrated into the file. Writes never go back to NVS. */
+    fav_item_t nvs_item;
+    bool nvs_found = false;
+    hal_status_t nerr = favorites_read_nvs(&nvs_item.user, &nvs_item.builtin, &nvs_found);
+    if (nerr != HAL_OK) {
+        ESP_LOGW(TAG, "legacy favorites read from '%s' failed: %s", PROFILES_NVS_PARTITION, hal_status_to_name(nerr));
     }
 
-    err = favorites_load_user_mask(&h, &s_fav_user);
-    if (err == HAL_OK) {
-        err = favorites_load_key(&h, NVS_KEY_FAV_BUILTIN, &s_fav_builtin);
+    fav_item_t resolved;
+    uint32_t rev = 0;
+    bool used_file = false;
+    bool have = pref_cfg_fs_resolve(PROFILES_FAVORITES_FILE_PATH, &nvs_item, sizeof(nvs_item),
+                                    nerr == HAL_OK && nvs_found, 0, fav_item_validate, &resolved, &rev, &used_file);
+    if (!have) {
+        if (nerr == HAL_OK) {
+            ESP_LOGI(TAG, "no favorites saved yet");
+            return ESP_OK;
+        }
+        return hal_status_to_esp_err(nerr);
     }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGW(TAG, "favorites read failed: %s -- starting with none", hal_status_to_name(err));
-        profiles_slot_bitmap_from_u32(&s_fav_user, 0);
-        s_fav_builtin = 0;
-        return hal_status_to_esp_err(err);
-    }
-
-    ESP_LOGI(TAG, "favorites: saved mask 0x%02lx, builtin mask 0x%08lx",
-             (unsigned long)profiles_slot_bitmap_to_u32(&s_fav_user), (unsigned long)s_fav_builtin);
+    s_fav_user = resolved.user;
+    s_fav_builtin = resolved.builtin;
+    s_fav_rev = rev;
+    ESP_LOGI(TAG, "favorites: saved mask 0x%02lx, builtin mask 0x%08lx (source=%s, rev=%lu)",
+             (unsigned long)profiles_slot_bitmap_to_u32(&s_fav_user), (unsigned long)s_fav_builtin,
+             used_file ? "file" : "NVS", (unsigned long)s_fav_rev);
     return ESP_OK;
 }
 
@@ -226,13 +260,46 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
         return ESP_OK;
     }
 
-    hal_status_t err = favorites_save();
-    if (err != HAL_OK) {
-        ESP_LOGW(TAG, "favorite save failed: %s -- applied live but will revert on reboot",
-                 hal_status_to_name(err));
-        return hal_status_to_esp_err(err);
+    /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
+     * no NVS write follows, and a failure is returned, never masked. The rev
+     * advances only after a verified write. */
+    fav_item_t item = { .user = s_fav_user, .builtin = s_fav_builtin };
+    uint32_t new_rev = s_fav_rev + 1;
+    esp_err_t err = pref_cfg_fs_commit(PROFILES_FAVORITES_FILE_PATH, &item, sizeof(item), new_rev, "profile favorites");
+    if (err != ESP_OK) {
+        return err;
     }
+    s_fav_rev = new_rev;
     return ESP_OK;
+}
+
+void profiles_favorites_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                             bool *diverged)
+{
+    fav_item_t f;
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw_quiet(PROFILES_FAVORITES_FILE_PATH, sizeof(f), fav_item_validate, &f, &f_rev, &f_valid);
+
+    fav_item_t n;
+    bool n_found = false;
+    bool n_valid = favorites_read_nvs(&n.user, &n.builtin, &n_found) == HAL_OK && n_found;
+    bool content_equal = f_valid && n_valid && memcmp(&f, &n, sizeof(f)) == 0;
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0; /* the NVS copy has no rev key */
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
 }
 
 void profiles_favorites_masks(profiles_slot_bitmap_t *out_user, uint32_t *out_builtin)

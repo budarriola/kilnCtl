@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_stack_margin_registration.ps1 -- keeps every long-lived internal
 # FreeRTOS task registered with stack_margin.c (App/drivers), so its
 # uxTaskGetStackHighWaterMark() reading stays reachable, and keeps
@@ -51,7 +52,8 @@
 # Usage: powershell -File tools\check_stack_margin_registration.ps1
 #        (-DriversDir <path> to smoke-test against a simulated tree)
 param(
-    [string]$DriversDir
+    [string]$DriversDir,
+    [string]$RecoveryDir
 )
 
 $ErrorActionPreference = "Stop"
@@ -172,7 +174,7 @@ $requiredNames = @(
     # allocated kiln_cfg_swap_pending_t is ~1.7 kB on its own frame), which
     # is precisely why it is not allowed on the shared httpd worker stack --
     # so its live margin has to stay measurable.
-    "kiln_cfg_swap",
+    "kiln_cfg_swap",
 
     # Review finding at 4ddad119 (CLAUDE.md "Register every new task for
     # stack-margin reporting"): zones_current_sweep_task.c's one-shot,
@@ -211,6 +213,10 @@ $requiredNames = @(
     # this fix, on a heap-allocated stack that carries no .dram0.bss cost).
     "wifi_prov_owner"  # liveness: always
 )
+# A stray unary comma / line-ending slip turns an entry into a nested Object[] (DEV_TOOLS_REVIEW_2026-10-09 LOW-1);
+# -contains and task_liveness.py would then silently miss it. Every entry must be a plain string.
+$nonStringRequired = @($requiredNames | Where-Object { $_ -isnot [string] })
+if ($nonStringRequired.Count -gt 0) { throw "check_stack_margin_registration.ps1: `$requiredNames has $($nonStringRequired.Count) non-string entr(ies) (a stray comma line?); fix the list." }
 # 2026-09-08: the six UART bridge tasks above (thermo/touch/ui_test/io/
 # uart_log/safety) were long-lived (`while (true)`, never self-deleting)
 # peers of system_uart_bridge/info_uart_bridge that existed and ran every
@@ -587,5 +593,48 @@ if ($unrecognized.Count -gt 0) {
 }
 
 Write-Host "Stack margin create-vs-register check passed: $($createdTasks.Count) xTaskCreate*() call site(s) all accounted for (registered or exempted)." -ForegroundColor Green
+
+# --- Recovery image (firmware/KilnFW_recovery) -----------------------------
+#
+# Recovery audit finding 5: the standalone recovery image has no stack_margin
+# API (stack_margin.c lives in KilnFW App/drivers), so the scans above never
+# saw its tasks (relay_hold in recovery_io.c went unchecked though its
+# high-water mark is reported in the status JSON). Its equivalent mechanism is
+# local: the file that creates a task reads uxTaskGetStackHighWaterMark() and
+# reports it. Rule: every xTaskCreate*() under the recovery sources must sit in
+# a file that also calls uxTaskGetStackHighWaterMark(), or be allowlisted below
+# with a reason. This list is deliberately separate from $requiredNames /
+# $exemptCreatedNames above (task_liveness.py parses $requiredNames).
+$recoveryExemptNames = @{
+    "rec_restart" = "recovery_http.c restart_task: one-shot reboot-after-delay, never returns to measure"
+}
+if ($RecoveryDir) {
+    $recoveryDirResolved = (Resolve-Path $RecoveryDir).Path
+} else {
+    $recoveryDirResolved = (Resolve-Path (Join-Path $root "..\firmware\KilnFW_recovery\main")).Path
+}
+$recFiles = @(Get-ChildItem -Path $recoveryDirResolved -Filter "*.c" -Recurse -File)
+if ($recFiles.Count -lt 1) {
+    throw "check_stack_margin_registration.ps1: no .c files under $recoveryDirResolved -- has the recovery image moved?"
+}
+$recCreateRe = 'xTaskCreate\w*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*"([^"]+)"'
+$recViolations = @()
+$recCreated = 0
+foreach ($f in $recFiles) {
+    $joined = [string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName))
+    $hasHwm = $joined -match 'uxTaskGetStackHighWaterMark\s*\('
+    foreach ($m in [regex]::Matches($joined, $recCreateRe)) {
+        $recCreated++
+        $n = $m.Groups[1].Value
+        if ($hasHwm -or $recoveryExemptNames.ContainsKey($n)) { continue }
+        $recViolations += "$n (in $($f.Name)): xTaskCreate*() with no uxTaskGetStackHighWaterMark() reporting in the same file and no `$recoveryExemptNames entry"
+    }
+}
+if ($recViolations.Count -gt 0) {
+    Write-Host "RECOVERY STACK-MARGIN CHECK FAILED:" -ForegroundColor Red
+    foreach ($v in $recViolations) { Write-Host "    $v" -ForegroundColor Red }
+    throw "A recovery-image task is created without any stack high-water-mark reporting. Report uxTaskGetStackHighWaterMark() (see recovery_io.c relay_hold) or add it to `$recoveryExemptNames with a reason."
+}
+Write-Host "Recovery stack-margin check passed: $recCreated xTaskCreate*() call site(s) reported or exempted." -ForegroundColor Green
 
 exit 0

@@ -16,21 +16,13 @@ $planDoc = Join-Path $repoRoot "docs\BENCH_TEST_SYSTEM_PLAN.md"
 # back to `python` on PATH there rather than hard-failing; the pyScript
 # below inserts tools\PcTools\src onto sys.path itself, so a plain PATH
 # python can still import kilnctrl for this check specifically.
-$venvPython = Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"
-$venvCfg = Join-Path $repoRoot "tools\PcTools\.venv\pyvenv.cfg"
-if ((Test-Path $venvPython) -and (Test-Path $venvCfg)) {
-    $python = $venvPython
-    Write-Host "check_bench_test_registry.ps1: using venv python at $python"
-} else {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { $cmd = Get-Command python3 -ErrorAction SilentlyContinue }
-    if (-not $cmd) {
-        Write-Error "check_bench_test_registry.ps1: no venv python at $venvPython and no python/python3 on PATH"
-        exit 1
-    }
-    $python = $cmd.Source
-    Write-Host "check_bench_test_registry.ps1: no venv at $venvPython -- using PATH python at $python"
+. (Join-Path $PSScriptRoot "lib_pctools_python.ps1")
+$python = Resolve-PcToolsPython -RepoRoot $repoRoot
+if (-not $python) {
+    Write-Error "check_bench_test_registry.ps1: no PcTools python (worktree venv, KILNCTL_PCTOOLS_PYTHON, main tree venv) and no python/python3 on PATH"
+    exit 1
 }
+Write-Host "check_bench_test_registry.ps1: using python at $python"
 if (-not (Test-Path $planDoc)) {
     Write-Error "check_bench_test_registry.ps1: plan doc not found at $planDoc"
     exit 1

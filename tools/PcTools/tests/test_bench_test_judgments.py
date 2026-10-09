@@ -122,17 +122,26 @@ class CoredumpReadableTest(unittest.TestCase):
 
 
 class CfgFsStateTest(unittest.TestCase):
+    # GET /api/cfgfs never emits a pending flag; GET /api/cfgfs/format_pending
+    # returns {"pending": bool, "reason": str} (cfg_fs_format_http.c).
+    CFGFS = {"mounted": True, "status": "ok", "file_count": 7}
+
     def test_not_pending_passes(self):
-        r = J.judge_cfgfs_state({"format_pending": False, "mounted": False})
+        r = J.judge_cfgfs_state(self.CFGFS, {"pending": False, "reason": ""})
         self.assertEqual(r.verdict, Verdict.PASS)
 
     def test_pending_is_inconclusive_not_fail(self):
-        # FL-07 never FAILs (plan §7 owner decision 6) -- record-only.
-        r = J.judge_cfgfs_state({"format_pending": True})
+        # FL-07 never FAILs (plan 7 owner decision 6) -- record-only.
+        r = J.judge_cfgfs_state(self.CFGFS, {"pending": True, "reason": "wrong size"})
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("True", r.reason)
+
+    def test_cfgfs_body_alone_cannot_pass(self):
+        r = J.judge_cfgfs_state(self.CFGFS)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
     def test_missing_field_is_inconclusive_not_fail(self):
-        r = J.judge_cfgfs_state({})
+        r = J.judge_cfgfs_state({}, {})
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
 
 

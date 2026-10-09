@@ -1288,17 +1288,17 @@ unchanged across the flash: `[2201, 2994, 3214, 0]`. `httpd_worker` stack
 margin, separately tracked as CRITICAL (632-468 B free), now reads 4520 B
 free / 55.2% headroom -- that fix has also landed and holds on this boot.
 
-**New finding, not yet fixed**: `GET /api/firing_history?profile_id=0`
-panicked the board (`uptime_s=35` at next `get_heap_status`, reset_reason
-`PANIC`, `exc_cause=65535`, `exc_task` garbled, `exc_addr=0x0`, `a0` not the
-known-stale `0xa5a5a5a5` pattern -- genuinely new, distinguishable from the
-two pre-existing stale crash records). This was hit while trying to trigger
-`firing_stats`'s lazy on-first-read migration per this doc's own plan; the
-crash happened before the migration outcome could be observed, so
-`firing_stats: file_backed:false` is **unconfirmed either way**, not a
-negative result. Board self-recovered (auto-reboot, relays stayed off, no
-firing in progress) and was otherwise healthy afterward -- not a brick, no
-recovery-flash was needed. This crash report is still unacknowledged on the
-board as of this writing and needs its own investigation (likely an
-out-of-bounds or null-history-array access in the firing_history GET
-handler when `profile_id=0` has no recorded firing history yet).
+**New finding, CLOSED**: `GET /api/firing_history?profile_id=0` panicked the
+board (`uptime_s=35`, reset_reason `PANIC`, `exc_addr=0x0`) while trying to
+trigger `firing_stats`'s lazy migration; the migration outcome was never
+observed, so `firing_stats: file_backed:false` stayed unconfirmed at that
+point. Root cause was a stack overflow, not a null/out-of-bounds access: the
+history read stacked several blob-sized buffers on the httpd task. Fixed by
+heap-allocating them (Fix section of
+`docs/audits/firing_history_stack_overflow_2026-09-08.md`; handler frame 6544 B
+down to 1088 B; regression test
+`test_fscf_history_read_uses_the_heap_not_the_httpd_stack()`).
+
+**Parked:** the `logs` SPIFFS to LittleFS track (steps 3-4 above: bench flash,
+then flip the default) stays parked until its trigger fires (`logs` retention
+raised well past 256 KiB/kind). Nothing is pending there today.

@@ -120,6 +120,7 @@ $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\pushed_build_stamp.ps1")
 
 # -LiteralPath: Resolve-Path glob-expands otherwise, so a tree path containing
 # [ or ] would fail to resolve here. This matters more than cosmetically now
@@ -211,13 +212,19 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     if (Test-Path "Env:$v") { Remove-Item "Env:$v" }
 }
 
-$buildGate = Enter-KilnBuildGate -Label "kilnfw_pushed_build"
+# RESULT REUSE (2026-10-07, tools/pushed_build_stamp.ps1): a PASS for exactly
+# this origin/main sha is reused instead of rebuilt, and concurrent callers
+# queue on a per-sha lock (no gate slot held) rather than all building it.
+Write-Host "origin/main is $originSha"
+$pushedSlot = Enter-PushedBuildSlot -Name "kilnfw" -Sha $originSha
+if ($pushedSlot.Reused) {
+    Write-PushedBuildReused -Stamp $pushedSlot.Stamp -Sha $originSha -What "KilnFW target"
+    exit 0
+}
+Write-Host "No reusable PASS stamp for $originSha -- building (this run owns the build)."
 try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
-$lock = Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree"
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
+$lock = Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree" -ProgressPath @((Join-Path $WorktreePath "firmware\KilnFW\build"))
 try {
     # CREATION IS INSIDE THE LOCK (2026-09-16). It used to sit above, outside
     # it, so two concurrent first-runs from different trees both saw
@@ -333,8 +340,13 @@ try {
     $elfPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.elf"
 
     Write-Host "Building KilnFW target against origin/main ($originSha) in $WorktreePath ..."
-    $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
-    $buildExit = $LASTEXITCODE
+    $buildGate = Enter-KilnBuildGate -Label "kilnfw_pushed_build"
+    try {
+        $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
+        $buildExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $buildGate
+    }
 
     $buildOutput | Write-Host
 
@@ -355,10 +367,12 @@ try {
 } finally {
     Exit-BuildLock -Lock $lock
 }
+# Every verification above passed (Fail exits 1 before here): record it.
+Write-PushedBuildStamp -Path (Get-PushedBuildStampPath -Name "kilnfw") -Sha $originSha -Detail "KilnCtrl.bin $((Get-Item $binPath).Length) bytes"
 } finally {
-    Exit-KilnBuildGate -Gate $buildGate
+    Exit-PushedBuildSlot -Slot $pushedSlot
 }
 
 Write-Host ""
-Write-Host "PASS: origin/main (commit $originSha) builds KilnFW target cleanly." -ForegroundColor Green
+Write-Host "PASS: origin/main (commit $originSha) builds KilnFW target cleanly. [built]" -ForegroundColor Green
 exit 0

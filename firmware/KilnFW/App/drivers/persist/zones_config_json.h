@@ -566,16 +566,17 @@ typedef struct {
      * INVALIDATION (the reset-one-side risk this whole feature exists to
      * avoid -- see zones_config_set_pid()'s own comment): every path that
      * changes pid_kp/pid_ki/pid_kd goes through zones_config_set_pid(),
-     * which sets tuning_valid = false unconditionally before saving,
-     * regardless of caller (autotune accept, a manual POST /api/zones/pid
-     * edit, adaptive_tune.c's blended re-tune, backup_http.c's restore, or
-     * the LCD UI/uart_bridge_ext.c path) -- a stale quality record pinned to
-     * hand-edited gains would be worse than none. autotune_engine.c's
-     * finalize accept() path re-establishes a fresh record via
-     * zones_config_set_tuning_quality() immediately afterward, once the new
-     * gains AND model are both already persisted, so the invalidate-then-
-     * repopulate ordering never leaves a valid-looking stale record visible
-     * in between. */
+     * which sets tuning_valid = false when the gains ACTUALLY change (same
+     * relative tolerance as the whole-page POST /api/zones path), regardless
+     * of caller (autotune accept, a manual POST /api/zones/pid edit,
+     * adaptive_tune.c's blended re-tune, backup import, or the LCD
+     * UI/uart_bridge_ext.c path). A same-value write leaves the record
+     * standing -- a stale quality record pinned to changed gains would be
+     * worse than none. autotune_engine.c's finalize accept() path
+     * re-establishes a fresh record via zones_config_set_tuning_quality()
+     * immediately afterward, once the new gains AND model are both already
+     * persisted, so the invalidate-then-repopulate ordering never leaves a
+     * valid-looking stale record visible in between. */
     uint8_t  tuning_valid;                      /* 0/1 -- same "0 means cannot answer" convention as
                                                   * every other bool-shaped uint8_t in this struct
                                                   * (relay_mask siblings), never a real C99 bool: this
@@ -3305,6 +3306,34 @@ typedef struct {
 } zones_cfg_v21_t; /* v21 -- what zones_cfg_t looked like immediately before THIS
                      * pass; predates progress_band_c. */
 
+/* The conversion scratch (persist_scratch_alloc(sizeof(zones_cfg_t)) in zones_config_migrate.c) holds a
+ * copy of the OLD blob, so every historical layout must fit in the current struct's size. */
+_Static_assert(sizeof(zones_cfg_v1_t) <= sizeof(zones_cfg_t), "v1 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v2_t) <= sizeof(zones_cfg_t), "v2 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v3_t) <= sizeof(zones_cfg_t), "v3 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v4_t) <= sizeof(zones_cfg_t), "v4 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v5_t) <= sizeof(zones_cfg_t), "v5 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v6_t) <= sizeof(zones_cfg_t), "v6 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v7_t) <= sizeof(zones_cfg_t), "v7 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v8_t) <= sizeof(zones_cfg_t), "v8 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v9_t) <= sizeof(zones_cfg_t), "v9 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v10_t) <= sizeof(zones_cfg_t), "v10 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v11_t) <= sizeof(zones_cfg_t), "v11 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v12_t) <= sizeof(zones_cfg_t), "v12 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v13_t) <= sizeof(zones_cfg_t), "v13 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v14_t) <= sizeof(zones_cfg_t), "v14 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v15_t) <= sizeof(zones_cfg_t), "v15 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v16_t) <= sizeof(zones_cfg_t), "v16 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v17_t) <= sizeof(zones_cfg_t), "v17 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v18_t) <= sizeof(zones_cfg_t), "v18 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v19_t) <= sizeof(zones_cfg_t), "v19 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v20_t) <= sizeof(zones_cfg_t), "v20 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v21_t) <= sizeof(zones_cfg_t), "v21 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v22_t) <= sizeof(zones_cfg_t), "v22 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v23_t) <= sizeof(zones_cfg_t), "v23 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v24_t) <= sizeof(zones_cfg_t), "v24 blob must fit the zones_cfg_t conversion scratch");
+_Static_assert(sizeof(zones_cfg_v25_t) <= sizeof(zones_cfg_t), "v25 blob must fit the zones_cfg_t conversion scratch");
+
 
 
 typedef enum {
@@ -3315,6 +3344,10 @@ typedef enum {
     ZONES_DECODE_NEWER,   /* version > ZONES_CFG_VERSION -- refuse without guessing;
                            * *out is zeroed, but the caller must treat the SOURCE bytes
                            * as real, protected data (see nvs_load_from()'s *out_found) */
+    ZONES_DECODE_OOM,     /* a scratch allocation failed: nothing is known about the source bytes.
+                           * *out is zeroed. Callers must treat this as "could not decide" --
+                           * never as corrupt/unreadable (no fault latch, no overwrite of the
+                           * other store, no rev reset) and fail the load. */
 } zones_decode_result_t;
 
 /* The one place a stored zones_cfg blob (from NVS or a kiln_cfg_store import)

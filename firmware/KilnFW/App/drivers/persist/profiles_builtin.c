@@ -98,34 +98,15 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
-/* Persists the mask at the next rev: file first (best-effort, logged and
- * swallowed -- also a no-op when cfg_fs is unmounted), then NVS (authoritative,
- * its status is what the caller gets). s_hidden_rev advances only once NVS
- * accepted the write, same as unit_pref_set(). */
-static hal_status_t hidden_mask_save(void)
+/* Persists the mask at the next rev to the cfg file ONLY (docs/CONFIG_FILESYSTEM.md,
+ * "Dual-write window: closed"). s_hidden_rev advances only once the verified
+ * write succeeded, same as unit_pref_set(). */
+static esp_err_t hidden_mask_save(void)
 {
     uint32_t new_rev = s_hidden_rev + 1;
     uint32_t mask = s_hidden_mask;
-    esp_err_t file_err = pref_cfg_fs_save(PROFILES_HIDDEN_FILE_PATH, &mask, sizeof(mask), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "hidden-mask file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
-    }
-    err = hal_kv_set_u32(&h, NVS_KEY_HIDDEN, s_hidden_mask);
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_HIDDEN_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err == HAL_OK) {
+    esp_err_t err = pref_cfg_fs_commit(PROFILES_HIDDEN_FILE_PATH, &mask, sizeof(mask), new_rev, "hidden schedules");
+    if (err == ESP_OK) {
         s_hidden_rev = new_rev;
     }
     return err;
@@ -322,13 +303,7 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
         return ESP_OK; /* already in the requested state -- no flash write */
     }
     s_hidden_mask = updated;
-    hal_status_t err = hidden_mask_save();
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "hidden-mask NVS write failed: %s -- applied live; persisted only if the cfg file "
-                      "write succeeded",
-                 hal_status_to_name(err));
-    }
-    return hal_status_to_esp_err(err);
+    return hidden_mask_save();
 }
 
 esp_err_t profiles_builtin_restore_all(void)
@@ -337,13 +312,7 @@ esp_err_t profiles_builtin_restore_all(void)
         return ESP_OK;
     }
     s_hidden_mask = 0;
-    hal_status_t err = hidden_mask_save();
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "hidden-mask NVS write failed: %s -- restored live; persisted only if the cfg file "
-                      "write succeeded",
-                 hal_status_to_name(err));
-    }
-    return hal_status_to_esp_err(err);
+    return hidden_mask_save();
 }
 
 esp_err_t profiles_builtin_discard_file(void)

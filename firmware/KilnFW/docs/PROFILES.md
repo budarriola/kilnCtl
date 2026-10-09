@@ -77,7 +77,7 @@ blobs.
 reads through `profiles_http_get()` and never touches NVS — the same
 one-owner discipline `zones_http.c` established for zone config.
 
-### 100-slot work (docs/PROFILE_SLOTS_100_PLAN.md)
+### 100-slot work (docs/PROFILE_SLOTS_100.md)
 
 `PROFILES_MAX_COUNT` is 100 as of 2026-09-19 (plan task 6, landed in
 `C:\wt\s100t6_0juqog`). `PROFILE_BUILTIN_ID_BASE` (128) is documented in

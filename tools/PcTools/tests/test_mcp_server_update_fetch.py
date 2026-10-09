@@ -48,7 +48,7 @@ class FetchFakeBoard(FakeBoard):
     def _fetch_status(self) -> dict:
         j = self.job
         st = {"ok": True, "state": "idle", "kind": "check", "stage": "", "error": "", "http_status": 0,
-              "bytes_done": 0, "bytes_total": 0, "busy": False, "repo": "owner/kiln", "unsigned": True,
+              "bytes_done": 0, "bytes_total": 0, "busy": False, "repo": "owner/kiln",
               "tag": "", "prerelease": False, "app_size": 0, "running": "", "commit": "", "sha256": "",
               "verdict": "", "reason": "", "allowed": False, "needs_typed_confirm": False,
               "zones_cfg_lower": False}
@@ -151,7 +151,7 @@ class StatusTest(_Base):
     def test_idle_status_is_read_only(self):
         out = msu.update_fetch_status()
         self.assertTrue(out.startswith("ok - state=idle"), out)
-        self.assertIn("UNSIGNED", out)
+        self.assertNotIn("UNSIGNED", out)
         self.assertEqual(self.board.posts(), [])
 
     def test_unreachable(self):
@@ -209,7 +209,7 @@ class DownloadTest(_Base):
         out = msu.update_stage_release(confirm=True)
         self.assertTrue(out.startswith("ok - release v1.5.0 staged and verified"), out)
         self.assertIn(RELEASE_SHA, out)
-        self.assertIn("UNSIGNED", out)
+        self.assertNotIn("UNSIGNED", out)
         self.assertEqual(self.board.last_query, "")
 
     def test_overrides_passed_through(self):

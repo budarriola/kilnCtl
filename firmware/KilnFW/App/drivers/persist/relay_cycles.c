@@ -1,4 +1,5 @@
 #include "relay_cycles.h"
+#include "legacy_default_nvs.h"
 
 #include <string.h>
 
@@ -257,6 +258,32 @@ static void migrate_from_default_partition(void)
     hal_kv_close(&hw);
     if (err == HAL_OK) {
         ESP_LOGI(TAG, "migrated relay cycle counts from default NVS partition to '%s'", KILN_NVS_PARTITION);
+        /* Read the copy back before touching the old one: a write that lied
+         * must not cost the only good copy. Once verified, erase the old
+         * default-partition copy so a later kiln_nvs erase (factory reset)
+         * cannot re-seed stale counts from it. */
+        hal_kv_handle_t vh;
+        relay_cycles_blob_t back;
+        size_t back_len = sizeof(back);
+        bool verified = false;
+        if (hal_kv_open(&vh, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            verified = hal_kv_get_blob(&vh, NVS_KEY_CYCLES, &back, &back_len) == HAL_OK &&
+                       back_len == sizeof(old_blob) && memcmp(&back, &old_blob, sizeof(old_blob)) == 0;
+            hal_kv_close(&vh);
+        }
+        if (!verified) {
+            ESP_LOGW(TAG, "relay cycle migration read-back did not match -- keeping the old default-partition copy");
+        } else {
+            /* ACCEPTED TRADE-OFF (DEV_FIRMWARE_REVIEW_2 finding 8): erasing the old default-partition copy
+             * removes what a rollback to PRE-SPLIT firmware would read, so after such a rollback the relay
+             * cycle counts restart from 0. Kept deliberately: the copy was read back and memcmp-verified
+             * above (no data lost on this firmware), and leaving it behind let factory reset / stale
+             * copies resurrect old counts. See docs/CONFIG_FILESYSTEM.md. */
+            esp_err_t eerr = legacy_default_nvs_erase_relay_cycles();
+            if (eerr != ESP_OK) {
+                ESP_LOGE(TAG, "could not erase the old default-partition relay cycle copy: %s", esp_err_to_name(eerr));
+            }
+        }
     } else {
         ESP_LOGW(TAG, "relay cycle count migration to '%s' failed: %s", KILN_NVS_PARTITION, hal_status_to_name(err));
     }
@@ -297,39 +324,9 @@ static bool caller_stack_is_external(void)
     return !hal_kv_write_safe_here();
 }
 
-static hal_status_t persist_locked(void)
-{
-    if (caller_stack_is_external()) {
-        ESP_LOGE(TAG, "persist_locked: REFUSING -- calling task's stack is in external RAM "
-                      "(PSRAM). A flash/NVS write from here would abort the whole board "
-                      "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
-                      "through a task with an internal-SRAM stack instead -- see "
-                      "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
-                      "worker for the established pattern.");
-        return HAL_NOT_READY;
-    }
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
-    }
-    relay_cycles_blob_t blob;
-    memset(&blob, 0, sizeof(blob)); /* padding is written to flash; keep it deterministic */
-    blob.version = RELAY_CYCLES_VERSION;
-    memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
-    memcpy(blob.types, s_rc.types, sizeof(blob.types));
-    memcpy(blob.rated_overrides, s_rc.rated_overrides, sizeof(blob.rated_overrides));
-    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err == HAL_OK) {
-        s_rc.dirty = false;
-        s_rc.last_persist_us = (int64_t)hal_time_now_us();
-    }
-    return err;
-}
+/* (persist_locked(), a rev-less NVS-only writer with no remaining caller, was
+ * removed when the dual-write window closed -- persist_snapshot() below is the
+ * one writer, and it writes the cfg file only.) */
 
 esp_err_t relay_cycles_init(void)
 {
@@ -723,12 +720,12 @@ typedef struct {
  * item uses (ramp_assist_cfg.c etc). The rev key is written in the SAME NVS
  * transaction as the blob so a torn write can never leave rev ahead of a
  * blob that was never actually committed. */
-static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
+static esp_err_t persist_snapshot(const reset_persist_job_arg_t *snap)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(TAG, "persist_snapshot: REFUSING -- calling task's stack is in external RAM "
                       "(PSRAM). See persist_locked()'s identical guard comment in this file.");
-        return HAL_NOT_READY;
+        return ESP_ERR_INVALID_STATE;
     }
 
     relay_cycles_blob_t blob;
@@ -747,26 +744,8 @@ static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
     memcpy(blob.types, snap->types, sizeof(blob.types));
     memcpy(blob.rated_overrides, snap->rated_overrides, sizeof(blob.rated_overrides));
 
-    esp_err_t file_err = pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &blob, sizeof(blob), snap->rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "relay cycle counts file write failed: %s -- NVS remains the source of truth "
-                      "this boot", esp_err_to_name(file_err));
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_CYCLES_REV, snap->rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    return err;
+    /* cfg file ONLY -- docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed". */
+    return pref_cfg_fs_commit(RELAY_CYCLES_FILE_PATH, &blob, sizeof(blob), snap->rev, "relay cycle counts");
 }
 
 /* The job run ON the flash worker's own internal-SRAM stack -- see
@@ -783,7 +762,7 @@ typedef struct {
 static void reset_persist_job(void *arg)
 {
     reset_persist_job_ctx_t *ctx = (reset_persist_job_ctx_t *)arg;
-    ctx->err = hal_status_to_esp_err(persist_snapshot(ctx->snap));
+    ctx->err = persist_snapshot(ctx->snap);
 }
 
 /* THE one owning copy of this module's snapshot head, shared by EVERY writer
@@ -1009,7 +988,6 @@ bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_t
  * refused wholesale (all-or-nothing) rather than clamped, since a
  * wildly-out-of-range value is much more likely a corrupt/truncated backup
  * field than a real relay with that many operations. */
-#define RELAY_CYCLES_RESTORE_MAX_COUNT 100000000u /* 100M -- far past any rated life in this file's own table */
 
 bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
                                relay_cycles_restore_result_t *out_result)

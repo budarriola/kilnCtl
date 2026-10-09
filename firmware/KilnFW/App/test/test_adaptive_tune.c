@@ -329,6 +329,39 @@ bool profile_executor_get_active_id(uint8_t *out_id)
                        * cfg_fs tests below call these directly. Was relying on an implicit
                        * declaration (C4013); now an error. */
 
+static const char *AT_SCRATCH_BASE = "cfg_fs_test_adaptive_tune";
+
+/* Saves are cfg-file-only since the NVS dual-write close, so every test that
+ * persists the Ki baseline needs a freshly mounted cfg scratch directory.
+ * Also usable by the #included test_adaptive_tune_ki_bounds.c. */
+static void at_mount_scratch(void)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/.tmp/%s", AT_SCRATCH_BASE, ADAPTIVE_TUNE_KIBASE_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", AT_SCRATCH_BASE, ADAPTIVE_TUNE_KIBASE_FILE_PATH);
+    remove(path);
+    char tmp[600];
+    snprintf(tmp, sizeof(tmp), "%s/.tmp", AT_SCRATCH_BASE);
+    ATCF_RMDIR(tmp);
+    ATCF_RMDIR(AT_SCRATCH_BASE);
+    ATCF_MKDIR(AT_SCRATCH_BASE);
+    cfg_fs_deinit();
+    (void)cfg_fs_init(AT_SCRATCH_BASE, NULL);
+}
+
+/* Stages the blob+rev a LEGACY (pre dual-write-close) firmware left in NVS. */
+static void at_stage_legacy_kibase(const adaptive_tune_kibase_blob_t *kb, uint32_t rev)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, ADAPTIVE_TUNE_NVS_PARTITION) == HAL_OK) {
+        hal_kv_set_blob(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE, kb, sizeof(*kb));
+        hal_kv_set_u32(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV, rev);
+        hal_kv_commit(&h);
+        hal_kv_close(&h);
+    }
+}
+
 // ---------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------
@@ -604,8 +637,6 @@ void run_test_adaptive_tune(void)
 // adaptive_tune_init()/adaptive_tune_clear_ki_baseline() public entry
 // points plus a real cfg_fs.c against a temp directory.
 // ---------------------------------------------------------------------
-static const char *AT_SCRATCH_BASE = "cfg_fs_test_adaptive_tune";
-
 static void reset_all_cfg_fs_at(void)
 {
     char path[600];
@@ -629,24 +660,33 @@ static void reset_all_cfg_fs_at(void)
 
 static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
 {
-    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: partition absent -- behaves exactly like NVS-only");
+    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: partition absent -- a legacy NVS copy still loads, a save "
+                 "fails loud and never falls back to NVS");
     reset_all_cfg_fs_at();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
 
-    adaptive_tune_zones[1].ki_baseline_valid = true;
-    adaptive_tune_zones[1].ki_baseline = 3.5f;
-    kibase_job_t job = {.result = ESP_FAIL};
+    adaptive_tune_kibase_blob_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.mask = 0x02;
+    legacy.vals[1] = 3.5f;
+    at_stage_legacy_kibase(&legacy, 1);
+    adaptive_tune_init();
+    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid && adaptive_tune_zones[1].ki_baseline == 3.5f,
+               "a legacy NVS-only board still loads its baseline");
+
+    adaptive_tune_zones[1].ki_baseline = 4.5f;
+    kibase_job_t job = {.result = ESP_OK};
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         job.blob.vals[zi] = adaptive_tune_zones[zi].ki_baseline;
         if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
     }
     save_kibase_job(&job);
-    TEST_CHECK(job.result == ESP_OK, "save succeeds with no `cfg` partition mounted");
+    TEST_CHECK(job.result != ESP_OK, "save fails loud with no `cfg` partition mounted");
 
     memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     adaptive_tune_init();
     TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid && adaptive_tune_zones[1].ki_baseline == 3.5f,
-               "reload matches what was saved, sourced purely from NVS");
+               "the NVS copy was NOT overwritten by the failed save (no fallback)");
 }
 
 static void test_kibase_cfg_fs_migrates_then_prefers_file(void)
@@ -663,11 +703,11 @@ static void test_kibase_cfg_fs_migrates_then_prefers_file(void)
         if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
     }
     save_kibase_job(&job);
-    TEST_CHECK(job.result == ESP_OK, "dual-write save succeeds (file first, then NVS)");
+    TEST_CHECK(job.result == ESP_OK, "cfg-only save succeeds");
 
     bool exists = false;
     TEST_CHECK(cfg_fs_exists(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &exists) == ESP_OK && exists,
-               "the save's dual-write actually created the file");
+               "the save actually created the file");
 
     memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     adaptive_tune_init();
@@ -707,14 +747,14 @@ static void test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_u
         if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
     }
     save_kibase_job(&job);
-    TEST_CHECK(job.result == ESP_OK, "save still reports OK -- NVS is authoritative");
+    TEST_CHECK(job.result != ESP_OK, "a failed cfg write is reported -- there is no NVS fallback any more");
     pref_cfg_fs_reset_write_fn_for_test();
 
     adaptive_tune_kibase_blob_t raw;
     uint32_t rev = 0;
     bool valid = false;
     pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), kibase_file_validate, &raw, &rev, &valid);
-    TEST_CHECK(!valid, "with the file write skipped, the file never catches up -- NVS alone carries the value");
+    TEST_CHECK(!valid, "with the file write skipped there is no file, and no NVS copy was written either");
 }
 
 static void test_kibase_status_padding_is_not_data(void)

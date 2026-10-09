@@ -374,7 +374,7 @@ static size_t profiles_build_get(uint8_t *out, uint8_t id)
  * see uart_task_ids.h for why. */
 static size_t profiles_build_exec_status(uint8_t *out)
 {
-    /* profile_exec_status_t is 1384 B; this runs on bx_flash_worker, whose
+    /* profile_exec_status_t is 1464 B; this runs on bx_flash_worker, whose
      * stack ceiling profile_executor_get_active_id()'s own doc comment
      * measures at 3792 B (zero headroom on clean main) -- a stack-local
      * instance here would be the same class of regression that function
@@ -531,7 +531,7 @@ static void profiles_handle_message(void *vargs)
                 }
                 bool ok = profiles_http_delete(del_id);
                 if (!ok) {
-                    /* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7):
+                    /* Review fold-in (PROFILE_SLOTS_100.md section 7):
                      * profiles_http_delete() returns false both for "no such
                      * profile" and "that profile is currently running/paused
                      * and refused" -- reporting the latter as "no such

@@ -84,6 +84,22 @@ foreach ($e in $expectations) {
     }
 }
 
+# The gate function's own return expression (a `return true;` mutation keeps both call sites intact).
+$gatePath = Join-Path $root "firmware\KilnFW\App\drivers\http\http_auth_disclosure_gate.c"
+if (-not (Test-Path -LiteralPath $gatePath -PathType Leaf)) {
+    $failures += "http_auth_disclosure_gate.c: file not found"
+} else {
+    $gate = Get-Content -LiteralPath $gatePath -Raw
+    $gate = [regex]::Replace($gate, '/\*.*?\*/', '', 'Singleline')
+    $gate = [regex]::Replace($gate, '//[^\n]*', '')
+    $gm = [regex]::Match($gate, 'bool\s+http_auth_may_disclose\s*\([^)]*\)\s*\{(?<b>[^{}]*)\}')
+    if (-not $gm.Success) {
+        $failures += "http_auth_disclosure_gate.c: http_auth_may_disclose() not found"
+    } elseif ($gm.Groups['b'].Value -notmatch 'return\s+!\s*http_auth_policy_web_enabled\s*\(\s*\)\s*\|\|\s*http_auth_caller_is_admin\s*\(\s*req\s*\)\s*;') {
+        $failures += "http_auth_disclosure_gate.c: http_auth_may_disclose() no longer returns '!http_auth_policy_web_enabled() || http_auth_caller_is_admin(req)' -- the gate has been neutered or reshaped."
+    }
+}
+
 if ($failures.Count -gt 0) {
     Write-Host "DISCLOSURE GATE CALL-SITE CHECK FAILED:" -ForegroundColor Red
     foreach ($f in $failures) {

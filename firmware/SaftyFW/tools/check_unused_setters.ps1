@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_unused_setters.ps1 -- every public *_set_*() function declared in
 # firmware/SaftyFW/src/*.h must have at least one CALL site somewhere in
 # src/ (outside its own declaration/definition), not just a definition.

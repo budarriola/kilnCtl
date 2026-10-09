@@ -148,45 +148,13 @@ esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
     uint32_t new_rev = s_ramp_assist_rev + 1;
     uint8_t raw = enabled ? 1 : 0;
 
-    // FILE FIRST (best-effort, failure logged and swallowed -- NVS below
-    // remains the persistence guarantee), THEN NVS (authoritative).
-    esp_err_t file_err = pref_cfg_fs_save(RAMP_ASSIST_FILE_PATH, &raw, sizeof(raw), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "ramp assist file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- ramp assist setting not persisted",
-                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return hal_status_to_esp_err(part_err);
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "hal_kv_open failed: %s -- ramp assist setting not persisted",
-                 hal_status_to_name(err));
-        return hal_status_to_esp_err(err);
-    }
-    err = hal_kv_set_u8(&h, NVS_KEY_RAMP_ASSIST, raw);
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_RAMP_ASSIST_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-
-    if (err != HAL_OK) {
-        ESP_LOGE(TAG, "could not persist ramp assist setting: %s -- will not survive a reboot",
-                 hal_status_to_name(err));
-    } else {
+    // cfg file ONLY -- see unit_pref_set() and docs/CONFIG_FILESYSTEM.md.
+    esp_err_t err = pref_cfg_fs_commit(RAMP_ASSIST_FILE_PATH, &raw, sizeof(raw), new_rev, "ramp assist setting");
+    if (err == ESP_OK) {
         s_ramp_assist_rev = new_rev;
         ESP_LOGW(TAG, "ramp assist saved: %s", enabled ? "ENABLED" : "disabled");
     }
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 void ramp_assist_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,

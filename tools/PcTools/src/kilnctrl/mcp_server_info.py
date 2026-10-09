@@ -1386,22 +1386,44 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     else:
         lines.append(f"tmp_entries_now={tmp_now}")
 
+    subdirs = cfgfs.get("subdirs") or []
+    for sd in subdirs:
+        unknown = sd.get("unknown_size") or 0
+        note = f" ({unknown} of unknown size)" if unknown else ""
+        lines.append(
+            f"  {sd.get('name')}/: {sd.get('file_count')} file(s), {sd.get('size_bytes')} B{note}"
+        )
+
     dual = cfgfs.get("dual_write") or {}
-    zones = dual.get("zones") or {}
-    if zones.get("file_backed"):
-        diverged_note = " !!! DIVERGED -- a prior file write failed, only NVS advanced" if zones.get("diverged") else ""
-        lines.append(f"dual_write.zones: file_rev={zones.get('file_rev')} nvs_rev={zones.get('nvs_rev')}{diverged_note}")
-    else:
-        lines.append("dual_write.zones: not file-backed yet (NVS only)")
+    items = dual.get("items") or []
+    lines.append(f"dual_write: write_mode={dual.get('write_mode')} items={len(items)}")
+    for it in items:
+        flags = []
+        if it.get("diverged"):
+            flags.append("!!! DIVERGED -- a prior file write failed, only NVS advanced")
+        if it.get("nvs_stale"):
+            flags.append("nvs_stale (file is newer than NVS)")
+        if it.get("migration_deferred"):
+            flags.append("migration_deferred")
+        if not it.get("file_backed"):
+            flags.append("not file-backed yet")
+        tail = f" [{'; '.join(flags)}]" if flags else ""
+        lines.append(
+            f"  dual_write.{it.get('name')}: file_rev={it.get('file_rev')} "
+            f"nvs_rev={it.get('nvs_rev')}{tail}"
+        )
     nvs_only = dual.get("nvs_only") or []
     if nvs_only:
         lines.append(f"still NVS-only: {', '.join(nvs_only)}")
+    nvs_permanent = dual.get("nvs_permanent") or []
+    if nvs_permanent:
+        lines.append(f"NVS by design: {', '.join(nvs_permanent)}")
 
     return "\n".join(lines)
 
 
 @_core._tool()
-def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
+def cfgfs_format(confirm: bool = False, host: Optional[str] = None, force_healthy: bool = False) -> str:
     """Confirm-and-format the `cfg` LittleFS partition -- POST
     /api/cfgfs/format_confirm (cfg_fs_format_http.c's format_confirm_post_
     handler(), ROUTE_TIER_ADMIN). This is the operator confirmation
@@ -1417,6 +1439,15 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
     an empty filesystem. NVS stays authoritative and unaffected by this call
     on its own (see CLAUDE.md's cfg-partition dual-write section) -- this is
     strictly a `cfg`-partition-only action, not a factory_reset(scope=KILN).
+
+    HEALTHY-CFG GUARD: since the NVS dual-write close, a mounted cfg partition is
+    the ONLY copy of zones/profiles/preferences, so the firmware answers 409
+    ("cfg is mounted and healthy ...") to a format of a healthy partition. This
+    tool reports that as a refusal with the firmware's message. Only
+    ``force_healthy=True`` (default False, still requires ``confirm=True``) sends
+    the explicit override ``?force_healthy=1``; use it only when you really mean
+    to erase a working cfg partition. A partition that is not mounted (the
+    needs-format case) needs no override.
 
     Always reads GET /api/cfgfs FIRST and reports the current file count
     (never guesses). REFUSES UNLESS ``confirm=True`` -- without it, this is a
@@ -1450,11 +1481,19 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
     before_count = before.get("file_count")
 
     if not confirm:
+        healthy_note = ""
+        if before.get("mounted") is True and not force_healthy:
+            healthy_note = ("; cfg is mounted and healthy, so the firmware would refuse (409) unless "
+                            "force_healthy=True is also passed")
         return (f"DRY RUN (pass confirm=True to actually format) -- cfg partition currently holds "
-                f"{before_count} file(s) (host={resolved}); formatting would erase all of them")
+                f"{before_count} file(s) (host={resolved}); formatting would erase all of them"
+                f"{healthy_note}")
 
     try:
-        result = ota_http.format_cfgfs(resolved)
+        if force_healthy:
+            result = ota_http.format_cfgfs(resolved, force_healthy=True)
+        else:
+            result = ota_http.format_cfgfs(resolved)
     except ota_http.OtaHttpError as exc:
         from . import zones_http_client  # local import: avoid a module-load-order cycle, same convention as the other local imports in this function
         if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
@@ -1462,6 +1501,9 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None) -> str:
                     f"a firing or autotune run is active; cfgfs format is not available until it "
                     f"ends. Distinct from OTA's own 428 interlock (host={resolved}, "
                     f"before file_count={before_count})")
+        if exc.status == 409:
+            return (f"refused: firmware answered HTTP 409: {exc.detail} (host={resolved}, "
+                    f"before file_count={before_count}); nothing was formatted")
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         return f"error: {exc}{status_bit} (host={resolved}, before file_count={before_count})"
 

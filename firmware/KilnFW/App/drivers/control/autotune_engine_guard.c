@@ -295,6 +295,26 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         out->adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED;
         out->old_ceiling_c_per_hr = 0.0f;
         out->new_ceiling_c_per_hr = 0.0f;
+        out->refused_by_mode_gate = false;
+        out->mode_reason[0] = '\0';
+    }
+    /* Owner decision 2026-10-08 (docs/SYSTEM_MODE_GATE_PLAN.md): accept
+     * writes zone PID gains/max_ramp, so refuse while a firing or autotune
+     * run is active, before any mutation. Single choke point for the HTTP
+     * and UART-bridge callers. */
+    {
+        sys_mode_snapshot_t mode_snap = {0};
+        relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+        char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        mode_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &mode_snap, mode_reason, sizeof(mode_reason))) {
+            ESP_LOGW(AT_TAG, "autotune_engine_accept() refused by system mode gate: %s", mode_reason);
+            if (out != NULL) {
+                out->refused_by_mode_gate = true;
+                snprintf(out->mode_reason, sizeof(out->mode_reason), "%s", mode_reason);
+            }
+            return false;
+        }
     }
     /* See autotune_begin_run_locked()'s guard comment above. */
     if (s_at.lock == NULL) {
@@ -413,6 +433,35 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
     float step_ambient_c = s_at.step_ambient_c;
     float predicted_max_ramp_ambient_c_per_hr = s_at.predicted_max_ramp_ambient_c_per_hr;
     xSemaphoreGive(s_at.lock);
+
+    /* Review finding 1b (cbc43a7f): the mode-gate snapshot at the top of this
+     * function predates s_at.lock and the reservation, so a profile start on
+     * another task can land in that window. Re-check now that the reservation
+     * is held and before the first write. relay_authority_heat_run_active()
+     * is a leaf spinlock (takes no other lock), so calling it here -- after
+     * s_at.lock was released, holding only the reservation flag -- cannot
+     * invert any lock order. A start that lands after this re-check is not
+     * closed here: profile_executor_run() has no cheap way to see the
+     * reservation, so a residual window of the few writes below remains.
+     * Other gated writers (e.g. zones_http_pid.c) share the same
+     * snapshot-then-write pattern; deliberately unchanged in this pass. */
+    {
+        sys_mode_snapshot_t recheck = {0};
+        relay_authority_heat_run_active(&recheck.profile_running, &recheck.autotune_running);
+        char recheck_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        recheck_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &recheck, recheck_reason,
+                                   sizeof(recheck_reason))) {
+            autotune_engine_release_zone_for_external_write(zone);
+            ESP_LOGW(AT_TAG, "autotune_engine_accept() refused by system mode gate (re-check): %s",
+                     recheck_reason);
+            if (out != NULL) {
+                out->refused_by_mode_gate = true;
+                snprintf(out->mode_reason, sizeof(out->mode_reason), "%s", recheck_reason);
+            }
+            return false;
+        }
+    }
 
     if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
         autotune_engine_release_zone_for_external_write(zone);
@@ -714,9 +763,13 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * gains (above) and the model (just above) are both already persisted --
      * a quality record attached to a model that failed to save would
      * describe a fit the zone isn't actually running. zones_config_set_pid()
-     * already invalidated any PRIOR record unconditionally the moment it ran
-     * (see that function's own comment), so this call is what re-establishes
-     * a fresh one for the run that just completed; a failure here is logged,
+     * invalidated any PRIOR record when the gains changed beyond
+     * zones_config_gain_changed()'s tolerance (see that function's own
+     * comment), so this call is what re-establishes a fresh one for the run
+     * that just completed. Edge: if the accepted gains equal the stored ones
+     * within tolerance, set_pid leaves the old record valid, and a failure of
+     * set_tuning_quality below then leaves that old record standing (it still
+     * describes gains equal within tolerance to the live ones); a failure here is logged,
      * not propagated, for the exact same reason the model-persist failure
      * just above isn't -- the gains and model the operator actually clicked
      * Accept for are already live either way. */

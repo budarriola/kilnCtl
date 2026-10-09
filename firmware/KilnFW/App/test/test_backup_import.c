@@ -39,6 +39,7 @@
 // other two through test_stub_zones_set_thermo_count()/
 // test_stub_zones_set_max_ramp(), two small hooks added to
 // test_profile_feasibility.c for exactly this cross-file sharing.
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -100,8 +101,18 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
 // pulled in here, same convention as before the split (backup_import_apply()
 // is `static` with no public seam, and the other three still have to
 // compile and link even though these tests only ever call it).
+#include "profiles_builtin.h"
+/* Mutable stand-in for the const catalogue width so a test can outgrow the hidden mask. */
+size_t g_test_builtin_count = 28;
+#define g_builtin_profile_count g_test_builtin_count
 #include "../drivers/persist/backup_json.c"
 #include "../drivers/http/backup_export.c"
+// The REAL save-time validators (validate_io_segment/validate_on_off_rules and their *_in_state forms), not a
+// stub: backup_import.c's pass 1 calls the *_in_state forms, and profiles_http_save() below calls the live forms
+// the way production does, so a restore that pass 1 accepted but the commit would refuse fails these tests.
+#include "profile_rule_target.h"
+#include "profiles_http_internal.h"
+#include "../drivers/http/profiles_validate.c"
 #include "../drivers/http/backup_import.c"
 
 // backup_import_apply() gained mode/dry_run/ack_delete_count/
@@ -132,7 +143,7 @@ esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other h
 
 // LIVE_EDIT_WORKING_SLOT_ID (== PROFILES_MAX_COUNT) -- used by the
 // live-edit-slot-id-rejected test below (task 7,
-// PROFILE_SLOTS_100_PLAN.md section 7). Header-only, no persistence
+// PROFILE_SLOTS_100.md section 7). Header-only, no persistence
 // functions linked in, so this pulls in nothing beyond profiles_types.h,
 // already a transitive dependency of every include above.
 #include "../drivers/persist/live_profile.h"
@@ -162,8 +173,22 @@ esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other h
 // executable's other files define it (ota_http.c/test_web_auth_store.c each
 // live in their own separate executables), so it is defined here.
 #include "web_auth_store.h"
+#include "relay_cycles.h"
 #include "update_settings.h"
 #include "fake_kv.h"
+#include "cfg_fs.h"
+#include "pref_cfg_fs.h"
+#include "kiln_cfg_store_cfg_fs.h"
+#ifdef _WIN32
+#include <direct.h>
+#define BI_MKDIR(p) _mkdir(p)
+#define BI_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define BI_MKDIR(p) mkdir((p), 0755)
+#define BI_RMDIR(p) rmdir(p)
+#endif
 #include "psa/crypto.h"
 psa_status_t g_stub_psa_import_key_result = PSA_SUCCESS;
 
@@ -216,6 +241,75 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
     return PROFILE_DECODE_OK;
 }
 
+// ---- operator-preference fakes (backup gaps 1+2) ---------------------------
+// unit_pref/ramp_assist/display_power/time_sync/relay-name accessors are not linked in this
+// executable; these keep the same validation contract as the real setters.
+#include "unit_pref.h"
+#include "ramp_assist_cfg.h"
+#include "display_power_cfg.h"
+#include "time_sync.h"
+/* g_builtin_profile_count: see g_test_builtin_count above (real width 28; hidden mask is 32 bits) */
+static char g_pf_tz[TIME_SYNC_TZ_MAX_LEN + 1] = "UTC0";
+void time_sync_get_status(time_sync_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    strcpy(out->tz, g_pf_tz);
+}
+esp_err_t time_sync_set_tz(const char *tz)
+{
+    if (!time_sync_tz_is_valid(tz)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    strcpy(g_pf_tz, tz);
+    return ESP_OK;
+}
+static bool g_pf_hidden[32];
+static bool g_pf_ids_valid = false;
+bool profiles_builtin_is_hidden(uint8_t id) { return id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 28 && g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE]; }
+esp_err_t profiles_builtin_set_hidden(uint8_t id, bool h)
+{
+    if (id < PROFILE_BUILTIN_ID_BASE || id >= PROFILE_BUILTIN_ID_BASE + 28) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE] = h;
+    return ESP_OK;
+}
+static char g_pf_rname[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 1];
+static relay_device_type_t g_pf_rtype[KILN_IO_RELAY_COUNT];
+bool zones_config_get_relay_name(uint8_t n, char *out, size_t cap)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || !out || cap == 0) { return false; }
+    strncpy(out, g_pf_rname[n - 1], cap - 1);
+    out[cap - 1] = '\0';
+    return true;
+}
+bool zones_config_set_relay_name(uint8_t n, const char *name)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || (name && strlen(name) > RELAY_NAME_MAX_LEN)) { return false; }
+    strncpy(g_pf_rname[n - 1], name ? name : "", RELAY_NAME_MAX_LEN);
+    return true;
+}
+bool zones_config_get_relay_device_type(uint8_t n, relay_device_type_t *out)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || !out) { return false; }
+    *out = g_pf_rtype[n - 1];
+    return true;
+}
+bool zones_config_set_relay_device_type(uint8_t n, relay_device_type_t t)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || (uint8_t)t >= RELAY_DEVICE_TYPE_COUNT) { return false; }
+    g_pf_rtype[n - 1] = t;
+    return true;
+}
+static void pf_reset(void)
+{
+    g_pf_ids_valid = true;
+    fake_kv_reset_all();
+    (void)unit_pref_start(); (void)ramp_assist_cfg_start(); (void)display_power_cfg_start();
+    strcpy(g_pf_tz, "UTC0"); memset(g_pf_hidden, 0, sizeof(g_pf_hidden));
+    memset(g_pf_rname, 0, sizeof(g_pf_rname)); memset(g_pf_rtype, 0, sizeof(g_pf_rtype));
+}
+
 // ---- profiles_builtin.h stub bodies ---------------------------------------
 // live_profile.c (linked for real, see build_host_tests.ps1's comment on this
 // executable's $sources entry -- Opus review of 5dd23944 finding B) also
@@ -236,7 +330,8 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
 static bool g_fake_builtin_on = false;
 bool profiles_builtin_id_valid(uint8_t id)
 {
-    return g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE;
+    return (g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE) ||
+           (g_pf_ids_valid && id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 28);
 }
 const builtin_profile_t *profiles_builtin_entry(uint8_t id)
 {
@@ -684,6 +779,7 @@ static int g_apply_lower_calls;
 static float g_apply_lower_last_max[STUB_ZONE_COUNT];
 static int g_total_write_calls;
 static int g_profile_save_calls;
+static int g_profile_save_refusals; /* live validator refused inside the profiles_http_save stub */
 static uint8_t g_last_saved_profile_id;
 static profile_t g_last_saved_profile;
 
@@ -693,8 +789,48 @@ static profile_t g_last_saved_profile;
 static bool s_profile_present[PROFILES_MAX_COUNT];
 static profile_t s_profile_slots[PROFILES_MAX_COUNT];
 
+/* Config saves go to the `cfg` partition ONLY now (docs/CONFIG_FILESYSTEM.md,
+ * NVS dual-write close), so every test that persists something needs a mounted
+ * scratch cfg. Each call starts from an EMPTY one: leftover files from an
+ * earlier test would otherwise win over a freshly wiped NVS. */
+static const char *BI_SCRATCH_BASE = "cfg_fs_test_backup_import";
+
+static esp_err_t bi_failing_cfg_write(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
+static void bi_mount_fresh_cfg(void)
+{
+    /* aux_out.dat too: it lives on the same scratch mount, and a file left by an
+     * earlier test would otherwise leak aux state into the next one. */
+    static const char *const files[] = { KILN_CFG_STORE_FILE_PATH, UPDATE_SETTINGS_FILE_PATH,
+                                         AUX_OUTPUTS_FILE_PATH };
+    char path[600];
+    cfg_fs_deinit();
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        snprintf(path, sizeof(path), "%s/.tmp/%s", BI_SCRATCH_BASE, files[i]);
+        remove(path);
+        snprintf(path, sizeof(path), "%s/%s", BI_SCRATCH_BASE, files[i]);
+        remove(path);
+    }
+    snprintf(path, sizeof(path), "%s/.tmp", BI_SCRATCH_BASE);
+    BI_RMDIR(path);
+    BI_RMDIR(BI_SCRATCH_BASE);
+    BI_MKDIR(BI_SCRATCH_BASE);
+    pref_cfg_fs_reset_write_fn_for_test();
+    kiln_cfg_store_cfg_fs_reset_write_fn_for_test();
+    if (cfg_fs_init(BI_SCRATCH_BASE, NULL) != ESP_OK) {
+        TEST_CHECK(false, "setup: the scratch cfg mounts");
+    }
+}
+
 static void reset_stub_state(void)
 {
+    bi_mount_fresh_cfg();
     test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test();
     memset(s_writes, 0, sizeof(s_writes));
     /* Real decoded zones configs never leave a zone's settings_source at raw
@@ -1346,14 +1482,23 @@ void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)
 // own pass 1 has already validated everything by the time pass 2 calls
 // these). ----
 
-/* Models zones_config_set_pid_no_save()'s unconditional tuning_valid = 0
- * (zones_config_accessors.c) -- the real setter clears the record on EVERY
- * gain change, which the earlier stub omitted and so let a commit-time
- * "matches live" compare pass here while failing on hardware. */
-static void stub_invalidate_tuning_record(uint8_t zi)
+/* zones_config_gain_changed() is static inline in zones_config_accessors.h,
+ * so these stubs call the real compare, not a copy of it. */
+/* Models zones_config_set_pid_no_save()'s tuning_valid = 0 (zones_config_
+ * accessors.c): the real setter clears the record only when a gain changes
+ * beyond zones_config_gain_changed()'s tolerance versus the stored gains, and
+ * leaves it standing for equal-within-tolerance gains. The earlier stub
+ * invalidated unconditionally (a mirror false-green: it made the identity
+ * round trip look like it exercised the reinstate path when the real setter
+ * never invalidates there). Must run BEFORE the s_writes[] gains are
+ * overwritten, so the live gains are the pre-write ones. */
+static void stub_invalidate_tuning_record_if_gains_changed(uint8_t zi, float kp, float ki, float kd)
 {
+    const bool changed = zones_config_gain_changed(s_writes[zi].kp, kp) ||
+                         zones_config_gain_changed(s_writes[zi].ki, ki) ||
+                         zones_config_gain_changed(s_writes[zi].kd, kd);
     zone_tuning_quality_t cur;
-    if (zones_config_get_tuning_quality(zi, &cur) && cur.valid) {
+    if (changed && zones_config_get_tuning_quality(zi, &cur) && cur.valid) {
         cur.valid = false;
         test_stub_zones_set_full_tuning_quality(zi, &cur);
     }
@@ -1362,22 +1507,22 @@ static void stub_invalidate_tuning_record(uint8_t zi)
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
+    stub_invalidate_tuning_record_if_gains_changed(zone_index, kp, ki, kd);
     s_writes[zone_index].set_pid_called = true;
     s_writes[zone_index].kp = kp;
     s_writes[zone_index].ki = ki;
     s_writes[zone_index].kd = kd;
-    stub_invalidate_tuning_record(zone_index);
     g_total_write_calls++;
     return true;
 }
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= STUB_ZONE_COUNT) return false;
+    stub_invalidate_tuning_record_if_gains_changed(zone_index, kp, ki, kd);
     s_writes[zone_index].set_pid_called = true;
     s_writes[zone_index].kp = kp;
     s_writes[zone_index].ki = ki;
     s_writes[zone_index].kd = kd;
-    stub_invalidate_tuning_record(zone_index);
     g_total_write_calls++;
     return true;
 }
@@ -2187,6 +2332,38 @@ uint8_t zones_config_json_aux_enabled_mask(void)
     return g_fake_aux_enabled_mask;
 }
 
+/* relay_cycles fakes (relay_cycles.c is not linked into this executable): live counts, with the
+ * real restore_all's monotonic clamp + ceiling check so backup_import's use of it is exercised. */
+uint32_t g_fake_rc_counts[RELAY_CYCLES_COUNT];
+int g_fake_rc_restore_calls;
+bool g_fake_rc_restore_fail;
+
+void relay_cycles_get_all(uint32_t *out)
+{
+    memcpy(out, g_fake_rc_counts, sizeof(g_fake_rc_counts));
+}
+
+bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
+                              relay_cycles_restore_result_t *out_result)
+{
+    (void)out_result;
+    g_fake_rc_restore_calls++;
+    if (counts == NULL || g_fake_rc_restore_fail) {
+        return false;
+    }
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        if (counts[i] > RELAY_CYCLES_RESTORE_MAX_COUNT) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        if (counts[i] >= g_fake_rc_counts[i] || (allow_lower_mask & (1u << i))) {
+            g_fake_rc_counts[i] = counts[i];
+        }
+    }
+    return true;
+}
+
 /* zones_config_push_relay_type() -- zones_http_internal.h declares this
  * (relay_cycles_set_type() push-out, defined for real in
  * zones_config_store.c); backup_import.c now calls it itself, once per
@@ -2271,8 +2448,22 @@ bool profiles_http_get(uint8_t id, profile_t *out)
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
-    (void)err_msg;
-    (void)err_cap;
+    char local_err[160];
+    if (err_msg == NULL || err_cap == 0) {
+        err_msg = local_err;
+        err_cap = sizeof(local_err);
+    }
+    for (uint8_t si = 0; si < candidate->segment_count; si++) {
+        if (candidate->segments[si].seg_kind == PROFILE_SEG_KIND_RELAY_IO &&
+            !validate_io_segment(&candidate->segments[si], (uint8_t)(si + 1u), err_msg, err_cap)) {
+            g_profile_save_refusals++;
+            return false;
+        }
+    }
+    if (!validate_on_off_rules(candidate, err_msg, err_cap)) {
+        g_profile_save_refusals++;
+        return false;
+    }
     g_profile_save_calls++;
     g_total_write_calls++;
     uint8_t id = (requested_id < PROFILES_MAX_COUNT) ? requested_id : 0;
@@ -2584,12 +2775,13 @@ static void test_unknown_version_refused(void)
      * this test moved to version 5, the new too-new boundary. Task 9
      * (bkfinish_assessment.md): BACKUP_FORMAT_VERSION moved 4 -> 5 (top-level
      * kiln_configs[] array, safety_tc_type key), so 5 is now real/supported
-     * too -- this test moves again, to version 6, the new too-new boundary. */
-    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[]}";
+     * too -- this test moves again, to version 6, the new too-new boundary.
+     * 5 -> 6 (profile segment kinds, io fields, on_off_rules): the boundary is now 7. */
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
     char err[160];
     bool ok = test_backup_import_apply(body, err, sizeof(err));
 
-    TEST_CHECK(!ok, "version 6 is newer than this firmware's BACKUP_FORMAT_VERSION (5) -- must be refused");
+    TEST_CHECK(!ok, "version 7 is newer than this firmware's BACKUP_FORMAT_VERSION (6) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
 }
 
@@ -2763,7 +2955,7 @@ static void test_profile_name_at_limit_accepted(void)
     TEST_CHECK(strcmp(g_last_saved_profile.name, "ExactlyFifteenC") == 0, "the full, untruncated name was written");
 }
 
-// PROFILE_SLOTS_100_PLAN.md section 7 task 7: a backup carrying exactly
+// PROFILE_SLOTS_100.md section 7 task 7: a backup carrying exactly
 // PROFILES_MAX_COUNT profiles must import in full, and one carrying
 // PROFILES_MAX_COUNT+1 must be refused BY NAME (the explicit
 // "backup has more than %u profiles" count check a few lines above, not an
@@ -3060,8 +3252,8 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
         "{",
         // wrong "kind"
         "{\"kind\":\"something_else\",\"version\":2,\"profiles\":[],\"zones\":[]}",
-        // version newer than this firmware's BACKUP_FORMAT_VERSION (5)
-        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[]}",
+        // version newer than this firmware's BACKUP_FORMAT_VERSION (6)
+        "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}",
         // a version number "from the future", far past anything ever issued
         "{\"kind\":\"kilnctl_backup\",\"version\":9999,\"profiles\":[],\"zones\":[]}",
         // valid JSON, in-range "kind"/"version", but a value outside the
@@ -3745,7 +3937,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(s_export_body != NULL && s_export_len > 0, "the handler must have streamed something");
 
     TEST_CHECK(strstr(s_export_body, "\"kind\":\"kilnctl_backup\"") != NULL, "top-level kind key");
-    TEST_CHECK(strstr(s_export_body, "\"version\":5") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (5)");
+    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (6)");
 
     TEST_CHECK(strstr(s_export_body, "\"id\":0,\"name\":\"Cone6\",\"zone_mask\":3") != NULL,
               "the seeded profile's id/name/zone_mask are emitted exactly");
@@ -4813,19 +5005,17 @@ static void test_import_refuses_duplicate_zone_index(void)
 // ---------------------------------------------------------------------------
 // 2026-10-05 bench round trip (kilnctl_backup_20261005T071413Z.json ->
 // import -> ...071420Z.json): the fix above was inert on hardware, zones 1 and
-// 2's tuning_seq still went 13 -> 14. Cause: the commit loop calls
-// zones_config_set_pid_no_save() (which sets tuning_valid = 0 on every gain
-// change) BEFORE the tuning compare, so the compare always saw an invalid live
-// record. The stubs now model that invalidation; this test uses the two real
-// zones' tuning blocks from that bench file, with live values at full float
-// precision, and requires seq unchanged AND the record valid afterwards.
+// 2's tuning_seq still went 13 -> 14. Cause: when the file's gains differ from
+// the live ones, the commit loop's zones_config_set_pid_no_save() sets
+// tuning_valid = 0 BEFORE the tuning compare, so a commit-time compare always
+// saw an invalid live record. The stubs model that invalidation (only when a
+// gain changes beyond zones_config_gain_changed()'s tolerance, as the real
+// setter does). Two tests: an identity round trip (gains equal, set_pid never
+// invalidates, record untouched) and a gains-differ case where the record
+// really is invalidated mid-commit and `reinstate` must run.
 // ---------------------------------------------------------------------------
-static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
+static void seed_bench_tuning_records(void)
 {
-    TEST_SECTION("backup_import_apply -- identity round trip with the bench's real tuning blocks "
-                 "(zones 1 and 2): tuning_seq unchanged, record still valid after set_pid's invalidation");
-    reset_stub_state();
-
     static const struct { float base, amb, raw, inf; } bench[2] = {
         { 36.3667f, 37.0f, 15.5333f, 16.1982f },
         { 35.3281f, 36.1562f, 16.5719f, 16.9253f },
@@ -4851,6 +5041,15 @@ static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
         /* seeded after set_pid so the record is valid going into the export */
         TEST_CHECK(s_writes[zi].tuning_seq == 1, "seeded once");
     }
+}
+
+static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
+{
+    TEST_SECTION("backup_import_apply -- identity round trip with the bench's real tuning blocks "
+                 "(zones 1 and 2): gains equal so set_pid never invalidates; tuning_seq unchanged, "
+                 "record still valid");
+    reset_stub_state();
+    seed_bench_tuning_records();
 
     esp_err_t err = run_export();
     TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
@@ -4860,10 +5059,53 @@ static void test_import_identity_roundtrip_keeps_tuning_seq_and_validity(void)
     for (uint8_t zi = 1; zi <= 2; zi++) {
         zone_tuning_quality_t after;
         TEST_CHECK(zones_config_get_tuning_quality(zi, &after) && after.valid,
-                  "tuning record is valid again after the restore (set_pid invalidated it mid-commit)");
+                  "tuning record is still valid after an identity restore");
         TEST_CHECK(s_writes[zi].tuning_seq == 1, "tuning_seq did not move on an identity restore");
-        TEST_CHECK(after.baseline_c == bench[zi - 1].base, "live float not rewritten at export precision");
     }
+}
+
+static void test_import_gains_differ_invalidates_then_reinstates_matching_record(void)
+{
+    TEST_SECTION("backup_import_apply -- file gains differ from live gains but the tuning record is "
+                 "identical: set_pid invalidates mid-commit and reinstate restores it, tuning_seq unchanged");
+    reset_stub_state();
+    seed_bench_tuning_records();
+
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    char *body = s_export_body ? strdup(s_export_body) : NULL;
+    TEST_CHECK(body != NULL, "copy the export (file gains: zone 1/2 kp = 1.0)");
+    if (!body) {
+        return;
+    }
+
+    /* Move the LIVE gains away from the file's (a real edit, so set_pid
+     * invalidates), then put the identical record back, valid, at the same
+     * seq: live record == file record, live gains != file gains. */
+    for (uint8_t zi = 1; zi <= 2; zi++) {
+        zone_tuning_quality_t before;
+        TEST_CHECK(zones_config_get_tuning_quality(zi, &before) && before.valid, "setup: record valid");
+        const uint32_t seq_before = (uint32_t)s_writes[zi].tuning_seq;
+        zones_config_set_pid(zi, 2.0f, 0.0f, 0.0f);
+        zone_tuning_quality_t mid;
+        TEST_CHECK(zones_config_get_tuning_quality(zi, &mid) && !mid.valid,
+                  "setup: a real gain change invalidated the record");
+        test_stub_zones_set_full_tuning_quality(zi, &before);
+        TEST_CHECK((uint32_t)s_writes[zi].tuning_seq == seq_before, "setup: seq untouched");
+    }
+
+    char import_err[256];
+    TEST_CHECK(test_backup_import_apply(body, import_err, sizeof(import_err)),
+              "importing the differing-gains export must succeed");
+    for (uint8_t zi = 1; zi <= 2; zi++) {
+        float kp, ki, kd;
+        zone_tuning_quality_t after;
+        TEST_CHECK(zones_config_get_pid(zi, &kp, &ki, &kd) && kp == 1.0f, "file gains were applied");
+        TEST_CHECK(zones_config_get_tuning_quality(zi, &after) && after.valid,
+                  "record reinstated after set_pid's invalidation");
+        TEST_CHECK(s_writes[zi].tuning_seq == 1, "tuning_seq did not move (reinstate, not re-commit)");
+    }
+    free(body);
 }
 
 // ---------------------------------------------------------------------------
@@ -5416,6 +5658,7 @@ static void test_backup_tuning_float_matches_huge_values(void)
 // ---- WP9 (docs/GITHUB_RELEASE_UPDATE_PLAN.md): the "update_repo" key ----
 static void wp9_fresh_repo_setting(void)
 {
+    bi_mount_fresh_cfg();
     fake_kv_reset_all();
     hal_kv_init_partition("kiln_nvs");
     update_settings_reset_ram_for_test();
@@ -5517,6 +5760,10 @@ static void test_update_repo_export_round_trip(void)
         bool ok = test_backup_import_apply(saved, err, sizeof(err));
         TEST_CHECK(ok, "the exported document imports back");
         TEST_CHECK(strcmp(update_settings_repo(), "round/trip-repo") == 0, "the repo is restored from the backup");
+        // cfg-file-only saves (NVS dual-write close): neither the set()s nor the import wrote NVS.
+        bool nvs_has_copy = true;
+        update_settings_get_dualwrite_status(NULL, NULL, &nvs_has_copy, NULL, NULL);
+        TEST_CHECK(!nvs_has_copy, "set()/import saved to the cfg file only: no NVS copy was written");
         free(saved);
     }
 }
@@ -5630,10 +5877,25 @@ static void test_update_settings_http_post(void)
     s_test_autotune_running_for_mode_gate = false;
 
     // Persist failure: reported as a 500, never as success.
-    fake_kv_script_next_write_status(HAL_IO);
+    pref_cfg_fs_set_write_fn(bi_failing_cfg_write);
     wp9_http_post("repo=flaky%2Fwrite");
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(strcmp(s_post_last_status, "500 Internal Server Error") == 0, "a failed persist gets 500");
-    TEST_CHECK(strstr(s_send_last_body, "\"ok\":false") != NULL, "the 500 body says ok:false");
+    TEST_CHECK(strstr(s_post_last_body, "\"ok\":false") != NULL, "the 500 body says ok:false");
+
+    // cfg unmounted (owner decision 2026-10-06): a 503 refusal with the shared
+    // text, the live value untouched -- never a success, never a 500 that
+    // pretends the write was attempted.
+    wp9_fresh_repo_setting();
+    update_settings_set("before/unmount");
+    cfg_fs_deinit();
+    s_post_last_status[0] = '\0';
+    s_post_last_body[0] = '\0';
+    wp9_http_post("repo=never%2Fapplied");
+    TEST_CHECK(strcmp(s_post_last_status, "503 Service Unavailable") == 0, "an unmounted cfg is refused with 503");
+    TEST_CHECK(strstr(s_post_last_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL, "the 503 body carries the shared text");
+    TEST_CHECK(strcmp(update_settings_repo(), "before/unmount") == 0, "a refused save must not change the live value");
+    bi_mount_fresh_cfg();
 
     // GET reflects the live value.
     wp9_fresh_repo_setting();
@@ -5705,11 +5967,10 @@ static void test_update_repo_default_value_is_unset(void)
     TEST_CHECK(update_settings_repo_is_default(), "the default is in use afterwards");
     tus_blob_probe_t probe;
     memset(&probe, 0xAB, sizeof(probe));
-    hal_kv_handle_t h;
-    hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, "kiln_nvs");
-    size_t len = sizeof(probe);
-    TEST_CHECK(hal_kv_get_blob(&h, "update_repo", &probe, &len) == HAL_OK, "the blob exists");
-    hal_kv_close(&h);
+    uint32_t probe_rev = 0;
+    bool probe_ok = false;
+    pref_cfg_fs_load_raw(UPDATE_SETTINGS_FILE_PATH, sizeof(probe), NULL, &probe, &probe_rev, &probe_ok);
+    TEST_CHECK(probe_ok, "the cfg file exists");
     TEST_CHECK(probe.repo[0] == '\0', "stored as empty, not as the default string");
 
     // Already default: an empty update_repo imports again and stays default.
@@ -5779,13 +6040,14 @@ static void test_update_repo_persist_failure_is_partial_write(void)
     kiln_cfg_plan_t plan;
     bool partial = false;
     char err[160] = "";
-    fake_kv_script_next_write_status(HAL_IO);
+    pref_cfg_fs_set_write_fn(bi_failing_cfg_write);
     bool ok = wp9_apply_full(",\"update_repo\":\"someone/fork\"", KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial,
                              err, sizeof(err));
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(!ok, "a failed update_repo persist fails the restore");
     TEST_CHECK(partial, "it is reported as a partial write (the handler turns this into the 500)");
     TEST_CHECK(strstr(err, "update_repo") != NULL, "the error names update_repo");
-    TEST_CHECK(g_profile_save_calls > 0, "the profiles had already been written (hence partial)");
+    TEST_CHECK(g_profile_save_calls == 0, "profiles are committed LAST: the zones had landed (hence partial) but no profile was written");
 }
 
 static void test_update_repo_pass1_refusal_skips_kiln_configs_commit(void)
@@ -6011,6 +6273,268 @@ static void test_aux_outputs_zone_and_aux_swap_applies_in_either_direction(void)
     TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "aux relay 3 is disabled");
 }
 
+/* ---- RELAY_IO segments / on_off_rules: pass-1 validation against the post-import state ---- */
+
+/* Aux relay 1 enabled with a thermocouple zone: the live state a rule aimed at target 8 needs. */
+static void bi_seed_aux_relay1_enabled(void)
+{
+    aux_bk_fresh();
+    aux_output_entry_t e = aux_bk_entry(true, 1, 2.0f, 10, 10);
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) == ESP_OK, "seed aux relay 1 enabled");
+}
+
+// Backup carries segment kinds / io_* and on_off_rules (incl. an aux target 8+).
+static void test_export_import_roundtrips_relay_io_segments_and_onoff_rules(void)
+{
+    TEST_SECTION("backup export->import: RELAY_IO segments and on/off rules (aux target) round-trip byte-identically");
+    reset_stub_state();
+    TEST_CHECK(zones_config_set_pid(0, 5.0f, 0.6f, 0.02f), "seed zone 0");
+    TEST_CHECK(zones_config_set_zone_type(0, ZONE_TYPE_ON_OFF), "zone 0 is an on/off device (rule target)");
+    bi_seed_aux_relay1_enabled();
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strncpy(p.name, "IoRules", PROFILE_NAME_MAX_LEN);
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    p.segments[0].target_c = 500.0f;
+    p.segments[0].ramp_c_per_hr = 100.0f;
+    p.segments[0].dwell_min = 5;
+    p.segments[1].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    p.segments[1].dwell_min = 3;
+    p.segments[1].target_c = 250.0f;     /* not meaningful for RELAY_IO, but the slot keeps it: round trip must too */
+    p.segments[1].ramp_c_per_hr = 60.0f;
+    p.segments[1].io_target = 2;         /* relay 2: not zone-owned, not bound to an aux output */
+    p.segments[1].io_state = 1;
+    p.segments[1].io_blocking = 1;
+    p.on_off_rule_count = 2;
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].phase_mask = 3;
+    p.on_off_rules[0].direction_mask = 1;
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = 1;
+    p.on_off_rules[0].temp_threshold_c = 123.5f;
+    p.on_off_rules[0].time_start_s = 10;
+    p.on_off_rules[0].time_stop_s = 600;
+    p.on_off_rules[0].invert = 1;
+    p.on_off_rules[1] = p.on_off_rules[0];
+    p.on_off_rules[1].zone_index = 8; /* aux relay 1 */
+    p.on_off_rules[1].segment_index = 1;
+    p.on_off_rules[1].invert = 0;
+    test_stub_profiles_set(0, &p);
+
+    TEST_CHECK(run_export() == ESP_OK, "export ok");
+    char *first = strdup(s_export_body);
+    TEST_CHECK(first != NULL, "copy export");
+    TEST_CHECK(strstr(first, "\"seg_kind\":1") != NULL, "RELAY_IO seg_kind emitted");
+    TEST_CHECK(strstr(first, "\"zone\":8,") != NULL, "aux rule target emitted");
+
+    g_profile_save_calls = 0;
+    memset(&g_last_saved_profile, 0, sizeof(g_last_saved_profile));
+    char err[256];
+    bool ok = test_backup_import_apply(first, err, sizeof(err));
+    if (!ok) printf("    refusal: %s\n", err);
+    TEST_CHECK(ok, "import accepts it");
+    TEST_CHECK(g_profile_save_calls == 1, "profile committed (the real validators accepted it)");
+    TEST_CHECK(g_last_saved_profile.segments[1].seg_kind == PROFILE_SEG_KIND_RELAY_IO, "seg_kind restored");
+    TEST_CHECK(g_last_saved_profile.segments[1].io_target == 2 && g_last_saved_profile.segments[1].io_state == 1 &&
+                   g_last_saved_profile.segments[1].io_blocking == 1,
+               "io_* restored");
+    TEST_CHECK(g_last_saved_profile.segments[1].target_c == 250.0f &&
+                   g_last_saved_profile.segments[1].ramp_c_per_hr == 60.0f,
+               "RELAY_IO target_c/ramp_c_per_hr kept, as profiles_export_http.c keeps them");
+    TEST_CHECK(g_last_saved_profile.on_off_rule_count == 2, "both rules restored");
+    TEST_CHECK(g_last_saved_profile.on_off_rules[1].zone_index == 8, "aux target restored");
+
+    /* Re-export the restored profile: bodies must be byte-identical. */
+    test_stub_profiles_set(0, &g_last_saved_profile);
+    TEST_CHECK(run_export() == ESP_OK, "re-export ok");
+    TEST_CHECK(strcmp(first, s_export_body) == 0, "re-export is byte-identical to the first export");
+    free(first);
+
+    /* Older backup: no seg_kind, io_ or on_off_rules keys -> plain ramp, zero rules. */
+    const char *old_body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[{\"id\":0,\"name\":\"Old\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":500,\"ramp_c_per_hr\":100,\"dwell_min\":5}]}],\"zones\":[]}";
+    g_profile_save_calls = 0;
+    ok = test_backup_import_apply(old_body, err, sizeof(err));
+    if (!ok) printf("    old refusal: %s\n", err);
+    TEST_CHECK(ok, "old-format import still accepted");
+    TEST_CHECK(g_last_saved_profile.segments[0].seg_kind == PROFILE_SEG_KIND_ZONE_RAMP &&
+                   g_last_saved_profile.on_off_rule_count == 0,
+               "old backup: ZONE_RAMP, zero rules");
+}
+
+static char s_bi_body[3072];
+
+/* A one-profile backup: segment 0 a ZONE_RAMP, segment 1 `seg1`; `rules` is the on_off_rules array body. */
+static const char *bi_profile_backup(const char *seg1, const char *rules, const char *zones, const char *aux)
+{
+    snprintf(s_bi_body, sizeof(s_bi_body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"profiles\":[{\"id\":0,\"name\":\"P\",\"zone_mask\":1,"
+             "\"segments\":[{\"target_c\":500,\"ramp_c_per_hr\":100,\"dwell_min\":5},%s],\"on_off_rules\":[%s]}],"
+             "\"zones\":[%s]%s%s}",
+             BACKUP_FORMAT_VERSION, seg1, rules, zones, aux[0] ? ",\"aux_outputs\":[" : "", aux);
+    if (aux[0]) {
+        size_t n = strlen(s_bi_body);
+        s_bi_body[n - 1] = '\0'; /* the closing } */
+        snprintf(s_bi_body + n - 1, sizeof(s_bi_body) - n + 1, "]}");
+    }
+    return s_bi_body;
+}
+
+#define BI_IO_SEG(target) "{\"seg_kind\":1,\"io_target\":" #target ",\"io_state\":1,\"io_blocking\":0,\"dwell_min\":3}"
+#define BI_RULE(zone) "{\"zone\":" #zone ",\"segment\":1,\"enable\":1,\"phase_mask\":3,\"direction_mask\":1,\"time_stop_s\":600}"
+
+static void bi_expect_pass1_refusal(const char *label, const char *body, const char *needle)
+{
+    char err[256] = "";
+    g_total_write_calls = 0;
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(!ok, label);
+    TEST_CHECK(strstr(err, needle) != NULL, "refusal names the reason");
+    if (strstr(err, needle) == NULL) printf("    got: %s\n", err);
+    TEST_CHECK(g_total_write_calls == 0, "pass 1 refusal: NOTHING was written (no zone, profile or kiln write)");
+    TEST_CHECK(g_profile_save_calls == 0 && g_profile_save_refusals == 0,
+               "pass 1 refusal: the profile commit was never reached (not a half-restore)");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "pass 1 refusal: the aux store is untouched");
+}
+
+static void test_profile_validators_run_in_pass_1_against_the_post_import_state(void)
+{
+    TEST_SECTION("backup_import_apply -- the real RELAY_IO/on_off validators refuse in pass 1, against the "
+                 "post-import config, before any commit");
+    char err[256] = "";
+    const char *zone0 = "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}";
+
+    /* 1. A rule aimed at aux relay 1 (target 8) while the same backup does NOT enable it. */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("rule on a disabled aux relay is refused",
+                            bi_profile_backup(BI_IO_SEG(2), BI_RULE(8), zone0, ""), "aux relay");
+
+    /* 2. io_target 9 is in the dead gap between the relay and IO ranges. */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("io_target 9 is refused", bi_profile_backup(BI_IO_SEG(9), "", zone0, ""), "io_target 9");
+
+    /* 3. A rule aimed at a HEATER zone (the dangerous direction). */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("rule aimed at a heater zone is refused",
+                            bi_profile_backup(BI_IO_SEG(2), BI_RULE(1), zone0, ""), "on/off device");
+
+    /* 4. A RELAY_IO segment on a relay the same backup still gives to a zone. */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("RELAY_IO segment on a zone-owned relay (per the backup) is refused",
+                            bi_profile_backup(BI_IO_SEG(3), "",
+                                              "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,"
+                                              "\"relay_mask\":4,\"settings_source\":255}",
+                                              ""),
+                            "assigned to zone");
+
+    /* 5. Duplicate rule (same segment and target). */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("duplicate (segment, target) rule is refused",
+                            bi_profile_backup(BI_IO_SEG(2), BI_RULE(1) "," BI_RULE(1),
+                                              "{\"index\":1,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"zone_type\":1,"
+                                              "\"settings_source\":255}",
+                                              ""),
+                            "duplicates rule");
+
+    /* 6. Aux rule with a reserved temp_source. */
+    reset_stub_state();
+    bi_seed_aux_relay1_enabled();
+    {
+        const char *rule = "{\"zone\":8,\"segment\":1,\"enable\":1,\"phase_mask\":3,\"direction_mask\":1,"
+                           "\"temp_source\":2,\"time_stop_s\":600}";
+        char label_err[256] = "";
+        g_total_write_calls = 0;
+        g_profile_save_calls = 0;
+        TEST_CHECK(!test_backup_import_apply(bi_profile_backup(BI_IO_SEG(2), rule, zone0, ""), label_err,
+                                             sizeof(label_err)),
+                   "aux rule with temp_source 2 is refused");
+        TEST_CHECK(strstr(label_err, "temp_source") != NULL, "refusal names temp_source");
+        TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0, "nothing written");
+    }
+
+    /* 7. The accepted cases: the dependency arrives in the SAME backup and is live by the profile commit. */
+    reset_stub_state();
+    aux_bk_fresh();
+    g_total_write_calls = 0;
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    TEST_CHECK(test_backup_import_apply(
+                   bi_profile_backup(BI_IO_SEG(2), BI_RULE(8), zone0,
+                                     "{\"relay\":1,\"enabled\":true,\"tc_zone\":0}"),
+                   err, sizeof(err)),
+               "rule on aux relay 1 imports when the same backup enables it");
+    if (err[0]) printf("    refusal: %s\n", err);
+    TEST_CHECK(g_profile_save_calls == 1 && g_profile_save_refusals == 0,
+               "profile committed with no live-validator refusal (aux enable landed BEFORE the profile)");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x01, "aux relay 1 enabled");
+
+    reset_stub_state();
+    aux_bk_fresh();
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    TEST_CHECK(test_backup_import_apply(
+                   bi_profile_backup(BI_IO_SEG(2), BI_RULE(1),
+                                     "{\"index\":1,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"zone_type\":1,"
+                                     "\"settings_source\":255}",
+                                     ""),
+                   err, sizeof(err)),
+               "rule on zone 1 imports when the same backup types zone 1 ON_OFF");
+    TEST_CHECK(g_profile_save_calls == 1 && g_profile_save_refusals == 0,
+               "profile committed after the zone landed (never a rule stored aimed at a HEATER)");
+
+    reset_stub_state();
+    aux_bk_fresh();
+    TEST_CHECK(zones_config_set_relay_mask(0, 0x04), "live zone 0 owns relay 3");
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    TEST_CHECK(test_backup_import_apply(
+                   bi_profile_backup(BI_IO_SEG(3), "",
+                                     "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"relay_mask\":1,"
+                                     "\"settings_source\":255}",
+                                     ""),
+                   err, sizeof(err)),
+               "RELAY_IO segment on relay 3 imports when the same backup frees it from zone 0");
+    TEST_CHECK(g_profile_save_calls == 1 && g_profile_save_refusals == 0, "profile committed after the zone freed it");
+
+    /* 8. A dry run reports the same refusal and writes nothing. */
+    reset_stub_state();
+    aux_bk_fresh();
+    memset(&s_test_backup_plan, 0, sizeof(s_test_backup_plan));
+    bool partial = false;
+    g_total_write_calls = 0;
+    TEST_CHECK(!backup_import_apply(bi_profile_backup(BI_IO_SEG(9), "", zone0, ""), KILN_CFG_RESTORE_MERGE, true, -1,
+                                    true, &s_test_backup_plan, &partial, err, sizeof(err)),
+               "dry run refuses an invalid io_target too");
+    TEST_CHECK(g_total_write_calls == 0 && !partial, "dry run wrote nothing");
+}
+
+static void test_backup_format_version_is_6_and_5_still_imports(void)
+{
+    TEST_SECTION("backup format version is 6 (seg_kind/io_*/on_off_rules); a version-5 file is still accepted");
+    reset_stub_state();
+    TEST_CHECK(BACKUP_FORMAT_VERSION == 6, "BACKUP_FORMAT_VERSION is 6");
+    TEST_CHECK(run_export() == ESP_OK, "export ok");
+    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "export stamps version 6");
+    char err[200] = "";
+    const char *v5 = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
+    TEST_CHECK(test_backup_import_apply(v5, err, sizeof(err)), "a version-5 backup is still accepted");
+    const char *v7 = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
+    TEST_CHECK(!test_backup_import_apply(v7, err, sizeof(err)), "a version newer than 6 is refused");
+}
+
 static void test_aux_outputs_dry_run_and_partial_write(void)
 {
     TEST_SECTION("backup_import_apply -- aux_outputs dry run writes nothing; a failed persist is a partial write");
@@ -6027,13 +6551,16 @@ static void test_aux_outputs_dry_run_and_partial_write(void)
 
     reset_stub_state();
     aux_bk_fresh();
-    fake_kv_script_next_write_status(HAL_IO);
+    /* aux_outputs now persists to the cfg file only, so the failure is injected
+     * at the cfg write seam, not the NVS one. */
+    pref_cfg_fs_set_write_fn(bi_failing_cfg_write);
     bool ok = wp9_apply_full(",\"aux_outputs\":[{\"relay\":2,\"enabled\":true}]", KILN_CFG_RESTORE_MERGE, false, -1,
                              &plan, &partial, err, sizeof(err));
+    pref_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(!ok, "a failed aux persist fails the restore");
     TEST_CHECK(partial, "reported as a partial write (the handler turns this into the 500)");
     TEST_CHECK(strstr(err, "aux_outputs") != NULL, "the error names aux_outputs");
-    TEST_CHECK(g_profile_save_calls > 0, "the profiles had already been written (hence partial)");
+    TEST_CHECK(g_profile_save_calls == 0, "profiles are committed LAST: the zones had landed (hence partial) but no profile was written");
 }
 
 static void test_aux_outputs_phase1_reverted_when_zones_fail(void)
@@ -6135,8 +6662,244 @@ static void test_aux_outputs_export_round_trip(void)
     aux_bk_fresh();
 }
 
+// ---- relay_cycles wear counters: export + import ----
+static const char *RC_OK = ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":10,\"c1\":20,\"c2\":30,\"c3\":40,\"c4\":50}";
+
+static void test_relay_cycles_round_trip_and_absent_preserves(void)
+{
+    TEST_SECTION("backup relay_cycles -- exported, restored after a reset, absent key preserves");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    uint32_t want[RELAY_CYCLES_COUNT] = {111, 222, 333, 444, 555};
+    memcpy(g_fake_rc_counts, want, sizeof(want));
+    TEST_CHECK(run_export() == ESP_OK, "export succeeds");
+    TEST_CHECK(strstr(s_export_body, "\"relay_cycles\":{\"hw_relays\":4,\"c0\":111,\"c1\":222,\"c2\":333,"
+                                     "\"c3\":444,\"c4\":555}") != NULL,
+               "all five counters and hw_relays are exported");
+    char *saved = strdup(s_export_body);
+    TEST_CHECK(saved != NULL, "copy the exported document");
+    if (saved != NULL) {
+        memset(g_fake_rc_counts, 0, sizeof(g_fake_rc_counts)); // factory reset
+        char err[160] = "";
+        TEST_CHECK(test_backup_import_apply(saved, err, sizeof(err)), "the exported document imports back");
+        TEST_CHECK(memcmp(g_fake_rc_counts, want, sizeof(want)) == 0, "every counter is restored exactly");
+        free(saved);
+    }
+    // Absent key (older backup): live counts untouched, restore not even called.
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    memcpy(g_fake_rc_counts, want, sizeof(want));
+    g_fake_rc_restore_calls = 0;
+    char err[160] = "";
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)), "a body without relay_cycles imports");
+    TEST_CHECK(memcmp(g_fake_rc_counts, want, sizeof(want)) == 0, "absent key preserves live counters");
+    TEST_CHECK(g_fake_rc_restore_calls == 0, "absent key never calls the restore");
+}
+
+static void test_relay_cycles_never_lowers_live_count(void)
+{
+    TEST_SECTION("backup relay_cycles -- a stale backup cannot lower a live count");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    uint32_t live[RELAY_CYCLES_COUNT] = {5, 99, 0, 41, 1000};
+    memcpy(g_fake_rc_counts, live, sizeof(live));
+    char err[160] = "";
+    TEST_CHECK(wp9_import_with(RC_OK, err, sizeof(err)), "imports");
+    TEST_CHECK(g_fake_rc_counts[0] == 10 && g_fake_rc_counts[1] == 99 && g_fake_rc_counts[2] == 30 &&
+                   g_fake_rc_counts[3] == 41 && g_fake_rc_counts[4] == 1000,
+               "counts only move up");
+    TEST_CHECK(s_rc_kept_mask == ((1u << 1) | (1u << 3) | (1u << 4)), "relays whose live count was kept are reported");
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)) && s_rc_kept_mask == 0, "an import without relay_cycles reports none kept");
+}
+
+static void test_relay_cycles_commit_failure_message_is_accurate(void)
+{
+    TEST_SECTION("backup relay_cycles -- commit failure names what landed and what did not");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    g_fake_rc_restore_fail = true;
+    char err[300] = "";
+    TEST_CHECK(!wp9_import_with(RC_OK, err, sizeof(err)), "a relay_cycles persist failure fails the import");
+    TEST_CHECK(strstr(err, "already landed; preferences and profiles were NOT written") != NULL, "message states profiles were not written");
+    g_fake_rc_restore_fail = false;
+}
+
+static void test_relay_cycles_bad_input_refuses_whole_restore(void)
+{
+    TEST_SECTION("backup relay_cycles -- hardware mismatch / bad values refuse everything, nothing written");
+    const char *tails[] = {
+        ",\"relay_cycles\":{\"hw_relays\":6,\"c0\":1,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"c0\":1,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":1,\"c1\":1,\"c2\":1,\"c3\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":-1,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":1.5,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":100000001,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":[1,2,3]",
+    };
+    for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); i++) {
+        reset_stub_state();
+        wp9_fresh_repo_setting();
+        memset(g_fake_rc_counts, 0, sizeof(g_fake_rc_counts));
+        g_fake_rc_restore_calls = 0;
+        char err[160] = "";
+        TEST_CHECK(!wp9_import_with(tails[i], err, sizeof(err)), "a bad relay_cycles is refused");
+        TEST_CHECK(g_fake_rc_restore_calls == 0, "nothing was restored");
+        TEST_CHECK(strstr(err, "relay_cycles") != NULL, "the error names relay_cycles");
+    }
+}
+
+// ---- operator preferences (backup gaps 1+2): unit, ramp_assist, display_power, hidden profiles, tz, relay_names ----
+static const char *PF_FULL =
+    ",\"unit\":1,\"ramp_assist\":false,\"display_power\":{\"brightness_percent\":40,\"timeout_setting\":2,"
+    "\"keep_on_while_firing\":true,\"display_on_error\":true},\"hidden_builtin_profiles\":[128,130],"
+    "\"tz\":\"EST5EDT,M3.2.0,M11.1.0\",\"relay_names\":[{\"relay\":1,\"name\":\"Vent \\\"fan\\\"\",\"type\":4},"
+    "{\"relay\":3,\"name\":\"Lamp\",\"type\":5}]";
+
+static void test_prefs_import_applies_each_key(void)
+{
+    TEST_SECTION("backup_import_apply -- every operator preference key is applied through its setter");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with(PF_FULL, err, sizeof(err)), "a document with all six preference keys imports");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "unit applied");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "ramp_assist applied");
+    TEST_CHECK(display_power_cfg_brightness_percent() == 40 && display_power_cfg_timeout_setting() == DISPLAY_TIMEOUT_10_MIN &&
+                   display_power_cfg_keep_on_while_firing() && display_power_cfg_display_on_error(),
+               "display_power applied");
+    TEST_CHECK(g_pf_hidden[0] && !g_pf_hidden[1] && g_pf_hidden[2], "hidden_builtin_profiles applied as a full set");
+    TEST_CHECK(strcmp(g_pf_tz, "EST5EDT,M3.2.0,M11.1.0") == 0, "tz applied");
+    TEST_CHECK(strcmp(g_pf_rname[0], "Vent \"fan\"") == 0 && g_pf_rtype[0] == 4, "relay 1 name (escaped quotes) and type");
+    TEST_CHECK(strcmp(g_pf_rname[2], "Lamp") == 0 && g_pf_rtype[2] == 5 && g_pf_rname[1][0] == '\0',
+               "relay 3 applied, unnamed relay 2 untouched");
+}
+
+static void test_prefs_hidden_past_eighth_builtin(void)
+{
+    TEST_SECTION("backup_import_apply -- hiding the 9th and 28th builtin imports and commits those bits");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with(",\"hidden_builtin_profiles\":[136,155]", err, sizeof(err)), "ids past the 8th builtin import");
+    TEST_CHECK(g_pf_hidden[8] && g_pf_hidden[27] && !g_pf_hidden[0] && !g_pf_hidden[9], "bits 8 and 27 committed only");
+    TEST_CHECK(!wp9_import_with(",\"hidden_builtin_profiles\":[156]", err, sizeof(err)), "id past the catalogue still refused");
+}
+
+static void test_prefs_absent_keys_preserve(void)
+{
+    TEST_SECTION("backup_import_apply -- absent preference keys preserve the live values");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    (void)unit_pref_set(UNIT_PREF_FAHRENHEIT); (void)ramp_assist_cfg_set_enabled(false);
+    (void)display_power_cfg_set(55, DISPLAY_TIMEOUT_NEVER, false, false); g_pf_hidden[1] = true;
+    strcpy(g_pf_tz, "JST-9"); strcpy(g_pf_rname[1], "Keep"); g_pf_rtype[1] = RELAY_DEVICE_TYPE_OUTLET;
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)), "a document with none of the keys imports");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT && !ramp_assist_cfg_enabled() &&
+                   display_power_cfg_brightness_percent() == 55 && g_pf_hidden[1] &&
+                   strcmp(g_pf_tz, "JST-9") == 0 && strcmp(g_pf_rname[1], "Keep") == 0 &&
+                   g_pf_rtype[1] == RELAY_DEVICE_TYPE_OUTLET,
+               "all six values unchanged");
+}
+
+static void test_prefs_invalid_refuses_whole_restore(void)
+{
+    TEST_SECTION("backup_import_apply -- an invalid preference (incl. relay_names) refuses the whole restore");
+    static const char *bad[] = {
+        ",\"unit\":2",
+        ",\"unit\":\"C\"",
+        ",\"ramp_assist\":1",
+        ",\"display_power\":{\"brightness_percent\":101,\"timeout_setting\":0,\"keep_on_while_firing\":true,\"display_on_error\":true}",
+        ",\"display_power\":{\"brightness_percent\":50,\"timeout_setting\":99,\"keep_on_while_firing\":true,\"display_on_error\":true}",
+        ",\"display_power\":{\"brightness_percent\":50}",
+        ",\"hidden_builtin_profiles\":[5]",
+        ",\"hidden_builtin_profiles\":3",
+        ",\"tz\":\"\"",
+        ",\"tz\":5",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"0123456789abcdef\"}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":5}]",
+        ",\"relay_names\":[{\"relay\":5,\"name\":\"x\"}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"a\"},{\"relay\":1,\"name\":\"b\"}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"a\",\"type\":99}]",
+        ",\"relay_names\":[{\"relay\":1}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"ok\"}],\"unit\":9",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_stub_state();
+        pf_reset();
+        char err[200] = "";
+        bool ramp0 = ramp_assist_cfg_enabled();
+        unit_pref_t unit0 = unit_pref_get();
+        bool ok = wp9_import_with(bad[i], err, sizeof(err));
+        TEST_CHECK(!ok && err[0] != '\0', "invalid preference refused with a message");
+        TEST_CHECK(unit_pref_get() == unit0 && g_pf_rname[0][0] == '\0' && !g_pf_hidden[0] &&
+                       ramp_assist_cfg_enabled() == ramp0,
+                   "nothing was written");
+    }
+}
+
+static void test_prefs_export_round_trip(void)
+{
+    TEST_SECTION("backup_export_get_handler -- the six preference keys round-trip export, import, export");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with(PF_FULL, err, sizeof(err)), "seed all preferences");
+    TEST_CHECK(run_export() == ESP_OK, "export succeeds");
+    const char *u = strstr(s_export_body, "\"unit\":1,\"ramp_assist\":false,\"display_power\":{");
+    TEST_CHECK(u != NULL && strstr(u, "\"hidden_builtin_profiles\":[128,130]") != NULL &&
+                   strstr(u, "\"tz\":\"EST5EDT,M3.2.0,M11.1.0\"") != NULL &&
+                   strstr(u, "\"relay_names\":[{\"relay\":1,\"name\":\"Vent \\\"fan\\\"\",\"type\":4}") != NULL,
+               "exported keys carry the seeded values");
+    char *saved = strdup(s_export_body);
+    TEST_CHECK(saved != NULL, "copy the document");
+    if (saved != NULL) {
+        char first[900] = "", second[900] = "";
+        const char *a = strstr(saved, "\"unit\":");
+        snprintf(first, sizeof(first), "%.*s", (int)sizeof(first) - 1, a ? a : "");
+        pf_reset();
+        TEST_CHECK(test_backup_import_apply(saved, err, sizeof(err)), "the exported document imports back");
+        TEST_CHECK(run_export() == ESP_OK, "re-export succeeds");
+        a = strstr(s_export_body, "\"unit\":");
+        snprintf(second, sizeof(second), "%.*s", (int)sizeof(second) - 1, a ? a : "");
+        TEST_CHECK(first[0] != '\0' && strcmp(first, second) == 0, "preference keys byte-identical after the round trip");
+        free(saved);
+    }
+    pf_reset();
+}
+
+static void test_prefs_hidden_catalogue_overflow_refused_before_writes(void)
+{
+    TEST_SECTION("backup_import_apply -- builtin catalogue wider than the hidden mask refuses before any write");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    (void)unit_pref_set(UNIT_PREF_FAHRENHEIT);
+    g_pf_hidden[1] = true;
+    strcpy(g_pf_tz, "JST-9");
+    unit_pref_t unit0 = unit_pref_get();
+    bool hidden0[32];
+    memcpy(hidden0, g_pf_hidden, sizeof(hidden0));
+    char tz0[sizeof(g_pf_tz)];
+    memcpy(tz0, g_pf_tz, sizeof(tz0));
+    g_test_builtin_count = 33;
+    bool ok = wp9_import_with(",\"unit\":0,\"hidden_builtin_profiles\":[128],\"tz\":\"UTC0\"", err, sizeof(err));
+    g_test_builtin_count = 28;
+    TEST_CHECK(!ok, "oversized catalogue with hidden data is refused");
+    TEST_CHECK(unit_pref_get() == unit0 && memcmp(hidden0, g_pf_hidden, sizeof(hidden0)) == 0 &&
+                   memcmp(tz0, g_pf_tz, sizeof(tz0)) == 0,
+               "prefs byte-identical to before (nothing written)");
+}
+
 void run_test_backup_import(void)
 {
+    test_prefs_hidden_catalogue_overflow_refused_before_writes();
+    test_prefs_import_applies_each_key();
+    test_prefs_hidden_past_eighth_builtin();
+    test_prefs_absent_keys_preserve();
+    test_prefs_invalid_refuses_whole_restore();
+    test_prefs_export_round_trip();
+    g_pf_ids_valid = false;
     test_update_settings_http_post();
     test_update_repo_backslash_refused();
     test_update_repo_default_value_is_unset();
@@ -6147,12 +6910,18 @@ void run_test_backup_import(void)
     test_update_repo_absent_is_noop();
     test_update_repo_invalid_refuses_whole_restore();
     test_update_repo_export_round_trip();
+    test_relay_cycles_round_trip_and_absent_preserves();
+    test_relay_cycles_never_lowers_live_count();
+    test_relay_cycles_commit_failure_message_is_accurate();
+    test_relay_cycles_bad_input_refuses_whole_restore();
     test_aux_outputs_import_applies_and_persists();
     test_aux_outputs_absent_is_noop();
     test_aux_outputs_malformed_refuses_whole_restore();
     test_aux_outputs_quarantined_store_refuses_import();
     test_aux_outputs_conflict_with_zone_relay_refused_in_pass_1();
     test_aux_outputs_zone_and_aux_swap_applies_in_either_direction();
+    test_profile_validators_run_in_pass_1_against_the_post_import_state();
+    test_backup_format_version_is_6_and_5_still_imports();
     test_aux_outputs_dry_run_and_partial_write();
     test_aux_outputs_export_round_trip();
     test_aux_outputs_phase1_reverted_when_zones_fail();
@@ -6207,6 +6976,7 @@ void run_test_backup_import(void)
     test_backup_import_rollback_tracks_pico_ceiling_back_to_restored_max();
 
     test_export_emits_expected_keys_and_values_for_a_known_config();
+    test_export_import_roundtrips_relay_io_segments_and_onoff_rules();
     test_backup_export_kiln_config_package_present();
     test_kiln_configs_absent_key_is_a_no_op();
     test_kiln_configs_present_empty_merge_is_a_no_op();
@@ -6218,6 +6988,7 @@ void run_test_backup_import(void)
     test_import_of_identical_tuning_quality_does_not_bump_seq();
     test_import_refuses_duplicate_zone_index();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
+    test_import_gains_differ_invalidates_then_reinstates_matching_record();
     test_timing_profiles_bundle_round_trips_nonempty();
     test_export_preserves_coupling_matrix_when_a_zone_is_on_off();
     test_import_tau_only_cell_preserves_coeff_touching_on_off_zone();

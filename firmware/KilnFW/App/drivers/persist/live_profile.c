@@ -10,8 +10,11 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+#include "cfg_fs_status.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "pref_cfg_fs.h"
+#include "persist_scratch.h"
 #include "profiles_builtin.h" /* live_edit_name_collides() also scans the read-only catalogue -- LOW review item */
 
 /* profile_encode_current_blob()/profile_decode_blob() live in
@@ -38,6 +41,8 @@ typedef enum {
 #endif
 profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profile_t *out, const char **err_reason);
 size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t cap);
+
+_Static_assert(PROFILE_BLOB_MAX_SIZE <= PREF_CFG_FS_MAX_LARGE_ITEM, "working profile must fit pref_cfg_fs");
 
 static const char *LIVE_PROFILE_TAG = "live_profile";
 
@@ -370,25 +375,70 @@ bool live_edit_check_window(const profile_t *running, const profile_t *candidate
 }
 
 /* ---- persistence ----------------------------------------------------------
- * caller_stack_is_external()-style write-context contract per hal_kv.h --
- * these functions are called from the flash worker / init-time context by
- * every existing caller convention (nvs_save_slot() in profiles_http.c is
- * the direct precedent this mirrors); no separate guard is added here
- * because none of pass 1's own callers (host tests, and pass 2's future HTTP
- * handler which will route through the same worker dispatch every other
- * profile write already uses) run on a PSRAM-backed stack. */
+ * Owner decision 2026-10-07 (docs/CONFIG_FILESYSTEM.md): the pending-decision
+ * record and the working profile live in two cfg files (LIVE_PROFILE_RECORD_
+ * FILE_PATH / LIVE_PROFILE_WORKING_FILE_PATH, "<4-byte rev><bytes>" via
+ * pref_cfg_fs.h). Saves go to the files ONLY. The legacy NVS keys are a
+ * read-only fallback while a file is absent (live_profile_start() copies them
+ * into cfg once at boot); live_profile_clear() erases them FIRST so a cleared
+ * edit can never reappear from the fallback. A save while cfg is unmounted
+ * fails with a message naming the cause. The files' revs are read back from
+ * the file at save time (next = file rev + 1, or 1), so there is no RAM
+ * counter to drift. */
 
-/* Pattern 2 (local caller_stack_is_external() guard, via the SAME shared
- * hal_kv_write_safe_here() predicate kiln_cfg_store.c's/kiln_cfg_swap.c's
- * entries in flash_worker_lint.py's allowlist use -- not a re-derived copy).
- * live_profile_save_record()/_save_working()/_clear() are reached from host
- * tests today and, from pass 2 on, from the profile-edit HTTP handler and
- * profile_executor's own end-of-firing decision path -- neither a PSRAM-
- * stacked task nor the flash worker itself, but refusing loudly here rather
- * than assuming so is exactly the discipline this lint exists to enforce. */
+#define LIVE_FS_REC_CAP (sizeof(live_edit_persisted_t))
+
+/* Every save and clear here writes flash: the cfg file (a LittleFS write,
+ * which disables the cache exactly like an NVS write) and, for
+ * live_profile_clear(), the legacy NVS erase too. Refuse all three from a
+ * stack the flash layer cannot write from (hal_kv.h's write-context contract;
+ * the same shared hal_kv_write_safe_here() predicate flash_worker_lint.py's
+ * allowlist names). */
 static bool caller_stack_is_external(void)
 {
     return !hal_kv_write_safe_here();
+}
+
+static uint32_t next_rev_for(const char *path, size_t cap)
+{
+    uint8_t *tmp = (uint8_t *)persist_scratch_alloc(cap);
+    if (tmp == NULL) {
+        return 1;
+    }
+    size_t len = 0;
+    uint32_t rev = 0;
+    if (!pref_cfg_fs_load_var(path, tmp, cap, &len, &rev)) {
+        rev = 0;
+    }
+    free(tmp);
+    return rev + 1;
+}
+
+/* Reads the legacy NVS blob. *opened is false when the partition/namespace
+ * itself could not be opened (a TRANSIENT-class failure for the working
+ * profile; "nothing there" for the record). */
+static hal_status_t nvs_legacy_get(const char *key, void *buf, size_t *len, bool *opened)
+{
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, LIVE_PROFILE_NVS_PARTITION);
+    if (opened) {
+        *opened = (kv_err == HAL_OK);
+    }
+    if (kv_err != HAL_OK) {
+        return kv_err;
+    }
+    kv_err = hal_kv_get_blob(&h, key, buf, len);
+    hal_kv_close(&h);
+    return kv_err;
+}
+
+static void fill_unmounted_err(char *err, size_t err_cap, const char *what)
+{
+    if (err) {
+        snprintf(err, err_cap,
+                 "live_profile: %s not saved -- the cfg filesystem is not mounted or the write failed "
+                 "(POST /api/cfgfs/format_confirm if cfg was reported unformatted)", what);
+    }
 }
 
 bool live_profile_save_record(const live_edit_record_t *rec, char *err, size_t err_cap)
@@ -397,34 +447,28 @@ bool live_profile_save_record(const live_edit_record_t *rec, char *err, size_t e
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
         return false;
     }
-    hal_kv_handle_t h;
-    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, LIVE_PROFILE_NVS_PARTITION);
-    if (kv_err != HAL_OK) {
-        if (err) snprintf(err, err_cap, "live_profile: open failed (%s)", hal_status_to_name(kv_err));
-        return false;
-    }
     uint8_t buf[sizeof(live_edit_persisted_t)];
     size_t len = live_edit_record_encode(rec, buf, sizeof(buf));
-    kv_err = hal_kv_set_blob(&h, NVS_KEY_LIVE_RECORD, buf, len);
-    if (kv_err == HAL_OK) {
-        kv_err = hal_kv_commit(&h);
+    if (len == 0) {
+        if (err) snprintf(err, err_cap, "live_profile: record encode failed");
+        return false;
     }
-    hal_kv_close(&h);
-    if (kv_err != HAL_OK) {
-        if (err) snprintf(err, err_cap, "live_profile: record write failed (%s)", hal_status_to_name(kv_err));
+    uint32_t rev = next_rev_for(LIVE_PROFILE_RECORD_FILE_PATH, LIVE_FS_REC_CAP);
+    if (pref_cfg_fs_commit(LIVE_PROFILE_RECORD_FILE_PATH, buf, len, rev, "live-edit record") != ESP_OK) {
+        fill_unmounted_err(err, err_cap, "record");
         return false;
     }
 
     /* Read-back verification (this file's header doc comment / CLAUDE.md's
      * "logging unchecked success" class -- boot_guard_mark_healthy()'s fix
-     * is the precedent). A write whose commit reported HAL_OK but whose
+     * is the precedent). A write whose commit reported OK but whose
      * read-back disagrees is treated as a failure, not a false success. */
     live_edit_record_t readback;
     if (!live_profile_load_record(&readback) || readback.origin_id != rec->origin_id ||
         readback.working_id != rec->working_id || readback.origin_is_builtin != rec->origin_is_builtin ||
         readback.pending != rec->pending || strncmp(readback.origin_name, rec->origin_name,
                                                       sizeof(readback.origin_name)) != 0) {
-        ESP_LOGE(LIVE_PROFILE_TAG, "live_edit_v1 write reported success but read-back did not match -- "
+        ESP_LOGE(LIVE_PROFILE_TAG, "live-edit record write reported success but read-back did not match -- "
                                     "treating as a failed write");
         if (err) snprintf(err, err_cap, "record write could not be verified by read-back");
         return false;
@@ -434,16 +478,16 @@ bool live_profile_save_record(const live_edit_record_t *rec, char *err, size_t e
 
 bool live_profile_load_record(live_edit_record_t *out)
 {
-    hal_kv_handle_t h;
-    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, LIVE_PROFILE_NVS_PARTITION);
-    if (kv_err != HAL_OK) {
-        return false;
-    }
     uint8_t buf[sizeof(live_edit_persisted_t)];
-    size_t len = sizeof(buf);
-    kv_err = hal_kv_get_blob(&h, NVS_KEY_LIVE_RECORD, buf, &len);
-    hal_kv_close(&h);
-    if (kv_err != HAL_OK) {
+    size_t len = 0;
+    uint32_t rev = 0;
+    if (pref_cfg_fs_load_var(LIVE_PROFILE_RECORD_FILE_PATH, buf, sizeof(buf), &len, &rev)) {
+        /* A file that is present is final: a wrong-version/short record is
+         * discarded, never papered over by the older legacy NVS copy. */
+        return live_edit_record_decode(buf, len, out);
+    }
+    len = sizeof(buf);
+    if (nvs_legacy_get(NVS_KEY_LIVE_RECORD, buf, &len, NULL) != HAL_OK) {
         return false;
     }
     return live_edit_record_decode(buf, len, out);
@@ -455,26 +499,22 @@ bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
         return false;
     }
-    hal_kv_handle_t h;
-    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, LIVE_PROFILE_NVS_PARTITION);
-    if (kv_err != HAL_OK) {
-        if (err) snprintf(err, err_cap, "live_profile: open failed (%s)", hal_status_to_name(kv_err));
+    uint8_t *buf = (uint8_t *)persist_scratch_alloc(PROFILE_BLOB_MAX_SIZE);
+    if (buf == NULL) {
+        if (err) snprintf(err, err_cap, "live_profile: out of memory");
         return false;
     }
-    uint8_t buf[PROFILE_BLOB_MAX_SIZE];
-    size_t len = profile_encode_current_blob(p, buf, sizeof(buf));
-    hal_status_t set_err = HAL_OK;
-    if (len == 0) {
-        set_err = HAL_INVALID_SIZE; /* encode refused -- profile too large for PROFILE_BLOB_MAX_SIZE */
-    } else {
-        set_err = hal_kv_set_blob(&h, NVS_KEY_LIVE_PROFILE, buf, len);
-        if (set_err == HAL_OK) {
-            set_err = hal_kv_commit(&h);
-        }
-    }
-    hal_kv_close(&h);
-    if (set_err != HAL_OK) {
+    size_t len = profile_encode_current_blob(p, buf, PROFILE_BLOB_MAX_SIZE);
+    if (len == 0) { /* encode refused -- profile too large for PROFILE_BLOB_MAX_SIZE */
+        free(buf);
         if (err) snprintf(err, err_cap, "live_profile: working profile write failed");
+        return false;
+    }
+    uint32_t rev = next_rev_for(LIVE_PROFILE_WORKING_FILE_PATH, PROFILE_BLOB_MAX_SIZE);
+    esp_err_t werr = pref_cfg_fs_commit(LIVE_PROFILE_WORKING_FILE_PATH, buf, len, rev, "live-edit working profile");
+    free(buf);
+    if (werr != ESP_OK) {
+        fill_unmounted_err(err, err_cap, "working profile");
         return false;
     }
 
@@ -513,40 +553,44 @@ typedef enum {
 static load_working_outcome_t load_working_internal(profile_t *out, const char **out_reason)
 {
     const char *reason = "";
-    hal_kv_handle_t h;
-    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, LIVE_PROFILE_NVS_PARTITION);
-    if (kv_err != HAL_OK) {
-        if (out_reason) *out_reason = "hal_kv_open failed";
-        return LOAD_WORKING_TRANSIENT;
-    }
     /* Heap-allocated, not a stack local -- same reasoning as
      * profile_executor.c's reload_live_profile_if_changed() candidate blob:
      * this function sits on executor_task_entry's call chain
      * (check_executor_task_stack_budget.ps1), and PROFILE_BLOB_MAX_SIZE is
      * cumulative on top of every other frame in that chain. Established
      * pattern per firing_stats_persist()/firing_stats_load(): heap_caps_malloc
-     * + free() on every return path, never a bigger stack. Internal DRAM: this
-     * path reads NVS via hal_kv, same reasoning as firing_stats_load()'s own
-     * MALLOC_CAP_INTERNAL comment. */
+     * + free() on every return path, never a bigger stack. Internal DRAM: the
+     * legacy path reads NVS via hal_kv, same reasoning as firing_stats_load()'s
+     * own MALLOC_CAP_INTERNAL comment. */
     uint8_t *buf = heap_caps_malloc(PROFILE_BLOB_MAX_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (buf == NULL) {
         ESP_LOGE(LIVE_PROFILE_TAG, "live_profile_load_working: malloc(%u) failed",
                  (unsigned)PROFILE_BLOB_MAX_SIZE);
-        hal_kv_close(&h);
         if (out_reason) *out_reason = "decode buffer malloc failed";
         return LOAD_WORKING_TRANSIENT;
     }
-    size_t len = PROFILE_BLOB_MAX_SIZE;
-    kv_err = hal_kv_get_blob(&h, NVS_KEY_LIVE_PROFILE, buf, &len);
-    hal_kv_close(&h);
-    if (kv_err != HAL_OK) {
-        free(buf);
-        if (kv_err == HAL_NOT_FOUND || kv_err == HAL_INVALID_SIZE) {
-            if (out_reason) *out_reason = (kv_err == HAL_NOT_FOUND) ? "working blob not found" : "working blob wrong length";
-            return LOAD_WORKING_PERMANENT;
+    size_t len = 0;
+    uint32_t rev = 0;
+    if (!pref_cfg_fs_load_var(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev)) {
+        /* No cfg file: the legacy NVS copy (pre-2026-10-07 builds) is the
+         * fallback. */
+        bool opened = false;
+        len = PROFILE_BLOB_MAX_SIZE;
+        hal_status_t kv_err = nvs_legacy_get(NVS_KEY_LIVE_PROFILE, buf, &len, &opened);
+        if (!opened) {
+            free(buf);
+            if (out_reason) *out_reason = "hal_kv_open failed";
+            return LOAD_WORKING_TRANSIENT;
         }
-        if (out_reason) *out_reason = "hal_kv_get_blob transient error";
-        return LOAD_WORKING_TRANSIENT;
+        if (kv_err != HAL_OK) {
+            free(buf);
+            if (kv_err == HAL_NOT_FOUND || kv_err == HAL_INVALID_SIZE) {
+                if (out_reason) *out_reason = (kv_err == HAL_NOT_FOUND) ? "working blob not found" : "working blob wrong length";
+                return LOAD_WORKING_PERMANENT;
+            }
+            if (out_reason) *out_reason = "hal_kv_get_blob transient error";
+            return LOAD_WORKING_TRANSIENT;
+        }
     }
     profile_decode_result_t dres = profile_decode_blob(buf, len, out, &reason);
     free(buf);
@@ -686,6 +730,8 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
 
 bool live_profile_clear(char *err, size_t err_cap)
 {
+    /* Legacy NVS copy first: if the file removal below were to fail or be
+     * interrupted, the fallback must not be able to resurrect the edit. */
     if (caller_stack_is_external()) {
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
         return false;
@@ -706,14 +752,86 @@ bool live_profile_clear(char *err, size_t err_cap)
         if (err) snprintf(err, err_cap, "live_profile: clear failed");
         return false;
     }
+    /* Then the cfg files. Unmounted cfg cannot hold a live edit (every save
+     * was refused), so there is nothing to remove and the clear stands. */
+    esp_err_t r1 = pref_cfg_fs_remove(LIVE_PROFILE_RECORD_FILE_PATH);
+    esp_err_t r2 = pref_cfg_fs_remove(LIVE_PROFILE_WORKING_FILE_PATH);
+    bool r1_bad = (r1 != ESP_OK && r1 != ESP_ERR_INVALID_STATE && r1 != ESP_ERR_NOT_FOUND);
+    bool r2_bad = (r2 != ESP_OK && r2 != ESP_ERR_INVALID_STATE && r2 != ESP_ERR_NOT_FOUND);
+    if (r1_bad || r2_bad) {
+        ESP_LOGE(LIVE_PROFILE_TAG, "live-edit cfg file removal failed (record %s, working %s)",
+                 esp_err_to_name(r1), esp_err_to_name(r2));
+        if (err) snprintf(err, err_cap, "live_profile: clear failed");
+        return false;
+    }
     live_edit_record_t readback;
     if (live_profile_load_record(&readback) && readback.pending) {
-        ESP_LOGE(LIVE_PROFILE_TAG, "live_edit_v1 clear reported success but a pending record is still readable");
+        ESP_LOGE(LIVE_PROFILE_TAG, "live-edit clear reported success but a pending record is still readable");
         if (err) snprintf(err, err_cap, "clear could not be verified by read-back");
         return false;
     }
     atomic_fetch_add(&s_live_profile_generation, 1u);
     return true;
+}
+
+/* One-time boot migration: copies a legacy NVS record / working profile into
+ * the cfg files when the matching file is absent (cfg mounted only). The NVS
+ * keys stay as a read fallback until live_profile_clear() erases them. */
+void live_profile_start(void)
+{
+    uint8_t rbuf[sizeof(live_edit_persisted_t)];
+    size_t rlen = 0;
+    uint32_t rev = 0;
+    if (!pref_cfg_fs_load_var(LIVE_PROFILE_RECORD_FILE_PATH, rbuf, sizeof(rbuf), &rlen, &rev)) {
+        rlen = sizeof(rbuf);
+        live_edit_record_t tmp;
+        if (nvs_legacy_get(NVS_KEY_LIVE_RECORD, rbuf, &rlen, NULL) == HAL_OK && live_edit_record_decode(rbuf, rlen, &tmp)) {
+            if (pref_cfg_fs_save(LIVE_PROFILE_RECORD_FILE_PATH, rbuf, rlen, 1) == ESP_OK) {
+                ESP_LOGI(LIVE_PROFILE_TAG, "migrated the legacy live-edit record into cfg");
+            }
+        }
+    }
+    uint8_t *buf = (uint8_t *)persist_scratch_alloc(PROFILE_BLOB_MAX_SIZE);
+    if (buf == NULL) {
+        return;
+    }
+    size_t len = 0;
+    if (!pref_cfg_fs_load_var(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev)) {
+        len = PROFILE_BLOB_MAX_SIZE;
+        profile_t tmp;
+        const char *reason = "";
+        if (nvs_legacy_get(NVS_KEY_LIVE_PROFILE, buf, &len, NULL) == HAL_OK &&
+            profile_decode_blob(buf, len, &tmp, &reason) == PROFILE_DECODE_OK) {
+            if (pref_cfg_fs_save(LIVE_PROFILE_WORKING_FILE_PATH, buf, len, 1) == ESP_OK) {
+                ESP_LOGI(LIVE_PROFILE_TAG, "migrated the legacy live working profile into cfg");
+            }
+        }
+    }
+    free(buf);
+}
+
+/* Read-only dual-write status for GET /api/cfgfs (the record file stands for
+ * the pair: the working profile is only meaningful beside its record). */
+void live_profile_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                       bool *diverged)
+{
+    uint8_t fb[sizeof(live_edit_persisted_t)];
+    size_t flen = 0;
+    uint32_t f_rev = 0;
+    live_edit_record_t fr;
+    bool f_valid = pref_cfg_fs_load_var(LIVE_PROFILE_RECORD_FILE_PATH, fb, sizeof(fb), &flen, &f_rev) &&
+                   live_edit_record_decode(fb, flen, &fr);
+    uint8_t nb[sizeof(live_edit_persisted_t)];
+    size_t nlen = sizeof(nb);
+    live_edit_record_t nr;
+    bool n_valid = nvs_legacy_get(NVS_KEY_LIVE_RECORD, nb, &nlen, NULL) == HAL_OK &&
+                   live_edit_record_decode(nb, nlen, &nr);
+    bool content_equal = f_valid && n_valid && flen == nlen && memcmp(fb, nb, flen) == 0;
+    if (file_valid) *file_valid = f_valid;
+    if (file_rev) *file_rev = f_valid ? f_rev : 0;
+    if (nvs_valid) *nvs_valid = n_valid;
+    if (nvs_rev) *nvs_rev = 0; /* the NVS record has no rev key */
+    if (diverged) *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
 }
 
 uint32_t live_profile_generation(void)

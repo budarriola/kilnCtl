@@ -58,9 +58,8 @@ recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
     }
     /* esp_ota_set_boot_partition(factory) verifies the image, then ERASES otadata so the bootloader
      * falls through to factory. A failure part-way (or a read-back mismatch) can therefore already have changed otadata, so never
-     * assume nothing was written. recovery_switch_restore_running() is called on SET_FAILED by the
-     * recovery_boot handler (ota_http_recovery.c:306 and :343); recovery_switch_at_boot_threshold()
-     * does not call it and just stays in degraded in-app recovery mode. */
+     * assume nothing was written. Both callers call recovery_switch_restore_running() on SET_FAILED:
+     * the recovery_boot handler (ota_http_recovery.c) and recovery_switch_at_boot_threshold() below. */
     esp_err_t err = boot_partition_set_and_verify(recovery);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "boot_partition_set_and_verify(recovery) failed: %s", esp_err_to_name(err));
@@ -101,13 +100,29 @@ void recovery_switch_at_boot_threshold(void)
     switch (boot_guard_decide_recovery_route(threshold, is_factory, valid)) {
     case BOOT_RECOVERY_ROUTE_SWITCH_PARTITION: {
         char msg[96];
-        if (recovery_switch_select_boot(msg, sizeof(msg)) == RECOVERY_SWITCH_OK) {
+        const recovery_switch_result_t sel = recovery_switch_select_boot(msg, sizeof(msg));
+        if (sel == RECOVERY_SWITCH_OK) {
             ESP_LOGE(TAG, "boot threshold reached and the recovery image verifies -- rebooting into it");
             hal_wdt_reboot();
             return; /* not reached on a real backend */
         }
-        ESP_LOGE(TAG, "boot threshold reached but selecting recovery failed (%s) -- staying in degraded in-app "
-                      "recovery mode", msg);
+        if (sel == RECOVERY_SWITCH_SET_FAILED) {
+            /* esp_ota_set_boot_partition(factory) may already have erased otadata, or the read-back
+             * found it pointing somewhere else. Put the boot target back on the running partition so
+             * otadata is never left blank or inconsistent. One bounded attempt, no retry loop: this
+             * runs on the boot path. The boot_guard counter is untouched, so the next boot is still
+             * at threshold and tries the switch again. Under APP_ROLLBACK the restored entry is NEW,
+             * so a board that keeps reset-looping before the rollback-confirm task marks it valid
+             * still falls back to factory (recovery). If the restore itself fails, otadata may be
+             * blank and the next reset boots recovery -- that image just verified, so it is safe. */
+            const bool restored = recovery_switch_restore_running();
+            ESP_LOGE(TAG, "boot threshold reached but selecting recovery failed (%s) -- boot target restore %s; "
+                          "staying in degraded in-app recovery mode",
+                     msg, restored ? "succeeded" : "FAILED (the next reset may boot recovery)");
+        } else {
+            ESP_LOGE(TAG, "boot threshold reached but selecting recovery failed (%s) -- staying in degraded "
+                          "in-app recovery mode", msg);
+        }
         break;
     }
     case BOOT_RECOVERY_ROUTE_DEGRADED:

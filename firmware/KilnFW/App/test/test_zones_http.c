@@ -190,6 +190,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
  * still relies on. */
 static int s_ceiling_writer_calls = 0;
 static float s_ceiling_writer_last_target_c = 0.0f;
+static int s_ceiling_writer_bumps_generation = 0; /* simulates a concurrent writer during the blocking ceiling write */
 
 bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
                                           char *reason_out, size_t reason_cap,
@@ -199,6 +200,9 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
     (void)param_id;
     s_ceiling_writer_calls++;
     s_ceiling_writer_last_target_c = value;
+    if (s_ceiling_writer_bumps_generation) {
+        s_config_generation++;
+    }
     if (reason_out && reason_cap > 0) {
         reason_out[0] = '\0';
     }
@@ -247,6 +251,36 @@ static inline void nvs_test_enable(bool enable)
                   // in this file MUST keep the enable(true)/nvs_test_clear() bracket regardless.
 }
 
+// Saves are cfg-file-only since the NVS dual-write close, so every persistence
+// test needs a mounted cfg scratch directory. This wipes it between tests so a
+// leftover file never wins over NVS staged by the next test.
+#ifdef _WIN32
+#include <direct.h>
+#define ZH_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define ZH_MKDIR(p) mkdir((p), 0755)
+#endif
+#include "cfg_fs.h"
+#include "cfg_fs_refusal_http.h"
+static const char *ZH_CFG_SCRATCH = "cfg_fs_test_zones_http";
+
+static inline void zh_cfg_remount_fresh(void)
+{
+    if (cfg_fs_is_available()) {
+        cfg_fs_entry_t ents[32];
+        size_t n = 0;
+        if (cfg_fs_list("", ents, 32, &n) == ESP_OK) {
+            for (size_t i = 0; i < n; i++) {
+                (void)cfg_fs_delete(ents[i].name);
+            }
+        }
+    }
+    cfg_fs_deinit();
+    (void)ZH_MKDIR(ZH_CFG_SCRATCH);
+    (void)cfg_fs_init(ZH_CFG_SCRATCH, NULL);
+}
+
 static inline void nvs_test_clear(void)
 {
     // Called both right after nvs_test_enable(true) (to guarantee a clean
@@ -255,6 +289,7 @@ static inline void nvs_test_clear(void)
     // effect the old stub's nvs_test_clear() gave.
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
+    zh_cfg_remount_fresh();
 }
 
 // ---- Embedded-page symbols page_get_handler() references ------------------
@@ -1739,6 +1774,63 @@ static uint8_t test_aux_provider(void)
     return s_test_aux_mask;
 }
 
+static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(void)
+{
+    TEST_SECTION("POST /api/zones -- a concurrent writer bumping the config generation between the "
+                 "snapshot and the commit makes the submit refuse 409 instead of overwriting it");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+
+    /* control: no concurrent writer -> commits */
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "control: undisturbed submit commits");
+
+    seed_two_zone_pid_baseline();
+    s_zones.cfg.zones[0].max_temp_c = 100.0f; /* below the body's max, so the commit path raises the Pico ceiling */
+    s_zones.cfg.zones[1].max_temp_c = 100.0f;
+    uint32_t gen_before = s_config_generation;
+    zones_cfg_t before = s_zones.cfg;
+    s_ceiling_writer_calls = 0;
+    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs (unknown Pico ceiling -> always raises) */
+    s_ceiling_writer_bumps_generation = 1;
+    run_zones_post(body);
+    s_ceiling_writer_bumps_generation = 0;
+    s_hw_safety = NULL;
+    TEST_CHECK(s_ceiling_writer_calls >= 1, "test setup: the ceiling write ran (the blocking window)");
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "lost-update answered 409");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_changed_concurrently") != NULL, "refusal names the cause");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched by the refused submit");
+    TEST_CHECK(s_config_generation == gen_before + 1, "only the concurrent writer's bump advanced the generation");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+}
+
+static void test_zones_cfg_lock_covers_commit_and_setters(void)
+{
+    TEST_SECTION("zones config lock -- the POST commit and every field setter's mutate-and-bump take "
+                 "zones_cfg_lock() (review L2; host tests are single-threaded, so this proves the lock "
+                 "is TAKEN around the write, not real mutual exclusion)");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    /* nvs_save() snapshots RAM under the same lock (LOW-4), so measure its own acquisitions
+     * first and expect the commit's single acquisition on top of that. */
+    uint32_t s0 = s_zones_cfg_lock_acquires;
+    (void)nvs_save();
+    uint32_t save_acq = s_zones_cfg_lock_acquires - s0;
+    TEST_CHECK(save_acq >= 1, "nvs_save takes the zones lock to snapshot");
+    uint32_t a0 = s_zones_cfg_lock_acquires;
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "submit commits");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1 + save_acq, "the successful commit took the lock once, plus its save's snapshot");
+
+    a0 = s_zones_cfg_lock_acquires;
+    TEST_CHECK(zones_config_set_max_ramp_no_save(0, 100.0f), "setter succeeds");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1, "a field setter takes the lock around mutate+bump");
+    uint32_t g = s_config_generation;
+    TEST_CHECK(!zones_config_set_max_ramp_no_save(0, -1.0f), "rejected setter");
+    TEST_CHECK(s_config_generation == g && s_zones_cfg_lock_acquires == a0 + 1,
+               "a rejected setter neither locks nor bumps");
+}
+
 static void test_zones_post_refuses_relay_claimed_by_aux(void)
 {
     TEST_SECTION("POST /api/zones -- a zone relay_mask claiming a relay an enabled aux output owns is "
@@ -2722,15 +2814,18 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
     (void)zones_http_start(); // ESP_ERR_INVALID_STATE from the stub HTTP server is expected/ignored --
                               // the NVS load/migrate/persist logic under test already ran by then.
 
-    hal_kv_handle_t readback_h;
-    hal_status_t readback_err = hal_kv_open(&readback_h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    // The cfg file is the only store written now: 4-byte LE rev + raw blob.
+    uint8_t readback_file[sizeof(zones_cfg_t) + 4];
+    size_t readback_file_len = 0;
+    esp_err_t readback_ferr = cfg_fs_read(ZONES_CFG_FILE_PATH, readback_file, sizeof(readback_file),
+                                          &readback_file_len);
+    hal_status_t readback_err = (readback_ferr == ESP_OK && readback_file_len >= 4) ? HAL_OK : HAL_IO;
     uint8_t readback[sizeof(zones_cfg_t)];
-    size_t readback_len = sizeof(readback);
-    if (readback_err == HAL_OK) {
-        readback_err = hal_kv_get_blob(&readback_h, NVS_KEY_ZONES, readback, &readback_len);
-        hal_kv_close(&readback_h);
+    size_t readback_len = readback_file_len >= 4 ? readback_file_len - 4 : 0;
+    if (readback_err == HAL_OK && readback_len <= sizeof(readback)) {
+        memcpy(readback, readback_file + 4, readback_len);
     }
-    TEST_CHECK(readback_err == HAL_OK, "the migrated blob must actually be readable back from flash");
+    TEST_CHECK(readback_err == HAL_OK, "the migrated blob must actually be readable back from the cfg file");
     TEST_CHECK(readback_len == sizeof(zones_cfg_t),
               "the persisted blob must be full current-version size, not the old v1 size still sitting there");
     TEST_CHECK(readback[0] == ZONES_CFG_VERSION,
@@ -2760,6 +2855,14 @@ static void test_zones_http_start_persists_migrated_blob_with_real_crc(void)
 // docs/audits/boot_guard_recovery_loop_2026-09-08.md that motivated the
 // read-back-verified pattern this function copies) must latch the fault; an
 // ordinary successful migration (the test above) must NOT.
+static esp_err_t zh_failing_cfg_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
 static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
 {
     TEST_SECTION("zones_config_get_migration_persist_fault -- latches when the migrated blob's "
@@ -2787,16 +2890,10 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     src.zones[0].max_temp_c = 1000.0f;
     stage_zones_blob(&src, sizeof(src));
 
-    // Arm BOTH write-back attempts (zones_config_persist_migrated_blob_verified()'s
-    // bounded retry loop tries up to 2 times) to lie -- report HAL_OK while
-    // leaving the key's persisted value untouched, so the read-back inside
-    // that function can never match and it must exhaust its retry and give up.
-    // 4, not 2: nvs_save() makes TWO set-shaped calls per attempt
-    // (hal_kv_set_blob(NVS_KEY_ZONES) then hal_kv_set_u32(NVS_KEY_ZONES_REV)) --
-    // arming only 2 lies covers just attempt 0's pair, leaving attempt 1 to
-    // write for real and defeat this test (found by running it: it failed
-    // with the fault never latching, because attempt 1 silently succeeded).
-    fake_kv_script_silent_set_noops(4);
+    // Sabotage the cfg write so BOTH write-back attempts
+    // (zones_config_persist_migrated_blob_verified()'s bounded retry loop
+    // tries up to 2 times) fail and the verification can never succeed.
+    zones_config_cfg_fs_set_write_fn(zh_failing_cfg_write_fn);
 
     s_zones_config_valid = false;
     (void)zones_http_start();
@@ -2807,9 +2904,99 @@ static void test_zones_http_migration_persist_fault_latches_on_lying_write(void)
     TEST_CHECK(fault.on_disk_version == 1, "the latched fault must name the pre-migration on-disk version");
     TEST_CHECK(fault.fw_version == ZONES_CFG_VERSION,
               "the latched fault must name the firmware version the migration was TO, not a stale value");
+    zones_config_cfg_fs_reset_write_fn_for_test();
 
     nvs_test_enable(false);
     nvs_test_clear();
+}
+
+// Owner decision 2026-10-06 ("Refuse, and prompt the format"): cfg is the only
+// save target, so with cfg unmounted a save must be REFUSED with a 503 whose
+// body names the cause and the format-confirm remedy (the shared
+// CFG_FS_NOT_MOUNTED_TEXT), before any RAM mutation, and must never be
+// reported as success. A write failure on a mounted cfg is a 500, also never
+// "ok".
+static void test_zones_post_refused_when_cfg_unmounted(void)
+{
+    TEST_SECTION("zones_post_handler -- cfg unmounted is a 503 refusal naming the format-confirm remedy; "
+                 "mounted-but-write-failing is a 500; neither reports ok");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    // A body that really commits (the same shape the legal-chain test uses),
+    // so "refused" cannot be confused with "rejected as malformed".
+    zh_cfg_remount_fresh();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    run_zones_post(body);
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") == 0, "test setup: this body must commit when cfg is mounted");
+
+    // 1. Unmounted: refused up front.
+    cfg_fs_deinit();
+    TEST_CHECK(!cfg_fs_is_available(), "test setup: cfg must be unmounted");
+    uint32_t gen_before = s_config_generation;
+    s_ceiling_writer_calls = 0;
+    run_zones_post(body);
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0,
+              "unmounted cfg must refuse with 503, not 400/409/500/200");
+    TEST_CHECK(strstr(s_last_resp_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL,
+              "the 503 body must carry the shared cfg-not-mounted text");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":false") != NULL, "the 503 body must say ok:false");
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") != 0, "must never answer the plain-text success body");
+    TEST_CHECK(s_config_generation == gen_before, "a refused save must not commit to RAM (generation unchanged)");
+    TEST_CHECK(s_ceiling_writer_calls == 0, "a refused save must not write the Pico ceiling");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after a refused run");
+
+    // 2. Mounted but the write fails: 500 whose body is not a success.
+    zh_cfg_remount_fresh();
+    TEST_CHECK(cfg_fs_is_available(), "test setup: cfg must be mounted again");
+    zones_config_cfg_fs_set_write_fn(zh_failing_cfg_write_fn);
+    run_zones_post(body);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0,
+              "a mounted cfg whose write fails must answer 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":false") != NULL, "the 500 body must say ok:false");
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") != 0, "a failed save must never answer the plain-text success body");
+
+    // 3. Healthy mounted: still succeeds.
+    run_zones_post(body);
+    TEST_CHECK(strcmp(s_last_resp_body, "ok") == 0, "a healthy mounted save must still answer ok");
+}
+
+// The shared helper itself (cfg_fs_refusal_http.h), used by every other save
+// route (settings, profiles, aux, kiln_configs, backup import).
+static void test_cfg_fs_refusal_helper(void)
+{
+    TEST_SECTION("cfg_fs_http_refuse_if_unmounted / cfg_fs_http_persist_failed -- shared text and statuses");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    zh_cfg_remount_fresh();
+    test_post_hooks_reset();
+    s_last_resp_body[0] = '\0';
+    TEST_CHECK(!cfg_fs_http_refuse_if_unmounted(&req), "mounted cfg must not be refused");
+    TEST_CHECK(s_last_resp_body[0] == '\0' && s_test_last_status[0] == '\0', "a pass-through must send nothing");
+    (void)cfg_fs_http_persist_failed(&req);
+    TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0, "mounted persist failure is a 500");
+    TEST_CHECK(strstr(s_last_resp_body, "could not be saved to flash") != NULL, "500 body names the cause");
+
+    cfg_fs_deinit();
+    test_post_hooks_reset();
+    TEST_CHECK(cfg_fs_http_refuse_if_unmounted(&req), "unmounted cfg must be refused");
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0, "refusal is a 503");
+    TEST_CHECK(strstr(s_last_resp_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL, "refusal body carries the shared text");
+    TEST_CHECK(strstr(CFG_FS_NOT_MOUNTED_TEXT, "/api/cfgfs/format_confirm") != NULL,
+              "the shared text must name the format-confirm route");
+    test_post_hooks_reset();
+    (void)cfg_fs_http_persist_failed(&req);
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0,
+              "persist failure with cfg unmounted is also a 503");
+    TEST_CHECK(strstr(s_last_resp_body, CFG_FS_NOT_MOUNTED_TEXT) != NULL, "same shared text on the failure path");
+    zh_cfg_remount_fresh();
 }
 
 // ---------------------------------------------------------------------------
@@ -7525,11 +7712,9 @@ static void test_tuning_quality_round_trip_asymmetric_per_zone(void)
 // The invalidation this whole feature exists to get right: ANY gain change
 // through zones_config_set_pid() -- a manual PID edit is the operator-facing
 // example, but the setter cannot distinguish its callers -- must invalidate
-// a previously-written tuning-quality record. This is the reset-one-side
-// guard: comment out the invalidation line in zones_config_set_pid() and
-// this test must fail. Verified by hand (see this file's own build log) --
-// removing `z->tuning_valid = 0;` from zones_config_accessors.c leaves
-// tuning_valid at 1, and the "invalidated" TEST_CHECK below goes red.
+// a previously-written tuning-quality record (a same-value write is NOT a
+// change and keeps it). This is the reset-one-side guard: remove the
+// invalidation in zones_config_set_pid_no_save() and this test must fail.
 static void test_zones_config_set_pid_invalidates_tuning_quality(void)
 {
     TEST_SECTION("zones_config_set_pid() invalidates a zone's tuning-quality record -- "
@@ -7570,6 +7755,103 @@ static void test_zones_config_set_pid_invalidates_tuning_quality(void)
     zone_tuning_quality_t zone0_after = {0};
     TEST_CHECK(zones_config_get_tuning_quality(0, &zone0_after) && zone0_after.valid,
               "zone 0's record survives a DIFFERENT zone's gain edit -- invalidation is per-zone");
+
+    // Same-value write-back (a GET-merge-POST client re-posting the stored
+    // gains, e.g. control_set_zone_pid) must NOT clear the record; only an
+    // actual change does. Matches the whole-page POST /api/zones path.
+    TEST_CHECK(zones_config_set_pid(1, 12.0f, 0.5f, 3.0f), "zone 1 gains set to a known triple");
+    TEST_CHECK(zones_config_set_tuning_quality(1, &q), "zone 1's record re-set (fresh autotune accept)");
+    TEST_CHECK(zones_config_set_pid(1, 12.0f, 0.5f, 3.0f), "same-value set_pid on zone 1 succeeds");
+    zone_tuning_quality_t same = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &same) && same.valid,
+              "same-value set_pid keeps tuning_valid = 1");
+    TEST_CHECK(zones_config_set_pid(1, 12.0f, 0.5f, 3.5f), "set_pid changing only Kd succeeds");
+    zone_tuning_quality_t kd_changed = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &kd_changed) && !kd_changed.valid,
+              "changing any single gain (Kd only) clears tuning_valid");
+    TEST_CHECK(zones_config_set_tuning_quality(1, &q), "zone 1's record re-set once more");
+    TEST_CHECK(zones_config_set_pid_no_save(1, 12.0f, 0.5f, 3.5f), "same-value set_pid_no_save succeeds");
+    zone_tuning_quality_t ns_same = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &ns_same) && ns_same.valid,
+              "same-value set_pid_no_save keeps tuning_valid = 1");
+    TEST_CHECK(zones_config_set_pid_no_save(1, 13.0f, 0.5f, 3.5f), "set_pid_no_save changing Kp succeeds");
+    zone_tuning_quality_t ns_chg = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &ns_chg) && !ns_chg.valid,
+              "changed-value set_pid_no_save clears tuning_valid");
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+// Setter-path boundary of zones_config_gain_changed(): the tolerance is
+// |next - cur| > 1e-6 + 1e-5*|cur|, cur = the STORED gain. Drives the real
+// zones_config_set_pid()/_no_save() (the narrow POST /api/zones/pid, autotune,
+// LCD and backup-import path), not the whole-page parser the sibling
+// round-trip test covers. Boundary pairs sit ~10% inside/outside the
+// tolerance so float32 rounding cannot flip them.
+static bool gain_edit_keeps_record(bool use_no_save, float kp0, float ki0, float kd0, float kp1, float ki1,
+                                   float kd1)
+{
+    const zone_tuning_quality_t q = {
+        .valid = true, .method = 0, .rule = 0,
+        .settled = true, .extrapolation_converged = true, .tau_consistent = true,
+        .baseline_c = 25.0f, .step_ambient_c = 25.0f, .raw_rise_c = 50.0f, .rise_inf_c = 50.0f,
+    };
+    /* Establish the stored gains (this itself may invalidate), then a fresh valid record. */
+    TEST_CHECK(zones_config_set_pid(1, kp0, ki0, kd0), "boundary setup: store the starting gains");
+    TEST_CHECK(zones_config_set_tuning_quality(1, &q), "boundary setup: record set after the gains");
+    zone_tuning_quality_t pre = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &pre) && pre.valid, "boundary setup: record reads valid");
+    const bool ok = use_no_save ? zones_config_set_pid_no_save(1, kp1, ki1, kd1)
+                                : zones_config_set_pid(1, kp1, ki1, kd1);
+    TEST_CHECK(ok, "boundary: the edit itself succeeds");
+    zone_tuning_quality_t post = {0};
+    TEST_CHECK(zones_config_get_tuning_quality(1, &post), "boundary: getter succeeds");
+    return post.valid;
+}
+
+static void test_zones_config_set_pid_gain_tolerance_boundaries(void)
+{
+    TEST_SECTION("zones_config_set_pid()/_no_save() tolerance boundary -- just inside keeps the tuning "
+                 "record, just outside clears it, the 1e-6 floor dominates a small Ki, a Ki-only edit counts");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 3;
+
+    for (int ns = 0; ns < 2; ns++) {
+        const bool no_save = ns != 0;
+        // Kp = 1.0: tolerance 1e-6 + 1e-5 = 1.1e-5. Inside +1.0e-5, outside +1.3e-5.
+        TEST_CHECK(gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.00001f, 0.5f, 3.0f),
+                  "Kp +1.0e-5 on Kp=1 (inside 1.1e-5) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.000013f, 0.5f, 3.0f),
+                  "Kp +1.3e-5 on Kp=1 (outside 1.1e-5) clears the record");
+        // Kd = 3: tolerance 1e-6 + 3e-5 = 3.1e-5. Inside +2.8e-5, outside +3.5e-5 (Kd-only).
+        TEST_CHECK(gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.0f, 0.5f, 3.000028f),
+                  "Kd +2.8e-5 on Kd=3 (inside 3.1e-5) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 1.0f, 0.5f, 3.0f, 1.0f, 0.5f, 3.000035f),
+                  "Kd +3.5e-5 on Kd=3 (outside 3.1e-5) clears the record");
+        // Small Ki = 1e-4: the relative term is 1e-9, so the 1e-6 floor sets the tolerance
+        // (1.001e-6). +0.9e-6 (0.9%) is inside, +1.2e-6 (1.2%) is outside.
+        TEST_CHECK(gain_edit_keeps_record(no_save, 1.0f, 1.0e-4f, 3.0f, 1.0f, 1.009e-4f, 3.0f),
+                  "Ki +0.9e-6 on Ki=1e-4 (floor-dominated tolerance 1.001e-6) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 1.0f, 1.0e-4f, 3.0f, 1.0f, 1.012e-4f, 3.0f),
+                  "Ki +1.2e-6 on Ki=1e-4 (outside the floor) clears the record");
+        // A Ki-only change, large and visible: Kp/Kd identical, only Ki moves.
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 12.0f, 0.5f, 3.0f, 12.0f, 0.6f, 3.0f),
+                  "a Ki-only change (0.5 -> 0.6, Kp/Kd identical) clears the record");
+        // The tolerance is relative to the STORED gain, not the new one: a large Kp is
+        // forgiving by 1e-5*|cur| (Kp=100 -> 1.001e-3), so +5e-4 is inside, +2e-3 outside.
+        TEST_CHECK(gain_edit_keeps_record(no_save, 100.0f, 0.5f, 3.0f, 100.0005f, 0.5f, 3.0f),
+                  "Kp +5e-4 on Kp=100 (inside 1.001e-3) keeps the record");
+        TEST_CHECK(!gain_edit_keeps_record(no_save, 100.0f, 0.5f, 3.0f, 100.002f, 0.5f, 3.0f),
+                  "Kp +2e-3 on Kp=100 (outside 1.001e-3) clears the record");
+    }
+    // NaN on either side counts as a change (a corrupt stored gain being replaced must
+    // clear the record); the old `delta > tol` form returned false here.
+    TEST_CHECK(zones_config_gain_changed(NAN, 1.0f), "stored NaN gain -> changed");
+    TEST_CHECK(zones_config_gain_changed(1.0f, NAN), "new NaN gain -> changed");
+    TEST_CHECK(!zones_config_gain_changed(0.0f, 0.0f), "0 -> 0 is not a change");
 
     nvs_test_enable(false);
     nvs_test_clear();
@@ -11417,7 +11699,11 @@ static void test_ct_blob_validate_rejects_what_it_must(void)
 
 static void test_ct_store_round_trips_through_nvs(void)
 {
+    // The verdict is cfg-file-only (owner decision 2026-10-07): mount a fresh
+    // cfg and reload so the RAM copy starts empty.
     fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    (void)ct_verify_store_start();
     TEST_CHECK(!ct_verify_store_get(NULL), "ct store: nothing stored before anything is saved");
 
     ct_verify_blob_t in = ctb_base();
@@ -11437,6 +11723,85 @@ static void test_ct_store_round_trips_through_nvs(void)
     memset(&out, 0, sizeof(out));
     TEST_CHECK(ct_verify_store_get(&out) && out.zone[2].verdict == (uint8_t)ZONE_CT_VERDICT_FAIL,
                "ct store: the refused save left the good verdict standing");
+
+    // The real reboot: only the cfg file survives. start() reloads it.
+    TEST_CHECK(ct_verify_store_start() == ESP_OK, "ct store: start() after the 'reboot'");
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(ct_verify_store_get(&out) && memcmp(&in, &out, sizeof(in)) == 0,
+               "ct store: the verdict survives a restart from the cfg file alone");
+    fake_kv_reset_all();
+}
+
+static bool ct_file_exists(void)
+{
+    bool e = false;
+    return cfg_fs_exists(CT_VERIFY_CFG_FILE_PATH, &e) == ESP_OK && e;
+}
+
+static bool ct_nvs_has_verdict(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_init_partition("kiln_nvs") != HAL_OK ||
+        hal_kv_open(&h, "ct_verify", HAL_KV_MODE_READ_ONLY, "kiln_nvs") != HAL_OK) {
+        return false;
+    }
+    ct_verify_blob_t b;
+    size_t len = sizeof(b);
+    bool have = hal_kv_get_blob(&h, "verdict_v1", &b, &len) == HAL_OK;
+    hal_kv_close(&h);
+    return have;
+}
+
+static void test_ct_store_cfg_only_and_refuses_when_unmounted(void)
+{
+    fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    (void)ct_verify_store_start();
+    ct_verify_blob_t in = ctb_base();
+    TEST_CHECK(ct_verify_store_save(&in) == ESP_OK, "ct cfg: save with cfg mounted");
+    TEST_CHECK(ct_file_exists(), "ct cfg: the verdict file was written");
+    TEST_CHECK(!ct_nvs_has_verdict(), "ct cfg: nothing was written to NVS");
+    bool fv = false, nv = true, dv = true;
+    uint32_t fr = 0, nr = 0;
+    ct_verify_store_get_dualwrite_status(&fv, &fr, &nv, &nr, &dv);
+    TEST_CHECK(fv && fr == 1 && !nv && !dv, "ct cfg: status shows file rev 1, no NVS side, not diverged");
+
+    cfg_fs_deinit();
+    in.zone[0].verdict = (uint8_t)ZONE_CT_VERDICT_FAIL;
+    TEST_CHECK(ct_verify_store_save(&in) == ESP_ERR_INVALID_STATE, "ct cfg: save refused while cfg is unmounted");
+    TEST_CHECK(!ct_nvs_has_verdict(), "ct cfg: and no NVS fallback write happened");
+    // Remount over the same files (nothing could be deleted while unmounted):
+    // the restart sees the last PERSISTED verdict, not the refused change.
+    (void)cfg_fs_init(ZH_CFG_SCRATCH, NULL);
+    (void)ct_verify_store_start();
+    {
+        ct_verify_blob_t back;
+        memset(&back, 0, sizeof(back));
+        TEST_CHECK(ct_verify_store_get(&back) && back.zone[0].verdict != (uint8_t)ZONE_CT_VERDICT_FAIL,
+                   "ct cfg: the refused change is gone after a restart; the last persisted verdict stands");
+    }
+}
+
+static void test_ct_store_legacy_nvs_migrates(void)
+{
+    fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    ct_verify_blob_t legacy = ctb_base();
+    legacy.zone[1].verdict = (uint8_t)ZONE_CT_VERDICT_FAIL;
+    TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "ct mig: init legacy partition");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "ct_verify", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK, "ct mig: open legacy ns");
+    TEST_CHECK(hal_kv_set_blob(&h, "verdict_v1", &legacy, sizeof(legacy)) == HAL_OK, "ct mig: write legacy blob");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(!ct_file_exists(), "ct mig: precondition, no file yet");
+    TEST_CHECK(ct_verify_store_start() == ESP_OK, "ct mig: start()");
+    ct_verify_blob_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_CHECK(ct_verify_store_get(&out) && memcmp(&out, &legacy, sizeof(out)) == 0,
+               "ct mig: the legacy NVS verdict is read as the fallback");
+    TEST_CHECK(ct_file_exists(), "ct mig: and was migrated into the cfg file");
+    TEST_CHECK(ct_nvs_has_verdict(), "ct mig: the NVS copy is left in place");
     fake_kv_reset_all();
 }
 
@@ -11459,6 +11824,8 @@ static void ctf_install_live_config(void)
 static void test_ct_current_fact_tracks_the_stored_verdict(void)
 {
     fake_kv_reset_all();
+    zh_cfg_remount_fresh();
+    (void)ct_verify_store_start();
     ctf_install_live_config();
 
     TEST_CHECK(ct_verify_current_fact() == (int)READINESS_CT_ATTR_NEVER_RUN,
@@ -15577,16 +15944,91 @@ static void test_zone_free_for_aux(void)
     nvs_test_clear();
 }
 
+/* Fails the NEXT cfg write only, then behaves like the real writer -- the
+ * put-back save after a refused free must land. Saves are cfg-file-only since
+ * the NVS dual-write close, so an NVS (fake_kv) write fault no longer reaches
+ * this path at all; the failure must be injected at the cfg seam. */
+static int s_zfa_cfg_fail_writes;
+static int s_zfa_cfg_write_calls;
+static esp_err_t zfa_fail_once_cfg_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    s_zfa_cfg_write_calls++;
+    if (s_zfa_cfg_fail_writes > 0) {
+        s_zfa_cfg_fail_writes--;
+        return ESP_FAIL;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
 static void test_zone_free_for_aux_nvs_failure_restores_ram(void)
 {
-    TEST_SECTION("zones_http_zone_free_for_aux -- a failed NVS write is a refusal and RAM is put back");
+    TEST_SECTION("zones_http_zone_free_for_aux -- a failed cfg write is a refusal and RAM is put back");
     zfa_seed();
     zone_cfg_t old = s_zones.cfg.zones[1];
-    fake_kv_script_next_write_status(HAL_IO);
-    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_NOTHING_CHANGED,
+    s_zfa_cfg_fail_writes = 1;
+    s_zfa_cfg_write_calls = 0;
+    zones_config_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    int r = zones_http_zone_free_for_aux(1);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_zfa_cfg_write_calls >= 2, "the failed save and the put-back save both reached the cfg writer");
+    TEST_CHECK(r == ZONES_AUX_FREE_NOTHING_CHANGED,
                "a persist failure refuses the free and the put-back save is reported as clean");
     TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "RAM zone is back to the original");
     TEST_CHECK(!zones_http_zone_restore_after_aux(1), "nothing is left saved after the refusal");
+
+    /* Both saves fail: the put-back save could not land, so the cfg file may
+     * still hold the freed zone -- that must be reported as UNCERTAIN. */
+    zfa_seed();
+    s_zfa_cfg_fail_writes = 1000;
+    zones_config_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    r = zones_http_zone_free_for_aux(1);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    s_zfa_cfg_fail_writes = 0;
+    TEST_CHECK(r == ZONES_AUX_FREE_UNCERTAIN, "a failed put-back save is reported as uncertain, never clean");
+    TEST_CHECK(memcmp(&s_zones.cfg.zones[1], &old, sizeof(old)) == 0, "RAM zone is still put back");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+/* The zone-to-aux conversion's final read-back (zone_aux_convert_http.c's
+ * op_verify_persisted()) calls zones_config_persisted_equals_ram(). Saves are
+ * cfg-file-only since the dual-write close, so it must re-read the FILE: an
+ * NVS read-back would compare RAM against a blob no save updates, and every
+ * conversion would end in a failed read-back. */
+static void test_zones_persisted_equals_ram_reads_the_cfg_file(void)
+{
+    TEST_SECTION("zones_config_persisted_equals_ram -- re-reads the cfg file, the only save target");
+    zfa_seed();
+    /* zfa_seed()'s memset leaves every settings_source at 0, i.e. zone 0
+     * inheriting from itself: a cycle the load path normalizes to CUSTOM, so
+     * the decoded file would never equal this un-normalized RAM. A real RAM
+     * config never holds a cycle (load normalizes, POST/import reject). */
+    for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+        memset(s_zones.cfg.zones[i].settings_source, ZONE_SETTINGS_SOURCE_CUSTOM,
+               sizeof(s_zones.cfg.zones[i].settings_source));
+    }
+    TEST_CHECK(zones_http_zone_free_for_aux(1) == ZONES_AUX_FREE_OK, "a save lands (cfg file only)");
+    {
+        hal_kv_handle_t h;
+        bool nvs_has = false;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            size_t len = 0;
+            nvs_has = hal_kv_get_blob(&h, NVS_KEY_ZONES, NULL, &len) == HAL_OK;
+            hal_kv_close(&h);
+        }
+        TEST_CHECK(!nvs_has, "no NVS zones blob was written");
+    }
+    TEST_CHECK(zones_config_persisted_equals_ram(), "the cfg file equals RAM right after a good save");
+
+    s_zfa_cfg_fail_writes = 1000;
+    zones_config_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    s_zones.cfg.zones[0].max_temp_c = 1100.0f;
+    esp_err_t err = nvs_save();
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    s_zfa_cfg_fail_writes = 0;
+    TEST_CHECK(err != ESP_OK, "a failed cfg write is reported");
+    TEST_CHECK(!zones_config_persisted_equals_ram(), "RAM edited but not persisted: read-back is false");
+    zones_http_zone_discard_saved_for_aux();
     nvs_test_enable(false);
     nvs_test_clear();
 }
@@ -15619,13 +16061,18 @@ static void test_zone_restore_refuses_on_aux_conflict(void)
 
 void run_test_zones_http(void)
 {
+    // cfg is the only save target now, so every handler test that commits a
+    // config needs it mounted: a save with cfg unmounted is refused (503).
+    zh_cfg_remount_fresh();
     test_zone_free_for_aux();
     test_zone_restore_refuses_on_aux_conflict();
     test_zone_free_for_aux_nvs_failure_restores_ram();
+    test_zones_persisted_equals_ram_reads_the_cfg_file();
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();
     test_small_ki_edit_tolerance_is_relative_not_absolute();
     test_gain_round_trip_at_9g_never_invalidates_any_magnitude();
+    test_zones_config_set_pid_gain_tolerance_boundaries();
     test_in_range_zone_thermo_mask_legacy_fallback_unchanged();
     test_old_behaviour_would_have_zeroed_it();
 
@@ -15841,6 +16288,8 @@ void run_test_zones_http(void)
     test_ct_fingerprint_notices_every_field();
     test_ct_blob_validate_rejects_what_it_must();
     test_ct_store_round_trips_through_nvs();
+    test_ct_store_cfg_only_and_refuses_when_unmounted();
+    test_ct_store_legacy_nvs_migrates();
     test_ct_current_fact_tracks_the_stored_verdict();
     test_ct_stale_verdict_is_never_reported_as_the_verdict_it_was();
     test_ct_producer_summed_uncommitted_map_is_shared_not_wrong_channel();
@@ -15948,7 +16397,11 @@ void run_test_zones_http(void)
     // test_safety_cfg_http.c -- once admitted here, http_async_job_busy()
     // reads true for the rest of this executable.
     test_zones_post_http_sync_claim();
+    test_zones_post_refused_when_cfg_unmounted();
+    test_cfg_fs_refusal_helper();
+    test_zones_cfg_lock_covers_commit_and_setters();
     test_zones_post_refuses_relay_claimed_by_aux();
+    test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
     test_zones_post_refused_while_async_job_busy();
 }
 

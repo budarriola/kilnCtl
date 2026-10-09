@@ -69,6 +69,7 @@ $ErrorActionPreference = "Continue"
 
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\lib_safe_remove.ps1")
 
 $repoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..\..")
 $repoRootFull = ([System.IO.Path]::GetFullPath($repoRoot.Path)).TrimEnd('\')
@@ -147,7 +148,7 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
             continue
         }
         Write-Host "Pruning stale build directory $($stale.FullName) -- its tree '$owner' no longer exists"
-        Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-TreeSafe -Path $stale.FullName
     } finally {
         if ($staleHeld) {
             try { $staleMutex.ReleaseMutex() } catch { }
@@ -156,12 +157,7 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
     }
 }
 
-$buildGate = Enter-KilnBuildGate -Label "kilnfw_recovery_target_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
 $lock = Enter-BuildLock -Name $LockName
 try {
     New-Item -ItemType Directory -Force -Path $WorktreePath | Out-Null
@@ -211,7 +207,8 @@ try {
     $sharedFiles = @(
         "update\stage_header.c", "update\stage_header.h",
         "update\update_semver.c", "update\update_semver.h",
-        "http\ota_image_crc.c", "http\ota_image_crc.h"
+        "http\ota_image_crc.c", "http\ota_image_crc.h",
+        "http\http_origin_check.h"
     )
     $appDriversSrc = Join-Path $repoRoot "firmware\KilnFW\App\drivers"
     $appDriversDst = Join-Path $WorktreePath "KilnFW\App\drivers"
@@ -264,7 +261,23 @@ try {
     }
 
     & $IdfProfile *>&1 | Out-Null
-    $env:CCACHE_DISABLE = "1"
+    # ccache: same pinned, asserted configuration as
+    # check_00_kilnfw_target_build.ps1 (lib_kilnfw_ccache.ps1 has the
+    # staleness argument). KILNCTL_CCACHE_DISABLE=1 turns it off.
+    . (Join-Path $PSScriptRoot "lib_kilnfw_ccache.ps1")
+    if ($env:KILNCTL_CCACHE_DISABLE -eq "1") {
+        Disable-KilnfwCcache
+    } else {
+        $ccacheExe = Get-KilnfwCcacheExe
+        if (-not $ccacheExe) {
+            Fail "ccache not found after loading the ESP-IDF profile ($IdfProfile); set KILNCTL_CCACHE_DISABLE=1 to build without it."
+        }
+        Enable-KilnfwCcache
+        $ccacheProblems = @(Get-KilnfwCcacheConfigProblems -CcacheExe $ccacheExe)
+        if ($ccacheProblems.Count -gt 0) {
+            Fail ("ccache's effective configuration is not the pinned one -- refusing to build with it:`n  " + ($ccacheProblems -join "`n  "))
+        }
+    }
 
     $binPath = Join-Path $dstRoot "build\KilnFW_recovery.bin"
     $elfPath = Join-Path $dstRoot "build\KilnFW_recovery.elf"
@@ -316,8 +329,13 @@ try {
     }
 
     Write-Host "Building KilnFW_recovery target in $dstRoot (sdkconfig.defaults hash $recoveryDefaultsHash) ..."
-    $buildOutput = & idf.py -C $dstRoot build 2>&1
-    $buildExit = $LASTEXITCODE
+    $buildGate = Enter-KilnBuildGate -Label "kilnfw_recovery_target_build"
+    try {
+        $buildOutput = & idf.py -C $dstRoot build 2>&1
+        $buildExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $buildGate
+    }
     $buildOutput | Write-Host
 
     if ($buildExit -ne 0) {
@@ -386,7 +404,4 @@ try {
     Write-Host "PASS: built $([System.IO.Path]::GetFileName($binPath)) ($((Get-Item -LiteralPath $binPath).Length) B) against sdkconfig.defaults hash $recoveryDefaultsHash, published to $mainRecoveryBuildDir (including as recovery.bin for tools/check_recovery_image_size.py)."
 } finally {
     Exit-BuildLock -Lock $lock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }

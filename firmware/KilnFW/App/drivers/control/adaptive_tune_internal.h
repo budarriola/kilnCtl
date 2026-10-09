@@ -229,7 +229,7 @@ extern const char *ADAPTIVE_TUNE_TAG;
 
 #define ADAPTIVE_TUNE_MAX_EXCLUDED_FRACTION 0.05f
 
-// ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: how much a refined K_dc may move
+// ADAPTIVE_FUZZY_EVALUATION.md sec 3: how much a refined K_dc may move
 // (percent, either direction) from the prior accepted value and still count
 // as a "good" run toward the fuzzy confidence counter. CHOSEN, not measured
 // -- deliberately tighter than ADAPTIVE_TUNE_MIN_MATERIAL_MOVE_FRAC's 0.5%
@@ -581,7 +581,7 @@ typedef struct {
     float    revert_ki_baseline;
 
     // ---------------------------------------------------------------------
-    // ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the fuzzy confidence gate's
+    // ADAPTIVE_FUZZY_EVALUATION.md sec 3: the fuzzy confidence gate's
     // cross-firing "c" counter (0..PID_FUZZY_CONFIDENCE_MAX_C), consulted by
     // pid_fuzzy_prepare_gains() every tick via adaptive_tune_get_fuzzy_
     // confidence_c() and updated only here, at run end. RAM-only, per-BOOT
@@ -599,7 +599,7 @@ typedef struct {
     // refined model counts as one "good" run (increment, capped at MAX_C);
     // a skipped/excluded run or a large delta floors it to 0 immediately.
     // This is an intentional divergence from the plan's literal residual-CV
-    // machinery, not an oversight -- see the ADAPTIVE_FUZZY_EVALUATION_PLAN
+    // machinery, not an oversight -- see the ADAPTIVE_FUZZY_EVALUATION
     // sec 3 implementation report for the rationale.
     uint8_t  fuzzy_confidence_c;
 } adaptive_tune_zone_t;

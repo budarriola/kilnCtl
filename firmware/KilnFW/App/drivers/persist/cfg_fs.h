@@ -104,6 +104,31 @@ void cfg_fs_deinit(void);
 cfg_fs_status_t cfg_fs_get_status(void);
 bool cfg_fs_is_available(void); /* true only when status == MOUNTED */
 
+/* The one user-facing message for "a save was refused because cfg is not
+ * mounted". cfg is the only save target (NVS is a read-only legacy source),
+ * so every save route, and the readiness/LCD prompts, point at the same
+ * remedy. A string literal on purpose: HTTP handlers concatenate it into JSON
+ * bodies without a stack buffer. */
+#define CFG_FS_NOT_MOUNTED_TEXT     "settings storage (cfg) not mounted - confirm format via POST /api/cfgfs/format_confirm"
+
+/* Recovery-mode variant, chosen when cfg_fs_skipped_for_recovery() is true:
+ * the partition was deliberately left unmounted and still holds the saved
+ * config, so this text must NOT advise a format. */
+#define CFG_FS_RECOVERY_SKIPPED_TEXT "settings storage (cfg) not mounted in recovery mode - leave recovery mode (POST /api/ota/esp/recovery_exit) to save settings; do not format"
+
+/* True when this boot skipped the mount because boot_guard RECOVERY MODE is
+ * active (cfg_fs_mount_or_skip(true, ...)) and cfg is still not mounted.
+ * Since the NVS dual-write close the partition holds the board's only
+ * up-to-date config, so leaving recovery mode is the remedy, never a format.
+ * Cleared by cfg_fs_deinit() and by a non-recovery cfg_fs_mount_or_skip(). */
+bool cfg_fs_skipped_for_recovery(void);
+
+/* The refusal text for the current unmounted state (either literal above). */
+static inline const char *cfg_fs_not_mounted_text(void)
+{
+    return cfg_fs_skipped_for_recovery() ? CFG_FS_RECOVERY_SKIPPED_TEXT : CFG_FS_NOT_MOUNTED_TEXT;
+}
+
 /* `rel_path` is always relative to the mounted base, e.g. "zones.json" or
  * "profiles/3.json" -- at most one '/' level of nesting is supported (the
  * plan's layout never nests deeper than one directory). Every function

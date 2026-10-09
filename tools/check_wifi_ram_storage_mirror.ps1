@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_wifi_ram_storage_mirror.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob picks up check_wifi_ram_storage_mirror.py without any
 # further wiring. See that script's own docstring for what it compares

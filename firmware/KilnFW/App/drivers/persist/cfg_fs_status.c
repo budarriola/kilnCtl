@@ -23,14 +23,24 @@
 #define CFG_FS_STATUS_MAX_FILES 32
 #define CFG_FS_STATUS_PATH_MAX 600
 
-/* -1 means "size unknown" -- distinguished from a real 0-byte file. */
-static long file_size_or_unknown(const char *base_dir, const char *rel_name)
+/* One-level subdirectories cfg_fs holds files in (cfg_fs.h supports at most
+ * one '/' of nesting). Only profiles/ exists today (profiles_cfg_fs.h's
+ * PROFILES_CFG_FS_PATH_FMT, profiles_builtin.c's hidden.json). */
+static const char *const CFG_FS_STATUS_SUBDIRS[] = { "profiles" };
+
+/* -1 means "size unknown" -- distinguished from a real 0-byte file.
+ * `sub_dir` is NULL for a root file, else the one-level subdirectory the
+ * file lives in; the join happens here, in the one path buffer this
+ * function already needs, so callers never hold a second path buffer on the
+ * httpd stack. */
+static long file_size_or_unknown(const char *base_dir, const char *sub_dir, const char *name)
 {
     if (!base_dir) {
         return -1;
     }
     char path[CFG_FS_STATUS_PATH_MAX];
-    int n = snprintf(path, sizeof(path), "%s/%s", base_dir, rel_name);
+    int n = sub_dir ? snprintf(path, sizeof(path), "%s/%s/%s", base_dir, sub_dir, name)
+                    : snprintf(path, sizeof(path), "%s/%s", base_dir, name);
     if (n <= 0 || (size_t)n >= sizeof(path)) {
         return -1;
     }
@@ -82,6 +92,11 @@ bool cfg_fs_format_is_stalled(bool in_progress, uint32_t elapsed_ms)
 bool cfg_fs_status_item_diverged(bool file_valid, bool nvs_valid, bool content_equal)
 {
     return file_valid && nvs_valid && !content_equal;
+}
+
+bool cfg_fs_status_item_nvs_stale(bool raw_diverged, uint32_t file_rev, uint32_t nvs_rev)
+{
+    return raw_diverged && file_rev > nvs_rev;
 }
 
 esp_err_t cfg_fs_status_build_json(const char *base_dir_for_sizes, const cfg_fs_capacity_info_t *cap,
@@ -170,7 +185,7 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
 
     APPEND(",\"file_count\":%lu,\"files\":[", (unsigned long)file_count);
     for (size_t i = 0; i < file_count; i++) {
-        long sz = file_size_or_unknown(base_dir_for_sizes, files[i].name);
+        long sz = file_size_or_unknown(base_dir_for_sizes, NULL, files[i].name);
         if (sz >= 0) {
             APPEND("%s{\"name\":\"%s\",\"size_bytes\":%ld}", i == 0 ? "" : ",", files[i].name, sz);
         } else {
@@ -179,9 +194,41 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
     }
     APPEND("]");
 
+    /* cfg_fs_list("") skips subdirectories, so files nested one level down
+     * (profiles/prof<id>.json, profiles/hidden.json) never reach files[]
+     * above. Summarize each known subdirectory as a count plus total bytes
+     * instead of listing names: names would not be fetchable through
+     * /api/cfgfs/file (which refuses '/'), and a summary keeps the response
+     * inside CFG_FS_STATUS_HANDLER_JSON_BUF. tmp_files is free scratch by
+     * now (only tmp_count was needed from it). Sizes come from the same
+     * stat path as files[]; an entry whose size is unknown adds 0 to bytes
+     * and bumps "unknown_size". */
+    APPEND(",\"subdirs\":[");
+    for (size_t d = 0; d < sizeof(CFG_FS_STATUS_SUBDIRS) / sizeof(CFG_FS_STATUS_SUBDIRS[0]); d++) {
+        size_t sub_count = 0;
+        unsigned long sub_bytes = 0;
+        unsigned long sub_unknown = 0;
+        if (mounted && cfg_fs_list(CFG_FS_STATUS_SUBDIRS[d], tmp_files, CFG_FS_STATUS_MAX_FILES, &sub_count) ==
+                           ESP_OK) {
+            for (size_t i = 0; i < sub_count; i++) {
+                long sz = file_size_or_unknown(base_dir_for_sizes, CFG_FS_STATUS_SUBDIRS[d], tmp_files[i].name);
+                if (sz >= 0) {
+                    sub_bytes += (unsigned long)sz;
+                } else {
+                    sub_unknown++;
+                }
+            }
+        } else {
+            sub_count = 0;
+        }
+        APPEND("%s{\"name\":\"%s\",\"file_count\":%lu,\"size_bytes\":%lu,\"unknown_size\":%lu}",
+              d == 0 ? "" : ",", CFG_FS_STATUS_SUBDIRS[d], (unsigned long)sub_count, sub_bytes, sub_unknown);
+    }
+    APPEND("]");
+
     APPEND(",\"tmp_entries_now\":%lu", (unsigned long)tmp_count);
 
-    APPEND(",\"dual_write\":{\"items\":[");
+    APPEND(",\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":[");
     size_t n_items = items ? item_count : 0;
     if (n_items > CFG_FS_STATUS_MAX_ITEMS) {
         /* Clamped, not rejected -- see cfg_fs_status.h's CFG_FS_STATUS_MAX_ITEMS
@@ -195,10 +242,11 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
     for (size_t i = 0; i < n_items; i++) {
         const cfg_fs_dualwrite_item_t *it = &items[i];
         APPEND("%s{\"name\":\"%s\",\"file_backed\":%s,\"file_rev\":%lu,\"nvs_backed\":%s,\"nvs_rev\":%lu,"
-              "\"diverged\":%s,\"migration_deferred\":%s}",
+              "\"diverged\":%s,\"nvs_stale\":%s,\"migration_deferred\":%s}",
               i == 0 ? "" : ",", it->name ? it->name : "?", it->file_valid ? "true" : "false",
               (unsigned long)it->file_rev, it->nvs_valid ? "true" : "false", (unsigned long)it->nvs_rev,
-              it->diverged ? "true" : "false", it->migration_deferred ? "true" : "false");
+              it->diverged ? "true" : "false", it->nvs_stale ? "true" : "false",
+              it->migration_deferred ? "true" : "false");
     }
     APPEND("]");
     /* 2026-09-08 audit (deaccc4f): this list used to also carry "prefs" and
@@ -241,9 +289,29 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
      * cache the safety path must not depend on the filesystem for),
      * rp2040_config_store (a different chip -- out of scope permanently),
      * logs/coredump (already on their own dedicated partitions). */
+    /* 2026-10-07 audit: the list below also carries every persist/control
+     * store that is NVS-only today, found by grepping for hal_kv_* users
+     * with no cfg_fs or pref_cfg_fs path: profiles_favorites.c
+     * (prof_favusr/prof_favbi), live_profile.c (live_edit_v1/live_prof),
+     * firing_shadow.c (shadow_tune/sdwblob), ct_verify_store.c (ct_verify),
+     * kiln_cfg_swap.c (swap_pend), aux_outputs_cfg.c's convert journal
+     * (aux_conv_jrnl -- the aux_outputs config itself is a dual-write row),
+     * setup_wizard_progress.c (progress_v1), plus pico_update_attempts.c
+     * and pico_image_manifest.c (boot-time records in kiln_cfg). The
+     * estop_verification.c (estop_verif) and dualwrite_window.c (dwwin, the
+     * window tracker itself, which must not depend on the filesystem it
+     * judges) are NVS-only too. The
+     * credential stores are deliberately NOT named here: check_kiln_auth_config_
+     * isolation.ps1 forbids any config-path file from referencing them. run_state.c
+     * is the existing "run_state_breadcrumb" entry. iter_tune_store.c,
+     * profiles_favorites.c, live_profile.c, ct_verify_store.c and
+     * setup_wizard_progress.c are NOT listed: they moved to cfg files on
+     * 2026-10-07 and report dual_write rows instead. */
     APPEND(",\"nvs_permanent\":[\"wifi_creds\",\"boot_guard_counter\",\"watchdog_panic_disable\","
           "\"ota_record\",\"crash_report\",\"touch_cal\",\"run_state_breadcrumb\",\"safety_mirror_esp\","
-          "\"rp2040_config_store\",\"logs\",\"coredump\"]");
+          "\"rp2040_config_store\",\"logs\",\"coredump\","
+          "\"firing_shadow\",\"kiln_cfg_swap\",\"aux_convert_journal\","
+          "\"pico_update_attempts\",\"pico_image_manifest\",\"estop_verification\",\"dualwrite_window\"]");
     APPEND("}");
 
     /* "dual_write_window" -- progress toward closing the dual-write window

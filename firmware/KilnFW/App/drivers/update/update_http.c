@@ -3,6 +3,7 @@
 // three ADMIN routes.
 #include "update_http.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,7 @@
 #include "system_mode_gate_http.h"
 #include "update_fetch.h"
 #include "update_http_internal.h"
+#include "update_policy.h"
 #include "update_stage.h"
 #include "update_stale_stage.h"
 #include "wifi_provision_http.h"
@@ -124,11 +126,22 @@ static uint8_t *buf_get(size_t *cap)
     return ota_http_esp_chunk_buf(cap);
 }
 
+// Review 3 LOW-1: a BUSY stage with a wedged fetch writer stays busy until reboot; say so.
+static const char *stage_err_name_w(update_stage_err_t e)
+{
+    if (e == UPDATE_STAGE_ERR_BUSY && update_fetch_writer_wedged()) {
+        return "writer_wedged_reboot_required";
+    }
+    return update_stage_err_name(e);
+}
+
 static const char *http_status_for(update_stage_err_t e)
 {
     switch (e) {
     case UPDATE_STAGE_OK: return "200 OK";
-    case UPDATE_STAGE_ERR_BUSY: return "409 Conflict";
+    case UPDATE_STAGE_ERR_BUSY:
+    case UPDATE_STAGE_ERR_VERSION_MISMATCH:
+    case UPDATE_STAGE_ERR_POLICY: return "409 Conflict";
     case UPDATE_STAGE_ERR_OVERSIZE: return "413 Payload Too Large";
     case UPDATE_STAGE_ERR_FLASH:
     case UPDATE_STAGE_ERR_HASH:
@@ -183,7 +196,119 @@ static bool claim_refuses(httpd_req_t *req, const char *what, const char *ip)
         (void)send_error_json(req, "409 Conflict", "update_in_progress");
         return true;
     }
+    // Claim-first ordering: heat starts test ota_http_heat_blocked_by_update(), which reads the claim, so
+    // once it is held no run can start. A run that started between the pre-claim mode-gate check and the
+    // claim is caught here by re-checking the mode gate under the claim; the claim is released on refusal.
+    // (The OTA interlock cannot be re-run here: it refuses while ANY claim, including ours, is held.)
+    if (mode_gate_refuses(req, what, ip)) {
+        ota_http_update_end();
+        return true;
+    }
     return false;
+}
+
+// Optional request header as text; false when absent, true (and dst NUL-terminated) when present and fits.
+static bool hdr_text(httpd_req_t *req, const char *name, char *dst, size_t cap)
+{
+    dst[0] = '\0';
+    size_t n = httpd_req_get_hdr_value_len(req, name);
+    if (n == 0 || n >= cap) {
+        return false;
+    }
+    return httpd_req_get_hdr_value_str(req, name, dst, cap) == ESP_OK;
+}
+
+static bool hdr_flag(httpd_req_t *req, const char *name)
+{
+    char v[8];
+    return hdr_text(req, name, v, sizeof(v)) && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0);
+}
+
+// Optional unsigned header: 0 = absent, 1 = parsed into *out, -1 = present but malformed (not a plain
+// decimal, trailing junk, zero or out of range). Never fails open to "absent".
+static int hdr_u32(httpd_req_t *req, const char *name, uint32_t *out)
+{
+    char v[12];
+    *out = 0;
+    if (httpd_req_get_hdr_value_len(req, name) == 0) {
+        return 0;
+    }
+    return hdr_text(req, name, v, sizeof(v)) && update_policy_parse_hdr_u32(v, out) ? 1 : -1;
+}
+
+// Downgrade gate (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6) for the hand upload, applied once
+// the image head is in (so a version taken from the image's own app descriptor is covered too), before any
+// image byte is written. On refusal the 409 (400 for a malformed header) is sent here and
+// UPDATE_STAGE_ERR_POLICY returned. The schema versions come from the identity record embedded in the
+// image (update_image_id_t); X-Stage-Zones-Cfg / X-Stage-Kilnlink / X-Stage-Uart are advisory and must agree
+// with it. Overrides are X-Stage-Force, X-Stage-Allow-Downgrade and X-Stage-Confirm (typed: equal to the
+// version). The project-identity check is not part of this.
+typedef struct {
+    httpd_req_t *req;
+    const char *ip;
+} policy_gate_ctx_t;
+
+// Gate scratch lives here, not on the httpd stack (the handler sits at its stack ceiling). Safe because
+// ota_http_update_try_begin() admits one upload at a time.
+static struct {
+    char confirm[STAGE_SEMVER_FIELD_LEN + 1];
+    update_upload_request_t ur;
+    update_identity_t run;
+    char cand[STAGE_SEMVER_FIELD_LEN + 1];
+    char json[512];
+} s_gate;
+
+static update_stage_err_t policy_gate(void *vctx, const char *semver, const char *commit, const update_image_id_t *id)
+{
+    const policy_gate_ctx_t *gc = vctx;
+    httpd_req_t *req = gc->req;
+    const char *ip = gc->ip;
+    (void)hdr_text(req, "X-Stage-Confirm", s_gate.confirm, sizeof(s_gate.confirm));
+    memset(&s_gate.ur, 0, sizeof(s_gate.ur));
+    s_gate.ur.version = semver;
+    s_gate.ur.commit = commit;
+    s_gate.ur.have_image_id = id != NULL;
+    if (id != NULL) {
+        s_gate.ur.image_id = *id;
+    }
+    if (hdr_u32(req, "X-Stage-Zones-Cfg", &s_gate.ur.zones_cfg_version) < 0 ||
+        hdr_u32(req, "X-Stage-Kilnlink", &s_gate.ur.kilnlink_version) < 0 ||
+        hdr_u32(req, "X-Stage-Uart", &s_gate.ur.uart_version) < 0) {
+        ESP_LOGW(TAG, "stage upload from %s: malformed X-Stage schema header", ip);
+        (void)send_error_json(req, "400 Bad Request", "bad_schema_header");
+        return UPDATE_STAGE_ERR_POLICY;
+    }
+    s_gate.ur.force = hdr_flag(req, "X-Stage-Force");
+    s_gate.ur.allow_downgrade = hdr_flag(req, "X-Stage-Allow-Downgrade");
+    s_gate.ur.confirm = s_gate.confirm;
+    update_fetch_running_identity(&s_gate.run, commit);
+    update_decision_t d = update_policy_decide_upload(&s_gate.run, &s_gate.ur);
+    ESP_LOGW(TAG, "stage upload from %s: policy %s (%s)", ip, update_verdict_name(d.verdict), d.reason ? d.reason : "");
+    if (d.allowed) {
+        return UPDATE_STAGE_OK;
+    }
+    const char *name = d.verdict == UPDATE_VERDICT_REFUSE_DOWNGRADE ? "downgrade_refused"
+                       : (d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE || d.verdict == UPDATE_VERDICT_UP_TO_DATE)
+                           ? "needs_force"
+                           : update_verdict_name(d.verdict);
+    // reason strings are static and quote-free; the candidate version may come from the image, so filter it.
+    size_t ci = 0;
+    for (; semver[ci] != '\0' && ci < sizeof(s_gate.cand) - 1; ci++) {
+        char ch = semver[ci];
+        bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '.' || ch == '-' || ch == '+';
+        s_gate.cand[ci] = ok ? ch : '?';
+    }
+    s_gate.cand[ci] = '\0';
+    snprintf(s_gate.json, sizeof(s_gate.json),
+             "{\"ok\":false,\"error\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\","
+             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s,"
+             "\"candidate_version\":\"%s\",\"running_version\":\"%s\"}",
+             name, update_verdict_name(d.verdict), d.reason ? d.reason : "", d.needs_typed_confirm ? "true" : "false",
+             d.zones_cfg_lower ? "true" : "false", s_gate.cand, s_gate.run.version);
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    (void)httpd_resp_sendstr(req, s_gate.json);
+    return UPDATE_STAGE_ERR_POLICY;
 }
 
 static esp_err_t stage_upload_post_handler(httpd_req_t *req)
@@ -233,9 +358,15 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: refused: %s (%u bytes)", ip, update_stage_err_name(e),
                          (unsigned)req->content_len);
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 failed_mid_body = true;
             }
+        }
+
+        policy_gate_ctx_t gate_ctx = { .req = req, .ip = ip };
+        bool response_sent = false;
+        if (!failed_mid_body) {
+            update_stage_set_gate(&s_stage, policy_gate, &gate_ctx);
         }
 
         size_t remaining = failed_mid_body ? 0 : req->content_len;
@@ -256,7 +387,10 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             e = update_stage_upload_write(&s_stage, buf, (size_t)r);
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: write failed: %s", ip, update_stage_err_name(e));
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                response_sent = (e == UPDATE_STAGE_ERR_POLICY); // policy_gate() already sent the 409
+                if (!response_sent) {
+                    (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
+                }
                 failed_mid_body = true;
                 break;
             }
@@ -267,7 +401,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             e = update_stage_upload_finish(&s_stage);
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: finish failed: %s", ip, update_stage_err_name(e));
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 failed_mid_body = true;
             } else {
                 ESP_LOGW(TAG, "stage upload from %s: %u bytes staged and verified", ip,
@@ -278,6 +412,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
         } else {
             update_stage_upload_abort(&s_stage); // idempotent
         }
+        update_stage_set_gate(&s_stage, NULL, NULL); // gate_ctx is on this stack frame
         ota_http_update_end();
     }
 
@@ -300,7 +435,7 @@ static esp_err_t stage_clear_post_handler(httpd_req_t *req)
     ota_http_update_end();
     if (e != UPDATE_STAGE_OK) {
         ESP_LOGW(TAG, "stage clear from %s: failed: %s", ip, update_stage_err_name(e));
-        return send_error_json(req, http_status_for(e), update_stage_err_name(e));
+        return send_error_json(req, http_status_for(e), stage_err_name_w(e));
     }
     ESP_LOGW(TAG, "stage clear from %s: stage header erased", ip);
     httpd_resp_set_type(req, "application/json");
@@ -314,8 +449,10 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     update_stage_info_t info = { 0 };
     update_stage_err_t e = update_stage_get_status(&s_stage, buf, buf_cap, &info);
     if (e != UPDATE_STAGE_OK && e != UPDATE_STAGE_ERR_BUSY && info.reason == NULL) {
-        return send_error_json(req, http_status_for(e), update_stage_err_name(e));
+        return send_error_json(req, http_status_for(e), stage_err_name_w(e));
     }
+    const bool wedged = update_fetch_writer_wedged();
+    info.reason = update_stage_status_reason(&info, wedged);
 
     char sha_hex[2 * STAGE_SHA256_LEN + 1] = "";
     const bool hdr_ok = (info.hdr_status == STAGE_HDR_OK);
@@ -324,12 +461,12 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     }
     // semver is validated charset (digits, '.', '-', '+', alnum) and commit is
     // lowercase hex, by stage_header_decode(); no escaping needed.
-    char json[576];
+    char json[608];
     int n = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"phase\":\"%s\",\"busy\":%s,\"bytes_done\":%u,\"bytes_total\":%u,"
                      "\"staged\":%s,\"reason\":\"%s\",\"header\":\"%s\",\"capacity\":%u,"
                      "\"image_length\":%u,\"state\":\"%s\",\"semver\":\"%s\",\"commit\":\"%s\","
-                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s}",
+                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s,\"fetch_writer_wedged\":%s}",
                      update_stage_phase_name(info.phase), info.busy ? "true" : "false",
                      (unsigned)info.bytes_done, (unsigned)info.bytes_total, info.staged ? "true" : "false",
                      info.reason ? info.reason : "", stage_hdr_status_name(info.hdr_status),
@@ -337,7 +474,7 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
                      hdr_ok ? stage_state_name(info.state) : "", hdr_ok ? info.semver : "",
                      hdr_ok ? info.commit : "", sha_hex, hdr_ok ? (unsigned)info.source : 0u,
                      update_stale_result_name(s_last_auto_clear),
-                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false");
+                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false", wedged ? "true" : "false");
     return ota_http_send_json_clamped(req, json, n, sizeof(json));
 }
 

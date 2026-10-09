@@ -184,6 +184,7 @@
 
 #include "ui_page_home_internal.h"
 #include "ui_page_profile_picker.h" /* ui_page_profile_picker_set_pick_cb() -- UI_PLAN.md 6.1 */
+#include "ui_page_safety.h" /* ui_page_safety_open() -- trip strip tap */
 
 const char *UI_HOME_TAG = "ui_page_home";
 
@@ -215,6 +216,15 @@ uint8_t s_ui_home_zone_count; /* zones_config_get_thermo_count() at build time *
 /* Trip strip -- hidden unless a live trip is present; see its creation in
  * ui_page_home_build() for why it is hidden rather than absent. */
 lv_obj_t *s_ui_home_trip_strip;
+bool s_ui_home_trip_strip_is_safety;
+
+static void trip_strip_clicked_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_ui_home_trip_strip_is_safety) {
+        ui_page_safety_open(false); /* ungated entry: Back must go home, not to the hub */
+    }
+}
 
 /* PID_EXPANSION_PLAN.md 7.4's LCD warning surface: "kiln is behind schedule"
  * -- INFORMATIONAL, not a fault, so deliberately NOT styled like
@@ -730,6 +740,8 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_radius(s_ui_home_trip_strip, UI_THEME_CORNER_RADIUS_PX, 0);
     lv_obj_set_style_pad_all(s_ui_home_trip_strip, 3, 0);
     lv_label_set_text(s_ui_home_trip_strip, "");
+    lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_ui_home_trip_strip, trip_strip_clicked_cb, LV_EVENT_CLICKED, NULL);
 
     /* PID_EXPANSION_PLAN.md 7.4's LCD lag notice. Same hidden-until-needed,
      * zero-height-while-hidden strip idiom as s_ui_home_trip_strip immediately

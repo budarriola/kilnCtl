@@ -81,14 +81,22 @@ def _read(root, rel):
         raise ReleaseError("cannot read %s: %s" % (rel, e))
 
 
-def read_compat(root):
+def read_compat(root, reader=None):
+    """reader(rel_path) -> bytes overrides reading the working tree (e.g. `git show tag:path`)."""
+    if reader is None:
+        def reader(rel):
+            try:
+                with open(os.path.join(root, rel), "rb") as f:
+                    return f.read()
+            except OSError as e:
+                raise ReleaseError("cannot read %s: %s" % (rel, e))
     # All three are mandatory: the on-board update policy treats a zero/absent
     # kilnlink_version or uart_version as MALFORMED, so never emit a partial compat.
     compat = {}
     for key, rel, name in (("zones_cfg_version", ZONES_HEADER, "ZONES_CFG_VERSION"),
                            ("kilnlink_version", KILNLINK_HEADER, "KILNLINK_PROTOCOL_VERSION"),
                            ("uart_version", UART_HEADER, "UART_PROTOCOL_VERSION")):
-        val = parse_define_int(_read(root, rel), name)
+        val = parse_define_int(reader(rel).decode("utf-8", "replace"), name)
         if val is None:
             raise ReleaseError("%s not found in %s" % (name, rel))
         if val <= 0:
@@ -96,8 +104,7 @@ def read_compat(root):
         compat[key] = val
     # sha256 of the CSV exactly as committed, with CRLF normalised so a
     # Windows autocrlf checkout and a Linux checkout agree.
-    with open(os.path.join(root, PARTITIONS_CSV), "rb") as f:
-        data = f.read().replace(b"\r\n", b"\n")
+    data = reader(PARTITIONS_CSV).replace(b"\r\n", b"\n")
     compat["partitions_sha256"] = hashlib.sha256(data).hexdigest()
     return compat
 

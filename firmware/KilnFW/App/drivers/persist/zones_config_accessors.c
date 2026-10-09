@@ -32,8 +32,10 @@ bool zones_config_set_max_ramp_no_save(uint8_t zone_index, float c_per_hr)
     if (!isfinite(c_per_hr) || c_per_hr < 0.0f || c_per_hr > ZONE_MAX_RAMP_C_PER_HR_MAX) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].max_ramp_c_per_hr = c_per_hr;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -65,8 +67,10 @@ bool zones_config_set_coil_power_w_no_save(uint8_t zone_index, float power_w)
         (power_w != 0.0f && (power_w < ZONE_COIL_POWER_W_MIN || power_w > ZONE_COIL_POWER_W_MAX))) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].coil_power_w = power_w;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -96,8 +100,10 @@ bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c)
     if (!isfinite(cal_offset_c) || cal_offset_c < ZONE_CAL_OFFSET_MIN_C || cal_offset_c > ZONE_CAL_OFFSET_MAX_C) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].cal_offset_c = cal_offset_c;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -128,8 +134,10 @@ bool zones_config_set_adaptive_tune_enabled_no_save(uint8_t zone_index, bool ena
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].adaptive_tune_enabled = enabled ? 1 : 0;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -162,8 +170,10 @@ void zones_config_get_full_copy(zones_cfg_t *out)
 
 void zones_config_restore_snapshot_no_save(const zones_cfg_t *snapshot)
 {
+    zones_cfg_lock();
     s_zones.cfg = *snapshot;
     s_config_generation++;
+    zones_cfg_unlock();
 }
 
 /* TODO.md 8.2 "Tie it to the guards, not only the UI" -- see
@@ -266,8 +276,10 @@ bool zones_config_set_tc_type_no_save(uint8_t zone_index, uint8_t tc_type)
          * operator-facing "thermocouple type" control, LCD or web alike. */
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].tc_type = tc_type;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -292,8 +304,10 @@ bool zones_config_set_safety_tc_type(uint8_t tc_type)
     if (tc_type > ZONE_TC_TYPE_MAX_REAL) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.safety_tc_type = tc_type;
     s_config_generation++;
+    zones_cfg_unlock();
     return nvs_save() == ESP_OK;
 }
 
@@ -317,8 +331,10 @@ bool zones_config_set_relay_mask_no_save(uint8_t zone_index, uint8_t relay_mask)
     if ((relay_mask & ~valid_bits) != 0) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].relay_mask = relay_mask;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -353,8 +369,10 @@ bool zones_config_set_thermo_mask_no_save(uint8_t zone_index, uint8_t thermo_mas
     if ((thermo_mask & ~valid_bits) != 0) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].thermo_mask = thermo_mask;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -387,8 +405,10 @@ bool zones_config_set_ct_mask_no_save(uint8_t zone_index, uint8_t ct_mask)
     if ((ct_mask & ~valid_bits) != 0) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].ct_mask = ct_mask;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -423,9 +443,11 @@ bool zones_config_set_name_no_save(uint8_t zone_index, const char *name)
     if (len > ZONE_NAME_MAX_LEN) {
         return false;
     }
+    zones_cfg_lock();
     strncpy(s_zones.cfg.zones[zone_index].name, name ? name : "", ZONE_NAME_MAX_LEN);
     s_zones.cfg.zones[zone_index].name[ZONE_NAME_MAX_LEN] = '\0';
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -531,33 +553,42 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
         return false;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    /* Judged BEFORE the stores below overwrite the old values. Uses
+     * zones_config_gain_changed(), the same helper the whole-page POST
+     * /api/zones path uses (which carries the rationale), so both paths
+     * agree on what "the gains changed" means. */
+    const bool gains_changed = zones_config_gain_changed(z->pid_kp, kp) || zones_config_gain_changed(z->pid_ki, ki) ||
+                               zones_config_gain_changed(z->pid_kd, kd);
+    zones_cfg_lock();
     z->pid_kp = kp;
     z->pid_ki = ki;
     z->pid_kd = kd;
     /* ZONES_CFG_VERSION 12->13: invalidate the tuning-quality record (set 1
-     * -- see zone_cfg_t::tuning_valid's own doc comment) on EVERY gain
-     * change, unconditionally, regardless of caller -- autotune's own
-     * accept() path, a manual POST /api/zones/pid edit, adaptive_tune.c's
-     * blended re-tune, backup_http.c's restore, or the LCD UI/uart_bridge_
-     * ext.c path. All of them reach gains through this one setter, which is
-     * exactly why the invalidation lives HERE and not duplicated at every
-     * call site -- this repo's recurring "reset-one-side" bug class (state
-     * updated on one path of a pair and not the other) is precisely the
-     * shape a per-caller invalidation would risk. autotune_engine.c's own
-     * accept() path re-establishes a fresh record via zones_config_set_
-     * tuning_quality() immediately after this call (and after the model is
-     * also persisted), so the invalidate-then-repopulate ordering never
-     * leaves a stale-but-valid-looking record visible in between; every
-     * OTHER caller simply leaves it invalidated, since none of them have a
-     * new fit to attach. A stale quality record pinned to hand-edited gains
-     * would be worse than none -- see zone_tuning_quality_t's own comment. */
-    z->tuning_valid = 0;
+     * -- see zone_cfg_t::tuning_valid's own doc comment) when the gains
+     * ACTUALLY change, regardless of caller -- autotune's accept() path, a
+     * manual POST /api/zones/pid edit, adaptive_tune.c's blended re-tune,
+     * backup import, or the LCD UI/uart_bridge_ext.c path. All of them reach
+     * gains through this one setter, which is why the invalidation lives
+     * HERE and not at every call site (the "reset-one-side" bug class). A
+     * same-value write-back (a GET-merge-POST client re-posting the stored
+     * gains) leaves the record standing: the gains it describes are still
+     * the gains the zone runs. That is what lost bench zone 0's record
+     * (docs/BENCH_TEST_LOG.md, a same-value control_set_zone_pid write).
+     * autotune accept() re-establishes a fresh record via
+     * zones_config_set_tuning_quality() immediately after this call, so the
+     * invalidate-then-repopulate ordering never leaves a stale-but-valid-
+     * looking record visible in between. A stale quality record pinned to
+     * changed gains would be worse than none. */
+    if (gains_changed) {
+        z->tuning_valid = 0;
+    }
     /* Bumped before the NVS write, not after it: the gains are already live
      * for the next control tick at this point, so a running profile must
      * re-read them (TODO.md 6A.7) whether or not the save succeeds. Note
      * this returns false on a save failure while the config change stands --
      * unchanged behaviour, and the generation reflects the in-RAM truth. */
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -591,8 +622,10 @@ bool zones_config_set_fuzzy_strength_pct_no_save(uint8_t zone_index, float pct)
     if (!isfinite(pct) || pct < 0.0f || pct > ZONE_FUZZY_STRENGTH_PCT_MAX) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].fuzzy_strength_pct = pct;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -632,8 +665,10 @@ bool zones_config_set_coupling_diag_k_dc_no_save(uint8_t zone_index, float k_dc)
     if (!isfinite(k_dc) || k_dc < 0.0f || k_dc > ZONE_MODEL_K_MAX) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].coupling_diag_k_dc = k_dc;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -790,8 +825,10 @@ bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHAN
         }
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    zones_cfg_lock();
     memcpy(z->coupling_coeff, row, sizeof(z->coupling_coeff));
     s_config_generation++;
+    zones_cfg_unlock();
     return nvs_save() == ESP_OK;
 }
 
@@ -828,11 +865,13 @@ bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor
         dead_time_s > ZONE_MODEL_TIME_MAX_S) {
         return false;
     }
+    zones_cfg_lock();
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->coupling_coeff[neighbor_index] = coeff;
     z->coupling_tau_s[neighbor_index] = tau_s;
     z->coupling_dead_time_s[neighbor_index] = dead_time_s;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -902,8 +941,10 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t
     if (zones_config_json_settings_source_chain_has_cycle(probe, group, zone_index, thermo_count)) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].settings_source[group] = settings_source;
     s_config_generation++;
+    zones_cfg_unlock();
     return nvs_save() == ESP_OK;
 }
 
@@ -941,8 +982,10 @@ bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t grou
     if (settings_source == zone_index) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].settings_source[group] = settings_source;
     s_config_generation++;
+    zones_cfg_unlock();
     return nvs_save() == ESP_OK;
 }
 
@@ -964,8 +1007,10 @@ bool zones_config_set_settings_source_unchecked_no_save(uint8_t zone_index, uint
     if (settings_source == zone_index) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].settings_source[group] = settings_source;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1021,8 +1066,10 @@ bool zones_config_set_sanity_rate_no_save(uint8_t zone_index, float c_per_min)
     if (!isfinite(c_per_min) || c_per_min < 0.0f || c_per_min > ZONE_SANITY_RATE_MAX_C_PER_MIN) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].sanity_rate_c_per_min = c_per_min;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1052,8 +1099,10 @@ bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode
     if ((unsigned)mode > (unsigned)ZONE_CONTROL_MODE_PID_FUZZY) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].control_mode = (uint8_t)mode;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1084,8 +1133,10 @@ bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type)
     if ((unsigned)type > (unsigned)ZONE_TYPE_ON_OFF) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].zone_type = (uint8_t)type;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1170,8 +1221,10 @@ bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state)
     if (zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].failsafe_state = on_state ? 1u : 0u;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1207,8 +1260,10 @@ bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c)
         hyst_c > ZONE_HYST_C_MAX || (hyst_c != 0.0f && hyst_c < ZONE_HYST_C_MIN)) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].hyst_c = hyst_c;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1243,8 +1298,10 @@ bool zones_config_set_min_on_s_no_save(uint8_t zone_index, uint16_t min_on_s)
         (min_on_s != 0u && min_on_s < ZONE_MIN_ON_OFF_S_MIN)) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].min_on_s = min_on_s;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1277,8 +1334,10 @@ bool zones_config_set_min_off_s_no_save(uint8_t zone_index, uint16_t min_off_s)
         (min_off_s != 0u && min_off_s < ZONE_MIN_ON_OFF_S_MIN)) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].min_off_s = min_off_s;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1318,10 +1377,12 @@ bool zones_config_set_temp_limits_no_save(uint8_t zone_index, float max_temp_c, 
     if (!isfinite(min_temp_c) || min_temp_c < ZONE_MIN_TEMP_C_MIN || min_temp_c > ZONE_MIN_TEMP_C_MAX) {
         return false;
     }
+    zones_cfg_lock();
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->max_temp_c = max_temp_c;
     z->min_temp_c = min_temp_c;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1377,11 +1438,13 @@ bool zones_config_set_heater_cfg_no_save(uint8_t zone_index, float window_ms, fl
     if (window_ms > 0.0f && window_ms < zone_required_window_ms(min_on_ms)) {
         return false;
     }
+    zones_cfg_lock();
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->heater_window_ms = window_ms;
     z->heater_min_on_ms = min_on_ms;
     z->heater_min_off_ms = min_off_ms;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1508,8 +1571,10 @@ bool zones_config_set_timing_profile_index_no_save(uint8_t zone_index, uint8_t i
     if (zone_index >= s_zones.cfg.thermo_count || index >= s_zones.cfg.timing_profile_count) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].timing_profile = index;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1597,6 +1662,7 @@ bool zones_config_set_timing_profile_raw_no_save(uint8_t profile_index, const ch
         return false;
     }
     zone_timing_profile_t *tp = &s_zones.cfg.timing_profiles[profile_index];
+    zones_cfg_lock();
     strncpy(tp->name, name, TIMING_PROFILE_NAME_MAX_LEN);
     tp->name[TIMING_PROFILE_NAME_MAX_LEN] = '\0';
     tp->guard_progress_duty_min = progress_duty_min;
@@ -1612,6 +1678,7 @@ bool zones_config_set_timing_profile_raw_no_save(uint8_t profile_index, const ch
         s_zones.cfg.timing_profile_count = (uint8_t)(profile_index + 1);
     }
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1681,8 +1748,10 @@ bool zones_config_set_ease_off_window_mult_no_save(uint8_t zone_index, float mul
         (mult != 0.0f && (mult < ZONE_EASE_OFF_WINDOW_MULT_MIN || mult > ZONE_EASE_OFF_WINDOW_MULT_MAX))) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].ease_off_window_mult = mult;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1734,8 +1803,10 @@ bool zones_config_set_approach_rate_cap_c_per_hr_no_save(uint8_t zone_index, flo
                                    cap_c_per_hr > ZONE_APPROACH_RATE_CAP_C_PER_HR_MAX))) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].approach_rate_cap_c_per_hr = cap_c_per_hr;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1781,8 +1852,10 @@ bool zones_config_set_error_band_c_no_save(uint8_t zone_index, float band_c)
         (band_c != 0.0f && (band_c < ZONE_ERROR_BAND_C_MIN || band_c > ZONE_ERROR_BAND_C_MAX))) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].error_band_c = band_c;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1818,8 +1891,10 @@ bool zones_config_set_rate_band_c_per_s_no_save(uint8_t zone_index, float band_c
          (band_c_per_s < ZONE_RATE_BAND_C_PER_S_MIN || band_c_per_s > ZONE_RATE_BAND_C_PER_S_MAX))) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].rate_band_c_per_s = band_c_per_s;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1872,8 +1947,10 @@ bool zones_config_set_relay_type_no_save(uint8_t zone_index, uint8_t relay_type)
     if (zone_index >= MAX31856_CHANNEL_COUNT || relay_type > ZONE_RELAY_TYPE_MAX) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].relay_type = relay_type;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1918,8 +1995,10 @@ bool zones_config_set_progress_band_c_no_save(uint8_t zone_index, float band_c)
         (band_c != 0.0f && (band_c < ZONE_PROGRESS_BAND_C_MIN || band_c > ZONE_PROGRESS_BAND_C_MAX))) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].progress_band_c = band_c;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -1972,6 +2051,7 @@ bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float wrong_d
     if (!isfinite(frozen_window_s) || frozen_window_s < 0.0f || frozen_window_s > ZONE_GUARD_TIME_S_MAX) {
         return false;
     }
+    zones_cfg_lock();
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->guard_wrong_dir_window_s = wrong_dir_window_s;
     z->guard_wrong_dir_rate_c_per_min = wrong_dir_rate_c_per_min;
@@ -1982,6 +2062,7 @@ bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float wrong_d
     z->guard_sensor_fault_debounce_ticks = sensor_fault_debounce_ticks;
     z->guard_frozen_window_s = frozen_window_s;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -2016,8 +2097,10 @@ bool zones_config_set_cross_zone_delta_no_save(uint8_t zone_index, float max_del
     if (!isfinite(max_delta_c) || max_delta_c < 0.0f || max_delta_c > ZONE_CROSS_ZONE_DELTA_C_MAX) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].cross_zone_max_delta_c = max_delta_c;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -2064,6 +2147,7 @@ bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s,
         return false;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    zones_cfg_lock();
     z->model_k_dc = k_dc;
     z->model_tau_s = tau_s;
     z->model_dead_time_s = dead_time_s;
@@ -2073,6 +2157,7 @@ bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s,
      * firing is running is precisely what TODO.md 6A.7's reload path
      * exists to prevent. */
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -2117,10 +2202,12 @@ bool zones_config_set_model_fit_context_no_save(uint8_t zone_index, float fit_te
     if (!zone_model_fit_temp_valid(fit_temp_c) || !zone_model_fit_temp_valid(fit_ambient_c)) {
         return false;
     }
+    zones_cfg_lock();
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->model_fit_temp_c = fit_temp_c;
     z->model_fit_ambient_c = fit_ambient_c;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -2154,8 +2241,10 @@ bool zones_config_set_autotune_baseline_k_dc_no_save(uint8_t zone_index, float k
     if (!isfinite(k_dc) || k_dc < 0.0f || k_dc > ZONE_AUTOTUNE_K_DC_MAX) {
         return false;
     }
+    zones_cfg_lock();
     s_zones.cfg.zones[zone_index].autotune_baseline_k_dc = k_dc;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -2215,6 +2304,7 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
         return false;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    zones_cfg_lock();
     z->tuning_valid = 1;
     z->tuning_method = q->method;
     z->tuning_rule = q->rule;
@@ -2229,6 +2319,7 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
      * function's own header comment (zones_http.h) for why. */
     z->tuning_seq++;
     s_config_generation++;
+    zones_cfg_unlock();
     return true;
 }
 
@@ -2239,8 +2330,10 @@ bool zones_config_reinstate_tuning_quality_no_save(uint8_t zone_index)
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     if (!z->tuning_valid) {
+        zones_cfg_lock();
         z->tuning_valid = 1;
         s_config_generation++;
+        zones_cfg_unlock();
     }
     return true;
 }
@@ -2340,9 +2433,11 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
      * range) leaves the live config completely untouched. Same
      * all-or-nothing discipline as zones_post_handler()'s own commit
      * point. */
+    zones_cfg_lock();
     s_zones.cfg = cand;
     s_zones_config_valid = true;
     s_config_generation++;
+    zones_cfg_unlock();
     esp_err_t err = nvs_save();
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG, "nvs_save after kiln-config apply failed: %s -- config applied live but "

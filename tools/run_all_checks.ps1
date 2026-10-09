@@ -136,7 +136,26 @@ param(
     # fail the suite" behavior for a machine that genuinely lacks a
     # prerequisite (no node/toolchain installed) and is not expected to ever
     # pass those checks.
-    [switch]$AllowSkips
+    [switch]$AllowSkips,
+
+    # Disable the machine-wide check-result cache (tools/checkcache_lib.ps1;
+    # KILNCTL_CHECKCACHE=0 does the same). Every check then runs for real.
+    [switch]$NoCache,
+
+    # A check that could not get a build-gate slot within the gate timeout
+    # (tools/build_gate.ps1, 3600 s) did NOT run: that is machine load, not a
+    # defect in the tree. It is filed under its own BUSY heading with a
+    # rerun-it-alone hint instead of an anonymous FAIL, but it still fails the
+    # run (nothing was verified) unless -AllowBusy is passed.
+    [switch]$AllowBusy,
+
+    # "Known failures on main" baseline (tools/main_baseline_lib.ps1). Every run
+    # prints a "vs main baseline" section splitting failures into NEW / KNOWN /
+    # FIXED. By default the exit code is unchanged (any failure fails the run).
+    # With -FailOnlyOnNew a run whose every failure is KNOWN (also fails on the
+    # baseline of an origin/main ancestor of HEAD) exits 0, loudly. No usable
+    # baseline means nothing is KNOWN, so the exit code stays as it was.
+    [switch]$FailOnlyOnNew
 )
 
 # param() must be the first statement in the script, so this assignment --
@@ -249,6 +268,23 @@ if (Test-Path $routeTierNegativeTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
+# test_check_uri_handler_cap_max_routes.ps1 is a negative test -- it proves
+# check_uri_handler_cap.ps1's KILN_HTTP_MAX_ROUTES rule fails when violated.
+# Named test_*, so the glob above does not pick it up; wired explicitly here.
+$uriCapNegativeTest = Join-Path $repoRoot "firmware\KilnFW\App\test\test_check_uri_handler_cap_max_routes.ps1"
+if (Test-Path $uriCapNegativeTest) {
+    $checks += Get-Item $uriCapNegativeTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected negative test $uriCapNegativeTest not found." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
+} else {
+    Write-Host "WARNING: expected negative test $uriCapNegativeTest not found -- proceeding" -ForegroundColor Yellow
+}
+
 # test_check_config_migration_steps.ps1 is a negative test, not a guard -- it
 # proves check_config_migration_steps.ps1's scan (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
 # section 5) can actually detect a version bump with no matching step, plus
@@ -296,6 +332,26 @@ if (Test-Path $stopPathNegativeTest) {
     Write-Host ""
     Write-Host "WARNING: expected negative test $stopPathNegativeTest not found -- proceeding" -ForegroundColor Yellow
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
+}
+
+# test_check_duplicate_symbols.ps1 is a scratch-dir test of
+# check_duplicate_symbols.ps1's manifest selection, not a guard. Named test_*,
+# not check_*, so the glob above does not pick it up; wired explicitly here,
+# same pattern as the negative tests above.
+$dupSymbolsTest = Join-Path $repoRoot "tools\test_check_duplicate_symbols.ps1"
+if (Test-Path $dupSymbolsTest) {
+    $checks += Get-Item $dupSymbolsTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected test $dupSymbolsTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected test $dupSymbolsTest not found -- proceeding" -ForegroundColor Yellow
 }
 
 # test_check_lcd_home_nav_gated.ps1 is a negative test, not a guard -- it
@@ -490,21 +546,9 @@ $selfcheckPy = Join-Path $pcToolsDir "selfcheck.py"
 # `git rev-parse --git-common-dir`). selfcheck.py is always run from the
 # worktree's own tools\PcTools with PYTHONPATH=src (see Start-CheckAsync),
 # so a borrowed interpreter still tests THIS tree's code, not the main tree's.
-function Resolve-PcToolsPython {
-    param([string]$PcToolsDir, [string]$RepoRoot)
-    $own = Join-Path $PcToolsDir ".venv\Scripts\python.exe"
-    if (Test-Path $own) { return $own }
-    $envPy = $env:KILNCTL_PCTOOLS_PYTHON
-    if (-not [string]::IsNullOrWhiteSpace($envPy) -and (Test-Path $envPy)) { return $envPy }
-    $common = (& git -C $RepoRoot rev-parse --path-format=absolute --git-common-dir 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $common) {
-        $mainRoot = Split-Path -Parent ([string]($common | Select-Object -First 1)).Trim()
-        $mainPy = Join-Path $mainRoot "tools\PcTools\.venv\Scripts\python.exe"
-        if (Test-Path $mainPy) { return $mainPy }
-    }
-    return $own
-}
-$selfcheckPython = Resolve-PcToolsPython -PcToolsDir $pcToolsDir -RepoRoot $repoRoot
+. (Join-Path $PSScriptRoot "lib_pctools_python.ps1")
+$selfcheckPython = Resolve-PcToolsPython -RepoRoot $repoRoot -NoPathFallback
+if (-not $selfcheckPython) { $selfcheckPython = Join-Path $pcToolsDir ".venv\Scripts\python.exe" }
 if ((Test-Path $selfcheckPy) -and (Test-Path $selfcheckPython)) {
     # A synthetic entry: the main loop below special-cases .py files to run
     # under $selfcheckPython instead of `powershell -File`.
@@ -620,14 +664,29 @@ if ($ListOnly) {
     exit 0
 }
 
+# Check-result cache (tools/checkcache_lib.ps1): a PASS of an opt-in
+# (`# checkcache: ok`) check is reused when the tree is clean and identical.
+. (Join-Path $PSScriptRoot "checkcache_lib.ps1")
+. (Join-Path $PSScriptRoot "main_baseline_lib.ps1")
+$script:MainBaselineStart = $null
+try { $script:MainBaselineStart = Get-MainBaselineStartState -RepoRoot $repoRoot } catch { }
+$script:CheckCacheCtx = Initialize-CheckCache -RepoRoot $repoRoot -Fast:$Fast -NoCache:$NoCache -PcToolsPython $selfcheckPython
+
 Write-Host ""
 Write-Host "Running $($checks.Count) guard scripts from $repoRoot (parallel, throttle $MaxParallel)"
+Write-Host "Run mode: $(if ($Fast) { 'fast' } else { 'full' })"
+if ($script:CheckCacheCtx.Enabled) {
+    Write-Host "Check cache: on (tree $($script:CheckCacheCtx.Tree.Substring(0,12)), $($script:CheckCacheCtx.Mode))" -ForegroundColor Cyan
+} else {
+    Write-Host "Check cache: off ($($script:CheckCacheCtx.Reason))" -ForegroundColor Yellow
+}
 Write-Host ""
 
 $failed = @()
 $passed = @()
 $skipped = @()
 $skippedFast = @()
+$busy = @()
 
 # Scratch dir for redirected stdout/stderr of each parallel check process.
 # Keyed by PID so two concurrent run_all_checks.ps1 invocations (different
@@ -725,6 +784,8 @@ function Complete-CheckResult {
 
     if ($code -eq 0) {
         Write-Host "  PASS  $($Running.Rel)" -ForegroundColor Green
+        [void](Add-CheckCacheResult -Ctx $script:CheckCacheCtx -Rel $Running.Rel -Bucket "pass" `
+            -DurationSec ([DateTime]::UtcNow - $Running.Started).TotalSeconds -OutputText $outText)
         return [pscustomobject]@{ Bucket = "pass"; Path = $Running.Rel }
     } elseif ($code -eq $SkipExitCode) {
         # SKIP-FAST is checked first: a check that prints it is asserting its
@@ -743,6 +804,14 @@ function Complete-CheckResult {
         }
         Write-Host "  SKIP  $($Running.Rel)" -ForegroundColor Yellow
         return [pscustomobject]@{ Bucket = "skip"; Path = $Running.Rel; Reason = $reasonLine.Trim() }
+    } elseif (($script:gateWaitingRels -contains $Running.Rel) -and
+              ($outText -match 'build gate: timed out after \d+s waiting for a (heavy|light)-lane build slot')) {
+        # Load artifact, not a defect: the check never got to build. Own bucket.
+        # Only a check that itself takes the gate ($gateWaitingPaths) can be
+        # BUSY: a pytest/unit-test check whose FAILING output merely quotes the
+        # message (a gate unit test, mcpkit/buildgate.py's own tests) stays a FAIL.
+        Write-Host "  BUSY  $($Running.Rel) (build gate timeout -- not run)" -ForegroundColor Yellow
+        return [pscustomobject]@{ Bucket = "busy"; Path = $Running.Rel; Code = $code; Output = $outText }
     } else {
         Write-Host "  FAIL  $($Running.Rel) (exit $code)" -ForegroundColor Red
         return [pscustomobject]@{ Bucket = "fail"; Path = $Running.Rel; Code = $code; Output = $outText }
@@ -753,17 +822,35 @@ function Invoke-ChecksParallel {
     # PerCheckTimeoutSec > 0: a check still running after that many seconds is
     # killed (whole process tree, bounded) and filed as a FAIL, so one hung
     # child can never stall the run. 0 = no cap (phases 1 and 2).
-    param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode, [int]$PerCheckTimeoutSec = 0)
+    param($ChecksToRun, [int]$MaxParallel, [string]$RepoRoot, [string]$SelfcheckPy, [string]$SelfcheckPython, [string]$ScratchDir, [int]$SkipExitCode, [int]$PerCheckTimeoutSec = 0, [string[]]$UnthrottledPaths = @())
 
     $pending = New-Object System.Collections.Generic.Queue[object]
-    foreach ($c in $ChecksToRun) { $pending.Enqueue($c) }
+    # Gate-using checks go first so they join the gate queue early.
+    # The count is bounded by the discovered check list (~20 today), never
+    # open-ended.
+    foreach ($c in $ChecksToRun) { if ($c.FullName -in $UnthrottledPaths) { $pending.Enqueue($c) } }
+    foreach ($c in $ChecksToRun) { if ($c.FullName -notin $UnthrottledPaths) { $pending.Enqueue($c) } }
     $running = @()
     $results = @()
 
     while ($pending.Count -gt 0 -or $running.Count -gt 0) {
-        while ($running.Count -lt $MaxParallel -and $pending.Count -gt 0) {
+        # Gate-using checks are NOT exempt from $MaxParallel: a slot is held only
+        # around the compile now, so such a check spends most of its life doing
+        # real work (setup, link, running test exes) outside any slot. They are
+        # merely queued FIRST (see $UnthrottledPaths above) so they join the
+        # gate queue early.
+        while ($pending.Count -gt 0 -and @($running).Count -lt $MaxParallel) {
             $c = $pending.Dequeue()
-            $running += Start-CheckAsync -Check $c -RepoRoot $RepoRoot -SelfcheckPy $SelfcheckPy -SelfcheckPython $SelfcheckPython -ScratchDir $ScratchDir
+            $cRel = $c.FullName.Substring($RepoRoot.Length + 1)
+            $hit = Find-CheckCacheHit -Ctx $script:CheckCacheCtx -Rel $cRel
+            if ($hit) {
+                Write-Host "  PASS  $cRel (cached $($hit.When.ToLocalTime().ToString('yyyy-MM-dd HH:mm')) from $($hit.Worktree))" -ForegroundColor Green
+                [void]$script:CheckCacheCtx.Hits.Add($hit)
+                $results += [pscustomobject]@{ Bucket = "pass"; Path = $cRel }
+                continue
+            }
+            $started = Start-CheckAsync -Check $c -RepoRoot $RepoRoot -SelfcheckPy $SelfcheckPy -SelfcheckPython $SelfcheckPython -ScratchDir $ScratchDir
+            $running += $started
         }
         Start-Sleep -Milliseconds 200
         $stillRunning = @()
@@ -872,7 +959,7 @@ $restChecks = $restChecks | Where-Object {
 
 # Each of the three phase-1 target-build checks (and the two
 # build_host_tests.ps1 scripts) now enters tools/build_gate.ps1's
-# machine-wide heavy-build gate (KILNCTL_BUILD_GATE_SLOTS, default 2) before
+# machine-wide heavy-build gate (KILNCTL_BUILD_GATE_SLOTS, default 4) before
 # its actual idf.py/ninja/cmake step, so "run concurrently" above is now
 # "launch concurrently" -- the three builds may still serialize (or run two
 # at a time) against that gate rather than all three hitting ninja's default
@@ -883,6 +970,15 @@ $restChecks = $restChecks | Where-Object {
 # Small single-exe compiles (check_recovery_*.ps1, check_commonfw_*.ps1) use the
 # separate "light" lane (-Lane light, KILNCTL_LIGHT_GATE_SLOTS, default 4) so they
 # never queue behind a 7-18 minute heavy holder.
+# Checks that queue on the build gate (heavy or light lane) or call a
+# build_host_tests.ps1: detected from their own source, not a hand list, so a
+# new gated check is covered the moment it exists.
+$gateWaitingPaths = @($checks | Where-Object {
+    $_.Extension -eq ".ps1" -and
+    (Select-String -LiteralPath $_.FullName -Pattern 'Enter-KilnBuildGate|Join-Path \$testDir [\x22]build_host_tests\.ps1' -Quiet)
+} | ForEach-Object { $_.FullName })
+# Same set as repo-relative paths, for Complete-CheckResult's BUSY rule.
+$script:gateWaitingRels = @($gateWaitingPaths | ForEach-Object { $_.Substring($repoRoot.Length + 1) })
 $results = @()
 if ($buildChecks.Count -gt 0) {
     Write-Host "Phase 1/3: full target builds ($($buildChecks.Count))" -ForegroundColor Cyan
@@ -891,7 +987,7 @@ if ($buildChecks.Count -gt 0) {
 }
 if ($restChecks.Count -gt 0) {
     Write-Host "Phase 2/3: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel `
+    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel -UnthrottledPaths $gateWaitingPaths `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($uiSweepChecks.Count -gt 0) {
@@ -910,6 +1006,8 @@ foreach ($r in $results) {
         $passed += $r.Path
     } elseif ($r.Bucket -eq "skipfast") {
         $skippedFast += [pscustomobject]@{ Path = $r.Path; Reason = $r.Reason }
+    } elseif ($r.Bucket -eq "busy") {
+        $busy += $r
     } elseif ($r.Bucket -eq "skip") {
         $skipped += [pscustomobject]@{ Path = $r.Path; Reason = $r.Reason }
     } else {
@@ -917,7 +1015,57 @@ foreach ($r in $results) {
     }
 }
 
+$cacheStored = Save-CheckCache -Ctx $script:CheckCacheCtx
+
+# Main-baseline report, recording and exit (tools/main_baseline_lib.ps1). Every
+# exit after the results are known goes through here.
+function Exit-WithBaseline {
+    param([int]$Code)
+    $mode = if ($Fast) { "fast" } else { "full" }
+    $cur = @()
+    foreach ($p in $passed) { $cur += [pscustomobject]@{ Path = $p; Status = "PASS" } }
+    foreach ($s in $skippedFast) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP-FAST" } }
+    foreach ($s in $skipped) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP"; Signature = (Get-MainFailureSignature -Reason ([string]$s.Reason)) } }
+    foreach ($b in $busy) { $cur += [pscustomobject]@{ Path = $b.Path; Status = "BUSY" } }
+    foreach ($f in $failed) { $cur += [pscustomobject]@{ Path = $f.Path; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output ([string]$f.Output) -ExitCode $f.Code) } }
+    # Only the failures that actually failed the run count against -FailOnlyOnNew.
+    $cur2 = @($cur | Where-Object {
+        ($_.Status -ne "SKIP" -or -not $AllowSkips) -and ($_.Status -ne "BUSY" -or -not $AllowBusy) })
+    $rep = $null
+    try {
+        $rep = Show-MainBaselineSection -Current $cur2 -Mode $mode -RepoRoot $repoRoot
+        if (-not $Only -and -not $Skip) {
+            $rec = Test-MainBaselineRecordable -RepoRoot $repoRoot -Start $script:MainBaselineStart
+            if ($rec.Ok) {
+                $fp = Get-CheckCacheFingerprint -PcToolsPython $selfcheckPython
+                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur -RepoRoot $repoRoot
+                Write-Host "Recorded main baseline ($mode) for origin/main $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
+            } else {
+                Write-Host "Main baseline not recorded: $($rec.Reason)" -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "Main baseline not recorded: -Only/-Skip run is partial" -ForegroundColor DarkGray
+        }
+    } catch {
+        Write-Host "main baseline: skipped ($($_.Exception.Message))" -ForegroundColor Yellow
+    }
+    Clear-ChecksFastEnv
+    if ($Code -ne 0 -and $FailOnlyOnNew) {
+        if ($null -ne $rep -and $rep.Found -and $rep.Cmp.New.Count -eq 0) {
+            Write-Host "" 
+            Write-Host "!!! -FailOnlyOnNew: exiting 0 although $($rep.Cmp.Known.Count) check(s) FAILED -- every failure is KNOWN on origin/main. This is NOT a clean run. !!!" -ForegroundColor Yellow
+            exit 0
+        }
+        Write-Host "-FailOnlyOnNew: exit code stays $Code (NEW failures present or no usable baseline)." -ForegroundColor Red
+    }
+    exit $Code
+}
 Write-Host ""
+if ($script:CheckCacheCtx.Hits.Count -gt 0 -or $cacheStored -gt 0) {
+    $savedSec = [int](($script:CheckCacheCtx.Hits | Measure-Object DurationSec -Sum).Sum)
+    Write-Host "Check cache: $($script:CheckCacheCtx.Hits.Count) of the passed checks were cached hits (about ${savedSec}s of check time saved), $cacheStored new entr$(if ($cacheStored -eq 1) {'y'} else {'ies'}) stored." -ForegroundColor Cyan
+    Write-Host ""
+}
 
 if ($skippedFast.Count -gt 0) {
     # Never fatal, regardless of -AllowSkips: each of these named its SKIP as
@@ -941,6 +1089,15 @@ if ($skipped.Count -gt 0) {
     Write-Host ""
 }
 
+if ($busy.Count -gt 0) {
+    Write-Host "$($busy.Count) check(s) did NOT RUN -- build gate busy (load, not a tree defect; nothing was verified):" -ForegroundColor Yellow
+    foreach ($b in $busy) {
+        Write-Host "  BUSY  $($b.Path)" -ForegroundColor Yellow
+        Write-Host "        rerun alone: tools/run_all_checks.ps1 -Fast -Only '$([regex]::Escape((Split-Path -Leaf $b.Path)))'" -ForegroundColor Yellow
+    }
+    Write-Host ""
+}
+
 if ($failed.Count -gt 0) {
     Write-Host "$($failed.Count) of $($checks.Count) checks FAILED:" -ForegroundColor Red
     foreach ($f in $failed) {
@@ -950,8 +1107,7 @@ if ($failed.Count -gt 0) {
     }
     Write-Host ""
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
-    Clear-ChecksFastEnv
-    exit 1
+    Exit-WithBaseline 1
 }
 
 # A skip is never silently folded into "passed" -- the summary line always
@@ -973,13 +1129,16 @@ if ($failed.Count -gt 0) {
 # about since its first revision. Default posture: any SKIP fails the run;
 # -AllowSkips opts back into the old behavior for a machine that genuinely,
 # permanently lacks a prerequisite.
+if ($busy.Count -gt 0 -and -not $AllowBusy) {
+    Write-Host "$($passed.Count) passed, $($skipped.Count) skipped, $($busy.Count) BUSY (not run), $($failed.Count) failed." -ForegroundColor Red
+    Write-Host "FAILED: $($busy.Count) check(s) never got a build-gate slot -- rerun them alone (see above); -AllowBusy only for a deliberately partial run." -ForegroundColor Red
+    Exit-WithBaseline 1
+}
 if ($skipped.Count -gt 0 -and -not $AllowSkips) {
     Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Red
     Write-Host "FAILED: $($skipped.Count) check(s) skipped and -AllowSkips was not passed -- a skip is not a pass." -ForegroundColor Red
-    Clear-ChecksFastEnv
-    exit 1
+    Exit-WithBaseline 1
 }
 
 Write-Host "$($passed.Count) passed, $($skipped.Count) skipped ($($skippedFast.Count) due to -Fast), $($failed.Count) failed." -ForegroundColor Green
-Clear-ChecksFastEnv
-exit 0
+Exit-WithBaseline 0

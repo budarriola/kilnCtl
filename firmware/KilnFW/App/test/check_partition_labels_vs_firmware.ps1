@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_partition_labels_vs_firmware.ps1 -- do partitions.csv and the firmware
 # agree about which partitions exist and what kind of thing lives in each?
 #

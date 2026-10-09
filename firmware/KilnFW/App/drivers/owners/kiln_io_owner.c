@@ -21,6 +21,7 @@
 #include "ota_state.h" /* ota_http_heat_blocked_by_update() -- see relay_on_blocked() below */
 #include "owner_slot_pool.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see system_mode_gate_blocks_relay() below */
+#include "relay_off_tracker.h" /* ON-to-OFF times for the on/off min_off_s hold -- see owner_task() */
 #include "stack_margin.h"
 #include "system_mode_gate.h" /* SYS_ACTION_RAW_RELAY_DEBUG_WRITE -- see relay_on_blocked() below */
 
@@ -402,6 +403,9 @@ static void handle_set_relay(const owner_cmd_t *cmd, owner_result_t *r)
         }
     }
     r->err = kiln_io_set_relay(s_io, relay, on);
+    if (r->err == ESP_OK) {
+        relay_off_tracker_note_write((uint8_t)(1u << (relay - 1u)), on ? (uint8_t)(1u << (relay - 1u)) : 0u);
+    }
     r->relay_result = (r->err == ESP_OK) ? KILN_IO_OWNER_RELAY_OK : KILN_IO_OWNER_RELAY_ERR_IO_FAIL;
 }
 
@@ -430,6 +434,9 @@ static void handle_set_relay_mask(const owner_cmd_t *cmd, owner_result_t *r)
         }
     }
     r->err = kiln_io_set_relay_mask(s_io, mask, value);
+    if (r->err == ESP_OK) {
+        relay_off_tracker_note_write(mask, value);
+    }
     r->relay_result = (r->err == ESP_OK) ? KILN_IO_OWNER_RELAY_OK : KILN_IO_OWNER_RELAY_ERR_IO_FAIL;
 }
 
@@ -460,6 +467,9 @@ static void owner_task(void *arg)
              * applied its own zone-level gate before posting this. */
             r.err = kiln_io_set_relay_mask(s_io, cmd.args.set_relay_mask.mask,
                                            cmd.args.set_relay_mask.value);
+            if (r.err == ESP_OK) {
+                relay_off_tracker_note_write(cmd.args.set_relay_mask.mask, cmd.args.set_relay_mask.value);
+            }
             break;
         case CMD_SET_IO:
             r.err = kiln_io_set_io(s_io, cmd.args.set_io.index, cmd.args.set_io.level);
@@ -470,6 +480,9 @@ static void owner_task(void *arg)
             break;
         case CMD_ALL_RELAYS_OFF:
             r.err = kiln_io_all_relays_off(s_io);
+            if (r.err == ESP_OK) {
+                relay_off_tracker_note_write(0xFFu, 0u);
+            }
             break;
         case CMD_READ:
             r.err = kiln_io_read(s_io, &r.read_state);

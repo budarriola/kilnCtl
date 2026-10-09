@@ -257,46 +257,18 @@ esp_err_t time_sync_set_tz(const char *tz)
     apply_tz(tz);
     uint32_t new_rev = s_tz_rev + 1;
 
-    /* FILE FIRST (best-effort; a failure here is logged and swallowed --
-     * NVS below remains the persistence guarantee every existing caller
-     * already depends on), THEN NVS (authoritative, failure returned/logged
-     * as before) -- same policy unit_pref_set()/relay_names_save() use. */
+    /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed").
+     * This used to return ESP_OK even when nothing was persisted (the NVS
+     * failure branches only warned); a failed cfg write is now returned. The
+     * TZ stays applied live for this boot either way. */
     uint8_t file_item[TZ_ITEM_SIZE];
     memset(file_item, 0, sizeof(file_item));
     strncpy((char *)file_item, tz, TZ_ITEM_SIZE - 1);
-    esp_err_t file_err = pref_cfg_fs_save(TIME_SYNC_TZ_FILE_PATH, file_item, TZ_ITEM_SIZE, new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "TZ file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
-    if (part_err != HAL_OK) {
-        ESP_LOGW(TAG, "NVS partition '%s' init failed: %s -- TZ applied live but NOT persisted",
-                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
-        return ESP_OK;
-    }
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        ESP_LOGW(TAG, "nvs_open_from_partition (RW) failed: %s -- TZ applied live but NOT persisted",
-                 hal_status_to_name(err));
-        return ESP_OK;
-    }
-    err = hal_kv_set_str(&h, NVS_KEY_TZ, tz);
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_TZ_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGW(TAG, "TZ persist failed: %s -- applied live for this boot only", hal_status_to_name(err));
-    } else {
+    esp_err_t err = pref_cfg_fs_commit(TIME_SYNC_TZ_FILE_PATH, file_item, TZ_ITEM_SIZE, new_rev, "time zone");
+    if (err == ESP_OK) {
         s_tz_rev = new_rev;
     }
-    return ESP_OK;
+    return err;
 }
 
 void time_sync_get_tz_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,

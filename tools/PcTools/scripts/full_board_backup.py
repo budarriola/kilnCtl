@@ -107,7 +107,7 @@ GET_ENDPOINTS = [
 ]
 
 # /api/firing_history requires ?profile_id=N. Default probes every user
-# profile slot 0..PROFILES_MAX_COUNT-1 (100 as of docs/PROFILE_SLOTS_100_PLAN.md
+# profile slot 0..PROFILES_MAX_COUNT-1 (100 as of docs/PROFILE_SLOTS_100.md
 # section 7 task 6) -- main() below narrows this to only the ids actually
 # present in /api/profiles when that endpoint answered, so a 100-slot board
 # with a handful of profiles saved does not cost 100 requests every backup.
@@ -767,7 +767,7 @@ def main() -> int:
 
     # Narrow the firing-history probe to ids actually present in
     # /api/profiles when that endpoint answered -- a 100-slot board (docs/
-    # PROFILE_SLOTS_100_PLAN.md section 7 task 6) with only a handful of
+    # PROFILE_SLOTS_100.md section 7 task 6) with only a handful of
     # profiles saved should not cost 100 requests every backup. Falls back
     # to the full PROFILES_MAX_COUNT range if /api/profiles failed or came
     # back in an unexpected shape, matching this script's existing

@@ -187,6 +187,20 @@ if ($r7.MenuNavGated) {
     Write-Host "Assertion 7 OK: a direct navigation beside a stray gate token is detected (MenuNavGated=false)."
 }
 
+# --- Assertion 7b: gate call KEPT, plus an added direct navigation -> caught. ---
+$gateAndDirectBody = $goodBody -replace [regex]::Escape('ui_home_menu_nav_gated_cb, NULL);'), "ui_home_menu_nav_gated_cb, NULL);`n    kiln_ui_show(`"config`");"
+if ($gateAndDirectBody -eq $goodBody) {
+    throw "test setup error: the replace for assertion 7b did not match anything in `$goodBody"
+}
+$gateAndDirectFile = Join-Path $scratchDir "gate_and_direct.c"
+Set-Content -Path $gateAndDirectFile -Value $gateAndDirectBody -Encoding utf8
+$r7b = Invoke-HomeNavGateScan -SourceFile $gateAndDirectFile
+if ($r7b.MenuNavGated) {
+    $failures += "Assertion 7b FAILED: a kept gate PLUS a direct kiln_ui_show() was NOT detected (MenuNavGated=true)."
+} else {
+    Write-Host "Assertion 7b OK: a kept gate plus a direct navigation is detected (MenuNavGated=false)."
+}
+
 # --- Assertion 8: remove the Edit button's PIN gate -> caught. ---
 $noEditGateBody = $goodBody -replace [regex]::Escape('ui_lcd_lock_run_gated("Enter PIN to edit firing", LCD_PIN_ROLE_USER,
                            ui_home_edit_btn_gated_cb, NULL);'), "kiln_ui_show(`"edit_firing`");"

@@ -39,18 +39,21 @@ $ErrorActionPreference = "Stop"
 # instead of corrupting the shared build tree.
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\tools\build_gate.ps1")
-$buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
-$buildLock = Enter-BuildLock -Name "saftyfw_bootloader_build"
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
+$buildLock = $null
 
 $bootloaderDir = Join-Path $PSScriptRoot "..\bootloader"
 $buildDir = Join-Path $bootloaderDir "build"
 
 try {
+# Key the lock by the RESOLVED build dir: the tree is per-worktree
+# (<worktree>irmware\SaftyFWootloaderuild), so only runs sharing one
+# tree need to serialize. A fixed name made every worktree on the machine
+# queue on one mutex and time out after 900 s under parallel load.
+$resolvedBuildDir = [System.IO.Path]::GetFullPath($buildDir).TrimEnd('').ToLowerInvariant()
+$sha = [System.Security.Cryptography.SHA1]::Create()
+$dirHash = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($resolvedBuildDir))[0..7] | ForEach-Object { $_.ToString("x2") })
+$buildLock = Enter-BuildLock -Name "saftyfw_bootloader_build_$dirHash"
 
 if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
     Write-Host "No $buildDir\CMakeCache.txt -- first-time configure (cmake -G Ninja -B build .) ..."
@@ -112,9 +115,15 @@ try {
     }
 
     Write-Host "Building saftyfw_bootloader (ninja) ..."
-    ninja
-    if ($LASTEXITCODE -ne 0) {
-        throw "ninja build failed with exit code $LASTEXITCODE"
+    $buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build" -Lane heavy
+    try {
+        ninja
+        $ninjaExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $buildGate
+    }
+    if ($ninjaExit -ne 0) {
+        throw "ninja build failed with exit code $ninjaExit"
     }
 }
 finally {
@@ -132,8 +141,5 @@ exit 0
 
 }
 finally {
-    Exit-BuildLock -Lock $buildLock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
+    if ($null -ne $buildLock) { Exit-BuildLock -Lock $buildLock }
 }

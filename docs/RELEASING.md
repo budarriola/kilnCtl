@@ -96,7 +96,7 @@ WP2), which is now also the actual `app` partition size in `partitions.csv`.
 6. `ota_matrix_run` passes on the image (ESP via recovery, Pico auto-update, rollback).
 7. Readiness all ok on the bench board after flashing the release image (hardware-gated
    items listed in the notes).
-8. `KilnCtrl.bin` <= 0x400000 and `.dram0.bss` <= 101000 B.
+8. `KilnCtrl.bin` <= 0x400000 and `.dram0.bss` <= 101000 B. `make_release.ps1` enforces both on the built ELF (the DRAM step runs `check_kilnfw_dram_bss_budget.py`; a failure or an unmeasured SKIP refuses).
 9. Release notes list schema versions and any rollback hazard versus the previous release.
 
 `make_release.ps1` enforces mechanically what it can prove (clean tree, origin/main, free
@@ -152,6 +152,10 @@ last 50 commits when there is no previous semver tag, followed by the commit and
 Gate 9 (schema versions and rollback hazards versus the previous release) stays a human
 review: pass a hand-written notes file for a real release.
 
+## Release signing
+
+Release signing: REMOVED by owner decision 2026-10-07. Do not reintroduce. A release is accepted when it is for the correct project (project-identity check, `firmware/KilnFW/App/drivers/update/update_stage.c:230-241`).
+
 ## Token setup
 
 Publishing reads the environment variable `KILNCTL_GITHUB_TOKEN`. It is never printed,
@@ -175,3 +179,21 @@ logged, or passed on a command line.
 - Size gate refusal: the image exceeds the 0x400000 planned post-split app size; that is a
   partition-table decision, not something to bypass.
 - Build SKIP (exit 3): the ESP-IDF toolchain is missing; a release needs real binaries.
+
+## Release branch
+
+`origin/release` holds only release commits, one per release or prerelease tag: an empty-tree root
+`b0bb567d`, then single-parent commits (effectively a squash of a main commit into release). Each release
+commit M has the tree of a qualified main commit X, a message naming X's full SHA
+(`Files identical to main commit <X> (tag <T>).`), and the annotated tag `T`. The one exception is
+`8d366dd7` (`v1.0.0-pre.1`), whose legacy tag sits on `bf9ddea2` (same tree). Nothing else is ever committed
+to release; the named SHAs ascend along main.
+
+    powershell -ExecutionPolicy Bypass -File tools\release_merge.ps1 -Commit <X> -Tag v1.0.0-pre.N [-Message "<evidence>"] [-Push]
+
+Dry run unless `-Push`. It refuses (naming the rule) unless X is an ancestor of `origin/main`, the previous
+release's main commit is an ancestor of X, the tag is valid per `check_release_version_regex.ps1`, the tag is
+free locally and on origin, and the tag is semver-newer than every tag on release. It builds M with
+`git commit-tree X^{tree} -p <origin/release tip>` (no working-tree or index access), verifies the tree
+equals X's, and with `-Push` fast-forward pushes release (never forced), tags M and pushes the tag.
+`tools/make_release.ps1` then builds from M. `tools/check_release_branch.ps1` enforces the shape offline.

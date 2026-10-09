@@ -1,6 +1,6 @@
 /* profiles_bench_slot.h -- the hidden bench-harness profile slot.
  *
- * docs/PROFILE_SLOTS_100_PLAN.md section 7, "Owner decision, 2026-09-19
+ * docs/PROFILE_SLOTS_100.md section 7, "Owner decision, 2026-09-19
  * (post phase-A review)": beyond the 100 user slots (ids 0..99) and the 1
  * reserved live-edit slot (id 100, LIVE_EDIT_WORKING_SLOT_ID, live_profile.h),
  * there is one additional hidden slot reserved for

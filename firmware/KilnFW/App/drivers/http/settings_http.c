@@ -9,6 +9,7 @@
 #include "display_power_cfg.h"
 #include "display_power_policy.h"
 #include "http_form.h"
+#include "cfg_fs_refusal_http.h"
 #include "time_sync.h"
 #include "web_encoding.h"
 #include "wifi_provision_http.h"
@@ -74,6 +75,9 @@ static esp_err_t settings_display_page_get_handler(httpd_req_t *req)
 
 static esp_err_t settings_tz_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > TZ_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -119,9 +123,7 @@ static esp_err_t settings_tz_post_handler(httpd_req_t *req)
          * live value took effect, so this is reported as an error to the
          * client rather than silently swallowed, but is not a 500: the
          * board is in a consistent (if not-yet-persisted) state. */
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                             "tz applied live but could not be saved");
-        return ESP_OK;
+        return cfg_fs_http_persist_failed(req);
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -176,6 +178,9 @@ static esp_err_t settings_display_power_get_handler(httpd_req_t *req)
 
 static esp_err_t settings_display_power_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > DISPLAY_POWER_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -238,8 +243,7 @@ static esp_err_t settings_display_power_post_handler(httpd_req_t *req)
          * (see its own comment) -- a non-OK here means the values took
          * effect for the rest of this boot but a save failed, same
          * "consistent but not-yet-persisted" reporting as the tz handler. */
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "applied live but could not be saved");
-        return ESP_OK;
+        return cfg_fs_http_persist_failed(req);
     }
 
     httpd_resp_set_type(req, "application/json");

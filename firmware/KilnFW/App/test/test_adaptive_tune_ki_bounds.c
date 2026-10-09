@@ -106,6 +106,7 @@ static void test_ki_baseline_survives_reboot_not_relatched_from_grown_ki(void)
     reset_module_state();
     fake_kv_reset_all();
     hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
+    at_mount_scratch();
 
     adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 10.0f;
@@ -167,6 +168,7 @@ static void test_clear_ki_baseline_lets_the_next_refine_relatch_fresh(void)
     reset_module_state();
     fake_kv_reset_all();
     hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
+    at_mount_scratch();
 
     adaptive_tune_zones[0].enabled = true;
     s_fake_zone_cfg[0].k_dc = 10.0f;
@@ -273,6 +275,7 @@ static void test_accept_path_clear_ki_baseline_does_not_reenter_worker(void)
     reset_module_state();
     fake_kv_reset_all();
     hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
+    at_mount_scratch();
 
     adaptive_tune_zones[2].enabled = true;
     adaptive_tune_zones[2].ki_baseline_valid = true;
@@ -346,6 +349,7 @@ static void test_halt_path_run_end_does_not_reenter_worker(void)
     reset_module_state();
     fake_kv_reset_all();
     hal_kv_init_partition(ADAPTIVE_TUNE_NVS_PARTITION);
+    at_mount_scratch();
 
     s_halt_like_zone = 0;
     adaptive_tune_zones[0].enabled = true;

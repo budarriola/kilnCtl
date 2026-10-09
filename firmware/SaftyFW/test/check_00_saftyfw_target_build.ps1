@@ -96,12 +96,8 @@ if (-not $haveToolchainOnPath -and -not $env:PICO_TOOLCHAIN_PATH -and -not $have
     exit 3
 }
 
-$buildGate = Enter-KilnBuildGate -Label "saftyfw_target_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# Build lock FIRST; a build-gate slot is held only around the ninja compile
+# (never while waiting for this lock, never around cmake configure)
 $lock = Enter-BuildLock -Name "saftyfw_target_build"
 try {
     if (-not (Test-Path (Join-Path $buildDir "CMakeCache.txt"))) {
@@ -146,18 +142,21 @@ try {
         }
 
         Write-Host "Building SaftyFW (ninja) ..."
-        ninja | Write-Host
-        if ($LASTEXITCODE -ne 0) {
-            Fail "ninja build failed (exit $LASTEXITCODE) -- see output above."
+        $buildGate = Enter-KilnBuildGate -Label "saftyfw_target_build"
+        try {
+            ninja | Write-Host
+            $ninjaExit = $LASTEXITCODE
+        } finally {
+            Exit-KilnBuildGate -Gate $buildGate
+        }
+        if ($ninjaExit -ne 0) {
+            Fail "ninja build failed (exit $ninjaExit) -- see output above."
         }
     } finally {
         Pop-Location
     }
 } finally {
     Exit-BuildLock -Lock $lock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }
 
 $elf = Join-Path $buildDir "SaftyFW.elf"

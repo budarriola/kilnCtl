@@ -58,7 +58,7 @@ param(
 
     [switch]$Confirm,
 
-    [string]$Branch = "origin/main"
+    [string]$Branch = "origin/dev"
 )
 
 $ErrorActionPreference = "Continue"

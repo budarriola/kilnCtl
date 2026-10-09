@@ -7,9 +7,9 @@
 // NVS blob layout, nvs_load_all_from(), profiles_http_get()) and what the
 // executor consumes can never fail there. This executable links the REAL
 // profiles_http.c (as its own object, over the real host hal_kv backend
-// fake_kv.c; profiles_cfg_fs.c is linked too, but cfg_fs_init() is never
-// called here, so only the NVS path is exercised, NOT the cfg_fs file
-// mirror) and reuses the
+// fake_kv.c; profiles_cfg_fs.c is linked too, and main() mounts a scratch cfg
+// directory: since the NVS dual-write close, profile saves go to the cfg
+// files only) and reuses the
 // prestart test's fakes for everything else by #including that file with its
 // main() renamed and its two profiles_http fakes compiled out
 // (PEX_STORE_LINK_TEST). Own executable for the usual reason: the prestart
@@ -19,8 +19,8 @@
 // zone_mask, name, and per segment seg_kind, target_c, ramp_c_per_hr,
 // dwell_min. Other profile_t fields are not compared.
 //
-// Flow under test: profiles_http_save(id, ...) -> NVS blob (cfg_fs not inited) ->
-// in-memory state wiped -> profiles_http_start() reloads from NVS ->
+// Flow under test: profiles_http_save(id, ...) -> cfg file (scratch mount) ->
+// in-memory state wiped -> profiles_http_start() reloads from the file ->
 // profile_executor_run(id) reads it through the real profiles_http_get() ->
 // s_exec.profile (what the executor actually holds) must equal what was saved.
 #define PEX_STORE_LINK_TEST 1
@@ -28,6 +28,14 @@
 #include "test_profile_executor_prestart.c"
 #undef main
 
+#ifdef _WIN32
+#include <direct.h>
+#define SL_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define SL_MKDIR(p) mkdir((p), 0755)
+#endif
+#include "cfg_fs.h"
 #include "profiles_http_internal.h" /* profiles_storage_ensure()/profiles_state_t */
 #include "profiles_http.h"
 #include "live_profile.h"
@@ -187,6 +195,20 @@ int main(void)
     fake_kv_reset_all();
     hal_kv_init_partition("profiles_nvs");
     hal_kv_init_partition(NULL);
+    {
+        /* Clean scratch cfg mount: start from no leftover profile files. */
+        const char *base = "cfg_fs_test_store_link";
+        (void)SL_MKDIR(base);
+        cfg_fs_deinit();
+        TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+        cfg_fs_entry_t ents[64];
+        size_t n = 0;
+        if (cfg_fs_list("", ents, 64, &n) == ESP_OK) {
+            for (size_t i = 0; i < n; i++) {
+                (void)cfg_fs_delete(ents[i].name);
+            }
+        }
+    }
     test_store_to_executor_multi_segment_profile();
     test_store_to_executor_highest_slot_max_segments();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

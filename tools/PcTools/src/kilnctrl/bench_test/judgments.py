@@ -102,21 +102,24 @@ def judge_coredump_readable(status: Optional[int], body: Any) -> CaseResult:
     return CaseResult(Verdict.PASS, observed={"body": body})
 
 
-def judge_cfgfs_state(data: dict) -> CaseResult:
+def judge_cfgfs_state(data: dict, pending_data: Optional[dict] = None) -> CaseResult:
     """FL-07: record-only (plan §7 owner decision 6) -- the `cfg` LittleFS
     partition is unformatted/unmounted on the bench board today
     (CLAUDE.md/CONFIG_FILESYSTEM.md), so a pending/unknown format state is
-    expected, not a defect. This case never FAILs: `format_pending` False
-    is PASS, anything else is INCONCLUSIVE with the full state recorded so
-    a human can review it, never silently dropped."""
-    pending = data.get("format_pending", data.get("pending"))
+    expected, not a defect. This case never FAILs: `pending` False is PASS,
+    anything else is INCONCLUSIVE with the full state recorded so a human
+    can review it, never silently dropped. `pending_data` is the body of
+    GET /api/cfgfs/format_pending ({"pending": bool, "reason": str}) -- the
+    only route that emits the flag; GET /api/cfgfs (`data`) does not."""
+    observed = dict(data, format_pending_route=pending_data)
+    pending = pending_data.get("pending") if isinstance(pending_data, dict) else None
     if pending is not False:
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason=f"format_pending={pending!r}, not confirmed False (record-only, plan §7 decision 6)",
-            observed=data,
+            reason=f"format pending={pending!r}, not confirmed False (record-only, plan Â§7 decision 6)",
+            observed=observed,
         )
-    return CaseResult(Verdict.PASS, observed=data)
+    return CaseResult(Verdict.PASS, observed=observed)
 
 
 def judge_pico_slot_metadata(commit: Optional[str], boot_reason: Optional[str],

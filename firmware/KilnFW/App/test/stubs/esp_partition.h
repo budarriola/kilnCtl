@@ -38,6 +38,10 @@ typedef int esp_partition_subtype_t;
 #define ESP_PARTITION_TYPE_APP 0x00
 #define ESP_PARTITION_TYPE_DATA 0x01
 #define ESP_PARTITION_SUBTYPE_ANY 0xff
+/* Added for recovery_switch.c's host test (test_recovery_switch.c); same
+ * real ESP-IDF encoding as the constants above. */
+#define ESP_PARTITION_SUBTYPE_APP_FACTORY 0x00
+#define ESP_PARTITION_SUBTYPE_APP_OTA_0 0x10
 /* Added for ota_pico_relay.c's host test (test_ota_pico_relay.c) -- value
  * matches real ESP-IDF's ESP_PARTITION_SUBTYPE_DATA_UNDEFINED encoding,
  * same convention as the constants above. */

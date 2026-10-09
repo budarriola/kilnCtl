@@ -158,15 +158,24 @@ esp_err_t iter_tune_store_start(void);
 bool iter_tune_store_get_zone(uint8_t zone_index, iter_tune_store_zone_t *out);
 
 // Replaces zone_index's persisted entry wholesale and persists the WHOLE
-// document (NVS + cfg file, rev bumped). Returns ESP_ERR_INVALID_ARG for an
-// out-of-range zone_index. In-RAM truth updates first, so a failed NVS
-// write means the entry will not survive a reboot, not that it failed to
-// take effect now (same contract as ct_verify_store_save()).
+// document to the cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write
+// window: closed"; the NVS copy is read-only legacy). Returns
+// ESP_ERR_INVALID_ARG for an out-of-range zone_index, and an error -- most
+// notably ESP_ERR_INVALID_STATE when cfg is not mounted -- when the write did
+// not land. In-RAM truth updates first, so a failed write means the entry
+// will not survive a reboot, not that it failed to take effect now.
 //
-// MUST NOT be called from a PSRAM-stacked task: the underlying NVS write
-// refuses (and panics on real hardware) -- see hal_kv.h's write-context
-// contract and safety_cfg_store.c's caller_stack_is_external() note.
+// MUST NOT be called from a PSRAM-stacked task: the cfg LittleFS write
+// disables the flash cache exactly like an NVS write does (and panics on real
+// hardware) -- see hal_kv.h's write-context contract and safety_cfg_store.c's
+// caller_stack_is_external() note.
 esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zone_t *in);
+
+// Read-only dual-write status for GET /api/cfgfs; same contract as
+// unit_pref_get_dualwrite_status() (fresh re-read of both sides, no resync
+// write). Any output pointer may be NULL.
+void iter_tune_store_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                          bool *diverged);
 
 // True if the most recent iter_tune_store_start() saw a blob (NVS or cfg
 // file) whose version field was NEWER than ITER_TUNE_STORE_VERSION -- e.g.

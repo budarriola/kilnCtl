@@ -11,6 +11,7 @@
 #include "esp_log.h"
 
 #include "http_auth_enforce.h"
+#include "http_origin_check.h"
 #include "http_auth_policy_iface.h"
 #include "http_session_iface.h"
 #include "wifi_prov.h" // wifi_prov_request_arrived_on_ap() -- 2026-09-29 via_ap tagging
@@ -281,6 +282,20 @@ static esp_err_t refusal_result(const httpd_req_t *req) {
     return http_auth_refusal_should_close(req->content_len) ? ESP_FAIL : ESP_OK;
 }
 
+// MED-1 (ROUTE_TIER_REVIEW_2026-10-09): refuse a cross-origin state-changing
+// request. Decision glue lives in http_origin_check.h (host-tested); these are
+// the httpd adapters. Fixed small buffers (3 x HTTP_ORIGIN_HDR_BUF on the httpd stack).
+static size_t origin_hdr_len(void *c, const char *name) {
+    return httpd_req_get_hdr_value_len((httpd_req_t *)c, name);
+}
+static int origin_hdr_str(void *c, const char *name, char *buf, size_t cap) {
+    esp_err_t e = httpd_req_get_hdr_value_str((httpd_req_t *)c, name, buf, cap);
+    return e == ESP_OK ? 0 : (e == ESP_ERR_HTTPD_RESULT_TRUNC ? 1 : -1);
+}
+static bool request_is_cross_origin(httpd_req_t *req) {
+    return http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str);
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever
@@ -292,6 +307,16 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_send(req, "auth wiring error", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
+    }
+
+    // MED-1: cross-origin refusal comes first -- before any handler work, before
+    // the body is read, and regardless of auth state.
+    if (req->method != HTTP_GET && req->method != HTTP_HEAD && request_is_cross_origin(req)) {
+        ESP_LOGW(AUTH_HTTP_TAG, "cross-origin refused: method=%d uri=%s", (int)req->method, ctx->uri);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"cross_origin\"}", HTTPD_RESP_USE_STRLEN);
+        return refusal_result(req);
     }
 
     bool web_enabled = http_auth_policy_web_enabled();

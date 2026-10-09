@@ -6,11 +6,13 @@
 #include "adaptive_tune.h"
 #include "aux_outputs_cfg.h"
 #include "cfg_fs.h"
+#include "ct_verify_store.h"
 #include "display_power_cfg.h"
 #include "iter_tune_store.h"
 #include "kiln_cfg_store_cfg_fs.h"
 #include "ramp_assist_cfg.h"
 #include "relay_cycles.h"
+#include "setup_wizard_progress.h"
 #include "time_sync.h"
 #include "unit_pref.h"
 #include "update_settings.h"
@@ -33,6 +35,8 @@ static const char *const kKilnScopeFiles[] = {
     ITER_TUNE_CFG_FILE_PATH,         /* iterative-tune store */
     AUX_OUTPUTS_FILE_PATH,           /* spare-relay aux outputs */
     UPDATE_SETTINGS_FILE_PATH,       /* update repo preference */
+    CT_VERIFY_CFG_FILE_PATH,         /* CT verify store (cfg only since 2026-10-07) */
+    SETUP_WIZARD_PROGRESS_FILE_PATH, /* setup wizard progress (cfg only since 2026-10-07) */
 };
 
 const char *const *kiln_scope_cfg_files_list(size_t *out_count)

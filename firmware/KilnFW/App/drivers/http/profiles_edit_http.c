@@ -12,10 +12,11 @@
 #include "http_form.h"
 #include "live_profile.h" /* live_edit_name_collides() -- profile_post_handler()'s dup-name refusal */
 #include "profile_executor.h" /* profile_executor_get_status() -- Opus review item 2,
-                                 * PROFILE_SLOTS_100_PLAN.md section 7: refuse to delete
+                                 * PROFILE_SLOTS_100.md section 7: refuse to delete
                                  * the slot the executor is currently running/paused on. */
 #include "profiles_builtin.h"
 #include "profiles_favorites.h"
+#include "cfg_fs_refusal_http.h"
 #include "zones_config_accessors.h"
 
 /* profiles_http_json_escape() now lives in profiles_http_internal.h (Opus review of
@@ -474,6 +475,9 @@ static const char *profile_post_name_at(void *ctx, uint8_t id)
 
 esp_err_t profile_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > PROFILE_BODY_MAX) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -520,25 +524,6 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
     long requested_id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
-
-    uint8_t target_id;
-    if (requested_id >= 0 && requested_id < PROFILES_MAX_COUNT) {
-        target_id = (uint8_t)requested_id;
-    } else {
-        int free_slot = -1;
-        for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!profiles_slot_used(i)) {
-                free_slot = i;
-                break;
-            }
-        }
-        if (free_slot < 0) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile storage full");
-            free(body);
-            return ESP_OK;
-        }
-        target_id = (uint8_t)free_slot;
-    }
 
     /* check_httpd_task_stack_budget.py: profile_t (~428 B) used to be a
      * plain local (`tmp`) here, contributing to this handler's own
@@ -614,6 +599,40 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return ret;
     }
 
+    if (profiles_http_convert_busy()) {
+        char json[96];
+        int bn = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"busy: zone conversion running, retry\"}");
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t ret = httpd_resp_send(req, json, bn < 0 ? 0 : (size_t)bn);
+        free(warn_json);
+        free(tmp);
+        return ret;
+    }
+    /* Slot allocation, duplicate-name check, assign and save are one section
+     * under the save mutex (two creates must not pick the same free slot). */
+    profiles_save_lock();
+    uint8_t target_id;
+    if (requested_id >= 0 && requested_id < PROFILES_MAX_COUNT) {
+        target_id = (uint8_t)requested_id;
+    } else {
+        int free_slot = -1;
+        for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+            if (!profiles_slot_used(i)) {
+                free_slot = i;
+                break;
+            }
+        }
+        if (free_slot < 0) {
+            profiles_save_unlock();
+            free(warn_json);
+            free(tmp);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile storage full");
+            return ESP_OK;
+        }
+        target_id = (uint8_t)free_slot;
+    }
+
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
      * duplicate name. Same check/helper profiles_http_save() now runs --
      * see that function's comment. exclude_id lets overwriting a slot with
@@ -640,6 +659,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
             profiles_http_json_escape(name_err, name_err_escaped, sizeof(name_err_escaped));
             char json[192 + sizeof(name_err_escaped)];
             int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name_err_escaped);
+            profiles_save_unlock();
             httpd_resp_set_status(req, "400 Bad Request");
             httpd_resp_set_type(req, "application/json");
             esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
@@ -649,13 +669,29 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         }
     }
 
+    /* Re-validate under the lock: a zone/aux conversion may have committed since
+     * the unlocked validation above. */
+    if (!validate_on_off_rules(tmp, validate_err, sizeof(validate_err))) {
+        profiles_save_unlock();
+        char json[256];
+        int vn = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", validate_err);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t ret = httpd_resp_send(req, json, vn < 0 ? 0 : (size_t)vn);
+        free(warn_json);
+        free(tmp);
+        return ret;
+    }
     s_profiles.profiles[target_id] = *tmp;
     free(tmp);
     profiles_slot_set(target_id);
-    esp_err_t err = nvs_save_slot(target_id);
+    esp_err_t err = nvs_save_slot_locked(target_id);
+    profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
+        free(warn_json);
+        return cfg_fs_http_persist_failed(req);
     }
 
     /* HEAP (PSRAM), same reasoning as warn_json above -- embeds warn_json's
@@ -682,6 +718,9 @@ esp_err_t profile_post_handler(httpd_req_t *req)
 
 esp_err_t profile_delete_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     if (req->content_len <= 0 || req->content_len > 64) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
@@ -717,11 +756,11 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }
-    /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
+    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
      * delete a slot the executor is currently running or has paused. Same
      * check as profiles_http.c's benchproto profiles_http_delete(). */
     /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1384-byte
+     * narrow accessor profile_executor.h recommends over a 1464-byte
      * profile_exec_status_t stack local on the httpd task. */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id) && active_id == id) {
@@ -733,7 +772,7 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
     }
 
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
-     * PROFILE_SLOTS_100_PLAN.md section 7): erase-then-clear left a window
+     * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
      * where a power cut between the two steps could survive with the slot
      * erased but its favorite bit still set -- an import that later lands on
      * this same id inherits that orphaned favorite (profiles_favorites.h's
@@ -741,12 +780,22 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
      * A failed save is logged inside the module and does not fail the
      * delete. */
     (void)profiles_favorites_set((uint8_t)id, false);
-    profiles_slot_clear(id);
-    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
-    esp_err_t err = nvs_erase_slot((uint8_t)id);
+    /* Prune firing history before the slot is touched so a failure leaves the
+     * slot in place and the delete retryable (see profiles_http_delete()). */
+    if (firing_stats_erase((uint8_t)id) != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
+    profiles_save_lock();
+    esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
+    if (err == ESP_OK) {
+        profiles_slot_clear(id);
+        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+    }
+    profiles_save_unlock();
     if (err != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- deleted live but may reappear after reboot", id,
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- slot kept, retry", id,
                  esp_err_to_name(err));
+        return cfg_fs_http_persist_failed(req);
     }
     return httpd_resp_sendstr(req, "ok");
 }
@@ -780,6 +829,9 @@ static bool read_small_body(httpd_req_t *req, char *buf, size_t cap)
 
 esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     char body[65];
     if (!read_small_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
@@ -803,6 +855,9 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
     bool hidden = (hid_len <= 0) || (hid_val[0] != '0');
 
     esp_err_t err = profiles_builtin_set_hidden((uint8_t)id, hidden);
+    if (err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"id\":%ld,\"hidden\":%s,\"persisted\":%s}",
                      "true", id, hidden ? "true" : "false", err == ESP_OK ? "true" : "false");
@@ -812,12 +867,18 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 
 esp_err_t builtin_restore_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     char body[65];
     if (req->content_len > 0 && !read_small_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large or read failed");
         return ESP_OK;
     }
     esp_err_t err = profiles_builtin_restore_all();
+    if (err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     char json[96];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"persisted\":%s}", err == ESP_OK ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
@@ -837,6 +898,10 @@ esp_err_t builtin_restore_post_handler(httpd_req_t *req)
  */
 esp_err_t profile_favorite_post_handler(httpd_req_t *req)
 {
+    /* cfg-only persistence (docs/CONFIG_FILESYSTEM.md): refuse before any state change. */
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     char body[65];
     if (!read_small_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing, too large, or read failed");
@@ -866,6 +931,9 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
     bool favorite = (fav_len <= 0) || (fav_val[0] != '0');
 
     esp_err_t err = profiles_favorites_set((uint8_t)id, favorite);
+    if (err != ESP_OK) {
+        return cfg_fs_http_persist_failed(req);
+    }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%ld,\"favorite\":%s,\"persisted\":%s}", id,
                      favorite ? "true" : "false", err == ESP_OK ? "true" : "false");

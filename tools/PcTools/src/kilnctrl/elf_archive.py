@@ -1673,6 +1673,36 @@ def list_all_kiln_elf_paths() -> list[str]:
     return paths
 
 
+def recovery_archive_dir() -> str:
+    """Recovery-image ELF archive (written by recovery_flash.archive_recovery_elf),
+    a sibling of the KilnFW app archive under firmware/KilnFW/."""
+    return os.path.join(os.path.dirname(kiln_archive_dir()), "recovery_elf_archive")
+
+
+def list_recovery_elf_paths(archive_dir: Optional[str] = None) -> list[str]:
+    """Every recovery-<sha12>.elf in the recovery archive, sorted. Content
+    matching (esp_coredump's SHA check) decides which one fits a dump."""
+    import glob  # noqa: PLC0415
+    d = archive_dir or recovery_archive_dir()
+    return sorted(glob.glob(os.path.join(d, "recovery-*.elf")))
+
+
+def find_recovery_elf_for_build(fw_build: str, archive_dir: Optional[str] = None) -> tuple[Optional[str], str]:
+    """Recovery-archive counterpart of find_kiln_elf_for_build()."""
+    d = archive_dir or recovery_archive_dir()
+    try:
+        with open(os.path.join(d, "manifest.json"), "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        manifest = {}
+    entry = manifest.get(normalize_build_timestamp(fw_build))
+    if isinstance(entry, dict) and entry.get("elf_key"):
+        path = os.path.join(d, f"recovery-{entry['elf_key']}.elf")
+        if os.path.isfile(path):
+            return path, f"found {path} (recovery image, archived {entry.get('archived_at')}, commit {entry.get('git_commit')})"
+    return None, f"no recovery-archive ELF for fw_build={fw_build!r} in {d}"
+
+
 def find_kiln_elf_for_build(fw_build: str) -> tuple[Optional[str], str]:
     """Returns (path, message). path is None on no match -- message always
     explains what was searched and, on a miss, how many entries exist so a

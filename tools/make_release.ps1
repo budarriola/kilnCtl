@@ -11,8 +11,7 @@
 #     binaries shipped must be the ones this script just built from the stamped commit)
 #   * tag matches ^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$
 #   * working tree is clean (git status --porcelain, logs/release excluded)
-#   * HEAD equals origin/main (after a read-only `git fetch origin main`)
-#   * the tag exists neither locally nor on origin (git ls-remote)
+#   * HEAD is the commit annotated tag <tag> peels to, that tag is on origin, and it is the origin/release tip (tools/release_merge.ps1)
 #   * KilnCtrl.bin <= 0x400000: deliberately the planned post-split app size (see
 #     docs/GITHUB_RELEASE_UPDATE_PLAN.md WP2), which is now also the actual app partition size
 # -DevDryRun downgrades the git gates to warnings so the packaging path can be
@@ -35,6 +34,11 @@
 # generated: git log --oneline <previous semver tag merged into HEAD>..HEAD, or the last 50
 # commits if there is none. The body is also written to logs\release\<tag>.notes.md for review.
 #
+# Bench evidence: after the app binary is located, `release_gates.py bench-evidence --app-bin` requires a
+# full, passing, <= 7 day old run of suites ota, lcd, safety on exactly that build. Treated like an open
+# gate: -Publish of a STABLE tag refuses without it unless -AllowOpenGates; dry runs and pre-release tags
+# print the result as a WARNING. -BenchLogsDir overrides the logs location.
+#
 # -Publish (token from env KILNCTL_GITHUB_TOKEN, never printed): POST a DRAFT release
 # with target_commitish = the commit, upload every asset, re-download each one and
 # compare sha256, and only then PATCH draft=false. Any mismatch leaves the draft in
@@ -52,7 +56,9 @@ param(
     [string]$NotesFile,
     [string]$GatesFile,
     [switch]$AllowOpenGates,
-    [switch]$LoadFunctionsOnly
+    [string]$BenchLogsDir,       # bench_test run logs (default <repo>\logs\bench_test; gitignored, so pass the main tree's in a release worktree)
+    [switch]$LoadFunctionsOnly,
+    [int]$DramCeilingBytes = 0   # test override for the .dram0.bss gate (0 = checker default)
 )
 
 $ErrorActionPreference = "Stop"
@@ -169,6 +175,15 @@ function Invoke-ReleasePublish {
     Write-Host "published $Tag : https://github.com/$Repo/releases/tag/$Tag"
 }
 
+function Test-DramBssBudget([string]$Python, [string]$Elf, [int]$Ceiling = 0) {
+    # Reuses the standing checker (no second parser). Exit 0 = pass; 1 = over; 3 = unmeasured SKIP -- both refuse.
+    $checker = Join-Path $repoRoot "firmware\KilnFW\App\test\check_kilnfw_dram_bss_budget.py"
+    $a = @($checker, "--elf", $Elf)
+    if ($Ceiling -gt 0) { $a += @("--ceiling-bytes", "$Ceiling") }
+    & $Python @a
+    if ($LASTEXITCODE -ne 0) { Fail ".dram0.bss budget check failed or could not measure (exit $LASTEXITCODE) on $Elf; a release needs a measured pass." }
+}
+
 if ($LoadFunctionsOnly) { return }
 
 # ---------------------------------------------------------------- gates
@@ -183,15 +198,9 @@ function Gate([string]$msg) {
     if ($DevDryRun) { Write-Host "WARNING (DevDryRun): $msg" -ForegroundColor Yellow } else { Fail $msg }
 }
 
-$python = $null
-foreach ($cand in @((Join-Path $repoRoot "tools\PcTools\.venv\Scripts\python.exe"))) {
-    if (Test-Path -LiteralPath $cand) { $python = $cand }
-}
-if (-not $python) {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { Fail "no python (tools\PcTools\.venv or PATH); release_manifest.py needs one." }
-    $python = $cmd.Source
-}
+. (Join-Path $PSScriptRoot "lib_pctools_python.ps1")
+$python = Resolve-PcToolsPython -RepoRoot $repoRoot
+if (-not $python) { Fail "no python (tools\PcTools\.venv, KILNCTL_PCTOOLS_PYTHON, main tree venv or PATH); release_manifest.py needs one." }
 if ($NotesFile -and -not (Test-Path -LiteralPath $NotesFile -PathType Leaf)) { Fail "-NotesFile $NotesFile does not exist." }
 if ($NotesFile -and ((Get-Item -LiteralPath $NotesFile).Length -eq 0)) { Fail "-NotesFile $NotesFile is empty." }
 if (-not $GatesFile) { $GatesFile = Join-Path $repoRoot "docs\release_gates.json" }
@@ -208,16 +217,20 @@ if ($LASTEXITCODE -ne 0) { Fail "git status failed." }
 if ($dirty.Count -gt 0) { Gate "working tree is dirty ($($dirty.Count) change(s), first: $($dirty[0])); build releases from a clean worktree (tools\worktree_mint.ps1)." }
 
 $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
-& git -C $repoRoot fetch --quiet origin main
-if ($LASTEXITCODE -ne 0) { Fail "git fetch origin main failed." }
-$originMain = (& git -C $repoRoot rev-parse origin/main).Trim()
-if ($commit -ne $originMain) { Gate "HEAD $($commit.Substring(0,12)) is not origin/main $($originMain.Substring(0,12))." }
-
-if ((& git -C $repoRoot tag --list $Tag)) { Fail "tag $Tag already exists locally." }
-$remoteTag = @(& git -C $repoRoot ls-remote --tags origin "refs/tags/$Tag")
-if ($LASTEXITCODE -ne 0) { Fail "git ls-remote --tags origin failed (cannot prove the tag is free)." }
-if ($remoteTag.Count -gt 0) { Fail "tag $Tag already exists on origin." }
-
+# Releases are built from the TAGGED RELEASE COMMIT (tools/release_merge.ps1 -Push puts the single-parent
+# commit M on origin/release and the annotated tag on M), not from origin/main: HEAD must be the commit
+# the tag peels to, and that commit must be the origin/release tip.
+& git -C $repoRoot fetch --quiet origin release --tags
+if ($LASTEXITCODE -ne 0) { Fail "git fetch origin release --tags failed." }
+$tagCommit = (& git -C $repoRoot rev-parse --verify --quiet "refs/tags/$Tag^{commit}")
+if ($LASTEXITCODE -ne 0 -or -not $tagCommit) { Fail "tag $Tag does not exist locally; run tools\release_merge.ps1 -Commit <main commit> -Tag $Tag -Push first." }
+$tagCommit = $tagCommit.Trim()
+$remoteTag = @(& git -C $repoRoot ls-remote --tags origin "refs/tags/$Tag^{}")
+if ($LASTEXITCODE -ne 0) { Fail "git ls-remote --tags origin failed (cannot prove the tag is on origin)." }
+if ($remoteTag.Count -eq 0 -or ($remoteTag[0] -split '\s+')[0] -ne $tagCommit) { Gate "tag $Tag is not on origin at $($tagCommit.Substring(0,12))." }
+if ($commit -ne $tagCommit) { Gate "HEAD $($commit.Substring(0,12)) is not the commit tag $Tag peels to ($($tagCommit.Substring(0,12))); check out the tagged release commit." }
+$relTip = (& git -C $repoRoot rev-parse --verify --quiet "refs/remotes/origin/release^{commit}")
+if ($LASTEXITCODE -ne 0 -or -not $relTip -or $relTip.Trim() -ne $tagCommit) { Gate "tag $Tag is not the origin/release tip." }
 # Release body: resolved before the (long) build so a bad -NotesFile or a git failure costs nothing.
 if ($NotesFile) {
     $bodyBase = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile).Path)
@@ -257,6 +270,7 @@ foreach ($p in @($appBin, $elf, $RecoveryBin)) {
 }
 $appSize = (Get-Item -LiteralPath $appBin).Length
 if ($appSize -gt $MaxAppSize) { Fail "KilnCtrl.bin is $appSize bytes, over the $MaxAppSize (0x400000) gate (planned post-split app size, GITHUB_RELEASE_UPDATE_PLAN.md WP2)." }
+Test-DramBssBudget $python $elf $DramCeilingBytes
 
 $outDir = Join-Path $repoRoot "logs\release\$Tag"
 if (Test-Path -LiteralPath $outDir) { Fail "$outDir already exists; remove it (or pick a new tag) so no stale asset is published." }

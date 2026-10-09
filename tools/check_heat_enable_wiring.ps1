@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_heat_enable_wiring.ps1 -- every path in KilnFW that can command heat
 # must ASK the safety processor to permit it (heat_enable_acquire) and must
 # GIVE THAT PERMISSION BACK (heat_enable_release).

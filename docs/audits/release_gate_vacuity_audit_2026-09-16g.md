@@ -137,9 +137,9 @@ convention), since superseded
 by later unrelated edits to the file; the underlying finding -- that
 `json_escape()` is where the negative test was inserted and that the
 restore was byte-exact -- is unchanged, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`614e7e01` (citation
+blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`dd0478dc` (citation
 refreshed 2026-09-24, again 2026-09-28 after HP-02, again 2026-10-05 after
-spare-relay WP-6)) matched HEAD. Re-run: PASS.
+spare-relay WP-6, again 2026-10-08 after the /api/status ETag helpers)) matched HEAD. Re-run: PASS.
 
 **Verdict: load-bearing.**
 
@@ -160,8 +160,8 @@ blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c
 convention), since superseded by a later unrelated edit; line 505 still holds the same
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` call this negative test
 targeted, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`8f3f2a8f`
-(citation refreshed again 2026-09-24 after 540b2d72 added the per-zone claim release, and 2026-10-05 after spare-relay WP-3 added the aux functions; the heat_enable_release() call this test targets is unchanged))
+blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`0ca1a2b0`
+(citation refreshed again 2026-09-24 after 540b2d72 added the per-zone claim release, 2026-10-05 after spare-relay WP-3 added the aux functions, and 2026-10-07 after the on/off min_off_s seed helper, and 2026-10-09 after later unrelated edits, and again 2026-10-09 after 45c2b4de and 8c287553; the heat_enable_release() call this test targets is unchanged))
 and, at the time of this audit, 552f8a05 for `profile_executor_status.c`
 -- that file has since changed, so its blob id is no longer cited as
 resolvable against current HEAD) matched HEAD on both at audit time. Re-run:

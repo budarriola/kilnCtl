@@ -112,6 +112,14 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): boot_guard_record_boot() is called once
     # from app_main's own task before the scheduler starts any other task.
     "boot_guard.c",
+    # Pattern 3 (internal-SRAM-stack caller): since the NVS dual-write close
+    # the aux config itself persists through pref_cfg_fs.c, but the
+    # zone-to-aux conversion journal (aux_convert_journal_write()/_clear(),
+    # docs/SPARE_RELAY_ONOFF_PLAN.md section 10) is still an NVS marker. Its
+    # only callers are zone_aux_convert_http.c's move_handler(), reached from
+    # zones_post_handler on the httpd task's internal-SRAM stack -- never the
+    # flash worker, never a PSRAM stack.
+    "aux_outputs_cfg.c",
     # Pattern 3 (init-time only): crash_report_save() runs from the panic/
     # boot path, before normal task concurrency exists.
     "crash_report.c",
@@ -155,16 +163,6 @@ ALLOWLIST = {
     # the PSRAM-stack restriction explicitly, so a future second caller has
     # to confront it rather than discover it on hardware.
     "ct_verify_store.c",
-    # Pattern 3 (init-time only): display_power_cfg_set() runs from
-    # settings_http.c's POST /api/settings/display_power handler, on that
-    # handler's own internal-SRAM-stack httpd task -- same story as
-    # unit_pref.c/zones_config_store.c's identical entries below.
-    "display_power_cfg.c",
-    # Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md WP-1):
-    # aux_outputs_cfg_set() is a per-relay config write called from the
-    # zones HTTP handler / MCP path on an httpd task's internal-SRAM stack,
-    # same story as display_power_cfg.c's entry immediately above.
-    "aux_outputs_cfg.c",
     # docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 7 (firing stats/
     # history cfg-filesystem bridge, 2026-09-08): firing_stats_cfg_fs_
     # write_rev()'s hal_kv_set_u32()/hal_kv_commit() calls are this file's
@@ -285,22 +283,6 @@ ALLOWLIST = {
     # second, redundant check here would just be pattern 2 duplicated across
     # a call boundary with no additional caller.
     "firing_shadow.c",
-    # RE-JUSTIFIED 2026-09-06 (flash-safety review of the hal_kv migration):
-    # the "init-time only" claim below was FALSE -- profiles_builtin_start()
-    # is init-time, but profiles_builtin_set_hidden()/_restore_all() (this
-    # file's OTHER two write call sites) are reached live, long after boot,
-    # from profiles_edit_http.c:505/520 (POST /api/profiles/builtin/hidden,
-    # POST .../restore) and ui_page_profiles.c:50 (the "restore all" LCD
-    # button). Actually Pattern 3 (internal-SRAM-stack caller, not init-time
-    # concurrency-free-ness): profiles_edit_http.c's two call sites run on
-    # the httpd task -- internal-SRAM stack, same established fact
-    # zones_config_store.c's/unit_pref.c's/display_power_cfg.c's own entries
-    # below rely on -- and ui_page_profiles.c's call site runs on the LVGL
-    # task, whose stack is `static StackType_t s_lvgl_task_stack[...]`
-    # (lvgl_port.c, xTaskCreateStaticPinnedToCore) -- a plain static array,
-    # .bss-resident, never PSRAM. No caller of either write function reaches
-    # it from a PSRAM-stacked task.
-    "profiles_builtin.c",
     # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time),
     # the same shape and the same established facts as profiles_builtin.c's
     # entry directly above -- this file stores the favorite masks the way
@@ -319,22 +301,6 @@ ALLOWLIST = {
     # "earlier pass treated this file as always-internal-stack" incident --
     # see this file's own comment.
     "profiles_http.c",
-    # RE-JUSTIFIED 2026-09-06 (flash-safety review of the hal_kv migration):
-    # the "init-time only" claim below was FALSE for one of this file's two
-    # write call sites -- ramp_assist_cfg_start() runs at boot from
-    # app_main, but ramp_assist_cfg_set_enabled() is reached live from
-    # diagnostics_http.c:455 (POST the ramp-assist debug toggle), long after
-    # boot. Actually Pattern 3 (internal-SRAM-stack caller): the httpd task
-    # diagnostics_http.c's handler runs on has an internal-SRAM stack, the
-    # same established fact zones_config_store.c's/unit_pref.c's/
-    # display_power_cfg.c's/profiles_builtin.c's own entries in this list
-    # rely on -- not a PSRAM-stacked task.
-    "ramp_assist_cfg.c",
-    # Pattern 3 (internal-SRAM-stack httpd task, not init-time): the write
-    # call site is update_settings_set(), reached from update_settings_http.c's
-    # POST handler and backup import (http_async_job), the same httpd/internal
-    # stack story as display_power_cfg.c; update_settings_start() is boot-time.
-    "update_settings.c",
     # Pattern 2 (local caller_stack_is_external() guard), added when the
     # guard was introduced -- see this file's own comment; also called once
     # from app_main's own task before the scheduler starts.
@@ -359,16 +325,9 @@ ALLOWLIST = {
     # write half, which this entry covers the same way those three files'
     # entries do.
     "setup_wizard_progress.c",
-    # Pattern 3 (init-time only): time zone save runs from the settings
-    # HTTP handler's own internal-SRAM-stack httpd task, no PSRAM stack
-    # involved in this handler's call chain.
-    "time_sync.c",
     # Pattern 3 (init-time only): touch calibration is saved once from the
     # commissioning flow's own internal-SRAM-stack task.
     "touch_cal_store.c",
-    # Pattern 3 (init-time only): unit preference save runs from the
-    # settings HTTP handler's internal-SRAM-stack httpd task.
-    "unit_pref.c",
     # Pattern 3 (internal-SRAM-stack caller, reached live, not init-time) --
     # same shape as display_power_cfg.c's/unit_pref.c's/zones_config_store.c's
     # own entries. iter_tune_store_set_zone()'s only write call site is
@@ -462,6 +421,15 @@ ALLOWLIST = {
     # write_fn/delete_fn indirection story; this file's only cfg_fs-surface
     # call site is THROUGH that wrapper, never the bare cfg_fs_delete().
     "profiles_http.c",
+    # Legacy default-partition kiln_cfg key erase (erase_keys()). Callers:
+    # factory_reset.c's execute_scope_job() (pattern 1 by transitivity -- that
+    # job runs ON the flash worker, internal-SRAM stack, same reasoning as
+    # kiln_scope_cfg_files.c above) and relay_cycles.c's one-time legacy
+    # migration, which runs in relay_cycles_init() from app_main's own task
+    # before other tasks exist (pattern 3, same argument relay_cycles.c's own
+    # allowlist entry makes). Per-FILE allowlist: any new caller needs its own
+    # justification here.
+    "legacy_default_nvs.c",
 }
 
 # ---- cfg_fs (LittleFS-backed) write/delete/format surface -------------
@@ -514,15 +482,24 @@ CFG_FS_ALLOWLIST = {
     "cfg_fs_mount.c",
     "diagnostics_http.c",
     "profiles_http.c",
+    # NVS dual-write close (2026-10-06): the preference files that used to be
+    # on ALLOWLIST for their hal_kv_* writes (display_power_cfg.c,
+    # aux_outputs_cfg.c, ramp_assist_cfg.c, update_settings.c, time_sync.c,
+    # unit_pref.c, profiles_builtin.c) now persist only through
+    # pref_cfg_fs_commit()/pref_cfg_fs_save() here, and were removed from
+    # ALLOWLIST. Their callers are unchanged: internal-SRAM-stack httpd
+    # handlers or boot-time app_main, never the flash worker, never a PSRAM
+    # stack, so the justification they carried applies to this file's write
+    # path as a whole.
     "pref_cfg_fs.c",
     "profiles_cfg_fs.c",
     "zones_config_cfg_fs.c",
-    # cfg_fs_save_raw()'s cfg_fs_write_atomic() call -- see ALLOWLIST's twin
-    # entry above for the httpd-task/internal-SRAM-stack reasoning; same call
-    # site, same caller (iter_tune_store_set_zone()), just the cfg dual-write
-    # half of the same write instead of the NVS half.
+    # iter_tune_store_set_zone()'s pref_cfg_fs_commit() call (the only write
+    # since the 2026-10-07 dual-write close; the NVS half is gone) -- see
+    # ALLOWLIST's twin entry above for the httpd-task/internal-SRAM-stack
+    # reasoning, same call site, same caller.
     "iter_tune_store.c",
-    # firing_stats_cfg_fs_delete() (PROFILE_SLOTS_100_PLAN.md sec 7 task 10):
+    # firing_stats_cfg_fs_delete() (PROFILE_SLOTS_100.md sec 7 task 10):
     # deletes the firing-history mirror file for a profile id being erased,
     # called only from profile_executor_firing_stats.c's firing_stats_erase(),
     # itself only reached through profiles_http.c's nvs_erase_slot() -- same
@@ -545,8 +522,8 @@ CFG_FS_ALLOWLIST = {
     # without its own review.
     "kiln_scope_cfg_files.c",
     "profiles_scope_cfg_files.c",
-    # profiles_builtin.c is already justified for the hal_kv_* surface (see
-    # ALLOWLIST: httpd/LVGL internal-SRAM callers); its cfg_fs_delete() is the
+    # profiles_builtin.c no longer writes NVS (the 2026-10-06 NVS dual-write
+    # close removed it from ALLOWLIST); its cfg_fs_delete() is the
     # one bare cfg_fs call in the file, profiles_builtin_discard_file(), whose
     # only caller is factory_reset.c's execute_scope_job() on the flash worker
     # (same reasoning as the two entries above). Its other file writes go

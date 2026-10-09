@@ -722,6 +722,18 @@ void executor_task_entry(void *arg)
             thermo_channels_read(s_exec.thermo_bus, &pre_lock_snap);
         }
 
+        /* F1/F2: fresh Pico TRIPPED report, read outside s_exec.lock (same
+         * rule as the watchdog's safety_link_get_status()). */
+        bool pre_lock_pico_tripped = false;
+        if (s_exec.safety) {
+            safety_link_status_t pre_st;
+            if (safety_link_get_status(s_exec.safety, &pre_st) == ESP_OK) {
+                pre_lock_pico_tripped = pre_st.diag_ever_received &&
+                                        !safety_link_is_stale(pre_st.age_ms, SAFETY_LINK_STALE_MS) &&
+                                        pre_st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+            }
+        }
+
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
         s_exec.last_tick_tick = now; /* guard 9 -- updated every iteration regardless of run state */
@@ -736,7 +748,7 @@ void executor_task_entry(void *arg)
              * it, or it never started) costs nothing extra here. */
             io_segs_force_all_off(false);
             /* Spare-relay WP-3: retry a run-end aux OFF whose write failed.
-             * Never while PAUSED (a pause holds aux at its last state) and a
+             * Never while PAUSED (a pause holds aux at its last state while no fault is asserted -- see profile_executor_aux_fault_drop()) and a
              * no-op once the write has landed, so it cannot fight a later
              * manual toggle. */
             if (s_exec.aux_off_pending && s_exec.state != PROFILE_EXEC_PAUSED) {
@@ -751,6 +763,9 @@ void executor_task_entry(void *arg)
              * free rather than a release frame per tick. PAUSED lands here too, which is what a pause is
              * supposed to mean -- see profile_executor_pause(). */
             heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_PROFILE);
+            /* F1/F2: aux outputs drop on any safety fault even while paused
+             * or idle; never assume K4 covers them (wiring varies). */
+            profile_executor_aux_fault_drop(pre_lock_pico_tripped);
             /* PID_EXPANSION_PLAN.md Phase 7a: the moment a run first lands
              * in DONE or FAULTED, persist its firing stats -- this is the
              * "run completion" write, not waiting on the operator to press
@@ -840,7 +855,7 @@ void executor_task_entry(void *arg)
                                                     * picture" reasoning as raw_c/sensor_ok, and handed to
                                                     * thermal_guard_tick() both as this zone's own
                                                     * on_off_zone flag and as every OTHER zone's
-                                                    * peer_is_on_off[] so guard 9/cross-zone excludes an
+                                                    * peer_is_on_off[] so guard 8/cross-zone excludes an
                                                     * on/off zone from both sides of the comparison. */
         bool zone_guard_exempt[MAX31856_CHANNEL_COUNT]; /* on/off OR monitor-only: guards 1/2/3/4/cross-zone are
                                                     * not meaningful for it (no heat commanded, or no
@@ -912,11 +927,11 @@ void executor_task_entry(void *arg)
              * would let a zone sitting at ambient (or with no thermocouple
              * at all) freeze the whole firing's ramp forever. Hard
              * requirement, not an optimisation. */
-            if (zone_is_on_off(zi)) continue;
             /* SPARE_RELAY_ONOFF_PLAN.md sec 10: a monitor-only zone (relay
              * converted to an aux) cannot heat, so it must not hold the
-             * firing's ramp either. */
-            if (s_exec.zones[zi].monitor_only) continue;
+             * firing's ramp either. Both exclusions are the one shared
+             * predicate. */
+            if (!profile_executor_zone_drives_run(zi)) continue;
             /* ONE-SIDED (2026-09-03, hot-start defect): only a zone that is
              * COLDER than the shared target by more than the band can hold
              * the lock. A zone that is HOTTER than target by the same
@@ -1773,12 +1788,6 @@ void executor_task_entry(void *arg)
                 zones_config_get_min_off_s(zi, &min_off_s);
                 float hyst_c = 2.0f;
                 zones_config_get_hyst_c(zi, &hyst_c);
-                uint8_t direction_bit = (uint8_t)ON_OFF_DIR_FLAT;
-                if (s_exec.target_rate_c_per_s > 0.0f) {
-                    direction_bit = (uint8_t)ON_OFF_DIR_HEATING;
-                } else if (s_exec.target_rate_c_per_s < 0.0f) {
-                    direction_bit = (uint8_t)ON_OFF_DIR_COOLING;
-                }
                 /* Refreshed HERE, directly, rather than by reading z->
                  * heat_blocked: for a heater zone heat_blocked is already
                  * fresh by this point in the tick because apply_relay() ran
@@ -1810,36 +1819,14 @@ void executor_task_entry(void *arg)
                  * temp_cmp NONE (its temperature axis drops out of the AND
                  * as a tautology) until a later step resolves them -- never
                  * silently mis-evaluated against the wrong reading. */
-                on_off_trigger_rule_t resolved_rule =
-                    profile_resolve_on_off_rule(&s_exec.profile, zi, s_exec.segment_index);
-
-                bool run_ending_failsafe = (s_exec.state == PROFILE_EXEC_FAULTED) || z->faulted ||
-                                           authority_blocked_now;
-                bool guard_5_6_tripped_now = z->guard_state.is_tripped &&
-                    (z->guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP ||
-                     z->guard_state.reason == THERMAL_GUARD_TRIP_MIN_TEMP);
-                bool run_running_now = (s_exec.state == PROFILE_EXEC_RUNNING);
-
-                on_off_trigger_input_t oin = {
-                    .failsafe_override = run_ending_failsafe,
-                    .failsafe_state_on = failsafe_on,
-                    .guard_5_6_tripped = guard_5_6_tripped_now,
-                    .run_running = run_running_now,
-                    .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
-                    .failsafe_on_pause = false, /* no per-zone override field yet -- plan step 6's UI */
-                    .min_on_s = min_on_s,
-                    .min_off_s = min_off_s,
-                    .rule = resolved_rule,
-                    .current_phase_is_dwell = s_exec.dwelling || z->on_off_trigger_state.quasi_dwell,
-                    .current_direction = direction_bit,
-                    .temp_measurement_c = z->actual_c,
-                    .hyst_c = hyst_c,
-                    .segment_elapsed_s = (float)s_exec.segment_elapsed_s,
-                    .ramp_lock_held = s_exec.ramp_lock_held,
-                    .stretched_this_tick = stretched_this_tick,
-                    .segment_index = s_exec.segment_index,
-                    .dt_s = dt_s,
-                };
+                /* Rule lookup, direction/phase/run-state facts, the dead-sensor
+                 * fail-safe and the AND of every run-ending path are all in the
+                 * shared builder (profile_executor_relay_io.c), the same one the
+                 * aux path uses, so the two producers cannot drift. */
+                bool bypass_hold = false;
+                on_off_trigger_input_t oin = profile_executor_zone_on_off_input(
+                    zi, failsafe_on, min_on_s, min_off_s, hyst_c, authority_blocked_now,
+                    stretched_this_tick, dt_s, &bypass_hold);
                 /* Requirement 4: the actuation layer enforces min_on_s/
                  * min_off_s AGAIN, independent of on_off_trigger_decide()'s
                  * own hold timer, so a decision-core bug cannot chatter the
@@ -1853,7 +1840,6 @@ void executor_task_entry(void *arg)
                  * the same call -- see profile_executor_on_off_zone_tick()'s
                  * header comment for why this whole chain is one production
                  * function rather than inline code here. */
-                bool bypass_hold = run_ending_failsafe || guard_5_6_tripped_now || !run_running_now;
                 /* Captured BEFORE the tick call: both on_off_trigger_decide()
                  * (inside profile_executor_on_off_zone_tick(), via
                  * z->on_off_trigger_state) and the actuation-gate hold
@@ -1934,7 +1920,7 @@ void executor_task_entry(void *arg)
                         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
                     } else if (tick_result.cap_denied) {
                         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
-                    } else if (!resolved_rule.enable) {
+                    } else if (!oin.rule.enable) {
                         z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_ON_OFF_NO_RULE;
                     }
                 }

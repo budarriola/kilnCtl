@@ -178,9 +178,13 @@ static void autotune_handle_message(void *vargs)
                  * defaults to false. */
                 bool ack_unsettled = (msg.length >= 2) && (msg.payload[1] != 0);
                 autotune_accept_opts_t accept_opts = {.ack_unsettled = ack_unsettled, .adopt_ceiling = false};
-                bool ok = autotune_engine_accept(&accept_opts, NULL);
+                autotune_accept_result_t accept_result = {0};
+                bool ok = autotune_engine_accept(&accept_opts, &accept_result);
                 uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_AUTOTUNE, subcmd, ok,
-                                             ok ? NULL : "no completed autotune result to accept, or it never settled "
+                                             ok ? NULL
+                                                : accept_result.refused_by_mode_gate
+                                                    ? accept_result.mode_reason
+                                                    : "no completed autotune result to accept, or it never settled "
                                                          "and needs the ack_unsettled byte set to accept anyway");
                 break;
             }

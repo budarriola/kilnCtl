@@ -110,3 +110,30 @@ display_power_result_t display_power_policy_step(const display_power_input_t *in
 
     return out;
 }
+
+bool display_power_touch_gate_press(display_power_touch_gate_t *gate, uint32_t now_ms)
+{
+    if (gate->held) {
+        return false; // held repeat of the same press
+    }
+    gate->held = true;
+    if (gate->have_release && gate->held_swallow &&
+        (uint32_t)(now_ms - gate->last_release_ms) < DISPLAY_POWER_TOUCH_REPRESS_MS) {
+        return false; // dropout inside a swallowed touch: same touch, still swallowed
+    }
+    return true;
+}
+
+void display_power_touch_gate_record(display_power_touch_gate_t *gate, bool swallow)
+{
+    gate->held_swallow = swallow;
+}
+
+void display_power_touch_gate_release(display_power_touch_gate_t *gate, uint32_t now_ms)
+{
+    if (gate->held) {
+        gate->last_release_ms = now_ms;
+        gate->have_release = true;
+    }
+    gate->held = false;
+}

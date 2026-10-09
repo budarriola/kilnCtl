@@ -17,10 +17,42 @@
 
 #include "../drivers/persist/setup_wizard_progress.c"
 
+#ifdef _WIN32
+#include <direct.h>
+#define SWP_MKDIR(p) _mkdir(p)
+#define SWP_RMDIR(p) _rmdir(p)
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#define SWP_MKDIR(p) mkdir((p), 0755)
+#define SWP_RMDIR(p) rmdir(p)
+#endif
+#include "cfg_fs.h"
+
+static const char *SWP_SCRATCH = "cfg_fs_test_setup_wizard_progress";
+
+/* Progress saves are cfg-only (owner decision 2026-10-07), so a test that
+ * saves needs a freshly mounted, empty cfg scratch directory. */
+static void mount_fresh_cfg(void)
+{
+    cfg_fs_deinit();
+    char path[600];
+    snprintf(path, sizeof(path), "%s/.tmp/%s", SWP_SCRATCH, SETUP_WIZARD_PROGRESS_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", SWP_SCRATCH, SETUP_WIZARD_PROGRESS_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/.tmp", SWP_SCRATCH);
+    SWP_RMDIR(path);
+    SWP_RMDIR(SWP_SCRATCH);
+    SWP_MKDIR(SWP_SCRATCH);
+    (void)cfg_fs_init(SWP_SCRATCH, NULL);
+}
+
 static void reset(void)
 {
     fake_kv_reset_all();
     hal_kv_init_partition(NVS_PARTITION);
+    mount_fresh_cfg();
 }
 
 // ---------------------------------------------------------------------
@@ -71,6 +103,91 @@ static void test_round_trip(void)
         setup_wizard_progress_get_step(i, &s);
         TEST_CHECK(s.state == SETUP_WIZ_STEP_PENDING, "untouched steps stay PENDING after a sibling's set_step");
     }
+}
+
+// ---------------------------------------------------------------------
+// cfg-only storage (owner decision 2026-10-07)
+// ---------------------------------------------------------------------
+
+static bool swp_file_exists(void)
+{
+    bool e = false;
+    return cfg_fs_exists(SETUP_WIZARD_PROGRESS_FILE_PATH, &e) == ESP_OK && e;
+}
+
+static bool nvs_has_progress(void)
+{
+    setup_wizard_progress_blob_t b;
+    setup_wizard_progress_v3_legacy_t raw;
+    return nvs_v5_read_quiet(&b, &raw);
+}
+
+static void test_save_goes_to_cfg_file_not_nvs(void)
+{
+    reset();
+    setup_wizard_progress_start();
+    TEST_CHECK(setup_wizard_progress_set_step(4, SETUP_WIZ_STEP_DONE, "note") == ESP_OK, "save succeeds with cfg mounted");
+    TEST_CHECK(swp_file_exists(), "the progress file now exists in cfg");
+    TEST_CHECK(!nvs_has_progress(), "NO NVS record was written (cfg-only)");
+    bool fv = false, nv = true, div = true;
+    uint32_t fr = 0, nr = 9;
+    setup_wizard_progress_get_dualwrite_status(&fv, &fr, &nv, &nr, &div);
+    TEST_CHECK(fv && fr == 1 && !nv && !div, "status: file valid at rev 1, no NVS side, not diverged");
+}
+
+static void test_save_refused_when_cfg_unmounted(void)
+{
+    reset();
+    setup_wizard_progress_start();
+    cfg_fs_deinit();
+    TEST_CHECK(setup_wizard_progress_set_step(5, SETUP_WIZ_STEP_DONE, NULL) == ESP_ERR_INVALID_STATE,
+               "save with cfg unmounted is REFUSED, not silently dropped");
+    TEST_CHECK(!nvs_has_progress(), "the refused save did not fall back to writing NVS");
+    setup_wizard_step_t st;
+    setup_wizard_progress_get_step(5, &st);
+    TEST_CHECK(st.state == SETUP_WIZ_STEP_DONE, "the live value still took effect in RAM for this boot");
+}
+
+static void test_legacy_nvs_record_migrates_into_cfg(void)
+{
+    reset();
+    setup_wizard_progress_start();
+    setup_wizard_progress_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = SETUP_WIZARD_PROGRESS_VERSION;
+    b.steps[2].state = (uint8_t)SETUP_WIZ_STEP_DONE;
+    b.steps[2].ts = 777;
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_PARTITION) == HAL_OK, "stash: open");
+    hal_kv_set_blob(&h, NVS_KEY_PROGRESS, &b, sizeof(b));
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(!swp_file_exists(), "precondition: no cfg file yet");
+
+    apply_defaults();
+    setup_wizard_progress_start();
+    setup_wizard_step_t s2;
+    setup_wizard_progress_get_step(2, &s2);
+    TEST_CHECK(s2.state == SETUP_WIZ_STEP_DONE && s2.ts == 777, "the legacy NVS record is read as the fallback");
+    TEST_CHECK(swp_file_exists(), "and was migrated into the cfg file");
+    {
+        bool fv = false, nv = false, div = true;
+        uint32_t fr = 9, nr = 9;
+        setup_wizard_progress_get_dualwrite_status(&fv, &fr, &nv, &nr, &div);
+        TEST_CHECK(fv && nv && fr == 0 && nr == 0 && !div,
+                   "status after migration: file and NVS both valid, same content, not diverged");
+        TEST_CHECK(setup_wizard_progress_set_step(3, SETUP_WIZ_STEP_DONE, NULL) == ESP_OK, "post-migration save");
+        setup_wizard_progress_get_dualwrite_status(&fv, &fr, &nv, &nr, &div);
+        TEST_CHECK(fv && nv && fr == 1 && div, "status after a cfg-only save: file rev 1 differs from the NVS copy");
+    }
+
+    /* A later boot with NVS wiped still has the data: the file stands alone. */
+    fake_kv_reset_all();
+    hal_kv_init_partition(NVS_PARTITION);
+    apply_defaults();
+    setup_wizard_progress_start();
+    setup_wizard_progress_get_step(2, &s2);
+    TEST_CHECK(s2.state == SETUP_WIZ_STEP_DONE && s2.ts == 777, "the migrated file survives without NVS");
 }
 
 static void test_get_all_matches_get_step(void)
@@ -338,6 +455,7 @@ static void test_set_step_rejects_invalid_state(void)
 static void test_partition_init_failure_degrades_to_defaults(void)
 {
     fake_kv_reset_all();
+    mount_fresh_cfg();
     /* The fake models a fixed number of partition slots
      * (FAKE_KV_MAX_PARTITIONS==4). Filling every slot with unrelated
      * partitions before setup_wizard_progress_start() ever runs forces its
@@ -451,6 +569,9 @@ void run_test_setup_wizard_progress(void)
 {
     test_defaults_on_empty_nvs();
     test_round_trip();
+    test_save_goes_to_cfg_file_not_nvs();
+    test_save_refused_when_cfg_unmounted();
+    test_legacy_nvs_record_migrates_into_cfg();
     test_get_all_matches_get_step();
     test_migration_from_v1();
     test_migration_from_v2_legacy();

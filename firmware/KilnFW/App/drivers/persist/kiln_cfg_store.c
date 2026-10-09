@@ -641,34 +641,24 @@ static hal_status_t nvs_save_store(void)
     }
     s_store.version = KILN_CFG_STORE_VERSION;
 
-    /* Dual-write, FILE FIRST -- docs/FILESYSTEM_USER_DATA_PLAN.md's
-     * "kiln config slots" item, requirement 1: the file write's own failure
-     * is logged inside kiln_cfg_store_cfg_fs_save() and otherwise swallowed
-     * here, since NVS below is still authoritative for older firmware and
-     * for every board today (no `cfg` partition mounted -- ESP_ERR_INVALID_
-     * STATE is the expected, silent outcome). Every mutating public
-     * function in this module (save/clone/apply/delete/rename) funnels
-     * through this one function, so bumping the rev here once covers a
-     * delete exactly the same as a save -- see s_kiln_cfg_rev's own comment
-     * for why this store needs no separate per-slot rev the way
-     * profiles_cfg_fs.c does. */
-    s_kiln_cfg_rev++;
-    (void)kiln_cfg_store_cfg_fs_save(&s_store, s_kiln_cfg_rev);
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return err;
+    /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
+     * NVS is no longer written, and a failed file write is returned (never
+     * masked by a fallback NVS write). Every mutating public function in this
+     * module (save/clone/apply/delete/rename) funnels through this one
+     * function, so one rev covers a delete exactly the same as a save -- see
+     * s_kiln_cfg_rev's own comment for why this store needs no separate
+     * per-slot rev the way profiles_cfg_fs.c does. The rev advances only
+     * after a verified write. kiln_cfg_store_cfg_fs_save() logs the failure. */
+    uint32_t new_rev = s_kiln_cfg_rev + 1;
+    esp_err_t ferr = kiln_cfg_store_cfg_fs_save(&s_store, new_rev);
+    if (ferr != ESP_OK) {
+        ESP_LOGE(TAG, "kiln config store NOT persisted: %s -- NVS is no longer written, the change lives in RAM "
+                      "until reboot",
+                 esp_err_to_name(ferr));
+        return hal_esp_err_to_status(ferr);
     }
-    err = hal_kv_set_blob(&h, NVS_KEY_STORE, &s_store, sizeof(s_store));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_STORE_REV, s_kiln_cfg_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    return err;
+    s_kiln_cfg_rev = new_rev;
+    return HAL_OK;
 }
 
 /* ---- Internal helpers ------------------------------------------------------ */
@@ -703,6 +693,22 @@ static bool set_reason(char *reason_out, size_t reason_cap, const char *msg)
         reason_out[reason_cap - 1] = '\0';
     }
     return false;
+}
+
+/* A mutator's cfg-file write failed (nvs_save_store() returned `err`). The text
+ * always contains KILN_CFG_PERSIST_FAIL_TEXT so HTTP callers answer 500, not 400
+ * (kiln_cfg_store_reason_is_persist_failure()). Always returns false. */
+static bool fail_persist(char *reason_out, size_t reason_cap, const char *what, hal_status_t err, const char *tail)
+{
+    char msg[128];
+    snprintf(msg, sizeof(msg), "%s " KILN_CFG_PERSIST_FAIL_TEXT " (%s)%s", what, hal_status_to_name(err), tail);
+    ESP_LOGE(TAG, "%s", msg);
+    return set_reason(reason_out, reason_cap, msg);
+}
+
+bool kiln_cfg_store_reason_is_persist_failure(const char *reason)
+{
+    return reason != NULL && strstr(reason, KILN_CFG_PERSIST_FAIL_TEXT) != NULL;
 }
 
 /* H3: the one gate every mutating entry point (save/clone/rename/delete)
@@ -1222,6 +1228,16 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
     }
 
     kiln_cfg_entry_t *e = &s_store.entries[idx];
+    /* Rollback copy: a failed cfg write must not leave the RAM store claiming a
+     * save that vanishes at reboot. */
+    kiln_cfg_entry_t *prev_entry = persist_scratch_alloc(sizeof(*prev_entry));
+    if (!prev_entry) {
+        free(scratch);
+        free(scratch_cfg);
+        return set_reason(reason_out, reason_cap, "out of memory preparing kiln config save");
+    }
+    memcpy(prev_entry, e, sizeof(*e));
+    const int32_t prev_active = s_store.active_id;
     e->in_use = 1;
     e->id = id;
     strncpy(e->name, normalized, KILN_CFG_NAME_MAX_LEN);
@@ -1263,9 +1279,12 @@ static bool kiln_cfg_store_save_current_ex(const char *name, int32_t id_or_negat
 
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_save_store after save failed: %s -- saved live but will not survive a reboot",
-                 hal_status_to_name(err));
+        memcpy(e, prev_entry, sizeof(*e));
+        free(prev_entry);
+        s_store.active_id = prev_active;
+        return fail_persist(reason_out, reason_cap, "kiln config", err, " -- not saved");
     }
+    free(prev_entry);
     if (out_id) {
         *out_id = id;
     }
@@ -1325,8 +1344,8 @@ bool kiln_cfg_store_clone(int32_t src_id, const char *name, int32_t *out_id, cha
      * header comment. */
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_save_store after clone failed: %s -- cloned live but will not survive a reboot",
-                 hal_status_to_name(err));
+        memset(dst, 0, sizeof(*dst));
+        return fail_persist(reason_out, reason_cap, "kiln config clone", err, " -- not saved");
     }
     if (out_id) {
         *out_id = new_id;
@@ -1623,9 +1642,9 @@ bool kiln_cfg_store_apply(int32_t id, bool ack_no_safety_processor, bool ack_har
     s_store.active_id = id;
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_save_store after apply failed: %s -- active id applied live but will not "
-                      "survive a reboot",
-                 hal_status_to_name(err));
+        /* The zones import above is already live; only the active-id bookkeeping
+         * is unsaved. */
+        return fail_persist(reason_out, reason_cap, "active kiln config id", err, " -- applied live only");
     }
     return true;
 }
@@ -1666,16 +1685,28 @@ bool kiln_cfg_store_delete(int32_t id, bool ack_no_safety_processor, char *reaso
                  s_store.entries[idx].name);
         return set_reason(reason_out, reason_cap, msg);
     }
+    kiln_cfg_entry_t *prev_entry = persist_scratch_alloc(sizeof(*prev_entry));
+    if (!prev_entry) {
+        return set_reason(reason_out, reason_cap, "out of memory preparing kiln config delete");
+    }
+    memcpy(prev_entry, &s_store.entries[idx], sizeof(*prev_entry));
     memset(&s_store.entries[idx], 0, sizeof(s_store.entries[idx]));
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_save_store after delete failed: %s -- deleted live but will not survive a reboot",
-                 hal_status_to_name(err));
+        memcpy(&s_store.entries[idx], prev_entry, sizeof(*prev_entry));
+        free(prev_entry);
+        return fail_persist(reason_out, reason_cap, "kiln config delete", err, " -- kept");
     }
+    free(prev_entry);
     return true;
 }
 
 bool kiln_cfg_store_rename(int32_t id, const char *name)
+{
+    return kiln_cfg_store_rename_ex(id, name, NULL, 0);
+}
+
+bool kiln_cfg_store_rename_ex(int32_t id, const char *name, char *reason_out, size_t reason_cap)
 {
     if (s_quarantined) {
         return false; /* H3 -- no reason_out on this function's signature; kiln_cfg_http.c's rename
@@ -1698,12 +1729,14 @@ bool kiln_cfg_store_rename(int32_t id, const char *name)
     if (name_collides(normalized, id)) {
         return false;
     }
+    char old_name[KILN_CFG_NAME_MAX_LEN + 1];
+    memcpy(old_name, s_store.entries[idx].name, sizeof(old_name));
     strncpy(s_store.entries[idx].name, normalized, KILN_CFG_NAME_MAX_LEN);
     s_store.entries[idx].name[KILN_CFG_NAME_MAX_LEN] = '\0';
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_save_store after rename failed: %s -- renamed live but will not survive a reboot",
-                 hal_status_to_name(err));
+        memcpy(s_store.entries[idx].name, old_name, sizeof(old_name));
+        return fail_persist(reason_out, reason_cap, "kiln config rename", err, " -- reverted");
     }
     return true;
 }
@@ -1750,12 +1783,38 @@ bool kiln_cfg_store_quarantine_clear(bool confirm_discard, char *reason_out, siz
                            "clearing the quarantine discards whatever kiln configs could not be read -- "
                            "pass confirm_discard=1 to proceed");
     }
+    if (caller_stack_is_external()) {
+        return set_reason(reason_out, reason_cap,
+                           "refusing: calling task's stack is in external RAM (PSRAM) and the legacy NVS "
+                           "blob erase would abort the board -- retry from an internal-stack task");
+    }
     ESP_LOGW(TAG, "kiln_cfg_store: operator confirmed discard of quarantined store (%s) -- starting a "
                   "fresh, empty store",
              s_quarantine_reason);
     reset_to_defaults();
     s_quarantined = false;
     s_quarantine_reason[0] = '\0';
+    /* The unreadable NVS blob is what quarantined this boot, and saves no
+     * longer write NVS (docs/CONFIG_FILESYSTEM.md, "Dual-write window:
+     * closed"), so it would never be overwritten and the next boot would
+     * quarantine again off the same bytes. The operator just confirmed
+     * discarding it: erase the legacy blob and its rev key explicitly. */
+    {
+        hal_kv_handle_t eh;
+        if (hal_kv_open(&eh, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK) {
+            hal_status_t e1 = hal_kv_erase_key(&eh, NVS_KEY_STORE);
+            hal_status_t e2 = hal_kv_erase_key(&eh, NVS_KEY_STORE_REV);
+            hal_status_t ec = hal_kv_commit(&eh);
+            hal_kv_close(&eh);
+            if ((e1 != HAL_OK && e1 != HAL_NOT_FOUND) || (e2 != HAL_OK && e2 != HAL_NOT_FOUND) || ec != HAL_OK) {
+                ESP_LOGE(TAG, "could not erase the quarantined legacy NVS blob (blob %s, rev %s, commit %s) -- "
+                              "it may quarantine again next boot",
+                         hal_status_to_name(e1), hal_status_to_name(e2), hal_status_to_name(ec));
+            }
+        } else {
+            ESP_LOGE(TAG, "could not open NVS to erase the quarantined legacy blob -- it may quarantine again");
+        }
+    }
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
         /* The in-RAM store is a clean, empty, valid one regardless -- this
@@ -1906,9 +1965,7 @@ bool kiln_cfg_store_set_active_id_raw(int32_t id, char *reason_out, size_t reaso
     s_store.active_id = id;
     hal_status_t err = nvs_save_store();
     if (err != HAL_OK) {
-        ESP_LOGE(TAG, "nvs_save_store after set_active_id_raw failed: %s -- active id set live but "
-                      "will not survive a reboot",
-                 hal_status_to_name(err));
+        return fail_persist(reason_out, reason_cap, "active kiln config id", err, " -- set live only");
     }
     return true;
 }

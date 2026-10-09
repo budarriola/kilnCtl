@@ -2,6 +2,7 @@
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <math.h>
+#include <stdatomic.h> /* _Atomic bool s_convert_busy (MSVC /experimental:c11atomics, as backup_import.c) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,9 +11,10 @@
 #include "esp_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h" /* portMUX_TYPE -- profiles_storage_ensure()'s once-guard below */
+#include "freertos/semphr.h" /* s_save_mutex -- profiles_save_lock() */
 #include "freertos/task.h" /* vTaskDelay() -- same once-guard, the losing task's wait */
 #include "esp_heap_caps.h" /* heap_caps_malloc()/MALLOC_CAP_* -- profiles_storage_ensure()'s
-                            * PSRAM allocation (docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3) */
+                            * PSRAM allocation (docs/PROFILE_SLOTS_100.md section 7 task 3) */
 #include "esp_log.h"
 
 #include "hal_kv.h"
@@ -31,7 +33,7 @@
                                   * comment; profiles_edit_http.c's web delete handler already
                                   * clears a deleted slot's favorite mark, and this benchproto
                                   * path must not leave that half undone (Opus review item 1,
-                                  * PROFILE_SLOTS_100_PLAN.md section 7). */
+                                  * PROFILE_SLOTS_100.md section 7). */
 #include "wifi_provision_http.h"
 #include "zones_config_accessors.h"
 #include "aux_outputs_cfg.h"   /* aux_outputs_cfg_get()/_enabled_mask() -- spare-relay targets (WP-4) */
@@ -49,7 +51,7 @@
                                 * read-through/dual-write bridge to the `cfg`
                                 * LittleFS partition, one file per slot. See
                                 * that header for the full policy. */
-#include "profile_executor.h" /* firing_stats_erase() -- docs/PROFILE_SLOTS_100_PLAN.md
+#include "profile_executor.h" /* firing_stats_erase() -- docs/PROFILE_SLOTS_100.md
                                  * section 7 task 10, called from nvs_erase_slot() below
                                  * so deleting a slot also prunes its firing history. */
 
@@ -72,6 +74,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_USED);
 NVS_KEY_LEN_CHECK(NVS_KEY_PROFILE_REV);
 
 uint32_t s_profile_rev[PROFILES_MAX_COUNT];
+bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
 
 /* profiles_nvs is the 2026-08-13 split target for fire profiles (see
  * partitions.csv and TODO.md 8.1) -- profiles are the one section of the old
@@ -196,7 +199,7 @@ _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
  * profiles_http_internal.h -- profiles_catalog_http.c/profiles_edit_http.c
  * need the type too.
  *
- * docs/PROFILE_SLOTS_100_PLAN.md section 7 task 3: profiles_state_t
+ * docs/PROFILE_SLOTS_100.md section 7 task 3: profiles_state_t
  * (dominated by profiles[PROFILES_MAX_COUNT], and growing further once task
  * 6 raises PROFILES_MAX_COUNT) is now a lazily allocated PSRAM buffer
  * instead of a .bss global -- see profiles_storage_ensure() below, the only
@@ -208,7 +211,7 @@ _Static_assert(PROFILE_TARGET_C_MAX <= ZONE_MAX_TEMP_C_MAX,
  * sizeof(s_profiles))`, used throughout the host tests, still zeroes the
  * allocated struct in place rather than the pointer itself. */
 static profiles_state_t *s_profiles_ptr = NULL;
-/* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): the plain
+/* Review fold-in (PROFILE_SLOTS_100.md section 7): the plain
  * check-then-act above raced two callers on the first call each -- both
  * could pass the NULL check, both allocate, and the losing store leaks its
  * allocation (or worse, two callers observe two different pointers across
@@ -292,7 +295,7 @@ profiles_state_t *profiles_storage_ensure(void)
     return s_profiles_ptr;
 }
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 1 -- the sanctioned way to
+/* docs/PROFILE_SLOTS_100.md section 7 task 1 -- the sanctioned way to
  * test/set/clear a bit of s_profiles.used_bitmap. Thin wrappers over the
  * generic profiles_slot_bitmap_t helpers (profiles_slot_bitmap.h); kept
  * here (not inline in the header) so this is the one place s_profiles is
@@ -662,7 +665,7 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
  * Content-Length before a single byte is read. */
 
 /* "prof" + the id's decimal digits + NUL. Asserted rather than only trusted
- * in a comment, per docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6 -- and
+ * in a comment, per docs/PROFILE_SLOTS_100.md section 7 task 6 -- and
  * asserted against PROFILES_MAX_COUNT itself rather than against a literal
  * id, so a future raise of the slot count cannot quietly outgrow either
  * bound. The "+ 2" is the two reserved ids above the user range
@@ -687,6 +690,66 @@ static void profile_nvs_key(uint8_t id, char *out, size_t out_cap)
 
 esp_err_t nvs_save_slot(uint8_t id);
 
+/* SAVE MUTEX. nvs_save_slot()/nvs_erase_slot() read-modify-write
+ * s_profile_rev[id] and the slot's cfg file, and the HTTP save handlers assign
+ * s_profiles.profiles[id] just before. Two concurrent saves of one slot could
+ * both read the same s_profile_rev[id], both write rev+1 and have RAM end up
+ * holding one body while the file holds the other. One static mutex makes the
+ * rev read, RAM assignment (handlers), file write and rev bump one critical
+ * section. Held across the module's own NVS plus cfg-file I/O only; never across
+ * producer calls (firing_stats_erase runs after the unlock). Created on first use
+ * under a claim flag, so every take sees a non-NULL handle. */
+static StaticSemaphore_t s_save_mutex_storage;
+static SemaphoreHandle_t s_save_mutex = NULL;
+static portMUX_TYPE s_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static bool s_save_mutex_claimed = false;
+/* Release/acquire publish of the handle (target GCC builds); the MSVC host test
+ * build is single-threaded and uses plain accesses. */
+#if defined(__GNUC__)
+#define SAVE_MUTEX_LOAD() __atomic_load_n(&s_save_mutex, __ATOMIC_ACQUIRE)
+#define SAVE_MUTEX_STORE(v) __atomic_store_n(&s_save_mutex, (v), __ATOMIC_RELEASE)
+#else
+#define SAVE_MUTEX_LOAD() (*(SemaphoreHandle_t volatile *)&s_save_mutex)
+#define SAVE_MUTEX_STORE(v) (*(SemaphoreHandle_t volatile *)&s_save_mutex = (v))
+#endif
+
+void profiles_save_lock(void)
+{
+    if (SAVE_MUTEX_LOAD() == NULL) {
+        /* Same once-guard as profiles_storage_ensure(): only the claim is inside
+         * the critical section; the create runs after it (no FreeRTOS object
+         * creation with interrupts disabled). The loser waits for the winner. */
+        bool mine = false;
+        portENTER_CRITICAL(&s_save_mutex_mux);
+        if (!s_save_mutex_claimed) {
+            s_save_mutex_claimed = true;
+            mine = true;
+        }
+        portEXIT_CRITICAL(&s_save_mutex_mux);
+        if (mine) {
+            SAVE_MUTEX_STORE(xSemaphoreCreateMutexStatic(&s_save_mutex_storage));
+        } else {
+            while (SAVE_MUTEX_LOAD() == NULL) {
+                vTaskDelay(1);
+            }
+        }
+    }
+    (void)xSemaphoreTake(SAVE_MUTEX_LOAD(), portMAX_DELAY);
+}
+
+static _Atomic bool s_convert_busy = false; /* lock-free, like backup_import.c's s_config_change_in_flight */
+void profiles_http_set_convert_busy(bool busy) { atomic_store(&s_convert_busy, busy); }
+bool profiles_http_convert_busy(void) { return atomic_load(&s_convert_busy); }
+
+void profiles_save_unlock(void)
+{
+    (void)xSemaphoreGive(SAVE_MUTEX_LOAD());
+}
+
+/* Caller holds profiles_save_lock(). */
+esp_err_t nvs_save_slot_locked(uint8_t id);
+
 /* Brings up one NVS partition, erasing ONLY that partition if its contents
  * are unusable. Copied/adapted from wifi_prov.c's nvs_partition_init() (see
  * that file for the full rationale) -- NO_FREE_PAGES / NEW_VERSION_FOUND
@@ -699,7 +762,7 @@ static esp_err_t nvs_partition_init(const char *partition)
     return hal_status_to_esp_err(hal_kv_init_partition(partition));
 }
 
-/* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 6: NVS_KEY_USED used to be a
+/* docs/PROFILE_SLOTS_100.md section 7 task 6: NVS_KEY_USED used to be a
  * single uint8_t (8 bits, exactly PROFILES_MAX_COUNT's old value). Raising
  * PROFILES_MAX_COUNT to 100 needs all 4 words of profiles_slot_bitmap_t
  * persisted, not just word[0]. These two helpers are the read/write seam:
@@ -768,6 +831,225 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
  * requirement). *out_any_found reports whether the used-bitmap key existed
  * at all (vs. existing but empty/unreadable), which the one-time migration
  * below keys off. */
+/* nvs_load_all_from()'s no-legacy-namespace path: every slot is resolved from its
+ * cfg file alone (no NVS copy, rev 0). */
+/* Reads the persisted per-slot rev array on its own (the files-only path runs
+ * when the full NVS load failed, but the rev key is often still readable).
+ * Returns true and fills floors[] when the array is KNOWN: read OK, or the
+ * namespace/key genuinely absent (nothing was ever persisted, floor 0). Returns
+ * false when it cannot be established (open error, short/failed read). */
+/* Only two rev-array lengths were ever written: 32 B (the legacy 8-slot array)
+ * and 4*PROFILES_MAX_COUNT. Anything else is NOT trusted as "known" (a
+ * truncated blob would otherwise give its tail slots floor 0 and let a stale
+ * cfg file win resolve). A well-formed array LONGER than this build's (a
+ * newer firmware with more slots wrote it) is handled by rev_read(): the first
+ * PROFILES_MAX_COUNT entries are used and the tail ignored. */
+static bool rev_blob_len_ok(size_t len)
+{
+    return len == sizeof(uint32_t) * 8 || len == sizeof(uint32_t) * PROFILES_MAX_COUNT;
+}
+
+#define REV_LONGER_MAX_BYTES 4096u
+
+typedef enum {
+    REV_KNOWN,  /* floors[] valid (absent = zeros, legacy short, current, or longer-than-ours) */
+    REV_JUNK,   /* a blob is stored but its length is not one this firmware ever wrote: repairable */
+    REV_IO_ERR, /* could not be read (transient / open / alloc failure): NOT repairable here */
+} rev_state_t;
+
+/* Reads prof_rev from an OPEN handle into floors[PROFILES_MAX_COUNT]. */
+static rev_state_t rev_read(hal_kv_handle_t *h, uint32_t *floors)
+{
+    memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+    size_t len = 0;
+    hal_status_t e = hal_kv_get_blob(h, NVS_KEY_PROFILE_REV, NULL, &len);
+    if (e == HAL_NOT_FOUND) {
+        return REV_KNOWN;
+    }
+    if (e != HAL_OK) {
+        return REV_IO_ERR;
+    }
+    if (rev_blob_len_ok(len)) {
+        size_t rl = len;
+        e = hal_kv_get_blob(h, NVS_KEY_PROFILE_REV, floors, &rl);
+        if (e != HAL_OK || rl != len) {
+            memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+            return REV_IO_ERR;
+        }
+        return REV_KNOWN;
+    }
+    if (len > sizeof(uint32_t) * PROFILES_MAX_COUNT && (len % sizeof(uint32_t)) == 0 && len <= REV_LONGER_MAX_BYTES) {
+        /* Newer firmware, more slots: use our first entries, ignore the tail. */
+        uint32_t *tmp = persist_scratch_alloc(len);
+        if (tmp == NULL) {
+            return REV_IO_ERR;
+        }
+        size_t rl = len;
+        e = hal_kv_get_blob(h, NVS_KEY_PROFILE_REV, tmp, &rl);
+        if (e == HAL_OK && rl == len) {
+            memcpy(floors, tmp, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+        }
+        free(tmp);
+        return (e == HAL_OK && rl == len) ? REV_KNOWN : REV_IO_ERR;
+    }
+    return REV_JUNK;
+}
+
+/* Bounded one-shot repair of a JUNK prof_rev (length this firmware never wrote;
+ * the old floors are unrecoverable). s_profile_rev[] already holds each
+ * file-backed slot's file rev. Every slot WITHOUT a file is raised to the
+ * highest rev observed on any slot, so a later save carries a rev above any
+ * plausible stale legacy value, then the whole array is written ONCE and read
+ * back (memcmp). Only a verified rewrite clears the unknown flag; otherwise
+ * saves/deletes stay refused this boot (fail closed) and the next boot retries.
+ * Boot-only; `used` is the post-resolve bitmap. */
+struct rev_repair_scratch {
+    bool has_file[PROFILES_MAX_COUNT];
+    uint32_t back[PROFILES_MAX_COUNT];
+    profile_t fp;
+};
+
+static bool rev_repair_junk(const char *partition, const profiles_slot_bitmap_t *used)
+{
+    if (caller_stack_is_external()) {
+        ESP_LOGE(PROFILES_TAG, "rev_repair_junk: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM); an NVS write from here would abort the whole board. See "
+                      "DRAM_PSRAM_PLAN.md section 7.2.");
+        return false; /* fail closed, same as a failed repair */
+    }
+    (void)used;
+    if (!cfg_fs_is_available()) {
+        /* Without cfg mounted no file revs are visible: any rebuild would write
+         * floors of 0 and a later cfg-mounted boot would let stale files win. */
+        ESP_LOGW(PROFILES_TAG, "prof_rev junk repair deferred: cfg not mounted (fail closed)");
+        return false;
+    }
+    /* Large buffers live on the heap, not this boot-path stack frame (review 5 L4); fail closed. */
+    struct rev_repair_scratch *sc = persist_scratch_alloc(sizeof(*sc));
+    if (sc == NULL) {
+        ESP_LOGE(PROFILES_TAG, "prof_rev junk repair: no memory for scratch -- saves/deletes refused this boot");
+        return false;
+    }
+    uint32_t maxrev = 0;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        uint32_t frev = 0;
+        bool fvalid = false;
+        bool ferr = false;
+        profiles_cfg_fs_load_raw_ex(id, &sc->fp, &frev, &fvalid, &ferr);
+        if (ferr) {
+            /* review 8 L4: a failed read is not "no file": fail closed, no floor raise, slots stay rev-unknown */
+            ESP_LOGE(PROFILES_TAG, "prof_rev junk repair: cfg read error on slot %u -- saves/deletes refused this boot", id);
+            free(sc);
+            return false;
+        }
+        sc->has_file[id] = fvalid;
+        if (s_profile_rev[id] > maxrev) {
+            maxrev = s_profile_rev[id];
+        }
+    }
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (!sc->has_file[id] && s_profile_rev[id] < maxrev) {
+            s_profile_rev[id] = maxrev;
+        }
+    }
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, partition) != HAL_OK) {
+        free(sc);
+        return false;
+    }
+    hal_status_t e = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
+    if (e == HAL_OK) {
+        e = hal_kv_commit(&h);
+    }
+    bool ok = false;
+    if (e == HAL_OK) {
+        size_t bl = sizeof(sc->back);
+        ok = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, sc->back, &bl) == HAL_OK && bl == sizeof(sc->back) &&
+             memcmp(sc->back, s_profile_rev, sizeof(sc->back)) == 0;
+    }
+    hal_kv_close(&h);
+    free(sc);
+    ESP_LOGW(PROFILES_TAG, "prof_rev had an unrecognised length: floors rebuilt from file revs (max %u), rewrite %s", (unsigned)maxrev,
+             ok ? "verified" : "FAILED -- saves/deletes refused this boot");
+    return ok;
+}
+
+static rev_state_t nvs_read_rev_floors(const char *partition, uint32_t *floors)
+{
+    memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (kv_err == HAL_NOT_FOUND) {
+        return REV_KNOWN;
+    }
+    if (kv_err != HAL_OK) {
+        return REV_IO_ERR;
+    }
+    rev_state_t st = rev_read(&h, floors);
+    hal_kv_close(&h);
+    return st;
+}
+
+/* nvs_load_all_from()'s no-legacy-namespace / NVS-load-failed path: every slot is
+ * resolved from its cfg file alone. The per-slot rev floor is seeded from the
+ * persisted rev array when readable (a slot deleted earlier keeps a floor above
+ * any stale value, B1 soak design below). When the floor cannot be established
+ * and the slot has no file, saves/deletes to that slot are refused this boot
+ * (s_profile_rev_unknown) rather than writing at rev 1, which the next normal
+ * boot would delete as stale. */
+static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *out, bool *out_any_found)
+{
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    if (strcmp(partition, PROFILES_NVS_PARTITION) != 0) {
+        memset(s_profile_rev, 0, sizeof(s_profile_rev));
+        return ESP_OK;
+    }
+    uint32_t floors[PROFILES_MAX_COUNT];
+    rev_state_t floors_state = nvs_read_rev_floors(partition, floors);
+    bool floors_known = (floors_state == REV_KNOWN);
+    bool any_resolve_err = false;
+    bool slot_res_err[PROFILES_MAX_COUNT] = {false};
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profile_t resolved;
+        uint32_t resolved_rev = 0;
+        bool used_file = false;
+        profile_t none;
+        memset(&none, 0, sizeof(none));
+        /* Floor 0 on purpose: with nvs_valid=false resolve() deletes a file whose rev is
+         * <= a nonzero nvs_rev as stale, and the dual-write-era rev array equals the
+         * file rev for every slot not re-saved since. This degraded path must never
+         * delete; the floor only seeds s_profile_rev below. */
+        bool res_err = false;
+        bool have = profiles_cfg_fs_resolve_ex(id, &none, false, 0, &resolved, &resolved_rev, &used_file, &res_err);
+        if (res_err) {
+            any_resolve_err = true;
+            slot_res_err[id] = true; /* review 7 L3: file unexamined -> slot unknown, saves/deletes refused */
+        }
+        if (have) {
+            out->profiles[id] = resolved;
+            profiles_slot_bitmap_set(&out->used_bitmap, id);
+            if (out_any_found) {
+                *out_any_found = true; /* a file-backed profile counts as "recorded": keeps the pre-split migration from re-running over it */
+            }
+            s_profile_rev[id] = resolved_rev > floors[id] ? resolved_rev : floors[id];
+        } else {
+            s_profile_rev[id] = floors[id];
+        }
+        if (!floors_known) {
+            s_profile_rev_unknown[id] = true;
+        }
+    }
+    if (floors_state == REV_JUNK && rev_repair_junk(partition, &out->used_bitmap)) {
+        memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    }
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (slot_res_err[id]) {
+            s_profile_rev_unknown[id] = true;
+        }
+    }
+    return any_resolve_err ? ESP_ERR_NO_MEM : ESP_OK;
+}
+
 static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out, bool *out_any_found)
 {
     memset(out, 0, sizeof(*out));
@@ -778,7 +1060,11 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
     if (kv_err == HAL_NOT_FOUND) {
-        return ESP_OK; /* no kiln_cfg namespace on this partition yet -- nothing configured */
+        /* No kiln_cfg namespace on this partition: nothing legacy in NVS. Saves are
+         * cfg-file-only now, so a board that never had (or no longer has) the
+         * namespace still carries its profiles in the cfg files -- fall through to
+         * the file resolve instead of returning empty. */
+        return nvs_load_files_only(partition, out, out_any_found);
     }
     if (kv_err != HAL_OK) {
         return hal_status_to_esp_err(kv_err);
@@ -805,11 +1091,21 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
      * only updated once, after the resolve pass below, so a load failure
      * partway through never leaves s_profile_rev half from-NVS/half-stale. */
     uint32_t nvs_rev[PROFILES_MAX_COUNT];
-    memset(nvs_rev, 0, sizeof(nvs_rev));
-    size_t rev_len = sizeof(nvs_rev);
-    hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len); /* ignore result -- see above */
+    rev_state_t rev_state = rev_read(&h, nvs_rev);
+    /* NOT_FOUND = never written = genuine "no opinion"; a longer-than-ours array is
+     * KNOWN (tail ignored). A junk length or a read failure means the floors are
+     * unknown: every slot is refused saves, except a JUNK array is repaired below. */
+    bool rev_floors_known = (rev_state == REV_KNOWN);
+    if (!rev_floors_known) {
+        memset(nvs_rev, 0, sizeof(nvs_rev));
+    }
+    bool slot_rev_unknown[PROFILES_MAX_COUNT] = {0};
 
     bool nvs_slot_valid[PROFILES_MAX_COUNT] = {0};
+    /* Slots whose bitmap bit was set but whose profN blob is present-but-unreadable
+     * or undecodable: NOT a deletion, so resolve must not treat the NVS rev as a
+     * staleness floor (it would delete the live file when file_rev == nvs_rev). */
+    bool slot_blob_bad[PROFILES_MAX_COUNT] = {0};
 
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (!profiles_slot_bitmap_test(&out->used_bitmap, id)) {
@@ -824,6 +1120,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' failed (%s) -- marking unused", id, partition,
                      hal_status_to_name(slot_kv_err));
             profiles_slot_bitmap_clear(&out->used_bitmap, id);
+            slot_blob_bad[id] = true;
             continue;
         }
         /* decode_profile_blob() is the ONE place a stored blob is checked
@@ -851,11 +1148,13 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         case PROFILE_DECODE_NEWER:
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' refused: %s", id, partition, reason);
             profiles_slot_bitmap_clear(&out->used_bitmap, id);
+            slot_blob_bad[id] = true;
             continue;
         case PROFILE_DECODE_CORRUPT:
         default:
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' rejected: %s -- marking unused", id, partition, reason);
             profiles_slot_bitmap_clear(&out->used_bitmap, id);
+            slot_blob_bad[id] = true;
             continue;
         }
     }
@@ -872,27 +1171,57 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
      * today (no `cfg` partition mounted yet), so profiles_cfg_fs_resolve()
      * degrades to "trust whatever NVS decoded" for every slot, unchanged
      * from this function's pre-existing behavior. */
+    bool any_resolve_err = false;
+    bool slot_res_err[PROFILES_MAX_COUNT] = {false};
     if (strcmp(partition, PROFILES_NVS_PARTITION) == 0) {
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             profile_t resolved;
             uint32_t resolved_rev = 0;
             bool used_file = false;
-            bool trustworthy = profiles_cfg_fs_resolve(id, &out->profiles[id], nvs_slot_valid[id], nvs_rev[id],
-                                                        &resolved, &resolved_rev, &used_file);
+            bool res_err = false;
+            bool trustworthy = profiles_cfg_fs_resolve_ex(id, &out->profiles[id], nvs_slot_valid[id],
+                                                           slot_blob_bad[id] ? 0 : nvs_rev[id], &resolved, &resolved_rev,
+                                                           &used_file, &res_err);
+            if (res_err) {
+                any_resolve_err = true;
+                slot_res_err[id] = true; /* review 7 L3 */
+            }
             if (trustworthy) {
                 out->profiles[id] = resolved;
                 profiles_slot_bitmap_set(&out->used_bitmap, id);
+                if (out_any_found) {
+                    *out_any_found = true; /* see nvs_load_files_only() */
+                }
             } else {
                 memset(&out->profiles[id], 0, sizeof(out->profiles[id]));
                 profiles_slot_bitmap_clear(&out->used_bitmap, id);
             }
-            s_profile_rev[id] = resolved_rev;
+            /* A slot that resolved to "unused" keeps its persisted NVS rev as the
+             * floor for the next save: delete bumps that counter, so seeding 0 here
+             * let a post-reboot re-save carry a LOWER rev than the stale counter and
+             * the next boot's resolve() deleted the new file as "stale" (bench
+             * 2026-10-08, B1 soak). */
+            s_profile_rev[id] = trustworthy ? resolved_rev : nvs_rev[id];
+            if (trustworthy && slot_blob_bad[id] && nvs_rev[id] > s_profile_rev[id]) {
+                s_profile_rev[id] = nvs_rev[id]; /* later saves must still exceed the floor */
+            }
+            slot_rev_unknown[id] = !rev_floors_known;
         }
     } else {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
     }
+    memcpy(s_profile_rev_unknown, slot_rev_unknown, sizeof(s_profile_rev_unknown));
+    if (rev_state == REV_JUNK && strcmp(partition, PROFILES_NVS_PARTITION) == 0 &&
+        rev_repair_junk(partition, &out->used_bitmap)) {
+        memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    }
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (slot_res_err[id]) {
+            s_profile_rev_unknown[id] = true; /* review 7 L3: stays refused even after a junk-rev repair */
+        }
+    }
 
-    return ESP_OK;
+    return any_resolve_err ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
 /* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
@@ -916,6 +1245,14 @@ static bool caller_stack_is_external(void)
 
 esp_err_t nvs_save_slot(uint8_t id)
 {
+    profiles_save_lock();
+    esp_err_t r = nvs_save_slot_locked(id);
+    profiles_save_unlock();
+    return r;
+}
+
+esp_err_t nvs_save_slot_locked(uint8_t id)
+{
     if (caller_stack_is_external()) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot: REFUSING -- calling task's stack is in external RAM "
                       "(PSRAM). A flash/NVS write from here would abort the whole board "
@@ -925,59 +1262,29 @@ esp_err_t nvs_save_slot(uint8_t id)
                       "worker for the established pattern.");
         return ESP_ERR_INVALID_STATE;
     }
-    /* FILE FIRST, then NVS (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step
-     * 4 requirement 1). A file write failure is logged and swallowed here --
-     * profiles_cfg_fs_save() already does that logging -- NVS below remains
-     * the persistence guarantee every existing caller of nvs_save_slot()
-     * already depends on; a subsequent NVS write failure is a hard error
-     * (ESP_LOGE below, exactly as before this pass) even though the profile
-     * is still applied live in RAM, same convention as before. */
+    /* FILE ONLY (docs/CONFIG_FILESYSTEM.md "NVS dual-write closed"). The file
+     * write is verified by read-back inside cfg_fs_write_atomic(); a failure
+     * is returned to the caller (never silently fallen back to NVS) and the
+     * in-RAM rev only advances on success so a retry reuses the same rev. The
+     * legacy "profN" NVS blob, used bitmap and rev array are no longer written
+     * here: nvs_load_all_from() already derives the used bitmap and rev from
+     * the file, and a legacy NVS-only slot is migrated to a file on first
+     * load. */
+    if (s_profile_rev_unknown[id]) {
+        ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u): REFUSED -- this boot's profile NVS load failed and the slot's rev floor "
+                               "could not be established; a save at rev 1 would be deleted as stale on the next normal boot. "
+                               "A junk prof_rev is rebuilt at boot; this one could not be read or rewritten -- "
+                               "check the profiles NVS partition, then reboot.", (unsigned)id);
+        return ESP_ERR_INVALID_STATE;
+    }
     uint32_t new_rev = s_profile_rev[id] + 1;
-    (void)profiles_cfg_fs_save(id, &s_profiles.profiles[id], new_rev);
-
-    hal_kv_handle_t h;
-    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
-    if (kv_err != HAL_OK) {
-        return hal_status_to_esp_err(kv_err);
+    esp_err_t ferr = profiles_cfg_fs_save(id, &s_profiles.profiles[id], new_rev);
+    if (ferr != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u): cfg file write failed: %s", (unsigned)id, esp_err_to_name(ferr));
+        return ferr;
     }
-    char key[8];
-    profile_nvs_key(id, key, sizeof(key));
-    profile_persisted_t persisted = {
-        .version = PROFILE_VERSION,
-        .profile = s_profiles.profiles[id],
-        .crc32 = 0,
-    };
-    persisted.crc32 = compute_profile_crc(&persisted);
-    kv_err = hal_kv_set_blob(&h, key, &persisted, sizeof(persisted));
-    if (kv_err == HAL_OK) {
-        kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
-    }
-    /* Update the in-RAM rev in place and persist s_profile_rev itself rather
-     * than a stack copy of it: at PROFILES_MAX_COUNT == 100 that copy was a
-     * 400 B local (32 B at the old 8 slots) and it pushed nvs_erase_slot()'s
-     * twin of this block over bx_flash_worker's stack ceiling
-     * (check_all_task_stack_budgets.ps1). The persisted bytes are identical
-     * -- the snapshot only ever differed from s_profile_rev by this one
-     * element, which is assigned here instead. Assigning before the write
-     * rather than after it is also behaviour-identical: the old code
-     * assigned unconditionally once it got past hal_kv_open(), which is the
-     * only early return above this point.
-     *
-     * The in-RAM rev is updated regardless of NVS outcome: it is ephemeral for
-     * this boot only (a reboot re-derives it from whatever actually got
-     * persisted, via nvs_load_all_from()'s resolve pass), and keeping it in
-     * lockstep with the file (already written above) means a subsequent
-     * save/delete this boot bumps from the true latest rev instead of
-     * replaying an already-used one. */
     s_profile_rev[id] = new_rev;
-    if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
-    }
-    if (kv_err == HAL_OK) {
-        kv_err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    return hal_status_to_esp_err(kv_err);
+    return ESP_OK;
 }
 
 /* DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
@@ -989,7 +1296,26 @@ esp_err_t nvs_save_slot(uint8_t id)
  * handlers) run on httpd_worker, an internal-SRAM stack, so this cannot fire
  * the crash today; added so a future audit does not read this file as fully
  * covered when it was not. */
+esp_err_t nvs_erase_slot_locked(uint8_t id);
+
 esp_err_t nvs_erase_slot(uint8_t id)
+{
+    profiles_save_lock();
+    esp_err_t r = nvs_erase_slot_locked(id);
+    profiles_save_unlock();
+    if (r != ESP_OK) {
+        return r;
+    }
+    /* Stats prune runs OUTSIDE the save mutex (another module's flash I/O). */
+    esp_err_t serr = firing_stats_erase(id);
+    if (serr != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): firing stats prune failed: %s", (unsigned)id, esp_err_to_name(serr));
+        return serr;
+    }
+    return ESP_OK;
+}
+
+esp_err_t nvs_erase_slot_locked(uint8_t id)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot: REFUSING -- calling task's stack is in external RAM "
@@ -997,20 +1323,20 @@ esp_err_t nvs_erase_slot(uint8_t id)
                       "DRAM_PSRAM_PLAN.md section 7.2/9.");
         return ESP_ERR_INVALID_STATE;
     }
-    /* A delete is a mutation of this slot's rev too (docs/
-     * FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 requirement 1 /
-     * profiles_cfg_fs.h's header comment) -- bumping it here, and deleting
-     * the file FIRST, is what lets profiles_cfg_fs_resolve() tell "this
-     * slot was legitimately deleted" apart from "a save's NVS write failed
-     * after its file write succeeded" on the next boot. */
+    /* ERASE-FIRST DELETE (docs/CONFIG_FILESYSTEM.md "NVS dual-write closed").
+     * Saves no longer touch NVS, so a legacy "profN" blob left behind would
+     * resurrect a deleted slot through the NVS fallback at next boot. The
+     * legacy key, used bitmap and rev array are therefore erased FIRST and the
+     * result is checked: on failure the file is left intact and the error is
+     * returned (the slot stays, loudly), never half-deleted. Only then is the
+     * file deleted. The rev bump is persisted so a later save into a reused
+     * id always carries a rev above any stale value. */
+    if (s_profile_rev_unknown[id]) {
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): REFUSED -- rev floor unknown this boot (profile NVS load failed)",
+                 (unsigned)id);
+        return ESP_ERR_INVALID_STATE;
+    }
     uint32_t new_rev = s_profile_rev[id] + 1;
-    (void)profiles_cfg_fs_delete(id); /* logged internally on failure, best-effort */
-    /* docs/PROFILE_SLOTS_100_PLAN.md section 7 task 10: prune this id's
-     * firing history too, best-effort, same "delete must not itself fail"
-     * contract as the cfg-fs delete just above -- see firing_stats_erase()'s
-     * own doc comment (profile_executor.h) for why this matters once ids
-     * start being reused at higher slot counts. */
-    firing_stats_erase(id);
 
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
@@ -1024,19 +1350,83 @@ esp_err_t nvs_erase_slot(uint8_t id)
         hal_kv_close(&h);
         return hal_status_to_esp_err(erase_err);
     }
-    kv_err = used_bitmap_save(&h, &s_profiles.used_bitmap);
-    /* ephemeral this boot, see nvs_save_slot()'s identical comment -- and see
-     * that function for why s_profile_rev is updated in place and persisted
-     * directly instead of through a PROFILES_MAX_COUNT-sized stack copy. */
+    /* READ-MODIFY-WRITE of the LEGACY NVS bitmap and rev array: only THIS
+     * id's bit and rev entry change. Writing the in-RAM bitmap/rev array
+     * wholesale (as the dual-write era did) is wrong once saves are
+     * file-only: any other slot saved since the close carries a file rev the
+     * NVS side never saw, so copying s_profile_rev[] into NVS made that
+     * slot's NVS rev EQUAL its file rev while the legacy "profN" blob still
+     * held the old content -- profiles_cfg_fs_resolve() then adopted the
+     * stale NVS copy at the next boot (equal rev, differing bytes), and a
+     * slot created file-only after the close (RAM bit copied into NVS, no
+     * "profN" key) had its file DELETED as "stale". The rev array is read
+     * into heap scratch, not a PROFILES_MAX_COUNT-sized stack copy
+     * (bx_flash_worker stack ceiling). */
+    uint32_t old_rev = s_profile_rev[id];
     s_profile_rev[id] = new_rev;
+    profiles_slot_bitmap_t nvs_used;
+    memset(&nvs_used, 0, sizeof(nvs_used));
+    kv_err = used_bitmap_load(&h, &nvs_used);
+    if (kv_err == HAL_NOT_FOUND) {
+        memset(&nvs_used, 0, sizeof(nvs_used));
+        kv_err = HAL_OK;
+    }
     if (kv_err == HAL_OK) {
-        kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
+        profiles_slot_bitmap_clear(&nvs_used, id);
+        kv_err = used_bitmap_save(&h, &nvs_used);
+    }
+    if (kv_err == HAL_OK) {
+        /* A longer-than-ours array (newer firmware, more slots) is rewritten at
+         * its FULL original length: the tail floors are preserved verbatim so a
+         * downgrade then re-upgrade does not lose them. */
+        size_t full_len = 0;
+        hal_status_t lst = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, NULL, &full_len);
+        if (lst != HAL_OK || full_len < sizeof(s_profile_rev) || full_len > REV_LONGER_MAX_BYTES ||
+            (full_len % sizeof(uint32_t)) != 0) {
+            full_len = sizeof(s_profile_rev);
+        }
+        uint32_t *nvs_rev = persist_scratch_alloc(full_len);
+        if (nvs_rev == NULL) {
+            kv_err = HAL_NO_MEM;
+        } else {
+            memset(nvs_rev, 0, full_len);
+            rev_state_t rst = rev_read(&h, nvs_rev);
+            if (rst != REV_KNOWN) {
+                /* Unreadable/junk: writing zeros for the other slots would erase
+                 * their floors. Refuse the rev-array write (and so the erase). */
+                kv_err = HAL_IO;
+            }
+            if (kv_err == HAL_OK && full_len > sizeof(s_profile_rev)) {
+                size_t rl = full_len;
+                if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rl) != HAL_OK || rl != full_len) {
+                    kv_err = HAL_IO;
+                }
+            }
+            if (kv_err == HAL_OK) {
+                /* A legacy short array was zero-initialised above: slots past its old
+                 * count never existed, so the full-width write is zero-extended. */
+                nvs_rev[id] = new_rev;
+                kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, full_len);
+            }
+            free(nvs_rev);
+        }
     }
     if (kv_err == HAL_OK) {
         kv_err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
-    return hal_status_to_esp_err(kv_err);
+    if (kv_err != HAL_OK) {
+        s_profile_rev[id] = old_rev;
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): legacy NVS erase failed, file kept", (unsigned)id);
+        return hal_status_to_esp_err(kv_err);
+    }
+
+    esp_err_t ferr = profiles_cfg_fs_delete(id);
+    if (ferr != ESP_OK && ferr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): cfg file delete failed: %s", (unsigned)id, esp_err_to_name(ferr));
+        return ferr;
+    }
+    return ESP_OK;
 }
 
 /* One-time move of persisted profiles out of the default partition's
@@ -1178,250 +1568,7 @@ bool profiles_http_get(uint8_t id, profile_t *out)
  * side already hands over a decoded profile_t -- everything downstream of
  * that parse is shared. */
 
-/* Owner's design rule, the exact one rules_http.c's check_relay_not_zone_owned()
- * already enforces for RULE-driven relays (that file is untouched by this pass
- * -- see profiles_http.h's profile_seg_kind_t comment): a relay already
- * assigned to a zone's heater output must never ALSO be reachable as a
- * profile segment target -- a segment turning it on/off would fight (or
- * silently lose to) that zone's own PID/bang-bang control of the same
- * contact. This is an independent copy of the same check, not a shared call
- * into rules_http.c: this file owns profile validation and rules_http.c owns
- * rule validation, and neither may depend on the other (rules_*.* is deleted
- * in a later task; this file must keep working the day that happens, same as
- * rules_http.c's own comment already notes about zones_config_get_relay_mask()
- * being read fresh every check, never cached, since a relay can be
- * (re)assigned to a zone at any time from the Thermocouples & Zones page).
- * relay_1_4 is 1-based, matching kiln_io_set_relay()'s convention. Returns
- * true (refuse) if ANY configured zone currently claims this relay. */
-static bool profile_relay_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
-{
-    uint8_t bit = (uint8_t)(1u << (relay_1_4 - 1u));
-    uint8_t zone_count = zones_config_get_thermo_count();
-    for (uint8_t zi = 0; zi < zone_count; zi++) {
-        uint8_t zone_mask = 0;
-        if (!zones_config_get_relay_mask(zi, &zone_mask)) {
-            continue;
-        }
-        if ((zone_mask & bit) != 0) {
-            if (out_zone_index) *out_zone_index = zi;
-            return true;
-        }
-    }
-    return false;
-}
-
-/* Validates one RELAY_IO segment's target/flags -- the SAVE-TIME half of the
- * "two independent checks, deliberately" the owner's IO-side gate needs. The
- * second is profile_executor.c's own re-check at run start (relay_io_target_
- * is_zone_owned() in that file), for the same reason profile_post_handler's
- * feasibility check is re-run at run start too: a relay can be reassigned to
- * a zone AFTER a profile was saved, same reload-time hazard zones_http.c's
- * relay_mask comment and rules_task.c's compute_heater_relay_mask() both
- * already document. Only meaningful for seg->seg_kind ==
- * PROFILE_SEG_KIND_RELAY_IO -- callers check the kind first. */
-bool validate_io_segment(const profile_segment_t *seg, uint8_t seg_num, char *err_msg, size_t err_cap)
-{
-    uint8_t t = seg->io_target;
-    bool is_relay = (t >= PROFILE_IO_TARGET_RELAY_BASE) && (t < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT);
-    bool is_io = (t >= PROFILE_IO_TARGET_IO_BASE) && (t < PROFILE_IO_TARGET_IO_BASE + KILN_IO_DIGITAL_COUNT);
-    if (!is_relay && !is_io) {
-        /* Covers PROFILE_IO_TARGET_NONE, the deliberate dead gap between the
-         * two ranges (would-be DRDY/LCD encodings -- see profiles_http.h),
-         * and anything past either range -- all rejected the same way,
-         * before this value is ever turned into a kiln_io call. This is the
-         * refusal the investigation found missing: kiln_io_set_io()'s own
-         * index parameter structurally can't reach IO8-10 (~DRDY) or IO14-15
-         * (LCD_IORQ/LCD_Reset) either (it only accepts 1-7), but that
-         * structural limit lives in a driver two layers away from a saved
-         * profile and must not be the ONLY thing standing between a bad
-         * io_target value and those lines -- this gate is the explicit,
-         * named one, checked before a value is ever handed to that driver. */
-        snprintf(err_msg, err_cap,
-                "segment %u: io_target %u is not a valid relay (1-%u) or IO (%u-%u) target",
-                seg_num, t, (unsigned)KILN_IO_RELAY_COUNT, (unsigned)PROFILE_IO_TARGET_IO_BASE,
-                (unsigned)(PROFILE_IO_TARGET_IO_BASE + KILN_IO_DIGITAL_COUNT - 1u));
-        return false;
-    }
-    if (is_relay) {
-        uint8_t owning_zone = 0;
-        if (profile_relay_is_zone_owned(t, &owning_zone)) {
-            snprintf(err_msg, err_cap,
-                    "segment %u: relay %u is assigned to zone %u -- only relays not owned by any "
-                    "zone can be a segment target",
-                    seg_num, t, owning_zone);
-            return false;
-        }
-        /* Owner decision 2026-10-04 (plan sec 14 item 10): a relay bound to an
-         * ENABLED aux output belongs to the aux evaluator; a RELAY_IO segment
-         * on it would fight the aux rule. Refused at save. */
-        if ((aux_outputs_cfg_enabled_mask() & (uint8_t)(1u << (t - 1u))) != 0) {
-            snprintf(err_msg, err_cap,
-                    "segment %u: relay %u is bound to an aux output -- only relays not owned by a zone "
-                    "or an aux output can be a segment target",
-                    seg_num, t);
-            return false;
-        }
-    }
-    if (seg->io_leave_on_at_end && (seg->io_blocking || !seg->io_state)) {
-        /* "Leave it on at run end" is nonsensical for a segment that isn't
-         * commanding the relay/IO ON in the first place, and for a BLOCKING
-         * segment the schedule has already waited for it and moved past it
-         * by the time the run could possibly end mid-segment -- there is no
-         * "still running when the profile ends" case for a blocking segment
-         * to leave anything in. Rejected rather than silently ignored, same
-         * as every other malformed-combination gate in this file. */
-        snprintf(err_msg, err_cap,
-                "segment %u: leave-on-at-end only applies to a non-blocking segment commanding the "
-                "relay/IO ON",
-                seg_num);
-        return false;
-    }
-    return true;
-}
-
-/* docs/ON_OFF_ZONE_PLAN.md plan step 5 validation -- shared by
- * profiles_http_save() (both the HTTP POST and UART-bridge entry points)
- * so a rule referencing a nonexistent segment or a non-ON_OFF zone can
- * never be persisted, regardless of entry point. THIS IS THE DANGEROUS
- * DIRECTION this check exists to close: a rule pointing at a HEATER zone
- * would let on/off (bang-bang, no PID, no guards 1-4/9) logic drive a real
- * heating element -- see this function's own negative test. Bounds every
- * numeric field so a corrupt/hand-crafted candidate cannot smuggle an
- * out-of-range value past decode. */
-bool validate_on_off_rules(const profile_t *candidate, char *err_msg, size_t err_cap)
-{
-    for (uint8_t i = 0; i < candidate->on_off_rule_count; i++) {
-        const profile_on_off_rule_t *r = &candidate->on_off_rules[i];
-        if (i >= PROFILE_MAX_ON_OFF_RULES) {
-            snprintf(err_msg, err_cap, "rule %u: on_off_rule_count exceeds PROFILE_MAX_ON_OFF_RULES (%u)", i,
-                     (unsigned)PROFILE_MAX_ON_OFF_RULES);
-            return false;
-        }
-        if (r->segment_index >= candidate->segment_count) {
-            snprintf(err_msg, err_cap, "rule %u: segment_index %u does not exist in this profile (%u segments)",
-                     i, r->segment_index, candidate->segment_count);
-            return false;
-        }
-        for (uint8_t j = 0; j < i; j++) {
-            /* At most one rule per (segment, target): the executor's resolver takes the
-             * first match and never looks for a second (profile_executor.c). */
-            if (candidate->on_off_rules[j].segment_index == r->segment_index &&
-                candidate->on_off_rules[j].zone_index == r->zone_index) {
-                snprintf(err_msg, err_cap, "rule %u: duplicates rule %u (segment %u, target %u) -- one rule per "
-                         "segment and target", i, j, r->segment_index, r->zone_index);
-                return false;
-            }
-        }
-        if (profile_rule_target_is_aux(r->zone_index)) {
-            /* Aux target (plan sec 6): the aux entry for that relay must be enabled
-             * and not conflicted; a temperature axis needs a valid tc_zone and the
-             * "this zone's TC" source (1 = the entry's tc_zone). Sources 2/3 stay
-             * reserved. */
-            uint8_t relay = profile_rule_target_aux_relay(r->zone_index);
-            aux_output_t ax;
-            if (!aux_outputs_cfg_get(relay, &ax)) {
-                snprintf(err_msg, err_cap, "rule %u: aux relay %u cannot be read", i, relay);
-                return false;
-            }
-            if (ax.conflicted) {
-                snprintf(err_msg, err_cap,
-                         "rule %u: aux relay %u is conflicted (a zone also claims that relay) -- resolve it on the "
-                         "zones page first",
-                         i, relay);
-                return false;
-            }
-            if (!ax.enabled) {
-                snprintf(err_msg, err_cap,
-                         "rule %u: aux relay %u is not an enabled aux output -- enable it on the zones page first",
-                         i, relay);
-                return false;
-            }
-            if (r->temp_source > 1) {
-                snprintf(err_msg, err_cap, "rule %u: temp_source %u is reserved for aux targets (use 0 or 1)", i,
-                         r->temp_source);
-                return false;
-            }
-            if (r->temp_cmp != ON_OFF_TEMP_CMP_NONE &&
-                (r->temp_source != 1 || ax.tc_zone == AUX_TC_ZONE_NONE)) {
-                snprintf(err_msg, err_cap,
-                         "rule %u: aux relay %u temperature rule needs temp_source 1 and a thermocouple zone "
-                         "set on the aux output",
-                         i, relay);
-                return false;
-            }
-        } else {
-            if (r->zone_index >= MAX31856_CHANNEL_COUNT) {
-                snprintf(err_msg, err_cap,
-                         "rule %u: zone_index %u out of range (zones 0-%u, aux relays %u-%u)", i, r->zone_index,
-                         (unsigned)(MAX31856_CHANNEL_COUNT - 1u), (unsigned)PROFILE_RULE_TARGET_AUX_BASE,
-                         (unsigned)(PROFILE_RULE_TARGET_AUX_BASE + PROFILE_RULE_TARGET_AUX_COUNT - 1u));
-                return false;
-            }
-            zone_type_t zt = ZONE_TYPE_HEATER;
-            if (!zones_config_get_zone_type(r->zone_index, &zt) || zt != ZONE_TYPE_ON_OFF) {
-                /* THE dangerous direction: refuse a rule aimed at anything that
-                 * is not (already, currently) a typed on/off device -- most
-                 * importantly a HEATER, which on/off logic must never drive. */
-                snprintf(err_msg, err_cap,
-                         "rule %u: zone %u is not configured as an on/off device -- refusing to let on/off logic "
-                         "drive it",
-                         i, r->zone_index);
-                return false;
-            }
-        }
-        if ((r->phase_mask & (uint8_t)~(ON_OFF_PHASE_RAMP | ON_OFF_PHASE_DWELL)) != 0) {
-            snprintf(err_msg, err_cap, "rule %u: phase_mask has unknown bits set", i);
-            return false;
-        }
-        if ((r->direction_mask & (uint8_t)~(ON_OFF_DIR_HEATING | ON_OFF_DIR_COOLING | ON_OFF_DIR_FLAT)) != 0) {
-            snprintf(err_msg, err_cap, "rule %u: direction_mask has unknown bits set", i);
-            return false;
-        }
-        if (r->temp_cmp > ON_OFF_TEMP_CMP_BELOW) {
-            snprintf(err_msg, err_cap, "rule %u: temp_cmp %u is not a known comparison", i, r->temp_cmp);
-            return false;
-        }
-        if (r->temp_source > 3) {
-            snprintf(err_msg, err_cap, "rule %u: temp_source %u is not a known source", i, r->temp_source);
-            return false;
-        }
-        if (r->temp_source == 2 && r->temp_ref_zone >= MAX31856_CHANNEL_COUNT) {
-            snprintf(err_msg, err_cap, "rule %u: temp_ref_zone %u out of range", i, r->temp_ref_zone);
-            return false;
-        }
-        /* TODO (Opus review N8): the catalog/export/edit HTTP handlers do not
-         * yet round-trip temp_ref_zone at all -- this bounds check is the
-         * only place today that knows the field exists. When temp_source==2
-         * (an explicit reference-zone thermocouple, distinct from
-         * temp_source 0/1) is actually wired up end to end, add
-         * temp_ref_zone to profiles_catalog_http.c's JSON output,
-         * profiles_export_http.c's export/import, and profiles_edit_http.c's
-         * form parser in the SAME change -- adding it to only one leaves the
-         * others silently dropping or defaulting the field. */
-        if (r->temp_cmp != ON_OFF_TEMP_CMP_NONE &&
-            (isnan(r->temp_threshold_c) || r->temp_threshold_c < PROFILE_TARGET_C_MIN ||
-             r->temp_threshold_c > PROFILE_TARGET_C_MAX)) {
-            snprintf(err_msg, err_cap, "rule %u: temp_threshold_c out of range (%.0f-%.0f)", i,
-                     (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX);
-            return false;
-        }
-        /* time_stop_s == 0 means "to end of segment" (profiles_types.h) --
-         * only a NONZERO stop must be after start. Both fields are
-         * uint16_t, so an upper bound is enforced structurally already
-         * (max 65535 s ~ 18.2h, comfortably above PROFILE_DWELL_MIN_MAX's
-         * 1440 minutes/segment); no separate range check needed. */
-        if (r->time_stop_s != 0 && r->time_stop_s <= r->time_start_s) {
-            snprintf(err_msg, err_cap, "rule %u: time_stop_s must be after time_start_s (or 0 for end-of-segment)",
-                     i);
-            return false;
-        }
-        if (r->enable > 1 || r->invert > 1) {
-            snprintf(err_msg, err_cap, "rule %u: enable/invert must be 0 or 1", i);
-            return false;
-        }
-    }
-    return true;
-}
+#include "profiles_validate.c" /* validate_io_segment()/validate_on_off_rules(), split out */
 
 /* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY configured
  * max_temp_c of one of its zone_mask zones, and fills `note` (if non-NULL)
@@ -1542,32 +1689,6 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         return false;
     }
 
-    /* SAVE-VS-COPY, for a save aimed at a builtin catalogue id: the catalogue
-     * lives in .rodata and cannot be written, so "overwrite it" is not a
-     * thing that can happen. Rather than fail, this redirects to "save a copy
-     * into a user slot" -- which is exactly what the existing API shape
-     * already does with any id >= PROFILES_MAX_COUNT ("first free slot"), so
-     * builtin ids need no special case to land on the right behaviour, only
-     * this note saying it is deliberate. The caller learns the real slot from
-     * *out_id, so nothing is silent about it. */
-    uint8_t target_id;
-    if (requested_id < PROFILES_MAX_COUNT) {
-        target_id = requested_id;
-    } else {
-        /* profiles_http_first_free_slot() (Opus review nit N5) -- shared with
-         * backup_import.c's pass-1 commit simulation so the two allocation
-         * scans cannot silently drift apart. A callback straight onto
-         * profiles_slot_used(), not a materialized bool[PROFILES_MAX_COUNT]
-         * array -- see the helper's own comment: that array once pushed
-         * bx_flash_worker over its stack ceiling. */
-        int free_slot = profiles_http_first_free_slot(profiles_http_slot_used_cb, NULL);
-        if (free_slot < 0) {
-            snprintf(err_msg, err_cap, "profile storage full");
-            return false;
-        }
-        target_id = (uint8_t)free_slot;
-    }
-
     /* Feasibility check (TODO.md section 5), same rule profile_post_handler
      * runs: every participating zone's max-ramp ceiling must accommodate
      * every ramped segment, or the whole submission is rejected. */
@@ -1614,6 +1735,38 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         warn_count++;
     }
 
+    /* SAVE-VS-COPY, for a save aimed at a builtin catalogue id: the catalogue
+     * lives in .rodata and cannot be written, so "overwrite it" is not a
+     * thing that can happen. Rather than fail, this redirects to "save a copy
+     * into a user slot" -- which is exactly what the existing API shape
+     * already does with any id >= PROFILES_MAX_COUNT ("first free slot"), so
+     * builtin ids need no special case to land on the right behaviour, only
+     * this note saying it is deliberate. The caller learns the real slot from
+     * *out_id, so nothing is silent about it. */
+    if (profiles_http_convert_busy()) {
+        snprintf(err_msg, err_cap, "busy: zone conversion running, retry");
+        return false;
+    }
+    profiles_save_lock(); /* slot allocation, duplicate-name check, validate, assign and save: one section */
+    uint8_t target_id;
+    if (requested_id < PROFILES_MAX_COUNT) {
+        target_id = requested_id;
+    } else {
+        /* profiles_http_first_free_slot() (Opus review nit N5) -- shared with
+         * backup_import.c's pass-1 commit simulation so the two allocation
+         * scans cannot silently drift apart. A callback straight onto
+         * profiles_slot_used(), not a materialized bool[PROFILES_MAX_COUNT]
+         * array -- see the helper's own comment: that array once pushed
+         * bx_flash_worker over its stack ceiling. */
+        int free_slot = profiles_http_first_free_slot(profiles_http_slot_used_cb, NULL);
+        if (free_slot < 0) {
+            profiles_save_unlock();
+            snprintf(err_msg, err_cap, "profile storage full");
+            return false;
+        }
+        target_id = (uint8_t)free_slot;
+    }
+
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
      * duplicate name. Reuses live_edit_name_collides_ex() (live_profile.c),
      * same case/whitespace normalization as the live-edit SAVE_AS path.
@@ -1633,12 +1786,21 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
      * doc comment. */
     if (live_edit_name_collides_ex(candidate->name, profiles_http_name_at, NULL, target_id, false, err_msg,
                                     err_cap)) {
+        profiles_save_unlock();
         return false; /* live_edit_name_collides_ex already filled err_msg */
+    }
+
+    /* Re-validate under the lock: a zone/aux conversion may have committed since
+     * the unlocked validation above. */
+    if (!validate_on_off_rules(candidate, err_msg, err_cap)) {
+        profiles_save_unlock();
+        return false;
     }
 
     s_profiles.profiles[target_id] = *candidate;
     profiles_slot_set(target_id);
-    esp_err_t err = nvs_save_slot(target_id);
+    esp_err_t err = nvs_save_slot_locked(target_id);
+    profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
@@ -1664,7 +1826,7 @@ bool profiles_http_delete(uint8_t id)
     if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
         return false;
     }
-    /* Opus review item 2 (PROFILE_SLOTS_100_PLAN.md section 7): refuse to
+    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
      * delete a slot the executor is currently running or has paused --
      * deleting it out from under an in-progress firing would leave
      * profile_executor_run()'s copied-at-start name/segments as the only
@@ -1672,14 +1834,14 @@ bool profiles_http_delete(uint8_t id)
      * of this id would silently relabel that run's history. Same check as
      * profiles_edit_http.c's web delete handler. */
     /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1384-byte
+     * narrow accessor profile_executor.h recommends over a 1464-byte
      * profile_exec_status_t stack local. */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id) && active_id == id) {
         return false;
     }
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
-     * PROFILE_SLOTS_100_PLAN.md section 7): erase-then-clear left a window
+     * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
      * where a power cut between the two steps could survive with the slot
      * erased but its favorite bit still set -- an import that later lands on
      * this same id inherits that orphaned favorite (profiles_favorites.h's
@@ -1689,12 +1851,29 @@ bool profiles_http_delete(uint8_t id)
      * orphan bit surviving into a fresh profile. Best-effort: a failed save
      * is logged inside the module and must not block the delete. */
     (void)profiles_favorites_set((uint8_t)id, false);
-    profiles_slot_clear(id);
-    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
-    esp_err_t err = nvs_erase_slot((uint8_t)id);
+    /* Prune the firing history BEFORE the slot is touched (review L1): if the
+     * stats delete fails the slot is still used and fully intact, so the
+     * caller can simply retry; a failure after the slot was gone would leave
+     * history a later profile saved at this id inherits, with no way to retry
+     * (the slot reads unused). nvs_erase_slot() prunes again (idempotent). */
+    esp_err_t serr = firing_stats_erase((uint8_t)id);
+    if (serr != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "profiles_http_delete(%u): firing stats prune failed: %s -- slot kept, retry", id,
+                 esp_err_to_name(serr));
+        return false;
+    }
+    /* Persistent erase BEFORE dropping RAM state: on failure the slot stays fully
+     * live and the caller can retry; only after it succeeds is the slot cleared. */
+    profiles_save_lock();
+    esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
+    if (err == ESP_OK) {
+        profiles_slot_clear(id);
+        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+    }
+    profiles_save_unlock();
     if (err != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
-                 esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- slot kept, retry", id, esp_err_to_name(err));
+        return false;
     }
     return true;
 }
@@ -1710,19 +1889,22 @@ void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
     if (out_dwell_min_max) *out_dwell_min_max = PROFILE_DWELL_MIN_MAX;
 }
 
-esp_err_t profiles_http_start(void)
+/* Boot-time load. If the NVS side fails, the cfg files are STILL resolved
+ * (files-only, rev floors seeded from them): wiping to an empty table would
+ * make file-backed slots look free, so a save could overwrite a live file at
+ * rev 1 and a later NVS recovery would delete it as stale. Refusing saves
+ * instead was rejected: it would strand the operator on a board whose files are
+ * perfectly readable. Host tests include this file and call it directly. */
+static esp_err_t profiles_boot_load(void)
 {
-    /* profiles_nvs is used only by this module, but nvs_flash_init_partition()
-     * on an already-initialized partition is a harmless no-op (ESP_OK), so
-     * bringing it up here independently (rather than assuming some other
-     * module did it) is safe either way. */
     esp_err_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
     if (part_err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "NVS init for '%s' failed: %s -- profiles will not persist", PROFILES_NVS_PARTITION,
                  esp_err_to_name(part_err));
     }
 
-    esp_err_t err = ESP_OK;
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown)); /* early-return load paths leave the marks untouched */
+    esp_err_t err = part_err;
     if (part_err == ESP_OK) {
         bool found_in_profiles_nvs = false;
         err = nvs_load_all_from(PROFILES_NVS_PARTITION, &s_profiles, &found_in_profiles_nvs);
@@ -1734,9 +1916,27 @@ esp_err_t profiles_http_start(void)
         }
     }
     if (err != ESP_OK) {
-        ESP_LOGW(PROFILES_TAG, "profile NVS load failed: %s -- starting with no saved profiles", esp_err_to_name(err));
+        ESP_LOGW(PROFILES_TAG, "profile NVS load failed: %s -- resolving cfg files only", esp_err_to_name(err));
+        /* review 8 L3: marks the failed pass set (slots whose cfg read errored) must survive the fallback,
+         * which clears them; re-apply after it. */
+        bool keep_unknown[PROFILES_MAX_COUNT];
+        memcpy(keep_unknown, s_profile_rev_unknown, sizeof(keep_unknown));
         memset(&s_profiles, 0, sizeof(s_profiles));
+        bool any = false;
+        (void)nvs_load_files_only(PROFILES_NVS_PARTITION, &s_profiles, &any);
+        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+            if (keep_unknown[id]) {
+                s_profile_rev_unknown[id] = true;
+            }
+        }
     }
+    return err;
+}
+
+esp_err_t profiles_http_start(void)
+{
+    (void)profiles_boot_load();
+    esp_err_t err;
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {
@@ -1902,8 +2102,7 @@ void profiles_http_get_dualwrite_status(uint8_t id, bool *file_valid, uint32_t *
                     s->n_profile = s->decoded;
                 }
             }
-            size_t rev_len = sizeof(s->revs);
-            if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, s->revs, &rev_len) == HAL_OK) {
+            if (rev_read(&h, s->revs) == REV_KNOWN) {
                 n_rev = s->revs[id];
             }
             hal_kv_close(&h);
@@ -1969,7 +2168,8 @@ static uint16_t retarget_count_rules(const profile_t *p, uint8_t target)
 
 /* allow_dest: a resume, where an earlier run already moved some slots, so rules at the destination
  * are expected and not a refusal. */
-static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool allow_dest,
+static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool allow_dest, bool have_active,
+                          uint8_t active_id,
                           profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t c = {0};
@@ -1979,8 +2179,6 @@ static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool al
         if (counts) *counts = c;
         return false;
     }
-    uint8_t active_id = 0;
-    bool have_active = profile_executor_get_active_id(&active_id);
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (!profiles_slot_used(id)) {
             continue;
@@ -2033,44 +2231,40 @@ static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool al
 bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_has_tc,
                                         profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
-    return retarget_plan(zone, relay, zone_has_tc, false, counts, err, err_cap);
+    uint8_t active_id = 0;
+    bool have_active = profile_executor_get_active_id(&active_id);
+    return retarget_plan(zone, relay, zone_has_tc, false, have_active, active_id, counts, err, err_cap);
 }
 
-/* Read slot `id` back out of NVS and require the WHOLE stored profile to equal RAM: right length and
- * version, a CRC that matches the stored bytes, and the profile payload byte-for-byte equal. A
- * three-field compare of the rules could not see a save that lost or altered anything else. The
- * wrapper is NOT compared against a freshly encoded one: its padding bytes are indeterminate, so two
- * encodes of the same profile can differ while both are valid. */
+/* Read slot `id` back out of its cfg FILE (the only place nvs_save_slot() writes since the NVS
+ * dual-write close, docs/CONFIG_FILESYSTEM.md) and require the WHOLE stored profile to equal RAM:
+ * a file that decodes as valid (length, version and CRC checked by profiles_cfg_fs_load_raw()), at
+ * the RAM rev, with the profile payload byte-for-byte equal. A three-field compare of the rules
+ * could not see a save that lost or altered anything else. Reading the legacy NVS blob here would
+ * compare RAM against a copy no save updates, so every retarget would fail its read-back. */
 static bool retarget_verify_slot(uint8_t id)
 {
-    hal_kv_handle_t h;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION) != HAL_OK) {
+    profile_t *loaded = persist_scratch_alloc(sizeof(*loaded));
+    if (!loaded) {
         return false;
     }
-    char key[8];
-    profile_nvs_key(id, key, sizeof(key));
-    profile_persisted_t *loaded = persist_scratch_alloc(sizeof(*loaded));
-    bool ok = false;
-    if (loaded) {
-        size_t len = sizeof(*loaded);
-        ok = hal_kv_get_blob(&h, key, loaded, &len) == HAL_OK && len == sizeof(*loaded) &&
-             loaded->version == PROFILE_VERSION && loaded->crc32 == compute_profile_crc(loaded) &&
-             memcmp(&loaded->profile, &s_profiles.profiles[id], sizeof(loaded->profile)) == 0;
-    }
+    uint32_t rev = 0;
+    bool valid = false;
+    profiles_cfg_fs_load_raw(id, loaded, &rev, &valid);
+    bool ok = valid && rev == s_profile_rev[id] && memcmp(loaded, &s_profiles.profiles[id], sizeof(*loaded)) == 0;
     free(loaded);
-    hal_kv_close(&h);
     return ok;
 }
 
 /* Undo `from`->`to` on the first `n` journal entries, newest first. Returns
- * false if any slot could not be re-persisted. */
+ * false if any slot could not be re-persisted. CALLER HOLDS profiles_save_lock(). */
 static bool retarget_revert(const uint8_t *journal, uint8_t n, uint8_t from, uint8_t to)
 {
     bool clean = true;
     while (n > 0) {
         uint8_t id = journal[--n];
         (void)retarget_swap_rules(&s_profiles.profiles[id], from, to);
-        if (nvs_save_slot(id) != ESP_OK || !retarget_verify_slot(id)) {
+        if (nvs_save_slot_locked(id) != ESP_OK || !retarget_verify_slot(id)) {
             clean = false;
         }
     }
@@ -2081,7 +2275,23 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
                             profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t plan;
-    if (!retarget_plan(zone, relay, zone_has_tc, resume, &plan, err, err_cap)) {
+    profile_t *trial = persist_scratch_alloc(sizeof(*trial));
+    if (!trial) {
+        snprintf(err, err_cap, "out of memory");
+        if (counts) memset(counts, 0, sizeof(*counts));
+        return false;
+    }
+    /* The whole retarget (plan re-check, swap, save, verify, revert) is ONE
+     * section under the save mutex; only leaf locks are taken inside. The plan
+     * refusals are re-run here, under the lock, so a slot changed since the
+     * caller's own plan() cannot slip past them. */
+    /* Executor state is read BEFORE the save lock so no executor lock is taken under it. */
+    uint8_t active_id = 0;
+    bool have_active = profile_executor_get_active_id(&active_id);
+    profiles_save_lock();
+    if (!retarget_plan(zone, relay, zone_has_tc, resume, have_active, active_id, &plan, err, err_cap)) {
+        profiles_save_unlock();
+        free(trial);
         if (counts) *counts = plan;
         return false;
     }
@@ -2091,12 +2301,6 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
     profiles_retarget_counts_t done = plan;
     done.profiles_affected = 0;
     done.rules_retargeted = 0;
-    profile_t *trial = persist_scratch_alloc(sizeof(*trial));
-    if (!trial) {
-        snprintf(err, err_cap, "out of memory");
-        if (counts) *counts = done;
-        return false;
-    }
     const char *fail = NULL;
     char why[96] = "";
     uint8_t fail_id = 0;
@@ -2113,7 +2317,8 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
         }
         s_profiles.profiles[id] = *trial;
         journal[jn++] = id;
-        if (nvs_save_slot(id) != ESP_OK) {
+        esp_err_t rt_save = nvs_save_slot_locked(id);
+        if (rt_save != ESP_OK) {
             fail = "persisting the rewritten profile failed";
             break;
         }
@@ -2131,9 +2336,11 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
         bool clean = retarget_revert(journal, jn, dest, zone);
         snprintf(err, err_cap, "profile slot %u: %s%s%s -- %s", fail_id, fail, why[0] ? ": " : "", why,
                  clean ? "all profiles restored" : "REVERT INCOMPLETE, profiles may be mixed");
+        profiles_save_unlock();
         if (counts) *counts = done;
         return false;
     }
+    profiles_save_unlock();
     if (counts) *counts = done;
     return true;
 }
@@ -2158,10 +2365,13 @@ bool profiles_retarget_zone_to_aux_revert(uint8_t zone, uint8_t relay)
     }
     uint8_t journal[PROFILES_MAX_COUNT];
     uint8_t jn = 0;
+    profiles_save_lock(); /* journal build and the revert are one section */
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (profiles_slot_used(id) && retarget_count_rules(&s_profiles.profiles[id], dest) != 0) {
             journal[jn++] = id;
         }
     }
-    return retarget_revert(journal, jn, dest, zone);
+    bool clean = retarget_revert(journal, jn, dest, zone);
+    profiles_save_unlock();
+    return clean;
 }

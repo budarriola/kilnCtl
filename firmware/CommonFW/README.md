@@ -134,12 +134,12 @@ exceptions. `ANNOUNCE_VERSION` (0x0F) is wired on both ends:
 ones via `kilnlink_announce_encode()` (its `components/kilnlink/CMakeLists.txt`
 now compiles `kilnlink_announce.c` to make that possible -- still a subset of
 what `SaftyFW`'s CMake links, see the ESP-IDF component wrapper item below).
-`CLEAR_TRIP` (0x0A) is wired on the receive side only: `SaftyFW`'s
+`CLEAR_TRIP` (0x0A) is wired on both ends: `SaftyFW`'s
 `link_task.c` decodes it via `kilnlink_clear_trip_decode()` and enforces the
-refusal rules `docs/LINK_PROTOCOL.md` §4 describes (refuses if nothing is
+refusal rules `docs/LINK_PROTOCOL.md` section 4 describes (refuses if nothing is
 currently tripped, refuses if the wire `trip_mask` doesn't match the
-latched one); `KilnFW` has no send side for it yet -- no GUI trigger exists
-to call `kilnlink_clear_trip_encode()` from.
+latched one); `KilnFW`'s `safety_link_commands.c` builds it via
+`kilnlink_clear_trip_encode()`.
 
 ## Why this exists
 
@@ -545,9 +545,8 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
 - [ ] Payload codecs (`context`/`ceiling`/`get_fw_version`/`set_clock`/
       `status`/`diag`/`trip`/`power`) wired into either firmware's real
       send/receive dispatch — most are still codec-only. `announce` and
-      `clear_trip` are partial exceptions: `announce` is wired both ways,
-      `clear_trip` is wired receive-only (`SaftyFW`'s `link_task.c`) with no
-      `KilnFW` send side yet. See the 2026-08-19 note above for the exact
+      `clear_trip` are exceptions: both are wired both ways
+      (`clear_trip` send side: `KilnFW`'s `safety_link_commands.c`). See the 2026-08-19 note above for the exact
       state of each
 - [x] **Frame C (`SAFETY_CMD_FW_VERSION`, §6) now has a `CommonFW` codec**
       (2026-09-01): `kilnlink_fw_version.{c,h}` — same layout as
@@ -568,6 +567,17 @@ Tick these as they land. Phase numbers refer to [`../SaftyFW/TODO.md`](../SaftyF
       from the encoder each turned green tests red before the mutation was
       reverted) — this is not a codec that merely runs, it is one whose
       tests can prove a defect.
+
+      **Drift now pinned by host tests (2026-10-07):** both sides are byte-compared
+      against this codec -- `SaftyFW/test/test_link_frame_wire.c`
+      (`test_fw_version_pack_matches_commonfw_codec`: `link_frame_pack_fw_version()`
+      vs `kilnlink_fw_version_encode()`, byte-identical over empty, 1-byte,
+      max-length (64+32) and endianness-probe inputs, plus the same undersized-buffer
+      refusal) and `KilnFW/App/test/test_safety_link_compile.c`
+      (`test_fw_version_parse_matches_commonfw_codec`: `safety_parse_fw_version()`
+      recovers every field from the codec's encoder output). A one-byte change to
+      either hand-rolled side now fails a test; the hand-rolled code itself is
+      still not replaced.
 
       **Still open, and deliberately not done in this pass:** `SaftyFW`'s
       `link_frame.c` (`link_frame_pack_fw_version()`) and `KilnFW`'s

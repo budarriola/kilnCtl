@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_ota_esp_refuses_running_target.ps1 -- source guard for the application
 # image's POST /api/ota/esp handler (firmware/KilnFW/App/drivers/http/ota_http_esp.c).
 #
@@ -25,11 +26,21 @@ $esp = Strip-Comments (Get-Content -Raw (Join-Path $dir "ota_http_esp.c"))
 $pico = Strip-Comments (Get-Content -Raw (Join-Path $dir "ota_http_pico.c"))
 $fail = @()
 
-$usable = $esp.IndexOf("ota_http_esp_target_usable(target, esp_ota_get_running_partition())")
+# The guard must be the WHOLE condition of an if-block that refuses (goto cleanup) -- a bare substring match
+# was satisfied by "if (0 && !ota_http_esp_target_usable(...))" (vacuity audit 2026-10-07).
+$um = [regex]::Match($esp, "if\s*\(\s*!\s*ota_http_esp_target_usable\(target,\s*esp_ota_get_running_partition\(\)\)\s*\)\s*\{[^{}]*goto\s+cleanup\s*;\s*\}")
+$usable = if ($um.Success) { $um.Index } else { -1 }
 $begin = $esp.IndexOf("esp_ota_begin(target")
-if ($usable -lt 0) { $fail += "ota_http_esp.c no longer compares the update target against esp_ota_get_running_partition()" }
+if ($usable -lt 0) { $fail += "ota_http_esp.c no longer refuses (if (!ota_http_esp_target_usable(target, esp_ota_get_running_partition())) { ... goto cleanup; }) when the update target is the running partition" }
 if ($begin -lt 0) { $fail += "ota_http_esp.c: esp_ota_begin(target...) call not found -- has the handler moved?" }
 if ($usable -ge 0 -and $begin -ge 0 -and $usable -gt $begin) { $fail += "ota_http_esp.c: the running-partition check must come BEFORE esp_ota_begin()" }
+
+# The predicate itself: host test test_esp_target_usable_refuses_running_partition covers behaviour, but pin the
+# comparison in source too so neutering it fails this check directly (vacuity audit 2026-10-08).
+$util = Strip-Comments (Get-Content -Raw (Join-Path $dir "ota_http_util.c"))
+$ufn = [regex]::Match($util, "bool\s+ota_http_esp_target_usable\s*\([^)]*\)\s*\{(?<b>[^{}]*)\}")
+if (-not $ufn.Success) { $fail += "ota_http_util.c: ota_http_esp_target_usable() not found" }
+elseif ($ufn.Groups['b'].Value -notmatch "return\s+target\s*!=\s*NULL\s*&&\s*target\s*!=\s*running\s*;") { $fail += "ota_http_util.c: ota_http_esp_target_usable() must return 'target != NULL && target != running;'" }
 
 $specs = @(
     @{ File = "ota_http_esp.c";  Src = $esp;  Kind = "esp";  Do = "ota_esp_do_transfer";  Ret = "return !ok;";           Buf = "s_ota_esp_chunk" },

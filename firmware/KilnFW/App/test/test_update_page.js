@@ -27,7 +27,7 @@ assert(!!m, 'sanity: found the pure block in ota_page.html');
 const api = new Function(m[1] +
   '; return { GH_ERRORS: GH_ERRORS, GH_VERDICTS: GH_VERDICTS, ghErrorText: ghErrorText,' +
   ' ghVerdictText: ghVerdictText, ghDownloadQuery: ghDownloadQuery, ghCheckQuery: ghCheckQuery, ghCanDownload: ghCanDownload,' +
-  ' stageInstallable: stageInstallable, ghRefusalText: ghRefusalText };')();
+  ' stageInstallable: stageInstallable, ghRefusalText: ghRefusalText, stageWedgeNote: stageWedgeNote };')();
 
 // Every verdict name the firmware can emit has a sentence.
 const verdicts = Array.from(POLICY_C.matchAll(/return "([a-z_]+)";/g)).map(x => x[1])
@@ -79,6 +79,11 @@ assert(api.ghCanDownload({ state: 'checking', tag: 'v1' }, {}) === false, 'not w
 assert(api.ghCanDownload(null, {}) === false, 'no status -> no download');
 
 // Install only for a verified, idle stage.
+// Review 7 L1: the wedge flag drives the notice, independent of the (busy) reason.
+assert(api.stageWedgeNote({ busy: true, reason: 'busy', fetch_writer_wedged: true }).indexOf('restarted') > 0, 'L1: wedged flag shows reboot notice');
+assert(api.stageWedgeNote({ reason: 'writer_wedged_reboot_required' }) !== '', 'L1: wedge reason shows reboot notice');
+assert(api.stageWedgeNote({ reason: 'blank', fetch_writer_wedged: false }) === '', 'L1: no notice when not wedged');
+assert(SRC.indexOf("stageWedgeNote(s)") > 0 && SRC.indexOf("row('Warning', wedge)") > 0, 'L1: renderStageInfo uses the notice');
 assert(api.stageInstallable({ staged: true, header: 'ok', state: 'verified', busy: false }) === true, 'verified stage installable');
 assert(api.stageInstallable({ staged: true, header: 'ok', state: 'verified', busy: true }) === false, 'not while busy');
 assert(api.stageInstallable({ staged: false, header: 'ok', state: 'verified' }) === false, 'not when unstaged');
@@ -94,13 +99,27 @@ assert(api.ghRefusalText(500, '') === 'HTTP 500', 'empty 500');
 // Wiring: every route and element the card needs is in the page, nothing else is invented.
 ['/api/update/check', '/api/update/download', '/api/update/fetch', '/api/update/fetch/cancel',
  '/api/ota/esp/recovery_boot'].forEach(r => assert(SRC.indexOf("'" + r) >= 0, 'page calls ' + r));
-['ghCheckBtn', 'ghDownloadBtn', 'ghCancelBtn', 'ghUnsigned', 'ghBusyBox', 'ghInfo', 'ghTyped', 'stageInstallBtn']
+['ghCheckBtn', 'ghDownloadBtn', 'ghCancelBtn', 'ghBusyBox', 'ghInfo', 'ghTyped', 'stageInstallBtn']
   .forEach(id => assert(SRC.indexOf('id="' + id + '"') >= 0, 'element ' + id));
 assert(!/id="stageInstallBtn"[^>]*disabled[^>]*title="Waiting/.test(SRC), 'the placeholder install title is gone');
 // Every action goes through the admin-gated OTA fetch, never a bare fetch().
 const ghPart = SRC.slice(SRC.indexOf('Update from GitHub (WP10'), SRC.indexOf('Update repo setting'));
 assert(ghPart.indexOf('kcOtaAuthedFetch(') >= 0 && !/[^a-zA-Z]fetch\(/.test(ghPart.replace(/kcOtaAuthedFetch\(/g, '')),
   'GitHub card uses only kcOtaAuthedFetch');
+
+// Hand-upload downgrade gate (plan section 6): the page can pass the overrides and explains a 409.
+['stageForce', 'stageDown', 'stageTyped', 'stageTypedWrap'].forEach(id => assert(SRC.indexOf('id="' + id + '"') >= 0, 'element ' + id));
+['X-Stage-Force', 'X-Stage-Allow-Downgrade', 'X-Stage-Confirm'].forEach(h => assert(SRC.indexOf("'" + h + "'") >= 0, 'upload sends ' + h));
+assert(SRC.indexOf('stageRefusalText(e)') >= 0, 'upload failure goes through stageRefusalText');
+const UH = fs.readFileSync(resolveDriverFile(DRIVERS_DIR, 'update_http.c'), 'utf8');
+['X-Stage-Force', 'X-Stage-Allow-Downgrade', 'X-Stage-Confirm'].forEach(h => assert(UH.indexOf('"' + h + '"') >= 0, 'firmware reads ' + h));
+assert(/update_stage_set_gate\(&s_stage, policy_gate/.test(UH), 'upload handler installs the policy gate');
+
+assert(SRC.indexOf('espUpdateBtn') < 0 && SRC.indexOf('espRollbackBtn') < 0, 'retired single-slot ESP buttons are gone');
+assert(!/pushImage\(\s*'\/api\/ota\/esp'/.test(SRC), 'page has no push call to /api/ota/esp');
+assert(SRC.indexOf('/api/ota/esp/rollback') < 0, 'page does not reference /api/ota/esp/rollback');
+
+assert(SRC.indexOf('espFile') < 0 && SRC.indexOf('espPicker') < 0 && SRC.indexOf('updateOrderHint') < 0, 'orphaned ESP picker and order hint are gone');
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);

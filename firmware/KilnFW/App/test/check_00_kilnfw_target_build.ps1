@@ -38,19 +38,28 @@
 # machine, ninja -j auto) at:
 #   cold build (empty build/, fresh worktree)   ~138 s
 #   incremental, one real TU edited             ~27-29 s
-# 138 s is affordable for a suite that is invoked deliberately, but the
-# actual hazard this check exists to catch is narrower than "any stale
-# object": it is specifically CCACHE MASKING a broken translation unit
-# (a hit from before the break was introduced, or from a shared tree another
-# agent already "fixed" locally without committing). Ninja's own dependency
-# tracking already forces a real recompile of any TU whose content or
-# transitively-included headers changed -- that part of "staleness" is not
-# ccache's problem and a full wipe buys nothing extra for it that
-# CCACHE_DISABLE=1 does not already buy for the TUs that actually changed.
-# So: this check keeps ONE persistent worktree/build dir across runs
-# (avoiding the ~138 s cold-configure cost every time) and forces
-# CCACHE_DISABLE=1 so ccache cannot serve a stale hit for whatever changed
-# since the last run. Every run it MIRRORS (robocopy /MIR) the main tree's
+# 138 s is affordable for a suite that is invoked deliberately. Ninja's own
+# dependency tracking already forces a real recompile of any TU whose content
+# or transitively-included headers changed, so this check keeps ONE
+# persistent worktree/build dir per invoking tree across runs (avoiding the
+# cold-configure cost every time).
+#
+# CCACHE (2026-10-08). From 139debb5 until 2026-10-08 this check forced
+# CCACHE_DISABLE=1, on the grounds that ccache could mask a broken TU with a
+# hit from before the break. That reason does not hold for a content-keyed
+# cache (see lib_kilnfw_ccache.ps1's header for the full argument), and it
+# cost a full ~2100-TU cold compile in every new agent worktree, because each
+# tree gets its own build directory (below). ccache is now ON with one pinned,
+# asserted configuration (preprocessor mode, no sloppiness, shared cache at
+# C:\wt\.ccache, base_dir C:\wt) so a fresh worktree reuses objects any other
+# tree already compiled from byte-identical preprocessed input.
+# check_kilnfw_ccache_no_stale.ps1 proves against the real ccache binary that
+# a one-byte source/header/flag change misses and changes the object. ccache
+# never decides WHETHER a TU compiles -- ninja does -- so it cannot make this
+# check skip a compile; it can only substitute an identical result. Set
+# KILNCTL_CCACHE_DISABLE=1 for a comparison run without it.
+#
+# Every run it MIRRORS (robocopy /MIR) the main tree's
 # actual firmware/KilnFW and firmware/hwAbstraction directories -- including
 # uncommitted edits, deliberately, not just HEAD -- into the worktree. This
 # is what lets the check catch a break before it is even committed (this
@@ -139,6 +148,7 @@ $ErrorActionPreference = "Continue"
 # against another tree's build directory.
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_lock.ps1")
 . (Join-Path $PSScriptRoot "..\..\..\..\tools\build_gate.ps1")
+. (Join-Path $PSScriptRoot "..\..\..\..\tools\lib_safe_remove.ps1")
 
 # This file lives at firmware/KilnFW/App/test/ -- four levels below repo root.
 # -LiteralPath: Resolve-Path glob-expands otherwise, so a tree path containing
@@ -172,8 +182,8 @@ if (-not (Test-Path -LiteralPath $IdfProfile)) {
 #     then died with "Failed to resolve component 'lvgl': unknown name" -- a
 #     CMake configure error indistinguishable, to whoever reads it, from a
 #     real break in their own source.
-#   * Thrash, and readers seeing someone else's build. With CCACHE_DISABLE=1
-#     two trees alternating through one build directory recompile essentially
+#   * Thrash, and readers seeing someone else's build. Two trees
+#     alternating through one build directory recompile essentially
 #     everything each time, and anything reading the artifacts mid-run is
 #     reading a build that was grading a different tree's source -- one
 #     documented source of the transiently-incomplete-ELF readings that have
@@ -412,9 +422,10 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
             continue
         }
         Write-Host "Pruning stale build worktree $($stale.FullName) -- its tree '$owner' no longer exists"
+        Remove-ReparsePointsUnder -Path $stale.FullName | Out-Null
         & git -C $repoRoot worktree remove --force $stale.FullName 2>&1 | Write-Host
         if ([System.IO.Directory]::Exists($stale.FullName)) {
-            Remove-Item -LiteralPath $stale.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-TreeSafe -Path $stale.FullName
         }
         & git -C $repoRoot worktree prune 2>&1 | Write-Host
     } finally {
@@ -439,12 +450,7 @@ foreach ($stale in (Get-ChildItem -LiteralPath "C:\wt" -Directory -ErrorAction S
 # The prune loop above deliberately stays OUTSIDE this lock: it is this tree's
 # lock, and every directory the prune can delete belongs to a different tree
 # and is guarded by that tree's own lock, which the prune takes separately.
-$buildGate = Enter-KilnBuildGate -Label "kilnfw_target_build"
-try {
-# Enter-BuildLock is INSIDE the gate's try (opus review A5): if it throws
-# before its own try block starts, the gate is still released by the outer
-# finally below -- a flat gate/lock/try/finally chain would leak the gate
-# slot forever in that case.
+# Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
 $lock = Enter-BuildLock -Name $LockName
 try {
     if (-not (Test-Path -LiteralPath $WorktreePath)) {
@@ -1037,11 +1043,51 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     # these two files once they are missing, so a missing arm-none-eabi
     # toolchain is a hard FAIL, not a soft SKIP.
     . (Join-Path $PSScriptRoot "lib_saftyfw_slot_images.ps1")
-    Ensure-SaftyfwSlotImages -KilnfwWorktreePath $WorktreePath
+
+    # ccache: ON with the pinned configuration lib_kilnfw_ccache.ps1 owns and
+    # asserts (see this file's header, "CCACHE (2026-10-08)"). Set BEFORE the
+    # SaftyFW slot build so both builds compile through the same verified
+    # configuration, but the slot build still runs before the IDF profile is
+    # loaded, exactly as before -- the profile swaps cmake/ninja on PATH for
+    # the ESP-IDF copies, which the SaftyFW build has never used.
+    # KILNCTL_CCACHE_DISABLE=1 restores the old CCACHE_DISABLE=1 behaviour for
+    # a comparison run.
+    . (Join-Path $PSScriptRoot "lib_kilnfw_ccache.ps1")
+    $ccacheStatsLog = ""
+    $ccacheExe = $null
+    if ($env:KILNCTL_CCACHE_DISABLE -eq "1") {
+        Disable-KilnfwCcache
+        $ccacheMode = "CCACHE_DISABLE=1 (KILNCTL_CCACHE_DISABLE=1)"
+    } else {
+        $ccacheExe = Get-KilnfwCcacheExe
+        if (-not $ccacheExe) {
+            Fail "ccache not found (not on PATH, and no C:\Espressif\tools\ccache\*\*\ccache.exe) -- idf.py configures RULE_LAUNCH_COMPILE=ccache from the profile's IDF_CCACHE_ENABLE, so the build needs it. Install it with the ESP-IDF tools installer, or set KILNCTL_CCACHE_DISABLE=1 to build without it."
+        }
+        $ccacheStatsLog = Join-Path ([System.IO.Path]::GetTempPath()) ("kilnfw_ccache_stats_{0}.log" -f [guid]::NewGuid().ToString("N"))
+        Enable-KilnfwCcache -StatsLog $ccacheStatsLog
+        $ccacheProblems = @(Get-KilnfwCcacheConfigProblems -CcacheExe $ccacheExe)
+        if ($ccacheProblems.Count -gt 0) {
+            Fail ("ccache's effective configuration is not the one lib_kilnfw_ccache.ps1's staleness argument was made for -- refusing to build with it:`n  " + ($ccacheProblems -join "`n  "))
+        }
+        $ccacheMode = "ccache ON (preprocessor mode, cache $env:CCACHE_DIR)"
+    }
+
+    Ensure-SaftyfwSlotImages -KilnfwWorktreePath $WorktreePath -CcacheExe $ccacheExe
 
     & $IdfProfile *>&1 | Out-Null
 
-    $env:CCACHE_DISABLE = "1"
+    if ($ccacheExe) {
+        # The profile must not have changed the configuration, and the ccache
+        # idf.py's rules.ninja launches by name must be the one just verified.
+        $ccacheOnPath = Get-Command "ccache" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $ccacheOnPath -or ($ccacheOnPath.Source -ne $ccacheExe)) {
+            Fail "after loading the ESP-IDF profile, 'ccache' on PATH is '$(if ($ccacheOnPath) { $ccacheOnPath.Source } else { '<none>' })', not the verified '$ccacheExe'."
+        }
+        $ccacheProblems = @(Get-KilnfwCcacheConfigProblems -CcacheExe $ccacheExe)
+        if ($ccacheProblems.Count -gt 0) {
+            Fail ("ccache configuration changed after loading the ESP-IDF profile -- refusing to build with it:`n  " + ($ccacheProblems -join "`n  "))
+        }
+    }
 
     $binPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.bin"
     $elfPath = Join-Path $WorktreePath "firmware\KilnFW\build\KilnCtrl.elf"
@@ -1056,11 +1102,24 @@ foreach ($v in @("MSYSTEM", "MSYSTEM_PREFIX", "MSYSTEM_CARCH", "MSYSTEM_CHOST", 
     $bootloaderPath = Join-Path $WorktreePath "firmware\KilnFW\build\bootloader\bootloader.bin"
     $partitionTablePath = Join-Path $WorktreePath "firmware\KilnFW\build\partition_table\partition-table.bin"
 
-    Write-Host "Building KilnFW target (CCACHE_DISABLE=1) in $WorktreePath ..."
-    $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
-    $buildExit = $LASTEXITCODE
+    Write-Host "Building KilnFW target ($ccacheMode) in $WorktreePath ..."
+    $buildGate = Enter-KilnBuildGate -Label "kilnfw_target_build"
+    try {
+        $buildOutput = & idf.py -C (Join-Path $WorktreePath "firmware\KilnFW") build 2>&1
+        $buildExit = $LASTEXITCODE
+    } finally {
+        Exit-KilnBuildGate -Gate $buildGate
+    }
 
     $buildOutput | Write-Host
+
+    if ($ccacheStatsLog) {
+        $ccacheCounts = Get-KilnfwCcacheStatsLogCounts -StatsLog $ccacheStatsLog
+        $ccacheSummary = (@($ccacheCounts.Keys | Where-Object { $_ -notlike "local_storage*" } | Sort-Object) | ForEach-Object { "$_=$($ccacheCounts[$_])" }) -join " "
+        if (-not $ccacheSummary) { $ccacheSummary = "(no compiles ran through ccache this run)" }
+        Write-Host "ccache results this run (SaftyFW slots + KilnFW): $ccacheSummary"
+        Remove-Item -LiteralPath $ccacheStatsLog -Force -ErrorAction SilentlyContinue
+    }
 
     if ($buildExit -ne 0) {
         Fail "idf.py build failed (exit $buildExit) -- see output above. This is exactly the class of break check_00_kilnfw_target_build.ps1 exists to catch (e.g. commit 9bc155ea's -Werror=format-truncation in readiness_http.c)."
@@ -1363,6 +1422,23 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
         }
     }
     Write-Host "Published object-file trees for check_duplicate_symbols.ps1 to $mainBuildDir\esp-idf\*"
+    # Manifest of the .c.obj files THIS build produces (build.ninja outputs), so
+    # check_duplicate_symbols.ps1 can ignore objects a shared build dir holds from
+    # another worktree path or an older configuration. build.ninja itself is not
+    # published (16 MB).
+    $ninjaSrc = Join-Path $WorktreePath "firmware\KilnFW\build\build.ninja"
+    if (Test-Path -LiteralPath $ninjaSrc) {
+        $objLines = New-Object System.Collections.Generic.List[string]
+        foreach ($m in [regex]::Matches((Get-Content -Raw -LiteralPath $ninjaSrc), '(?m)^build\s+(\S+?\.c\.obj)(?:\s|:)')) {
+            $objLines.Add((($m.Groups[1].Value -replace '\$:', ':') -replace '\\', '/'))
+        }
+        if ($objLines.Count -gt 0) {
+            $manTmp = Join-Path $WorktreePath "firmware\KilnFW\build\obj_manifest.txt.tmp"
+            Set-Content -LiteralPath $manTmp -Value $objLines -Encoding ascii
+            Publish-BuildArtifact -SourcePath $manTmp -TempPath ((Join-Path $mainBuildDir "obj_manifest.txt") + ".new") -FinalPath (Join-Path $mainBuildDir "obj_manifest.txt")
+            Write-Host "Published obj_manifest.txt ($($objLines.Count) objects) for check_duplicate_symbols.ps1"
+        }
+    }
 
     # ALSO PUBLISH THE PRE-GZIPPED WEB ASSETS (2026-09-22). App/drivers/CMakeLists.txt
     # gzips KILNCTL_GZIP_ASSETS into this component's binary dir at CONFIGURE time and
@@ -1402,9 +1478,6 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "bootloader\bootloader.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $mainBuildDirCleanup "partition_table\partition-table.bin.tmp_$PID") -Force -ErrorAction SilentlyContinue
     Exit-BuildLock -Lock $lock
-}
-} finally {
-    Exit-KilnBuildGate -Gate $buildGate
 }
 
 Write-Host ""

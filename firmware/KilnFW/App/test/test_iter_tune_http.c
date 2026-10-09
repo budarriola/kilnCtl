@@ -415,6 +415,36 @@ static void test_successful_restore_persists_new_baseline(void)
 // system_mode_gate wiring (2026-09-25): refused while a firing is active,
 // touching neither the reservation, zones_config_set_pid(), nor the
 // persisted record at all.
+// cfg_fs_refusal_http.h (iter_tune_http.c includes it): the record is cfg-only,
+// so the restore route refuses with a 503 when cfg is unmounted. The fake
+// store here never touches a filesystem; these stubs just model "mounted".
+static bool s_test_cfg_mounted = true;
+bool cfg_fs_is_available(void) { return s_test_cfg_mounted; }
+bool cfg_fs_skipped_for_recovery(void) { return false; }
+esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *str)
+{
+    return httpd_resp_send(r, str, HTTPD_RESP_USE_STRLEN);
+}
+
+static void test_restore_refused_when_cfg_unmounted(void)
+{
+    reset_capture();
+    s_fake_store[0] = make_commissioned_zone(12.0f, 99.0f);
+    s_fake_present[0] = true;
+    s_fake_query = "zone=0";
+    s_test_cfg_mounted = false;
+
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_restore_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (503 is in the HTTP status)");
+    TEST_CHECK(s_resp_status == 503, "restore with cfg unmounted reports 503");
+    TEST_CHECK(strstr(s_resp_body, "format_confirm") != NULL, "the refusal names the remedy");
+    TEST_CHECK(s_set_pid_calls == 0, "zones_config_set_pid never called: the restore is not half done");
+    TEST_CHECK(s_set_zone_calls == 0, "iter_tune_store_set_zone never called");
+
+    s_test_cfg_mounted = true;
+}
+
 static void test_restore_refused_while_profile_running(void)
 {
     reset_capture();
@@ -679,6 +709,7 @@ int main(void)
     test_successful_restore_persists_new_baseline();
     test_restore_refused_while_profile_running();
     test_restore_refused_while_autotune_running();
+    test_restore_refused_when_cfg_unmounted();
     test_restore_accepts_while_idle();
     test_refused_apply_leaves_record_untouched();
     test_refuses_when_reservation_refused();

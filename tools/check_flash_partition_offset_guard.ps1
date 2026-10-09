@@ -103,6 +103,11 @@ if ($null -eq $flashFnStart) {
     if ($body -notmatch '=\s*_check_app_flash_offset_matches_chip\s*\(\s*partition_guard_host\s*,\s*app_target\s*\)') {
         $failures += "flash_firmware() no longer calls _check_app_flash_offset_matches_chip(partition_guard_host, app_target) and assigns its result -- the guard function may still exist and be named in the docstring, but the real call site is gone, so a board/tool offset mismatch would go undetected again."
     }
+    # The refusal branch itself: a mutation like `if False and partition_mismatch:` keeps
+    # every name above present while neutering the guard, so require the bare branch.
+    if ($body -notmatch '(?m)^\s*if\s+partition_mismatch\s*:\s*$') {
+        $failures += "flash_firmware() has no bare 'if partition_mismatch:' refusal branch -- the guard result is computed but may no longer be able to refuse (e.g. short-circuited with 'False and ...')."
+    }
     if ($body -notmatch 'app_target\s*=\s*_resolve_app_flash_target\s*\(') {
         $failures += "flash_firmware() no longer resolves app_target via _resolve_app_flash_target() -- the write offset must be derived from partitions.csv, not a hardcoded constant (this is the exact class of bug that put the app image in the wrong partition originally)."
     }

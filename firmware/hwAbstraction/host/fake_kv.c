@@ -103,7 +103,12 @@ static char                   s_next_open_fail_namespace[FAKE_KV_MAX_NAME_LEN];
 
 static const char *norm_partition(const char *partition)
 {
-    return partition ? partition : "";
+    /* The real backend selects the default partition with either NULL or the
+     * literal NVS_DEFAULT_PART_NAME ("nvs"); fold both to one slot here so a
+     * test that seeds via one spelling and a module that reads via the other
+     * (wifi_prov_nvs.c uses "nvs", most migrations use NULL) sees one store. */
+    if (partition == NULL || strcmp(partition, "nvs") == 0) return "";
+    return partition;
 }
 
 /* Bounded copy, always NUL-terminated within dst_size bytes -- avoids MSVC's

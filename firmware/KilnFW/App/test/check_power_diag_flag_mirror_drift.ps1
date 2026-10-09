@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_power_diag_flag_mirror_drift.ps1 -- wrapper so tools/run_all_checks.ps1's
 # check_*.ps1 glob (see check_js_host_tests.ps1's own header comment for why
 # that discovery mechanism exists) picks up power_diag_flag_mirror_drift_check.py

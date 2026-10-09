@@ -104,6 +104,10 @@ bool g_stub_hardware_differs = false;
 uint8_t kiln_cfg_store_max_count(void) { return 8; }
 bool kiln_cfg_store_pico_half_recapture_pending(void) { return false; }
 bool safety_cfg_store_has_data(void) { return true; }
+/* kiln_cfg_http.c's persist-failure branch asks cfg_fs_is_available() (via
+ * cfg_fs_refusal_http.h); the store is stubbed here, so cfg counts as mounted. */
+bool cfg_fs_is_available(void) { return true; }
+bool cfg_fs_skipped_for_recovery(void) { return false; }
 uint8_t kiln_cfg_store_list(kiln_cfg_summary_t *out, uint8_t out_cap) { (void)out; (void)out_cap; return 0; }
 int32_t kiln_cfg_store_get_active_id(void) { return KILN_CFG_NO_ACTIVE_ID; }
 bool kiln_cfg_store_get_name(int32_t id, char *out, size_t out_cap)
@@ -152,6 +156,16 @@ bool kiln_cfg_store_delete(int32_t id, bool ack_no_safety_processor, char *reaso
     return true;
 }
 bool kiln_cfg_store_rename(int32_t id, const char *name) { (void)id; (void)name; return true; }
+bool kiln_cfg_store_rename_ex(int32_t id, const char *name, char *reason_out, size_t reason_cap)
+{
+    (void)id; (void)name;
+    if (reason_out && reason_cap) reason_out[0] = '\0';
+    return true;
+}
+bool kiln_cfg_store_reason_is_persist_failure(const char *reason)
+{
+    return reason != NULL && strstr(reason, KILN_CFG_PERSIST_FAIL_TEXT) != NULL;
+}
 bool kiln_cfg_store_name_would_collide(const char *name, int32_t exclude_id)
 {
     (void)name; (void)exclude_id;

@@ -187,6 +187,8 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "ui/ui_page_live_decide.c"
                        "ui/ui_edit_firing_apply.c"
                        "ui/ui_profile_list_order.c"
+                       "ui/ui_page_safety.c"
+                       "ui/ui_page_safety_logic.c"
                        "ui/ui_page_config.c"
                        "ui/ui_page_temperature.c"
                        "ui/ui_page_temperature_safety.c"
@@ -349,6 +351,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # WP8: pure URL/allowlist and release-JSON rules (host-tested).
                        "update/update_url.c"
                        "update/update_release.c"
+                       "update/update_fetch_heap.c"
                        # WP8: the board-side GitHub fetch (TLS client, two tasks, four routes).
                        "update/update_fetch.c"
                        "update/update_http.c"
@@ -532,6 +535,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # never a curated field list -- see kiln_package.h).
                        "persist/kiln_cfg_store_cfg_fs.c"
                        "persist/kiln_scope_cfg_files.c"
+                       "persist/legacy_default_nvs.c"
                        "persist/profiles_scope_cfg_files.c"
                        "persist/iter_tune_store.c"
                        # iter_tune redesign plan step 7 persistence
@@ -625,7 +629,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "http/board_temps_http.c"
                        "control/pid.c"
                        "control/pid_fuzzy.c"
-                       # ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3: the confidence
+                       # ADAPTIVE_FUZZY_EVALUATION.md sec 3: the confidence
                        # gate (L/tau authority cap, c/4 schedule, oscillation
                        # backstop) -- pure, host-testable, no globals, same as
                        # pid_fuzzy.c itself.
@@ -636,6 +640,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "control/thermo_channel_read.c"
                        "control/cone_table.c"
                        "control/heat_enable.c"
+                       "control/relay_off_tracker.c"
                        "control/heater_output.c"
                        "control/zone_coupling_solve.c"
                        "control/s8_rate_guard_estimate.c"
@@ -754,6 +759,12 @@ add_dependencies(${COMPONENT_LIB} drivers_build_info)
 # REQUIRES would not help: that is the dependency that already exists, and in
 # the wrong direction for this.
 idf_component_add_link_dependency(FROM lvgl)
+
+# update/update_fetch.c's g_update_image_id sits in .rodata_custom_desc (right after the app
+# descriptor) but nothing references it and the IDF linker script has no KEEP for that
+# section, so --gc-sections dropped it (found by inspecting the built .bin). -u makes it a
+# root so the stage-upload gate can read the schema versions out of the image.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u g_update_image_id")
 
 # 2026-09-16: an implicit function declaration is a HARD ERROR in this
 # component, not a warning.

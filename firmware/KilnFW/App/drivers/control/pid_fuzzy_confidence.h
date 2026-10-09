@@ -1,5 +1,5 @@
 // pid_fuzzy_confidence -- the confidence gate specified in
-// docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3. Pure C, no FreeRTOS, no
+// docs/ADAPTIVE_FUZZY_EVALUATION.md sec 3. Pure C, no FreeRTOS, no
 // ESP-IDF, no logging, no I/O, no globals -- same host-testable discipline
 // as pid_fuzzy.c/pid.c.
 //

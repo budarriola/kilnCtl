@@ -1,5 +1,5 @@
 // Host tests for pid_fuzzy_confidence.c -- the confidence gate,
-// docs/ADAPTIVE_FUZZY_EVALUATION_PLAN.md sec 3.
+// docs/ADAPTIVE_FUZZY_EVALUATION.md sec 3.
 #include "test_common.h"
 #include "../drivers/control/pid_fuzzy_confidence.h"
 

@@ -1,4 +1,4 @@
-/* Node-only test for profiles_page.html's PROFILE_SLOTS_100_PLAN.md section 7
+/* Node-only test for profiles_page.html's PROFILE_SLOTS_100.md section 7
  * task 8 additions: the client-side name filter and the "recently fired"
  * group. Extracts filterProfilesByName(), recentlyFiredProfiles(),
  * renderList(), renderFavorites() and renderRecent() VERBATIM from the page
@@ -253,7 +253,7 @@ function runIntegrationCheck(scaleLabel, items) {
   runIntegrationCheck('8 slots', items);
 }
 
-// 100 simulated rows (PROFILE_SLOTS_100_PLAN.md's target scale -- fake test
+// 100 simulated rows (PROFILE_SLOTS_100.md's target scale -- fake test
 // data only, PROFILES_MAX_COUNT itself is NOT touched by this task).
 {
   const items = [];

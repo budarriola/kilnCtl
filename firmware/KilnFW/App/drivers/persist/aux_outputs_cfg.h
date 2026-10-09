@@ -103,8 +103,8 @@ bool aux_outputs_cfg_quarantined(void);
 /* Validates and persists one relay's entry (relay 1-based). Refused, nothing
  * changed: ESP_ERR_INVALID_ARG (bad relay, field out of range, tc_zone_plus1
  * beyond MAX31856_CHANNEL_COUNT, reserved != 0); ESP_ERR_INVALID_STATE (enabling a
- * relay in `zones_relay_union`, or the store is quarantined). In-RAM first, as
- * display_power_cfg_set(); a save failure is returned but the RAM value stands. */
+ * relay in `zones_relay_union`, or the store is quarantined). Save first, RAM
+ * second: a save failure is returned unchanged and RAM is left exactly as it was. Thread-safe. */
 esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, uint8_t zones_relay_union);
 
 /* Pure field-range check shared with the backup importer (backup_import.c), so a restored
@@ -117,8 +117,9 @@ bool aux_outputs_cfg_entry_valid(const aux_output_entry_t *entry);
  * conflict/quarantine applied. For a caller that must put an entry back bit-for-bit. */
 bool aux_outputs_cfg_get_raw(uint8_t relay, aux_output_entry_t *out);
 
-/* true = the NVS blob re-read right now is valid and its entries equal the RAM entries. A RAM-only
- * read-back cannot see a save that failed or a blob NVS did not keep. */
+/* true = the cfg file re-read right now is valid, at the RAM rev, and its entries equal the RAM
+ * entries. A RAM-only read-back cannot see a save that failed or a file the filesystem did not keep.
+ * NVS is not consulted: since the dual-write close no save writes it. */
 bool aux_outputs_cfg_verify_persisted(void);
 
 /* ---- Zone-to-aux conversion journal (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----

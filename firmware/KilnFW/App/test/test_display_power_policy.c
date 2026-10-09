@@ -337,8 +337,59 @@ static void test_display_on_error_switch_off_error_does_not_force_hold(void)
     TEST_CHECK(out.state == DISPLAY_POWER_OFF, "display-on-error switch OFF: error does not force the display on");
 }
 
+// ---------------------------------------------------------------------------
+// Touch gate (release debounce): a controller dropout mid-wake-touch must not
+// let the continuing touch through as a fresh press (2026-10-07).
+// ---------------------------------------------------------------------------
+
+static void test_gate_wake_touch_dropout_stays_swallowed(void)
+{
+    display_power_touch_gate_t g = {0};
+    TEST_CHECK(display_power_touch_gate_press(&g, 1000), "first press is an edge");
+    display_power_touch_gate_record(&g, true); // wake swallow
+    TEST_CHECK(!display_power_touch_gate_press(&g, 1030), "held repeat is not an edge");
+    display_power_touch_gate_release(&g, 1060); // dropout
+    TEST_CHECK(!display_power_touch_gate_press(&g, 1090),
+               "re-press 30 ms after a swallowed touch's release is NOT a new edge");
+    TEST_CHECK(g.held_swallow, "and the verdict is still swallow");
+    display_power_touch_gate_release(&g, 1200);
+    TEST_CHECK(!display_power_touch_gate_press(&g, 1200 + DISPLAY_POWER_TOUCH_REPRESS_MS - 1),
+               "re-press just inside the window is still the same touch");
+}
+
+static void test_gate_new_touch_after_window_is_an_edge(void)
+{
+    display_power_touch_gate_t g = {0};
+    (void)display_power_touch_gate_press(&g, 1000);
+    display_power_touch_gate_record(&g, true);
+    display_power_touch_gate_release(&g, 1100);
+    TEST_CHECK(display_power_touch_gate_press(&g, 1100 + DISPLAY_POWER_TOUCH_REPRESS_MS),
+               "a press a full window after the release is a fresh edge");
+}
+
+static void test_gate_passed_touch_repress_is_a_fresh_edge(void)
+{
+    display_power_touch_gate_t g = {0};
+    (void)display_power_touch_gate_press(&g, 1000);
+    display_power_touch_gate_record(&g, false); // passed through
+    display_power_touch_gate_release(&g, 1050);
+    TEST_CHECK(display_power_touch_gate_press(&g, 1100),
+               "quick second tap after a PASSED touch is never debounced away");
+}
+
+static void test_gate_release_without_press_is_harmless(void)
+{
+    display_power_touch_gate_t g = {0};
+    display_power_touch_gate_release(&g, 500);
+    TEST_CHECK(display_power_touch_gate_press(&g, 510), "poll-tick releases with nothing held do not arm the debounce");
+}
+
 void run_test_display_power_policy(void)
 {
+    test_gate_wake_touch_dropout_stays_swallowed();
+    test_gate_new_touch_after_window_is_an_edge();
+    test_gate_passed_touch_repress_is_a_fresh_edge();
+    test_gate_release_without_press_is_harmless();
     test_timeout_ms_mapping();
     test_timeout_setting_validity();
     test_stays_on_before_timeout();

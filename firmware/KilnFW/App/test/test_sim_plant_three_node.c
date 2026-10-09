@@ -416,6 +416,77 @@ static void test_decompose_refuses_degenerate_inputs(void)
     TEST_CHECK(sim_plant_decompose_three_node(&req, &out), "phi == 1.0 (boundary) must succeed, not be refused");
 }
 
+/* ---- sim_kiln_step() wiring (credibility-gate dwell-peak work, 2026-10-07) ----
+ * A SIM_NODE_THREE zone inside sim_kiln_step() must (a) with zero coupling
+ * and no radiation reproduce sim_plant_three_node_step() bit-for-bit,
+ * (b) read its thermocouple off the sensor node, (c) take neighbour-duty
+ * coupling into its ELEMENT node and (d) leave a SIM_NODE_LEGACY neighbour
+ * on the unchanged one-node path. */
+static void test_kiln_step_three_node_wiring(void)
+{
+    sim_kiln_cfg_t kcfg = {0};
+    kcfg.zone_count = 2;
+    kcfg.zone[0].plant = three_node_cfg(0.8333f);
+    kcfg.zone[1].plant = three_node_cfg(0.8333f);
+    sim_kiln_state_t ks;
+    sim_kiln_reset(&ks, &kcfg);
+
+    sim_plant_cfg_t solo_cfg = three_node_cfg(0.8333f);
+    sim_plant_state_t solo;
+    sim_plant_reset(&solo, &solo_cfg);
+
+    bool identical = true;
+    for (int i = 0; i < 2000; i++) {
+        float duty[2] = { (i / 100) % 2 ? 0.0f : 1.0f, 0.0f };
+        sim_kiln_step(&ks, &kcfg, duty, DT_S);
+        sim_plant_three_node_step(&solo, &solo_cfg, duty[0], DT_S);
+        if (ks.zone[0].element_c != solo.element_c || ks.zone[0].load_c != solo.load_c ||
+            ks.zone[0].sensor_node_c != solo.sensor_node_c || ks.zone[0].sensor_c != solo.sensor_c) {
+            identical = false;
+            break;
+        }
+    }
+    TEST_CHECK(identical, "uncoupled three-node zone in sim_kiln_step must match sim_plant_three_node_step bit-for-bit");
+    TEST_CHECK(ks.zone[1].load_c == 20.0f && ks.zone[1].element_c == 20.0f,
+               "an undriven, uncoupled three-node zone must stay at ambient");
+    TEST_CHECK(ks.zone[0].sensor_c != ks.zone[0].element_c, "reading must come from the sensor node, not the element");
+
+    /* (c) neighbour-duty coupling lands in the element node. */
+    kcfg.coupling_w_per_c[1][0] = 50.0f;
+    sim_kiln_reset(&ks, &kcfg);
+    for (int i = 0; i < 200; i++) {
+        float duty[2] = { 1.0f, 0.0f };
+        sim_kiln_step(&ks, &kcfg, duty, DT_S);
+    }
+    TEST_CHECK(ks.zone[1].element_c > 20.5f, "neighbour duty must heat a three-node zone's element via coupling");
+    TEST_CHECK(ks.zone[1].element_c > ks.zone[1].load_c, "coupling heat enters the element first, then the load");
+
+    /* (d) a legacy neighbour is untouched by the three-node branch. */
+    sim_kiln_cfg_t lcfg = {0};
+    lcfg.zone_count = 2;
+    for (int z = 0; z < 2; z++) {
+        lcfg.zone[z].plant.ambient_c = 20.0f;
+        lcfg.zone[z].plant.heater_power_w = 40.0f;
+        lcfg.zone[z].plant.thermal_mass_j_per_c = 200.0f;
+        lcfg.zone[z].plant.loss_coeff_w_per_c = 1.0f;
+    }
+    lcfg.zone[1].plant = kcfg.zone[0].plant; /* mixed: zone 0 legacy, zone 1 three-node */
+    lcfg.coupling_w_per_c[0][1] = 5.0f;
+    sim_kiln_state_t lks;
+    sim_kiln_reset(&lks, &lcfg);
+    sim_plant_cfg_t lone = lcfg.zone[0].plant;
+    sim_plant_state_t lone_s;
+    sim_plant_reset(&lone_s, &lone);
+    bool legacy_ok = true;
+    for (int i = 0; i < 500; i++) {
+        float duty[2] = { 0.5f, 0.0f };
+        sim_kiln_step(&lks, &lcfg, duty, DT_S);
+        sim_plant_step(&lone_s, &lone, duty[0], DT_S);
+        if (lks.zone[0].element_c != lone_s.element_c) { legacy_ok = false; break; }
+    }
+    TEST_CHECK(legacy_ok, "legacy zone beside a three-node zone must follow the unchanged one-node path");
+}
+
 void run_test_sim_plant_three_node(void)
 {
     /* Catches this TU being linked against a stale/mismatched sim_plant.o --
@@ -427,4 +498,5 @@ void run_test_sim_plant_three_node(void)
     test_decompose_roundtrip();
     test_decompose_invariance();
     test_decompose_refuses_degenerate_inputs();
+    test_kiln_step_three_node_wiring();
 }

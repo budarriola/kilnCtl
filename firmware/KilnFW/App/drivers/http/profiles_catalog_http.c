@@ -13,7 +13,7 @@
 #include "web_encoding.h"
 #include "zones_config_query.h"  /* zones_config_get_thermo_count() -- builtin_effective_zone_mask() */
 
-/* PROFILE_SLOTS_100_PLAN.md section 4 item 3 / section 7 task 8: the web
+/* PROFILE_SLOTS_100.md section 4 item 3 / section 7 task 8: the web
  * "recently fired" group needs a per-profile last-run timestamp, and the
  * plan is explicit that this must cost one extra field in the EXISTING
  * /api/profiles listing rather than a new route (the URI handler cap has one
@@ -109,7 +109,7 @@ static esp_err_t send_chunk_checked(httpd_req_t *req, const char *buf, int n, si
         return ESP_OK; /* encoding error -- skip this fragment, keep the response alive */
     }
     if ((size_t)n >= cap) {
-        /* Opus review, docs/PROFILE_SLOTS_100_PLAN.md sec 7 task 11 item 4:
+        /* Opus review, docs/PROFILE_SLOTS_100.md sec 7 task 11 item 4:
          * this used to clamp and still send ESP_OK, shipping a truncated
          * fragment as if it were a complete, valid 200. Unreachable at
          * today's field widths (~127 B max vs the smallest cap here, 190 B)
@@ -287,7 +287,7 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
  * 230. The constant is widened to keep the same ~121-byte slack margin the
  * original 224 (vs. its own 103-byte base) carried. */
 #define PROFILE_LIST_ENTRY_MAX 352 /* +30 (2026-09-02) for the ",\"exceeds_ceiling\":false" marker;
-                                     * +37 (PROFILE_SLOTS_100_PLAN.md task 8) for
+                                     * +37 (PROFILE_SLOTS_100.md task 8) for
                                      * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max);
                                      * base recomputed to 230 for N3's *6 name-escaping term above,
                                      * +121 slack (matching the original margin) = 351, rounded to 352 */
@@ -601,7 +601,7 @@ esp_err_t favorites_list_get_handler(httpd_req_t *req)
         if (!profiles_slot_bitmap_test(&user_mask, i)) {
             continue;
         }
-        /* Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): filter by the
+        /* Review fold-in (PROFILE_SLOTS_100.md section 7): filter by the
          * used bitmap too. An orphaned favorite bit surviving over an
          * unused/deleted slot (e.g. a power cut between clearing the
          * favorite and erasing the slot, or vice versa, pre-fix) must never

@@ -34,6 +34,12 @@
 
 #include "cfg_fs.h"
 
+#include "ota_image_crc.h"
+/* LOW-3 probe: record the stub lock depth every time start() validates a blob. */
+static int g_probe_crc_max_depth = -1;
+#define ota_image_crc32(p, n) \
+    (g_probe_crc_max_depth = (g_test_stub_lock_depth > g_probe_crc_max_depth ? g_test_stub_lock_depth : g_probe_crc_max_depth), \
+     ota_image_crc32((p), (n)))
 #include "../drivers/persist/aux_outputs_cfg.c"
 #include "../drivers/safety/safety_pico_relay_mask.h"
 
@@ -66,11 +72,34 @@ static void simulate_reboot(void)
     s_rev = 77;
 }
 
+/* Fresh fake NVS plus a freshly mounted cfg scratch: saves are cfg-file-only
+ * since the dual-write close, so a mounted partition is the normal case. */
 static void fresh_board(void)
 {
+    ao_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(AO_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts against the scratch dir");
+    simulate_reboot();
+}
+
+/* Same, with NO cfg partition mounted. */
+static void fresh_board_unmounted(void)
+{
+    ao_cfg_fs_reset();
     fake_kv_reset_all();
     hal_kv_init_partition(KILN_NVS_PARTITION);
     simulate_reboot();
+}
+
+static aux_outputs_blob_t make_blob_one_enabled(unsigned idx)
+{
+    aux_outputs_blob_t blob;
+    memset(&blob, 0, sizeof(blob));
+    blob.version = AUX_OUTPUTS_CFG_VERSION;
+    blob.entries[idx].enabled = 1;
+    blob.crc32 = blob_checksum(&blob);
+    return blob;
 }
 
 static aux_output_entry_t on_entry(void)
@@ -291,16 +320,10 @@ static void test_corrupt_blob_defaults(void)
     aux_output_entry_t e = on_entry();
     TEST_CHECK(aux_outputs_cfg_set(3, &e, 0) == ESP_OK, "persist a good blob");
 
-    /* Flip one payload byte inside the stored blob: CRC no longer matches. */
-    hal_kv_handle_t h;
-    aux_outputs_blob_t blob;
-    size_t len = sizeof(blob);
-    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "open");
-    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && len == sizeof(blob), "read back");
-    blob.entries[0].hyst_c = 3.0f;
-    hal_kv_set_blob(&h, NVS_KEY_AUX_OUT, &blob, sizeof(blob));
-    hal_kv_commit(&h);
-    hal_kv_close(&h);
+    /* Overwrite the cfg file with a blob whose CRC no longer matches. */
+    aux_outputs_blob_t blob = make_blob_one_enabled(2);
+    blob.entries[0].hyst_c = 3.0f; /* payload changed after the CRC was computed */
+    TEST_CHECK(pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), 9) == ESP_OK, "stage a bad-CRC file");
 
     simulate_reboot();
     aux_outputs_cfg_start(0);
@@ -308,6 +331,8 @@ static void test_corrupt_blob_defaults(void)
     TEST_CHECK(!aux_outputs_cfg_quarantined(), "a corrupt blob is not a quarantine");
     TEST_CHECK(aux_outputs_cfg_set(3, &e, 0) == ESP_OK, "and it can be rewritten");
 
+    /* A legacy NVS blob of the wrong size, no cfg file. */
+    fresh_board();
     uint8_t two[2] = { 1, 2 };
     stash_blob(two, sizeof(two), 1);
     simulate_reboot();
@@ -315,12 +340,22 @@ static void test_corrupt_blob_defaults(void)
     TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0 && !aux_outputs_cfg_quarantined(), "wrong size: defaults");
 }
 
+static void test_set_without_cfg_partition_fails_loud(void)
+{
+    TEST_SECTION("aux_outputs_cfg_set: no cfg partition mounted -- fails loud, nothing falls back to NVS");
+    fresh_board_unmounted();
+    aux_outputs_cfg_start(0);
+    aux_output_entry_t e = on_entry();
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) != ESP_OK, "set() reports the failed cfg write");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
+               "no NVS write was made as a fallback");
+}
+
 static void test_dual_write_and_file_tiebreak(void)
 {
-    TEST_SECTION("cfg_fs dual-write: file mirrors NVS, higher rev wins on divergence");
+    TEST_SECTION("cfg-only save: file written, NVS untouched, higher rev wins, equal-rev legacy NVS wins");
     fresh_board();
-    ao_cfg_fs_reset();
-    TEST_CHECK(cfg_fs_init(AO_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     aux_outputs_cfg_start(0);
     aux_output_entry_t e = on_entry();
     TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) == ESP_OK, "set lands");
@@ -328,7 +363,7 @@ static void test_dual_write_and_file_tiebreak(void)
     bool fv = false, nv = false, div = true;
     uint32_t fr = 0, nr = 0;
     aux_outputs_cfg_get_dualwrite_status(&fv, &fr, &nv, &nr, &div);
-    TEST_CHECK(fv && nv && fr == nr && fr == 1 && !div, "file and NVS both valid, same rev, not diverged");
+    TEST_CHECK(fv && !nv && fr == 1 && !div, "file valid at rev 1, no NVS copy written, not diverged");
 
     /* File ahead of NVS: a later write that only reached the file. */
     aux_outputs_blob_t blob;
@@ -346,6 +381,14 @@ static void test_dual_write_and_file_tiebreak(void)
     aux_outputs_cfg_start(0x04);
     TEST_CHECK(aux_outputs_cfg_conflict_mask() == 0x04 && aux_outputs_cfg_enabled_mask() == 0,
                "file-sourced entry is reconciled against the zones too");
+
+    /* A legacy/rollback writer left an NVS copy at the SAME rev with different
+     * content: NVS wins the equal-rev tie (the dangerous case stays visible). */
+    aux_outputs_blob_t legacy = make_blob_one_enabled(0);
+    stash_blob(&legacy, sizeof(legacy), 5);
+    simulate_reboot();
+    aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x01, "equal rev, differing bytes: NVS wins");
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
@@ -423,6 +466,14 @@ static void test_pico_mask_call_site_shape(void)
     }
 }
 
+static esp_err_t ao_failing_cfg_write(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    return ESP_FAIL;
+}
+
 static void test_raw_verify_and_journal(void)
 {
     TEST_SECTION("get_raw / verify_persisted / conversion journal");
@@ -437,13 +488,30 @@ static void test_raw_verify_and_journal(void)
                "get_raw returns the stored entry without defaults");
     TEST_CHECK(!aux_outputs_cfg_get_raw(0, &raw) && !aux_outputs_cfg_get_raw(5, &raw), "get_raw refuses a bad relay");
     TEST_CHECK(aux_outputs_cfg_verify_persisted(), "verify_persisted true right after a good save");
+    {
+        /* The save went to the cfg file only: the NVS key holds nothing, and
+         * verify_persisted() must still read true (it re-reads the file). */
+        hal_kv_handle_t h;
+        aux_outputs_blob_t nb;
+        size_t nl = sizeof(nb);
+        bool nvs_has = false;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            nvs_has = hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &nb, &nl) == HAL_OK;
+            hal_kv_close(&h);
+        }
+        TEST_CHECK(!nvs_has, "no NVS copy was written, yet verify_persisted reads true from the file");
+    }
 
-    fake_kv_script_next_write_status(HAL_IO);
+    /* Failure injected at the cfg write seam, where saves land since the
+     * dual-write close (an NVS-seam injection would never be consumed). */
+    pref_cfg_fs_set_write_fn(ao_failing_cfg_write);
     aux_output_entry_t e2 = on_entry();
     e2.min_on_s = 30;
     TEST_CHECK(aux_outputs_cfg_set(3, &e2, 0x03) != ESP_OK, "save failure is returned");
-    TEST_CHECK(aux_outputs_cfg_get_raw(3, &raw) && raw.enabled == 1, "the RAM value stands after the failed save");
-    TEST_CHECK(!aux_outputs_cfg_verify_persisted(), "verify_persisted false: RAM and NVS differ");
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(aux_outputs_cfg_get_raw(3, &raw) && raw.enabled == 0, "F3: RAM unchanged after the failed save");
+    TEST_CHECK((aux_outputs_cfg_enabled_mask() & 0x04) == 0, "F3: enabled mask unchanged after the failed save");
+    TEST_CHECK(aux_outputs_cfg_verify_persisted(), "verify_persisted true: RAM and the cfg file still agree");
 
     aux_convert_journal_t j;
     memset(&j, 0, sizeof(j));
@@ -464,8 +532,22 @@ static void test_raw_verify_and_journal(void)
     TEST_CHECK(aux_convert_journal_clear() && !aux_convert_journal_read(&j), "clear removes the marker");
 }
 
+static void test_start_holds_no_lock_during_io(void)
+{
+    fresh_board();
+    aux_outputs_blob_t blob = make_blob_one_enabled(1);
+    stash_blob(&blob, sizeof(blob), 3);
+    g_probe_crc_max_depth = -1;
+    g_test_stub_lock_depth = 0;
+    TEST_CHECK(aux_outputs_cfg_start(0) == ESP_OK, "start ok");
+    TEST_CHECK(g_probe_crc_max_depth == 0, "no lock held while start() reads/validates NVS and cfg-fs");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "start() releases its lock");
+    TEST_CHECK(s_rev == 3 && s_entries[1].enabled == 1, "start() still publishes the loaded value");
+}
+
 void run_test_aux_outputs_store(void)
 {
+    test_start_holds_no_lock_during_io();
     test_predicate();
     test_defaults_all_disabled();
     test_set_round_trip();
@@ -476,6 +558,7 @@ void run_test_aux_outputs_store(void)
     test_oversize_blob_quarantined();
     test_checksum_known_answer();
     test_corrupt_blob_defaults();
+    test_set_without_cfg_partition_fails_loud();
     test_dual_write_and_file_tiebreak();
     test_pico_mask_strips_aux();
     test_pico_mask_call_site_shape();

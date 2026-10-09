@@ -40,15 +40,21 @@ $ErrorActionPreference = "Stop"
 $testDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $commonDir = Split-Path -Parent $testDir
 
-# Build gate: LIGHT lane. This compiles small, self-contained CommonFW C host
-# tests, not an ESP-IDF or full host-test build, so it must not queue behind
-# multi-minute heavy builds. That is only valid while the build stays serial:
-# the --build call below passes --parallel 1 so CMAKE_BUILD_PARALLEL_LEVEL or a
-# Ninja generator cannot fan it out. Gates only the --build call, not the cheap
-# configure or the ctest run.
+# Build gate: HEAVY lane. The build is parallel (Ninja, -j), so it is no longer
+# the single serial compile the light lane assumes. The MSVC environment is
+# imported ONCE, before the gate (Import-KilnVcvarsEnv), and the slot is held
+# only around the --build call, not the configure or the ctest run.
 . (Join-Path $testDir "..\..\..\tools\build_gate.ps1")
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+# PROFILE (2026-10-08, this machine): the Visual Studio generator took ~68 s to
+# configure and ~1206 s to build serially (msbuild spawns several processes per
+# target and Defender scans each one); ctest itself is ~79 s serial. Ninja + cl
+# with a parallel build and `ctest -j` removes most of it. The build dir stays
+# fresh and $PID-keyed on purpose: a dropped or misconfigured target in
+# CMakeLists.txt must still be caught the way a clean clone would catch it.
+$jobs = [Math]::Max(2, [Math]::Min(8, [Environment]::ProcessorCount))
 
 if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
     Write-Host "SKIP: no ``cmake`` on PATH -- cannot build CommonFW's host tests."
@@ -64,7 +70,22 @@ $buildDir = Join-Path $env:TEMP ("commonfw_ctest_" + $PID)
 try {
     if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
 
-    $cfg = & cmake -S $commonDir -B $buildDir 2>&1
+    $cfgArgs = @("-S", $commonDir, "-B", $buildDir)
+    # Locate vcvarsall via vswhere; the old hardcoded path is only a fallback.
+    $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $found = & $vswhere -latest -products * -find "VC\Auxiliary\Build\vcvarsall.bat" 2>$null | Select-Object -First 1
+        if ($found -and (Test-Path $found)) { $vcvars = $found }
+    }
+    if ((Get-Command ninja -ErrorAction SilentlyContinue) -and (Test-Path $vcvars)) {
+        Import-KilnVcvarsEnv -Vcvars $vcvars
+        $cfgArgs += @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_C_COMPILER=cl")
+        Write-Host "check_commonfw_ctest.ps1: generator = Ninja + cl (vcvars: $vcvars)"
+    } else {
+        Write-Host "check_commonfw_ctest.ps1: generator = CMake default (Visual Studio fallback; ninja or vcvars not found, vcvars tried: $vcvars)"
+    }
+    $cfg = & cmake @cfgArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
         # No usable C toolchain is a legitimate SKIP (a machine without MSVC
         # or gcc), but any other configure failure is a real defect -- same
@@ -79,9 +100,9 @@ try {
 
     # No -target: build everything CMakeLists.txt declares (both libraries
     # plus every host-test executable), not just one.
-    $gate = Enter-KilnBuildGate -Label "commonfw_ctest" -Lane light
+    $gate = Enter-KilnBuildGate -Label "commonfw_ctest" -Lane heavy
     try {
-        $bld = & cmake --build $buildDir --config Debug --parallel 1 2>&1
+        $bld = & cmake --build $buildDir --config Debug --parallel $jobs 2>&1
         $bldExit = $LASTEXITCODE
     } finally {
         Exit-KilnBuildGate -Gate $gate
@@ -110,7 +131,7 @@ try {
     # doesn't need file redirection, just a non-terminating error action.
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $ctestOut = & ctest --test-dir $buildDir --output-on-failure --timeout 60 -C Debug 2>&1
+    $ctestOut = & ctest --test-dir $buildDir --output-on-failure --timeout 60 --no-tests=error -C Debug -j $jobs 2>&1
     $ctestExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEap
     $ctestOut | ForEach-Object { Write-Host $_ }
@@ -121,10 +142,22 @@ try {
     Write-Host "check_commonfw_ctest.ps1: wall time ${elapsedS}s"
 
     $summaryLine = ($ctestOut -split "`r?`n" | Where-Object { $_ -match '^\d+% tests passed' } | Select-Object -First 1)
-    if ($summaryLine) {
-        Write-Host "check_commonfw_ctest.ps1: $($summaryLine.Trim())"
-    } else {
-        Write-Host "check_commonfw_ctest.ps1: WARNING -- no 'N% tests passed' summary line found in ctest output"
+    if (-not $summaryLine) {
+        throw "no 'N% tests passed' summary line in ctest output -- cannot confirm tests ran."
+    }
+    Write-Host "check_commonfw_ctest.ps1: $($summaryLine.Trim())"
+    # Floor: every add_test( in CMakeLists.txt must have run. Zero tests, or a
+    # disabled test block, must go RED rather than pass.
+    $declared = @(Select-String -Path (Join-Path $commonDir "CMakeLists.txt") -Pattern '^\s*add_test\(').Count
+    # Fixed floor too: commenting add_test lines out lowers $declared as well, so
+    # the comparison alone would not catch it. Raise this when tests are added.
+    $minTests = 42
+    if ($declared -lt $minTests) { throw "CMakeLists.txt declares only $declared add_test( line(s), below the floor of $minTests -- tests were removed or commented out (lower `$minTests only if deliberate)." }
+    if ($summaryLine -notmatch 'out of (\d+)') { throw "could not parse test count from: $summaryLine" }
+    $ran = [int]$Matches[1]
+    Write-Host "check_commonfw_ctest.ps1: ctest ran $ran test(s); CMakeLists.txt declares $declared add_test( line(s)"
+    if ($ran -lt $declared) {
+        throw "ctest ran only $ran test(s) but CMakeLists.txt declares $declared add_test( -- a test block was disabled or dropped."
     }
 
     if ($ctestExit -ne 0) {

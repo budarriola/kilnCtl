@@ -77,7 +77,7 @@ static uint32_t screen_idle_now_ms(void)
 /* THE single call site for display_power_policy_step() -- both the poll
  * task's idle-timeout tick and a touch edge (screen_idle_touch_swallow())
  * fund it through here so the edge-tracked inputs (error_prev_active,
- * touch_held/touch_held_swallow) are never computed two different ways.
+ * touch_gate) are never computed two different ways.
  * MUST be called with idle->lock already held; never takes/releases it
  * itself (same "caller's discipline" convention profile_executor_wd_
  * decide()'s doc comment describes for its own pure-step neighbor). Makes
@@ -186,7 +186,7 @@ static void screen_idle_refresh_inputs(screen_idle_t *idle)
 
     /* screen_idle_task's own stack is 6144 B (screen_idle_start()'s
      * xTaskCreatePinnedToCore below) -- heap-allocate rather than add a
-     * 1384-byte profile_exec_status_t stack local; only .state is read
+     * 1464-byte profile_exec_status_t stack local; only .state is read
      * below (for both RUNNING/PAUSED and FAULTED), which the narrow
      * profile_executor_get_active_id() accessor cannot report (it only
      * distinguishes RUNNING-or-PAUSED from everything else, collapsing
@@ -374,10 +374,10 @@ esp_err_t screen_idle_inject_touch(screen_idle_t *idle, uint16_t x, uint16_t y, 
     // SEPARATE call (lvgl_port_inject_touch(), read back by touch_read_cb(),
     // which is the call site that owns the real swallow decision -- see
     // that function's own screen_idle_touch_swallow() call). Both paths
-    // share the one edge-tracked state in `idle` (touch_held et al.), so
+    // share the one edge-tracked state in `idle` (touch_gate), so
     // whichever of the two calls observes a press transition first computes
     // the edge; the other lands as a harmless repeat. See screen_idle.h's
-    // touch_held field comment.
+    // touch_gate field comment.
     bool swallow_unused;
     return screen_idle_touch_swallow(idle, x, y, pressed, &swallow_unused);
 }
@@ -398,9 +398,9 @@ esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y,
         // is evaluated as a fresh edge. Never itself swallowed (there is
         // nothing new to decide) -- if the press that is now releasing was
         // swallowed, the caller was already reporting RELEASED to LVGL for
-        // every poll of it (see screen_idle.h's touch_held comment), so
+        // every poll of it (see screen_idle.h's touch_gate comment), so
         // this changes nothing observable, only resets bookkeeping.
-        idle->touch_held = false;
+        display_power_touch_gate_release(&idle->touch_gate, screen_idle_now_ms());
         screen_idle_unlock(idle);
         return ESP_OK;
     }
@@ -408,16 +408,18 @@ esp_err_t screen_idle_touch_swallow(screen_idle_t *idle, uint16_t x, uint16_t y,
     uint32_t now_ms = screen_idle_now_ms();
     bool was_wake = !idle->screen_on;
 
-    if (!idle->touch_held) {
+    if (display_power_touch_gate_press(&idle->touch_gate, now_ms)) {
         // Press EDGE: exactly one display_power_policy_step() call with
-        // touch_event=true per the header's calling contract.
-        idle->touch_held = true;
-        idle->touch_held_swallow = screen_idle_run_policy_locked(idle, now_ms, true);
+        // touch_event=true per the header's calling contract. A re-press
+        // right after a swallowed touch's release (controller dropout) is
+        // NOT an edge -- see display_power_touch_gate_t.
+        display_power_touch_gate_record(&idle->touch_gate,
+                                        screen_idle_run_policy_locked(idle, now_ms, true));
     }
     // Repeat within the same held press: return the edge's cached verdict,
     // do NOT re-run the policy (would violate "exactly one call per edge").
 
-    *out_swallow = idle->touch_held_swallow;
+    *out_swallow = idle->touch_gate.held_swallow;
     screen_idle_unlock(idle);
 
     if (was_wake) ESP_LOGI(TAG, "screen woken");

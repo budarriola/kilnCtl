@@ -1,4 +1,5 @@
 #include "zones_http_internal.h"
+#include "persist_scratch.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -211,9 +212,9 @@ static esp_err_t nvs_load_from_with_migration_info(const char *partition, zones_
  * carries the single step from its immediate predecessor loses the config
  * entirely if two schema-bumping firmwares are installed in a row without an
  * intervening boot on the first one (see nvs_load()'s call site). */
-static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
-                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
-                                       bool *out_refused_newer)
+static esp_err_t nvs_load_from_decode_buf(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                           bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
+                                           bool *out_refused_newer, uint8_t *raw)
 {
     if (out_refused_newer) {
         *out_refused_newer = false;
@@ -249,9 +250,8 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
      * exactly the bug this pass fixes). Sized to the largest possible
      * on-flash layout, which by construction is the current one (every
      * historical struct above is smaller). */
-    uint8_t raw[sizeof(zones_cfg_t)];
-    memset(raw, 0, sizeof(raw));
-    size_t len = sizeof(raw);
+    memset(raw, 0, sizeof(zones_cfg_t));
+    size_t len = sizeof(zones_cfg_t);
     err = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len);
     hal_kv_close(&h);
     if (err == HAL_NOT_FOUND) {
@@ -312,6 +312,12 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
             *out_found = true;
         }
         return ESP_OK;
+    case ZONES_DECODE_OOM:
+        /* Not judged: no fault latch, nothing found/valid, the load fails. */
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg blob from '%s': out of memory while converting -- load fails, "
+                      "flash data left untouched",
+                 partition);
+        return ESP_ERR_NO_MEM;
     case ZONES_DECODE_CORRUPT:
     default:
         /* Genuine corruption (too short, wrong length for the claimed
@@ -333,6 +339,40 @@ static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cf
         }
         return ESP_OK;
     }
+}
+
+/* The raw blob buffer is a whole zones_cfg_t (~1 KB); heap, not stack, because
+ * this runs on the shared 8 KB httpd stack via profile_exec_start_post_handler
+ * -> profile_executor_run -> ... -> nvs_load (check_httpd_task_stack_budget).
+ * OOM reads as a failed load (outputs already reset to "nothing found"). */
+static esp_err_t nvs_load_from_decode(const char *partition, zones_cfg_t *out_cfg, bool *out_found,
+                                       bool *out_valid, bool *out_migrated, uint8_t *out_on_disk_version,
+                                       bool *out_refused_newer)
+{
+    uint8_t *raw = (uint8_t *)persist_scratch_alloc(sizeof(zones_cfg_t));
+    if (!raw) {
+        if (out_refused_newer) {
+            *out_refused_newer = false;
+        }
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        if (out_migrated) {
+            *out_migrated = false;
+        }
+        if (out_on_disk_version) {
+            *out_on_disk_version = 0;
+        }
+        memset(out_cfg, 0, sizeof(*out_cfg));
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t e = nvs_load_from_decode_buf(partition, out_cfg, out_found, out_valid, out_migrated,
+                                           out_on_disk_version, out_refused_newer, raw);
+    free(raw);
+    return e;
 }
 
 /* One-time move of the persisted zones config out of the default partition's
@@ -435,21 +475,23 @@ static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_
                      attempt, esp_err_to_name(save_err));
             continue;
         }
-        uint8_t raw[sizeof(zones_cfg_t)];
-        memset(raw, 0, sizeof(raw));
-        size_t len = sizeof(raw);
-        hal_kv_handle_t h;
-        hal_status_t oerr = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
-        if (oerr != HAL_OK) {
-            ESP_LOGW(ZONES_HTTP_TAG, "migrated zones_cfg write-back attempt %d: read-back open failed", attempt);
-            continue;
+        /* cfg file only since the dual-write close: read the file back (a
+         * second, independent read on top of cfg_fs_write_atomic's own). */
+        /* Heap/PSRAM scratch, not a static (.dram0.bss is at its budget) and not the stack. */
+        zones_cfg_t *readback = persist_scratch_alloc(sizeof(*readback));
+        uint32_t rb_rev = 0;
+        bool rb_valid = false;
+        bool rb_match = false;
+        if (readback) {
+            memset(readback, 0, sizeof(*readback));
+            zones_config_cfg_fs_load_raw(readback, &rb_rev, &rb_valid);
+            rb_match = rb_valid && memcmp(readback, &s_zones.cfg, sizeof(s_zones.cfg)) == 0;
+            free(readback);
         }
-        hal_status_t gerr = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len);
-        hal_kv_close(&h);
-        if (gerr == HAL_OK && len == sizeof(s_zones.cfg) && memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0) {
-            ESP_LOGI(ZONES_HTTP_TAG, "migrated zones_cfg (was %s) persisted to '%s' and verified by "
+        if (rb_match) {
+            ESP_LOGI(ZONES_HTTP_TAG, "migrated zones_cfg (was %s) persisted to the cfg file and verified by "
                           "read-back as v%u, crc32 0x%08x",
-                     source_desc, KILN_NVS_PARTITION,
+                     source_desc,
                      (unsigned)ZONES_CFG_VERSION, (unsigned)s_zones.cfg.crc32);
             return true;
         }
@@ -457,11 +499,11 @@ static bool zones_config_persist_migrated_blob_verified(uint8_t on_disk_version_
                       "just written -- retrying",
                  attempt);
     }
-    ESP_LOGE(ZONES_HTTP_TAG, "migrated zones_cfg (was %s) could NOT be verified as persisted to '%s' "
+    ESP_LOGE(ZONES_HTTP_TAG, "migrated zones_cfg (was %s) could NOT be verified as persisted to the cfg file "
                   "after retry -- this boot runs on the migrated in-RAM copy, but flash still holds the old "
                   "bytes; a second firmware install one step further (the one-step migration policy) will "
                   "be unable to read them and will treat this config as too old to consume",
-             source_desc, KILN_NVS_PARTITION);
+             source_desc);
     /* M13 fix (2026-09-16): this used to be an ESP_LOGE only, invisible to
      * the operator -- see zones_cfg_migration_persist_fault_t's doc comment
      * (zones_config_accessors.h). Latch it so dashboard_http.c/LCD can name
@@ -488,6 +530,19 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
                                                         &migrated_from_nvs, &on_disk_version_before,
                                                         &nvs_refused_as_newer);
+    if (err == ESP_ERR_NO_MEM) {
+        /* Decode OOM: could not judge the NVS bytes. Do not resolve (the file would
+         * be compared against nothing), keep the rev floor, fail the load. */
+        s_zones_cfg_rev = zones_cfg_rev_load();
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return err;
+    }
 
     /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
      * against the `cfg` file on top of whatever nvs_load_from() just
@@ -500,12 +555,40 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * case. */
     bool nvs_valid = out_valid ? *out_valid : false;
     uint32_t nvs_rev = zones_cfg_rev_load();
-    zones_cfg_t resolved;
+    /* Heap, not stack (~1 KB): shared httpd stack, see check_httpd_task_stack_budget.
+     * OOM is a clean load failure: config zeroed, nothing found/valid. */
+    zones_cfg_t *resolved = persist_scratch_alloc(sizeof(*resolved));
+    if (!resolved) {
+        s_zones_cfg_rev = nvs_rev; /* rev floor: a later save must not restamp rev 1 */
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return ESP_ERR_NO_MEM;
+    }
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     uint8_t file_on_disk_version = 0;
-    bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, &resolved, &resolved_rev,
+    bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                     &used_file, &file_on_disk_version);
+    if (file_on_disk_version == ZONES_CFG_RESOLVE_OOM_VERSION && !trustworthy && !used_file) {
+        /* Resolve could not allocate: keep the rev floor and fail the load so the
+         * legacy NVS copy is not adopted as valid (a later save would overwrite
+         * the newer authoritative file). */
+        s_zones_cfg_rev = nvs_rev;
+        free(resolved);
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return ESP_ERR_NO_MEM;
+    }
     s_zones_cfg_rev = resolved_rev;
     /* cfg is MOUNTED on the bench board as of 2026-09-21 (7 files, confirmed
      * via GET /api/cfgfs -- CLAUDE.md's "512K LittleFS cfg partition"), so
@@ -517,7 +600,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * the NVS candidate BEFORE it is overwritten below: `s_zones.cfg` still
      * holds whatever nvs_load_from_with_migration_info() just decoded (or
      * the zeroed default, if !nvs_valid), and `resolved` is a struct this
-     * function already owns on the stack -- no new large local needed. If
+     * function already owns on the heap (persist_scratch) -- no large local. If
      * the two don't already agree, NVS (and, redundantly but harmlessly,
      * the file itself, since zones_config_cfg_fs_save() re-stamps a fresh
      * CRC) needs a write-back once this boot's winner is adopted, same as
@@ -538,10 +621,19 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
          * in-RAM config, exactly as before -- only the write-back is
          * suppressed. A found-but-CORRUPT NVS side is NOT protected and is
          * still written back: there is nothing there worth keeping. */
-        file_side_needs_writeback =
-            !nvs_refused_as_newer && (!nvs_valid || memcmp(&s_zones.cfg, &resolved, sizeof(resolved)) != 0);
+        /* The cfg file is the only store a save writes now (NVS is legacy,
+         * read-only), so a missing or different NVS copy is no reason to write
+         * anything: doing so would rewrite the file on EVERY boot of a
+         * post-close board, whose NVS blob is permanently absent or stale. Only
+         * an old-schema file that was migrated in RAM needs the rewrite. */
+        /* A file whose settings_source cycle was collapsed by load-time normalization
+         * is no longer self-consistent (normalization does not re-stamp crc32), so
+         * that also needs the rewrite, once. */
+        file_side_needs_writeback = !nvs_refused_as_newer &&
+                                    (file_on_disk_version != ZONES_CFG_VERSION ||
+                                     resolved->crc32 != zones_config_json_compute_crc(resolved));
         migrated_from_nvs = false;
-        s_zones.cfg = resolved;
+        s_zones.cfg = *resolved;
         if (out_found) {
             *out_found = true;
         }
@@ -549,6 +641,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
             *out_valid = true;
         }
     }
+    free(resolved);
 
     if (err == ESP_OK && trustworthy) {
         /* RELAY_LIFE_BUDGET.md, "on load": s_zones.cfg is now
@@ -643,59 +736,81 @@ static void zones_autosave_job(void *arg)
     }
 }
 
-bool zones_config_nvs_equals_ram(void)
+bool zones_config_persisted_equals_ram(void)
 {
-    zones_cfg_t *raw = malloc(sizeof(*raw));
-    if (raw == NULL) {
+    /* Re-reads the cfg FILE, the only place nvs_save() writes since the
+     * dual-write close (docs/CONFIG_FILESYSTEM.md, "Dual-write window:
+     * closed"); the NVS blob is a frozen legacy copy no save updates. */
+    zones_cfg_t *raw = persist_scratch_alloc(sizeof(*raw));
+    zones_cfg_t *snap = persist_scratch_alloc(sizeof(*snap));
+    if (raw == NULL || snap == NULL) {
+        free(raw);
+        free(snap);
         return false;
     }
     memset(raw, 0, sizeof(*raw));
-    size_t len = sizeof(*raw);
-    hal_kv_handle_t h;
-    bool ok = false;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
-        ok = hal_kv_get_blob(&h, NVS_KEY_ZONES, raw, &len) == HAL_OK && len == sizeof(s_zones.cfg) &&
-             memcmp(raw, &s_zones.cfg, sizeof(s_zones.cfg)) == 0;
-        hal_kv_close(&h);
-    }
+    /* Snapshot RAM under the zones lock (copy only), then stamp the copy exactly as
+     * nvs_save() stamps what it writes, so the compare is against what a save would
+     * have put in the file, not a live struct a writer can be mid-edit on. */
+    zones_cfg_lock();
+    memcpy(snap, &s_zones.cfg, sizeof(*snap));
+    zones_cfg_unlock();
+    snap->version = ZONES_CFG_VERSION;
+    snap->crc32 = zones_config_json_compute_crc(snap);
+    uint32_t rev = 0;
+    bool valid = false;
+    zones_config_cfg_fs_load_raw(raw, &rev, &valid);
+    bool ok = valid && memcmp(raw, snap, sizeof(*snap)) == 0;
     free(raw);
+    free(snap);
     return ok;
 }
 
 esp_err_t nvs_save(void)
 {
+    /* Persist a SNAPSHOT, never the live struct: copy s_zones.cfg and read the rev under
+     * zones_cfg_lock() (portMUX: copy only, no I/O/alloc/log inside), stamp version/CRC
+     * on the copy (last, after every other field is final -- see
+     * zones_config_json_compute_crc()/zones_cfg_t::crc32's comments), and write the copy.
+     * Every save re-stamps; there is no path that writes the blob without it. */
+    zones_cfg_t *snap = persist_scratch_alloc(sizeof(*snap));
+    if (snap == NULL) {
+        ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: no memory for the snapshot");
+        return ESP_ERR_NO_MEM;
+    }
+    zones_cfg_lock();
     s_zones.cfg.version = ZONES_CFG_VERSION;
-    /* Stamped last, after every other field is final for this write -- see
-     * zones_config_json_compute_crc()/zones_cfg_t::crc32's comments. Any in-RAM edit that
-     * lands here (a setter, a POST commit, an import) gets a fresh, correct
-     * CRC every time this function runs; there is no path that writes the
-     * blob without also re-stamping it. */
-    s_zones.cfg.crc32 = zones_config_json_compute_crc(&s_zones.cfg);
+    memcpy(snap, &s_zones.cfg, sizeof(*snap));
+    uint32_t new_zones_rev = s_zones_cfg_rev + 1;
+    zones_cfg_unlock();
+    snap->crc32 = zones_config_json_compute_crc(snap);
+    /* Mirror the stamp into RAM (one scalar) ONLY if RAM still equals the snapshot (L5): a setter
+     * that edited s_zones.cfg since the snapshot would otherwise be left with new fields under
+     * this snapshot's CRC. On a mismatch RAM keeps its own (older) CRC and that setter's own
+     * save stamps it. Compare is memcmp with the snapshot's crc field temporarily set to RAM's. */
+    zones_cfg_lock();
+    {
+        uint32_t stamped = snap->crc32;
+        snap->crc32 = s_zones.cfg.crc32;
+        bool unchanged = memcmp(snap, &s_zones.cfg, sizeof(*snap)) == 0;
+        snap->crc32 = stamped;
+        if (unchanged) {
+            s_zones.cfg.crc32 = stamped;
+        }
+    }
+    zones_cfg_unlock();
 
-    /* Dual-write, FILE FIRST: requirement 1 of the zones-config-move task.
-     * The file write's own failure is logged inside
-     * zones_config_cfg_fs_save() and otherwise swallowed here -- NVS below
-     * is still authoritative for older firmware and for a board with no
-     * `cfg` partition (ESP_ERR_INVALID_STATE is the expected, silent
-     * outcome on every board today), so a file-write failure must not stop
-     * the NVS write that every existing caller of nvs_save() still depends
-     * on for its actual persistence guarantee. */
-    s_zones_cfg_rev++;
-    (void)zones_config_cfg_fs_save(&s_zones.cfg, s_zones_cfg_rev);
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
+    esp_err_t err = zones_config_cfg_fs_save(snap, new_zones_rev);
+    free(snap);
+    if (err == ESP_OK) {
+        zones_cfg_lock();
+        s_zones_cfg_rev = new_zones_rev;
+        zones_cfg_unlock();
+    } else {
+        ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: %s -- NVS is no longer written, the change "
+                                 "lives in RAM until reboot",
+                 esp_err_to_name(err));
     }
-    err = hal_kv_set_blob(&h, NVS_KEY_ZONES, &s_zones.cfg, sizeof(s_zones.cfg));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_ZONES_REV, s_zones_cfg_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
 
     /* docs/KILN_PROFILES_PLAN.md section 2.4 (2026-09-14 "finish upload/
      * download" follow-up, item 13 -- auto-save): every zones-config write
@@ -726,14 +841,15 @@ esp_err_t nvs_save(void)
      * logged, never turned into this function's own return value -- the
      * zones write ITSELF already fully succeeded by this point. */
     esp_err_t autosave_dispatch_err =
-        uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle());
+        (err == ESP_OK) ? uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle())
+                        : ESP_OK; /* nothing was saved, so there is nothing to autosave */
     if (autosave_dispatch_err != ESP_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "kiln config autosave could not be dispatched: %s -- the active kiln "
                       "package was NOT updated with this change, though the change itself was saved",
                  esp_err_to_name(autosave_dispatch_err));
     }
 
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 /* RELAY_LIFE_BUDGET.md -- see zones_http_internal.h's own
@@ -1154,38 +1270,13 @@ esp_err_t relay_names_save(void)
     s_relay_names.cfg.crc32 = compute_relay_names_crc(&s_relay_names.cfg);
     uint32_t new_rev = s_relay_names_rev + 1;
 
-    /* FILE FIRST (best-effort; a failure here is logged and swallowed --
-     * NVS below remains the persistence guarantee every existing caller
-     * already depends on), THEN NVS (authoritative, failure returned to the
-     * caller) -- same policy unit_pref_set()/zones_config_cfg_fs.c's step-5
-     * note document. */
-    esp_err_t file_err =
-        pref_cfg_fs_save(RELAY_NAMES_FILE_PATH, &s_relay_names.cfg, sizeof(s_relay_names.cfg), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(ZONES_HTTP_TAG, "relay names file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_RELAY_NAMES, &s_relay_names.cfg, sizeof(s_relay_names.cfg));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_RELAY_NAMES_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGW(ZONES_HTTP_TAG, "relay_names_save failed: %s -- relay names will not survive a reboot",
-                 hal_status_to_name(err));
-    } else {
+    /* cfg file ONLY -- docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed". */
+    esp_err_t err = pref_cfg_fs_commit(RELAY_NAMES_FILE_PATH, &s_relay_names.cfg, sizeof(s_relay_names.cfg), new_rev,
+                                       "relay names");
+    if (err == ESP_OK) {
         s_relay_names_rev = new_rev;
     }
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 /* ---- Task 1's persisted normal-current results ----------------------------
@@ -1350,36 +1441,13 @@ static esp_err_t zone_normals_save(void)
     s_zone_normals.cfg.crc32 = compute_zone_normals_crc(&s_zone_normals.cfg);
     uint32_t new_rev = s_zone_normals_rev + 1;
 
-    /* File first, best-effort (same policy as relay_names_save()); NVS below
-     * stays authoritative and its failure is what the caller sees. */
-    esp_err_t file_err =
-        pref_cfg_fs_save(ZONE_NORMALS_FILE_PATH, &s_zone_normals.cfg, sizeof(s_zone_normals.cfg), new_rev);
-    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(ZONES_HTTP_TAG, "zone normals file write failed: %s -- NVS remains the source of truth this boot",
-                 esp_err_to_name(file_err));
-    }
-
-    hal_kv_handle_t h;
-    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
-    if (err != HAL_OK) {
-        return hal_status_to_esp_err(err);
-    }
-    err = hal_kv_set_blob(&h, NVS_KEY_ZONE_NORMALS, &s_zone_normals.cfg, sizeof(s_zone_normals.cfg));
-    if (err == HAL_OK) {
-        err = hal_kv_set_u32(&h, NVS_KEY_ZONE_NORMALS_REV, new_rev);
-    }
-    if (err == HAL_OK) {
-        err = hal_kv_commit(&h);
-    }
-    hal_kv_close(&h);
-    if (err != HAL_OK) {
-        ESP_LOGW(ZONES_HTTP_TAG, "zone_normals_save failed: %s -- measured normals/CT map/k_ct will not "
-                                  "survive a reboot",
-                 hal_status_to_name(err));
-    } else {
+    /* cfg file ONLY (same policy as relay_names_save()). */
+    esp_err_t err = pref_cfg_fs_commit(ZONE_NORMALS_FILE_PATH, &s_zone_normals.cfg, sizeof(s_zone_normals.cfg),
+                                       new_rev, "zone normals / CT map");
+    if (err == ESP_OK) {
         s_zone_normals_rev = new_rev;
     }
-    return hal_status_to_esp_err(err);
+    return err;
 }
 
 /* Read-only dual-write status for GET /api/cfgfs's "zone_normals" row -- same

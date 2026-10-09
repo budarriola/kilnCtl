@@ -51,6 +51,7 @@
 #include "kiln_io.h"
 #include "pid_autotune.h"
 #include "safety_link.h"
+#include "system_mode_gate.h"
 #include "thermal_guard.h"
 
 #ifdef __cplusplus
@@ -414,6 +415,13 @@ typedef struct {
     autotune_ceiling_adoption_t adoption;
     float old_ceiling_c_per_hr;
     float new_ceiling_c_per_hr;
+    /* Owner decision 2026-10-08: accept writes zone PID gains/max_ramp, so
+     * it is refused while a firing or autotune run is active (system mode
+     * gate, SYS_ACTION_WRITE_ZONES_CONFIG). When that is why it returned
+     * false, refused_by_mode_gate is true and mode_reason holds the gate's
+     * text; HTTP maps it to 409. Nothing is written in that case. */
+    bool refused_by_mode_gate;
+    char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
 } autotune_accept_result_t;
 
 /* Writes proposed_gains into this zone's stored PID config via

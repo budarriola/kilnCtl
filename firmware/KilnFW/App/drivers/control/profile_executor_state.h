@@ -373,6 +373,8 @@ typedef struct {
         bool    commanded_on;
         bool    actuated_on;
         uint8_t rule_reason;
+        uint32_t on_time_s;    /* whole seconds commanded ON this run */
+        uint32_t switch_count; /* off->on transitions this run */
     } aux[AUX_OUTPUTS_COUNT];
 
     /* Duration-model inputs for /api/profile_exec's total_planned_s/

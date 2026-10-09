@@ -10,7 +10,10 @@
 
 #include "cfg_fs.h"
 #include "firing_stats_cfg_fs.h"
+#include "live_profile.h"
+#include "persist_scratch.h"
 #include "profiles_cfg_fs.h"
+#include "profiles_favorites.h"
 
 static const char *PSCF_TAG = "profiles_scope_cfg";
 
@@ -24,6 +27,15 @@ typedef struct {
 static const pscf_family_t kFamilies[] = {
     { PROFILES_CFG_FS_DIR, PROFILES_CFG_FS_PATH_FMT },         /* profile slots */
     { FIRING_STATS_CFG_FS_DIR, FIRING_STATS_CFG_FS_PATH_FMT }, /* firing history */
+};
+
+/* Single files at the cfg root whose NVS side is in profiles_nvs (owner
+ * decision 2026-10-07: favorites and the live-edit record/working profile are
+ * cfg-only now). Named by their owners' macros. */
+static const char *const kRootPaths[] = {
+    PROFILES_FAVORITES_FILE_PATH,
+    LIVE_PROFILE_RECORD_FILE_PATH,
+    LIVE_PROFILE_WORKING_FILE_PATH,
 };
 
 static const char *const kDirs[] = { PROFILES_CFG_FS_DIR, FIRING_STATS_CFG_FS_DIR };
@@ -65,7 +77,7 @@ esp_err_t profiles_scope_cfg_files_delete(int *out_deleted)
 {
     esp_err_t first_err = ESP_OK;
     int deleted = 0;
-    cfg_fs_entry_t *ents = malloc(PSCF_LIST_MAX * sizeof(*ents));
+    cfg_fs_entry_t *ents = persist_scratch_alloc(PSCF_LIST_MAX * sizeof(*ents));
     if (!ents) {
         if (out_deleted) {
             *out_deleted = 0;
@@ -124,6 +136,18 @@ esp_err_t profiles_scope_cfg_files_delete(int *out_deleted)
         }
     }
     free(ents);
+    for (size_t r = 0; r < sizeof(kRootPaths) / sizeof(kRootPaths[0]); r++) {
+        esp_err_t err = cfg_fs_delete(kRootPaths[r]);
+        if (err == ESP_OK) {
+            deleted++;
+        } else if (err != ESP_ERR_NOT_FOUND && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(PSCF_TAG, "profiles reset: could not delete cfg file %s: %s", kRootPaths[r],
+                     esp_err_to_name(err));
+            if (first_err == ESP_OK) {
+                first_err = err;
+            }
+        }
+    }
     if (out_deleted) {
         *out_deleted = deleted;
     }

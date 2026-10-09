@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_heartbeat_contract.ps1 -- the PC-side heartbeat that keeps
 # uart_bridge.c's link watchdog fed (e3e8ec6, "The heartbeat the firmware
 # required, nobody was sending") is a cross-language producer/consumer pair:

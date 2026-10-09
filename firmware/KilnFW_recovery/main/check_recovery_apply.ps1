@@ -36,6 +36,8 @@ if (-not $vcvars) {
     Write-Host "SKIP: vcvarsall.bat not found -- cannot build the host test with MSVC."
     exit 3
 }
+# vcvarsall runs ONCE here, outside the build gate; the gate then covers only cl.
+Import-KilnVcvarsEnv -Vcvars $vcvars
 
 $work = Join-Path $env:TEMP "recovery_apply_$PID"
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
@@ -64,7 +66,7 @@ function Build-And-Run {
     New-Item -ItemType Directory -Path $obj -Force | Out-Null
     $test = Join-Path $here "test_recovery_apply.c"
     $srcs = ($Impls | ForEach-Object { "`"$_`"" }) -join " "
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$updateDir`" /I`"$httpDir`" `"$test`" $srcs /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$updateDir`" /I`"$httpDir`" `"$test`" $srcs /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
     $gate = Enter-KilnBuildGate -Label "recovery_apply" -Lane light
     try {
         $ErrorActionPreference = "Continue"
@@ -137,6 +139,8 @@ try {
     Test-Mutant "modflag" @(, @("prog->app_modified = true;", "(void)0;"))
     Test-Mutant "shaabort" @(, @("if (io->sha_abort) {", "if (0) {"))
     Test-Mutant "scratchlen" @(, @("scratch_len < RECOVERY_APPLY_CHUNK ||", "0 ||"))
+    Test-Mutant "shafinish" @(, @("sha_finish(io->ctx, out) == 0 ? 0 : 2", "sha_finish(io->ctx, out) == 0 ? 0 : 0"))
+    Test-Mutant "shaupdate" @(, @("if (io->sha_update(io->ctx, scratch, n) != 0) {", "if (io->sha_update(io->ctx, scratch, n) == 12345) {"))
     # Readback and verification of what landed in app.
     Test-Mutant "readbacksrc" @(, @("hash_region(io, io->app_read, 0, len, scratch, sha)",
                                     "hash_region(io, io->stage_read, STAGE_IMAGE_OFFSET, len, scratch, sha)"))
@@ -154,7 +158,7 @@ try {
     Test-Mutant "noerase" @(, @("prog->stage_cleared = io->stage_erase(io->ctx, 0, STAGE_HEADER_SECTOR) == 0;",
                                 "prog->stage_cleared = true;"))
 
-    Write-Host "check_recovery_apply: PASS ($passCount assertions; 19 negative-test mutants plus the real build failed or passed as required)"
+    Write-Host "check_recovery_apply: PASS ($passCount assertions; 21 negative-test mutants plus the real build failed or passed as required)"
     exit 0
 }
 finally {

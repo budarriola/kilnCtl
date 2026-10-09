@@ -493,7 +493,13 @@ class AlwaysLastAcrossEverySuiteTest(unittest.TestCase):
         self.assertIn("web", containing)
         self.assertIn("full", containing)
         for name in containing:
-            self.assertEqual(R.SUITES[name][-1], "WEB-SEC-05", name)
+            ids = R.SUITES[name]
+            self.assertEqual(ids.count("WEB-SEC-05"), 1, name)
+            # Only result-only aliases of WEB-SEC-05 (depends_on == WEB-SEC-05)
+            # may follow it; every board-touching case must come before it.
+            for cid in ids[ids.index("WEB-SEC-05") + 1:]:
+                self.assertEqual(R.get_case(cid).depends_on, "WEB-SEC-05",
+                                 f"{name}: {cid} runs after WEB-SEC-05")
 
 
 if __name__ == "__main__":

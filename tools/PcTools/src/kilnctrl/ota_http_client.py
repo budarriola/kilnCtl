@@ -803,7 +803,7 @@ def sw_reset(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     return {"ok": True, "status_code": status_code, "detail": body_text}
 
 
-def format_cfgfs(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
+def format_cfgfs(host: str, timeout: float = OTA_HTTP_TIMEOUT_S, force_healthy: bool = False) -> dict:
     """POST /api/cfgfs/format_confirm -- the operator confirmation that lets
     cfg_fs_mount.c actually erase and reformat the `cfg` LittleFS partition
     after it detected (at boot) that auto-formatting would silently discard
@@ -821,6 +821,12 @@ def format_cfgfs(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     /api/factory_reset (cfg_fs_format_http.c's format_confirm_post_handler()
     deliberately reused rather than minting its own), which is now moot.
 
+    Since the NVS dual-write close the firmware REFUSES (HTTP 409, plain text)
+    to format a cfg partition that is mounted and healthy, because cfg is then
+    the only copy of zones/profiles/preferences. ``force_healthy=True`` adds
+    the explicit override query ``?force_healthy=1``; it is never sent by
+    default. The unmounted/needs-format path needs no override.
+
     DESTRUCTIVE: on success this erases every file cfg_fs holds and remounts
     an empty filesystem. The response body is plain text (not JSON, same
     departure from the rest of this module as sw_reset() above) -- reported
@@ -833,8 +839,9 @@ def format_cfgfs(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     -- request construction/response-parsing are unit-tested with mocked
     HTTP only; see test_ota_http_client.py.
     """
+    path = "/api/cfgfs/format_confirm" + ("?force_healthy=1" if force_healthy else "")
     req = urllib.request.Request(
-        _url(host, "/api/cfgfs/format_confirm"),
+        _url(host, path),
         data=b"",
         method="POST",
         headers={

@@ -79,6 +79,16 @@ static bool zone_is_on_off(uint8_t zone_index)
     return s_mirror_on_off[zone_index];
 }
 
+/* Stand-in for profile_executor_zone_drives_run() (neither on/off nor
+ * monitor-only), the one shared predicate the production loop calls. The
+ * mirrored loop publishes its zone array through s_mirror_zones so this
+ * stand-in can read monitor_only the way production reads the live zone. */
+static const mirror_zone_t *s_mirror_zones;
+static bool profile_executor_zone_drives_run(uint8_t zi)
+{
+    return !zone_is_on_off(zi) && !s_mirror_zones[zi].monitor_only;
+}
+
 /* Mirrors profile_executor.c's per-tick lock_ok/lagging loop (anchored on
  * the one-sided condition itself, not a line number -- see
  * ramp_lock_decision_mirror_drift_check.py). old_fabsf selects the PRE-FIX formula
@@ -87,10 +97,10 @@ static bool zone_is_on_off(uint8_t zone_index)
 static uint8_t lock_lagging_mask(const mirror_zone_t zones[TEST_ZONE_COUNT], float target_c, bool old_fabsf)
 {
     uint8_t lagging = 0;
+    s_mirror_zones = zones;
     for (uint8_t zi = 0; zi < TEST_ZONE_COUNT; zi++) {
         if (!zones[zi].active || zones[zi].faulted) continue;
-        if (zone_is_on_off(zi)) continue;
-        if (zones[zi].monitor_only) continue;
+        if (!profile_executor_zone_drives_run(zi)) continue;
         bool held;
         if (old_fabsf) {
             held = !zones[zi].sensor_ok || fabsf(zones[zi].actual_c - target_c) > TEST_RAMP_LOCK_BAND_C;

@@ -18,6 +18,7 @@
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
+#include "cfg_fs_refusal_http.h"
 #include "safety_cfg_store.h" /* safety_cfg_store_has_data() -- GET /api/kiln_configs */
 #include "safety_ceiling_sync.h" /* 2026-09-15 review (review_divergence_check_561efa3b_2026-09-15.md,
                                    * LOW) -- warn on an explicit save while diverged */
@@ -233,7 +234,13 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     char reason[96];
     reason[0] = '\0';
     if (!kiln_cfg_store_save_current(name, id_or_negative, &new_id, reason, sizeof(reason))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason[0] ? reason : "save failed");
+        if (kiln_cfg_store_reason_is_persist_failure(reason) && !cfg_fs_is_available()) {
+            return cfg_fs_http_persist_failed(req);
+        }
+        httpd_resp_send_err(req,
+                            kiln_cfg_store_reason_is_persist_failure(reason) ? HTTPD_500_INTERNAL_SERVER_ERROR
+                                                                              : HTTPD_400_BAD_REQUEST,
+                            reason[0] ? reason : "save failed");
         return ESP_OK;
     }
 
@@ -304,7 +311,13 @@ static esp_err_t clone_post_handler(httpd_req_t *req)
     char reason[96];
     reason[0] = '\0';
     if (!kiln_cfg_store_clone(src_id, name, &new_id, reason, sizeof(reason))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, reason[0] ? reason : "clone failed");
+        if (kiln_cfg_store_reason_is_persist_failure(reason) && !cfg_fs_is_available()) {
+            return cfg_fs_http_persist_failed(req);
+        }
+        httpd_resp_send_err(req,
+                            kiln_cfg_store_reason_is_persist_failure(reason) ? HTTPD_500_INTERNAL_SERVER_ERROR
+                                                                              : HTTPD_400_BAD_REQUEST,
+                            reason[0] ? reason : "clone failed");
         return ESP_OK;
     }
 
@@ -532,10 +545,17 @@ static esp_err_t delete_post_handler(httpd_req_t *req)
     char delete_reason[96];
     delete_reason[0] = '\0';
     if (!kiln_cfg_store_delete(id, ack, delete_reason, sizeof(delete_reason))) {
+        if (kiln_cfg_store_reason_is_persist_failure(delete_reason) && !cfg_fs_is_available()) {
+            return cfg_fs_http_persist_failed(req);
+        }
         if (strcmp(delete_reason, "no saved kiln config with that id") == 0) {
             httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such kiln config");
         } else {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, delete_reason[0] ? delete_reason : "delete failed");
+            httpd_resp_send_err(req,
+                                kiln_cfg_store_reason_is_persist_failure(delete_reason)
+                                    ? HTTPD_500_INTERNAL_SERVER_ERROR
+                                    : HTTPD_400_BAD_REQUEST,
+                                delete_reason[0] ? delete_reason : "delete failed");
         }
         return ESP_OK;
     }
@@ -571,8 +591,17 @@ static esp_err_t rename_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "a saved kiln config already has that name");
         return ESP_OK;
     }
-    if (!kiln_cfg_store_rename(id, name)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no such kiln config, or name invalid");
+    char rename_reason[96];
+    rename_reason[0] = '\0';
+    if (!kiln_cfg_store_rename_ex(id, name, rename_reason, sizeof(rename_reason))) {
+        if (kiln_cfg_store_reason_is_persist_failure(rename_reason) && !cfg_fs_is_available()) {
+            return cfg_fs_http_persist_failed(req);
+        }
+        if (kiln_cfg_store_reason_is_persist_failure(rename_reason)) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, rename_reason);
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no such kiln config, or name invalid");
+        }
         return ESP_OK;
     }
     return httpd_resp_sendstr(req, "ok");

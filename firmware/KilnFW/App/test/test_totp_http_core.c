@@ -9,7 +9,10 @@
 
 #include "test_common.h"
 
+#include "fake_kv.h"
+#include "hal_kv.h"
 #include "../drivers/http/totp_http_core.h"
+#include "../drivers/persist/totp_config.h"
 
 // --- 503-before-anything-else ordering --------------------------------------
 
@@ -312,10 +315,50 @@ static void test_forgot_board_cap_success_never_resets(void)
     TEST_CHECK(c.failures == TOTP_FORGOT_BOARD_CAP, "the count saturates at the cap");
 }
 
+// --- credential wipe disenrolls TOTP (2026-09-25) ---------------------------
+
+static int s_tokens_cleared;
+static int s_pending_cleared;
+static void fake_clear_tokens(void) { s_tokens_cleared++; }
+static void fake_clear_pending(void) { s_pending_cleared++; }
+
+static void test_wipe_disenrolls_totp(void)
+{
+    TEST_SECTION("totp_wipe_disenroll -- credential wipe clears secret, counter, tokens, pending");
+    fake_kv_reset_all();
+    fake_kv_set_write_safe_here(true);
+    hal_kv_init_partition(NULL);
+    totp_config_ram_reset();
+    s_tokens_cleared = 0;
+    s_pending_cleared = 0;
+
+    uint8_t secret[TOTP_SECRET_LEN];
+    memset(secret, 0x5A, sizeof(secret));
+    TEST_CHECK(totp_config_set_secret(secret), "enroll a secret");
+    TEST_CHECK(totp_config_set_last_counter(4242), "persist a nonzero replay counter");
+    TEST_CHECK(totp_config_enrolled(), "enrolled before the wipe");
+
+    TEST_CHECK(totp_wipe_disenroll(totp_config_clear, fake_clear_tokens, fake_clear_pending),
+               "wipe reports success");
+    TEST_CHECK(!totp_config_enrolled(), "enrolled == false after the wipe");
+    uint8_t out[TOTP_SECRET_LEN];
+    TEST_CHECK(totp_config_load_secret(out) == TOTP_CONFIG_LOAD_ABSENT, "secret reads back ABSENT");
+    uint32_t ctr = 1;
+    TEST_CHECK(totp_config_load_last_counter(&ctr) == TOTP_CONFIG_LOAD_ABSENT && ctr == 0,
+               "replay counter cleared");
+    TEST_CHECK(s_tokens_cleared == 1, "outstanding reset tokens dropped");
+    TEST_CHECK(s_pending_cleared == 1, "pending enrollment secret dropped");
+
+    // Enrollment is refused while auth is off (owner decision), so a wiped
+    // board with auth off cannot silently re-enroll.
+    TEST_CHECK(!totp_enroll_allowed(false), "enrollment refused with web auth off after the wipe");
+}
+
 void run_test_totp_http_core(void)
 {
     test_clock_ready();
     test_enroll_allowed();
+    test_wipe_disenrolls_totp();
     test_pending_begin_and_valid();
     test_pending_expires_and_zeroes();
     test_pending_never_active_is_invalid();

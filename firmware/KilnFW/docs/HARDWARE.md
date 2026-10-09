@@ -42,11 +42,10 @@ below.
 
 One bus (SCLK 12 / MOSI 11 / MISO 13), four chip selects: three MAX31856s across
 J6 and the display on J2. The thermocouple parts run SPI mode 1 and are **capped
-at 4 MHz** — the part is rated to 5 MHz. The cap was set because the (since
-deleted, 2026-08-28) SimFW bench fixture's slave emulation could not reliably meet
-the first-byte deadline above 4 MHz; the rationale in the Kconfig help still
-cites `firmware/SimFW/docs/SPI_ACCESS_AUDIT.md`, which no longer exists. The cap
-itself is still enforced by a `range` on `KILNCTL_THERMO_SPI_CLOCK_HZ` and a
+at 4 MHz** — the part is rated to 5 MHz. The cap is an owner decision
+(2026-10-06): 4 MHz is ample for the MAX31856 conversion rates and faster SPI is
+not needed (it was originally set for the SimFW bench fixture, deleted
+2026-08-28). The cap is enforced by a `range` on `KILNCTL_THERMO_SPI_CLOCK_HZ` and a
 `_Static_assert` in `MAX31856.c`.
 
 The ILI9488 runs mode 0 and much faster (`KILNCTL_DISPLAY_SPI_CLOCK_HZ`, 20 MHz),

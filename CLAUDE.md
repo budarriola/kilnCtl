@@ -22,8 +22,8 @@ links to the per-area plans that own the detail.
 **Anything involving the boards or the KiCad project starts
 with one of these calls.** Do not conclude a capability is missing because you
 cannot see a tool for it — each server publishes six or seven tools and keeps
-the rest behind a search facade (229 tools for `kilnctrl`, 86 for `kicad`, both
-per `kiln_help()`/`kicad_help()` as of 2026-10-06: `profile_save_bench_aux_rule` (confirm-gated, read-back-verified; saves the one `BENCH_AUX_RULE` bench profile carrying an aux on/off rule so spare-relay bench steps 3/4/6/7 can run, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a, `mcp_server_aux.py`) took the count from 228 to 229; `control_convert_onoff_zone_to_aux` (confirm-gated, one-way; a single `POST /api/zones` with only `move_zone_to_aux=Z&confirm=1`, which the firmware does all-or-nothing: frees the ON_OFF zone, enables the aux binding and rewrites every stored profile rule for the zone to aux target 8+(relay-1), rolling back on any failure; the tool prechecks, then verifies zone, aux entry and every profile by read-back; `docs/SPARE_RELAY_ONOFF_PLAN.md` section 10, `mcp_server_aux.py`) took the count from 227 to 228; `update_check`/`update_fetch_status`/`update_get_settings` (read-only) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated; `update_stage_release` claims success only when the stage read-back is verified, source github, and its sha256 equals the release's; GitHub release check/stage, fetch-job status/cancel and repo setting over WP8's `/api/update/check|download|fetch|fetch/cancel` and WP9's `/api/update/settings`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP10, `mcp_server_update.py`) took the count from 221 to 227; `control_set_relay_type(relay, device_type, confirm=False)` (confirm-gated, refuses mid-run, read-back verified; a narrow writer for one relay's device type, POST key `relay<N>_type` with N 1-based, enum 0 unset/1 damper/2 outlet/3 valve/4 fan/5 light/6 other, `docs/ZONE_GRAPHIC_PLAN.md` M17; `control_get_zones` now also prints `relay_types`) took the count from 220 to 221; `control_get_aux_outputs` (read-only), `control_set_aux_output` and `control_set_aux_manual` (confirm-gated, refuse mid-run, read-back verified; spare-relay aux outputs, `docs/SPARE_RELAY_ONOFF_PLAN.md` WP-7, `mcp_server_aux.py`) took the count from 217 to 220; `bench_test_start`/`ota_matrix_start` (background twins of `bench_test_run`/`ota_matrix_run`: return a job id at once; the job calls the real tool function with confirm/allow_heat/ota_allow_heat/... passed through unchanged, so the board lock, run-level preflight and every gate still apply; `ota_matrix_start` answers a dry run or an unconfirmed call synchronously and starts no job) and `bench_test_job_status` (RUNNING with a runner.log tail, then OK/INCOMPLETE/FAILED plus the report; `wait_s` clamped to 120 s; same `mcpkit/build_jobs.py` registry as `build_job_status`, because the client aborts a call after 300 s of silence while the run keeps going) took the count from 214 to 217; `debug_reset` and `update_stage_upload` also changed text only, no count change (the reset result now has a `reset markers:` line stating whether `KCTL_RESET_ISSUED`/`KCTL_STATE` were seen and `still_halted`, so the dark-board path is distinguishable from the healthy one; a 400 `bad_version` upload refusal now explains the embedded image version is not semver and says to retry with an explicit `version="x.y.z"`, never inventing one); `recovery_apply_status` (read-only) and `recovery_apply_staged` (confirm-gated, polls to done/failed; recovery image only, wraps WP5's `POST /api/recovery/apply_staged`/`GET /api/recovery/apply_status`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md`) took the count from 212 to 214; `update_status` (read-only), `update_stage_upload` and `update_stage_clear` (confirm-gated, verify by read-back; the application's `stage` partition, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP6; no apply tool yet) took the count from 209 to 212; `build_kilnfw_start`/`build_job_status` took the count from 207 to 209; `recovery_enter` (confirm-gated `POST /api/ota/esp/recovery_boot`, the deliberate way from the application into the recovery image; see docs/MCP_SERVERS.md) took the count from 206 to 207; the three further `recovery_*` tools (`recovery_pico_abort`, `recovery_sw_reset`, `recovery_push_esp_image`, all confirm-gated, recovery image only; since 2026-10-02 the recovery image is unauthenticated -- no password, no key, no HMAC; its SoftAP shows a random per-boot passphrase on the LCD, see docs/MCP_SERVERS.md) took the count from 203 to 206; earlier the five `recovery_*` tools (`recovery_status` read-only; `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`, `recovery_pico_upload` confirm-gated; recovery image only, unauthenticated since 2026-10-02 (any joiner automation reads the LCD passphrase from `KILNCTL_RECOVERY_AP_PASSPHRASE`, no PcTools tool joins the AP), see docs/MCP_SERVERS.md) took the count from 198 to 203; `flash_recovery` (JTAG write of the `recovery` partition only; see docs/MCP_SERVERS.md) took the count from 197 to 198; on 2026-10-01 the two `network_get_ip_config`/`network_set_ip_config` tools added that day took the count from 195 to 197, after 2026-09-29, when the AP-password HMAC
+the rest behind a search facade (231 tools for `kilnctrl`, 86 for `kicad`, both
+per `kiln_help()`/`kicad_help()` as of 2026-10-07: `latency_soak`/`latency_soak_start` (read-only; GET-only per-surface HTTP latency soak with p50/p95/max, errors and clustered-stall ticks, for the never-reproduced 2026-08 multi-surface stall; `latency_soak_start` is the background twin polled via `bench_test_job_status`; `mcp_server_latency_soak.py`, `latency_soak.py`, `latency_soak_stats.py`) took the count from 229 to 231; `profile_save_bench_aux_rule` (confirm-gated, read-back-verified; saves the one `BENCH_AUX_RULE` bench profile carrying an aux on/off rule so spare-relay bench steps 3/4/6/7 can run, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a, `mcp_server_aux.py`) took the count from 228 to 229; `control_convert_onoff_zone_to_aux` (confirm-gated, one-way; a single `POST /api/zones` with only `move_zone_to_aux=Z&confirm=1`, which the firmware does all-or-nothing: frees the ON_OFF zone, enables the aux binding and rewrites every stored profile rule for the zone to aux target 8+(relay-1), rolling back on any failure; the tool prechecks, then verifies zone, aux entry and every profile by read-back; `docs/SPARE_RELAY_ONOFF_PLAN.md` section 10, `mcp_server_aux.py`) took the count from 227 to 228; `update_check`/`update_fetch_status`/`update_get_settings` (read-only) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated; `update_stage_release` claims success only when the stage read-back is verified, source github, and its sha256 equals the release's; GitHub release check/stage, fetch-job status/cancel and repo setting over WP8's `/api/update/check|download|fetch|fetch/cancel` and WP9's `/api/update/settings`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP10, `mcp_server_update.py`) took the count from 221 to 227; `control_set_relay_type(relay, device_type, confirm=False)` (confirm-gated, refuses mid-run, read-back verified; a narrow writer for one relay's device type, POST key `relay<N>_type` with N 1-based, enum 0 unset/1 damper/2 outlet/3 valve/4 fan/5 light/6 other, `docs/ZONE_GRAPHIC_PLAN.md` M17; `control_get_zones` now also prints `relay_types`) took the count from 220 to 221; `control_get_aux_outputs` (read-only), `control_set_aux_output` and `control_set_aux_manual` (confirm-gated, refuse mid-run, read-back verified; spare-relay aux outputs, `docs/SPARE_RELAY_ONOFF_PLAN.md` WP-7, `mcp_server_aux.py`) took the count from 217 to 220; `bench_test_start`/`ota_matrix_start` (background twins of `bench_test_run`/`ota_matrix_run`: return a job id at once; the job calls the real tool function with confirm/allow_heat/ota_allow_heat/... passed through unchanged, so the board lock, run-level preflight and every gate still apply; `ota_matrix_start` answers a dry run or an unconfirmed call synchronously and starts no job) and `bench_test_job_status` (RUNNING with a runner.log tail, then OK/INCOMPLETE/FAILED plus the report; `wait_s` clamped to 120 s; same `mcpkit/build_jobs.py` registry as `build_job_status`, because the client aborts a call after 300 s of silence while the run keeps going) took the count from 214 to 217; `debug_reset` and `update_stage_upload` also changed text only, no count change (the reset result now has a `reset markers:` line stating whether `KCTL_RESET_ISSUED`/`KCTL_STATE` were seen and `still_halted`, so the dark-board path is distinguishable from the healthy one; a 400 `bad_version` upload refusal now explains the embedded image version is not semver and says to retry with an explicit `version="x.y.z"`, never inventing one); `recovery_apply_status` (read-only) and `recovery_apply_staged` (confirm-gated, polls to done/failed; recovery image only, wraps WP5's `POST /api/recovery/apply_staged`/`GET /api/recovery/apply_status`, `docs/GITHUB_RELEASE_UPDATE_PLAN.md`) took the count from 212 to 214; `update_status` (read-only), `update_stage_upload` and `update_stage_clear` (confirm-gated, verify by read-back; the application's `stage` partition, `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP6; no apply tool yet) took the count from 209 to 212; `build_kilnfw_start`/`build_job_status` took the count from 207 to 209; `recovery_enter` (confirm-gated `POST /api/ota/esp/recovery_boot`, the deliberate way from the application into the recovery image; see docs/MCP_SERVERS.md) took the count from 206 to 207; the three further `recovery_*` tools (`recovery_pico_abort`, `recovery_sw_reset`, `recovery_push_esp_image`, all confirm-gated, recovery image only; since 2026-10-02 the recovery image is unauthenticated -- no password, no key, no HMAC; its SoftAP shows a random per-boot passphrase on the LCD, see docs/MCP_SERVERS.md) took the count from 203 to 206; earlier the five `recovery_*` tools (`recovery_status` read-only; `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`, `recovery_pico_upload` confirm-gated; recovery image only, unauthenticated since 2026-10-02 (any joiner automation reads the LCD passphrase from `KILNCTL_RECOVERY_AP_PASSPHRASE`, no PcTools tool joins the AP), see docs/MCP_SERVERS.md) took the count from 198 to 203; `flash_recovery` (JTAG write of the `recovery` partition only; see docs/MCP_SERVERS.md) took the count from 197 to 198; on 2026-10-01 the two `network_get_ip_config`/`network_set_ip_config` tools added that day took the count from 195 to 197, after 2026-09-29, when the AP-password HMAC
 retirement (below) deleted the `ota_get_challenge` tool along with
 `GET /api/ota/challenge` itself, dropping the count from 196 to 195. The one
 added before that removal was `control_set_zone_coupling`, 2026-09-28 -- a narrow writer for ONE coupling-matrix cell,
@@ -37,8 +37,7 @@ whole-page write. GET-merge-POST like `control_set_zone_type`, except that it
 strips the fields `zones_http_post_parse.c` omit-preserves (every other
 coupling cell, the `k`/`tau`/`deadtime` plant model, `coupling_diag_k_dc`)
 so the firmware keeps them bit-exact instead of taking GET's rounded print;
-required fields such as PID gains are still re-posted at GET's `%.4f`, the
-same residual as the other narrow writers. Refuses unless `confirm is True`,
+required fields such as PID gains are re-posted from GET's lossless `%.9g` print (tau/deadtime print at `%.1f` but are omit-preserved). Refuses unless `confirm is True`,
 refuses mid-run (precheck plus the `system_mode_gate` 409), and fails loud
 unless the cell reads back within 0.0005 with nothing else in `/api/zones`
 changed. The one before it was
@@ -502,7 +501,7 @@ Three git-workflow guards live under `tools/`: `worktree_mint.ps1` (mint/remove
 a short, uniquely-named worktree at `origin/main` under `C:\wt\`),
 `push_verify.ps1` (verify a commit actually landed on `origin/main`, direction-
 and `$?`-safe), and `commit_guard.ps1` (refuse a commit whose working copy
-differs from `origin/main` until every difference is confirmed as your own).
+differs from `origin/main` until every difference is confirmed as your own), plus `tools/land.ps1` (the whole landing sequence -- check-log gate, rebase, narrow re-check, push, push_verify LANDED, optional MCP restart/worktree removal -- in one command; finish with `tools\land.ps1`).
 Full detail: **docs/MCP_SERVERS.md**'s "Git workflow guards" section.
 
 **What is safe to delete during cleanup.** Many parallel sessions build and
@@ -526,6 +525,16 @@ other captured run data, any `.kicad_*` file, or a tracked file with local
 modifications — those need owner review, not deletion, and reverting them
 to investigate is exactly the mistake to avoid (other sessions' uncommitted
 work lives in this same shared tree).
+
+`tools/wt_status.ps1` applies these rules mechanically to `C:\wt`: a report of
+every directory (registered or not, branch/HEAD, commits ahead of origin/main
+each marked on-main or unlanded by `git cherry` patch-id, dirty and untracked
+counts, idle time, live processes under the path) classed ACTIVE / HAS_WORK /
+STALE_CLEAN / ORPHAN_DIR / UNKNOWN, with helpers (`.buildgate`, `.checkcache`,
+`*_logs`, loose files) listed and never pruned. `-Prune` (preview with
+`-WhatIf` first) deletes only STALE_CLEAN and ORPHAN_DIR entries,
+junction-safe, then runs `git worktree prune`. Run it instead of cleaning
+`C:\wt` by hand; tests are `tools/check_wt_status.ps1`.
 
 ## Project Structure
 
@@ -681,6 +690,8 @@ panel — it only feeds the legacy resistive NS2009 path; the live knob is the
 `KILNCTL_TOUCH_CAP_*` family. See `firmware/KilnFW/docs/PROJECT_STATUS.md`
 "Hardware present on this bench unit" for the full explanation.
 
+UTF-16 logs: PowerShell `*>` writes UTF-16LE, so `grep`/`until` loops silently never match. Wait with `tools/wait_for.ps1` (bounded, encoding-aware, `WAIT_RESULT {json}`; from Bash: `powershell -ExecutionPolicy Bypass -File tools/wait_for.ps1 -TimeoutSec 600 -LogFile x.log -Pattern DONE`) and read a log with `tools/decode_log.ps1 x.log`.
+
 Run `tools/run_all_checks.ps1` with `-ExecutionPolicy Bypass`. Without it the
 script fails to load, and the Bash tool still reports exit 0 for the wrapper
 — an unbypassed run looks like a pass when nothing ran. Separately, SaftyFW
@@ -709,6 +720,12 @@ this 24-core machine (when no other session holds a build gate slot -- see
 check; `-Fast` skips the three phase-1 target builds and, separately,
 `check_00_kilnfw_host_tests.ps1` (phase 2) for a caller that already ran the
 equivalent multi-minute build/host-test work itself — no other check.
+The two KilnFW target builds compile through a shared, pinned ccache
+(`C:\wt\.ccache`, `lib_kilnfw_ccache.ps1`, ON since 2026-10-08 after
+`139debb5` had disabled it), so a new worktree's cold `checkbuild_<hex>` dir
+reuses objects any tree already compiled from identical bytes instead of
+recompiling ~2100 TUs; `check_kilnfw_ccache_no_stale.ps1` proves a changed
+byte always recompiles. Detail: "Heavy builds" in `docs/agent_rules/COMMON.md`.
 (**2026-09-20 history:** the KilnFW application build briefly gained a
 build-order dependency here, once it started `EMBED_FILES`ing both SaftyFW
 slot images so the ESP can auto-update the Pico at boot
@@ -758,6 +775,28 @@ A green `-Fast` run in a fresh worktree therefore says nothing about stack or
 DRAM headroom: those checks measure a `build/` ELF and are SKIP-FAST unless one
 is present.
 
+**Check result cache (2026-10-08).** `run_all_checks.ps1` reuses a prior PASS of
+a check carrying a `# checkcache: ok` marker when `git status` is clean and the
+HEAD tree hash, run mode (-Fast/full) and tool/env fingerprint match
+(`tools/checkcache_lib.ps1`, store `C:\wt\.checkcache\`, 7-day expiry). A hit
+prints `PASS  <check> (cached <time> from <worktree>)` and the summary counts
+hits and time saved. A dirty tree, any doubt, or `-NoCache` /
+`KILNCTL_CHECKCACHE=0` means every check runs for real. Only PASS is stored.
+Rules for marking a check: `docs/agent_rules/COMMON.md` "Check result cache".
+
+**Known failures on main (2026-10-08).** Every run prints a "vs main baseline"
+section splitting failures into NEW (fails here, passed on main), KNOWN (also
+fails on main) and FIXED. A run on a clean tree with HEAD == origin/main records
+the baseline (`C:\wt\.mainbaseline\<tree>-<fast|full>.json`, plus
+`latest-<mode>.json`); `tools/main_baseline.ps1 -Record` seeds it (detached
+`-Fast` run in a minted worktree), `-Show` prints the failing checks. A baseline
+counts only if its origin/main commit is an ancestor of HEAD; the merge-base's is
+preferred, an older one is used with a warning. Exit code is unchanged by default;
+`-FailOnlyOnNew` exits 0 (loudly) when every failure is KNOWN, and
+`tools/land.ps1 -AllowKnownFailures` accepts a `-CheckLog` whose only failures are
+KNOWN. Logic: `tools/main_baseline_lib.ps1`; test: `tools/check_main_baseline.ps1`.
+Landers read the NEW list; KNOWN failures need one line, no re-reporting.
+
 A 2026-09-04 panic (`safety_poll`, `IllegalInstruction`, `exc_addr 0x0`) ran
 five hours unnoticed before `get_heap_status` was fixed to surface it (see
 the flash/OTA section above). `exc_addr 0x0` was a red herring: the real
@@ -793,6 +832,18 @@ root-caused it. An empty `git diff` proves the *source* is restored; it says
 nothing about build artifacts. Never measure from a prebuilt binary whose
 provenance (what source state actually produced it) isn't established —
 rebuild first.
+
+**Negative-test with `tools/negtest.ps1`, never by hand.** Hand-edit-and-restore
+is deprecated (2026-10-08: it also left a `<` -> `<=` in `update_fetch_heap.c`
+and a 100 -> 200 in `test_update_stage.c` sitting in two worktrees).
+`negtest.ps1` applies each mutation (`-File -Find -Replace`, `-Diff`, or
+`-Mutations <json>`) in a throwaway `git worktree` under `C:\wt\negtest_*`,
+requires the unmutated baseline to pass, runs every build into a fresh `{OUT}`
+so no prebuilt binary is reused, reports CAUGHT/MISSED per mutation (exit 0/1/2,
+last stdout line JSON), always removes the copy, and fails loudly if the real
+tree's status or a mutated file changed. Presets: `kilnfw-host`, `saftyfw-host`,
+`check -PresetArg <check_*.ps1>`, `pytest`. Example:
+`powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset kilnfw-host -File firmware\KilnFW\App\drivers\update\update_fetch_heap.c -Find "free_internal < FETCH_HEAP_PRECHECK_MIN" -Replace "free_internal <= FETCH_HEAP_PRECHECK_MIN" -ExpectPattern "FAIL .*test_update_fetch_heap"`.
 
 KilnFW's `boot_guard.h` RECOVERY MODE deliberately skips starting subsystems
 (`profile_executor`, `autotune_engine`), so a task started unconditionally in
@@ -862,7 +913,7 @@ no key -- reachable only over its own WPA2 SoftAP, whose random per-boot
 passphrase is shown only on the LCD. See `docs/RECOVERY_IMAGE_PLAN.md`.)
 `flash_firmware()`'s result reports the counter's before value, the clear result, and the
 verified-or-not after value, never a silent clear. A `GET /api/boot_guard` diagnostics route
-also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauthenticated so
+also landed in the same commit, exposing `{"boot_count","recovery_mode"}` (ROUTE_TIER_ADMIN in the main firmware; unauthenticated only in the recovery image) so
 this class of fix no longer needs a JTAG read of `s_bg` to verify. **2026-09-30 fix:** both that
 route and `POST /api/ota/esp/boot_guard_reset` now also report `persisted_count` -- a live
 re-read of NVS via the new read-only `boot_guard_get_persisted_count()` accessor
@@ -899,9 +950,10 @@ a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
 **The URI handler cap has essentially no headroom left.** `check_uri_handler_cap.ps1`
-(as of 2026-10-02, recounted at `cf5cbbde`) reports 163 `httpd_uri_t` routes
+(as of 2026-10-09) reports 175 `httpd_uri_t` routes
 registered under `firmware/KilnFW/App/drivers/*.c` against
-`wifi_provision_http.c`'s `config.max_uri_handlers = 170` — 7 spare slots.
+`wifi_provision_http.c`'s `config.max_uri_handlers = 184` — 9 spare slots (it
+also now requires `http_auth_http.c`'s `KILN_HTTP_MAX_ROUTES` >= both).
 The next route added
 anywhere under `drivers/` will need that cap bumped in the same change, or
 the check fails; see the check script's own header comment for why this is a
@@ -998,7 +1050,7 @@ kicad hardware\mainBoard\kiln.kicad_sch
 ### Replicate Routing Across Repeated Blocks
 There is no autorouter in this repo any more -- it was removed from `mykicadMcp`, and
 `kicad_router_tool.py` no longer exists. Route by hand in KiCad, then replicate that work onto the
-sibling instances of a repeated block (the five identical thermocouple channels, for example):
+sibling instances of a repeated block (the three identical thermocouple channels on `hardware/ThermocoupleBoard`, for example):
 
 ```
 kicad_call(name="copy_kicad_component_routing", args={

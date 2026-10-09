@@ -1,9 +1,9 @@
 # System-mode command gate — design (Phase 6)
 
-**Status: DESIGN DOC ONLY, no code. Owner-approved for a design pass,
-2026-09-25.** Source: `firmware/KilnFW/TODO.md` section 10.14, "Phase 6"
-(added mid-Phase-1, user request). Do not implement ahead of an owner
-decision on the open questions below.
+**Status: IMPLEMENTED (slices 1-7 landed, see §3.6; code is
+`system_mode_gate_check()` in `firmware/KilnFW/App/drivers/safety/system_mode_gate.c`).
+Originally a design doc, owner-approved for a design pass, 2026-09-25.** Source: `firmware/KilnFW/TODO.md` section 10.14, "Phase 6"
+(added mid-Phase-1, user request). The open questions below are resolved; see their LANDED notes.
 
 ## 1. Problem statement
 
@@ -286,14 +286,12 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    `http_async_job_busy()` (landed alongside A1). Handler-level test:
    `test_zones_http.c`'s
    `test_zones_post_refused_by_mode_gate_before_interlock`.
-   **Known test gap (still open):** `kiln_cfg_http.c`'s and
-   `backup_import.c`'s handler-level gate wiring are now covered
-   (`test_kiln_cfg_http.c`, `test_backup_import.c`).
-   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` still has no
-   host-test harness exercising the UART entry point itself — its gate
-   wiring is verified by code-pattern review and an ESP-IDF target build
-   only. `zones_http_pid.c` and `iter_tune_http.c` DO have handler-level
-   tests (`test_zones_http.c`, `test_iter_tune_http.c`).
+   **Handler-level gate coverage:** `kiln_cfg_http.c` and `backup_import.c`
+   (`test_kiln_cfg_http.c`, `test_backup_import.c`), `zones_http_pid.c` and
+   `iter_tune_http.c` (`test_zones_http.c`, `test_iter_tune_http.c`), and
+   `uart_bridge_ext_control.c`'s `SET_ZONE_PID`/`SET_ZONE_MODEL` UART entry
+   point (`test_uart_bridge_ext_control_gate.c`, its own executable in
+   `build_host_tests.ps1`).
    **Closed:** `adaptive_tune_http.c`'s `enable`/`revert` handlers (including
    the 2026-09-25 enabled=false carve-out) now have their own executable,
    `test_adaptive_tune_http_gate.c` (separate from `test_adaptive_tune_http.c`,
@@ -311,12 +309,14 @@ shape as `test_readiness_gate.c`'s full-cross-product test and
    proving the exact return-code contract `uart_bridge_system.c`'s mapping
    depends on (`FACTORY_RESET_ERR_MODE_GATE_REFUSED`, never
    `ESP_ERR_INVALID_STATE`).
-6. **Deferred, not landed this pass** — `check_uri_handler_cap.ps1`-style
-   mechanical check (or extend an existing one) confirming every route in a
-   to-be-decided "gated action" allowlist actually calls
-   `system_mode_gate_check()` before doing its mutation, so this doesn't
-   silently rot the way the recovery banner did before `d89256fe`'s audit
-   caught it.
+6. **LANDED, 2026-10-08** -- `tools/check_system_mode_gate_call_sites.ps1`: explicit
+   allowlist (19 files, 23 entries) of the handlers/helpers that must contain a
+   `system_mode_gate_check()` call (zones POST/PID, kiln_cfg apply, backup_import,
+   iter_tune restore, adaptive_tune enable/revert, factory_reset, cfgfs format, recovery boot,
+   aux outputs, zone aux convert, UART zones write, relay choke point, update stage write and
+   settings, start profile/autotune). Fails if an entry disappears, loses its call, the entry
+   count changes, or an unlisted driver file adds a call. Presence-in-function only; "gate
+   first" ordering stays with the handler host tests. Negative-tested with `negtest.ps1`.
 7. **LANDED, 2026-09-28** — PcTools' `factory_default_then_load_preset()`
    (`mcp_server_ui_test.py`) used to "confirm" a factory reset by calling
    `get_fw_version()`, a plain UART query the always-alive INFO task answers
@@ -375,3 +375,19 @@ IMPLEMENTER.md discipline before merge; no slice depends on a later one.
    wired in slice 4/5 sends this 409 via the shared
    `system_mode_gate_http_send_refusal()` sender, distinct from OTA's 428
    and (where applicable) `http_async_job_busy()`'s own 409.
+
+## Addendum 2026-10-08: autotune accept
+
+Owner decision: `POST /api/autotune/accept` (and the UART bridge
+`AUTOTUNE_CMD_ACCEPT`, and so the PcTools `autotune_accept` tool) is refused
+while a firing or autotune run is active, because accept writes zone PID gains
+and optionally `max_ramp`. The gate sits in `autotune_engine_accept()`
+(`autotune_engine_guard.c`), the single choke point, using
+`SYS_ACTION_WRITE_ZONES_CONFIG` before any mutation; the result struct carries
+`refused_by_mode_gate`/`mode_reason`, which HTTP maps to the standard 409 via
+`system_mode_gate_http_send_refusal()` and UART returns as the reply reason.
+Host test: `test_autotune_engine_accept_refused_by_mode_gate_while_running`.
+
+Route inventory: autotune/accept is now gated. The owner chose to leave these
+ungated: `ramp_assist`, `watchdog_cfg`, `rate_guard/auto`,
+`relay_cycles/restore`, `kiln_configs` save/import.

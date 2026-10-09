@@ -150,6 +150,8 @@ typedef struct {
     unsigned corrupt_write_at; // Nth app_write silently flips a bit, returns 0
     unsigned fail_read_at;     // Nth read (stage or app) fails
     bool fail_sha_start;
+    bool fail_sha_update;
+    bool fail_sha_finish;
     bool fail_verify;
     // Counters.
     unsigned mut_ops, writes, reads, violations, bad_ranges;
@@ -275,7 +277,7 @@ static int cb_sha_start(void *c)
 static int cb_sha_update(void *c, const void *b, size_t n)
 {
     fl_t *f = c;
-    if (!f->sha_open) {
+    if (!f->sha_open || f->fail_sha_update) {
         return -1;
     }
     sha_update(&f->sha, b, n);
@@ -284,7 +286,7 @@ static int cb_sha_update(void *c, const void *b, size_t n)
 static int cb_sha_finish(void *c, uint8_t out[32])
 {
     fl_t *f = c;
-    if (!f->sha_open) {
+    if (!f->sha_open || f->fail_sha_finish) {
         return -1;
     }
     sha_final(&f->sha, out);
@@ -585,6 +587,12 @@ static void test_refusals(void)
     fresh(f);
     f->fail_sha_start = true;
     expect_refused("sha_start fails", f, RECOVERY_APPLY_ERR_SHA);
+    fresh(f);
+    f->fail_sha_update = true;
+    expect_refused("sha_update fails", f, RECOVERY_APPLY_ERR_SHA);
+    fresh(f);
+    f->fail_sha_finish = true;
+    expect_refused("sha_finish fails", f, RECOVERY_APPLY_ERR_SHA);
     free(f);
 }
 

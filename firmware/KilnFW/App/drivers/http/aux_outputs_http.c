@@ -10,6 +10,7 @@
 #include "MAX31856.h"
 #include "aux_outputs_cfg.h"
 #include "aux_outputs_http_core.h"
+#include "cfg_fs_refusal_http.h"
 #include "dashboard_http.h" // dashboard_set_relay()
 #include "relay_authority.h"
 #include "safety_cfg_writer_guard.h"
@@ -143,6 +144,9 @@ static esp_err_t aux_get_handler(httpd_req_t *req)
 
 static esp_err_t aux_post_handler(httpd_req_t *req)
 {
+    if (cfg_fs_http_refuse_if_unmounted(req)) {
+        return ESP_OK;
+    }
     char body[AUX_BODY_MAX];
     if (!read_body(req, body, sizeof(body))) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");

@@ -52,6 +52,23 @@ static inline bool totp_enroll_allowed(bool web_auth_enabled)
     return web_auth_enabled;
 }
 
+// --- Credential wipe disenrolls TOTP (2026-09-25 owner decision) -----------
+
+// The TOTP half of web_auth_backend_clear_all_credentials(): erases the
+// enrolled secret + replay counter, drops outstanding /api/auth/forgot reset
+// tokens and any pending enrollment secret. All three steps run
+// unconditionally (best-effort, no short-circuit). Returns what
+// `config_clear` returned (read-back-verified erase). Callbacks are injected
+// so host tests can run it against the real totp_config on a fake KV.
+static inline bool totp_wipe_disenroll(bool (*config_clear)(void), void (*clear_reset_tokens)(void),
+                                       void (*clear_pending)(void))
+{
+    bool ok = config_clear();
+    clear_reset_tokens();
+    clear_pending();
+    return ok;
+}
+
 // --- RAM-only pending-enrollment-secret state machine -----------------------
 //
 // Enrollment begin() generates a candidate secret and holds it here, in RAM

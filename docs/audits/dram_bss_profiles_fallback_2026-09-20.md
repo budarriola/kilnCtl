@@ -7,7 +7,7 @@ as part of the same commissioning pass.
 ## Symptom
 
 First bench flash of `5f58ba09` (the build carrying `PROFILES_MAX_COUNT = 100`,
-docs/PROFILE_SLOTS_100_PLAN.md). The ESP booted, joined Wi-Fi, served HTTP, then
+docs/PROFILE_SLOTS_100.md). The ESP booted, joined Wi-Fi, served HTTP, then
 panicked once within the first minutes and rebooted. The crash record the board
 kept (`GET /api/crash_report`) was `exc_task: "wifi"`, `IllegalInstruction`,
 `exc_pc 0xfffffffd`, `backtrace_corrupted: true` -- useless on its own. The

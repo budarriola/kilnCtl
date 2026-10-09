@@ -30,6 +30,8 @@ if (-not $vcvars) {
     Write-Host "SKIP: vcvarsall.bat not found -- cannot build the host test with MSVC."
     exit 3
 }
+# vcvarsall runs ONCE here, outside the build gate; the gate then covers only cl.
+Import-KilnVcvarsEnv -Vcvars $vcvars
 
 $work = Join-Path $env:TEMP "recovery_image_check_$PID"
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
@@ -41,7 +43,7 @@ function Build-And-Run {
     $obj = Join-Path $work $Tag
     New-Item -ItemType Directory -Path $obj -Force | Out-Null
     $test = Join-Path $here "test_recovery_image_check.c"
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" `"$test`" `"$ImplC`" /Fe:`"$exe`" /Fo:`"$obj\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && cl /nologo /W3 /WX /std:c11 /I`"$here`" `"$test`" `"$ImplC`" /Fe:`"$exe`" /Fo:`"$obj\\`""
     $gate = Enter-KilnBuildGate -Label "recovery_image_check" -Lane light
     try {
         $ErrorActionPreference = "Continue"

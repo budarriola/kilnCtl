@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_safety_baud_sync.ps1 -- the ESP<->RP2040 isolated link baud rate is
 # hardcoded in FOUR places that must agree, with no negotiation on the wire.
 # A mismatch does not degrade gracefully: it produces framing errors and

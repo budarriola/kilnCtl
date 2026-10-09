@@ -23,6 +23,7 @@
 #include "live_profile.h" /* live_profile_load_record()/live_profile_generation() -- "Keep?" button */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 #include "ct_leak_alarm.h" /* H9 CT alarm -- trip-strip branch */
+#include "ui_page_safety_logic.h" /* shared live-trip derive for the trip strip */
 
 /* 2026-09-15 review follow-up (review_divergence_wiring_60d6552f_2026-09-15.md,
  * items A/B/C and HIGH 1): the deferred Pico-half recapture poll and its
@@ -125,7 +126,7 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * that task's deepest known dispatch target against the 4880 B
      * measured ceiling within its 8192 B stack (see this file's own header
      * comment above and check_all_task_stack_budgets.py) -- heap-allocate
-     * rather than add a 1384-byte profile_exec_status_t stack local here,
+     * rather than add a 1464-byte profile_exec_status_t stack local here,
      * same pattern as safety_cfg_http.c/dashboard_exec_http.c. */
     profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!st) {
@@ -231,8 +232,11 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * layout, so this costs zero height whenever nothing is wrong, which is
      * what lets the chart still reach all the way down to the Start button. */
     if (s_ui_home_trip_strip != NULL) {
-        bool safety_tripped = ds.diag_ever_received && ds.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
-                              ds.diag_age_ms < SAFETY_LINK_STALE_MS;
+        /* Same live-trip predicate the Safety page uses (one shared derive,
+         * ui_page_safety_logic.h) so the strip and the page cannot disagree. */
+        bool safety_tripped = ui_safety_view_derive(ds.diag_ever_received, ds.diag_state,
+                                                     ds.diag_age_ms).tripped_live;
+        s_ui_home_trip_strip_is_safety = safety_tripped;
         // The BOOT-button OTA-auth bypass banner that used to rank above the
         // safety-trip text here was retired 2026-09-29 along with the
         // AP-password HMAC scheme itself: ROUTE_TIER_ADMIN is the only gate
@@ -325,14 +329,16 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                     lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
                 } else if (ds.cfg_fs_format_pending) {
                     /* cfg_fs ask-first format refusal (docs/CONFIG_FILESYSTEM.md):
-                     * lowest priority, informational only -- the board runs on
-                     * NVS/defaults either way. No action from the LCD (the
-                     * confirm is the web UI's, admin-gated); the reason text
-                     * is on the web dashboard/Settings page. Same strip, same
-                     * 96-char/no-scroll constraint. Hides itself once the
-                     * format completes (the flag clears). */
+                     * lowest priority. While this shows, cfg is unmounted and
+                     * every save is refused (owner decision 2026-10-06), so
+                     * the text says so. No action from the LCD (the confirm
+                     * is the web UI's, admin-gated, POST /api/cfgfs/
+                     * format_confirm); the reason text is on the web
+                     * dashboard/Settings page. Same strip, same 96-char/
+                     * no-scroll constraint. Hides itself once the format
+                     * completes (the flag clears). */
                     lv_label_set_text(s_ui_home_trip_strip,
-                                       "CONFIG FS NEEDS FORMAT CONFIRM -- see web Settings");
+                                       "SAVES REFUSED: CONFIG FS NEEDS FORMAT CONFIRM -- see web Settings");
                     lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
                 } else {
                     lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);

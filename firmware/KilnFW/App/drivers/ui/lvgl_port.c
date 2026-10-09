@@ -393,7 +393,7 @@ typedef struct {
     /* 2026-09-24 tap-swallow observability: a monotonically increasing id
      * assigned to every PRESS injection (a release keeps the id of the press
      * it ends -- releases are never themselves swallow candidates, see
-     * screen_idle.h's touch_held comment). touch_read_cb() runs in a
+     * screen_idle.h's touch_gate comment). touch_read_cb() runs in a
      * different task than the caller of lvgl_port_inject_touch() and only
      * learns the real screen_idle_touch_swallow() verdict once it actually
      * delivers this press on its own ~30ms LVGL poll -- this seq is the
@@ -678,7 +678,7 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         // place a physical release is ever observed (touch_dev_read simply
         // stops reporting `pressed`, unlike the injected path's explicit
         // pressed=false frame) -- screen_idle's press-edge tracker
-        // (screen_idle.h's touch_held) needs this notified or a physical
+        // (screen_idle.h's touch_gate) needs this notified or a physical
         // touch's release would never clear it, and every later press would
         // be mistaken for a "repeat" of the first (wrongly reusing that
         // first press's swallow verdict forever). p->idle is intentionally
@@ -773,7 +773,7 @@ static void touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     // (on the press edge) returns whether this touch must be swallowed. On
     // swallow, revert to RELEASED and skip arbitration entirely: this exact
     // press must never reach any widget underneath, on this or any later
-    // poll of the same held press (see screen_idle.h's touch_held comment --
+    // poll of the same held press (see screen_idle.h's touch_gate comment --
     // the verdict is cached for the whole press/release gesture, not just
     // this one sample). This is the fix for the gap lvgl_port.h's own
     // header comment used to document ("neither path checks screen_idle's

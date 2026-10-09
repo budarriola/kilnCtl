@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_profiles_capacity.ps1 -- thin wrapper so run_all_checks.ps1's
 # check_*.ps1 glob discovers the profile-store capacity gate
 # (tools/check_profiles_capacity.py) automatically, the same convention
@@ -7,7 +8,7 @@
 # the Python script's own module docstring -- read that before editing
 # behaviour here.
 #
-# docs/PROFILE_SLOTS_100_PLAN.md section 5, task 4: lands while
+# docs/PROFILE_SLOTS_100.md section 5, task 4: lands while
 # PROFILES_MAX_COUNT is still 8 and `cfg` is still 0x80000, so this gate is
 # already live and enforcing before task 6 raises the slot count.
 #

@@ -30,6 +30,7 @@
 // if pass 1 fully succeeded, and commits every candidate via the same
 // profiles_http_save()/zones_config_set_*() calls the UI's own pages use.
 
+#include "cfg_fs_refusal_http.h"
 #include "backup_http.h"
 #include "backup_http_internal.h"
 #include "backup_json.h"
@@ -61,6 +62,7 @@
 #include "live_profile.h" /* live_edit_name_collides() -- Opus review finding B, the pass-1
                             * dup-name pre-check below (before pass 2 writes anything) */
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
+#include "persist_scratch.h" /* persist_scratch_alloc() -- pass-1 validation scratch */
 #include "profiles_http.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
@@ -74,7 +76,13 @@
                                 * reused here so the Pico's i_normal_a[0..2] restore is never trusted on a
                                 * bare ACK -- see the push immediately after the ceiling guard below. */
 #include "update_settings.h" /* WP9: top-level "update_repo" */
+#include "relay_cycles.h" /* top-level "relay_cycles" wear counters */
 #include "aux_outputs_cfg.h" /* top-level "aux_outputs" (spare-relay on/off outputs) */
+#include "display_power_cfg.h" /* top-level "display_power" */
+#include "profiles_builtin.h" /* top-level "hidden_builtin_profiles" */
+#include "ramp_assist_cfg.h" /* top-level "ramp_assist" */
+#include "time_sync.h" /* top-level "tz" */
+#include "unit_pref.h" /* top-level "unit" */
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
                                  * error_band_c/rate_band_c_per_s setters --
@@ -779,9 +787,11 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
     // ---- this commit -- see the `is_active` comment above.
     for (size_t i = 0; i < file_n; i++) {
         if (action[i] == ACT_RENAME) {
-            if (!kiln_cfg_store_rename(action_board_id[i], action_name[i])) {
-                snprintf(err_msg, err_cap, "kiln_configs[%u]: rename to \"%.23s\" failed at commit", (unsigned)i,
-                         action_name[i]);
+            char rename_reason[96];
+            rename_reason[0] = '\0';
+            if (!kiln_cfg_store_rename_ex(action_board_id[i], action_name[i], rename_reason, sizeof(rename_reason))) {
+                snprintf(err_msg, err_cap, "kiln_configs[%u]: rename to \"%.23s\" failed at commit%s%.60s",
+                         (unsigned)i, action_name[i], rename_reason[0] ? ": " : "", rename_reason);
                 return false;
             }
             if (wrote_out) {
@@ -847,10 +857,119 @@ typedef struct {
     profile_t tmp_slot_check;
 } backup_import_slot_scratch_t;
 
+/* Portable noinline -- same guard as kiln_cfg_swap.c's KILN_CFG_SWAP_NOINLINE:
+ * MSVC (host tests) rejects GCC's __attribute__((noinline)) syntax outright.
+ * Only the Xtensa GCC target build's stack depth is measured. */
+#if defined(_MSC_VER)
+#define BACKUP_IMPORT_NOINLINE
+#else
+#define BACKUP_IMPORT_NOINLINE __attribute__((noinline))
+#endif
+
+/* One segment's seg_kind and RELAY_IO fields (io_target/io_state/io_blocking/io_leave_on_at_end), absent =
+ * ZONE_RAMP with all io_* zero. Shared by the profile parse in backup_import_apply_locked() and the pass-1
+ * candidate-state check backup_import_profiles_precheck(), so both read the same fields the same way.
+ * `entry` and `seg_i` are 0-based and only feed the error text. */
+static BACKUP_IMPORT_NOINLINE bool backup_import_parse_seg_kind_io(const char *se, size_t entry, uint8_t seg_i,
+                                                                   profile_segment_t *sg, char *err_msg,
+                                                                   size_t err_cap)
+{
+    double dkind = 0.0, dio = 0.0;
+    bool has_kind = false, hv = false;
+    if (!backup_json_field_opt_num(se, "seg_kind", 0, 1, &dkind, &has_kind, "seg_kind", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: seg_kind out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    sg->seg_kind = has_kind ? (uint8_t)dkind : PROFILE_SEG_KIND_ZONE_RAMP;
+    sg->io_target = sg->io_state = sg->io_blocking = sg->io_leave_on_at_end = 0;
+    if (!backup_json_field_opt_num(se, "io_target", 0, 255, &dio, &hv, "io_target", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_target out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_target = (uint8_t)dio;
+    hv = false;
+    if (!backup_json_field_opt_num(se, "io_state", 0, 1, &dio, &hv, "io_state", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_state out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_state = (uint8_t)dio;
+    hv = false;
+    if (!backup_json_field_opt_num(se, "io_blocking", 0, 1, &dio, &hv, "io_blocking", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_blocking out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_blocking = (uint8_t)dio;
+    hv = false;
+    if (!backup_json_field_opt_num(se, "io_leave_on_at_end", 0, 1, &dio, &hv, "io_leave_on_at_end", NULL, 0,
+                                   seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_leave_on_at_end out of range",
+                 (unsigned)entry, (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_leave_on_at_end = (uint8_t)dio;
+    return true;
+}
+
+/* One on_off_rules[] entry. Same fields/ranges as profiles_export_http.c's importer; the target/segment/aux
+ * checks are validate_on_off_rules_in_state()'s job. Shared with backup_import_profiles_precheck(). */
+static BACKUP_IMPORT_NOINLINE bool backup_import_parse_rule(const char *re, size_t entry, uint8_t rule_i,
+                                                            profile_on_off_rule_t *r, char *err_msg, size_t err_cap)
+{
+    double dz = 0.0, dsg = 0.0, dv = 0.0;
+    bool hv = false;
+    if (!backup_json_field_num(re, "zone", &dz) || dz < 0 || dz > 255 ||
+        !backup_json_field_num(re, "segment", &dsg) || dsg < 0 || dsg > 255) {
+        snprintf(err_msg, err_cap, "profile entry %u, rule %u: zone/segment missing or invalid", (unsigned)entry,
+                 (unsigned)(rule_i + 1));
+        return false;
+    }
+    r->zone_index = (uint8_t)dz;
+    r->segment_index = (uint8_t)dsg;
+#define BK_RULE_NUM(dst, key, lo, hi, cast)                                                                    \
+    do {                                                                                                       \
+        dst = 0;                                                                                               \
+        hv = false;                                                                                            \
+        if (!backup_json_field_opt_num(re, key, lo, hi, &dv, &hv, key, NULL, 0, rule_i)) {                     \
+            snprintf(err_msg, err_cap, "profile entry %u, rule %u: " key " out of range", (unsigned)entry,     \
+                    (unsigned)(rule_i + 1));                                                                   \
+            return false;                                                                                      \
+        }                                                                                                      \
+        if (hv) dst = (cast)dv;                                                                                \
+    } while (0)
+    BK_RULE_NUM(r->enable, "enable", 0, 1, uint8_t);
+    BK_RULE_NUM(r->phase_mask, "phase_mask", 0, 255, uint8_t);
+    BK_RULE_NUM(r->direction_mask, "direction_mask", 0, 255, uint8_t);
+    BK_RULE_NUM(r->temp_source, "temp_source", 0, 3, uint8_t);
+    BK_RULE_NUM(r->temp_cmp, "temp_cmp", 0, 255, uint8_t);
+    BK_RULE_NUM(r->temp_threshold_c, "temp_c", (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX, float);
+    BK_RULE_NUM(r->time_start_s, "time_start_s", 0, 65535, uint16_t);
+    BK_RULE_NUM(r->time_stop_s, "time_stop_s", 0, 65535, uint16_t);
+    BK_RULE_NUM(r->invert, "invert", 0, 1, uint8_t);
+#undef BK_RULE_NUM
+    return true;
+}
+
+/* Defined below with the update_repo/aux code; apply_locked() runs them between the zone commit and the
+ * profile commit (see its commit-order comment). */
+static bool backup_import_update_repo(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
+                                      size_t err_cap);
+static bool backup_import_relay_cycles(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
+                                       size_t err_cap);
+static bool backup_import_prefs(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
+                               size_t err_cap);
+static bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote, char *err_msg,
+                                             size_t err_cap);
+
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
-                                        timing_profile_candidate_t *timing_profile_candidates)
+                                        timing_profile_candidate_t *timing_profile_candidates,
+                                        bool *zones_landed_out, bool *aux_wrote_out)
 {
+    *zones_landed_out = false;
     double dver;
     char kind[24];
     if (!backup_json_field_str(body, "kind", kind, sizeof(kind)) || strcmp(kind, "kilnctl_backup") != 0) {
@@ -940,16 +1059,35 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                         (unsigned)PROFILE_MAX_SEGMENTS);
                 return false;
             }
-            double dt, dr, dd;
-            if (!backup_json_field_num(se, "target_c", &dt) || dt < bound_target_min || dt > bound_target_max) {
+            double dt = 0.0, dr = 0.0, dd;
+            profile_segment_t *sg = &c->p.segments[seg_i];
+            if (!backup_import_parse_seg_kind_io(se, candidate_count, seg_i, sg, err_msg, err_cap)) {
+                return false;
+            }
+            uint8_t kind = sg->seg_kind;
+            if (kind == PROFILE_SEG_KIND_ZONE_RAMP &&
+                (!backup_json_field_num(se, "target_c", &dt) || dt < bound_target_min || dt > bound_target_max)) {
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: target_c missing or out of range",
                         (unsigned)candidate_count, (unsigned)(seg_i + 1));
                 return false;
             }
-            if (!backup_json_field_num(se, "ramp_c_per_hr", &dr) || dr < bound_ramp_min || dr > bound_ramp_max) {
+            if (kind == PROFILE_SEG_KIND_ZONE_RAMP &&
+                (!backup_json_field_num(se, "ramp_c_per_hr", &dr) || dr < bound_ramp_min || dr > bound_ramp_max)) {
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: ramp_c_per_hr missing or out of range",
                         (unsigned)candidate_count, (unsigned)(seg_i + 1));
                 return false;
+            }
+            if (kind == PROFILE_SEG_KIND_RELAY_IO) {
+                /* Not meaningful for this kind, but profiles_export_http.c keeps whatever the slot holds, so
+                 * keep it here too: the backup round trip stays byte-identical. Absent = 0, as before. */
+                double dkeep = 0.0;
+                if (backup_json_field_num(se, "target_c", &dkeep) && isfinite(dkeep)) {
+                    dt = dkeep;
+                }
+                dkeep = 0.0;
+                if (backup_json_field_num(se, "ramp_c_per_hr", &dkeep) && isfinite(dkeep)) {
+                    dr = dkeep;
+                }
             }
             if (!backup_json_field_num(se, "dwell_min", &dd) || dd < 0 || dd > bound_dwell_max) {
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: dwell_min missing or out of range",
@@ -967,12 +1105,31 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         }
         c->p.segment_count = seg_i;
 
+        /* on_off_rules (absent key = zero rules, today's behavior). Same fields/ranges as
+         * profiles_export_http.c's importer; profiles_http_save() validates targets later. */
+        {
+            const char *rules_arr = backup_json_obj_find(pe, "on_off_rules");
+            uint8_t rule_i = 0;
+            for (const char *re = backup_json_arr_first(rules_arr); re; re = backup_json_arr_next(re)) {
+                if (rule_i >= PROFILE_MAX_ON_OFF_RULES) {
+                    snprintf(err_msg, err_cap, "profile entry %u: too many on_off_rules", (unsigned)candidate_count);
+                    return false;
+                }
+                if (!backup_import_parse_rule(re, candidate_count, rule_i, &c->p.on_off_rules[rule_i], err_msg,
+                                              err_cap)) {
+                    return false;
+                }
+                rule_i++;
+            }
+            c->p.on_off_rule_count = rule_i;
+        }
+
         /* Same feasibility rule profiles_http_save() enforces -- duplicated
          * here so it is caught in validation, before any profile in this
          * import has been written. */
         for (uint8_t i = 0; i < c->p.segment_count; i++) {
             float rate = c->p.segments[i].ramp_c_per_hr;
-            if (rate <= 0.0f) {
+            if (c->p.segments[i].seg_kind != PROFILE_SEG_KIND_ZONE_RAMP || rate <= 0.0f) {
                 continue;
             }
             for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -2062,23 +2219,6 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         return false;
     }
 
-    /* ---- Pass 2: everything validated -- commit ---- */
-    for (size_t i = 0; i < candidate_count; i++) {
-        profile_candidate_t *c = &candidates[i];
-        uint8_t out_id = 0;
-        char save_err[96];
-        if (!profiles_http_save(c->has_id ? c->id : PROFILES_MAX_COUNT, &c->p, &out_id, NULL, save_err,
-                                sizeof(save_err))) {
-            /* Should not happen -- pass 1 already checked everything
-             * profiles_http_save() itself checks -- but if it does (a race
-             * with a concurrent change to zone config between pass 1 and
-             * pass 2, say), report exactly which entry and why rather than a
-             * generic failure. Any candidates before this one in the loop
-             * are already committed -- see this function's header comment. */
-            snprintf(err_msg, err_cap, "profile entry %u rejected at commit: %s", (unsigned)i, save_err);
-            return false;
-        }
-    }
     /* opus review finding (LOW-MEDIUM), originally closed with a narrow
      * settings_source[]-only snapshot/restore here: superseded below by
      * zones_snapshot, a whole-zones_cfg_t snapshot taken right before the
@@ -2239,10 +2379,13 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     zones_config_get_full_copy(&zones_snapshot);
     /* Judge "does the file's tuning record equal the live one" NOW, before
      * the loop below runs. zones_config_set_pid_no_save() invalidates the
-     * zone's tuning record (tuning_valid = 0) on every gain change, so a
-     * compare made after it always reads "not valid" and a restore of an
-     * unchanged backup would re-commit the record and bump tuning_seq (and
-     * with it the active kiln_config's pkg_hash). 2026-10-05 bench finding:
+     * zone's tuning record (tuning_valid = 0) when a gain changes beyond
+     * zones_config_gain_changed()'s tolerance (equal-within-tolerance gains
+     * leave it standing), so a compare made after it reads "not valid"
+     * whenever the file's gains differ from the live ones, and a restore of
+     * such a backup would re-commit the record and bump tuning_seq (and
+     * with it the active kiln_config's pkg_hash) even when the record is
+     * unchanged. 2026-10-05 bench finding:
      * the earlier fix compared at commit time, after set_pid, and was inert
      * on hardware. */
     for (size_t i = 0; i < zone_candidate_count; i++) {
@@ -2753,18 +2896,50 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             }
         }
     }
+    /* From here on the zones are persisted: a failure below is a partial write and must NOT put the
+     * phase-1 aux disables back (the caller keys that off zones_landed_out). */
+    *zones_landed_out = true;
 
+    /* ---- Commit order: kiln_configs, aux phase 1 (disables), zones, update_repo, aux phase 2 (enables),
+     * profiles LAST. profiles_http_save() re-runs validate_io_segment()/validate_on_off_rules() against
+     * the LIVE config, and a profile in this backup can depend on that config as the same backup
+     * leaves it: an on/off rule aimed at an aux relay this backup enables (target 8..11), a rule aimed at
+     * a zone this backup types ON_OFF, a RELAY_IO segment on a relay this backup frees from a zone's
+     * relay_mask. Committing profiles before those landed made the save refuse mid-loop and left a
+     * half-restored board. Safety of the order: every dependency a rule has (zone typed ON_OFF, aux
+     * enabled) is persisted before a rule that relies on it, so a rule can never be stored aimed at
+     * a HEATER zone or an unconfigured aux output; if any earlier step fails no profile has been written
+     * at all. backup_import_profiles_precheck() already proved the post-import state accepts every
+     * profile, so the live re-validation below passing is expected -- it stays as the last guard. ---- */
+    if (!backup_import_update_repo(body, true, NULL, err_msg, err_cap)) {
+        return false; // zones already landed: reported as a partial write by the caller
+    }
+    if (!backup_import_aux_outputs_commit(body, true, aux_wrote_out, err_msg, err_cap)) {
+        return false;
+    }
+    if (!backup_import_relay_cycles(body, true, NULL, err_msg, err_cap)) {
+        return false; // zones already landed: reported as a partial write by the caller
+    }
+    if (!backup_import_prefs(body, true, NULL, err_msg, err_cap)) {
+        return false; // zones already landed: reported as a partial write by the caller
+    }
+    /* ---- Pass 2: everything validated -- commit profiles ---- */
+    for (size_t i = 0; i < candidate_count; i++) {
+        profile_candidate_t *c = &candidates[i];
+        uint8_t out_id = 0;
+        char save_err[96];
+        if (!profiles_http_save(c->has_id ? c->id : PROFILES_MAX_COUNT, &c->p, &out_id, NULL, save_err,
+                                sizeof(save_err))) {
+            /* Should not happen -- pass 1 (including backup_import_profiles_precheck()) already checked
+             * everything profiles_http_save() itself checks -- but if it does (a race with a concurrent
+             * change to zone config, say), report exactly which entry and why. Candidates before this one
+             * are already committed. */
+            snprintf(err_msg, err_cap, "profile entry %u rejected at commit: %s", (unsigned)i, save_err);
+            return false;
+        }
+    }
     return true;
 }
-
-/* Portable noinline -- same guard as kiln_cfg_swap.c's KILN_CFG_SWAP_NOINLINE:
- * MSVC (host tests) rejects GCC's __attribute__((noinline)) syntax outright.
- * Only the Xtensa GCC target build's stack depth is measured. */
-#if defined(_MSC_VER)
-#define BACKUP_IMPORT_NOINLINE
-#else
-#define BACKUP_IMPORT_NOINLINE __attribute__((noinline))
-#endif
 
 /* See the call site in backup_import_apply() below for why. Mirrors
  * zones_http_post.c's post-commit apply_lower block. NOINLINE: inlined, its
@@ -2857,6 +3032,303 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, b
         return false;
     }
     return true;
+}
+
+/* Optional top-level "relay_cycles" {"hw_relays":N,"c0".."c4"} (backup_export_relay_cycles()). Absent =
+ * no-op. Present: hw_relays must equal this board's KILN_IO_RELAY_COUNT (counts from a different relay
+ * layout are not this board's wear history) and every c<i> must be an integer in
+ * [0, RELAY_CYCLES_RESTORE_MAX_COUNT]; anything else refuses the WHOLE restore in pass 1. Commit goes
+ * through relay_cycles_restore_all() with allow_lower_mask 0: a stale backup can never LOWER a live
+ * wear count (it is clamped up and reported), which on a freshly factory-reset board is the same as an
+ * exact restore. Types/rated overrides are not touched (relay type travels with the zones). */
+/* Bit i set = relay i kept its (higher) live count on the last committed import. Reported in the commit response. */
+static uint8_t s_rc_kept_mask;
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_relay_cycles(const char *body, bool commit, kiln_cfg_plan_t *plan,
+                                                              char *err_msg, size_t err_cap)
+{
+    if (commit) {
+        s_rc_kept_mask = 0;
+    }
+    const char *obj = backup_json_obj_find(body, "relay_cycles");
+    if (obj == NULL) {
+        return true;
+    }
+    if (*backup_json_skip_ws(obj) != '{') {
+        snprintf(err_msg, err_cap, "relay_cycles must be an object");
+        return false;
+    }
+    double hw = 0.0;
+    if (!backup_json_field_num(obj, "hw_relays", &hw) || hw != (double)KILN_IO_RELAY_COUNT) {
+        snprintf(err_msg, err_cap, "relay_cycles: hw_relays missing or differs from this board's %u heater relays",
+                 (unsigned)KILN_IO_RELAY_COUNT);
+        return false;
+    }
+    uint32_t counts[RELAY_CYCLES_COUNT];
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "c%u", i);
+        double d = 0.0;
+        if (!backup_json_field_num(obj, key, &d) || d < 0 || d > (double)RELAY_CYCLES_RESTORE_MAX_COUNT ||
+            (double)(long long)d != d) {
+            snprintf(err_msg, err_cap, "relay_cycles: %s missing or not an integer in range", key);
+            return false;
+        }
+        counts[i] = (uint32_t)d;
+    }
+    if (!commit) {
+        if (plan != NULL) {
+            uint32_t live[RELAY_CYCLES_COUNT];
+            relay_cycles_get_all(live);
+            for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+                if (counts[i] < live[i]) {
+                    kiln_cfg_plan_add(plan, "relay_cycles c%u: backup %lu is below live %lu, live count is kept", i,
+                                      (unsigned long)counts[i], (unsigned long)live[i]);
+                }
+            }
+        }
+        return true;
+    }
+    uint32_t live_now[RELAY_CYCLES_COUNT];
+    relay_cycles_get_all(live_now);
+    s_rc_kept_mask = 0;
+    if (!relay_cycles_restore_all(counts, 0, NULL)) {
+        snprintf(err_msg, err_cap,
+                 "relay_cycles could not be persisted -- kiln_configs, zones, update_repo and aux_outputs already "
+                 "landed; preferences and profiles were NOT written");
+        return false;
+    }
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        if (counts[i] < live_now[i]) {
+            s_rc_kept_mask |= (uint8_t)(1u << i); /* live > backup: live count kept */
+        }
+    }
+    return true;
+}
+
+/* Operator preferences (docs/audits/BACKUP_CFGFS_COVERAGE_AUDIT_2026-10-09.md gaps 1+2): the
+ * optional top-level keys backup_export_prefs() writes -- unit, ramp_assist, display_power,
+ * hidden_builtin_profiles, tz, relay_names. Each absent key preserves the live value. Present
+ * keys are held to the validation of their live path (unit_pref_set / ramp_assist / display_power
+ * range + timeout enum / time_sync_tz_is_valid / relay<N>_name <= RELAY_NAME_MAX_LEN and
+ * relay<N>_type < RELAY_DEVICE_TYPE_COUNT, as POST /api/zones) and ANY invalid value refuses the
+ * WHOLE restore in pass 1 (commit=false). With commit=true the same parse is applied through the
+ * validated setters. Parsed state is a few hundred bytes; nothing large lives here. */
+/* Width of profiles_builtin.c's uint32_t hidden mask (one bit per catalogue entry, 28 today). */
+#define BACKUP_HIDDEN_MASK_BITS 32u
+_Static_assert(PROFILE_BUILTIN_ID_BASE + BACKUP_HIDDEN_MASK_BITS - 1u <= 255u, "hidden ids must fit uint8_t");
+typedef struct {
+    bool has_unit, has_ramp, has_display, has_hidden, has_tz, has_names;
+    unit_pref_t unit;
+    bool ramp;
+    uint8_t brightness;
+    display_timeout_setting_t timeout;
+    bool keep_on, on_error;
+    bool hidden[BACKUP_HIDDEN_MASK_BITS]; /* indexed by builtin id - PROFILE_BUILTIN_ID_BASE */
+    char tz[TIME_SYNC_TZ_MAX_LEN + 2];
+    bool name_set[KILN_IO_RELAY_COUNT];
+    char name[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 2];
+    bool type_set[KILN_IO_RELAY_COUNT];
+    relay_device_type_t type[KILN_IO_RELAY_COUNT];
+} backup_prefs_t;
+
+static bool backup_prefs_int(const char *v, double lo, double hi, double *out)
+{
+    char *end = NULL;
+    if (v == NULL || *v == '"' || *v == '\0') {
+        return false;
+    }
+    double d = strtod(v, &end);
+    if (end == v || d < lo || d > hi || d != (double)(long long)d) {
+        return false;
+    }
+    *out = d;
+    return true;
+}
+
+static bool backup_prefs_bool(const char *v, bool *out)
+{
+    if (v != NULL && strncmp(v, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (v != NULL && strncmp(v, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_prefs_parse(const char *body, backup_prefs_t *p, char *err_msg,
+                                                      size_t err_cap)
+{
+    memset(p, 0, sizeof(*p));
+    double d;
+    const char *v = backup_json_obj_find(body, "unit");
+    if (v != NULL) {
+        if (!backup_prefs_int(v, 0, 1, &d)) {
+            snprintf(err_msg, err_cap, "unit must be 0 (C) or 1 (F)");
+            return false;
+        }
+        p->has_unit = true;
+        p->unit = (unit_pref_t)(int)d;
+    }
+    v = backup_json_obj_find(body, "ramp_assist");
+    if (v != NULL) {
+        if (!backup_prefs_bool(v, &p->ramp)) {
+            snprintf(err_msg, err_cap, "ramp_assist must be true or false");
+            return false;
+        }
+        p->has_ramp = true;
+    }
+    v = backup_json_obj_find(body, "display_power");
+    if (v != NULL) {
+        const char *b = backup_json_obj_find(v, "brightness_percent");
+        const char *t = backup_json_obj_find(v, "timeout_setting");
+        double bd = 0, td = 0;
+        if (*backup_json_skip_ws(v) != '{' || !backup_prefs_int(b, 0, 100, &bd) || !backup_prefs_int(t, 0, 255, &td) ||
+            !display_power_timeout_setting_is_valid((display_timeout_setting_t)(int)td) ||
+            !backup_prefs_bool(backup_json_obj_find(v, "keep_on_while_firing"), &p->keep_on) ||
+            !backup_prefs_bool(backup_json_obj_find(v, "display_on_error"), &p->on_error)) {
+            snprintf(err_msg, err_cap,
+                     "display_power is not a valid {brightness_percent 0-100, timeout_setting, "
+                     "keep_on_while_firing, display_on_error}");
+            return false;
+        }
+        p->has_display = true;
+        p->brightness = (uint8_t)bd;
+        p->timeout = (display_timeout_setting_t)(int)td;
+    }
+    v = backup_json_obj_find(body, "hidden_builtin_profiles");
+    if (v != NULL) {
+        if (*backup_json_skip_ws(v) != '[') {
+            snprintf(err_msg, err_cap, "hidden_builtin_profiles must be an array");
+            return false;
+        }
+        for (const char *e = backup_json_arr_first(v); e != NULL; e = backup_json_arr_next(e)) {
+            if (!backup_prefs_int(e, PROFILE_BUILTIN_ID_BASE, 255, &d) || !profiles_builtin_id_valid((uint8_t)d) ||
+                (size_t)((uint8_t)d - PROFILE_BUILTIN_ID_BASE) >= sizeof(p->hidden)) {
+                snprintf(err_msg, err_cap, "hidden_builtin_profiles holds an id that is not a builtin profile");
+                return false;
+            }
+            p->hidden[(uint8_t)d - PROFILE_BUILTIN_ID_BASE] = true;
+        }
+        p->has_hidden = true;
+    }
+    v = backup_json_obj_find(body, "tz");
+    if (v != NULL) {
+        if (!backup_json_field_str(body, "tz", p->tz, sizeof(p->tz)) || strlen(p->tz) > TIME_SYNC_TZ_MAX_LEN ||
+            !time_sync_tz_is_valid(p->tz)) {
+            snprintf(err_msg, err_cap, "tz is not a valid POSIX TZ string");
+            return false;
+        }
+        p->has_tz = true;
+    }
+    v = backup_json_obj_find(body, "relay_names");
+    if (v != NULL) {
+        if (*backup_json_skip_ws(v) != '[') {
+            snprintf(err_msg, err_cap, "relay_names must be an array");
+            return false;
+        }
+        unsigned n = 0;
+        for (const char *e = backup_json_arr_first(v); e != NULL; e = backup_json_arr_next(e), n++) {
+            double rd = 0;
+            if (*backup_json_skip_ws(e) != '{' ||
+                !backup_prefs_int(backup_json_obj_find(e, "relay"), 1, KILN_IO_RELAY_COUNT, &rd)) {
+                snprintf(err_msg, err_cap, "relay_names[%u]: relay missing or not 1-%u", n,
+                         (unsigned)KILN_IO_RELAY_COUNT);
+                return false;
+            }
+            unsigned ri = (unsigned)rd - 1u;
+            if (p->name_set[ri] || p->type_set[ri]) {
+                snprintf(err_msg, err_cap, "relay_names[%u]: relay %u listed twice", n, ri + 1u);
+                return false;
+            }
+            if (backup_json_obj_find(e, "name") != NULL) {
+                if (!backup_json_field_str(e, "name", p->name[ri], sizeof(p->name[ri])) ||
+                    strlen(p->name[ri]) > RELAY_NAME_MAX_LEN) {
+                    snprintf(err_msg, err_cap, "relay_names[%u]: name must be a string of at most %u characters", n,
+                             (unsigned)RELAY_NAME_MAX_LEN);
+                    return false;
+                }
+                p->name_set[ri] = true;
+            }
+            const char *tv = backup_json_obj_find(e, "type");
+            if (tv != NULL) {
+                double td = 0;
+                if (!backup_prefs_int(tv, 0, RELAY_DEVICE_TYPE_COUNT - 1, &td)) {
+                    snprintf(err_msg, err_cap, "relay_names[%u]: type out of range", n);
+                    return false;
+                }
+                p->type[ri] = (relay_device_type_t)(int)td;
+                p->type_set[ri] = true;
+            }
+            if (!p->name_set[ri] && !p->type_set[ri]) {
+                snprintf(err_msg, err_cap, "relay_names[%u]: neither name nor type given", n);
+                return false;
+            }
+        }
+        p->has_names = true;
+    }
+    return true;
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_prefs(const char *body, bool commit, kiln_cfg_plan_t *plan,
+                                                       char *err_msg, size_t err_cap)
+{
+    backup_prefs_t p;
+    if (!backup_prefs_parse(body, &p, err_msg, err_cap)) {
+        return false;
+    }
+    if (p.has_hidden && g_builtin_profile_count > BACKUP_HIDDEN_MASK_BITS) {
+        /* Catalogue outgrew the 32-bit mask: refuse in pass 1 (before any write), never skip entries. */
+        snprintf(err_msg, err_cap, "hidden_builtin_profiles: built-in catalogue is wider than the %u-bit mask",
+                 (unsigned)BACKUP_HIDDEN_MASK_BITS);
+        return false;
+    }
+    if (!commit) {
+        if (plan != NULL && (p.has_unit || p.has_ramp || p.has_display || p.has_hidden || p.has_tz || p.has_names)) {
+            kiln_cfg_plan_add(plan, "preferences in this backup (unit/ramp_assist/display_power/hidden profiles/tz/"
+                                    "relay names) are restored; keys absent from it are kept");
+        }
+        return true;
+    }
+    bool ok = true;
+    if (p.has_unit && unit_pref_set(p.unit) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_ramp && ramp_assist_cfg_set_enabled(p.ramp) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_display && display_power_cfg_set(p.brightness, p.timeout, p.keep_on, p.on_error) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_hidden) {
+        for (size_t i = 0; i < g_builtin_profile_count && i < BACKUP_HIDDEN_MASK_BITS; i++) {
+            uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
+            if (profiles_builtin_is_hidden(id) != p.hidden[i] &&
+                profiles_builtin_set_hidden(id, p.hidden[i]) != ESP_OK) {
+                ok = false;
+            }
+        }
+    }
+    if (p.has_tz && time_sync_set_tz(p.tz) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_names) {
+        for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+            if (p.name_set[r] && !zones_config_set_relay_name((uint8_t)(r + 1u), p.name[r])) {
+                ok = false;
+            }
+            if (p.type_set[r] && !zones_config_set_relay_device_type((uint8_t)(r + 1u), p.type[r])) {
+                ok = false;
+            }
+        }
+    }
+    if (!ok) {
+        snprintf(err_msg, err_cap, "a preference could not be persisted -- the rest of the restore already landed");
+    }
+    return ok;
 }
 
 /* Top-level "aux_outputs": the spare-relay on/off outputs (docs/SPARE_RELAY_ONOFF_PLAN.md), the
@@ -3067,6 +3539,160 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char
     return true;
 }
 
+/* Pass 1 for the profiles' RELAY_IO segments and on_off_rules: run the REAL save-time validators
+ * (validate_io_segment_in_state()/validate_on_off_rules_in_state(), profiles_validate.c) against the
+ * configuration this import WILL produce -- candidate zone_type and relay_mask per zone, and the aux
+ * entries as the backup leaves them -- instead of the live one. profiles_http_save() runs the same
+ * validators against the live config during the profile commit, which is too late to refuse cleanly;
+ * with this check every refusal happens before anything is written (including in a dry run). Absent
+ * keys keep the live value, exactly as the commit passes treat them. The scratch (state plus one
+ * profile_t) lives on the heap: no new buffer on the async-job stack. */
+typedef struct {
+    profile_validate_state_t st;
+    profile_t p;
+} backup_import_precheck_scratch_t;
+
+/* Prepend "profile entry N: " to the message already in err_msg, in place and truncating safely
+ * (no bounce buffer, so no -Wformat-truncation and no stack cost). */
+static void backup_import_prefix_entry(char *err_msg, size_t err_cap, unsigned entry)
+{
+    char prefix[32];
+    int n = snprintf(prefix, sizeof(prefix), "profile entry %u: ", entry);
+    if (err_cap == 0 || n < 0 || (size_t)n >= err_cap) {
+        return;
+    }
+    size_t len = strlen(err_msg);
+    size_t avail = err_cap - 1u - (size_t)n;
+    if (len > avail) {
+        len = avail;
+    }
+    memmove(err_msg + n, err_msg, len);
+    memcpy(err_msg, prefix, (size_t)n);
+    err_msg[(size_t)n + len] = '\0';
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *body, char *err_msg, size_t err_cap)
+{
+    const char *profiles_arr = backup_json_obj_find(body, "profiles");
+    if (profiles_arr == NULL || backup_json_arr_first(profiles_arr) == NULL) {
+        return true;
+    }
+    backup_import_precheck_scratch_t *sc = persist_scratch_alloc(sizeof(*sc));
+    if (sc == NULL) {
+        snprintf(err_msg, err_cap, "out of memory (profile validation scratch)");
+        return false;
+    }
+    memset(sc, 0, sizeof(*sc));
+    bool ok = false;
+    profile_validate_state_t *st = &sc->st;
+    st->zone_count = zones_config_get_thermo_count();
+    if (st->zone_count > MAX31856_CHANNEL_COUNT) {
+        st->zone_count = MAX31856_CHANNEL_COUNT;
+    }
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zone_type_t zt = ZONE_TYPE_HEATER;
+        if (zones_config_get_zone_type(zi, &zt)) {
+            st->zone_type[zi] = (uint8_t)zt;
+        } else {
+            st->zone_type[zi] = (uint8_t)ZONE_TYPE_HEATER;
+        }
+        uint8_t m = 0;
+        (void)zones_config_get_relay_mask(zi, &m);
+        st->zone_relay_mask[zi] = m;
+    }
+    for (const char *ze = backup_json_arr_first(backup_json_obj_find(body, "zones")); ze;
+         ze = backup_json_arr_next(ze)) {
+        double di = 0.0, dv = 0.0;
+        bool hv = false;
+        if (!backup_json_field_num(ze, "index", &di) || di < 0 || di >= MAX31856_CHANNEL_COUNT) {
+            continue; // pass 1b refuses a malformed zone entry; nothing to validate against here
+        }
+        unsigned zi = (unsigned)di;
+        if (backup_json_field_opt_num(ze, "relay_mask", 0, 255, &dv, &hv, "relay_mask", NULL, 0, zi) && hv) {
+            st->zone_relay_mask[zi] = (uint8_t)dv;
+        }
+        hv = false;
+        if (backup_json_field_opt_num(ze, "zone_type", 0, (double)ZONE_TYPE_ON_OFF, &dv, &hv, "zone_type", NULL, 0,
+                                      zi) &&
+            hv) {
+            st->zone_type[zi] = (uint8_t)dv;
+        }
+    }
+    for (uint8_t relay = 1; relay <= AUX_OUTPUTS_COUNT; relay++) {
+        aux_output_t cur;
+        memset(&cur, 0, sizeof(cur));
+        (void)aux_outputs_cfg_get(relay, &cur);
+        st->aux[relay - 1u] = cur;
+    }
+    {
+        backup_aux_import_t a;
+        if (!backup_import_aux_parse(body, &a, err_msg, err_cap)) {
+            goto done; // already refused by the aux pass; kept so this function is safe on its own
+        }
+        if (a.present) {
+            for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+                if (!a.has[i]) {
+                    continue;
+                }
+                aux_output_t *o = &st->aux[i];
+                o->enabled = a.entry[i].enabled != 0;
+                o->conflicted = false;
+                o->tc_zone = a.entry[i].tc_zone_plus1 == 0 ? (uint8_t)AUX_TC_ZONE_NONE
+                                                          : (uint8_t)(a.entry[i].tc_zone_plus1 - 1u);
+                o->hyst_c = a.entry[i].hyst_c;
+                o->min_on_s = a.entry[i].min_on_s;
+                o->min_off_s = a.entry[i].min_off_s;
+            }
+        }
+    }
+    size_t entry = 0;
+    for (const char *pe = backup_json_arr_first(profiles_arr); pe; pe = backup_json_arr_next(pe), entry++) {
+        profile_t *p = &sc->p;
+        memset(p, 0, sizeof(*p));
+        uint8_t seg_i = 0;
+        for (const char *se = backup_json_arr_first(backup_json_obj_find(pe, "segments")); se;
+             se = backup_json_arr_next(se)) {
+            if (seg_i >= PROFILE_MAX_SEGMENTS) {
+                snprintf(err_msg, err_cap, "profile entry %u: more than %u segments", (unsigned)entry,
+                         (unsigned)PROFILE_MAX_SEGMENTS);
+                goto done;
+            }
+            profile_segment_t *sg = &p->segments[seg_i];
+            if (!backup_import_parse_seg_kind_io(se, entry, seg_i, sg, err_msg, err_cap)) {
+                goto done;
+            }
+            if (sg->seg_kind == PROFILE_SEG_KIND_RELAY_IO &&
+                !validate_io_segment_in_state(sg, (uint8_t)(seg_i + 1u), st, err_msg, err_cap)) {
+                backup_import_prefix_entry(err_msg, err_cap, (unsigned)entry);
+                goto done;
+            }
+            seg_i++;
+        }
+        p->segment_count = seg_i;
+        uint8_t rule_i = 0;
+        for (const char *re = backup_json_arr_first(backup_json_obj_find(pe, "on_off_rules")); re;
+             re = backup_json_arr_next(re)) {
+            if (rule_i >= PROFILE_MAX_ON_OFF_RULES) {
+                snprintf(err_msg, err_cap, "profile entry %u: too many on_off_rules", (unsigned)entry);
+                goto done;
+            }
+            if (!backup_import_parse_rule(re, entry, rule_i, &p->on_off_rules[rule_i], err_msg, err_cap)) {
+                goto done;
+            }
+            rule_i++;
+        }
+        p->on_off_rule_count = rule_i;
+        if (!validate_on_off_rules_in_state(p, st, err_msg, err_cap)) {
+            backup_import_prefix_entry(err_msg, err_cap, (unsigned)entry);
+            goto done;
+        }
+    }
+    ok = true;
+done:
+    free(sc);
+    return ok;
+}
+
 static uint8_t backup_import_aux_zones_union_live(void)
 {
     uint8_t zones_union = 0;
@@ -3199,8 +3825,17 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!backup_import_update_repo(body, false, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed update_repo refuses the WHOLE restore, nothing written
     }
+    if (!backup_import_relay_cycles(body, false, plan, err_msg, err_cap)) {
+        return false; // pass 1: malformed relay_cycles refuses the WHOLE restore, nothing written
+    }
+    if (!backup_import_prefs(body, false, plan, err_msg, err_cap)) {
+        return false; // pass 1: an invalid preference refuses the WHOLE restore, nothing written
+    }
     if (!backup_import_aux_outputs_validate(body, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed/conflicting aux_outputs refuses the WHOLE restore, nothing written
+    }
+    if (!backup_import_profiles_precheck(body, err_msg, err_cap)) {
+        return false; // pass 1: a profile the post-import config would refuse; nothing written
     }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched
@@ -3235,7 +3870,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     /* PSRAM only, no internal-DRAM fallback: at PROFILES_MAX_COUNT == 100 this
      * array is ~42.8 KB (profile_candidate_t, ~428 B each) -- a `malloc()`
      * fallback landing in internal DRAM at that size is exactly the hazard
-     * PROFILE_SLOTS_100_PLAN.md section 7 task 7 calls out (sockets reset
+     * PROFILE_SLOTS_100.md section 7 task 7 calls out (sockets reset
      * below ~11.9 KB of internal DRAM headroom on this board). Fail cleanly
      * with a logged error instead -- see the "out of memory" `err_msg` path
      * just below. Note this is NOT a "nothing changed" 400: we are past
@@ -3281,8 +3916,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         return false;
     }
 
+    bool zones_landed = false;
     bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates,
-                                         timing_profile_candidates);
+                                         timing_profile_candidates, &zones_landed, &aux_wrote);
     /* Pico ceiling LOWERING direction (review of 34a2da1b): run on EVERY
      * exit from backup_import_apply_locked(), success or failure. Two cases
      * need it. (1) A successful import that lowered a zone max_temp_c --
@@ -3305,20 +3941,15 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
      * same as the POST handler: a failure is logged, never this request's
      * own failure. */
     backup_import_track_ceiling_lower();
-    if (!ok) {
-        backup_import_aux_outputs_revert_phase1(); // profiles/zones failed: put the phase-1 aux disables back
+    if (!ok && !zones_landed) {
+        backup_import_aux_outputs_revert_phase1(); // zones not persisted: put the phase-1 aux disables back
     }
 
     free(timing_profile_candidates);
     free(zone_candidates);
     free(candidates);
-    if (ok && !backup_import_update_repo(body, true, NULL, err_msg, err_cap)) {
-        ok = false; // profiles/zones already landed: reported as a partial write below
-    }
-    // aux_outputs phase 2 (the entries that ENABLE a relay) against the zones union as committed.
-    if (ok && !backup_import_aux_outputs_commit(body, true, &aux_wrote, err_msg, err_cap)) {
-        ok = false;
-    }
+    // update_repo and aux_outputs phase 2 (the entries that ENABLE a relay) now run inside
+    // backup_import_apply_locked(), after the zones landed and before the profiles are committed.
     if (!ok) {
         // kiln_configs[] already committed above -- this restore is a
         // partial write, not the clean "nothing changed" a 400 implies.
@@ -3466,6 +4097,14 @@ static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
         return;
     }
 
+    /* cfg is the only save target: a real import with cfg unmounted would
+     * commit nothing durable. Refuse up front (503, same text as every other
+     * save route); a dry run writes nothing and is still allowed. */
+    if (!dry_run && cfg_fs_http_refuse_if_unmounted(async_req)) {
+        free(body);
+        return;
+    }
+
     char err_msg[160];
     /* Task 5: kiln_cfg_plan_t heap-allocated -- same reasoning as the pre-A4
      * inline handler used at this same point. Freed on every exit path
@@ -3514,7 +4153,20 @@ static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
 
     free(plan);
     httpd_resp_set_type(async_req, "application/json");
-    const char *ok_json = "{\"ok\":true}";
+    char ok_json[96];
+    int ok_n = snprintf(ok_json, sizeof(ok_json), "{\"ok\":true");
+    if (s_rc_kept_mask != 0) {
+        ok_n += snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, ",\"relay_cycles_kept\":[");
+        bool first = true;
+        for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+            if (s_rc_kept_mask & (1u << i)) {
+                ok_n += snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, first ? "%u" : ",%u", i);
+                first = false;
+            }
+        }
+        ok_n += snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, "]");
+    }
+    snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, "}");
     httpd_resp_send(async_req, ok_json, strlen(ok_json));
 }
 

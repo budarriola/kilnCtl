@@ -1,5 +1,15 @@
 # User data on the filesystem — migration design
 
+> **Design record; `docs/CONFIG_FILESYSTEM.md` is authoritative** for what has
+> shipped. Two items below that read as open are closed: the **pre-fire
+> interlock** (every "NOT done" mention) was decided 2026-10-06 and is
+> recorded at `firmware/KilnFW/App/drivers/http/readiness_http.h`
+> (`readiness_cfg_fs_status()`): with `cfg` unmounted every save route refuses
+> 503 and the readiness item is NOT_DONE with a format prompt, but it does
+> **not** gate a firing (a firing runs from the config already in RAM); and
+> **step 7** (closing the dual-write window) closed 2026-10-05 (saves are
+> cfg-file-only, NVS is a read-only legacy source).
+
 Companion to `docs/FILESYSTEM_PLAN.md` (which stages the `logs` SPIFFS→LittleFS
 track). **Owner decision, 2026-09-07:** user-editable configuration and
 user-created profiles move onto a filesystem. This document designs that; it
@@ -127,7 +137,8 @@ Therefore:
 5. **No safety decision may depend on a file.** Guard thresholds live in (1)
    which moves — so the pre-fire interlock gains a check: *if the config FS did
    not mount this boot, refuse to start a firing.* Defaults are for surviving,
-   not for heating.
+   not for heating. **Superseded 2026-10-06:** the firing refusal was not
+   built; saves refuse 503 instead and a firing runs from RAM (banner above).
 
 ---
 
@@ -270,7 +281,7 @@ last.
 | 2 | `cfg_fs_write_atomic()` + temp sweep + flash-worker routing. No callers. | no | none | **DONE, 2026-09-07.** `App/drivers/persist/cfg_fs.c`/`.h` (pure, host-testable, mirrors `log_store.c`'s split) provide mount/read/write-atomic/delete/exists/list; `App/drivers/persist/cfg_fs_mount.c`/`.h` are the device-only glue (`esp_vfs_littlefs_register`, `uart_bridge_ext_run_on_flash_worker()` routing — no callers yet). Host test: `test_cfg_fs.c`, obstructs the temp file's location and asserts the old final file survives untouched. **Negative-tested by breaking the production function** (redirected `cfg_fs_write_atomic()`'s `fopen()` from `tmp_path` to `final_path`, bypassing the temp file entirely): `test_cfg_fs.c:231: write_atomic() reports failure when it cannot create its own temp file` went RED, restored by hand, `git diff` empty (new, untracked file — confirmed identical to the pre-break version by re-running the full green suite). |
 | 3 | Migrate **prefs** (10,11,12,14) — the lowest-stakes items. Read-through + dual-write + `rev` counter. | no | Backup export/import must read/write through the same accessors, not NVS directly — verify `/api/backup/export` output is byte-identical before/after. | Host round-trip; bench: change unit pref, reboot, power-cut during write. **Items 11 (unit pref), 10 (ramp assist), 12 (display power), 14 (TZ) DONE, 2026-09-07.** Item 3 (relay names) **DONE, 2026-09-07** (see step 5's close-out note, since it travels with zones config administratively but reuses this same generic bridge). |
 | 4 | Migrate **profiles** (5,6) and **firing stats** (7). | no | **Highest interaction.** Profile export/import and `backup_import.c` both go through `profiles_http_get()/_save()/_delete()` — keep them as the sole entry points so the storage swap is invisible. Explicitly re-test profile export → factory reset → import. | Host: 8-profile fill, delete, re-save. Bench: export/import round trip; confirm `prof_used` bitmap path is gone, not merely unused. **Item 5 (user profile slots 0..7) DONE, 2026-09-07** — see the note immediately below the table. **Item 7 (firing stats/history) DONE, 2026-09-08** — see "Step 6b (item 7 — firing stats/history)" below. Item 6 (hidden-builtin mask) is **DONE, 2026-10-03** (`2749be53`, `/cfg/profiles/hidden.json`). |
-| 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). **Item 1 (the `zones_cfg_t` blob itself: PID gains, FOPDT, coupling matrix, guards, wiring, per-zone tc_type) DONE, 2026-09-07, read-through + dual-write** — see the note immediately below the table. Item 3 (relay names) is **also DONE, 2026-09-07** — a SEPARATE NVS key/blob (`relay_names_cfg_t`, its own `relay_names_save()`), dual-written through the generic `pref_cfg_fs.h` bridge rather than this bespoke module — see "Step 3/5 close-out: relay names + TZ" below the step-3 note. Item 8 (kiln config slots) is **also DONE, 2026-09-07** — see the "Step 5 (item 8 — kiln config slots only)" note below the step-4 note. **Item 9 (adaptive-tune Ki baseline) DONE, 2026-09-08** — see "Step 6c (item 9 — adaptive-tune state)" below; deliberately SIMPLER treatment than this row's own "bespoke bridge" framing (generic `pref_cfg_fs.h`, no per-zone divergence forensics), per the re-derivable-over-one-firing audit finding. Item 2 (zone normals) is **DONE, 2026-10-03** — dual-written to `zone_normals.dat` through `pref_cfg_fs.h`, rev key `znorm_rev`, same bridge as relay names. The pre-fire interlock is **NOT done** — no caller refuses a firing on a failed `cfg` mount yet. |
+| 5 | Migrate **zones config** (1,2,3) + **kiln config slots** (8) + **adaptive tune** (9). Schema 22 becomes `"schema": 22`; migration chain retained. Add the pre-fire interlock: refuse to start a firing if the config FS did not mount. | no | Backup format version stays as-is; export is regenerated from the same getters. | Host: every version 1..22 fixture file parses to the same struct the blob chain produces — **bind the JSON reader to the C migration chain with vector comparison**, per `project_binding_a_python_mirror_to_c`. Bench: full firing on migrated config, then `ota_rollback_esp()` and confirm the rolled-back build reads the same gains (this is the trap being tested). **Item 1 (the `zones_cfg_t` blob itself: PID gains, FOPDT, coupling matrix, guards, wiring, per-zone tc_type) DONE, 2026-09-07, read-through + dual-write** — see the note immediately below the table. Item 3 (relay names) is **also DONE, 2026-09-07** — a SEPARATE NVS key/blob (`relay_names_cfg_t`, its own `relay_names_save()`), dual-written through the generic `pref_cfg_fs.h` bridge rather than this bespoke module — see "Step 3/5 close-out: relay names + TZ" below the step-3 note. Item 8 (kiln config slots) is **also DONE, 2026-09-07** — see the "Step 5 (item 8 — kiln config slots only)" note below the step-4 note. **Item 9 (adaptive-tune Ki baseline) DONE, 2026-09-08** — see "Step 6c (item 9 — adaptive-tune state)" below; deliberately SIMPLER treatment than this row's own "bespoke bridge" framing (generic `pref_cfg_fs.h`, no per-zone divergence forensics), per the re-derivable-over-one-firing audit finding. Item 2 (zone normals) is **DONE, 2026-10-03** — dual-written to `zone_normals.dat` through `pref_cfg_fs.h`, rev key `znorm_rev`, same bridge as relay names. The pre-fire interlock is **closed differently, 2026-10-06**: saves refuse 503 on an unmounted `cfg` and readiness prompts the format; a firing is deliberately not blocked (`readiness_http.h`). |
 | 6 | Migrate **relay cycle counters** (4). | no | counters appear in backup export | Bench soak: confirm the 600 s write cadence lands and survives 24 h. **DONE, 2026-09-08** — see "Step 6a (item 4 — relay cycle counters)" below. Bench soak still outstanding (host-proven, board-absent by construction, same as every other item in this plan so far). |
 | 7 | *(Owner-gated, not scheduled)* Stop dual-writing to NVS. **Not cheaply reversible** — this is the point of no return for rollback. | no | none | Requires an explicit owner decision that no older firmware will be booted again. |
 
@@ -342,7 +353,7 @@ behavior for free).
   (29/29 executables, `tools/run_all_checks.ps1`).
 - **Not done in this pass** (as of that pass; zone normals (2) and relay names (3) have since landed, `208de3d4` and `288dc91c`):
   kiln config slots (8); adaptive tune
-  (9); the pre-fire interlock; the JSON-text file format upgrade noted
+  (9); the pre-fire interlock (since closed, see banner); the JSON-text file format upgrade noted
   above; no board has this flashed. Correction: the bench board's `cfg`
   partition was actually flashed at `c4b4e65d` (2026-09-07) — it exists in
   the partition table, it is merely unformatted (reads as all-0xFF), which
@@ -644,7 +655,7 @@ board-absent by construction.** Item 2 (zone normals) was NOT done here but is
 DONE (2026-10-03, `zone_normals.dat` via `pref_cfg_fs`, same shape as relay names). Item 9 (adaptive tune) was NOT done at this point in the plan's
 history but is DONE as of Step 6c below (`762bb29e` bridge, `2e88e90a`
 /api/cfgfs reporting). The pre-fire interlock (refuse a firing if `cfg`
-did not mount) is still **NOT done** either.
+did not mount) was NOT done here; closed 2026-10-06 as a save refusal rather than a firing gate (see banner).
 
 - **Shape**: unlike `profiles_cfg_fs.c`'s per-slot files, the whole saved-
   configs store — every slot, `active_id`, `next_id` — was ALREADY one NVS

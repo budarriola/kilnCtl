@@ -64,7 +64,7 @@ static void test_unmounted(void)
     TEST_CHECK(json_has(json, "\"reason\":"), "carries a reason string when not mounted");
     TEST_CHECK(json_has(json, "\"capacity\":{\"known\":false}"), "capacity reported unknown, not zeroed");
     TEST_CHECK(json_has(json, "\"file_count\":0"), "no files when unmounted");
-    TEST_CHECK(json_has(json, "\"dual_write\":{\"items\":[]"),
+    TEST_CHECK(json_has(json, "\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":[]"),
                "dual-write section present but empty when no items are supplied");
     TEST_CHECK(json_has(json, "\"format\":{\"known\":false}"),
                "format section present but reports known:false when no progress info is supplied "
@@ -213,11 +213,11 @@ static void test_mounted_with_files(void)
     TEST_CHECK(json_has(json, "\"capacity\":{\"known\":true,\"total_bytes\":524288,\"used_bytes\":4096,"
                               "\"free_bytes\":520192}"),
                "capacity section echoes the caller-supplied values and computes free correctly");
-    TEST_CHECK(json_has(json, "\"dual_write\":{\"items\":["
+    TEST_CHECK(json_has(json, "\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":["
                               "{\"name\":\"zones\",\"file_backed\":true,\"file_rev\":5,\"nvs_backed\":true,"
-                              "\"nvs_rev\":5,\"diverged\":false,\"migration_deferred\":false},"
+                              "\"nvs_rev\":5,\"diverged\":false,\"nvs_stale\":false,\"migration_deferred\":false},"
                               "{\"name\":\"unit_pref\",\"file_backed\":true,\"file_rev\":2,\"nvs_backed\":true,"
-                              "\"nvs_rev\":2,\"diverged\":false,\"migration_deferred\":false}]"),
+                              "\"nvs_rev\":2,\"diverged\":false,\"nvs_stale\":false,\"migration_deferred\":false}]"),
                "dual-write: every item passed in gets its own row, not just zones -- 70ed6514 fixed the stale "
                "lists but left per-item detail zones-only; this is the widened per-bridge picture");
     TEST_CHECK(json_has(json, "\"nvs_only\":[]"),
@@ -250,7 +250,7 @@ static void test_mounted_with_files(void)
         TEST_CHECK(cfg_fs_status_build_json_ex(base, &cap, items, 2, NULL, &win, wjson, sizeof(wjson), &wlen) == ESP_OK &&
                        json_has(wjson, "\"restore_verified\":true,\"window_may_close\":true}"),
                    "flipped flags are rendered independently");
-        TEST_CHECK(json_has(wjson, "\"dual_write\":{\"items\":[") && json_has(wjson, "\"format\":{"),
+        TEST_CHECK(json_has(wjson, "\"dual_write\":{\"write_mode\":\"cfg_only\",\"items\":[") && json_has(wjson, "\"format\":{"),
                    "window section sits between dual_write and format without disturbing either");
     }
 
@@ -412,38 +412,43 @@ static void test_buffer_too_small(void)
  * populated the way the handler populates it: all 15 real row names at
  * UINT32_MAX revs with diverged and migration_deferred set, capacity known at
  * SIZE_MAX-ish sizes, a completed-and-failed format object, a filled
- * dual-write window, and the 13 real root files with multi-digit sizes. The
+ * dual-write window, and the 18 real root files (2026-10-07: 20 rows) with multi-digit sizes. The
  * host esp_err_to_name() stub returns "ESP_FAIL", so the longest real error name
  * (ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED, 38 chars) is added to the measured
  * length by hand. The result must fit the handler's cfgfs_status_scratch_t.json
- * (CFG_FS_STATUS_HANDLER_JSON_BUF, 4096 B) with at least 400 B to spare. */
+ * (CFG_FS_STATUS_HANDLER_JSON_BUF, 5632 B) with at least 400 B to spare. */
 #define WORST_CASE_HANDLER_BUF CFG_FS_STATUS_HANDLER_JSON_BUF
 static void test_worst_case_fits_handler_buffer(void)
 {
-    TEST_SECTION("cfg_fs_status: worst-case /api/cfgfs (15 rows at UINT32_MAX, known capacity, failed format, "
-                 "filled window, 13 root files) via the handler's _ex path fits the handler buffer with 400 B spare");
+    TEST_SECTION("cfg_fs_status: worst-case /api/cfgfs (20 rows at UINT32_MAX, known capacity, failed format, "
+                 "filled window, 18 root files) via the handler's _ex path fits the handler buffer with 400 B spare");
     cfg_fs_deinit();
     const char *base = "cfg_fs_status_test_worstcase";
     reset_scratch(base);
     TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
 
-    static const char *const files[13] = { "zones.json",    "kiln_configs.json", "unit_pref.dat",
+    static const char *const files[18] = { "zones.json",    "kiln_configs.json", "unit_pref.dat",
                                            "ki_base.dat",   "ramp_assist.dat",   "tz.dat",
                                            "display_power.dat", "iter_tune.bin", "relay_cycles.dat",
                                            "relay_names.dat", "zone_normals.dat", "aux_out.dat",
-                                           "update_repo.dat" };
+                                           "update_repo.dat", "prof_fav.bin",  "ct_verify.bin",
+                                           "setup_wiz.bin", "prof_live_rec.bin", "prof_live_work.bin" };
     static char payload[100000];
     memset(payload, 'x', sizeof(payload));
-    for (size_t i = 0; i < 13; i++) {
+    for (size_t i = 0; i < 18; i++) {
         TEST_CHECK(cfg_fs_write_atomic(files[i], payload, sizeof(payload)) == ESP_OK, "write a real root file");
     }
+    TEST_CHECK(cfg_fs_write_atomic("profiles/prof1.json", payload, sizeof(payload)) == ESP_OK,
+               "write a profiles/ file so the subdirs[] summary renders at six-digit bytes");
 
-    static const char *const names[15] = { "zones",         "kiln_cfg_store", "unit_pref",     "profiles_hidden",
+    static const char *const names[20] = { "zones",         "kiln_cfg_store", "unit_pref",     "profiles_hidden",
                                            "zone_normals",  "ramp_assist",    "display_power", "tz",
                                            "profiles",      "relay_cycles",   "adaptive_tune", "firing_stats",
-                                           "relay_names",   "aux_outputs",    "update_repo" };
-    cfg_fs_dualwrite_item_t items[15];
-    for (size_t i = 0; i < 15; i++) {
+                                           "relay_names",   "aux_outputs",    "update_repo",
+                                           "iter_tune",     "profiles_favorites", "ct_verify_store",
+                                           "setup_wizard_progress", "live_profile" };
+    cfg_fs_dualwrite_item_t items[20];
+    for (size_t i = 0; i < 20; i++) {
         items[i] = (cfg_fs_dualwrite_item_t){ .name = names[i], .file_valid = true, .file_rev = UINT32_MAX,
                                               .nvs_valid = true, .nvs_rev = UINT32_MAX, .diverged = true,
                                               .migration_deferred = true };
@@ -456,7 +461,7 @@ static void test_worst_case_fits_handler_buffer(void)
 
     static char json[WORST_CASE_HANDLER_BUF];
     size_t len = 0;
-    esp_err_t err = cfg_fs_status_build_json_ex(base, &cap, items, 15, &fmt, &win, json, sizeof(json), &len);
+    esp_err_t err = cfg_fs_status_build_json_ex(base, &cap, items, 20, &fmt, &win, json, sizeof(json), &len);
     TEST_CHECK(err == ESP_OK, "worst-case render fits the handler's buffer");
     if (err == ESP_OK) {
         size_t real_len = len + (strlen("ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED") - strlen(esp_err_to_name(ESP_FAIL)));
@@ -476,6 +481,86 @@ static void test_worst_case_fits_handler_buffer(void)
     cfg_fs_deinit();
 }
 
+/* GET /api/cfgfs used to omit every file in a subdirectory: cfg_fs_list("")
+ * skips directories, so profiles/prof<id>.json never appeared anywhere.
+ * The builder now summarizes each known subdirectory (count + bytes). */
+static void test_subdirs_summarized(void)
+{
+    TEST_SECTION("cfg_fs_status: files under profiles/ are summarized in subdirs[] (count and bytes), not "
+                 "silently absent");
+    cfg_fs_deinit();
+    const char *base = "cfg_fs_status_test_subdirs";
+    {
+        /* reset_scratch() only removes .tmp and base; clear profiles/ first. */
+        char p1[600], p2[600], pd[600], pt[600];
+        snprintf(p1, sizeof(p1), "%s/profiles/prof1.json", base);
+        snprintf(p2, sizeof(p2), "%s/profiles/prof2.json", base);
+        snprintf(pd, sizeof(pd), "%s/profiles", base);
+        snprintf(pt, sizeof(pt), "%s/profiles/hidden.json", base);
+        remove(p1);
+        remove(p2);
+        remove(pt);
+        TCFS_RMDIR(pd);
+    }
+    reset_scratch(base);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
+
+    char json[4608];
+    size_t len = 0;
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds with no subdirectory present");
+    TEST_CHECK(json_has(json, "\"subdirs\":[{\"name\":\"profiles\",\"file_count\":0,\"size_bytes\":0,"
+                              "\"unknown_size\":0}]"),
+               "an absent profiles/ directory reads as 0 files, not as an error");
+
+    TEST_CHECK(cfg_fs_write_atomic("zones.json", "abcdef", 6) == ESP_OK, "write a root file");
+    TEST_CHECK(cfg_fs_write_atomic("profiles/prof1.json", "0123456789", 10) == ESP_OK, "write profiles/prof1.json");
+    TEST_CHECK(cfg_fs_write_atomic("profiles/prof2.json", "abcde", 5) == ESP_OK, "write profiles/prof2.json");
+    TEST_CHECK(cfg_fs_write_atomic("profiles/hidden.json", "xyz", 3) == ESP_OK, "write profiles/hidden.json");
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK,
+               "build succeeds with subdirectory files");
+    TEST_CHECK(json_has(json, "\"file_count\":1,\"files\":[{\"name\":\"zones.json\",\"size_bytes\":6}]"),
+               "files[] still lists only root files (the existing contract is unchanged)");
+    TEST_CHECK(json_has(json, "\"subdirs\":[{\"name\":\"profiles\",\"file_count\":3,\"size_bytes\":18,"
+                              "\"unknown_size\":0}]"),
+               "profiles/ reports 3 files and 18 bytes");
+    cfg_fs_deinit();
+}
+
+/* nvs_permanent must name every store that is NVS-only today (2026-10-07
+ * audit, see cfg_fs_status.c). */
+static void test_nvs_permanent_lists_current_stores(void)
+{
+    TEST_SECTION("cfg_fs_status: nvs_permanent names every NVS-only store, including the ones added after the "
+                 "list was first written");
+    cfg_fs_deinit();
+    char json[4608];
+    size_t len = 0;
+    TEST_CHECK(cfg_fs_status_build_json(NULL, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build");
+    const char *perm = strstr(json, "\"nvs_permanent\":[");
+    TEST_CHECK(perm != NULL, "nvs_permanent present");
+    static const char *const want[] = { "firing_shadow",       "kiln_cfg_swap",       "aux_convert_journal",
+                                        "run_state_breadcrumb", "pico_update_attempts",
+                                        "pico_image_manifest", "estop_verification", "dualwrite_window" };
+    for (size_t i = 0; perm && i < sizeof(want) / sizeof(want[0]); i++) {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\"%s\"", want[i]);
+        const char *hit = strstr(perm, needle);
+        const char *end = perm ? strchr(perm, ']') : NULL;
+        TEST_CHECK(hit != NULL && end != NULL && hit < end, want[i]);
+    }
+    // Moved to cfg files 2026-10-07: they must NOT be reported NVS-permanent.
+    static const char *const gone[] = { "profiles_favorites", "live_profile", "ct_verify_store", "setup_wizard_progress",
+                                        "iter_tune" };
+    const char *pend = perm ? strchr(perm, ']') : NULL;
+    for (size_t i = 0; perm && pend && i < sizeof(gone) / sizeof(gone[0]); i++) {
+        char needle[64];
+        snprintf(needle, sizeof(needle), "\"%s\"", gone[i]);
+        const char *hit = strstr(perm, needle);
+        TEST_CHECK(hit == NULL || hit > pend, gone[i]);
+    }
+}
+
 void run_test_cfg_fs_status(void)
 {
     test_unmounted();
@@ -487,6 +572,8 @@ void run_test_cfg_fs_status(void)
     test_format_stalled_ceiling();
     test_buffer_too_small();
     test_worst_case_fits_handler_buffer();
+    test_subdirs_summarized();
+    test_nvs_permanent_lists_current_stores();
     test_item_diverged_rule();
     cfg_fs_deinit();
 }

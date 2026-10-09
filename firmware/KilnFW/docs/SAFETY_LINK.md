@@ -35,8 +35,8 @@ where it stops applying.
 
 | Part | Driven by | Output | Direction |
 |------|---------------|--------------------|-----------|
-| U6 (VIB/VOB) | Pico `PicoTx` (GP4, safety side) | ESP GPIO4, net `DataFromSafty` | Pico -> ESP data |
-| U6 (VIA/VOA) | ESP GPIO5, net `DataToSafty` | Pico `PicoRx` (GP5), R9 1k pull-up | ESP -> Pico data |
+| U6 (VIA/VOA) | Pico `PicoTx` (GP4, safety side, pin 7) | ESP GPIO4, net `DataFromSafty` (pin 2) | Pico -> ESP data |
+| U6 (VIB/VOB) | ESP GPIO5, net `DataToSafty` (pin 3) | Pico `PicoRx` (GP5, pin 6), no pull-up in the schematic (R9 is gone) | ESP -> Pico data |
 | U1 (opto) | ESP GPIO6 via R11 390R, net `Fault` | Pico `mainFault` (GPIO10), R8 1k pull-up | ESP -> Pico fault |
 
 There are three traps here, and getting any of them wrong produces a link that

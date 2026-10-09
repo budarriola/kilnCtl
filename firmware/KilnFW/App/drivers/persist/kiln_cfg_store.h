@@ -333,6 +333,20 @@ bool kiln_cfg_store_delete(int32_t id, bool ack_no_safety_processor, char *reaso
  * `name` is invalid (including a duplicate of another entry's name). */
 bool kiln_cfg_store_rename(int32_t id, const char *name);
 
+/* Same as kiln_cfg_store_rename(), plus a reason on failure (may be NULL/0).
+ * A failed cfg-file write is reported through reason_out with
+ * KILN_CFG_PERSIST_FAIL_TEXT in it (see below) and the rename is rolled back. */
+bool kiln_cfg_store_rename_ex(int32_t id, const char *name, char *reason_out, size_t reason_cap);
+
+/* Since the NVS dual-write close (docs/CONFIG_FILESYSTEM.md) the store persists
+ * to the cfg file only, and every mutator (save/clone/apply/delete/rename/
+ * set_active_id_raw) returns false when that write fails instead of reporting a
+ * change that vanishes at the next reboot. The failure reason always contains
+ * KILN_CFG_PERSIST_FAIL_TEXT, so an HTTP caller can answer 500 (a storage fault)
+ * rather than 400 (a bad request) via kiln_cfg_store_reason_is_persist_failure(). */
+#define KILN_CFG_PERSIST_FAIL_TEXT "could not be saved to flash"
+bool kiln_cfg_store_reason_is_persist_failure(const char *reason);
+
 /* True if `name` (after the same trim/case-fold normalization every write
  * path applies) would collide with some saved config OTHER than
  * `exclude_id` -- exposed purely so a caller (kiln_cfg_http.c's rename

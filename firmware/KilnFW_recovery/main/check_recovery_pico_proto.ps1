@@ -33,6 +33,8 @@ if (-not $vcvars) {
     Write-Host "SKIP: vcvarsall.bat not found -- cannot build the host test with MSVC."
     exit 3
 }
+# vcvarsall runs ONCE here, outside the build gate; the gate then covers only cl.
+Import-KilnVcvarsEnv -Vcvars $vcvars
 
 $work = Join-Path $env:TEMP "recovery_pico_proto_$PID"
 if (Test-Path $work) { Remove-Item -Recurse -Force $work }
@@ -46,7 +48,7 @@ function Build-And-Run {
     $test = if ($TestC) { $TestC } else { Join-Path $here "test_recovery_pico_proto.c" }
     $crc = Join-Path $common "src\kilnlink_crc.c"
     $frm = Join-Path $common "src\kilnlink_frame.c"
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$common\include`" `"$test`" `"$ImplC`" `"$crc`" `"$frm`" /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
+    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && cl /nologo /W3 /WX /std:c11 /I`"$here`" /I`"$common\include`" `"$test`" `"$ImplC`" `"$crc`" `"$frm`" /Fe:`"$exe`" /Fo:`"$obj\\`" /Fd:`"$obj\\`""
     $gate = Enter-KilnBuildGate -Label "recovery_pico_proto" -Lane light
     try {
         $ErrorActionPreference = "Continue"
