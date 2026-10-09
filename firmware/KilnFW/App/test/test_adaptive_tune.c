@@ -95,6 +95,15 @@ bool zone_is_monitor_only(uint8_t zone_index)
     return s_stub_zone_is_monitor_only[zone_index];
 }
 
+// F3 (FLASH_WORKER_LOCK_INVERSION_AUDIT): the real zones setters end in the zones
+// NVS save and reach the flash worker, which itself takes adaptive_tune_lock. The
+// semphr stub counts every held lock in g_test_stub_lock_depth and the only lock
+// this module takes is adaptive_tune_lock, so a nonzero depth inside a setter
+// means run_end called it with that lock held.
+static int g_setter_calls = 0;
+static int g_setter_max_lock_depth = 0;
+#define SETTER_LOCK_PROBE()     do {         g_setter_calls++;         if (g_test_stub_lock_depth > g_setter_max_lock_depth) g_setter_max_lock_depth = g_test_stub_lock_depth;     } while (0)
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
@@ -105,6 +114,7 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
 }
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES) return false;
     s_fake_zone_cfg[zone_index].k_dc = k_dc;
     s_fake_zone_cfg[zone_index].tau_s = tau_s;
@@ -127,6 +137,7 @@ bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc
 }
 bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES) return false;
     s_fake_zone_cfg[zone_index].autotune_baseline_k_dc = k_dc;
     return true;
@@ -154,6 +165,7 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
                                         // file does not include zones_http.h (see its own #include list)
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES) return false;
     if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) || kp < 0.0f || ki < 0.0f || kd < 0.0f ||
         kp > TEST_ZONE_PID_GAIN_MAX || ki > TEST_ZONE_PID_GAIN_MAX || kd > TEST_ZONE_PID_GAIN_MAX) {
@@ -243,6 +255,7 @@ bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES || neighbor_index >= TEST_MAX_ZONES) return false;
     s_fake_coupling[zone_index][neighbor_index] = coeff;
     s_fake_coupling_tau[zone_index][neighbor_index] = tau_s;
@@ -533,6 +546,7 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: guards");
     test_min_observations_guard_rejects_too_few();
+    test_run_end_holds_no_lock_across_zones_setters(); // F3
     test_duty_spread_guard_rejects_clustered_observations();
     test_duty_spread_guard_pins_exact_threshold(); // P4
     test_implausible_jump_guard_rejects_far_off_fit();

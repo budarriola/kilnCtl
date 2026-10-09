@@ -652,6 +652,38 @@ void adaptive_tune_set_reason(char *buf, size_t bufsz, const char *fmt, ...);
 // only from adaptive_tune_run_end() (adaptive_tune.c), always with adaptive_tune_lock
 // already held.
 bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id);
+
+// F3 plan/apply/commit split of the two refines above (see the comment in
+// adaptive_tune_model.c): plan and commit run with adaptive_tune_lock held,
+// apply runs with it RELEASED because the zones setters reach the flash worker.
+typedef struct {
+    bool bootstrap_baseline, bootstrap_ok;
+    float baseline_k_dc;
+    bool have_model, model_ok, pid_ok;
+    float k_dc, k_blended, tau_s, dead_time_s, kp, ki, kd;
+    uint8_t profile_id;
+    uint32_t clear_gen; // adaptive_tune_ki_clear_gen at plan time
+} adaptive_tune_zone_plan_t;
+
+typedef struct {
+    bool reached_apply;
+    uint8_t count;
+    struct {
+        uint8_t j;
+        bool ok;
+        float blended, tau, dead;
+    } cells[MAX31856_CHANNEL_COUNT];
+} adaptive_tune_coupled_plan_t;
+
+// Bumped (under adaptive_tune_lock) by adaptive_tune_clear_ki_baseline().
+extern uint32_t adaptive_tune_ki_clear_gen;
+
+bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tune_zone_plan_t *plan);
+void adaptive_tune_apply_zone_plan(uint8_t zi, adaptive_tune_zone_plan_t *plan);
+bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_t *plan);
+void adaptive_tune_plan_coupled_locked(uint8_t zi, adaptive_tune_coupled_plan_t *plan);
+void adaptive_tune_apply_coupled_plan(uint8_t zi, adaptive_tune_coupled_plan_t *plan);
+void adaptive_tune_commit_coupled_locked(uint8_t zi, const adaptive_tune_coupled_plan_t *plan);
 void adaptive_tune_refine_coupled_locked(uint8_t zi);
 void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats);
 

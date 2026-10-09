@@ -625,6 +625,8 @@ static void save_kibase_job(void *arg)
                                      "adaptive-tune ki baseline");
 }
 
+uint32_t adaptive_tune_ki_clear_gen = 0;
+
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
 {
     if (!rec) {
@@ -641,6 +643,12 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     // still holding the lock, so the dispatch below is a plain memcpy-then-
     // write with no second lock acquisition needed.
     bool baseline_newly_latched = false;
+    bool zone_active[MAX31856_CHANNEL_COUNT] = {false};
+    bool zone_planned[MAX31856_CHANNEL_COUNT] = {false};
+    bool baseline_was_valid_a[MAX31856_CHANNEL_COUNT] = {false};
+    float baseline_before_a[MAX31856_CHANNEL_COUNT] = {0};
+    adaptive_tune_zone_plan_t zone_plans[MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_plan_t coupled_plans[MAX31856_CHANNEL_COUNT];
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
         const profile_firing_zone_record_t *zr = &rec->zones[zi];
@@ -708,10 +716,40 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         // watch for a VALUE change, not only a false->true valid transition
         // (the transition alone was already sufficient before Q4, when
         // adaptive_tune_refine_ki_locked() was the only writer).
-        bool baseline_was_valid = z->ki_baseline_valid;
-        float baseline_before = z->ki_baseline;
-        bool model_refined = adaptive_tune_refine_zone_locked(zi, rec->profile_id);
-        adaptive_tune_refine_coupled_locked(zi);
+        // F3: plan only (no zones setter) while the lock is held; the setters run
+        // in the unlocked pass below and their outcome is committed in the third.
+        zone_active[zi] = true;
+        baseline_was_valid_a[zi] = z->ki_baseline_valid;
+        baseline_before_a[zi] = z->ki_baseline;
+        zone_planned[zi] = adaptive_tune_plan_zone_locked(zi, rec->profile_id, &zone_plans[zi]);
+        adaptive_tune_plan_coupled_locked(zi, &coupled_plans[zi]);
+    }
+
+    // F3: the zones setters end in the zones NVS save, which dispatches onto the
+    // flash worker; the worker takes adaptive_tune_lock (UART Accept ->
+    // adaptive_tune_clear_ki_baseline()). Never hold the lock across them.
+    xSemaphoreGive(adaptive_tune_lock);
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!zone_active[zi]) {
+            continue;
+        }
+        if (zone_planned[zi] || zone_plans[zi].bootstrap_baseline) {
+            adaptive_tune_apply_zone_plan(zi, &zone_plans[zi]);
+        }
+        adaptive_tune_apply_coupled_plan(zi, &coupled_plans[zi]);
+    }
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!zone_active[zi]) {
+            continue;
+        }
+        adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
+        const profile_firing_zone_record_t *zr = &rec->zones[zi];
+        bool baseline_was_valid = baseline_was_valid_a[zi];
+        float baseline_before = baseline_before_a[zi];
+        bool model_refined = adaptive_tune_commit_zone_locked(zi, &zone_plans[zi]);
+        adaptive_tune_commit_coupled_locked(zi, &coupled_plans[zi]);
         if (!model_refined) {
             adaptive_tune_refine_ki_locked(zi, &zr->stats);
         } else {
@@ -1015,6 +1053,7 @@ void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zones[zone_index].ki_baseline_valid = false;
     adaptive_tune_zones[zone_index].ki_baseline = 0.0f;
+    adaptive_tune_ki_clear_gen++; // F3: invalidates any in-flight run_end plan's baseline re-latch
 
     kibase_job_t job = {.result = ESP_FAIL};
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {

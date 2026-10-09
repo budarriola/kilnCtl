@@ -34,9 +34,23 @@
 // the SIMC recompute. adaptive_tune_run_end() uses this to decide whether
 // adaptive_tune_refine_ki_locked() may run this same run -- see that call site's own
 // comment (D5).
-bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
+//
+// F3 (docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md): every
+// zones_config_set_*() below ends in the zones NVS save, which dispatches onto
+// the flash worker; the worker itself takes adaptive_tune_lock (UART AUTOTUNE
+// ACCEPT -> adaptive_tune_clear_ki_baseline()). So the refine is split in
+// three: plan_*_locked() (decisions only, adaptive_tune_lock held, NO zones
+// setter), apply_*_plan() (the setters, adaptive_tune_lock NOT held) and
+// commit_*_locked() (lock retaken, outcome-dependent state written).
+// adaptive_tune_refine_zone_locked()/_coupled_locked() at the end of each
+// section run all three back to back for callers that do not hold the lock
+// across a flash-worker dispatch (host tests).
+bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tune_zone_plan_t *plan)
 {
     adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
+    memset(plan, 0, sizeof(*plan));
+    plan->profile_id = profile_id;
+    plan->clear_gen = adaptive_tune_ki_clear_gen;
 
     if (z->ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS) {
         adaptive_tune_set_refusal(z, "only %u/%u dwell observations", (unsigned)z->ring_count,
@@ -113,12 +127,8 @@ bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     float baseline_k_dc;
     if (!zones_config_get_autotune_baseline_k_dc(zi, &baseline_k_dc) || !(baseline_k_dc > 0.0f)) {
         baseline_k_dc = k_dc;
-        if (!zones_config_set_autotune_baseline_k_dc(zi, baseline_k_dc)) {
-            ESP_LOGW(ADAPTIVE_TUNE_TAG,
-                     "zone %u: could not persist bootstrapped autotune_baseline_k_dc=%.4f -- "
-                     "using it in-RAM for this run only, will retry bootstrapping next run",
-                     (unsigned)zi, (double)baseline_k_dc);
-        }
+        plan->bootstrap_baseline = true; // persisted by apply_zone_plan(), outside the lock
+        plan->baseline_k_dc = baseline_k_dc;
     }
 
     // THE fix: the plausibility ratio test is anchored to baseline_k_dc (a
@@ -222,14 +232,58 @@ bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
                                                                 // no worse than not having one
     adaptive_tune_capture_revert_locked(z, prior_kp, prior_ki, prior_kd, k_dc, tau_s, dead_time_s);
 
-    if (!zones_config_set_model(zi, k_blended, tau_s, dead_time_s)) {
+    plan->have_model = true;
+    plan->k_dc = k_dc;
+    plan->k_blended = k_blended;
+    plan->tau_s = tau_s;
+    plan->dead_time_s = dead_time_s;
+    plan->kp = gains.kp;
+    plan->ki = gains.ki;
+    plan->kd = gains.kd;
+    return true;
+}
+
+// No adaptive_tune_lock may be held (F3): the setters reach the flash worker.
+void adaptive_tune_apply_zone_plan(uint8_t zi, adaptive_tune_zone_plan_t *plan)
+{
+    if (plan->bootstrap_baseline) {
+        plan->bootstrap_ok = zones_config_set_autotune_baseline_k_dc(zi, plan->baseline_k_dc);
+    }
+    if (!plan->have_model) {
+        return;
+    }
+    plan->model_ok = zones_config_set_model(zi, plan->k_blended, plan->tau_s, plan->dead_time_s);
+    if (plan->model_ok) {
+        plan->pid_ok = zones_config_set_pid(zi, plan->kp, plan->ki, plan->kd);
+    }
+}
+
+// Returns true when the model AND PID writes both landed (same contract as the
+// old adaptive_tune_refine_zone_locked()). adaptive_tune_lock held.
+bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_t *plan)
+{
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
+    float baseline_k_dc = plan->baseline_k_dc;
+    float k_dc = plan->k_dc, k_blended = plan->k_blended, tau_s = plan->tau_s, dead_time_s = plan->dead_time_s;
+    autotune_gains_t gains = {.kp = plan->kp, .ki = plan->ki, .kd = plan->kd};
+    uint8_t profile_id = plan->profile_id;
+    if (plan->bootstrap_baseline && !plan->bootstrap_ok) {
+        ESP_LOGW(ADAPTIVE_TUNE_TAG,
+                 "zone %u: could not persist bootstrapped autotune_baseline_k_dc=%.4f -- "
+                 "using it in-RAM for this run only, will retry bootstrapping next run",
+                 (unsigned)zi, (double)baseline_k_dc);
+    }
+    if (!plan->have_model) {
+        return false; // plan refused; its refusal reason is already set
+    }
+    if (!plan->model_ok) {
         adaptive_tune_set_refusal(z, "zones_config_set_model() rejected %.4f/%.1f/%.1f", (double)k_blended, (double)tau_s,
                     (double)dead_time_s);
         z->revert_available = false; // nothing was actually written -- do not offer a revert to a "before"
                                       // that never became a real "after"
         return false;
     }
-    if (!zones_config_set_pid(zi, gains.kp, gains.ki, gains.kd)) {
+    if (!plan->pid_ok) {
         adaptive_tune_set_refusal(z, "zones_config_set_pid() rejected %.4f/%.4f/%.4f", (double)gains.kp, (double)gains.ki,
                     (double)gains.kd);
         // The model write above DID land, even though the PID write just
@@ -257,13 +311,31 @@ bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
     // detects this write and dispatches the NVS persist the same way it
     // already does for adaptive_tune_ki.c's own latch -- see that function's
     // baseline_newly_latched comment.
-    z->ki_baseline = gains.ki;
-    z->ki_baseline_valid = true;
+    // F3: the lock was dropped for the setters; an UART Accept that cleared
+    // this zone's baseline in that window also rewrote the live PID, so the SIMC
+    // Ki planned above is stale -- do not re-latch it.
+    if (adaptive_tune_ki_clear_gen == plan->clear_gen) {
+        z->ki_baseline = gains.ki;
+        z->ki_baseline_valid = true;
+    }
 
     ESP_LOGI(ADAPTIVE_TUNE_TAG, "zone %u: K_dc %.4f -> %.4f (%.1f%%) from %u observations, profile %u", (unsigned)zi,
              (double)k_dc, (double)k_blended, (double)z->last_delta_pct, (unsigned)z->ring_count,
              (unsigned)profile_id);
     return true;
+}
+
+// Plan + apply + commit in one call: ONLY for callers that do not hold
+// adaptive_tune_lock across the zones setters (adaptive_tune_run_end() must
+// not use this -- it drives the three phases itself).
+bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id)
+{
+    adaptive_tune_zone_plan_t plan;
+    bool planned = adaptive_tune_plan_zone_locked(zi, profile_id, &plan);
+    if (planned || plan.bootstrap_baseline) {
+        adaptive_tune_apply_zone_plan(zi, &plan);
+    }
+    return adaptive_tune_commit_zone_locked(zi, &plan);
 }
 
 // ---------------------------------------------------------------------
@@ -470,9 +542,10 @@ adaptive_tune_coupled_result_t adaptive_tune_coupled_fit(
     return ADAPTIVE_TUNE_COUPLED_OK;
 }
 
-void adaptive_tune_refine_coupled_locked(uint8_t zi)
+void adaptive_tune_plan_coupled_locked(uint8_t zi, adaptive_tune_coupled_plan_t *plan)
 {
     adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
+    memset(plan, 0, sizeof(*plan));
     z->coupled_attempted = true;
     z->coupled_applied = false;
     z->coupled_cells_changed = 0;
@@ -543,7 +616,6 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
     if (!zones_config_get_coupling_tau(zi, tau_row)) memset(tau_row, 0, sizeof(tau_row));
     if (!zones_config_get_coupling_dead_time(zi, dead_row)) memset(dead_row, 0, sizeof(dead_row));
 
-    uint8_t changed = 0;
     for (uint8_t j = 0; j < n; j++) {
         if (j == zi) {
             continue; // diagonal (this zone's own gain) stays owned by the existing per-zone K_dc
@@ -623,11 +695,36 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
         if (blended < 0.0f) blended = 0.0f;                   // storage convention: non-negative
         if (blended > ZONE_COUPLING_COEFF_MAX) blended = ZONE_COUPLING_COEFF_MAX;
 
-        if (zones_config_set_coupling_cell(zi, j, blended, tau_row[j], dead_row[j])) {
+        plan->cells[plan->count].j = j;
+        plan->cells[plan->count].blended = blended;
+        plan->cells[plan->count].tau = tau_row[j];
+        plan->cells[plan->count].dead = dead_row[j];
+        plan->count++;
+    }
+    plan->reached_apply = true;
+}
+
+// No adaptive_tune_lock may be held (F3).
+void adaptive_tune_apply_coupled_plan(uint8_t zi, adaptive_tune_coupled_plan_t *plan)
+{
+    for (uint8_t c = 0; c < plan->count; c++) {
+        plan->cells[c].ok = zones_config_set_coupling_cell(zi, plan->cells[c].j, plan->cells[c].blended,
+                                                           plan->cells[c].tau, plan->cells[c].dead);
+    }
+}
+
+void adaptive_tune_commit_coupled_locked(uint8_t zi, const adaptive_tune_coupled_plan_t *plan)
+{
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
+    if (!plan->reached_apply) {
+        return; // plan already recorded its refusal and breadcrumb
+    }
+    uint8_t changed = 0;
+    for (uint8_t c = 0; c < plan->count; c++) {
+        if (plan->cells[c].ok) {
             changed++;
         }
     }
-
     z->coupled_cells_changed = changed;
     if (changed > 0) {
         z->coupled_applied = true;
@@ -639,4 +736,14 @@ void adaptive_tune_refine_coupled_locked(uint8_t zi)
                    "coupled solve succeeded but every off-diagonal cell was implausible or rejected");
     }
     adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
+}
+
+// Plan + apply + commit in one call -- NOT for adaptive_tune_run_end() (see
+// adaptive_tune_refine_zone_locked()).
+void adaptive_tune_refine_coupled_locked(uint8_t zi)
+{
+    adaptive_tune_coupled_plan_t plan;
+    adaptive_tune_plan_coupled_locked(zi, &plan);
+    adaptive_tune_apply_coupled_plan(zi, &plan);
+    adaptive_tune_commit_coupled_locked(zi, &plan);
 }
