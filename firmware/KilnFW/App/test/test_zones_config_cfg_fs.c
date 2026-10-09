@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "nvs_flash.h"
 
 #ifdef _WIN32
 #include <direct.h>
@@ -1047,34 +1048,147 @@ static void scratch_oom_disarm(void)
     persist_scratch_test_fail_nth = 0;
 }
 
-static void test_resolve_oom_keeps_rev_floor_and_fails_load(void)
+static void fill_v21_fixture(zones_cfg_v21_t *v21)
 {
-    TEST_SECTION("zones cfg_fs: resolve OOM fails the load, keeps the rev floor, never lets a save clobber "
-                 "the newer file (47e07df6 review 2a)");
+    memset(v21, 0, sizeof(*v21));
+    v21->version = 21;
+    v21->thermo_count = 1;
+    v21->relay_count = 1;
+    v21->max_simultaneous_relays = 1;
+    v21->safety_tc_type = 3;
+    v21->timing_profile_count = 1;
+    strncpy(v21->timing_profiles[0].name, "Default", TIMING_PROFILE_NAME_MAX_LEN);
+    v21->timing_profiles[0].guard_progress_duty_min = 0.1f;
+    v21->timing_profiles[0].ramp_lock_band_c = 3.0f;
+    v21->zones[0].relay_mask = 1;
+    v21->zones[0].thermo_mask = 1;
+    snprintf(v21->zones[0].name, sizeof(v21->zones[0].name), "V21Zone");
+    v21->zones[0].pid_kp = 9.0f;
+    v21->zones[0].max_temp_c = 1200.0f;
+    v21->zones[0].model_k_dc = 12.0f;
+}
+
+/* Common setup: a CURRENT-version file at rev 5 plus a stale legacy NVS copy at rev 1. */
+static void oom_setup_file_rev5_and_stale_nvs(void)
+{
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero(); /* deterministic: a skipped rev floor would restamp rev 1 */
     zones_cfg_t c;
     fill_valid_cfg(&c, "newer_file", 4.0f);
     c.version = ZONES_CFG_VERSION;
     c.crc32 = zones_config_json_compute_crc(&c);
     TEST_CHECK(zones_config_cfg_fs_save(&c, 5) == ESP_OK, "setup: file at rev 5");
     stage_legacy_nvs("stale_legacy", 1.0f, 1);
+}
 
-    bool found = true, valid = true;
-    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
-    scratch_oom_arm(2); // 1st = nvs decode buffer, 2nd = resolve's file candidate
-    esp_err_t e = nvs_load(&found, &valid);
-    scratch_oom_disarm();
-    TEST_CHECK(e == ESP_ERR_NO_MEM, "nvs_load reports the OOM instead of ESP_OK");
-    TEST_CHECK(!valid, "the legacy NVS copy is NOT adopted as valid");
-
+/* After an OOM'd load: a save must stamp a rev above 5 (never restamp rev 1) and the file must
+ * hold the new content, proving the load did not rewind the rev floor. */
+static void oom_check_rev_floor_kept(void)
+{
     stage("after_oom", 9.0f);
     TEST_CHECK(nvs_save() == ESP_OK, "a later save lands");
     uint32_t rev = 0;
     zones_cfg_t raw;
     bool raw_valid = false;
     zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
-    TEST_CHECK(raw_valid && rev > 5, "the save stamped a rev above the file's rev 5, not rev 1");
+    TEST_CHECK(raw_valid && rev > 1, "the save stamped a rev above the NVS rev floor (1), never restamped rev 1");
+}
+
+static void test_resolve_oom_keeps_rev_floor_and_fails_load(void)
+{
+    TEST_SECTION("zones cfg_fs: resolve's own candidate OOM fails the load, keeps the rev floor, never lets a "
+                 "save clobber the newer file (47e07df6 review 2a)");
+    oom_setup_file_rev5_and_stale_nvs();
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    scratch_oom_arm(3); // 1 = nvs decode buffer, 2 = nvs_load's `resolved`, 3 = resolve's file candidate
+    esp_err_t e = nvs_load(&found, &valid);
+    scratch_oom_disarm();
+    TEST_CHECK(persist_scratch_test_seen >= 3, "the 3rd same-size scratch allocation was reached (test is aimed right)");
+    TEST_CHECK(e == ESP_ERR_NO_MEM, "nvs_load reports the OOM instead of ESP_OK");
+    TEST_CHECK(!valid, "the legacy NVS copy is NOT adopted as valid");
+    oom_check_rev_floor_kept();
+}
+
+static void test_nvs_load_resolved_oom_keeps_rev_floor(void)
+{
+    TEST_SECTION("zones cfg_fs: nvs_load's own `resolved` scratch OOM keeps the rev floor (fcdfc823 review HIGH1)");
+    oom_setup_file_rev5_and_stale_nvs();
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    scratch_oom_arm(2);
+    esp_err_t e = nvs_load(&found, &valid);
+    scratch_oom_disarm();
+    TEST_CHECK(e == ESP_ERR_NO_MEM && !valid && !found, "load fails with nothing found/valid");
+    oom_check_rev_floor_kept();
+}
+
+static void test_nvs_conversion_scratch_oom_is_not_corrupt(void)
+{
+    TEST_SECTION("zones cfg_fs: conversion-scratch OOM on an OLD-version NVS blob fails the load, latches no "
+                 "UNREADABLE fault, leaves the newer file alone (fcdfc823 review HIGH2, NVS side)");
+    oom_setup_file_rev5_and_stale_nvs();
+    // Replace the stale current-version NVS blob with a v21 one.
+    zones_cfg_v21_t v21;
+    fill_v21_fixture(&v21);
+    {
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "open NVS");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_ZONES, &v21, sizeof(v21)) == HAL_OK, "stage v21 blob");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "commit");
+        hal_kv_close(&h);
+    }
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    scratch_oom_arm(0); // fail by exact size below: the conversion scratch is sizeof(zones_cfg_t)
+    persist_scratch_test_fail_size = sizeof(zones_cfg_t);
+    persist_scratch_test_seen = 0;
+    persist_scratch_test_fail_nth = 2; // 1 = nvs decode buffer, 2 = conversion scratch
+    esp_err_t e = nvs_load(&found, &valid);
+    scratch_oom_disarm();
+    TEST_CHECK(e == ESP_ERR_NO_MEM && !valid, "load fails with NO_MEM, nothing adopted");
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(!zones_config_get_load_fault(&lf) || lf.kind != ZONES_CFG_LOAD_FAULT_UNREADABLE,
+               "no UNREADABLE fault was latched for an OOM that judged nothing");
+    uint32_t rev = 0;
+    zones_cfg_t raw;
+    bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 5 && strcmp(raw.zones[0].name, "newer_file") == 0,
+               "the newer file is untouched");
+    oom_check_rev_floor_kept();
+}
+
+static void test_file_conversion_scratch_oom_does_not_overwrite_file(void)
+{
+    TEST_SECTION("zones cfg_fs: conversion-scratch OOM on an OLD-version FILE is 'cannot decide' -- the newer "
+                 "file is not replaced by the legacy NVS blob (fcdfc823 review HIGH2, file side)");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    zones_cfg_v21_t v21;
+    fill_v21_fixture(&v21);
+    uint8_t filebuf[4 + sizeof(v21)];
+    filebuf[0] = 5; filebuf[1] = 0; filebuf[2] = 0; filebuf[3] = 0;
+    memcpy(filebuf + 4, &v21, sizeof(v21));
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, filebuf, sizeof(filebuf)) == ESP_OK, "v21 file at rev 5");
+    stage_legacy_nvs("stale_legacy", 1.0f, 1);
+
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    persist_scratch_test_fail_size = sizeof(zones_cfg_t);
+    persist_scratch_test_seen = 0;
+    persist_scratch_test_fail_nth = 4; // 1 nvs decode, 2 `resolved`, 3 resolve candidate, 4 file conversion scratch
+    esp_err_t e = nvs_load(&found, &valid);
+    int seen = persist_scratch_test_seen;
+    scratch_oom_disarm();
+    TEST_CHECK(seen >= 4, "the 4th same-size scratch allocation was reached (test is aimed right)");
+    TEST_CHECK(e == ESP_ERR_NO_MEM && !valid, "load fails loud");
+    static uint8_t after[4 + sizeof(zones_cfg_t)];
+    size_t alen = 0;
+    TEST_CHECK(cfg_fs_read(ZONES_CFG_FILE_PATH, after, sizeof(after), &alen) == ESP_OK &&
+                   alen == sizeof(filebuf) && memcmp(after, filebuf, alen) == 0,
+               "the file is byte-for-byte unchanged (not overwritten with the legacy NVS blob)");
 }
 
 static void test_start_does_not_migrate_after_load_oom(void)
@@ -1125,6 +1239,9 @@ void run_test_zones_config_cfg_fs(void)
     test_file_sourced_writeback_happens_once_not_every_boot();
     test_file_cycle_is_normalized_in_ram_and_on_writeback();
     test_resolve_oom_keeps_rev_floor_and_fails_load();
+    test_nvs_load_resolved_oom_keeps_rev_floor();
+    test_nvs_conversion_scratch_oom_is_not_corrupt();
+    test_file_conversion_scratch_oom_does_not_overwrite_file();
     test_start_does_not_migrate_after_load_oom();
 
     reset_all();

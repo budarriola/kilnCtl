@@ -312,6 +312,12 @@ static esp_err_t nvs_load_from_decode_buf(const char *partition, zones_cfg_t *ou
             *out_found = true;
         }
         return ESP_OK;
+    case ZONES_DECODE_OOM:
+        /* Not judged: no fault latch, nothing found/valid, the load fails. */
+        ESP_LOGW(ZONES_HTTP_TAG, "zones_cfg blob from '%s': out of memory while converting -- load fails, "
+                      "flash data left untouched",
+                 partition);
+        return ESP_ERR_NO_MEM;
     case ZONES_DECODE_CORRUPT:
     default:
         /* Genuine corruption (too short, wrong length for the claimed
@@ -524,6 +530,19 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
                                                         &migrated_from_nvs, &on_disk_version_before,
                                                         &nvs_refused_as_newer);
+    if (err == ESP_ERR_NO_MEM) {
+        /* Decode OOM: could not judge the NVS bytes. Do not resolve (the file would
+         * be compared against nothing), keep the rev floor, fail the load. */
+        s_zones_cfg_rev = zones_cfg_rev_load();
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return err;
+    }
 
     /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
      * against the `cfg` file on top of whatever nvs_load_from() just
@@ -540,6 +559,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * OOM is a clean load failure: config zeroed, nothing found/valid. */
     zones_cfg_t *resolved = persist_scratch_alloc(sizeof(*resolved));
     if (!resolved) {
+        s_zones_cfg_rev = nvs_rev; /* rev floor: a later save must not restamp rev 1 */
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -559,6 +579,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
          * legacy NVS copy is not adopted as valid (a later save would overwrite
          * the newer authoritative file). */
         s_zones_cfg_rev = nvs_rev;
+        free(resolved);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -579,7 +600,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * the NVS candidate BEFORE it is overwritten below: `s_zones.cfg` still
      * holds whatever nvs_load_from_with_migration_info() just decoded (or
      * the zeroed default, if !nvs_valid), and `resolved` is a struct this
-     * function already owns on the stack -- no new large local needed. If
+     * function already owns on the heap (persist_scratch) -- no large local. If
      * the two don't already agree, NVS (and, redundantly but harmlessly,
      * the file itself, since zones_config_cfg_fs_save() re-stamps a fresh
      * CRC) needs a write-back once this boot's winner is adopted, same as

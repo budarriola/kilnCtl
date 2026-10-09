@@ -84,7 +84,10 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
      * docs/audits/boot_hang_2026-09-08.md. */
     uint8_t *raw = persist_scratch_alloc(ZCFG_FILE_BUF_MAX);
     if (!raw) {
-        ESP_LOGW(ZCFG_FS_TAG, "zones config file read buffer alloc failed -- treating as file absent");
+        ESP_LOGW(ZCFG_FS_TAG, "zones config file read buffer alloc failed -- cannot decide");
+        if (out_on_disk_version) {
+            *out_on_disk_version = ZONES_CFG_RESOLVE_OOM_VERSION;
+        }
         return;
     }
     size_t len = 0;
@@ -121,6 +124,14 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
      * still sees the same all-zero struct it did before. */
     zones_decode_result_t result = zones_config_json_decode_blob(raw + 4, len - 4, out_cfg, &reason);
     free(raw);
+    if (result == ZONES_DECODE_OOM) {
+        ESP_LOGW(ZCFG_FS_TAG, "zones config file decode ran out of memory -- cannot decide");
+        memset(out_cfg, 0, sizeof(*out_cfg));
+        if (out_on_disk_version) {
+            *out_on_disk_version = ZONES_CFG_RESOLVE_OOM_VERSION;
+        }
+        return;
+    }
     if (result != ZONES_DECODE_OK) {
         ESP_LOGW(ZCFG_FS_TAG, "zones config file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides",
                  (unsigned long)rev, reason);
@@ -269,6 +280,18 @@ static bool resolve_with_file_buf(const zones_cfg_t *nvs_cfg, bool nvs_valid, ui
     bool file_valid = false;
     uint8_t file_on_disk_version = 0;
     load_raw_impl(file_cfg, &file_rev, &file_valid, &file_on_disk_version);
+
+    if (!file_valid && file_on_disk_version == ZONES_CFG_RESOLVE_OOM_VERSION) {
+        /* Could not read/decode the file: unknown, NOT absent. Do not fall back to (and
+         * write over the file with) the NVS candidate. Keep the rev floor. */
+        memset(out_cfg, 0, sizeof(*out_cfg));
+        *out_rev = nvs_rev;
+        *out_used_file = false;
+        if (out_on_disk_version) {
+            *out_on_disk_version = ZONES_CFG_RESOLVE_OOM_VERSION;
+        }
+        return false;
+    }
 
     if (!file_valid) {
         /* No usable file. Fall back to the NVS candidate, and if it is
