@@ -121,9 +121,13 @@ srv.serve_forever()
 $srv = Start-Process -FilePath $python -ArgumentList @($srvPy) -RedirectStandardOutput $srvOut -PassThru -WindowStyle Hidden
 try {
     $port = $null
-    for ($i = 0; $i -lt 100 -and -not $port; $i++) {
+    # Deadline-based, not an iteration count: under heavy parallel load python startup alone
+    # can exceed 10 s. Give up early only if the server process itself died.
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 120 -and -not $port) {
         Start-Sleep -Milliseconds 100
         if (Test-Path $srvOut) { $line = (Get-Content -LiteralPath $srvOut -ErrorAction SilentlyContinue | Select-Object -First 1); if ($line -match '^\d+$') { $port = $line } }
+        if (-not $port -and $srv.HasExited) { break }
     }
     if (-not $port) { Note-Fail "local redirect server did not start" }
     else {
