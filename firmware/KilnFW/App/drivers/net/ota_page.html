@@ -373,14 +373,28 @@ function renderEspInfo(s) {
 }
 
 function pollEspStatus() {
-  fetch('/api/ota/esp/status').then(function (r) { return r.json(); }).then(function (s) {
+  fetch('/api/ota/esp/status').then(function (r) {
+    // /api/ota/esp/status is ADMIN (46616a4e). After a post-OTA reboot the RAM
+    // sessions are gone, so a 401 is expected: the board ANSWERED, i.e. it is
+    // back up -- it just needs a fresh login. Say so and stop polling; never
+    // feed an error body to r.json()/renderEspInfo() or retry in a loop.
+    if (r.status === 401) {
+      var e401 = new Error('unauthorized');
+      e401.status = 401;
+      throw e401;
+    }
+    if (!r.ok) { throw new Error('HTTP ' + r.status); }
+    return r.json();
+  }).then(function (s) {
     var phase = renderEspInfo(s);
     if (phase === 'writing' || phase === 'verifying' || phase === 'finalizing') {
       setTimeout(pollEspStatus, 1000);
     }
   }).catch(function (authErr) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-    document.getElementById('espInfo').textContent = 'Could not load ESP status.';
+    document.getElementById('espInfo').textContent = (authErr && authErr.status === 401)
+      ? 'ESP is up (it answered) but your session ended -- reload and log in again to see status.'
+      : 'Could not load ESP status.';
   });
 }
 

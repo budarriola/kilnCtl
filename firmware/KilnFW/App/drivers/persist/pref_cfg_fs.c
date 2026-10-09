@@ -160,7 +160,17 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
     size_t len = 0;
     esp_err_t err = cfg_fs_read(rel_path, buf, cap, &len);
     bool newer = false;
-    if (err == ESP_OK && len != 4 + item_size && len > 4 + version_offset && buf[4 + version_offset] > current_version) {
+    if (err == ESP_ERR_INVALID_SIZE) {
+        /* The file exists but is bigger than anything this build can write
+         * (pref_cfg_fs_save() refuses items over PREF_CFG_FS_MAX_LARGE_ITEM), so
+         * it can only come from newer firmware. Count it as NEWER so resolve()
+         * never overwrites it. The version byte is unreadable here: report 0xFF
+         * ("unknown, newer"). */
+        newer = true;
+        if (out_version) {
+            *out_version = 0xFF;
+        }
+    } else if (err == ESP_OK && len != 4 + item_size && len > 4 + version_offset && buf[4 + version_offset] > current_version) {
         newer = true;
         if (out_version) {
             *out_version = buf[4 + version_offset];

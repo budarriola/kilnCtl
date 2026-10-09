@@ -3041,9 +3041,15 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, b
  * through relay_cycles_restore_all() with allow_lower_mask 0: a stale backup can never LOWER a live
  * wear count (it is clamped up and reported), which on a freshly factory-reset board is the same as an
  * exact restore. Types/rated overrides are not touched (relay type travels with the zones). */
+/* Bit i set = relay i kept its (higher) live count on the last committed import. Reported in the commit response. */
+static uint8_t s_rc_kept_mask;
+
 static BACKUP_IMPORT_NOINLINE bool backup_import_relay_cycles(const char *body, bool commit, kiln_cfg_plan_t *plan,
                                                               char *err_msg, size_t err_cap)
 {
+    if (commit) {
+        s_rc_kept_mask = 0;
+    }
     const char *obj = backup_json_obj_find(body, "relay_cycles");
     if (obj == NULL) {
         return true;
@@ -3083,9 +3089,19 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_relay_cycles(const char *body, 
         }
         return true;
     }
+    uint32_t live_now[RELAY_CYCLES_COUNT];
+    relay_cycles_get_all(live_now);
+    s_rc_kept_mask = 0;
     if (!relay_cycles_restore_all(counts, 0, NULL)) {
-        snprintf(err_msg, err_cap, "relay_cycles could not be persisted -- the rest of the restore already landed");
+        snprintf(err_msg, err_cap,
+                 "relay_cycles could not be persisted -- kiln_configs, zones, update_repo and aux_outputs already "
+                 "landed; preferences and profiles were NOT written");
         return false;
+    }
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        if (counts[i] < live_now[i]) {
+            s_rc_kept_mask |= (uint8_t)(1u << i); /* live > backup: live count kept */
+        }
     }
     return true;
 }
@@ -4134,7 +4150,20 @@ static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
 
     free(plan);
     httpd_resp_set_type(async_req, "application/json");
-    const char *ok_json = "{\"ok\":true}";
+    char ok_json[96];
+    int ok_n = snprintf(ok_json, sizeof(ok_json), "{\"ok\":true");
+    if (s_rc_kept_mask != 0) {
+        ok_n += snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, ",\"relay_cycles_kept\":[");
+        bool first = true;
+        for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+            if (s_rc_kept_mask & (1u << i)) {
+                ok_n += snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, first ? "%u" : ",%u", i);
+                first = false;
+            }
+        }
+        ok_n += snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, "]");
+    }
+    snprintf(ok_json + ok_n, sizeof(ok_json) - (size_t)ok_n, "}");
     httpd_resp_send(async_req, ok_json, strlen(ok_json));
 }
 

@@ -242,7 +242,7 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
 // correctness problem the way torn reads of the nonce/lockout state would
 // be).
 
-// GET /api/ota/esp/status -- unauthenticated poll-back endpoint pairing
+// GET /api/ota/esp/status -- ROUTE_TIER_ADMIN (46616a4e; a 401 without a session) poll-back endpoint pairing
 // GET /api/ota/pico/status below, closing the gap ota_http_client.py's
 // header comment and mcp_server.py's ota_status() doc comment both flagged:
 // ota_http_get_esp_progress() and the persisted ota_record.h "last update"

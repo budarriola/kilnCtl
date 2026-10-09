@@ -584,6 +584,23 @@ static void test_cfg_wrong_size_newer_vs_corrupt(void)
     TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates wrong-size current-version file");
     TEST_CHECK(!iter_tune_store_schema_refused(NULL), "current-version wrong-size file is corruption, not newer");
 
+    // A newer file larger than the probe buffer (cfg_fs_read fails INVALID_SIZE)
+    // must still count as NEWER and stay untouched.
+    static uint8_t huge[4 + PREF_CFG_FS_MAX_LARGE_ITEM + 64 + 100];
+    memset(huge, 0, sizeof(huge));
+    huge[0] = 9;
+    huge[4] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1);
+    huge[sizeof(huge) - 1] = 0xCD;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, huge, sizeof(huge)) == ESP_OK, "over-cap newer file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates over-cap newer cfg file");
+    TEST_CHECK(iter_tune_store_schema_refused(NULL), "over-cap newer cfg file reported as NEWER");
+    static uint8_t hback[sizeof(huge) + 16];
+    got = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, hback, sizeof(hback), &got) == ESP_OK && got == sizeof(huge) &&
+                   memcmp(hback, huge, sizeof(huge)) == 0,
+               "over-cap newer cfg file preserved byte-identical");
+
     cfg_fs_deinit();
     tit_scratch_clean();
 }

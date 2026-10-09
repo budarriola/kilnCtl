@@ -6704,6 +6704,20 @@ static void test_relay_cycles_never_lowers_live_count(void)
     TEST_CHECK(g_fake_rc_counts[0] == 10 && g_fake_rc_counts[1] == 99 && g_fake_rc_counts[2] == 30 &&
                    g_fake_rc_counts[3] == 41 && g_fake_rc_counts[4] == 1000,
                "counts only move up");
+    TEST_CHECK(s_rc_kept_mask == ((1u << 1) | (1u << 3) | (1u << 4)), "relays whose live count was kept are reported");
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)) && s_rc_kept_mask == 0, "an import without relay_cycles reports none kept");
+}
+
+static void test_relay_cycles_commit_failure_message_is_accurate(void)
+{
+    TEST_SECTION("backup relay_cycles -- commit failure names what landed and what did not");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    g_fake_rc_restore_fail = true;
+    char err[300] = "";
+    TEST_CHECK(!wp9_import_with(RC_OK, err, sizeof(err)), "a relay_cycles persist failure fails the import");
+    TEST_CHECK(strstr(err, "already landed; preferences and profiles were NOT written") != NULL, "message states profiles were not written");
+    g_fake_rc_restore_fail = false;
 }
 
 static void test_relay_cycles_bad_input_refuses_whole_restore(void)
@@ -6870,6 +6884,7 @@ void run_test_backup_import(void)
     test_update_repo_export_round_trip();
     test_relay_cycles_round_trip_and_absent_preserves();
     test_relay_cycles_never_lowers_live_count();
+    test_relay_cycles_commit_failure_message_is_accurate();
     test_relay_cycles_bad_input_refuses_whole_restore();
     test_aux_outputs_import_applies_and_persists();
     test_aux_outputs_absent_is_noop();

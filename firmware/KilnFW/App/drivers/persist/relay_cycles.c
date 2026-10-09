@@ -274,6 +274,11 @@ static void migrate_from_default_partition(void)
         if (!verified) {
             ESP_LOGW(TAG, "relay cycle migration read-back did not match -- keeping the old default-partition copy");
         } else {
+            /* ACCEPTED TRADE-OFF (DEV_FIRMWARE_REVIEW_2 finding 8): erasing the old default-partition copy
+             * removes what a rollback to PRE-SPLIT firmware would read, so after such a rollback the relay
+             * cycle counts restart from 0. Kept deliberately: the copy was read back and memcmp-verified
+             * above (no data lost on this firmware), and leaving it behind let factory reset / stale
+             * copies resurrect old counts. See docs/CONFIG_FILESYSTEM.md. */
             esp_err_t eerr = legacy_default_nvs_erase_relay_cycles();
             if (eerr != ESP_OK) {
                 ESP_LOGE(TAG, "could not erase the old default-partition relay cycle copy: %s", esp_err_to_name(eerr));

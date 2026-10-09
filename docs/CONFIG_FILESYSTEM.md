@@ -556,6 +556,10 @@ follows it.
 Marker and migration writes that are not config saves stay as they are:
 relay_cycles' NVS-to-NVS default-partition migration, adaptive_tune's
 enable-mask migrated marker. Each is documented in the code where it lives.
+Accepted trade-off (2026-10-09, `docs/audits/DEV_FIRMWARE_REVIEW_2_2026-10-09.md` finding 8): after
+the relay_cycles migration copy to `kiln_nvs` is read back and verified, the old default-partition
+`relay_cyc` key is erased, so a rollback to pre-split firmware sees no legacy copy and its relay cycle
+counts restart from 0. The current firmware loses nothing.
 The iter_tune store was an exception here until 2026-10-07 and is now closed
 like the rest (last section).
 
