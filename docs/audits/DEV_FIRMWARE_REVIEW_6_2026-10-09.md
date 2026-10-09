@@ -15,6 +15,8 @@ None.
 
 ### M1. A failed first migration erases the legacy Wi-Fi credential, and the "will retry" logs are false (7551d44a)
 
+**Fixed in @@SHA@@.**
+
 - Where: `firmware/KilnFW/App/drivers/net/wifi_prov_nvs.c:531-543` (`adopt = !found_in_wifi_nvs`, plus the
   stale-copy erase); `:561` (`nvs_save_mode()` runs first); `:582`, `:587`, `:621`, `:629` (the "will
   retry" messages).
@@ -83,6 +85,8 @@ WEB-ZONE-10 POSTs `current_sweep/abort` with no `write_refusal()` gate (listed i
 ## LOW
 
 ### L1. Comments still say the legacy Wi-Fi copy is never deleted (7551d44a)
+
+**Fixed in @@SHA@@.**
 
 - Where: `firmware/KilnFW/App/drivers/net/wifi_prov_nvs.c:237`, `:487-491`, `:523-529` (still describes
   the removed `default_has_legacy && !wifi_nvs_has_legacy` clause), and `:597`.

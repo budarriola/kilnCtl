@@ -626,6 +626,30 @@ static void test_legacy_wifi_migration_is_one_shot(void)
     TEST_CHECK(!s_legacy_single.has, "second boot finds no legacy credential to adopt");
 }
 
+static void test_interrupted_first_migration_retries_next_boot(void)
+{
+    TEST_SECTION("a first migration that dies after the mode write (wifi_nvs namespace exists, no saved_nets) "
+                 "keeps the legacy credential and migrates it next boot (DEV_FIRMWARE_REVIEW_6 M1)");
+    seed_legacy_default_wifi();
+    /* Boot 1, interrupted: the migrate step ran (mode written, namespace created)
+     * but nvs_load_saved_nets() never persisted the list (power loss / save failure). */
+    bool found = false;
+    memset(&s_legacy_single, 0, sizeof(s_legacy_single));
+    TEST_CHECK(wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &found) == ESP_OK, "boot1: load");
+    wifi_prov_migrate_from_default_partition(found);
+    s_legacy_erase_pending = false;
+    TEST_CHECK(legacy_wifi_key_present(NVS_KEY_SSID), "boot1: legacy ssid still present");
+    simulate_reboot_state();
+    /* Boot 2: wifi_nvs now has the namespace + mode key but no saved_nets record. */
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.saved_nets.count == 1 && strcmp(s_wifi.saved_nets.nets[0].ssid, "oldnet") == 0,
+               "boot2: the legacy credential is still migrated");
+    TEST_CHECK(!legacy_wifi_key_present(NVS_KEY_SSID), "boot2: legacy erased only after the verified copy");
+    simulate_reboot_state();
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.saved_nets.count == 1, "boot3: migrated list persists");
+}
+
 static void test_forget_last_network_survives_reboot(void)
 {
     TEST_SECTION("forget the last saved network, then reboot: zero saved nets, legacy copy does not return");
@@ -1614,6 +1638,7 @@ void run_test_wifi_prov(void)
     test_dns_nvs_round_trip();
     test_legacy_default_wifi_erase_keeps_board_unprovisioned();
     test_legacy_wifi_migration_is_one_shot();
+    test_interrupted_first_migration_retries_next_boot();
     test_forget_last_network_survives_reboot();
     test_mode_and_ap_name_change_survives_reboot();
     test_apply_sta_config_dns();

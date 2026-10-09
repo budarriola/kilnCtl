@@ -234,10 +234,30 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
 }
 
 /* Every writer below targets WIFI_NVS_PARTITION unconditionally. The old
- * default-partition copy is deliberately never written again (nor deleted --
- * see the migration note in wifi_prov_start()), so a rollback to firmware that
- * predates the split still finds the credentials it knew about, just frozen at
- * whatever they were when this build first ran. */
+ * default-partition copy is never written again, and is erased exactly once:
+ * after wifi_prov_migrate_from_default_partition() has adopted it AND the
+ * saved_nets record has been written and read back from WIFI_NVS_PARTITION
+ * (see nvs_load_saved_nets()). Consequence, accepted: once that migration has
+ * completed, a rollback to firmware that predates the partition split finds no
+ * legacy credentials and boots unprovisioned. */
+
+/* True only if `partition` holds a complete, readable saved_nets record. This
+ * -- not the existence of the wifi_cfg namespace or of the mode key, both of
+ * which the first migration step creates before the credential is persisted --
+ * is what proves the migration finished and the legacy copy is stale. */
+static bool nvs_saved_nets_record_present(const char *partition)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition) != HAL_OK) {
+        return false;
+    }
+    saved_nets_blob_t blob;
+    size_t len = sizeof(blob);
+    hal_status_t err = hal_kv_get_blob(&h, NVS_KEY_SAVED_NETS, &blob, &len);
+    hal_kv_close(&h);
+    return err == HAL_OK && len == sizeof(blob) && blob.version == SAVED_NETS_VERSION &&
+           blob.count <= WIFI_PROV_MAX_SAVED_NETWORKS;
+}
 
 /* Reads the legacy single-network keys (NVS_KEY_SSID/NVS_KEY_PASS/
  * NVS_KEY_HAS_CREDS) out of `partition`, with the same has_creds-missing
@@ -484,11 +504,12 @@ hal_status_t wifi_prov_nvs_partition_init(const char *partition)
  * should win and, if so, leaves s_wifi holding it and persists it to the new
  * home.
  *
- * The old copy is intentionally left in place rather than deleted: someone
- * rolling back to pre-split firmware to chase a regression should still find a
- * board that can join its network. The cost is a stale duplicate that this
- * build never reads again after the migration and never writes at all --
- * cheap, and strictly safer than the alternative. */
+ * The old copy is erased only once the credential is safely in the new home
+ * (saved_nets record written and read back; see nvs_load_saved_nets()). Until
+ * then it is left intact, and because the adopt decision below keys on a
+ * verified saved_nets record in WIFI_NVS_PARTITION, a failed or interrupted
+ * migration is retried on the next boot. Trade-off: after a completed
+ * migration a rollback past the partition split boots unprovisioned. */
 void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
 {
     /* Snapshot first: wifi_prov_nvs_load_from() writes straight into s_wifi, so the
@@ -521,17 +542,18 @@ void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
     bool default_has_legacy = false;
     nvs_load_legacy_single(NVS_DEFAULT_PART_NAME, &default_legacy_net, &default_has_legacy);
 
-    /* Adopt the old copy when the new home has nothing at all (the true
-     * first-boot-after-the-split case), or when the new home exists but has no
-     * legacy credentials while the old one does -- which is what a board looks
-     * like if it reached the new firmware, saved only an AP-identity override,
-     * and still has its real network sitting in the old partition. Anything
-     * the new partition has already recorded otherwise wins outright; the new
-     * location is the source of truth from the moment it holds credentials. */
-    bool adopt = !found_in_wifi_nvs;
+    /* Adopt the old copy unless the new home already holds a verified
+     * saved_nets record. Namespace/mode existence (found_in_wifi_nvs) is NOT
+     * the test: the first migration step (nvs_save_mode) creates the
+     * namespace before the credential is persisted, so a failed or
+     * interrupted migration would otherwise look "already migrated" and have
+     * its still-only copy erased as stale. Once a verified record exists the
+     * new location is the source of truth and the legacy copy is stale. */
+    (void)found_in_wifi_nvs;
+    bool adopt = !nvs_saved_nets_record_present(WIFI_NVS_PARTITION);
     if (!adopt) {
-        /* The destination already holds data: it is the source of truth and the
-         * legacy copy is stale. Drop it so no reset path (recovery wifi reset,
+        /* The destination holds a verified saved_nets record: it is the source
+         * of truth and the legacy copy is stale. Drop it so no reset path (recovery wifi reset,
          * forget-last-network) can ever resurrect it. Best effort. */
         esp_err_t stale_err = legacy_default_nvs_erase_wifi();
         if (stale_err != ESP_OK) {
@@ -594,9 +616,9 @@ void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
  * does have a winning legacy single-network credential (s_legacy_single, set
  * by wifi_prov_migrate_from_default_partition() just before this is called), wraps
  * that single credential into nets[0]/count=1 and persists it in the new
- * format. The old single-key entries are never deleted and never read again
- * after this -- same "leave the old copy in place" rationale as every other
- * migration in this file. Must be called after migrate_from_default_
+ * format. The old default-partition copy is erased only after that record is
+ * written and read back (s_legacy_erase_pending); on any failure it is kept
+ * and the whole migration retries next boot. Must be called after migrate_from_default_
  * partition() so s_legacy_single reflects the cross-partition "which copy
  * wins" decision, not just whatever WIFI_NVS_PARTITION alone happened to
  * hold. */
