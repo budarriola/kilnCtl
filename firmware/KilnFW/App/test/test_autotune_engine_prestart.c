@@ -879,9 +879,17 @@ static bool s_stub_set_pid_result = false;
  * unaffected. */
 static bool s_probe_reserve_during_set_pid = false;
 static bool s_probe_reserve_during_set_pid_result = true;
+/* Fake zone gain store + call count: a stand-in for "what zones config now
+ * holds", so a refused accept() can be proven to have written nothing. */
+static float s_fake_zone_kp = 0.0f, s_fake_zone_ki = 0.0f, s_fake_zone_kd = 0.0f;
+static float s_fake_zone_max_ramp = 0.0f;
+static int s_fake_set_pid_call_count = 0;
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
-    (void)kp; (void)ki; (void)kd;
+    s_fake_set_pid_call_count++;
+    if (s_stub_set_pid_result) {
+        s_fake_zone_kp = kp; s_fake_zone_ki = ki; s_fake_zone_kd = kd;
+    }
     if (s_probe_reserve_during_set_pid) {
         s_probe_reserve_during_set_pid_result = autotune_engine_reserve_zone_for_external_write(zone_index);
     }
@@ -906,6 +914,9 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
     s_stub_set_max_ramp_call_count++;
     s_stub_set_max_ramp_zone = zone_index;
     s_stub_set_max_ramp_value = c_per_hr;
+    if (s_stub_set_max_ramp_result) {
+        s_fake_zone_max_ramp = c_per_hr;
+    }
     return s_stub_set_max_ramp_result;
 }
 
@@ -3827,22 +3838,48 @@ static void test_autotune_engine_accept_refused_by_mode_gate_while_running(void)
     s_at.model.tau_s = 100.0f;
     s_at.model.dead_time_s = 5.0f;
     s_stub_set_pid_result = true;
+    bool saved_set_model_result = s_stub_set_model_result;
+    s_stub_set_model_result = true;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 500.0f; /* so adopt_ceiling has a max_ramp to write */
+
+    /* Seed known gains/max_ramp; a refused accept must leave them bit-identical. */
+    const float seed_kp = 1.25f, seed_ki = 0.0625f, seed_kd = 3.5f, seed_ramp = 200.0f;
+    s_fake_zone_kp = seed_kp; s_fake_zone_ki = seed_ki; s_fake_zone_kd = seed_kd;
+    s_fake_zone_max_ramp = seed_ramp;
+    s_fake_set_pid_call_count = 0;
+    int ramp_calls_before = s_stub_set_max_ramp_call_count;
+    autotune_accept_opts_t adopt = {.adopt_ceiling = true};
 
     for (int which = 0; which < 2; which++) {
         s_stub_profile_running = (which == 0);
         s_stub_autotune_running = (which == 1);
         autotune_accept_result_t res = {0};
-        bool ok = autotune_engine_accept(NULL, &res);
+        bool ok = autotune_engine_accept(&adopt, &res);
         TEST_CHECK(!ok, "accept must be refused while a firing/autotune run is active");
         TEST_CHECK(res.refused_by_mode_gate, "refusal must be flagged as a mode-gate refusal (HTTP 409)");
         TEST_CHECK(res.mode_reason[0] != '\0', "gate reason text must be reported");
         TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "refused accept must not consume the result");
+        TEST_CHECK(s_fake_set_pid_call_count == 0, "refused accept must not call the zones-config PID write");
+        TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before,
+                   "refused accept must not call the zones-config max_ramp write");
+        TEST_CHECK(memcmp(&s_fake_zone_kp, &seed_kp, sizeof(float)) == 0 &&
+                   memcmp(&s_fake_zone_ki, &seed_ki, sizeof(float)) == 0 &&
+                   memcmp(&s_fake_zone_kd, &seed_kd, sizeof(float)) == 0,
+                   "zone PID gains must be bit-identical after a refused accept");
+        TEST_CHECK(memcmp(&s_fake_zone_max_ramp, &seed_ramp, sizeof(float)) == 0,
+                   "zone max_ramp must be bit-identical after a refused accept");
     }
     s_stub_profile_running = false;
     s_stub_autotune_running = false;
     autotune_accept_result_t res = {0};
-    TEST_CHECK(autotune_engine_accept(NULL, &res), "accept must succeed when idle");
+    TEST_CHECK(autotune_engine_accept(&adopt, &res), "accept must succeed when idle");
     TEST_CHECK(!res.refused_by_mode_gate, "no gate refusal when idle");
+    TEST_CHECK(s_fake_set_pid_call_count == 1, "idle accept must write the PID gains exactly once");
+    TEST_CHECK(s_fake_zone_kp != seed_kp || s_fake_zone_ki != seed_ki || s_fake_zone_kd != seed_kd,
+               "idle accept must change the stored gains");
+    TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before + 1 &&
+               s_fake_zone_max_ramp == 500.0f, "idle accept with adopt_ceiling must write max_ramp once");
+    s_stub_set_model_result = saved_set_model_result;
     s_stub_set_pid_result = false;
 }
 
