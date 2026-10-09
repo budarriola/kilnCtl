@@ -5,7 +5,7 @@
 # carries somewhere around a hundred dirty tracked paths belonging to other
 # concurrent sessions (see CLAUDE.md's "concurrent sessions" notes), so
 # nearly all real work has to happen in a separate worktree checked out at
-# origin/main. Two constraints have bitten repeatedly enough to be written
+# origin/dev (or -Base <ref>). Two constraints have bitten repeatedly enough to be written
 # down as project memory:
 #
 #   - SHORT PATH. SaftyFW host-test builds overflow the MSVC command line
@@ -24,7 +24,7 @@
 # USAGE
 #   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature
 #       Fetches origin, creates C:\wt\myfeature_<6-char-random> checked out
-#       at origin/main (detached), and prints the path on its own line
+#       at -Base (default origin/dev; e.g. -Base origin/main) detached, and prints the path on its own line
 #       prefixed "WORKTREE: " so a caller can grep it out reliably.
 #
 #   powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature -NoSubmodules
@@ -184,6 +184,8 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: git fetch origin failed." -ForegroundColor Red
     exit 1
 }
+
+if (-not $Remove) { git -C $repoRoot rev-parse --verify --quiet "$Base^{commit}" *>$null; if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: -Base ref '$Base' does not resolve to a commit." -ForegroundColor Red; exit 1 } }
 
 # Try a handful of times in the (very unlikely) event of a suffix collision
 # against another concurrent mint.
