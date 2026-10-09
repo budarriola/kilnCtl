@@ -41,6 +41,7 @@ static int g_probe_crc_max_depth = -1;
     (g_probe_crc_max_depth = (g_test_stub_lock_depth > g_probe_crc_max_depth ? g_test_stub_lock_depth : g_probe_crc_max_depth), \
      ota_image_crc32((p), (n)))
 #include "../drivers/persist/aux_outputs_cfg.c"
+#include "save_section_probe.h"
 #include "../drivers/safety/safety_pico_relay_mask.h"
 
 static const char *AO_SCRATCH_BASE = "cfg_fs_test_aux_outputs";
@@ -169,6 +170,21 @@ static void test_set_round_trip(void)
     TEST_CHECK(o.tc_zone == 1 && o.hyst_c == 5.0f && o.min_on_s == 60 && o.min_off_s == 90, "fields round trip");
     TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x08, "mask survives");
     TEST_CHECK(aux_outputs_cfg_get(1, &o) && !o.enabled, "other relays stay disabled");
+}
+
+/* "Save mutex vs. flash worker" (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):
+ * s_set_lock is a cfg_save_lock_t, so the set reserves the flash worker
+ * before the mutex and releases it after, with its cfg write inside. */
+static void test_set_runs_in_save_section(void)
+{
+    TEST_SECTION("aux_outputs_cfg_set: save inside the reserved save section");
+    fresh_board();
+    aux_outputs_cfg_start(0x03);
+    aux_output_entry_t e = on_entry();
+    ssp_install();
+    TEST_CHECK(aux_outputs_cfg_set(4, &e, 0x03) == ESP_OK, "set ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation before the mutex, released after, write inside it");
+    ssp_uninstall();
 }
 
 static void test_set_refuses_invalid(void)
@@ -548,6 +564,7 @@ static void test_start_holds_no_lock_during_io(void)
 void run_test_aux_outputs_store(void)
 {
     test_start_holds_no_lock_during_io();
+    test_set_runs_in_save_section();
     test_predicate();
     test_defaults_all_disabled();
     test_set_round_trip();

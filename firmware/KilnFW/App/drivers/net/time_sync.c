@@ -10,6 +10,7 @@
 #include "freertos/portmacro.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
+#include "cfg_save_lock.h"
 #include "pref_cfg_fs.h" /* item 14 (TZ), docs/FILESYSTEM_USER_DATA.md section 5
                             * step 3 close-out: TZ is a small fixed-CAPACITY string
                             * (<=TIME_SYNC_TZ_MAX_LEN bytes) with no migration chain of
@@ -244,6 +245,12 @@ void time_sync_get_status(time_sync_status_t *out)
     out->now_epoch = out->ever_synced ? time(NULL) : 0;
 }
 
+/* Callers: httpd and backup_import's own async task (http_async_job_try_start),
+ * so the rev read, RAM assign, commit and rev bump are one section
+ * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
+ * reserves the flash worker first -- see cfg_save_lock.h. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 esp_err_t time_sync_set_tz(const char *tz)
 {
     if (!time_sync_tz_is_valid(tz)) {
@@ -254,6 +261,7 @@ esp_err_t time_sync_set_tz(const char *tz)
     /* Live immediately, same "in-RAM/live truth first" convention as
      * unit_pref_set() -- an NVS write failure below must not leave the
      * board running the OLD timezone after reporting success. */
+    cfg_save_lock_take(&s_save_lock);
     apply_tz(tz);
     uint32_t new_rev = s_tz_rev + 1;
 
@@ -268,6 +276,7 @@ esp_err_t time_sync_set_tz(const char *tz)
     if (err == ESP_OK) {
         s_tz_rev = new_rev;
     }
+    cfg_save_lock_give(&s_save_lock);
     return err;
 }
 

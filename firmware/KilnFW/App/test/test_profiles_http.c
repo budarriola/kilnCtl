@@ -223,6 +223,7 @@ static nvs_stub_entry_t *nvs_stub_find(const char *partition, const char *ns, co
 // test_wifi_prov.c/test_autotune_engine_prestart.c use for their own splits.
 #include "../drivers/http/profiles_catalog_http.c"
 #include "../drivers/http/profiles_edit_http.c"
+#include "save_section_probe.h"
 
 #undef asm
 
@@ -1605,6 +1606,53 @@ static void test_save_mutex_serializes_rev_write_bump(void)
     TEST_CHECK(g_test_stub_lock_depth == 0, "mutex released after the saves");
     profiles_cfg_fs_reset_write_fn_for_test();
 }
+/* "Save mutex vs. flash worker" (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):
+ * profiles_save_lock() reserves the flash worker BEFORE taking the mutex and
+ * releases it AFTER giving it, and the cfg write / delete happen inside the
+ * reservation. This is the deadlock on main and in v1.0.0-pre.2: an httpd save
+ * holding the mutex waited for the worker while the worker ran a PROFILES
+ * SAVE/DELETE job blocked on the mutex. */
+static unsigned s_ps_writes_outside;
+static esp_err_t ps_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    g_ssp.writes++;
+    if (g_ssp.depth <= 0) {
+        s_ps_writes_outside++;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+static esp_err_t ps_delete_fn(const char *rel_path)
+{
+    g_ssp.writes++;
+    if (g_ssp.depth <= 0) {
+        s_ps_writes_outside++;
+    }
+    return cfg_fs_delete(rel_path);
+}
+static void test_profiles_save_reserves_flash_worker(void)
+{
+    TEST_SECTION("profiles save/delete -- worker reserved before the save mutex, released after; file I/O inside");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    s_profiles.profiles[5] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x20);
+    ssp_install();
+    s_ps_writes_outside = 0;
+    profiles_cfg_fs_set_write_fn(ps_write_fn);
+    profiles_cfg_fs_set_delete_fn(ps_delete_fn);
+    TEST_CHECK(nvs_save_slot(5) == ESP_OK, "save slot 5");
+    TEST_CHECK(ssp_shape_ok(1) && s_ps_writes_outside == 0, "save: reservation wraps the mutex and the file write");
+    int enters_after_save = g_ssp.enters;
+    TEST_CHECK(profiles_http_delete(5), "delete slot 5");
+    TEST_CHECK(g_ssp.enters > enters_after_save, "delete opened a section too");
+    TEST_CHECK(ssp_shape_ok(2) && s_ps_writes_outside == 0, "delete: reservation wraps the mutex and the file delete");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "everything released");
+    profiles_cfg_fs_reset_write_fn_for_test();
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    ssp_uninstall();
+}
+
 /* Delete and retarget seams (Opus review of 0880162b): the erase / rewrite must
  * run with the save mutex held. */
 static int s_dl_depth_at_delete;
@@ -4528,6 +4576,7 @@ void run_test_profiles_http(void)
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_boot_fallback_keeps_rev_unknown_marks();
     test_save_mutex_serializes_rev_write_bump();
+    test_profiles_save_reserves_flash_worker();
     test_delete_paths_hold_save_lock_at_erase_seam();
     test_pcfg_junk_repair_load_error_fails_closed();
     test_pcfg_junk_rev_repair_deferred_without_cfg();

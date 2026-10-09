@@ -86,6 +86,20 @@ pref_cfg_fs_save() -> the installed cfg_fs_write_atomic_device() write_fn,
 which dispatches onto bx_flash_worker AGAIN with no re-entrancy check --
 deadlock).
 
+EXTENDED 2026-10-09 (save mutex held across a worker wait): a task that
+holds a mutex while it waits on the flash worker deadlocks the board if the
+worker is, at that moment, running a job that takes the same mutex
+(docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, "Save mutex vs. flash
+worker"). Every config save lock is therefore a cfg_save_lock_t
+(cfg_save_lock.h), whose take reserves the worker FIRST, so no worker job
+can be running while an off-worker task holds the save mutex. scan_held_lock()
+flags the other shape mechanically: a raw xSemaphoreTake*(X) followed, before
+the matching xSemaphoreGive*(X) in the same function, by a call that writes
+config or waits on the worker (HELD_LOCK_WRITE_RE). A lock may be listed in
+HELD_LOCK_ALLOWLIST only with a reason it is never taken by any code that
+runs on the worker. Convert anything else to cfg_save_lock_t, or release it
+before the write.
+
 Usage: python flash_worker_lint.py [drivers_dir]
 Exit 0: clean. Exit 1: violation(s) found (printed as file:line).
 Exit 3: SKIPPED -- drivers dir not found (missing prerequisite, not a pass).
@@ -679,6 +693,70 @@ def scan_reentrancy(path: Path):
     return violations
 
 
+# ---- save mutex held across a worker wait (2026-10-09) ---------------------
+# Calls that write config (and so dispatch onto, or run as, the flash worker)
+# or that wait on the worker directly. relay_cycles_maybe_persist() is here
+# because it ends in a worker dispatch: profile_executor.c once called it
+# with s_exec.lock held while the worker's PROFILES DELETE job blocked on
+# that same lock (see the comment at its call site).
+HELD_LOCK_WRITE_RE = re.compile(
+    r"\b(pref_cfg_fs_commit|pref_cfg_fs_save\w*|profiles_cfg_fs_save\w*|"
+    r"zones_config_cfg_fs_save\w*|cfg_fs_write_atomic\w*|cfg_fs_delete\w*|"
+    r"uart_bridge_ext_run_on_flash_worker\w*|relay_cycles_maybe_persist|"
+    r"relay_names_save\w*|zone_normals_save\w*)\s*\("
+)
+HELD_LOCK_TAKE_RE = re.compile(r"\bxSemaphoreTake(?:Recursive)?\s*\(\s*([^,]+?)\s*,")
+HELD_LOCK_GIVE_RE = re.compile(r"\bxSemaphoreGive(?:Recursive)?\s*\(\s*([^)]+?)\s*\)")
+
+# (file name, lock expression) -> why no worker job ever takes this lock.
+HELD_LOCK_ALLOWLIST = {
+    ("relay_cycles.c", "s_rc.persist_lock"):
+        "persist_snapshot_now() is the only taker; it runs from the executor "
+        "tick (after s_exec.lock is released), relay_cycles_flush_now() and "
+        "backup import -- never from a flash-worker job, so the worker can "
+        "never block on it.",
+}
+
+
+def scan_held_lock(path: Path):
+    """A raw mutex taken and still held when a HELD_LOCK_WRITE_RE call is
+    made. Brace depth decides what a Give means: a Give at the Take's own
+    depth releases the lock; a Give nested deeper (an early-exit branch such
+    as `if (done) { xSemaphoreGive(l); ...; }`) releases it only until that
+    block closes, after which the fall-through path still holds it. Depth 0
+    (between functions) clears everything. Returns (lineno, text, lock)
+    triples; the caller applies HELD_LOCK_ALLOWLIST."""
+    violations = []
+    held = {}  # lock -> {"depth": take depth, "suspended_until": depth or None}
+    depth = 0
+    for lineno, line, raw_line in stripped_lines(path):
+        for m in HELD_LOCK_TAKE_RE.finditer(line):
+            held[m.group(1)] = {"depth": depth, "suspended_until": None}
+        for g in HELD_LOCK_GIVE_RE.finditer(line):
+            st = held.get(g.group(1))
+            if st is None:
+                continue
+            if depth <= st["depth"]:
+                del held[g.group(1)]
+            else:
+                st["suspended_until"] = depth
+        active = [k for k, st in held.items() if st["suspended_until"] is None]
+        if active and HELD_LOCK_WRITE_RE.search(line):
+            for lock in active:
+                violations.append((lineno, raw_line.strip(), lock))
+        depth += line.count("{") - line.count("}")
+        if depth <= 0:
+            depth = 0
+            held.clear()
+            continue
+        for k in list(held):
+            st = held[k]
+            if depth < st["depth"]:
+                del held[k]  # the block the Take ran in has closed
+            elif st["suspended_until"] is not None and depth < st["suspended_until"]:
+                st["suspended_until"] = None
+    return violations
+
 def main(argv):
     default_drivers = Path(__file__).resolve().parent.parent / "drivers"
     drivers_dir = Path(argv[1]) if len(argv) > 1 else default_drivers
@@ -708,6 +786,7 @@ def main(argv):
     write_violations = []
     cfg_fs_violations = []
     reentrancy_violations = []
+    held_lock_violations = []
     for c_file in all_driver_files:
         rel = c_file.relative_to(drivers_dir.parent)
         if c_file.name not in ALLOWLIST:
@@ -724,8 +803,12 @@ def main(argv):
         # second (that is exactly what this rule caught in cfg_fs_mount.c).
         for lineno, text in scan_reentrancy(c_file):
             reentrancy_violations.append(f"{rel}:{lineno}: {text}")
+        for lineno, text, lock in scan_held_lock(c_file):
+            if (c_file.name, lock) in HELD_LOCK_ALLOWLIST:
+                continue
+            held_lock_violations.append(f"{rel}:{lineno}: [{lock}] {text}")
 
-    if write_violations or cfg_fs_violations or reentrancy_violations:
+    if write_violations or cfg_fs_violations or reentrancy_violations or held_lock_violations:
         if write_violations:
             print("FLASH WORKER LINT: direct flash/NVS write(s) outside the allowlist:")
             for v in write_violations:
@@ -749,6 +832,15 @@ def main(argv):
             print("Add the guard, or a comment containing the exact phrase")
             print("\"not reachable on-worker\" explaining why this dispatch's caller can")
             print("never already be on the worker.")
+        if held_lock_violations:
+            print("FLASH WORKER LINT: a raw mutex is held across a config write or")
+            print("flash-worker wait. If any worker job takes that mutex, the board")
+            print("deadlocks (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):")
+            for v in held_lock_violations:
+                print(f"  {v}")
+            print("Use cfg_save_lock_t (cfg_save_lock.h), release the lock before the")
+            print("write, or add a HELD_LOCK_ALLOWLIST entry saying why no worker job")
+            print("ever takes it.")
         return 1
 
     print(f"flash_worker_lint: clean ({len(all_driver_files)} driver files scanned, "

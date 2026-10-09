@@ -152,9 +152,11 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     // Live immediately -- the very next LCD redraw tick and the next
     // GET /api/status both need to see this, whether or not the NVS write
     // below succeeds (same "in-RAM truth first" reasoning zones_http.c's
-    // zones_config_set_pid()/set_model() use).
-    s_unit_pref = pref;
+    // zones_config_set_pid()/set_model() use). Assigned INSIDE the save lock
+    // (CFG_STORE_SAVE_RACE audit, MED-3): assigned before it, two racing
+    // setters could leave RAM holding one value and the file the other.
     cfg_save_lock_take(&s_save_lock);
+    s_unit_pref = pref;
     uint32_t new_rev = s_unit_pref_rev + 1;
     uint8_t raw = (uint8_t)pref;
 

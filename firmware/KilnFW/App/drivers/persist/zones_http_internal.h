@@ -273,6 +273,12 @@ void migrate_from_default_partition(void);
 
 void relay_names_load(void);
 esp_err_t relay_names_save(void);
+/* relay_names_save() without the save mutex: the caller holds
+ * zones_cfg_save_section_lock() across its RAM edit and this call
+ * (CFG_STORE_SAVE_RACE audit MED-1). */
+esp_err_t relay_names_save_locked(void);
+void zones_cfg_save_section_lock(void);
+void zones_cfg_save_section_unlock(void);
 
 
 /* Zone normals (docs/CONFIG_FILESYSTEM.md item 2) -- shared with the host tests. See

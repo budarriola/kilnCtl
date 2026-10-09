@@ -102,6 +102,24 @@ void pref_cfg_fs_reset_write_fn_for_test(void);
  * section 1). */
 pref_cfg_fs_write_fn_t pref_cfg_fs_get_write_fn(void);
 
+/* SAVE-SECTION HOOKS (2026-10-09, docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md
+ * "Save mutex vs. flash worker"). Every cfg store save lock (cfg_save_lock.h,
+ * and through it zones_config_store.c's and profiles_http.c's) calls
+ * pref_cfg_fs_save_section_enter() BEFORE taking its mutex and
+ * pref_cfg_fs_save_section_exit() with that call's result AFTER giving it.
+ * On the device uart_bridge_ext.c installs hooks that reserve the flash
+ * worker for the section when the caller is not the worker, so a save mutex
+ * is never held off the worker while the worker runs a job that could need
+ * the same mutex. Without installed hooks both calls are no-ops (enter
+ * returns false). Lives here, not in uart_bridge_ext.c, because every host
+ * test that links a saver already links this file and none links the bridge.
+ * Lock order: reservation OUTER, save mutex INNER, never the other way. */
+typedef bool (*pref_cfg_fs_save_enter_fn_t)(void);
+typedef void (*pref_cfg_fs_save_exit_fn_t)(bool reserved);
+void pref_cfg_fs_set_save_section_hooks(pref_cfg_fs_save_enter_fn_t enter, pref_cfg_fs_save_exit_fn_t exit_fn);
+bool pref_cfg_fs_save_section_enter(void);
+void pref_cfg_fs_save_section_exit(bool reserved);
+
 // Returns true if `bytes` (exactly `len` bytes, always == the call site's
 // item_size) is a value this build considers valid and safe to adopt --
 // same discipline as unit_pref_start()'s range check, ramp_assist_cfg_start()'s

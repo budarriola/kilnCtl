@@ -31,6 +31,7 @@
 #include "cfg_fs.h"
 
 #include "../drivers/persist/unit_pref.c"
+#include "save_section_probe.h"
 
 static const char *UP_SCRATCH_BASE = "cfg_fs_test_unit_pref";
 
@@ -442,6 +443,31 @@ static void test_save_holds_lock_across_rev_read_and_commit(void)
     cfg_fs_deinit();
 }
 
+/* CFG_STORE_SAVE_RACE audit, "Save mutex vs. flash worker" and MED-3: the
+ * worker reservation is taken before the save mutex and released after it,
+ * the cfg write happens inside it, and RAM is still the OLD value when the
+ * section opens (RAM is assigned under the lock, not before it). */
+static unit_pref_t g_up_ram_at_enter;
+static void up_record_ram_at_enter(void) { g_up_ram_at_enter = s_unit_pref; }
+
+static void test_save_reserves_worker_around_lock(void)
+{
+    TEST_SECTION("unit_pref_set: worker reservation wraps the save lock; RAM assigned inside it");
+    up_mount_scratch();
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "starts at Celsius");
+    ssp_install();
+    g_ssp.on_enter = up_record_ram_at_enter;
+    g_up_ram_at_enter = UNIT_PREF_FAHRENHEIT;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "save ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation taken before the mutex, released after, write inside it");
+    TEST_CHECK(g_up_ram_at_enter == UNIT_PREF_CELSIUS, "RAM not yet assigned when the section opens (MED-3)");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "RAM holds the new value after the save");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
 void run_test_unit_pref(void)
 {
     TEST_SECTION("unit_pref");
@@ -456,6 +482,7 @@ void run_test_unit_pref(void)
     test_dualwrite_status_reports_divergence();
     test_mount_failed_falls_through_to_nvs_only();
     test_save_holds_lock_across_rev_read_and_commit();
+    test_save_reserves_worker_around_lock();
 
     test_start_partition_init_failure_returns_error_and_defaults();
     test_start_open_error_without_file_returns_error();

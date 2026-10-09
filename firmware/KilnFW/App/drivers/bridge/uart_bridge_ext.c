@@ -43,6 +43,7 @@
 #include "freertos/task.h"
 
 #include "stack_margin.h"
+#include "pref_cfg_fs.h" /* pref_cfg_fs_set_save_section_hooks() -- flash-worker reservation */
 
 const char *UART_BRIDGE_EXT_TAG = "uart_bridge_ext";
 
@@ -384,9 +385,22 @@ static void bx_worker_task(void *arg)
             }
             xSemaphoreGive(s_bx_done);
         }
-        bx_job_fn posted = bx_take_posted_job();
-        if (posted) {
-            posted(NULL);
+        /* SAVE-SECTION RESERVATION (see bx_reserve_for_save_section() below):
+         * a posted job runs with no dispatcher holding s_bx_lock, so the
+         * worker takes it itself, without waiting, before claiming the job.
+         * If another task holds it -- a dispatcher between its take and its
+         * send, or a task inside a save section -- the posted job stays in
+         * its slot and runs on a later iteration. This keeps the invariant
+         * "a job runs on this worker only while s_bx_lock is held by its
+         * dispatcher or by the worker", which is what stops the worker from
+         * ever blocking on a save mutex held by a task that is itself
+         * waiting for the worker. */
+        if (xSemaphoreTakeRecursive(s_bx_lock, 0) == pdTRUE) {
+            bx_job_fn posted = bx_take_posted_job();
+            if (posted) {
+                posted(NULL);
+            }
+            xSemaphoreGiveRecursive(s_bx_lock);
         }
     }
 }
@@ -400,6 +414,56 @@ static void bx_worker_task(void *arg)
  * created; callers MUST fail the start rather than fall through to running
  * handlers on their PSRAM stack, which is the bug this file is about. */
 static bool s_bx_started = false;
+
+/* ---- SAVE-SECTION RESERVATION (2026-10-09) --------------------------------
+ * The deadlock this closes (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md,
+ * "Save mutex vs. flash worker"): a cfg store's save mutex (zones_config_
+ * store.c's, profiles_http.c's, every cfg_save_lock_t) is taken by more than
+ * one task, and one of those tasks is THIS worker -- CONTROL SET_ZONE_PID/
+ * SET_ZONE_MODEL/SET_UNIT_PREF, PROFILES SAVE/DELETE and AUTOTUNE ACCEPT all
+ * reach a saver as a job here. Meanwhile the saver's own cfg-file write
+ * dispatches onto this worker. So:
+ *   httpd:  take save mutex -> cfg write -> wait for s_bx_lock / s_bx_done
+ *   worker: running the bridge's job   -> wait for the same save mutex
+ * and neither ever proceeds; every later flash job wedges behind them.
+ *
+ * Fix: every save section entered OFF the worker first reserves the worker
+ * by taking s_bx_lock (recursive), and only then the save mutex
+ * (pref_cfg_fs_save_section_enter(), called by every save lock's take). The
+ * worker itself never reserves (it already IS the worker). Invariant: a job
+ * runs on the worker only while s_bx_lock is held -- by the job's dispatcher,
+ * or by the worker itself for a posted job (bx_worker_task's try-take). A
+ * task inside a save section also holds s_bx_lock, so while any off-worker
+ * task holds a save mutex no worker job can be running, and the worker can
+ * never block on a save mutex. The section's own cfg write takes s_bx_lock
+ * again recursively and dispatches as normal.
+ *
+ * Cost: while one task is inside a save section, other tasks' flash-worker
+ * dispatches wait for it (they would have waited for its write anyway), and
+ * two save sections on different stores no longer overlap.
+ *
+ * Residual (documented, not closed): a section entered before the worker is
+ * started reserves nothing (s_bx_started false -> returns false), and its
+ * exit then releases nothing. Save sections run from httpd/bridge/executor
+ * tasks, all started after uart_bridge_ext_start_flash_worker(). */
+static bool bx_reserve_for_save_section(void)
+{
+    if (!s_bx_started || !s_bx_lock) {
+        return false;
+    }
+    if (bx_caller_is_worker_task(s_bx_worker_task_handle, xTaskGetCurrentTaskHandle())) {
+        return false;
+    }
+    xSemaphoreTakeRecursive(s_bx_lock, portMAX_DELAY);
+    return true;
+}
+
+static void bx_release_save_section(bool reserved)
+{
+    if (reserved) {
+        xSemaphoreGiveRecursive(s_bx_lock);
+    }
+}
 
 bool uart_bridge_ext_worker_ensure_started(void)
 {
@@ -419,7 +483,10 @@ bool uart_bridge_ext_worker_ensure_started(void)
     // race it, and it fails in the safe direction if that ever changed.
     s_bx_jobs = xQueueCreate(1, sizeof(bx_job_t));
     s_bx_done = xSemaphoreCreateBinary();
-    s_bx_lock = xSemaphoreCreateMutex();
+    /* RECURSIVE since 2026-10-09: a task inside a save section already holds
+     * it (bx_reserve_for_save_section()), and the cfg-file write that section
+     * makes dispatches through bx_run_on_internal_stack(), which takes it again. */
+    s_bx_lock = xSemaphoreCreateRecursiveMutex();
     s_bx_post_lock = xSemaphoreCreateMutex();
     if (!s_bx_jobs || !s_bx_done || !s_bx_lock || !s_bx_post_lock) {
         ESP_LOGE(UART_BRIDGE_EXT_TAG, "flash-safe worker: queue/semaphore allocation failed");
@@ -453,6 +520,7 @@ bool uart_bridge_ext_worker_ensure_started(void)
     stack_margin_register("bx_flash_worker", &s_bx_worker_task_handle, BX_WORKER_STACK);
 
     s_bx_started = true;
+    pref_cfg_fs_set_save_section_hooks(bx_reserve_for_save_section, bx_release_save_section);
     return true;
 
 fail:
@@ -490,10 +558,10 @@ esp_err_t uart_bridge_ext_start_flash_worker(void)
  * message() -> AUTOTUNE_CMD_ACCEPT -> autotune_engine_accept() ->
  * adaptive_tune_clear_ki_baseline()) can legitimately need to dispatch
  * ANOTHER flash-safe call. Going through the normal path here would deadlock
- * permanently: s_bx_lock is a non-recursive mutex already held by the
- * ORIGINAL caller (e.g. autotune_task), which is blocked on s_bx_done waiting
- * for THIS job to finish, so xSemaphoreTake(s_bx_lock, ...) below would block
- * forever; a recursive mutex would not save it either, since the 1-deep queue
+ * permanently: s_bx_lock is already held by the ORIGINAL caller (e.g.
+ * autotune_task), which is blocked on s_bx_done waiting for THIS job to
+ * finish, so taking s_bx_lock below would block forever; that it is a
+ * recursive mutex (since 2026-10-09) does not save it, since the 1-deep queue
  * is only ever drained by bx_worker_task, which is the very task now stuck
  * trying to enqueue into it. Confirmed as a real, reproduced deadlock (opus
  * review of commit 7c47683) that hung the flash worker for the whole board --
@@ -551,13 +619,13 @@ static bool bx_run_on_internal_stack(bx_job_fn fn, void *arg)
      * place to put a timeout: a timed-out xSemaphoreTake on s_bx_done would
      * leave `job` still sitting in the queue for the worker to run later
      * against a stack frame the caller has already unwound. */
-    xSemaphoreTake(s_bx_lock, portMAX_DELAY);
+    xSemaphoreTakeRecursive(s_bx_lock, portMAX_DELAY);
     bx_job_t job = { .fn = fn, .arg = arg };
     bool ok = (xQueueSend(s_bx_jobs, &job, portMAX_DELAY) == pdTRUE);
     if (ok) {
         xSemaphoreTake(s_bx_done, portMAX_DELAY);
     }
-    xSemaphoreGive(s_bx_lock);
+    xSemaphoreGiveRecursive(s_bx_lock);
     return ok;
 }
 
@@ -583,7 +651,7 @@ static bool bx_run_on_internal_stack_timeout(bx_job_fn fn, void *arg, TickType_t
         }
         return true;
     }
-    if (xSemaphoreTake(s_bx_lock, wait_ticks) != pdTRUE) {
+    if (xSemaphoreTakeRecursive(s_bx_lock, wait_ticks) != pdTRUE) {
         *out_timed_out = true;
         return false;
     }
@@ -614,7 +682,7 @@ static bool bx_run_on_internal_stack_timeout(bx_job_fn fn, void *arg, TickType_t
          * until that exists. */
         xSemaphoreTake(s_bx_done, portMAX_DELAY);
     }
-    xSemaphoreGive(s_bx_lock);
+    xSemaphoreGiveRecursive(s_bx_lock);
     return ok;
 }
 

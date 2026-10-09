@@ -1965,10 +1965,6 @@ void executor_task_entry(void *arg)
          * on manually after a firing ended. */
         sweep_unowned_relays();
 
-        /* Rate-limited internally (at most one NVS write per 10 min, and only
-         * if something changed) -- see relay_cycles.h's flash-wear note. */
-        relay_cycles_maybe_persist();
-
         /* --- History sample (TODO.md section 0 / 6A.9), ALL active zones,
          * one per 30s (2026-09-01: was a single representative zone -- see
          * profile_executor.h's doc comment on profile_history_entry_t for
@@ -2051,6 +2047,22 @@ void executor_task_entry(void *arg)
         capture_run_snapshot(&tick_snap);
         bool faulted_now = run_faulted_this_tick;
         xSemaphoreGive(s_exec.lock);
+
+        /* Rate-limited internally (at most one NVS write per 10 min, and only
+         * if something changed) -- see relay_cycles.h's flash-wear note.
+         *
+         * Called AFTER s_exec.lock is released, never under it: a due
+         * persist dispatches to the flash worker (persist_snapshot_now() ->
+         * uart_bridge_ext_run_on_flash_worker(), which takes s_bx_lock and
+         * waits for the worker). Holding s_exec.lock across that wait
+         * deadlocked against any worker job that itself takes s_exec.lock --
+         * PROFILES DELETE's profile_executor_get_active_id() on the worker, or
+         * a save section holding the worker reservation (cfg_save_lock.h) that
+         * reads the executor. Lock order is s_bx_lock -> s_exec.lock; see
+         * docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, "Save mutex vs. flash
+         * worker". Nothing here reads executor state, so the move changes only
+         * which lock the persist runs under. */
+        relay_cycles_maybe_persist();
 
         if (faulted_now) {
             /* Ended badly, but ENDED -- the distinction the operator needs is

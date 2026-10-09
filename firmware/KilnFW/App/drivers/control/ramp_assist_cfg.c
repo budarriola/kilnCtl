@@ -6,6 +6,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_save_lock.h"
 
 static const char *TAG = "ramp_assist_cfg";
 
@@ -137,6 +138,12 @@ bool ramp_assist_cfg_enabled(void)
     return s_ramp_assist_enabled;
 }
 
+/* Callers: httpd and backup_import's own async task (http_async_job_try_start),
+ * so the rev read, RAM assign, commit and rev bump are one section
+ * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
+ * reserves the flash worker first -- see cfg_save_lock.h. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
 {
     // Live immediately, same "in-RAM truth first" reasoning unit_pref_set()/
@@ -144,6 +151,7 @@ esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
     // below succeeds, the very next reader (a status poll, or the future
     // ramp-stretch consumer) must see this take effect for the rest of the
     // boot.
+    cfg_save_lock_take(&s_save_lock);
     s_ramp_assist_enabled = enabled;
     uint32_t new_rev = s_ramp_assist_rev + 1;
     uint8_t raw = enabled ? 1 : 0;
@@ -152,6 +160,9 @@ esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
     esp_err_t err = pref_cfg_fs_commit(RAMP_ASSIST_FILE_PATH, &raw, sizeof(raw), new_rev, "ramp assist setting");
     if (err == ESP_OK) {
         s_ramp_assist_rev = new_rev;
+    }
+    cfg_save_lock_give(&s_save_lock);
+    if (err == ESP_OK) {
         ESP_LOGW(TAG, "ramp assist saved: %s", enabled ? "ENABLED" : "disabled");
     }
     return err;

@@ -8,6 +8,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_save_lock.h"
 
 static const char *TAG = "display_power_cfg";
 
@@ -179,6 +180,12 @@ display_timeout_setting_t display_power_cfg_timeout_setting(void) { return s_tim
 bool display_power_cfg_keep_on_while_firing(void) { return s_keep_on_while_firing; }
 bool display_power_cfg_display_on_error(void) { return s_display_on_error; }
 
+/* Callers: httpd and backup_import's own async task (http_async_job_try_start),
+ * so the rev read, RAM assign, commit and rev bump are one section
+ * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
+ * reserves the flash worker first -- see cfg_save_lock.h. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_setting_t timeout_setting,
                                 bool keep_on_while_firing, bool display_on_error)
 {
@@ -192,6 +199,7 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     // In-RAM truth first -- live for the very next display_power_policy_step()
     // caller regardless of whether the NVS write below succeeds, same
     // ordering as unit_pref_set()/ramp_assist_cfg_set_enabled().
+    cfg_save_lock_take(&s_save_lock);
     s_brightness_percent = brightness_percent;
     s_timeout_setting = timeout_setting;
     s_keep_on_while_firing = keep_on_while_firing;
@@ -210,6 +218,9 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     esp_err_t err = pref_cfg_fs_commit(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev, "display power settings");
     if (err == ESP_OK) {
         s_display_power_rev = new_rev;
+    }
+    cfg_save_lock_give(&s_save_lock);
+    if (err == ESP_OK) {
         ESP_LOGI(TAG, "display power settings saved: brightness=%u%% timeout_setting=%u keep_on_while_firing=%s "
                       "display_on_error=%s",
                  (unsigned)brightness_percent, (unsigned)timeout_setting,

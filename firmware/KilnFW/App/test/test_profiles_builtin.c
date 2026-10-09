@@ -54,6 +54,7 @@ int g_test_count = 0;
 #include "cfg_fs.h"
 
 #include "profiles_builtin.c"
+#include "save_section_probe.h"
 
 static const char *UNRATED_CODES[] = {
     "FSCG1", "FSCGB1", "FSCGCL", "FSCGWM", "FSCRGL",
@@ -241,6 +242,32 @@ static void test_hidden_save_writes_file_only(void)
     cfg_fs_deinit();
 }
 
+/* CFG_STORE_SAVE_RACE audit MED-2 / "Save mutex vs. flash worker": the mask
+ * edit, rev read, commit and rev bump run inside the reserved save section,
+ * so the mask still holds its old value when the section opens. */
+static uint32_t s_pb_mask_at_enter;
+static void pb_capture_mask(void) { s_pb_mask_at_enter = s_hidden_mask; }
+static void test_hidden_save_runs_in_save_section(void)
+{
+    TEST_SECTION("hidden mask: set_hidden()/restore_all() save inside the reserved save section");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    pb_reboot();
+    profiles_builtin_start();
+    ssp_install();
+    g_ssp.on_enter = pb_capture_mask;
+    s_pb_mask_at_enter = 0xFFFFFFFFu;
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 4, true) == ESP_OK, "set_hidden ok");
+    TEST_CHECK(ssp_shape_ok(1), "set_hidden: reservation before the mutex, released after, write inside it");
+    TEST_CHECK(s_pb_mask_at_enter == 0, "set_hidden: mask untouched until the section is open");
+    ssp_uninstall();
+    ssp_install();
+    TEST_CHECK(profiles_builtin_restore_all() == ESP_OK, "restore_all ok");
+    TEST_CHECK(ssp_shape_ok(1), "restore_all: same shape");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
 static void test_hidden_boot_resolves_from_file_when_nvs_empty(void)
 {
     TEST_SECTION("hidden mask: NVS empty + file present -> start() adopts the file");
@@ -405,6 +432,7 @@ void run_test_profiles_builtin(void)
     test_exactly_the_ten_named_entries_are_unrated();
     test_every_rising_segment_has_bounded_positive_ramp();
     test_hidden_save_writes_file_only();
+    test_hidden_save_runs_in_save_section();
     test_hidden_boot_resolves_from_file_when_nvs_empty();
     test_hidden_higher_rev_wins_over_file();
     test_hidden_unmounted_fails_loud_and_loads_legacy();

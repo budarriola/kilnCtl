@@ -31,6 +31,7 @@
 #include "cfg_fs.h"
 
 #include "../drivers/persist/display_power_cfg.c"
+#include "save_section_probe.h"
 
 static const char *DP_SCRATCH_BASE = "cfg_fs_test_display_power";
 
@@ -358,6 +359,28 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     cfg_fs_deinit();
 }
 
+/* CFG_STORE_SAVE_RACE audit MED-2 / "Save mutex vs. flash worker". */
+static uint8_t g_dp_brightness_at_enter;
+static void dp_record_ram_at_enter(void) { g_dp_brightness_at_enter = s_brightness_percent; }
+
+static void test_set_runs_in_save_section(void)
+{
+    TEST_SECTION("display_power_cfg_set: RAM assign and save inside the reserved save section");
+    dp_mount_scratch();
+    display_power_cfg_start();
+    uint8_t before = display_power_cfg_brightness_percent();
+    uint8_t target = (uint8_t)(before == 42 ? 43 : 42);
+    ssp_install();
+    g_ssp.on_enter = dp_record_ram_at_enter;
+    g_dp_brightness_at_enter = target;
+    TEST_CHECK(display_power_cfg_set(target, DISPLAY_TIMEOUT_10_MIN, true, true) == ESP_OK, "save ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation taken before the mutex, released after, write inside it");
+    TEST_CHECK(g_dp_brightness_at_enter == before, "RAM not yet assigned when the section opens");
+    TEST_CHECK(display_power_cfg_brightness_percent() == target, "RAM holds the new value after the save");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
 void run_test_display_power_cfg(void)
 {
     test_defaults_on_empty_nvs();
@@ -371,6 +394,7 @@ void run_test_display_power_cfg(void)
     test_nvs_fallback_when_file_absent_then_migrates();
     test_divergence_tie_break_higher_rev_wins();
     test_mount_failed_falls_through_to_nvs_only();
+    test_set_runs_in_save_section();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

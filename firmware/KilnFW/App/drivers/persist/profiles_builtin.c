@@ -21,6 +21,7 @@
 #include "cfg_fs_status.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_save_lock.h"
 
 static const char *TAG = "profiles_builtin";
 
@@ -98,9 +99,15 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
+/* Callers: httpd and backup_import's own async task (http_async_job_try_start),
+ * so the rev read, RAM assign, commit and rev bump are one section
+ * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
+ * reserves the flash worker first -- see cfg_save_lock.h. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 /* Persists the mask at the next rev to the cfg file ONLY (docs/CONFIG_FILESYSTEM.md,
  * "Dual-write window: closed"). s_hidden_rev advances only once the verified
- * write succeeded, same as unit_pref_set(). */
+ * write succeeded, same as unit_pref_set(). Caller holds s_save_lock. */
 static esp_err_t hidden_mask_save(void)
 {
     uint32_t new_rev = s_hidden_rev + 1;
@@ -298,21 +305,29 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
     if (!builtin_index(id, &idx)) {
         return ESP_ERR_INVALID_ARG;
     }
+    cfg_save_lock_take(&s_save_lock);
     uint32_t updated = hidden ? (s_hidden_mask | (1u << idx)) : (s_hidden_mask & ~(1u << idx));
     if (updated == s_hidden_mask) {
+        cfg_save_lock_give(&s_save_lock);
         return ESP_OK; /* already in the requested state -- no flash write */
     }
     s_hidden_mask = updated;
-    return hidden_mask_save();
+    esp_err_t err = hidden_mask_save();
+    cfg_save_lock_give(&s_save_lock);
+    return err;
 }
 
 esp_err_t profiles_builtin_restore_all(void)
 {
+    cfg_save_lock_take(&s_save_lock);
     if (s_hidden_mask == 0) {
+        cfg_save_lock_give(&s_save_lock);
         return ESP_OK;
     }
     s_hidden_mask = 0;
-    return hidden_mask_save();
+    esp_err_t err = hidden_mask_save();
+    cfg_save_lock_give(&s_save_lock);
+    return err;
 }
 
 esp_err_t profiles_builtin_discard_file(void)

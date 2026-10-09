@@ -142,14 +142,22 @@ bool kiln_cfg_store_autosave_from_live_for_dispatcher(void *dispatcher_task, cha
 // synchronously, same shape as test_autotune_engine_prestart.c's/
 // test_ota_http.c's/test_safety_cfg_store.c's identical fakes of this
 // function.
+int g_stub_flash_worker_dispatches = 0;
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
     if (!fn) {
         return ESP_ERR_INVALID_ARG;
     }
+    g_stub_flash_worker_dispatches++;
     fn(arg);
     return ESP_OK;
 }
+
+// nvs_save() runs the autosave inline when already on the flash worker
+// (SET_ZONE_PID/MODEL, AUTOTUNE ACCEPT jobs). Controllable so a test can take
+// both branches.
+bool g_stub_on_flash_worker = false;
+bool uart_bridge_ext_is_on_flash_worker(void) { return g_stub_on_flash_worker; }
 
 #include "../drivers/http/zones_http.c"
 #include "../drivers/persist/zones_config_store.c"
@@ -158,6 +166,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
                                             * fuzzy_model_valid call site (GAP 2,
                                             * docs/audits/observability_gaps_closed_2026-09-14.md) */
 #include "../drivers/http/zones_http_get.c"
+#include "save_section_probe.h"
 #include "../drivers/http/zones_http_post_parse.c"
 #include "../drivers/http/http_async_job.h"
 #include "../drivers/http/zones_http_post.c"
@@ -1817,10 +1826,17 @@ static void test_zones_cfg_lock_covers_commit_and_setters(void)
     (void)nvs_save();
     uint32_t save_acq = s_zones_cfg_lock_acquires - s0;
     TEST_CHECK(save_acq >= 1, "nvs_save takes the zones lock to snapshot");
+    /* relay_names_save() snapshots s_relay_names under the same lock too
+     * (CFG_STORE_SAVE_RACE audit MED-1). */
+    s0 = s_zones_cfg_lock_acquires;
+    (void)relay_names_save();
+    uint32_t names_acq = s_zones_cfg_lock_acquires - s0;
+    TEST_CHECK(names_acq == 1, "relay_names_save takes the zones lock once to snapshot");
     uint32_t a0 = s_zones_cfg_lock_acquires;
     run_zones_post(body);
     TEST_CHECK(s_test_ok_called && !s_test_err_called, "submit commits");
-    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1 + save_acq, "the successful commit took the lock once, plus its save's snapshot");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1 + save_acq + names_acq,
+               "the successful commit took the lock once, plus its two saves' snapshots");
 
     a0 = s_zones_cfg_lock_acquires;
     TEST_CHECK(zones_config_set_max_ramp_no_save(0, 100.0f), "setter succeeds");
@@ -3193,6 +3209,54 @@ static void test_nvs_save_runs_under_save_mutex_with_distinct_revs(void)
     nvs_test_enable(false);
 }
 
+/* Save mutex vs. flash worker (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):
+ * the zones save mutex reserves the flash worker before it is taken and
+ * releases it after it is given, so no worker job can be running -- and
+ * blocked on this mutex -- while the holder waits on the worker for its cfg
+ * write. MED-1: the relay-name and zone-normal setters edit RAM only inside
+ * that section, so RAM still holds the old value when the section opens. */
+static void reset_relay_names(void);
+static char s_ssp_name_at_enter[RELAY_NAME_MAX_LEN + 1];
+static float s_ssp_normal_at_enter;
+static void ssp_capture_zones_ram(void)
+{
+    memcpy(s_ssp_name_at_enter, s_relay_names.cfg.names[2], sizeof(s_ssp_name_at_enter));
+    s_ssp_normal_at_enter = s_zone_normals.cfg.normal_current_a[0];
+}
+static void test_zones_saves_run_in_save_section(void)
+{
+    TEST_SECTION("zones saves -- worker reserved around the save mutex; setters edit RAM inside it (MED-1)");
+    nvs_test_enable(true);
+    nvs_test_clear();
+
+    ssp_install();
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save ok");
+    TEST_CHECK(ssp_shape_ok(0), "nvs_save: reservation taken before the mutex and released after it");
+    ssp_uninstall();
+
+    reset_relay_names();
+    ssp_install();
+    g_ssp.on_enter = ssp_capture_zones_ram;
+    TEST_CHECK(zones_config_set_relay_name(3, "Kiln vent"), "relay name setter ok");
+    TEST_CHECK(ssp_shape_ok(1), "relay name setter: well-formed section, every cfg write inside it");
+    TEST_CHECK(g_ssp.enters == 1, "relay name setter: one section");
+    TEST_CHECK(s_ssp_name_at_enter[0] == '\0', "relay name setter: RAM untouched until the section is open");
+    ssp_uninstall();
+
+    s_zone_normals.cfg.normal_current_a[0] = 1.0f;
+    ssp_install();
+    g_ssp.on_enter = ssp_capture_zones_ram;
+    TEST_CHECK(zone_normals_set(0, 7.5f), "zone_normals_set ok");
+    TEST_CHECK(ssp_shape_ok(1), "zone_normals_set: well-formed section, every cfg write inside it");
+    TEST_CHECK(g_ssp.enters == 1, "zone_normals_set: one section");
+    TEST_CHECK(s_ssp_normal_at_enter == 1.0f, "zone_normals_set: RAM untouched until the section is open");
+    TEST_CHECK(s_zone_normals.cfg.normal_current_a[0] == 7.5f, "zone_normals_set: RAM updated");
+    ssp_uninstall();
+
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 // Round-trip: nvs_save() then nvs_load() (the real save/load pair, not just
 // nvs_load_from() in isolation) must hand back every field identical,
 // including the newly-added crc32-stamping behavior itself.
@@ -3246,6 +3310,20 @@ static void test_nvs_save_dispatches_the_kiln_config_autosave(void)
     TEST_CHECK(g_stub_autosave_called, "the auto-save hook must still have been attempted");
 
     g_stub_autosave_result = true;
+    g_stub_autosave_called = false;
+
+    // On the flash worker (a SET_ZONE_PID/MODEL or AUTOTUNE ACCEPT job) the
+    // autosave runs inline, never re-dispatched, and still carries the
+    // calling task's identity.
+    g_stub_on_flash_worker = true;
+    g_stub_flash_worker_dispatches = 0;
+    g_stub_autosave_dispatcher = NULL;
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save() on the flash worker succeeds");
+    TEST_CHECK(g_stub_autosave_called, "on the worker the autosave still runs");
+    TEST_CHECK(g_stub_flash_worker_dispatches == 0, "on the worker the autosave is inline, not dispatched");
+    TEST_CHECK(g_stub_autosave_dispatcher == (void *)xTaskGetCurrentTaskHandle(),
+              "inline autosave carries the calling task's handle");
+    g_stub_on_flash_worker = false;
     g_stub_autosave_called = false;
 }
 
@@ -16178,6 +16256,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_failed_validation_is_rejected();
     test_nvs_save_load_round_trip_current_version();
     test_nvs_save_dispatches_the_kiln_config_autosave();
+    test_zones_saves_run_in_save_section();
     test_nvs_save_runs_under_save_mutex_with_distinct_revs();
     test_nvs_load_from_v1_blob_upconverts_fields_correctly();
     test_nvs_load_from_v2_blob_upconverts_fields_correctly();

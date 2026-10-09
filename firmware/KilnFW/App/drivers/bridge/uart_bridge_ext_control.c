@@ -621,8 +621,8 @@ static void profiles_task(void *arg)
          * command AND safety_cfg_store's deferred NVS flush -- and
          * additionally behind profile_executor's own s_exec.lock, which the
          * executor task holds for the length of an entire 1 Hz tick
-         * (PID/feedforward/guard math for every active zone, plus an
-         * occasional in-lock NVS write from relay_cycles_maybe_persist()). A
+         * (PID/feedforward/guard math for every active zone;
+         * relay_cycles_maybe_persist()'s NVS write runs after the lock). A
          * caller polling GET_EXEC_STATUS at a fixed cadence during a
          * multi-zone firing could queue behind either of those and miss a
          * 3 s reply deadline -- the frame was already ACKed by the transport

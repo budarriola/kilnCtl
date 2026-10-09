@@ -19,7 +19,8 @@
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h" /* s_zcfg_save_mutex */
+#include "freertos/semphr.h"
+#include "cfg_save_lock.h" /* s_zcfg_save_mutex */
 #include "freertos/task.h" /* xTaskGetCurrentTaskHandle() -- autosave dispatcher identity, 2026-09-16 */
 #include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- docs/KILN_PROFILES_PLAN.md
                              * section 2.4, item 13. */
@@ -52,7 +53,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_ZONES_REV);
 static uint32_t s_zones_cfg_rev = 0;
 
 /* SAVE MUTEX (dev review 5 L5, modeled on profiles_http.c's profiles_save_lock()).
- * nvs_save(), relay_names_save() and zone_normals_save() each compute rev+1 from a
+ * nvs_save(), relay_names_save() and zone_normals_save_locked() each compute rev+1 from a
  * file-scope counter, write the cfg file, then publish the counter; callers span httpd,
  * the profile executor and adaptive tune, so two concurrent saves could both stamp the
  * same rev. One static mutex makes rev read + write + rev bump one critical section per
@@ -62,41 +63,22 @@ static uint32_t s_zones_cfg_rev = 0;
  * call these savers, or take the save mutex, while holding zones_cfg_lock().
  * Held across the module's own cfg-file I/O only, never across a producer call
  * (the kiln-config autosave dispatch in nvs_save() runs after the unlock). Created on
- * first use under a claim flag so every take sees a non-NULL handle. */
-static StaticSemaphore_t s_zcfg_save_mutex_storage;
-static SemaphoreHandle_t s_zcfg_save_mutex = NULL;
-static portMUX_TYPE s_zcfg_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
-static bool s_zcfg_save_mutex_claimed = false;
-#if defined(__GNUC__)
-#define ZCFG_SAVE_MUTEX_LOAD() __atomic_load_n(&s_zcfg_save_mutex, __ATOMIC_ACQUIRE)
-#define ZCFG_SAVE_MUTEX_STORE(v) __atomic_store_n(&s_zcfg_save_mutex, (v), __ATOMIC_RELEASE)
-#else
-#define ZCFG_SAVE_MUTEX_LOAD() (*(SemaphoreHandle_t volatile *)&s_zcfg_save_mutex)
-#define ZCFG_SAVE_MUTEX_STORE(v) (*(SemaphoreHandle_t volatile *)&s_zcfg_save_mutex = (v))
-#endif
+ * first use under a claim flag so every take sees a non-NULL handle.
+ * cfg_save_lock_t since 2026-10-09: the take also reserves the flash worker when the
+ * caller is not the worker -- these savers run as worker jobs too (CONTROL
+ * SET_ZONE_PID/SET_ZONE_MODEL, AUTOTUNE ACCEPT) while their own cfg write dispatches
+ * onto the worker; see cfg_save_lock.h. */
+static cfg_save_lock_t s_zcfg_save_mutex = CFG_SAVE_LOCK_INIT;
 
-static void zcfg_save_lock(void)
-{
-    if (ZCFG_SAVE_MUTEX_LOAD() == NULL) {
-        bool mine = false;
-        portENTER_CRITICAL(&s_zcfg_save_mutex_mux);
-        if (!s_zcfg_save_mutex_claimed) {
-            s_zcfg_save_mutex_claimed = true;
-            mine = true;
-        }
-        portEXIT_CRITICAL(&s_zcfg_save_mutex_mux);
-        if (mine) {
-            ZCFG_SAVE_MUTEX_STORE(xSemaphoreCreateMutexStatic(&s_zcfg_save_mutex_storage));
-        } else {
-            while (ZCFG_SAVE_MUTEX_LOAD() == NULL) {
-                vTaskDelay(1);
-            }
-        }
-    }
-    (void)xSemaphoreTake(ZCFG_SAVE_MUTEX_LOAD(), portMAX_DELAY);
-}
+static void zcfg_save_lock(void) { cfg_save_lock_take(&s_zcfg_save_mutex); }
 
-static void zcfg_save_unlock(void) { (void)xSemaphoreGive(ZCFG_SAVE_MUTEX_LOAD()); }
+static void zcfg_save_unlock(void) { cfg_save_lock_give(&s_zcfg_save_mutex); }
+
+/* For the relay-name setters in zones_config_accessors.c (CFG_STORE_SAVE_RACE
+ * audit MED-1): RAM edit and save in one section under the same mutex. */
+void zones_cfg_save_section_lock(void) { zcfg_save_lock(); }
+
+void zones_cfg_save_section_unlock(void) { zcfg_save_unlock(); }
 
 /* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16 -- see
  * zones_cfg_load_fault_t's own doc comment (zones_config_accessors.h) for
@@ -756,6 +738,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
  * doc comment) -- avoids pulling in the whole UART bridge API for one call.
  */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+bool uart_bridge_ext_is_on_flash_worker(void);
 
 /* Job body for nvs_save()'s auto-save dispatch, immediately below --
  * `arg` is unused (kiln_cfg_store_autosave_from_live() reads the live
@@ -883,17 +866,26 @@ esp_err_t nvs_save(void)
      * moves that frame onto the flash worker's OWN dedicated stack instead
      * -- invisible to every caller's static stack-depth measurement, the
      * same reason relay_cycles.c's own persist path uses this pattern.
-     * uart_bridge_ext_run_on_flash_worker() is not reachable on-worker from
-     * here: nvs_save() is called from ordinary httpd/executor/adaptive-tune
-     * contexts, never from a job already running on the flash worker
-     * itself, so no is_on_flash_worker() re-entrancy guard is needed (see
-     * flash_worker_lint.py's own header comment for this justification
-     * phrase's precedent). Best-effort: a dispatch/autosave failure is
-     * logged, never turned into this function's own return value -- the
-     * zones write ITSELF already fully succeeded by this point. */
-    esp_err_t autosave_dispatch_err =
-        (err == ESP_OK) ? uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle())
-                        : ESP_OK; /* nothing was saved, so there is nothing to autosave */
+     *
+     * nvs_save() IS reached on the flash worker: CONTROL SET_ZONE_PID/MODEL
+     * and AUTOTUNE_CMD_ACCEPT run as worker jobs (corrected 2026-10-09; an
+     * earlier comment here said it never was). On the worker the job runs
+     * inline -- the worker's own stack is the one this dispatch targets
+     * anyway, and dispatching would only re-enter the worker.
+     * uart_bridge_ext_run_on_flash_worker() also inlines on-worker, but the
+     * guard here makes that explicit rather than relying on it. Best-effort:
+     * a dispatch/autosave failure is logged, never turned into this
+     * function's own return value -- the zones write ITSELF already fully
+     * succeeded by this point. */
+    esp_err_t autosave_dispatch_err = ESP_OK; /* nothing saved: nothing to autosave */
+    if (err == ESP_OK) {
+        if (uart_bridge_ext_is_on_flash_worker()) {
+            zones_autosave_job((void *)xTaskGetCurrentTaskHandle());
+        } else {
+            autosave_dispatch_err =
+                uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle());
+        }
+    }
     if (autosave_dispatch_err != ESP_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "kiln config autosave could not be dispatched: %s -- the active kiln "
                       "package was NOT updated with this change, though the change itself was saved",
@@ -1315,19 +1307,31 @@ void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool
     }
 }
 
-esp_err_t relay_names_save(void)
+/* Caller holds zones_cfg_save_section_lock(). Commits a snapshot taken under
+ * zones_cfg_lock(): zones_http_post.c assigns s_relay_names.cfg under that
+ * lock, so the file is never a torn mix of two writers' names. */
+esp_err_t relay_names_save_locked(void)
 {
-    zcfg_save_lock(); /* rev read .. rev bump; see s_zcfg_save_mutex */
-    s_relay_names.cfg.version = RELAY_NAMES_CFG_VERSION;
-    s_relay_names.cfg.crc32 = compute_relay_names_crc(&s_relay_names.cfg);
+    relay_names_cfg_t snap;
+    zones_cfg_lock();
+    snap = s_relay_names.cfg;
+    zones_cfg_unlock();
+    snap.version = RELAY_NAMES_CFG_VERSION;
+    snap.crc32 = compute_relay_names_crc(&snap);
     uint32_t new_rev = s_relay_names_rev + 1;
 
     /* cfg file ONLY -- docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed". */
-    esp_err_t err = pref_cfg_fs_commit(RELAY_NAMES_FILE_PATH, &s_relay_names.cfg, sizeof(s_relay_names.cfg), new_rev,
-                                       "relay names");
+    esp_err_t err = pref_cfg_fs_commit(RELAY_NAMES_FILE_PATH, &snap, sizeof(snap), new_rev, "relay names");
     if (err == ESP_OK) {
         s_relay_names_rev = new_rev;
     }
+    return err;
+}
+
+esp_err_t relay_names_save(void)
+{
+    zcfg_save_lock(); /* rev read .. rev bump; see s_zcfg_save_mutex */
+    esp_err_t err = relay_names_save_locked();
     zcfg_save_unlock();
     return err;
 }
@@ -1374,9 +1378,9 @@ esp_err_t relay_names_save(void)
  * commissioning page reporting writes that never landed") and was invisible
  * because the pre-migration host stub (stubs/nvs.h) modeled ONE shared blob
  * slot with no key-length check of any kind, and the board's own
- * zone_normals_save() logged nothing on a non-OK return (unlike every
+ * zone_normals_save_locked() logged nothing on a non-OK return (unlike every
  * sibling setter in this file) -- fixed in the 2026-09-07 persist-logging
- * audit (docs/audits/persist_save_logging_2026-09-07.md), zone_normals_save()
+ * audit (docs/audits/persist_save_logging_2026-09-07.md), zone_normals_save_locked()
  * now logs an ESP_LOGW naming the module and esp_err_to_name() on failure.
  * At the time the key-length bug was live, EVERY zone_normals_set()/
  * zone_ct_map_set()/zone_k_ct_set() write since that commit has silently
@@ -1488,9 +1492,12 @@ void zone_normals_load(void)
              (unsigned long)s_zone_normals_rev);
 }
 
-static esp_err_t zone_normals_save(void)
+/* Caller holds zcfg_save_lock() across its RAM edit AND this save
+ * (CFG_STORE_SAVE_RACE audit MED-1): every setter below mutates
+ * s_zone_normals.cfg only inside that section, so a concurrent setter can
+ * neither interleave its edit into this commit nor publish a rev for it. */
+static esp_err_t zone_normals_save_locked(void)
 {
-    zcfg_save_lock(); /* rev read .. rev bump; see s_zcfg_save_mutex */
     s_zone_normals.cfg.version = ZONE_NORMALS_CFG_VERSION;
     s_zone_normals.cfg.crc32 = compute_zone_normals_crc(&s_zone_normals.cfg);
     uint32_t new_rev = s_zone_normals_rev + 1;
@@ -1501,7 +1508,6 @@ static esp_err_t zone_normals_save(void)
     if (err == ESP_OK) {
         s_zone_normals_rev = new_rev;
     }
-    zcfg_save_unlock();
     return err;
 }
 
@@ -1582,9 +1588,12 @@ bool zone_normals_set(uint8_t zone_index, float amps)
     if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(amps) || amps < 0.0f) {
         return false;
     }
+    zcfg_save_lock();
     s_zone_normals.cfg.normal_current_a[zone_index] = amps;
     s_zone_normals.cfg.measured_mask |= (uint8_t)(1u << zone_index);
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 /* 2026-09-10: originally written to clear a zone's measured normal current
@@ -1616,7 +1625,9 @@ bool zone_normals_invalidate_mask(uint8_t zone_mask)
         return true;
     }
     zone_mask &= (uint8_t)((1u << MAX31856_CHANNEL_COUNT) - 1u);
+    zcfg_save_lock();
     if ((s_zone_normals.cfg.measured_mask & zone_mask) == 0) {
+        zcfg_save_unlock();
         return true; /* nothing measured in the affected set -- nothing to invalidate */
     }
     s_zone_normals.cfg.measured_mask &= (uint8_t)~zone_mask;
@@ -1625,7 +1636,9 @@ bool zone_normals_invalidate_mask(uint8_t zone_mask)
             s_zone_normals.cfg.normal_current_a[zi] = 0.0f;
         }
     }
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 /* Same "the sweep is the only legitimate writer" rule zone_normals_set()
@@ -1637,14 +1650,16 @@ bool zone_normals_invalidate_mask(uint8_t zone_mask)
  * to be shown as current. */
 void zone_ct_map_clear(void)
 {
+    zcfg_save_lock();
     s_zone_normals.cfg.ct_map_derived_mask = 0;
     memset(s_zone_normals.cfg.ct_map_zone, 0, sizeof(s_zone_normals.cfg.ct_map_zone));
     /* Persisted immediately, not left for the first zone_ct_map_set() to
      * flush: a sweep that clears the map and then fails outright never
      * reaches a set(), and leaving the old map in NVS would resurrect it on
      * the next boot as though it were still current. Failure is already
-     * logged inside zone_normals_save() itself. */
-    esp_err_t clear_err = zone_normals_save();
+     * logged inside zone_normals_save_locked() itself. */
+    esp_err_t clear_err = zone_normals_save_locked();
+    zcfg_save_unlock();
     (void)clear_err;
 }
 
@@ -1653,9 +1668,12 @@ bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
     if (ct_channel >= ZONE_CT_CHANNEL_COUNT || zone_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
+    zcfg_save_lock();
     s_zone_normals.cfg.ct_map_zone[ct_channel] = zone_index;
     s_zone_normals.cfg.ct_map_derived_mask |= (uint8_t)(1u << ct_channel);
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 /* M12b: same discipline as zone_ct_map_clear()/zone_ct_map_set() just above
@@ -1665,10 +1683,12 @@ bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
  * calibration. */
 void zone_k_ct_clear(void)
 {
+    zcfg_save_lock();
     s_zone_normals.cfg.k_ct_derived_mask = 0;
     memset(s_zone_normals.cfg.k_ct_v_per_a, 0, sizeof(s_zone_normals.cfg.k_ct_v_per_a));
-    /* Failure is already logged inside zone_normals_save() itself. */
-    esp_err_t clear_err = zone_normals_save();
+    /* Failure is already logged inside zone_normals_save_locked() itself. */
+    esp_err_t clear_err = zone_normals_save_locked();
+    zcfg_save_unlock();
     (void)clear_err;
 }
 
@@ -1677,9 +1697,12 @@ bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a)
     if (ct_channel >= ZONE_CT_CHANNEL_COUNT || !isfinite(k_v_per_a) || k_v_per_a <= 0.0f) {
         return false;
     }
+    zcfg_save_lock();
     s_zone_normals.cfg.k_ct_v_per_a[ct_channel] = k_v_per_a;
     s_zone_normals.cfg.k_ct_derived_mask |= (uint8_t)(1u << ct_channel);
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)

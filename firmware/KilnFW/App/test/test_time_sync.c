@@ -45,6 +45,7 @@ int g_test_count = 0;
 #include "cfg_fs.h"
 
 #include "../drivers/net/time_sync.c"
+#include "save_section_probe.h"
 
 static const char *TS_SCRATCH_BASE = "cfg_fs_test_time_sync";
 
@@ -293,6 +294,21 @@ static void test_ts_sntp_init_failure_on_empty_nvs_defaults_to_utc(void)
     TEST_CHECK(strcmp(st.tz, TIME_SYNC_TZ_DEFAULT) == 0, "UTC default is applied despite the sntp failure");
 }
 
+/* CFG_STORE_SAVE_RACE audit MED-2 / "Save mutex vs. flash worker": apply,
+ * rev read, commit and rev bump run inside the reserved save section. */
+static void test_ts_set_tz_runs_in_save_section(void)
+{
+    TEST_SECTION("time_sync_set_tz: save inside the reserved save section");
+    ts_fresh_mounted();
+    ssp_install();
+    uint32_t r0 = s_tz_rev;
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "save ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation taken before the mutex, released after, write inside it");
+    TEST_CHECK(s_tz_rev == r0 + 1, "rev bumped once");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
 static void run_test_time_sync(void)
 {
     TEST_SECTION("time_sync (TZ validation + degrade-to-UTC)");
@@ -437,6 +453,7 @@ static void run_test_time_sync(void)
     test_ts_mount_failed_falls_through_to_nvs_only();
     test_ts_sntp_init_failure_returns_error_and_tz_still_applied();
     test_ts_sntp_init_failure_on_empty_nvs_defaults_to_utc();
+    test_ts_set_tz_runs_in_save_section();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

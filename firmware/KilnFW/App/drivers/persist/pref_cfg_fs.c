@@ -28,6 +28,29 @@ pref_cfg_fs_write_fn_t pref_cfg_fs_get_write_fn(void)
     return s_write_fn;
 }
 
+static pref_cfg_fs_save_enter_fn_t s_save_enter_fn = NULL;
+static pref_cfg_fs_save_exit_fn_t s_save_exit_fn = NULL;
+
+void pref_cfg_fs_set_save_section_hooks(pref_cfg_fs_save_enter_fn_t enter, pref_cfg_fs_save_exit_fn_t exit_fn)
+{
+    s_save_enter_fn = enter;
+    s_save_exit_fn = exit_fn;
+}
+
+bool pref_cfg_fs_save_section_enter(void)
+{
+    pref_cfg_fs_save_enter_fn_t fn = s_save_enter_fn;
+    return fn ? fn() : false;
+}
+
+void pref_cfg_fs_save_section_exit(bool reserved)
+{
+    pref_cfg_fs_save_exit_fn_t fn = s_save_exit_fn;
+    if (fn) {
+        fn(reserved);
+    }
+}
+
 static void put_u32_le(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)(v & 0xFF);

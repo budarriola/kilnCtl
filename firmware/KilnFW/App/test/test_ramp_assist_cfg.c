@@ -39,6 +39,7 @@
 #include "cfg_fs.h"
 
 #include "../drivers/control/ramp_assist_cfg.c"
+#include "save_section_probe.h"
 
 static const char *RA_SCRATCH_BASE = "cfg_fs_test_ramp_assist";
 
@@ -535,6 +536,30 @@ static void test_ra_start_nvs_error_but_file_fallback_returns_ok_with_file_value
     cfg_fs_deinit();
 }
 
+/* CFG_STORE_SAVE_RACE audit MED-2 / "Save mutex vs. flash worker": the save
+ * lock (with its worker reservation) covers the RAM assign through the rev
+ * bump, so RAM is still the old value when the section opens. */
+static bool g_ra_ram_at_enter;
+static void ra_record_ram_at_enter(void) { g_ra_ram_at_enter = s_ramp_assist_enabled; }
+
+static void test_set_enabled_runs_in_save_section(void)
+{
+    TEST_SECTION("ramp_assist_cfg_set_enabled: RAM assign and save inside the reserved save section");
+    ra_mount_scratch();
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "starts disabled");
+    ssp_install();
+    g_ssp.on_enter = ra_record_ram_at_enter;
+    g_ra_ram_at_enter = true;
+    TEST_CHECK(ramp_assist_cfg_set_enabled(true) == ESP_OK, "save ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation taken before the mutex, released after, write inside it");
+    TEST_CHECK(g_ra_ram_at_enter == false, "RAM not yet assigned when the section opens");
+    TEST_CHECK(ramp_assist_cfg_enabled(), "RAM holds the new value after the save");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
 void run_test_ramp_assist_cfg(void)
 {
     test_default_is_disabled_on_empty_nvs();
@@ -552,6 +577,7 @@ void run_test_ramp_assist_cfg(void)
     test_ra_start_open_error_without_file_returns_error();
     test_ra_start_read_error_without_file_returns_error();
     test_ra_start_nvs_error_but_file_fallback_returns_ok_with_file_value();
+    test_set_enabled_runs_in_save_section();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

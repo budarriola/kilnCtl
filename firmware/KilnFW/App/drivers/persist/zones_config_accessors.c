@@ -481,9 +481,16 @@ bool zones_config_set_relay_name(uint8_t relay_n, const char *name)
     if (len > RELAY_NAME_MAX_LEN) {
         return false;
     }
+    /* RAM edit and save are one section (CFG_STORE_SAVE_RACE audit MED-1);
+     * the edit itself is under zones_cfg_lock() like zones_http_post.c's. */
+    zones_cfg_save_section_lock();
+    zones_cfg_lock();
     strncpy(s_relay_names.cfg.names[relay_n - 1], name ? name : "", RELAY_NAME_MAX_LEN);
     s_relay_names.cfg.names[relay_n - 1][RELAY_NAME_MAX_LEN] = '\0';
-    return relay_names_save() == ESP_OK;
+    zones_cfg_unlock();
+    bool ok = relay_names_save_locked() == ESP_OK;
+    zones_cfg_save_section_unlock();
+    return ok;
 }
 
 /* See zones_config_accessors.h's doc comment on this pair. Note the getter
@@ -518,8 +525,13 @@ bool zones_config_set_relay_device_type(uint8_t relay_n, relay_device_type_t typ
     if ((uint8_t)type >= RELAY_DEVICE_TYPE_COUNT) {
         return false;
     }
+    zones_cfg_save_section_lock(); /* see zones_config_set_relay_name() */
+    zones_cfg_lock();
     s_relay_names.cfg.types[relay_n - 1] = (uint8_t)type;
-    return relay_names_save() == ESP_OK;
+    zones_cfg_unlock();
+    bool ok = relay_names_save_locked() == ESP_OK;
+    zones_cfg_save_section_unlock();
+    return ok;
 }
 
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)

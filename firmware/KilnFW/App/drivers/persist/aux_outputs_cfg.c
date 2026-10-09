@@ -6,6 +6,7 @@
 
 #include "MAX31856.h"
 #include "cfg_fs_status.h"
+#include "cfg_save_lock.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -52,10 +53,14 @@ static uint32_t s_rev = 0;
 /* s_lock guards the RAM globals above (short critical sections only, never
  * across flash I/O or another module's calls). s_set_lock serializes whole
  * set() calls so the unlocked save in the middle cannot interleave with another
- * writer. Created in start() (idempotent); NULL (prestart) = no locking, never a
- * hang. Lock order: s_set_lock -> s_lock. */
+ * writer. s_lock is created in start() (idempotent); NULL (prestart) = no
+ * locking, never a hang. s_set_lock is a cfg_save_lock_t (created lazily): it
+ * is held across pref_cfg_fs_commit(), which waits on the flash worker, so it
+ * must reserve the worker first (cfg_save_lock.h,
+ * docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md "Save mutex vs. flash worker").
+ * Lock order: s_set_lock -> s_lock. */
 static SemaphoreHandle_t s_lock = NULL;
-static SemaphoreHandle_t s_set_lock = NULL;
+static cfg_save_lock_t s_set_lock = CFG_SAVE_LOCK_INIT;
 
 static void ao_lock(SemaphoreHandle_t l)
 {
@@ -138,9 +143,6 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
 {
     if (!s_lock) {
         s_lock = xSemaphoreCreateMutex();
-    }
-    if (!s_set_lock) {
-        s_set_lock = xSemaphoreCreateMutex();
     }
     /* All NVS / cfg-fs I/O below runs into locals; s_lock is taken only to publish. */
     aux_outputs_blob_t nvs_blob;
@@ -264,13 +266,13 @@ bool aux_outputs_cfg_verify_persisted(void)
     memset(&blob, 0, sizeof(blob));
     uint32_t rev = 0;
     bool valid = false;
-    ao_lock(s_set_lock); /* no set() in flight: RAM and file are consistent */
+    cfg_save_lock_take(&s_set_lock); /* no set() in flight: RAM and file are consistent */
     pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(blob), aux_validate, &blob, &rev, &valid);
     ao_lock(s_lock);
     bool same = valid && rev == s_rev && blob.version == AUX_OUTPUTS_CFG_VERSION &&
                 memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
     ao_unlock(s_lock);
-    ao_unlock(s_set_lock);
+    cfg_save_lock_give(&s_set_lock);
     return same;
 }
 
@@ -312,7 +314,7 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
         return ESP_ERR_INVALID_STATE;
     }
 
-    ao_lock(s_set_lock); /* one writer at a time; readers are not blocked by the save */
+    cfg_save_lock_take(&s_set_lock); /* one writer at a time; readers are not blocked by the save */
 
     /* Snapshot under the short lock. The OTHER entries' persisted state is
      * carried through unchanged (a start()-time conflicted one stays persisted
@@ -326,7 +328,7 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
     uint32_t new_rev = s_rev + 1;
     ao_unlock(s_lock);
     if (quarantined) {
-        ao_unlock(s_set_lock);
+        cfg_save_lock_give(&s_set_lock);
         return ESP_ERR_INVALID_STATE;
     }
     blob.entries[relay - 1] = *entry;
@@ -348,7 +350,7 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
         s_rev = new_rev;
         ao_unlock(s_lock);
     }
-    ao_unlock(s_set_lock);
+    cfg_save_lock_give(&s_set_lock);
     return err;
 }
 

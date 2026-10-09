@@ -11,7 +11,8 @@
 #include "esp_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h" /* portMUX_TYPE -- profiles_storage_ensure()'s once-guard below */
-#include "freertos/semphr.h" /* s_save_mutex -- profiles_save_lock() */
+#include "freertos/semphr.h"
+#include "cfg_save_lock.h" /* s_save_mutex -- profiles_save_lock() */
 #include "freertos/task.h" /* vTaskDelay() -- same once-guard, the losing task's wait */
 #include "esp_heap_caps.h" /* heap_caps_malloc()/MALLOC_CAP_* -- profiles_storage_ensure()'s
                             * PSRAM allocation (docs/PROFILE_SLOTS_100.md section 7 task 3) */
@@ -699,53 +700,21 @@ esp_err_t nvs_save_slot(uint8_t id);
  * section. Held across the module's own NVS plus cfg-file I/O only; never across
  * producer calls (firing_stats_erase runs after the unlock). Created on first use
  * under a claim flag, so every take sees a non-NULL handle. */
-static StaticSemaphore_t s_save_mutex_storage;
-static SemaphoreHandle_t s_save_mutex = NULL;
-static portMUX_TYPE s_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
+static cfg_save_lock_t s_save_mutex = CFG_SAVE_LOCK_INIT;
 
-static bool s_save_mutex_claimed = false;
-/* Release/acquire publish of the handle (target GCC builds); the MSVC host test
- * build is single-threaded and uses plain accesses. */
-#if defined(__GNUC__)
-#define SAVE_MUTEX_LOAD() __atomic_load_n(&s_save_mutex, __ATOMIC_ACQUIRE)
-#define SAVE_MUTEX_STORE(v) __atomic_store_n(&s_save_mutex, (v), __ATOMIC_RELEASE)
-#else
-#define SAVE_MUTEX_LOAD() (*(SemaphoreHandle_t volatile *)&s_save_mutex)
-#define SAVE_MUTEX_STORE(v) (*(SemaphoreHandle_t volatile *)&s_save_mutex = (v))
-#endif
-
-void profiles_save_lock(void)
-{
-    if (SAVE_MUTEX_LOAD() == NULL) {
-        /* Same once-guard as profiles_storage_ensure(): only the claim is inside
-         * the critical section; the create runs after it (no FreeRTOS object
-         * creation with interrupts disabled). The loser waits for the winner. */
-        bool mine = false;
-        portENTER_CRITICAL(&s_save_mutex_mux);
-        if (!s_save_mutex_claimed) {
-            s_save_mutex_claimed = true;
-            mine = true;
-        }
-        portEXIT_CRITICAL(&s_save_mutex_mux);
-        if (mine) {
-            SAVE_MUTEX_STORE(xSemaphoreCreateMutexStatic(&s_save_mutex_storage));
-        } else {
-            while (SAVE_MUTEX_LOAD() == NULL) {
-                vTaskDelay(1);
-            }
-        }
-    }
-    (void)xSemaphoreTake(SAVE_MUTEX_LOAD(), portMAX_DELAY);
-}
+/* cfg_save_lock_t since 2026-10-09: the take also reserves the flash worker when the
+ * caller is not the worker. profiles_http_save()/profiles_http_delete() run as
+ * worker jobs too (uart_bridge_ext_control.c PROFILES SAVE/DELETE) while the
+ * section's own cfg write dispatches onto the worker: an httpd save holding this
+ * mutex and waiting for the worker, against a worker job waiting for this mutex,
+ * deadlocked both (on main since the save lock landed). See cfg_save_lock.h. */
+void profiles_save_lock(void) { cfg_save_lock_take(&s_save_mutex); }
 
 static _Atomic bool s_convert_busy = false; /* lock-free, like backup_import.c's s_config_change_in_flight */
 void profiles_http_set_convert_busy(bool busy) { atomic_store(&s_convert_busy, busy); }
 bool profiles_http_convert_busy(void) { return atomic_load(&s_convert_busy); }
 
-void profiles_save_unlock(void)
-{
-    (void)xSemaphoreGive(SAVE_MUTEX_LOAD());
-}
+void profiles_save_unlock(void) { cfg_save_lock_give(&s_save_mutex); }
 
 /* Caller holds profiles_save_lock(). */
 esp_err_t nvs_save_slot_locked(uint8_t id);
