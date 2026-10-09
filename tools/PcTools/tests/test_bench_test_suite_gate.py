@@ -26,15 +26,13 @@ WRITING_IDS = [
     "WEB-DIAG-09", "WEB-KCFG-02", "WEB-LOG-02", "WEB-PROF-02", "WEB-PROF-08",
     "WEB-ZONE-05",
     "WEB-DASH-05", "WEB-DASH-07", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
-    "WEB-PROF-06", "WEB-PROF-07", "WEB-ZONE-09",
+    "WEB-PROF-06", "WEB-PROF-07", "WEB-ZONE-09", "WEB-ZONE-10",
 ]
 
 # Judges that reach a write seam but are deliberately not behind write_refusal().
 EXEMPT_WRITERS = {
     "WEB-WIFI-05": "refusal probes: proves the POST helpers RAISE on denied paths, never reaches the board",
     "WEB-PROF-11": "user-role login probe expecting a refusal; web auth is never changed",
-    "WEB-ZONE-10": "KNOWN GAP (review 6 M2 follow-up): POSTs current_sweep/abort with no "
-                   "write_refusal() gate; only reached when the sweep status is not running",
 }
 
 # Judges that read the board BEFORE their gate need plausible GET bodies to reach it.

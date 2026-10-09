@@ -925,6 +925,9 @@ def _case_zone09(ctx: dict) -> CaseResult:
 
 
 def _case_zone10(ctx: dict) -> CaseResult:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     miss = _missing_tokens(_html(ctx, "/settings/zones"), ["sweepStartBtn", "sweepAbortBtn"])
     s, st = _GET(ctx, "/api/zones/current_sweep/status")
     state = st.get("state") if isinstance(st, dict) else None

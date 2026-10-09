@@ -79,8 +79,8 @@ rather than keeping it by hand.
 
 **Fixed in df75de64** (test only). Every writing judge now reaches its gate and must report the refusal;
 WRITING_IDS adds DASH-05/07, PROF-03..07 and ZONE-09 and is checked against a code-derived writer scan;
-a permanent test proves that removing the gate fails all 23 cases. Gap found, not changed here:
-WEB-ZONE-10 POSTs `current_sweep/abort` with no `write_refusal()` gate (listed in EXEMPT_WRITERS).
+a permanent test proves that removing the gate fails all 23 cases. WEB-ZONE-10 (`current_sweep/abort`)
+was a gap here and is now gated by `write_refusal()` and listed in WRITING_IDS.
 
 ## LOW
 
