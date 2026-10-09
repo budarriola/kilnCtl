@@ -1019,11 +1019,19 @@ static void test_v1_record(void)
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.have_id &&
                    r.id.magic == UPDATE_IMAGE_ID_MAGIC_V1 && r.id.uart_version == 13,
                "R7 L4: v1-only record is found");
-    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id) == UPDATE_STAGE_OK,
-               "R7 L4: v1 record passes the manifest gate with no commit check");
-    r.id.uart_version = 14;
     TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id) == UPDATE_STAGE_ERR_POLICY,
-               "R7 L4: v1 record still gets the schema comparison");
+               "R8 L2: v1 record is refused when the manifest declares a commit (image_id_v1_no_commit)");
+    {
+        update_identity_t nocommit = want;
+        memset(nocommit.commit, 0, sizeof(nocommit.commit));
+        TEST_CHECK(update_stage_manifest_gate(&nocommit, "1.2.3", "", &r.id) == UPDATE_STAGE_OK,
+                   "R8 L2: v1 record passes when the manifest declares no commit");
+        r.id.uart_version = 14;
+        TEST_CHECK(update_stage_manifest_gate(&nocommit, "1.2.3", "", &r.id) == UPDATE_STAGE_ERR_POLICY,
+                   "R7 L4: v1 record still gets the schema comparison");
+        r.id.uart_version = 13;
+    }
+    r.id.uart_version = 14;
 
     // New-image layout: v1 first (what an old gate scans for inside its 320-byte head), v2 right after.
     update_image_id_t v2;

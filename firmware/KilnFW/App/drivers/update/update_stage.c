@@ -384,8 +384,12 @@ update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, con
     // Review 3 LOW-6 / review 5 M1: when the manifest carries a commit, the commit embedded in the IMAGE
     // must be a prefix of it (the build embeds the short hash). An image with no usable commit
     // ("", "unknown", non-hex, under 7 chars) fails closed.
-    // A legacy v1 record carries no commit: nothing to compare (images from builds before the commit field).
-    if (want->commit[0] != '\0' && id->magic != UPDATE_IMAGE_ID_MAGIC_V1) {
+    // Review 8 L2: a legacy v1 record carries no commit, so when the manifest declares one the binding cannot be
+    // proven: fail closed ("image_id_v1_no_commit"). A manifest with no commit still accepts v1.
+    if (want->commit[0] != '\0' && id->magic == UPDATE_IMAGE_ID_MAGIC_V1) {
+        return UPDATE_STAGE_ERR_POLICY; // image_id_v1_no_commit
+    }
+    if (want->commit[0] != '\0') {
         const size_t n = strnlen(id->commit, UPDATE_IMAGE_ID_COMMIT_LEN);
         if (n < 7u || n > STAGE_COMMIT_HEX_LEN) {
             return UPDATE_STAGE_ERR_POLICY;

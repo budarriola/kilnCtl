@@ -872,7 +872,14 @@ static bool rev_repair_junk(const char *partition, const profiles_slot_bitmap_t 
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         uint32_t frev = 0;
         bool fvalid = false;
-        profiles_cfg_fs_load_raw(id, &sc->fp, &frev, &fvalid);
+        bool ferr = false;
+        profiles_cfg_fs_load_raw_ex(id, &sc->fp, &frev, &fvalid, &ferr);
+        if (ferr) {
+            /* review 8 L4: a failed read is not "no file": fail closed, no floor raise, slots stay rev-unknown */
+            ESP_LOGE(PROFILES_TAG, "prof_rev junk repair: cfg read error on slot %u -- saves/deletes refused this boot", id);
+            free(sc);
+            return false;
+        }
         sc->has_file[id] = fvalid;
         if (s_profile_rev[id] > maxrev) {
             maxrev = s_profile_rev[id];
@@ -1797,6 +1804,7 @@ static esp_err_t profiles_boot_load(void)
                  esp_err_to_name(part_err));
     }
 
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown)); /* early-return load paths leave the marks untouched */
     esp_err_t err = part_err;
     if (part_err == ESP_OK) {
         bool found_in_profiles_nvs = false;
@@ -1810,9 +1818,18 @@ static esp_err_t profiles_boot_load(void)
     }
     if (err != ESP_OK) {
         ESP_LOGW(PROFILES_TAG, "profile NVS load failed: %s -- resolving cfg files only", esp_err_to_name(err));
+        /* review 8 L3: marks the failed pass set (slots whose cfg read errored) must survive the fallback,
+         * which clears them; re-apply after it. */
+        bool keep_unknown[PROFILES_MAX_COUNT];
+        memcpy(keep_unknown, s_profile_rev_unknown, sizeof(keep_unknown));
         memset(&s_profiles, 0, sizeof(s_profiles));
         bool any = false;
         (void)nvs_load_files_only(PROFILES_NVS_PARTITION, &s_profiles, &any);
+        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+            if (keep_unknown[id]) {
+                s_profile_rev_unknown[id] = true;
+            }
+        }
     }
     return err;
 }

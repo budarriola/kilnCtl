@@ -1474,6 +1474,51 @@ static void test_pcfg_junk_rev_repair_scratch_oom_fails_closed(void)
     TEST_CHECK(blen == sizeof(junk), "rev blob not rewritten");
 }
 
+static void test_pcfg_boot_fallback_keeps_rev_unknown_marks(void)
+{
+    TEST_SECTION("boot fallback after OOM keeps rev-unknown marks of the failed pass (review 8 L3)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(0, &src, 1); /* legacy NVS-only slot, no file */
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    struct { uint8_t raw[4 + PROFILE_BLOB_MAX_SIZE]; profile_t cand; } probe;
+    persist_scratch_test_fail_size = sizeof(probe);
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    esp_err_t e = profiles_boot_load();
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen >= 1, "the load scratch allocation was reached");
+    TEST_CHECK(e == ESP_ERR_NO_MEM, "first pass failed with NO_MEM and the files-only fallback ran");
+    TEST_CHECK(s_profile_rev_unknown[0], "slot 0 stays rev-unknown after the fallback (save/erase refused)");
+}
+
+static void test_pcfg_junk_repair_load_error_fails_closed(void)
+{
+    TEST_SECTION("junk rev repair: cfg read error fails closed, no floor raise (review 8 L4)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(1, &p0, 9) == ESP_OK, "file at rev 9 (slot 1)");
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    pcfg_set_rev_blob(junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    struct { uint8_t raw[4 + PROFILE_BLOB_MAX_SIZE]; profile_t cand; } probe;
+    persist_scratch_test_fail_size = sizeof(probe);
+    persist_scratch_test_fail_nth = PROFILES_MAX_COUNT + 1; /* the repair's first load, after the resolve pass */
+    persist_scratch_test_seen = 0;
+    profiles_state_t out;
+    bool any_found = false;
+    (void)nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen > PROFILES_MAX_COUNT, "the repair load allocation was reached");
+    TEST_CHECK(s_profile_rev_unknown[3] && s_profile_rev_unknown[1], "slots stay rev-unknown");
+    TEST_CHECK(s_profile_rev[3] == 0, "no floor raise on a failed load");
+}
+
 static void test_pcfg_junk_rev_repair_deferred_without_cfg(void)
 {
     TEST_SECTION("junk rev blob with cfg NOT mounted: repair deferred, stays fail-closed, prof_rev untouched");
@@ -4305,6 +4350,8 @@ void run_test_profiles_http(void)
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
+    test_pcfg_boot_fallback_keeps_rev_unknown_marks();
+    test_pcfg_junk_repair_load_error_fails_closed();
     test_pcfg_junk_rev_repair_deferred_without_cfg();
     test_pcfg_truncated_rev_blob_not_known_lengths();
     test_pcfg_junk_rev_blob_is_repaired_once();
