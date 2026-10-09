@@ -611,7 +611,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         bool saved = profiles_http_save(PROFILES_MAX_COUNT /* first free */, working, &id, &warn_count, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
-            return LIVE_DECIDE_BAD_REQUEST;
+            return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
         }
         char clear_err[64];
         live_profile_clear(clear_err, sizeof(clear_err));
@@ -647,7 +647,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         bool saved = profiles_http_save(rec.origin_id, working, &id, &warn_count, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
-            return LIVE_DECIDE_BAD_REQUEST;
+            return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
         }
         char clear_err[64];
         live_profile_clear(clear_err, sizeof(clear_err));
@@ -681,6 +681,7 @@ static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_resu
 {
     switch (r) {
     case LIVE_DECIDE_NOTHING_PENDING:
+    case LIVE_DECIDE_BUSY:
         return send_conflict(req, err);
     case LIVE_DECIDE_FORBIDDEN:
         return send_forbidden(req, err);

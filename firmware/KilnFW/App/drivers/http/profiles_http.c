@@ -2,6 +2,7 @@
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
 #include <math.h>
+#include <stdatomic.h> /* _Atomic bool s_convert_busy (MSVC /experimental:c11atomics, as backup_import.c) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -737,9 +738,9 @@ void profiles_save_lock(void)
     (void)xSemaphoreTake(SAVE_MUTEX_LOAD(), portMAX_DELAY);
 }
 
-static volatile bool s_convert_busy = false;
-void profiles_http_set_convert_busy(bool busy) { s_convert_busy = busy; }
-bool profiles_http_convert_busy(void) { return s_convert_busy; }
+static _Atomic bool s_convert_busy = false; /* lock-free, like backup_import.c's s_config_change_in_flight */
+void profiles_http_set_convert_busy(bool busy) { atomic_store(&s_convert_busy, busy); }
+bool profiles_http_convert_busy(void) { return atomic_load(&s_convert_busy); }
 
 void profiles_save_unlock(void)
 {
