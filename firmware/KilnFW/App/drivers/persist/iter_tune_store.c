@@ -10,6 +10,7 @@
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
 #include "pref_cfg_fs.h"
+#include "persist_scratch.h"
 
 static const char *TAG = "iter_tune_store";
 
@@ -126,7 +127,7 @@ static void note_oversized_nvs_blob(void) {
     size_t real_len = 0;
     if (hal_kv_get_blob(&h, ITER_TUNE_NVS_KEY_BLOB, NULL, &real_len) == HAL_OK && real_len >= 1 &&
         real_len <= ITER_TUNE_NVS_PROBE_MAX) {
-        uint8_t *buf = (uint8_t *)malloc(real_len);
+        uint8_t *buf = (uint8_t *)persist_scratch_alloc(real_len);
         if (buf != NULL) {
             size_t got = real_len;
             if (hal_kv_get_blob(&h, ITER_TUNE_NVS_KEY_BLOB, buf, &got) == HAL_OK && got >= 1) {
