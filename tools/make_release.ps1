@@ -51,7 +51,8 @@ param(
     [string]$NotesFile,
     [string]$GatesFile,
     [switch]$AllowOpenGates,
-    [switch]$LoadFunctionsOnly
+    [switch]$LoadFunctionsOnly,
+    [int]$DramCeilingBytes = 0   # test override for the .dram0.bss gate (0 = checker default)
 )
 
 $ErrorActionPreference = "Stop"
@@ -168,6 +169,15 @@ function Invoke-ReleasePublish {
     Write-Host "published $Tag : https://github.com/$Repo/releases/tag/$Tag"
 }
 
+function Test-DramBssBudget([string]$Python, [string]$Elf, [int]$Ceiling = 0) {
+    # Reuses the standing checker (no second parser). Exit 0 = pass; 1 = over; 3 = unmeasured SKIP -- both refuse.
+    $checker = Join-Path $repoRoot "firmware\KilnFW\App\test\check_kilnfw_dram_bss_budget.py"
+    $a = @($checker, "--elf", $Elf)
+    if ($Ceiling -gt 0) { $a += @("--ceiling-bytes", "$Ceiling") }
+    & $Python @a
+    if ($LASTEXITCODE -ne 0) { Fail ".dram0.bss budget check failed or could not measure (exit $LASTEXITCODE) on $Elf; a release needs a measured pass." }
+}
+
 if ($LoadFunctionsOnly) { return }
 
 # ---------------------------------------------------------------- gates
@@ -254,6 +264,7 @@ foreach ($p in @($appBin, $elf, $RecoveryBin)) {
 }
 $appSize = (Get-Item -LiteralPath $appBin).Length
 if ($appSize -gt $MaxAppSize) { Fail "KilnCtrl.bin is $appSize bytes, over the $MaxAppSize (0x400000) gate (planned post-split app size, GITHUB_RELEASE_UPDATE_PLAN.md WP2)." }
+Test-DramBssBudget $python $elf $DramCeilingBytes
 
 $outDir = Join-Path $repoRoot "logs\release\$Tag"
 if (Test-Path -LiteralPath $outDir) { Fail "$outDir already exists; remove it (or pick a new tag) so no stale asset is published." }
