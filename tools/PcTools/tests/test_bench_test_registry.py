@@ -241,8 +241,6 @@ _KNOWN_UNIMPLEMENTED = frozenset({
     "LCD-20",
     "OT-B02",
     "OT-E11",
-    "SP-10",
-    "SP-11",
     "ST-01",
     "ST-02",
     "ST-03",
