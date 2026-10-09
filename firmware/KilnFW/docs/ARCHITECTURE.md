@@ -16,7 +16,7 @@ isolation from priority and queues, not core affinity.
 
 This file was written after `TODO.md` section 10.14's owner-task pass
 (Phases 1, 2, 4 done; Phase 3 skipped with a documented reason; Phase 5
-partially absorbed into Phases 1/2; Phase 6 designed, not built) gave
+partially absorbed into Phases 1/2; Phase 6 built: `system_mode_gate_check()` in `App/drivers/safety/system_mode_gate.c`) gave
 `KilnFW` a genuinely nontrivial task architecture. Everything below is
 verified against the code that creates these tasks, cited by file and line.
 
@@ -44,7 +44,7 @@ urgent.
 | `thermo_owner` | 5 | 4096 | **Single writer/caller** of the MAX31856 thermocouple SPI API (config, thresholds, one-shot/read, faults) | `App/drivers/owners/thermo_owner.c:245` |
 | `profile_executor` | 5 | 4096 | The fire-profile control task: PID/bang-bang per zone, ramp/dwell stepping, relay drive via `kiln_io_owner`'s AUTHORIZED path | `App/drivers/control/profile_executor_start.c:85` (moved out of `profile_executor.c`, which split into several `profile_executor_*.c` files) |
 | `profile_exec_wdt` | 5 | **4096** (STALE — was 2560, corrected 2026-09-04) | Guard 9 — profile-executor's own watchdog; forces relays off if the control task's tick goes stale or the safety link is silent ≥30 s. Deliberately independent of the task it watches | `App/drivers/control/profile_executor_start.c:129` |
-| `autotune_engine` | 5 | 4096 | PID autotune step-test task (relay-feedback autotune not yet built) | `App/drivers/control/autotune_engine.c:813` |
+| `autotune_engine` | 5 | 4096 | PID autotune step-test task (step test and relay-feedback methods both built, see `autotune_engine.c` init log) | `App/drivers/control/autotune_engine.c:813` |
 | `wifi_prov_owner` | 5 | 4096 | **Single writer** of `s_wifi` — all `esp_wifi_*`/NVS Wi-Fi calls, including the driver's own `on_wifi_event`/`on_ip_event` handlers, routed through the same queue as external callers | `App/drivers/net/wifi_prov.c:399` |
 | `thermo_uart_bridge` | 5 | 4096 | UART bridge subsystem task, THERMO command family — dispatches into `thermo_owner` | `App/drivers/bridge/uart_bridge_thermo.c:475` (split out of `uart_bridge.c`) |
 | `io_uart_bridge` | 5 | 4096 | UART bridge subsystem task, IO command family — dispatches into `kiln_io_owner` | `App/drivers/bridge/uart_bridge_io.c:652` (split out of `uart_bridge.c`) |
@@ -230,11 +230,11 @@ choke point for Phase 6 (§3) — not a bug fix.
 
 ---
 
-## 3. What's still planned, not built
+## 3. Planned work and status
 
 ### Phase 6 — system-mode command gate
 
-Not started; design sketch only, recorded in `TODO.md` §10.14 and the
+**BUILT** (slices 1-7 of `docs/SYSTEM_MODE_GATE_PLAN.md` landed): `system_mode_gate_check()` in `App/drivers/safety/system_mode_gate.c`, HTTP wiring in `App/drivers/http/system_mode_gate_http.c`, call-site lint `tools/check_system_mode_gate_call_sites.ps1`. The text below is the original design sketch (policy layer name was TBD; it shipped as `system_mode_gate`), recorded in `TODO.md` §10.14 and the
 approved plan. Distinct question from single-writer ownership: not "can two
 writers race on this state" (which the owner tasks already answer) but "is
 this *class* of command allowed at all, given what the system is doing
@@ -257,7 +257,7 @@ built:
 Open design questions per the plan: where in the call chain it's checked
 (once, at the HTTP/LCD/UART producer boundary, so the policy lives in one
 place), and how "reads still allowed" is drawn precisely for SX1509 raw
-commands. Deliberately not built ahead of a real caller needing it.
+commands. (Historical: "deliberately not built ahead of a real caller" no longer applies; see above.)
 
 ### `ui_page_network.c`'s three ad-hoc job structs
 

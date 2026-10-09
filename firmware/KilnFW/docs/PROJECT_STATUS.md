@@ -263,8 +263,9 @@ own remaining-work list.
   the ESP-IDF build itself. Nothing runs the test suite on the ESP32-S3
   itself; a guard passing in the sim is shown *logically* right, not that it
   fires against real silicon.
-- **Phase 6 (system-mode command gate) is design-only, not built.** See
-  `ARCHITECTURE.md` §3 for the sketch and open questions.
+- **Phase 6 (system-mode command gate) is built** (`system_mode_gate_check()`,
+  `App/drivers/safety/system_mode_gate.c`; slices 1-7 landed per
+  `docs/SYSTEM_MODE_GATE_PLAN.md` §3.6). `ARCHITECTURE.md` §3 keeps the design sketch.
 - **`ui_page_network.c`'s three ad-hoc Wi-Fi worker tasks are not migrated**
   onto `wifi_prov_owner`'s queue — see `ARCHITECTURE.md` §3.
 
