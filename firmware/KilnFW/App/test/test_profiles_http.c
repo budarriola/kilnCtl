@@ -1361,6 +1361,35 @@ static void test_pcfg_junk_rev_blob_is_repaired_once(void)
     TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete works (also exercises firing_stats_erase after the change)");
 }
 
+static void test_pcfg_junk_rev_repair_raises_fileless_to_max(void)
+{
+    TEST_SECTION("junk rev blob, cfg mounted, files at revs 5 and 9: file-less slots raised to max (9), file slots keep own rev");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5 (slot 0)");
+    TEST_CHECK(profiles_cfg_fs_save(1, &p0, 9) == ESP_OK, "file at rev 9 (slot 1)");
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    pcfg_set_rev_blob(junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    TEST_CHECK(s_profile_rev[0] == 5, "slot 0 (file) keeps its own rev 5");
+    TEST_CHECK(s_profile_rev[1] == 9, "slot 1 (file) keeps its own rev 9");
+    TEST_CHECK(s_profile_rev[3] == 9, "file-less slot 3 raised to max observed rev 9");
+    TEST_CHECK(s_profile_rev[4] == 9, "file-less slot 4 raised to max observed rev 9");
+    TEST_CHECK(!s_profile_rev_unknown[3] && !s_profile_rev_unknown[4], "repair verified");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(back) && back[0] == 5 && back[1] == 9 && back[3] == 9, "persisted floors match");
+}
+
 static void test_pcfg_junk_rev_repair_deferred_without_cfg(void)
 {
     TEST_SECTION("junk rev blob with cfg NOT mounted: repair deferred, stays fail-closed, prof_rev untouched");
@@ -4189,6 +4218,7 @@ void run_test_profiles_http(void)
     test_pcfg_legacy_32_byte_rev_array_is_known();
     test_pcfg_non_multiple_of_4_rev_blob_stays_unknown();
     test_pcfg_longer_rev_array_is_known_tail_ignored();
+    test_pcfg_junk_rev_repair_raises_fileless_to_max();
     test_pcfg_junk_rev_repair_deferred_without_cfg();
     test_pcfg_truncated_rev_blob_not_known_lengths();
     test_pcfg_junk_rev_blob_is_repaired_once();
