@@ -1,4 +1,4 @@
-﻿# Release-gate vacuity audit, hwAbstraction and KilnFW build-artifact checks, 2026-10-08
+# Release-gate vacuity audit, hwAbstraction and KilnFW build-artifact checks, 2026-10-08
 
 Follow-up to the rows the previous pass left NOT AUDITED. Worktree
 `C:\wt\vacgrpA_3bnpv6`. No board access, no `.kicad_*` file touched.

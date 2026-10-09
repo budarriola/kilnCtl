@@ -988,9 +988,9 @@ function Exit-WithBaseline {
     $cur = @()
     foreach ($p in $passed) { $cur += [pscustomobject]@{ Path = $p; Status = "PASS" } }
     foreach ($s in $skippedFast) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP-FAST" } }
-    foreach ($s in $skipped) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP" } }
+    foreach ($s in $skipped) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP"; Signature = (Get-MainFailureSignature -Reason ([string]$s.Reason)) } }
     foreach ($b in $busy) { $cur += [pscustomobject]@{ Path = $b.Path; Status = "BUSY" } }
-    foreach ($f in $failed) { $cur += [pscustomobject]@{ Path = $f.Path; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output ([string]$f.Output)) } }
+    foreach ($f in $failed) { $cur += [pscustomobject]@{ Path = $f.Path; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output ([string]$f.Output) -ExitCode $f.Code) } }
     # Only the failures that actually failed the run count against -FailOnlyOnNew.
     $cur2 = @($cur | Where-Object {
         ($_.Status -ne "SKIP" -or -not $AllowSkips) -and ($_.Status -ne "BUSY" -or -not $AllowBusy) })

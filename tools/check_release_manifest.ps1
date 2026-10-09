@@ -118,7 +118,8 @@ srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 print(srv.server_address[1], flush=True)
 srv.serve_forever()
 '@ | Set-Content -LiteralPath $srvPy -Encoding ascii
-$srv = Start-Process -FilePath $python -ArgumentList @($srvPy) -RedirectStandardOutput $srvOut -PassThru -WindowStyle Hidden
+$srvErr = $srvOut + '.err'
+$srv = Start-Process -FilePath $python -ArgumentList @($srvPy) -RedirectStandardOutput $srvOut -RedirectStandardError $srvErr -PassThru -WindowStyle Hidden
 try {
     $port = $null
     # Deadline-based, not an iteration count: under heavy parallel load python startup alone
@@ -129,7 +130,11 @@ try {
         if (Test-Path $srvOut) { $line = (Get-Content -LiteralPath $srvOut -ErrorAction SilentlyContinue | Select-Object -First 1); if ($line -match '^\d+$') { $port = $line } }
         if (-not $port -and $srv.HasExited) { break }
     }
-    if (-not $port) { Note-Fail "local redirect server did not start" }
+    if (-not $port) {
+        $why = if ($srv.HasExited) { "server exited (code $($srv.ExitCode))" } else { "timed out after 120 s waiting for its port" }
+        $se = if (Test-Path $srvErr) { (Get-Content -LiteralPath $srvErr -Raw -ErrorAction SilentlyContinue) } else { "" }
+        Note-Fail "local redirect server did not start: $why; stderr: $se"
+    }
     else {
         $dl = Join-Path ([System.IO.Path]::GetTempPath()) ("reldl_" + [guid]::NewGuid().ToString("N"))
         try {

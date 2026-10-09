@@ -76,12 +76,34 @@ try {
         [pscustomobject]@{ check = "tools\check_s.ps1"; status = "FAIL"; sig = $sigA },
         [pscustomobject]@{ check = "tools\check_o.ps1"; status = "FAIL" }) }
     $scur = @([pscustomobject]@{ Path = "tools\check_s.ps1"; Status = "FAIL"; Signature = $sigC },
-              [pscustomobject]@{ Path = "tools\check_o.ps1"; Status = "FAIL"; Signature = $sigC })
+              [pscustomobject]@{ Path = "tools\check_o.ps1"; Status = "FAIL"; Signature = "" })
     $cs = Compare-MainBaseline -Current $scur -Baseline $sbase -Exact
     Assert ((Same $cs.Changed @("tools\check_s.ps1")) -and ($cs.New -contains "tools\check_s.ps1")) "same check failing differently is CHANGED and counts as NEW"
-    Assert ((Same $cs.Known @("tools\check_o.ps1")) -and $cs.Warnings.Count -ge 1) "baseline row without a signature matches, with a warning"
+    Assert ((Same $cs.Known @("tools\check_o.ps1")) -and $cs.Warnings.Count -ge 1) "both sides unsigned matches on status only, with a warning"
     $scur2 = @([pscustomobject]@{ Path = "tools\check_s.ps1"; Status = "FAIL"; Signature = $sigB })
     Assert ((Same (Compare-MainBaseline -Current $scur2 -Baseline $sbase -Exact).Known @("tools\check_s.ps1"))) "same signature stays KNOWN"
+
+    Write-Host "case: one-sided signature, exit code and SKIP reason are CHANGED (review finding 1)"
+    # exit code is part of the signature: TIMEOUT vs exit 1 with identical (or no) FAIL lines
+    $sigT = Get-MainFailureSignature -Output "TIMEOUT: exceeded 600s per-check wall-clock cap" -ExitCode "timeout"
+    $sigT2 = Get-MainFailureSignature -Output "partial output, no keyword line" -ExitCode "timeout"
+    $sig1 = Get-MainFailureSignature -Output "partial output, no keyword line" -ExitCode 1
+    Assert ($sigT2 -and $sigT2 -cne $sig1) "same output, TIMEOUT vs exit 1 -> different signature"
+    Assert ((Get-MainFailureSignature -Output "TIMEOUT: x") -cne "") "TIMEOUT is a signature keyword"
+    $obase = [pscustomobject]@{ host = "H"; results = @(
+        [pscustomobject]@{ check = "tools\check_p.ps1"; status = "FAIL"; sig = $sig1 },
+        [pscustomobject]@{ check = "tools\check_q.ps1"; status = "FAIL" },
+        [pscustomobject]@{ check = "tools\check_r.ps1"; status = "FAIL"; sig = $sig1 },
+        [pscustomobject]@{ check = "tools\check_k.ps1"; status = "SKIP"; sig = (Get-MainFailureSignature -Reason "SKIP: no arm-none-eabi-gcc") },
+        [pscustomobject]@{ check = "tools\check_k2.ps1"; status = "SKIP"; sig = (Get-MainFailureSignature -Reason "SKIP: no arm-none-eabi-gcc") }) }
+    $ocur = @([pscustomobject]@{ Path = "tools\check_p.ps1"; Status = "FAIL"; Signature = $sigT2 },   # exit 1 -> TIMEOUT, no FAIL line
+              [pscustomobject]@{ Path = "tools\check_q.ps1"; Status = "FAIL"; Signature = $sig1 },    # baseline row has no signature
+              [pscustomobject]@{ Path = "tools\check_r.ps1"; Status = "FAIL"; Signature = "" },       # current has none, baseline does
+              [pscustomobject]@{ Path = "tools\check_k.ps1"; Status = "SKIP"; Signature = (Get-MainFailureSignature -Reason "SKIP: no cmake") },
+              [pscustomobject]@{ Path = "tools\check_k2.ps1"; Status = "SKIP"; Signature = (Get-MainFailureSignature -Reason "SKIP: no arm-none-eabi-gcc") })
+    $co = Compare-MainBaseline -Current $ocur -Baseline $obase -Exact -HostName "H"
+    Assert (Same $co.Changed @("tools\check_k.ps1", "tools\check_p.ps1", "tools\check_q.ps1", "tools\check_r.ps1")) "TIMEOUT-vs-exit1, one-sided signatures and a new SKIP reason are CHANGED"
+    Assert ((Same $co.Known @("tools\check_k2.ps1")) -and ($co.New.Count -eq 4)) "a SKIP for the same reason stays KNOWN"
 
     Write-Host "case: SKIP recorded on another host (finding 5)"
     $hb = [pscustomobject]@{ host = "OTHERHOST"; results = @([pscustomobject]@{ check = "tools\check_t.ps1"; status = "SKIP" }) }
@@ -260,7 +282,7 @@ try {
     git clone $origin $lc *>$null
     Commit-File $lc "mine.txt" "x" "mine"
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $mainSha -Tree (Tree $lc "origin/main") `
-        -Results @((Row "tools\check_known.ps1" "FAIL"), (Row "tools\check_ok.ps1" "PASS")))
+        -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output "x" -ExitCode 1) }, (Row "tools\check_ok.ps1" "PASS")))
     $log = Join-Path $tmp "run.log"
     function Run-Land([string[]]$more) {
         Push-Location $lc
@@ -280,7 +302,7 @@ try {
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 1 -and ($r.Json.new_fails -contains 'tools\check_new.ps1')) "a NEW failure still refuses and is listed in new_fails"
     # CHANGED signature (finding 2): same check fails on main but for a different reason.
-    $sigMain = Get-MainFailureSignature -Output "FAIL: original reason"
+    $sigMain = Get-MainFailureSignature -Output "FAIL: original reason" -ExitCode 1
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $mainSha -Tree (Tree $lc "origin/main") `
         -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = $sigMain }))
     @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "", "--- tools\check_known.ps1 (exit 1) ---", "FAIL: original reason", "",
@@ -306,6 +328,34 @@ try {
     @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 1) "a baseline from another lineage excuses nothing"
+
+    # Review finding 2: land must fetch BEFORE the gate, and re-run the known-failing check
+    # after the rebase. Scenario: HEAD is based on M1 (origin advanced) but the local
+    # refs/remotes/origin/main is stale at M0; the exact baseline is at M1.
+    Write-Host "case: land fetches before the -AllowKnownFailures gate; known-failing checks re-run after the rebase"
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
+    $m0 = Rev $lc "origin/main"
+    Commit-File $seed "m1.txt" "m1" "m1"
+    git -C $seed push origin HEAD:main *>$null
+    $m1 = Rev $seed HEAD
+    git -C $lc fetch origin *>$null
+    git -C $lc rebase origin/main *>$null
+    git -C $lc update-ref refs/remotes/origin/main $m0
+    Assert ((Rev $lc "origin/main") -ceq $m0) "scenario: local origin/main is stale"
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $m1 -Tree (Tree $lc $m1) `
+        -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output "FAIL: r" -ExitCode 1) }))
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "", "--- tools\check_known.ps1 (exit 1) ---", "FAIL: r", "",
+      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    $r = Run-Land @("-AllowKnownFailures")
+    Assert ($r.Code -eq 0 -and ($r.Json.known_fails -contains 'tools\check_known.ps1')) "known failure matched against the FETCHED origin/main (stale ref refreshed first)"
+    $argsFile = Join-Path $tmp "stub_args.txt"
+    $stub = Join-Path $tmp "stub_checks.ps1"
+    Set-Content -LiteralPath $stub -Encoding ascii -Value @("param([string]`$Only,[switch]`$AllowFewerChecks,[switch]`$FailOnlyOnNew)", "Add-Content -LiteralPath '$argsFile' -Value ('ONLY=' + `$Only + ' FOON=' + `$FailOnlyOnNew)", "exit 0")
+    Push-Location $lc
+    try { $lo = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone -CheckLog $log -AllowKnownFailures -ChecksScript $stub 2>&1 | Out-String; $lcode = $LASTEXITCODE } finally { Pop-Location }
+    $sa = if (Test-Path $argsFile) { Get-Content -Raw $argsFile } else { "" }
+    Assert ($lcode -eq 0) "land with a known failure lands (exit $lcode)"
+    Assert ($sa -match 'check_known' -and $sa -match 'FOON=True') "post-rebase run re-runs the known-failing check under -FailOnlyOnNew (stub saw: $($sa.Trim()))"
 } finally {
     $env:KILNCTL_MAINBASELINE_DIR = $savedDir
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

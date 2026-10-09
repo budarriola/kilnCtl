@@ -117,6 +117,7 @@ function Get-BuildLockProgressToken {
             if ($m.Maximum) { $parts += "m:$($m.Maximum.Ticks):$($m.Count)" }
         }
     }
+    if ($null -eq $Holder -or $null -eq $Holder.pid) { return ($parts -join "|") }
     try {
         $ids = @([int]$Holder.pid)
         $all = @(Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId, ParentProcessId)
@@ -146,7 +147,10 @@ function Enter-BuildLock {
         [int]$StallSeconds = 3600,
         [int]$MaxWaitSeconds = 21600,
         [int]$PollSeconds = 5,
-        [string[]]$ProgressPath = @()
+        [string[]]$ProgressPath = @(),
+        # The progress token walks the ProgressPath tree and queries CIM for the holder's
+        # process tree; that is too heavy to do on every 5 s poll of every waiter.
+        [int]$ProgressCheckSeconds = 30
     )
 
     $mutexName = Get-BuildLockMutexName -Name $Name
@@ -158,6 +162,7 @@ function Enter-BuildLock {
     $announced = $false
     $lastToken = $null
     $lastProgress = [System.Diagnostics.Stopwatch]::StartNew()
+    $sinceCheck = $null
     while ($true) {
         $acquired = $false
         $wait = 0
@@ -174,6 +179,8 @@ function Enter-BuildLock {
                 Write-Host "build lock '$Name': stale record (pid $($old.pid) is dead); taking over" -ForegroundColor Yellow
             }
             Write-BuildLockHolder -Name $Name -Note $note
+            if (-not $script:BuildLockDepth) { $script:BuildLockDepth = @{} }
+            $script:BuildLockDepth[$Name] = 1 + [int]$script:BuildLockDepth[$Name]
             if ($announced) { Write-Host "acquired build lock '$Name'" -ForegroundColor Yellow }
             return [PSCustomObject]@{ Mutex = $mutex; Name = $Name }
         }
@@ -182,8 +189,18 @@ function Enter-BuildLock {
             Write-Host "waiting for build lock '$Name': $(Format-BuildLockHolder -Holder $holder -Name $Name)" -ForegroundColor Yellow
             $announced = $true
         }
-        if ($holder -and (Test-BuildLockHolderAlive -Holder $holder)) {
-            $tok = Get-BuildLockProgressToken -Holder $holder -ProgressPath $ProgressPath
+        # Stall detection needs something to observe: a live holder record (CPU of its process
+        # tree, plus any ProgressPath) or at least a ProgressPath. With NO usable record (an
+        # older build_lock.ps1 sharing this mutex, or the holder's record write failed) and no
+        # ProgressPath there is nothing to judge "no progress" by, so only MaxWaitSeconds ends the
+        # wait: the mutex is still held, which is evidence enough that someone is working.
+        $holderAlive = ($holder -and (Test-BuildLockHolderAlive -Holder $holder))
+        $canJudge = ($holderAlive -or (@($ProgressPath | Where-Object { $_ }).Count -gt 0))
+        if (-not $canJudge) {
+            $lastProgress.Restart()
+        } elseif ($null -eq $sinceCheck -or $sinceCheck.Elapsed.TotalSeconds -ge $ProgressCheckSeconds) {
+            $sinceCheck = [System.Diagnostics.Stopwatch]::StartNew()
+            $tok = Get-BuildLockProgressToken -Holder $(if ($holderAlive) { $holder } else { $null }) -ProgressPath $ProgressPath
             if ($tok -ne $lastToken) { $lastToken = $tok; $lastProgress.Restart() }
         }
         if ($lastProgress.Elapsed.TotalSeconds -ge $StallSeconds -or $sw.Elapsed.TotalSeconds -ge $MaxWaitSeconds) {
@@ -199,12 +216,18 @@ function Exit-BuildLock {
     param(
         [Parameter(Mandatory = $true)]$Lock
     )
-    try {
-        $rec = Read-BuildLockHolder -Name $Lock.Name
-        if ($rec -and $rec.pid -eq $PID) {
-            [System.IO.File]::Delete((Get-BuildLockRecordPath -Name $Lock.Name))
-        }
-    } catch {}
+    # Nested Enter in one process: the mutex is recursive, so the inner Exit must not delete the
+    # record while the outer still holds the lock. Only the outermost Exit removes it.
+    $depth = 0
+    if ($script:BuildLockDepth) { $depth = [int]$script:BuildLockDepth[$Lock.Name] - 1; $script:BuildLockDepth[$Lock.Name] = [Math]::Max(0, $depth) }
+    if ($depth -le 0) {
+        try {
+            $rec = Read-BuildLockHolder -Name $Lock.Name
+            if ($rec -and $rec.pid -eq $PID) {
+                [System.IO.File]::Delete((Get-BuildLockRecordPath -Name $Lock.Name))
+            }
+        } catch {}
+    }
     try {
         $Lock.Mutex.ReleaseMutex()
     } catch {

@@ -28,7 +28,8 @@
 # failed at B0, was fixed at B1 and re-broke on a branch from B1 must not read as KNOWN).
 # A failing check also stores a SIGNATURE (hash of its normalised FAIL/assert/error lines);
 # a KNOWN failure whose signature differs from main's is CHANGED and counts as NEW. A
-# baseline row without a signature (older format) matches, with a warning. A SKIP recorded
+# baseline row without a signature (older format) is CHANGED when the current failure has
+# one (a signature on only one side is never KNOWN); both sides unsigned matches, with a warning. A SKIP recorded
 # on another host is not KNOWN here (the missing toolchain may be this host's only).
 # RECORDING also requires HEAD and `git status --porcelain` identical at run START and END.
 
@@ -64,7 +65,7 @@ function Write-MainBaseline {
     $rows = @($Results | Sort-Object Path | ForEach-Object {
         $row = [ordered]@{ check = ([string]$_.Path -replace '/', '\'); status = [string]$_.Status }
         $sig = if ($_.PSObject.Properties['Signature']) { [string]$_.Signature } else { "" }
-        if ($_.Status -ceq 'FAIL' -and $sig) { $row['sig'] = $sig }
+        if (($_.Status -ceq 'FAIL' -or $_.Status -ceq 'SKIP') -and $sig) { $row['sig'] = $sig }
         $row })
     $file = "$Tree-$Mode.json"
     $obj = [ordered]@{
@@ -100,11 +101,10 @@ function Write-MainBaseline {
 # check's output (timestamps, paths, temp names, hex ids and numbers stripped). "" when
 # the output has no such line.
 function Get-MainFailureSignature {
-    param([string]$Output)
-    if ([string]::IsNullOrWhiteSpace($Output)) { return "" }
+    param([string]$Output, $ExitCode = $null, [string]$Reason = "")
     $lines = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($l in ($Output -split "`r?`n")) {
-        if ($l -notmatch '(?i)\b(FAIL|FAILED|FAILURE|ASSERT\w*|ERROR|exception)\b') { continue }
+    $norm = {
+        param([string]$l)
         $n = $l.Trim()
         $n = [regex]::Replace($n, '\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?Z?', '<ts>')
         $n = [regex]::Replace($n, '\d{1,2}:\d{2}:\d{2}(\.\d+)?', '<t>')
@@ -113,7 +113,15 @@ function Get-MainFailureSignature {
         $n = [regex]::Replace($n, '[A-Za-z0-9_]*(?:test|tmp|scratch|checkbuild)_[0-9a-f]{6,}', '<tmp>')
         $n = [regex]::Replace($n, '\b[0-9a-fA-F]{7,}\b', '<hex>')
         $n = [regex]::Replace($n, '\d+', '#')
-        [void]$lines.Add($n)
+        return $n
+    }
+    # The exit code is part of the signature (TIMEOUT vs 1 differ even with no FAIL line).
+    if ($null -ne $ExitCode -and [string]$ExitCode -ne "") { [void]$lines.Add("exit=" + [string]$ExitCode) }
+    # A SKIP's signature is its reason line, so a SKIP for a new reason is CHANGED.
+    if (-not [string]::IsNullOrWhiteSpace($Reason)) { [void]$lines.Add("reason=" + (& $norm $Reason)) }
+    foreach ($l in ($Output -split "`r?`n")) {
+        if ($l -notmatch '(?i)\b(FAIL|FAILED|FAILURE|ASSERT\w*|ERROR|exception|TIMEOUT)\b') { continue }
+        [void]$lines.Add((& $norm $l))
     }
     if ($lines.Count -eq 0) { return "" }
     $text = (@($lines) | Sort-Object { $_ } -CaseSensitive) -join "`n"
@@ -241,7 +249,9 @@ function Compare-MainBaseline {
             if ($was -ceq $c.Status -and $was -cne 'BUSY') {
                 $p = [string]$c.Path
                 $csig = if ($c.PSObject.Properties['Signature']) { [string]$c.Signature } else { "" }
-                if ($c.Status -ceq 'FAIL' -and $bsig[$key] -and $csig -and $bsig[$key] -cne $csig) {
+                $sigged = ($c.Status -ceq 'FAIL' -or $c.Status -ceq 'SKIP')
+                # A signature on one side and not the other, or two different ones, is CHANGED.
+                if ($sigged -and ([bool]$bsig[$key] -or [bool]$csig) -and $bsig[$key] -cne $csig) {
                     $changed += $p; $new += $p
                 } elseif ($c.Status -ceq 'SKIP' -and $bhost -and $HostName -and $bhost -cne $HostName) {
                     $warn += "SKIP of $p was recorded on host $bhost, this is $HostName; not KNOWN"
@@ -249,7 +259,7 @@ function Compare-MainBaseline {
                 } elseif (-not $Exact) {
                     $down += $p; $new += $p
                 } else {
-                    if ($c.Status -ceq 'FAIL' -and -not ($bsig[$key] -and $csig)) { $warn += "no failure signature for $p (older baseline or no FAIL line); matched on status only" }
+                    if ($sigged -and -not ($bsig[$key] -and $csig)) { $warn += "no failure signature for $p (neither side has one); matched on status only" }
                     $known += $p
                 }
             } else { $new += [string]$c.Path }

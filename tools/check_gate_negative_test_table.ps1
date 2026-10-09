@@ -41,6 +41,26 @@ foreach ($k in $rows.Keys) {
     if ($discovered -notcontains $k -and -not (Test-Path (Join-Path $repoRoot $k))) { $bad += "row names a check that no longer exists: $k" }
     if ($valid -notcontains $rows[$k]) { $bad += "row has unknown status '$($rows[$k])': $k" }
 }
+# The header's "Gate rows: N." and its per-status "## Counts" table must equal what the rows say.
+$tableText = (Get-Content $table -Raw)
+$tm = [regex]::Match($tableText, '(?m)^Gate rows:\s*(\d+)\.')
+if (-not $tm.Success) { $bad += "header has no 'Gate rows: N.' line" }
+elseif ([int]$tm.Groups[1].Value -ne $rows.Count) { $bad += "header says 'Gate rows: $($tm.Groups[1].Value)' but the table has $($rows.Count) rows" }
+$cm = [regex]::Match($tableText, '(?ms)^## Counts\s*$(.*?)^## ')
+if (-not $cm.Success) { $bad += "no '## Counts' section" }
+else {
+    $declared = @{}
+    foreach ($l in ($cm.Groups[1].Value -split "`r?`n")) {
+        if ($l -match '^\|\s*([^|]+?)\s*\|\s*(\d+)\s*\|\s*$') { $declared[$Matches[1]] = [int]$Matches[2] }
+    }
+    $actual = @{}
+    foreach ($k in $rows.Keys) { $actual[$rows[$k]] = 1 + [int]$actual[$rows[$k]] }
+    foreach ($st in (@($declared.Keys) + @($actual.Keys) | Sort-Object -Unique)) {
+        if ($st -eq 'Status') { continue }
+        $d = [int]$declared[$st]; $a2 = [int]$actual[$st]
+        if ($d -ne $a2) { $bad += "Counts table says $d for '$st' but the rows have $a2" }
+    }
+}
 if ($bad.Count -gt 0) {
     Write-Host "FAIL: GATE_NEGATIVE_TEST_EVIDENCE.md out of sync with discovered checks:" -ForegroundColor Red
     $bad | Sort-Object | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }

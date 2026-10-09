@@ -149,6 +149,11 @@ if (-not $isLinked -and -not $AllowStandaloneClone) {
 }
 $mainRoot = if ($isLinked) { Split-Path -Parent $commonDir } else { $top }
 
+# Fetch BEFORE anything reads origin/main: the -AllowKnownFailures gate below computes a
+# merge-base and selects a baseline against it, and must see the current origin/main.
+git fetch origin *>$null
+if ($LASTEXITCODE -ne 0) { Finish 1 "git fetch origin failed" }
+
 Step "preflight"
 Git-Clean-Or-Die "tracked modifications present"
 $ahead = git rev-list --count origin/main..HEAD 2>$null
@@ -209,7 +214,9 @@ if ($WaitPid -gt 0 -or $CheckLog) {
             $outs = Get-LogFailureOutputs -Text $text
             $cur = @($blocked | Where-Object { $failNames -contains $_ } | ForEach-Object {
                 $o = if ($outs.ContainsKey($_)) { [string]$outs[$_] } else { "" }
-                [pscustomobject]@{ Path = $_; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output $o) } })
+                $ec = [regex]::Match($text, '(?m)^\s*FAIL\s+' + [regex]::Escape($_) + '\s+\(exit ([^)]*)\)')
+                $code = if ($ec.Success) { $ec.Groups[1].Value } else { $null }
+                [pscustomobject]@{ Path = $_; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output $o -ExitCode $code) } })
             $cmp = Compare-MainBaseline -Current $cur -Baseline $sel.Baseline -Exact:$sel.Exact
             foreach ($w in $cmp.Warnings) { Write-Host "WARNING: $w" -ForegroundColor Yellow }
             $script:knownFails = @($cmp.Known)
@@ -262,7 +269,17 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     if ($PostRebaseChecks) { $re += "|($PostRebaseChecks)" }
     Step "post-rebase checks (NARROW re-confirmation only, not the full suite): -Only '$re'"
     if (-not (Test-Path -LiteralPath $ChecksScript)) { Finish 1 "checks script not found: $ChecksScript" }
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $ChecksScript -Only $re -AllowFewerChecks
+    # A check excused as KNOWN against the PRE-rebase merge-base is re-run on the rebased tree
+    # and re-judged against the baseline at the NEW merge-base (-FailOnlyOnNew exits 0 only
+    # when every failure is KNOWN there with an unchanged signature).
+    $extra = @()
+    if ($script:knownFails.Count -gt 0) {
+        $kre = ($script:knownFails | ForEach-Object { ([regex]::Escape(($_ -replace '\\', '/')) -replace '/', '[\\/]') }) -join '|'
+        $re += "|($kre)"
+        $extra = @('-FailOnlyOnNew')
+        Step "re-running $($script:knownFails.Count) known-failing check(s) after the rebase"
+    }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $ChecksScript -Only $re -AllowFewerChecks @extra
     if ($LASTEXITCODE -ne 0) { Finish 1 "post-rebase checks failed (exit $LASTEXITCODE); rebased commits remain local, nothing pushed" }
 
     Step "push origin HEAD:main (attempt $try)"
