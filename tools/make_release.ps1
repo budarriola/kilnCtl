@@ -34,6 +34,11 @@
 # generated: git log --oneline <previous semver tag merged into HEAD>..HEAD, or the last 50
 # commits if there is none. The body is also written to logs\release\<tag>.notes.md for review.
 #
+# Bench evidence: after the app binary is located, `release_gates.py bench-evidence --app-bin` requires a
+# full, passing, <= 7 day old run of suites ota, lcd, safety on exactly that build. Treated like an open
+# gate: -Publish of a STABLE tag refuses without it unless -AllowOpenGates; dry runs and pre-release tags
+# print the result as a WARNING. -BenchLogsDir overrides the logs location.
+#
 # -Publish (token from env KILNCTL_GITHUB_TOKEN, never printed): POST a DRAFT release
 # with target_commitish = the commit, upload every asset, re-download each one and
 # compare sha256, and only then PATCH draft=false. Any mismatch leaves the draft in
@@ -51,6 +56,7 @@ param(
     [string]$NotesFile,
     [string]$GatesFile,
     [switch]$AllowOpenGates,
+    [string]$BenchLogsDir,       # bench_test run logs (default <repo>\logs\bench_test; gitignored, so pass the main tree's in a release worktree)
     [switch]$LoadFunctionsOnly,
     [int]$DramCeilingBytes = 0   # test override for the .dram0.bss gate (0 = checker default)
 )

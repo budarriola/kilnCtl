@@ -357,5 +357,26 @@ class BenchEvidence(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("no runs found", out)
 
+    def test_app_bin_and_arg_validation(self):
+        import contextlib, io, tempfile
+        def run(args):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = rg.main(["bench-evidence"] + args)
+            return code, buf.getvalue()
+        self.assertEqual(run([])[0], 2)
+        self.assertEqual(run(["--fw-build", "B", "--app-bin", "x"])[0], 2)
+        with tempfile.TemporaryDirectory() as d:
+            bad = os.path.join(d, "KilnCtrl.bin")
+            with open(bad, "wb") as f:
+                f.write(b"junk")
+            code, out = run(["--app-bin", bad, "--logs-dir", d])
+            self.assertEqual(code, 2)
+            self.assertIn("cannot read build", out)
+
+    def test_build_compare_ignores_date_padding(self):
+        self.assertEqual(rg._norm_build("Sep  3 2026 20:13:41"), rg._norm_build("Sep 3 2026 20:13:41"))
+
+
 if __name__ == "__main__":
     unittest.main()

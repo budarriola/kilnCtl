@@ -230,6 +230,11 @@ def _registry_suites():
     return {k: list(v) for k, v in SUITES.items()}
 
 
+def _norm_build(v):
+    """Whitespace-collapsed build timestamp (__DATE__ pads single-digit days)."""
+    return " ".join(v.split()) if isinstance(v, str) else v
+
+
 def _evaluate_run(doc, fw_build, max_age_s, now, suite_cases):
     """Return (reasons, counts, age_s). reasons is empty for a qualifying run.
 
@@ -269,7 +274,7 @@ def _evaluate_run(doc, fw_build, max_age_s, now, suite_cases):
     if bad:
         reasons.append("not PASS: %s" % ",".join(bad[:5]))
     before = doc.get("board_before") if isinstance(doc.get("board_before"), dict) else {}
-    if before.get("esp_fw_build") != fw_build:
+    if _norm_build(before.get("esp_fw_build")) != _norm_build(fw_build):
         reasons.append("other build (%s)" % before.get("esp_fw_build"))
     ended = doc.get("ended")
     age = now - ended if isinstance(ended, (int, float)) else None
@@ -337,12 +342,27 @@ def main(argv=None):
     n.add_argument("--out")
     n.add_argument("--max", type=int, default=50)
     b = sub.add_parser("bench-evidence")
-    b.add_argument("--fw-build", required=True)
+    b.add_argument("--fw-build")
+    b.add_argument("--app-bin", help="derive --fw-build from this KilnCtrl.bin's esp_app_desc_t")
     b.add_argument("--logs-dir", default="logs/bench_test")
     b.add_argument("--max-age-days", type=float, default=7)
     b.add_argument("--suites", default="ota,lcd,safety")
     a = ap.parse_args(argv)
     if a.cmd == "bench-evidence":
+        if bool(a.fw_build) == bool(a.app_bin):
+            print("bench-evidence: give exactly one of --fw-build / --app-bin")
+            return 2
+        if a.app_bin:
+            src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "PcTools", "src")
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            from kilnctrl.esp_app_desc import parse_app_desc_file
+            try:
+                a.fw_build = parse_app_desc_file(a.app_bin).build_timestamp
+            except Exception as e:
+                print("bench-evidence: cannot read build from %s: %s" % (a.app_bin, e))
+                return 2
+            print("fw_build from %s: %s" % (a.app_bin, a.fw_build))
         code, out = bench_evidence(a.logs_dir, a.fw_build, [s for s in a.suites.split(",") if s], a.max_age_days)
         print(chr(10).join(out))
         return code
