@@ -1574,7 +1574,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
       '<option value="1"' + (zoneType === 1 ? ' selected' : '') + '>On/off device (vent, damper, fan -- not PID controlled)</option>' +
     '</select>' +
     '<p class="onoffWarn hint" style="color:var(--bad);font-weight:bold;' + (zoneType === 1 ? '' : 'display:none') + '">' +
-      'On/off device: guards 1 (stall), 2 (wrong direction), 3 (runaway), 4 (drift) and 9 (cross-zone) ' +
+      'On/off device: guards 1 (stall), 2 (wrong direction), 3 (runaway), 4 (drift) and 8 (cross-zone) ' +
       'are DISABLED for this zone, and its coupling row/column are zeroed (treated as injecting no heat ' +
       'and having no setpoint of its own). PID gains, ramp rate, control mode and those guard thresholds ' +
       'are hidden below because none of them do anything for this zone any more.' +
