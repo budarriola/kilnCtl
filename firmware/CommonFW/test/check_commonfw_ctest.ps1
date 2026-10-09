@@ -71,10 +71,19 @@ try {
     if (Test-Path $buildDir) { Remove-Item -Recurse -Force $buildDir }
 
     $cfgArgs = @("-S", $commonDir, "-B", $buildDir)
+    # Locate vcvarsall via vswhere; the old hardcoded path is only a fallback.
     $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $found = & $vswhere -latest -products * -find "VC\Auxiliary\Build\vcvarsall.bat" 2>$null | Select-Object -First 1
+        if ($found -and (Test-Path $found)) { $vcvars = $found }
+    }
     if ((Get-Command ninja -ErrorAction SilentlyContinue) -and (Test-Path $vcvars)) {
         Import-KilnVcvarsEnv -Vcvars $vcvars
         $cfgArgs += @("-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_C_COMPILER=cl")
+        Write-Host "check_commonfw_ctest.ps1: generator = Ninja + cl (vcvars: $vcvars)"
+    } else {
+        Write-Host "check_commonfw_ctest.ps1: generator = CMake default (Visual Studio fallback; ninja or vcvars not found, vcvars tried: $vcvars)"
     }
     $cfg = & cmake @cfgArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -122,7 +131,7 @@ try {
     # doesn't need file redirection, just a non-terminating error action.
     $prevEap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $ctestOut = & ctest --test-dir $buildDir --output-on-failure --timeout 60 -C Debug -j $jobs 2>&1
+    $ctestOut = & ctest --test-dir $buildDir --output-on-failure --timeout 60 --no-tests=error -C Debug -j $jobs 2>&1
     $ctestExit = $LASTEXITCODE
     $ErrorActionPreference = $prevEap
     $ctestOut | ForEach-Object { Write-Host $_ }
@@ -133,10 +142,22 @@ try {
     Write-Host "check_commonfw_ctest.ps1: wall time ${elapsedS}s"
 
     $summaryLine = ($ctestOut -split "`r?`n" | Where-Object { $_ -match '^\d+% tests passed' } | Select-Object -First 1)
-    if ($summaryLine) {
-        Write-Host "check_commonfw_ctest.ps1: $($summaryLine.Trim())"
-    } else {
-        Write-Host "check_commonfw_ctest.ps1: WARNING -- no 'N% tests passed' summary line found in ctest output"
+    if (-not $summaryLine) {
+        throw "no 'N% tests passed' summary line in ctest output -- cannot confirm tests ran."
+    }
+    Write-Host "check_commonfw_ctest.ps1: $($summaryLine.Trim())"
+    # Floor: every add_test( in CMakeLists.txt must have run. Zero tests, or a
+    # disabled test block, must go RED rather than pass.
+    $declared = @(Select-String -Path (Join-Path $commonDir "CMakeLists.txt") -Pattern '^\s*add_test\(').Count
+    # Fixed floor too: commenting add_test lines out lowers $declared as well, so
+    # the comparison alone would not catch it. Raise this when tests are added.
+    $minTests = 42
+    if ($declared -lt $minTests) { throw "CMakeLists.txt declares only $declared add_test( line(s), below the floor of $minTests -- tests were removed or commented out (lower `$minTests only if deliberate)." }
+    if ($summaryLine -notmatch 'out of (\d+)') { throw "could not parse test count from: $summaryLine" }
+    $ran = [int]$Matches[1]
+    Write-Host "check_commonfw_ctest.ps1: ctest ran $ran test(s); CMakeLists.txt declares $declared add_test( line(s)"
+    if ($ran -lt $declared) {
+        throw "ctest ran only $ran test(s) but CMakeLists.txt declares $declared add_test( -- a test block was disabled or dropped."
     }
 
     if ($ctestExit -ne 0) {

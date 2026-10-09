@@ -237,6 +237,7 @@ function Remove-StaleCopies([string]$root) {
 }
 
 function New-Copy($spec) {
+    $script:lastTimedOut = $false   # 4d: per copy, not sticky for the rest of the run
     if (-not (Test-Path -LiteralPath $spec.copy_root)) { New-Item -ItemType Directory -Force -Path $spec.copy_root | Out-Null }
     $copy = $null
     for ($i = 0; $i -lt 20; $i++) {
@@ -331,6 +332,16 @@ public static class NegJob {
     public static bool Assign(IntPtr job, IntPtr proc) { return AssignProcessToJobObject(job, proc); }
     public static bool Kill(IntPtr job) { return TerminateJobObject(job, 1); }
     public static void Close(IntPtr job) { CloseHandle(job); }
+    // Clear KILL_ON_JOB_CLOSE so closing the handle after a NORMAL exit does not kill survivors
+    // (shared per-user daemons such as mspdbsrv.exe that another session's cl build depends on).
+    public static bool Disarm(IntPtr job) {
+        int size = IntPtr.Size == 8 ? 144 : 112;
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        try {
+            for (int i = 0; i < size; i++) Marshal.WriteByte(buf, i, 0);
+            return SetInformationJobObject(job, 9, buf, size);
+        } finally { Marshal.FreeHGlobal(buf); }
+    }
 }
 "@
 }
@@ -385,6 +396,9 @@ exit 0
     $p = Start-Process -FilePath "$env:SystemRoot\System32\cmd.exe" -NoNewWindow -PassThru -WorkingDirectory $copy `
         -ArgumentList "/d /s /c `"powershell -NoProfile -ExecutionPolicy Bypass -File `"$wrapper`" > `"$log`" 2>&1`""
     $null = $p.Handle   # PS 5.1: cache the handle or ExitCode reads back null
+    # 4b (documented residual gap): the child is created by Start-Process and assigned to the job AFTER
+    # it starts, so a grandchild spawned in that window escapes the job. Stop-CopyProcesses (command-line
+    # match on the copy path) is the backstop; a suspended-create + resume needs CreateProcess P/Invoke.
     $job = [NegJob]::Create()
     if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; falling back to taskkill" Yellow } }
     $script:liveChild = $p
@@ -394,7 +408,14 @@ exit 0
         if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p.Id; $p.WaitForExit(10000) | Out-Null; break }
     }
     if ($timedOut) { Stop-CopyProcesses $copy }
-    if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null; [NegJob]::Close($job) }
+    # 4c: kill the job ONLY on timeout. After a normal exit, disarm kill-on-close and just close the
+    # handle: killing the whole job would take down a shared mspdbsrv.exe (and ccache etc.) that other
+    # sessions' builds use. Stragglers are handled by the targeted Stop-CopyProcesses below.
+    if ($job -ne [IntPtr]::Zero) {
+        if ($timedOut) { [NegJob]::Kill($job) | Out-Null } else { [NegJob]::Disarm($job) | Out-Null }
+        [NegJob]::Close($job)
+    }
+    if (-not $timedOut) { Stop-CopyProcesses $copy }
     $script:liveChild = $null
     if ($timedOut) { $script:lastTimedOut = $true }
     $exit = if ($timedOut) { -1 } else { $p.ExitCode }

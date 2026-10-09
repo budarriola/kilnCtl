@@ -34,18 +34,29 @@ if (-not $Group) {
     # Parent: run each independent group in its own child (own scratch repo) concurrently.
     # Every assertion still runs; this only overlaps the process/git-spawn latency that dominates.
     $groups = 'A', 'A2', 'B', 'C', 'D', 'E', 'F', 'G', 'H1', 'H2', 'I'
+    # Per-group minimum assertion counts (recorded from a green run); a group that
+    # silently skips its body would report far fewer.
+    $minAssert = @{ 'A' = 14; 'A2' = 15; 'B' = 26; 'C' = 10; 'D' = 13; 'E' = 8; 'F' = 18; 'G' = 7; 'H1' = 9; 'H2' = 9; 'I' = 5 }
+    # 4a: $groups and $minAssert must name exactly the same groups.
+    $missingMin = @($groups | Where-Object { -not $minAssert.ContainsKey($_) })
+    $extraMin = @($minAssert.Keys | Where-Object { $groups -notcontains $_ })
+    if ($missingMin.Count -gt 0 -or $extraMin.Count -gt 0) {
+        Write-Host "NEGTEST CHECK FAILED: group/minAssert mismatch. groups without minAssert: [$($missingMin -join ',')]; minAssert without group: [$($extraMin -join ',')]" -ForegroundColor Red
+        exit 1
+    }
     $tmpd = Join-Path ([System.IO.Path]::GetTempPath()) ("negchk_par_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $tmpd -Force | Out-Null
     $procs = @{}
+    $scratchOf = @{}
     foreach ($g in $groups) {
+        $scratchOf[$g] = Join-Path ([System.IO.Path]::GetTempPath()) ("negtest_chk_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+        $env:NEGCHK_SCRATCH_DIR = $scratchOf[$g]
         $procs[$g] = Start-Process -FilePath powershell.exe -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $tmpd "$g.out") -RedirectStandardError (Join-Path $tmpd "$g.err") `
             -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $MyInvocation.MyCommand.Path, '-ScriptUnderTest', $ScriptUnderTest, '-Group', $g)
         $null = $procs[$g].Handle
     }
-    # Per-group minimum assertion counts (recorded from a green run); a group that
-    # silently skips its body would report far fewer.
-    $minAssert = @{ 'A' = 14; 'A2' = 15; 'B' = 26; 'C' = 10; 'D' = 13; 'E' = 8; 'F' = 18; 'G' = 7; 'H1' = 9; 'H2' = 9; 'I' = 5 }
+    Remove-Item Env:\NEGCHK_SCRATCH_DIR -ErrorAction SilentlyContinue
     $groupTimeoutMs = 15 * 60 * 1000
     $totalA = 0; $bad = New-Object System.Collections.Generic.List[string]
     foreach ($g in $groups) {
@@ -53,6 +64,17 @@ if (-not $Group) {
         if (-not $procs[$g].WaitForExit($groupTimeoutMs)) {
             & taskkill.exe /T /F /PID $procs[$g].Id 2>&1 | Out-Null
             $bad.Add("group ${g}: timed out after 15 min and was killed")
+            # 4e: clean up the killed child's scratch repo and its worktree copies.
+            Start-Sleep -Seconds 2
+            try {
+                $r = Join-Path $scratchOf[$g] 'repo'
+                if (Test-Path -LiteralPath $r) {
+                    Get-ChildItem -LiteralPath (Join-Path $scratchOf[$g] 'copies') -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'negtest_*' -and $_.PSIsContainer } | ForEach-Object {
+                        & git -C $r worktree remove --force --force $_.FullName 2>&1 | Out-Null
+                    }
+                }
+                Remove-TreeSafe -Path $scratchOf[$g]
+            } catch { $bad.Add("group ${g}: scratch cleanup after timeout failed: $($_.Exception.Message)") }
             continue
         }
         $txt = (Get-Content -LiteralPath (Join-Path $tmpd "$g.out") -Raw -ErrorAction SilentlyContinue)
@@ -77,7 +99,7 @@ if (-not $Group) {
     exit 0
 }
 
-$scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("negtest_chk_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+$scratch = if ($env:NEGCHK_SCRATCH_DIR) { $env:NEGCHK_SCRATCH_DIR } else { Join-Path ([System.IO.Path]::GetTempPath()) ("negtest_chk_" + [guid]::NewGuid().ToString("N").Substring(0, 8)) }
 $repo = Join-Path $scratch "repo"
 $copies = Join-Path $scratch "copies"
 $logs = Join-Path $scratch "logs"

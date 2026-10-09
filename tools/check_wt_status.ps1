@@ -118,7 +118,16 @@ try {
     foreach ($d in $procWt, $procPfx) {
         $procs += Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -PassThru -ArgumentList @("-NoProfile", "-Command", "`"Start-Sleep -Seconds 600 ; '$d\marker.txt'`"")
     }
-    Start-Sleep -Seconds 2
+    # Race fix: a fixed 2 s sleep let a slow powershell startup (disk/AV contention) leave the
+    # process invisible to wt_status's Win32_Process scan, so proc_wt/pfx_longer looked idle and
+    # were pruned. Wait until both command lines are actually visible (up to 60 s).
+    $seenDeadline = (Get-Date).AddSeconds(60)
+    do {
+        Start-Sleep -Milliseconds 500
+        $cl = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | ForEach-Object { ("" + $_.CommandLine) -replace '/', '\' })
+        $seen = @($procWt, $procPfx | Where-Object { $d = $_; @($cl | Where-Object { $_.IndexOf("$d\marker.txt", [StringComparison]::OrdinalIgnoreCase) -ge 0 }).Count -gt 0 }).Count
+    } while ($seen -lt 2 -and (Get-Date) -lt $seenDeadline)
+    Assert-True ($seen -eq 2) "fixture: helper processes for proc_wt/pfx_longer never became visible"
 
     # ---- cherry-landed: same patch on origin/main under a different sha ----
     $p = New-Wt "landed"; Set-Content -LiteralPath (Join-Path $p "l.txt") -Value "l"; G -C $p add l.txt; G -C $p commit -m "landed work"

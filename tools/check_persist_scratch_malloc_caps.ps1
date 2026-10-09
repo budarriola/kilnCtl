@@ -73,7 +73,7 @@ $persistRoot = Join-Path $RepoRoot $persistDir
 if (-not (Test-Path $persistRoot)) { Write-Host "FAIL: $persistDir not found -- moved/renamed? update this script"; exit 1 }
 $persistFound = @(Get-ChildItem -Path $persistRoot -Recurse -File -Filter *.c | Sort-Object FullName | ForEach-Object {
     $_.FullName.Substring($RepoRoot.Length).TrimStart([char]92, [char]47).Replace([string][char]92, "/") })
-if ($persistFound.Count -lt 20) { Write-Host "FAIL: persist discovery found only $($persistFound.Count) file(s); glob went blind"; exit 1 }
+if ($persistFound.Count -lt 45) { Write-Host "FAIL: persist discovery found only $($persistFound.Count) file(s); glob went blind"; exit 1 }
 $files = $persistFound + $extraFiles
 
 # Adoption guard (vacuity audit 2026-10-07): a file that already calls persist_scratch_alloc() has opted
