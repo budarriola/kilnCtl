@@ -434,7 +434,7 @@ SUITES["smoke"] = [
 SUITES["static"] = ["ST-01", "ST-02", "ST-03", "ST-04", "ST-05"]
 SUITES["flash"] = [c for c in REGISTRY if c.startswith("FL-")]
 SUITES["stack"] = [c for c in REGISTRY if c.startswith("SK-")]
-SUITES["ota"] = [c for c in REGISTRY if c.startswith("OT-")]
+SUITES["ota"] = [c for c in REGISTRY if c.startswith("OT-") and c != "OT-B02"] + ["OT-B02"]  # summary runs last
 SUITES["autotune"] = [c for c in REGISTRY if c.startswith("AT-")]
 SUITES["heat"] = [c for c in REGISTRY if c.startswith("HP-")]
 SUITES["web"] = list(_WEB_IDS)

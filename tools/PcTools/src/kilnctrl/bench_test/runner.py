@@ -514,6 +514,8 @@ class BenchTestRunner:
         self._log(f"preflight: {'OK' if preflight_ok else 'FAILED - ' + preflight_reason}")
 
         results: Dict[str, CaseResult] = {}
+        # Read-only view for summary cases (OT-B02): the live results dict.
+        self.ctx["_run_results"] = results
         executed: List[str] = []
 
         if not preflight_ok:

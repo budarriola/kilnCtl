@@ -2435,8 +2435,35 @@ def _case_otg06(ctx: dict) -> CaseResult:
                       expected=result.expected, evidence=evidence)
 
 
+
+def _case_otb02(ctx: dict) -> CaseResult:
+    """OT-B02: summarize the OT-* results of the run in progress. Reads
+    ``ctx["_run_results"]`` (the runner's live results dict); never re-runs
+    anything. PASS unless an OT case is FAIL/ERROR; INCONCLUSIVE when every
+    other OT case is NOT_RUN/SKIP; a ctx with no results is an ERROR (reported
+    as FAIL, the runner's mapping for a case error)."""
+    results = ctx.get("_run_results")
+    if not isinstance(results, dict):
+        return CaseResult(Verdict.FAIL, reason="ERROR: no run results in ctx")
+    rows = {cid: str(getattr(r, "verdict", r)) for cid, r in results.items()
+            if cid.startswith("OT-") and cid != "OT-B02"}
+    if not rows:
+        return CaseResult(Verdict.FAIL, reason="ERROR: no OT-* results in ctx")
+    table = [f"{cid}: {v}" for cid, v in sorted(rows.items())]
+    bad = sorted(c for c, v in rows.items() if v in ("FAIL", "ERROR"))
+    observed = {"table": table}
+    if bad:
+        return CaseResult(Verdict.FAIL, reason="OT failures: " + ", ".join(bad),
+                          observed=observed, evidence=table)
+    if all(v in ("NOT_RUN", "SKIP") for v in rows.values()):
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no OT case ran",
+                          observed=observed, evidence=table)
+    return CaseResult(Verdict.PASS, reason=f"{len(rows)} OT cases, none FAIL/ERROR",
+                      observed=observed, evidence=table)
+
 _CASE_FUNCS = {
     "OT-B01": _case_otb01,
+    "OT-B02": _case_otb02,
     "OT-E01": _case_ote01,
     "OT-E02": _case_ote02,
     "OT-E03": _case_ote03,
