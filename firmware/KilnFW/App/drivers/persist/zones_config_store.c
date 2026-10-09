@@ -536,11 +536,23 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
      * case. */
     bool nvs_valid = out_valid ? *out_valid : false;
     uint32_t nvs_rev = zones_cfg_rev_load();
-    zones_cfg_t resolved;
+    /* Heap, not stack (~1 KB): shared httpd stack, see check_httpd_task_stack_budget.
+     * OOM is a clean load failure: config zeroed, nothing found/valid. */
+    zones_cfg_t *resolved = persist_scratch_alloc(sizeof(*resolved));
+    if (!resolved) {
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return ESP_ERR_NO_MEM;
+    }
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     uint8_t file_on_disk_version = 0;
-    bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, &resolved, &resolved_rev,
+    bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                     &used_file, &file_on_disk_version);
     s_zones_cfg_rev = resolved_rev;
     /* cfg is MOUNTED on the bench board as of 2026-09-21 (7 files, confirmed
@@ -584,9 +596,9 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
          * that also needs the rewrite, once. */
         file_side_needs_writeback = !nvs_refused_as_newer &&
                                     (file_on_disk_version != ZONES_CFG_VERSION ||
-                                     resolved.crc32 != zones_config_json_compute_crc(&resolved));
+                                     resolved->crc32 != zones_config_json_compute_crc(resolved));
         migrated_from_nvs = false;
-        s_zones.cfg = resolved;
+        s_zones.cfg = *resolved;
         if (out_found) {
             *out_found = true;
         }
@@ -594,6 +606,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
             *out_valid = true;
         }
     }
+    free(resolved);
 
     if (err == ESP_OK && trustworthy) {
         /* RELAY_LIFE_BUDGET.md, "on load": s_zones.cfg is now

@@ -10,6 +10,7 @@
 
 #include "esp_crc.h"
 #include "esp_log.h"
+#include "persist_scratch.h"
 
 /* ZONES_CFG_VERSION 20->21 (docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs) widened settings_source
  * from a single byte to settings_source[SRC_GROUP_COUNT] -- a MID-STRUCT
@@ -46,7 +47,11 @@ static void zone_cfg_migrate_prefix_and_tail(zone_cfg_t *d, const void *src_zone
            tail_len);
 }
 
-static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
+/* `scratch` (sizeof(zones_cfg_t) bytes, the largest layout) holds the historical
+ * vN_t copy each case decodes from; heap, not stack, because this runs on the
+ * shared httpd stack via nvs_load (check_httpd_task_stack_budget). */
+static bool convert_versioned_blob_to_current_impl(uint8_t version, const void *blob, zones_cfg_t *out,
+                                                    void *scratch)
 {
     memset(out, 0, sizeof(*out));
     /* ZONES_CFG_VERSION 16->17: ease_off_window_mult is now PER-ZONE
@@ -97,116 +102,116 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
      * this function returns, same as it does for a same-version load. */
     switch (version) {
     case 1: {
-        zones_cfg_v1_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
+        zones_cfg_v1_t *src = (zones_cfg_v1_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
         out->continue_on_zone_trip = 0; /* predates this field -- 0 is its documented default */
         out->safety_tc_type = THERMO_TC_K;
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v1(&src.zones[i], &out->zones[i], i);
+            convert_zone_v1(&src->zones[i], &out->zones[i], i);
         }
         set_default_timing_profile(out);
         return true;
     }
     case 2: {
-        zones_cfg_v2_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        zones_cfg_v2_t *src = (zones_cfg_v2_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
         out->safety_tc_type = THERMO_TC_K;
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v1(&src.zones[i], &out->zones[i], i);
+            convert_zone_v1(&src->zones[i], &out->zones[i], i);
         }
         set_default_timing_profile(out);
         return true;
     }
     case 3: {
-        zones_cfg_v3_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        zones_cfg_v3_t *src = (zones_cfg_v3_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
         out->safety_tc_type = THERMO_TC_K;
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v3(&src.zones[i], &out->zones[i], i);
+            convert_zone_v3(&src->zones[i], &out->zones[i], i);
         }
         set_default_timing_profile(out);
         return true;
     }
     case 4: {
-        zones_cfg_v4_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
+        zones_cfg_v4_t *src = (zones_cfg_v4_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
         out->safety_tc_type = THERMO_TC_K;
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v4(&src.zones[i], &out->zones[i]);
+            convert_zone_v4(&src->zones[i], &out->zones[i]);
         }
         set_default_timing_profile(out);
         return true;
     }
     case 5: {
-        zones_cfg_v5_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type; /* real value from v5 on */
+        zones_cfg_v5_t *src = (zones_cfg_v5_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type; /* real value from v5 on */
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v5(&src.zones[i], &out->zones[i]);
+            convert_zone_v5(&src->zones[i], &out->zones[i]);
         }
         set_default_timing_profile(out);
         return true;
     }
     case 6: {
-        zones_cfg_v6_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
+        zones_cfg_v6_t *src = (zones_cfg_v6_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
         out->pc_link_abort_silence_ms = 0.0f; /* v6 has no such field -- 0 = firmware default */
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v7(&src.zones[i], &out->zones[i]);
+            convert_zone_v7(&src->zones[i], &out->zones[i]);
         }
         set_default_timing_profile(out);
         return true;
     }
     case 7: {
-        zones_cfg_v7_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
+        zones_cfg_v7_t *src = (zones_cfg_v7_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
         out->pc_link_abort_silence_ms = 0.0f; /* v7 has no such field -- 0 = firmware default */
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v7(&src.zones[i], &out->zones[i]);
+            convert_zone_v7(&src->zones[i], &out->zones[i]);
         }
         set_default_timing_profile(out);
-        /* src.crc32 is deliberately NOT carried over: it covered the v7 shape,
+        /* src->crc32 is deliberately NOT carried over: it covered the v7 shape,
          * and nvs_save() stamps a fresh one over the current struct. */
         return true;
     }
     case 8: {
-        zones_cfg_v8_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v8 value */
+        zones_cfg_v8_t *src = (zones_cfg_v8_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v8 value */
         /* THE actual v8->v9 migration (see ZONES_CFG_VERSION's 8->9 comment
          * for the full rationale): v8 kept the nine timing overrides PER
          * ZONE, so migrating them verbatim would mean giving every zone its
@@ -224,7 +229,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * zone" is always the worst case, never an overflow. */
         uint8_t profile_count = 0;
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            const zone_cfg_v8_t *s = &src.zones[i];
+            const zone_cfg_v8_t *s = &src->zones[i];
             uint8_t match = profile_count; /* == "no match found yet" sentinel */
             for (uint8_t p = 0; p < profile_count; p++) {
                 const zone_timing_profile_t *tp = &out->timing_profiles[p];
@@ -313,20 +318,20 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * gotten right is convert_zone_v9()'s explicit settings_source
          * assignment -- see its own comment and ZONES_CFG_VERSION's 9->10
          * comment. */
-        zones_cfg_v9_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v9 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v9_t *src = (zones_cfg_v9_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v9 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v9(&src.zones[i], &out->zones[i]);
+            convert_zone_v9(&src->zones[i], &out->zones[i]);
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v9 shape;
+        /* src->crc32 deliberately NOT carried over -- it covered the v9 shape;
          * nvs_save() stamps a fresh one over the current (v11) struct. */
         return true;
     }
@@ -337,20 +342,20 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * again). The one real migration is convert_zone_v10()'s folding of
          * the single coupling pair into the new row; see that function's own
          * comment and ZONES_CFG_VERSION's 10->11 comment. */
-        zones_cfg_v10_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v10 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v10_t *src = (zones_cfg_v10_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v10 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v10(&src.zones[i], &out->zones[i], i);
+            convert_zone_v10(&src->zones[i], &out->zones[i], i);
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v10
+        /* src->crc32 deliberately NOT carried over -- it covered the v10
          * shape; nvs_save() stamps a fresh one over the current (v12)
          * struct. */
         return true;
@@ -362,20 +367,20 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * convert_zone_v11() leaving coupling_tau_s[]/coupling_dead_time_s[]
          * at their zeroed "not measured" default; see that function's own
          * comment and ZONES_CFG_VERSION's 11->12 comment. */
-        zones_cfg_v11_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v11 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v11_t *src = (zones_cfg_v11_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v11 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v11(&src.zones[i], &out->zones[i]);
+            convert_zone_v11(&src->zones[i], &out->zones[i]);
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v11
+        /* src->crc32 deliberately NOT carried over -- it covered the v11
          * shape; nvs_save() stamps a fresh one over the current (v12)
          * struct. */
         return true;
@@ -387,20 +392,20 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * convert_zone_v12() leaving every tuning_* field at its zeroed
          * "unknown" default; see that function's own comment and
          * ZONES_CFG_VERSION's 12->13 comment. */
-        zones_cfg_v12_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v12 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v12_t *src = (zones_cfg_v12_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v12 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v12(&src.zones[i], &out->zones[i]);
+            convert_zone_v12(&src->zones[i], &out->zones[i]);
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v12
+        /* src->crc32 deliberately NOT carried over -- it covered the v12
          * shape; nvs_save() stamps a fresh one over the current (v13)
          * struct. */
         return true;
@@ -412,20 +417,20 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * convert_zone_v13() leaving adaptive_tune_enabled at its zeroed
          * "opted out" default; see that function's own comment and zone_
          * cfg_t::adaptive_tune_enabled's ZONES_CFG_VERSION 13->14 comment. */
-        zones_cfg_v13_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v13 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v13_t *src = (zones_cfg_v13_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v13 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v13(&src.zones[i], &out->zones[i]);
+            convert_zone_v13(&src->zones[i], &out->zones[i]);
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v13
+        /* src->crc32 deliberately NOT carried over -- it covered the v13
          * shape; nvs_save() stamps a fresh one over the current (v14)
          * struct. */
         return true;
@@ -438,20 +443,20 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * "not measured" default; see that function's own comment and
          * zone_cfg_t::coupling_diag_k_dc's ZONES_CFG_VERSION 14->15
          * comment. */
-        zones_cfg_v14_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v14 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v14_t *src = (zones_cfg_v14_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v14 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            convert_zone_v14(&src.zones[i], &out->zones[i]);
+            convert_zone_v14(&src->zones[i], &out->zones[i]);
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v14
+        /* src->crc32 deliberately NOT carried over -- it covered the v14
          * shape; nvs_save() stamps a fresh one over the current (v15)
          * struct. */
         return true;
@@ -470,30 +475,30 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * identical" whole-array memcpy -- it just cannot be a single
          * whole-array memcpy any more now that the current zone_cfg_t has
          * grown one more tail field the v15 shape does not have. */
-        zones_cfg_v15_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v15 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v15_t *src = (zones_cfg_v15_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v15 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            /* src.zones[i] is zone_cfg_v16_t, not zone_cfg_v15_t -- see
+            /* src->zones[i] is zone_cfg_v16_t, not zone_cfg_v15_t -- see
              * zones_cfg_v15_t's own comment: it was repointed at
              * zone_cfg_v16_t (byte-for-byte identical to what zone_cfg_t
              * was at v15/v16) once the bare zone_cfg_t name stopped meaning
              * that shape, rather than freezing a separate, redundant type. */
-            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src->zones[i], sizeof(src->zones[i]),
                                               offsetof(zone_cfg_v16_t, settings_source),
                                               offsetof(zone_cfg_v16_t, tuning_valid));
             /* out->zones[i].ease_off_window_mult already 0 from this
              * function's entry memset -- the sentinel, same as every
              * pre-v16 case. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v15
+        /* src->crc32 deliberately NOT carried over -- it covered the v15
          * shape; nvs_save() stamps a fresh one over the current (v17)
          * struct. */
         return true;
@@ -510,23 +515,23 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * This is what makes a v16->v17 upgrade produce EXACTLY today's
          * behaviour, the same guarantee every other single-field-added
          * migration in this switch documents for its own field. */
-        zones_cfg_v16_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v16 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v16_t *src = (zones_cfg_v16_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v16 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src->zones[i], sizeof(src->zones[i]),
                                               offsetof(zone_cfg_v16_t, settings_source),
                                               offsetof(zone_cfg_v16_t, tuning_valid));
-            out->zones[i].ease_off_window_mult = src.ease_off_window_mult; /* the v16 global, carried verbatim */
+            out->zones[i].ease_off_window_mult = src->ease_off_window_mult; /* the v16 global, carried verbatim */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v16
+        /* src->crc32 deliberately NOT carried over -- it covered the v16
          * shape; nvs_save() stamps a fresh one over the current (v17)
          * struct. */
         return true;
@@ -544,18 +549,18 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * prefix is exactly equivalent to a whole-array memcpy, just typed
          * against the smaller historical shape -- same technique case 15
          * uses against zone_cfg_v16_t. */
-        zones_cfg_v17_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v17 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v17_t *src = (zones_cfg_v17_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v17 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src->zones[i], sizeof(src->zones[i]),
                                               offsetof(zone_cfg_v17_t, settings_source),
                                               offsetof(zone_cfg_v17_t, tuning_valid));
             /* out->zones[i].approach_rate_cap_c_per_hr already 0 (uncapped)
@@ -563,7 +568,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
              * prior global opinion to carry forward, unlike
              * ease_off_window_mult's v16->v17 migration just above. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v17
+        /* src->crc32 deliberately NOT carried over -- it covered the v17
          * shape; nvs_save() stamps a fresh one over the current (v18)
          * struct. */
         return true;
@@ -579,18 +584,18 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * exactly equivalent to a whole-array memcpy, just typed against
          * the smaller historical shape -- same technique case 17 uses
          * against zone_cfg_v17_t. */
-        zones_cfg_v18_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v18 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v18_t *src = (zones_cfg_v18_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v18 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src->zones[i], sizeof(src->zones[i]),
                                               offsetof(zone_cfg_v18_t, settings_source),
                                               offsetof(zone_cfg_v18_t, tuning_valid));
             /* out->zones[i].error_band_c/rate_band_c_per_s already 0 (use
@@ -599,7 +604,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
              * forward, same as approach_rate_cap_c_per_hr's own v17->v18
              * migration just above. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v18
+        /* src->crc32 deliberately NOT carried over -- it covered the v18
          * shape; nvs_save() stamps a fresh one over the current (v19)
          * struct. */
         return true;
@@ -614,18 +619,18 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * per-element memcpy of that prefix is exactly equivalent to a
          * whole-array memcpy, just typed against the smaller historical
          * shape -- same technique case 18 uses against zone_cfg_v18_t. */
-        zones_cfg_v19_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v19 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v19_t *src = (zones_cfg_v19_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v19 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src.zones[i], sizeof(src.zones[i]),
+            zone_cfg_migrate_prefix_and_tail(&out->zones[i], &src->zones[i], sizeof(src->zones[i]),
                                               offsetof(zone_cfg_v19_t, settings_source),
                                               offsetof(zone_cfg_v19_t, tuning_valid));
             /* out->zones[i].relay_type already 0 (ssr) from this function's
@@ -633,7 +638,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
              * to carry forward, same as error_band_c/rate_band_c_per_s's
              * own v18->v19 migration just above. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v19
+        /* src->crc32 deliberately NOT carried over -- it covered the v19
          * shape; nvs_save() stamps a fresh one over the current (v20)
          * struct. */
         return true;
@@ -656,18 +661,18 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * "same as zone 0" must keep behaving identically after this
          * upgrade, for every one of the five now-independent groups, not
          * silently reset to "custom" on four of them. */
-        zones_cfg_v20_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v20 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v20_t *src = (zones_cfg_v20_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v20 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            const zone_cfg_v20_t *s = &src.zones[i];
+            const zone_cfg_v20_t *s = &src->zones[i];
             zone_cfg_t *d = &out->zones[i];
             memcpy(d->name, s->name, sizeof(d->name));
             d->cal_offset_c = s->cal_offset_c;
@@ -726,7 +731,7 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
             d->rate_band_c_per_s = s->rate_band_c_per_s;
             d->relay_type = s->relay_type;
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v20
+        /* src->crc32 deliberately NOT carried over -- it covered the v20
          * shape; nvs_save() stamps a fresh one over the current (v21)
          * struct. */
         return true;
@@ -744,22 +749,22 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * sentinel via this function's entry memset -- brand-new mechanism,
          * no prior global opinion to carry forward, same shape as relay_
          * type's own v19->v20 migration. */
-        zones_cfg_v21_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v21 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v21_t *src = (zones_cfg_v21_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v21 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            memcpy(&out->zones[i], &src->zones[i], sizeof(src->zones[i]));
             /* out->zones[i].progress_band_c already 0 from this function's
              * entry memset -- see this case's own top comment. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v21
+        /* src->crc32 deliberately NOT carried over -- it covered the v21
          * shape; nvs_save() stamps a fresh one over the current (v22)
          * struct. */
         return true;
@@ -778,23 +783,23 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * OFF == 0 are BOTH load-bearing here: a v22 board upgrading must
          * never silently gain an on/off zone or a fail-safe-ON device it
          * never configured. */
-        zones_cfg_v22_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v22 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v22_t *src = (zones_cfg_v22_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v22 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            memcpy(&out->zones[i], &src->zones[i], sizeof(src->zones[i]));
             /* out->zones[i].zone_type/failsafe_state/hyst_c/min_on_s/
              * min_off_s already 0 from this function's entry memset -- see
              * this case's own top comment. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v22
+        /* src->crc32 deliberately NOT carried over -- it covered the v22
          * shape; nvs_save() stamps a fresh one over the current (v23)
          * struct. */
         return true;
@@ -815,23 +820,23 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * decode_blob() backfills the real sentinel onto every zone right
          * after this function returns, for every pre-v24 version uniformly,
          * rather than duplicating that assignment in each case here. */
-        zones_cfg_v23_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v23 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v23_t *src = (zones_cfg_v23_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v23 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            memcpy(&out->zones[i], &src->zones[i], sizeof(src->zones[i]));
             /* out->zones[i].model_fit_temp_c/model_fit_ambient_c backfilled
              * to the UNKNOWN sentinel by the caller -- see this case's own
              * top comment. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v23
+        /* src->crc32 deliberately NOT carried over -- it covered the v23
          * shape; nvs_save() stamps a fresh one over the current (v24)
          * struct. */
         return true;
@@ -847,22 +852,22 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * overridden, use an equal share of the sum nameplate" sentinel --
          * unlike case 23's model_fit_temp_c, no separate backfill is
          * needed. */
-        zones_cfg_v24_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v24 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v24_t *src = (zones_cfg_v24_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v24 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            memcpy(&out->zones[i], &src->zones[i], sizeof(src->zones[i]));
             /* out->zones[i].coil_power_w already 0 from this function's
              * entry memset -- see this case's own top comment. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v24
+        /* src->crc32 deliberately NOT carried over -- it covered the v24
          * shape; nvs_save() stamps a fresh one over the current (v25)
          * struct. */
         return true;
@@ -881,22 +886,22 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * itself, the first time it runs against an upgraded zone that
          * already has a model but reads 0 here -- see that function's own
          * comment. */
-        zones_cfg_v25_t src;
-        memcpy(&src, blob, sizeof(src));
-        out->thermo_count = src.thermo_count;
-        out->relay_count = src.relay_count;
-        out->max_simultaneous_relays = src.max_simultaneous_relays;
-        out->continue_on_zone_trip = src.continue_on_zone_trip;
-        out->safety_tc_type = src.safety_tc_type;
-        out->pc_link_abort_silence_ms = src.pc_link_abort_silence_ms; /* real v25 value */
-        out->timing_profile_count = src.timing_profile_count;
-        memcpy(out->timing_profiles, src.timing_profiles, sizeof(out->timing_profiles));
+        zones_cfg_v25_t *src = (zones_cfg_v25_t *)scratch;
+        memcpy(src, blob, sizeof(*src));
+        out->thermo_count = src->thermo_count;
+        out->relay_count = src->relay_count;
+        out->max_simultaneous_relays = src->max_simultaneous_relays;
+        out->continue_on_zone_trip = src->continue_on_zone_trip;
+        out->safety_tc_type = src->safety_tc_type;
+        out->pc_link_abort_silence_ms = src->pc_link_abort_silence_ms; /* real v25 value */
+        out->timing_profile_count = src->timing_profile_count;
+        memcpy(out->timing_profiles, src->timing_profiles, sizeof(out->timing_profiles));
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            memcpy(&out->zones[i], &src.zones[i], sizeof(src.zones[i]));
+            memcpy(&out->zones[i], &src->zones[i], sizeof(src->zones[i]));
             /* out->zones[i].autotune_baseline_k_dc already 0 from this
              * function's entry memset -- see this case's own top comment. */
         }
-        /* src.crc32 deliberately NOT carried over -- it covered the v25
+        /* src->crc32 deliberately NOT carried over -- it covered the v25
          * shape; nvs_save() stamps a fresh one over the current (v26)
          * struct. */
         return true;
@@ -908,6 +913,18 @@ static bool convert_versioned_blob_to_current(uint8_t version, const void *blob,
          * explicit refusal rather than silently guessing. */
         return false;
     }
+}
+
+static bool convert_versioned_blob_to_current(uint8_t version, const void *blob, zones_cfg_t *out)
+{
+    void *scratch = persist_scratch_alloc(sizeof(zones_cfg_t));
+    if (!scratch) {
+        memset(out, 0, sizeof(*out));
+        return false; /* OOM reads as a failed conversion (clean load failure) */
+    }
+    bool ok = convert_versioned_blob_to_current_impl(version, blob, out, scratch);
+    free(scratch);
+    return ok;
 }
 
 /* esp_crc32_le() (same helper crash_report.c's compute_crc() uses) over the
