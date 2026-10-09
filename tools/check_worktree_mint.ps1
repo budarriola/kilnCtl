@@ -40,6 +40,46 @@ try {
     $newDev = (git -C $other rev-parse HEAD).Trim()
     Assert ($newDev -ne $devSha) "scratch origin dev advanced"
     Assert ((Mint @()) -eq $newDev) "mint lands on the advanced origin/dev tip"
+    Write-Host "case: -Remove (F4/F14)"
+    function MintPath() {
+        Push-Location $work
+        try { $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label r -WtRoot $wtroot -NoSubmodules 2>&1 | Out-String } finally { Pop-Location }
+        return ([regex]::Match($o, '(?m)^WORKTREE:\s*(.+?)\s*$')).Groups[1].Value
+    }
+    function Run-MintRemove([string[]]$more, [string]$cwd = $work) {
+        Push-Location $cwd
+        try { $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Remove @more 2>&1 | Out-String; $rc = $LASTEXITCODE } finally { Pop-Location }
+        return [pscustomobject]@{ Rc = $rc; Out = $o }
+    }
+    # clean worktree at origin/dev: removed
+    $w1 = MintPath
+    $r = Run-MintRemove @("-Path", $w1)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w1)) "clean worktree is removed"
+    # unlanded detached commit: refused, kept; -Force removes
+    $w2 = MintPath
+    Set-Content -LiteralPath (Join-Path $w2 "u.txt") -Value "u" -Encoding ascii
+    git -C $w2 add u.txt *>$null; git -C $w2 commit -m unlanded *>$null
+    $r = Run-MintRemove @("-Path", $w2)
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w2) -and $r.Out -match "REFUSED") "unlanded detached commit: -Remove refused and worktree kept"
+    $r = Run-MintRemove @("-Path", $w2, "-Force")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w2)) "unlanded detached commit: -Remove -Force removes"
+    # commit that is on a branch: allowed
+    $w3 = MintPath
+    git -C $w3 checkout -b keepme *>$null
+    Set-Content -LiteralPath (Join-Path $w3 "k.txt") -Value "k" -Encoding ascii
+    git -C $w3 add k.txt *>$null; git -C $w3 commit -m onbranch *>$null
+    $r = Run-MintRemove @("-Path", $w3)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w3)) "commit reachable from a branch: -Remove allowed"
+    # main tree refused, and nothing in it touched
+    $r = Run-MintRemove @("-Path", $work)
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath (Join-Path $work "a.txt")) -and $r.Out -match "not a linked worktree") "main tree is refused"
+    # relative path resolves against PowerShell location
+    $w4 = MintPath
+    $r = Run-MintRemove @("-Path", ("..\wt\" + (Split-Path -Leaf $w4)))
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w4)) "relative -Path resolves against the caller's location"
+    # nonexistent / wildcard path
+    $r = Run-MintRemove @("-Path", (Join-Path $wtroot "no[x]such"))
+    Assert ($r.Rc -ne 0) "nonexistent path refused"
     Write-Host "case: guard defaults"
     foreach ($f in "commit_guard.ps1", "push_verify.ps1", "wt_status.ps1") {
         $t = Get-Content -Raw -LiteralPath (Join-Path $here $f)

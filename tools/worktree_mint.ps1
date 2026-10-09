@@ -126,9 +126,25 @@ if ($Remove) {
         exit 1
     }
     $repoRoot = Get-RepoRoot
-    $full = [System.IO.Path]::GetFullPath($Path)
-    if (-not (Test-Path $full)) {
-        Write-Host "ERROR: '$full' does not exist -- nothing to remove." -ForegroundColor Red
+    # F14: resolve against PowerShell's location (not the process cwd), literal paths only.
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Host "ERROR: '$Path' does not exist -- nothing to remove." -ForegroundColor Red
+        exit 1
+    }
+    $full = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
+    # F14: git must confirm this is a LINKED worktree (not the main tree) before anything is touched.
+    $isLinked = $false
+    $wtLines = git -C $repoRoot worktree list --porcelain 2>$null
+    $idx = 0
+    foreach ($ln in $wtLines) {
+        if ($ln -like 'worktree *') {
+            $wp = ($ln.Substring(9) -replace '/', '\').TrimEnd('\')
+            if ($idx -gt 0 -and [string]::Equals($wp, $full, [StringComparison]::OrdinalIgnoreCase)) { $isLinked = $true }
+            $idx++
+        }
+    }
+    if (-not $isLinked) {
+        Write-Host "ERROR: '$full' is not a linked worktree of this repository (git worktree list); refusing." -ForegroundColor Red
         exit 1
     }
 
@@ -148,6 +164,18 @@ if ($Remove) {
     if ($porcelain -and $Force) {
         Write-Host "WARNING: removing '$full' with uncommitted changes present (-Force):" -ForegroundColor Yellow
         Write-Host $porcelain
+    }
+
+    # F4: a detached worktree's unlanded commits die with its reflog. Refuse unless -Force.
+    $unlanded = @(git -C $full rev-list HEAD --not --remotes --branches 2>$null)
+    if ($unlanded.Count -gt 0) {
+        Write-Host "commits reachable only from this worktree ($($unlanded.Count)):" -ForegroundColor Yellow
+        $unlanded | ForEach-Object { Write-Host "  $_" }
+        if (-not $Force) {
+            Write-Host "REFUSED: worktree '$full' holds commits that exist nowhere else. Push or branch them, or pass -Force to drop them." -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "WARNING: dropping the commits above (-Force)." -ForegroundColor Yellow
     }
 
     # Strip junctions/symlinks (e.g. a .venv junction into the main tree) as links

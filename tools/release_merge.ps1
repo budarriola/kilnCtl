@@ -2,8 +2,8 @@
 #
 # Flow (docs/RELEASING.md "Release branch"): qualify a main commit X, then
 #   release_merge.ps1 -Commit <X> -Tag v1.0.0-pre.N -Message "<gate evidence>" [-Push]
-# builds M = commit-tree(tree of X, sole parent origin/release tip; message line 'Files identical to main commit <X> (tag <T>).'), pushes release as a plain
-# fast-forward, creates the ANNOTATED tag on M (message = -Message) and pushes it. make_release.ps1
+# builds M = commit-tree(tree of X, sole parent origin/release tip; message line 'Files identical to main commit <X> (tag <T>).'), creates the ANNOTATED tag on M (message = -Message) and pushes release (plain
+# fast-forward) and the tag in ONE atomic push. make_release.ps1
 # then builds from M. Dry run unless -Push; it never touches the working tree or index (git plumbing
 # only) and never force-pushes.
 #
@@ -19,7 +19,7 @@ param(
     [string]$Message = "",
     [switch]$Push,
     [string]$RepoPath = "",
-    [string]$Trailer = "Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
+    [string]$Trailer = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 )
 $ErrorActionPreference = 'Continue'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -116,12 +116,11 @@ $tagMsg = if ($Message) { $Message } else { "Release $Tag" }
 if (-not $Push) {
     Write-Host "DRY RUN: nothing pushed. -Push would fast-forward origin/release to $m, then create and push annotated tag $Tag on it."
 } else {
-    G push origin "${m}:refs/heads/release" | Out-Null
-    if ($rc -ne 0) { Fail 'push-release' 'plain fast-forward push of release was rejected (never forced).' }
+    # Tag first (local only), then ONE atomic push of branch + tag: no partial release state.
     G tag -a $Tag $m -m $tagMsg | Out-Null
-    if ($rc -ne 0) { Fail 'tag-create' "could not create tag $Tag on $m (release already pushed; create and push the tag by hand)." }
-    G push origin "refs/tags/$Tag" | Out-Null
-    if ($rc -ne 0) { Fail 'push-tag' "push of tag $Tag failed (release already pushed)." }
+    if ($rc -ne 0) { Fail 'tag-create' "could not create tag $Tag on $m (nothing pushed)." }
+    G push --atomic origin "${m}:refs/heads/release" "refs/tags/$Tag" | Out-Null
+    if ($rc -ne 0) { G tag -d $Tag | Out-Null; Fail 'push-release' "atomic push of release + tag $Tag was rejected (never forced; nothing was updated, local tag removed)." }
     G fetch --quiet origin --tags | Out-Null
     if ((G rev-parse 'refs/remotes/origin/release') -ne $m) { Fail 'verify-release' 'origin/release != the new merge after re-fetch.' }
     $peeled = @(G ls-remote origin "refs/tags/$Tag^{}")

@@ -15,13 +15,14 @@
 #   powershell -ExecutionPolicy Bypass -File tools\wt_status.ps1 -Prune     # remove
 #
 # REPORT, per directory under -Root: registered in `git worktree list`?,
-# branch or HEAD sha, commits ahead of origin/main, tracked-modified and
+# branch or HEAD sha, commits ahead of -Base (default origin/dev), tracked-modified and
 # untracked counts (gitignored excluded), idle time (newest file mtime,
 # skipping build\ and .git internals and never entering a junction), live
 # processes whose command line / executable path is under the directory,
 # and a class:
 #   ACTIVE       a live process references it, or a file changed < 15 min ago
-#   HAS_WORK     registered, and has commits ahead of origin/main or is dirty
+#   HAS_WORK     registered, and has commits ahead of -Base, is dirty, holds gitignored
+#                data under logs/ or elf_archive/, or is mid-rebase/cherry-pick/merge/revert
 #   STALE_CLEAN  registered, nothing ahead, clean, idle > 2 h, no process
 #   ORPHAN_DIR   not registered, no process, idle > 2 h
 #   UNKNOWN      anything else (locked, git query failed, a .git inside an
@@ -32,15 +33,17 @@
 #
 # PRUNE removes only STALE_CLEAN and ORPHAN_DIR, each re-evaluated just before
 # its removal. Registered worktrees go through worktree_mint.ps1 -Remove
-# (which itself refuses a dirty tree and unlinks junctions first); orphan dirs
+# (-Force: wt_status itself has proven nothing unlanded via git cherry and a clean tree; unlinks junctions first); orphan dirs
 # go through lib_safe_remove.ps1's Remove-TreeSafe (reparse points are deleted
 # as links, never followed). Then `git worktree prune`. -WhatIf lists and
 # removes nothing. Unsure means skip. Exit 1 only if a removal failed.
 #
 # PARAMETERS beyond the above are for tests: -Root, -Repo (a repo whose
-# `git worktree list` is authoritative), -Base (default origin/main),
+# `git worktree list` is authoritative), -Base (default origin/dev),
 # -ActiveMinutes / -StaleHours thresholds, -PassThru (emit objects, never
 # `exit`), -Quiet.
+# LIMIT: another process's cwd is not readable from PowerShell 5.1, so a session whose
+# cwd (but no command line) is in a worktree is only protected by the idle thresholds.
 
 [CmdletBinding()]
 param(
@@ -194,14 +197,14 @@ function Get-ProcCount([string]$dirFull, $texts) {
 $gather = {
     param($dir, $registered, $base, $wantSize)
     $ErrorActionPreference = 'Continue'
-    $f = @{ Dir = $dir; GitOk = $true; Head = ''; Ahead = @(); Unlanded = 0; Mod = 0; Untr = 0; Newest = 0; Bytes = 0; Kicad = $false; Errors = 0; HasGit = $false }
+    $f = @{ Dir = $dir; GitOk = $true; Head = ''; Ahead = @(); Unlanded = 0; Ignored = 0; GitState = ''; Mod = 0; Untr = 0; Newest = 0; Bytes = 0; Kicad = $false; Errors = 0; HasGit = $false }
     $w = [WtStatusWalk]::Walk($dir, [bool]$wantSize)
     $f.Newest = $w.NewestTicksUtc; $f.Bytes = $w.Bytes; $f.Kicad = $w.HasKicad; $f.Errors = $w.Errors
     $topM = (Get-Item -LiteralPath $dir -Force).LastWriteTimeUtc.Ticks
     if ($topM -gt $f.Newest) { $f.Newest = $topM }
     $f.HasGit = Test-Path -LiteralPath (Join-Path $dir '.git')
     if ($registered) {
-        $g2 = [WtStatusWalk]::Git($dir, "log -n 200 --format=%H%x20%s $base..HEAD"); $rc2 = $g2.ExitCode; $ah = @($g2.Lines)
+        $g2 = [WtStatusWalk]::Git($dir, "log --format=%H%x20%s $base..HEAD"); $rc2 = $g2.ExitCode; $ah = @($g2.Lines)
         # git cherry compares patch-ids, so a commit landed on main under a rebased sha reads "-".
         $gc = [WtStatusWalk]::Git($dir, "cherry $base HEAD"); $landed = @{}
         if ($gc.ExitCode -eq 0) { foreach ($cl in $gc.Lines) { if ($cl.Length -gt 2) { $landed[$cl.Substring(2)] = ($cl[0] -eq '-') } } }
@@ -212,6 +215,15 @@ $gather = {
             $ah2 += ($mk + $full.Substring(0, [Math]::Min(8, $full.Length)) + ' ' + $subj)
         }
         $ah = $ah2; $f.Unlanded = $unl
+        # Gitignored captured data under logs/ or elf_archive/ must never be pruned (CLAUDE.md).
+        $gi = [WtStatusWalk]::Git($dir, 'status --porcelain=v1 --ignored')
+        if ($gi.ExitCode -eq 0) { foreach ($il in $gi.Lines) { if ($il.StartsWith('!! ') -and $il.Substring(3) -match '(^|/)(logs|elf_archive)(/|$)') { $f.Ignored++ } } } else { $f.GitOk = $false }
+        # Mid-operation worktrees keep their only copy of commits in rebase state / ORIG_HEAD.
+        $gd = [WtStatusWalk]::Git($dir, 'rev-parse --absolute-git-dir')
+        if ($gd.ExitCode -eq 0 -and $gd.Lines.Count -gt 0) {
+            $gdir = $gd.Lines[0]
+            foreach ($mk in 'rebase-merge', 'rebase-apply', 'CHERRY_PICK_HEAD', 'MERGE_HEAD', 'REVERT_HEAD') { if (Test-Path -LiteralPath (Join-Path $gdir $mk)) { $f.GitState = $mk; break } }
+        } else { $f.GitOk = $false }
         $g3 = [WtStatusWalk]::Git($dir, 'status --porcelain=v2 --branch --untracked-files=all'); $rc3 = $g3.ExitCode
         if ($rc2 -ne 0 -or $rc3 -ne 0) { $f.GitOk = $false }
         else {
@@ -248,6 +260,8 @@ function Get-Class($name, $dirFull, $facts, $reg, $isReparse, $procCount) {
     if ($reg) {
         if ($reg.Locked) { return @('UNKNOWN', 'worktree is locked') }
         if (-not $facts.GitOk) { return @('UNKNOWN', 'git query failed') }
+        if ($facts.GitState) { return @('HAS_WORK', "mid-operation ($($facts.GitState))") }
+        if ($facts.Ignored -gt 0) { return @('HAS_WORK', 'gitignored data under logs/ or elf_archive/') }
         if ($facts.Unlanded -gt 0 -or $facts.Mod -gt 0 -or $facts.Untr -gt 0) { return @('HAS_WORK', '') }
         if ($idle -gt ($StaleHours * 60)) { return @('STALE_CLEAN', '') }
         return @('UNKNOWN', 'clean but idle less than the stale threshold')
@@ -320,7 +334,7 @@ $rows = New-Object System.Collections.Generic.List[object]
 foreach ($e in $entries) {
     if ($e.Reparse -or -not $e.Facts) {
         $cls = @('UNKNOWN', $(if ($e.Reparse) { 'is a reparse point' } else { 'could not be inspected' }))
-        $facts = @{ Head = ''; Ahead = @(); Unlanded = 0; Mod = 0; Untr = 0; Newest = 0; Bytes = 0 }
+        $facts = @{ Head = ''; Ahead = @(); Unlanded = 0; Ignored = 0; GitState = ''; Mod = 0; Untr = 0; Newest = 0; Bytes = 0 }
         $pc = 0
     } else {
         $facts = $e.Facts
@@ -356,7 +370,7 @@ if (-not $Quiet) {
     foreach ($r in ($sorted | Where-Object { $_.Ahead -gt 0 })) {
         Write-Host "  ahead of ${Base}: $($r.Name)"
         foreach ($c in ($r.AheadCommits | Select-Object -First 10)) { Write-Host "    $c" }
-        if ($r.Ahead -gt 10) { Write-Host "    ... and $($r.Ahead - 10) more" }
+        if ($r.Ahead -gt 10) { Write-Host "    ... and $($r.Ahead - 10) more (display truncated at 10; counts above are complete)" }
     }
     Write-Host ""
     Write-Host "Helper files and dirs (never pruned): $($helpers.Count)"
@@ -388,7 +402,7 @@ if ($Prune) {
         try {
             if ($r.Class -eq 'STALE_CLEAN') {
                 Push-Location -LiteralPath $Repo
-                try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $mint -Remove -Path $dirFull -WtRoot $rootFull 2>&1; $rc = $LASTEXITCODE } finally { Pop-Location }
+                try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $mint -Remove -Force -Path $dirFull -WtRoot $rootFull 2>&1; $rc = $LASTEXITCODE } finally { Pop-Location }
                 if ($rc -ne 0) { $res.Result = "FAILED: worktree_mint -Remove exit $rc"; $failed++ }
                 elseif (Test-Path -LiteralPath $dirFull) { $res.Result = 'PARTIAL: unregistered but directory remnant left'; $failed++ }
                 else { $res.Result = 'removed' }

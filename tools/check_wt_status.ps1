@@ -62,7 +62,7 @@ try {
     G clone $origin $repo
     G -C $repo checkout -b main
     Set-Content -LiteralPath (Join-Path $repo "a.txt") -Value "a"
-    Set-Content -LiteralPath (Join-Path $repo ".gitignore") -Value "*.log`nbuild/`nvenv_link"
+    Set-Content -LiteralPath (Join-Path $repo ".gitignore") -Value "*.log`nbuild/`nvenv_link`nlogs/"
     Set-Content -LiteralPath (Join-Path $repo "tracked.kicad_pcb") -Value "board"; G -C $repo add a.txt .gitignore tracked.kicad_pcb   # tracked board file: must not make registered worktrees UNKNOWN
     G -C $repo commit -m "base"
     G -C $repo push -u origin main
@@ -92,6 +92,8 @@ try {
     $p = New-Wt "stale_ignored"
     Set-Content -LiteralPath (Join-Path $p "x.log") -Value "log"; Set-TreeAge $p 3
     New-Item -ItemType Directory -Path (Join-Path $p "build") | Out-Null; Set-Content -LiteralPath (Join-Path $p "build\out.o") -Value "fresh object"; Set-DirAge $p 3   # fresh, but build\ is skipped
+    $p = New-Wt "ignored_data";  New-Item -ItemType Directory -Path (Join-Path $p "logs\coupling") | Out-Null; Set-Content -LiteralPath (Join-Path $p "logs\coupling\cap.tsv") -Value "captured"; Set-TreeAge $p 3   # gitignored captured data: never prune
+    $p = New-Wt "midpick";       $gd = (& git -C $p rev-parse --absolute-git-dir).Trim(); Set-Content -LiteralPath (Join-Path $gd "CHERRY_PICK_HEAD") -Value $mainSha; Set-TreeAge $p 3   # mid-cherry-pick: never prune
     $p = New-Wt "pfx";           Set-TreeAge $p 3
     $p = New-Wt "ahead";         Set-Content -LiteralPath (Join-Path $p "n.txt") -Value "n"; G -C $p add n.txt; G -C $p commit -m "unpushed work"; Set-TreeAge $p 3
     $p = New-Wt "dirty";         Set-TreeAge $p 3; Add-Content -LiteralPath (Join-Path $p "a.txt") -Value "edit"; [System.IO.File]::SetLastWriteTimeUtc((Join-Path $p "a.txt"), [DateTime]::UtcNow.AddHours(-3)); Set-DirAge $p 3
@@ -151,7 +153,7 @@ try {
     $r = Run-Tool @{ Size = $true }
     $expect = [ordered]@{
         stale_clean = "STALE_CLEAN"; stale_ignored = "STALE_CLEAN"; pfx = "STALE_CLEAN"
-        ahead = "HAS_WORK"; ahead2 = "HAS_WORK"; landed = "STALE_CLEAN"; dirty = "HAS_WORK"; untracked = "HAS_WORK"
+        ignored_data = "HAS_WORK"; midpick = "HAS_WORK"; ahead = "HAS_WORK"; ahead2 = "HAS_WORK"; landed = "STALE_CLEAN"; dirty = "HAS_WORK"; untracked = "HAS_WORK"
         recent_clean = "ACTIVE"; proc_wt = "ACTIVE"; orphan_recent = "ACTIVE"; pfx_longer = "ACTIVE"
         idle30 = "UNKNOWN"; locked_wt = "UNKNOWN"; orphan_git = "UNKNOWN"; orphan_kicad = "UNKNOWN"
         orphan = "ORPHAN_DIR"
@@ -182,7 +184,7 @@ try {
     Assert-True (-not (@($r.Rows | ForEach-Object { $_.Name }) -contains ".buildgate")) "helpers: .buildgate must not be classified"
     $r2 = Run-Tool @{}
     Assert-True ($null -eq (Row $r2 "stale_clean").SizeMB) "report: SizeMB must be null without -Size"
-    Assert-True ($r.Counts["STALE_CLEAN"] -eq 4 -and $r.Counts["ORPHAN_DIR"] -eq 1 -and $r.Counts["HAS_WORK"] -eq 4) "summary counts wrong: $($r.Counts | Out-String)"
+    Assert-True ($r.Counts["STALE_CLEAN"] -eq 4 -and $r.Counts["ORPHAN_DIR"] -eq 1 -and $r.Counts["HAS_WORK"] -eq 6) "summary counts wrong: $($r.Counts | Out-String)"
 
     Step 'report mode done'
     # ======== -Prune -WhatIf ========
@@ -190,7 +192,7 @@ try {
     $w = Run-Tool @{ Prune = $true; WhatIf = $true }
     $after = @(Get-ChildItem -LiteralPath $wt -Force | ForEach-Object { $_.Name }) | Sort-Object
     Assert-True (($before -join ',') -eq ($after -join ',')) "WhatIf removed or created something under the root"
-    Assert-True (@(& git -C $repo worktree list).Count -eq 13) "WhatIf changed the worktree registry"
+    Assert-True (@(& git -C $repo worktree list).Count -eq 15) "WhatIf changed the worktree registry"
     $would = @($w.Prune | Where-Object { $_.Action -eq 'would remove' } | ForEach-Object { $_.Name }) | Sort-Object
     Assert-True (($would -join ',') -eq 'landed,orphan,pfx,stale_clean,stale_ignored') "WhatIf should list exactly landed,orphan,pfx,stale_clean,stale_ignored; got: $($would -join ',')"
     Assert-True ((Test-Path -LiteralPath (Join-Path $ext1 "deep\sentinel.txt")) -and (Test-Path -LiteralPath (Join-Path $ext2 "deep\sentinel.txt"))) "WhatIf touched a junction target"
@@ -204,11 +206,11 @@ try {
     }
     $wtList = (& git -C $repo worktree list) -join "`n"
     foreach ($gone in "stale_clean", "stale_ignored", "pfx", "landed") { Assert-True ($wtList -notmatch "wt/$gone(\s|$)") "prune: '$gone' still registered" }
-    foreach ($keep in "ahead", "ahead2", "dirty", "untracked", "recent_clean", "proc_wt", "idle30", "locked_wt", "orphan_recent", "orphan_git", "orphan_kicad", "pfx_longer", "somejob_logs", ".buildgate", ".checkcache", "loose.log") {
+    foreach ($keep in "ignored_data", "midpick", "ahead", "ahead2", "dirty", "untracked", "recent_clean", "proc_wt", "idle30", "locked_wt", "orphan_recent", "orphan_git", "orphan_kicad", "pfx_longer", "somejob_logs", ".buildgate", ".checkcache", "loose.log") {
         Assert-True (Test-Path -LiteralPath (Join-Path $wt $keep)) "prune: '$keep' must survive (HAS_WORK/ACTIVE/UNKNOWN/helper)"
     }
     $touched = @($p.Prune | ForEach-Object { $_.Name })
-    foreach ($never in "ahead", "ahead2", "dirty", "untracked", "recent_clean", "proc_wt", "pfx_longer", "orphan_recent", "idle30", "locked_wt", "orphan_git", "orphan_kicad") {
+    foreach ($never in "ignored_data", "midpick", "ahead", "ahead2", "dirty", "untracked", "recent_clean", "proc_wt", "pfx_longer", "orphan_recent", "idle30", "locked_wt", "orphan_git", "orphan_kicad") {
         Assert-True ($touched -notcontains $never) "prune: '$never' must never be a prune candidate"
     }
     Assert-True (Test-Path -LiteralPath (Join-Path $ext1 "deep\sentinel.txt")) "JUNCTION: registered-worktree prune followed a junction and deleted its target"

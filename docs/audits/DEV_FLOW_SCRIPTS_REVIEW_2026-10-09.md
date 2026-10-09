@@ -19,8 +19,8 @@ This is a review only. No code was changed. Line numbers refer to `1e6d375f`.
 | F1 | HIGH | land.ps1 | `-Target main` pushes straight to main with no required check log |
 | F2 | MED | dev_promote.ps1 | Promote has no test-evidence gate; any dev ancestor can reach main |
 | F3 | MED | land.ps1 | `-RestartMcp` calls the undefined `Run-Bounded`; always exits 1, never restarts |
-| F4 | MED | worktree_mint.ps1 | `-Remove` deletes a detached worktree whose commits exist nowhere else |
-| F5 | MED | wt_status.ps1 | `-Prune` deletes gitignored captured data, mid-rebase worktrees, and cwd-only sessions |
+| F4 | MED | worktree_mint.ps1 | `-Remove` deletes a detached worktree whose commits exist nowhere else -- FIXED (worktree_mint -Remove refuses on `rev-list HEAD --not --remotes --branches` unless -Force; lists the shas) |
+| F5 | MED | wt_status.ps1 | `-Prune` deletes gitignored captured data, mid-rebase worktrees, and cwd-only sessions -- FIXED (gitignored data under logs/ or elf_archive/ and mid-rebase/cherry-pick/merge/revert are HAS_WORK; the cwd-only case is not detectable from PS 5.1, documented in the script header) |
 | F6 | MED | main_baseline_lib.ps1 | Baseline lineage never matches in the dev flow; KNOWN/`-AllowKnownFailures` inert |
 | F7 | MED | push_verify.ps1 | `-Branch dev` (no remote prefix) checks a local ref; can print LANDED for an unpushed commit |
 | F8 | MED | commit_guard.ps1 | Never fetches; compares against a stale local origin/dev |
@@ -28,12 +28,12 @@ This is a review only. No code was changed. Line numbers refer to `1e6d375f`.
 | F10 | LOW | land.ps1 | FAIL-line parse can under-count; failedCount not reconciled |
 | F11 | LOW | land.ps1 | Any `rejected` (hook / protected branch) is retried as a non-fast-forward |
 | F12 | LOW | dev_promote.ps1, release_merge.ps1 | Post-push "verify" is tautological; a racing push gives a false failure |
-| F13 | LOW | release_merge.ps1 | Release push and tag push are not atomic; wrong default trailer model |
-| F14 | LOW | worktree_mint.ps1 | `-Remove` path handling: cwd-relative GetFullPath, wildcard Test-Path, junction unlink before git validates |
-| F15 | LOW | wt_status.ps1 | 200-commit cap on ahead list; stale header text says origin/main |
-| F16 | LOW | main_baseline.ps1 | `-Record` Start-Process arguments are unquoted (paths with spaces) |
+| F13 | LOW | release_merge.ps1 | Release push and tag push are not atomic; wrong default trailer model -- FIXED (one `git push --atomic` of release + tag, local tag dropped on rejection; default trailer Opus 5.5) |
+| F14 | LOW | worktree_mint.ps1 | `-Remove` path handling: cwd-relative GetFullPath, wildcard Test-Path, junction unlink before git validates -- FIXED (Resolve-Path -LiteralPath, linked-worktree check via `git worktree list` before any unlink) |
+| F15 | LOW | wt_status.ps1 | 200-commit cap on ahead list; stale header text says origin/main -- FIXED (no cap on the unlanded count; header names the real base) |
+| F16 | LOW | main_baseline.ps1 | `-Record` Start-Process arguments are unquoted (paths with spaces) -- FIXED (-Record quotes the run_all_checks path) |
 | F17 | LOW | commit_guard.ps1 | `-File` comma arrays, binary numstat, deleted files |
-| F18 | LOW | tests | No tests for release_merge, push_verify, commit_guard; land tests default to `-Target main` |
+| F18 | LOW | tests | No tests for release_merge, push_verify, commit_guard; land tests default to `-Target main` -- PARTLY FIXED (check_worktree_mint -Remove cases, check_release_merge.ps1, wt_status stale_ignored flipped; push_verify/commit_guard/land/dev_promote/main_baseline gaps remain) |
 
 Things checked and found sound are listed at the end.
 
@@ -275,6 +275,9 @@ Things checked and found sound are listed at the end.
   pre-quoted argument string.
 
 ### F17 LOW -- commit_guard.ps1 input edge cases
+
+No release_merge part exists in this finding; commit_guard.ps1 is handled separately and stays open here.
+
 
 - Where: `tools/commit_guard.ps1` parameters; `:93` (Test-Path on each path);
   the numstat parse.
