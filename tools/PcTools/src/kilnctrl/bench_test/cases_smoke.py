@@ -225,13 +225,14 @@ def _case_fl07(ctx: dict) -> CaseResult:
 
     try:
         data = dashboard_http_client.get_cfgfs_status(host)
+        pending_data = dashboard_http_client.get_cfgfs_format_pending(host)
     except Exception as exc:  # noqa: BLE001
         return CaseResult(
             Verdict.INCONCLUSIVE,
-            reason=f"GET /api/cfgfs failed: {exc} (record-only, plan §7 decision 6)",
+            reason=f"GET /api/cfgfs or /api/cfgfs/format_pending failed: {exc} (record-only, plan §7 decision 6)",
             observed=dict(tables, cfgfs="error: " + str(exc)),
         )
-    result = J.judge_cfgfs_state(data)
+    result = J.judge_cfgfs_state(data, pending_data)
     if result.observed is not None:
         result.observed = dict(result.observed, **tables)
     return result

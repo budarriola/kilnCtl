@@ -37,8 +37,7 @@ whole-page write. GET-merge-POST like `control_set_zone_type`, except that it
 strips the fields `zones_http_post_parse.c` omit-preserves (every other
 coupling cell, the `k`/`tau`/`deadtime` plant model, `coupling_diag_k_dc`)
 so the firmware keeps them bit-exact instead of taking GET's rounded print;
-required fields such as PID gains are still re-posted at GET's `%.4f`, the
-same residual as the other narrow writers. Refuses unless `confirm is True`,
+required fields such as PID gains are re-posted from GET's lossless `%.9g` print (tau/deadtime print at `%.1f` but are omit-preserved). Refuses unless `confirm is True`,
 refuses mid-run (precheck plus the `system_mode_gate` 409), and fails loud
 unless the cell reads back within 0.0005 with nothing else in `/api/zones`
 changed. The one before it was
