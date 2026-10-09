@@ -72,6 +72,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_USED);
 NVS_KEY_LEN_CHECK(NVS_KEY_PROFILE_REV);
 
 uint32_t s_profile_rev[PROFILES_MAX_COUNT];
+bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
 
 /* profiles_nvs is the 2026-08-13 split target for fire profiles (see
  * partitions.csv and TODO.md 8.1) -- profiles are the one section of the old
@@ -770,26 +771,72 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
  * below keys off. */
 /* nvs_load_all_from()'s no-legacy-namespace path: every slot is resolved from its
  * cfg file alone (no NVS copy, rev 0). */
+/* Reads the persisted per-slot rev array on its own (the files-only path runs
+ * when the full NVS load failed, but the rev key is often still readable).
+ * Returns true and fills floors[] when the array is KNOWN: read OK, or the
+ * namespace/key genuinely absent (nothing was ever persisted, floor 0). Returns
+ * false when it cannot be established (open error, short/failed read). */
+static bool nvs_read_rev_floors(const char *partition, uint32_t *floors)
+{
+    memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (kv_err == HAL_NOT_FOUND) {
+        return true;
+    }
+    if (kv_err != HAL_OK) {
+        return false;
+    }
+    size_t len = sizeof(uint32_t) * PROFILES_MAX_COUNT;
+    hal_status_t get_err = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, floors, &len);
+    hal_kv_close(&h);
+    if (get_err == HAL_NOT_FOUND) {
+        memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+        return true;
+    }
+    if (get_err != HAL_OK || len != sizeof(uint32_t) * PROFILES_MAX_COUNT) {
+        memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+        return false;
+    }
+    return true;
+}
+
+/* nvs_load_all_from()'s no-legacy-namespace / NVS-load-failed path: every slot is
+ * resolved from its cfg file alone. The per-slot rev floor is seeded from the
+ * persisted rev array when readable (a slot deleted earlier keeps a floor above
+ * any stale value, B1 soak design below). When the floor cannot be established
+ * and the slot has no file, saves/deletes to that slot are refused this boot
+ * (s_profile_rev_unknown) rather than writing at rev 1, which the next normal
+ * boot would delete as stale. */
 static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *out, bool *out_any_found)
 {
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
     if (strcmp(partition, PROFILES_NVS_PARTITION) != 0) {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
         return ESP_OK;
     }
+    uint32_t floors[PROFILES_MAX_COUNT];
+    bool floors_known = nvs_read_rev_floors(partition, floors);
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         profile_t resolved;
         uint32_t resolved_rev = 0;
         bool used_file = false;
         profile_t none;
         memset(&none, 0, sizeof(none));
-        if (profiles_cfg_fs_resolve(id, &none, false, 0, &resolved, &resolved_rev, &used_file)) {
+        bool have = profiles_cfg_fs_resolve(id, &none, false, floors[id], &resolved, &resolved_rev, &used_file);
+        if (have) {
             out->profiles[id] = resolved;
             profiles_slot_bitmap_set(&out->used_bitmap, id);
             if (out_any_found) {
                 *out_any_found = true; /* a file-backed profile counts as "recorded": keeps the pre-split migration from re-running over it */
             }
+            s_profile_rev[id] = resolved_rev > floors[id] ? resolved_rev : floors[id];
+        } else {
+            s_profile_rev[id] = floors[id];
+            if (!floors_known) {
+                s_profile_rev_unknown[id] = true;
+            }
         }
-        s_profile_rev[id] = resolved_rev;
     }
     return ESP_OK;
 }
@@ -929,6 +976,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     } else {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
     }
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
 
     return ESP_OK;
 }
@@ -971,6 +1019,12 @@ esp_err_t nvs_save_slot(uint8_t id)
      * here: nvs_load_all_from() already derives the used bitmap and rev from
      * the file, and a legacy NVS-only slot is migrated to a file on first
      * load. */
+    if (s_profile_rev_unknown[id]) {
+        ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u): REFUSED -- this boot's profile NVS load failed and the slot's rev floor "
+                               "could not be established; a save at rev 1 would be deleted as stale on the next normal boot. "
+                               "Reboot once NVS is healthy.", (unsigned)id);
+        return ESP_ERR_INVALID_STATE;
+    }
     uint32_t new_rev = s_profile_rev[id] + 1;
     esp_err_t ferr = profiles_cfg_fs_save(id, &s_profiles.profiles[id], new_rev);
     if (ferr != ESP_OK) {
@@ -1006,6 +1060,11 @@ esp_err_t nvs_erase_slot(uint8_t id)
      * returned (the slot stays, loudly), never half-deleted. Only then is the
      * file deleted. The rev bump is persisted so a later save into a reused
      * id always carries a rev above any stale value. */
+    if (s_profile_rev_unknown[id]) {
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): REFUSED -- rev floor unknown this boot (profile NVS load failed)",
+                 (unsigned)id);
+        return ESP_ERR_INVALID_STATE;
+    }
     uint32_t new_rev = s_profile_rev[id] + 1;
 
     hal_kv_handle_t h;

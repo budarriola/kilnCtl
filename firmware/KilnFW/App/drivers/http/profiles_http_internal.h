@@ -267,6 +267,9 @@ size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t c
  * static) only because test_profiles_cfg_fs.c inspects it directly to set up
  * fixtures without going through the full NVS load path. */
 extern uint32_t s_profile_rev[PROFILES_MAX_COUNT];
+/* true = the slot's rev floor could not be established this boot (NVS load failed and the
+ * rev array was unreadable, slot has no file): saves/deletes to it are refused. */
+extern bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
 
 /* ---- profiles_http.c -------------------------------------------------------
  * NVS persistence primitives -- profiles_catalog_http.c never calls these
