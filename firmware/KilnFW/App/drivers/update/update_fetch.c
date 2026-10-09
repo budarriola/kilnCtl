@@ -354,8 +354,22 @@ static void wr_task(void *arg)
             vTaskDelete(NULL);
             return;
         }
+        if (s_c->wr_wedged) {
+            // Review 3 LOW-1: this op was abandoned (the job already reported FAILED). Never let it leave
+            // a valid stage behind: undo a late finish (clear) or begin/write (abort).
+            if (c->cmd == WR_FINISH && c->res == UPDATE_STAGE_OK) {
+                (void)update_stage_clear(st);
+            } else if (c->cmd == WR_BEGIN || c->cmd == WR_WRITE) {
+                update_stage_upload_abort(st);
+            }
+        }
         xSemaphoreGive(s_c->wr_done);
     }
+}
+
+bool update_fetch_writer_wedged(void)
+{
+    return s_c != NULL && s_c->wr_wedged;
 }
 
 static bool wr_start(void)
@@ -605,6 +619,9 @@ static const char *stage_begin(work_t *w, int64_t clen)
         return "size_mismatch";
     }
     if (!wr_start()) {
+        if (s_c->wr_wedged) {
+            return "writer_wedged_reboot_required";
+        }
         return "no_memory";
     }
     w->sha = psa_hash_operation_init();
@@ -799,7 +816,7 @@ static void fetch_task(void *arg)
     if (s_c->wr_wedged) {
         // The writer may still be reading these; abandon them (a reboot recovers) rather than race it.
         ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
-        err = "writer_timeout";
+        err = "writer_wedged_reboot_required";
     } else {
         heap_caps_free(scratch);
         heap_caps_free(body);

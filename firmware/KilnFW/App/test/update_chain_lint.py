@@ -7,7 +7,7 @@
   MED-1: the fetch scratch is MALLOC_CAP_INTERNAL, not a PSRAM array.
   MED-2: WR_BEGIN installs update_stage_manifest_gate.
 """
-import pathlib, re, sys
+import os, pathlib, re, sys
 
 root = pathlib.Path(__file__).resolve().parent.parent / "drivers" / "update"
 http = (root / "update_http.c").read_text()
@@ -31,6 +31,12 @@ if "uint8_t scratch[" in fetch or "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);" not 
     bad.append("MED-1: fetch scratch must be a MALLOC_CAP_INTERNAL allocation")
 if "update_stage_set_gate(st, update_stage_manifest_gate" not in fetch:
     bad.append("MED-2: fetch does not install update_stage_manifest_gate")
+if "writer_wedged_reboot_required" not in fetch or "writer_timeout" in fetch:
+    bad.append("LOW-1: wedge must report writer_wedged_reboot_required (not writer_timeout)")
+if not re.search(r"if \(s_c->wr_wedged\) \{[^}]*?update_stage_clear\(st\)", fetch, re.S):
+    bad.append("LOW-1: abandoned writer must undo a late finish (update_stage_clear)")
+if "update_fetch_writer_wedged()" not in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "drivers", "update", "update_http.c")).read():
+    bad.append("LOW-1: stage routes must surface the wedged writer")
 
 for x in bad:
     print("FAIL:", x)

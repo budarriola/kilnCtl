@@ -1025,6 +1025,33 @@ static void test_manifest_gate(void)
     put_record(24, 16, 13);
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.4", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_VERSION_MISMATCH,
                "descriptor version differs from the manifest version: refused");
+
+    // LOW-6: commit compared when the manifest carries one.
+    {
+        const char *c1 = "0123456789abcdef0123456789abcdef01234567";
+        const char *c2 = "0123456789abcdef0123456789abcdef01234568";
+        update_identity_t wc = want;
+        strcpy(wc.commit, c1);
+        for (int k = 0; k < 2; k++) {
+            reset_board();
+            make_image(30000, "v1.2.3");
+            put_record(24, 16, 13);
+            update_stage_err_t e = update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 30000, "v1.2.3",
+                                                             k == 0 ? c2 : c1, STAGE_SOURCE_UPLOAD);
+            update_stage_set_gate(&g_st, update_stage_manifest_gate, &wc);
+            for (size_t off = 0; e == UPDATE_STAGE_OK && off < 30000; off += 4096) {
+                e = update_stage_upload_write(&g_st, g_img + off, 30000 - off < 4096 ? 30000 - off : 4096);
+            }
+            if (e == UPDATE_STAGE_OK) {
+                e = update_stage_upload_finish(&g_st);
+            }
+            if (k == 0) {
+                TEST_CHECK(e == UPDATE_STAGE_ERR_POLICY && !is_staged(), "LOW-6: commit differs from manifest: refused");
+            } else {
+                TEST_CHECK(e == UPDATE_STAGE_OK && is_staged(), "LOW-6: matching commit: staged");
+            }
+        }
+    }
 }
 
 void run_test_update_stage(void)

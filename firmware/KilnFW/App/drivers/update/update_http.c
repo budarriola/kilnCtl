@@ -126,6 +126,15 @@ static uint8_t *buf_get(size_t *cap)
     return ota_http_esp_chunk_buf(cap);
 }
 
+// Review 3 LOW-1: a BUSY stage with a wedged fetch writer stays busy until reboot; say so.
+static const char *stage_err_name_w(update_stage_err_t e)
+{
+    if (e == UPDATE_STAGE_ERR_BUSY && update_fetch_writer_wedged()) {
+        return "writer_wedged_reboot_required";
+    }
+    return update_stage_err_name(e);
+}
+
 static const char *http_status_for(update_stage_err_t e)
 {
     switch (e) {
@@ -349,7 +358,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: refused: %s (%u bytes)", ip, update_stage_err_name(e),
                          (unsigned)req->content_len);
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 failed_mid_body = true;
             }
         }
@@ -380,7 +389,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
                 ESP_LOGW(TAG, "stage upload from %s: write failed: %s", ip, update_stage_err_name(e));
                 response_sent = (e == UPDATE_STAGE_ERR_POLICY); // policy_gate() already sent the 409
                 if (!response_sent) {
-                    (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                    (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 }
                 failed_mid_body = true;
                 break;
@@ -392,7 +401,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             e = update_stage_upload_finish(&s_stage);
             if (e != UPDATE_STAGE_OK) {
                 ESP_LOGW(TAG, "stage upload from %s: finish failed: %s", ip, update_stage_err_name(e));
-                (void)send_error_json(req, http_status_for(e), update_stage_err_name(e));
+                (void)send_error_json(req, http_status_for(e), stage_err_name_w(e));
                 failed_mid_body = true;
             } else {
                 ESP_LOGW(TAG, "stage upload from %s: %u bytes staged and verified", ip,
@@ -426,7 +435,7 @@ static esp_err_t stage_clear_post_handler(httpd_req_t *req)
     ota_http_update_end();
     if (e != UPDATE_STAGE_OK) {
         ESP_LOGW(TAG, "stage clear from %s: failed: %s", ip, update_stage_err_name(e));
-        return send_error_json(req, http_status_for(e), update_stage_err_name(e));
+        return send_error_json(req, http_status_for(e), stage_err_name_w(e));
     }
     ESP_LOGW(TAG, "stage clear from %s: stage header erased", ip);
     httpd_resp_set_type(req, "application/json");
@@ -440,7 +449,10 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     update_stage_info_t info = { 0 };
     update_stage_err_t e = update_stage_get_status(&s_stage, buf, buf_cap, &info);
     if (e != UPDATE_STAGE_OK && e != UPDATE_STAGE_ERR_BUSY && info.reason == NULL) {
-        return send_error_json(req, http_status_for(e), update_stage_err_name(e));
+        return send_error_json(req, http_status_for(e), stage_err_name_w(e));
+    }
+    if (update_fetch_writer_wedged()) {
+        info.reason = "writer_wedged_reboot_required";
     }
 
     char sha_hex[2 * STAGE_SHA256_LEN + 1] = "";

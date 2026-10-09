@@ -362,9 +362,13 @@ update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, con
                                               const update_image_id_t *id)
 {
     (void)semver;
-    (void)commit;
     const update_identity_t *want = ctx;
     if (want == NULL || id == NULL) {
+        return UPDATE_STAGE_ERR_POLICY;
+    }
+    // Review 3 LOW-6: when the manifest carries a commit, the stager's declared commit must equal it.
+    if (want->commit[0] != '\0' &&
+        (commit == NULL || strncmp(commit, want->commit, STAGE_COMMIT_HEX_LEN) != 0)) {
         return UPDATE_STAGE_ERR_POLICY;
     }
     if (id->zones_cfg_version != want->zones_cfg_version || id->kilnlink_version != want->kilnlink_version ||
