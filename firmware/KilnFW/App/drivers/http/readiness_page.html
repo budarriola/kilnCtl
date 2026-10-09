@@ -202,8 +202,10 @@ but it will not stop you.</p>
       document.getElementById('items').innerHTML = '<p class="empty">Could not load readiness data.</p>';
     });
   }
-  poll();
-  setInterval(poll, 5000);
+  /* Deferred: app.js is <script defer>; render() needs window.kcEscapeHtml. */
+  function bootPage() { poll(); setInterval(poll, 5000); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPage);
+  else bootPage();
 })();
 </script>
 </body>

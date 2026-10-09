@@ -1189,6 +1189,8 @@ document.getElementById('repoSaveBtn').addEventListener('click', function () {
 document.getElementById('repoResetBtn').addEventListener('click', function () { saveRepo(''); });
 
 /* ---- Boot ------------------------------------------------------------------ */
+/* Deferred: app.js is <script defer>, so window.kc* helpers do not exist while this inline script runs. */
+function bootPage() {
 loadInterlock();
 setInterval(loadInterlock, 15000);
 pollEspStatus();
@@ -1198,6 +1200,9 @@ setInterval(pollSafetyBuildInfo, 3000);
 loadStageStatus();
 loadRepo();
 loadGh();
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPage);
+else bootPage();
 
 (function () {
   var btn = document.getElementById('themeBtn');

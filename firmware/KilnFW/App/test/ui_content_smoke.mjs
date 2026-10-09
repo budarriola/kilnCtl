@@ -34,6 +34,9 @@ for (let i = 2; i < process.argv.length; i++) if (process.argv[i] === '--dir') D
 
 const TIMEOUT = 10000;
 const fetchT = (u, o = {}) => fetch(u, { ...o, signal: AbortSignal.timeout(TIMEOUT) });
+// Race pass: app.js/nav.js/commissioning_shared.js are held back this long so any inline
+// script calling window.kc* helpers at parse time (they come from the deferred app.js) throws.
+let scriptDelayMs = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function findChrome() {
@@ -102,6 +105,7 @@ function startServer() {
   const server = createServer(async (req, res) => {
     try {
       const p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+      if (p === '/app.js' || p === '/nav.js' || p === '/commissioning_shared.js') await sleep(scriptDelayMs);
       if (p === '/favicon.ico') { res.writeHead(204); res.end(); return; } // browser probe, not a page asset
       if (p.startsWith('/api/')) {
         // Unmocked /api GETs answer a valid empty object so background polls do not
@@ -140,7 +144,7 @@ class Cdp {
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
-  waitFor(method, ms = 15000) {
+  waitFor(method, ms = 30000) {
     return new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`timed out waiting for ${method}`)), ms);
       this.handlers.push((m, p) => { if (m === method) { clearTimeout(t); resolve(p); } });
@@ -150,7 +154,7 @@ class Cdp {
 
 // Load one page, collect console errors, run `probe` (an in-page expression returning
 // an array of failure strings), return failures.
-async function checkPage(cdpPort, base, page, probe, settleMs = 1200) {
+async function checkPage(cdpPort, base, page, probe, settleMs = 2500, ignore404 = false) {
   const tab = await (await fetchT(`http://127.0.0.1:${cdpPort}/json/new?about:blank`, { method: 'PUT' })).json();
   const ws = await new Promise((res, rej) => {
     const w = new WebSocket(tab.webSocketDebuggerUrl);
@@ -162,7 +166,7 @@ async function checkPage(cdpPort, base, page, probe, settleMs = 1200) {
   cdp.handlers.push((m, p) => {
     if (m === 'Runtime.exceptionThrown') errors.push('uncaught: ' + (p.exceptionDetails.exception?.description || p.exceptionDetails.text));
     else if (m === 'Runtime.consoleAPICalled' && p.type === 'error') errors.push('console.error: ' + p.args.map((a) => a.value ?? a.description).join(' '));
-    else if (m === 'Log.entryAdded' && p.entry.level === 'error') errors.push('log: ' + p.entry.text + ' ' + (p.entry.url || ''));
+    else if (m === 'Log.entryAdded' && p.entry.level === 'error' && !(ignore404 && /\b404\b/.test(p.entry.text))) errors.push('log: ' + p.entry.text + ' ' + (p.entry.url || ''));
   });
   try {
     await cdp.send('Page.enable'); await cdp.send('Runtime.enable'); await cdp.send('Log.enable');
@@ -273,7 +277,7 @@ async function main() {
   const profile = await mkdtemp(path.join(os.tmpdir(), 'kc-ui-sweep-profile-smoke-'));
   const chrome = spawn(chromePath, [`--remote-debugging-port=${cdpPort}`, '--headless=new', '--disable-gpu', '--no-first-run',
     '--no-default-browser-check', '--disable-extensions', `--user-data-dir=${profile}`], { stdio: 'ignore' });
-  const wd = setTimeout(() => { console.log('ui_content_smoke: OVERALL TIMEOUT'); killTreeSync(chrome.pid); process.exit(4); }, 120000);
+  const wd = setTimeout(() => { console.log('ui_content_smoke: OVERALL TIMEOUT'); killTreeSync(chrome.pid); process.exit(4); }, 200000);
   wd.unref();
   const { server, port } = await startServer();
   const base = `http://127.0.0.1:${port}`;
@@ -296,6 +300,20 @@ async function main() {
       console.log(`ui_content_smoke: ${page}: ${f.length ? f.length + ' failure(s)' : 'ok'}`);
       failures = failures.concat(f);
     }
+    // Race pass: EVERY *_page.html with the shared scripts delayed. Inline scripts that call
+    // window.kc* helpers (defined by the deferred app.js) at parse time throw; any uncaught page
+    // error / console error fails. (A call wrapped in try/catch is not seen here; fix by review.)
+    const pages = walkFiles(DIR).filter((f) => /_page\.html$/.test(f)).map((f) => path.basename(f));
+    if (pages.length < 10) throw new Error(`only ${pages.length} *_page.html found; scan is broken`);
+    scriptDelayMs = 1500;
+    for (let i = 0; i < pages.length; i += 6) {
+      const res = await Promise.all(pages.slice(i, i + 6).map((p) => checkPage(cdpPort, base, p, p === 'readiness_page.html' ? READY_PROBE : '[]', scriptDelayMs + 1500, true)));
+      res.forEach((f, j) => {
+        console.log(`ui_content_smoke: ${pages[i + j]} (scripts delayed ${scriptDelayMs} ms): ${f.length ? f.length + ' failure(s)' : 'ok'}`);
+        failures = failures.concat(f);
+      });
+    }
+    scriptDelayMs = 0;
   } catch (e) {
     console.log(`ui_content_smoke: HARNESS_ERROR ${e && e.message}`);
     process.exitCode = 3;
@@ -309,7 +327,8 @@ async function main() {
     console.log(`ui_content_smoke: ${failures.length} content checks FAILED`);
     process.exit(1);
   }
-  console.log('ui_content_smoke: All 4 page content checks passed.');
+  console.log('ui_content_smoke: All page content checks passed.');
+  process.exit(0);
 }
 // Exit explicitly once cleanup is done: a lingering handle (keep-alive CDP/HTTP sockets,
 // the spawned Chrome handle) otherwise keeps the loop alive until the 120 s watchdog fires (exit 4).

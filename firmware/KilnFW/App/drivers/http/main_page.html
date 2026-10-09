@@ -4581,6 +4581,8 @@ function reloadAfterLoginPickers() {
 window.addEventListener('kc-login', reloadAfterLoginPickers);
 window.addEventListener('kc-logout', hideAuxDash);
 
+/* Deferred: app.js is <script defer>, so window.kc* helpers do not exist while this inline script runs. */
+function bootPage() {
 loadAuxDash();
 loadZones().then(function () {
   loadProfileList().then(function () {
@@ -4599,6 +4601,9 @@ loadZones().then(function () {
 setInterval(pollHistory, 15000); // history only gains a new sample every 30s -- no need to poll faster
 pollAutotune();
 setInterval(pollAutotune, 10000); // matches AUTOTUNE_ENGINE_SAMPLE_PERIOD_S -- the trace can't move faster than that
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootPage);
+else bootPage();
 window.addEventListener('resize', function () { if (wasIdle) { drawIdleDots(lastChannelsData); } else { pollHistory(); } });
 
 // UI_PLAN.md item 7: re-render immediately on a °C/°F toggle instead of
