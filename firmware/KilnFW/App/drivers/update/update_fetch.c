@@ -41,6 +41,7 @@
 #include "update_release.h"
 #include "update_settings.h"
 #include "update_stage.h"
+#include "update_wr_arb.h"
 #include "update_url.h"
 #include "zones_config_json.h"
 
@@ -145,6 +146,7 @@ typedef struct {
     TaskHandle_t wr_task;     // stack-margin slot
     SemaphoreHandle_t wr_req;
     SemaphoreHandle_t wr_done;
+    volatile update_wr_arb_t wr_arb; // guarded by s_wr_mux; see update_wr_arb.h
     volatile bool wr_wedged;  // a writer op timed out: its task/buffers are abandoned until reboot
     wr_cmd_t wr;
 } fetch_ctx_t;
@@ -287,6 +289,7 @@ const update_image_id_t g_update_image_id = {
     .zones_cfg_version = ZONES_CFG_VERSION,
     .kilnlink_version = KILNLINK_PROTOCOL_VERSION,
     .uart_version = UART_PROTOCOL_VERSION,
+    .commit = FW_GIT_COMMIT,
     .check = UPDATE_IMAGE_ID_MAGIC ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
 };
 
@@ -327,6 +330,8 @@ void update_fetch_running_identity(update_identity_t *r, const char *cand_commit
 }
 
 // ---- flash writer task -----------------------------------------------------------------------
+static portMUX_TYPE s_wr_mux = portMUX_INITIALIZER_UNLOCKED;
+
 static void wr_task(void *arg)
 {
     (void)arg;
@@ -354,13 +359,20 @@ static void wr_task(void *arg)
             vTaskDelete(NULL);
             return;
         }
-        if (s_c->wr_wedged) {
+        // Review 5 L1: one critical section decides whether the caller already timed out, so a finish in
+        // the same tick as the timeout is either collected by the caller or undone here, never both
+        // skipped.
+        portENTER_CRITICAL(&s_wr_mux);
+        const bool abandoned = update_wr_arb_writer_done(&s_c->wr_arb);
+        portEXIT_CRITICAL(&s_wr_mux);
+        if (abandoned) {
             // Review 3 LOW-1: this op was abandoned (the job already reported FAILED). Never let it leave
-            // a valid stage behind: undo a late finish (clear) or begin/write (abort).
+            // a valid stage behind: undo a late finish (clear) or begin/write (abort). The abort is scoped
+            // to the fetch's own upload (review 5 L3) so it cannot kill a newer hand upload.
             if (c->cmd == WR_FINISH && c->res == UPDATE_STAGE_OK) {
                 (void)update_stage_clear(st);
             } else if (c->cmd == WR_BEGIN || c->cmd == WR_WRITE) {
-                update_stage_upload_abort(st);
+                update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB);
             }
         }
         xSemaphoreGive(s_c->wr_done);
@@ -414,13 +426,23 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
     if (s_c->wr_wedged) {
         return UPDATE_STAGE_ERR_FLASH;
     }
+    portENTER_CRITICAL(&s_wr_mux);
+    update_wr_arb_issue(&s_c->wr_arb);
+    portEXIT_CRITICAL(&s_wr_mux);
     xSemaphoreGive(s_c->wr_req);
     if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) != pdTRUE) {
-        // Wedged flash op. Never race the writer: abandon its task, semaphores and the buffers it may
-        // still touch (see fetch_task), fail the job and let the caller release the update claim.
-        s_c->wr_wedged = true;
-        ESP_LOGE(TAG, "flash writer op %d timed out after %u ms", (int)cmd, (unsigned)FETCH_WR_TIMEOUT_MS);
-        return UPDATE_STAGE_ERR_FLASH;
+        portENTER_CRITICAL(&s_wr_mux);
+        const bool wedged = update_wr_arb_caller_timeout(&s_c->wr_arb);
+        portEXIT_CRITICAL(&s_wr_mux);
+        if (wedged) {
+            // Wedged flash op. Never race the writer: abandon its task, semaphores and the buffers it may
+            // still touch (see fetch_task), fail the job and let the caller release the update claim.
+            s_c->wr_wedged = true;
+            ESP_LOGE(TAG, "flash writer op %d timed out after %u ms", (int)cmd, (unsigned)FETCH_WR_TIMEOUT_MS);
+            return UPDATE_STAGE_ERR_FLASH;
+        }
+        // Review 5 L1: the writer finished in the same instant; its give is (about to be) posted.
+        (void)xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000));
     }
     return s_c->wr.res;
 }

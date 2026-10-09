@@ -451,9 +451,8 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     if (e != UPDATE_STAGE_OK && e != UPDATE_STAGE_ERR_BUSY && info.reason == NULL) {
         return send_error_json(req, http_status_for(e), stage_err_name_w(e));
     }
-    if (update_fetch_writer_wedged()) {
-        info.reason = "writer_wedged_reboot_required";
-    }
+    const bool wedged = update_fetch_writer_wedged();
+    info.reason = update_stage_status_reason(&info, wedged);
 
     char sha_hex[2 * STAGE_SHA256_LEN + 1] = "";
     const bool hdr_ok = (info.hdr_status == STAGE_HDR_OK);
@@ -462,12 +461,12 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
     }
     // semver is validated charset (digits, '.', '-', '+', alnum) and commit is
     // lowercase hex, by stage_header_decode(); no escaping needed.
-    char json[576];
+    char json[608];
     int n = snprintf(json, sizeof(json),
                      "{\"ok\":true,\"phase\":\"%s\",\"busy\":%s,\"bytes_done\":%u,\"bytes_total\":%u,"
                      "\"staged\":%s,\"reason\":\"%s\",\"header\":\"%s\",\"capacity\":%u,"
                      "\"image_length\":%u,\"state\":\"%s\",\"semver\":\"%s\",\"commit\":\"%s\","
-                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s}",
+                     "\"sha256\":\"%s\",\"source\":%u,\"boot_auto_clear\":\"%s\",\"boot_auto_cleared\":%s,\"fetch_writer_wedged\":%s}",
                      update_stage_phase_name(info.phase), info.busy ? "true" : "false",
                      (unsigned)info.bytes_done, (unsigned)info.bytes_total, info.staged ? "true" : "false",
                      info.reason ? info.reason : "", stage_hdr_status_name(info.hdr_status),
@@ -475,7 +474,7 @@ static esp_err_t stage_status_get_handler(httpd_req_t *req)
                      hdr_ok ? stage_state_name(info.state) : "", hdr_ok ? info.semver : "",
                      hdr_ok ? info.commit : "", sha_hex, hdr_ok ? (unsigned)info.source : 0u,
                      update_stale_result_name(s_last_auto_clear),
-                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false");
+                     update_stale_result_cleared(s_last_auto_clear) ? "true" : "false", wedged ? "true" : "false");
     return ota_http_send_json_clamped(req, json, n, sizeof(json));
 }
 

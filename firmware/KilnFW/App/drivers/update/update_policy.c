@@ -219,12 +219,16 @@ uint32_t update_image_id_check(const update_image_id_t *id)
     return id->magic ^ id->zones_cfg_version ^ id->kilnlink_version ^ id->uart_version ^ 0xA5A5A5A5u;
 }
 
-void update_image_id_make(update_image_id_t *id, uint32_t zones, uint32_t kl, uint32_t uart)
+void update_image_id_make(update_image_id_t *id, uint32_t zones, uint32_t kl, uint32_t uart, const char *commit)
 {
+    memset(id, 0, sizeof(*id));
     id->magic = UPDATE_IMAGE_ID_MAGIC;
     id->zones_cfg_version = zones;
     id->kilnlink_version = kl;
     id->uart_version = uart;
+    if (commit != NULL) {
+        memcpy(id->commit, commit, strnlen(commit, UPDATE_IMAGE_ID_COMMIT_LEN - 1u));
+    }
     id->check = update_image_id_check(id);
 }
 
@@ -247,7 +251,9 @@ bool update_image_id_find(const uint8_t *head, size_t len, size_t from, update_i
         id.zones_cfg_version = rd32le(head + o + 4);
         id.kilnlink_version = rd32le(head + o + 8);
         id.uart_version = rd32le(head + o + 12);
-        id.check = rd32le(head + o + 16);
+        memcpy(id.commit, head + o + 16, UPDATE_IMAGE_ID_COMMIT_LEN);
+        id.commit[UPDATE_IMAGE_ID_COMMIT_LEN - 1u] = '\0';
+        id.check = rd32le(head + o + 32);
         if (id.check == update_image_id_check(&id) && id.zones_cfg_version != 0 && id.kilnlink_version != 0 &&
             id.uart_version != 0) {
             *out = id;

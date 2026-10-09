@@ -9,6 +9,7 @@
 #include "test_common.h"
 
 #include "../drivers/update/update_stage.h"
+#include "../drivers/update/update_wr_arb.h"
 
 #define PART_SIZE (4096u + 98304u) // header sector + 96 KB image area (1.5 erase units)
 #define CAP 98304u
@@ -914,7 +915,7 @@ static void test_install_gate(void)
     make_image(30000, "v1.2.3");
     {
         update_image_id_t id;
-        update_image_id_make(&id, 24, 16, 13);
+        update_image_id_make(&id, 24, 16, 13, "abc1234");
         memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM, &id, sizeof(id));
     }
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.have_id &&
@@ -978,10 +979,10 @@ static void test_gate_refusal_keeps_stage(void)
 }
 
 // MED-2: the GitHub fetch installs update_stage_manifest_gate with release.json's identity.
-static void put_record(uint32_t z, uint32_t k, uint32_t u)
+static void put_record_c(uint32_t z, uint32_t k, uint32_t u, const char *commit)
 {
     update_image_id_t id;
-    update_image_id_make(&id, z, k, u);
+    update_image_id_make(&id, z, k, u, commit);
     memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM, &id, sizeof(id));
 }
 
@@ -996,24 +997,24 @@ static void test_manifest_gate(void)
 
     reset_board();
     make_image(30000, "v1.2.3");
-    put_record(24, 16, 13);
+    put_record_c(24, 16, 13, "abc1234");
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_OK,
                "matching record and version: staged");
 
     reset_board();
     make_image(30000, "v1.2.3");
-    put_record(23, 16, 13);
+    put_record_c(23, 16, 13, "abc1234");
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_POLICY &&
                    !is_staged(),
                "zones_cfg differs from the manifest: refused, stage blank");
     reset_board();
     make_image(30000, "v1.2.3");
-    put_record(24, 15, 13);
+    put_record_c(24, 15, 13, "abc1234");
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_POLICY,
                "kilnlink differs: refused");
     reset_board();
     make_image(30000, "v1.2.3");
-    put_record(24, 16, 12);
+    put_record_c(24, 16, 12, "abc1234");
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_POLICY,
                "uart differs: refused");
     reset_board();
@@ -1022,22 +1023,34 @@ static void test_manifest_gate(void)
                "image with no identity record: refused");
     reset_board();
     make_image(30000, "v1.2.3");
-    put_record(24, 16, 13);
+    put_record_c(24, 16, 13, "abc1234");
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.4", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_VERSION_MISMATCH,
                "descriptor version differs from the manifest version: refused");
 
-    // LOW-6: commit compared when the manifest carries one.
+    // Review 5 M1: the IMAGE embedded commit is compared with the manifest commit. The stager declared
+    // commit is what production passes (the manifest own), so it is always the matching one here.
     {
         const char *c1 = "0123456789abcdef0123456789abcdef01234567";
-        const char *c2 = "0123456789abcdef0123456789abcdef01234568";
         update_identity_t wc = want;
         strcpy(wc.commit, c1);
-        for (int k = 0; k < 2; k++) {
+        static const struct {
+            const char *img_commit;
+            bool ok;
+            const char *what;
+        } cases[] = {
+            { "0123456", true, "M1: image commit is a prefix of the manifest commit: staged" },
+            { "0123456789AB", true, "M1: prefix compare is case-insensitive" },
+            { "0123457", false, "M1: image built from another commit than the manifest names: refused" },
+            { "", false, "M1: image with no commit, manifest declares one: refused (fail closed)" },
+            { "unknown", false, "M1: image built without git (unknown): refused" },
+            { "012345", false, "M1: image commit shorter than 7 chars: refused" },
+        };
+        for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
             reset_board();
             make_image(30000, "v1.2.3");
-            put_record(24, 16, 13);
-            update_stage_err_t e = update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 30000, "v1.2.3",
-                                                             k == 0 ? c2 : c1, STAGE_SOURCE_UPLOAD);
+            put_record_c(24, 16, 13, cases[k].img_commit);
+            update_stage_err_t e = update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 30000, "v1.2.3", c1,
+                                                             STAGE_SOURCE_GITHUB);
             update_stage_set_gate(&g_st, update_stage_manifest_gate, &wc);
             for (size_t off = 0; e == UPDATE_STAGE_OK && off < 30000; off += 4096) {
                 e = update_stage_upload_write(&g_st, g_img + off, 30000 - off < 4096 ? 30000 - off : 4096);
@@ -1045,18 +1058,75 @@ static void test_manifest_gate(void)
             if (e == UPDATE_STAGE_OK) {
                 e = update_stage_upload_finish(&g_st);
             }
-            if (k == 0) {
-                TEST_CHECK(e == UPDATE_STAGE_ERR_POLICY && !is_staged(), "LOW-6: commit differs from manifest: refused");
+            if (cases[k].ok) {
+                TEST_CHECK(e == UPDATE_STAGE_OK && is_staged(), cases[k].what);
             } else {
-                TEST_CHECK(e == UPDATE_STAGE_OK && is_staged(), "LOW-6: matching commit: staged");
+                TEST_CHECK(e == UPDATE_STAGE_ERR_POLICY && !is_staged(), cases[k].what);
             }
         }
+        // A manifest without a commit does not demand one of the image.
+        reset_board();
+        make_image(30000, "v1.2.3");
+        put_record_c(24, 16, 13, "");
+        TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_OK,
+                   "M1: manifest without a commit: image commit not required");
     }
+}
+
+// Review 5 L1: the writer-op / timeout race is decided by one arbiter, in either order.
+static void test_wr_arb(void)
+{
+    TEST_SECTION("update_wr_arb -- writer finish vs caller timeout (review 5 L1)");
+    update_wr_arb_t a;
+    update_wr_arb_issue(&a);
+    TEST_CHECK(!update_wr_arb_writer_done(&a) && update_wr_arb_caller_timeout(&a) == false,
+               "L1: writer finished first (same tick as the timeout): caller sees completion, not wedged");
+    update_wr_arb_issue(&a);
+    TEST_CHECK(update_wr_arb_caller_timeout(&a) && update_wr_arb_writer_done(&a),
+               "L1: caller timed out first: writer is told it was abandoned and must clean up");
+    update_wr_arb_issue(&a);
+    TEST_CHECK(!update_wr_arb_writer_done(&a), "L1: finish on a pending op is not abandoned");
+}
+
+// Review 5 L2: the wedge replaces only the benign "blank" reason of an unstaged stage.
+static void test_status_reason(void)
+{
+    TEST_SECTION("update_stage -- status reason under a wedged writer (review 5 L2)");
+    update_stage_info_t i;
+    memset(&i, 0, sizeof(i));
+    i.reason = "blank";
+    TEST_CHECK(strcmp(update_stage_status_reason(&i, true), "writer_wedged_reboot_required") == 0,
+               "L2: wedged + blank stage: wedge reason shown");
+    TEST_CHECK(strcmp(update_stage_status_reason(&i, false), "blank") == 0, "L2: not wedged: reason untouched");
+    i.reason = "sha_mismatch";
+    TEST_CHECK(strcmp(update_stage_status_reason(&i, true), "sha_mismatch") == 0, "L2: a real fault reason is not masked");
+    i.reason = "";
+    i.staged = true;
+    TEST_CHECK(strcmp(update_stage_status_reason(&i, true), "") == 0, "L2: a valid stage is not reported as wedged");
+}
+
+// Review 5 L3: an abandoned fetch writer abort must not kill a newer hand upload.
+static void test_abort_owned(void)
+{
+    TEST_SECTION("update_stage -- owned abort (review 5 L3)");
+    reset_board();
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 30000, "v1.2.3", NULL, STAGE_SOURCE_UPLOAD) ==
+                   UPDATE_STAGE_OK,
+               "hand upload begun");
+    TEST_CHECK(!update_stage_upload_abort_owned(&g_st, STAGE_SOURCE_GITHUB) && g_st.phase == UPDATE_STAGE_UPLOADING,
+               "L3: abort scoped to the fetch source leaves a hand upload running");
+    TEST_CHECK(update_stage_upload_abort_owned(&g_st, STAGE_SOURCE_UPLOAD) && g_st.phase == UPDATE_STAGE_IDLE,
+               "L3: the owner can abort its own upload");
+    TEST_CHECK(!update_stage_upload_abort_owned(&g_st, STAGE_SOURCE_UPLOAD), "L3: nothing active: false");
 }
 
 void run_test_update_stage(void)
 {
     test_manifest_gate();
+    test_wr_arb();
+    test_status_reason();
+    test_abort_owned();
     test_sha_reference();
     test_happy_path();
     test_semver_and_commit_args();

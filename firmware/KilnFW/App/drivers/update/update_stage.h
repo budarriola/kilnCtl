@@ -44,7 +44,7 @@ extern "C" {
 #endif
 
 #define UPDATE_STAGE_ERASE_UNIT 65536u   // erase-ahead granularity (multiple of the 4 KB sector)
-#define UPDATE_STAGE_HEAD_LEN 320u       // image bytes buffered before the first flash write (through app_desc and the identity record after it)
+#define UPDATE_STAGE_HEAD_LEN 328u       // image bytes buffered before the first flash write (through app_desc and the identity record after it)
 #define UPDATE_STAGE_APP_DESC_SIZE 256u
 #define UPDATE_STAGE_IMAGE_ID_FROM (UPDATE_STAGE_APP_DESC_OFFSET + UPDATE_STAGE_APP_DESC_SIZE) // identity record scan start
 #define UPDATE_STAGE_ESP32S3_CHIP_ID 9u
@@ -186,6 +186,12 @@ update_stage_err_t update_stage_upload_finish(update_stage_t *st);
 // Ends a failed/cancelled upload. If the header was already erased (checks
 // passed), the stage stays blank; safe to call when no upload is active.
 void update_stage_upload_abort(update_stage_t *st);
+// Review 5 L3: abort only when the current upload was begun with `source` (an abandoned fetch writer must
+// not kill a newer hand upload). true = aborted something.
+bool update_stage_upload_abort_owned(update_stage_t *st, stage_source_t source);
+// Review 5 L2: the reason the status route reports. A wedged fetch writer replaces only the benign
+// "blank" reason of a stage that is not staged; a valid stage or a real fault reason is never masked.
+const char *update_stage_status_reason(const update_stage_info_t *info, bool writer_wedged);
 
 // Erases the header sector (the image area is left; without a header it is
 // unreachable). Idempotent.

@@ -111,19 +111,21 @@ update_decision_t update_policy_decide_typed(const update_identity_t *running, c
 // version is treated as unknown and needs force plus confirm == "unversioned". Signing plays no part.
 // Identity record the firmware embeds in its own image (a const in .rodata_custom_desc, the section the
 // linker places directly after esp_app_desc_t), so a hand upload's schema versions come from the image
-// itself rather than from headers the uploader may omit. check = magic ^ the three versions ^ 0xA5A5A5A5.
-#define UPDATE_IMAGE_ID_MAGIC 0x4B494449u
-#define UPDATE_IMAGE_ID_SIZE 20u
+// itself rather than from headers the uploader may omit. check = magic ^ the three versions ^ 0xA5A5A5A5 (the commit is not covered).
+#define UPDATE_IMAGE_ID_MAGIC 0x32444B49u /* layout v2 (adds commit); v1 magic was 0x4B494449 */
+#define UPDATE_IMAGE_ID_SIZE 36u
+#define UPDATE_IMAGE_ID_COMMIT_LEN 16u /* NUL-padded short build commit (FW_GIT_COMMIT) */
 typedef struct {
     uint32_t magic;
     uint32_t zones_cfg_version;
     uint32_t kilnlink_version;
     uint32_t uart_version;
+    char commit[UPDATE_IMAGE_ID_COMMIT_LEN]; // build commit, short hex, NUL-padded; "" if unknown
     uint32_t check;
 } update_image_id_t;
 
 uint32_t update_image_id_check(const update_image_id_t *id);
-void update_image_id_make(update_image_id_t *id, uint32_t zones, uint32_t kl, uint32_t uart);
+void update_image_id_make(update_image_id_t *id, uint32_t zones, uint32_t kl, uint32_t uart, const char *commit);
 // Scans head[from .. len) at 4-byte steps for a valid record (little-endian words). false = none.
 bool update_image_id_find(const uint8_t *head, size_t len, size_t from, update_image_id_t *out);
 

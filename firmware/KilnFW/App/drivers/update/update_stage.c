@@ -362,14 +362,28 @@ update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, con
                                               const update_image_id_t *id)
 {
     (void)semver;
+    (void)commit; // the stager's declared commit IS the manifest's: comparing it proves nothing (review 5 M1)
     const update_identity_t *want = ctx;
     if (want == NULL || id == NULL) {
         return UPDATE_STAGE_ERR_POLICY;
     }
-    // Review 3 LOW-6: when the manifest carries a commit, the stager's declared commit must equal it.
-    if (want->commit[0] != '\0' &&
-        (commit == NULL || strncmp(commit, want->commit, STAGE_COMMIT_HEX_LEN) != 0)) {
-        return UPDATE_STAGE_ERR_POLICY;
+    // Review 3 LOW-6 / review 5 M1: when the manifest carries a commit, the commit embedded in the IMAGE
+    // must be a prefix of it (the build embeds the short hash). An image with no usable commit
+    // ("", "unknown", non-hex, under 7 chars) fails closed.
+    if (want->commit[0] != '\0') {
+        const size_t n = strnlen(id->commit, UPDATE_IMAGE_ID_COMMIT_LEN);
+        if (n < 7u || n > STAGE_COMMIT_HEX_LEN) {
+            return UPDATE_STAGE_ERR_POLICY;
+        }
+        for (size_t i = 0; i < n; i++) {
+            char a = id->commit[i];
+            char b = want->commit[i];
+            a = (a >= 'A' && a <= 'F') ? (char)(a + 32) : a;
+            b = (b >= 'A' && b <= 'F') ? (char)(b + 32) : b;
+            if (!((a >= '0' && a <= '9') || (a >= 'a' && a <= 'f')) || a != b) {
+                return UPDATE_STAGE_ERR_POLICY;
+            }
+        }
     }
     if (id->zones_cfg_version != want->zones_cfg_version || id->kilnlink_version != want->kilnlink_version ||
         id->uart_version != want->uart_version) {
@@ -443,6 +457,29 @@ void update_stage_upload_abort(update_stage_t *st)
         sha_abort(st);
         set_phase(st, UPDATE_STAGE_IDLE);
     }
+}
+
+bool update_stage_upload_abort_owned(update_stage_t *st, stage_source_t source)
+{
+    if (st == NULL || st->source != source) {
+        return false;
+    }
+    if (st->phase != UPDATE_STAGE_UPLOADING && st->phase != UPDATE_STAGE_VERIFYING) {
+        return false;
+    }
+    update_stage_upload_abort(st);
+    return true;
+}
+
+const char *update_stage_status_reason(const update_stage_info_t *info, bool writer_wedged)
+{
+    if (info == NULL) {
+        return "";
+    }
+    if (writer_wedged && !info->staged && info->reason != NULL && strcmp(info->reason, "blank") == 0) {
+        return "writer_wedged_reboot_required";
+    }
+    return info->reason;
 }
 
 update_stage_err_t update_stage_clear(update_stage_t *st)
