@@ -166,7 +166,7 @@ class SuiteTest(unittest.TestCase):
         # SP-04 and LCD-04 are OT-B01's observers and deliberately sit
         # inside the OTA block (right after OT-B01), so they are not part of
         # the "everything else runs before the OTA block" set.
-        _ot_observers = ("SP-04", "LCD-04")
+        _ot_observers = ("SP-04", "LCD-04", "WEB-SAF-03", "WEB-RDY-04", "WEB-WIZ-11", "WEB-SET-04")
         non_ot_ids = [c for c in ids if not c.startswith("OT-") and c not in _ot_observers]
         self.assertLess(max(idx[c] for c in non_ot_ids), min(idx[c] for c in ot_ids))
         # SK-02's own dependency wiring, and each SP observer sits right
@@ -208,6 +208,12 @@ class SuiteTest(unittest.TestCase):
             "WEB-KCFG-02", "WEB-KCFG-03",
             "WEB-DASH-13",
             "WEB-DIAG-07", "WEB-DIAG-08",
+            "WEB-SAF-02", "WEB-SAF-03", "WEB-SAF-04",
+            "WEB-COMM-02", "WEB-COMM-03", "WEB-COMM-04", "WEB-COMM-05", "WEB-COMM-06", "WEB-COMM-07",
+            "WEB-RDY-02", "WEB-RDY-03", "WEB-RDY-04",
+            "WEB-WIZ-02", "WEB-WIZ-03", "WEB-WIZ-04", "WEB-WIZ-05", "WEB-WIZ-06", "WEB-WIZ-07",
+            "WEB-WIZ-08", "WEB-WIZ-09", "WEB-WIZ-10", "WEB-WIZ-11",
+            "WEB-SET-02", "WEB-SET-03", "WEB-SET-04", "WEB-DISP-02", "WEB-DISP-03", "WEB-DISP-04",
             "WEB-OTA-01", "WEB-OTA-02",
             "WEB-SEC-03", "WEB-LOG-02",
             "WEB-X-01", "WEB-X-02",
@@ -246,34 +252,6 @@ _KNOWN_UNIMPLEMENTED = frozenset({
     "LCD-20",
     "OT-B02",
     "OT-E11",
-    "WEB-COMM-02",
-    "WEB-COMM-03",
-    "WEB-COMM-04",
-    "WEB-COMM-05",
-    "WEB-COMM-06",
-    "WEB-COMM-07",
-    "WEB-DISP-02",
-    "WEB-DISP-03",
-    "WEB-DISP-04",
-    "WEB-RDY-02",
-    "WEB-RDY-03",
-    "WEB-RDY-04",
-    "WEB-SAF-02",
-    "WEB-SAF-03",
-    "WEB-SAF-04",
-    "WEB-SET-02",
-    "WEB-SET-03",
-    "WEB-SET-04",
-    "WEB-WIZ-02",
-    "WEB-WIZ-03",
-    "WEB-WIZ-04",
-    "WEB-WIZ-05",
-    "WEB-WIZ-06",
-    "WEB-WIZ-07",
-    "WEB-WIZ-08",
-    "WEB-WIZ-09",
-    "WEB-WIZ-10",
-    "WEB-WIZ-11",
     "WEB-ZONE-11",
 })
 

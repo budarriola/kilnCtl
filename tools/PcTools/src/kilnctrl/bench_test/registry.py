@@ -352,6 +352,10 @@ get_case("WEB-DASH-06").depends_on = "HP-04"
 get_case("WEB-ZONE-06").depends_on = "AT-03"
 get_case("WEB-ZONE-08").depends_on = "AT-05"
 get_case("WEB-ZONE-11").depends_on = "HP-01"
+for _cid, _dep in (("WEB-SAF-03", "OT-B01"), ("WEB-RDY-04", "OT-B01"), ("WEB-WIZ-11", "OT-B01"),
+                   ("WEB-SET-04", "OT-B01"), ("WEB-COMM-04", "HP-01"),
+                   ("WEB-WIZ-07", "WEB-COMM-03"), ("WEB-WIZ-09", "WEB-ZONE-05")):
+    get_case(_cid).depends_on = _dep
 # Post-run alias of the pinned-last lockout case (_ALWAYS_LAST).
 get_case("WEB-LOG-03").depends_on = "WEB-SEC-05"
 
@@ -509,6 +513,15 @@ _NIGHTLY_ORDER: List[str] = [
     "WEB-BAK-02", "WEB-BAK-03",
     "WEB-KCFG-02", "WEB-KCFG-03",
     "WEB-DIAG-07", "WEB-DIAG-08",
+    # docs/BENCH_TEST_WEB_JUDGES_PLAN.md 4.4/4.5. WIZ-07 observes COMM-03,
+    # WIZ-09 observes ZONE-05 (earlier in this list); the OT-B01 / HP-01
+    # observers (SAF-03, RDY-04, WIZ-11, SET-04, COMM-04) follow their hosts below.
+    "WEB-SAF-02", "WEB-SAF-04",
+    "WEB-COMM-02", "WEB-COMM-03", "WEB-COMM-05", "WEB-COMM-06", "WEB-COMM-07",
+    "WEB-RDY-02", "WEB-RDY-03",
+    "WEB-WIZ-02", "WEB-WIZ-03", "WEB-WIZ-04", "WEB-WIZ-05", "WEB-WIZ-06",
+    "WEB-WIZ-07", "WEB-WIZ-08", "WEB-WIZ-09", "WEB-WIZ-10",
+    "WEB-SET-02", "WEB-SET-03", "WEB-DISP-02", "WEB-DISP-03", "WEB-DISP-04",
     # WEB-OTA-02, WEB-X-02 and the DASH observers moved below (observers
     # follow their hosts; WEB-X-02 joins the auth-on group) --
     # docs/BENCH_TEST_WEB_JUDGES_PLAN.md section 3 item 6.
@@ -518,7 +531,7 @@ _NIGHTLY_ORDER: List[str] = [
     "LCD-09", "LCD-14", "LCD-16",
     # WEB-DASH-09 directly after HP-01, before HP-02: a new run clears the
     # history ring.
-    "HP-01", "SP-06", "LCD-02", "WEB-DASH-09", "WEB-DASH-03", "WEB-OTA-02", "WEB-ZONE-11",
+    "HP-01", "SP-06", "LCD-02", "WEB-DASH-09", "WEB-DASH-03", "WEB-OTA-02", "WEB-ZONE-11", "WEB-COMM-04",
     "HP-02", "SP-03",
     "HP-04", "LCD-03", "WEB-DASH-06", "HP-05", "HP-06", "HP-08",
     "SK-02",
@@ -526,6 +539,7 @@ _NIGHTLY_ORDER: List[str] = [
     # SP-04 is a pure observer of OT-B01's already-collected trip/clear data
     # (cases_safety._case_sp04, depends_on="OT-B01"), so it follows it directly.
     "OT-B01", "SP-04", "LCD-04",
+    "WEB-SAF-03", "WEB-RDY-04", "WEB-WIZ-11", "WEB-SET-04",
     "OT-E01", "OT-E02", "OT-E03", "OT-E12",
 ]
 assert len(_NIGHTLY_ORDER) == len(set(_NIGHTLY_ORDER)), "duplicate id in _NIGHTLY_ORDER"

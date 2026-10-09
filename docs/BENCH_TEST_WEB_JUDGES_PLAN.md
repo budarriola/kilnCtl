@@ -1726,9 +1726,9 @@ recommended form unless the owner rules otherwise.
 | WEB-ZONE-02 | The whole-page identity POST may resync the Pico abs_max, because GET prints the ceiling at `%.1f`. | Strict ceiling gate plus stripped model keys. Otherwise reduce to read-only. |
 | WEB-ZONE-03 | The selects have no narrow writer, and writing tc_type reconfigures hardware. | Read-only plus a static check. Never write tc_type. |
 | WEB-ZONE-05 | `zones_page.html` never calls `/api/zones/pid`. | An identity write on the route itself, or retarget the case. |
-| WEB-SAF-03 | It needs a pre-clear OT-B01 hook. The button's enable predicate is "trip seen this Pico boot". | Yes to the hook (the `otb01_tripped` probe). Otherwise judge only the pre-state half. |
-| WEB-COMM-03 | Any `commit=1` sends abs_max and the CT gains. | The read-only CRC-stability form. |
-| WEB-COMM-06 | "Channel 2 only" is a DOM claim. | Judge the inputs plus the static markers. |
+| WEB-SAF-03 | It needs a pre-clear OT-B01 hook. The button's enable predicate is "trip seen this Pico boot". | Yes to the hook (the `otb01_tripped` probe). Otherwise judge only the pre-state half. **Owner 2026-10-09: accepted recommendation.** Implemented. |
+| WEB-COMM-03 | Any `commit=1` sends abs_max and the CT gains. | The read-only CRC-stability form. **Owner 2026-10-09: accepted recommendation.** Implemented. |
+| WEB-COMM-06 | "Channel 2 only" is a DOM claim. | Judge the inputs plus the static markers. **Owner 2026-10-09: accepted recommendation.** Implemented. |
 | WEB-DIAG-09 | May Danger Mode energize R0? | Read-only plus a 409 refusal probe. The full toggle only behind an explicit opt-in. Resolved. Owner 2026-10-09: accepted recommendation. |
 | WEB-DIAG-11 | The stale banner needs a browser. | A static presence check. Resolved. Owner 2026-10-09: accepted recommendation. |
 | WEB-OTA-03 | This is an OTA push through the DOM. | An alias of OT-E01 plus a static check. Never push. Resolved. Owner 2026-10-09: accepted recommendation. |
