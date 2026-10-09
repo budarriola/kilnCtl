@@ -503,8 +503,9 @@ static void test_raw_verify_and_journal(void)
     e2.min_on_s = 30;
     TEST_CHECK(aux_outputs_cfg_set(3, &e2, 0x03) != ESP_OK, "save failure is returned");
     pref_cfg_fs_reset_write_fn_for_test();
-    TEST_CHECK(aux_outputs_cfg_get_raw(3, &raw) && raw.enabled == 1, "the RAM value stands after the failed save");
-    TEST_CHECK(!aux_outputs_cfg_verify_persisted(), "verify_persisted false: RAM and the cfg file differ");
+    TEST_CHECK(aux_outputs_cfg_get_raw(3, &raw) && raw.enabled == 0, "F3: RAM unchanged after the failed save");
+    TEST_CHECK((aux_outputs_cfg_enabled_mask() & 0x04) == 0, "F3: enabled mask unchanged after the failed save");
+    TEST_CHECK(aux_outputs_cfg_verify_persisted(), "verify_persisted true: RAM and the cfg file still agree");
 
     aux_convert_journal_t j;
     memset(&j, 0, sizeof(j));

@@ -103,8 +103,8 @@ bool aux_outputs_cfg_quarantined(void);
 /* Validates and persists one relay's entry (relay 1-based). Refused, nothing
  * changed: ESP_ERR_INVALID_ARG (bad relay, field out of range, tc_zone_plus1
  * beyond MAX31856_CHANNEL_COUNT, reserved != 0); ESP_ERR_INVALID_STATE (enabling a
- * relay in `zones_relay_union`, or the store is quarantined). In-RAM first, as
- * display_power_cfg_set(); a save failure is returned but the RAM value stands. */
+ * relay in `zones_relay_union`, or the store is quarantined). Save first, RAM
+ * second: a save failure is returned unchanged and RAM is left exactly as it was. Thread-safe. */
 esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, uint8_t zones_relay_union);
 
 /* Pure field-range check shared with the backup importer (backup_import.c), so a restored
