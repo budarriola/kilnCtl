@@ -392,6 +392,44 @@ function Test-AuxOutputsCfgVersion {
     return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
 }
 
+function Test-IterTuneStoreMigrationStep {
+    <#
+      docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1 row "ESP iterative-tuning
+      persistence": ITER_TUNE_STORE_VERSION in iter_tune_store.h. Migration is
+      one in-RAM function keyed on named ITER_TUNE_STORE_VERSION_V<N> macros.
+      Enforced: version symbol parseable; every V1..V<CURRENT-1> macro exists
+      with value N (a bump cannot land without naming the format it
+      supersedes); no macro names a version >= CURRENT. The per-bump D1 rule
+      (vs a baseline ref) runs via Get-StoreStepModel.
+    #>
+    param([Parameter(Mandatory = $true)][string]$VersionHeaderText)
+    $failures = New-Object System.Collections.Generic.List[string]
+    $hdr = Remove-CComments -Text $VersionHeaderText
+    $verMatch = [regex]::Match($hdr, '#define\s+ITER_TUNE_STORE_VERSION\s+(\d+)u?')
+    if (-not $verMatch.Success) {
+        $failures.Add("iter_tune store: could not find '#define ITER_TUNE_STORE_VERSION <N>'")
+        return @{ Ok = $false; Failures = $failures }
+    }
+    $current = [int]$verMatch.Groups[1].Value
+    $defined = @{}
+    foreach ($m in [regex]::Matches($hdr, '#define\s+ITER_TUNE_STORE_VERSION_V(\d+)\s+(\d+)u?')) {
+        $n = [int]$m.Groups[1].Value
+        $defined[$n] = $true
+        if ([int]$m.Groups[2].Value -ne $n) {
+            $failures.Add("iter_tune store: ITER_TUNE_STORE_VERSION_V$n has value $($m.Groups[2].Value), expected $n")
+        }
+        if ($n -ge $current) {
+            $failures.Add("iter_tune store: ITER_TUNE_STORE_VERSION_V$n is defined but ITER_TUNE_STORE_VERSION is only $current")
+        }
+    }
+    for ($v = 1; $v -lt $current; $v++) {
+        if (-not $defined.ContainsKey($v)) {
+            $failures.Add("iter_tune store: ITER_TUNE_STORE_VERSION is $current but no ITER_TUNE_STORE_VERSION_V$v macro/step exists -- version v$v was skipped")
+        }
+    }
+    return @{ Ok = ($failures.Count -eq 0); Failures = $failures }
+}
+
 function Test-ZonesMigrationSteps {
     <#
       Pure function over explicit file contents, so both the real check
@@ -555,7 +593,7 @@ function Get-StoreStepModel {
       Returns $null when the version symbol is not found.
     #>
     param(
-        [Parameter(Mandatory = $true)][ValidateSet('zones', 'kiln', 'profiles', 'safty')][string]$Store,
+        [Parameter(Mandatory = $true)][ValidateSet('zones', 'kiln', 'profiles', 'safty', 'itertune')][string]$Store,
         [Parameter(Mandatory = $true)][string]$VersionHeaderText,
         [Parameter(Mandatory = $true)][string]$SourceText
     )
@@ -566,6 +604,7 @@ function Get-StoreStepModel {
         'kiln' { '#define\s+KILN_CFG_STORE_VERSION\s+(\d+)' }
         'profiles' { '#define\s+PROFILE_VERSION\s+(\d+)' }
         'safty' { '#define\s+CONFIG_STORE_FORMAT_VERSION\s+(\d+)' }
+        'itertune' { '#define\s+ITER_TUNE_STORE_VERSION\s+(\d+)' }
     }
     $m = [regex]::Match($hdr, $verRx)
     if (-not $m.Success) { return $null }
@@ -575,6 +614,7 @@ function Get-StoreStepModel {
         'kiln' { foreach ($x in [regex]::Matches($src, '\bmigrate_store_v(\d+)_to_v(\d+)\s*\(')) { $steps.Add([int]$x.Groups[2].Value) } }
         'profiles' { foreach ($x in [regex]::Matches($src, '(?m)^\s*static\s+[\w\*\s]+\bconvert_profile_v(\d+)\s*\(')) { $steps.Add([int]$x.Groups[1].Value + 1) } }
         'safty' { foreach ($x in [regex]::Matches($hdr, '#define\s+CONFIG_STORE_FORMAT_VERSION_V(\d+)\s+\d+u?')) { $steps.Add([int]$x.Groups[1].Value + 1) } }
+        'itertune' { foreach ($x in [regex]::Matches($hdr, '#define\s+ITER_TUNE_STORE_VERSION_V(\d+)\s+\d+u?')) { $steps.Add([int]$x.Groups[1].Value + 1) } }
     }
     $uniq = @($steps | Sort-Object -Unique)
     return @{ Version = [int]$m.Groups[1].Value; Steps = $uniq }
@@ -714,9 +754,12 @@ $profilesSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\http\profiles
 $saftyVersionHeader = Join-Path $repoRoot "firmware\SaftyFW\src\config_store.h"
 $saftySource = Join-Path $repoRoot "firmware\SaftyFW\src\config_store.c"
 
+$iterTuneHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_tune_store.h"
+$iterTuneSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_tune_store.c"
+
 $auxSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\aux_outputs_cfg.c"
 
-foreach ($p in @($auxSource, $versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
+foreach ($p in @($iterTuneHeader, $iterTuneSource, $auxSource, $versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
         $profilesSource, $saftyVersionHeader, $saftySource)) {
     if (-not (Test-Path $p)) {
         Write-Host "check_config_migration_steps: FAIL -- expected path not found: $p"
@@ -758,6 +801,8 @@ $profilesResult = Test-ProfilesMigrationStep -VersionHeaderText $profilesSourceT
 $saftyResult = Test-SaftyConfigStoreMigrationStep -VersionHeaderText (Get-Content -Raw $saftyVersionHeader) `
     -SourceText (Get-Content -Raw $saftySource)
 
+$iterTuneResult = Test-IterTuneStoreMigrationStep -VersionHeaderText (Get-Content -Raw $iterTuneHeader)
+
 $auxResult = Test-AuxOutputsCfgVersion -SourceText (Get-Content -Raw $auxSource)
 
 # --- Plan sec 5.1 follow-up rules: D1 new-step-per-bump (vs baseline ref),
@@ -771,7 +816,9 @@ $storeSpecs = @(
     @{ Name = "fire profiles"; Store = "profiles"; Prefix = "profiles"; MinTo = 1
        Hdr = $profilesSource; Src = $profilesSource },
     @{ Name = "RP2040 safety config"; Store = "safty"; Prefix = "safety_cfg"; MinTo = 1
-       Hdr = $saftyVersionHeader; Src = $saftySource }
+       Hdr = $saftyVersionHeader; Src = $saftySource },
+    @{ Name = "iter_tune"; Store = "itertune"; Prefix = "iter_tune"; MinTo = 1
+       Hdr = $iterTuneHeader; Src = $iterTuneSource }
 )
 $followFailures = @()
 foreach ($sp in $storeSpecs) {
@@ -812,6 +859,7 @@ foreach ($sp in $storeSpecs) {
 
 $allFailures = @()
 $allFailures += $followFailures
+$allFailures += $iterTuneResult.Failures
 $allFailures += $auxResult.Failures
 $allFailures += $zonesResult.Failures
 $allFailures += $kilnCfgResult.Failures

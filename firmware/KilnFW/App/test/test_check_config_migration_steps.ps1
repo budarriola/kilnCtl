@@ -565,6 +565,20 @@ $d2Prof = Get-StoreStepModel -Store profiles -VersionHeaderText "#define PROFILE
 Test-ChainCase 59 (Test-ExpiryFloor -StoreName "fire profiles" -Model $d2Prof) $false "still migrates from v1" "D2: an expired profile converter is caught."
 Test-ChainCase 60 (Test-ExpiryFloor -StoreName "RP2040" -Model $sBase) $true "" "D2: the real-shaped RP2040 model passes."
 
+# Assertions 62-66: iter_tune store (ITER_TUNE_STORE_VERSION, 2026-10-09).
+$itHdr2 = "#define ITER_TUNE_STORE_VERSION_V1 1u`n#define ITER_TUNE_STORE_VERSION 2u`n"
+Test-ChainCase 62 (Test-IterTuneStoreMigrationStep -VersionHeaderText $itHdr2) $true "" "iter_tune: v2 with the V1 macro passes."
+$itHdr3None = "#define ITER_TUNE_STORE_VERSION_V1 1u`n#define ITER_TUNE_STORE_VERSION 3u`n"
+Test-ChainCase 63 (Test-IterTuneStoreMigrationStep -VersionHeaderText $itHdr3None) $false "no ITER_TUNE_STORE_VERSION_V2" "iter_tune NEGATIVE: bump to 3 with no step is caught."
+$itBase = Get-StoreStepModel -Store itertune -VersionHeaderText $itHdr2 -SourceText "int x;"
+$itCur3None = Get-StoreStepModel -Store itertune -VersionHeaderText $itHdr3None -SourceText "int x;"
+Test-ChainCase 64 (Test-NewStepPerBump -StoreName "iter_tune" -Baseline $itBase -Current $itCur3None) $false "bump to v3 must add exactly one NEW step, found 0" "iter_tune D1: bump to 3 with no new step vs baseline is caught."
+$itHdr3 = $itHdr3None + "#define ITER_TUNE_STORE_VERSION_V2 2u`n"
+$itCur3 = Get-StoreStepModel -Store itertune -VersionHeaderText $itHdr3 -SourceText "int x;"
+Test-ChainCase 65 (Test-NewStepPerBump -StoreName "iter_tune" -Baseline $itBase -Current $itCur3) $true "" "iter_tune D1: bump to 3 adding the V2 macro passes."
+$itRealHdr = Get-Content -Raw (Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_tune_store.h")
+Test-ChainCase 66 (Test-IterTuneStoreMigrationStep -VersionHeaderText $itRealHdr) $true "" "iter_tune: the real header passes."
+
 # 61: the real sources must pass the whole production script (all new rules
 # run). Baseline HEAD so the test does not depend on origin being fetched.
 $env:KILNCTL_MIGCHK_BASELINE = "HEAD"
@@ -582,5 +596,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 61 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 66 assertions passed." -ForegroundColor Green
 exit 0
