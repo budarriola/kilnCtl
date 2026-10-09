@@ -39,8 +39,8 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 
 | Gate | Status | Audit | Mutation | Result |
 |---|---|---|---|---|
-| `firmware/CommonFW/test/check_commonfw_ctest.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/CommonFW/test/check_commonfw_diag_vectors.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/CommonFW/test/check_commonfw_ctest.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1, after the Ninja/parallel speedup) | kilnlink_set_config.c: OFF_TC_TYPE 1u -> 0u | RED (test_set_config, test_fuzz_payloads failed); real tree unchanged |
+| `firmware/CommonFW/test/check_commonfw_diag_vectors.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1) | kilnlink_diag.c: log_frames_dropped encoded as 0u | RED (test_diag: 2 failures); real tree unchanged |
 | `firmware/hwAbstraction/test/compile_esp_backends.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/hwAbstraction/test/compile_pico_backends.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/hwAbstraction/test/test_host_fakes.ps1` | NOT AUDITED | - | none | NOT AUDITED |
