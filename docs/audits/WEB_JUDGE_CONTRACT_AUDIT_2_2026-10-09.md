@@ -29,7 +29,7 @@ This is a read-only audit. No judge was changed. Paths are relative to
 
 ## Status
 
-Open. No finding below has been fixed yet.
+All findings fixed in 55cfee20 (strengthened tests in 207acff7); L6 has one residual noted below. Tests: tests/test_bench_test_cases_web_{rw,prof,safety}.py (AuditTwo* classes).
 
 ## HIGH
 
@@ -38,6 +38,8 @@ None.
 ## MEDIUM
 
 ### M1. An unmounted cfg partition turns several writing judges into FAIL instead of INCONCLUSIVE
+
+**Fixed (55cfee20).** cfg_guarded (pre-gate on GET /api/cfgfs mounted:false, POST 503 relabels FAIL as INCONCLUSIVE) on DASH-13, DIAG-08, KCFG-02, PROF-02..08.
 
 Many write routes refuse with 503 while the `cfg` LittleFS partition is not
 mounted. The refusal comes from `cfg_fs_http_refuse_if_unmounted()` at
@@ -81,6 +83,8 @@ routes as INCONCLUSIVE.
 
 ### M2. WEB-SEC-03 overwrites the admin password without first proving the credential is live
 
+**Fixed (55cfee20).** SEC-03 logs in with the harness credential first; INCONCLUSIVE and no set_web_password on failure.
+
 `cases_web_rw.py:640` calls
 `client.set_web_password(username, password)` using
 `KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD`. It does not first log in
@@ -111,6 +115,8 @@ nothing.
 
 ### L1. The rw-module writers have no executor or autotune idle gate
 
+**Fixed (55cfee20).** idle_gate_reason (executor idle, autotune idle/done/aborted) in the toggle cases, DASH-13 and ZONE-10.
+
 DASH-13 (`cases_web_rw.py:338`), DIAG-07 and DIAG-08 (via
 `_bool_toggle_case`, `:302`) check only `board_lock.write_refusal(ctx)`.
 The dash, diag and misc modules use `mutating_gate` instead
@@ -128,6 +134,8 @@ window.
 
 ### L2. The prof module's gate accepts only autotune `idle`
 
+**Fixed (55cfee20).** prof gate accepts idle/done/aborted.
+
 `_mutating_gate()` (`cases_web_prof.py:62-78`) passes autotune only when
 the state reads exactly `idle` (`_is_idle_state`, `:58`). Autotune reports
 `done` or `aborted` after a tune ends (the module's own `_AT_NOT_ACTIVE`,
@@ -142,6 +150,8 @@ tune toggle never actually run.
 
 ### L3. WIZ-06 PASSes vacuously on an empty zones list
 
+**Fixed (55cfee20).** empty zones[] is FAIL (INCONCLUSIVE only when thermo_count is 0).
+
 `cases_web_safety.py:726-748` checks its page markers, then loops over
 the zones array and PASSes when no zone lacks an integer `zone_type`. An
 empty array yields PASS with the `zone_type` half of the check never
@@ -152,6 +162,8 @@ exactly this class, but WIZ-06 does not use it.
 `thermo_count` reads 0 after a bad config load). WIZ-06 PASSes.
 
 ### L4. DISP-02's brightness write proves nothing when the board is already at 50
+
+**Fixed (55cfee20).** DISP-02 writes 60 when the snapshot is 50.
 
 `cases_web_safety.py:978` always writes `brightness_percent=50` and checks
 that 50 reads back (`:982`). When the snapshot is already 50, the write is
@@ -165,6 +177,8 @@ still PASSes.
 that case.
 
 ### L5. Some first-read failures FAIL instead of INCONCLUSIVE
+
+**Fixed (55cfee20).** first read with status None or 401 is INCONCLUSIVE, nothing written.
 
 DASH-13 (`cases_web_rw.py:341-347`), `_bool_toggle_case` (`:305-311`) and
 SEC-03 (`:615-621`) return FAIL when the very first GET fails, before
@@ -180,6 +194,8 @@ points at the watchdog route instead of the session.
 
 ### L6. WEB-SEC-04 can PASS with an unverified pre-existing LCD PIN and pass it to LCD-19
 
+**Fixed (55cfee20).** SEC-04 no longer hands a pre-existing, unverified PIN to LCD-19 (observed.pin_unverified). Residual, won't fix here: cases_lcd.py seed_lcd_pin (outside these judges) still trusts a PIN set outside the harness.
+
 `_write_lcd_pin_if_needed()` (`cases_web_rw.py:836-851`) skips the write
 when `admin_pin_set` is already true. The firmware config GET
 (`http/security_http.c:79-116`) reports only that a PIN is set, never which
@@ -194,6 +210,8 @@ reports a lockout or UI FAIL that has nothing to do with LCD-19's own
 contract.
 
 ### L7. ZONE-05's whole-page compare includes live sensor fields
+
+**Fixed (55cfee20).** ZONE-05 compare drops generation, safety_wiring, safety_ceiling, ct_warn_mask.
 
 ZONE-05 (`cases_web_prof.py:759-805`) compares every field of two
 `GET /api/zones` bodies, minus `generation`
@@ -216,6 +234,8 @@ the write was a perfect identity.
 
 ### L8. ZONE-09 accepts a "save failed" enable as success
 
+**Fixed (55cfee20).** ZONE-09 FAILs on an ok:true response carrying a warning, enable and restore.
+
 `POST /api/adaptive_tune/enable` answers
 `{"ok":true,"warning":"applied live, save failed"}` when the NVS save
 fails (`http/adaptive_tune_http.c:197`). ZONE-09
@@ -230,6 +250,8 @@ comes back from the stale NVS state.
 
 ### L9. ZONE-10's abort can kill a sweep that starts between the status read and the abort
 
+**Fixed (55cfee20).** ZONE-10 re-reads sweep status immediately before the abort; running gives INCONCLUSIVE.
+
 ZONE-10 (`cases_web_prof.py:956-976`) reads
 `/api/zones/current_sweep/status`. It does the right thing when the state
 is `running` (INCONCLUSIVE, no abort). Otherwise it posts the abort, which
@@ -243,6 +265,8 @@ sweep's CT calibration is never derived. The window is small, so this is
 LOW.
 
 ### L10. With no stored policy, the LOG-02 and SEC-03 restores create one
+
+**Fixed (55cfee20).** policy_unstored: SEC-03, SEC-04 and the LOG-02/X-02 prelude refuse to start from the false/false/-1/-1 signature (no clear-policy route exists to restore none).
 
 The security config GET (`http/security_http.c:79-116`) prints
 `false`/`false`/`-1`/`-1` when no policy has ever been stored. The restore
