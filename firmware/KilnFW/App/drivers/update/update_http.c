@@ -410,7 +410,10 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
                 (void)httpd_resp_sendstr(req, "{\"ok\":true,\"staged\":true}");
             }
         } else {
-            update_stage_upload_abort(&s_stage); // idempotent
+            // Owner-scoped (as update_fetch.c's abandoned-op abort is): a refused begin means ANOTHER owner may hold
+            // the stage (a wedged fetch writer keeps it UPLOADING after the claim is released), and an unscoped
+            // abort here would reset that owner's phase under its still-running flash op.
+            (void)update_stage_upload_abort_owned(&s_stage, STAGE_SOURCE_UPLOAD);
         }
         update_stage_set_gate(&s_stage, NULL, NULL); // gate_ctx is on this stack frame
         ota_http_update_end();

@@ -436,15 +436,18 @@ fail:
 static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t len, uint32_t total,
                                   const char *semver, const char *commit)
 {
+    if (s_c->wr_wedged) {
+        // Before touching the command block: an abandoned writer op still owns it and reads wr.cmd after it
+        // returns to pick its undo (abort vs clear). Overwriting it here (the job's final WR_ABORT) made the
+        // late op skip its cleanup and leave the stage UPLOADING.
+        return UPDATE_STAGE_ERR_FLASH;
+    }
     s_c->wr.cmd = cmd;
     s_c->wr.data = data;
     s_c->wr.len = len;
     s_c->wr.total = total;
     s_c->wr.semver = semver;
     s_c->wr.commit = commit;
-    if (s_c->wr_wedged) {
-        return UPDATE_STAGE_ERR_FLASH;
-    }
     portENTER_CRITICAL(&s_wr_mux);
     update_wr_arb_issue(&s_c->wr_arb);
     portEXIT_CRITICAL(&s_wr_mux);

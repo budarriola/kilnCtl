@@ -2934,6 +2934,30 @@ try {
 
     Invoke-HostTestExe -Name "http_body_recv" -ExePath $exeHbr -BuildCmd $cmdHbr
 
+    # ---- test_update_fetch.c: its own SEPARATE executable --------------------
+    # Compiles the REAL update_fetch.c, update_http.c and update_stage.c (plus
+    # policy/release/url/heap helpers) against fakes for the HTTP client, psa
+    # sha256, FreeRTOS tasks (Windows threads), the stage partition, the update
+    # claim and httpd (stubs_update_fetch/ + fake_support.c). Private stub dir
+    # first: it overrides semphr/task/psa/esp_app_* headers.
+    $exeUf = Join-Path $outDir "kilnctl_host_tests_update_fetch.exe"
+    $ufObjDir = Join-Path $outDir "uf"
+    New-Item -ItemType Directory -Force -Path $ufObjDir | Out-Null
+    $ufStubDir = Join-Path $testDir "stubs_update_fetch"
+    $ufSrcs = @(
+        "test_update_fetch.c", "fake_support.c"
+    ) | ForEach-Object { "`"$(Join-Path $testDir $_)`"" }
+    $ufSrcs += @(
+        "update/update_fetch.c", "update/update_http.c", "update/update_stage.c", "update/update_policy.c",
+        "update/update_release.c", "update/update_url.c", "update/update_fetch_heap.c",
+        "update/update_stale_stage.c", "update/stage_header.c", "update/update_semver.c",
+        "http/ota_esp_image_header.c", "http/ota_image_crc.c", "safety/system_mode_gate.c"
+    ) | ForEach-Object { "`"$(Join-Path $driversDir $_)`"" }
+    $cmdUf = "cl /I`"$ufStubDir`" @`"$hostTestsRsp`" /std:c11 /FI`"$(Join-Path $ufStubDir 'shim.h')`" " +
+            "/Fo:`"$ufObjDir\\`" /Fe:`"$exeUf`" " + ($ufSrcs -join " ")
+
+    Invoke-HostTestExe -Name "update_fetch" -ExePath $exeUf -BuildCmd $cmdUf
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -3126,8 +3150,9 @@ try {
     # 68 -> 69: added test_recovery_switch.c's own Invoke-HostTestExe
     # (recovery_switch_at_boot_threshold() restores the boot target on SET_FAILED).
     # 69 -> 70: added test_http_body_recv.c (looped httpd_req_recv helper).
+    # 70 -> 71: added test_update_fetch.c (real update_fetch.c/update_http.c over fakes).
     Complete-HostTestQueue
-    $totalExpected = 70
+    $totalExpected = 71
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
