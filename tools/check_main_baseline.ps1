@@ -55,10 +55,40 @@ try {
              (Row "tools\check_f.ps1" "FAIL"),      # BUSY (unknown) on main-> NEW
              (Row "tools\check_h.ps1" "FAIL"),      # absent on main        -> NEW
              (Row "tools\check_g.ps1" "SKIP-FAST")) # -Fast skip            -> nothing
-    $cmp = Compare-MainBaseline -Current $cur -Baseline $base
+    $cmp = Compare-MainBaseline -Current $cur -Baseline $base -Exact
     Assert (Same $cmp.New @("tools/check_a.ps1", "tools\check_f.ps1", "tools\check_h.ps1")) "NEW = passed-on-main, BUSY-on-main and absent checks (slashes normalised)"
     Assert (Same $cmp.Known @("tools\check_b.ps1", "tools\check_d.ps1")) "KNOWN = same non-pass status on main"
     Assert (Same $cmp.Fixed @("tools\check_c.ps1")) "FIXED = fails on main, passes here"
+
+    Write-Host "case: non-exact baseline never excuses (finding 1)"
+    $cmpI = Compare-MainBaseline -Current $cur -Baseline $base
+    Assert ($cmpI.Known.Count -eq 0 -and (Same $cmpI.Downgraded @("tools\check_b.ps1", "tools\check_d.ps1"))) "without -Exact nothing is KNOWN, would-be KNOWN is Downgraded"
+    Assert (($cmpI.New -contains "tools\check_b.ps1") -and ($cmpI.New -contains "tools\check_d.ps1")) "Downgraded failures count as NEW"
+
+    Write-Host "case: failure signature (finding 2)"
+    $sigA = Get-MainFailureSignature -Output "x`nFAIL: expected 3 got 4 at C:\wt\abc_123\foo.c 12:01:02 2026-10-08T01:02:03Z tmp_deadbeef1"
+    $sigB = Get-MainFailureSignature -Output "FAIL: expected 5 got 9 at D:\other\bar.c 23:59:59 2026-01-01T00:00:00Z tmp_cafebabe22"
+    $sigC = Get-MainFailureSignature -Output "FAIL: something entirely different"
+    Assert ($sigA -and $sigA -ceq $sigB) "signature ignores timestamps, paths, temp names and numbers"
+    Assert ($sigA -cne $sigC) "different failure text -> different signature"
+    Assert ((Get-MainFailureSignature -Output "all quiet") -ceq "") "no FAIL line -> empty signature"
+    $sbase = [pscustomobject]@{ host = "H"; results = @(
+        [pscustomobject]@{ check = "tools\check_s.ps1"; status = "FAIL"; sig = $sigA },
+        [pscustomobject]@{ check = "tools\check_o.ps1"; status = "FAIL" }) }
+    $scur = @([pscustomobject]@{ Path = "tools\check_s.ps1"; Status = "FAIL"; Signature = $sigC },
+              [pscustomobject]@{ Path = "tools\check_o.ps1"; Status = "FAIL"; Signature = $sigC })
+    $cs = Compare-MainBaseline -Current $scur -Baseline $sbase -Exact
+    Assert ((Same $cs.Changed @("tools\check_s.ps1")) -and ($cs.New -contains "tools\check_s.ps1")) "same check failing differently is CHANGED and counts as NEW"
+    Assert ((Same $cs.Known @("tools\check_o.ps1")) -and $cs.Warnings.Count -ge 1) "baseline row without a signature matches, with a warning"
+    $scur2 = @([pscustomobject]@{ Path = "tools\check_s.ps1"; Status = "FAIL"; Signature = $sigB })
+    Assert ((Same (Compare-MainBaseline -Current $scur2 -Baseline $sbase -Exact).Known @("tools\check_s.ps1"))) "same signature stays KNOWN"
+
+    Write-Host "case: SKIP recorded on another host (finding 5)"
+    $hb = [pscustomobject]@{ host = "OTHERHOST"; results = @([pscustomobject]@{ check = "tools\check_t.ps1"; status = "SKIP" }) }
+    $hc = @([pscustomobject]@{ Path = "tools\check_t.ps1"; Status = "SKIP" })
+    $ch = Compare-MainBaseline -Current $hc -Baseline $hb -Exact -HostName "HERE"
+    Assert ($ch.Known.Count -eq 0 -and $ch.New -contains "tools\check_t.ps1" -and $ch.Warnings.Count -eq 1) "SKIP from another host is NEW with a warning"
+    Assert ((Compare-MainBaseline -Current $hc -Baseline $hb -Exact -HostName "OTHERHOST").Known.Count -eq 1) "SKIP from the same host is KNOWN"
 
     # ---------------------------------------------------------------- 2
     Write-Host "case: atomic write"
@@ -130,6 +160,28 @@ try {
     Assert (-not (Test-MainBaselineRecordable -RepoRoot $repo).Ok) "dirty tree does not record"
     git -C $repo checkout -- f.txt *>$null
 
+    Write-Host "case: HEAD and status must be identical at run start and end (finding 3)"
+    $s0 = Get-MainBaselineStartState -RepoRoot $repo
+    Assert ((Test-MainBaselineRecordable -RepoRoot $repo -Start $s0).Ok) "unchanged HEAD/status since start records"
+    $s1 = [pscustomobject]@{ Head = $A; Status = $s0.Status }
+    Assert (-not (Test-MainBaselineRecordable -RepoRoot $repo -Start $s1).Ok) "HEAD moved since start does not record"
+    $s2 = [pscustomobject]@{ Head = $s0.Head; Status = " M f.txt`n" }
+    Assert (-not (Test-MainBaselineRecordable -RepoRoot $repo -Start $s2).Ok) "dirty-at-start (cleaned later) does not record"
+
+    Write-Host "case: latest pointer only moves forward (finding 4)"
+    $pd = Join-Path $tmp "ptr"
+    [void](Write-MainBaseline -Dir $pd -Mode "fast" -Commit $B -Tree (Tree $repo $B) -Results $r1 -RepoRoot $repo)
+    [void](Write-MainBaseline -Dir $pd -Mode "fast" -Commit $A -Tree (Tree $repo $A) -Results $r1 -RepoRoot $repo)
+    $pj = [System.IO.File]::ReadAllText((Join-Path $pd "latest-fast.json")) | ConvertFrom-Json
+    Assert ($pj.commit -ceq $B) "an older commit's baseline does not move the pointer back"
+    Assert (Test-Path -LiteralPath (Join-Path $pd ((Tree $repo $A) + "-fast.json"))) "the older baseline file is still written"
+    [void](Write-MainBaseline -Dir $pd -Mode "fast" -Commit $X -Tree (Tree $repo $X) -Results $r1 -RepoRoot $repo)
+    $pj = [System.IO.File]::ReadAllText((Join-Path $pd "latest-fast.json")) | ConvertFrom-Json
+    Assert ($pj.commit -ceq $B) "a non-descendant commit does not move the pointer"
+    [void](Write-MainBaseline -Dir $pd -Mode "fast" -Commit $C -Tree (Tree $repo $B) -Results $r1 -RepoRoot $repo)
+    $pj = [System.IO.File]::ReadAllText((Join-Path $pd "latest-fast.json")) | ConvertFrom-Json
+    Assert ($pj.commit -ceq $C) "a descendant commit moves the pointer"
+
     # ---------------------------------------------------------------- 5
     Write-Host "case: run_all_checks -FailOnlyOnNew (scratch repo)"
     $sc = Join-Path $tmp "scratch"
@@ -182,6 +234,15 @@ try {
     $r = Run-Checks @("-FailOnlyOnNew")
     Assert ($r.Code -eq 1 -and $r.Out -match 'No usable baseline') "-FailOnlyOnNew with no baseline keeps the failing exit code"
 
+    # Inexact baseline (finding 1): baseline at an ancestor of HEAD that is not the
+    # merge-base with origin/main must not excuse a failure.
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
+    $prev = Rev $sc "HEAD~1"
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $prev -Tree (Tree $sc "HEAD~1") `
+        -Results @((Row "tools\check_known.ps1" "FAIL"), (Row "tools\check_ok.ps1" "PASS")))
+    $r = Run-Checks @("-FailOnlyOnNew")
+    Assert ($r.Code -eq 1 -and $r.Out -match 'NOT at the merge-base') "-FailOnlyOnNew with a non-merge-base baseline keeps the failing exit code"
+
     # ---------------------------------------------------------------- 6
     Write-Host "case: land.ps1 -AllowKnownFailures (dry run)"
     $land = Join-Path $tools "land.ps1"
@@ -218,6 +279,24 @@ try {
     @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "  FAIL  tools\check_new.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 2 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 1 -and ($r.Json.new_fails -contains 'tools\check_new.ps1')) "a NEW failure still refuses and is listed in new_fails"
+    # CHANGED signature (finding 2): same check fails on main but for a different reason.
+    $sigMain = Get-MainFailureSignature -Output "FAIL: original reason"
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $mainSha -Tree (Tree $lc "origin/main") `
+        -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = $sigMain }))
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "", "--- tools\check_known.ps1 (exit 1) ---", "FAIL: original reason", "",
+      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    $r = Run-Land @("-AllowKnownFailures")
+    Assert ($r.Code -eq 0 -and ($r.Json.known_fails -contains 'tools\check_known.ps1')) "same failure signature as main stays KNOWN in land"
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "", "--- tools\check_known.ps1 (exit 1) ---", "FAIL: a brand new reason", "",
+      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    $r = Run-Land @("-AllowKnownFailures")
+    Assert ($r.Code -eq 1) "a different failure signature is not excused by land"
+    # Non-exact baseline (finding 1): ancestor of HEAD, not the merge-base.
+    Remove-Item -LiteralPath $bdir -Recurse -Force
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit (Rev $lc HEAD) -Tree (Tree $lc HEAD) -Results @((Row "tools\check_known.ps1" "FAIL")))
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    $r = Run-Land @("-AllowKnownFailures")
+    Assert ($r.Code -eq 1) "a non-merge-base baseline excuses nothing in land"
     # Other lineage: a baseline whose commit is not an ancestor of HEAD is ignored.
     Remove-Item -LiteralPath $bdir -Recurse -Force
     $other = Join-Path $tmp "other"

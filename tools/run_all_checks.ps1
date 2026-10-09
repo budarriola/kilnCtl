@@ -631,6 +631,8 @@ if ($ListOnly) {
 # (`# checkcache: ok`) check is reused when the tree is clean and identical.
 . (Join-Path $PSScriptRoot "checkcache_lib.ps1")
 . (Join-Path $PSScriptRoot "main_baseline_lib.ps1")
+$script:MainBaselineStart = $null
+try { $script:MainBaselineStart = Get-MainBaselineStartState -RepoRoot $repoRoot } catch { }
 $script:CheckCacheCtx = Initialize-CheckCache -RepoRoot $repoRoot -Fast:$Fast -NoCache:$NoCache -PcToolsPython $selfcheckPython
 
 Write-Host ""
@@ -988,7 +990,7 @@ function Exit-WithBaseline {
     foreach ($s in $skippedFast) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP-FAST" } }
     foreach ($s in $skipped) { $cur += [pscustomobject]@{ Path = $s.Path; Status = "SKIP" } }
     foreach ($b in $busy) { $cur += [pscustomobject]@{ Path = $b.Path; Status = "BUSY" } }
-    foreach ($f in $failed) { $cur += [pscustomobject]@{ Path = $f.Path; Status = "FAIL" } }
+    foreach ($f in $failed) { $cur += [pscustomobject]@{ Path = $f.Path; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output ([string]$f.Output)) } }
     # Only the failures that actually failed the run count against -FailOnlyOnNew.
     $cur2 = @($cur | Where-Object {
         ($_.Status -ne "SKIP" -or -not $AllowSkips) -and ($_.Status -ne "BUSY" -or -not $AllowBusy) })
@@ -996,10 +998,10 @@ function Exit-WithBaseline {
     try {
         $rep = Show-MainBaselineSection -Current $cur2 -Mode $mode -RepoRoot $repoRoot
         if (-not $Only -and -not $Skip) {
-            $rec = Test-MainBaselineRecordable -RepoRoot $repoRoot
+            $rec = Test-MainBaselineRecordable -RepoRoot $repoRoot -Start $script:MainBaselineStart
             if ($rec.Ok) {
                 $fp = Get-CheckCacheFingerprint -PcToolsPython $selfcheckPython
-                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur
+                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur -RepoRoot $repoRoot
                 Write-Host "Recorded main baseline ($mode) for origin/main $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
             } else {
                 Write-Host "Main baseline not recorded: $($rec.Reason)" -ForegroundColor DarkGray

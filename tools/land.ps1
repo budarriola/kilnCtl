@@ -205,8 +205,13 @@ if ($WaitPid -gt 0 -or $CheckLog) {
             Write-Host "-AllowKnownFailures: no usable $bmode baseline: $($sel.Reason)" -ForegroundColor Yellow
         } else {
             if ($sel.Warning) { Write-Host "WARNING: $($sel.Warning)" -ForegroundColor Yellow }
-            $cur = @($blocked | Where-Object { $failNames -contains $_ } | ForEach-Object { [pscustomobject]@{ Path = $_; Status = "FAIL" } })
-            $cmp = Compare-MainBaseline -Current $cur -Baseline $sel.Baseline
+            if (-not $sel.Exact) { Write-Host "-AllowKnownFailures: baseline is not at the merge-base with origin/main, so nothing counts as KNOWN. Record one there: tools\main_baseline.ps1 -Record" -ForegroundColor Yellow }
+            $outs = Get-LogFailureOutputs -Text $text
+            $cur = @($blocked | Where-Object { $failNames -contains $_ } | ForEach-Object {
+                $o = if ($outs.ContainsKey($_)) { [string]$outs[$_] } else { "" }
+                [pscustomobject]@{ Path = $_; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output $o) } })
+            $cmp = Compare-MainBaseline -Current $cur -Baseline $sel.Baseline -Exact:$sel.Exact
+            foreach ($w in $cmp.Warnings) { Write-Host "WARNING: $w" -ForegroundColor Yellow }
             $script:knownFails = @($cmp.Known)
             foreach ($k in $script:knownFails) { Write-Host "!!! KNOWN FAIL on origin/main (-AllowKnownFailures): $k" -ForegroundColor Yellow }
             $blocked = @($blocked | Where-Object { $script:knownFails -notcontains $_ })

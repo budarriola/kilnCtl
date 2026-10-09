@@ -22,6 +22,15 @@
 #   KNOWN  the baseline has the same non-pass status for it (FAIL, or SKIP)
 #   NEW    anything else (passed on main, absent from the baseline, BUSY on main)
 # FIXED  = failed/skipped on main, passes here.
+# KNOWN only EXCUSES a failure (-FailOnlyOnNew exit 0, land -AllowKnownFailures) when the
+# selected baseline is Exact (its commit == merge-base of HEAD with origin/main). From an
+# older baseline the classification is shown but every failure counts as NEW (a check that
+# failed at B0, was fixed at B1 and re-broke on a branch from B1 must not read as KNOWN).
+# A failing check also stores a SIGNATURE (hash of its normalised FAIL/assert/error lines);
+# a KNOWN failure whose signature differs from main's is CHANGED and counts as NEW. A
+# baseline row without a signature (older format) matches, with a warning. A SKIP recorded
+# on another host is not KNOWN here (the missing toolchain may be this host's only).
+# RECORDING also requires HEAD and `git status --porcelain` identical at run START and END.
 
 $script:MainBaselineSchema = 1
 
@@ -51,8 +60,12 @@ function Write-MainBaselineJsonAtomic {
 function Write-MainBaseline {
     param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$Mode,
           [Parameter(Mandatory = $true)][string]$Commit, [Parameter(Mandatory = $true)][string]$Tree,
-          [string]$Fingerprint = "", [Parameter(Mandatory = $true)]$Results)
-    $rows = @($Results | Sort-Object Path | ForEach-Object { [ordered]@{ check = ([string]$_.Path -replace '/', '\'); status = [string]$_.Status } })
+          [string]$Fingerprint = "", [Parameter(Mandatory = $true)]$Results, [string]$RepoRoot = "")
+    $rows = @($Results | Sort-Object Path | ForEach-Object {
+        $row = [ordered]@{ check = ([string]$_.Path -replace '/', '\'); status = [string]$_.Status }
+        $sig = if ($_.PSObject.Properties['Signature']) { [string]$_.Signature } else { "" }
+        if ($_.Status -ceq 'FAIL' -and $sig) { $row['sig'] = $sig }
+        $row })
     $file = "$Tree-$Mode.json"
     $obj = [ordered]@{
         schema = $script:MainBaselineSchema; mode = $Mode; commit = $Commit; tree = $Tree
@@ -62,14 +75,81 @@ function Write-MainBaseline {
     Write-MainBaselineJsonAtomic -Path (Join-Path $Dir $file) -Object $obj
     $ptr = [ordered]@{ schema = $script:MainBaselineSchema; mode = $Mode; commit = $Commit; tree = $Tree
                        file = $file; time_utc = $obj.time_utc }
-    Write-MainBaselineJsonAtomic -Path (Join-Path $Dir "latest-$Mode.json") -Object $ptr
+    # Move the pointer only forward: the new commit must equal or descend from the
+    # pointer's commit (a slow older run must not overwrite a newer pointer).
+    $pp = Join-Path $Dir "latest-$Mode.json"
+    $move = $true
+    if ($RepoRoot -and (Test-Path -LiteralPath $pp)) {
+        try {
+            $old = [System.IO.File]::ReadAllText($pp) | ConvertFrom-Json -ErrorAction Stop
+            $oc = [string]$old.commit
+            if ($oc -and $oc -cne $Commit) {
+                & git -C $RepoRoot cat-file -e "$oc^{commit}" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    & git -C $RepoRoot merge-base --is-ancestor $oc $Commit 2>$null
+                    if ($LASTEXITCODE -ne 0) { $move = $false }
+                }
+            }
+        } catch { }
+    }
+    if ($move) { Write-MainBaselineJsonAtomic -Path $pp -Object $ptr }
     return (Join-Path $Dir $file)
+}
+
+# Failure signature: SHA1 of the sorted unique normalised FAIL/assert/error lines of a
+# check's output (timestamps, paths, temp names, hex ids and numbers stripped). "" when
+# the output has no such line.
+function Get-MainFailureSignature {
+    param([string]$Output)
+    if ([string]::IsNullOrWhiteSpace($Output)) { return "" }
+    $lines = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($l in ($Output -split "`r?`n")) {
+        if ($l -notmatch '(?i)\b(FAIL|FAILED|FAILURE|ASSERT\w*|ERROR|exception)\b') { continue }
+        $n = $l.Trim()
+        $n = [regex]::Replace($n, '\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?Z?', '<ts>')
+        $n = [regex]::Replace($n, '\d{1,2}:\d{2}:\d{2}(\.\d+)?', '<t>')
+        $n = [regex]::Replace($n, '[A-Za-z]:[\\/][^\s''"()\[\]]*', '<path>')
+        $n = [regex]::Replace($n, '(?<![\w.])/(?:[\w.\-]+/)+[\w.\-]*', '<path>')
+        $n = [regex]::Replace($n, '[A-Za-z0-9_]*(?:test|tmp|scratch|checkbuild)_[0-9a-f]{6,}', '<tmp>')
+        $n = [regex]::Replace($n, '\b[0-9a-fA-F]{7,}\b', '<hex>')
+        $n = [regex]::Replace($n, '\d+', '#')
+        [void]$lines.Add($n)
+    }
+    if ($lines.Count -eq 0) { return "" }
+    $text = (@($lines) | Sort-Object { $_ } -CaseSensitive) -join "`n"
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    return ([BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text))) -replace '-', '').ToLowerInvariant()
+}
+
+# {path -> output} from a run_all_checks log ("--- <path> (exit N) ---" sections).
+function Get-LogFailureOutputs {
+    param([string]$Text)
+    $map = @{}
+    $ms = [regex]::Matches($Text, '(?m)^--- (\S+) \(exit [^)]*\) ---[ \t]*\r?$')
+    for ($i = 0; $i -lt $ms.Count; $i++) {
+        $start = $ms[$i].Index + $ms[$i].Length
+        $end = $Text.Length
+        if ($i + 1 -lt $ms.Count) { $end = $ms[$i + 1].Index }
+        $body = $Text.Substring($start, $end - $start)
+        $sm = [regex]::Match($body, '(?m)^\s*\d+ passed,')
+        if ($sm.Success) { $body = $body.Substring(0, $sm.Index) }
+        $map[([string]$ms[$i].Groups[1].Value -replace '/', '\')] = $body
+    }
+    return $map
+}
+
+# HEAD + `git status --porcelain` snapshot; captured at run start and compared at the end.
+function Get-MainBaselineStartState {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $head = (& git -C $RepoRoot rev-parse HEAD 2>$null | Out-String).Trim()
+    $st = (& git -C $RepoRoot status --porcelain 2>$null | Out-String)
+    return [PSCustomObject]@{ Head = $head; Status = $st }
 }
 
 # Recording is allowed only for a clean tree whose HEAD is origin/main or an ancestor of it.
 # Returns @{ Ok; Reason; Commit; Tree }.
 function Test-MainBaselineRecordable {
-    param([Parameter(Mandatory = $true)][string]$RepoRoot, [string]$MainRef = "origin/main")
+    param([Parameter(Mandatory = $true)][string]$RepoRoot, [string]$MainRef = "origin/main", $Start = $null)
     $no = { param($why) [PSCustomObject]@{ Ok = $false; Reason = $why; Commit = ""; Tree = "" } }
     $head = (& git -C $RepoRoot rev-parse HEAD 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $head) { return (& $no "cannot resolve HEAD") }
@@ -83,6 +163,12 @@ function Test-MainBaselineRecordable {
     }
     $st = Get-CheckCacheTreeState -RepoRoot $RepoRoot
     if (-not $st.Clean) { return (& $no $st.Reason) }
+    if ($null -ne $Start) {
+        if ($Start.Head -cne $head) { return (& $no "HEAD moved during the run") }
+        $now = (& git -C $RepoRoot status --porcelain 2>$null | Out-String)
+        if ($now -cne $Start.Status) { return (& $no "working tree status changed during the run") }
+        if ($Start.Status.Trim()) { return (& $no "working tree was not clean at run start") }
+    }
     return [PSCustomObject]@{ Ok = $true; Reason = ""; Commit = $head; Tree = $st.Tree }
 }
 
@@ -132,23 +218,47 @@ function Select-MainBaseline {
     return $r
 }
 
-# Current: array of @{Path;Status}. Returns @{ New; Known; Fixed } as arrays of strings.
+# Current: array of @{Path;Status[;Signature]}. Returns @{ New; Known; Fixed; Changed;
+# Downgraded; Warnings }. New includes Changed and Downgraded (what counts for exit codes).
+# Known is only populated when -Exact (baseline commit == merge-base); otherwise would-be
+# KNOWN failures go to Downgraded and New.
 function Compare-MainBaseline {
-    param([Parameter(Mandatory = $true)]$Current, [Parameter(Mandatory = $true)]$Baseline)
-    $base = @{}
-    foreach ($x in @($Baseline.results)) { $base[([string]$x.check -replace '/', '\').ToLowerInvariant()] = [string]$x.status }
+    param([Parameter(Mandatory = $true)]$Current, [Parameter(Mandatory = $true)]$Baseline,
+          [switch]$Exact, [string]$HostName = $env:COMPUTERNAME)
+    $base = @{}; $bsig = @{}
+    foreach ($x in @($Baseline.results)) {
+        $k = ([string]$x.check -replace '/', '\').ToLowerInvariant()
+        $base[$k] = [string]$x.status
+        $bsig[$k] = if ($x.PSObject.Properties['sig']) { [string]$x.sig } else { "" }
+    }
+    $bhost = if ($Baseline.PSObject.Properties['host']) { [string]$Baseline.host } else { "" }
     $bad = @('FAIL', 'SKIP', 'BUSY')
-    $new = @(); $known = @(); $fixed = @()
+    $new = @(); $known = @(); $fixed = @(); $changed = @(); $down = @(); $warn = @()
     foreach ($c in @($Current)) {
         $key = ([string]$c.Path -replace '/', '\').ToLowerInvariant()
         $was = if ($base.ContainsKey($key)) { $base[$key] } else { "" }
         if ($bad -contains $c.Status) {
-            if ($was -ceq $c.Status -and $was -cne 'BUSY') { $known += [string]$c.Path } else { $new += [string]$c.Path }
+            if ($was -ceq $c.Status -and $was -cne 'BUSY') {
+                $p = [string]$c.Path
+                $csig = if ($c.PSObject.Properties['Signature']) { [string]$c.Signature } else { "" }
+                if ($c.Status -ceq 'FAIL' -and $bsig[$key] -and $csig -and $bsig[$key] -cne $csig) {
+                    $changed += $p; $new += $p
+                } elseif ($c.Status -ceq 'SKIP' -and $bhost -and $HostName -and $bhost -cne $HostName) {
+                    $warn += "SKIP of $p was recorded on host $bhost, this is $HostName; not KNOWN"
+                    $new += $p
+                } elseif (-not $Exact) {
+                    $down += $p; $new += $p
+                } else {
+                    if ($c.Status -ceq 'FAIL' -and -not ($bsig[$key] -and $csig)) { $warn += "no failure signature for $p (older baseline or no FAIL line); matched on status only" }
+                    $known += $p
+                }
+            } else { $new += [string]$c.Path }
         } elseif ($c.Status -ceq 'PASS' -and ($was -ceq 'FAIL' -or $was -ceq 'SKIP')) {
             $fixed += [string]$c.Path
         }
     }
-    return [PSCustomObject]@{ New = @($new | Sort-Object); Known = @($known | Sort-Object); Fixed = @($fixed | Sort-Object) }
+    return [PSCustomObject]@{ New = @($new | Sort-Object); Known = @($known | Sort-Object); Fixed = @($fixed | Sort-Object)
+                              Changed = @($changed | Sort-Object); Downgraded = @($down | Sort-Object); Warnings = @($warn) }
 }
 
 # Prints the "vs main baseline" section. Returns @{ Found; Cmp; Sel }.
@@ -167,12 +277,18 @@ function Show-MainBaselineSection {
     if ($sel.Ignored -gt 0) { $ign = " ($($sel.Ignored) other-lineage baseline(s) ignored)" }
     Write-Host "Baseline: origin/main $(([string]$b.commit).Substring(0,10)) recorded $($b.time_utc)$ign"
     if ($sel.Warning) { Write-Host "WARNING: $($sel.Warning)" -ForegroundColor Yellow }
-    $cmp = Compare-MainBaseline -Current $Current -Baseline $b
+    $cmp = Compare-MainBaseline -Current $Current -Baseline $b -Exact:$sel.Exact
+    if (-not $sel.Exact) {
+        Write-Host "Baseline is NOT at the merge-base: KNOWN is informational only; every failure counts as NEW. Record a baseline at the merge-base (tools\main_baseline.ps1 -Record)." -ForegroundColor Yellow
+    }
+    foreach ($w in $cmp.Warnings) { Write-Host "WARNING: $w" -ForegroundColor Yellow }
     $nc = 'Green'; if ($cmp.New.Count) { $nc = 'Red' }
     Write-Host "NEW (fails here, passed on main): $($cmp.New.Count)" -ForegroundColor $nc
     foreach ($x in $cmp.New) { Write-Host "  NEW    $x" -ForegroundColor Red }
+    foreach ($x in $cmp.Changed) { Write-Host "  CHANGED $x (fails on main too, but with a different failure signature; counts as NEW)" -ForegroundColor Red }
     Write-Host "KNOWN (also fails on main): $($cmp.Known.Count)" -ForegroundColor Yellow
     foreach ($x in $cmp.Known) { Write-Host "  KNOWN  $x" -ForegroundColor Yellow }
+    foreach ($x in $cmp.Downgraded) { Write-Host "  (known-at-older-main, counts as NEW) $x" -ForegroundColor Yellow }
     Write-Host "FIXED (passes here, failed on main): $($cmp.Fixed.Count)" -ForegroundColor Green
     foreach ($x in $cmp.Fixed) { Write-Host "  FIXED  $x" -ForegroundColor Green }
     return [PSCustomObject]@{ Found = $true; Cmp = $cmp; Sel = $sel }

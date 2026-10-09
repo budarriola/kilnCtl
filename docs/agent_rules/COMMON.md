@@ -173,8 +173,14 @@ is the only list that is yours to fix or report. KNOWN failures need no
 re-reporting beyond one line ("N KNOWN failures, same as main"); do not
 re-investigate whether main is already fixed, the baseline says. The baseline is
 recorded by a clean run at origin/main (`tools/main_baseline.ps1 -Record` seeds it,
-`-Show` prints it) and only counts if its commit is an ancestor of your HEAD; a
-warning means it is from an older main sha. `-FailOnlyOnNew` exits 0 when every
+`-Show` prints it) and only counts if its commit is an ancestor of your HEAD. KNOWN
+only excuses a failure when the baseline commit IS the merge-base of HEAD with
+origin/main; from an older main sha the classification is informational and every
+failure counts as NEW (record one at the merge-base). A KNOWN check whose failure
+signature (normalised FAIL/assert lines) differs from main's is CHANGED and counts
+as NEW, and a SKIP recorded on another host is not KNOWN. A run records only if HEAD
+and `git status --porcelain` are identical at its start and end and HEAD is
+origin/main or an ancestor. `-FailOnlyOnNew` exits 0 when every
 failure is KNOWN (it says so loudly); `tools/land.ps1 -AllowKnownFailures` accepts
 a check log whose only failures are KNOWN. `-AllowFail` is unchanged, for failures
 that are neither.

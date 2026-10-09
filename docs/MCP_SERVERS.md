@@ -883,7 +883,8 @@ gate and fetch and changes nothing. The last stdout line is one JSON object:
 `{"sha","landed","steps","allowed_fails","known_fails","new_fails","dry_run","error"}`.
 `-AllowKnownFailures` also accepts a `FAIL <check>` that is KNOWN on origin/main (the
 main baseline, `tools/main_baseline.ps1` / `tools/main_baseline_lib.ps1`, recorded for an
-origin/main commit that is an ancestor of HEAD; mode from the log's `Run mode:` line); any
+origin/main commit that must be the merge-base of HEAD with origin/main, else nothing is KNOWN; a
+check failing with a different failure signature than on main is CHANGED = NEW; mode from the log's `Run mode:` line); any
 NEW failure still refuses and is listed in `new_fails`; `-AllowFail` is unchanged. Unit test:
 `tools/check_land.ps1` (throwaway bare repo under temp).
 (`commit_guard.ps1` is a pre-commit guard and stays a manual step before the commit.)
