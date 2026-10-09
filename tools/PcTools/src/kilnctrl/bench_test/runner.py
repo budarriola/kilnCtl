@@ -371,6 +371,11 @@ class BenchTestRunner:
             # stall flag immediately before each one.
             if ok and exec_status.state_name == "running" and not stalled.is_set():
                 _safe_call(srv.profiles_stop)
+            # Suite-registered restore hooks (e.g. AX relay-4 aux entry) run even
+            # when the run aborted between the mutating case and its restore case.
+            for hook in list(ctx.get("teardown_hooks") or []):
+                if not stalled.is_set():
+                    _safe_call(hook, ctx)
             ok, at_status = _safe_call(srv._autotune.get_status)
             if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling")                     and not stalled.is_set():
                 _safe_call(srv.autotune_abort)

@@ -76,6 +76,13 @@ _ENTRY_RE = re.compile(
     r"min_on_s=(\d+), min_off_s=(\d+)")
 
 
+def _to_float(v: str) -> Optional[float]:
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
 def parse_aux_outputs(text: str) -> Dict[str, Any]:
     """Parse ``control_get_aux_outputs`` text into
     ``{"enabled_mask": int|None, "relays": {n: {...}}}``; ``{}`` on error text."""
@@ -87,6 +94,7 @@ def parse_aux_outputs(text: str) -> Dict[str, Any]:
         relays[int(e.group(1))] = {
             "enabled": e.group(2) == "ENABLED", "conflicted": bool(e.group(3)),
             "tc_zone": None if e.group(4) == "none" else int(e.group(4)),
+            "hyst_c": _to_float(e.group(5)),
             "min_on_s": int(e.group(6)), "min_off_s": int(e.group(7)),
         }
     return {"enabled_mask": int(m.group(1)) if m else None, "relays": relays}
@@ -111,10 +119,44 @@ def _ambient_c(ctx: dict) -> Optional[float]:
     try:
         if fn is not None:
             return float(fn())
-        m = re.search(r"(-?\d+(?:\.\d+)?)", _srv(ctx).thermo_read(0))
+        # devices_thermo.describe(): "CH0: 21.50 C (CJ 23.00 C)" or "CH0: invalid".
+        m = re.search(r"CH\d+:\s*(-?\d+(?:\.\d+)?)\s*C\b", _srv(ctx).thermo_read(0))
         return float(m.group(1)) if m else None
     except Exception:  # noqa: BLE001
         return None
+
+
+_EXEC_RE = re.compile(r"state=(\w+)\s+profile=#(-?\d+)")
+
+
+def _exec(ctx: dict) -> Optional["tuple[str, int]"]:
+    """(state_name_lower, profile_id) of the executor, or None if unreadable."""
+    try:
+        fn = ctx.get("aux_exec_fn")
+        text = fn() if fn is not None else _srv(ctx).profiles_get_exec_status()
+        if isinstance(text, tuple):
+            return text
+        m = _EXEC_RE.search(text)
+        return (m.group(1).lower(), int(m.group(2))) if m else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _slot_exists(ctx: dict) -> Optional[bool]:
+    try:
+        return BENCH_PROFILE_NAME in _srv(ctx).profiles_list()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _start_and_confirm(ctx: dict, pid: int) -> Optional[CaseResult]:
+    out = _srv(ctx).profiles_start(pid)
+    if not _is_ok(out):
+        return CaseResult(Verdict.FAIL, reason=f"profiles_start: {str(out)[:120]}")
+    ex = _exec(ctx)
+    if ex is None or ex != ("running", pid):
+        return CaseResult(Verdict.FAIL, reason=f"executor not running profile {pid} after start (read {ex})")
+    return None
 
 
 def _sleep(ctx: dict, s: float) -> None:
@@ -161,9 +203,11 @@ def judge_rule_samples(samples: List["tuple[float, Optional[bool]]"], min_on_s: 
            if d + tol_s < (min_on_s if s else min_off_s)]
     if bad:
         return CaseResult(Verdict.FAIL, reason=f"min on/off violated: {bad}", observed={"runs": runs})
-    note = "" if transitions >= 2 else " (only one transition observed; min on/off not exercised)"
-    return CaseResult(Verdict.PASS, reason=f"rule toggled relay 4{note}" if note else "",
-                      observed={"transitions": transitions, "runs": runs})
+    if transitions < 2:
+        return CaseResult(Verdict.INCONCLUSIVE,
+                          reason=f"only {transitions} transition(s) observed; need >= 2 to exercise min on/off",
+                          observed={"transitions": transitions, "runs": runs})
+    return CaseResult(Verdict.PASS, observed={"transitions": transitions, "runs": runs})
 
 
 def judge_conflict_refusal(text: str, mask_before: Optional[int], mask_after: Optional[int]) -> CaseResult:
@@ -178,28 +222,35 @@ def judge_conflict_refusal(text: str, mask_before: Optional[int], mask_after: Op
 
 # -- shared run helper -------------------------------------------------------
 
-def _save_rule(ctx: dict, threshold_delta: float, target_delta: float = 10.0) -> "tuple[Optional[int], str]":
+def _save_rule(ctx: dict, threshold_delta: float, target_delta: float = 10.0) -> "tuple[Optional[int], Optional[CaseResult]]":
+    """(pid, None) on success else (None, CaseResult to return)."""
+    if _slot_exists(ctx) is not False:
+        return None, CaseResult(Verdict.SKIP, reason=f"profile {BENCH_PROFILE_NAME} already exists (or unreadable); "
+                                "not overwriting it")
     amb = _ambient_c(ctx)
     if amb is None:
-        return None, "could not read ambient zone-0 temperature"
+        return None, CaseResult(Verdict.INCONCLUSIVE, reason="could not read a valid ambient zone-0 temperature")
     out = _srv(ctx).profile_save_bench_aux_rule(
         target_c=amb + target_delta, threshold_c=amb + threshold_delta, temp_cmp="below", confirm=True)
     m = re.search(r"profile id (\d+)", out) if isinstance(out, str) else None
     if not _is_ok(out) or not m:
-        return None, f"profile_save_bench_aux_rule: {str(out)[:160]}"
+        return None, CaseResult(Verdict.FAIL, reason=f"profile_save_bench_aux_rule: {str(out)[:160]}")
     pid = int(m.group(1))
     ctx.setdefault("_aux_profile_ids", []).append(pid)
-    return pid, ""
+    return pid, None
 
 
 def _teardown(ctx: dict, pid: Optional[int]) -> str:
     """Stop the firing and delete the saved slot. Returns "" or a problem."""
     srv = _srv(ctx)
     problems = []
-    try:
-        srv.profiles_stop()
-    except Exception as exc:  # noqa: BLE001
-        problems.append(f"profiles_stop raised {type(exc).__name__}")
+    ex = _exec(ctx)
+    # Stop only our own firing; unreadable status -> stop (fail safe, we may have started it).
+    if pid is not None and (ex is None or (ex[0] != "idle" and ex[1] == pid)):
+        try:
+            srv.profiles_stop()
+        except Exception as exc:  # noqa: BLE001
+            problems.append(f"profiles_stop raised {type(exc).__name__}")
     if ctx.get("aux_idle_fn") is not None:
         idle = ctx["aux_idle_fn"]()
     else:
@@ -241,16 +292,73 @@ def _preflight(ctx: dict) -> Optional[CaseResult]:
 
 # -- cases -------------------------------------------------------------------
 
+def _fw_post_aux(ctx: dict, relay: int, enabled: bool, tc_zone: Optional[int]) -> "tuple[Optional[int], bool]":
+    """POST /api/aux_outputs straight through the HTTP client (no MCP precheck).
+    Returns (http_status_or_None, board_said_ok). ``ctx["aux_post_fn"]`` is the test seam."""
+    fn = ctx.get("aux_post_fn")
+    if fn is not None:
+        return fn(relay, enabled, tc_zone)
+    from .. import aux_http_client as ahc
+    from ..mcp_server_aux import _resolve_host
+    try:
+        return 200, bool(ahc.post_aux_output(_resolve_host(ctx.get("host")), relay, enabled, tc_zone))
+    except ahc.AuxHttpError as exc:
+        return exc.status, False
+
+
+def _restore(ctx: dict) -> List[str]:
+    """Put relay 4's full aux entry and enabled_mask back to what AX-C01 recorded.
+    Idempotent; returns problems ([] on success or when nothing is dirty)."""
+    orig = ctx.get("_aux_orig")
+    if orig is None or not ctx.get("_aux_dirty"):
+        return []
+    srv = _srv(ctx)
+    problems: List[str] = []
+    o = orig["relay4"]
+    if o:
+        out = srv.control_set_aux_output(
+            relay=AUX_RELAY, enabled=o["enabled"], tc_zone=-1 if o["tc_zone"] is None else o["tc_zone"],
+            hyst_c=o.get("hyst_c"), min_on_s=o["min_on_s"], min_off_s=o["min_off_s"], confirm=True)
+    else:
+        out = srv.control_set_aux_output(relay=AUX_RELAY, enabled=False, confirm=True)
+    if not _is_ok(out):
+        problems.append(f"restore relay 4: {str(out)[:100]}")
+    now = _aux_state(ctx)
+    cur = now.get("relays", {}).get(AUX_RELAY, {})
+    for k in ("enabled", "tc_zone", "hyst_c", "min_on_s", "min_off_s"):
+        if o and cur.get(k) != o.get(k):
+            problems.append(f"relay 4 {k} {cur.get(k)!r} != original {o.get(k)!r}")
+    if now.get("enabled_mask") != orig["enabled_mask"]:
+        problems.append(f"enabled_mask {now.get('enabled_mask')} != original {orig['enabled_mask']}")
+    if not problems:
+        ctx["_aux_dirty"] = False
+    return problems
+
+
+def aux_teardown_hook(ctx: dict) -> None:
+    """Runner teardown: restore relay 4 if AX-C01 mutated it and AX-R01 never ran/finished."""
+    if ctx.get("_aux_dirty") and _restore(ctx):
+        ctx["_tainted"] = True
+
+
 def _case_ax_c01(ctx: dict) -> CaseResult:
     skip = _gate(ctx, heat=False)
     if skip:
         return skip
     srv = _srv(ctx)
+    if _slot_exists(ctx) is not False:
+        ctx["_tainted"] = True  # later aux cases must not run either
+        return CaseResult(Verdict.SKIP, reason=f"profile {BENCH_PROFILE_NAME} already exists (or unreadable); "
+                          "suite skipped rather than overwrite it")
     before = _aux_state(ctx)
     if not before:
         return CaseResult(Verdict.INCONCLUSIVE, reason="control_get_aux_outputs unreadable")
     ctx["_aux_orig"] = {"enabled_mask": before["enabled_mask"],
                         "relay4": dict(before["relays"].get(AUX_RELAY, {}))}
+    ctx["_aux_dirty"] = True
+    ctx.setdefault("teardown_hooks", [])
+    if aux_teardown_hook not in ctx["teardown_hooks"]:
+        ctx["teardown_hooks"].append(aux_teardown_hook)
     out = srv.control_set_aux_output(relay=AUX_RELAY, enabled=True, tc_zone=0, confirm=True)
     if not _is_ok(out):
         return CaseResult(Verdict.FAIL, reason=f"control_set_aux_output: {str(out)[:160]}")
@@ -259,27 +367,39 @@ def _case_ax_c01(ctx: dict) -> CaseResult:
 
 
 def _case_ax_c02(ctx: dict) -> CaseResult:
-    """Plan step 5a: enabling aux on a zone-owned relay (relay 1) is refused."""
+    """Plan step 5a: enabling aux on a zone-owned relay (relay 1) is refused. Two
+    sub-checks: the MCP precheck refusal, and the FIRMWARE's own 400 via a direct POST."""
     skip = _gate(ctx, heat=False)
     if skip:
         return skip
     before = _aux_state(ctx)
     out = _srv(ctx).control_set_aux_output(relay=1, enabled=True, tc_zone=0, confirm=True)
+    pre = judge_conflict_refusal(out, before.get("enabled_mask"), _aux_state(ctx).get("enabled_mask"))
+    status, fw_ok = _fw_post_aux(ctx, 1, True, 0)
     after = _aux_state(ctx)
-    res = judge_conflict_refusal(out, before.get("enabled_mask"), after.get("enabled_mask"))
-    if res.verdict == Verdict.FAIL and after.get("relays", {}).get(1, {}).get("enabled") and \
-            not before.get("relays", {}).get(1, {}).get("enabled"):
+    changed = after.get("relays", {}).get(1, {}).get("enabled") and not before.get("relays", {}).get(1, {}).get("enabled")
+    if changed or fw_ok or pre.verdict == Verdict.FAIL and "changed" in pre.reason:
         undo = _srv(ctx).control_set_aux_output(relay=1, enabled=False, confirm=True)
-        if not _is_ok(undo):
+        if not _is_ok(undo) and _aux_state(ctx).get("relays", {}).get(1, {}).get("enabled"):
             ctx["_tainted"] = True
-            return CaseResult(Verdict.FAIL, reason=res.reason + "; ALSO could not disable relay 1 again -- run tainted")
-    return res
+            return CaseResult(Verdict.FAIL, reason="relay 1 aux write was accepted and could not be disabled -- run tainted")
+    obs = {"precheck": pre.verdict, "firmware_status": status, "firmware_ok": fw_ok}
+    if status != 400:
+        return CaseResult(Verdict.FAIL, reason=f"firmware answered {status} (ok={fw_ok}) to aux on a zone-owned relay, "
+                          "expected 400", observed=obs)
+    if after.get("enabled_mask") != before.get("enabled_mask"):
+        return CaseResult(Verdict.FAIL, reason="enabled_mask changed despite firmware 400", observed=obs)
+    if pre.verdict != Verdict.PASS:
+        return CaseResult(Verdict.FAIL, reason=f"MCP precheck sub-check: {pre.reason}", observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
 
 
 def _case_ax_c03(ctx: dict) -> CaseResult:
     """Plan step 5b: a zone relay_mask containing relay 4 is refused (400).
     No narrow relay_mask writer exists, so the write is injected via
-    ``ctx["aux_zone_mask_post_fn"]() -> (status, body)`` and SKIPs without it."""
+    ``ctx["aux_zone_mask_post_fn"]() -> (status, body)`` and SKIPs without it.
+    An accepted write is undone via optional ``ctx["aux_zone_mask_restore_fn"]()`` and
+    always taints the run."""
     skip = _gate(ctx, heat=False)
     if skip:
         return skip
@@ -289,7 +409,17 @@ def _case_ax_c03(ctx: dict) -> CaseResult:
     status, _body = fn()
     if status == 400:
         return CaseResult(Verdict.PASS, observed={"status": status})
-    return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 400")
+    restored = None
+    if status is not None and 200 <= status < 300:
+        ctx["_tainted"] = True
+        rfn = ctx.get("aux_zone_mask_restore_fn")
+        try:
+            restored = bool(rfn()) if rfn is not None else False
+        except Exception:  # noqa: BLE001
+            restored = False
+    return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 400"
+                      + ("" if restored is None else f"; original mask restore {'ok' if restored else 'NOT confirmed'}"
+                         " -- run tainted"), observed={"status": status, "restored": restored})
 
 
 def _case_ax_t01(ctx: dict) -> CaseResult:
@@ -300,12 +430,16 @@ def _case_ax_t01(ctx: dict) -> CaseResult:
     ent = _aux_state(ctx)["relays"][AUX_RELAY]
     pid, err = _save_rule(ctx, threshold_delta=4.0)
     if pid is None:
-        return CaseResult(Verdict.FAIL, reason=err)
+        return err
     samples: List["tuple[float, Optional[bool]]"] = []
     try:
-        started = _srv(ctx).profiles_start(pid)
-        if isinstance(started, str) and started.startswith(("error", "refused")):
-            return _finish(ctx, pid, CaseResult(Verdict.FAIL, reason=f"profiles_start: {started[:120]}"))
+        pre = _relay_on(ctx)
+        if pre is not False:
+            return _finish(ctx, pid, CaseResult(Verdict.INCONCLUSIVE,
+                                                reason=f"relay 4 read {pre} before profiles_start; need OFF"))
+        bad = _start_and_confirm(ctx, pid)
+        if bad:
+            return _finish(ctx, pid, bad)
         t = 0.0
         while t <= ctx.get("aux_window_s", RULE_WINDOW_S):
             samples.append((t, _relay_on(ctx)))
@@ -324,16 +458,21 @@ def _case_ax_k01(ctx: dict) -> CaseResult:
         return skip
     pid, err = _save_rule(ctx, threshold_delta=25.0)  # stays below threshold: R4 ON throughout
     if pid is None:
-        return CaseResult(Verdict.FAIL, reason=err)
+        return err
     srv = _srv(ctx)
     try:
-        srv.profiles_start(pid)
+        bad = _start_and_confirm(ctx, pid)
+        if bad:
+            return _finish(ctx, pid, bad)
         _sleep(ctx, SAMPLE_PERIOD_S)
         running_on = _relay_on(ctx)
         if running_on is not True:
             result = CaseResult(Verdict.INCONCLUSIVE, reason=f"relay 4 read {running_on} before pausing; nothing to compare")
         else:
-            srv.profiles_pause()
+            pout = srv.profiles_pause()
+            if not _is_ok(pout) or (_exec(ctx) or ("", -1))[0] != "paused":
+                return _finish(ctx, pid, CaseResult(
+                    Verdict.FAIL, reason=f"profiles_pause did not pause the run ({str(pout)[:80]}; state {_exec(ctx)})"))
             _sleep(ctx, SAMPLE_PERIOD_S)
             paused_on = _relay_on(ctx)
             try:
@@ -359,10 +498,12 @@ def _case_ax_t02(ctx: dict) -> CaseResult:
         return skip
     pid, err = _save_rule(ctx, threshold_delta=25.0)
     if pid is None:
-        return CaseResult(Verdict.FAIL, reason=err)
+        return err
     srv = _srv(ctx)
     try:
-        srv.profiles_start(pid)
+        bad = _start_and_confirm(ctx, pid)
+        if bad:
+            return _finish(ctx, pid, bad)
         _sleep(ctx, SAMPLE_PERIOD_S)
         if _relay_on(ctx) is not True:
             result = CaseResult(Verdict.INCONCLUSIVE, reason="relay 4 not ON before the trip; cannot show it drops")
@@ -397,7 +538,7 @@ def _case_ax_t02(ctx: dict) -> CaseResult:
 
 
 def _case_ax_r01(ctx: dict) -> CaseResult:
-    """Restore: relay 4 back to what AX-C01 found, no stray BENCH_AUX_RULE slot."""
+    """Restore: relay 4's FULL aux entry back to what AX-C01 found, no stray BENCH_AUX_RULE slot."""
     orig = ctx.get("_aux_orig")
     if orig is None:
         return CaseResult(Verdict.SKIP, reason="AX-C01 did not change anything")
@@ -407,17 +548,11 @@ def _case_ax_r01(ctx: dict) -> CaseResult:
         out = srv.profiles_delete(pid)
         if isinstance(out, str) and out.startswith(("error", "refused")):
             problems.append(f"profiles_delete({pid}): {out[:80]}")
-    if not orig["relay4"].get("enabled"):
-        out = srv.control_set_aux_output(relay=AUX_RELAY, enabled=False, confirm=True)
-        if not _is_ok(out):
-            problems.append(f"disable relay 4: {str(out)[:100]}")
-    now = _aux_state(ctx)
-    if now.get("enabled_mask") != orig["enabled_mask"]:
-        problems.append(f"enabled_mask {now.get('enabled_mask')} != original {orig['enabled_mask']}")
+    problems += _restore(ctx)
     if problems:
         ctx["_tainted"] = True
         return CaseResult(Verdict.FAIL, reason="; ".join(problems) + " -- run tainted")
-    return CaseResult(Verdict.PASS, observed={"enabled_mask": now.get("enabled_mask")})
+    return CaseResult(Verdict.PASS, observed={"enabled_mask": _aux_state(ctx).get("enabled_mask")})
 
 
 _CASE_FUNCS: Dict[str, Callable[[dict], CaseResult]] = {
