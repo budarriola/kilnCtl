@@ -3098,6 +3098,9 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_relay_cycles(const char *body, 
  * relay<N>_type < RELAY_DEVICE_TYPE_COUNT, as POST /api/zones) and ANY invalid value refuses the
  * WHOLE restore in pass 1 (commit=false). With commit=true the same parse is applied through the
  * validated setters. Parsed state is a few hundred bytes; nothing large lives here. */
+/* Width of profiles_builtin.c's uint32_t hidden mask (one bit per catalogue entry, 28 today). */
+#define BACKUP_HIDDEN_MASK_BITS 32u
+_Static_assert(PROFILE_BUILTIN_ID_BASE + BACKUP_HIDDEN_MASK_BITS - 1u <= 255u, "hidden ids must fit uint8_t");
 typedef struct {
     bool has_unit, has_ramp, has_display, has_hidden, has_tz, has_names;
     unit_pref_t unit;
@@ -3105,7 +3108,7 @@ typedef struct {
     uint8_t brightness;
     display_timeout_setting_t timeout;
     bool keep_on, on_error;
-    bool hidden[8]; /* indexed by builtin id - PROFILE_BUILTIN_ID_BASE */
+    bool hidden[BACKUP_HIDDEN_MASK_BITS]; /* indexed by builtin id - PROFILE_BUILTIN_ID_BASE */
     char tz[TIME_SYNC_TZ_MAX_LEN + 2];
     bool name_set[KILN_IO_RELAY_COUNT];
     char name[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 2];
@@ -3279,7 +3282,10 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_prefs(const char *body, bool co
         ok = false;
     }
     if (p.has_hidden) {
-        for (size_t i = 0; i < g_builtin_profile_count && i < sizeof(p.hidden); i++) {
+        if (g_builtin_profile_count > BACKUP_HIDDEN_MASK_BITS) {
+            ok = false; /* catalogue outgrew the 32-bit mask: never silently skip entries */
+        }
+        for (size_t i = 0; i < g_builtin_profile_count && i < BACKUP_HIDDEN_MASK_BITS; i++) {
             uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
             if (profiles_builtin_is_hidden(id) != p.hidden[i] &&
                 profiles_builtin_set_hidden(id, p.hidden[i]) != ESP_OK) {

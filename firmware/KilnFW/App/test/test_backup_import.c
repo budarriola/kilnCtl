@@ -244,7 +244,7 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
 #include "ramp_assist_cfg.h"
 #include "display_power_cfg.h"
 #include "time_sync.h"
-const size_t g_builtin_profile_count = 3;
+const size_t g_builtin_profile_count = 28; /* real catalogue width; hidden mask is 32 bits */
 static char g_pf_tz[TIME_SYNC_TZ_MAX_LEN + 1] = "UTC0";
 void time_sync_get_status(time_sync_status_t *out)
 {
@@ -259,12 +259,12 @@ esp_err_t time_sync_set_tz(const char *tz)
     strcpy(g_pf_tz, tz);
     return ESP_OK;
 }
-static bool g_pf_hidden[3];
+static bool g_pf_hidden[32];
 static bool g_pf_ids_valid = false;
-bool profiles_builtin_is_hidden(uint8_t id) { return id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 3 && g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE]; }
+bool profiles_builtin_is_hidden(uint8_t id) { return id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 28 && g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE]; }
 esp_err_t profiles_builtin_set_hidden(uint8_t id, bool h)
 {
-    if (id < PROFILE_BUILTIN_ID_BASE || id >= PROFILE_BUILTIN_ID_BASE + 3) {
+    if (id < PROFILE_BUILTIN_ID_BASE || id >= PROFILE_BUILTIN_ID_BASE + 28) {
         return ESP_ERR_INVALID_ARG;
     }
     g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE] = h;
@@ -327,7 +327,7 @@ static bool g_fake_builtin_on = false;
 bool profiles_builtin_id_valid(uint8_t id)
 {
     return (g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE) ||
-           (g_pf_ids_valid && id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 3);
+           (g_pf_ids_valid && id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 28);
 }
 const builtin_profile_t *profiles_builtin_entry(uint8_t id)
 {
@@ -6756,6 +6756,17 @@ static void test_prefs_import_applies_each_key(void)
                "relay 3 applied, unnamed relay 2 untouched");
 }
 
+static void test_prefs_hidden_past_eighth_builtin(void)
+{
+    TEST_SECTION("backup_import_apply -- hiding the 9th and 28th builtin imports and commits those bits");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with(",\"hidden_builtin_profiles\":[136,155]", err, sizeof(err)), "ids past the 8th builtin import");
+    TEST_CHECK(g_pf_hidden[8] && g_pf_hidden[27] && !g_pf_hidden[0] && !g_pf_hidden[9], "bits 8 and 27 committed only");
+    TEST_CHECK(!wp9_import_with(",\"hidden_builtin_profiles\":[156]", err, sizeof(err)), "id past the catalogue still refused");
+}
+
 static void test_prefs_absent_keys_preserve(void)
 {
     TEST_SECTION("backup_import_apply -- absent preference keys preserve the live values");
@@ -6842,6 +6853,7 @@ static void test_prefs_export_round_trip(void)
 void run_test_backup_import(void)
 {
     test_prefs_import_applies_each_key();
+    test_prefs_hidden_past_eighth_builtin();
     test_prefs_absent_keys_preserve();
     test_prefs_invalid_refuses_whole_restore();
     test_prefs_export_round_trip();
