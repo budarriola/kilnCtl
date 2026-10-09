@@ -776,6 +776,13 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
  * Returns true and fills floors[] when the array is KNOWN: read OK, or the
  * namespace/key genuinely absent (nothing was ever persisted, floor 0). Returns
  * false when it cannot be established (open error, short/failed read). */
+/* A persisted rev array is acceptable when it is a positive multiple of 4 bytes
+ * and no longer than the full array (legacy 8-slot firmware wrote 32 bytes). */
+static bool rev_blob_len_ok(size_t len)
+{
+    return len > 0 && (len % sizeof(uint32_t)) == 0 && len <= sizeof(uint32_t) * PROFILES_MAX_COUNT;
+}
+
 static bool nvs_read_rev_floors(const char *partition, uint32_t *floors)
 {
     memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
@@ -794,10 +801,12 @@ static bool nvs_read_rev_floors(const char *partition, uint32_t *floors)
         memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
         return true;
     }
-    if (get_err != HAL_OK || len != sizeof(uint32_t) * PROFILES_MAX_COUNT) {
+    if (get_err != HAL_OK || !rev_blob_len_ok(len)) {
         memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
         return false;
     }
+    /* A legacy shorter array (8-slot firmware) is KNOWN: floors[] was zeroed up
+     * front, so slots beyond the old count read floor 0 (they never existed). */
     return true;
 }
 
@@ -837,9 +846,9 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
             s_profile_rev[id] = resolved_rev > floors[id] ? resolved_rev : floors[id];
         } else {
             s_profile_rev[id] = floors[id];
-            if (!floors_known) {
-                s_profile_rev_unknown[id] = true;
-            }
+        }
+        if (!floors_known) {
+            s_profile_rev_unknown[id] = true;
         }
     }
     return ESP_OK;
@@ -891,13 +900,17 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     hal_status_t rev_err = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len);
     /* NOT_FOUND = never written = genuine "no opinion". Any other failure, or a short
      * blob, means the floors are unknown: slots without a file get refused saves. */
-    bool rev_floors_known = (rev_err == HAL_NOT_FOUND) || (rev_err == HAL_OK && rev_len == sizeof(nvs_rev));
+    bool rev_floors_known = (rev_err == HAL_NOT_FOUND) || (rev_err == HAL_OK && rev_blob_len_ok(rev_len));
     if (!rev_floors_known) {
         memset(nvs_rev, 0, sizeof(nvs_rev));
     }
     bool slot_rev_unknown[PROFILES_MAX_COUNT] = {0};
 
     bool nvs_slot_valid[PROFILES_MAX_COUNT] = {0};
+    /* Slots whose bitmap bit was set but whose profN blob is present-but-unreadable
+     * or undecodable: NOT a deletion, so resolve must not treat the NVS rev as a
+     * staleness floor (it would delete the live file when file_rev == nvs_rev). */
+    bool slot_blob_bad[PROFILES_MAX_COUNT] = {0};
 
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (!profiles_slot_bitmap_test(&out->used_bitmap, id)) {
@@ -912,6 +925,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' failed (%s) -- marking unused", id, partition,
                      hal_status_to_name(slot_kv_err));
             profiles_slot_bitmap_clear(&out->used_bitmap, id);
+            slot_blob_bad[id] = true;
             continue;
         }
         /* decode_profile_blob() is the ONE place a stored blob is checked
@@ -939,11 +953,13 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         case PROFILE_DECODE_NEWER:
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' refused: %s", id, partition, reason);
             profiles_slot_bitmap_clear(&out->used_bitmap, id);
+            slot_blob_bad[id] = true;
             continue;
         case PROFILE_DECODE_CORRUPT:
         default:
             ESP_LOGW(PROFILES_TAG, "prof%u load from '%s' rejected: %s -- marking unused", id, partition, reason);
             profiles_slot_bitmap_clear(&out->used_bitmap, id);
+            slot_blob_bad[id] = true;
             continue;
         }
     }
@@ -965,8 +981,8 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             profile_t resolved;
             uint32_t resolved_rev = 0;
             bool used_file = false;
-            bool trustworthy = profiles_cfg_fs_resolve(id, &out->profiles[id], nvs_slot_valid[id], nvs_rev[id],
-                                                        &resolved, &resolved_rev, &used_file);
+            bool trustworthy = profiles_cfg_fs_resolve(id, &out->profiles[id], nvs_slot_valid[id],
+                                                        slot_blob_bad[id] ? 0 : nvs_rev[id], &resolved, &resolved_rev, &used_file);
             if (trustworthy) {
                 out->profiles[id] = resolved;
                 profiles_slot_bitmap_set(&out->used_bitmap, id);
@@ -983,7 +999,10 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
              * the next boot's resolve() deleted the new file as "stale" (bench
              * 2026-10-08, B1 soak). */
             s_profile_rev[id] = trustworthy ? resolved_rev : nvs_rev[id];
-            slot_rev_unknown[id] = !trustworthy && !rev_floors_known;
+            if (trustworthy && slot_blob_bad[id] && nvs_rev[id] > s_profile_rev[id]) {
+                s_profile_rev[id] = nvs_rev[id]; /* later saves must still exceed the floor */
+            }
+            slot_rev_unknown[id] = !rev_floors_known;
         }
     } else {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
@@ -1126,12 +1145,14 @@ esp_err_t nvs_erase_slot(uint8_t id)
             hal_status_t rget = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len);
             if (rget == HAL_NOT_FOUND) {
                 memset(nvs_rev, 0, sizeof(s_profile_rev)); /* never written: genuine no-opinion */
-            } else if (rget != HAL_OK || rev_len != sizeof(s_profile_rev)) {
+            } else if (rget != HAL_OK || !rev_blob_len_ok(rev_len)) {
                 /* Unreadable/short: writing zeros for the other slots would erase
                  * their floors. Refuse the rev-array write (and so the erase). */
                 kv_err = HAL_IO;
             }
             if (kv_err == HAL_OK) {
+                /* A legacy short array was zero-initialised above: slots past its old
+                 * count never existed, so the full-width write is zero-extended. */
                 nvs_rev[id] = new_rev;
                 kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, sizeof(s_profile_rev));
             }

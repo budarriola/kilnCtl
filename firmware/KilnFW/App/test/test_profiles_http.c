@@ -1100,7 +1100,7 @@ static void test_pcfg_files_only_unknown_floor_refuses_save(void)
     memset(s_profile_rev, 0, sizeof(s_profile_rev));
     TEST_CHECK(profiles_boot_load() != ESP_OK, "the NVS load reports its failure");
     TEST_CHECK(s_profile_rev_unknown[3], "file-less slot 3 has an unknown floor");
-    TEST_CHECK(!s_profile_rev_unknown[0], "file-backed slot 0 is fine (its file rev is the floor)");
+    TEST_CHECK(s_profile_rev_unknown[0], "file-backed slot 0 is flagged too (floors unknown)");
     s_profiles.profiles[3] = make_stored_profile();
     profiles_slot_bitmap_set(&s_profiles.used_bitmap, 3);
     TEST_CHECK(nvs_save_slot(3) != ESP_OK, "save into the unknown-floor slot is refused");
@@ -1109,7 +1109,7 @@ static void test_pcfg_files_only_unknown_floor_refuses_save(void)
     profile_t fp;
     profiles_cfg_fs_load_raw(3, &fp, &file_rev, &valid);
     TEST_CHECK(!valid, "no file was written for slot 3");
-    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "slot 0 still saves");
+    TEST_CHECK(nvs_save_slot(0) != ESP_OK, "slot 0 save is refused too (floors unknown)");
 }
 
 static void test_pcfg_files_only_keeps_files_when_rev_array_equals_file_rev(void)
@@ -1157,8 +1157,97 @@ static void test_pcfg_full_load_short_rev_blob_marks_fileless_slots_unknown(void
     bool any_found = false;
     TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
     TEST_CHECK(s_profile_rev_unknown[3], "file-less slot 3 is rev-unknown");
-    TEST_CHECK(!s_profile_rev_unknown[0], "file-backed slot 0 is fine");
+    TEST_CHECK(s_profile_rev_unknown[0], "file-backed slot 0 is flagged too");
     memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
+static void test_pcfg_legacy_32_byte_rev_array_is_known(void)
+{
+    TEST_SECTION("nvs_load_all_from -- legacy 32-byte rev array is KNOWN: save and delete work");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint32_t legacy[8] = {5, 0, 0, 0, 0, 0, 0, 0};
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, legacy, sizeof(legacy));
+    nvs_commit(h);
+    nvs_close(h);
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    TEST_CHECK(!s_profile_rev_unknown[3] && !s_profile_rev_unknown[0], "no slot is rev-unknown");
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 3);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save into file-less slot 3 works");
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete of slot 3 works with the legacy-width array");
+}
+
+static void test_pcfg_non_multiple_of_4_rev_blob_stays_unknown(void)
+{
+    TEST_SECTION("nvs_load_all_from -- 30-byte rev blob stays unknown");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t odd[30] = {0};
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, odd, sizeof(odd));
+    nvs_commit(h);
+    nvs_close(h);
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    TEST_CHECK(s_profile_rev_unknown[3], "slot 3 is rev-unknown");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
+static void test_pcfg_unknown_floors_flag_file_backed_slots_too(void)
+{
+    TEST_SECTION("nvs_load_all_from -- unknown floors flag EVERY slot, file-backed included");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    TEST_CHECK(s_profile_rev_unknown[0], "file-backed slot 0 is rev-unknown too");
+    TEST_CHECK(s_profile_rev_unknown[3], "file-less slot 3 is rev-unknown");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
+static void test_pcfg_corrupt_nvs_blob_keeps_live_file(void)
+{
+    TEST_SECTION("nvs_load_all_from -- corrupt profN blob, file rev == nvs rev: file survives and loads");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    stage_legacy_slot(0, &p0, 5);
+    uint8_t junk[7] = {9, 9, 9, 9, 9, 9, 9};
+    stage_profile_blob(0, junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    profile_t fp;
+    TEST_CHECK(pcfg_file_profile(0, &fp), "the live file was NOT deleted");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 loads from its file");
+    TEST_CHECK(s_profile_rev[0] >= 5, "rev floor kept");
 }
 
 static void test_nvs_erase_slot_refuses_when_rev_array_unreadable(void)
@@ -3917,6 +4006,10 @@ void run_test_profiles_http(void)
     test_pcfg_files_only_unknown_floor_refuses_save();
     test_pcfg_files_only_keeps_files_when_rev_array_equals_file_rev();
     test_pcfg_full_load_short_rev_blob_marks_fileless_slots_unknown();
+    test_pcfg_legacy_32_byte_rev_array_is_known();
+    test_pcfg_non_multiple_of_4_rev_blob_stays_unknown();
+    test_pcfg_unknown_floors_flag_file_backed_slots_too();
+    test_pcfg_corrupt_nvs_blob_keeps_live_file();
     test_nvs_erase_slot_refuses_when_rev_array_unreadable();
     test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
