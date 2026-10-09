@@ -160,8 +160,8 @@ blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c
 convention), since superseded by a later unrelated edit; line 505 still holds the same
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` call this negative test
 targeted, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`66794843`
-(citation refreshed again 2026-09-24 after 540b2d72 added the per-zone claim release, 2026-10-05 after spare-relay WP-3 added the aux functions, and 2026-10-07 after the on/off min_off_s seed helper, and 2026-10-09 after later unrelated edits, and again 2026-10-09 after 45c2b4de; the heat_enable_release() call this test targets is unchanged))
+blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`0ca1a2b0`
+(citation refreshed again 2026-09-24 after 540b2d72 added the per-zone claim release, 2026-10-05 after spare-relay WP-3 added the aux functions, and 2026-10-07 after the on/off min_off_s seed helper, and 2026-10-09 after later unrelated edits, and again 2026-10-09 after 45c2b4de and 8c287553; the heat_enable_release() call this test targets is unchanged))
 and, at the time of this audit, 552f8a05 for `profile_executor_status.c`
 -- that file has since changed, so its blob id is no longer cited as
 resolvable against current HEAD) matched HEAD on both at audit time. Re-run:
