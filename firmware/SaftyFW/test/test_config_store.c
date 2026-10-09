@@ -2056,8 +2056,10 @@ static void test_config_params_set_range_validation(void)
         // 20.0 (not 12.5) since max_rate_c_per_min now carries its own
         // [CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, _CEILING] bound (15..60) --
         // see that macro's doc comment (config_store.h) -- and this loop
-        // shares one value across every field in the table.
-        v.f32_val = 20.0f;
+        // shares one value across every field in the table, except the
+        // ct_cal gains, whose sanity band tops out at
+        // CONFIG_PARAMS_CT_CAL_GAIN_MAX (kilnlink audit 2026-10-09 L2).
+        v.f32_val = (f32_ids[i] >= 0x0310u && f32_ids[i] <= 0x0312u) ? 1.0f : 20.0f;
         TEST_CHECK(config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
                    "an ordinary finite value is still accepted for this F32 field");
     }
@@ -2459,6 +2461,87 @@ static void test_config_params_ct_topology_set(void)
     v.u8_val = 0u;
     TEST_CHECK(!config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U16, v),
                "ct_topology refuses a mismatched wire type");
+}
+
+// kilnlink audit 2026-10-09 L2: a calibrated ct_cal channel with gain <= 0
+// reads 0 A and blinds S14; SET_PARAM, SET_CT_CAL (via
+// config_params_ct_cal_entry_ok()) and COMMIT_CONFIG (validate_ex) must refuse
+// it, while an uncalibrated channel's default gain 0 stays storable.
+static void test_config_params_ct_cal_gain_offset_bounds(void)
+{
+    TEST_SECTION("config_params -- ct_cal gain/offset sanity bounds (kilnlink audit L2)");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    kilnlink_param_value_t v;
+
+    // SET_PARAM, one field at a time.
+    v.f32_val = 0.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0310u, KILNLINK_PARAM_TYPE_F32, v),
+               "gain 0 is still stageable (uncalibrated default, kiln_cfg re-push)");
+    v.f32_val = -1.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0310u, KILNLINK_PARAM_TYPE_F32, v), "negative gain refused");
+    v.f32_val = CONFIG_PARAMS_CT_CAL_GAIN_MAX * 2.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0311u, KILNLINK_PARAM_TYPE_F32, v), "absurd gain refused");
+    v.f32_val = NAN;
+    TEST_CHECK(!config_params_set(&rec, 0x0312u, KILNLINK_PARAM_TYPE_F32, v), "NaN gain refused");
+    v.f32_val = 1.05f;
+    TEST_CHECK(config_params_set(&rec, 0x0312u, KILNLINK_PARAM_TYPE_F32, v), "ordinary gain accepted");
+    v.f32_val = CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A + 1.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0313u, KILNLINK_PARAM_TYPE_F32, v), "offset above band refused");
+    v.f32_val = -(CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A + 1.0f);
+    TEST_CHECK(!config_params_set(&rec, 0x0315u, KILNLINK_PARAM_TYPE_F32, v), "offset below band refused");
+    v.f32_val = -0.5f;
+    TEST_CHECK(config_params_set(&rec, 0x0314u, KILNLINK_PARAM_TYPE_F32, v), "ordinary offset accepted");
+
+    // Whole-record: the default (uncalibrated, gain 0) passes validate_ex.
+    config_store_default(&rec);
+    TEST_CHECK(config_params_validate_ex(&rec, NULL, NULL, NULL),
+               "default record (uncalibrated, gain 0) still validates");
+
+    // Calibrated with gain 0: the exact audit trigger. Refused, naming gain.
+    rec.ct_cal[1].calibrated = true;
+    rec.ct_cal[1].gain = 0.0f;
+    rec.ct_cal[1].offset = 0.0f;
+    const char *field = NULL;
+    const char *rule = NULL;
+    config_params_reject_reason_t reason = CONFIG_PARAMS_REJECT_NONE;
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "calibrated channel with gain 0 is refused at commit");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_RANGE, "reported as a RANGE rejection");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0311u, "names ct_cal[1].gain (0x0311)");
+
+    rec.ct_cal[1].gain = 1.0f;
+    TEST_CHECK(config_params_validate_ex(&rec, NULL, NULL, NULL), "calibrated with gain 1.0 validates");
+    rec.ct_cal[1].offset = 75.0f;
+    field = NULL;
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, NULL, NULL), "calibrated with absurd offset refused");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0314u, "names ct_cal[1].offset (0x0314)");
+
+    // Load-time validate_ranges deliberately does NOT reject a legacy bad
+    // ct_cal: that would discard the whole record (see config_params.c).
+    config_store_default(&rec);
+    rec.ct_cal[0].calibrated = true;
+    rec.ct_cal[0].gain = 0.0f;
+    TEST_CHECK(config_params_validate_ranges(&rec, NULL, NULL, NULL),
+               "load-time range check keeps the record (no whole-record discard)");
+
+    // The SET_CT_CAL helper.
+    TEST_CHECK(!config_params_ct_cal_entry_ok(true, 0.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL calibrated gain 0 refused");
+    TEST_CHECK(!config_params_ct_cal_entry_ok(true, -2.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL calibrated negative gain refused");
+    TEST_CHECK(!config_params_ct_cal_entry_ok(false, -2.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL uncalibrated negative gain refused");
+    TEST_CHECK(config_params_ct_cal_entry_ok(false, 0.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL uncalibrated zero entry accepted");
+    TEST_CHECK(config_params_ct_cal_entry_ok(true, 0.98f, -0.2f, NULL, NULL, NULL),
+               "SET_CT_CAL ordinary calibrated entry accepted");
+    bool gain_bad = true;
+    bool offset_bad = false;
+    TEST_CHECK(!config_params_ct_cal_entry_ok(true, 1.0f, INFINITY, &gain_bad, &offset_bad, NULL),
+               "SET_CT_CAL infinite offset refused");
+    TEST_CHECK(!gain_bad && offset_bad, "infinite offset reported as the offset field");
 }
 
 static void test_config_params_finalize_i_present_a(void)
@@ -3339,6 +3422,7 @@ void run_test_config_store(void)
     test_config_params_ct_channel_map_two_of_three();
     test_ct_topology_legacy_decode();
     test_config_params_ct_topology_set();
+    test_config_params_ct_cal_gain_offset_bounds();
     test_config_params_finalize_i_present_a();
     test_config_params_finalize_i_normal_a_invalidation();
     test_config_params_all_required_set();

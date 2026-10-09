@@ -108,6 +108,33 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id);
 bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
                         kilnlink_param_value_t value);
 
+// Legacy ct_cal[] gain/offset sanity bounds (kilnlink robustness audit
+// 2026-10-09, finding L2). ct_amps_cal_apply() computes
+// `gain * raw_amps + offset`, clamped at 0, and feeds the result to S14
+// (over-current WARN) and S15 (under-current WARN). A calibrated channel with
+// gain <= 0 reads 0 A forever, which blinds S14. These are sanity bounds on an
+// entry, not commissioning tolerances: gain is a multiplicative correction
+// near 1.0 and an order of magnitude above that is already a wrong clamp, and
+// the offset band matches the ESP's own CT trim offset band
+// (SAFETY_CT_CAL_TRIM_OFFSET_A_MIN/_MAX, safety_cfg_store.h).
+//
+// gain 0 (and offset 0) stays storable while a channel is NOT calibrated:
+// that is the compiled default (config_store_default(),
+// ct_amps_cal_uncalibrated_table()), ct_amps_cal_apply() never reads it in
+// that state, and kiln_cfg packages re-push it verbatim via SET_PARAM. Only a
+// calibrated channel must carry gain > 0.
+#define CONFIG_PARAMS_CT_CAL_GAIN_MAX 10.0f
+#define CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A 50.0f
+
+// True iff one channel's (calibrated, gain, offset) triple is acceptable to
+// store: both floats finite, 0 <= gain <= CONFIG_PARAMS_CT_CAL_GAIN_MAX,
+// |offset| <= CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A, and gain > 0 when
+// calibrated. `out_gain_bad` / `out_offset_bad` / `out_rule` are optional and
+// say which field and rule failed (gain is reported first).
+bool config_params_ct_cal_entry_ok(bool calibrated, float gain, float offset,
+                                   bool *out_gain_bad, bool *out_offset_bad,
+                                   const char **out_rule);
+
 // Validates the cross-field rules CONFIG_REFERENCE.md states for the staged
 // record AS A WHOLE -- COMMISSIONING.md section 2: "Validation happens at
 // COMMIT_CONFIG, not at SET_PARAM, because the rules that matter are

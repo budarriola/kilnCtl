@@ -359,8 +359,11 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
 //     `isfinite(x) && x < abs_max` check with no lower bound). Every OTHER
 //     float field in this table (firing_margin_c, tc_disagreement_c,
 //     tc_expected_offset_c, cj_warn_c/cj_max_c, k_ct_v_per_a, gain,
-//     mains_voltage_v, ct_cal gain/offset, ...) is deliberately left
-//     UNBOUNDED beyond finiteness: CONFIG_REFERENCE.md does not document a
+//     mains_voltage_v, ...) is deliberately left
+//     UNBOUNDED beyond finiteness (the legacy ct_cal gain/offset used to be
+//     on this list; CHECK_CT_CAL_GAIN/CHECK_CT_CAL_OFFSET below bound them
+//     since the 2026-10-09 kilnlink audit, finding L2, because a calibrated
+//     gain of 0 blinds S14): CONFIG_REFERENCE.md does not document a
 //     sign or magnitude constraint for any of them (tc_expected_offset_c is
 //     explicitly signed; a margin or gain of unusual magnitude is merely
 //     unusual commissioning, not an impossible one), and inventing a bound
@@ -390,6 +393,57 @@ bool config_params_is_set(const config_store_record_t *rec, uint16_t id)
         if (!isfinite(value.f32_val)) { return false; } \
         if (value.f32_val != 0.0f && (value.f32_val < (min) || value.f32_val > (max))) { return false; } \
     } while (0)
+
+// Legacy ct_cal gain/offset (0x0310-0x0315), kilnlink audit 2026-10-09 L2:
+// see CONFIG_PARAMS_CT_CAL_GAIN_MAX's comment (config_params.h). SET_PARAM
+// stages one field at a time, so gain == 0 must stay accepted here (an
+// uncalibrated channel's default, re-pushed verbatim by kiln_cfg packages);
+// "calibrated needs gain > 0" is a whole-record rule enforced by
+// config_params_validate_ex() at COMMIT_CONFIG/APPLY_VOLATILE time.
+#define CHECK_CT_CAL_GAIN() do { \
+        if (!isfinite(value.f32_val) || value.f32_val < 0.0f || \
+            value.f32_val > CONFIG_PARAMS_CT_CAL_GAIN_MAX) { return false; } \
+    } while (0)
+#define CHECK_CT_CAL_OFFSET() do { \
+        if (!isfinite(value.f32_val) || fabsf(value.f32_val) > CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A) { \
+            return false; \
+        } \
+    } while (0)
+
+bool config_params_ct_cal_entry_ok(bool calibrated, float gain, float offset,
+                                   bool *out_gain_bad, bool *out_offset_bad,
+                                   const char **out_rule)
+{
+    const char *rule = NULL;
+    bool gain_bad = true;
+    bool offset_bad = false;
+    if (!isfinite(gain)) {
+        rule = "NaN/Inf is never a valid ct_cal gain";
+    } else if (gain < 0.0f || gain > CONFIG_PARAMS_CT_CAL_GAIN_MAX) {
+        rule = "ct_cal gain outside [0, CONFIG_PARAMS_CT_CAL_GAIN_MAX]";
+    } else if (calibrated && gain <= 0.0f) {
+        rule = "a calibrated ct_cal channel needs gain > 0 -- gain 0 reads 0 A and blinds S14";
+    } else {
+        gain_bad = false;
+        if (!isfinite(offset)) {
+            rule = "NaN/Inf is never a valid ct_cal offset";
+            offset_bad = true;
+        } else if (fabsf(offset) > CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A) {
+            rule = "ct_cal offset magnitude above CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A";
+            offset_bad = true;
+        }
+    }
+    if (out_gain_bad) {
+        *out_gain_bad = gain_bad;
+    }
+    if (out_offset_bad) {
+        *out_offset_bad = offset_bad;
+    }
+    if (rule != NULL && out_rule) {
+        *out_rule = rule;
+    }
+    return rule == NULL;
+}
 
 bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
                         kilnlink_param_value_t value)
@@ -495,12 +549,12 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     case 0x030Du: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->gain[2] = value.f32_val; return true;
     case 0x030Eu: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->mains_voltage_v = value.f32_val; rec->fields_set |= CONFIG_STORE_SET_MAINS_VOLTAGE_V; return true;
     case 0x030Fu: CHECK_TYPE(KILNLINK_PARAM_TYPE_U16); rec->power_window_s = value.u16_val; return true;
-    case 0x0310u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->ct_cal[0].gain = value.f32_val; return true;
-    case 0x0311u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->ct_cal[1].gain = value.f32_val; return true;
-    case 0x0312u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->ct_cal[2].gain = value.f32_val; return true;
-    case 0x0313u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->ct_cal[0].offset = value.f32_val; return true;
-    case 0x0314u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->ct_cal[1].offset = value.f32_val; return true;
-    case 0x0315u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->ct_cal[2].offset = value.f32_val; return true;
+    case 0x0310u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_GAIN(); rec->ct_cal[0].gain = value.f32_val; return true;
+    case 0x0311u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_GAIN(); rec->ct_cal[1].gain = value.f32_val; return true;
+    case 0x0312u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_GAIN(); rec->ct_cal[2].gain = value.f32_val; return true;
+    case 0x0313u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_OFFSET(); rec->ct_cal[0].offset = value.f32_val; return true;
+    case 0x0314u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_OFFSET(); rec->ct_cal[1].offset = value.f32_val; return true;
+    case 0x0315u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_CT_CAL_OFFSET(); rec->ct_cal[2].offset = value.f32_val; return true;
     case 0x0316u: CHECK_TYPE(KILNLINK_PARAM_TYPE_BOOL); rec->ct_cal[0].calibrated = (value.bool_val != 0u); return true;
     case 0x0317u: CHECK_TYPE(KILNLINK_PARAM_TYPE_BOOL); rec->ct_cal[1].calibrated = (value.bool_val != 0u); return true;
     // max_expected_power_w: ROADMAP.md M12, sanity/plausibility input only --
@@ -559,6 +613,8 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 #undef CHECK_F32_FINITE
 #undef CHECK_F32_NONNEG
 #undef CHECK_F32_POS
+#undef CHECK_CT_CAL_GAIN
+#undef CHECK_CT_CAL_OFFSET
 }
 
 // Re-checks every bound config_params_set() enforces at SET_PARAM time,
@@ -766,6 +822,40 @@ bool config_params_validate_ex(const config_store_record_t *rec, const char **ou
 
     if (!config_params_validate_ranges(rec, out_field, out_rule, out_reason)) {
         return false;
+    }
+
+    // kilnlink audit 2026-10-09 L2: per-channel ct_cal sanity, including the
+    // cross-field "calibrated needs gain > 0" rule SET_PARAM cannot check one
+    // field at a time. Deliberately here (write time) and NOT in
+    // config_params_validate_ranges(), which also runs at LOAD time: a load
+    // rejection discards the WHOLE record and falls back to defaults, losing
+    // abs_max_temp_c and every other commissioned field -- far worse than a
+    // WARN-only S14 reading a legacy record's bad ct_cal. The next commit of
+    // such a record is refused here instead, naming the field.
+    {
+        static const char *const CT_CAL_GAIN_NAMES[CONFIG_STORE_CT_CAL_NUM_CHANNELS] = {
+            "ct_cal[0].gain", "ct_cal[1].gain", "ct_cal[2].gain",
+        };
+        static const char *const CT_CAL_OFFSET_NAMES[CONFIG_STORE_CT_CAL_NUM_CHANNELS] = {
+            "ct_cal[0].offset", "ct_cal[1].offset", "ct_cal[2].offset",
+        };
+        for (size_t ch = 0; ch < CONFIG_STORE_CT_CAL_NUM_CHANNELS; ch++) {
+            const char *rule = NULL;
+            bool gain_bad = false;
+            if (!config_params_ct_cal_entry_ok(rec->ct_cal[ch].calibrated, rec->ct_cal[ch].gain,
+                                               rec->ct_cal[ch].offset, &gain_bad, NULL, &rule)) {
+                if (out_field) {
+                    *out_field = gain_bad ? CT_CAL_GAIN_NAMES[ch] : CT_CAL_OFFSET_NAMES[ch];
+                }
+                if (out_rule) {
+                    *out_rule = rule;
+                }
+                if (out_reason) {
+                    *out_reason = CONFIG_PARAMS_REJECT_RANGE;
+                }
+                return false;
+            }
+        }
     }
 
     // CONFIG_REFERENCE.md section 1 / COMMISSIONING.md section 2: only a

@@ -1977,6 +1977,19 @@ static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
         return;
     }
 
+    // kilnlink audit 2026-10-09 L2: the same per-channel sanity bounds
+    // config_params_set()/config_params_validate_ex() apply to the
+    // SET_PARAM/COMMIT_CONFIG path (config_params.h,
+    // CONFIG_PARAMS_CT_CAL_GAIN_MAX). config_store_write() itself does not
+    // range-check, so without this a calibrated gain of 0 or less would make
+    // the channel read 0 A and blind S14.
+    const char *cal_rule = NULL;
+    if (!config_params_ct_cal_entry_ok(msg.calibrated != 0u, msg.gain, msg.offset, NULL, NULL,
+                                       &cal_rule)) {
+        log_task_log(LOG_LEVEL_WARN, "set_ct_cal", cal_rule ? cal_rule : "refused, value out of range");
+        return;
+    }
+
     // Read-modify-write against the committed record via config_store_
     // get_full_record(), not the piecemeal getters + config_store_default()
     // this used to build on -- see link_frame_apply_set_ct_cal()'s own
