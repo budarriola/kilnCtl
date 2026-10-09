@@ -208,6 +208,11 @@ def _prof_preflight(ctx: dict, names: List[str], need_free: int) -> "Tuple[Optio
     }
 
 
+# Wire contract (profiles_edit_http.c): POST /api/profile form fields id, name,
+# zone_mask (:56), seg_count (:73), seg<i>_kind/_target/_ramp/_dwell (:105,165,177,188);
+# reply {"ok":true,"id":N}. Delete: POST /api/profile/delete id=N -> 200 "ok",
+# builtin id 400, unused 404 (:689-735). GET /api/profile?id=N 404 for an unused
+# slot (profiles_catalog_http.c:366+); detail keys seg_kind/target_c/ramp_c_per_hr/dwell_min.
 def _seg_form(segs: List[dict]) -> Dict[str, str]:
     f: Dict[str, str] = {}
     for i, sg in enumerate(segs):
@@ -972,19 +977,28 @@ def _case_zone10(ctx: dict) -> CaseResult:
     return CaseResult(Verdict.PASS, observed={"state": state, "start": "not exercised: writes CT calibration"})
 
 
-def _find_sample_counts(node: Any, out: List[int], in_fs: bool = False) -> None:
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if k == "firing_stats" and isinstance(v, dict):
-                sc = v.get("sample_count")
-                if isinstance(sc, int):
-                    out.append(sc)
-                _find_sample_counts(v, out, True)
-            else:
-                _find_sample_counts(v, out, in_fs)
-    elif isinstance(node, list):
-        for x in node:
-            _find_sample_counts(x, out, in_fs)
+def _fs_counts(zones: Any) -> List[int]:
+    """sample_count of each ``zones[].firing_stats`` entry (exact path).
+
+    Wire contract: dashboard_json.c:196-205 (/api/profile_exec, top-level
+    ``zones`` array, non-control shape) and dashboard_json.c:485-494
+    (/api/firing_history: ``records[].zones[].firing_stats``); both emit
+    ``"sample_count":%lu``.
+    """
+    out: List[int] = []
+    for z in zones if isinstance(zones, list) else []:
+        fs = z.get("firing_stats") if isinstance(z, dict) else None
+        sc = fs.get("sample_count") if isinstance(fs, dict) else None
+        if isinstance(sc, int) and not isinstance(sc, bool):
+            out.append(sc)
+    return out
+
+
+def _history_counts(fh: Any) -> List[int]:
+    out: List[int] = []
+    for rec in (fh.get("records") if isinstance(fh, dict) else None) or []:
+        out += _fs_counts(rec.get("zones") if isinstance(rec, dict) else None)
+    return out
 
 
 def _case_zone11(ctx: dict) -> CaseResult:
@@ -1007,13 +1021,11 @@ def _case_zone11(ctx: dict) -> CaseResult:
             valid_any = True
             if not isinstance(zz.get("method"), (str, int)) or not isinstance(zz.get("settled", False), (bool, int)):
                 return CaseResult(Verdict.FAIL, reason=f"zone {i} tuning_* fields malformed")
-    counts: List[int] = []
     _s, pe = _GET(ctx, "/api/profile_exec")
-    _find_sample_counts(pe, counts)
+    counts = _fs_counts(pe.get("zones") if isinstance(pe, dict) else None)
     pid = (ctx.get("_hp01") or {}).get("profile_id") if isinstance(ctx.get("_hp01"), dict) else None
     _s, fh = _GET(ctx, "/api/firing_history" + (f"?profile_id={pid}" if pid is not None else ""))
-    hist: List[int] = []
-    _find_sample_counts(fh, hist)
+    hist = _history_counts(fh)
     obs = {"profile_exec_counts": counts, "history_counts": hist}
     if hp.verdict == Verdict.PASS and not any(c > 0 for c in counts + hist):
         return CaseResult(Verdict.FAIL, reason="HP-01 PASSed but every firing_stats has sample_count 0 or is absent", observed=obs)

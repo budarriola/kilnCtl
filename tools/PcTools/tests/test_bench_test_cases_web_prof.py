@@ -5,7 +5,7 @@ import unittest
 
 from kilnctrl import bench_test  # noqa: F401 - wires judges
 from kilnctrl.bench_test import registry as R
-from kilnctrl.bench_test.registry import Verdict
+from kilnctrl.bench_test.registry import CaseResult, Verdict
 
 HTML_OK = ("favToggleBtn /api/profile/favorite addSegBtn saveBtn kcConfirm /api/profile/delete "
            "modeExportBtn /api/profile/import /api/profile/import validateImportJson "
@@ -236,6 +236,29 @@ class ZoneTests(unittest.TestCase):
         bad = zones_body()
         bad["zones"][0]["timing_profile"] = 9
         self.assertEqual(run("WEB-STIM-02", self.ctx(bad)).verdict, Verdict.FAIL)
+
+    def test_zone11_exact_key_paths(self):
+        z = zones_body()
+        z["zones"][0]["tuning_valid"] = True
+        z["zones"][0]["method"] = "x"
+        html = "tuningQuality firingStatsCurrent firingStatsHistory"
+
+        def mk(pe, fh):
+            def g(p):
+                if p == "/api/zones":
+                    return 200, z
+                if p == "/api/profile_exec":
+                    return 200, pe
+                return 200, fh
+            return {"http_get_json": g, "web_client": Web(html),
+                    "_results": {"HP-01": CaseResult(Verdict.PASS)}}
+        good_pe = {"zones": [{"firing_stats": {"sample_count": 5}}]}
+        good_fh = {"records": [{"zones": [{"firing_stats": {"sample_count": 7}}]}]}
+        zero = {"zones": [{"firing_stats": {"sample_count": 0}}]}
+        self.assertEqual(run("WEB-ZONE-11", mk(good_pe, {"records": []})).verdict, Verdict.PASS)
+        self.assertEqual(run("WEB-ZONE-11", mk(zero, good_fh)).verdict, Verdict.PASS)
+        # a sample_count NOT at zones[].firing_stats must not count
+        self.assertEqual(run("WEB-ZONE-11", mk({"x": {"firing_stats": {"sample_count": 9}}}, {})).verdict, Verdict.FAIL)
 
     def test_zone03(self):
         self.assertEqual(run("WEB-ZONE-03", self.ctx(zones_body())).verdict, Verdict.PASS)
