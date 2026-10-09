@@ -10117,6 +10117,31 @@ static void test_idle_manual_aux_dropped_by_pico_trip_and_stays_off(void)
     TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, "no remembered ON state");
 }
 
+static void test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries(void)
+{
+    TEST_SECTION("LOW-2: failed aux OFF write keeps actuated_on and retries next tick");
+    for (int claimed = 0; claimed <= 1; claimed++) {
+        aux_fd_setup(PROFILE_EXEC_IDLE, true, claimed != 0);
+        s_exec.aux[0].actuated_on = true;
+        s_exec.aux[0].commanded_on = true;
+        s_test_relay_authority_blocked = true;
+        s_test_relay_authority_blocked_sources = 1;
+        g_relay_write_fail = true;
+        profile_executor_aux_fault_drop(false);
+        TEST_CHECK(s_exec.aux[0].actuated_on, "actuated_on stays true after a failed OFF write");
+        g_aux_write_log_n = 0;
+        profile_executor_aux_fault_drop(false);
+        TEST_CHECK(aux_test_wrote(0x01, 0x00), "OFF retried on the next tick");
+        TEST_CHECK(s_exec.aux[0].actuated_on, "still actuated_on while writes keep failing");
+        g_relay_write_fail = false;
+        g_aux_write_log_n = 0;
+        profile_executor_aux_fault_drop(false);
+        TEST_CHECK(aux_test_wrote(0x01, 0x00), "OFF retried and succeeds");
+        TEST_CHECK(!s_exec.aux[0].actuated_on && !s_exec.aux[0].commanded_on, "cleared only after success");
+        s_test_relay_authority_blocked = false;
+    }
+}
+
 static void test_on_off_zone_and_aux_input_builders_agree(void)
 {
     TEST_SECTION("on/off input: zone and aux producers share one builder (field-for-field equivalence)");
@@ -11271,6 +11296,7 @@ static void run_test_on_off_actuation(void)
     test_paused_aux_on_fault_drops_aux_within_one_tick();
     test_paused_aux_on_no_fault_stays_on();
     test_idle_manual_aux_dropped_by_pico_trip_and_stays_off();
+    test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();

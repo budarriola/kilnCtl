@@ -1289,7 +1289,7 @@ void force_all_relays_off(void);
  * current segment; relays_on_count/cap are the load-cap bookkeeping the zone
  * loop already did (aux is suppressed last). All must be called with
  * s_exec.lock held. */
-void aux_apply_relay(uint8_t aux_idx, bool want_on);
+bool aux_apply_relay(uint8_t aux_idx, bool want_on);
 void force_aux_relays_off(void);
 void profile_executor_aux_fault_drop(bool pico_tripped); /* F1/F2: not-RUNNING fault drop, lock held */
 void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap);

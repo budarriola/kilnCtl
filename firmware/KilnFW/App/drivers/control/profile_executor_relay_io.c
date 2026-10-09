@@ -478,10 +478,10 @@ void force_all_relays_off(void)
  * relays' kiln_io_owner write path and the global relay_authority gate.
  *
  * Must be called with s_exec.lock held. */
-void aux_apply_relay(uint8_t aux_idx, bool want_on)
+bool aux_apply_relay(uint8_t aux_idx, bool want_on)
 {
     if (aux_idx >= AUX_OUTPUTS_COUNT) {
-        return;
+        return false;
     }
     uint8_t mask = (uint8_t)(1u << aux_idx);
     /* Claimed in BOTH directions and before the authority gate, same
@@ -516,6 +516,7 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
         if (want_on && write_ok) s_exec.aux[aux_idx].switch_count++;
     }
     s_exec.aux[aux_idx].commanded_on = want_on;
+    return write_ok;
 }
 
 void profile_executor_on_off_seed_hold(on_off_trigger_state_t *decide_state, float *actuated_held_s,
@@ -587,9 +588,12 @@ void force_aux_relays_off(void)
  * behind K4, so K4 / the heat claim release is never what protects them. */
 void profile_executor_aux_fault_drop(bool pico_tripped)
 {
+    static uint8_t s_last_logged_on_mask;
+    static uint8_t s_fail_logged_mask;
     uint32_t sources = 0;
     bool blocked = relay_authority_on_blocked(s_exec.safety, &sources) || pico_tripped;
     if (!blocked) {
+        s_last_logged_on_mask = 0;
         return;
     }
     uint8_t cand = (uint8_t)(aux_outputs_cfg_enabled_mask() | s_exec.aux_claim_mask);
@@ -601,23 +605,48 @@ void profile_executor_aux_fault_drop(bool pico_tripped)
         if ((shadow & bit) || s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) on_mask |= bit;
     }
     if (on_mask == 0) {
+        s_last_logged_on_mask = 0;
         return;
     }
-    ESP_LOGW(PE_TAG, "safety fault while not running (sources 0x%02X, pico_tripped=%d): dropping aux mask 0x%02X",
-             (unsigned)sources, (int)pico_tripped, (unsigned)on_mask);
+    /* Log when the set of aux outputs being dropped changes, not every tick
+     * while an OFF write keeps failing (review LOW-2). */
+    if (on_mask != s_last_logged_on_mask) {
+        ESP_LOGW(PE_TAG, "safety fault while not running (sources 0x%02X, pico_tripped=%d): dropping aux mask 0x%02X",
+                 (unsigned)sources, (int)pico_tripped, (unsigned)on_mask);
+        s_last_logged_on_mask = on_mask;
+    }
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
-        if (!(on_mask & (1u << i))) continue;
-        if (s_exec.aux_claim_mask & (1u << i)) {
-            aux_apply_relay(i, false);
-        } else {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(on_mask & bit)) continue;
+        bool off_ok = true;
+        if (s_exec.aux_claim_mask & bit) {
+            off_ok = aux_apply_relay(i, false);
+        } else if (s_exec.io) {
             /* manual (unclaimed) aux: plain authorized OFF write */
-            if (s_exec.io &&
-                kiln_io_owner_command_set_relay_mask_authorized((uint8_t)(1u << i), 0) == ESP_OK) {
-                relay_off_tracker_note_write((uint8_t)(1u << i), 0);
-                relay_cycles_add((uint8_t)(1u << i), 1u);
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, 0);
+            if (err == ESP_OK) {
+                relay_off_tracker_note_write(bit, 0);
+                relay_cycles_add(bit, 1u);
+                s_exec.aux[i].commanded_on = false;
+            } else {
+                off_ok = false;
+                if (!(s_fail_logged_mask & bit)) {
+                    ESP_LOGE(PE_TAG, "aux relay %u fault-drop OFF write failed: %s -- retrying each tick",
+                             (unsigned)i + 1u, esp_err_to_name(err));
+                }
             }
         }
-        s_exec.aux[i].actuated_on = false;
+        if (off_ok) {
+            s_fail_logged_mask &= (uint8_t)~bit;
+            s_exec.aux[i].actuated_on = false;
+        } else {
+            /* relay may still be energised: keep actuated_on so the dashboard
+             * does not claim OFF, and retry next tick. */
+            if (!(s_fail_logged_mask & bit)) {
+                ESP_LOGE(PE_TAG, "aux relay %u fault-drop OFF not confirmed", (unsigned)i + 1u);
+            }
+            s_fail_logged_mask |= bit;
+        }
     }
 }
 
