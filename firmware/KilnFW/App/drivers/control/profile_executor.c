@@ -840,7 +840,7 @@ void executor_task_entry(void *arg)
                                                     * picture" reasoning as raw_c/sensor_ok, and handed to
                                                     * thermal_guard_tick() both as this zone's own
                                                     * on_off_zone flag and as every OTHER zone's
-                                                    * peer_is_on_off[] so guard 9/cross-zone excludes an
+                                                    * peer_is_on_off[] so guard 8/cross-zone excludes an
                                                     * on/off zone from both sides of the comparison. */
         bool zone_guard_exempt[MAX31856_CHANNEL_COUNT]; /* on/off OR monitor-only: guards 1/2/3/4/cross-zone are
                                                     * not meaningful for it (no heat commanded, or no
