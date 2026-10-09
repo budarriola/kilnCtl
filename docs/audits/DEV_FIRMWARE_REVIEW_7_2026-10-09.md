@@ -58,6 +58,8 @@ only when it is unchanged.
 
 ### L3. `profiles_cfg_fs_load_raw()` allocation failure now reads as "file absent", and resolve then overwrites the file with the stale NVS copy
 
+**Fixed in SHA_PLACEHOLDER.** `profiles_cfg_fs_load_raw_ex()`/`profiles_cfg_fs_resolve_ex()` add an error channel; resolve writes/deletes nothing on error and both boot loaders mark the slot rev-unknown (saves/deletes refused) and return `ESP_ERR_NO_MEM`.
+
 - Where: `firmware/KilnFW/App/drivers/persist/profiles_cfg_fs.c:96-100` (new allocation, returns with
   `*out_valid = false`), consumed by `profiles_cfg_fs_resolve()` at `:194-208`.
 
@@ -87,6 +89,8 @@ first post-change update must be a hand upload, or emit a v1 record as well (the
 offset 288 followed by the v2 record; this needs `UPDATE_STAGE_HEAD_LEN` at 344 or more).
 
 ### L5. The zones unlock test hook ships in production firmware
+
+**Fixed in SHA_PLACEHOLDER.** Hook declaration, definition and call are behind `KILNCTL_ZONES_UNLOCK_TEST_HOOK`, defined only in the zones cfg_fs host-test build line.
 
 - Where: `firmware/KilnFW/App/drivers/http/zones_http.c:423-429`, `persist/zones_http_internal.h:216`.
 

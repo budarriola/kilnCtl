@@ -644,7 +644,7 @@ try {
     # separate .c files (like zones_config_json.c below), not textually
     # included -- neither defines anything test_zones_http.c's #includes
     # already define, so there is no multiple-definition risk.
-    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
+    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_ZONES_UNLOCK_TEST_HOOK " +
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +

@@ -420,13 +420,17 @@ void zones_cfg_lock(void)
     portENTER_CRITICAL(&s_zones_cfg_mux);
     s_zones_cfg_lock_acquires++;
 }
+#ifdef KILNCTL_ZONES_UNLOCK_TEST_HOOK /* host zones-cfg test only; compiled out of the target (review 7 L5) */
 void (*s_zones_cfg_unlock_test_hook)(void) = NULL; /* host-test seam: runs after the critical section is left */
+#endif
 void zones_cfg_unlock(void)
 {
     portEXIT_CRITICAL(&s_zones_cfg_mux);
+#ifdef KILNCTL_ZONES_UNLOCK_TEST_HOOK
     if (s_zones_cfg_unlock_test_hook != NULL) {
         s_zones_cfg_unlock_test_hook();
     }
+#endif
 }
 
 /* ---- Hardware access for Tasks 1/2/3 (2026-08-27+2) ----------------------

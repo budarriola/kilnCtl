@@ -67,8 +67,11 @@ static uint32_t get_u32_le(const uint8_t *p)
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid)
+void profiles_cfg_fs_load_raw_ex(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid, bool *out_error)
 {
+    if (out_error) {
+        *out_error = false;
+    }
     if (out_profile) {
         memset(out_profile, 0, sizeof(*out_profile));
     }
@@ -88,14 +91,18 @@ void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_
     char path[40];
     profiles_cfg_fs_path(id, path, sizeof(path));
 
-    /* Heap, not stack: this runs on the boot path (review 5 L4). An allocation failure reads as
-     * "no valid file", the same as an unreadable one, and the caller already fails closed on that. */
+    /* Heap, not stack: this runs on the boot path (review 5 L4). An allocation failure is NOT "file
+     * absent" (review 7 L3): it is reported through *out_error so resolve() never overwrites or frees
+     * a slot whose file it could not even look at. */
     struct load_raw_scratch {
         uint8_t raw[PCFG_FILE_BUF_MAX];
         profile_t cand;
     } *ls = persist_scratch_alloc(sizeof(*ls));
     if (ls == NULL) {
-        ESP_LOGE(PCFG_FS_TAG, "prof%u load: no memory for scratch -- treating file as absent", id);
+        ESP_LOGE(PCFG_FS_TAG, "prof%u load: no memory for scratch -- file state UNKNOWN (error)", id);
+        if (out_error) {
+            *out_error = true;
+        }
         return;
     }
     uint8_t *raw = ls->raw;
@@ -130,6 +137,11 @@ void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_
     free(ls);
     *out_rev = rev;
     *out_valid = true;
+}
+
+void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_rev, bool *out_valid)
+{
+    profiles_cfg_fs_load_raw_ex(id, out_profile, out_rev, out_valid, NULL);
 }
 
 esp_err_t profiles_cfg_fs_save(uint8_t id, const profile_t *profile, uint32_t rev)
@@ -172,9 +184,12 @@ esp_err_t profiles_cfg_fs_delete(uint8_t id)
     return (err == ESP_ERR_NOT_FOUND) ? ESP_OK : err;
 }
 
-bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
-                              profile_t *out_profile, uint32_t *out_rev, bool *out_used_file)
+bool profiles_cfg_fs_resolve_ex(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
+                                 profile_t *out_profile, uint32_t *out_rev, bool *out_used_file, bool *out_error)
 {
+    if (out_error) {
+        *out_error = false;
+    }
     if (out_profile) {
         memset(out_profile, 0, sizeof(*out_profile));
     }
@@ -191,7 +206,16 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
     profile_t file_profile;
     uint32_t file_rev = 0;
     bool file_valid = false;
-    profiles_cfg_fs_load_raw(id, &file_profile, &file_rev, &file_valid);
+    bool load_err = false;
+    profiles_cfg_fs_load_raw_ex(id, &file_profile, &file_rev, &file_valid, &load_err);
+    if (load_err) {
+        /* Fail closed (review 7 L3): the file was not examined, so neither adopt NVS over it, write,
+         * delete, nor report the slot as free-by-decision. The caller must treat the slot as unknown. */
+        if (out_error) {
+            *out_error = true;
+        }
+        return false;
+    }
 
     if (!file_valid) {
         if (!nvs_valid) {
@@ -282,4 +306,10 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
         }
     }
     return true;
+}
+
+bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_valid, uint32_t nvs_rev,
+                              profile_t *out_profile, uint32_t *out_rev, bool *out_used_file)
+{
+    return profiles_cfg_fs_resolve_ex(id, nvs_profile, nvs_valid, nvs_rev, out_profile, out_rev, out_used_file, NULL);
 }

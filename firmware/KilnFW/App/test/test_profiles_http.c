@@ -1395,6 +1395,56 @@ size_t persist_scratch_test_fail_size = 0;
 int persist_scratch_test_fail_nth = 0;
 int persist_scratch_test_seen = 0;
 
+static void test_pcfg_resolve_scratch_oom_leaves_file_untouched(void)
+{
+    TEST_SECTION("resolve: load scratch allocation failure never overwrites the file or frees the slot (review 7 L3)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t file_p = make_stored_profile();
+    strncpy(file_p.name, "CurrentFile", PROFILE_NAME_MAX_LEN);
+    profile_t stale_nvs = make_stored_profile();
+    strncpy(stale_nvs.name, "StaleNvs", PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(profiles_cfg_fs_save(2, &file_p, 7) == ESP_OK, "file at rev 7");
+
+    /* same layout as load_raw's local scratch struct, so the sizes match */
+    struct { uint8_t raw[4 + PROFILE_BLOB_MAX_SIZE]; profile_t cand; } probe;
+    persist_scratch_test_fail_size = sizeof(probe);
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    profile_t out;
+    uint32_t out_rev = 99;
+    bool used_file = true, err = false;
+    bool have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, true, 3, &out, &out_rev, &used_file, &err);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen == 1, "the load scratch allocation was reached");
+    TEST_CHECK(err, "allocation failure reported as an error");
+    TEST_CHECK(!have && !used_file && out_rev == 0, "slot is not adopted");
+    profile_t after;
+    TEST_CHECK(pcfg_file_profile(2, &after), "file still present");
+    TEST_CHECK(strcmp(after.name, "CurrentFile") == 0, "file NOT overwritten with the stale NVS copy");
+
+    /* nvs_valid == false: must be an error, not 'genuinely unused' */
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    err = false;
+    have = profiles_cfg_fs_resolve_ex(2, &stale_nvs, false, 3, &out, &out_rev, &used_file, &err);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(err && !have, "nvs-absent case also reports error");
+    TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file still intact (no stale delete)");
+
+    /* boot loader: error propagates and the slot is refused for saves, not free */
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    profiles_state_t st;
+    bool any_found = false;
+    esp_err_t lerr = nvs_load_all_from(PROFILES_NVS_PARTITION, &st, &any_found);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(lerr == ESP_ERR_NO_MEM, "boot load reports the failure");
+    TEST_CHECK(s_profile_rev_unknown[0], "the unexamined slot is marked unknown (saves/deletes refused)");
+    TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact after boot load");
+}
+
 static void test_pcfg_junk_rev_repair_scratch_oom_fails_closed(void)
 {
     TEST_SECTION("junk rev repair: scratch allocation failure fails closed (review 5 L4)");
@@ -4253,6 +4303,7 @@ void run_test_profiles_http(void)
     test_pcfg_non_multiple_of_4_rev_blob_stays_unknown();
     test_pcfg_longer_rev_array_is_known_tail_ignored();
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
+    test_pcfg_resolve_scratch_oom_leaves_file_untouched();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_deferred_without_cfg();
     test_pcfg_truncated_rev_blob_not_known_lengths();

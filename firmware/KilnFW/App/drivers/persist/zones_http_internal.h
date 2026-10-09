@@ -213,7 +213,9 @@ extern uint32_t s_config_generation;
 void zones_cfg_lock(void);
 void zones_cfg_unlock(void);
 extern uint32_t s_zones_cfg_lock_acquires;
-extern void (*s_zones_cfg_unlock_test_hook)(void); /* host tests only: NULL in production */
+#ifdef KILNCTL_ZONES_UNLOCK_TEST_HOOK
+extern void (*s_zones_cfg_unlock_test_hook)(void); /* host tests only: absent from production (review 7 L5) */
+#endif
 
 /* ---- shared hardware handles (owned by zones_http.c) ------------------- */
 

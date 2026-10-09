@@ -938,6 +938,8 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
     uint32_t floors[PROFILES_MAX_COUNT];
     rev_state_t floors_state = nvs_read_rev_floors(partition, floors);
     bool floors_known = (floors_state == REV_KNOWN);
+    bool any_resolve_err = false;
+    bool slot_res_err[PROFILES_MAX_COUNT] = {false};
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         profile_t resolved;
         uint32_t resolved_rev = 0;
@@ -948,7 +950,12 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
          * <= a nonzero nvs_rev as stale, and the dual-write-era rev array equals the
          * file rev for every slot not re-saved since. This degraded path must never
          * delete; the floor only seeds s_profile_rev below. */
-        bool have = profiles_cfg_fs_resolve(id, &none, false, 0, &resolved, &resolved_rev, &used_file);
+        bool res_err = false;
+        bool have = profiles_cfg_fs_resolve_ex(id, &none, false, 0, &resolved, &resolved_rev, &used_file, &res_err);
+        if (res_err) {
+            any_resolve_err = true;
+            slot_res_err[id] = true; /* review 7 L3: file unexamined -> slot unknown, saves/deletes refused */
+        }
         if (have) {
             out->profiles[id] = resolved;
             profiles_slot_bitmap_set(&out->used_bitmap, id);
@@ -966,7 +973,12 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
     if (floors_state == REV_JUNK && rev_repair_junk(partition, &out->used_bitmap)) {
         memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
     }
-    return ESP_OK;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (slot_res_err[id]) {
+            s_profile_rev_unknown[id] = true;
+        }
+    }
+    return any_resolve_err ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
 static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out, bool *out_any_found)
@@ -1090,13 +1102,21 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
      * today (no `cfg` partition mounted yet), so profiles_cfg_fs_resolve()
      * degrades to "trust whatever NVS decoded" for every slot, unchanged
      * from this function's pre-existing behavior. */
+    bool any_resolve_err = false;
+    bool slot_res_err[PROFILES_MAX_COUNT] = {false};
     if (strcmp(partition, PROFILES_NVS_PARTITION) == 0) {
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             profile_t resolved;
             uint32_t resolved_rev = 0;
             bool used_file = false;
-            bool trustworthy = profiles_cfg_fs_resolve(id, &out->profiles[id], nvs_slot_valid[id],
-                                                        slot_blob_bad[id] ? 0 : nvs_rev[id], &resolved, &resolved_rev, &used_file);
+            bool res_err = false;
+            bool trustworthy = profiles_cfg_fs_resolve_ex(id, &out->profiles[id], nvs_slot_valid[id],
+                                                           slot_blob_bad[id] ? 0 : nvs_rev[id], &resolved, &resolved_rev,
+                                                           &used_file, &res_err);
+            if (res_err) {
+                any_resolve_err = true;
+                slot_res_err[id] = true; /* review 7 L3 */
+            }
             if (trustworthy) {
                 out->profiles[id] = resolved;
                 profiles_slot_bitmap_set(&out->used_bitmap, id);
@@ -1126,8 +1146,13 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         rev_repair_junk(partition, &out->used_bitmap)) {
         memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
     }
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (slot_res_err[id]) {
+            s_profile_rev_unknown[id] = true; /* review 7 L3: stays refused even after a junk-rev repair */
+        }
+    }
 
-    return ESP_OK;
+    return any_resolve_err ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
 /* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
