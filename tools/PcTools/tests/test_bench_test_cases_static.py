@@ -72,6 +72,21 @@ class StaticTest(CtxTest):
         self.assertEqual(REGISTRY["ST-03"].judge(self.ctx(build_saftyfw_host_tests_fn=lambda: BAD)).verdict, Verdict.FAIL)
         self.assertEqual(REGISTRY["ST-04"].judge(self.ctx(build_kilnfw_fn=lambda: BAD)).verdict, Verdict.FAIL)
 
+    def test_multiline_failed_kilnfw_after_ok_saftyfw_fails(self):
+        two = ("saftyfw: OK in 40.0s (10 log lines)\nfull log: a\n--\n"
+               "kilnfw: FAILED (exit 1) in 5.0s (3 log lines)\nfull log: b\n--\nboom")
+        r = REGISTRY["ST-04"].judge(self.ctx(build_kilnfw_fn=lambda: two))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_failed_exit0_output_check_fails(self):
+        txt = ("pctools: FAILED (exit 0, but output check failed) in 9.0s (3 log lines)\n"
+               "full log: x\n--\n12 passed\n")
+        for cid, key in (("ST-02", "run_pctools_tests_fn"), ("ST-03", "build_saftyfw_host_tests_fn"),
+                         ("ST-04", "build_kilnfw_fn")):
+            r = REGISTRY[cid].judge(self.ctx(**{key: lambda: txt}))
+            self.assertEqual(r.verdict, Verdict.FAIL, cid)
+        self.assertEqual(REGISTRY["ST-01"].judge(self.ctx(run_repo_checks_fn=lambda: txt + CHECKS_OK)).verdict, Verdict.FAIL)
+
     def test_pass_count_drop_fails(self):
         r = REGISTRY["ST-01"].judge(self.ctx(st01_baseline_passed=161))
         self.assertEqual(r.verdict, Verdict.FAIL)

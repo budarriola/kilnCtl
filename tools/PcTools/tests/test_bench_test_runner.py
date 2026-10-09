@@ -378,6 +378,15 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertIn("not confirmed idle", after["teardown_executor"])
         self.assertTrue(self.ctx["_tainted"])
 
+    def test_teardown_skips_restore_hooks_when_executor_not_idle(self):
+        ran = []
+        self.fake_srv.exec_status = _FakeExecStatus("running")  # stop does not take effect
+        self.ctx["teardown_idle_poll_s"] = 0
+        self.ctx["teardown_hooks"] = [lambda ctx: ran.append(1)]
+        after = BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertEqual(ran, [])
+        self.assertIn("not run", after["teardown_hooks_skipped"])
+
     def test_teardown_hook_error_reported(self):
         def boom(ctx):
             raise RuntimeError("restore failed")

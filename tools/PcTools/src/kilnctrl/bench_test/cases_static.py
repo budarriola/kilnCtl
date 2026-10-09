@@ -35,14 +35,19 @@ _COUNTS_RE = re.compile(
 
 def _exit_status(text: str) -> "tuple[Optional[int], str]":
     """(exit code or None, status word)."""
-    m = _STATUS_RE.search(text or "")
-    if not m:
+    # Parse EVERY status line (build_kilnfw prints one per tag, e.g.
+    # "saftyfw: OK" then "kilnfw: FAILED"); the worst one wins. FAILED is a
+    # failure whatever its exit code ("FAILED (exit 0, but output check failed)").
+    ms = list(_STATUS_RE.finditer(text or ""))
+    if not ms:
         return None, "unparseable"
-    if m.group(1) == "OK":
-        return 0, "OK"
-    if m.group(1) == "TIMEOUT":
+    failed = [m for m in ms if m.group(1).startswith("FAILED")]
+    if failed:
+        rc = next((int(m.group(2)) for m in failed if int(m.group(2)) != 0), None)
+        return (rc if rc is not None else -1), "FAILED"
+    if any(m.group(1) == "TIMEOUT" for m in ms):
         return None, "TIMEOUT"
-    return int(m.group(2)), "FAILED"
+    return 0, "OK"
 
 
 def _unparseable(tag: str, text: str) -> CaseResult:
@@ -58,8 +63,8 @@ def _exit_only(tag: str, text: str) -> "tuple[Optional[CaseResult], dict]":
         return _unparseable(tag, text), obs
     if word == "TIMEOUT":
         return CaseResult(Verdict.FAIL, reason=f"{tag} timed out", observed=obs), obs
-    if rc != 0:
-        return CaseResult(Verdict.FAIL, reason=f"{tag} exit {rc}", observed=obs), obs
+    if word == "FAILED" or rc != 0:
+        return CaseResult(Verdict.FAIL, reason=f"{tag} exit {rc} (status {word})", observed=obs), obs
     return None, obs
 
 

@@ -382,7 +382,11 @@ class BenchTestRunner:
                     ctx["_tainted"] = True
             # Suite-registered restore hooks (e.g. AX relay-4 aux entry) run even
             # when the run aborted between the mutating case and its restore case.
-            for hook in list(ctx.get("teardown_hooks") or []):
+            skip_hooks = "teardown_executor" in board_after
+            if skip_hooks and ctx.get("teardown_hooks"):
+                board_after["teardown_hooks_skipped"] = "executor not confirmed idle; restore hooks not run"
+                self._runner_log("teardown: executor not confirmed idle, skipping restore hooks")
+            for hook in ([] if skip_hooks else list(ctx.get("teardown_hooks") or [])):
                 if not stalled.is_set():
                     hok, herr = _safe_call(hook, ctx)
                     if not hok:

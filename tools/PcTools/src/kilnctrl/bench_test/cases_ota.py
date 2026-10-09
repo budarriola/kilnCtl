@@ -2439,8 +2439,10 @@ def _case_otg06(ctx: dict) -> CaseResult:
 def _case_otb02(ctx: dict) -> CaseResult:
     """OT-B02: summarize the OT-* results of the run in progress. Reads
     ``ctx["_run_results"]`` (the runner's live results dict); never re-runs
-    anything. PASS unless an OT case is FAIL/ERROR; INCONCLUSIVE when every
-    other OT case is NOT_RUN/SKIP; a ctx with no results is an ERROR (reported
+    anything. FAIL if any OT case is FAIL/ERROR. Otherwise PASS only if at
+    least one OT case PASSed and none is INCONCLUSIVE (SKIP/NOT_RUN rows are
+    not counted); any INCONCLUSIVE row, or no PASS row at all (all
+    NOT_RUN/SKIP, or a mix with INCONCLUSIVE), gives INCONCLUSIVE; a ctx with no results is an ERROR (reported
     as FAIL, the runner's mapping for a case error)."""
     results = ctx.get("_run_results")
     if not isinstance(results, dict):
@@ -2455,10 +2457,12 @@ def _case_otb02(ctx: dict) -> CaseResult:
     if bad:
         return CaseResult(Verdict.FAIL, reason="OT failures: " + ", ".join(bad),
                           observed=observed, evidence=table)
-    if all(v in ("NOT_RUN", "SKIP") for v in rows.values()):
-        return CaseResult(Verdict.INCONCLUSIVE, reason="no OT case ran",
+    inconc = sorted(c for c, v in rows.items() if v == "INCONCLUSIVE")
+    if inconc or not any(v == "PASS" for v in rows.values()):
+        why = ("INCONCLUSIVE OT cases: " + ", ".join(inconc)) if inconc else "no OT case ran"
+        return CaseResult(Verdict.INCONCLUSIVE, reason=why,
                           observed=observed, evidence=table)
-    return CaseResult(Verdict.PASS, reason=f"{len(rows)} OT cases, none FAIL/ERROR",
+    return CaseResult(Verdict.PASS, reason=f"{len(rows)} OT cases, none FAIL/ERROR/INCONCLUSIVE",
                       observed=observed, evidence=table)
 
 _CASE_FUNCS = {
