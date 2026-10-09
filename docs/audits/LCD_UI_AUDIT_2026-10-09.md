@@ -25,28 +25,28 @@ Context that shapes the findings:
 
 | ID | Sev | Area | Finding |
 |----|-----|------|---------|
-| L1 | MED | auth | Wi-Fi writes (add network, forget, mode switch, AP SSID/password) run at USER PIN; web equivalents are ADMIN. |
-| L2 | MED | auth | Profile save/overwrite (builder) and live-edit decide (save as / overwrite) run at USER PIN; web equivalents are ADMIN. |
-| L3 | MED | auth | Manual relay toggle on the Temperature page runs at USER PIN with no danger-mode step; the web paths that call the same writer are ADMIN (and danger-mode gated). |
-| L4 | MED | scroll | Network Manage scan and saved lists are 70 px `lv_list`s holding up to 20 / 8 rows of 72 px touch targets, so they scroll. |
-| L5 | LOW | scroll | Temperature page relay row is a deliberately scrollable 40 px box; 4 buttons of 144 px wrap to 2 rows, so it always scrolls. |
-| L6 | LOW | info | The AP password is displayed in clear on the Network page behind a USER PIN. |
+| L1 | MED | auth | Wi-Fi writes (add network, forget, mode switch, AP SSID/password) run at USER PIN; web equivalents are ADMIN. **FIXED in ef99c327.** |
+| L2 | MED | auth | Profile save/overwrite (builder) and live-edit decide (save as / overwrite) run at USER PIN; web equivalents are ADMIN. **FIXED in ef99c327.** |
+| L3 | MED | auth | Manual relay toggle on the Temperature page runs at USER PIN with no danger-mode step; the web paths that call the same writer are ADMIN (and danger-mode gated). **FIXED in ef99c327.** |
+| L4 | MED | scroll | Network Manage scan and saved lists are 70 px `lv_list`s holding up to 20 / 8 rows of 72 px touch targets, so they scroll. **FIXED in ef99c327.** |
+| L5 | LOW | scroll | Temperature page relay row is a deliberately scrollable 40 px box; 4 buttons of 144 px wrap to 2 rows, so it always scrolls. **FIXED in ef99c327.** |
+| L6 | LOW | info | The AP password is displayed in clear on the Network page behind a USER PIN. **FIXED in ef99c327.** |
 | L7 | LOW | auth | With the LCD policy off, every gate collapses to full access, including Clear Trip. Matches the web auth-off rule; recorded so the owner can confirm it is intended for the trip clear. |
 | L8 | INFO | timers | Page refresh timers are created once at build and never deleted; they keep running while the page is hidden. |
-| L9 | HIGH | auth | First boot with no stored touch calibration returns from `kiln_ui_init()` before the LCD lock is initialised, so every gate (Clear Trip included) is open until reboot. |
-| L10 | MED | auth | The Network Manage Forget dialog is a raw `lv_msgbox`, not `ui_confirm`, so it survives an LCD relock and stays tappable. |
-| L11 | MED | auth | More USER-gated writes whose web equivalents are ADMIN: unit preference, touch calibration save, profile delete, live-edit apply, AP QR code, crash-report acknowledge. |
+| L9 | HIGH | auth | First boot with no stored touch calibration returns from `kiln_ui_init()` before the LCD lock is initialised, so every gate (Clear Trip included) is open until reboot. **FIXED in ef99c327.** |
+| L10 | MED | auth | The Network Manage Forget dialog is a raw `lv_msgbox`, not `ui_confirm`, so it survives an LCD relock and stays tappable. **FIXED in ef99c327.** |
+| L11 | MED | auth | More USER-gated writes whose web equivalents are ADMIN: unit preference, touch calibration save, profile delete, live-edit apply, AP QR code, crash-report acknowledge. **FIXED in ef99c327.** |
 | L12 | MED | touch | Topbar touch-group registry holds 4 groups and drops the rest silently; 21 topbar call sites, so pages visited after the 4th lose nearest-center arbitration. |
 | L13 | MED | layout | Builder slot grid creates 100 slot cells in a 2-row box with scrolling removed; only 8 are reachable, and each build makes 100 profile reads. |
-| L14 | MED | churn | Network Manage saved list is cleaned and rebuilt every second, even when hidden. |
+| L14 | MED | churn | Network Manage saved list is cleaned and rebuilt every second, even when hidden. **FIXED in ef99c327.** |
 | L15 | MED | fit | Home right-hand rail height assert ignores the trip strip, lag notice and progress bar; with all visible, zone 3 and watts are clipped. |
-| L16 | LOW | strings | AP QR payload buffer can truncate a max-length SSID + password; no escaping; always `T:WPA`. |
-| L17 | LOW | race | A second AP Save overwrites the job strings before the busy check. |
+| L16 | LOW | strings | AP QR payload buffer can truncate a max-length SSID + password; no escaping; always `T:WPA`. **FIXED in ef99c327.** |
+| L17 | LOW | race | A second AP Save overwrites the job strings before the busy check. **FIXED in ef99c327.** |
 | L18 | LOW | dialogs | `ui_confirm` does not NULL-check its `lv_malloc`'d context and frees it only in the button callbacks, so a dialog closed by relock leaks it. |
 | L19 | LOW | keypad | `ui_lcd_keypad_show()` overwrites the pending callback if called while open; single global gate context. Reachability unconfirmed. |
 | L20 | LOW | fit | Long-text labels with no fixed height wrap instead of truncating (home strips, topbar status, rail zone names); Diagnostics Trip detail rows have no budget assert. |
 | L21 | LOW | cost | Home and Diagnostics refresh callbacks keep calling `dashboard_get_status()` (and a thermocouple read-all) while hidden. |
-| L22 | LOW | misc | Start confirm re-resolves the profile at Confirm time, not the one shown; picker id cache can go stale (mislabel only); live-decide Save As has no confirm. |
+| L22 | LOW | misc | Start confirm re-resolves the profile at Confirm time, not the one shown; picker id cache can go stale (mislabel only); live-decide Save As has no confirm. **FIXED in ef99c327.** |
 | L23 | INFO | threads | Debug flags and 64-bit flush stats shared across tasks without atomics; startup `lv_*` calls on app_main are an undocumented exception. |
 | L24 | MED | chart | Home chart looks up history by `t / 30 s` as a ring index; once the 640-sample ring wraps (5 h 20 min) the actual trace is time-shifted and then flat. |
 | L25 | LOW | chart | The dashed planned-line hook never runs: `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS` is never set, so the plan draws solid (home and profile detail). |
@@ -174,7 +174,7 @@ when no admin PIN is set and show "Set an admin PIN to clear from the LCD".
 
 ### L8 (INFO) Refresh timers outlive page visibility
 
-Example: `ui/ui_page_network_manage.c:726` creates `refresh_cb` once at build
+Example: `ui/ui_page_network_manage.c:727` creates `refresh_cb` once at build
 and never deletes it. Because screens are cached, this is not a leak and the
 widgets the timer touches stay valid. Cost is CPU on the LVGL task for hidden
 pages. Fix if it matters: pause/resume the timer on screen load/unload events.
