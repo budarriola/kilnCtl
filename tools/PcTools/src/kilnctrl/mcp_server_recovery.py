@@ -941,8 +941,9 @@ def recovery_apply_staged(confirm: bool = False, host: Optional[str] = None, wai
     keeps running). done -> ok, with the stack high-water; the board then
     reboots into the application, so losing the connection after done is
     EXPECTED. failed -> FAILED with the error name, app_modified and stack
-    high-water. A lost connection BEFORE done, or a timeout, is UNKNOWN/
-    UNVERIFIED, never ok. Success here means the copy was verified and `app`
+    high-water. A lost connection after the status reached "finalizing"
+    (the set_boot step) is PROBABLE-OK: confirm via the application. A lost
+    connection earlier than that, or a timeout, is UNKNOWN/UNVERIFIED, never ok. Success here means the copy was verified and `app`
     selected; it does not prove the new application booted healthy.
     """
     if confirm is not True:
@@ -990,6 +991,13 @@ def recovery_apply_staged(confirm: bool = False, host: Optional[str] = None, wai
         try:
             last = rhc.get_apply_status(resolved)
         except rhc.RecoveryHttpError as exc:
+            if last is not None and last.get("phase") == "finalizing":
+                # The set_boot step was reached and the board restarts 1.5 s after
+                # "done"; a poller slower than that sees the SoftAP drop instead.
+                return (f"PROBABLE-OK: {started}; lost contact ({exc}) after the apply reached "
+                        f"'finalizing' (the set_boot step; last: {_fmt_apply(last)}), which is the "
+                        f"expected restart window. Not confirmed: check that the application came "
+                        f"up (get_heap_status / the board's fw_build) before relying on it")
             if exc.status == 404:
                 return (f"UNKNOWN: {started}; apply_status now answers 404 (the application may be up) but "
                         f"done was never observed (last: {_fmt_apply(last) if last else 'none'}) -- check "

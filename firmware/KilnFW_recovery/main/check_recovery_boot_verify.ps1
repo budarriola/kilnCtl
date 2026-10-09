@@ -24,6 +24,31 @@ if ($wrapperCalls -lt 2) {
     exit 1
 }
 
+# Source-order guard (M1/M2, review 2026-10-09): the boot_guard clear must come BEFORE
+# the point of no return in both routes -- before set_boot in ota_esp_post, and before
+# recovery_apply_esp_start (the first erase of `app`) in apply_staged_post.
+function Get-FuncBody([string]$Src, [string]$Name) {
+    $m = [regex]::Match($Src, "static esp_err_t $Name\(httpd_req_t \*req\)\s*\{")
+    if (-not $m.Success) { Write-Host "FAIL: cannot find $Name in recovery_http.c."; exit 1 }
+    $rest = $Src.Substring($m.Index)
+    $end = $rest.IndexOf("`n}")
+    return $rest.Substring(0, $end)
+}
+$ota = Get-FuncBody $http "ota_esp_post"
+$iClear = $ota.IndexOf("boot_guard_clear_or_na(")
+$iSet = $ota.IndexOf("recovery_boot_partition_set_and_verify(")
+if ($iClear -lt 0 -or $iSet -lt 0 -or $iClear -gt $iSet) {
+    Write-Host "FAIL: ota_esp_post must clear boot_guard before recovery_boot_partition_set_and_verify()."
+    exit 1
+}
+$apply = Get-FuncBody $http "apply_staged_post"
+$iClear = $apply.IndexOf("boot_guard_clear_or_na(")
+$iStart = $apply.IndexOf("recovery_apply_esp_start(")
+if ($iClear -lt 0 -or $iStart -lt 0 -or $iClear -gt $iStart) {
+    Write-Host "FAIL: apply_staged_post must clear boot_guard before recovery_apply_esp_start()."
+    exit 1
+}
+
 $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
 $vcvars = $null
 if (Test-Path $vswhere) {

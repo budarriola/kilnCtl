@@ -150,6 +150,8 @@ static uint32_t app_image_len(void)
 }
 
 static bool clear_boot_guard(char *msg, size_t cap);
+static bool boot_guard_clear_or_na(char *msg, size_t cap);
+static esp_err_t stage_clear_after_upload(void);
 
 static void restart_task(void *arg)
 {
@@ -216,6 +218,19 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return recovery_upload_send_error(req, http_status, msg);
     }
 
+    // Clear the counter BEFORE selecting the new image (same order as
+    // /api/recovery/exit): a failed clear refuses with no set_boot and no
+    // reboot, since a count at or above the threshold would bounce the new app
+    // straight back to recovery. `app` already holds the verified image, so a
+    // later /api/recovery/exit can select it once the clear works.
+    char bg_msg[96];
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_hdr(req, "Connection", "close");
+        httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL;
+    }
+
     esp_err_t err = recovery_boot_partition_set_and_verify(target);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -224,14 +239,14 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    // Full success: the new image is the boot target, so the next boot must
-    // not be counted toward recovery. Verified clear, reported either way.
-    char bg_msg[96];
-    bool bg_ok = clear_boot_guard(bg_msg, sizeof(bg_msg));
-    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s)", bg_msg);
-    char body[192];
-    snprintf(body, sizeof(body), "ok, rebooting into new application image; boot_guard %s",
-             bg_ok ? "cleared and verified" : bg_msg);
+    // L3: a staged image of a different version must not stay installable
+    // behind the image just pushed. Best effort: reported, never fatal.
+    esp_err_t stage_err = stage_clear_after_upload();
+    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s; stage clear: %s)",
+             bg_msg, esp_err_to_name(stage_err));
+    char body[224];
+    snprintf(body, sizeof(body), "ok, rebooting into new application image; %s; stage %s", bg_msg,
+             stage_err == ESP_OK ? "cleared" : "clear FAILED (staged image may still be installable)");
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
@@ -588,14 +603,30 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
-// Erase one key; ESP_ERR_NVS_NOT_FOUND (key or namespace) counts as success.
+// Erase one key; a missing namespace or key counts as success. Opens READONLY
+// first so a missing namespace is never created (READWRITE would create it and
+// can fail NOT_ENOUGH_SPACE on a full partition); READWRITE only for a key that
+// exists.
 static esp_err_t erase_key_in(const char *ns, const char *key)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return ESP_OK;
     }
+    if (err != ESP_OK) {
+        return err;
+    }
+    nvs_type_t type;
+    err = nvs_find_key(h, key, &type);
+    nvs_close(h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
@@ -650,6 +681,19 @@ static bool clear_boot_guard(char *msg, size_t cap)
     }
     snprintf(msg, cap, "boot_guard cleared and verified");
     return true;
+}
+
+// Pre-flight clear for the routes that write or select `app`. A kiln_nvs that
+// failed to initialise at boot counts as "nothing to clear" (the application
+// treats an unusable kiln_nvs as count 0 too), so it must not block the apply.
+static bool boot_guard_clear_or_na(char *msg, size_t cap)
+{
+    if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {
+        snprintf(msg, cap, "boot_guard not applicable (kiln_nvs unavailable)");
+        ESP_LOGW(TAG, "%s", msg);
+        return true;
+    }
+    return clear_boot_guard(msg, cap);
 }
 
 // POST /api/ota/esp/boot_guard_reset
@@ -787,16 +831,20 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+#define BODY_STALL_LIMIT_MS 15000
+
 // Reads exactly `want` body bytes into buf. Returns bytes read (less on a dead
 // or stalled connection).
 static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
 {
     size_t got = 0;
-    int timeouts = 0;
+    // Wall-clock deadline with no progress: one stalled client must not hold
+    // the single httpd task (status, abort) for ~100 s.
+    int64_t last_progress_us = esp_timer_get_time();
     while (got < want) {
         int n = httpd_req_recv(req, (char *)buf + got, want - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
-            if (++timeouts > 20) {
+            if (esp_timer_get_time() - last_progress_us > (int64_t)BODY_STALL_LIMIT_MS * 1000) {
                 break;
             }
             continue;
@@ -804,7 +852,7 @@ static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
         if (n <= 0) {
             break;
         }
-        timeouts = 0;
+        last_progress_us = esp_timer_get_time();
         got += (size_t)n;
     }
     return got;
@@ -917,7 +965,19 @@ static esp_err_t pico_abort_post(httpd_req_t *req)
 static int apply_pre_boot(void)
 {
     char msg[96];
-    return clear_boot_guard(msg, sizeof(msg)) ? 0 : -1;
+    return boot_guard_clear_or_na(msg, sizeof(msg)) ? 0 : -1;
+}
+
+// Erases the stage header sector (what a finished apply does) so the stage is
+// blank and not installable. ESP_OK also when there is no stage partition.
+static esp_err_t stage_clear_after_upload(void)
+{
+    const esp_partition_t *stage =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "stage");
+    if (!stage) {
+        return ESP_OK;
+    }
+    return esp_partition_erase_range(stage, 0, STAGE_HEADER_SECTOR);
 }
 
 static const char *stage_source_str(stage_source_t s)
@@ -951,6 +1011,14 @@ static esp_err_t apply_staged_post(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, hs == STAGE_HDR_BLANK ? "nothing is staged" : "no installable staged image",
                                HTTPD_RESP_USE_STRLEN);
+    }
+    // Prove the boot_guard clear works BEFORE the first erase of `app`: a clear
+    // that fails after the copy would leave `app` rewritten but never selected.
+    // Idempotent; the apply task clears again just before set_boot.
+    char bg_msg[96];
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
     app_verify_invalidate(); // `app` is about to be erased
     esp_err_t e = recovery_apply_esp_start(app, apply_pre_boot);

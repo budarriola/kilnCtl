@@ -1011,7 +1011,7 @@ class ApplyStagedTest(_ApplyBase):
         self.assertEqual(board.posts[0]["data"], b"")
 
     def test_lost_before_done_is_unknown_not_ok(self):
-        board = ApplyBoard(apply=[_apply(), _apply(phase="finalizing"), _unreachable()], post_reply=_accepted())
+        board = ApplyBoard(apply=[_apply(), _apply(phase="copying"), _unreachable()], post_reply=_accepted())
         out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=10.0)
         self.assertTrue(out.startswith("UNKNOWN"), out)
         self.assertNotIn("ok", out.split(":")[0])
@@ -1026,6 +1026,19 @@ class ApplyStagedTest(_ApplyBase):
         self.assertIn("app_readback_mismatch", out)
         self.assertIn("app_modified=True", out)
         self.assertIn("1500 bytes free", out)
+
+    def test_lost_after_finalizing_is_probable_ok(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="finalizing"), _unreachable()],
+                           post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=30.0)
+        self.assertTrue(out.startswith("PROBABLE-OK"), out)
+        self.assertIn("application came up", out)
+
+    def test_lost_before_finalizing_is_still_unknown(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="copying"), _unreachable()],
+                           post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=2.0)
+        self.assertFalse(out.startswith(("PROBABLE-OK", "ok")), out)
 
     def test_timeout_is_unverified(self):
         board = ApplyBoard(apply=[_apply(), _apply(phase="copying")], post_reply=_accepted())
