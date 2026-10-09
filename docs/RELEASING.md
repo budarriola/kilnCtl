@@ -179,3 +179,21 @@ logged, or passed on a command line.
 - Size gate refusal: the image exceeds the 0x400000 planned post-split app size; that is a
   partition-table decision, not something to bypass.
 - Build SKIP (exit 3): the ESP-IDF toolchain is missing; a release needs real binaries.
+
+## Release branch
+
+`origin/release` holds only release commits, one per release or prerelease tag: an empty-tree root
+`b0bb567d`, then single-parent commits (effectively a squash of a main commit into release). Each release
+commit M has the tree of a qualified main commit X, a message naming X's full SHA
+(`Files identical to main commit <X> (tag <T>).`), and the annotated tag `T`. The one exception is
+`8d366dd7` (`v1.0.0-pre.1`), whose legacy tag sits on `bf9ddea2` (same tree). Nothing else is ever committed
+to release; the named SHAs ascend along main.
+
+    powershell -ExecutionPolicy Bypass -File tools\release_merge.ps1 -Commit <X> -Tag v1.0.0-pre.N [-Message "<evidence>"] [-Push]
+
+Dry run unless `-Push`. It refuses (naming the rule) unless X is an ancestor of `origin/main`, the previous
+release's main commit is an ancestor of X, the tag is valid per `check_release_version_regex.ps1`, the tag is
+free locally and on origin, and the tag is semver-newer than every tag on release. It builds M with
+`git commit-tree X^{tree} -p <origin/release tip>` (no working-tree or index access), verifies the tree
+equals X's, and with `-Push` fast-forward pushes release (never forced), tags M and pushes the tag.
+`tools/make_release.ps1` then builds from M. `tools/check_release_branch.ps1` enforces the shape offline.

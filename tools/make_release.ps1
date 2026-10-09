@@ -11,8 +11,7 @@
 #     binaries shipped must be the ones this script just built from the stamped commit)
 #   * tag matches ^v\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$
 #   * working tree is clean (git status --porcelain, logs/release excluded)
-#   * HEAD equals origin/main (after a read-only `git fetch origin main`)
-#   * the tag exists neither locally nor on origin (git ls-remote)
+#   * HEAD is the commit annotated tag <tag> peels to, that tag is on origin, and it is the origin/release tip (tools/release_merge.ps1)
 #   * KilnCtrl.bin <= 0x400000: deliberately the planned post-split app size (see
 #     docs/GITHUB_RELEASE_UPDATE_PLAN.md WP2), which is now also the actual app partition size
 # -DevDryRun downgrades the git gates to warnings so the packaging path can be
@@ -202,16 +201,20 @@ if ($LASTEXITCODE -ne 0) { Fail "git status failed." }
 if ($dirty.Count -gt 0) { Gate "working tree is dirty ($($dirty.Count) change(s), first: $($dirty[0])); build releases from a clean worktree (tools\worktree_mint.ps1)." }
 
 $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
-& git -C $repoRoot fetch --quiet origin main
-if ($LASTEXITCODE -ne 0) { Fail "git fetch origin main failed." }
-$originMain = (& git -C $repoRoot rev-parse origin/main).Trim()
-if ($commit -ne $originMain) { Gate "HEAD $($commit.Substring(0,12)) is not origin/main $($originMain.Substring(0,12))." }
-
-if ((& git -C $repoRoot tag --list $Tag)) { Fail "tag $Tag already exists locally." }
-$remoteTag = @(& git -C $repoRoot ls-remote --tags origin "refs/tags/$Tag")
-if ($LASTEXITCODE -ne 0) { Fail "git ls-remote --tags origin failed (cannot prove the tag is free)." }
-if ($remoteTag.Count -gt 0) { Fail "tag $Tag already exists on origin." }
-
+# Releases are built from the TAGGED RELEASE COMMIT (tools/release_merge.ps1 -Push puts the single-parent
+# commit M on origin/release and the annotated tag on M), not from origin/main: HEAD must be the commit
+# the tag peels to, and that commit must be the origin/release tip.
+& git -C $repoRoot fetch --quiet origin release --tags
+if ($LASTEXITCODE -ne 0) { Fail "git fetch origin release --tags failed." }
+$tagCommit = (& git -C $repoRoot rev-parse --verify --quiet "refs/tags/$Tag^{commit}")
+if ($LASTEXITCODE -ne 0 -or -not $tagCommit) { Fail "tag $Tag does not exist locally; run tools\release_merge.ps1 -Commit <main commit> -Tag $Tag -Push first." }
+$tagCommit = $tagCommit.Trim()
+$remoteTag = @(& git -C $repoRoot ls-remote --tags origin "refs/tags/$Tag^{}")
+if ($LASTEXITCODE -ne 0) { Fail "git ls-remote --tags origin failed (cannot prove the tag is on origin)." }
+if ($remoteTag.Count -eq 0 -or ($remoteTag[0] -split '\s+')[0] -ne $tagCommit) { Gate "tag $Tag is not on origin at $($tagCommit.Substring(0,12))." }
+if ($commit -ne $tagCommit) { Gate "HEAD $($commit.Substring(0,12)) is not the commit tag $Tag peels to ($($tagCommit.Substring(0,12))); check out the tagged release commit." }
+$relTip = (& git -C $repoRoot rev-parse --verify --quiet "refs/remotes/origin/release^{commit}")
+if ($LASTEXITCODE -ne 0 -or -not $relTip -or $relTip.Trim() -ne $tagCommit) { Gate "tag $Tag is not the origin/release tip." }
 # Release body: resolved before the (long) build so a bad -NotesFile or a git failure costs nothing.
 if ($NotesFile) {
     $bodyBase = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile).Path)
