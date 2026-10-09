@@ -692,10 +692,17 @@ def _case_zone03(ctx: dict) -> CaseResult:
     if not tc:
         return CaseResult(Verdict.INCONCLUSIVE, reason="thermo_count is 0")
     for i, zz in enumerate((z.get("zones") or [])[:tc]):
-        for k in ("zone_type", "failsafe_state", "tc_type", "relay_type"):
+        for k in ("zone_type", "tc_type", "relay_type"):
             v = zz.get(k)
             if not isinstance(v, int) or isinstance(v, bool):
                 return CaseResult(Verdict.FAIL, reason=f"zone {i} {k} missing or non-integer: {v!r}")
+        # zones_http_get.c emits failsafe_state as a JSON bool; accept 0/1 ints too.
+        fs = zz.get("failsafe_state")
+        if isinstance(fs, bool):
+            fs = int(fs)
+        if not isinstance(fs, int):
+            return CaseResult(Verdict.FAIL, reason=f"zone {i} failsafe_state missing or not bool/0-1: {zz.get('failsafe_state')!r}")
+        zz = dict(zz, failsafe_state=fs)
         if zz["zone_type"] not in (0, 1) or zz["failsafe_state"] not in (0, 1):
             return CaseResult(Verdict.FAIL, reason=f"zone {i} zone_type/failsafe_state out of range: {zz['zone_type']}/{zz['failsafe_state']}")
     rt, rc = z.get("relay_types"), z.get("relay_count")

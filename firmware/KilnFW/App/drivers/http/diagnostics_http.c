@@ -227,7 +227,10 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
               "\"cj_c\":%s,\"age_ms\":%s,\"stale\":%s}",
               ch == 0 ? "" : ",", (unsigned)ch, state, (unsigned)reading.fault_status,
               reading.fault_pin_asserted ? "true" : "false", cj_buf, age_buf,
-              reading.stale ? "true" : "false");
+              /* User-facing freshness is the age against the shared threshold,
+               * not the driver's "no new conversion this poll" flag (which is
+               * true on a fraction-of-a-second-old value); see MAX31856.h. */
+              (reading.age_ms >= KILN_TEMP_STALE_AGE_MS) ? "true" : "false");
     }
     APPEND("]");
 

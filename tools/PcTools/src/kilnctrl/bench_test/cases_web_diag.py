@@ -75,17 +75,20 @@ def _case_diag02(ctx: dict) -> CaseResult:
     present = body.get("present")
     if not isinstance(present, bool):
         return _R(Verdict.FAIL, reason="crash_report 'present' missing or not a bool", observed={"body": body})
-    if present:
+    # An acknowledged record is reviewed board state: the page is still
+    # checked. Only a present-but-unacknowledged record (or an unreadable
+    # flag) stays INCONCLUSIVE, since this case may not ack/clear it.
+    if present and body.get("acknowledged") is not True:
         return _R(Verdict.INCONCLUSIVE,
-                  reason="a crash is on record (board state); this case may not ack/clear it",
-                  observed={"present": True})
+                  reason="an unacknowledged crash is on record (board state); this case may not ack/clear it",
+                  observed={"present": True, "acknowledged": body.get("acknowledged")})
     html, err = _html(ctx, "/diagnostics")
     if html is None:
         return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
     miss = _missing(html, ('id="crashCard"', "crashAckBtn", "crashClearBtn"))
     if miss:
         return _R(Verdict.FAIL, reason=f"/diagnostics HTML missing {miss}", observed={"missing": miss})
-    return _R(Verdict.PASS, observed={"present": False})
+    return _R(Verdict.PASS, observed={"present": present, "acknowledged": bool(present)})
 
 
 # ---------------------------------------------------------------------------
@@ -439,12 +442,42 @@ def _alias_static(ctx: dict, markers, target: str) -> CaseResult:
     return _R(Verdict.PASS, observed={"alias_of": target, "static": "present"})
 
 
+# The single-slot redesign retired the ESP picker/update/rollback controls
+# (90b75e27, 02fd73ab); ESP images are staged and installed through the
+# Stage card (docs/GITHUB_RELEASE_UPDATE_PLAN.md WP6).
+_OTA_STAGE_MARKERS = ('id="stagePicker"', 'id="stageFile"', 'id="stageUploadBtn"', 'id="stageInstallBtn"',
+                      "/api/update/stage")
+_OTA_RETIRED_MARKERS = ('id="espPicker"', 'id="espFile"', 'id="espUpdateBtn"', 'id="espRollbackBtn"',
+                        "/api/ota/esp/rollback")
+
+
 def _case_ota03(ctx: dict) -> CaseResult:
-    return _alias_static(ctx, ('id="espPicker"', 'id="espFile"', 'id="espUpdateBtn"', "function pushImage"), "OT-E01")
+    # OT-E01 is "a direct ESP push is refused"; the page must no longer offer one.
+    html, err = _html(ctx, "/ota")
+    if html is None:
+        return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
+    miss = _missing(html, _OTA_STAGE_MARKERS)
+    if miss:
+        return _R(Verdict.FAIL, reason=f"/ota HTML missing Stage/Install card markers {miss}", observed={"missing": miss})
+    stale = [m for m in _OTA_RETIRED_MARKERS if m in html]
+    if stale:
+        return _R(Verdict.FAIL, reason=f"/ota still carries retired ESP push/rollback controls {stale}",
+                  observed={"retired_present": stale})
+    return _alias_static(ctx, (), "OT-E01")
 
 
 def _case_ota04(ctx: dict) -> CaseResult:
-    return _alias_static(ctx, ('id="espRollbackBtn"', "/api/ota/esp/rollback"), "OT-E02")
+    # Rollback is retired (OT-E02 reads NOT_RUN by design); static check only.
+    html, err = _html(ctx, "/ota")
+    if html is None:
+        return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
+    stale = [m for m in _OTA_RETIRED_MARKERS if m in html]
+    if stale:
+        return _R(Verdict.FAIL, reason=f"/ota still carries retired controls {stale}", observed={"retired_present": stale})
+    miss = _missing(html, ('id="stageClearBtn"', 'id="stageInstallBtn"'))
+    if miss:
+        return _R(Verdict.FAIL, reason=f"/ota HTML missing {miss}", observed={"missing": miss})
+    return _R(Verdict.PASS, observed={"static": "retired rollback controls absent; Stage card present"})
 
 
 # ---------------------------------------------------------------------------

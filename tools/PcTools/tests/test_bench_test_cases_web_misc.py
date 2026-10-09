@@ -29,12 +29,18 @@ class Wifi02(unittest.TestCase):
 
 
 WIFI_HTML = ('id="apSection" #apSection { display: none; } id="apQrCanvas" var KilnQr function renderApQr( '
-             "if (s.mode === 'ap') renderApQr "
+             "if (s.mode === 'ap') renderApQr(a, b) "
              'ipModeDhcpBtn ipModeStaticBtn <div id="staticIpFields" style="display:none"></div> applyIpModeUi '
              "document.getElementById('ipModeStaticBtn').addEventListener('click', function(){ applyIpModeUi('static'); });")
 
 
 class Wifi0304(unittest.TestCase):
+    def test_03_braced_multiline_call(self):
+        h = WIFI_HTML.replace("if (s.mode === 'ap') renderApQr(a, b) ", "if (s.mode === 'ap') {\n      renderApQr(a, b);\n    }")
+        self.assertEqual(run("WEB-WIFI-03", ctx_for({"/status": HOME}, {"/wifi": h})).verdict, PASS)
+        h = WIFI_HTML.replace("if (s.mode === 'ap') renderApQr(a, b) ", "")
+        self.assertEqual(run("WEB-WIFI-03", ctx_for({"/status": HOME}, {"/wifi": h})).verdict, FAIL)
+
     def test_03(self):
         self.assertEqual(run("WEB-WIFI-03", ctx_for({"/status": HOME}, {"/wifi": WIFI_HTML})).verdict, PASS)
         self.assertEqual(run("WEB-WIFI-03", ctx_for({"/status": HOME},
@@ -98,6 +104,13 @@ class Sec(unittest.TestCase):
         self.assertEqual(run("WEB-SEC-02", ctx_for({"/api/auth/config": cfg}, {"/settings/security": h})).verdict, FAIL)
         self.assertEqual(run("WEB-SEC-02", ctx_for({}, {"/settings/security": SEC_HTML})).verdict, INC)
 
+    def test_06_real_bench_dir_no_self_match(self):
+        # Regression: the judge's own literals used to trip its source scan.
+        from kilnctrl.bench_test import cases_web_misc
+        hits = cases_web_misc.scan_bench_sources(Path(cases_web_misc.__file__).parent, forbidden_literals=(),
+                                                 forbidden_imports=(), forbidden_extra=("clear_" + "credentials",))
+        self.assertEqual(hits, [])
+
     def test_06(self):
         pg = {"/settings/security": SEC_HTML}
         clean = tempfile.mkdtemp()
@@ -160,6 +173,8 @@ class Bak(unittest.TestCase):
         t = "<p>Import is refused while a profile is running / heaters on / OTA in progress</p>"
         self.assertEqual(run("WEB-BAK-04", ctx_for(pages={"/settings/backup": t})).verdict, PASS)
         self.assertEqual(run("WEB-BAK-04", ctx_for(pages={"/settings/backup": "x"})).verdict, FAIL)
+        wrapped = "<p>Restore is refused outright (nothing is written) while a profile is\n  running, the heaters</p>"
+        self.assertEqual(run("WEB-BAK-04", ctx_for(pages={"/settings/backup": wrapped})).verdict, PASS)
 
 
 KC_HTML = ('kcApplyBtn apply_status kcAckHwDiffers X-Kiln-Ack-Hardware-Differs '

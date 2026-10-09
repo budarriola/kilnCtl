@@ -265,6 +265,12 @@ class ZoneTests(unittest.TestCase):
         bad = zones_body()
         bad["zones"][0]["zone_type"] = 7
         self.assertEqual(run("WEB-ZONE-03", self.ctx(bad)).verdict, Verdict.FAIL)
+        # firmware emits failsafe_state as a JSON bool (zones_http_get.c)
+        b = zones_body()
+        b["zones"][0]["failsafe_state"] = False
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(b)).verdict, Verdict.PASS)
+        b["zones"][0]["failsafe_state"] = None
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(b)).verdict, Verdict.FAIL)
 
     def test_zone02_pass_identity(self):
         z = zones_body()

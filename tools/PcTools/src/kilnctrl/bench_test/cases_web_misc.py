@@ -64,7 +64,7 @@ def _case_wifi02(ctx: dict) -> CaseResult:
 
 
 _WIFI03_MARKERS = ('id="apSection"', "#apSection { display: none; }", 'id="apQrCanvas"',
-                   "var KilnQr", "function renderApQr(", "if (s.mode === 'ap') renderApQr")
+                   "var KilnQr", "function renderApQr(")
 
 
 def _case_wifi03(ctx: dict) -> CaseResult:
@@ -74,7 +74,10 @@ def _case_wifi03(ctx: dict) -> CaseResult:
     st, s = _get_json(ctx, "/status")
     if st != 200 or not isinstance(s, dict):
         return _R(Verdict.INCONCLUSIVE, reason=f"GET /status unreadable (status={st})")
-    miss = _missing(html, _WIFI03_MARKERS)
+    miss = list(_missing(html, _WIFI03_MARKERS))
+    # The call sits inside a braced if-block; match it whitespace-tolerantly.
+    if not re.search(r"if\s*\(\s*s\.mode\s*===\s*'ap'\s*\)\s*\{?\s*renderApQr\s*\(", html):
+        miss.append("if (s.mode === 'ap') renderApQr(")
     if miss:
         return _R(Verdict.FAIL, reason=f"/wifi HTML missing {miss}", observed={"missing": miss})
     if s.get("mode") == "ap":
@@ -253,10 +256,12 @@ def _case_sec06(ctx: dict) -> CaseResult:
     st, cfg = _get_json(ctx, "/api/auth/config")
     if st != 200 or not isinstance(cfg, dict) or "admin_password_set" not in cfg:
         return _R(Verdict.INCONCLUSIVE, reason=f"/api/auth/config unreadable at end (status={st})")
+    # Built by concatenation so this file's own literals never match the scan.
+    needle = "clear_" + "credentials"
     problems = [f"missing {m}" for m in _missing(html, ('id="kcSecClearCreds"', "Clear login credentials",
-                                                        "window.kcConfirm", "clear_credentials"))]
+                                                        "window.kcConfirm", needle))]
     hits = scan_bench_sources(_bench_dir(ctx), forbidden_literals=(), forbidden_imports=(),
-                              forbidden_extra=("clear_credentials",))
+                              forbidden_extra=(needle,))
     problems += hits
     start = ctx.get("_sec06_admin_start")
     if start is None:
@@ -356,8 +361,8 @@ def _case_bak04(ctx: dict) -> CaseResult:
     html, err = _html(ctx, "/settings/backup")
     if html is None:
         return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
-    low = html.lower()
-    if "refused while" in low and "profile is running" in low:
+    low = " ".join(html.lower().split())  # the page wraps this sentence across lines
+    if re.search(r"refused (outright )?(\(nothing is written\) )?while a profile is running", low):
         return _R(Verdict.PASS, observed={"reduction": "static page text (owner 2026-10-09)"})
     return _R(Verdict.FAIL, reason="/settings/backup lacks the 'refused while a profile is running' text")
 

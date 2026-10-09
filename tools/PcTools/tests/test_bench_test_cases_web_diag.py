@@ -63,6 +63,13 @@ class Diag02(unittest.TestCase):
 
     def test_inconclusive_present(self):
         self.assertEqual(run("WEB-DIAG-02", ctx_for({"/api/crash_report": {"present": True}})).verdict, INC)
+        self.assertEqual(run("WEB-DIAG-02", ctx_for({"/api/crash_report": {"present": True, "acknowledged": False}})).verdict, INC)
+
+    def test_acknowledged_crash_still_checks_page(self):
+        ack = {"present": True, "acknowledged": True}
+        self.assertEqual(run("WEB-DIAG-02", ctx_for({"/api/crash_report": ack}, {"/diagnostics": DIAG_HTML})).verdict, PASS)
+        r = run("WEB-DIAG-02", ctx_for({"/api/crash_report": ack}, {"/diagnostics": DIAG_HTML.replace("crashAckBtn", "x")}))
+        self.assertEqual(r.verdict, FAIL)
 
 
 CSV = "# Name,Type,SubType,Offset,Size\nnvs,data,nvs,0x9000,0x6000\napp,app,ota_0,0x10000,0x100000\n"
@@ -217,22 +224,35 @@ OTA_HTML = ('id="espPicker" id="espFile" id="espUpdateBtn" function pushImage id
             'id="picoRollbackBtn" id="recoveryExitBox" style="display:none" id="recoveryExitBtn"')
 
 
-class OtaAlias(unittest.TestCase):
-    def test_pass(self):
-        c = ctx_for(pages={"/ota": OTA_HTML}, _results={"OT-E01": CaseResult(PASS)})
+OTA_HTML_NEW = ('id="stagePicker" id="stageFile" id="stageUploadBtn" id="stageInstallBtn" id="stageClearBtn" '
+                '/api/update/stage id="picoRollbackBtn" id="recoveryExitBox" style="display:none" id="recoveryExitBtn"')
+
+
+class OtaStageCard(unittest.TestCase):
+    def test_03_current_page(self):
+        c = ctx_for(pages={"/ota": OTA_HTML_NEW}, _results={"OT-E01": CaseResult(PASS)})
         self.assertEqual(run("WEB-OTA-03", c).verdict, PASS)
 
-    def test_fail_target_failed(self):
-        c = ctx_for(pages={"/ota": OTA_HTML}, _results={"OT-E02": CaseResult(FAIL, reason="x")})
+    def test_03_fails_when_retired_control_returns_or_stage_missing(self):
+        c = ctx_for(pages={"/ota": OTA_HTML_NEW + ' id="espUpdateBtn"'}, _results={"OT-E01": CaseResult(PASS)})
+        self.assertEqual(run("WEB-OTA-03", c).verdict, FAIL)
+        c = ctx_for(pages={"/ota": "x"}, _results={"OT-E01": CaseResult(PASS)})
+        self.assertEqual(run("WEB-OTA-03", c).verdict, FAIL)
+
+    def test_04_static_only(self):
+        self.assertEqual(run("WEB-OTA-04", ctx_for(pages={"/ota": OTA_HTML_NEW})).verdict, PASS)
+        c = ctx_for(pages={"/ota": OTA_HTML_NEW + " /api/ota/esp/rollback"})
         self.assertEqual(run("WEB-OTA-04", c).verdict, FAIL)
 
+
+class OtaAlias(unittest.TestCase):
     def test_not_run_and_inconclusive(self):
-        self.assertEqual(run("WEB-OTA-03", ctx_for(pages={"/ota": OTA_HTML})).verdict, NR)
-        c = ctx_for(pages={"/ota": OTA_HTML}, _results={"OT-E01": CaseResult(SKIP, reason="no image")})
+        self.assertEqual(run("WEB-OTA-03", ctx_for(pages={"/ota": OTA_HTML_NEW})).verdict, NR)
+        c = ctx_for(pages={"/ota": OTA_HTML_NEW}, _results={"OT-E01": CaseResult(SKIP, reason="no image")})
         self.assertEqual(run("WEB-OTA-03", c).verdict, INC)
 
-    def test_fail_static(self):
-        c = ctx_for(pages={"/ota": "x"}, _results={"OT-E01": CaseResult(PASS)})
+    def test_fail_target_failed(self):
+        c = ctx_for(pages={"/ota": OTA_HTML_NEW}, _results={"OT-E01": CaseResult(FAIL, reason="x")})
         self.assertEqual(run("WEB-OTA-03", c).verdict, FAIL)
 
 
