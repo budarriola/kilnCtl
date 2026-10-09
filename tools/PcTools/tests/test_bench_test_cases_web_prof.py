@@ -287,6 +287,16 @@ class ZoneTests(unittest.TestCase):
         for active in ("relay_approach", "relay_cycling", "settling", "stepping"):
             self.assertEqual(run("WEB-ZONE-06", ctx(active)).verdict, Verdict.FAIL)
 
+    def test_zone06_at01_relay_states_are_active(self):
+        html = "atStartBtn atAbortBtn atAcceptBtn atAckUnsettled /api/autotune/start /api/autotune/abort /api/autotune/accept"
+
+        def ctx(state):
+            return {"http_get_json": lambda p: (200, {"state": state}), "web_client": Web(html),
+                    "_results": {"AT-01": CaseResult(Verdict.PASS)}}
+        self.assertEqual(run("WEB-ZONE-06", ctx("done")).verdict, Verdict.PASS)
+        for active in ("relay_approach", "relay_cycling"):
+            self.assertEqual(run("WEB-ZONE-06", ctx(active)).verdict, Verdict.FAIL)
+
     def test_zone03_fewer_relays_ok_and_short_zones_fail(self):
         z = zones_body(relay_count=2)
         self.assertEqual(run("WEB-ZONE-03", self.ctx(z)).verdict, Verdict.PASS)

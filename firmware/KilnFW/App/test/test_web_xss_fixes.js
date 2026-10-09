@@ -37,4 +37,5 @@ assert(/Feasibility notice [^']*' \+ window\.kcEscapeHtml\(name\)/.test(main), '
 const zones = read('zones_page.html');
 assert(!/\? ' \(' \+ current\.zones\[i\]\.name \+ '\)' : ''\;/.test(zones) && zones.indexOf('kgEsc(current.zones[i].name)') !== -1, 'F2 zone name escaped');
 assert(!/var caption = rec\.profile_name/.test(zones), 'F3 caption escaped');
+assert(zones.indexOf('var caption = kgEsc(rec.profile_name)') !== -1, 'F3 caption routes profile_name through kgEsc');
 process.exit(failed ? 1 : 0);
