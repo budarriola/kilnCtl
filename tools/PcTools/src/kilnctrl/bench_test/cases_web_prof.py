@@ -662,59 +662,22 @@ def _z02_body(ctx: dict, snap: dict) -> Dict[str, str]:
 
 
 def _case_zone02(ctx: dict) -> CaseResult:
-    gate = _mutating_gate(ctx, True)
-    if gate:
-        return gate
+    """Read-only (review 4 H2). The old identity POST re-posted the whole /api/zones
+    page rebuilt from GET output (PID gains rounded to %.4f, restore compared GET to
+    GET). No single field can be posted alone: gains and limits are required, so every
+    valid POST re-sends rounded values. This now only proves two reads agree and the
+    generation is stable; it never POSTs."""
     s, snap = _GET(ctx, "/api/zones")
     if s != 200 or not isinstance(snap, dict):
         return CaseResult(Verdict.FAIL, reason=f"GET /api/zones unusable (status={s})")
-    ceil = snap.get("safety_ceiling")
-    if not (isinstance(ceil, dict) and ceil.get("pico_known") is True and ceil.get("target_c") == ceil.get("pico_current_c")):
-        return CaseResult(Verdict.SKIP, reason=(
-            f"gate: safety_ceiling does not prove target_c == pico_current_c ({ceil}); a no-change POST could "
-            "resync the Pico abs_max_temp_c"))
-    try:
-        fields = _z02_body(ctx, snap)
-    except Exception as exc:  # noqa: BLE001
-        return CaseResult(Verdict.FAIL, reason=f"cannot build the POST body from the GET snapshot: {type(exc).__name__}: {exc}")
     s1, again = _GET(ctx, "/api/zones")
-    if s1 != 200 or not isinstance(again, dict) or again.get("generation") != snap.get("generation"):
-        return CaseResult(Verdict.INCONCLUSIVE, reason="generation moved between snapshot and POST (another writer)")
-    obs: Dict[str, Any] = {"generation_before": snap.get("generation")}
-    posted = False
-    after: Optional[dict] = None
-    verdict: Optional[CaseResult] = None
-    try:
-        posted = True
-        ps, ptext = W._post_raw(ctx, "/api/zones", fields)
-        if ps == 409:
-            posted = False
-            return CaseResult(Verdict.INCONCLUSIVE, reason="409 from system_mode_gate; nothing written", observed=obs)
-        if ps != 200 or (ptext or "").strip() != "ok":
-            verdict = CaseResult(Verdict.FAIL, reason=f"POST /api/zones returned status={ps} body={ptext!r}", observed=obs)
-        else:
-            s2, after = _GET(ctx, "/api/zones")
-            if s2 != 200 or not isinstance(after, dict):
-                verdict = CaseResult(Verdict.FAIL, reason="re-read of /api/zones failed", observed=obs)
-            else:
-                obs["generation_after"] = after.get("generation")
-                if _z02_strip(after) != _z02_strip(snap):
-                    diff = [k for k in set(_z02_strip(after)) | set(_z02_strip(snap))
-                            if _z02_strip(after).get(k) != _z02_strip(snap).get(k)]
-                    verdict = CaseResult(Verdict.FAIL, reason=f"config changed across an identity POST; differing keys: {sorted(diff)}", observed=obs)
-                elif snap.get("generation") is not None and after.get("generation") != snap["generation"] + 1:
-                    verdict = CaseResult(Verdict.FAIL, reason=f"generation {snap['generation']} -> {after.get('generation')}, expected +1", observed=obs)
-                else:
-                    verdict = CaseResult(Verdict.PASS, observed=obs)
-    finally:
-        if posted:
-            same = after is not None and _z02_strip(after) == _z02_strip(snap)
-            if not same:
-                W._post_raw(ctx, "/api/zones", fields)
-                _s3, fin = _GET(ctx, "/api/zones")
-                if not (isinstance(fin, dict) and _z02_strip(fin) == _z02_strip(snap)):
-                    verdict = CaseResult(Verdict.FAIL, reason="ERROR: zones config restore read-back mismatch (run tainted)", observed=obs)
-    return verdict
+    if s1 != 200 or not isinstance(again, dict):
+        return CaseResult(Verdict.FAIL, reason=f"second GET /api/zones unusable (status={s1})")
+    if snap.get("generation") != again.get("generation"):
+        return CaseResult(Verdict.INCONCLUSIVE, reason="generation moved between reads (another writer)")
+    if _z02_strip(snap) != _z02_strip(again):
+        return CaseResult(Verdict.FAIL, reason="two reads at the same generation differ")
+    return CaseResult(Verdict.PASS, observed={"generation": snap.get("generation"), "reduction": "read-only (review 4 H2)"})
 
 
 def _case_zone03(ctx: dict) -> CaseResult:

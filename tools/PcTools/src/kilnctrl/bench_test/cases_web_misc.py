@@ -399,10 +399,19 @@ def _case_kcfg02(ctx: dict) -> CaseResult:
             return None
         return b["id"]
 
+    # Review 4 H1: /api/kiln_configs/save makes the new entry the ACTIVE config
+    # (kiln_cfg_store.c save_current, id<0) and the delete route refuses to delete
+    # the active one, so saving is never used here. Clone/rename/export/import
+    # never move active_id; start from an existing config instead.
+    src = snap.get("active_id")
+    if not _int(src):
+        src = next((c.get("id") for c in snap["configs"] if _int(c.get("id"))), None)
+    if src is None:
+        return _R(Verdict.INCONCLUSIVE, reason="no existing kiln config to clone (save is not used: it activates the entry)")
+    obs["save"] = "not exercised (activates the entry)"
     try:
-        a = step("save", "/api/kiln_configs/save", {"name": "BENCH_tmp"})
+        a = src
         if a is not None:
-            created.append(a)
             b = step("clone", "/api/kiln_configs/clone", {"id": a, "name": "BENCH_tmp_c"})
             if b is not None:
                 created.append(b)
@@ -438,7 +447,7 @@ def _case_kcfg02(ctx: dict) -> CaseResult:
                             problems.append("import returned a non-new id")
     finally:
         for cid in reversed(created):
-            if cid == snap.get("active_id"):
+            if cid == snap.get("active_id") or cid == src:
                 continue
             _post_json(ctx, "/api/kiln_configs/delete", {"id": cid})
         after, aerr = _kcfg_snapshot(ctx)
@@ -520,6 +529,11 @@ def _creds(ctx: dict) -> "Tuple[Optional[str], Optional[str]]":
 
 def _open_window(client: Any, username: str, password: str, orig: dict,
                  web_timeout: Optional[int] = None) -> "Tuple[bool, str]":
+    # Review 4 L3: never write the admin password unless a real login with the
+    # same credential already succeeds (else the board password changes for good).
+    lst, lcookie = client.login(username, password)
+    if lst != 200 or not lcookie:
+        return False, f"INCONCLUSIVE: login with KILNCTL_WEB_PASSWORD failed (status={lst}); no password written"
     st, resp = client.set_web_password(username, password)
     if st != 200 or not (isinstance(resp, dict) and resp.get("ok") is True):
         return False, f"set_web_password not ok (status={st})"
@@ -562,7 +576,7 @@ def _case_log02(ctx: dict) -> CaseResult:
     try:
         ok, why = _open_window(client, user, pw, orig)
         if not ok:
-            verdict = _R(Verdict.FAIL, reason=why)
+            verdict = _R(Verdict.INCONCLUSIVE if why.startswith("INCONCLUSIVE") else Verdict.FAIL, reason=why)
         else:
             bst, bcookie = client.login(user, "bench-wrong-credential-x")
             if bst == 429:
@@ -624,7 +638,7 @@ def _case_x02(ctx: dict) -> CaseResult:
         else:
             ok, why = _open_window(client, user, pw, orig, web_timeout=1)
             if not ok:
-                verdict = _R(Verdict.FAIL, reason=why)
+                verdict = _R(Verdict.INCONCLUSIVE if why.startswith("INCONCLUSIVE") else Verdict.FAIL, reason=why)
             else:
                 lst, cookie = client.login(user, pw)
                 if lst == 429:

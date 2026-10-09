@@ -266,10 +266,6 @@ class ZoneTests(unittest.TestCase):
         bad["zones"][0]["zone_type"] = 7
         self.assertEqual(run("WEB-ZONE-03", self.ctx(bad)).verdict, Verdict.FAIL)
 
-    def test_zone02_gate_skip_when_ceiling_unproven(self):
-        z = zones_body(safety_ceiling={"pico_known": False})
-        self.assertEqual(run("WEB-ZONE-02", self.ctx(z)).verdict, Verdict.SKIP)
-
     def test_zone02_pass_identity(self):
         z = zones_body()
         state = {"gen": 4}
@@ -281,11 +277,10 @@ class ZoneTests(unittest.TestCase):
             return 200, {"state": "idle"}
 
         def post_raw(p, f):
-            state["gen"] += 1
-            return 200, "ok"
+            raise AssertionError("WEB-ZONE-02 must never POST /api/zones (review 4 H2)")
         c["http_get_json"] = get
         c["http_post_raw"] = post_raw
-        c["zones_build_body"] = lambda snap, preset: "a=1&z0_k=2"
+        c["http_post_json"] = post_raw
         r = run("WEB-ZONE-02", c)
         self.assertEqual(r.verdict, Verdict.PASS, r.reason)
 

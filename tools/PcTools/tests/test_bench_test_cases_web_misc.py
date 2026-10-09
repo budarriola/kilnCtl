@@ -175,6 +175,7 @@ class FakeKcfg:
         self.next = 10
         self.leak = leak
         self.deleted = []
+        self.posts = []
 
     def snapshot(self):
         return {"active_id": self.active, "max_count": 8,
@@ -186,7 +187,13 @@ class FakeKcfg:
         return (200, IDLE[path]) if path in IDLE else (404, None)
 
     def post(self, path, f):
-        if path.endswith("/save") or path.endswith("/clone"):
+        self.posts.append(path)
+        if path.endswith("/save"):
+            self.cfgs[self.next] = f["name"]
+            self.active = self.next  # firmware: save activates the new entry
+            self.next += 1
+            return 200, {"id": self.next - 1}
+        if path.endswith("/clone"):
             self.cfgs[self.next] = f["name"]
             self.next += 1
             return 200, {"id": self.next - 1}
@@ -195,6 +202,8 @@ class FakeKcfg:
             return 200, {"ok": True}
         if path.endswith("/delete"):
             self.deleted.append(int(f["id"]))
+            if int(f["id"]) == self.active:
+                return 409, None  # firmware refuses to delete the active config
             if not self.leak:
                 self.cfgs.pop(int(f["id"]), None)
             return 200, {"ok": True}
@@ -222,8 +231,10 @@ class Kcfg(unittest.TestCase):
         f = FakeKcfg()
         r = run("WEB-KCFG-02", f.ctx())
         self.assertEqual(r.verdict, PASS, r.reason)
-        self.assertEqual(sorted(f.deleted), [10, 11, 12])
+        self.assertEqual(sorted(f.deleted), [10, 11])
         self.assertNotIn(1, f.deleted)
+        self.assertFalse([p for p in f.posts if p.endswith("/save")])
+        self.assertEqual(f.active, 1)
 
     def test_02_restore_mismatch_fails(self):
         r = run("WEB-KCFG-02", FakeKcfg(leak=True).ctx())
@@ -266,12 +277,14 @@ class FakeSec:
         self.sessions = list(sessions or [])
         self.restore_ok = restore_ok
         self.policies = []
+        self.pw_writes = 0
         self.last_login_set_cookie = {"httponly": True, "secure": False, "samesite": "Strict"}
 
     def get_config(self):
         return 200, dict(self.cfg)
 
     def set_web_password(self, u, p):
+        self.pw_writes += 1
         return 200, {"ok": True}
 
     def set_policy(self, we, le, wt, lt):
@@ -297,6 +310,16 @@ def _auth_ctx(client, **extra):
 
 
 class LogX(unittest.TestCase):
+    def test_log02_x02_no_password_write_when_login_fails(self):
+        for case in ("WEB-LOG-02", "WEB-X-02"):
+            f = FakeSec(good=(401, None), sessions=[{"prompt": False, "seconds_left": 40, "role": "admin"}])
+            c = _auth_ctx(f)
+            c["http_get_text"] = lambda p: (200, "kc-lock-prompt Stay unlocked fetch('/api/auth/session/extend' st.prompt")
+            r = run(case, c)
+            self.assertEqual(r.verdict, INC, (case, r.reason))
+            self.assertEqual(f.pw_writes, 0, case)
+            self.assertNotIn("p", (r.reason or "").split())
+
     def test_log02_pass(self):
         f = FakeSec(sessions=[{"role": "admin"}])
         self.assertEqual(run("WEB-LOG-02", _auth_ctx(f)).verdict, PASS)
