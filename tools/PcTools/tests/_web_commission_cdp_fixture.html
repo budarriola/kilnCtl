@@ -11,7 +11,9 @@
 <html>
 <head><title>fixture</title></head>
 <body>
+  <button id="decoyAria" aria-label='Remove: Add "Bisque Fast" to favorites'>x</button>
   <button id="favBtn" aria-label='Add "Bisque Fast" to favorites'>&#9734;</button>
+  <button class="twin" id="twinA">a</button><button class="twin" id="twinB">b</button>
   <button id="addSegBtn">+ Add segment</button>
   <div id="segments"></div>
   <div id="result"></div>
@@ -44,6 +46,9 @@
         fetch(ok ? '/api/confirmed_delete' : '/api/declined_delete', { method: 'POST' });
       });
     });
+    document.getElementById('decoyAria').addEventListener('click', function () { fetch('/api/decoy_aria', { method: 'POST' }); });
+    document.getElementById('twinA').addEventListener('click', function () { fetch('/api/twin_first', { method: 'POST' }); });
+    document.getElementById('twinB').addEventListener('click', function () { fetch('/api/twin_last', { method: 'POST' }); });
     document.getElementById('favBtn').addEventListener('click', function () {
       fetch('/api/fav_toggle', { method: 'POST' });
     });

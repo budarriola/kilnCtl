@@ -126,6 +126,7 @@ async function main() {
         console.error(r.stderr);
       }
       ok(posts.includes('/api/fav_toggle'), 'aria-label click: server actually saw the fetch');
+      ok(!posts.includes('/api/decoy_aria'), 'aria-label click: exact match, not an earlier element whose label merely contains it');
     }
 
     // 2. selector-kind css: a control with neither an id nor a useful
@@ -140,6 +141,13 @@ async function main() {
       ]);
       ok(r.code === 0, 'css click: driver exits 0');
       ok(posts.includes('/api/fav_toggle'), 'css click: server actually saw the fetch');
+      posts.length = 0;
+      const r2 = await runDriver(host, [
+        '--route', '/', '--selector-kind', 'css', '--selector', '.twin',
+        '--expect-post', '/api/twin_first',
+      ]);
+      ok(r2.code === 0, 'css click: multi-match driver exits 0');
+      ok(posts.includes('/api/twin_first') && !posts.includes('/api/twin_last'), 'css click: first match wins (document.querySelector), not the last');
     }
 
     // 3. --steps: click #addSegBtn (renders a new row asynchronously, like
