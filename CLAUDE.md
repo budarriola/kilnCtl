@@ -372,9 +372,10 @@ unconditional, so the rollback hazard above is unchanged. The `cfg`
 partition itself is unformatted on the bench board and not yet mounted at
 boot, so this is inert today. **Superseded 2026-09-21:** the bench board
 (`8ab3b81a`) now has `cfg` mounted and populated with 7 files, confirmed
-via `GET /api/cfgfs` on hardware; NVS is still authoritative. Full detail, including a real unfixed
-atomicity defect in the RP2040's own config store found by the same
-review: `docs/CONFIG_FILESYSTEM.md`.
+via `GET /api/cfgfs` on hardware; NVS is still authoritative. Full detail: `docs/CONFIG_FILESYSTEM.md`.
+The RP2040 config store atomicity defects that review found are fixed:
+A/B sectors `24090c9a`, torn-slot reuse plus read-back verify (D2)
+`98d237b0`.
 
 `flash_firmware()` now checks this **automatically** after every flash (the
 `verify` parameter, default `True`): it polls the board's own HTTP API for the
