@@ -1001,6 +1001,16 @@ def seed_lcd_pin(ctx: dict) -> Dict[str, Any]:
     straight into a `CaseResult` -- the PIN is never present in either.
     """
     resolved = _resolve_lcd_pin(ctx)
+    if resolved["cfg0"].get("admin_pin_set"):
+        # L6 residual: the config GET only says a PIN is set, and no route
+        # verifies one without side effects, so a PIN set outside this run
+        # is never trusted to equal KILNCTL_LCD_PIN.
+        raise LcdPinSeedError(
+            "unverified",
+            "board already has an admin PIN that this run did not set; it cannot be verified "
+            f"against {_LCD_PIN_ENV} without side effects, so it is not trusted",
+            {"pin_unverified": True, "admin_pin_set_before": True},
+        )
     pin_set_ok, state = _write_lcd_pin_if_needed(resolved["client"], resolved["cfg0"], resolved["right_pin"])
     if not pin_set_ok:
         raise LcdPinSeedError(

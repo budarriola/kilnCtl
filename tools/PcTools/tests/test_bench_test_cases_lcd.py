@@ -2665,9 +2665,10 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         self.assertEqual(result.observed.get("wrong_pin_refused"), True)
         self.assertEqual(result.observed.get("right_pin_started"), True)
 
-    def test_self_seed_does_not_overwrite_an_existing_admin_pin(self):
-        # Same as WEB-SEC-04's own rule: never overwrite an admin PIN the
-        # board already has -- trust KILNCTL_LCD_PIN already matches it.
+    def test_preexisting_admin_pin_is_inconclusive_never_driven(self):
+        # L6 residual: a PIN set outside this run is unverifiable (no
+        # side-effect-free verify route), so LCD-19 must not trust it, must
+        # not overwrite it, and must never drive the keypad with it.
         os.environ[CW._LCD_PIN_ENV] = "1234"
         sec = FakeSec04Client(admin_pin_set=True)
         ui = PinKeypadUiTest(right_pin="1234", wrong_pin=CW._derive_wrong_lcd_pin("1234"))
@@ -2675,9 +2676,10 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         ctx = {"srv": srv, "sec_client": sec}
         result = C._case_lcd19(ctx)
         self.assertEqual(sec.set_lcd_pin_calls, [])
-        self.assertEqual(ctx["_lcd_pin"]["right_pin"], "1234")
-        self.assertEqual(result.observed.get("keypad_raised"), True)
-        self.assertEqual(result.observed.get("right_pin_started"), True)
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+        self.assertTrue(result.observed.get("pin_unverified"))
+        self.assertNotIn("_lcd_pin", ctx)
+        self.assertNotIn("1234", (result.reason or "") + str(result.observed))
 
     def test_self_seed_write_failure_fails_and_never_drives_keypad(self):
         os.environ[CW._LCD_PIN_ENV] = "1234"

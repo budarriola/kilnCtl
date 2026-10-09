@@ -3203,7 +3203,7 @@ def _case_lcd19(ctx: dict) -> CaseResult:
         try:
             seeded = _web.seed_lcd_pin(ctx)
         except _web.LcdPinSeedError as exc:
-            verdict = Verdict.NOT_RUN if exc.kind == "missing" else Verdict.FAIL
+            verdict = {"missing": Verdict.NOT_RUN, "unverified": Verdict.INCONCLUSIVE}.get(exc.kind, Verdict.FAIL)
             return CaseResult(verdict, reason=exc.reason, observed=exc.observed)
         pin_cfg = {"right_pin": seeded["right_pin"], "wrong_pin": seeded["wrong_pin"]}
         ctx["_lcd_pin"] = pin_cfg

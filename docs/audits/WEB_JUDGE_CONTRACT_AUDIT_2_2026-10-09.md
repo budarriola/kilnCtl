@@ -194,7 +194,7 @@ points at the watchdog route instead of the session.
 
 ### L6. WEB-SEC-04 can PASS with an unverified pre-existing LCD PIN and pass it to LCD-19
 
-**Fixed (55cfee20).** SEC-04 no longer hands a pre-existing, unverified PIN to LCD-19 (observed.pin_unverified). Residual, won't fix here: cases_lcd.py seed_lcd_pin (outside these judges) still trusts a PIN set outside the harness.
+**Fixed (55cfee20).** SEC-04 no longer hands a pre-existing, unverified PIN to LCD-19 (observed.pin_unverified). Residual fixed: `cases_web_rw.seed_lcd_pin` now raises `LcdPinSeedError("unverified")` when the board already had an admin PIN (no side-effect-free verify route exists), and LCD-19 returns INCONCLUSIVE with `observed.pin_unverified`, never driving the keypad.
 
 `_write_lcd_pin_if_needed()` (`cases_web_rw.py:836-851`) skips the write
 when `admin_pin_set` is already true. The firmware config GET
