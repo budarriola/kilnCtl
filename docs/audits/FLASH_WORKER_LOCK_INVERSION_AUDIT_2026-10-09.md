@@ -263,7 +263,19 @@ Still open (pre-existing, narrower):
 - The revert snapshot survives an Accept, so a later revert restores the
   pre-adaptive gains over the accepted ones.
 
-### F4 LOW (bounded): `s_rc.persist_lock` across the dispatch
+### F4 LOW (bounded): `s_rc.persist_lock` across the dispatch -- NOT CHANGED (by design)
+
+**Disposition.** Re-checked on dev after F1: the executor no longer holds
+`s_exec.lock` at the persist, so the only remaining cross-wait is
+`persist_lock` (executor, held across its dispatch) against the worker's
+`relay_cycles_flush` (bounded 3 s take). It is a bounded stall, not a
+deadlock, and cannot be removed without breaking the ordering invariant:
+`persist_lock` must bracket snapshot-through-dispatch-completion so an older
+snapshot cannot be written after a newer one (see the comment above
+`persist_snapshot_now`). A worker-side flush that skipped the wait and ran
+inline would overtake the executor's already-queued older snapshot. The
+failed flush leaves `dirty` set, so no counts are lost. Accepted; no code
+change.
 
 - `persist_snapshot_now` takes `persist_lock` (`relay_cycles.c:1140`) and
   holds it across the dispatch at `relay_cycles.c:1162`.
@@ -274,7 +286,13 @@ Still open (pre-existing, narrower):
   `ESP_ERR_TIMEOUT` flush (counts persisted later), not a deadlock.
 - This finding goes away if F1 is fixed by moving the persist off `s_exec.lock`.
 
-### F5 LOW (boot only): `s_rc.lock` in `relay_cycles_init`
+### F5 LOW (boot only): `s_rc.lock` in `relay_cycles_init` -- FIXED
+
+`relay_cycles_init` now loads (migrate, NVS read, `pref_cfg_fs_resolve`) into
+locals and takes `s_rc.lock` only to publish counts/types/overrides/rev and
+`initialized`. Host test `test_init_holds_no_lock_across_cfg_write`
+(test_relay_cycles.c) fails if the cfg write runs with a lock held; negtest
+(taking the lock before the load) CAUGHT. Original finding follows.
 
 - `relay_cycles_init` holds `s_rc.lock` from `relay_cycles.c:343` to
   `relay_cycles.c:496`.
@@ -361,5 +379,5 @@ No function in `wifi_prov`, `update_fetch`, LVGL, `heat_enable` or
 | F1 HIGH | `s_exec.lock` | profile executor | Fixed |
 | F2 HIGH | `s_at.lock` | autotune | Fixed |
 | F3 MEDIUM | `adaptive_tune_lock` | profile executor (run end) | FIXED (plan/apply/commit split) |
-| F4 LOW | `s_rc.persist_lock` | executor / worker | Bounded 3 s stall |
-| F5 LOW | `s_rc.lock` | boot (`relay_cycles_init`) | Boot-order protected |
+| F4 LOW | `s_rc.persist_lock` | executor / worker | Bounded 3 s stall; accepted by design (ordering invariant) |
+| F5 LOW | `s_rc.lock` | boot (`relay_cycles_init`) | FIXED (load into locals, publish under lock) |

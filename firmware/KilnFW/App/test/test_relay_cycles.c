@@ -1035,6 +1035,37 @@ static void test_cfg_fs_partition_absent_fails_loud_and_still_loads_legacy(void)
     TEST_CHECK(s_rc.counts[0] == 55, "the NVS copy was NOT overwritten by the failed save (no fallback)");
 }
 
+static int s_f5_depth_seen = -1;
+
+static esp_err_t rc_depth_probe_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path;
+    (void)data;
+    (void)len;
+    if (g_test_stub_lock_depth > s_f5_depth_seen) {
+        s_f5_depth_seen = g_test_stub_lock_depth;
+    }
+    return ESP_OK;
+}
+
+static void test_init_holds_no_lock_across_cfg_write(void)
+{
+    TEST_SECTION("relay_cycles_init -- s_rc.lock is NOT held while the cfg write (flash-worker dispatch) runs "
+                 "(lock-inversion audit F5)");
+    mount_cfg_fresh();
+    s_rc.counts[0] = 10;
+    TEST_CHECK(stage_legacy_nvs_blob(3) == HAL_OK, "stage a legacy NVS blob so init self-heals into the cfg file");
+    memset(&s_rc, 0, sizeof(s_rc));
+    g_test_stub_lock_depth = 0;
+    s_f5_depth_seen = -1;
+    pref_cfg_fs_set_write_fn(rc_depth_probe_write_fn);
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init");
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_f5_depth_seen >= 0, "the cfg write ran during init");
+    TEST_CHECK(s_f5_depth_seen == 0, "no stub lock held across the cfg write");
+    TEST_CHECK(s_rc.counts[0] == 10 && s_rc.initialized, "counts published");
+}
+
 static void test_cfg_fs_migrates_nvs_value_to_file_then_prefers_it(void)
 {
     TEST_SECTION("relay_cycles cfg_fs: legacy NVS value migrates to the file; a later boot needs only the file");
@@ -1539,6 +1570,7 @@ void run_test_relay_cycles(void)
     test_cfg_fs_dual_write_stays_in_sync_across_repeated_flushes();
     test_cfg_fs_divergence_tie_break_strict_greater_than();
     test_cfg_fs_reset_all_composes_with_migration_never_loses_counts();
+    test_init_holds_no_lock_across_cfg_write();
     test_cfg_fs_negative_no_file_write_means_file_never_catches_up();
     test_get_dualwrite_status_reports_real_divergence();
     test_padding_is_not_data_status_and_init();
