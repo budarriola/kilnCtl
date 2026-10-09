@@ -388,14 +388,18 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
         if (out_cfg) {
             memset(out_cfg, 0, sizeof(*out_cfg));
         }
+        /* Never report a rev below nvs_rev (every other false return keeps it):
+         * a caller that adopted rev 0 would let the next save write the file at
+         * rev 1 over a newer authoritative file. The sentinel version tells
+         * nvs_load() this was OOM, not an untrusted load. */
         if (out_rev) {
-            *out_rev = 0;
+            *out_rev = nvs_rev;
         }
         if (out_used_file) {
             *out_used_file = false;
         }
         if (out_on_disk_version) {
-            *out_on_disk_version = 0;
+            *out_on_disk_version = ZONES_CFG_RESOLVE_OOM_VERSION;
         }
         ESP_LOGE(ZCFG_FS_TAG, "zones config resolve: out of memory");
         return false;

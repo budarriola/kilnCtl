@@ -40,6 +40,7 @@
                                       * zones_config_accessors.c in test_zones_http.c, this TU's
                                       * link-mate in the same executable. */
 #include "zones_config_cfg_fs.h"
+#include "zones_http.h"
 #include "zones_http_internal.h" /* s_zones, nvs_load()/nvs_save() */
 
 static const char *SCRATCH_BASE = "cfg_fs_test_zones";
@@ -1026,6 +1027,88 @@ static void test_file_cycle_is_normalized_in_ram_and_on_writeback(void)
               "THE FIX: the file written back by the file-won path does NOT hold the un-normalized cycle");
 }
 
+// ---------------------------------------------------------------------
+// OOM on the scratch allocations (47e07df6 review, 2a/2b). The hook lives in
+// persist_scratch.h under KILNCTL_PERSIST_SCRATCH_TEST_HOOK.
+// ---------------------------------------------------------------------
+size_t persist_scratch_test_fail_size = 0;
+int persist_scratch_test_fail_nth = 0;
+int persist_scratch_test_seen = 0;
+
+static void scratch_oom_arm(int nth)
+{
+    persist_scratch_test_fail_size = sizeof(zones_cfg_t);
+    persist_scratch_test_seen = 0;
+    persist_scratch_test_fail_nth = nth;
+}
+
+static void scratch_oom_disarm(void)
+{
+    persist_scratch_test_fail_nth = 0;
+}
+
+static void test_resolve_oom_keeps_rev_floor_and_fails_load(void)
+{
+    TEST_SECTION("zones cfg_fs: resolve OOM fails the load, keeps the rev floor, never lets a save clobber "
+                 "the newer file (47e07df6 review 2a)");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    zones_cfg_t c;
+    fill_valid_cfg(&c, "newer_file", 4.0f);
+    c.version = ZONES_CFG_VERSION;
+    c.crc32 = zones_config_json_compute_crc(&c);
+    TEST_CHECK(zones_config_cfg_fs_save(&c, 5) == ESP_OK, "setup: file at rev 5");
+    stage_legacy_nvs("stale_legacy", 1.0f, 1);
+
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    scratch_oom_arm(2); // 1st = nvs decode buffer, 2nd = resolve's file candidate
+    esp_err_t e = nvs_load(&found, &valid);
+    scratch_oom_disarm();
+    TEST_CHECK(e == ESP_ERR_NO_MEM, "nvs_load reports the OOM instead of ESP_OK");
+    TEST_CHECK(!valid, "the legacy NVS copy is NOT adopted as valid");
+
+    stage("after_oom", 9.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "a later save lands");
+    uint32_t rev = 0;
+    zones_cfg_t raw;
+    bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev > 5, "the save stamped a rev above the file's rev 5, not rev 1");
+}
+
+static void test_start_does_not_migrate_after_load_oom(void)
+{
+    TEST_SECTION("zones_http_start: an nvs_load OOM does not run the legacy-partition migration "
+                 "(47e07df6 review 2b)");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    hal_kv_init_partition(NVS_DEFAULT_PART_NAME);
+    {
+        zones_cfg_t c;
+        fill_valid_cfg(&c, "prefsplit", 2.0f);
+        c.version = ZONES_CFG_VERSION;
+        c.crc32 = zones_config_json_compute_crc(&c);
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_DEFAULT_PART_NAME) == HAL_OK,
+                   "stage: open default partition");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_ZONES, &c, sizeof(c)) == HAL_OK, "stage: pre-split blob");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "stage: commit");
+        hal_kv_close(&h);
+    }
+    s_zones_config_valid = true; // wrong on purpose
+    scratch_oom_arm(1);
+    (void)zones_http_start();
+    scratch_oom_disarm();
+    TEST_CHECK(!s_zones_config_valid, "config not valid after the OOM'd load");
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists(ZONES_CFG_FILE_PATH, &exists) == ESP_OK && !exists,
+               "no stale pre-split copy was saved into the cfg file");
+    hal_kv_handle_t h;
+    reset_all();
+    (void)h;
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
     test_partition_absent_falls_through_to_nvs_only();
@@ -1041,6 +1124,8 @@ void run_test_zones_config_cfg_fs(void)
     test_newer_nvs_blob_is_not_overwritten_by_file_writeback();
     test_file_sourced_writeback_happens_once_not_every_boot();
     test_file_cycle_is_normalized_in_ram_and_on_writeback();
+    test_resolve_oom_keeps_rev_floor_and_fails_load();
+    test_start_does_not_migrate_after_load_oom();
 
     reset_all();
 }

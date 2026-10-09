@@ -734,8 +734,10 @@ esp_err_t zones_http_start(void)
          * whatever stale copy the old default-partition namespace still
          * holds -- destroying the very data nvs_load_from() had just gone out
          * of its way to leave untouched. */
+        /* Migrate only on a clean "nothing there": an nvs_load() error (e.g. OOM,
+         * found=false) must not run the migration and save a stale pre-split copy. */
         bool found_in_kiln_nvs = (err == ESP_OK && found);
-        if (!found_in_kiln_nvs) {
+        if (err == ESP_OK && !found_in_kiln_nvs) {
             /* Nothing usable in kiln_nvs yet -- see if the old default
              * partition has a pre-split copy worth carrying forward.
              * migrate_from_default_partition() sets s_zones_config_valid

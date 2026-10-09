@@ -554,6 +554,20 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     uint8_t file_on_disk_version = 0;
     bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                     &used_file, &file_on_disk_version);
+    if (file_on_disk_version == ZONES_CFG_RESOLVE_OOM_VERSION && !trustworthy && !used_file) {
+        /* Resolve could not allocate: keep the rev floor and fail the load so the
+         * legacy NVS copy is not adopted as valid (a later save would overwrite
+         * the newer authoritative file). */
+        s_zones_cfg_rev = nvs_rev;
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_found) {
+            *out_found = false;
+        }
+        if (out_valid) {
+            *out_valid = false;
+        }
+        return ESP_ERR_NO_MEM;
+    }
     s_zones_cfg_rev = resolved_rev;
     /* cfg is MOUNTED on the bench board as of 2026-09-21 (7 files, confirmed
      * via GET /api/cfgfs -- CLAUDE.md's "512K LittleFS cfg partition"), so

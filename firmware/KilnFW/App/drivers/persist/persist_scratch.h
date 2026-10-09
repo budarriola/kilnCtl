@@ -33,8 +33,22 @@
 
 #include "esp_heap_caps.h"
 
+#ifdef KILNCTL_PERSIST_SCRATCH_TEST_HOOK
+/* Host-test OOM injection: the persist_scratch_test_fail_nth-th call of exactly
+ * persist_scratch_test_fail_size bytes returns NULL. Defined by the test. */
+extern size_t persist_scratch_test_fail_size;
+extern int persist_scratch_test_fail_nth;
+extern int persist_scratch_test_seen;
+#endif
+
 static inline void *persist_scratch_alloc(size_t size)
 {
+#ifdef KILNCTL_PERSIST_SCRATCH_TEST_HOOK
+    if (persist_scratch_test_fail_nth > 0 && size == persist_scratch_test_fail_size &&
+        ++persist_scratch_test_seen == persist_scratch_test_fail_nth) {
+        return NULL;
+    }
+#endif
     void *p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p) {
         p = malloc(size);
