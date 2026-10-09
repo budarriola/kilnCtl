@@ -241,36 +241,21 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
 // MED-1: refuse cross-origin state-changing requests (same rule as the
 // application's kiln_http_prehandler()). Each route's real handler rides in
 // user_ctx; the guard runs first, before the body is read.
+static size_t origin_hdr_len(void *c, const char *name)
+{
+    return httpd_req_get_hdr_value_len((httpd_req_t *)c, name);
+}
+static int origin_hdr_str(void *c, const char *name, char *buf, size_t cap)
+{
+    esp_err_t e = httpd_req_get_hdr_value_str((httpd_req_t *)c, name, buf, cap);
+    return e == ESP_OK ? 0 : (e == ESP_ERR_HTTPD_RESULT_TRUNC ? 1 : -1);
+}
+
 static esp_err_t origin_guard(httpd_req_t *req)
 {
     esp_err_t (*real)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
     if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
-        char origin[HTTP_ORIGIN_HDR_BUF], referer[HTTP_ORIGIN_HDR_BUF], host[HTTP_ORIGIN_HDR_BUF];
-        const char *o = NULL, *r = NULL, *h = NULL;
-        bool overlong = false;
-        size_t n = httpd_req_get_hdr_value_len(req, "Origin");
-        if (n >= sizeof(origin)) {
-            overlong = true;
-        } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) == ESP_OK) {
-            o = origin;
-        }
-        if (o == NULL && !overlong) {
-            n = httpd_req_get_hdr_value_len(req, "Referer");
-            if (n >= sizeof(referer)) {
-                overlong = true;
-            } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Referer", referer, sizeof(referer)) == ESP_OK) {
-                r = referer;
-            }
-        }
-        if (o != NULL || r != NULL) {
-            n = httpd_req_get_hdr_value_len(req, "Host");
-            if (n >= sizeof(host)) {
-                overlong = true;
-            } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) == ESP_OK) {
-                h = host;
-            }
-        }
-        if (http_origin_is_cross_origin(o, r, h, overlong)) {
+        if (http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str)) {
             ESP_LOGW(TAG, "cross-origin refused: method=%d uri=%s", (int)req->method, req->uri);
             httpd_resp_set_status(req, "403 Forbidden");
             httpd_resp_set_type(req, "application/json");

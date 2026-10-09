@@ -592,6 +592,48 @@ static void test_refusal_close_threshold(void) {
     TEST_CHECK(http_auth_refusal_should_close(2500000u), "a multi-MB OTA image body: close");
 }
 
+typedef struct { const char *origin, *referer, *host; } fake_hdrs_t;
+static const char *fake_find(const fake_hdrs_t *f, const char *name) {
+    if (strcmp(name, "Origin") == 0) return f->origin;
+    if (strcmp(name, "Referer") == 0) return f->referer;
+    return f->host;
+}
+static size_t fake_len(void *c, const char *name) {
+    const char *v = fake_find((const fake_hdrs_t *)c, name);
+    return v ? strlen(v) : 0;
+}
+static int fake_str(void *c, const char *name, char *buf, size_t cap) {
+    const char *v = fake_find((const fake_hdrs_t *)c, name);
+    if (!v) return -1;
+    size_t n = strlen(v);
+    if (n >= cap) { memcpy(buf, v, cap - 1); buf[cap - 1] = '\0'; return 1; } /* truncated, like httpd */
+    memcpy(buf, v, n + 1);
+    return 0;
+}
+
+static void test_origin_glue(void) {
+    TEST_SECTION("http_origin_request_is_cross_origin -- header-extraction glue (LOW-8)");
+    char longref[300];
+    fake_hdrs_t f = {NULL, NULL, "192.168.1.50"};
+    snprintf(longref, sizeof(longref), "http://192.168.1.50/settings?q=%0200d", 7);
+    f.referer = longref;
+    TEST_CHECK(!http_origin_request_is_cross_origin(&f, fake_len, fake_str), "long same-origin Referer, no Origin: allowed");
+    snprintf(longref, sizeof(longref), "http://evil.example/p?q=%0200d", 7);
+    TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "long cross-origin Referer: refused");
+    snprintf(longref, sizeof(longref), "http://%0200d.example/p", 7);
+    TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "authority itself truncated: refused");
+    f.referer = "http://192.168.1.50/settings";
+    TEST_CHECK(!http_origin_request_is_cross_origin(&f, fake_len, fake_str), "short matching Referer: allowed");
+    f.origin = "http://evil.example";
+    TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "Origin beats good Referer: refused");
+    f.origin = longref;
+    TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "overlong Origin: refused");
+    fake_hdrs_t none = {NULL, NULL, "192.168.1.50"};
+    TEST_CHECK(!http_origin_request_is_cross_origin(&none, fake_len, fake_str), "no provenance headers: allowed");
+    fake_hdrs_t proxy = {"http://kiln.example", NULL, "10.0.0.2"};
+    TEST_CHECK(http_origin_request_is_cross_origin(&proxy, fake_len, fake_str), "proxy-rewritten Host refused by design");
+}
+
 static void test_origin_check(void) {
     TEST_SECTION("http_origin_is_cross_origin -- MED-1 CSRF guard");
     TEST_CHECK(!http_origin_is_cross_origin("http://192.168.1.50", NULL, "192.168.1.50", false), "match");
@@ -612,6 +654,7 @@ static void test_origin_check(void) {
 
 void run_test_http_auth_enforce(void) {
     test_origin_check();
+    test_origin_glue();
     test_page_shell_allowlist();
     test_lookup_tier_real_routes();
     test_effective_tier_fail_closed_default();

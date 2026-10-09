@@ -101,6 +101,65 @@ static inline bool http_origin_is_cross_origin(const char *origin, const char *r
     return !(a.port == b.port && strcmp(a.host, b.host) == 0);
 }
 
+// ---- Header-extraction glue (shared by both httpd call sites; host-tested with fakes) ----
+// Callbacks wrap httpd_req_get_hdr_value_len()/_str(). get_str returns 0 = ok,
+// 1 = value copied but TRUNCATED to cap-1 chars, <0 = not available.
+typedef size_t (*http_origin_hdr_len_fn)(void *c, const char *name);
+typedef int (*http_origin_hdr_str_fn)(void *c, const char *name, char *buf, size_t cap);
+
+// A Referer longer than the buffer is legitimate (long query strings): only
+// scheme://host[:port] is compared, so a truncated copy is usable iff the
+// authority ends (a '/', '?' or '#') inside what we kept.
+static inline bool http_origin_url_authority_complete_(const char *s) {
+    const char *p = strstr(s, "://");
+    if (p == NULL) {
+        return false;
+    }
+    for (p += 3; *p != '\0'; p++) {
+        if (*p == '/' || *p == '?' || *p == '#') {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Full MED-1 decision for one non-GET/HEAD request. true = REFUSE.
+// Caller decides GET/HEAD from the REAL request method (req->method), not the
+// method a route was registered under. Reverse-proxy Host rewriting is refused
+// by design (Origin host != Host header).
+static inline bool http_origin_request_is_cross_origin(void *c, http_origin_hdr_len_fn len_fn,
+                                                       http_origin_hdr_str_fn get_fn) {
+    char origin[HTTP_ORIGIN_HDR_BUF], referer[HTTP_ORIGIN_HDR_BUF], host[HTTP_ORIGIN_HDR_BUF];
+    const char *o = NULL, *r = NULL, *h = NULL;
+    bool overlong = false;
+    size_t n = len_fn(c, "Origin");
+    if (n >= sizeof(origin)) {
+        overlong = true;
+    } else if (n > 0 && get_fn(c, "Origin", origin, sizeof(origin)) == 0) {
+        o = origin;
+    }
+    if (o == NULL && !overlong) {
+        n = len_fn(c, "Referer");
+        if (n > 0) {
+            int rc = get_fn(c, "Referer", referer, sizeof(referer));
+            if (rc == 0 || (rc == 1 && http_origin_url_authority_complete_(referer))) {
+                r = referer;
+            } else if (rc == 1) {
+                overlong = true;
+            }
+        }
+    }
+    if (o != NULL || r != NULL) {
+        n = len_fn(c, "Host");
+        if (n >= sizeof(host)) {
+            overlong = true;
+        } else if (n > 0 && get_fn(c, "Host", host, sizeof(host)) == 0) {
+            h = host;
+        }
+    }
+    return http_origin_is_cross_origin(o, r, h, overlong);
+}
+
 #ifdef __cplusplus
 }
 #endif
