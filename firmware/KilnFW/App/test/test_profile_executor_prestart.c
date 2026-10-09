@@ -600,11 +600,19 @@ void dualwrite_window_note_firing_complete(void)
 {
 }
 
+/* Controllable: default ESP_FAIL (no status). The aux fault-drop tick tests
+ * set g_stub_safety_rc/g_stub_safety_st to drive the Pico-tripped derivation. */
+static esp_err_t g_stub_safety_rc = ESP_FAIL;
+static safety_link_status_t g_stub_safety_st;
+
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
-    if (out) memset(out, 0, sizeof(*out));
-    return ESP_FAIL;
+    if (out) {
+        if (g_stub_safety_rc == ESP_OK) *out = g_stub_safety_st;
+        else memset(out, 0, sizeof(*out));
+    }
+    return g_stub_safety_rc;
 }
 
 /* Spy state for the guard9_assert_stale_tick_fault() tests below (audit
@@ -10836,6 +10844,36 @@ static void test_aux_off_pending_retried_by_task_loop(void)
     s_exec.state = PROFILE_EXEC_IDLE;
 }
 
+/* Host-test gap audit 2026-10-09 gap 2: drive the real task tick so the call
+ * site and the Pico-tripped derivation in executor_task_entry() are covered. */
+static bool aux_tick_case(bool received, uint16_t age_ms, uint8_t diag)
+{
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    memset(&g_stub_safety_st, 0, sizeof(g_stub_safety_st));
+    g_stub_safety_st.diag_ever_received = received;
+    g_stub_safety_st.age_ms = age_ms;
+    g_stub_safety_st.diag_state = diag;
+    g_stub_safety_rc = ESP_OK;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    aux_test_run_task_ticks(1);
+    g_stub_safety_rc = ESP_FAIL;
+    s_exec.safety = NULL;
+    return aux_test_wrote(0x01, 0x00);
+}
+
+static void test_aux_fault_drop_via_task_tick(void)
+{
+    TEST_SECTION("aux fault-drop through executor_task_entry(): fresh TRIPPED drops; stale/never-received/not-tripped do not");
+    TEST_CHECK(aux_tick_case(true, 100, SAFETY_LINK_DIAG_STATE_TRIPPED), "(a) fresh TRIPPED drops aux OFF");
+    TEST_CHECK(!aux_tick_case(true, SAFETY_LINK_STALE_MS + 1, SAFETY_LINK_DIAG_STATE_TRIPPED),
+               "(b) stale TRIPPED is not tripped: aux stays ON");
+    TEST_CHECK(!aux_tick_case(false, 100, SAFETY_LINK_DIAG_STATE_TRIPPED),
+               "(c) never-received status is not tripped: aux stays ON");
+    TEST_CHECK(!aux_tick_case(true, 100, SAFETY_LINK_DIAG_STATE_ARMED),
+               "(d) non-TRIPPED status leaves aux ON");
+    s_exec.state = PROFILE_EXEC_IDLE;
+}
+
 /* ===== SPARE_RELAY_ONOFF_PLAN.md sec 10: monitor-only zone, per-tick wiring =====
  * The predicate tests above prove each consumer on its own; this drives the
  * real executor_task_entry() tick body one tick at a time (budget 1 lets one
@@ -11366,6 +11404,7 @@ static void run_test_aux_wp3(void)
     test_aux_handoff_write_failure_sets_pending();
     test_aux_status_reports_claimed_aux();
     test_aux_off_pending_retried_by_task_loop();
+    test_aux_fault_drop_via_task_tick();
     test_monitor_only_zone_tick_wiring();
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();

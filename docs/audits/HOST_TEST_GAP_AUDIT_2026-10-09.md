@@ -73,7 +73,9 @@ Suggested route: a `test_update_fetch.c` that `#include`s `update_fetch.c`. It n
 
 It should drive `run_job()`/`fetch_task()` synchronously, with the writer replaced by a direct call or a controllable fake.
 
-### 2. HIGH: the aux fault-drop is never driven through the executor task loop
+### 2. ADDRESSED: the aux fault-drop was never driven through the executor task loop
+
+**Addressed:** `test_aux_fault_drop_via_task_tick()` in `test_profile_executor_prestart.c` drives `executor_task_entry()` with a controllable `safety_link_get_status()` stub. Negative-tested with `tools/negtest.ps1`: deleting the call and inverting the stale check are both CAUGHT. The gap text below is the original finding.
 
 `profile_executor_aux_fault_drop()` (`drivers/control/profile_executor_relay_io.c:598`) is well tested by calling it directly in `test_profile_executor_prestart.c` (around lines 10113-10240). Covered cases:
 
