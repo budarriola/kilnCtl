@@ -1,4 +1,4 @@
-﻿# Gate to negative-test evidence
+# Gate to negative-test evidence
 
 Consolidated table for `docs/RELEASE_HARDENING_PLAN.md` section 3, acceptance step 4.
 One row per check that `tools/run_all_checks.ps1 -ListOnly` discovers (plus the guard that
@@ -23,14 +23,14 @@ Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `chec
 
 ## Counts
 
-Gate rows: 178.
+Gate rows: 179.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 154 |
+| NEGATIVE-TESTED | 163 |
 | PARTIAL | 2 |
 | REVIEWED, NOT MUTATED | 14 |
-| NOT AUDITED | 9 |
+| NOT AUDITED | 0 |
 | NOT AUDITED (pass 12 pending) | 0 |
 
 ## Table
@@ -62,7 +62,6 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_fuzzy_gain_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | kp/ki argument order swapped in the real pid_fuzzy_adjust call | RED, first divergent line shown; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_heater_output_pwm_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | on_ms + 1u | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_httpd_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 1024 B volatile local in profile_decode_blob, real rebuild | +1024 B exactly, RED 5328 B > 4832 B; fullclean rebuild back to 4304 B |
-| `firmware/KilnFW/App/test/check_js_host_tests.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_kilnfw_ccache_no_stale.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | lib_kilnfw_ccache.ps1: CCACHE_NODIRECT removed (direct mode on), via tools/negtest.ps1 | CAUGHT: stale hit(direct) at the shadowing-header step and direct_mode 'true'; baseline PASS; real tree unchanged |
 | `firmware/KilnFW/App/test/check_kilnfw_dram_bss_budget.ps1` | NEGATIVE-TESTED | rest-10-08 | main-tree ELF: PASS; -CeilingBytes 1000 FAIL | hand test |
 | `firmware/KilnFW/App/test/check_kv_narrow_stack.ps1` | NEGATIVE-TESTED | rest-10-08 | min-width removed from .kv dd | RED; hand-restored; PASS |
@@ -95,11 +94,10 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_thermal_guard_input_producers.ps1` | NEGATIVE-TESTED | rest-10-08 | new field added to the struct | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_uart_log_bridge_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 256 B volatile local in uart_protocol.c frame_and_send, real rebuild | +256 B exactly, RED 1456 B > 1200 B; fullclean rebuild back to baseline |
 | `firmware/KilnFW/App/test/check_ui_budget_asserts.ps1` | NEGATIVE-TESTED | 09-16f | _Static_assert in ui_page_temperature.c wrapped in a comment | RED, names the missing assertion; hand-restored; PASS |
-| `firmware/KilnFW/App/test/check_ui_relay_reset_removed.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_ui_responsive_sweep.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_ui_shell_layout.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_ui_relay_reset_removed.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | ui_topbar.c relay_cycles_reset() commented; flex align END->START; warning block moved after gear block | RED on all 3 |
+| `firmware/KilnFW/App/test/check_ui_responsive_sweep.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | main_page.html #channels and zones_page.html #zones given min-width: 900px (two mutations) | RED both |
+| `firmware/KilnFW/App/test/check_ui_shell_layout.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | theme.css --kc-shell-max 100%; zones_page.html #zones grid 1fr; net/ota_page.html max-width 600px | RED on all 3 (1 required rule missing) |
 | `firmware/KilnFW/App/test/check_ui_status_color.ps1` | NEGATIVE-TESTED | 09-16f | --ok colour in main_page.html changed to a low-contrast value | RED below 3:1 floor; hand-restored; PASS |
-| `firmware/KilnFW/App/test/check_ui_test_click_result_mirror_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_wire_protocol_fingerprint.ps1` | NEGATIVE-TESTED | rest-10-08 | KILNLINK_ANNOUNCE_CMD 0x0F to 0x0E | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_check_config_migration_steps.ps1` | NEGATIVE-TESTED | rest-10-08 | expectedFrom = current - 2 | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_check_hal_include_boundary.ps1` | NEGATIVE-TESTED | rest-10-08 | baseline comparison disabled | RED; hand-restored; PASS |
@@ -205,10 +203,10 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_web_gzip_parity.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | fabricated .gz from HEAD sources, then changed zones_page.html relative to its gz | RED (exit 1, mismatch); check returned to PASS on restore |
 | `tools/check_wifi_ram_storage_mirror.ps1` | NEGATIVE-TESTED | 10-02 | mirrored constant edited in wifi_prov.c | RED; restored |
 | `tools/check_zone_graphic_render.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | zones_page.html: renamed kg-port; moved zone label x 345 -> 346 (two mutations) | RED both; check returned to PASS on restore |
-| `tools/PcTools/check_zones_per_zone_field_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/PcTools/selfcheck.py` | NOT AUDITED | - | none | NOT AUDITED |
-| `tools/PcTools/tests/check_web_commission_cdp_driver.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NOT AUDITED | - | none (added after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `tools/PcTools/check_zones_per_zone_field_drift.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | client hyst_c entry dropped; client form key minons renamed; firmware z%u_hystc key renamed | RED on all 3 |
+| `tools/PcTools/selfcheck.py` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | crc16.py poly 0x1021->0x1023; protocol.py FRAME_DELIM 0x7E->0x7F | RED both ([FAIL] lines) |
+| `tools/PcTools/tests/check_web_commission_cdp_driver.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | _web_commission_cdp.mjs aria-label === -> .includes, and css querySelector -> querySelectorAll().pop() (both MISSED 20/20 before: fixture had no decoys; fixture and test now add decoys and 3 assertions); postCursor reset to 0 | RED on assertion FAIL lines with the fix; GREEN without it; cursor mutation RED |
+| `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | zones_page.html auxrow class renamed; readiness_page.html class="fix" renamed; diagnostics_page.html set(flashChip) removed; nav.js /readiness href changed | RED on all 4 |
 | `tools/check_build_gate_usage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | check_commonfw_ctest.ps1: Start-Sleep inserted between gate enter and exit | RED; check returned to PASS on restore |
 | `tools/check_main_baseline.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | main_baseline_lib.ps1: other-lineage ancestor rule disabled | RED; check returned to PASS on restore; 2026-10-08 hardening (exact merge-base, signatures, start-state, forward-only pointer, host check) each reverted by hand, RED on its cases, restored |
 | `tools/check_build_lock_holder.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | build_lock.ps1: fail-loud throw stopped naming the holder (scenario 3) | RED (FAILED: 3: failure did not name the holder pid); check returned to PASS on restore |
@@ -218,3 +216,5 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_pushed_build_stamp.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | pushed_build_stamp.ps1: sha mismatch test replaced by $false | RED; check returned to PASS on restore |
 | `tools/check_agent_tail.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | agent_tail.ps1: dead-log heuristic off; repeat heuristic off (two mutations) | RED both; check returned to PASS on restore |
 | `tools/check_system_mode_gate_call_sites.ps1` | NEGATIVE-TESTED | - | none (added 2026-10-08, hardened same day: named functions replace whole-file entries, gate result must be consumed, helper wiring asserted, literal-aware tokenizer; tools/negtest.ps1 -Preset check, 5 mutations all CAUGHT, baseline PASS, real tree unchanged: profile_executor_run.c and autotune_engine.c start gates deleted despite surviving late (void) calls, zones_post_handler gate turned into (void)+if (0), aux_outputs_http.c .mode_blocked unwired, zones_post_handler gate deleted) | NEGATIVE-TESTED |
+| `firmware/KilnFW/App/test/check_js_host_tests.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | main_page.html long-press timer x10; zones_page.html resetZone tie-break flipped; 1-hop self-reference forced:false; test_longpress.js process.exit(1); main_page.html chColor returns CH_COLORS[0] (first run MISSED: no test covered chColor; test_firing_chart.js now pins it) | RED on all five after the chColor test was added |
+| `firmware/KilnFW/App/test/check_ui_test_click_result_mirror_drift.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | protocol.py INJECT_FAILED 6->7; ui_test_client.py decoder entry dropped; uart_task_ids.h 0x06u->0x16u | RED on all 3 |
