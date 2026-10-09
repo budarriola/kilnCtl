@@ -759,6 +759,12 @@ add_dependencies(${COMPONENT_LIB} drivers_build_info)
 # the wrong direction for this.
 idf_component_add_link_dependency(FROM lvgl)
 
+# update/update_fetch.c's g_update_image_id sits in .rodata_custom_desc (right after the app
+# descriptor) but nothing references it and the IDF linker script has no KEEP for that
+# section, so --gc-sections dropped it (found by inspecting the built .bin). -u makes it a
+# root so the stage-upload gate can read the schema versions out of the image.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u g_update_image_id")
+
 # 2026-09-16: an implicit function declaration is a HARD ERROR in this
 # component, not a warning.
 #
