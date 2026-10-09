@@ -73,6 +73,19 @@
 # (clamped to 1..4, the heavy slot count) runs N copies at once; their compiles
 # still queue on the gate.
 #
+# QUOTING (-Find/-Replace text with double quotes, $, backticks, backslashes):
+#   ROOT CAUSE: Windows PowerShell 5.1 re-joins native-command arguments into one
+#   command line WITHOUT escaping embedded double quotes, so
+#   `& powershell.exe -File negtest.ps1 -Find 'printf("x")'` delivers printf(x) --
+#   the quotes are gone before this script runs. This script cannot recover them.
+#   * From Bash, single-quote the text: -Find 'printf("x")' passes through intact.
+#   * From PowerShell, use -FindBase64/-ReplaceBase64 (UTF-8 base64; takes
+#     precedence over -Find/-Replace; byte-exact for any text):
+#       $b = { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($args[0])) }
+#       powershell -File tools\negtest.ps1 ... -File x.c -FindBase64 (& $b 'puts("a");') -ReplaceBase64 (& $b 'puts("b");')
+#     or in Bash: -FindBase64 "$(printf '%s' 'puts("a");' | base64 -w0)"
+#   * Or use -Mutations <json>, which never touches the command line.
+#
 # MUTATIONS: one of
 #   -File <repo path> -Find <exact text> -Replace <text> [-Name <label>]
 #   -Diff <unified diff file>  [-Name <label>]   (applied with `git apply`)
@@ -111,6 +124,8 @@ param(
     [string]$File,
     [string]$Find,
     [string]$Replace,
+    [string]$FindBase64,
+    [string]$ReplaceBase64,
     [string]$Diff,
     [string]$Name,
     [string]$Mutations,
@@ -518,6 +533,16 @@ function Finish([int]$code, [string]$err) {
     if ($err) { $script:result.error = $err; Write-Line "NEGTEST ERROR: $err" Red }
     Write-Output ($script:result | ConvertTo-Json -Compress -Depth 8)
     exit $code
+}
+
+# ---- decode base64 find/replace (PS 5.1 strips embedded double quotes from native args)
+foreach ($pair in @(@('FindBase64','Find'), @('ReplaceBase64','Replace'))) {
+    $bv = (Get-Variable -Name $pair[0] -ValueOnly)
+    if ($PSBoundParameters.ContainsKey($pair[0])) {
+        try { Set-Variable -Name $pair[1] -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($bv))) }
+        catch { Finish 2 "-$($pair[0]) is not valid base64" }
+        $PSBoundParameters[$pair[1]] = (Get-Variable -Name $pair[1] -ValueOnly)
+    }
 }
 
 # ---- usage

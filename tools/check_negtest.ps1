@@ -199,6 +199,13 @@ exit 0
     Assert-True ($r.Json.real_tree_unchanged -eq $true -and $r.Json.copies_removed -eq $true) "caught: guard/cleanup flags not true"
     Assert-True ($r.Text -match '(?m)^CAUGHT\s') "caught: no human CAUGHT line"
     Assert-True (@(Get-Content -LiteralPath $fixtureLog).Count -eq 2) "caught: fixture should have run twice (baseline + mutation)"
+    # quotes, $ and backticks in -Find/-Replace survive via -FindBase64/-ReplaceBase64 (PS 5.1 strips
+    # embedded double quotes from native args, so the plain form cannot carry them).
+    $b64 = { param($t) [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($t)) }
+    $qf = 'Write-Output "failures: $fail"'
+    $qr = 'Write-Output "failures: $fail"; Write-Output "q`"\x"; exit 1'
+    $r = Run-Neg "quotes_b64" @('-Command', $testCmd, '-File', 'test.ps1', '-FindBase64', (& $b64 $qf), '-ReplaceBase64', (& $b64 $qr))
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "quotes_b64: a find/replace with quotes, dollar, backtick, backslash must match and be CAUGHT (exit $($r.Exit))`n$($r.Text)"
     Step "caught"
     }
     if ($Group -eq 'A2') {
