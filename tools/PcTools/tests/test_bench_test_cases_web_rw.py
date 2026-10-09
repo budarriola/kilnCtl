@@ -957,3 +957,38 @@ class RegistryWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthedGetGzipTests(unittest.TestCase):
+    """_http_get_raw_authed must advertise gzip and decode a gzip body
+    (firmware answers 406 to Accept-Encoding: identity for embedded pages)."""
+
+    def test_sends_gzip_and_decodes(self):
+        import gzip as _gz
+        from unittest import mock
+        from kilnctrl.bench_test import cases_web_rw as R
+        seen = {}
+
+        class _Resp:
+            headers = {"Content-Encoding": "gzip"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def read(self):
+                return _gz.compress(b"<html>ok</html>")
+
+        def fake(req, timeout=None):
+            seen["ae"] = req.get_header("Accept-encoding")
+            return _Resp()
+
+        with mock.patch.object(R.http_auth, "urlopen", fake):
+            st, text = R._http_get_raw_authed("h", "/safety")
+        self.assertEqual((st, text), (200, "<html>ok</html>"))
+        self.assertEqual(seen["ae"], "gzip")

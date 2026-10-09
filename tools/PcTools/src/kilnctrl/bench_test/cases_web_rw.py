@@ -110,6 +110,21 @@ def _http_post_raw(host: str, path: str, fields: Dict[str, Any], timeout: float 
         return None, str(exc), None
 
 
+def _decode_body(raw: bytes, headers) -> str:
+    """Decode a response body, gunzipping when Content-Encoding says gzip."""
+    enc = ""
+    try:
+        enc = (headers.get("Content-Encoding") or "") if headers is not None else ""
+    except Exception:  # noqa: BLE001
+        enc = ""
+    if enc.lower() == "gzip":
+        try:
+            raw = gzip.decompress(raw)
+        except (OSError, EOFError):
+            pass
+    return raw.decode("utf-8", errors="replace")
+
+
 def _http_get_raw_authed(host: str, path: str, timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
     """Authenticated GET via ``kilnctrl.http_auth.urlopen`` -- for
     WEB-DASH-13/WEB-DIAG-07/WEB-DIAG-08 and WEB-SEC-03's own
@@ -120,13 +135,15 @@ def _http_get_raw_authed(host: str, path: str, timeout: float = 5.0) -> "Tuple[O
     write path itself, not the auth gate, and must keep working whether the
     board's web auth happens to be on or off when the run reaches them."""
     url = f"http://{host}{path}"
-    req = urllib.request.Request(url, method="GET")
+    # urllib's default "Accept-Encoding: identity" makes the firmware answer
+    # 406 for its gzip-only embedded pages; advertise gzip and decode.
+    req = urllib.request.Request(url, method="GET", headers={"Accept-Encoding": "gzip"})
     try:
         with http_auth.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read().decode("utf-8", errors="replace")
+            return resp.getcode(), _decode_body(resp.read(), resp.headers)
     except urllib.error.HTTPError as exc:
         try:
-            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else None
+            detail = _decode_body(exc.read(), exc.headers) if exc.fp else None
         except Exception:  # noqa: BLE001
             detail = None
         return exc.code, detail
