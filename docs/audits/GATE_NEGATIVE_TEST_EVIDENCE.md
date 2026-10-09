@@ -23,11 +23,11 @@ Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `chec
 
 ## Counts
 
-Gate rows: 184.
+Gate rows: 185.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 168 |
+| NEGATIVE-TESTED | 169 |
 | PARTIAL | 2 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |
@@ -220,6 +220,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_system_mode_gate_call_sites.ps1` | NEGATIVE-TESTED | - | none (added 2026-10-08, hardened same day: named functions replace whole-file entries, gate result must be consumed, helper wiring asserted, literal-aware tokenizer; tools/negtest.ps1 -Preset check, 5 mutations all CAUGHT, baseline PASS, real tree unchanged: profile_executor_run.c and autotune_engine.c start gates deleted despite surviving late (void) calls, zones_post_handler gate turned into (void)+if (0), aux_outputs_http.c .mode_blocked unwired, zones_post_handler gate deleted) | NEGATIVE-TESTED |
 | `firmware/KilnFW/App/test/check_js_host_tests.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | main_page.html long-press timer x10; zones_page.html resetZone tie-break flipped; 1-hop self-reference forced:false; test_longpress.js process.exit(1); main_page.html chColor returns CH_COLORS[0] (first run MISSED: no test covered chColor; test_firing_chart.js now pins it) | RED on all five after the chColor test was added |
 | `firmware/KilnFW/App/test/check_ui_test_click_result_mirror_drift.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | protocol.py INJECT_FAILED 6->7; ui_test_client.py decoder entry dropped; uart_task_ids.h 0x06u->0x16u | RED on all 3 |
+| `firmware/KilnFW/App/test/check_update_chain_lint.ps1` | NEGATIVE-TESTED | 2026-10-09 | update_fetch.c wr_done wait changed to portMAX_DELAY | RED (LOW-2 x2); hand-restored; PASS |
 | `tools/check_dev_promote.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | dev_promote.ps1: Test-RealPromote tree-equality and named-sha-on-dev checks removed one at a time | RED each time (forged-promote cases refused no longer); check returned to PASS on restore |
 | `tools/check_worktree_mint.ps1` | NEGATIVE-TESTED | 10-09 | worktree_mint.ps1 default changed to origin/main; -Base ignored; commit_guard.ps1 / push_verify.ps1 defaults changed to origin/main | RED each time; hand-restored; PASS |
 | `tools/test_check_duplicate_symbols.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (hand mutation, worktree off origin/dev) | check_duplicate_symbols.ps1 line 218 manifest selection: `Descending = $true` -> `$false` (picks the least-covering source); ran test_check_duplicate_symbols.ps1 | RED: `FAIL: A: output says the manifest was used`, `2 check(s) FAILED`, exit 1; restored by hand; `all passed`, exit 0 |

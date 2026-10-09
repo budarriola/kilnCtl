@@ -142,6 +142,9 @@ V4_COUPLING_KEY_PREFIX = "coupling_c"
 # heard of a brand-new additive key still round-trips every OTHER key
 # correctly -- it just cannot explain that one key's fate, which is exactly
 # what the mirror-drift check is for).
+ADDITIVE_TOP_LEVEL_KEYS = ("relay_cycles", "unit", "ramp_assist", "display_power",
+                           "hidden_builtin_profiles", "tz", "relay_names")
+
 KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     "coupling_tau_c", "coupling_dead_time_c", "coupling_diag_k_dc", "settings_source_g",
     "ease_off_window_mult", "approach_rate_cap_c_per_hr", "error_band_c", "rate_band_c_per_s",
@@ -470,6 +473,14 @@ def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
         out["aux_outputs"] = copy.deepcopy(doc["aux_outputs"])
         report.add("document", "aux_outputs", "kept",
                    "spare-relay aux_outputs array carried through unchanged")
+
+    # Additive optional top-level keys (relay_cycles wear counters and the
+    # preference block backup_export_prefs() writes): never version-gated,
+    # carried through unchanged when present.
+    for key in ADDITIVE_TOP_LEVEL_KEYS:
+        if key in doc:
+            out[key] = copy.deepcopy(doc[key])
+            report.add("document", key, "kept", f"additive top-level {key} carried through unchanged")
 
     if source_version == target_version:
         report.add("document", "version", "kept", "source and target versions are identical; document unchanged")

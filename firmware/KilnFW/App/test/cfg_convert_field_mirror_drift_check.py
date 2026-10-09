@@ -79,7 +79,14 @@ NON_ZONE_STRUCTURAL_KEYS = {"kind", "version", "profiles", "zones", "id", "segme
                             # Spare-relay WP-7: the top-level aux_outputs[] array and the per-entry keys
                             # that are not also zone keys (hyst_c/min_on_s/min_off_s are). Not zone
                             # data: cfg_convert.py carries the whole array verbatim, see its convert().
-                            "aux_outputs", "relay", "enabled", "tc_zone"}
+                            "aux_outputs", "relay", "enabled", "tc_zone",
+                            # Top-level additive blocks (relay_cycles, backup_export_prefs()) and
+                            # their nested sub-keys. Not zone data: cfg_convert.py carries the
+                            # top-level ones verbatim via ADDITIVE_TOP_LEVEL_KEYS.
+                            "relay_cycles", "hw_relays", "c", "unit", "ramp_assist", "display_power",
+                            "brightness_percent", "timeout_setting", "keep_on_while_firing",
+                            "display_on_error", "hidden_builtin_profiles", "tz", "relay_names",
+                            "type"}
 
 
 def strip_comments(text: str) -> str:

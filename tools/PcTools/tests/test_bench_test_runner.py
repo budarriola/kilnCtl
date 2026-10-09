@@ -286,12 +286,15 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.assertIn("synthetic case blowup", outcome.results["ST-05"].reason)
 
     def test_not_implemented_case_reports_not_run(self):
-        # SP-10 (CT / S9 / S14 / S15) has judge=None in wave 0.
-        self.assertIsNone(R.get_case("SP-10").judge)
+        # Pick a genuinely judge-less case from the registry itself so this
+        # does not break each time a case gains a judge.
+        cid = next((c for c, spec in R.REGISTRY.items() if spec.judge is None and not spec.depends_on), None)
+        if cid is None:
+            self.skipTest("every registered case has a judge")
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
-        outcome = runner.run(suite="safety", cases=["SP-10"])
-        self.assertEqual(outcome.results["SP-10"].verdict, R.Verdict.NOT_RUN)
-        self.assertEqual(outcome.results["SP-10"].reason, "not_implemented")
+        outcome = runner.run(suite="full", cases=[cid])
+        self.assertEqual(outcome.results[cid].verdict, R.Verdict.NOT_RUN)
+        self.assertEqual(outcome.results[cid].reason, "not_implemented")
 
     def test_full_suite_cases_filter_crosses_suite_boundary_for_a_dependency(self):
         """LCD-19 (suite `lcd`) `depends_on` WEB-SEC-04 (suite `web`) -- the
