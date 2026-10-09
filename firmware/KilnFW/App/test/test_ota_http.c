@@ -1414,6 +1414,8 @@ static void reset_wifi_restore_stub_counters(void)
 static const char *const LEGACY_KILN_KEYS[] = { "zones_cfg", "run_state", "relay_cyc" };
 static const char *const LEGACY_PROFILE_KEYS[] = { "prof_used", "prof0", "prof3", "prof7" };
 
+extern void fake_kv_script_write_status_after(unsigned skip, hal_status_t status);
+
 static void seed_legacy_default_keys(void)
 {
     fake_kv_reset_all();
@@ -1509,6 +1511,34 @@ static void test_factory_reset_fails_loudly_when_legacy_erase_fails(void)
     TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs (default partition NOT inited)");
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) != ESP_OK,
                "kiln reset reports failure when the legacy default-partition copy cannot be erased");
+}
+
+static void test_legacy_erase_mid_loop_and_commit_failures_are_reported(void)
+{
+    TEST_SECTION("legacy default-partition erase: a mid-loop erase failure or a commit failure is reported, "
+                 "never ESP_OK (HOST_TEST_GAP_AUDIT gap 7)");
+    bool saw_fail = false;
+    for (unsigned skip = 0; skip < 14; skip++) {
+        seed_legacy_default_keys();
+        fake_kv_script_write_status_after(skip, HAL_NO_MEM);
+        esp_err_t e = legacy_default_nvs_erase_profiles();
+        fake_kv_script_write_status_after(0, HAL_OK);
+        if (e != ESP_OK) saw_fail = true;
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, NULL) == HAL_OK, "reopen legacy ns");
+        char b[8];
+        size_t l = sizeof(b);
+        bool used_present = hal_kv_get_blob(&h, "prof_used", b, &l) != HAL_NOT_FOUND;
+        hal_kv_close(&h);
+        /* An armed fault that fires must surface as an error; a clean ESP_OK means the fault never fired
+         * (skip beyond the last write-class call) and the erase fully landed. */
+        TEST_CHECK(e != ESP_OK || !used_present, "ESP_OK only if the erase fully landed");
+        if (e != ESP_OK) {
+            TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
+                       "a retry after the failure completes the reset");
+        }
+    }
+    TEST_CHECK(saw_fail, "some injected failure (mid-loop erase or commit) was reported as an error");
 }
 
 static void test_factory_reset_wifi_scope_calls_esp_wifi_restore(void)
@@ -2541,6 +2571,7 @@ void run_test_ota_http(void)
     test_credential_survives_factory_reset_all_scope();
     test_factory_reset_erases_legacy_default_partition_keys();
     test_factory_reset_fails_loudly_when_legacy_erase_fails();
+    test_legacy_erase_mid_loop_and_commit_failures_are_reported();
     test_factory_reset_wifi_scope_calls_esp_wifi_restore();
     test_factory_reset_all_scope_calls_esp_wifi_restore();
     test_factory_reset_kiln_scope_never_calls_esp_wifi_restore();

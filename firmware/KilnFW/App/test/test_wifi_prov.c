@@ -650,6 +650,64 @@ static void test_interrupted_first_migration_retries_next_boot(void)
     TEST_CHECK(s_wifi.saved_nets.count == 1, "boot3: migrated list persists");
 }
 
+extern void fake_kv_script_write_status_after(unsigned skip, hal_status_t status);
+extern void fake_kv_script_silent_set_noops(unsigned count);
+
+static bool saved_net_oldnet_persisted(void)
+{
+    saved_nets_blob_t rb;
+    return nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &rb) == ESP_OK && rb.count == 1 &&
+           strcmp(rb.nets[0].ssid, "oldnet") == 0 && strcmp(rb.nets[0].password, "oldpass") == 0;
+}
+
+static void test_legacy_migration_failures_never_lose_credential(void)
+{
+    TEST_SECTION("legacy wifi migration with an injected write failure at every write-class call (save fail, "
+                 "legacy erase fail): the credential is never lost and the next clean boot completes it "
+                 "(HOST_TEST_GAP_AUDIT gap 4)");
+    int kept_legacy = 0, erase_failed_but_persisted = 0;
+    for (unsigned skip = 0; skip < 40; skip++) {
+        seed_legacy_default_wifi();
+        fake_kv_script_write_status_after(skip, HAL_NO_MEM);
+        bool found = false;
+        memset(&s_legacy_single, 0, sizeof(s_legacy_single));
+        TEST_CHECK(wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &found) == ESP_OK, "faulted boot: load");
+        wifi_prov_migrate_from_default_partition(found);
+        nvs_load_saved_nets();
+        bool legacy_left = legacy_wifi_key_present(NVS_KEY_SSID);
+        bool persisted = saved_net_oldnet_persisted();
+        TEST_CHECK(legacy_left || persisted, "credential exists in the legacy copy or the new list (never neither)");
+        TEST_CHECK(s_wifi.saved_nets.count == 1 || legacy_left,
+                   "RAM list holds the network unless the legacy copy still does");
+        if (legacy_left) kept_legacy++;
+        if (legacy_left && persisted) erase_failed_but_persisted++;
+        simulate_reboot_state(); /* clears the one-shot armed fault only if it never fired; re-seed none */
+        fake_kv_script_write_status_after(0, HAL_OK);
+        boot_wifi_migration();
+        TEST_CHECK(s_wifi.saved_nets.count == 1 && strcmp(s_wifi.saved_nets.nets[0].ssid, "oldnet") == 0,
+                   "clean reboot: network present");
+        TEST_CHECK(saved_net_oldnet_persisted(), "clean reboot: network persisted in the new list");
+        simulate_reboot_state();
+        boot_wifi_migration();
+        TEST_CHECK(!legacy_wifi_key_present(NVS_KEY_SSID), "after clean boots the legacy copy is erased");
+    }
+    TEST_CHECK(kept_legacy > 0, "some injected failure left the legacy copy in place (failure branch reached)");
+    TEST_CHECK(erase_failed_but_persisted > 0, "some injected failure hit the legacy erase after a verified copy");
+
+    /* Lossy write: set calls silently do nothing, so the read-back must differ and keep the legacy copy. */
+    for (unsigned n = 1; n < 8; n++) {
+        seed_legacy_default_wifi();
+        fake_kv_script_silent_set_noops(n);
+        boot_wifi_migration();
+        bool legacy_left = legacy_wifi_key_present(NVS_KEY_SSID);
+        TEST_CHECK(legacy_left || saved_net_oldnet_persisted(), "lossy write: credential never lost");
+        simulate_reboot_state();
+        fake_kv_script_silent_set_noops(0);
+        boot_wifi_migration();
+        TEST_CHECK(saved_net_oldnet_persisted(), "lossy write: next clean boot completes the migration");
+    }
+}
+
 static void test_forget_last_network_survives_reboot(void)
 {
     TEST_SECTION("forget the last saved network, then reboot: zero saved nets, legacy copy does not return");
@@ -1639,6 +1697,7 @@ void run_test_wifi_prov(void)
     test_legacy_default_wifi_erase_keeps_board_unprovisioned();
     test_legacy_wifi_migration_is_one_shot();
     test_interrupted_first_migration_retries_next_boot();
+    test_legacy_migration_failures_never_lose_credential();
     test_forget_last_network_survives_reboot();
     test_mode_and_ap_name_change_survives_reboot();
     test_apply_sta_config_dns();

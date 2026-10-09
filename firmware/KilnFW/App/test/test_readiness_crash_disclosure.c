@@ -130,14 +130,19 @@ esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *v
 
 int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
 
+static httpd_uri_t s_registered; // last route kiln_http_register() handed to httpd (the auth wrapper)
+static char s_resp_status[48];
+static char s_resp_body[96];
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
 {
-    (void)handle; (void)uri_handler;
+    (void)handle;
+    s_registered = *uri_handler;
     return ESP_OK;
 }
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
-    (void)r; (void)buf; (void)buf_len;
+    (void)r; (void)buf_len;
+    snprintf(s_resp_body, sizeof(s_resp_body), "%s", buf ? buf : "");
     return ESP_OK;
 }
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
@@ -145,7 +150,7 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     (void)r; (void)error; (void)msg;
     return ESP_OK;
 }
-esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
+esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; snprintf(s_resp_status, sizeof(s_resp_status), "%s", status); return ESP_OK; }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value) { (void)r; (void)field; (void)value; return ESP_OK; }
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 
@@ -336,6 +341,55 @@ static void test_gate_auth_on_admin_session(void)
     TEST_CHECK(strstr(detail, "synth_task") != NULL, "ADMIN role -- real task disclosed");
 }
 
+// ---------------------------------------------------------------------------
+// 3. CSRF wiring (HOST_TEST_GAP_AUDIT gap 5): kiln_http_prehandler() must refuse
+//    a cross-origin non-GET/HEAD request BEFORE the handler runs, and let
+//    same-origin POSTs and foreign-Origin GETs through.
+// ---------------------------------------------------------------------------
+static int s_handler_calls;
+static esp_err_t counting_handler(httpd_req_t *req) { (void)req; s_handler_calls++; return ESP_OK; }
+
+static void run_prehandler(const char *uri, httpd_method_t m, const char *origin, const char *host)
+{
+    httpd_uri_t u = { .uri = uri, .method = m, .handler = counting_handler, .user_ctx = NULL };
+    memset(&s_registered, 0, sizeof(s_registered));
+    TEST_CHECK(kiln_http_register((httpd_handle_t)1, &u) == ESP_OK, "route registers through the auth wrapper");
+    stub_headers_reset();
+    if (origin) stub_header_set("Origin", origin);
+    if (host) stub_header_set("Host", host);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.method = (int)m;
+    req.user_ctx = s_registered.user_ctx;
+    s_handler_calls = 0;
+    s_resp_status[0] = '\0';
+    s_resp_body[0] = '\0';
+    (void)s_registered.handler(&req);
+}
+
+static void test_csrf_prehandler_wiring(void)
+{
+    TEST_SECTION("kiln_http_prehandler -- cross-origin POST refused 403 before the handler; same-origin POST "
+                 "and foreign-Origin GET pass (ROUTE_TIER_REVIEW MED-1 wiring)");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false, .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: auth off");
+
+    run_prehandler("/api/estop/verify", HTTP_POST, "http://evil.example", "192.168.1.50");
+    TEST_CHECK(s_handler_calls == 0, "cross-origin POST: handler NOT called");
+    TEST_CHECK(strcmp(s_resp_status, "403 Forbidden") == 0 && strstr(s_resp_body, "cross_origin") != NULL,
+               "cross-origin POST: 403 cross_origin");
+
+    run_prehandler("/api/estop/verify", HTTP_POST, "http://192.168.1.50", "192.168.1.50");
+    TEST_CHECK(s_handler_calls == 1, "same-origin POST: handler called");
+
+    run_prehandler("/api/estop/verify", HTTP_POST, NULL, "192.168.1.50");
+    TEST_CHECK(s_handler_calls == 1, "POST with neither Origin nor Referer: allowed (non-browser client)");
+
+    run_prehandler("/api/status", HTTP_GET, "http://evil.example", "192.168.1.50");
+    TEST_CHECK(s_handler_calls == 1 && s_resp_status[0] == '\0', "GET with a foreign Origin: passes");
+}
+
 int main(void)
 {
     test_detail_no_record();
@@ -347,6 +401,7 @@ int main(void)
     test_gate_auth_on_no_session();
     test_gate_auth_on_user_session();
     test_gate_auth_on_admin_session();
+    test_csrf_prehandler_wiring();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -250,6 +250,7 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
 #include "time_sync.h"
 /* g_builtin_profile_count: see g_test_builtin_count above (real width 28; hidden mask is 32 bits) */
 static char g_pf_tz[TIME_SYNC_TZ_MAX_LEN + 1] = "UTC0";
+static bool g_pf_fail_tz = false, g_pf_fail_hidden = false, g_pf_fail_relay_name = false;
 void time_sync_get_status(time_sync_status_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -260,6 +261,7 @@ esp_err_t time_sync_set_tz(const char *tz)
     if (!time_sync_tz_is_valid(tz)) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (g_pf_fail_tz) { return ESP_FAIL; }
     strcpy(g_pf_tz, tz);
     return ESP_OK;
 }
@@ -271,6 +273,7 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool h)
     if (id < PROFILE_BUILTIN_ID_BASE || id >= PROFILE_BUILTIN_ID_BASE + 28) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (g_pf_fail_hidden) { return ESP_FAIL; }
     g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE] = h;
     return ESP_OK;
 }
@@ -286,6 +289,7 @@ bool zones_config_get_relay_name(uint8_t n, char *out, size_t cap)
 bool zones_config_set_relay_name(uint8_t n, const char *name)
 {
     if (n < 1 || n > KILN_IO_RELAY_COUNT || (name && strlen(name) > RELAY_NAME_MAX_LEN)) { return false; }
+    if (g_pf_fail_relay_name) { return false; }
     strncpy(g_pf_rname[n - 1], name ? name : "", RELAY_NAME_MAX_LEN);
     return true;
 }
@@ -6891,8 +6895,34 @@ static void test_prefs_hidden_catalogue_overflow_refused_before_writes(void)
                "prefs byte-identical to before (nothing written)");
 }
 
+static void test_prefs_commit_failure_is_partial_write_profiles_untouched(void)
+{
+    TEST_SECTION("backup_import_apply -- a preference setter failing at commit time is a 500 partial write, "
+                 "profiles untouched (HOST_TEST_GAP_AUDIT gap 6)");
+    static const struct { const char *tail; bool *flag; const char *what; } cases[] = {
+        { ",\"tz\":\"EST5EDT,M3.2.0,M11.1.0\"", &g_pf_fail_tz, "tz" },
+        { ",\"hidden_builtin_profiles\":[128]", &g_pf_fail_hidden, "hidden profiles" },
+        { ",\"relay_names\":[{\"relay\":1,\"name\":\"Vent\"}]", &g_pf_fail_relay_name, "relay name" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_stub_state();
+        pf_reset();
+        kiln_cfg_plan_t plan;
+        bool partial = false;
+        char err[200] = "";
+        *cases[i].flag = true;
+        bool ok = wp9_apply_full(cases[i].tail, KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial, err, sizeof(err));
+        *cases[i].flag = false;
+        TEST_CHECK(!ok, cases[i].what);
+        TEST_CHECK(partial, "reported as a partial write (the handler turns this into the 500)");
+        TEST_CHECK(strstr(err, "a preference could not be persisted") != NULL, "error text names the preference failure");
+        TEST_CHECK(g_profile_save_calls == 0, "profiles are committed last: none written");
+    }
+}
+
 void run_test_backup_import(void)
 {
+    test_prefs_commit_failure_is_partial_write_profiles_untouched();
     test_prefs_hidden_catalogue_overflow_refused_before_writes();
     test_prefs_import_applies_each_key();
     test_prefs_hidden_past_eighth_builtin();

@@ -1488,6 +1488,35 @@ static void test_pcfg_junk_rev_repair_scratch_oom_fails_closed(void)
     TEST_CHECK(blen == sizeof(junk), "rev blob not rewritten");
 }
 
+static void test_pcfg_junk_rev_repair_refuses_on_external_ram_stack(void)
+{
+    TEST_SECTION("junk rev repair: PSRAM-stack caller is refused, fails closed, prof_rev untouched "
+                 "(HOST_TEST_GAP_AUDIT gap 7, commit 7d155f5a)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(1, &p0, 9) == ESP_OK, "file at rev 9 (slot 1)");
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    pcfg_set_rev_blob(junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    fake_kv_set_write_safe_here(false);
+    profiles_state_t out;
+    bool any_found = false;
+    (void)nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(s_profile_rev_unknown[3] && s_profile_rev_unknown[1], "slots stay rev-unknown (fail closed)");
+    TEST_CHECK(s_profile_rev[3] == 0, "no floor raise when the repair is refused");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(junk), "rev blob not rewritten");
+}
+
 static void test_pcfg_boot_fallback_keeps_rev_unknown_marks(void)
 {
     TEST_SECTION("boot fallback after OOM keeps rev-unknown marks of the failed pass (review 8 L3)");
@@ -4574,6 +4603,7 @@ void run_test_profiles_http(void)
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
+    test_pcfg_junk_rev_repair_refuses_on_external_ram_stack();
     test_pcfg_boot_fallback_keeps_rev_unknown_marks();
     test_save_mutex_serializes_rev_write_bump();
     test_profiles_save_reserves_flash_worker();
