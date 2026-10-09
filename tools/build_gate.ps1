@@ -371,7 +371,9 @@ function Get-KilnBuildGateLiveTickets {
 
 function Remove-KilnBuildGateTicket {
     param([string]$Lane, [string]$Name)
-    try { Remove-Item -LiteralPath (Join-Path (Get-KilnBuildGateQueueDir -Lane $Lane) $Name) -Force -ErrorAction Stop } catch { }
+    for ($i = 0; $i -lt 5; $i++) {
+        try { Remove-Item -LiteralPath (Join-Path (Get-KilnBuildGateQueueDir -Lane $Lane) $Name) -Force -ErrorAction Stop; return } catch { if (-not (Test-Path -LiteralPath (Join-Path (Get-KilnBuildGateQueueDir -Lane $Lane) $Name))) { return }; Start-Sleep -Milliseconds 200 }
+    }
 }
 
 # ---- re-entrancy ------------------------------------------------------------
@@ -574,6 +576,9 @@ function Enter-KilnBuildGate {
     }
 
     # Queue. Only the head ticket touches the slots; it waits on ALL of them.
+    # Reap tickets this very process leaked earlier (a failed delete is swallowed): a live pid
+    # with an old ticket must never queue behind itself.
+    foreach ($old in @(Get-ChildItem -LiteralPath (Get-KilnBuildGateQueueDir -Lane $Lane) -Filter "*-$PID-*.ticket" -ErrorAction SilentlyContinue)) { Remove-KilnBuildGateTicket -Lane $Lane -Name $old.Name }
     $ticket = New-KilnBuildGateTicket -Lane $Lane -Label $Label
     $ticketPath = Join-Path (Get-KilnBuildGateQueueDir -Lane $Lane) $ticket
     $sw = [System.Diagnostics.Stopwatch]::StartNew()

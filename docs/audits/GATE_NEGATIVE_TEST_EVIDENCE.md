@@ -23,11 +23,11 @@ Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `chec
 
 ## Counts
 
-Gate rows: 179.
+Gate rows: 180.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 163 |
+| NEGATIVE-TESTED | 164 |
 | PARTIAL | 2 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |

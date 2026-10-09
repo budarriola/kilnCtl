@@ -738,3 +738,30 @@ def test_ps_ticket_scan_skips_stale_and_dead_and_is_cheap(monkeypatch, tmp_path)
     assert not (q / f"{2:015d}-999999-bbbbbbbb.ticket").exists()
     ms = int(r.stdout.rsplit("MS=", 1)[1].split()[0])
     assert ms < 2500, f"ticket scan took {ms} ms"
+
+
+def test_ps_enter_reaps_own_leaked_ticket_and_does_not_queue_behind_it(monkeypatch, tmp_path):
+    """A ticket this process leaked earlier (delete swallowed) must be reaped on the next Enter;
+    with all light slots held the process would otherwise wait behind its own old ticket."""
+    import shutil
+    import subprocess
+
+    ps = shutil.which("powershell")
+    if ps is None:
+        pytest.fail("powershell not available")
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_DIR", str(tmp_path / "gate"))
+    monkeypatch.delenv("KILNCTL_BUILD_GATE_HELD", raising=False)
+    _prefixes(monkeypatch)
+    gate_ps1 = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "tools", "build_gate.ps1")
+    script = (f". '{gate_ps1}'; $q = Get-KilnBuildGateQueueDir -Lane light; "
+              "New-Item -ItemType Directory -Force -Path $q | Out-Null; "
+              "$leak = Join-Path $q (\"000000000000001-$PID-deadbeef.ticket\"); "
+              "'{\"pid\":'+$PID+'}' | Set-Content $leak; "
+              "$g = Enter-KilnBuildGate -Label 'leak-test' -Lane light -TimeoutSeconds 20 -PollIntervalSeconds 1; "
+              "Exit-KilnBuildGate -Gate $g; "
+              "Write-Output \"OK leaked_left=$((Test-Path $leak))\"")
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                       capture_output=True, text=True, timeout=120, env=os.environ.copy())
+    assert "OK leaked_left=False" in r.stdout, (r.stdout, r.stderr)
