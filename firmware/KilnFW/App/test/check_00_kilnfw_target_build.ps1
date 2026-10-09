@@ -1422,6 +1422,23 @@ public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFile
         }
     }
     Write-Host "Published object-file trees for check_duplicate_symbols.ps1 to $mainBuildDir\esp-idf\*"
+    # Manifest of the .c.obj files THIS build produces (build.ninja outputs), so
+    # check_duplicate_symbols.ps1 can ignore objects a shared build dir holds from
+    # another worktree path or an older configuration. build.ninja itself is not
+    # published (16 MB).
+    $ninjaSrc = Join-Path $WorktreePath "firmware\KilnFW\build\build.ninja"
+    if (Test-Path -LiteralPath $ninjaSrc) {
+        $objLines = New-Object System.Collections.Generic.List[string]
+        foreach ($m in [regex]::Matches((Get-Content -Raw -LiteralPath $ninjaSrc), '(?m)^build\s+(\S+?\.c\.obj)(?:\s|:)')) {
+            $objLines.Add((($m.Groups[1].Value -replace '\$:', ':') -replace '\\', '/'))
+        }
+        if ($objLines.Count -gt 0) {
+            $manTmp = Join-Path $WorktreePath "firmware\KilnFW\build\obj_manifest.txt.tmp"
+            Set-Content -LiteralPath $manTmp -Value $objLines -Encoding ascii
+            Publish-BuildArtifact -SourcePath $manTmp -TempPath ((Join-Path $mainBuildDir "obj_manifest.txt") + ".new") -FinalPath (Join-Path $mainBuildDir "obj_manifest.txt")
+            Write-Host "Published obj_manifest.txt ($($objLines.Count) objects) for check_duplicate_symbols.ps1"
+        }
+    }
 
     # ALSO PUBLISH THE PRE-GZIPPED WEB ASSETS (2026-09-22). App/drivers/CMakeLists.txt
     # gzips KILNCTL_GZIP_ASSETS into this component's binary dir at CONFIGURE time and

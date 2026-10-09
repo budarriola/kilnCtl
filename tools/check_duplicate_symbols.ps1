@@ -170,6 +170,28 @@ foreach ($sourceRoot in ($allSourceRoots | Select-Object -Unique)) {
     $sourceBasenamesByRoot[$sourceRoot] = $names
 }
 
+# Objects this tree's own build actually produces: the `build <obj>:` outputs in
+# build.ninja. A shared/reused build dir can hold .c.obj files from another
+# worktree's path (kilnlink's obj dirs encode the absolute source path) or from
+# older configurations; those match a basename in the source tree but are not
+# produced by THIS tree's build, so they are not part of any real link. Absent
+# build.ninja (non-ninja or unconfigured dir) the filter is skipped.
+$ninjaOutputs = $null
+$ninjaFile = Join-Path $buildDir "build.ninja"
+$manifestFile = Join-Path $buildDir "obj_manifest.txt"   # published by check_00_kilnfw_target_build.ps1
+$ninjaLines = @()
+if (Test-Path -LiteralPath $ninjaFile) {
+    foreach ($m in [regex]::Matches((Get-Content -Raw -LiteralPath $ninjaFile), '(?m)^build\s+(\S+?\.c\.obj)(?:\s|:)')) {
+        $ninjaLines += (($m.Groups[1].Value -replace '\$:', ':') -replace '\\', '/')
+    }
+} elseif (Test-Path -LiteralPath $manifestFile) {
+    $ninjaLines = @(Get-Content -LiteralPath $manifestFile | Where-Object { $_ })
+}
+if ($ninjaLines.Count -gt 0) {
+    $ninjaOutputs = @{}
+    foreach ($o in $ninjaLines) { $ninjaOutputs[$o.ToLowerInvariant()] = $true }
+}
+$notOursObjFiles = @()
 $objFiles = @()
 $staleObjFiles = @()
 foreach ($c in $componentDirs) {
@@ -191,6 +213,11 @@ foreach ($c in $componentDirs) {
                     }
                 }
             }
+            $relObj = ($obj.FullName.Substring($buildDir.Length + 1) -replace '\\', '/').ToLowerInvariant()
+            if ($ninjaOutputs -and -not $ninjaOutputs.ContainsKey($relObj)) {
+                $notOursObjFiles += $obj
+                continue
+            }
             if ($haveAnyKnownNames -and -not $foundInAnyRoot) {
                 $staleObjFiles += [pscustomobject]@{ Obj = $obj; ExpectedBaseName = $expectedBaseName; SourceRoot = ($sourceRoots -join ", ") }
             } else {
@@ -198,6 +225,11 @@ foreach ($c in $componentDirs) {
             }
         }
     }
+}
+
+if ($notOursObjFiles.Count -gt 0) {
+    Write-Host "NOTE: ignoring $($notOursObjFiles.Count) .c.obj file(s) in build/ that this tree's build manifest (build.ninja / obj_manifest.txt) does not produce (left by another worktree path or an older configuration):" -ForegroundColor Yellow
+    foreach ($n in $notOursObjFiles) { Write-Host "        $($n.FullName.Substring($buildDir.Length + 1))" }
 }
 
 if ($staleObjFiles.Count -gt 0) {

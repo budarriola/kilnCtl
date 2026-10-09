@@ -1040,7 +1040,12 @@ CEILING_BYTES = {
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
     "http_async_job": 4592,
     "recovery_exit": 80,
-    "backlight_pwm": 112,
+    # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
+    # (5ddf68d1): backlight_pwm_task 80 + hal_pwm_set_duty 32 + ledc_set_duty 48 +
+    # _ledc_fade_hw_release 32 = 192 B of the 3072 B stack (84% free). The walk
+    # now follows hal_pwm_set_duty into the IDF LEDC driver; the old 112 B only
+    # covered task + hal_pwm_set_duty. Real, tiny, stack is ample: ceiling follows.
+    "backlight_pwm": 192,
     "i2c_owner_ns2009": 144,
     "i2c_owner_sx1509": 144,
     "kiln_io_owner": 720,
