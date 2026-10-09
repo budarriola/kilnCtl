@@ -33,8 +33,23 @@ Context that shapes the findings:
 | L6 | LOW | info | The AP password is displayed in clear on the Network page behind a USER PIN. |
 | L7 | LOW | auth | With the LCD policy off, every gate collapses to full access, including Clear Trip. Matches the web auth-off rule; recorded so the owner can confirm it is intended for the trip clear. |
 | L8 | INFO | timers | Page refresh timers are created once at build and never deleted; they keep running while the page is hidden. |
+| L9 | HIGH | auth | First boot with no stored touch calibration returns from `kiln_ui_init()` before the LCD lock is initialised, so every gate (Clear Trip included) is open until reboot. |
+| L10 | MED | auth | The Network Manage Forget dialog is a raw `lv_msgbox`, not `ui_confirm`, so it survives an LCD relock and stays tappable. |
+| L11 | MED | auth | More USER-gated writes whose web equivalents are ADMIN: unit preference, touch calibration save, profile delete, live-edit apply, AP QR code, crash-report acknowledge. |
+| L12 | MED | touch | Topbar touch-group registry holds 4 groups and drops the rest silently; 21 topbar call sites, so pages visited after the 4th lose nearest-center arbitration. |
+| L13 | MED | layout | Builder slot grid creates 100 slot cells in a 2-row box with scrolling removed; only 8 are reachable, and each build makes 100 profile reads. |
+| L14 | MED | churn | Network Manage saved list is cleaned and rebuilt every second, even when hidden. |
+| L15 | MED | fit | Home right-hand rail height assert ignores the trip strip, lag notice and progress bar; with all visible, zone 3 and watts are clipped. |
+| L16 | LOW | strings | AP QR payload buffer can truncate a max-length SSID + password; no escaping; always `T:WPA`. |
+| L17 | LOW | race | A second AP Save overwrites the job strings before the busy check. |
+| L18 | LOW | dialogs | `ui_confirm` does not NULL-check its `lv_malloc`'d context and frees it only in the button callbacks, so a dialog closed by relock leaks it. |
+| L19 | LOW | keypad | `ui_lcd_keypad_show()` overwrites the pending callback if called while open; single global gate context. Reachability unconfirmed. |
+| L20 | LOW | fit | Long-text labels with no fixed height wrap instead of truncating (home strips, topbar status, rail zone names); Diagnostics Trip detail rows have no budget assert. |
+| L21 | LOW | cost | Home and Diagnostics refresh callbacks keep calling `dashboard_get_status()` (and a thermocouple read-all) while hidden. |
+| L22 | LOW | misc | Start confirm re-resolves the profile at Confirm time, not the one shown; picker id cache can go stale (mislabel only); live-decide Save As has no confirm. |
+| L23 | INFO | threads | Debug flags and 64-bit flush stats shared across tasks without atomics; startup `lv_*` calls on app_main are an undocumented exception. |
 
-No finding was rated HIGH. Clear Trip itself is correct: ADMIN gate, role
+L9 (second pass, below) is the only HIGH finding: it opens every gate, Clear Trip included, on one boot path. Otherwise Clear Trip itself is correct: ADMIN gate, role
 re-checked inside the action, and the same `dashboard_safety_clear_trip()`
 the web route `POST /api/safety/clear_trip` calls (`http/dashboard_exec_http.c:875`, `:885`).
 
@@ -157,6 +172,206 @@ and never deletes it. Because screens are cached, this is not a leak and the
 widgets the timer touches stay valid. Cost is CPU on the LVGL task for hidden
 pages. Fix if it matters: pause/resume the timer on screen load/unload events.
 
+## Second pass (core files, home, diagnostics, follow-up verification)
+
+### L9 (HIGH) LCD lock never initialised on the touch-calibration boot path
+
+`ui/kiln_ui.c:337`-`:340`: when touch calibration is offerable and no
+calibration is stored, `kiln_ui_init()` returns `kiln_ui_show("touch_cal")`
+before `ui_lcd_lock_init()`, `ui_lcd_lock_set_relock_cb()` and
+`lcd_credential_bridge_init()` at `:354`-`:356`. Those are their only call
+sites. With no policy function wired, the default policy reports disabled
+and `ui_lcd_lock_has_role()` returns true for every role, ADMIN included.
+No relock tick runs either.
+
+Scenario: a board on the resistive NS2009 path with an erased calibration
+(fresh board, NVS loss) and LCD lock enabled. The user calibrates, lands on
+Config, and every gated action is open until the next reboot, including
+Clear Trip (`ui/ui_page_safety.c:210`, `:238`) and all home actions. The bench
+FT6336U panel is not offered calibration, so the bench does not show it.
+
+Fix: move the three init calls above the touch-cal branch. Add a host test
+that asserts the lock policy is wired after init with an uncalibrated store.
+
+### L10 (MED) Forget dialog survives relock
+
+`ui/ui_page_network_manage.c:408`-`:419` builds the Forget prompt with
+`lv_msgbox_create(NULL)` directly. The relock path closes only `ui_confirm`
+dialogs and the keypad (`ui/ui_lcd_lock.c:280`, `ui_confirm_close_open()`).
+
+Scenario: a user opens Forget and walks away; the lock times out and the UI
+goes home, but the top-layer msgbox stays up. Anyone can then tap Forget and
+drop a saved network without a PIN.
+
+Fix: build it with `ui_confirm`, or close it from the relock callback.
+
+### L11 (MED) More USER-gated writes
+
+Same class as L1-L3. Web equivalents are ADMIN.
+- Unit preference toggle: `ui/ui_page_config.c:127`.
+- Touch calibration save: `ui/ui_page_config.c:77`, `ui/ui_page_touch_cal.c:177`.
+- Profile delete: `ui/ui_page_profile_picker.c:204`.
+- Live-edit apply: `ui/ui_edit_firing_apply.c:232`, `:249`.
+- AP QR code (shows the AP credential, see L6): `ui/ui_page_network.c:498`-`:504`.
+- Crash-report Acknowledge: `crash_ack_btn_clicked_cb` in
+  `ui/ui_page_diagnostics.c` has a tap-twice confirm but no role gate; the
+  page is reached through the USER-gated hub (`ui/ui_page_config.c:86`).
+  `/api/crash_report/ack` is ADMIN (`http/route_tier_table.h:382`), and the
+  on-screen text says acknowledging allows manual relay-ON. The LCD calls
+  `crash_report_acknowledge_timeout()`, the web `crash_report_acknowledge()`
+  (`http/diagnostics_http.c:493`); confirm the former is a thin bounded-wait wrapper.
+
+Fix: ADMIN role for each, with a role re-check inside the action as
+`ui/ui_page_safety.c:210` does.
+
+### L12 (MED) Topbar touch groups capped at 4, overflow silent
+
+`ui/ui_theme.h:394` sets `UI_THEME_TOUCH_GROUP_MAX_GROUPS` to 4;
+`ui/ui_theme.c:96` returns silently when full. Each topbar with two or more
+icons registers a group (`ui/ui_topbar.c:277`-`:287`), and there are 21
+`ui_topbar_create()` call sites outside `ui_topbar.c`. Pages are built lazily,
+so only the first four pages visited in a boot get nearest-center
+arbitration. Later pages fall back to z-order, which is the "Back shadowed by
+later icons" bug the comment at `ui/ui_topbar.c:262`-`:276` says the group
+fixes. Whether a given page's Back fails depends on visit order; not
+reproduced on hardware.
+
+Fix: raise the cap to cover every topbar (or give the topbar its own
+arbitration), log on overflow, and add a check counting call sites against
+the cap.
+
+### L13 (MED) Builder slot grid: 100 cells, 8 reachable
+
+`ui/ui_page_profile_builder_review.c:165` loops to `PROFILES_MAX_COUNT` (100,
+`persist/profiles_types.h:30`), creating one cell per slot inside a grid
+whose height is two touch rows (`:60`, `:227`) with scrolling removed
+(`:233`). Only the first 8 cells are reachable, so the LCD can overwrite only
+slots 0-7 once they are full. Each build also makes 100 profile reads. The
+comment at `ui/ui_page_profile_detail.c:468`-`:473` describing this grid is stale.
+
+Fix: page the grid like the picker, and read slot state once per page.
+
+### L14 (MED) Saved-network list rebuilt every second
+
+`refresh_cb` (`ui/ui_page_network_manage.c:517`, `:540`) calls
+`refresh_saved_list()`, which runs `lv_obj_clean()` and rebuilds every row
+(`:457`-`:512`) once per second, visible or not. It resets scroll position
+(L4 makes that list scroll), can delete a button mid-press, and churns the heap.
+
+Fix: rebuild only when the saved set changes, and skip while hidden.
+
+### L15 (MED) Home rail can be clipped when status strips show
+
+`ui/ui_page_home.c` (rail `_Static_assert` near `:1120`, strips near
+`:725`-`:760`): the rail budget (208 px needed, 228 px allowed) assumes the
+graph row gets all content height except the action row. It ignores the trip
+strip, the lag notice and the progress wrap, which can all show at once (the
+progress bar stays visible on FAULTED, `ui/ui_page_home_refresh.c:157`-`:165`).
+
+Scenario: a safety trip faults the executor while a "Config mismatch (Pico)"
+notice stands. The strips and progress take roughly 80-110 px, leaving the
+graph row about 130-160 px against 208 px. The rail does not scroll, so the
+zone 3 row and the watts label are silently cut off. Estimate from source,
+not measured on the panel.
+
+Fix: pin each strip to one line, assert the rail against the budget minus
+both strips, the progress wrap and the action row, or hide the progress wrap
+while the trip strip shows.
+
+The Temperature relay row (L5) is the same class: with 3 buttons per row,
+Relay 4 sits entirely below the 40 px box, and the page budget assert at
+`ui/ui_page_temperature.c:147`-`:150` counts only 40 px for that row. The
+comment at `:116`-`:120` is wrong for the current relay count.
+
+### L16 (LOW) AP QR payload truncation and escaping
+
+`ui/ui_page_network.c:500` formats the Wi-Fi QR string into
+`sizeof(s_ap_qr_last)`. A 32-byte SSID plus a 63-byte password plus framing
+can exceed it, giving a QR that joins nothing. `;`, `,`, `:` and `\` are not
+escaped, and the type is always `T:WPA`, also for an open AP.
+
+Fix: size for the worst case plus escapes, escape per the Wi-Fi QR format,
+emit `T:nopass` for an open AP.
+
+### L17 (LOW) AP Save overwrites job strings before the busy check
+
+`ui/ui_page_network.c:622`-`:623` copies the new SSID/password into the job
+struct before `:575`'s busy check refuses a second request, so a double tap
+can change what the in-flight worker writes.
+
+Fix: check busy first, copy under the job mutex.
+
+### L18 (LOW) ui_confirm context handling
+
+`ui/ui_confirm.c:98` does not NULL-check `lv_malloc()`, and the context is
+freed only in the yes/cancel callbacks (`:20`, `:65`), not in the
+`LV_EVENT_DELETE` handler registered at `:102`. A dialog closed by relock
+(`ui_confirm_close_open()`) leaks the context.
+
+Fix: NULL-check and bail; free only in the delete handler.
+
+### L19 (LOW) Keypad callback overwrite
+
+`ui/ui_lcd_keypad.c:286`-`:296`: `ui_lcd_keypad_show()` overwrites the pending
+callback and user data while the keypad is open, and `ui/ui_lcd_lock.c:358`
+holds one global gate context. A second gated request before the first keypad
+closes drops the first action silently. The backdrop is modal, so this likely
+needs a programmatic caller; not confirmed reachable.
+
+Fix: finish the previous request as cancelled, or refuse the second.
+
+### L20 (LOW) Labels wrap instead of truncating; Trip detail has no budget
+
+In LVGL v9, LONG_DOT/LONG_CLIP truncate only with a fixed height
+(`ui/ui_page_safety.c:108` says so). The home trip strip and lag notice
+(`ui/ui_page_home.c` near `:725`-`:760`; messages up to "Config mismatch
+(Pico): %.130s"), the topbar status label, the rail zone-name labels and the
+profile button label have no fixed height and wrap. The Diagnostics Trip
+detail sub-page uses LONG_WRAP rows (latch text about 170 characters,
+"Detected:" up to 340 bytes, fault source up to 192) with no `_Static_assert`;
+all five filled likely exceed the 268 px content height and the bottom rows clip.
+
+Fix: fixed one-line heights on those labels; pin line counts on Trip detail
+as `ui/ui_page_safety.c:277`/`:279` does, and shorten the latch text.
+
+### L21 (LOW) Hidden pages keep doing heavy reads
+
+`ui_home_refresh_cb` (`ui/ui_page_home_refresh.c` near `:124`) and the
+Diagnostics `refresh_cb` have no "page not active" early return, so they call
+`dashboard_get_status()` (SPI reads, a queue wait, interrupts-disabled heap
+walks) every tick while hidden; Diagnostics also runs
+`thermo_owner_command_read_all()` every 2 s. The Safety page already guards
+this (`ui/ui_page_safety.c:131`).
+
+Fix: return early when the page is not active; keep a cheap path for anything
+that must stay live.
+
+### L22 (LOW) Smaller correctness items
+
+- Start confirm: `ui_home_do_start` (`ui/ui_page_home_actions.c` near
+  `:95`-`:115`) re-resolves the selected profile at Confirm time, not the id
+  shown in the dialog body (`:196`-`:250`). A selection change while the
+  dialog is open (from the web) starts a different profile. Fix: capture the
+  id at dialog build and pass it as user data.
+- `ui/ui_page_profile_picker.c:232` caches ids that `:199` can use after the
+  list changes; the tap resolves the id fresh, so the effect is a mislabel.
+- `ui/ui_page_live_decide.c:196`-`:205` runs Save As immediately with no
+  confirm, unlike Overwrite.
+
+### L23 (INFO) Cross-task diagnostics state and startup exception
+
+- `s_auto_tap_dump` (`ui/kiln_ui.c:114`) is written from the UART task and
+  read on the LVGL task without an atomic. Debug only.
+- The 64-bit flush timing sum in `ui/lvgl_port.c` is written by the SPI
+  completion path and read by HTTP handlers; a torn read skews a diagnostic mean.
+- The tap-walk hidden-pass flag (`ui/kiln_ui.c:1029`, `:1032`) can be reset
+  before a timed-out walk runs. Test path only.
+- `lv_init()` and `kiln_ui_init()` run on app_main before lvgl_port_task
+  exists. Safe, but an undocumented exception to "only lvgl_port_task calls lv_*".
+- The auth-reset corner gesture (`ui/ui_page_home_actions.c` near `:560`-`:620`)
+  clears the admin credential with no PIN. Intended physical-presence reset:
+  needs E-stop asserted, no firing, heat not enabled, four corner taps and a confirm.
+
 ## Checked and found clean
 
 - Clear Trip: ADMIN gate, role re-checked inside the action, same backend
@@ -182,10 +397,10 @@ pages. Fix if it matters: pause/resume the timer on screen load/unload events.
 
 ## Not covered
 
-This pass did not complete a line-by-line review of `ui/lvgl_port.c`,
-`ui/kiln_ui.c`, `ui/screen_idle.c`, the home page family
-(`ui/ui_page_home*.c`) or `ui/ui_page_diagnostics.c` for the leak,
-stale-pointer and cross-task criteria. Those files carry `_Static_assert`
-no-scroll budgets (`ui/ui_page_home.c:1151`, `ui/ui_page_diagnostics.c:331`-`:369`)
-but data-dependent content in them was not size-checked here. A follow-up
-pass should cover them.
+The second pass covered `ui/kiln_ui.c`, `ui/lvgl_port.c`, `ui/screen_idle.c`,
+`ui/ui_lcd_lock.c`, `ui/ui_lcd_keypad.c`, `ui/ui_confirm.c`, the theme and
+topbar code, `ui/ui_page_home.c`, `ui/ui_page_home_actions.c`,
+`ui/ui_page_home_refresh.c` and `ui/ui_page_diagnostics.c`. Not read line by
+line: `ui/ui_page_home_chart.c`, `ui/ui_page_home_graph.c`,
+`ui/ui_page_home_rail.c`, `ui/ui_page_home_internal.h`. L12, L15, L19 and the
+Trip detail part of L20 are estimates from source, not reproduced on the panel.
