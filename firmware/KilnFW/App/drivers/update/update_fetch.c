@@ -58,7 +58,8 @@ static const char *TAG = "update_fetch";
 #define FETCH_LIST_PER_PAGE 5u               // releases list size when pre-releases are allowed
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
-#define FETCH_SCRATCH_LEN (16u * 1024u)      // stager scratch; PSRAM
+#define FETCH_SCRATCH_LEN FETCH_HEAP_SCRATCH_BYTES // stager scratch; INTERNAL RAM (MED-1), see update_fetch_heap.h
+#define FETCH_WR_TIMEOUT_MS 30000u           // bounded wait for one flash-writer op (64 KiB erase+write is well under 1 s)
 // The request buffer: a signed release-assets URL carries a JWT query, so the GET line alone can be
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
@@ -130,6 +131,7 @@ typedef struct {
     uint32_t total;
     const char *semver;
     const char *commit;
+    const update_identity_t *want; // WR_BEGIN: manifest identity for update_stage_manifest_gate
     update_stage_err_t res;
 } wr_cmd_t;
 
@@ -143,6 +145,7 @@ typedef struct {
     TaskHandle_t wr_task;     // stack-margin slot
     SemaphoreHandle_t wr_req;
     SemaphoreHandle_t wr_done;
+    volatile bool wr_wedged;  // a writer op timed out: its task/buffers are abandoned until reboot
     wr_cmd_t wr;
 } fetch_ctx_t;
 
@@ -173,7 +176,7 @@ struct work {
     bool stage_begun;
     bool stage_done;
     uint8_t chunk[FETCH_CHUNK_LEN];
-    uint8_t scratch[FETCH_SCRATCH_LEN];
+    uint8_t *scratch;                 // FETCH_SCRATCH_LEN bytes, MALLOC_CAP_INTERNAL, freed with the job
 };
 
 // ---- small helpers ---------------------------------------------------------------------------
@@ -336,6 +339,11 @@ static void wr_task(void *arg)
         case WR_BEGIN:
             c->res = update_stage_upload_begin(st, (uint8_t *)c->data, c->len, c->total, c->semver, c->commit,
                                                STAGE_SOURCE_GITHUB);
+            if (c->res == UPDATE_STAGE_OK) {
+                // Cross-check the image against release.json (plan section 5): schema record and
+                // descriptor version must equal the manifest's, or the stage stays blank.
+                update_stage_set_gate(st, update_stage_manifest_gate, (void *)c->want);
+            }
             break;
         case WR_WRITE: c->res = update_stage_upload_write(st, c->data, c->len); break;
         case WR_FINISH: c->res = update_stage_upload_finish(st); break;
@@ -352,6 +360,9 @@ static void wr_task(void *arg)
 
 static bool wr_start(void)
 {
+    if (s_c->wr_wedged) {
+        return false; // a previous writer op never returned; reboot to recover
+    }
     s_c->wr_req = xSemaphoreCreateBinary();
     s_c->wr_done = xSemaphoreCreateBinary();
     if (s_c->wr_req == NULL || s_c->wr_done == NULL) {
@@ -386,14 +397,23 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
     s_c->wr.total = total;
     s_c->wr.semver = semver;
     s_c->wr.commit = commit;
+    if (s_c->wr_wedged) {
+        return UPDATE_STAGE_ERR_FLASH;
+    }
     xSemaphoreGive(s_c->wr_req);
-    xSemaphoreTake(s_c->wr_done, portMAX_DELAY);
+    if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) != pdTRUE) {
+        // Wedged flash op. Never race the writer: abandon its task, semaphores and the buffers it may
+        // still touch (see fetch_task), fail the job and let the caller release the update claim.
+        s_c->wr_wedged = true;
+        ESP_LOGE(TAG, "flash writer op %d timed out after %u ms", (int)cmd, (unsigned)FETCH_WR_TIMEOUT_MS);
+        return UPDATE_STAGE_ERR_FLASH;
+    }
     return s_c->wr.res;
 }
 
 static void wr_stop(void)
 {
-    if (s_c->wr_req == NULL) {
+    if (s_c->wr_req == NULL || s_c->wr_wedged) {
         return;
     }
     (void)wr_call(WR_EXIT, NULL, 0, 0, NULL, NULL);
@@ -592,7 +612,8 @@ static const char *stage_begin(work_t *w, int64_t clen)
         return "hash_failed";
     }
     w->sha_active = true;
-    update_stage_err_t e = wr_call(WR_BEGIN, w->scratch, sizeof(w->scratch), w->info.app_size,
+    s_c->wr.want = &w->man.identity;
+    update_stage_err_t e = wr_call(WR_BEGIN, w->scratch, FETCH_SCRATCH_LEN, w->info.app_size,
                                    w->man.identity.version, w->man.identity.commit);
     if (e != UPDATE_STAGE_OK) {
         return update_stage_err_name(e);
@@ -757,12 +778,15 @@ static void fetch_task(void *arg)
     const job_params_t p = s_c->params;
     work_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *body = heap_caps_malloc(FETCH_API_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    // The stager scratch is internal on purpose (MED-1); one 2 KiB block per job, in the admission budget.
+    uint8_t *scratch = heap_caps_malloc(FETCH_SCRATCH_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const char *err = NULL;
-    if (w == NULL || body == NULL) {
+    if (w == NULL || body == NULL || scratch == NULL) {
         err = "no_memory";
     } else {
         w->p = p;
         w->body = body;
+        w->scratch = scratch;
         err = run_job(w);
         if (w->sha_active) {
             psa_hash_abort(&w->sha);
@@ -772,8 +796,15 @@ static void fetch_task(void *arg)
         }
         wr_stop();
     }
-    heap_caps_free(body);
-    heap_caps_free(w);
+    if (s_c->wr_wedged) {
+        // The writer may still be reading these; abandon them (a reboot recovers) rather than race it.
+        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
+        err = "writer_timeout";
+    } else {
+        heap_caps_free(scratch);
+        heap_caps_free(body);
+        heap_caps_free(w);
+    }
     st_lock();
     s_c->st.error = err != NULL ? err : "";
     s_c->st.state = err != NULL ? FS_FAILED : FS_DONE;

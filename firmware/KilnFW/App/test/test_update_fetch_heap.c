@@ -7,6 +7,8 @@ static void test_admit(void)
 {
     TEST_SECTION("update_fetch_heap -- admission");
     TEST_CHECK(FETCH_HEAP_PRECHECK_MIN == 28672u, "precheck is 28 KB");
+    TEST_CHECK(FETCH_HEAP_SCRATCH_BYTES <= 4096u, "stager scratch is at most 4 KiB (MED-1)");
+    TEST_CHECK(FETCH_HEAP_WORST_DRAW_BYTES >= 16500u + FETCH_HEAP_SCRATCH_BYTES, "scratch is counted in the worst draw");
     // The derivation: floor + worst draw leaves the owner floor intact.
     TEST_CHECK(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_WORST_DRAW_BYTES >= FETCH_HEAP_FLOOR_BYTES,
                "admitted free minus worst draw stays at or above 8192");

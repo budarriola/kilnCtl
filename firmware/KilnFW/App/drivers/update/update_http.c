@@ -187,6 +187,14 @@ static bool claim_refuses(httpd_req_t *req, const char *what, const char *ip)
         (void)send_error_json(req, "409 Conflict", "update_in_progress");
         return true;
     }
+    // Claim-first ordering: heat starts test ota_http_heat_blocked_by_update(), which reads the claim, so
+    // once it is held no run can start. A run that started between the pre-claim mode-gate check and the
+    // claim is caught here by re-checking the mode gate under the claim; the claim is released on refusal.
+    // (The OTA interlock cannot be re-run here: it refuses while ANY claim, including ours, is held.)
+    if (mode_gate_refuses(req, what, ip)) {
+        ota_http_update_end();
+        return true;
+    }
     return false;
 }
 

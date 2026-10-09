@@ -977,8 +977,59 @@ static void test_gate_refusal_keeps_stage(void)
     TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE && !g_fl.sha_open, "idle, hash closed");
 }
 
+// MED-2: the GitHub fetch installs update_stage_manifest_gate with release.json's identity.
+static void put_record(uint32_t z, uint32_t k, uint32_t u)
+{
+    update_image_id_t id;
+    update_image_id_make(&id, z, k, u);
+    memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM, &id, sizeof(id));
+}
+
+static void test_manifest_gate(void)
+{
+    TEST_SECTION("update_stage -- fetch manifest cross-check gate");
+    update_identity_t want;
+    memset(&want, 0, sizeof(want));
+    want.zones_cfg_version = 24;
+    want.kilnlink_version = 16;
+    want.uart_version = 13;
+
+    reset_board();
+    make_image(30000, "v1.2.3");
+    put_record(24, 16, 13);
+    TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_OK,
+               "matching record and version: staged");
+
+    reset_board();
+    make_image(30000, "v1.2.3");
+    put_record(23, 16, 13);
+    TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_POLICY &&
+                   !is_staged(),
+               "zones_cfg differs from the manifest: refused, stage blank");
+    reset_board();
+    make_image(30000, "v1.2.3");
+    put_record(24, 15, 13);
+    TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_POLICY,
+               "kilnlink differs: refused");
+    reset_board();
+    make_image(30000, "v1.2.3");
+    put_record(24, 16, 12);
+    TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_POLICY,
+               "uart differs: refused");
+    reset_board();
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_POLICY,
+               "image with no identity record: refused");
+    reset_board();
+    make_image(30000, "v1.2.3");
+    put_record(24, 16, 13);
+    TEST_CHECK(upload_gated(30000, 4096, "v1.2.4", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_VERSION_MISMATCH,
+               "descriptor version differs from the manifest version: refused");
+}
+
 void run_test_update_stage(void)
 {
+    test_manifest_gate();
     test_sha_reference();
     test_happy_path();
     test_semver_and_commit_args();

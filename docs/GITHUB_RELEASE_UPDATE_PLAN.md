@@ -95,6 +95,18 @@ Current `app` is 0x210000 size 0x800000, `recovery` at 0xA10000. New layout; eve
   `boot_auto_cleared` in `GET /api/update/stage`. Bench case owed: interrupt a real apply after set_boot (power cut between set_boot and the header
   erase). The section 6 downgrade gate now runs on hand uploads (done: the stager calls it after the version is resolved, before any image byte is written). Pending MCP tools and bench cases are
   listed under WP5 in section 12.
+- **Power cut during the first boot of the new app (review 2026-10-09 LOW-3).** The recovery apply erases the stage header right after `set_boot`
+  (`recovery_apply.c`). With rollback enabled, a reset before the new app marks itself valid aborts it, and the board falls back to the factory
+  slot (recovery) with the stage already erased, so `GET /api/recovery/apply_status` reports "nothing is staged". The new app in `app` is intact:
+  the operator action is `recovery_exit` (MCP `recovery_exit`, `POST /api/ota/esp/recovery_exit`), which boots it. Do NOT re-apply (there is
+  nothing staged; stage again only if you want to change versions). If the first boot keeps failing, boot_guard sends the board back to recovery
+  again; the fix is then a new stage and apply, not `recovery_exit`.
+- **Fetch-path hardening (review 2026-10-09).** The download stager scratch is a 2 KiB INTERNAL block (`FETCH_HEAP_SCRATCH_BYTES`, counted in
+  `FETCH_HEAP_WORST_DRAW_BYTES`, taken from the slack) so the final verify re-read is direct; a PSRAM scratch made ESP-IDF borrow up to 16 KiB
+  of internal RAM per read. The fetch installs `update_stage_manifest_gate`: the image's embedded identity record and descriptor version must equal
+  `release.json`'s, else `policy` and the stage stays blank. Flash-writer waits are bounded at 30 s; a timeout fails the job with
+  `writer_timeout`, releases the update claim and abandons the writer until reboot. The stage upload and fetch re-check the system mode gate
+  after taking the update claim, closing the window in which a firing could start.
 
 ## 5. Integrity, signing and threat model (stated plainly)
 

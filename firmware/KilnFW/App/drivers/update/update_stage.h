@@ -172,6 +172,13 @@ uint32_t update_stage_capacity(const update_stage_t *st);
 update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratch, size_t scratch_len,
                                              uint32_t total_len, const char *semver, const char *commit,
                                              stage_source_t source);
+// Manifest cross-check gate for the GitHub fetch (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 5). `ctx` is a
+// const update_identity_t * (release.json's identity). Refuses with UPDATE_STAGE_ERR_POLICY unless the image
+// carries an identity record whose zones_cfg/kilnlink/uart versions equal the manifest's. The semver check
+// (descriptor vs manifest version) is already done by flush_head for any stager that has a gate and a
+// declared version. Install with update_stage_set_gate(st, update_stage_manifest_gate, &identity).
+update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, const char *commit,
+                                              const update_image_id_t *id);
 // Install a gate for the upload just begun (call after a successful update_stage_upload_begin).
 void update_stage_set_gate(update_stage_t *st, update_stage_gate_fn gate, void *ctx);
 update_stage_err_t update_stage_upload_write(update_stage_t *st, const uint8_t *data, size_t len);

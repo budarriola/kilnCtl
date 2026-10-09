@@ -358,6 +358,22 @@ static update_stage_err_t hash_from_flash(update_stage_t *st, uint32_t length, u
     return UPDATE_STAGE_OK;
 }
 
+update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, const char *commit,
+                                              const update_image_id_t *id)
+{
+    (void)semver;
+    (void)commit;
+    const update_identity_t *want = ctx;
+    if (want == NULL || id == NULL) {
+        return UPDATE_STAGE_ERR_POLICY;
+    }
+    if (id->zones_cfg_version != want->zones_cfg_version || id->kilnlink_version != want->kilnlink_version ||
+        id->uart_version != want->uart_version) {
+        return UPDATE_STAGE_ERR_POLICY;
+    }
+    return UPDATE_STAGE_OK;
+}
+
 update_stage_err_t update_stage_upload_finish(update_stage_t *st)
 {
     if (st == NULL) {

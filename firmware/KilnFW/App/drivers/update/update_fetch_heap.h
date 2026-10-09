@@ -18,7 +18,9 @@
 //                                                   TCB/heap overhead, about 4.5 KB; mbedTLS
 //                                                   buffers are PSRAM, so not counted. One hop,
 //                                                   releases/latest only, never the asset hop)
-//   slack, concurrent httpd / login KDF   3980 B
+//   (the 16500 B above now also includes the 2048 B internal stager scratch, FETCH_HEAP_SCRATCH_BYTES,
+//    so worst draw = 18548 B and slack = 1932 B; the PRECHECK sum is unchanged)
+//   slack, concurrent httpd / login KDF   3980 B (1932 B after the scratch)
 //   -> FETCH_HEAP_PRECHECK_MIN           28672 B   (28 KB)
 // The slack is deliberately NOT larger: the board idles at 29647-31123 B free
 // (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
@@ -48,8 +50,12 @@ extern "C" {
 #endif
 
 #define FETCH_HEAP_FLOOR_BYTES 8192u
-#define FETCH_HEAP_WORST_DRAW_BYTES 16500u
-#define FETCH_HEAP_SLACK_BYTES 3980u
+// Stager scratch: INTERNAL RAM (MALLOC_CAP_INTERNAL), one per job. Must be internal and small: a PSRAM
+// scratch makes esp_partition_read borrow an internal bounce buffer of up to 16 KiB per read (review
+// GITHUB_UPDATE_CHAIN_REVIEW_2026-10-09 MED-1). Its bytes are part of the worst draw, taken out of the slack.
+#define FETCH_HEAP_SCRATCH_BYTES 2048u
+#define FETCH_HEAP_WORST_DRAW_BYTES (16500u + FETCH_HEAP_SCRATCH_BYTES)
+#define FETCH_HEAP_SLACK_BYTES (3980u - FETCH_HEAP_SCRATCH_BYTES)
 #define FETCH_HEAP_PRECHECK_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_WORST_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
 #define FETCH_LARGEST_BLOCK_MIN 6144u
 // Mid-body abort (read loop only, session already built): floor plus 4 KB of transient room.
