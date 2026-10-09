@@ -279,9 +279,13 @@ static esp_err_t sim_post_handler(httpd_req_t *req)
      * per-zone faults below cannot express it. Deliberately separate from
      * `fault` because it is a property of the wiring, not of a sensor. */
     char swap_str[16];
-    if (http_form_find_field(buf, "swap", swap_str, sizeof(swap_str)) >= 0) {
-        int a = -1, b = -1;
-        if (sscanf(swap_str, "%d,%d", &a, &b) != 2) {
+    int swap_len = http_form_find_field(buf, "swap", swap_str, sizeof(swap_str));
+    if (swap_len == -2) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "swap value too long");
+    }
+    if (swap_len >= 0) {
+        int a = -1, b = -1, consumed = 0;
+        if (sscanf(swap_str, "%d,%d%n", &a, &b, &consumed) != 2 || swap_str[consumed] != '\0') {
             return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "swap must be \"a,b\" (two zone indices)");
         }
         xSemaphoreTake(s_sim.lock, portMAX_DELAY);

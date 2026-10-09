@@ -708,6 +708,14 @@ static void test_legacy_migration_failures_never_lose_credential(void)
     }
 }
 
+static void test_embedded_nul_refused(void)
+{
+    TEST_SECTION("embedded NUL in ssid/password is refused, not truncated (audit L15)");
+    TEST_CHECK(wifi_prov_add_network("ho\0x", 5, "pw", 2) == ESP_ERR_INVALID_ARG, "add: NUL in ssid refused");
+    TEST_CHECK(wifi_prov_add_network("home", 4, "p\0w", 3) == ESP_ERR_INVALID_ARG, "add: NUL in password refused");
+    TEST_CHECK(wifi_prov_forget_network("ho\0x", 5) == ESP_ERR_INVALID_ARG, "forget: NUL in ssid refused");
+}
+
 static void test_forget_last_network_survives_reboot(void)
 {
     TEST_SECTION("forget the last saved network, then reboot: zero saved nets, legacy copy does not return");
@@ -1699,6 +1707,7 @@ void run_test_wifi_prov(void)
     test_interrupted_first_migration_retries_next_boot();
     test_legacy_migration_failures_never_lose_credential();
     test_forget_last_network_survives_reboot();
+    test_embedded_nul_refused();
     test_mode_and_ap_name_change_survives_reboot();
     test_apply_sta_config_dns();
     test_set_dhcp_resets_confirmation();

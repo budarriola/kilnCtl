@@ -134,6 +134,10 @@ esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *p
     if (!password || password_len > WIFI_PROV_PASSWORD_MAX_LEN) {
         return ESP_ERR_INVALID_SIZE;
     }
+    /* An embedded NUL (%00 in the form) would be stored truncated (audit L15). */
+    if (memchr(ssid, '\0', ssid_len) != NULL || memchr(password, '\0', password_len) != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -206,6 +210,9 @@ esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
 {
     if (!ssid || ssid_len == 0 || ssid_len > WIFI_PROV_SSID_MAX_LEN) {
         return ESP_ERR_INVALID_SIZE;
+    }
+    if (memchr(ssid, '\0', ssid_len) != NULL) { /* embedded NUL (audit L15) */
+        return ESP_ERR_INVALID_ARG;
     }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;

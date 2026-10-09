@@ -94,7 +94,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
     if (n < 0 || (size_t)n >= sizeof(s->json)) {
         free(s);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     o = (size_t)n;
 
@@ -115,7 +115,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
             ESP_LOGE(TAG, "setup progress JSON did not fit SETUP_PROGRESS_JSON_CAP=%d", SETUP_PROGRESS_JSON_CAP);
             free(s);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
-            return ESP_FAIL;
+            return ESP_OK;
         }
         o += (size_t)n;
     }
@@ -124,7 +124,7 @@ static esp_err_t api_setup_progress_get_handler(httpd_req_t *req)
     if (n < 0 || (size_t)n >= sizeof(s->json) - o) {
         free(s);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "internal error");
-        return ESP_FAIL;
+        return ESP_OK;
     }
     o += (size_t)n;
 

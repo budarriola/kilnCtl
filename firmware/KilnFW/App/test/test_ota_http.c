@@ -317,8 +317,9 @@ bool uart_bridge_ext_is_on_flash_worker(void) { return false; }
 // ---------------------------------------------------------------------------
 esp_err_t esp_partition_write(const esp_partition_t *partition, size_t dst_offset, const void *src, size_t size)
 { (void)partition; (void)dst_offset; (void)src; (void)size; return ESP_OK; }
+static int g_erase_range_calls = 0;
 esp_err_t esp_partition_erase_range(const esp_partition_t *partition, size_t offset, size_t size)
-{ (void)partition; (void)offset; (void)size; return ESP_OK; }
+{ (void)partition; (void)offset; (void)size; g_erase_range_calls++; return ESP_OK; }
 uint32_t esp_partition_get_main_flash_sector_size(void) { return 4096u; }
 // Referenced by net/pico_image_source.c, linked in for real (see
 // build_host_tests.ps1's cmd8) because ota_pico_do_stage() now calls
@@ -2410,6 +2411,22 @@ static void test_pico_img_stage_offset_and_crc_bookkeeping(void)
                "no per-call reset");
 }
 
+static void test_pico_img_stage_erase_deferred_to_first_chunk(void)
+{
+    TEST_SECTION("pico_img_stage -- begin does not erase; first chunk does (audit L26)");
+    pico_img_stage_ctx_t ctx;
+    char fail_reason[64] = "";
+    pico_img_stage_begin_result_t result;
+    int before = g_erase_range_calls;
+    TEST_CHECK(pico_img_stage_begin(&ctx, 6u, fail_reason, sizeof(fail_reason), &result), "setup: begin");
+    TEST_CHECK(g_erase_range_calls == before, "begin alone destroys nothing (no erase)");
+    const uint8_t chunk[3] = {1, 2, 3};
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, chunk, sizeof(chunk), fail_reason, sizeof(fail_reason)), "first chunk");
+    TEST_CHECK(g_erase_range_calls == before + 1, "first chunk erases once");
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, chunk, sizeof(chunk), fail_reason, sizeof(fail_reason)), "second chunk");
+    TEST_CHECK(g_erase_range_calls == before + 1, "second chunk does not erase again");
+}
+
 static void test_pico_img_stage_write_chunk_refuses_overrun(void)
 {
     TEST_SECTION("pico_img_stage -- write_chunk refuses writing past the staged total (D6)");
@@ -2590,6 +2607,7 @@ void run_test_ota_http(void)
     test_refusal_drain_verdict();
 
     test_pico_img_stage_offset_and_crc_bookkeeping();
+    test_pico_img_stage_erase_deferred_to_first_chunk();
     test_pico_img_stage_write_chunk_refuses_overrun();
     test_pico_img_stage_begin_refuses_oversize();
     test_ota_pico_do_stage_refuses_oversize_with_http_400();

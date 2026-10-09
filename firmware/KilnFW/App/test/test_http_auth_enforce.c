@@ -13,6 +13,7 @@
 
 #include "../drivers/http/http_auth_enforce.h"
 #include "../drivers/http/http_origin_check.h"
+#include "../drivers/http/http_num_strict.h"
 #include "../drivers/common/json_escape_ctl.h"
 #include "../drivers/common/http_form.h"
 
@@ -607,10 +608,25 @@ static size_t fake_len(void *c, const char *name) {
 static int fake_str(void *c, const char *name, char *buf, size_t cap) {
     const char *v = fake_find((const fake_hdrs_t *)c, name);
     if (!v) return -1;
+    if (!cap) return 1;
     size_t n = strlen(v);
     if (n >= cap) { memcpy(buf, v, cap - 1); buf[cap - 1] = '\0'; return 1; } /* truncated, like httpd */
     memcpy(buf, v, n + 1);
     return 0;
+}
+
+static void test_num_strict(void) {
+    TEST_SECTION("http_num_parse_ulong -- strict decimal (audit L7)");
+    unsigned long v = 99;
+    TEST_CHECK(http_num_parse_ulong("123", &v) && v == 123, "plain decimal");
+    TEST_CHECK(http_num_parse_ulong("0", &v) && v == 0, "zero");
+    TEST_CHECK(!http_num_parse_ulong("-1", &v), "leading minus refused");
+    TEST_CHECK(!http_num_parse_ulong("", &v), "empty refused");
+    TEST_CHECK(!http_num_parse_ulong("+5", &v), "leading plus refused");
+    TEST_CHECK(!http_num_parse_ulong(" 5", &v), "leading space refused");
+    TEST_CHECK(!http_num_parse_ulong("5x", &v), "trailing junk refused");
+    TEST_CHECK(!http_num_parse_ulong("99999999999999999999999", &v), "overflow refused");
+    TEST_CHECK(!http_num_parse_ulong(NULL, &v), "NULL refused");
 }
 
 static void test_origin_glue(void) {
@@ -630,6 +646,8 @@ static void test_origin_glue(void) {
     TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "Origin beats good Referer: refused");
     f.origin = longref;
     TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "overlong Origin: refused");
+    fake_hdrs_t empty_o = {"", NULL, "192.168.1.50"};
+    TEST_CHECK(http_origin_request_is_cross_origin(&empty_o, fake_len, fake_str), "present-but-empty Origin, no Referer: refused (L35)");
     fake_hdrs_t none = {NULL, NULL, "192.168.1.50"};
     TEST_CHECK(!http_origin_request_is_cross_origin(&none, fake_len, fake_str), "no provenance headers: allowed");
     fake_hdrs_t proxy = {"http://kiln.example", NULL, "10.0.0.2"};
@@ -707,6 +725,7 @@ void run_test_http_auth_enforce(void) {
     test_origin_check();
     test_host_allowlist();
     test_origin_glue();
+    test_num_strict();
     test_page_shell_allowlist();
     test_lookup_tier_real_routes();
     test_effective_tier_fail_closed_default();

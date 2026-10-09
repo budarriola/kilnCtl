@@ -138,6 +138,10 @@ static inline bool http_origin_request_is_cross_origin(void *c, http_origin_hdr_
         overlong = true;
     } else if (n > 0 && get_fn(c, "Origin", origin, sizeof(origin)) == 0) {
         o = origin;
+    } else if (n == 0 && get_fn(c, "Origin", origin, sizeof(origin)) == 0) {
+        /* A present-but-empty Origin (len 0 looks like "absent" to the length probe) is a
+         * refusal, never a fall-through to the Referer/absent allow (HTTP input audit L35). */
+        overlong = true;
     }
     if (o == NULL && !overlong) {
         n = len_fn(c, "Referer");

@@ -47,6 +47,8 @@ typedef struct {
     uint32_t crc;
     size_t   written;
     size_t   total_len;
+    size_t   erase_len; /* bytes to erase; the erase is deferred to the first write_chunk (audit L26) */
+    bool     erased;
 } pico_img_stage_ctx_t;
 
 /* Review finding D5: pico_img_stage_begin()'s distinct failure shapes, for a

@@ -1,6 +1,7 @@
 #include "../common/json_escape_ctl.h"
 #include "diagnostics_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
+#include "http_num_strict.h" // http_num_parse_ulong() -- strict decimal (audit L7)
 
 #include <math.h>
 #include <stdint.h>
@@ -548,15 +549,13 @@ static esp_err_t coredump_chunk_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "offset and len query params required");
         return ESP_FAIL;
     }
-    char *endp = NULL;
-    unsigned long offset_ul = strtoul(off_str, &endp, 10);
-    if (!endp || *endp != '\0') {
+    unsigned long offset_ul = 0;
+    if (!http_num_parse_ulong(off_str, &offset_ul)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "offset must be a decimal integer");
         return ESP_FAIL;
     }
-    endp = NULL;
-    unsigned long len_ul = strtoul(len_str, &endp, 10);
-    if (!endp || *endp != '\0' || len_ul == 0) {
+    unsigned long len_ul = 0;
+    if (!http_num_parse_ulong(len_str, &len_ul) || len_ul == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "len must be a positive decimal integer");
         return ESP_FAIL;
     }
@@ -928,9 +927,8 @@ static esp_err_t relay_cycles_restore_post_handler(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
             return ESP_OK;
         }
-        char *endp = NULL;
-        unsigned long v = strtoul(val, &endp, 10);
-        if (endp == val || *endp != '\0') {
+        unsigned long v = 0;
+        if (!http_num_parse_ulong(val, &v)) {
             char err[48];
             snprintf(err, sizeof(err), "field \"%s\" is not a valid number", field);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);

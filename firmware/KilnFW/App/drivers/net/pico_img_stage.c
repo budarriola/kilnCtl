@@ -54,18 +54,13 @@ bool pico_img_stage_begin(pico_img_stage_ctx_t *ctx, size_t content_len, char *f
         return false;
     }
 
+    /* Audit L26: do NOT erase here. A request that fails before its first body
+     * byte arrives (or is refused) would otherwise destroy the previously staged
+     * image for nothing. The erase, and the staged-image manifest clear, happen
+     * on the first pico_img_stage_write_chunk(). */
     uint32_t sector = esp_partition_get_main_flash_sector_size();
-    size_t erase_len = ((content_len + sector - 1u) / sector) * sector;
-    esp_err_t erc = esp_partition_erase_range(part, 0, erase_len);
-    if (erc != ESP_OK) {
-        set_fail(fail_reason, fail_reason_len, "pico_img erase failed: %s", esp_err_to_name(erc));
-        ESP_LOGE(TAG, "pico_img erase failed: %s", esp_err_to_name(erc));
-        if (out_result != NULL) {
-            *out_result = PICO_IMG_STAGE_BEGIN_ERASE_FAILED;
-        }
-        return false;
-    }
-
+    ctx->erase_len = ((content_len + sector - 1u) / sector) * sector;
+    ctx->erased = false;
     ctx->part = part;
     ctx->crc = OTA_IMAGE_CRC32_INIT;
     ctx->written = 0;
@@ -93,6 +88,20 @@ bool pico_img_stage_write_chunk(pico_img_stage_ctx_t *ctx, const uint8_t *data, 
         ESP_LOGE(TAG, "pico_img_stage_write_chunk: overrun -- %u + %u bytes exceeds staged total of %u",
                  (unsigned)ctx->written, (unsigned)len, (unsigned)ctx->total_len);
         return false;
+    }
+    if (!ctx->erased) {
+        /* The old image is about to be destroyed: its manifest must not outlive it. */
+        if (!pico_image_manifest_clear()) {
+            ESP_LOGW(TAG, "pico_image_manifest_clear failed before erase -- stale manifest may remain "
+                          "(pico_image_source re-checks the CRC)");
+        }
+        esp_err_t erc = esp_partition_erase_range(ctx->part, 0, ctx->erase_len);
+        if (erc != ESP_OK) {
+            set_fail(fail_reason, fail_reason_len, "pico_img erase failed: %s", esp_err_to_name(erc));
+            ESP_LOGE(TAG, "pico_img erase failed: %s", esp_err_to_name(erc));
+            return false;
+        }
+        ctx->erased = true;
     }
     esp_err_t werr = esp_partition_write(ctx->part, ctx->written, data, len);
     if (werr != ESP_OK) {

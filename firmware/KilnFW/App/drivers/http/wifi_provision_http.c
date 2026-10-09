@@ -586,6 +586,10 @@ static esp_err_t forget_post_handler(httpd_req_t *req)
     esp_err_t err = wifi_prov_forget_network(ssid, (size_t)ssid_len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_forget_network failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_INVALID_ARG) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid contains a NUL byte");
+            return ESP_OK;
+        }
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not forget network");
         return ESP_OK;
     }
@@ -812,7 +816,9 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
     esp_err_t err = wifi_prov_add_network(ssid, (size_t)ssid_len, password, (size_t)password_len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_add_network failed: %s", esp_err_to_name(err));
-        if (err == ESP_ERR_NO_MEM) {
+        if (err == ESP_ERR_INVALID_ARG) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid or password contains a NUL byte");
+        } else if (err == ESP_ERR_NO_MEM) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "saved network list is full");
         } else {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not save credentials");
