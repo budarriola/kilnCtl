@@ -178,6 +178,24 @@ class Dash05(unittest.TestCase):
         self.assertEqual(run("WEB-DASH-05", c).verdict, Verdict.INCONCLUSIVE)
         self.assertEqual(c["_posted"], [])
 
+    def _with_autotune(self, at):
+        c, _ = self._fake()
+        base = c["http_get_json"]
+        c["http_get_json"] = lambda p: at if p == "/api/autotune" else base(p)
+        return c
+
+    def test_autotune_done_and_aborted_pass_gate(self):
+        for s in ("done", "aborted"):
+            c = self._with_autotune((200, {"state": s}))
+            self.assertEqual(run("WEB-DASH-05", c).verdict, Verdict.PASS, s)
+
+    def test_autotune_running_unknown_missing_refuse(self):
+        for at in ((200, {"state": "stepping"}), (200, {"state": "relay_cycling"}), (200, {"state": "unknown"}),
+                   (200, {}), (500, None)):
+            c = self._with_autotune(at)
+            self.assertEqual(run("WEB-DASH-05", c).verdict, Verdict.INCONCLUSIVE, at)
+            self.assertEqual(c["_posted"], [], at)
+
     def test_busy_executor_writes_nothing(self):
         c, _ = self._fake()
         base = c["http_get_json"]

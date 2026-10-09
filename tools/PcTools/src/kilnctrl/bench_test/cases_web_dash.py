@@ -23,6 +23,8 @@ from .board_lock import READ_ONLY_SUITES
 from .registry import CaseResult, Verdict, get_case
 
 BENCH_PROFILE_SLOT_ID = 7
+#: done/aborted are terminal (engine not running) and persist after a tune.
+_AUTOTUNE_NOT_RUNNING = ("idle", "done", "aborted")
 _EXEC_STATES = ("idle", "running", "paused", "done", "faulted")
 _FEAS_VALUES = ("ok", "too_fast", "unreachable", "unknown")
 _LAST_RUN_PHASES = ("none", "running", "paused", "done", "halted", "faulted")
@@ -71,8 +73,9 @@ def _mutating_gate(ctx: dict) -> Optional[str]:
     if st != 200 or not isinstance(body, dict) or body.get("state") != "idle":
         return f"executor not idle (status={st}, state={(body or {}).get('state') if isinstance(body, dict) else None})"
     st, body = W._get_json(ctx, "/api/autotune")
-    if st != 200 or not isinstance(body, dict) or body.get("state") != "idle":
-        return f"autotune not idle (status={st}, state={(body or {}).get('state') if isinstance(body, dict) else None})"
+    at_state = body.get("state") if isinstance(body, dict) else None
+    if st != 200 or at_state not in _AUTOTUNE_NOT_RUNNING:
+        return f"autotune running or unknown (status={st}, state={at_state})"
     return None
 
 
