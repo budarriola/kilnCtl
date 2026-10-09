@@ -194,7 +194,21 @@ void kiln_cfg_swap_set_link(SafetyLinkClass *link_or_null);
  * heaters are alarmed-and-disabled rather than merely refused, so a caller
  * building an operator message can distinguish "your swap was refused,
  * nothing changed" from "your swap partly landed and the board is now
- * alarmed -- see the divergence banner." */
+ * alarmed -- see the divergence banner."
+ *
+ * One more false outcome (M1, docs/audits/UNCHECKED_PERSIST_RESULT_
+ * AUDIT_2026-10-09.md): both halves landed and verified and the ceiling
+ * check passed, but persisting active_id failed. RAM active_id already names
+ * target_id; the pending record is left at ESP_DONE so the next boot
+ * retries the save. `reason_out` then starts with
+ * KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX and `out_diverged` stays
+ * false, so a caller can tell this apart from "nothing changed".
+ *
+ * Every journal marker save (STAGED, PICO_OPEN, PICO_DONE, ESP_DONE) is
+ * checked and read back (M2/L6): a failed save refuses before the next step
+ * (PICO_OPEN: before anything but the raise-first ceiling reaches the Pico)
+ * or rolls back, so the persisted marker never lags behind the two sides. */
+#define KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX "Kiln config applied on"
 bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *reason_out, size_t reason_cap,
                          bool *out_diverged);
 
@@ -248,6 +262,9 @@ typedef enum {
     KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED,      /* the rollback-to-R attempt itself failed */
     KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, /* ESP_DONE row: could not re-confirm both sides match */
     KILN_CFG_SWAP_BOOT_FAULT_UNRECOGNISED_MARKER,  /* pending record's marker byte is not a known value */
+    KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,    /* ESP_DONE row confirmed both sides, but the active_id save
+                                                    * failed; record kept for a retry next boot. Display-only:
+                                                    * both processors agree, heat is not gated by this. */
 } kiln_cfg_swap_boot_fault_kind_t;
 
 typedef struct {

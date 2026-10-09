@@ -1224,6 +1224,151 @@ static void test_boot_recover_latches_unreadable_when_malloc_fails(void)
                "fault kind names the unreadable/could-not-recover case");
 }
 
+// -- docs/audits/UNCHECKED_PERSIST_RESULT_AUDIT_2026-10-09.md M1/M2/L6 --
+// Write-class call indices on the swap record in one apply (each
+// save_pending() is set_blob + commit): STAGED 0/1, PICO_OPEN 2/3,
+// PICO_DONE 4/5, ESP_DONE 6/7, final clear 8/9.
+
+static uint32_t pico_param_bits(const kiln_pkg_safety_t *pkg, uint16_t id)
+{
+    for (uint16_t i = 0; i < pkg->count; i++) {
+        if (pkg->entries[i].param_id == id) {
+            return pkg->entries[i].value_bits;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+static void check_pico_open_save_failure(unsigned skip, const char *which)
+{
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    fake_kv_script_write_status_after(skip, HAL_IO);
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    printf("   (%s) reason: %s\n", which, reason);
+    TEST_CHECK(!ok, "swap refused when the PICO_OPEN marker cannot be persisted");
+    TEST_CHECK(!diverged, "refused before the Pico package push -- not a divergence");
+    TEST_CHECK(s_pico_committed.count == 0, "the Pico package was NEVER pushed (abort precedes step 6)");
+    TEST_CHECK(s_pico_ceiling == 1000.0f, "the raise-first ceiling was put back to R's (1000)");
+    TEST_CHECK(s_zones_import_call_count == 0, "ESP never touched");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id unchanged");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE,
+               "record cleared -- nothing left for boot recovery to act on");
+}
+
+static void test_pico_open_save_failure_aborts_before_pico_push(void)
+{
+    TEST_SECTION("M2: PICO_OPEN set_blob fails -- swap refused before the Pico is told anything");
+    check_pico_open_save_failure(2, "set_blob");
+    TEST_SECTION("M2: PICO_OPEN commit fails -- swap refused before the Pico is told anything");
+    check_pico_open_save_failure(3, "commit");
+}
+
+static void test_pico_done_save_failure_rolls_back(void)
+{
+    TEST_SECTION("M2: PICO_DONE save fails -- rolled back while the ESP is untouched");
+    reset_state();
+    fake_kv_script_write_status_after(4, HAL_IO);
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused when the PICO_DONE marker cannot be persisted");
+    TEST_CHECK(!diverged, "a clean rollback is not a divergence");
+    TEST_CHECK(s_zones_import_call_count == 0, "ESP half never committed");
+    TEST_CHECK(pico_param_bits(&s_pico_committed, 0x0201u) == 7u, "Pico re-pushed back to R (0x0201 == 7)");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id unchanged");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "record cleared after rollback");
+}
+
+static void test_esp_done_save_failure_rolls_back(void)
+{
+    TEST_SECTION("M2: ESP_DONE save fails -- both halves rolled back, never reported as success");
+    reset_state();
+    fake_kv_script_write_status_after(6, HAL_IO);
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused when the ESP_DONE marker cannot be persisted");
+    TEST_CHECK(!diverged, "a clean rollback is not a divergence");
+    TEST_CHECK(s_zones_import_call_count == 2, "ESP committed then restored (forward import + rollback import)");
+    TEST_CHECK(s_live_blob[0] == 0xCD && s_live_blob[31] == 0xCD, "ESP live blob back on R (0xCD)");
+    TEST_CHECK(pico_param_bits(&s_pico_committed, 0x0201u) == 7u, "Pico back on R (0x0201 == 7)");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active_id unchanged");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "record cleared after rollback");
+}
+
+static void test_active_id_save_failure_keeps_record_and_boot_retries(void)
+{
+    TEST_SECTION("M1: active-id save fails after a swap -- not a clean success, record kept for boot retry");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    s_set_active_id_should_fail = true;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "apply does NOT report a clean success when the active id did not persist");
+    TEST_CHECK(!diverged, "both processors are on the target -- not a divergence");
+    TEST_CHECK(strncmp(reason, KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX,
+                       strlen(KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX)) == 0,
+               "reason carries the applied-but-active-id-unsaved prefix the page keys on");
+    int32_t tgt = -1;
+    TEST_CHECK(kiln_cfg_swap_get_marker(&tgt, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE && tgt == 7,
+               "record left at ESP_DONE for target 7 so boot recovery retries");
+    TEST_CHECK(memcmp(s_live_blob, s_slot_blob, s_slot_blob_len) == 0, "ESP stays on the target (no rollback)");
+
+    TEST_SECTION("M1: boot recovery with the active-id save still failing -- logs, latches, keeps the record");
+    kiln_cfg_swap_boot_recover();
+    TEST_CHECK(kiln_cfg_swap_get_marker(&tgt, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE && tgt == 7,
+               "record still ESP_DONE -- retried again on the next boot");
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault) && fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,
+               "boot fault latched with kind ACTIVE_ID_UNSAVED");
+    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active id still unset");
+
+    TEST_SECTION("M1: next boot, active-id save works -- swap finished, record cleared");
+    s_set_active_id_should_fail = false;
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    kiln_cfg_swap_boot_recover();
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "record cleared on the retry");
+    TEST_CHECK(s_active_id == 7, "active id now names the target");
+    TEST_CHECK(!kiln_cfg_swap_get_boot_fault(NULL), "no boot fault on the successful retry");
+}
+
+static void test_save_pending_read_back_catches_silent_write(void)
+{
+    TEST_SECTION("L6: save_pending() fails when the write reports success but nothing landed");
+    reset_state();
+    kiln_cfg_swap_pending_t a;
+    memset(&a, 0, sizeof(a));
+    a.marker = KILN_CFG_SWAP_MARKER_STAGED;
+    a.target_id = 5;
+    a.crc32 = pending_crc(&a);
+    TEST_CHECK(save_pending(&a), "honest write verifies");
+    kiln_cfg_swap_pending_t b = a;
+    b.marker = KILN_CFG_SWAP_MARKER_PICO_OPEN;
+    b.target_id = 9;
+    b.crc32 = pending_crc(&b);
+    fake_kv_script_silent_set_noops(1);
+    TEST_CHECK(!save_pending(&b), "silently dropped write is reported as a failure");
+    int32_t tgt = -1;
+    TEST_CHECK(kiln_cfg_swap_get_marker(&tgt, NULL) == KILN_CFG_SWAP_MARKER_STAGED && tgt == 5,
+               "the record on flash is still the earlier one");
+
+    TEST_SECTION("L6: a silently dropped STAGED write refuses the swap before anything is touched");
+    reset_state();
+    fake_kv_script_silent_set_noops(1);
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused");
+    TEST_CHECK(s_pico_ceiling == 1000.0f && s_pico_committed.count == 0, "Pico untouched");
+    TEST_CHECK(s_zones_import_call_count == 0, "ESP untouched");
+}
+
 int main(void)
 {
     test_clean_swap_applies_both_halves();
@@ -1252,6 +1397,11 @@ int main(void)
     test_apply_refuses_when_scratch_malloc_fails();
     test_finish_esp_done_latches_fault_when_malloc_fails();
     test_boot_recover_latches_unreadable_when_malloc_fails();
+    test_pico_open_save_failure_aborts_before_pico_push();
+    test_pico_done_save_failure_rolls_back();
+    test_esp_done_save_failure_rolls_back();
+    test_active_id_save_failure_keeps_record_and_boot_retries();
+    test_save_pending_read_back_catches_silent_write();
 
     if (g_test_failures == 0) {
         printf("ALL TESTS PASSED\n");

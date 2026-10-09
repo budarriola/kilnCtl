@@ -357,9 +357,14 @@ function pollApplyStatus(cfg) {
           // flag alone -- only kiln_cfg_swap.c's ceiling-latch branch
           // disables heat; its four rollback-failure branches set the same
           // flag and disable nothing. The reason text above says which.
+          // A reason starting "Kiln config applied on" (kiln_cfg_swap.h's
+          // KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX) means the config
+          // DID land; only saving the active kiln failed. Never append
+          // "Nothing was changed." to that one.
+          var landed = /^Kiln config applied on/.test(st.reason || '');
           kcSetMsg((st.reason || 'Apply failed.') +
                    (st.diverged ? ' The safety processor is now out of sync; see the reason above.'
-                                : ' Nothing was changed.'), true);
+                                : (landed ? '' : ' Nothing was changed.')), true);
           refreshDivergence();
           loadKilnConfigs();
           resolve();
