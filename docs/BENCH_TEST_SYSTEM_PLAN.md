@@ -240,7 +240,7 @@ WEB-DASH-01 render (`profileSelect`, `runBtn`, zone cards) · WEB-DASH-02 profil
 | LCD-07 | home rail | post-rework only | rail region present (card colour) with 4 relay pills; the pill for zone 0's relay ≈ `ACCENT_4` during HP-01 and ≈ `NEUTRAL` idle | 30 s |
 | LCD-08 | config hub | tap the topbar gear (tap name `settings`; the Menu button was removed 2026-08-20) | page == `config`; five tiles by name (Profiles, Temperature, Network / Wi-Fi, Touch Calibration if present, Diagnostics) | 15 s |
 | LCD-09 | profiles picker | tap Profiles | page == `profiles` [pre: hub with 4 tiles]; rows located by y-position (below the list area, not a fixed `profile_row_*` name -- see round-4 note), ≤ 4, favorites first with a star glyph; FAILs (not INCONCLUSIVE) if no rows show but `profiles_count` > 0; paging indicator and New icon in the topbar; a row tap opens `profile_detail` | 30 s |
-| LCD-10 | profile detail → start/stop confirm | from LCD-09 on the hidden bench slot | Start opens `ui_confirm`; cancel returns; confirm starts (= HP-01 via LCD); Stop from home requires confirm | 1 min (heat via HP-01) |
+| LCD-10 | profile detail → start/stop confirm | from LCD-09 on a transient free USER slot the case saves itself (never slot 7) | Start opens `ui_confirm`; cancel returns; confirm starts (= HP-01 via LCD); Stop from home requires confirm | 1 min (real seconds-long firing; needs `allow_heat` AND `lcd_edit_heat`) |
 | LCD-11 | profile delete | post-rework | per-row Delete arms (first tap changes colour to `ACCENT_5`), second tap within 5 s deletes a harness-created copy; a single tap left 6 s disarms | 30 s |
 | LCD-12 | profile builder | New → zones step → segment step → review → save | `ui_num_pad` accepts digits; "Segment 1 of 1" label; review page saves to a free slot (`GET /api/profiles` shows it); deleted afterwards | 2 min |
 | LCD-13 | segments page | from detail | 4 rows/page paging works (a builtin with > 4 segments) | 20 s |
@@ -336,7 +336,7 @@ case in the same run.
 | AT autotune | 5 | 2 | 0 |
 | HP heating profiles | 8 | 6 | 0 |
 | WEB | 120 (DASH 13, PROF 11, ZONE 14, SAF 4, STIM 2, COMM 7, RDY 4, WIZ 11, DIAG 11, OTA 8, WIFI 6, SEC 6, BAK 4, KCFG 5, SET 4, DISP 4, LOG 3, X 3) | 0 own heat (several observe HP/AT) | WIFI-06 operator |
-| LCD | 26 | 4 (LCD-22, LCD-23, LCD-24, LCD-25) | LCD-20 only under OT-E11 |
+| LCD | 26 | 5 (LCD-10, LCD-22, LCD-23, LCD-24, LCD-25) | LCD-20 only under OT-E11 |
 | SP | 11 | 1 (SP-09) | SP-08/09 operator; SP-10 INCONCLUSIVE by design |
 | TP | 4 | 0 | TP-M01 opt-in via env credentials |
 | AX | 7 | 3 | AX-T02 operator; all writes opt-in via `KILNCTL_AUX_BENCH_CONFIRM=1` |

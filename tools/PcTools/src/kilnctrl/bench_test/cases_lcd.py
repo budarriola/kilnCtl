@@ -6023,7 +6023,8 @@ def observe_recovery_idle(ctx: dict) -> CaseResult:
     """LCD-20: runs only inside OT-E11, while the recovery image is up. The
     recovery image's screen_idle recovery flag means the panel must not blank:
     wait past the default blank timeout, sample the panel against the bezel.
-    Lit -> PASS; dark -> FAIL; no capture/sample -> INCONCLUSIVE."""
+    Lit -> INCONCLUSIVE by design (the recovery image never blanks); dark -> FAIL;
+    no capture/sample -> INCONCLUSIVE."""
     sleep = ctx.get("_sleep", time.sleep)
     sleep(ctx.get("lcd20_wait_s", _LCD20_WAIT_S))
     path = _capture(ctx, "lcd20_recovery_idle.jpg")
@@ -6040,7 +6041,13 @@ def observe_recovery_idle(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no panel/bezel sample", observed=obs, evidence=[path])
     if lcd_sampler.is_off(sample.region, sample.bezel):
         return CaseResult(Verdict.FAIL, reason="panel blanked in the recovery image", observed=obs, evidence=[path])
-    return CaseResult(Verdict.PASS, reason="panel stayed lit in the recovery image", observed=obs, evidence=[path])
+    # INCONCLUSIVE by design: the standalone recovery image never blanks
+    # (recovery_lcd.c), so a lit panel proves nothing about screen_idle's
+    # recovery flag, which belongs to the APP's boot_guard RECOVERY MODE
+    # (screen_idle.c). Dark would still be a real defect (FAIL above).
+    return CaseResult(Verdict.INCONCLUSIVE, observed=obs, evidence=[path],
+                      reason="panel stayed lit in the standalone recovery image, which never blanks by design; "
+                             "this does not exercise screen_idle's recovery flag (app boot_guard RECOVERY MODE)")
 
 
 def _case_lcd20(ctx: dict) -> CaseResult:
@@ -6079,12 +6086,14 @@ def _lcdwr_env(ctx: dict) -> dict:
             "sleep": ctx.get("_sleep", time.sleep), "observed": {}}
 
 
-def _lcdwr_free_slot(srv) -> "tuple[Optional[int], set]":
+def _lcdwr_free_slot(srv) -> "tuple[Optional[int], Optional[set]]":
+    """(slot, used_ids). used_ids is None when the listing could not be read:
+    "unknown" is never the same as "empty" (review CRITICAL-1)."""
     from . import cases_heat as _heat  # local import: avoids a module-load cycle
     try:
         used = {p.id for p in srv._profiles.list_all()}
     except Exception:  # noqa: BLE001
-        return None, set()
+        return None, None
     for sid in _LCDWR_SLOT_RANGE:
         if sid not in used and sid != _heat.BENCH_PROFILE_SLOT_ID:
             return sid, used
@@ -6097,10 +6106,14 @@ def _lcdwr_save_tmp(env: dict, name: str, target_c: float) -> "tuple[Optional[in
     from .. import devices
     srv = env["srv"]
     slot, used = _lcdwr_free_slot(srv)
+    if used is None:
+        return None, CaseResult(Verdict.INCONCLUSIVE,
+                                reason="could not read the profile list; cannot attribute what this run creates; nothing written"), None
     if slot is None:
         return None, CaseResult(Verdict.INCONCLUSIVE, reason="no free user profile slot; nothing written"), used
     seg = [devices.ProfileSegment(target_c=target_c, ramp_c_per_hr=100.0, dwell_min=1)]
     env["created"] = slot  # may exist from here on: the finally deletes it
+    env["created_name"] = name  # teardown deletes the slot only if it still holds this name
     try:
         res = srv._profiles.save(slot, name, 1, seg)
     except Exception as exc:  # noqa: BLE001
@@ -6111,23 +6124,39 @@ def _lcdwr_save_tmp(env: dict, name: str, target_c: float) -> "tuple[Optional[in
     return slot, None, used
 
 
-def _lcdwr_delete_new(env: dict, ids_before: set) -> dict:
-    """Delete every user slot that appeared since `ids_before` (the run's own
-    creations only) and report whether the list is back to what it was."""
+def _lcdwr_delete_new(env: dict, ids_before: "Optional[set]") -> dict:
+    """Delete ONLY the slot this run created (env["created"]), and only after a
+    fresh listing shows that slot holds the name the case saved (or, for a
+    UI-created slot with no known name, that it was absent from ids_before).
+    Never deletes a diff of two listings, never slot BENCH_PROFILE_SLOT_ID, and
+    deletes nothing when ids_before is unknown. Reports whether the list is
+    back to what it was (None when that cannot be shown)."""
+    from . import cases_heat as _heat  # local import: avoids a module-load cycle
     srv = env["srv"]
     out: Dict[str, Any] = {}
-    extra = set()
-    if env.get("created") is not None and env["created"] not in ids_before:
-        extra.add(env["created"])
-    try:
-        extra |= {p.id for p in srv._profiles.list_all()} - ids_before
-    except Exception:  # noqa: BLE001
-        out["list_error"] = True
-    for sid in sorted(extra):
+    created = env.get("created")
+    want_name = env.get("created_name")
+    if ids_before is None:
+        out["skipped"] = "ids_before unknown: nothing deleted"
+        out["restored"] = None
+        return out
+    if created is not None and created != _heat.BENCH_PROFILE_SLOT_ID and created not in ids_before:
         try:
-            srv._profiles.delete(sid)
-        except Exception as exc:  # noqa: BLE001
-            out[f"delete_{sid}"] = type(exc).__name__
+            now_list = srv._profiles.list_all()
+        except Exception:  # noqa: BLE001
+            now_list = None
+            out["list_error"] = True
+        if now_list is not None:
+            entry = next((p for p in now_list if p.id == created), None)
+            if entry is None:
+                out["created_absent"] = True
+            elif want_name is not None and getattr(entry, "name", None) != want_name:
+                out["delete_skipped_name_mismatch"] = getattr(entry, "name", None)
+            else:
+                try:
+                    srv._profiles.delete(created)
+                except Exception as exc:  # noqa: BLE001
+                    out[f"delete_{created}"] = type(exc).__name__
     try:
         after = {p.id for p in srv._profiles.list_all()}
         out["restored"] = after == ids_before
@@ -6164,7 +6193,7 @@ def _lcdwr_exec_state(srv) -> Optional[str]:
     return ex["state_name"] if ex else None
 
 
-def _lcdwr_finish(env: dict, result: Optional[CaseResult], ids_before: set) -> None:
+def _lcdwr_finish(env: dict, result: Optional[CaseResult], ids_before: "Optional[set]") -> None:
     """Common teardown tail: dismiss any leftover popup, go home, delete only
     this run's own slots; a restore that did not verify turns a PASS into a
     FAIL (never leaves a PASS standing over a dirty board)."""
@@ -6186,6 +6215,10 @@ def _lcdwr_finish(env: dict, result: Optional[CaseResult], ids_before: set) -> N
         if cleanup.get("restored") is not True and result.verdict == Verdict.PASS:
             result.verdict = Verdict.FAIL
             result.reason = "teardown could not verify the profile list was restored"
+    if cleanup.get("restored") is not True and ids_before is not None:
+        # An unrestored (or unverifiable) profile list taints the run even when
+        # the case itself is INCONCLUSIVE or raised.
+        env["ctx"]["_tainted"] = True
 
 
 # -- LCD-10 ----------------------------------------------------------------
@@ -6213,6 +6246,11 @@ def _case_lcd10(ctx: dict) -> CaseResult:
         return gate
     if ctx.get("allow_heat") is not True:
         return CaseResult(Verdict.NOT_RUN, reason="allow_heat=False: LCD-10 starts a real (seconds-long, low) firing")
+    if ctx.get("lcd22_allow_heat") is not True:
+        return CaseResult(
+            Verdict.NOT_RUN,
+            reason="lcd_edit_heat=False: LCD-10 starts a real low-temperature firing "
+                   "and needs the separate lcd_edit_heat=True opt-in")
     host = ctx.get("host")
     if not host:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx; no action taken")
@@ -6229,6 +6267,10 @@ def _case_lcd10(ctx: dict) -> CaseResult:
     if not temps:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no valid thermo reading; no action taken")
     target = min(temps.values()) + 15.0
+    if target > _LCD22_MAX_TARGET_C:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"ambient+15 = {target:.1f} C exceeds the {_LCD22_MAX_TARGET_C:.0f} C case ceiling; no action taken")
     ceil_ok, ceil_why = _heat._check_zone_ceilings(ctx, 1, target)
     if not ceil_ok:
         return CaseResult(Verdict.INCONCLUSIVE, reason=f"{ceil_why}; no action taken")
@@ -6236,7 +6278,8 @@ def _case_lcd10(ctx: dict) -> CaseResult:
 
     name = "LCD10_TMP"
     result: Optional[CaseResult] = None
-    ids_before: set = set()
+    ids_before: Optional[set] = None
+    slot: Optional[int] = None
     started = False
     try:
         slot, fail, ids_before = _lcdwr_save_tmp(env, name, target)
@@ -6283,6 +6326,20 @@ def _case_lcd10(ctx: dict) -> CaseResult:
             sleep(0.5)
         start_ran = _lcdwr_exec_state(srv) == "running"
         observed["running_seen"] = start_ran
+        if start_ran:
+            ex = _lcd22_exec_dict(srv)
+            observed["running_profile_id"] = ex.get("profile_id") if ex else None
+            if ex is None or ex.get("profile_id") != slot:
+                # A different profile is firing: stop at once (the finally also
+                # stops it) and never report PASS.
+                try:
+                    srv._profiles.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                result = CaseResult(
+                    Verdict.FAIL, observed=dict(observed),
+                    reason=f"executor started profile {observed['running_profile_id']!r}, not this case's slot {slot}")
+                return result
         stop_dialog = stop_cancel_kept = stopped = False
         if start_ran:
             observed["navigate_home"] = _navigate_home(ui)
@@ -6306,27 +6363,44 @@ def _case_lcd10(ctx: dict) -> CaseResult:
         result = _judge_lcd10(True, True, start_ran, stop_dialog, stop_cancel_kept, stopped)
         return result
     finally:
-        # Heat is stopped FIRST, unconditionally once a Start could have landed.
+        # Heat is stopped FIRST, and again on every poll while the executor is in
+        # ANY non-terminal state (running, paused, unreadable). Then K4 and every
+        # zone relay are bounded-polled to off.
         stop_err = None
-        if started or _lcdwr_exec_state(srv) == "running":
-            try:
-                srv._profiles.stop()
-            except Exception as exc:  # noqa: BLE001
-                stop_err = type(exc).__name__
+        verified = False
+        final_state = None
+        energized: Optional[bool] = None
+        zone_relays: "Optional[dict]" = None
         deadline = now() + 15.0
-        while _lcdwr_exec_state(srv) not in ("idle", "done", "faulted") and now() < deadline:
+        while True:
+            final_state = _lcdwr_exec_state(srv)
+            if final_state not in ("idle", "done", "faulted"):
+                try:
+                    srv._profiles.stop()
+                except Exception as exc:  # noqa: BLE001
+                    stop_err = type(exc).__name__
+            else:
+                energized = _heat._read_energized(ctx)
+                zone_relays = _lcd22_zone_relays(ctx, _heat)
+                if energized is False and zone_relays is not None and not any(zone_relays.values()):
+                    verified = True
+                    break
+            if now() >= deadline:
+                break
             sleep(0.5)
-        final_state = _lcdwr_exec_state(srv)
-        energized = _heat._read_energized(ctx)
         observed["final_exec_state"] = final_state
         observed["final_energized"] = energized
+        observed["final_zone_relays"] = zone_relays
         if stop_err:
             observed["stop_error"] = stop_err
         _lcdwr_finish(env, result, ids_before)
-        if result is not None and (final_state not in ("idle", "done", "faulted") or energized is not False):
+        if not verified:
+            ctx["_tainted"] = True
+            if result is None:
+                result = CaseResult(Verdict.FAIL, observed=dict(observed), reason="")
             result.verdict = Verdict.FAIL
-            result.reason = (f"cleanup not verified: executor={final_state!r}, energized={energized!r}; "
-                             "the firing may still be running")
+            result.reason = (f"cleanup not verified: executor={final_state!r}, energized={energized!r}, "
+                             f"zone_relays={zone_relays!r}; the firing may still be running")
 
 
 # -- LCD-11 ----------------------------------------------------------------
@@ -6339,7 +6413,7 @@ def _judge_lcd11(armed_label: bool, first_tap_kept: bool, stale_kept: bool, seco
     if not armed_label:
         return CaseResult(Verdict.FAIL, reason="first Delete tap did not relabel the button 'Confirm?'", observed=obs)
     if not stale_kept:
-        return CaseResult(Verdict.FAIL, reason="a tap after the 5 s window lapsed deleted the profile", observed=obs)
+        return CaseResult(Verdict.FAIL, reason="a tap after the 5 s window lapsed deleted the profile or left the button on 'Confirm?'", observed=obs)
     if not second_tap_deleted:
         return CaseResult(Verdict.FAIL, reason="the second tap within 5 s did not delete the profile", observed=obs)
     return CaseResult(Verdict.PASS, observed=obs)
@@ -6363,7 +6437,7 @@ def _case_lcd11(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     name = "LCD11_TMP"
     result: Optional[CaseResult] = None
-    ids_before: set = set()
+    ids_before: Optional[set] = None
     try:
         slot, fail, ids_before = _lcdwr_save_tmp(env, name, 50.0)
         if fail is not None:
@@ -6377,34 +6451,63 @@ def _case_lcd11(ctx: dict) -> CaseResult:
         if row is None:
             result = CaseResult(Verdict.INCONCLUSIVE, reason=f"row {name!r} not found on the picker")
             return result
-        tap, _b = _list_tap_targets_resolving_busy(ui)
-        btn = _lcdwr_delete_btn(tap.get("targets", []), float(row["cy"]))
-        if btn is None:
-            result = CaseResult(Verdict.INCONCLUSIVE, reason="no Delete button on the transient row")
-            return result
-
         def exists() -> Optional[bool]:
             try:
                 return slot in {p.id for p in srv._profiles.list_all()}
             except Exception:  # noqa: BLE001
                 return None
 
-        def armed() -> bool:
+        def resolve(labels=("Delete", "Confirm?")) -> "Optional[dict]":
+            """Re-read the list and return the button on THIS case's own row
+            (found by name, never by a remembered coordinate), else None."""
             t2, _ = _list_tap_targets_resolving_busy(ui)
-            return _lcdwr_delete_btn(t2.get("targets", []), float(row["cy"]), labels=("Confirm?",)) is not None
+            tg = t2.get("targets", [])
+            r2 = next((r for r in _profile_rows_by_position(tg) if r.get("name") == name), None)
+            if r2 is None:
+                return None
+            return _lcdwr_delete_btn(tg, float(r2["cy"]), labels=labels)
 
-        _lcd13_tap(touch, btn)  # arm
-        armed_label = armed()
-        first_kept = exists() is True
-        sleep(_LCDWR_STALE_WAIT_S)  # window lapses; the stale tap must only disarm
-        _lcd13_tap(touch, btn)
-        stale_kept = exists() is True
-        sleep(_LCDWR_DELETE_DEBOUNCE_S)
-        _lcd13_tap(touch, btn)  # arm again
-        sleep(_LCDWR_DELETE_DEBOUNCE_S)
-        _lcd13_tap(touch, btn)  # confirm within the window
-        sleep(1.0)
-        deleted = exists() is False
+        abort = {"why": None}
+
+        def tap_own() -> bool:
+            """One tap on the case's own Delete/Confirm? button, only while the
+            profile is still observed present and its row/button resolves."""
+            if exists() is not True:
+                abort["why"] = abort["why"] or "profile no longer observed present"
+                return False
+            b = resolve()
+            if b is None:
+                abort["why"] = "own row/Delete button not resolvable"
+                return False
+            _lcd13_tap(touch, b)
+            return True
+
+        if resolve(labels=("Delete",)) is None:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason="no Delete button on the transient row")
+            return result
+        armed_label = first_kept = stale_kept = deleted = False
+        if tap_own():  # arm
+            armed_label = resolve(labels=("Confirm?",)) is not None
+            first_kept = exists() is True
+            if first_kept:
+                sleep(_LCDWR_STALE_WAIT_S)  # window lapses; the stale tap must only disarm
+                if tap_own():
+                    # The stale tap must only disarm: profile still there AND the
+                    # button reverted to "Delete" (not left on "Confirm?").
+                    stale_kept = exists() is True and resolve(labels=("Delete",)) is not None
+                    if stale_kept:
+                        sleep(_LCDWR_DELETE_DEBOUNCE_S)
+                        if tap_own():  # arm again
+                            sleep(_LCDWR_DELETE_DEBOUNCE_S)
+                            if tap_own():  # confirm within the window
+                                sleep(1.0)
+                                deleted = exists() is False
+        observed["tap_abort"] = abort["why"]
+        if abort["why"] is not None and exists() is True:
+            # Could not resolve our own row while it still exists: no verdict.
+            result = CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                                reason=f"stopped tapping: {abort['why']}")
+            return result
         result = _judge_lcd11(armed_label, first_kept, stale_kept, deleted)
         return result
     finally:
@@ -6499,13 +6602,18 @@ def _case_lcd12(ctx: dict) -> CaseResult:
         names, trunc = _lcd25_wait_names(
             env, lambda n: any(_LCDWR_FREE_CELL_RE.match(str(x)) for x in n), _LCDWR_NAMES_WAIT_S)
         free = None
+        from . import cases_heat as _heat_mod  # local import: avoids a module-load cycle
         if names is not None and not trunc:
             for x in sorted(str(x) for x in names):
                 m = _LCDWR_FREE_CELL_RE.match(x)
-                if m and int(m.group(1)) != 7:
+                if m and int(m.group(1)) != _heat_mod.BENCH_PROFILE_SLOT_ID:
                     free = x
                     break
         observed["slot_names"] = sorted(str(x) for x in (names or []))
+        if names is None or trunc:
+            result = CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                                reason="slot name list unreadable or truncated; no slot chosen, nothing saved")
+            return result
         if free is None:
             result = _judge_lcd12(True, True, True, None, False, False)
             return result
@@ -6598,8 +6706,9 @@ def _case_lcd07(ctx: dict) -> CaseResult:
         return _judge_lcd07(page, [None] * 4, False)
     try:
         running = srv._profiles.get_exec_status().state_name == "running"
-    except Exception:  # noqa: BLE001
-        running = False
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(Verdict.INCONCLUSIVE,
+                          reason=f"executor state unreadable ({type(exc).__name__}); cannot tell idle from running")
     image_path = _capture(ctx, "lcd07_rail.jpg")
     if not image_path:
         return CaseResult(Verdict.INCONCLUSIVE, reason="camera capture failed")
@@ -6618,7 +6727,14 @@ def _case_lcd07(ctx: dict) -> CaseResult:
             states.append("neutral")
         else:
             states.append("other")
-    result = _judge_lcd07(page, states, running)
+    # Pills for aux (spare-relay) outputs may be on while the executor is idle;
+    # ctx["lcd07_aux_pills"] lists their 0-based indices and they are excluded
+    # from the all-off check.
+    aux = set(ctx.get("lcd07_aux_pills") or ())
+    judged_states = [("neutral" if (i in aux and st == "on") else st) for i, st in enumerate(states)]
+    result = _judge_lcd07(page, judged_states, running)
+    if aux:
+        result.observed = dict(result.observed or {}, aux_pills_excluded=sorted(aux), raw_pill_states=list(states))
     result.evidence = [image_path]
     return _downgrade_if_corners_stale(ctx, result, image_path)
 
@@ -6635,7 +6751,12 @@ def _judge_lcd15(page, has_manage: bool, manage_page, saved_ssids, targets_names
         return CaseResult(Verdict.FAIL, reason=f"Manage networks led to {manage_page!r}, not 'network_manage'", observed=obs)
     if not saved_ssids:
         return CaseResult(Verdict.INCONCLUSIVE, reason="board reports no saved networks to look for", observed=obs)
-    if not (set(saved_ssids) & set(targets_names)):
+    # The firmware labels rows "<ssid>  (connected)" for the active network
+    # (ui_page_network_manage.c): match on the SSID prefix, not exact equality.
+    def _norm(n):
+        n = str(n).rstrip()
+        return n[:-len("(connected)")].rstrip() if n.endswith("(connected)") else n
+    if not (set(saved_ssids) & {_norm(n) for n in targets_names}):
         return CaseResult(Verdict.FAIL, reason="no saved SSID appears on the network_manage page", observed=obs)
     return CaseResult(Verdict.PASS, observed=obs)
 
@@ -6711,24 +6832,48 @@ def _case_lcd17(ctx: dict) -> CaseResult:
         _navigate_home(ui)
 
 
-def _judge_lcd18(trip_active: bool, warn_is_error, warn_is_warn) -> CaseResult:
-    obs = {"trip_active": trip_active, "warning_matches_accent5": warn_is_error, "warning_matches_accent1": warn_is_warn}
-    if not trip_active:
-        return CaseResult(Verdict.NOT_RUN, reason="no safety trip latched (needs OT-B01's trip window)", observed=obs)
-    if warn_is_error is None:
+def _judge_lcd18(tier, warn_is_error, warn_is_warn) -> CaseResult:
+    """tier: the board's relay_life_tier ("none" | "warn" | "error" | None).
+    The topbar warning is driven ONLY by relay_cycles_max_budget_tier()
+    (ui_page_home_refresh.c), never by a safety trip."""
+    obs = {"relay_life_tier": tier, "warning_matches_accent5": warn_is_error, "warning_matches_accent1": warn_is_warn}
+    if tier not in ("warn", "error"):
+        return CaseResult(Verdict.NOT_RUN, reason=f"relay_life_tier is {tier!r}: no relay at >=80% of rated life, so no "
+                                                  "topbar warning is expected to be shown", observed=obs)
+    if warn_is_error is None or warn_is_warn is None:
         return CaseResult(Verdict.INCONCLUSIVE, reason="topbar warning region could not be sampled", observed=obs)
-    if warn_is_error:
+    want_err = tier == "error"
+    if (warn_is_error if want_err else warn_is_warn):
         return CaseResult(Verdict.PASS, observed=obs)
-    if warn_is_warn:
-        return CaseResult(Verdict.FAIL, reason="topbar warning shows the WARN tier (ACCENT_1) during a trip", observed=obs)
-    return CaseResult(Verdict.INCONCLUSIVE, reason="no warning indicator visible; the indicator is driven by relay-life tier (ui_page_home_refresh.c), not by trips, so absence is not a FAIL", observed=obs)
+    if warn_is_error or warn_is_warn:
+        return CaseResult(Verdict.FAIL, reason=f"topbar warning shows the wrong tier for relay_life_tier={tier!r}", observed=obs)
+    return CaseResult(Verdict.INCONCLUSIVE, reason="no warning indicator visible at the sampled slot (geometry or camera); not judged as FAIL", observed=obs)
+
+
+def _lcd18_relay_life_tier(ctx: dict) -> Optional[str]:
+    from . import cases_heat as _heat  # local import: avoids a module-load cycle
+    host = ctx.get("host")
+    if not host:
+        return None
+    get_json = ctx.get("_http_get_json", _heat._http_get_json)
+    try:
+        status, body = get_json(host, "/api/status")
+    except Exception:  # noqa: BLE001
+        return None
+    if status != 200 or not isinstance(body, dict):
+        return None
+    t = body.get("relay_life_tier")
+    return t if isinstance(t, str) else None
 
 
 def _case_lcd18(ctx: dict) -> CaseResult:
+    tier = _lcd18_relay_life_tier(ctx)
+    if tier is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="relay_life_tier unreadable from /api/status; nothing judged")
+    if tier not in ("warn", "error"):
+        return _judge_lcd18(tier, None, None)
+    _wake_and_home(ctx)
     srv = _srv(ctx)
-    diag = srv._safety.get_diag()
-    if not (getattr(diag, "trip_reason", 0) or 0):
-        return _judge_lcd18(False, None, None)
     ui = srv._ui_test
     if ui.get_current_page() != "home":
         return CaseResult(Verdict.INCONCLUSIVE, reason="not on home; topbar region not located")
@@ -6741,7 +6886,7 @@ def _case_lcd18(ctx: dict) -> CaseResult:
     anchor = dict(gear, cx=gear["cx"] + _LCD18_WARN_DX)
     is_err = _sample_button_bool(ctx, image_path, anchor, _ACCENT_5_RGB)
     is_warn = _sample_button_bool(ctx, image_path, anchor, _ACCENT_1_RGB)
-    result = _judge_lcd18(True, is_err, is_warn)
+    result = _judge_lcd18(tier, is_err, is_warn)
     result.evidence = [image_path]
     return _downgrade_if_corners_stale(ctx, result, image_path)
 

@@ -16,15 +16,17 @@ from kilnctrl.bench_test.registry import Verdict  # noqa: E402
 class _Profiles:
     def __init__(self, ids=(0,)):
         self.ids = set(ids)
+        self.names = {}
         self.calls = []
         self.state = "idle"
 
     def list_all(self):
-        return [SimpleNamespace(id=i, name=f"p{i}") for i in sorted(self.ids)]
+        return [SimpleNamespace(id=i, name=self.names.get(i, f"p{i}")) for i in sorted(self.ids)]
 
     def save(self, sid, name, mask, segs):
         self.calls.append(("save", sid))
         self.ids.add(sid)
+        self.names[sid] = name
         return SimpleNamespace(ok=True, error=None)
 
     def delete(self, sid):
@@ -71,9 +73,20 @@ class Gate(unittest.TestCase):
     def test_lcd10_not_run_without_allow_heat(self):
         p = _Profiles()
         for heat in (None, False, 1):
-            r = R.get_case("LCD-10").judge(_ctx(_Srv(p), allow_heat=heat))
+            r = R.get_case("LCD-10").judge(_ctx(_Srv(p), allow_heat=heat, lcd22_allow_heat=True))
             self.assertEqual(r.verdict, Verdict.NOT_RUN)
         self.assertEqual(p.calls, [])
+
+    def test_lcd10_not_run_without_second_opt_in(self):
+        p = _Profiles()
+        for second in (None, False, 1):
+            r = R.get_case("LCD-10").judge(_ctx(_Srv(p), allow_heat=True, lcd22_allow_heat=second))
+            self.assertEqual(r.verdict, Verdict.NOT_RUN)
+            self.assertIn("lcd_edit_heat", r.reason)
+        self.assertEqual(p.calls, [])
+
+    def test_lcd10_registry_heat_flag(self):
+        self.assertTrue(R.get_case("LCD-10").heat)
 
 
 class Verdicts(unittest.TestCase):
@@ -111,6 +124,8 @@ class Lcd11Flow(unittest.TestCase):
             sid = max(p.ids - {0}, default=None)
             if single_tap_deletes and sid is not None:
                 p.ids.discard(sid)
+            elif len(taps) == 2:
+                state["armed"] = False
             elif len(taps) in (1, 3):
                 state["armed"] = True
             elif len(taps) == 4 and double_tap_deletes and sid is not None:
@@ -123,6 +138,7 @@ class Lcd11Flow(unittest.TestCase):
         with mock.patch.object(L, "_wake_and_home"), \
                 mock.patch.object(L, "_lcdwr_open_picker", return_value=None), \
                 mock.patch.object(L, "_lcdwr_find_row", return_value=row), \
+                mock.patch.object(L, "_profile_rows_by_position", return_value=[row]), \
                 mock.patch.object(L, "_list_tap_targets_resolving_busy", side_effect=targets), \
                 mock.patch.object(L, "_lcd13_tap", side_effect=tap), \
                 mock.patch.object(L, "_dismiss_lcd19_overlay", return_value={}), \
@@ -150,6 +166,69 @@ class Lcd11Flow(unittest.TestCase):
         p = _Profiles({0, 1, 2, 3, 4, 5, 6})
         slot, _ = L._lcdwr_free_slot(_Srv(p))
         self.assertEqual(slot, 8)
+
+
+class Critical1(unittest.TestCase):
+    def test_list_all_raises_first_writes_and_deletes_nothing(self):
+        class P(_Profiles):
+            n = 0
+
+            def list_all(self):
+                P.n += 1
+                if P.n == 1:
+                    raise OSError("uart timeout")
+                return super().list_all()
+        p = P({0, 3, 7})
+        with mock.patch.object(L, "_wake_and_home"), \
+                mock.patch.object(L, "_dismiss_lcd19_overlay", return_value={}), \
+                mock.patch.object(L, "_navigate_home", return_value={}):
+            r = L._case_lcd11(_ctx(_Srv(p)))
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual([c for c in p.calls if c[0] in ("save", "delete")], [])
+        self.assertEqual(p.ids, {0, 3, 7})
+
+    def test_teardown_skips_foreign_name_and_slot7(self):
+        p = _Profiles({0, 1, 7})
+        p.names[1] = "someone_else"
+        L._lcdwr_delete_new({"srv": _Srv(p), "created": 1, "created_name": "LCD11_TMP"}, {0, 7})
+        self.assertEqual([c for c in p.calls if c[0] == "delete"], [])
+        L._lcdwr_delete_new({"srv": _Srv(p), "created": 7, "created_name": None}, {0})
+        self.assertEqual([c for c in p.calls if c[0] == "delete"], [])
+
+    def test_unknown_before_deletes_nothing(self):
+        p = _Profiles({0, 1})
+        L._lcdwr_delete_new({"srv": _Srv(p), "created": 1, "created_name": "p1"}, None)
+        self.assertEqual(p.calls, [])
+
+
+class High1(unittest.TestCase):
+    def test_no_tap_after_profile_gone_or_row_moved(self):
+        p = _Profiles({0})
+        srv = _Srv(p)
+        taps = []
+        row = {"name": "LCD11_TMP", "cy": 100.0, "cx": 10}
+        btn = {"name": "Delete", "cx": 300, "cy": 100.0}
+
+        def tap(touch, t):
+            taps.append(t)
+            for i in set(p.ids) - {0}:
+                p.ids.discard(i)  # first tap deletes it
+
+        def rows(tg):
+            return [row] if (p.ids - {0}) else [{"name": "USER_X", "cy": 100.0, "cx": 10}]
+        with mock.patch.object(L, "_wake_and_home"), \
+                mock.patch.object(L, "_lcdwr_open_picker", return_value=None), \
+                mock.patch.object(L, "_lcdwr_find_row", return_value=row), \
+                mock.patch.object(L, "_profile_rows_by_position", side_effect=rows), \
+                mock.patch.object(L, "_list_tap_targets_resolving_busy",
+                                  side_effect=lambda ui: ({"targets": [btn]}, False)), \
+                mock.patch.object(L, "_lcd13_tap", side_effect=tap), \
+                mock.patch.object(L, "_dismiss_lcd19_overlay", return_value={}), \
+                mock.patch.object(L, "_navigate_home", return_value={}):
+            r = L._case_lcd11(_ctx(srv))
+        self.assertEqual(len(taps), 1)
+        self.assertNotEqual(r.verdict, Verdict.PASS)
+        self.assertEqual(p.ids, {0})
 
 
 if __name__ == "__main__":

@@ -49,6 +49,10 @@ class Lcd07(unittest.TestCase):
 
 
 class Lcd15(unittest.TestCase):
+    def test_connected_label_matches(self):
+        r = C._judge_lcd15("network", True, "network_manage", {"A"}, ["A  (connected)", "back"], {})
+        self.assertEqual(r.verdict, V.PASS)
+
     def test_pass(self):
         r = C._judge_lcd15("network", True, "network_manage", {"A"}, ["A", "back"], {})
         self.assertEqual(r.verdict, V.PASS)
@@ -94,24 +98,31 @@ class Lcd17(unittest.TestCase):
 
 
 class Lcd18(unittest.TestCase):
-    def test_no_trip_not_run(self):
-        self.assertEqual(C._judge_lcd18(False, None, None).verdict, V.NOT_RUN)
+    def test_no_tier_not_run(self):
+        self.assertEqual(C._judge_lcd18("none", None, None).verdict, V.NOT_RUN)
 
     def test_error_tier_pass(self):
-        self.assertEqual(C._judge_lcd18(True, True, False).verdict, V.PASS)
+        self.assertEqual(C._judge_lcd18("error", True, False).verdict, V.PASS)
 
-    def test_warn_tier_fails(self):
-        self.assertEqual(C._judge_lcd18(True, False, True).verdict, V.FAIL)
+    def test_warn_tier_pass(self):
+        self.assertEqual(C._judge_lcd18("warn", False, True).verdict, V.PASS)
+
+    def test_wrong_tier_fails(self):
+        self.assertEqual(C._judge_lcd18("error", False, True).verdict, V.FAIL)
 
     def test_absent_inconclusive(self):
-        self.assertEqual(C._judge_lcd18(True, False, False).verdict, V.INCONCLUSIVE)
+        self.assertEqual(C._judge_lcd18("warn", False, False).verdict, V.INCONCLUSIVE)
 
     def test_unsampled_inconclusive(self):
-        self.assertEqual(C._judge_lcd18(True, None, None).verdict, V.INCONCLUSIVE)
+        self.assertEqual(C._judge_lcd18("error", None, None).verdict, V.INCONCLUSIVE)
 
-    def test_case_no_trip(self):
-        srv = NS(_safety=NS(get_diag=lambda: NS(trip_reason=0)))
-        self.assertEqual(C._case_lcd18({"srv": srv}).verdict, V.NOT_RUN)
+    def test_case_tier_none(self):
+        ctx = {"host": "h", "_http_get_json": lambda h, p: (200, {"relay_life_tier": "none"})}
+        self.assertEqual(C._case_lcd18(ctx).verdict, V.NOT_RUN)
+
+    def test_case_tier_unreadable(self):
+        ctx = {"host": "h", "_http_get_json": lambda h, p: (500, None)}
+        self.assertEqual(C._case_lcd18(ctx).verdict, V.INCONCLUSIVE)
 
 
 class Registered(unittest.TestCase):

@@ -43,7 +43,7 @@ class _Part:
 def _ctx(**over):
     calls = []
     c = {
-        "host": "h", "srv": _Srv(), "ota_image_path": "/img.bin", "_isfile_fn": lambda p: True,
+        "host": "h", "suite": "ota", "_safety_status_fn": lambda: "link_up trip_reason=0", "srv": _Srv(), "ota_image_path": "/img.bin", "_isfile_fn": lambda p: True,
         "_interlock_fn": lambda: {"ok": True}, "_sleep": lambda s: None, "_sleep_fn": lambda s: None,
         "partition_http_client": _Part("app"),
         "_recovery_enter_fn": lambda: calls.append("enter") or "ok - recovery boot accepted",
@@ -79,7 +79,7 @@ class Ote11Test(unittest.TestCase):
         self.assertEqual(c["_calls"], [])
 
     def test_enter_refused_no_exit(self):
-        c = _ctx(_recovery_enter_fn=lambda: "error: 409")
+        c = _ctx(_recovery_enter_fn=lambda: "error: 409", _recovery_status_fn=lambda: "application: x")
         r = C._case_ote11(c)
         self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
         self.assertNotIn("exit", c["_calls"])
@@ -101,6 +101,54 @@ class Ote11Test(unittest.TestCase):
         c = _ctx(_recovery_status_fn=lambda: "error: 404", ote11_recovery_wait_s=4.0)
         self.assertEqual(C._case_ote11(c).verdict, Verdict.FAIL)
         self.assertIn("exit", c["_calls"])
+
+    def test_no_write_gate_skips(self):
+        c = _ctx(); del c["suite"]
+        self.assertEqual(C._case_ote11(c).verdict, Verdict.SKIP)
+        self.assertEqual(c["_calls"], [])
+
+    def test_unreadable_status_after_exit_taints(self):
+        c = _ctx(_recovery_push_fn=lambda: "FAILED: x")
+        n = {"i": 0}
+
+        def st():
+            n["i"] += 1
+            if n["i"] == 1:
+                return "recovery image (host=h): x"
+            raise OSError("down")
+        c["_recovery_status_fn"] = st
+        r = C._case_ote11(c)
+        self.assertIsNone(r.observed["left_in_recovery"])
+        self.assertTrue(c["_tainted"])
+
+    def test_exit_failure_taints(self):
+        c = _ctx(_recovery_push_fn=lambda: "FAILED: x", _recovery_exit_fn=lambda: "FAILED: nope",
+                 _recovery_status_fn=lambda: "application")
+        C._case_ote11(c)
+        self.assertTrue(c["_tainted"])
+
+    def test_enter_transport_error_still_exits_when_in_recovery(self):
+        c = _ctx(_recovery_enter_fn=lambda: "error: timed out")
+        r = C._case_ote11(c)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("exit", c["_calls"])
+
+    def test_enter_transport_error_app_answers_no_exit(self):
+        c = _ctx(_recovery_enter_fn=lambda: "error: timed out", _recovery_status_fn=lambda: "application")
+        r = C._case_ote11(c)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertNotIn("exit", c["_calls"])
+
+    def test_latched_trip_reported_not_cleared(self):
+        c = _ctx(_safety_status_fn=lambda: "trip_reason=7")
+        r = C._case_ote11(c)
+        self.assertEqual(r.verdict, Verdict.PASS)
+        self.assertIn("LATCHED", r.reason)
+        self.assertTrue(c["_tainted"])
+
+    def test_missing_recovery_host_skips(self):
+        c = _ctx(); del c["_recovery_status_fn"]
+        self.assertEqual(C._case_ote11(c).verdict, Verdict.SKIP)
 
     def test_lcd20_not_run_without_ote11(self):
         self.assertEqual(L._case_lcd20({}).verdict, Verdict.NOT_RUN)

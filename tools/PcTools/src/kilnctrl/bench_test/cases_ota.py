@@ -2491,6 +2491,39 @@ def _ote11_in_recovery(text: object) -> bool:
     return isinstance(text, str) and text.lstrip().startswith("recovery image")
 
 
+def _ote11_probe_recovery(status_fn) -> Optional[bool]:
+    """True = answers as the recovery image, False = answers as something else,
+    None = unreadable (never treated as "not in recovery")."""
+    try:
+        text = status_fn()
+    except Exception:
+        return None
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if text.lstrip().lower().startswith("error"):
+        return None  # an unreachable host is "unknown", never "not in recovery"
+    return _ote11_in_recovery(text)
+
+
+def _ote11_trip_latched(text: object) -> Optional[bool]:
+    """Best-effort read of safety_get_status text: True when a trip is latched,
+    False when it reads clear, None when it cannot be told. Read-only: this
+    judge never clears a trip (the recovery dwell latches S6b, which only the
+    coordinator may clear)."""
+    import re
+    if not isinstance(text, str) or not text.strip():
+        return None
+    t = text.lower()
+    m = re.search(r"trip_reason\D{0,4}(\d+)", t)
+    if m:
+        return int(m.group(1)) != 0
+    if "not tripped" in t or "no trip" in t:
+        return False
+    if "tripped" in t or "safety_trip_" in t:
+        return True
+    return None
+
+
 def _ote11_wait_recovery(ctx: dict, status_fn, timeout_s: float) -> bool:
     import time
     sleep = ctx.get("_sleep") or time.sleep
@@ -2513,6 +2546,10 @@ def _case_ote11(ctx: dict) -> CaseResult:
     confirm RUNNING == app. Teardown attempts recovery_exit whenever the board
     is not confirmed back in the application and reports if it is still stuck
     in recovery (observed["left_in_recovery"], run taint)."""
+    from . import board_lock
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     host = ctx.get("host")
     idle, reason = _is_idle(ctx)
     if not idle:
@@ -2526,26 +2563,59 @@ def _case_ote11(ctx: dict) -> CaseResult:
     if not ok:
         return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to enter recovery: {ireason}")
 
+    # Two different hosts: the application's LAN address (recovery_enter, the
+    # RUNNING-partition check) and the recovery image's own SoftAP address
+    # (every recovery_* call). The recovery image serves only its SoftAP, so
+    # the app host cannot reach it.
+    app_host = ctx.get("app_host") or host
+    recovery_host = ctx.get("recovery_host")
+    injected = ctx.get("_recovery_status_fn") is not None
+    if not recovery_host and not injected:
+        return CaseResult(Verdict.SKIP, reason="recovery_host not provided for OT-E11 (the recovery image's "
+                                               "SoftAP address; the app host cannot reach it)")
     enter_fn = ctx.get("_recovery_enter_fn") or (
-        lambda: _ote11_tool("mcp_server_ota", "recovery_enter")(host=host, confirm=True))
+        lambda: _ote11_tool("mcp_server_ota", "recovery_enter")(host=app_host, confirm=True))
     status_fn = ctx.get("_recovery_status_fn") or (
-        lambda: _ote11_tool("mcp_server_recovery", "recovery_status")(host=host))
+        lambda: _ote11_tool("mcp_server_recovery", "recovery_status")(host=recovery_host))
     push_fn = ctx.get("_recovery_push_fn") or (
         lambda: _ote11_tool("mcp_server_recovery", "recovery_push_esp_image")(
-            image_path=image_path, confirm=True, host=host))
+            image_path=image_path, confirm=True, host=recovery_host))
     exit_fn = ctx.get("_recovery_exit_fn") or (
-        lambda: _ote11_tool("mcp_server_recovery", "recovery_exit")(confirm=True, host=host))
+        lambda: _ote11_tool("mcp_server_recovery", "recovery_exit")(confirm=True, host=recovery_host))
+
+    safety_fn = ctx.get("_safety_status_fn") or (
+        lambda: _ote11_tool("mcp_server_safety", "safety_get_status")())
+
+    def _taint(why: str) -> None:
+        ctx["_tainted"] = True
+        ctx.setdefault("_taint", []).append(why)
 
     observed: dict = {}
     entered = False
     pushed_ok = False
+    final: Optional[CaseResult] = None
     try:
         try:
             entered_text = enter_fn()
         except Exception as exc:
-            return CaseResult(Verdict.FAIL, reason=f"recovery_enter raised {type(exc).__name__}: {exc}")
+            # The POST may have been accepted before the transport failed.
+            entered = True
+            return CaseResult(Verdict.FAIL, reason=f"recovery_enter raised {type(exc).__name__}: {exc}; "
+                              "teardown will probe and exit recovery if the board is there")
         observed["recovery_enter"] = str(entered_text)[:300]
         if not _tool_ok(entered_text):
+            low = str(entered_text).lstrip().lower()
+            if low.startswith("error") and "refused" not in low:
+                # Transport-level error: the board may have accepted the request
+                # and rebooted. Probe before claiming it is unchanged.
+                probe = _ote11_probe_recovery(status_fn)
+                observed["probe_after_enter_error"] = probe
+                if probe is not False:
+                    entered = True  # in recovery or unknown: teardown tries recovery_exit
+                    return CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                                      reason="recovery_enter reported an error but the board "
+                                             f"{'answers as recovery' if probe else 'status is unreadable'}; "
+                                             "teardown attempts recovery_exit")
             return CaseResult(Verdict.INCONCLUSIVE, reason="recovery_enter refused or failed; board unchanged",
                               observed=observed)
         entered = True
@@ -2569,34 +2639,50 @@ def _case_ote11(ctx: dict) -> CaseResult:
             return CaseResult(Verdict.FAIL, reason="recovery_push_esp_image raised", observed=observed)
         observed["recovery_push"] = str(push_text)[:400]
         pushed_ok = _tool_ok(push_text)
-        running = _settled_running(ctx, host)
+        running = _settled_running(ctx, app_host)
         observed["running_after"] = running
         if not pushed_ok:
             return CaseResult(Verdict.FAIL, reason="recovery_push_esp_image did not report ok", observed=observed)
         if running != "app":
             return CaseResult(Verdict.FAIL, reason=f"after the push RUNNING is {running!r}, expected 'app'",
                               observed=observed)
-        safety_fn = ctx.get("_safety_status_fn")
-        if safety_fn is not None:
-            try:
-                observed["safety_after"] = str(safety_fn())[:300]
-            except Exception as exc:
-                observed["safety_after"] = f"unreadable: {type(exc).__name__}"
-        return CaseResult(Verdict.PASS, reason="recovery image accepted the app image; RUNNING == app",
-                          observed=observed)
+        reason = "recovery image accepted the app image; RUNNING == app"
+        if str(push_text).lstrip().lower().startswith("ok-with-warning"):
+            reason += f"; push reported a WARNING: {str(push_text)[:300]}"
+            observed["push_warning"] = True
+        final = CaseResult(Verdict.PASS, reason=reason, observed=observed)
+        return final
     finally:
         if entered and not (pushed_ok and observed.get("running_after") == "app"):
+            exit_ok = False
             try:
-                observed["teardown_exit"] = str(exit_fn())[:300]
+                exit_text = exit_fn()
+                observed["teardown_exit"] = str(exit_text)[:300]
+                exit_ok = _tool_ok(exit_text)
             except Exception as exc:
                 observed["teardown_exit"] = f"raised {type(exc).__name__}: {exc}"
+            still = _ote11_probe_recovery(status_fn)
+            observed["left_in_recovery"] = still  # True / False / None (unreadable)
+            if still is not False:
+                _taint("OT-E11: board left in the recovery image"
+                       if still else "OT-E11: board state unreadable after recovery_exit")
+            elif not exit_ok:
+                _taint("OT-E11: recovery_exit did not report ok")
+        if entered:
             try:
-                still = _ote11_in_recovery(status_fn())
-            except Exception:
-                still = False
-            observed["left_in_recovery"] = still
-            if still:
-                ctx.setdefault("_taint", []).append("OT-E11: board left in the recovery image")
+                st_text = safety_fn()
+                observed["safety_after"] = str(st_text)[:300]
+                latched = _ote11_trip_latched(st_text)
+            except Exception as exc:
+                observed["safety_after"] = f"unreadable: {type(exc).__name__}"
+                latched = None
+            observed["safety_trip_latched"] = latched
+            if latched:
+                # Report only; never cleared here (S6b after a recovery dwell is
+                # the coordinator's call).
+                _taint("OT-E11: a safety trip is latched after the recovery dwell (not cleared)")
+                if final is not None:
+                    final.reason = (final.reason or "") + "; safety trip LATCHED after the recovery dwell (not cleared)"
 
 
 _CASE_FUNCS = {
