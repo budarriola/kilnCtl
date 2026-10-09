@@ -376,6 +376,7 @@ class RunnerLifecycleTest(unittest.TestCase):
         self.ctx["teardown_idle_poll_s"] = 0
         after = BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
         self.assertIn("not confirmed idle", after["teardown_executor"])
+        self.assertTrue(self.ctx["_tainted"])
 
     def test_teardown_hook_error_reported(self):
         def boom(ctx):

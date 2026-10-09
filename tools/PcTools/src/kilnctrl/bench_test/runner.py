@@ -379,6 +379,7 @@ class BenchTestRunner:
                     (ctx.get("sleep_fn") or time.sleep)(float(ctx.get("teardown_idle_poll_s", 0.5)))
                 else:
                     board_after["teardown_executor"] = "executor not confirmed idle after stop"
+                    ctx["_tainted"] = True
             # Suite-registered restore hooks (e.g. AX relay-4 aux entry) run even
             # when the run aborted between the mutating case and its restore case.
             for hook in list(ctx.get("teardown_hooks") or []):

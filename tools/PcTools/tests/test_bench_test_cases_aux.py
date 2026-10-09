@@ -50,6 +50,7 @@ class FakeSrv:
         self.refuse_r1 = True
         self.trip_reason = 0
         self.delete_fails = False
+        self.slot_names = {}
 
     @property
     def r4(self):
@@ -133,6 +134,11 @@ class FakeSrv:
         self.calls.append(("resume",))
         self.exec_state = "running"
         return "ok"
+
+    def profiles_get(self, pid):
+        if pid in self.saved or (pid == 7 and self.preexisting_slot):
+            return f"#{pid} {self.slot_names.get(pid, 'BENCH_AUX_RULE')!r} zone_mask=0x1"
+        return f"no such profile #{pid}"
 
     def profiles_delete(self, pid):
         self.calls.append(("delete", pid))
@@ -608,6 +614,45 @@ class Finding8TeardownTest(unittest.TestCase):
         srv = FakeSrv()
         C._teardown(_ctx(srv), 7)
         self.assertNotIn(("stop",), srv.calls)
+
+
+class TeardownListTest(unittest.TestCase):
+    def test_r01_prunes_deleted_ids_so_hook_is_clean(self):
+        srv = FakeSrv()
+        srv.saved[7] = {}
+        ctx = _ctx(srv, _aux_profile_ids=[7], _aux_orig={"enabled_mask": 0})
+        C._restore = lambda c, _o=C._restore: []
+        try:
+            C._case_ax_r01(ctx)
+        finally:
+            C._restore = _ORIG_RESTORE
+        self.assertEqual(ctx["_aux_profile_ids"], [])
+        C.aux_teardown_hook(ctx)
+        self.assertEqual(srv.calls.count(("delete", 7)), 1)
+        self.assertFalse(ctx.get("_tainted"))
+
+    def test_hook_collects_errors_and_continues(self):
+        srv = FakeSrv()
+        srv.saved.update({1: {}, 2: {}})
+        srv.delete_fails = True
+        ctx = _ctx(srv, _aux_profile_ids=[1, 2])
+        with self.assertRaises(RuntimeError) as cm:
+            C.aux_teardown_hook(ctx)
+        self.assertIn("profiles_delete(1)", str(cm.exception))
+        self.assertIn("profiles_delete(2)", str(cm.exception))
+        self.assertTrue(ctx["_tainted"])
+
+    def test_hook_does_not_delete_foreign_slot(self):
+        srv = FakeSrv()
+        srv.saved[3] = {}
+        srv.slot_names[3] = "USER_FIRING"
+        ctx = _ctx(srv, _aux_profile_ids=[3])
+        with self.assertRaises(RuntimeError):
+            C.aux_teardown_hook(ctx)
+        self.assertNotIn(("delete", 3), srv.calls)
+
+
+_ORIG_RESTORE = C._restore
 
 
 if __name__ == "__main__":

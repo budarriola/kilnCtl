@@ -349,17 +349,39 @@ def _restore(ctx: dict) -> List[str]:
     return problems
 
 
+def _delete_bench_slot(ctx: dict, pid: int) -> Optional[str]:
+    """Delete slot ``pid`` only if it still holds BENCH_AUX_RULE; always drop it from the tracked list."""
+    srv = _srv(ctx)
+    ctx["_aux_profile_ids"] = [p for p in ctx.get("_aux_profile_ids", []) if p != pid]
+    try:
+        info = srv.profiles_get(pid)
+    except Exception as exc:  # noqa: BLE001
+        return f"profiles_get({pid}): {exc}"
+    if not isinstance(info, str) or info.lstrip().lower().startswith(("error", "refused")):
+        return f"profiles_get({pid}): {str(info)[:80]}"
+    if info.lstrip().lower().startswith("no such"):
+        return None  # already gone
+    if BENCH_PROFILE_NAME not in info:
+        return f"slot {pid} no longer holds {BENCH_PROFILE_NAME}; not deleted"
+    out = srv.profiles_delete(pid)
+    if isinstance(out, str) and out.startswith(("error", "refused")):
+        return f"profiles_delete({pid}): {out[:80]}"
+    return None
+
+
 def aux_teardown_hook(ctx: dict) -> None:
     """Runner teardown: restore relay 4 if AX-C01 mutated it and AX-R01 never ran/finished."""
     if ctx.get("_aux_dirty") and _restore(ctx):
         ctx["_tainted"] = True
     # Saved BENCH_AUX_RULE slots must not outlive an aborted run (later runs would skip at _slot_exists).
+    errors = []
     for pid in list(ctx.get("_aux_profile_ids", [])):
-        out = _srv(ctx).profiles_delete(pid)
-        if isinstance(out, str) and out.startswith(("error", "refused")):
-            ctx["_tainted"] = True
-            raise RuntimeError(f"profiles_delete({pid}): {out[:80]}")
-        ctx["_aux_profile_ids"] = [p for p in ctx.get("_aux_profile_ids", []) if p != pid]
+        err = _delete_bench_slot(ctx, pid)
+        if err:
+            errors.append(err)
+    if errors:
+        ctx["_tainted"] = True
+        raise RuntimeError("; ".join(errors))
 
 
 def _case_ax_c01(ctx: dict) -> CaseResult:
@@ -411,7 +433,7 @@ def _case_ax_c02(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.FAIL, reason=f"firmware answered {status} (ok={fw_ok}, detail={detail[:80]!r}) to aux on a "
                           "zone-owned relay, expected 409 'claimed by a zone relay_mask'", observed=obs)
     if after.get("enabled_mask") != before.get("enabled_mask"):
-        return CaseResult(Verdict.FAIL, reason="enabled_mask changed despite firmware 400", observed=obs)
+        return CaseResult(Verdict.FAIL, reason="enabled_mask changed despite firmware 409", observed=obs)
     if pre.verdict != Verdict.PASS:
         return CaseResult(Verdict.FAIL, reason=f"MCP precheck sub-check: {pre.reason}", observed=obs)
     return CaseResult(Verdict.PASS, observed=obs)
@@ -568,9 +590,9 @@ def _case_ax_r01(ctx: dict) -> CaseResult:
     srv = _srv(ctx)
     problems = []
     for pid in list(ctx.get("_aux_profile_ids", [])):
-        out = srv.profiles_delete(pid)
-        if isinstance(out, str) and out.startswith(("error", "refused")):
-            problems.append(f"profiles_delete({pid}): {out[:80]}")
+        err = _delete_bench_slot(ctx, pid)
+        if err:
+            problems.append(err)
     problems += _restore(ctx)
     if problems:
         ctx["_tainted"] = True
