@@ -19,7 +19,7 @@ summary of what the named audit recorded. Read the audit for the full procedure 
 
 Pass 09-18 also ran mechanical screens A to D over the whole population then in the repo (no failure path, skip-instead-of-fail, wrapper does not invoke its script, wired only by a comment). Only its findings are recorded per row; a clean screen is not a negative test.
 
-Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `check_01_saftyfw_pushed_build.ps1` build `origin/main` itself, so a local mutation cannot reach them (see 09-18).
+Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_build.ps1` (since driven through an `insteadOf` scratch remote, see its row) and `check_01_saftyfw_pushed_build.ps1` build `origin/main` itself, so a local mutation cannot reach them (see 09-18).
 
 ## Counts
 
@@ -27,8 +27,8 @@ Gate rows: 186.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 170 |
-| PARTIAL | 2 |
+| NEGATIVE-TESTED | 172 |
+| PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |
 | NOT AUDITED (pass 12 pending) | 0 |
@@ -47,8 +47,9 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_00_kilnfw_host_tests.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy aggregator; runs the host tests individually audited elsewhere | see audit |
 | `firmware/KilnFW/App/test/check_00_kilnfw_recovery_target_build.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy target build; compile failure is the check | see audit |
 | `firmware/KilnFW/App/test/check_00_kilnfw_target_build.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy target build; compile failure is the check | see audit |
-| `firmware/KilnFW/App/test/check_01_kilnfw_pushed_build.ps1` | PARTIAL | 09-18 | cannot be driven locally (builds origin/main in a throwaway worktree); 09-16e saw it genuinely FAIL on a real -Werror=format-truncation defect on origin/main | FAIL path propagated incidentally; no deliberate mutation. Re-examined 2026-10-09: still not completable without a target build -- it runs `idf.py build` on a fresh origin/main worktree (needs the ESP-IDF toolchain and submodules; a synthetic fixture would bypass the build, i.e. the whole check), so no honest local mutation exists. Missing: a deliberate break pushed to origin/main (or a stubbed build step) with the FAIL propagation observed |
-| `firmware/KilnFW/App/test/check_all_task_stack_budgets.ps1` | PARTIAL | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | real ELFs from existing checkbuilds; check-input mutation via its own -ForceCeiling zone_sweep=1000 (no source mutation) | RED on the real ELFs (bx_flash_worker 3808 B > 3792 B ceiling, a genuine finding); -ForceCeiling adds zone_sweep to the failing set. No source mutation of a measured task was run. Re-examined 2026-10-09: still PARTIAL -- a source mutation changes the measured stack only through a rebuilt KilnCtrl.elf (Xtensa toolchain/target build, forbidden here), and no Xtensa objdump or ELF is available in this worktree for a synthetic fixture. Missing: one injected-local mutation of a measured task plus forced full rebuild, as done for the dedicated per-task checks |
+| `firmware/KilnFW/App/test/check_01_kilnfw_pushed_build.ps1` | NEGATIVE-TESTED | 2026-10-09 (this file) | driven locally by pointing `origin` at a scratch bare repo via env-only `GIT_CONFIG_COUNT/KEY_0/VALUE_0` `url.<bare>.insteadOf https://github.com/budarriola/kilnCtl.git` (no repo config touched) whose `main` was origin/dev 6076535a plus a commit prepending `#error "NEGTEST deliberate compile break"` to `firmware/KilnFW/App/drivers/bridge/uart_bridge_ext.c`; ran the check directly (a real idf.py build in `C:\wt\checkbuild_origin_kilnfw`, no negtest.ps1 since the check builds a fetched ref, not the working tree) | exit 1, `error: #error "NEGTEST deliberate compile break"` then `FAILED: origin/main does not build -- idf.py build failed (exit 2) against origin/main commit 61e7c2ed`; also 09-16e genuine -Werror=format-truncation FAIL. Baseline PASS not re-run this session (cited from stamp/earlier runs). Side effect: shared `checkbuild_origin_kilnfw` was left at the broken commit until the next real run's `reset --hard`; `refs/remotes/origin/main` was briefly the scratch sha and was re-fetched |
+| `firmware/KilnFW/App/test/check_all_task_stack_budgets.ps1` | NEGATIVE-TESTED | 2026-10-09 (this file) | `tools
+egtest.ps1 -Command "powershell -File ...check_all_task_stack_budgets.ps1 -ElfPath <fresh KilnCtrl.elf built by build_kilnfw_start at origin/dev 6076535a>"`, mutation `uart_bridge_ext.c`: `#define BX_WORKER_STACK 10240` -> `2048` (ELF not rebuilt; the check reads the declared size from source and the walk from the ELF) | baseline PASS (exit 0, 33 INDETERMINATE, none over budget); mutation CAUGHT (exit 1): `FAIL: honest free is negative (-2060 B)` ... `1 of 33 tasks over budget: bx_flash_worker`; real tree unchanged |
 | `firmware/KilnFW/App/test/check_approach_rate_cap_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16 | production divisor 3600.0f changed to 1800.0f in the real cap loop | RED, both fragments shown; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_boot_guard_reset_reachability.ps1` | NEGATIVE-TESTED | rest-10-08 | added a boot_guard_reset_counter() call in boot_guard.c | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_cfg_convert_field_mirror_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | BACKUP_FORMAT_VERSION 5 to 6 | RED; hand-restored; PASS |
