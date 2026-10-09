@@ -1648,7 +1648,7 @@ bool zone_normals_invalidate_mask(uint8_t zone_mask)
  * the whole record at the START of a sweep is deliberate -- a re-sweep of
  * rewired hardware must not leave a channel's stale "derived" claim behind
  * to be shown as current. */
-void zone_ct_map_clear(void)
+bool zone_ct_map_clear(void)
 {
     zcfg_save_lock();
     s_zone_normals.cfg.ct_map_derived_mask = 0;
@@ -1660,7 +1660,7 @@ void zone_ct_map_clear(void)
      * logged inside zone_normals_save_locked() itself. */
     esp_err_t clear_err = zone_normals_save_locked();
     zcfg_save_unlock();
-    (void)clear_err;
+    return clear_err == ESP_OK;
 }
 
 bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
@@ -1681,7 +1681,7 @@ bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
  * estimate actually use lives on the Pico and is written by
  * zone_sweep_push_k_ct_v_per_a(); nothing here is ever read back as a
  * calibration. */
-void zone_k_ct_clear(void)
+bool zone_k_ct_clear(void)
 {
     zcfg_save_lock();
     s_zone_normals.cfg.k_ct_derived_mask = 0;
@@ -1689,7 +1689,7 @@ void zone_k_ct_clear(void)
     /* Failure is already logged inside zone_normals_save_locked() itself. */
     esp_err_t clear_err = zone_normals_save_locked();
     zcfg_save_unlock();
-    (void)clear_err;
+    return clear_err == ESP_OK;
 }
 
 bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a)

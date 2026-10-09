@@ -209,6 +209,23 @@ class StatusTest(unittest.TestCase):
             result = m.zone_current_sweep_status(host="10.0.0.5")
         self.assertNotIn("EXPECTED", result)
 
+    def test_esp_persist_failed_warning(self):
+        payload = {
+            "state": "done", "zone_index": 2, "zones_done": 3, "zones_total": 3,
+            "reason": "done", "ct_map_derived_mask": 0, "ct_map_reason": "n/a",
+            "k_ct_derived_mask": 0, "k_ct_reason": "n/a",
+            "i_normal_pushed_mask": 7, "summed_unmeasured_mask": 0,
+            "esp_persist_failed": True,
+            "nameplate_mismatch_mask": 0, "nameplate_reason": "n/a",
+        }
+        with unittest.mock.patch.object(sweep_http, "status", return_value=payload):
+            result = m.zone_current_sweep_status(host="10.0.0.5")
+        self.assertIn("WARNING: esp_persist_failed=true", result)
+        payload["esp_persist_failed"] = False
+        with unittest.mock.patch.object(sweep_http, "status", return_value=payload):
+            result = m.zone_current_sweep_status(host="10.0.0.5")
+        self.assertNotIn("esp_persist_failed", result)
+
     def test_transport_error_surfaced(self):
         with unittest.mock.patch.object(sweep_http, "status",
                                          side_effect=sweep_http.ZoneSweepHttpError("boom")):

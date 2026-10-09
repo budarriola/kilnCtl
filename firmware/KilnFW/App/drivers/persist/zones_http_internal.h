@@ -330,9 +330,9 @@ void zone_normals_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
 void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
                                       bool *diverged);
 
-void zone_ct_map_clear(void);
+bool zone_ct_map_clear(void);
 bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index);
-void zone_k_ct_clear(void);
+bool zone_k_ct_clear(void);
 bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a);
 
 uint8_t zone_owned_relay_mask(const zones_cfg_t *cfg);
@@ -406,6 +406,8 @@ typedef struct {
      * zone_sweep_plan_i_normal()'s doc comment for what "already measured"
      * means in each CT topology. */
     volatile uint8_t             i_normal_pushed_mask;
+    /* L2: any ESP-side save of the CT provenance records failed this run. */
+    volatile bool                esp_persist_failed;
     volatile char                i_normal_reason[96];
     /* Owner feature (2026-09-10): "set the nameplate value, find the normal
      * current on first heat, cause a fault if much higher or lower than

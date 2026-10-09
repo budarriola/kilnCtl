@@ -16227,6 +16227,36 @@ static void test_zone_free_for_aux_nvs_failure_restores_ram(void)
     nvs_test_clear();
 }
 
+/* L2 (UNCHECKED_PERSIST_RESULT_AUDIT): a failed ESP-side save of the CT
+ * provenance records must surface as esp_persist_failed, not clean success. */
+static void test_sweep_esp_persist_failure_is_surfaced(void)
+{
+    TEST_SECTION("sweep: failed ESP-side provenance saves set esp_persist_failed");
+    zfa_seed();
+    s_sweep.esp_persist_failed = false;
+    zone_sweep_task_record_normal(NULL, 0, 5.0f);
+    TEST_CHECK(!s_sweep.esp_persist_failed, "a successful save leaves the flag clear");
+
+    s_zfa_cfg_fail_writes = 1000;
+    pref_cfg_fs_set_write_fn(zfa_fail_once_cfg_write_fn);
+    zone_sweep_task_record_normal(NULL, 0, 6.0f);
+    TEST_CHECK(s_sweep.esp_persist_failed, "a failed zone_normals_set sets the flag");
+
+    s_sweep.esp_persist_failed = false;
+    TEST_CHECK(!zone_ct_map_clear(), "ct map clear reports the failed save");
+    TEST_CHECK(!zone_k_ct_clear(), "k_ct clear reports the failed save");
+    TEST_CHECK(!zone_ct_map_set(0, 1), "ct map set reports the failed save");
+    pref_cfg_fs_reset_write_fn_for_test();
+    s_zfa_cfg_fail_writes = 0;
+    zone_sweep_status_t st;
+    memset(&st, 0, sizeof(st));
+    s_sweep.esp_persist_failed = true;
+    zones_current_sweep_get_status(&st);
+    TEST_CHECK(st.esp_persist_failed, "the status snapshot carries the flag");
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 /* The zone-to-aux conversion's final read-back (zone_aux_convert_http.c's
  * op_verify_persisted()) calls zones_config_persisted_equals_ram(). Saves are
  * cfg-file-only since the dual-write close, so it must re-read the FILE: an
@@ -16305,6 +16335,7 @@ void run_test_zones_http(void)
     test_zone_free_for_aux();
     test_zone_restore_refuses_on_aux_conflict();
     test_zone_free_for_aux_nvs_failure_restores_ram();
+    test_sweep_esp_persist_failure_is_surfaced();
     test_zones_persisted_equals_ram_reads_the_cfg_file();
     test_out_of_range_zone_preserves_stored_fields();
     test_whole_page_post_invalidates_tuning_quality_only_when_gains_actually_change();

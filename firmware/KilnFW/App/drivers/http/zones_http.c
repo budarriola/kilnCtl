@@ -539,13 +539,14 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
                      "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\","
                      "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\","
                      "\"i_normal_pushed_mask\":%u,\"i_normal_reason\":\"%s\","
-                     "\"summed_unmeasured_mask\":%u,"
+                     "\"summed_unmeasured_mask\":%u,\"esp_persist_failed\":%s,"
                      "\"nameplate_mismatch_mask\":%u,\"nameplate_reason\":\"%s\","
                      "\"ct_installed\":%s}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
                      s->reason_escaped, st.ct_map_derived_mask, s->ct_reason_escaped,
                      st.k_ct_derived_mask, s->k_reason_escaped,
                      st.i_normal_pushed_mask, s->i_normal_reason_escaped, st.summed_unmeasured_mask,
+                     st.esp_persist_failed ? "true" : "false",
                      st.nameplate_mismatch_mask, s->nameplate_reason_escaped,
                      st.ct_installed ? "true" : "false");
     httpd_resp_set_type(req, "application/json");

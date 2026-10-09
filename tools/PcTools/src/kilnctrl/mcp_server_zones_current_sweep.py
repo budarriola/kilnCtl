@@ -206,6 +206,12 @@ def zone_current_sweep_status(host: Optional[str] = None) -> str:
             "its currents (~70 mA all zones, ~23 mA/zone alone) sit below the firmware's "
             "0.045 A noise floor; this is not a failure to retry."
         )
+    if st.get("esp_persist_failed"):
+        lines.append(
+            "WARNING: esp_persist_failed=true -- an ESP-side save of the CT provenance records "
+            "(normals/ct map/k_ct) failed this run; the Pico values are unaffected but the "
+            "ESP record may be stale or missing after reboot. Re-run the sweep."
+        )
     lines.append(f"(host={resolved})")
     return "\n".join(lines)
 

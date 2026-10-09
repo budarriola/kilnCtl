@@ -135,6 +135,8 @@ same pattern here, or roll RAM back on a failed save.
 
 ### L2. Current sweep: ESP-side CT provenance writes are unchecked (cosmetic / provenance)
 
+**FIXED (L2 commit, see git log):** every site is checked; a failure is logged and sets `esp_persist_failed` in `/api/zones/current_sweep/status` (surfaced by `zone_current_sweep_status` as a WARNING). `zone_ct_map_clear`/`zone_k_ct_clear` now return bool. Nothing sent to the Pico changed.
+
 `firmware/KilnFW/App/drivers/control/zones_current_sweep_task.c` discards these
 results:
 

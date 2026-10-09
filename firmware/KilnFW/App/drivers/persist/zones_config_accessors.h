@@ -1974,6 +1974,8 @@ typedef struct {
      * i_normal_reason is "" only when nothing needs saying, same convention
      * as ct_map_reason/k_ct_reason above. */
     uint8_t i_normal_pushed_mask;
+    /* L2: an ESP-side save of the CT provenance records failed this run. */
+    bool    esp_persist_failed;
     char    i_normal_reason[96];
     /* opus review finding (MEDIUM), CT_COMMISSIONING_PLAN.md step 3 summed
      * topology: zone_sweep_summed_normal_a() refuses (rather than clamping
