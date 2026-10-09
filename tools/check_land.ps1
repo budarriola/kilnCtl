@@ -37,7 +37,8 @@ function OriginHead { (git -C $origin rev-parse main).Trim() }
 function Run-Land([string]$dir, [string[]]$more) {
     Push-Location $dir
     try {
-        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone @more 2>&1 | Out-String
+        $tgt = if ($more -contains "-Target") { @() } else { @("-Target", "main") }
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone @tgt @more 2>&1 | Out-String
         $code = $LASTEXITCODE
     } finally { Pop-Location }
     $line = ($out -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
@@ -160,6 +161,25 @@ try {
         Assert ($r.Code -eq 1 -and $r.Json.error -match 'cannot read check log' -and $r.Json.error -match 'run\.log') "exclusively locked log fails fast naming file"
         Assert (((Get-Date) - $t0).TotalSeconds -lt 120) "fail-fast well before the wait deadline"
     } finally { $hold.Dispose() }
+
+    Write-Host "case: default target is dev; main untouched; -Target main still works"
+    git -C $origin branch dev main *>$null
+    $c = New-Clone "c_dev"
+    git -C $c fetch origin *>$null
+    git -C $c checkout -b work origin/dev *>$null
+    Commit-File $c "dev.txt" "x" "devcommit"
+    $mainBefore = OriginHead
+    $r = Run-Land $c @("-Target", "dev", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "land to dev succeeds (no check log needed)"
+    Assert ((OriginHead) -eq $mainBefore) "origin/main not advanced by a dev land"
+    Assert ((git -C $origin rev-parse dev).Trim() -eq $r.Json.sha) "origin/dev advanced to the landed sha"
+    $c = New-Clone "c_dev2"
+    git -C $c fetch origin *>$null
+    git -C $c checkout -b work origin/dev *>$null
+    Commit-File $c "dev2.txt" "x" "dev2"
+    Push-Location $c
+    try { $dout = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone -DryRun 2>&1 | Out-String } finally { Pop-Location }
+    Assert ($dout -match 'rebase onto origin/dev') "default target (no -Target) is dev"
 
     Write-Host "case: failing post-rebase check blocks push"
     $c = New-Clone "c_post"

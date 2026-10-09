@@ -14,7 +14,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\land.ps1
 #       [-WaitPid <pid>] [-CheckLog <file>] [-AllowFail <regex>[,<regex>]]
 #       [-AllowKnownFailures]
-#       [-PostRebaseChecks <regex>] [-RestartMcp] [-RemoveWorktree] [-DryRun]
+#       [-PostRebaseChecks <regex>] [-RestartMcp] [-RemoveWorktree] [-Target dev|main] [-DryRun]
 #
 #   -WaitPid / -CheckLog  wait (bounded by -WaitTimeoutMin, default 120) for a
 #       run_all_checks run to finish, then parse its summary. UTF-16 logs (what
@@ -35,6 +35,8 @@
 #       tree's copy (servers must serve the shared tree, not a worktree that is
 #       about to be removed). The main tree must itself hold the landed commit
 #       (fast-forward it first) or the restart just reloads old code; warned.
+#   -Target dev|main      branch to rebase onto and push to (default dev). Agents land on dev;
+#                         the coordinator promotes dev to main with tools\dev_promote.ps1.
 #   -RemoveWorktree       after LANDED only: cd out, worktree_mint -Remove.
 #   -DryRun               do the refusals + log gate + fetch, report what would
 #       happen, change nothing (no rebase, no push).
@@ -59,6 +61,7 @@ param(
     [string]$PostRebaseChecks,
     [switch]$RestartMcp,
     [switch]$RemoveWorktree,
+    [ValidateSet('dev','main')][string]$Target = 'dev',
     [switch]$DryRun,
     [double]$WaitTimeoutMin = 120,
     [string]$ChecksScript,
@@ -160,9 +163,9 @@ if ($LASTEXITCODE -ne 0) { Finish 1 "git fetch origin failed" }
 
 Step "preflight"
 Git-Clean-Or-Die "tracked modifications present"
-$ahead = git rev-list --count origin/main..HEAD 2>$null
-if ($LASTEXITCODE -ne 0) { Finish 1 "cannot resolve origin/main; run git fetch origin" }
-if ([int]$ahead -le 0) { Finish 1 "HEAD has no commits ahead of origin/main; nothing to land" }
+$ahead = git rev-list --count origin/$Target..HEAD 2>$null
+if ($LASTEXITCODE -ne 0) { Finish 1 "cannot resolve origin/$Target; run git fetch origin" }
+if ([int]$ahead -le 0) { Finish 1 "HEAD has no commits ahead of origin/$Target; nothing to land" }
 $script:sha = (git rev-parse HEAD).Trim()
 
 # ---------------------------------------------------------------- step 2
@@ -249,11 +252,11 @@ git fetch origin *>$null
 if ($LASTEXITCODE -ne 0) { Finish 1 "git fetch origin failed" }
 
 if ($DryRun) {
-    $behind = (git rev-list --count HEAD..origin/main).Trim()
-    $ahead = (git rev-list --count origin/main..HEAD).Trim()
-    Step "dry-run: would rebase onto origin/main (ahead $ahead, behind $behind)"
+    $behind = (git rev-list --count HEAD..origin/$Target).Trim()
+    $ahead = (git rev-list --count origin/$Target..HEAD).Trim()
+    Step "dry-run: would rebase onto origin/$Target (ahead $ahead, behind $behind)"
     Step "dry-run: would run post-rebase checks (check_mcp_tool_count_doc, check_mcp_facade_coverage$(if ($PostRebaseChecks) { ', ' + $PostRebaseChecks }))"
-    Step "dry-run: would git push origin HEAD:main (no force) and push_verify"
+    Step "dry-run: would git push origin HEAD:$Target (no force) and push_verify"
     if ($RestartMcp) { Step "dry-run: would restart MCP servers" }
     if ($RemoveWorktree) { Step "dry-run: would remove worktree $top" }
     Write-Host "DRY RUN: nothing changed." -ForegroundColor Green
@@ -265,8 +268,8 @@ if (-not $ChecksScript) { $ChecksScript = Join-Path $top "tools\run_all_checks.p
 $pushed = $false
 for ($try = 1; $try -le $MaxPushTries; $try++) {
     if ($try -gt 1) { git fetch origin *>$null; if ($LASTEXITCODE -ne 0) { Finish 1 "git fetch origin failed" } }
-    Step "rebase onto origin/main (attempt $try)"
-    $out = (& git rebase origin/main 2>&1 | Out-String)
+    Step "rebase onto origin/$Target (attempt $try)"
+    $out = (& git rebase "origin/$Target" 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) {
         $conf = @(git diff --name-only --diff-filter=U 2>$null)
         Abort-Rebase
@@ -295,8 +298,8 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $ChecksScript -Only $re -AllowFewerChecks @extra
     if ($LASTEXITCODE -ne 0) { Finish 1 "post-rebase checks failed (exit $LASTEXITCODE); rebased commits remain local, nothing pushed" }
 
-    Step "push origin HEAD:main (attempt $try)"
-    $pout = (& git push origin HEAD:main 2>&1 | Out-String)
+    Step "push origin HEAD:$Target (attempt $try)"
+    $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
     if ($pout -match 'non-fast-forward|fetch first|\[rejected\]|rejected') {
         Write-Host "push rejected as non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow
@@ -308,7 +311,7 @@ if (-not $pushed) { Finish 1 "push still rejected after $MaxPushTries attempts" 
 
 # ---------------------------------------------------------------- 6
 Step "push_verify"
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "push_verify.ps1") -Commit $script:sha
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "push_verify.ps1") -Commit $script:sha -Branch "origin/$Target"
 if ($LASTEXITCODE -ne 0) { Finish 1 "push_verify did not report LANDED for $($script:sha)" }
 Step "LANDED"
 

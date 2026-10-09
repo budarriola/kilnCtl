@@ -894,6 +894,18 @@ NEW failure still refuses and is listed in `new_fails`; `-AllowFail` is unchange
 powershell -ExecutionPolicy Bypass -File tools\land.ps1 -CheckLog C:\wt\x\run.log -AllowFail check_release_manifest -RemoveWorktree
 ```
 
+**dev/main flow and `tools/dev_promote.ps1`** (added 2026-10-09). Agents rebase onto
+`origin/dev`, run targeted tests only, and `land.ps1` pushes to dev (`-Target dev` is the
+default; `-Target main` remains for the coordinator; the check-log gate is optional for dev).
+Only the coordinator promotes: after one full `run_all_checks` on the dev tip,
+`dev_promote.ps1 -Commit <dev commit> [-Push]` builds `commit-tree X^{tree} -p origin/main`
+with the message `Promote dev <X full sha>: <dev commit subjects since the previous promote>`,
+verifies tree == X's tree and a single parent, and pushes to main as a plain fast-forward
+(no tag). It refuses when X is not on origin/dev, when X is not ahead of the previous promote,
+and when origin/main holds commits that are neither in dev nor earlier promote commits (a
+direct push to main): it names them and says to merge main into dev first. Unit test:
+`tools/check_dev_promote.ps1` (throwaway bare repo under temp).
+
 **`tools/wt_status.ps1`** -- report on, and safely prune, `C:\wt` (added
 2026-10-08). `C:\wt` accumulates hundreds of directories (worktrees, orphan dirs,
 `*_logs`, loose files). Report mode (default) lists every directory: registered in
