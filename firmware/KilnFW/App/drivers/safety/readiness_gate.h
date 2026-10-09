@@ -86,7 +86,7 @@ typedef enum {
      * safety link is actually up (the other four conditions are either
      * link-independent or already surface a down link first). */
     READINESS_GATE_BLOCK_CEILING_MISMATCH,
-    /* docs/PICO_AUTO_UPDATE_PLAN.md owner decision: "on an unrecoverable
+    /* docs/PICO_AUTO_UPDATE.md owner decision: "on an unrecoverable
      * version mismatch the ESP refuses to fire until matched" -- a real
      * structural block, not a warning surface. Ordered last: like
      * CEILING_MISMATCH this needs the safety link up to even know the
@@ -171,7 +171,7 @@ typedef struct {
     bool     estop_verified;     /* estop_verification_is_verified() */
     bool     ceiling_diverged;  /* safety_ceiling_sync_is_diverged() -- the SAME verdict the enforcement acts on */
     bool     pico_update_blocked; /* pico_auto_update_state_is_blocking() -- true only for an
-                                    * unrecoverable version mismatch (docs/PICO_AUTO_UPDATE_PLAN.md's
+                                    * unrecoverable version mismatch (docs/PICO_AUTO_UPDATE.md's
                                     * ABANDONED_* causes), the SAME verdict the boot-time glue computes */
     readiness_ct_attribution_fact_t ct_attribution; /* the stored CT attribution verdict, resolved against
                                     * TODAY's configuration fingerprint (ct_verify_current_fact(),

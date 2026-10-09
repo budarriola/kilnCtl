@@ -250,7 +250,7 @@ extern "C" {
 #define SAFETY_LINK_STATUS_FLAG2_TC_CONFIG_REASSERTED 0x04u
 
 /* 2026-09-23: mirrors SaftyFW's link_frame.h LINK_FLAG2_ACTIVE_SLOT_KNOWN
- * exactly (same numeric value, same reasoning) -- docs/PICO_AUTO_UPDATE_PLAN.md:64's
+ * exactly (same numeric value, same reasoning) -- docs/PICO_AUTO_UPDATE.md:64's
  * named gap ("the ESP has no wire field for the Pico's active slot, so A/B
  * alternation is blind"). Set iff update_task_get_active_slot() (SaftyFW)
  * established this boot's running bootloader slot from a real flash
@@ -969,7 +969,7 @@ typedef struct {
     bool     tc_config_reasserted_known;
     bool     tc_config_reasserted;
 
-    /* 2026-09-23: docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- the Pico's
+    /* 2026-09-23: docs/PICO_AUTO_UPDATE.md:64's named gap -- the Pico's
      * own view of which bootloader A/B slot it is currently running,
      * carried in the SAME V3 status frame's flags2 byte (bits 3/4,
      * SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B). Same

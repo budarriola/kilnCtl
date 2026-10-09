@@ -1,6 +1,6 @@
 # Release gate vacuity audit — 2026-09-16c
 
-Third slice of blocker 3 (`docs/RELEASE_HARDENING_PLAN.md`). Continues from
+Third slice of blocker 3 (`docs/RELEASE_HARDENING.md`). Continues from
 `docs/audits/release_gate_vacuity_audit_2026-09-16.md` and
 `_2026-09-16b.md`, both of which must not be redone — their gates are load-
 bearing and closed. This pass worked the `_2026-09-16b.md` "Gates not

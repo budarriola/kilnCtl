@@ -246,7 +246,7 @@ static inline readiness_status_t readiness_ceiling_match_status(bool link_up, bo
     return link_up ? READY_NOT_DONE : READY_CANNOT_YET;
 }
 
-/* docs/PICO_AUTO_UPDATE_PLAN.md owner decision: "on an unrecoverable version
+/* docs/PICO_AUTO_UPDATE.md owner decision: "on an unrecoverable version
  * mismatch the ESP refuses to fire until matched" -- this is the display
  * half of a real structural block (readiness_gate.h's
  * READINESS_GATE_BLOCK_PICO_UPDATE), the same "promoted from advisory to

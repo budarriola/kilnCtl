@@ -1,7 +1,7 @@
 // saftyfw_image_identity.h -- the build-identity record every SaftyFW slot
 // image carries INSIDE ITSELF, and the pure scanner that finds it.
 //
-// WHY THIS EXISTS (docs/PICO_AUTO_UPDATE_PLAN.md G1/G2). The ESP has to
+// WHY THIS EXISTS (docs/PICO_AUTO_UPDATE.md G1/G2). The ESP has to
 // answer "is the Pico out of date?" before it may push a new image at it.
 // That needs two identities: what the Pico reports over the link (it already
 // reports one -- SAFETY_CMD_FW_VERSION carries commit/dirty), and what the

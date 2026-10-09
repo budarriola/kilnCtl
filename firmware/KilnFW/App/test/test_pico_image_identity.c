@@ -1,6 +1,6 @@
 // Host tests for the SaftyFW build-identity record a slot image carries about
 // itself (firmware/CommonFW/src/saftyfw_image_identity.c) --
-// docs/PICO_AUTO_UPDATE_PLAN.md G2.
+// docs/PICO_AUTO_UPDATE.md G2.
 //
 // WHY THIS IS WORTH HOST-TESTING. The scanner is the ONE thing standing
 // between "a staged image" and "the identity this board expects the safety

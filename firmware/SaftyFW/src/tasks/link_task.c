@@ -888,7 +888,7 @@ static void link_task_send_status(void)
     // comment on the macro for why this is a nonzero-count test, not a
     // one-shot pulse.
     bool tc_config_reasserted = thermo_task_live_config_mismatch_count() != 0u;
-    // LINK_FLAG2_ACTIVE_SLOT_KNOWN/_B (docs/PICO_AUTO_UPDATE_PLAN.md:64) --
+    // LINK_FLAG2_ACTIVE_SLOT_KNOWN/_B (docs/PICO_AUTO_UPDATE.md:64) --
     // update_task_get_active_slot() (update_task.c) is the authoritative
     // "which bootloader slot is this boot actually running" answer, cached
     // once at that task's own startup from a real flash metadata read; see
@@ -945,7 +945,7 @@ static void link_task_send_fw_version(void)
     // generated strings themselves rather than a guessed constant.
     //
     // COMMIT/DIRTY COME FROM THE EMBEDDED IMAGE-IDENTITY RECORD, NOT FROM THE
-    // GENERATED MACROS DIRECTLY (docs/PICO_AUTO_UPDATE_PLAN.md G2). The ESP
+    // GENERATED MACROS DIRECTLY (docs/PICO_AUTO_UPDATE.md G2). The ESP
     // answers "is this Pico out of date?" by comparing what THIS frame
     // reports against the identity it scans out of the image it is about to
     // push at us. Those two have to be the same bytes or the comparison means

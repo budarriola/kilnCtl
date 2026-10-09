@@ -3,7 +3,7 @@
 Owner decision, 2026-09-19: the board carries **100 user fire-profile slots plus one
 reserved live-edit slot**, and the space for them comes from growing the `cfg` LittleFS
 partition into the unused flash directly above it. The 20-slot compromise and the
-"cut firing-stats depth" option recorded in `docs/LIVE_PROFILE_EDIT_PLAN.md` section 12
+"cut firing-stats depth" option recorded in `docs/LIVE_PROFILE_EDIT.md` section 12
 item 1 are both rejected and that section should be amended to point here.
 
 This plan is written against the tree at `8006ddd5`.
@@ -54,7 +54,7 @@ a subtype/retention change there is its own flag day.
 ## 2. Code constants and structures that change
 
 `PROFILES_MAX_COUNT` becomes **100**; the live-edit slot is id **100**, structural and
-outside that count, exactly as `LIVE_PROFILE_EDIT_PLAN.md` section 4 describes.
+outside that count, exactly as `LIVE_PROFILE_EDIT.md` section 4 describes.
 Ids therefore run 0..100, and `PROFILE_BUILTIN_ID_BASE` is 128 -- **27 ids of headroom
 left, and that base is the hard ceiling.** Any later raise past 127 user slots is a
 protocol change (`profiles_builtin.h`, `devices_profiles.py`'s two disjoint ranges),
@@ -76,7 +76,7 @@ not a constant bump. Say so in `profiles_types.h` next to the new value.
 | `ui/ui_page_profile_builder_review.c`, `ui_page_profile_detail.c` | linear scans over all slots; acceptable, but keep them off the LVGL render path. |
 | `tools/PcTools/src/kilnctrl/protocol.py` | `PROFILES_MAX_COUNT = 8` -> 100. This is the mirror of the firmware constant and the one place PcTools reads it; `devices_profiles.py` derives everything from it. |
 | `tools/PcTools/scripts/full_board_backup.py` | `FIRING_HISTORY_PROFILE_IDS = range(8)` -> derived from the imported constant, and skip ids absent from `/api/profiles` so a full backup is not 100 requests. |
-| `firmware/KilnFW/docs/PROFILES.md`, the `partitions.csv` comment block, `docs/CONFIG_FILESYSTEM.md`, `docs/LIVE_PROFILE_EDIT_PLAN.md` §12.1 | documented counts, and the superseded 20-slot conclusion. |
+| `firmware/KilnFW/docs/PROFILES.md`, the `partitions.csv` comment block, `docs/CONFIG_FILESYSTEM.md`, `docs/LIVE_PROFILE_EDIT.md` §12.1 | documented counts, and the superseded 20-slot conclusion. |
 
 `kiln_cfg_store`'s own 8 named-config slots are **not** changed by this pass.
 
@@ -284,7 +284,7 @@ One commit each, sized for a sonnet implementer, each independently buildable an
    the on-page note.
 10. **Firing-stats hygiene:** confirm/enforce "no `fs_` key until a profile has fired",
     prune stats on slot delete, host-test both.
-11. **Docs:** `PROFILES.md`, `CONFIG_FILESYSTEM.md`, and amend `LIVE_PROFILE_EDIT_PLAN.md`
+11. **Docs:** `PROFILES.md`, `CONFIG_FILESYSTEM.md`, and amend `LIVE_PROFILE_EDIT.md`
     §12.1 to record that its 20-slot conclusion is superseded by this plan.
 12. **Bench migration** per section 6, in its own session, with the backup taken first.
 

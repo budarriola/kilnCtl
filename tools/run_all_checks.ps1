@@ -889,7 +889,7 @@ function Invoke-ChecksParallel {
 # artifact from a previous run instead of this one, same failure shape
 # check_00_kilnfw_target_build.ps1's own header documents.
 #
-# 2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md): the KilnFW application build
+# 2026-09-20 (docs/PICO_AUTO_UPDATE.md): the KilnFW application build
 # EMBED_FILES SaftyFW's slot images (SaftyFW_slotA.bin/slotB.bin) and fails
 # at CMake configure time if either is missing or stale. This briefly split
 # phase 1 into a serialized 1a (SaftyFW alone) / 1b (the two KilnFW builds)

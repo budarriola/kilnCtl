@@ -1836,7 +1836,7 @@
   var ACK_STATES = { faulted: true, done: true };
   // Owner request: a button next to Start/Stop to adjust the CURRENTLY
   // RUNNING firing's dwell times/targets/ramp rates, reusing the existing
-  // /live_profile page (docs/LIVE_PROFILE_EDIT_PLAN.md) rather than a new
+  // /live_profile page (docs/LIVE_PROFILE_EDIT.md) rather than a new
   // editor. That plan's section 10/decision 4 allows editing in RUNNING,
   // PAUSED, *and* FAULTED alike (a fault freezes heat, not the schedule) --
   // deliberately not DONE, where there is no live run left to adjust.

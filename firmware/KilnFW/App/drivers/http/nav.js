@@ -98,7 +98,7 @@
         // Still the first thing in the menu -- now the first child of the
         // first group, which is the closest the nested structure allows.
         { href: '/profiles', label: 'Firing profiles' },
-        // docs/LIVE_PROFILE_EDIT_PLAN.md -- edit the profile actually firing
+        // docs/LIVE_PROFILE_EDIT.md -- edit the profile actually firing
         // right now, sits right beside the profile catalogue it forks from.
         { href: '/live_profile', label: 'Edit running firing' },
       ],

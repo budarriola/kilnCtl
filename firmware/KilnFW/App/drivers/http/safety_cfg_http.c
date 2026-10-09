@@ -165,7 +165,7 @@ typedef struct {
     bool tc_config_reasserted_known;
     bool tc_config_reasserted;
 
-    /* 2026-09-23: docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- the Pico's
+    /* 2026-09-23: docs/PICO_AUTO_UPDATE.md:64's named gap -- the Pico's
      * own view of which bootloader A/B slot it is currently running,
      * surfaced via the same V3 status frame flags2 byte
      * (SAFETY_LINK_STATUS_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B). Same
@@ -353,7 +353,7 @@ static size_t build_commissioning_json(const safety_cfg_http_snapshot_t *s, char
     if (s->tc_config_reasserted_known) {
         APPEND(",\"tc_config_reasserted\":%s", s->tc_config_reasserted ? "true" : "false");
     }
-    /* docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap -- "unknown" until a V3
+    /* docs/PICO_AUTO_UPDATE.md:64's named gap -- "unknown" until a V3
      * peer has confirmed the Pico's own active-slot answer at least once. */
     APPEND(",\"pico_active_slot\":\"%s\"",
            (!s->link_up || !s->pico_active_slot_known) ? "unknown" : (s->pico_active_slot_is_b ? "B" : "A"));

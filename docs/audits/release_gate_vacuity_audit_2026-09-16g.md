@@ -1,7 +1,7 @@
 # Release gate vacuity audit — 2026-09-16, part 7
 
 Continuation of `docs/audits/release_gate_vacuity_audit_2026-09-16.md` and
-`...16b.md`, blocker 3 of `docs/RELEASE_HARDENING_PLAN.md`. This pass has two
+`...16b.md`, blocker 3 of `docs/RELEASE_HARDENING.md`. This pass has two
 parts: (1) fix a real, previously-identified defect in
 `tools/check_duplicate_symbols.ps1` that was silently excluding a genuine
 component object from every duplicate-symbol scan, and (2) negative-test the

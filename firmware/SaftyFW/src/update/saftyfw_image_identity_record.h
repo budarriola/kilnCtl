@@ -17,7 +17,7 @@
 //     the image says it is" are the same bytes, not two readings of the same
 //     macro that a future edit could separate. The ESP's whole out-of-date
 //     decision rests on those two being comparable
-//     (docs/PICO_AUTO_UPDATE_PLAN.md G2).
+//     (docs/PICO_AUTO_UPDATE.md G2).
 #ifndef SAFTYFW_IMAGE_IDENTITY_RECORD_H
 #define SAFTYFW_IMAGE_IDENTITY_RECORD_H
 

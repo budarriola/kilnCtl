@@ -1,4 +1,4 @@
-# Verification pass: RELEASE_HARDENING_PLAN blockers 1, 2, 5, 7, 8
+# Verification pass: RELEASE_HARDENING blockers 1, 2, 5, 7, 8
 
 Scope: re-verify these five blockers against `origin/main` (bfc8e8a3) by
 reading code, tests and git history, not by trusting the plan's own prose.

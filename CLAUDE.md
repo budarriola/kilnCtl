@@ -224,7 +224,7 @@ one before it was the profile_live_* quartet, 2026-09-20 -- `profile_live_get`/
 `profile_live_fork`/`profile_live_edit`/`profile_live_decide`,
 MCP tools wrapping the five-route live profile edit HTTP surface
 (`firmware/KilnFW/App/drivers/http/profiles_live_http.c`,
-`docs/LIVE_PROFILE_EDIT_PLAN.md` section 10): fork the running profile into a
+`docs/LIVE_PROFILE_EDIT.md` section 10): fork the running profile into a
 working copy, read its status/content, edit it (400 on a bound violation, 409
 on a window violation), and decide its fate (discard/save_as/overwrite, the
 last refused 403 on a builtin origin). All four go through
@@ -729,7 +729,7 @@ byte always recompiles. Detail: "Heavy builds" in `docs/agent_rules/COMMON.md`.
 (**2026-09-20 history:** the KilnFW application build briefly gained a
 build-order dependency here, once it started `EMBED_FILES`ing both SaftyFW
 slot images so the ESP can auto-update the Pico at boot
-(`docs/PICO_AUTO_UPDATE_PLAN.md`) — `check_00_kilnfw_target_build.ps1`
+(`docs/PICO_AUTO_UPDATE.md`) — `check_00_kilnfw_target_build.ps1`
 originally read those slot bins out of the shared, non-isolated
 `firmware/SaftyFW/build/` directory, so phase 1 was briefly split into a
 serialized 1a (`check_00_saftyfw_target_build.ps1` alone) / 1b (the two

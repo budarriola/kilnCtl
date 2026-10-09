@@ -915,7 +915,7 @@ typedef struct {
     uint32_t config_generation;
 
     /* live_profile_generation() as of the last time this run polled the
-     * live-edit working slot (docs/LIVE_PROFILE_EDIT_PLAN.md pass 1, section
+     * live-edit working slot (docs/LIVE_PROFILE_EDIT.md pass 1, section
      * 3) -- same one-counter-per-tick poll shape as config_generation just
      * above, so an unedited run pays nothing beyond the comparison. Zeroed by
      * profile_executor_run() like the rest of this struct's per-run state;

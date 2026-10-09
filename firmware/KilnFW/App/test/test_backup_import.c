@@ -3224,7 +3224,7 @@ static void test_import_allows_profile_named_like_a_builtin(void)
     g_fake_builtin_on = false;
 }
 
-// RELEASE_HARDENING_PLAN.md item 7, "import of a deliberately hostile
+// RELEASE_HARDENING.md item 7, "import of a deliberately hostile
 // config": the individual rejection tests above (malformed body, wrong
 // kind, too-new version, out-of-range model, overlong zone/profile name)
 // each prove ONE shape is refused, but the actual release gate --

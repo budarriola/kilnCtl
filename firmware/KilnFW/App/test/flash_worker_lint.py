@@ -248,19 +248,19 @@ ALLOWLIST = {
     # Pattern 3 (init-time only): ota_record_save() runs once from
     # app_main's boot-time OTA-verify sequence.
     "ota_record.c",
-    # docs/PICO_AUTO_UPDATE_PLAN.md -- persisted per-pair attempt-budget
+    # docs/PICO_AUTO_UPDATE.md -- persisted per-pair attempt-budget
     # counter for the Pico auto-update decision (pico_auto_update.h). Same
     # mechanics as boot_guard.c (copied deliberately, see this file's own
     # header), and same allowlist reasoning: as of this pass its write
     # functions (pico_update_attempts_record_attempt()/_record_failure()/
     # _clear()) have no call site yet -- the boot-time glue
-    # (pico_auto_update_state.c, docs/PICO_AUTO_UPDATE_PLAN.md step 3) that
+    # (pico_auto_update_state.c, docs/PICO_AUTO_UPDATE.md step 3) that
     # will call them is a separate, later commit. When wired, its only
     # caller is the synchronous boot path in main_control_bringup.c, before
     # normal task concurrency exists -- Pattern 3 (init-time only), same
     # shape as boot_guard.c's own entry above. Until then this is dead code
     # with no PSRAM-stack exposure at all (unreachable).
-    # PICO_AUTO_UPDATE_PLAN.md G1 (2026-09-18). Pattern 3 (internal-SRAM-
+    # PICO_AUTO_UPDATE.md G1 (2026-09-18). Pattern 3 (internal-SRAM-
     # stack caller, reached live, not init-time) -- same shape as
     # estop_verification.c's entry above. pico_image_manifest_store() has
     # exactly one caller, ota_http_pico.c's ota_pico_do_stage(), which runs

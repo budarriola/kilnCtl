@@ -1,7 +1,7 @@
 # checkcache: ok
 # check_gate_negative_test_table.ps1 -- every check that run_all_checks.ps1
 # discovers must have a row in docs/audits/GATE_NEGATIVE_TEST_EVIDENCE.md
-# (docs/RELEASE_HARDENING_PLAN.md section 3, acceptance step 4), and every
+# (docs/RELEASE_HARDENING.md section 3, acceptance step 4), and every
 # row must name a check that still exists.
 #
 # A row whose status is "NOT AUDITED" is allowed: the point is that a gate is

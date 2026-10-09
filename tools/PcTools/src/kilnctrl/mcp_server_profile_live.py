@@ -1,5 +1,5 @@
 """Live profile edit tools -- wraps profiles_live_http.c's five-route HTTP
-surface (docs/LIVE_PROFILE_EDIT_PLAN.md section 10) over
+surface (docs/LIVE_PROFILE_EDIT.md section 10) over
 profile_live_http_client.py. See that client module's docstring for the full
 wire contract; this module is a thin MCP layer over it: host resolution,
 confirm-gating on writes, and echoing the board's own response text.

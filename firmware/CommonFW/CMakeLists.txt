@@ -74,7 +74,7 @@ add_library(kilnlink STATIC
     # either firmware because BOTH sides need it -- SaftyFW to emit the record
     # (src/update/saftyfw_image_identity_record.c) and KilnFW to find it in a
     # staged image (App/drivers/net/pico_image_source.c) -- which is exactly
-    # what CommonFW is for. docs/PICO_AUTO_UPDATE_PLAN.md G1/G2.
+    # what CommonFW is for. docs/PICO_AUTO_UPDATE.md G1/G2.
     src/saftyfw_image_identity.c
 )
 target_include_directories(kilnlink PUBLIC include)

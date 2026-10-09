@@ -322,7 +322,7 @@ static bool append_warning(char *json, size_t cap, size_t *o, bool *first, const
     return true;
 }
 
-/* docs/LIVE_PROFILE_EDIT_PLAN.md section 7/8 -- the single validation body
+/* docs/LIVE_PROFILE_EDIT.md section 7/8 -- the single validation body
  * shared by profile_post_handler() (mode ADVISORY, below), the live-edit
  * accept handler and the executor's pickup re-check (both mode HARD). Reads
  * zone config only; no httpd state, so it host-tests directly. `warnings_json`
@@ -562,7 +562,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return ret;
     }
 
-    /* Feasibility + ceiling check, docs/LIVE_PROFILE_EDIT_PLAN.md section 8
+    /* Feasibility + ceiling check, docs/LIVE_PROFILE_EDIT.md section 8
      * item 2 -- profiles_validate_candidate() is the one function the save
      * handler here, the live-edit handler and the executor's pickup check
      * all call. ADVISORY mode reproduces this handler's pre-extraction

@@ -1,5 +1,5 @@
 // Host tests for live_profile.c and profile_executor_live_pickup.c
-// (docs/LIVE_PROFILE_EDIT_PLAN.md pass 1). Its own SEPARATE executable
+// (docs/LIVE_PROFILE_EDIT.md pass 1). Its own SEPARATE executable
 // (same convention as test_kiln_cfg_swap.c / test_profiles_http.c): needs
 // the REAL host hal_kv backend (fake_kv.c) so the working-slot/record
 // read-back-verified writes are exercised for real, not mocked a second

@@ -426,7 +426,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(profiles_err));
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
-    // docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: must run after profiles_http_start()
+    // docs/LIVE_PROFILE_EDIT.md pass 2: must run after profiles_http_start()
     // just above -- calls the same profiles_http_get()/profiles_http_save()
     // seam.
     esp_err_t profiles_live_err = profiles_live_http_start();

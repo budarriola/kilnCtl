@@ -186,7 +186,7 @@ class FlashFirmwareAdapterPinningTest(unittest.TestCase):
 
 
 class FlashFirmwareSizePreflightTest(FlashFirmwareAdapterPinningTest):
-    """RELEASE_HARDENING_PLAN.md section 6: the size preflight in
+    """RELEASE_HARDENING.md section 6: the size preflight in
     flash_firmware() (mcp_server_flash.py, `if app_bin_size > app_target.size`)
     refuses before OpenOCD is touched when build/KilnCtrl.bin does not fit the
     resolved `app` partition -- the guard that would have caught the
@@ -198,7 +198,7 @@ class FlashFirmwareSizePreflightTest(FlashFirmwareAdapterPinningTest):
     1024 bytes specifically so this check is a no-op and does not interfere
     with what they're testing -- which meant, until this class, the refusal
     branch itself was never exercised by anything. Negative-tested manually
-    2026-09-17 (see RELEASE_HARDENING_PLAN.md section 6's status line): the
+    2026-09-17 (see RELEASE_HARDENING.md section 6's status line): the
     guard was disabled by commenting out the `if` fast-fail, the test below
     failed as expected (result did not start with "error:", OpenOCD WAS
     called), the file was restored by hand via Edit, `git diff` and

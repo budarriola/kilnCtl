@@ -1,4 +1,4 @@
-// pico_auto_update.h -- pure decision logic for docs/PICO_AUTO_UPDATE_PLAN.md
+// pico_auto_update.h -- pure decision logic for docs/PICO_AUTO_UPDATE.md
 // ("the ESP checks the Pico's firmware version on every boot and updates it
 // automatically if needed", owner requirement 2026-09-16, ROADMAP.md).
 //
@@ -6,7 +6,7 @@
 // function, pure and host-testable"): given the expected Pico identity, what
 // the Pico actually reported, whether a firing is in the way, the persisted
 // attempt count, and whether a config-format migration chain gap exists, it
-// answers exactly one of the outcomes docs/PICO_AUTO_UPDATE_PLAN.md sec 9
+// answers exactly one of the outcomes docs/PICO_AUTO_UPDATE.md sec 9
 // step 3 names. It does not touch flash, does not talk to the link, and does
 // not persist anything -- see pico_update_attempts.h for the counter and
 // pico_auto_update_state.h for the target-only glue that calls this with
@@ -59,7 +59,7 @@ extern "C" {
  * (boot_guard.h) so there is one number in the tree to remember. */
 #define PICO_AUTO_UPDATE_ATTEMPT_BUDGET 3u
 
-/* Every outcome docs/PICO_AUTO_UPDATE_PLAN.md sec 9 step 3 names. The four
+/* Every outcome docs/PICO_AUTO_UPDATE.md sec 9 step 3 names. The four
  * ABANDONED_* values are exactly the "unrecoverable" causes of plan sec 4/
  * 10.3 (this classification, and is_unrecoverable() below, are unchanged by
  * the 2026-09-20 amendments). What DOES differ per-cause, as of the same
@@ -68,7 +68,7 @@ extern "C" {
  * (Opus review, same day) are surfaced as a non-blocking
  * pico_auto_update_state_set_warning() rather than
  * pico_auto_update_state_set_blocking(true) -- see that switch and
- * docs/PICO_AUTO_UPDATE_PLAN.md sec 4/10.3's amendment notes. Only
+ * docs/PICO_AUTO_UPDATE.md sec 4/10.3's amendment notes. Only
  * NO_IMAGE and CHAIN_GAP still actually refuse the next firing start;
  * treat this enum's is_unrecoverable() as "the decision cannot self-heal",
  * not as "blocks firing" -- those stopped being the same thing here. */

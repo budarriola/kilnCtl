@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Reboot the Pico (debug_reset peer="pico") DURING a real running firing and
-record what the ESP does -- RELEASE_HARDENING_PLAN section 5's never-exercised
+record what the ESP does -- RELEASE_HARDENING section 5's never-exercised
 "Pico reboots mid-firing" scenario.
 
 Expected end state, derived from the code (not guessed). Paths are relative to

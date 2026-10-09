@@ -3950,7 +3950,7 @@ static void test_profiles_list_marks_exceeds_ceiling(void)
               "the over-ceiling profile must be marked exceeds_ceiling:true in the list");
 }
 
-// ---- profiles_validate_candidate() -- docs/LIVE_PROFILE_EDIT_PLAN.md section 7/8 -------
+// ---- profiles_validate_candidate() -- docs/LIVE_PROFILE_EDIT.md section 7/8 -------
 // The one function the save handler, the live-edit handler and the executor's pickup
 // check all share. These tests exercise it directly (no httpd_req_t needed -- it reads
 // only zone config), proving HARD refuses what ADVISORY only warns about, and that the

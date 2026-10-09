@@ -1,4 +1,4 @@
-// Host tests for App/drivers/http/profiles_live_http.c (docs/LIVE_PROFILE_EDIT_PLAN.md
+// Host tests for App/drivers/http/profiles_live_http.c (docs/LIVE_PROFILE_EDIT.md
 // pass 2, section 10/11). Its own SEPARATE executable, same "#include the .c
 // directly" convention as test_profiles_http.c/test_live_profile.c: this file
 // reaches every one of profiles_live_http.c's `static` handlers with no other

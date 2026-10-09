@@ -90,7 +90,7 @@ bool pico_image_embedded_describe_from(const uint8_t *slot_a, uint32_t slot_a_le
         commit_b[ident_b.commit_len] = '\0';
         set_reason(out, "embedded slot A (%s%s) and slot B (%s%s) disagree -- not the same SaftyFW build",
                    commit_a, ident_a.dirty ? "+dirty" : "", commit_b, ident_b.dirty ? "+dirty" : "");
-        ESP_LOGE(TAG, "%s -- refusing to use either as an update source (docs/PICO_AUTO_UPDATE_PLAN.md "
+        ESP_LOGE(TAG, "%s -- refusing to use either as an update source (docs/PICO_AUTO_UPDATE.md "
                       "sec 9 step 1's fleet-wide-refusal trap: a WRONG expected identity is worse than none)",
                  out->reason);
         return true;

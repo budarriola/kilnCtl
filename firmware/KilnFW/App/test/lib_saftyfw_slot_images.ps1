@@ -14,7 +14,7 @@
 #
 # ORIGIN (2026-09-20). firmware\KilnFW\App\drivers\CMakeLists.txt's
 # EMBED_FILES step FATAL_ERRORs at configure time if these two .bin files are
-# missing -- introduced by the Pico embedded auto-update chain (docs/PICO_AUTO_UPDATE_PLAN.md). This
+# missing -- introduced by the Pico embedded auto-update chain (docs/PICO_AUTO_UPDATE.md). This
 # logic first lived only in check_00_kilnfw_target_build.ps1, which builds a
 # mirrored copy of the local working tree and so happened to pick up a
 # SaftyFW build directory from earlier manual work; check_01_kilnfw_pushed_

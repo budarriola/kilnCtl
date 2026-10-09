@@ -38,7 +38,7 @@ recovery_flash_provenance.json
 recovery_elf_archive/
 
 # Durable coredump archive (kilnctrl coredump_fetch.py, 2026-09-16,
-# RELEASE_HARDENING_PLAN.md blocker 1 item 1) -- same "sibling of build/,
+# RELEASE_HARDENING.md blocker 1 item 1) -- same "sibling of build/,
 # never inside it" reasoning as elf_archive/ above. Machine-generated raw
 # board dumps and their provenance sidecars, never committed.
 coredump_archive/

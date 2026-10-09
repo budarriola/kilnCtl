@@ -1,4 +1,4 @@
-// docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 -- section 10's five-route HTTP surface
+// docs/LIVE_PROFILE_EDIT.md pass 2 -- section 10's five-route HTTP surface
 // over pass 1's live_profile.c/profile_executor_live_pickup.c backend.
 //
 // Window-check caveat: live_edit_check_window() needs a "running" profile_t

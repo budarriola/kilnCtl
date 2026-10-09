@@ -113,7 +113,7 @@ try {
         (Join-Path $testDir "test_firing_shadow.c"),
         (Join-Path $testDir "test_safety_cfg_store.c"),
         (Join-Path $testDir "test_boot_guard.c"),
-        # docs/PICO_AUTO_UPDATE_PLAN.md -- pure decision logic (header-only,
+        # docs/PICO_AUTO_UPDATE.md -- pure decision logic (header-only,
         # no I/O) and the persisted per-pair attempt-budget counter
         # (#includes pico_update_attempts.c directly, same convention as
         # test_boot_guard.c immediately above; no fake-body collision, so it
@@ -890,7 +890,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/firing_stats_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1: profile_executor.c (#included
+            # docs/LIVE_PROFILE_EDIT.md pass 1: profile_executor.c (#included
             # above) now calls profile_executor_live_pickup_check() from
             # reload_live_profile_if_changed(). Linked for REAL rather than
             # faked -- it is a small pure file (no hal_kv/FreeRTOS deps) and
@@ -942,7 +942,7 @@ try {
     Invoke-HostTestExe -Name "profile_executor_prestart" -ExePath $exe4 -BuildCmd $cmd4
 
     # ---- test_profile_executor_store_link.c: store-plus-consumer link test ----
-    # docs/RELEASE_HARDENING_PLAN.md: test_profile_executor_prestart.c feeds the
+    # docs/RELEASE_HARDENING.md: test_profile_executor_prestart.c feeds the
     # real profile_executor_run() from a hand-built profiles_http_get() fake, so a
     # store-layout/executor-consumption mismatch could never fail there. This
     # executable #includes that file (its main() renamed, its profiles_http_get()/
@@ -1111,7 +1111,7 @@ try {
     Invoke-HostTestExe -Name "profiles_http" -ExePath $exe7 -BuildCmd $cmd7
 
     # ---- test_live_profile.c: its own separate executable ---------------------
-    # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1. Same "#includes the .c directly"
+    # docs/LIVE_PROFILE_EDIT.md pass 1. Same "#includes the .c directly"
     # reason as test_zones_http.c/test_profiles_http.c above -- it reaches
     # live_profile.c's persistence functions and profile_executor_live_pickup.c's
     # pure pickup check by #including both files directly, and needs the REAL
@@ -1148,7 +1148,7 @@ try {
     Invoke-HostTestExe -Name "live_profile" -ExePath $exeLp -BuildCmd $cmdLp
 
     # ---- test_profiles_live_http.c: its own separate executable ---------------
-    # docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 (section 10/11 HTTP surface). Same
+    # docs/LIVE_PROFILE_EDIT.md pass 2 (section 10/11 HTTP surface). Same
     # "#includes the .c directly" reason as test_live_profile.c above -- it
     # reaches profiles_live_http.c's `static` handlers directly, and links the
     # REAL live_profile.c (in turn needing the real host hal_kv backend,
@@ -1214,7 +1214,7 @@ try {
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
             "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
-            # PICO_AUTO_UPDATE_PLAN.md G1: ota_http_pico.c (#included into
+            # PICO_AUTO_UPDATE.md G1: ota_http_pico.c (#included into
             # test_ota_http.c above) now records what it staged, so a later
             # boot can re-use the image. Linked in for REAL rather than faked,
             # same rationale as ota_record.c beside it -- it is a plain
@@ -1333,7 +1333,7 @@ try {
     Invoke-HostTestExe -Name "dashboard_status_http" -ExePath $exe9 -BuildCmd $cmd9
 
     # ---- test_ota_pico_relay.c: its own, separate executable -----------------
-    # docs/PICO_AUTO_UPDATE_PLAN.md used to flag this gap: "ota_pico_relay.c's
+    # docs/PICO_AUTO_UPDATE.md used to flag this gap: "ota_pico_relay.c's
     # own state machine has no host test today (only its terminal-state
     # recognition is exercised indirectly)." relay_task_fn() is `static` with
     # no other seam into it, so this file #includes ota_pico_relay.c directly
@@ -3055,11 +3055,11 @@ try {
     # host-compiled directly (GCC-only asm blob externs; wifi_provision_http.c
     # also #includes <sys/socket.h> with no host stub), so each tests its
     # fix's pure formatter plus the real may_disclose gate composition.
-    # 54 -> 55: docs/LIVE_PROFILE_EDIT_PLAN.md pass 1 added
+    # 54 -> 55: docs/LIVE_PROFILE_EDIT.md pass 1 added
     # test_live_profile.c (55th) as its own Invoke-HostTestExe call --
     # live_profile.c's persistence functions and profile_executor_live_
     # pickup.c's pure pickup check, both untested until now.
-    # 55 -> 56: docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 added
+    # 55 -> 56: docs/LIVE_PROFILE_EDIT.md pass 2 added
     # test_profiles_live_http.c (56th) as its own Invoke-HostTestExe call --
     # profiles_live_http.c's five HTTP handlers (status/fork/accept/decide/
     # page), untested until now.
@@ -3070,7 +3070,7 @@ try {
     # untested (see that file's own header comment).
     # 59 -> 60: added test_ota_pico_relay.c's own Invoke-HostTestExe call --
     # ota_pico_relay.c's relay state machine, untested until now
-    # (docs/PICO_AUTO_UPDATE_PLAN.md).
+    # (docs/PICO_AUTO_UPDATE.md).
     # 60 -> 61: added test_firing_compare_alloc.c's own Invoke-HostTestExe
     # call -- firing_compare()'s heap-allocation failure path
     # (ITER_TUNE_REDESIGN.md step 8 review).

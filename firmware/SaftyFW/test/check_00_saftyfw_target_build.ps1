@@ -168,7 +168,7 @@ if (-not (Test-Path $elf)) {
 # slot-linked executables, produced by a POST_BUILD add_custom_command on
 # each SaftyFW_slotX target (firmware/SaftyFW/CMakeLists.txt,
 # saftyfw_add_slot_executable()). These feed the ESP-side embed-and-push-to-
-# Pico auto-update path (docs/PICO_AUTO_UPDATE_PLAN.md, owner decision
+# Pico auto-update path (docs/PICO_AUTO_UPDATE.md, owner decision
 # 2026-09-20). Checked here, not in a separate check file, because this is
 # the one check that actually runs the target build both slot executables
 # come from. The two images MUST NOT be byte-identical -- they are

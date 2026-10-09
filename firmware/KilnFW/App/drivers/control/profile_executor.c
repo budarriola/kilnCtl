@@ -410,7 +410,7 @@ static bool live_pickup_validate_hard(void *ctx, const profile_t *candidate, cha
     return profiles_validate_candidate(candidate, (int)PROFILE_VALIDATE_HARD_LOCAL, NULL, 0, err_msg, err_cap);
 }
 
-/* docs/LIVE_PROFILE_EDIT_PLAN.md pass 1, section 3/7: same one-counter-per-
+/* docs/LIVE_PROFILE_EDIT.md pass 1, section 3/7: same one-counter-per-
  * tick poll shape as reload_config_if_changed() just above, called
  * immediately alongside it for the same "every edit lands at one known
  * point in the tick" reason. Only RUNNING adopts a swap (plan section 3) --

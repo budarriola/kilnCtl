@@ -1,7 +1,7 @@
 # Release-gate vacuity audit, 2026-09-17
 
 Continues the series started `docs/audits/release_gate_vacuity_audit_2026-09-16.md`,
-blocker 3 of `docs/RELEASE_HARDENING_PLAN.md`. This pass closes the one item
+blocker 3 of `docs/RELEASE_HARDENING.md`. This pass closes the one item
 explicitly carried forward, unexercised, across `...16e.md`, `...16f.md`, and
 `...16g.md`:
 

@@ -460,7 +460,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
     ROUTE_TIER("/safety", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/safety/commissioning", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/profiles", HTTP_GET, ROUTE_TIER_ADMIN),
-    /* docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 (section 10) -- all five routes
+    /* docs/LIVE_PROFILE_EDIT.md pass 2 (section 10) -- all five routes
      * ADMIN, matching /profiles: this edits a firing already running on this
      * kiln, right now, so it is at least as sensitive as profile creation. */
     ROUTE_TIER("/live_profile", HTTP_GET, ROUTE_TIER_ADMIN),

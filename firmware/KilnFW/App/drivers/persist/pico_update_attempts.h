@@ -1,5 +1,5 @@
 // pico_update_attempts.h -- the persisted, per-pair attempt-budget counter
-// behind docs/PICO_AUTO_UPDATE_PLAN.md sec 7/9 step 4 ("the persisted
+// behind docs/PICO_AUTO_UPDATE.md sec 7/9 step 4 ("the persisted
 // counter... per boot_guard.c's helpers").
 //
 // WHY A NEW COUNTER RATHER THAN REUSING boot_guard.c's: that counter answers

@@ -1,6 +1,6 @@
 // Host tests for App/drivers/net/pico_image_embedded.c -- the two embedded
 // SaftyFW slot images and whether they carry one agreeing identity.
-// docs/PICO_AUTO_UPDATE_PLAN.md, owner decision 2026-09-20.
+// docs/PICO_AUTO_UPDATE.md, owner decision 2026-09-20.
 //
 // pico_image_embedded_describe_from() is the pure core: it takes two caller-
 // supplied buffers instead of the linker-generated EMBED_FILES symbols, so it

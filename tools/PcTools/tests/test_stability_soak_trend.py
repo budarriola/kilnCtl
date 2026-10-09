@@ -1,5 +1,5 @@
 """Negative/positive tests for tools/PcTools/scripts/stability_soak.py's
-trend classifier (RELEASE_HARDENING_PLAN.md blocker 2, item "the trend test
+trend classifier (RELEASE_HARDENING.md blocker 2, item "the trend test
 is not a statistically significant slope test").
 
 Before this fix, `_trend_direction()` compared only the first and last

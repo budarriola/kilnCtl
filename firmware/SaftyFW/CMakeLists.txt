@@ -185,7 +185,7 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/update_task_erase_plan.c
     # 2026-09-20 -- the pure vector-table plausibility check behind the new
     # slot-linkage validation in update_task_process_end() (owner decision,
-    # PICO_AUTO_UPDATE_PLAN.md), split out for the same host-testability
+    # PICO_AUTO_UPDATE.md), split out for the same host-testability
     # reason as update_task_erase_plan.c immediately above -- see
     # update_task_slot_linkage.h.
     src/tasks/update_task_slot_linkage.c
@@ -209,7 +209,7 @@ set(SAFTYFW_APP_SOURCES
     src/update/received_ranges.c
     src/update/update_receiver.c
     src/update/confirm.c
-    # docs/PICO_AUTO_UPDATE_PLAN.md G2 -- the one instance of the
+    # docs/PICO_AUTO_UPDATE.md G2 -- the one instance of the
     # build-identity record this image declares about itself, which the ESP
     # scans out of a staged image to decide whether the running Pico is out of
     # date. Compiled into ALL THREE targets that share this source list
@@ -624,7 +624,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
     pico_set_linker_script(${TARGET_NAME} ${_saftyfw_slot_ld})
 
     # Raw binary image of this slot, for the ESP-side embed-and-push-to-Pico
-    # auto-update path (docs/PICO_AUTO_UPDATE_PLAN.md, owner decision
+    # auto-update path (docs/PICO_AUTO_UPDATE.md, owner decision
     # 2026-09-20). picotool is still unavailable in this build environment
     # (see the pico_add_extra_outputs() comment above) so no .uf2 is
     # produced here -- but a plain position-dependent .bin needs nothing

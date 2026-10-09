@@ -1178,7 +1178,7 @@ esp_err_t wifi_provision_http_start(void)
      * bytes = 44 bytes, noise against the documented ~11.9 kB DRAM failure
      * floor.
      *
-     * Bumped 151 -> 160, 2026-09-19: docs/LIVE_PROFILE_EDIT_PLAN.md pass 2's
+     * Bumped 151 -> 160, 2026-09-19: docs/LIVE_PROFILE_EDIT.md pass 2's
      * five new routes (GET /live_profile, GET+POST /api/profile/live, POST
      * /api/profile/live/fork, POST /api/profile/live/decide --
      * profiles_live_http.c) plus two favorites routes that landed

@@ -1,6 +1,6 @@
 # First-Firing Commissioning Checklist
 
-Closes `docs/RELEASE_HARDENING_PLAN.md` blocker 8. This is the procedure an
+Closes `docs/RELEASE_HARDENING.md` blocker 8. This is the procedure an
 owner follows the first time a REAL kiln — not the bench fixture — is fired
 under this controller. It is written for the owner, not a firmware
 developer: every step names what to do, what to read back, and what to do if
@@ -247,7 +247,7 @@ meaningful current reading.
 
 Current-sensing commissioning is real, owner-performed work, not a
 configuration checkbox — an uncalibrated CT leaves every CT-dependent guard
-dormant. Per `docs/RELEASE_HARDENING_PLAN.md`'s blocker-8 text, current-
+dormant. Per `docs/RELEASE_HARDENING.md`'s blocker-8 text, current-
 sensing commissioning under real load is what unlocks guards S3, S4, S9,
 S14, and S15 out of their commissioning-blocked state.
 
@@ -294,7 +294,7 @@ on THIS kiln's real wiring.
 | S13 (commissioning-gap arming) | Yes, executed/matched/cleared/restored on the bench. | Steps 5-7 are exactly the commissioning fields S13 checks; completing them is what arms it here. |
 | S6b (link-dead) | Attempted on the bench but not confirmed — the OpenOCD halt used to provoke it does not persist across the guard's wait window. | Not independently re-attempted by this checklist; a genuine link-loss event (unplugging the safety-link cable) during a supervised firing is the honest way to see it, and is deferred to the first attended firing, not this pre-firing checklist. |
 | S5 (sensor validity / SPI failure, safety-side TC) | Attempted but not verified on the bench — no register-level fault-injection tool exists for the safety processor's own MAX31856. | Step 4.3 exercises the adjacent, verifiable case (type mismatch via `s_tc_type_verified`), which is the observable this checklist can actually produce. A genuine SPI/wiring failure of the safety TC is only provable by disconnecting it and confirming the invalid-reading behavior described in `firmware/SaftyFW/docs/HARDWARE.md` §8.1 — do this once, deliberately, as an explicit extra check if you want S5 proven before firing. |
-| S2, S7, S9, S11 | Not attempted on the bench — need a human at a real bench/kiln, or a supervised firing. | S9 specifically needs a jig that injects real AC current while confirming the contactor de-energizes (`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §3.4); this checklist's low-temperature dry run (step 6) proves the contactor opens on command, which is necessary but not sufficient for S9's full claim. S2, S7, and S11 remain to be exercised during the low-temperature and full-temperature attended firings that follow this checklist, per `docs/RELEASE_HARDENING_PLAN.md` blocker 8's closure criterion. |
+| S2, S7, S9, S11 | Not attempted on the bench — need a human at a real bench/kiln, or a supervised firing. | S9 specifically needs a jig that injects real AC current while confirming the contactor de-energizes (`firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §3.4); this checklist's low-temperature dry run (step 6) proves the contactor opens on command, which is necessary but not sufficient for S9's full claim. S2, S7, and S11 remain to be exercised during the low-temperature and full-temperature attended firings that follow this checklist, per `docs/RELEASE_HARDENING.md` blocker 8's closure criterion. |
 | S3, S4, S14, S15 (CT-dependent) | Cannot arm on the bench at all — the bench has no real current to sense. | Step 7's calibration is what unlocks these from dormant; confirm each shows a live, non-dormant status on `GET /api/safety/commissioning` after step 7, and treat any that still shows dormant as unverified going into the first firing. |
 | KilnFW thermal_guard 1/2/3/4/5/7/9 | Not attempted on the bench — need real thermal mass and ramp behavior a 4 W fixture cannot produce. | Left to the low-temperature attended firing (S8's real rate-of-rise threshold, per blocker 8's second bullet, is a related, separate item that also needs a full-power ramp measurement and is explicitly out of this pre-power checklist's scope). |
 
@@ -305,6 +305,6 @@ on THIS kiln's real wiring.
 Completing sections 1-8 above makes the kiln ready for, in order: a
 low-temperature attended firing, then a full-temperature attended firing,
 then the first unattended firing — each a separate, later step with its own
-refusal conditions, per `docs/RELEASE_HARDENING_PLAN.md` blocker 8's closure
+refusal conditions, per `docs/RELEASE_HARDENING.md` blocker 8's closure
 criterion. Do not treat completion of this document as clearance for an
 unattended firing by itself.

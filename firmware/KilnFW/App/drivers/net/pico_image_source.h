@@ -1,7 +1,7 @@
 // pico_image_source.h -- "what SaftyFW image, if any, could this board push
 // at the Pico right now, and what build is it?"
 //
-// This is the ESP side of docs/PICO_AUTO_UPDATE_PLAN.md G1/G2. It answers
+// This is the ESP side of docs/PICO_AUTO_UPDATE.md G1/G2. It answers
 // both halves of the out-of-date question's premise from ONE source of
 // truth: the bytes actually sitting in the `pico_img` staging partition.
 //

@@ -87,7 +87,7 @@ static void set_fully_ready(void)
     /* 2026-09-14: the ceiling-match item, promoted into this gate the same
      * way estop_verified was. Not diverged -- the two sides agree. */
     s_fake_facts.ceiling_diverged = false;
-    /* docs/PICO_AUTO_UPDATE_PLAN.md's new item: not blocked, i.e. the
+    /* docs/PICO_AUTO_UPDATE.md's new item: not blocked, i.e. the
      * Pico's firmware version matches (or the boot-time glue has not
      * flagged an unrecoverable mismatch). */
     s_fake_facts.pico_update_blocked = false;
@@ -198,7 +198,7 @@ static void test_ceiling_divergence_alone_refuses(void)
 
 static void test_pico_update_blocked_alone_refuses(void)
 {
-    /* docs/PICO_AUTO_UPDATE_PLAN.md owner decision, verbatim: "on an
+    /* docs/PICO_AUTO_UPDATE.md owner decision, verbatim: "on an
      * unrecoverable version mismatch the ESP refuses to fire until
      * matched" -- an actual block, not a warning surface. This gate's item
      * is the enforcement half of that; pico_auto_update_state_is_blocking()

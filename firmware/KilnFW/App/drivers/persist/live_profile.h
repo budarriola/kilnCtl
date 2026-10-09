@@ -1,4 +1,4 @@
-/* live_profile.h -- docs/LIVE_PROFILE_EDIT_PLAN.md, pass 1 (backend only, no
+/* live_profile.h -- docs/LIVE_PROFILE_EDIT.md, pass 1 (backend only, no
  * HTTP routes -- those are pass 2/3).
  *
  * Owns the structural live-edit working slot (plan section 4): a profile
@@ -166,7 +166,7 @@ bool live_edit_can_overwrite(const live_edit_record_t *rec, char *err, size_t er
  * asks for -- that file was left untouched this pass (its own edit is out
  * of this pass's assigned scope), so this is a small, deliberately
  * duplicated equivalent pending that widening; flagged in
- * docs/LIVE_PROFILE_EDIT_PLAN.md as follow-up work. */
+ * docs/LIVE_PROFILE_EDIT.md as follow-up work. */
 bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
                               uint8_t exclude_id, char *err, size_t err_cap);
 

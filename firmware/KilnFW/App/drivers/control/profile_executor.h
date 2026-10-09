@@ -591,7 +591,7 @@ bool profile_executor_get_active_id(uint8_t *out_id);
  * /api/status and the LCD, which must not materialize a profile_exec_status_t. */
 uint8_t profile_executor_aux_claim_mask(void);
 
-/* docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: GET /api/profile/live's one locked
+/* docs/LIVE_PROFILE_EDIT.md pass 2: GET /api/profile/live's one locked
  * read of the live-edit-relevant slice of s_exec -- the run's identity/
  * segment position (meaningful only while active), and the last definitive
  * pickup refusal (s_exec.live_edit_last_refusal). This is the ONLY sanctioned

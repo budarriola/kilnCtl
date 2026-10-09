@@ -683,7 +683,7 @@ def judge_nav_menu(nav_js_text: Optional[str], href_count: Optional[int], expect
     "auto-expands the current group" half of the case.
 
     ``expected_count`` bumped 15 -> 16 2026-09-21: `e3de6122`
-    (LIVE_PROFILE_EDIT_PLAN.md) added `/live_profile` ("Edit running
+    (LIVE_PROFILE_EDIT.md) added `/live_profile` ("Edit running
     firing") to nav.js's menu after this case's 15 was set, which turned it
     red against a healthy, correctly-updated board -- same "count went
     stale the moment new content landed" class WEB-X-03's own docstring

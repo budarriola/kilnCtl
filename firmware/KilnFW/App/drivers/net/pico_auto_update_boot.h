@@ -1,5 +1,5 @@
 // pico_auto_update_boot.h -- the boot-time trigger for
-// docs/PICO_AUTO_UPDATE_PLAN.md (G3, plan sec 9 step 5): once per boot, ask
+// docs/PICO_AUTO_UPDATE.md (G3, plan sec 9 step 5): once per boot, ask
 // whether the safety processor is running the build this board has staged
 // for it, and if not, attempt exactly one update within a persisted,
 // read-back-verified budget.

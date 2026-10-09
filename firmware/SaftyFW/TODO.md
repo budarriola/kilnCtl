@@ -772,7 +772,7 @@ ROADMAP.md M8.
       the same staged image, so the two sides are not computing the same
       CRC32 variant/parameters (`../CommonFW/docs/UPDATE_PROTOCOL.md`
       "Hardware exercise 2026-09-05/06"). **Fixed by `fabd270f`** (see
-      `../../docs/PICO_AUTO_UPDATE_PLAN.md:167`).
+      `../../docs/PICO_AUTO_UPDATE.md:167`).
 
 ---
 

@@ -325,7 +325,7 @@ and 1 (23) is on the separate `logs` track.
   and "makes the dual-write bridges live" sentence below as a description of
   intended behavior on the CURRENT source, not an observed result, until the
   board is next reflashed and this note is updated with what actually
-  happened. See `docs/RELEASE_HARDENING_PLAN.md` section 10 for the
+  happened. See `docs/RELEASE_HARDENING.md` section 10 for the
   decision this drove (parked, not finished, pending bench time).
 - **Dual-write window (closing, see "NVS dual-write close" at the end of this
   document).** Superseded: the paragraph below describes the window as it was

@@ -4,7 +4,7 @@
 // off a socket) and net/pico_auto_update_boot.c's embedded-image writer
 // (the whole image already sits in flash-mapped .rodata, no streaming
 // needed). Factored out so the erase-then-write-then-verified-manifest
-// sequence exists in exactly one place, per docs/PICO_AUTO_UPDATE_PLAN.md's
+// sequence exists in exactly one place, per docs/PICO_AUTO_UPDATE.md's
 // task 3 instruction not to duplicate it.
 //
 // CONTRACT, mirrored from ota_http_pico.c's prior in-line version:

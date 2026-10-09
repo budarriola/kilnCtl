@@ -196,7 +196,7 @@ An opus review of the first pass found rows missing entirely, not just
 mistiered: the live-profile-edit route group (`GET /api/profile/live`,
 `POST /api/profile/live/fork`, `POST /api/profile/live`, `POST
 /api/profile/live/decide` — A45 and C13-C15, and the MCP tools `profile_live_get`/
-`_fork`/`_edit`/`_decide` from `docs/LIVE_PROFILE_EDIT_PLAN.md` section 10),
+`_fork`/`_edit`/`_decide` from `docs/LIVE_PROFILE_EDIT.md` section 10),
 `GET /api/profile/export` (A46), `POST /api/ota/esp/boot_guard_reset` (B32),
 `GET /api/logs/firing`/`GET /api/logs/autotune` (A47), `POST
 /api/safety/log_level` with its `safety_set_log_level` tool (B11), and

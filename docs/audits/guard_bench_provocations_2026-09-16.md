@@ -1,6 +1,6 @@
 # Bucket A guard bench provocations — executed evidence (2026-09-16)
 
-> Executes `docs/RELEASE_HARDENING_PLAN.md` blocker 4's bench half and fills
+> Executes `docs/RELEASE_HARDENING.md` blocker 4's bench half and fills
 > `firmware/SaftyFW/docs/GUARD_TEST_MATRIX.md` §3.4, which had zero executed
 > rows before this session. Read first: `docs/SAFETY_ARGUMENT_WITHOUT_BENCH.md`
 > (commit d913b608), which sorted every guard into three buckets and named 13

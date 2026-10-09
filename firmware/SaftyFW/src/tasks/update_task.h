@@ -170,7 +170,7 @@ void update_task_reboot_now(void);
 // transition in the unsafe direction.
 bool update_task_transfer_active(void);
 
-// docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap: "the ESP has no wire field
+// docs/PICO_AUTO_UPDATE.md:64's named gap: "the ESP has no wire field
 // for the Pico's active slot, so A/B alternation is blind". Returns true and
 // fills `*out_is_b` (false = BOOTLOADER_SLOT_A, true = BOOTLOADER_SLOT_B) iff
 // this boot's active slot was established from a real flash metadata record

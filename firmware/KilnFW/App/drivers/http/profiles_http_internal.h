@@ -325,7 +325,7 @@ bool validate_io_segment_in_state(const profile_segment_t *seg, uint8_t seg_num,
 bool validate_on_off_rules_in_state(const profile_t *candidate, const profile_validate_state_t *st, char *err_msg,
                                     size_t err_cap);
 
-/* Widened non-`static` (docs/LIVE_PROFILE_EDIT_PLAN.md section 8 item 1) so
+/* Widened non-`static` (docs/LIVE_PROFILE_EDIT.md section 8 item 1) so
  * the live-edit handler decodes the identical x-www-form-urlencoded shape
  * profiles_edit_http.c's own POST /api/profile does -- two decoders would
  * drift on the first new field. Renamed from the original `static
@@ -335,7 +335,7 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
 
 /* Selects which rule profiles_validate_candidate() applies to a ZONE_RAMP
  * segment's target_c against its zone's CURRENTLY configured max_temp_c
- * (docs/LIVE_PROFILE_EDIT_PLAN.md section 7). PROFILE_VALIDATE_ADVISORY is
+ * (docs/LIVE_PROFILE_EDIT.md section 7). PROFILE_VALIDATE_ADVISORY is
  * today's save-time behavior (profile_exceeds_zone_ceiling(): a profile
  * exceeding the live ceiling still saves, with a warning -- profiles are
  * portable between kilns, and only *starting* one enforces the ceiling).
@@ -365,7 +365,7 @@ _Static_assert(PROFILE_VALIDATE_HARD == 1, "profile_executor.c's local profile_v
 
 /* The one place a candidate profile_t is checked before it is written
  * anywhere. Called by profile_post_handler() (mode ADVISORY, unchanged
- * behavior), the live-edit POST handler (mode HARD, docs/LIVE_PROFILE_EDIT_PLAN.md
+ * behavior), the live-edit POST handler (mode HARD, docs/LIVE_PROFILE_EDIT.md
  * section 7), and the executor's pickup re-check (mode HARD, against the
  * *live* zone config, under s_exec.lock) -- three call sites, one rule.
  * Reads zone config; touches no httpd state, so it host-tests directly

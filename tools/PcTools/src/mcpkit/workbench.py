@@ -461,7 +461,7 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     `kiln_fw_root`" section) -- neither is a full build, so neither goes
     through the build gate.
 
-    2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md): the KilnFW APPLICATION build
+    2026-09-20 (docs/PICO_AUTO_UPDATE.md): the KilnFW APPLICATION build
     now ``EMBED_FILES`` two SaftyFW slot images
     (``firmware/SaftyFW/build/SaftyFW_slotA.bin``/``slotB.bin``) so the ESP
     can update the Pico automatically at boot, and fails at CMake configure

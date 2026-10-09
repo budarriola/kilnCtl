@@ -1,6 +1,6 @@
 // ui_page_live_decide -- LCD end-of-run decision for a live-edited firing.
 //
-// When a firing that was edited live (docs/LIVE_PROFILE_EDIT_PLAN.md) ends,
+// When a firing that was edited live (docs/LIVE_PROFILE_EDIT.md) ends,
 // the working copy is still owed a decision: Discard it, Save it as a new
 // profile, or Overwrite the original. The web does this on /live_profile;
 // this is the LCD equivalent (ROADMAP: LCD save/discard of live edits).

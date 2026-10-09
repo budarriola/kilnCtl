@@ -813,7 +813,7 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     probe taken just before the reset call, purely informational -- its
     failure never blocks or fails the reset itself, and is reported as
     "unknown" rather than silently dropped) alongside the reset call's own
-    verified-or-not after value -- RELEASE_HARDENING_PLAN.md blocker 6 calls
+    verified-or-not after value -- RELEASE_HARDENING.md blocker 6 calls
     for both, since a silent clear is not acceptable and a failed clear must
     be visible with enough context to judge it."""
     if not reset_boot_guard:
@@ -982,7 +982,7 @@ def _pico_image_provenance_note(app_bin_path: str) -> str:
     """One-line note recording what the ESP application binary about to be
     flashed believes about its embedded Pico (SaftyFW) image(s), per the
     2026-09-20 owner decision that the ESP embeds both SaftyFW slot images
-    and auto-updates the Pico at boot (docs/PICO_AUTO_UPDATE_PLAN.md).
+    and auto-updates the Pico at boot (docs/PICO_AUTO_UPDATE.md).
 
     Read-only and best-effort: this NEVER changes flash behavior or blocks a
     flash -- it only appends a line to the provenance report so a flash's

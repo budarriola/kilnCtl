@@ -1,5 +1,5 @@
 // test_profile_executor_store_link.c -- store-plus-consumer link test
-// (docs/RELEASE_HARDENING_PLAN.md, the "real store+consumer link test" item).
+// (docs/RELEASE_HARDENING.md, the "real store+consumer link test" item).
 //
 // test_profile_executor_prestart.c compiles the REAL profile_executor_run()
 // but answers its profiles_http_get() call from a hand-built fake, so a drift

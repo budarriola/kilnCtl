@@ -331,7 +331,7 @@ def check_saftyfw_stale(safty_fw_root: str) -> StaleResult:
     # test/ and README.md that never reach the Pico image) and
     # tools/PcTools/src/kilnctrl/pico_image_freshness.py's SCOPED_PATHS -- a
     # third, independently-maintained copy of the same list. See
-    # docs/PICO_AUTO_UPDATE_PLAN.md sec 13 and the drift test
+    # docs/PICO_AUTO_UPDATE.md sec 13 and the drift test
     # tools/PcTools/tests/test_pico_image_freshness.py::test_scoped_paths_match_cmake_and_stale_check.
     return check_stale(
         header_path=os.path.join(safty_fw_root, "build", "saftyfw_build_info.h"),

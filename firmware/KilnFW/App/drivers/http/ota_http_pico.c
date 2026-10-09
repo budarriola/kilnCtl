@@ -38,7 +38,7 @@
 #include "ota_pico_relay.h"
 #include "ota_record.h"
 #include "pico_image_manifest.h" /* pico_image_manifest_store() -- record what was staged, so a
-                                  * LATER BOOT can re-use this image (PICO_AUTO_UPDATE_PLAN.md G1) */
+                                  * LATER BOOT can re-use this image (PICO_AUTO_UPDATE.md G1) */
 #include "pico_image_source.h" /* pico_image_source_describe() -- reads back the image just staged
                                 * to learn its declared link_protocol_version, TODO.md 9.4 */
 #include "pico_img_stage.h" /* shared erase/write/manifest sequence -- owner decision 2026-09-20,
@@ -249,7 +249,7 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
         sha_op_active = false; // finished (or failed to finish) -- nothing left to abort in cleanup
     }
 
-    // docs/PICO_AUTO_UPDATE_PLAN.md G1: remember what was just staged, so a
+    // docs/PICO_AUTO_UPDATE.md G1: remember what was just staged, so a
     // LATER BOOT can re-use this image. pico_img_stage_finish() persists the
     // read-back-verified manifest (pico_image_manifest_store()) and hands
     // back the final CRC-32 -- written BEFORE the relay starts on purpose:

@@ -1,5 +1,5 @@
 """build_kilnfw() now builds SaftyFW first for a `build`/`reconfigure` target
-(docs/PICO_AUTO_UPDATE_PLAN.md, 2026-09-20) since the KilnFW application
+(docs/PICO_AUTO_UPDATE.md, 2026-09-20) since the KilnFW application
 embeds SaftyFW's slot bins. This test proves the ordering and the abort
 behavior WITHOUT running any real toolchain: `mcpkit.workbench.build_saftyfw`
 and the ESP-IDF profile / `_run_locked` call are monkeypatched.

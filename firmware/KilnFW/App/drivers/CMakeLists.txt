@@ -126,7 +126,7 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     endforeach()
 endif()
 
-# Owner decision 2026-09-20 (docs/PICO_AUTO_UPDATE_PLAN.md, overriding its
+# Owner decision 2026-09-20 (docs/PICO_AUTO_UPDATE.md, overriding its
 # own sec 2 "CORRECTION 2026-09-18"): embed both SaftyFW two-slot bootloader
 # images directly into this application build -- see
 # net/pico_image_embedded.h's own doc comment for the full rationale and the
@@ -279,7 +279,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "control/run_state.c"
                        "persist/boot_guard.c"
                        "persist/pico_update_attempts.c"
-                       # docs/PICO_AUTO_UPDATE_PLAN.md G1 -- the persisted
+                       # docs/PICO_AUTO_UPDATE.md G1 -- the persisted
                        # description of whatever SaftyFW image is staged in
                        # the pico_img partition, which is what turns a staged
                        # image into a re-usable boot-time update source. See
@@ -320,7 +320,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "net/time_sync.c"
                        "net/time_sync_tz.c"
                        "net/pico_auto_update_state.c"
-                       # docs/PICO_AUTO_UPDATE_PLAN.md G1/G2/G3: the staged
+                       # docs/PICO_AUTO_UPDATE.md G1/G2/G3: the staged
                        # image's verified description and self-declared build
                        # identity, and the one-shot boot task that compares it
                        # against what the Pico reports and acts on the answer.
@@ -596,7 +596,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # a separate module rather than a fourth split file: see
                        # its own header comment for why.
                        "http/profiles_export_http.c"
-                       # docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: the five-route
+                       # docs/LIVE_PROFILE_EDIT.md pass 2: the five-route
                        # HTTP surface over pass 1's live_profile.c backend.
                        "http/profiles_live_http.c"
                        # profiles_builtin.c is hand-written and #includes the
@@ -608,7 +608,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        # favorite is a shortcut, not a move -- see
                        # profiles_favorites.h.
                        "persist/profiles_favorites.c"
-                       # docs/LIVE_PROFILE_EDIT_PLAN.md pass 1: the structural
+                       # docs/LIVE_PROFILE_EDIT.md pass 1: the structural
                        # live-edit working slot + live_edit_v1 record, and the
                        # pure executor-side pickup/decision logic. No HTTP
                        # routes yet (pass 2).

@@ -104,7 +104,7 @@ typedef struct {
     bool tc_config_reasserted_known;
     bool tc_config_reasserted;
     // active_slot_known/active_slot_is_b mirror LINK_FLAG2_ACTIVE_SLOT_KNOWN/
-    // _ACTIVE_SLOT_B (link_frame.h, docs/PICO_AUTO_UPDATE_PLAN.md:64) -- same
+    // _ACTIVE_SLOT_B (link_frame.h, docs/PICO_AUTO_UPDATE.md:64) -- same
     // two-bit "_known" convention as cj_valid_known/tc_config_reasserted_known
     // above.
     bool active_slot_known;

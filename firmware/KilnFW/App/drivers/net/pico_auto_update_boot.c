@@ -287,7 +287,7 @@ static bool attempt_update_embedded(const pico_image_embedded_info_t *emb, int s
                                         slot);
 }
 
-/* Bug found 2026-09-21 (bench triage): docs/PICO_AUTO_UPDATE_PLAN.md sec 11's
+/* Bug found 2026-09-21 (bench triage): docs/PICO_AUTO_UPDATE.md sec 11's
  * source-only review found this board's SaftyFW has no confirmed two-slot
  * bootloader today (a flat image at 0x10000000, no seeded metadata sector) --
  * the P1-closed claim earlier in that plan does not hold for this board.
@@ -314,7 +314,7 @@ static void pico_auto_update_task(void *arg)
 #if !PICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT
     ESP_LOGW(TAG, "automatic Pico update is compiled OFF: no wire-level signal exists yet to "
                   "confirm this board's SaftyFW has an update-capable two-slot bootloader "
-                  "installed (docs/PICO_AUTO_UPDATE_PLAN.md sec 11, NO-GO as of 2026-09-21) -- "
+                  "installed (docs/PICO_AUTO_UPDATE.md sec 11, NO-GO as of 2026-09-21) -- "
                   "set -DPICO_AUTO_UPDATE_ASSUME_BOOTLOADER_PRESENT=1 once that is confirmed");
     pico_auto_update_state_set_blocking(false, NULL);
     pico_auto_update_state_set_warning(NULL);

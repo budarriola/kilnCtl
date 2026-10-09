@@ -76,7 +76,7 @@ static inline void *heap_caps_malloc(size_t size, uint32_t caps)
     return malloc(size);
 }
 
-// profiles_live_http.c (docs/LIVE_PROFILE_EDIT_PLAN.md pass 2) pairs its
+// profiles_live_http.c (docs/LIVE_PROFILE_EDIT.md pass 2) pairs its
 // heap_caps_malloc() calls with the real heap_caps_free(), not a bare
 // free() -- both real ESP-IDF free() and heap_caps_malloc()'s host stub
 // above ultimately go through the same malloc()/free() pool on the host, so

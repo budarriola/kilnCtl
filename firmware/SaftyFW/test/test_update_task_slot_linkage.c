@@ -1,6 +1,6 @@
 // test_update_task_slot_linkage.c -- update_task_slot_linkage_check(), the
 // vector-table plausibility check added 2026-09-20 (owner decision,
-// docs/PICO_AUTO_UPDATE_PLAN.md) to catch a build/tooling mixup where an
+// docs/PICO_AUTO_UPDATE.md) to catch a build/tooling mixup where an
 // image linked for one flash slot's address gets written into the OTHER
 // slot. That mixup CRCs correctly -- the bytes received are exactly the
 // bytes sent -- so the existing UPDATE_END CRC check cannot see it; only a

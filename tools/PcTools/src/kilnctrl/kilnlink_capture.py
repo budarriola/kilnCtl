@@ -104,7 +104,7 @@ class LinkDevice(enum.IntEnum):
 #: timeline. Not every id here has a structured decoder below; anything
 #: without one still gets a name and a raw hex payload dump.
 #
-# 2026-09-20, docs/PICO_AUTO_UPDATE_PLAN.md: the ESP now embeds both SaftyFW
+# 2026-09-20, docs/PICO_AUTO_UPDATE.md: the ESP now embeds both SaftyFW
 # slot images and updates the Pico automatically at boot. The UPDATE_* wire
 # frames below (0x10-0x14) and UPDATE_STATE_NAMES/UPDATE_ERR_BITS further
 # down decode that relay -- including state 8, REJECTED_SLOT_LINKAGE, added
@@ -165,7 +165,7 @@ CMD_NAMES: dict[int, str] = {
 #: report a state this table doesn't know yet, so lookups always fall back
 #: to a hex label rather than raising.
 #:
-#: State 8 (2026-09-20, docs/PICO_AUTO_UPDATE_PLAN.md): the Pico now rejects
+#: State 8 (2026-09-20, docs/PICO_AUTO_UPDATE.md): the Pico now rejects
 #: an UPDATE_BEGIN whose embedded image is linked for the WRONG target slot
 #: (position-dependent code -- see that plan's slot-selection hazard note).
 #: It reuses UPDATE_STATUS_ERR_CRC_MISMATCH's bit in `last_error` (no
@@ -246,7 +246,7 @@ def _decode_status_frame_a(payload: bytes) -> dict:
         # mismatch (see SaftyFW's link_frame.h/thermo_task.h).
         out["tc_config_reasserted"] = bool(flags2 & 0x04)
         # bits 3/4 (0x08/0x10) are LINK_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B,
-        # 2026-09-23 (docs/PICO_AUTO_UPDATE_PLAN.md:64): the Pico's own
+        # 2026-09-23 (docs/PICO_AUTO_UPDATE.md:64): the Pico's own
         # bootloader A/B slot, from update_task_get_active_slot(). Bit4 is
         # only meaningful when bit3 is set -- same "_known" pairing
         # convention as bit1/CJ_VALID -- so this is surfaced as one

@@ -124,7 +124,7 @@ in committed content (since `827dd887`), so a from-scratch `idf.py build` with
 no `sdkconfig` at all targets esp32s3 correctly on its own — confirmed
 directly, not just reasoned about, in `check_01_kilnfw_pushed_build.ps1`'s
 header (2026-09-16) and again empirically in a from-scratch worktree on
-2026-09-17 (see `docs/RELEASE_HARDENING_PLAN.md` section 11). Earlier
+2026-09-17 (see `docs/RELEASE_HARDENING.md` section 11). Earlier
 revisions of this doc recommended seeding a set-target step; that premise was
 already false by the time it was written (the target had been pinned all
 along) and following it is no longer necessary. Likewise, `tools/setup.ps1`

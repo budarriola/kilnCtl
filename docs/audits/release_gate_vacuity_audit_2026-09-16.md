@@ -1,6 +1,6 @@
 # Release gate vacuity audit — 2026-09-16
 
-Scope: blocker 3 of `docs/RELEASE_HARDENING_PLAN.md` ("test coverage that
+Scope: blocker 3 of `docs/RELEASE_HARDENING.md` ("test coverage that
 survives this repository's own failure modes"). This is not a search for
 gates that fail — it is a search for gates that pass while proving nothing,
 per the six confirmed instances listed in that plan section (vacuous pass,

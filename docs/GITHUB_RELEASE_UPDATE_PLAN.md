@@ -27,7 +27,7 @@ Everything else marked "default" is a recommendation, not yet owner-confirmed.
 4. Staging inside the running `app` partition is IMPOSSIBLE: IDF refuses writes and erases in the running partition
    (`esp_partition_main_flash_region_safe`, `partition_target.c`) and `CONFIG_SPI_FLASH_DANGEROUS_WRITE_ABORTS=y` would panic.
    Never enable `CONFIG_SPI_FLASH_DANGEROUS_WRITE_ALLOWED`. Staging needs its own partition (section 3).
-5. One ESP image covers both processors: it embeds both SaftyFW slot images and updates the Pico at boot (`docs/PICO_AUTO_UPDATE_PLAN.md`).
+5. One ESP image covers both processors: it embeds both SaftyFW slot images and updates the Pico at boot (`docs/PICO_AUTO_UPDATE.md`).
 6. Memory: `MBEDTLS_INTERNAL_MEM_ALLOC=y`, `EXTERNAL_MEM_ALLOC` and `DYNAMIC_BUFFER` off, `SSL_IN_CONTENT_LEN=16384`, full cert bundle
    already built in, `esp_http_client`/`esp-tls` not used anywhere in `App/`. A TLS session in internal RAM is roughly 35-45 KB (estimate,
    UNVERIFIED) against a bench idle of 29.6-31.1 KB current free internal heap (29 samples, `logs/sk04_sampling/2026-10-06.tsv`; low-water `min_free` 16555 B, largest block 9728 B; the older "17.6 KB" figure was the low-water mark of an earlier boot, not the idle level) and the owner floor `heap_internal min_free >= 8192 B`. TLS is therefore M2 only.
@@ -159,7 +159,7 @@ then undraft. Archive the ELF via `elf_archive`.
 1. Full `tools/run_all_checks.ps1 -ExecutionPolicy Bypass` (not `-Fast`, not `-Only`) green at the release commit, no unexplained SKIP.
 2. Release commit equals `origin/main` HEAD; artifacts built in a clean worktree, never the shared tree.
 3. ROADMAP.md has no open release-blocking row (open on 2026-10-04: the backup round-trip bug and the unexplained ESP restart); open items of
-   `docs/RELEASE_HARDENING_PLAN.md` section 2 are closed or waived by the owner in that file.
+   `docs/RELEASE_HARDENING.md` section 2 are closed or waived by the owner in that file.
 4. Latest bench pass (suites `ota`, `lcd`, safety link) at most 7 days old on the exact image released (`fw_build` matches); no crash report;
    readiness ok except hardware-gated items named in the notes.
 5. 24 h soak on the release image: `heap_internal min_free >= 8192 B`, all `$requiredNames` tasks alive.

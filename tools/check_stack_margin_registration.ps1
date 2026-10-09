@@ -187,7 +187,7 @@ $requiredNames = @(
     # into and cleared back to NULL from when it self-deletes.
     "zone_sweep",  # liveness: on-demand -- transient task an HTTP handler (zones_http.c's sweep_start_post_handler()) creates per POST /api/zones/sweep/start call
 
-    # docs/PICO_AUTO_UPDATE_PLAN.md G3 -- the one-shot boot-time Pico
+    # docs/PICO_AUTO_UPDATE.md G3 -- the one-shot boot-time Pico
     # auto-update evaluator (App/drivers/net/pico_auto_update_boot.c). It
     # self-deletes once it has a verdict, so it is short-lived rather than a
     # service, but it runs on EVERY boot and does a bounded link wait plus a

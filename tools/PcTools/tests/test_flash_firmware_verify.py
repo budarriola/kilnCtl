@@ -575,7 +575,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         # NVS) BEFORE the clear (from the GET probe above) alongside the
         # verified after-value, not just the after-value alone -- a silent
         # clear with no before/after context is not acceptable per
-        # RELEASE_HARDENING_PLAN.md blocker 6. boot_count (this boot's fixed
+        # RELEASE_HARDENING.md blocker 6. boot_count (this boot's fixed
         # in-RAM count) never changes across this call and is reported
         # separately.
         self.assertIn("before=2", result)

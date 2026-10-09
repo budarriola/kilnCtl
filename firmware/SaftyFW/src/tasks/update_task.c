@@ -316,7 +316,7 @@ static bool s_confirm_pending = false;
 static uint8_t s_own_slot = BOOTLOADER_SLOT_A;
 
 // --- Active-slot cache for update_task_get_active_slot() (docs/
-// PICO_AUTO_UPDATE_PLAN.md:64) -- populated once, at startup, by
+// PICO_AUTO_UPDATE.md:64) -- populated once, at startup, by
 // update_task_startup_confirm_check() below; NOT the same thing as
 // s_own_slot above (see update_task_get_active_slot()'s own doc comment in
 // update_task.h for why that cache cannot be reused here).

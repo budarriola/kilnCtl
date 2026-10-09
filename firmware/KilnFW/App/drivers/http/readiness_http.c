@@ -715,7 +715,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 10a3. Pico auto-update. docs/PICO_AUTO_UPDATE_PLAN.md owner decision:
+    /* 10a3. Pico auto-update. docs/PICO_AUTO_UPDATE.md owner decision:
      * "on an unrecoverable version mismatch the ESP refuses to fire until
      * matched" -- same shape as safety_ceiling_match immediately above (a
      * live verdict computed once elsewhere, displayed and blocked on here

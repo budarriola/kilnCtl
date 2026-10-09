@@ -88,7 +88,7 @@ WP2), which is now also the actual `app` partition size in `partitions.csv`.
    PASS at the release commit, zero unexplained SKIPs.
 2. Release commit equals origin/main HEAD in a clean worktree; artifacts built from it.
 3. ROADMAP.md has no unchecked release-blocking item; `docs/RELEASE_HARDENING_PLAN.md`
-   section 2 items closed or waived by the owner in that file.
+   sections 2, 4 and 5 closed or waived by the owner in that file.
 4. No open regression rows in the status/bench logs; latest bench pass (suites `ota`, `lcd`,
    safety link) at most 7 days old and on the exact image released (`fw_build` matches).
 5. `get_heap_status`: heap_internal min_free >= 8192 B over a 24 h soak on the release image,

@@ -183,7 +183,7 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 // mismatch_count() itself (still SWD-only) has that detail.
 #define LINK_FLAG2_TC_CONFIG_REASSERTED 0x04u
 
-// docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap: "the ESP has no wire field
+// docs/PICO_AUTO_UPDATE.md:64's named gap: "the ESP has no wire field
 // for the Pico's active slot, so A/B alternation is blind" (see
 // pico_update_attempts_next_slot()'s own comment, KilnFW's
 // pico_update_attempts.c, for the "reset one side of a pair" hazard this
@@ -281,7 +281,7 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 //
 // `active_slot_known`/`active_slot_is_b` control flags2 bits 3/4
 // (LINK_FLAG2_ACTIVE_SLOT_KNOWN/_B, see those macros' own comment above) --
-// docs/PICO_AUTO_UPDATE_PLAN.md:64's named gap. Same V3-only gate as every
+// docs/PICO_AUTO_UPDATE.md:64's named gap. Same V3-only gate as every
 // other flags2 field: only meaningful once `peer_supports_status_v3` is
 // true, same "no new byte, no protocol bump" reasoning. Pass
 // `active_slot_known = false` (and `active_slot_is_b` is then ignored, by

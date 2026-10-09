@@ -136,9 +136,9 @@ Plan: `docs/HW_ABSTRACTION.md`.
 
 ## Live profile edit mid-firing (delivered 2026-09-19)
 
-**Edit the running profile mid-firing, from the web UI -- owner request 2026-09-18. DELIVERED 2026-09-19**: `live_profile_page.html`, five ADMIN routes in `profiles_live_http.c`, fork-on-edit, HARD-mode validation, executor pickup, end-of-firing prompt, shared duplicate-name refusal. The LCD Edit-firing page and the LCD end-of-run Discard/Save as/Overwrite page also landed, bench PASS 2026-10-01 (LCD-22..25: live edit adopted by a running firing, decide page, heap floor). Pending bench items: delete the stray test profile "LiveEditTest" in slot 0 of the bench board, and decide which of the stored `kiln_auth` record and the bench env-var credentials is authoritative (the 2026-09-21 clean login returned 401). Plan: `docs/LIVE_PROFILE_EDIT_PLAN.md` section 10.
+**Edit the running profile mid-firing, from the web UI -- owner request 2026-09-18. DELIVERED 2026-09-19**: `live_profile_page.html`, five ADMIN routes in `profiles_live_http.c`, fork-on-edit, HARD-mode validation, executor pickup, end-of-firing prompt, shared duplicate-name refusal. The LCD Edit-firing page and the LCD end-of-run Discard/Save as/Overwrite page also landed, bench PASS 2026-10-01 (LCD-22..25: live edit adopted by a running firing, decide page, heap floor). Pending bench items: delete the stray test profile "LiveEditTest" in slot 0 of the bench board, and decide which of the stored `kiln_auth` record and the bench env-var credentials is authoritative (the 2026-09-21 clean login returned 401). Plan: `docs/LIVE_PROFILE_EDIT.md` section 10.
 
-Plan: `docs/LIVE_PROFILE_EDIT_PLAN.md`.
+Plan: `docs/LIVE_PROFILE_EDIT.md`.
 
 ## M18 commissioning narrative (2026-09-21 to 2026-10-04)
 
@@ -476,7 +476,7 @@ Moved verbatim out of `ROADMAP.md` M18 once every item in it had landed; the ope
   - (a) **Landed (`d484e51a`, `f017b285`):** an "Edit firing" button next to
     Start/Stop on the web UI opens `/live_profile`, prompting for login
     first if not already signed in (backend: `profiles_live_http.c`,
-    `docs/LIVE_PROFILE_EDIT_PLAN.md`'s five routes, the `profile_live_*` MCP
+    `docs/LIVE_PROFILE_EDIT.md`'s five routes, the `profile_live_*` MCP
     quartet). **LCD counterpart landed 2026-09-28** (`ebbbd34f`, review fixes
     `1a40133a`, `e35e1aff`): a live-edit-current-firing LCD page (guarded
     apply, refresh, heap state; `e35e1aff` clears a stale status line when

@@ -42,7 +42,7 @@ if(GIT_EXECUTABLE)
     # whole: esp/, host/, idf/, test/ and README.md live under that same
     # directory but never reach the Pico image, and scoping to the whole
     # directory made an edit to any of those spuriously restamp
-    # SAFTYFW_GIT_COMMIT (review round 3, docs/PICO_AUTO_UPDATE_PLAN.md sec
+    # SAFTYFW_GIT_COMMIT (review round 3, docs/PICO_AUTO_UPDATE.md sec
     # 13: 33 of the last 62 hwAbstraction-only commits touched only those
     # unreached subtrees). This is also NOT `rev-parse --short HEAD` of the
     # whole monorepo. A plain repo-wide HEAD changes on every commit

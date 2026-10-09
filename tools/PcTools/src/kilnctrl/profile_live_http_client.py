@@ -4,7 +4,7 @@ routes (firmware/KilnFW/App/drivers/http/profiles_live_http.c), used by
 mcp_server_profile_live.py's profile_live_* tools.
 
 Wire contract source of truth: profiles_live_http.c itself and
-docs/LIVE_PROFILE_EDIT_PLAN.md section 10. Mirrored here, not re-derived:
+docs/LIVE_PROFILE_EDIT.md section 10. Mirrored here, not re-derived:
 
   GET  /api/profile/live
        -> 200 {"active":bool,"origin_id":uint,"origin_is_builtin":bool,

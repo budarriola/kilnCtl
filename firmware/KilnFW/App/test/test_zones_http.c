@@ -2679,7 +2679,7 @@ static void test_nvs_load_from_newer_than_firmware_is_found_but_not_valid(void)
     nvs_test_clear();
 }
 
-// RELEASE_HARDENING_PLAN.md sec 5 (2026-09-17): the ONLY thing profile_executor_run()'s
+// RELEASE_HARDENING.md sec 5 (2026-09-17): the ONLY thing profile_executor_run()'s
 // quarantine gate, dashboard_http.c and ui_page_home_refresh.c actually consult is
 // zones_config_get_load_fault() -- not found/valid. Every test above this point drives
 // the REAL nvs_load_from()/zones_config_json_decode_blob() with a real staged blob
@@ -3070,7 +3070,7 @@ static void test_nvs_load_from_bad_crc_is_rejected(void)
     nvs_test_clear();
 }
 
-// RELEASE_HARDENING_PLAN.md sec 5 (2026-09-17): UNREADABLE half of the same gap closed
+// RELEASE_HARDENING.md sec 5 (2026-09-17): UNREADABLE half of the same gap closed
 // by test_nvs_load_from_newer_than_firmware_latches_real_load_fault() above -- a
 // corrupt (bad-CRC) current-version blob must ALSO latch the real
 // zones_config_get_load_fault() signal (kind == UNREADABLE), since that is what a real
@@ -4504,7 +4504,7 @@ static void test_nvs_load_from_v6_blob_upconverts_fields_correctly(void)
     nvs_test_clear();
 }
 
-// RELEASE_HARDENING_PLAN.md blocker 7's "migration test that runs every
+// RELEASE_HARDENING.md blocker 7's "migration test that runs every
 // historical schema version forward" -- confirmed genuinely missing by
 // docs/audits/release_hardening_plan_verify_1_2_5_7_8_2026-09-16.md: every
 // existing migration test above proves one hop (or, in the v1->v16 chain

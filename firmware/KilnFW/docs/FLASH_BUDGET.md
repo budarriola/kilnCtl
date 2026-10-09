@@ -594,7 +594,7 @@ history and are not hypothetical — each has already caused a problem here once
 
 ## Embedded SaftyFW slot images (2026-09-20)
 
-Owner decision 2026-09-20 (overriding `docs/PICO_AUTO_UPDATE_PLAN.md` sec 2's
+Owner decision 2026-09-20 (overriding `docs/PICO_AUTO_UPDATE.md` sec 2's
 "CORRECTION 2026-09-18"): `App/drivers/CMakeLists.txt` now `EMBED_FILES`s
 both SaftyFW two-slot bootloader binaries
 (`firmware/SaftyFW/build/SaftyFW_slotA.bin` /

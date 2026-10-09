@@ -810,7 +810,7 @@ static void test_apply_status_v3_tc_config_reasserted(void)
 static void test_apply_status_v3_active_slot(void)
 {
     TEST_SECTION("safety_apply_status -- V3 (26B) ACTIVE_SLOT_KNOWN/ACTIVE_SLOT_B flags2 bits 3/4 "
-                 "(2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64): absent-byte contract reads as "
+                 "(2026-09-23, docs/PICO_AUTO_UPDATE.md:64): absent-byte contract reads as "
                  "UNKNOWN, present byte decodes A/B correctly and is independent of bits 0/1/2, and "
                  "a V3->V1 regression clears the stale known-flag");
 

@@ -1,4 +1,4 @@
-/* Node-only test for live_profile_page.html (docs/LIVE_PROFILE_EDIT_PLAN.md,
+/* Node-only test for live_profile_page.html (docs/LIVE_PROFILE_EDIT.md,
  * sections 2, 8 and 10): the client-side editability rule that mirrors the
  * executor's `editable_from_segment` boundary, and the form serialisation
  * that must round-trip a frozen/read-only segment unchanged rather than

@@ -1,4 +1,4 @@
-// profiles_live_http -- docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: the five-route
+// profiles_live_http -- docs/LIVE_PROFILE_EDIT.md pass 2: the five-route
 // HTTP surface over pass 1's live_profile.c/profile_executor_live_pickup.c
 // backend (landed bca094fc). Deliberately its own file, not folded into
 // profiles_http.c/profiles_edit_http.c/profiles_catalog_http.c: the plan's

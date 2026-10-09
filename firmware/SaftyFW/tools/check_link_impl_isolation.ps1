@@ -183,7 +183,7 @@ $allowlistPaths = @(
     # integrity, or a plain accessor/stub computing nothing) than the link's
     # CRC16-CCITT-FALSE, not a from-scratch reimplementation of it.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\boot_guard.c"),
-    # docs/PICO_AUTO_UPDATE_PLAN.md pico_update_attempts.c -- same class as
+    # docs/PICO_AUTO_UPDATE.md pico_update_attempts.c -- same class as
     # boot_guard.c immediately above: a standalone table-less CRC32 (IEEE
     # 802.3/zlib polynomial) over this module's OWN NVS record, deliberately
     # copied from boot_guard.c's algorithm rather than shared (so this

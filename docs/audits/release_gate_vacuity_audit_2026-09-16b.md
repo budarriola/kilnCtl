@@ -1,7 +1,7 @@
 # Release gate vacuity audit — 2026-09-16, part 2
 
 Continuation of `docs/audits/release_gate_vacuity_audit_2026-09-16.md` (commit
-22919e5f), blocker 3 of `docs/RELEASE_HARDENING_PLAN.md`. That pass
+22919e5f), blocker 3 of `docs/RELEASE_HARDENING.md`. That pass
 negative-tested 7 gates and named roughly 85 not yet examined. This pass
 takes the next slice: the full mirror-drift family, the remaining
 KilnFW stack-budget checks, and the one open item that pass explicitly

@@ -1,7 +1,7 @@
 # Release-gate vacuity audit, 2026-10-07 (twelfth pass)
 
 Continues `docs/audits/release_gate_vacuity_audit_2026-10-02.md`; BLOCKER 3 of
-`docs/RELEASE_HARDENING_PLAN.md` item 3.
+`docs/RELEASE_HARDENING.md` item 3.
 
 Work was done in a dedicated worktree, `C:\wt\vac12_o50bic`, minted at
 origin/main (50fca908). No hardware was touched, no MCP tool called and no

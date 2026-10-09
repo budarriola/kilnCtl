@@ -426,7 +426,7 @@ def test_decode_status_frame_a_tc_config_reasserted_bit():
 
 def test_decode_status_frame_a_active_slot_bits():
     # flags2 bits 3/4 (0x08/0x10, LINK_FLAG2_ACTIVE_SLOT_KNOWN/_ACTIVE_SLOT_B,
-    # 2026-09-23, docs/PICO_AUTO_UPDATE_PLAN.md:64) ride the same V3 flags2
+    # 2026-09-23, docs/PICO_AUTO_UPDATE.md:64) ride the same V3 flags2
     # byte -- proves they decode into a single "A"/"B"/"unknown" string,
     # independent of the other bits, and that B (0x10) alone without KNOWN
     # (0x08) still reads "unknown" rather than a confident B.

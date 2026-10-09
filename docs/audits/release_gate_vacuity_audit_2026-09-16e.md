@@ -1,6 +1,6 @@
 # Release gate vacuity audit — 2026-09-16e
 
-Fifth slice of blocker 3 (`docs/RELEASE_HARDENING_PLAN.md`). Continues from
+Fifth slice of blocker 3 (`docs/RELEASE_HARDENING.md`). Continues from
 `docs/audits/release_gate_vacuity_audit_2026-09-16d.md`, which must not be
 redone — its eight gates are load-bearing and closed (as are the earlier
 `_2026-09-16.md`/`b`/`c` slices). This pass worked `_2026-09-16d.md`'s "Gates
@@ -13,7 +13,7 @@ Worktree: `C:\wt\vacuity5_xosst4` (`git worktree add --detach` at
 `origin/main`, minted via `tools/worktree_mint.ps1 -Label vacuity5 -RunSetup`),
 submodules initialized, `tools/PcTools/.venv` provisioned automatically by the
 `-RunSetup` switch (`SETUP: ok`). Concurrent agents were actively editing
-config/backup/persist code and `docs/RELEASE_HARDENING_PLAN.md` during this
+config/backup/persist code and `docs/RELEASE_HARDENING.md` during this
 pass; the worktree was re-fetched and moved to current `origin/main`
 (`git switch --detach origin/main`, landing on `2384ec1c`) before committing,
 and every touched-path diff was re-checked against that new base. SaftyFW and

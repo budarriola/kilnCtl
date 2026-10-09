@@ -24,7 +24,7 @@
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_is_pending() -- kiln_cfg_store_autosave_from_live()'s
                              * swap-pending seam, review_autosave_rework_5bc9afb5_2026-09-15.md MEDIUM */
 #include "kiln_io_owner.h"
-#include "pico_auto_update_boot.h" /* docs/PICO_AUTO_UPDATE_PLAN.md G3 -- the boot-time
+#include "pico_auto_update_boot.h" /* docs/PICO_AUTO_UPDATE.md G3 -- the boot-time
                                       * safety-processor firmware check started below */
 #include "profile_executor.h"
 #include "autotune_engine.h"
