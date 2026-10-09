@@ -73,6 +73,8 @@ Fix: either drop enabled-aux relays when a fault source is asserted while idle, 
 
 ### F4 (LOW): unlocked aux store
 
+**Fixed in 49ced2d0.**
+
 `s_entries`, `s_enabled_mask` and `s_conflict_mask` (`persist/aux_outputs_cfg.c:43-45`) are written by `aux_outputs_cfg_set()` (`:246-285`) on the httpd task. They are read by `aux_tick`, the run-start checks and `safety_pico_relay_mask()` on other tasks. Single-byte mask reads are atomic on the S3, but `aux_outputs_cfg_get()` copies a multi-field entry and can return a torn entry. The impact is low because the mode gate refuses aux writes while running.
 
 Fix: add a short spinlock or mutex around set and get.
@@ -139,6 +141,8 @@ Within this firmware, yes:
 For the profile store, a down-convert below PROFILE_VERSION 4 drops on/off rules, aux rules included, and reports the drop (`config_convert.py`, `convert_profile_blob`). The drop is not silent.
 
 ### F3 (LOW): RAM is not rolled back on a failed save
+
+**Fixed in 49ced2d0.**
 
 `persist/aux_outputs_cfg.c:268-285` updates `s_entries` and `s_enabled_mask` before `pref_cfg_fs_commit()` and leaves them changed when the commit fails. A failed enable therefore stays live in RAM:
 - the relay is driven by rules;
