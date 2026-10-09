@@ -17,6 +17,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/portmacro.h" /* portMUX_TYPE -- s_zones_cfg_mux */
 
 #include "MAX31856.h"
 #include "autotune_engine.h"
@@ -412,6 +413,18 @@ bool s_zones_config_valid = false;
  * looked," since a missed edit is simply picked up on the next tick. */
 uint32_t s_config_generation = 1;
 
+static portMUX_TYPE s_zones_cfg_mux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t s_zones_cfg_lock_acquires = 0;
+void zones_cfg_lock(void)
+{
+    portENTER_CRITICAL(&s_zones_cfg_mux);
+    s_zones_cfg_lock_acquires++;
+}
+void zones_cfg_unlock(void)
+{
+    portEXIT_CRITICAL(&s_zones_cfg_mux);
+}
+
 /* ---- Hardware access for Tasks 1/2/3 (2026-08-27+2) ----------------------
  * zones_http_start() itself takes no hardware pointers (pure config CRUD --
  * see its own comment); the current sweep, the CT-mapping check, and the
@@ -763,7 +776,9 @@ esp_err_t zones_http_start(void)
      * the counter's contract ("advances whenever the stored config was
      * replaced") holds unconditionally rather than only for the paths a
      * consumer happens to be watching today. */
+    zones_cfg_lock();
     s_config_generation++;
+    zones_cfg_unlock();
 
     /* 2026-08-21, TODO.md owner-report item 1 -- the actual fix for the
      * gap: apply the persisted per-channel thermocouple type to the real

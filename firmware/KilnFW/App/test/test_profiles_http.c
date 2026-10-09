@@ -622,6 +622,7 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
 // refuse to delete the slot the executor is currently running/paused on.
 // Defaults to IDLE (nothing running); tests that need a "delete refused"
 // case set g_fake_exec_state/g_fake_exec_profile_id first.
+_Static_assert(sizeof(profile_exec_status_t) == 1464, "profile_exec_status_t size: comments across drivers/ cite 1464 B -- update them");
 static profile_exec_state_t g_fake_exec_state = PROFILE_EXEC_IDLE;
 static uint8_t              g_fake_exec_profile_id = 0xFF;
 void profile_executor_get_status(profile_exec_status_t *out)
@@ -1381,6 +1382,34 @@ static void test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot(void)
                                                  "function's job (real implementation), not this handler's, to "
                                                  "treat a missing key as a no-op");
     TEST_CHECK(g_firing_stats_erase_last_id == 5, "called with the right id");
+}
+
+static void test_profiles_http_delete_stats_and_erase_failures(void)
+{
+    TEST_SECTION("profiles_http_delete() -- a failed firing-stats prune keeps the slot (retryable); a "
+                 "failed nvs_erase_slot() is reported, not swallowed (review L1)");
+    pcfg_reset_all();
+    profile_t p = make_stored_profile();
+    s_profiles.profiles[8] = p;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x100);
+    TEST_CHECK(nvs_save_slot(8) == ESP_OK, "save slot 8");
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    g_firing_stats_erase_result = ESP_FAIL;
+    TEST_CHECK(!profiles_http_delete(8), "stats prune failure fails the delete");
+    g_firing_stats_erase_result = ESP_OK;
+    TEST_CHECK(profiles_slot_used(8), "slot stays used so the delete can be retried");
+    TEST_CHECK(s_profiles.profiles[8].segment_count == p.segment_count, "slot content untouched");
+
+    s_profile_rev_unknown[8] = true; /* nvs_erase_slot() REFUSES -> ESP_ERR_INVALID_STATE */
+    TEST_CHECK(!profiles_http_delete(8), "nvs_erase_slot() failure is propagated as false, not true");
+    s_profile_rev_unknown[8] = false;
+
+    s_profiles.profiles[8] = p;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x100);
+    TEST_CHECK(profiles_http_delete(8), "with nothing failing the delete succeeds");
+    TEST_CHECK(!profiles_slot_used(8), "and the slot is gone");
 }
 
 static void test_profiles_http_delete_clears_favorite(void)
@@ -3991,6 +4020,7 @@ void run_test_profiles_http(void)
     test_nvs_erase_slot_prunes_firing_stats();
     test_nvs_erase_slot_prunes_firing_stats_for_never_fired_slot();
     test_profiles_http_delete_clears_favorite();
+    test_profiles_http_delete_stats_and_erase_failures();
     test_favorites_cfg_only_storage();
     test_favorites_refused_when_unmounted();
     test_favorites_legacy_nvs_migrates();

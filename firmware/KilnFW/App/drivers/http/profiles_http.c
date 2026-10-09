@@ -1576,7 +1576,7 @@ bool profiles_http_delete(uint8_t id)
      * of this id would silently relabel that run's history. Same check as
      * profiles_edit_http.c's web delete handler. */
     /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1384-byte
+     * narrow accessor profile_executor.h recommends over a 1464-byte
      * profile_exec_status_t stack local. */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id) && active_id == id) {
@@ -1593,12 +1593,24 @@ bool profiles_http_delete(uint8_t id)
      * orphan bit surviving into a fresh profile. Best-effort: a failed save
      * is logged inside the module and must not block the delete. */
     (void)profiles_favorites_set((uint8_t)id, false);
+    /* Prune the firing history BEFORE the slot is touched (review L1): if the
+     * stats delete fails the slot is still used and fully intact, so the
+     * caller can simply retry; a failure after the slot was gone would leave
+     * history a later profile saved at this id inherits, with no way to retry
+     * (the slot reads unused). nvs_erase_slot() prunes again (idempotent). */
+    esp_err_t serr = firing_stats_erase((uint8_t)id);
+    if (serr != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "profiles_http_delete(%u): firing stats prune failed: %s -- slot kept, retry", id,
+                 esp_err_to_name(serr));
+        return false;
+    }
     profiles_slot_clear(id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot((uint8_t)id);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
+        return false;
     }
     return true;
 }

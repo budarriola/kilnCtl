@@ -1804,6 +1804,27 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
 }
 
+static void test_zones_cfg_lock_covers_commit_and_setters(void)
+{
+    TEST_SECTION("zones config lock -- the POST commit and every field setter's mutate-and-bump take "
+                 "zones_cfg_lock() (review L2; host tests are single-threaded, so this proves the lock "
+                 "is TAKEN around the write, not real mutual exclusion)");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    uint32_t a0 = s_zones_cfg_lock_acquires;
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "submit commits");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1, "the successful commit took the lock exactly once");
+
+    a0 = s_zones_cfg_lock_acquires;
+    TEST_CHECK(zones_config_set_max_ramp_no_save(0, 100.0f), "setter succeeds");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1, "a field setter takes the lock around mutate+bump");
+    uint32_t g = s_config_generation;
+    TEST_CHECK(!zones_config_set_max_ramp_no_save(0, -1.0f), "rejected setter");
+    TEST_CHECK(s_config_generation == g && s_zones_cfg_lock_acquires == a0 + 1,
+               "a rejected setter neither locks nor bumps");
+}
+
 static void test_zones_post_refuses_relay_claimed_by_aux(void)
 {
     TEST_SECTION("POST /api/zones -- a zone relay_mask claiming a relay an enabled aux output owns is "
@@ -16372,6 +16393,7 @@ void run_test_zones_http(void)
     test_zones_post_http_sync_claim();
     test_zones_post_refused_when_cfg_unmounted();
     test_cfg_fs_refusal_helper();
+    test_zones_cfg_lock_covers_commit_and_setters();
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
     test_zones_post_refused_while_async_job_busy();

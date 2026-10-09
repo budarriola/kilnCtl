@@ -79,7 +79,8 @@
  * `{"relay":4,"commanded_on":false,"actuated_on":false,"rule_reason":255}`
  * = 71B worst case each, plus 1B of separator = 72B x 4 = 288B, plus the
  * `,"aux":[` / `]` framing (9B) = 297B. The fixed part was raised 960 -> 1344
- * (+384B) to carry it with headroom; the buffer is a PSRAM heap allocation
+ * (+384B) to carry it with headroom (and later 1344 -> 1920, see below: the real value is the
+ * #define, 1920 + MAX31856_CHANNEL_COUNT * 1024); the buffer is a PSRAM heap allocation
  * (dashboard_exec_http.c), never a task-stack buffer. */
 #define DASHBOARD_JSON_PROFILE_EXEC_BUF_SIZE (1920 + MAX31856_CHANNEL_COUNT * 1024)
 

@@ -203,6 +203,17 @@ extern zones_relay_names_state_t s_relay_names;
 extern bool s_zones_config_valid;
 extern uint32_t s_config_generation;
 
+/* Short critical section serialising every s_zones.cfg writer's
+ * mutate-and-bump (zones_config_accessors.c, the whole-page POST commit and the
+ * other whole-struct writers) against the POST commit's generation re-check
+ * (review L2, docs/audits/DEV_FIRMWARE_REVIEW_2026-10-09.md). Never hold it
+ * across a producer call, flash write, log line or allocation: take it only
+ * around the memory writes. s_zones_cfg_lock_acquires counts acquisitions
+ * (host-test observable). */
+void zones_cfg_lock(void);
+void zones_cfg_unlock(void);
+extern uint32_t s_zones_cfg_lock_acquires;
+
 /* ---- shared hardware handles (owned by zones_http.c) ------------------- */
 
 extern kiln_io_t *s_hw_io;

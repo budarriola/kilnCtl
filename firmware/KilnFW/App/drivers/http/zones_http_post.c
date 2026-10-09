@@ -82,15 +82,19 @@ int zones_http_zone_free_for_aux(uint8_t zone)
         return ZONES_AUX_FREE_NOTHING_CHANGED;
     }
     *saved = s_zones.cfg.zones[zone];
+    zones_cfg_lock();
     s_zones.cfg = *tmp;
-    free(tmp);
     s_config_generation++;
+    zones_cfg_unlock();
+    free(tmp);
     zones_config_push_all_relay_types();
     /* The cfg file is the only save target (NVS dual-write closed): a failed write here is a
      * refusal, because the caller goes on to rewrite profiles against this state. */
     if (nvs_save() != ESP_OK) {
+        zones_cfg_lock();
         s_zones.cfg.zones[zone] = *saved;
         s_config_generation++;
+        zones_cfg_unlock();
         zones_config_push_all_relay_types();
         /* Report the put-back's own result: a failed second save may leave the cfg file holding
          * the freed zone. */
@@ -124,8 +128,10 @@ bool zones_http_zone_restore_after_aux(uint8_t zone)
         return false;
     }
     free(cand);
+    zones_cfg_lock();
     s_zones.cfg.zones[zone] = *s_aux_saved_zone;
     s_config_generation++;
+    zones_cfg_unlock();
     zones_config_push_all_relay_types();
     bool ok = nvs_save() == ESP_OK;
     aux_saved_zone_drop();
@@ -649,7 +655,13 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
          * why that direction goes AFTER, not before. */
     }
 
+    /* Check-and-commit is ONE critical section against every other writer's mutate-and-bump
+     * (zones_cfg_lock(), review L2): the compare, the struct copies and the generation bump below
+     * cannot interleave with a concurrent setter. The lock is dropped before the 409 reply and held
+     * across no producer call -- everything slow (ceiling write, parsing) happened above on `tmp`. */
+    zones_cfg_lock();
     if (s_config_generation != gen_at_snapshot) {
+        zones_cfg_unlock();
         ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: zones config changed concurrently (generation %u -> %u)",
                  (unsigned)gen_at_snapshot, (unsigned)s_config_generation);
         httpd_resp_set_status(req, "409 Conflict");
@@ -674,6 +686,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * save. */
     s_zones_config_valid = true;
     s_config_generation++;
+    zones_cfg_unlock();
     /* RELAY_LIFE_BUDGET.md, "on every successful save": this
      * whole-page submit just validated cleanly and is now live in
      * s_zones.cfg (the "successful" part -- a rejected submission returned

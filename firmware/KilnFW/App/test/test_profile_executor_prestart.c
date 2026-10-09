@@ -10590,6 +10590,36 @@ static void test_aux_on_time_and_switch_count(void)
     profile_executor_halt();
 }
 
+static void test_aux_switch_count_ignores_failed_write(void)
+{
+    TEST_SECTION("aux: switch_count counts only transitions whose relay write succeeded (review L3)");
+    char err[192];
+    profile_t p = aux_test_profile();
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW;
+    p.on_off_rules[0].temp_threshold_c = 100.0f;
+    aux_test_setup(&p);
+    g_stub_aux[0].tc_zone = 0;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run starts");
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].faulted = false;
+    s_exec.zones[0].actual_c = 150.0f; /* rule BELOW 100 -> aux OFF */
+    aux_test_tick(2.0f);
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "aux starts OFF");
+    g_relay_write_fail = true;
+    s_exec.zones[0].actual_c = 50.0f; /* -> wants ON, but the write fails */
+    aux_test_tick(2.0f);
+    g_relay_write_fail = false;
+    TEST_CHECK(s_exec.aux[0].commanded_on, "commanded state still follows the rule");
+    TEST_CHECK(s_exec.aux[0].switch_count == 0, "failed write does not count as a switch");
+    s_exec.zones[0].actual_c = 150.0f;
+    aux_test_tick(2.0f);
+    s_exec.zones[0].actual_c = 50.0f;
+    aux_test_tick(2.0f);
+    TEST_CHECK(s_exec.aux[0].switch_count == 1, "a later successful OFF->ON counts exactly once");
+    profile_executor_halt();
+}
+
 static void test_aux_contact_cycles_are_counted(void)
 {
     TEST_SECTION("aux WP-3: every aux relay transition adds a contact cycle for that relay's mask");
@@ -11211,6 +11241,7 @@ static void run_test_aux_wp3(void)
     test_aux_relay_io_refusal_is_logged();
     test_aux_contact_cycles_are_counted();
     test_aux_on_time_and_switch_count();
+    test_aux_switch_count_ignores_failed_write();
     test_aux_handoff_write_failure_sets_pending();
     test_aux_status_reports_claimed_aux();
     test_aux_off_pending_retried_by_task_loop();

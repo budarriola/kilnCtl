@@ -494,9 +494,11 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
                  (unsigned)sources);
         want_on = false;
     }
+    bool write_ok = true; /* no io bound (host/sim) counts as ok: nothing can fail */
     if (s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
         if (err != ESP_OK) {
+            write_ok = false;
             ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
                      esp_err_to_name(err));
         } else {
@@ -509,7 +511,9 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
          * zone relays (heater_output.c note_transition()): an aux relay
          * switching is a contact cycle like any other. */
         relay_cycles_add(mask, 1u);
-        if (want_on) s_exec.aux[aux_idx].switch_count++;
+        /* switch_count is the dashboard's "it switched" figure: a failed write (state unknown) must
+         * not report a switch that never happened (review L3). */
+        if (want_on && write_ok) s_exec.aux[aux_idx].switch_count++;
     }
     s_exec.aux[aux_idx].commanded_on = want_on;
 }

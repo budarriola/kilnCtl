@@ -1168,7 +1168,7 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     // never nested the other way, same order every other call site in this
     // module keeps.
     /* Only state (RUNNING/PAUSED) is needed here -- use the narrow accessor
-     * profile_executor.h recommends rather than a 1384-byte profile_exec_
+     * profile_executor.h recommends rather than a 1464-byte profile_exec_
      * status_t stack local. This is reachable from the httpd task
      * (adaptive_tune_http.c's revert POST handler calls straight into this
      * function on its own 8192-byte stack). */

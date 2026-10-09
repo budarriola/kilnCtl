@@ -126,7 +126,7 @@ void ui_home_refresh_cb(lv_timer_t *timer)
      * that task's deepest known dispatch target against the 4880 B
      * measured ceiling within its 8192 B stack (see this file's own header
      * comment above and check_all_task_stack_budgets.py) -- heap-allocate
-     * rather than add a 1384-byte profile_exec_status_t stack local here,
+     * rather than add a 1464-byte profile_exec_status_t stack local here,
      * same pattern as safety_cfg_http.c/dashboard_exec_http.c. */
     profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!st) {

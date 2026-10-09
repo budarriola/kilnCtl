@@ -399,7 +399,7 @@ void safety_build_and_send_context(SafetyLinkClass *link)
      * whose stack is only SAFETY_POLL_TASK_STACK = 8192 B and lives in
      * PSRAM (safety_link.c:1636-1638's own comment on why nothing here can
      * risk a stack overflow with the flash cache disabled) -- heap-allocate
-     * rather than materialize a 1384-byte profile_exec_status_t on that
+     * rather than materialize a 1464-byte profile_exec_status_t on that
      * stack, same pattern as safety_cfg_http.c/dashboard_exec_http.c. Every
      * field below is read, not just the active-firing bool, so the narrow
      * profile_executor_get_active_id() accessor does not fit here. */
