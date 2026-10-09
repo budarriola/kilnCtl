@@ -6,6 +6,8 @@
 #define HTTP_FORM_H
 
 #include <ctype.h>
+#include <errno.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +35,11 @@ static inline int http_form_url_decode(const char *src, size_t src_len, char *ou
         } else if (c == '%' && i + 2 < src_len && isxdigit((unsigned char)src[i + 1]) &&
                    isxdigit((unsigned char)src[i + 2])) {
             char hex[3] = { src[i + 1], src[i + 2], '\0' };
-            out[o++] = (char)strtol(hex, NULL, 16);
+            char dec = (char)strtol(hex, NULL, 16);
+            if (dec == '\0') {
+                return -1; /* %00: embedded NUL would truncate the value silently */
+            }
+            out[o++] = dec;
             i += 2;
         } else {
             out[o++] = c;
@@ -55,6 +61,45 @@ static inline bool http_form_value_has_ctl(const char *v, int len)
         }
     }
     return false;
+}
+
+/* Strict integer parse of a decoded form value (v, len == strlen): whole string
+ * consumed, no sign/space garbage, errno clean, within [lo, hi]. */
+static inline bool http_form_parse_long(const char *v, int len, long lo, long hi, long *out)
+{
+    if (!v || len <= 0 || (int)strlen(v) != len || isspace((unsigned char)v[0])) {
+        return false;
+    }
+    char *end = NULL;
+    errno = 0;
+    long r = strtol(v, &end, 10);
+    if (end != v + len || errno != 0 || r < lo || r > hi) {
+        return false;
+    }
+    *out = r;
+    return true;
+}
+
+/* True only for exactly "0" or "1". */
+static inline bool http_form_is_bool01(const char *v, int len)
+{
+    return v && len == 1 && (v[0] == '0' || v[0] == '1');
+}
+
+/* Strict finite float parse, same contract as http_form_parse_long. */
+static inline bool http_form_parse_float(const char *v, int len, float *out)
+{
+    if (!v || len <= 0 || (int)strlen(v) != len || isspace((unsigned char)v[0])) {
+        return false;
+    }
+    char *end = NULL;
+    errno = 0;
+    float r = strtof(v, &end);
+    if (end != v + len || errno != 0 || !isfinite(r)) {
+        return false;
+    }
+    *out = r;
+    return true;
 }
 
 /* Finds "key=" as a whole &-delimited field in body and decodes its value

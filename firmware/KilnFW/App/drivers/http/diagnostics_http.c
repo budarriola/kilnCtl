@@ -757,8 +757,8 @@ static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 
     char val[4];
     int val_len = http_form_find_field(body, "disabled", val, sizeof(val));
-    if (val_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"disabled\" field");
+    if (!http_form_is_bool01(val, val_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "\"disabled\" must be 0 or 1");
         return ESP_OK;
     }
     bool disabled = (val[0] == '1');
@@ -1052,8 +1052,8 @@ static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
 
     char val[4];
     int val_len = http_form_find_field(body, "enabled", val, sizeof(val));
-    if (val_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"enabled\" field");
+    if (!http_form_is_bool01(val, val_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "\"enabled\" must be 0 or 1");
         return ESP_OK;
     }
     bool enabled = (val[0] == '1');
@@ -1263,12 +1263,12 @@ static esp_err_t danger_relay_post_handler(httpd_req_t *req)
     char on_val[4];
     int relay_len = http_form_find_field(body, "relay", relay_val, sizeof(relay_val));
     int on_len = http_form_find_field(body, "on", on_val, sizeof(on_val));
-    if (relay_len <= 0 || on_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay/on missing");
+    if (relay_len <= 0 || !http_form_is_bool01(on_val, on_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay missing or on not 0/1");
         return ESP_OK;
     }
-    long relay = strtol(relay_val, NULL, 10);
-    if (relay < 1 || relay > KILN_IO_RELAY_COUNT) {
+    long relay = 0;
+    if (!http_form_parse_long(relay_val, relay_len, 1, KILN_IO_RELAY_COUNT, &relay)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay out of range");
         return ESP_OK;
     }
@@ -1352,8 +1352,9 @@ static esp_err_t danger_enable_post_handler(httpd_req_t *req)
     body[received] = '\0';
 
     char on_val[4];
-    if (http_form_find_field(body, "on", on_val, sizeof(on_val)) <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on missing");
+    int on_len = http_form_find_field(body, "on", on_val, sizeof(on_val));
+    if (!http_form_is_bool01(on_val, on_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on must be 0 or 1");
         return ESP_OK;
     }
     bool want_on = on_val[0] == '1';

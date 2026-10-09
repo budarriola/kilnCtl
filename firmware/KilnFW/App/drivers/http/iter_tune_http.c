@@ -1,4 +1,5 @@
 #include "iter_tune_http.h"
+#include "http_form.h"
 #include "http_auth_http.h" // kiln_http_register()
 
 #include <stdio.h>
@@ -120,7 +121,9 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
         char val[8];
         if (httpd_query_key_value(query, "zone", val, sizeof(val)) == ESP_OK) {
-            zone = strtol(val, NULL, 10);
+            if (!http_form_parse_long(val, (int)strlen(val), 0, 255, &zone)) {
+                zone = -1;
+            }
         }
     }
     char json[160];

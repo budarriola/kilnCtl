@@ -195,6 +195,10 @@ static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
 
     char note_val[SETUP_WIZARD_NOTE_MAX];
     int note_len = http_form_find_field(body, "note", note_val, sizeof(note_val));
+    if (note_len == -2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "note too long");
+        return ESP_OK;
+    }
     const char *note = (note_len > 0) ? note_val : NULL;
 
     esp_err_t err = setup_wizard_progress_set_step((uint8_t)step_num, state, note);

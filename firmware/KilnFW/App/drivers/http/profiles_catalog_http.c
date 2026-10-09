@@ -1,3 +1,4 @@
+#include "http_form.h"
 #include "profiles_http_internal.h"
 
 #include <stdio.h>
@@ -241,8 +242,13 @@ static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_p
 esp_err_t builtin_list_get_handler(httpd_req_t *req)
 {
     bool include_hidden = false;
-    char query[48];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char query[96];
+    esp_err_t qerr = httpd_req_get_url_query_str(req, query, sizeof(query));
+    if (qerr == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "query too long");
+        return ESP_OK;
+    }
+    if (qerr == ESP_OK) {
         char val[8];
         if (httpd_query_key_value(query, "all", val, sizeof(val)) == ESP_OK && val[0] == '1') {
             include_hidden = true;
@@ -365,8 +371,13 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
 
 esp_err_t profile_detail_get_handler(httpd_req_t *req)
 {
-    char query[32];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    char query[96];
+    esp_err_t qerr = httpd_req_get_url_query_str(req, query, sizeof(query));
+    if (qerr == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "query too long");
+        return ESP_OK;
+    }
+    if (qerr != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
         return ESP_OK;
     }
@@ -375,9 +386,8 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
         return ESP_OK;
     }
-    char *end = NULL;
-    long id = strtol(id_str, &end, 10);
-    if (end == id_str || id < 0 || id > 255) {
+    long id = -1;
+    if (!http_form_parse_long(id_str, (int)strlen(id_str), 0, 255, &id)) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }

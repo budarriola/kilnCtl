@@ -157,8 +157,14 @@ static esp_err_t enable_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone and enabled fields required");
         return ESP_OK;
     }
-    int zone = atoi(zone_val);
-    bool enabled = (atoi(en_val) != 0);
+    long zone_l = -1;
+    if (!http_form_parse_long(zone_val, zone_len, 0, MAX31856_CHANNEL_COUNT - 1, &zone_l) ||
+        !http_form_is_bool01(en_val, en_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range or enabled not 0/1");
+        return ESP_OK;
+    }
+    int zone = (int)zone_l;
+    bool enabled = (en_val[0] == '1');
     if (zone < 0 || zone >= MAX31856_CHANNEL_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
         return ESP_OK;
@@ -228,7 +234,12 @@ static esp_err_t revert_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone field required");
         return ESP_OK;
     }
-    int zone = atoi(zone_val);
+    long zone_l = -1;
+    if (!http_form_parse_long(zone_val, zone_len, 0, MAX31856_CHANNEL_COUNT - 1, &zone_l)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
+        return ESP_OK;
+    }
+    int zone = (int)zone_l;
     if (zone < 0 || zone >= MAX31856_CHANNEL_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone out of range");
         return ESP_OK;

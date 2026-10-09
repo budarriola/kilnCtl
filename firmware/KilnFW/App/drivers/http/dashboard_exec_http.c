@@ -767,8 +767,8 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    long id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
-    if (id_len <= 0 || id < 0 || id > 255) {
+    long id = -1;
+    if (id_len <= 0 || !http_form_parse_long(id_val, id_len, 0, 255, &id)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or invalid");
         return ESP_OK;
     }

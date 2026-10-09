@@ -290,6 +290,10 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
         len = http_form_find_field(body, key, val, sizeof(val));
         fend = NULL;
         r->temp_threshold_c = len > 0 ? strtof(val, &fend) : 0.0f;
+        if (len > 0 && !isfinite(r->temp_threshold_c)) {
+            snprintf(err_msg, err_cap, "rule %u: temp_c not finite", i);
+            return false;
+        }
 
         snprintf(key, sizeof(key), "rule%u_time_start_s", i);
         len = http_form_find_field(body, key, val, sizeof(val));
@@ -527,7 +531,12 @@ esp_err_t profile_post_handler(httpd_req_t *req)
      * address it directly rather than relying on "first free". */
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    long requested_id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
+    long requested_id = -1;
+    if (id_len == -2 || (id_len > 0 && !http_form_parse_long(id_val, id_len, -1, PROFILES_MAX_COUNT - 1, &requested_id))) {
+        free(body);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id invalid");
+        return ESP_OK;
+    }
 
     /* check_httpd_task_stack_budget.py: profile_t (~428 B) used to be a
      * plain local (`tmp`) here, contributing to this handler's own
@@ -744,15 +753,15 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len > 0 && end != id_val && id >= 0 && id <= 255 && profiles_builtin_id_valid((uint8_t)id)) {
+    long id = -1;
+    bool id_ok = id_len > 0 && http_form_parse_long(id_val, id_len, 0, 255, &id);
+    if (id_ok && profiles_builtin_id_valid((uint8_t)id)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "built-in schedules are read-only and cannot be deleted -- "
                             "hide it instead (POST /api/profile/builtin/hide)");
         return ESP_OK;
     }
-    if (id_len <= 0 || end == id_val || id < 0 || id >= PROFILES_MAX_COUNT) {
+    if (!id_ok || id < 0 || id >= PROFILES_MAX_COUNT) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
     }
@@ -844,9 +853,9 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len <= 0 || end == id_val || id < 0 || id > 255 || !profiles_builtin_id_valid((uint8_t)id)) {
+    long id = -1;
+    bool id_ok = id_len > 0 && http_form_parse_long(id_val, id_len, 0, 255, &id);
+    if (!id_ok || !profiles_builtin_id_valid((uint8_t)id)) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such built-in schedule");
         return ESP_OK;
     }
@@ -914,9 +923,9 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
 
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-    char *end = NULL;
-    long id = (id_len > 0) ? strtol(id_val, &end, 10) : -1;
-    if (id_len <= 0 || end == id_val || id < 0 || id > 255) {
+    long id = -1;
+    bool id_ok = id_len > 0 && http_form_parse_long(id_val, id_len, 0, 255, &id);
+    if (!id_ok) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
     }
@@ -932,6 +941,14 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
      * uses for "hidden". */
     char fav_val[8];
     int fav_len = http_form_find_field(body, "favorite", fav_val, sizeof(fav_val));
+    if (fav_len == -2 || (fav_len > 0 && !(fav_len == 1 && (fav_val[0] == '0' || fav_val[0] == '1')))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "favorite must be 0 or 1");
+        return ESP_OK;
+    }
+    if (id < PROFILES_MAX_COUNT && !profiles_slot_used((uint8_t)id)) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
+        return ESP_OK;
+    }
     bool favorite = (fav_len <= 0) || (fav_val[0] != '0');
 
     esp_err_t err = profiles_favorites_set((uint8_t)id, favorite);

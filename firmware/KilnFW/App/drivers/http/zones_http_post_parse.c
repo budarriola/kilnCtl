@@ -50,7 +50,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     char name[ZONE_NAME_MAX_LEN + 1];
     int name_len = http_form_find_field(body, key, name, sizeof(name));
     if (name_len == -2) {
-        *err_reason = "zone name too long";
+        *err_reason = "zone name too long or contains a control character";
         return false;
     }
     if (name_len > 0 && http_form_value_has_ctl(name, name_len)) {
@@ -101,7 +101,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_tctype", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t tc_type_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, ZONE_TC_TYPE_MAX_REAL, &tc_type_raw)) {
                 *err_reason = "zone thermocouple type must be a real thermocouple type (0-7: "
@@ -181,7 +181,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_relaytype", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t relay_type_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, (long)ZONE_RELAY_TYPE_MAX, &relay_type_raw)) {
                 *err_reason = "zone relay_type out of range (0-2: SSR/Contactor/Mercury)";
@@ -208,7 +208,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_zonetype", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t zone_type_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, (long)ZONE_TYPE_ON_OFF, &zone_type_raw)) {
                 *err_reason = "zone zone_type out of range (0=heater, 1=on/off device)";
@@ -222,7 +222,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_failsafe", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t failsafe_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, 1, &failsafe_raw)) {
                 *err_reason = "zone failsafe_state out of range (0=off, 1=on)";
@@ -342,7 +342,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_thermo_mask", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t thermo_mask_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, 0xFF, &thermo_mask_raw)) {
                 *err_reason = "zone thermo_mask missing or invalid";
@@ -369,7 +369,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_ct_mask", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t ct_mask_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, 0xFF, &ct_mask_raw)) {
                 *err_reason = "zone ct_mask missing or invalid";
@@ -585,7 +585,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_wrongdirwindow", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_wrong_dir_window_s)) {
                 *err_reason = "zone guard_wrong_dir_window_s out of range";
                 return false;
@@ -595,7 +595,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_wrongdirrate", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_wrong_dir_rate_c_per_min)) {
                 *err_reason = "zone guard_wrong_dir_rate_c_per_min out of range";
                 return false;
@@ -605,7 +605,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_offsettle", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_off_settle_s)) {
                 *err_reason = "zone guard_off_settle_s out of range";
                 return false;
@@ -615,7 +615,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_runawayrate", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_runaway_rate_c_per_min)) {
                 *err_reason = "zone guard_runaway_rate_c_per_min out of range";
                 return false;
@@ -625,7 +625,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_runawaymargin", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->guard_runaway_margin_c)) {
                 *err_reason = "zone guard_runaway_margin_c out of range";
                 return false;
@@ -635,7 +635,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_driftperiod", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_drift_period_s)) {
                 *err_reason = "zone guard_drift_period_s out of range";
                 return false;
@@ -645,7 +645,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_debounce", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_DEBOUNCE_TICKS_MAX, &z->guard_sensor_fault_debounce_ticks)) {
                 *err_reason = "zone guard_sensor_fault_debounce_ticks out of range";
                 return false;
@@ -655,7 +655,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_frozenwindow", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_frozen_window_s)) {
                 *err_reason = "zone guard_frozen_window_s out of range";
                 return false;
@@ -678,7 +678,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_xzone", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_CROSS_ZONE_DELTA_C_MAX, &z->cross_zone_max_delta_c)) {
                 *err_reason = "zone cross_zone_max_delta_c out of range";
                 return false;
@@ -735,7 +735,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_k", i);
     {
         char probe[24];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MODEL_K_MAX, &z->model_k_dc)) {
                 *err_reason = "zone model K out of range";
                 return false;
@@ -747,7 +747,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_tau", i);
     {
         char probe[24];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MODEL_TIME_MAX_S, &z->model_tau_s)) {
                 *err_reason = "zone model tau out of range";
                 return false;
@@ -759,7 +759,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_deadtime", i);
     {
         char probe[24];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MODEL_TIME_MAX_S, &z->model_dead_time_s)) {
                 *err_reason = "zone model dead time out of range";
                 return false;

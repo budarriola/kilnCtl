@@ -337,7 +337,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     {
         char val[8];
         int len = http_form_find_field(body, "max_simultaneous_relays", val, sizeof(val));
-        if (len > 0) {
+        if (len != -1) {
             char *end = NULL;
             long v = strtol(val, &end, 10);
             /* *end != '\0' rejects trailing garbage after a valid numeric
@@ -358,7 +358,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     {
         char val[4];
         int len = http_form_find_field(body, "continue_on_zone_trip", val, sizeof(val));
-        if (len > 0) {
+        if (len != -1) {
             if (strcmp(val, "1") == 0) {
                 tmp.continue_on_zone_trip = 1;
             } else if (strcmp(val, "0") == 0) {
@@ -480,7 +480,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
     {
         char val[16];
         int len = http_form_find_field(body, "pc_link_abort_silence_ms", val, sizeof(val));
-        if (len > 0) {
+        if (len != -1) {
             if (!zones_config_json_parse_float_field(body, "pc_link_abort_silence_ms", 0.0f,
                                    ZONE_PC_LINK_SILENCE_MS_MAX, &tmp.pc_link_abort_silence_ms)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -565,12 +565,12 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         snprintf(tkey, sizeof(tkey), "relay%u_type", r);
         char tval[8];
         int tlen = http_form_find_field(body, tkey, tval, sizeof(tval));
-        if (tlen == -2) {
+        if (tlen == -2 || tlen == 0) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay device type out of range");
             free(body);
             return ESP_OK;
         }
-        if (tlen > 0) {
+        if (tlen != -1) {
             char *tend = NULL;
             long tv = strtol(tval, &tend, 10);
             if (tend == tval || *tend != '\0' || tv < 0 || tv >= (long)RELAY_DEVICE_TYPE_COUNT) {

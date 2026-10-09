@@ -383,14 +383,9 @@ static void test_out_of_range_temp_c_is_not_stored_unbounded(void)
 {
     reset_state();
     esp_err_t err = run_import(MAKE_BODY_WITH_OUT_OF_RANGE_TEMP_C);
-    TEST_CHECK(err == ESP_OK, "a rule with an out-of-range temp_c still imports (temp_cmp is NONE, "
-                              "so validate_on_off_rules() does not itself refuse it)");
-    TEST_CHECK(s_save_called, "profiles_http_save() is reached");
-    TEST_CHECK(s_last_saved.on_off_rule_count == 1, "exactly one rule imported");
-    const profile_on_off_rule_t *r = &s_last_saved.on_off_rules[0];
-    TEST_CHECK(r->temp_threshold_c >= PROFILE_TARGET_C_MIN && r->temp_threshold_c <= PROFILE_TARGET_C_MAX,
-              "an out-of-range temp_c (999999) must never be stored unbounded, "
-              "even when temp_cmp is NONE and the value is otherwise unused");
+    TEST_CHECK(err == ESP_OK, "handler replies itself");
+    TEST_CHECK(s_response_status == 400, "a present-but-out-of-range temp_c fails the import (400), not coerced");
+    TEST_CHECK(!s_save_called, "nothing is saved when an optional rule field is present but invalid");
 }
 
 // WP-4: an aux target (zone byte 8..11 = aux relay 1..4) is carried through

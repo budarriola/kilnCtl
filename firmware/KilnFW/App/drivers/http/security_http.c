@@ -185,7 +185,11 @@ static int parse_int_field(const char *body, const char *key, int *out)
     if (n <= 0) {
         return n; // -1 missing, -2 too long, 0 empty
     }
-    *out = (int)strtol(val, NULL, 10);
+    long v = 0;
+    if (!http_form_parse_long(val, n, -2147483647L, 2147483647L, &v)) {
+        return -2;
+    }
+    *out = (int)v;
     return n;
 }
 
@@ -474,13 +478,17 @@ static esp_err_t security_post_handler(httpd_req_t *req)
         int web_en = 0, lcd_en = 0;
         char flag_val[4];
         int n = http_form_find_field(body, "web_enabled", flag_val, sizeof(flag_val));
-        if (n > 0) {
-            web_en = (strcmp(flag_val, "1") == 0);
+        if (!http_form_is_bool01(flag_val, n)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "web_enabled must be 0 or 1");
+            return ESP_OK;
         }
+        web_en = (flag_val[0] == '1');
         n = http_form_find_field(body, "lcd_enabled", flag_val, sizeof(flag_val));
-        if (n > 0) {
-            lcd_en = (strcmp(flag_val, "1") == 0);
+        if (!http_form_is_bool01(flag_val, n)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "lcd_enabled must be 0 or 1");
+            return ESP_OK;
         }
+        lcd_en = (flag_val[0] == '1');
         int web_timeout = -1, lcd_timeout = -1;
         if (parse_int_field(body, "web_timeout_min", &web_timeout) <= 0 ||
             parse_int_field(body, "lcd_timeout_min", &lcd_timeout) <= 0) {

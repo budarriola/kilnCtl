@@ -331,10 +331,11 @@ esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len)
     }
     return ESP_OK;
 }
+static int s_last_err_code;
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg)
 {
     (void)r;
-    (void)error;
+    s_last_err_code = (int)error;
     (void)msg;
     return ESP_OK;
 }
@@ -374,7 +375,7 @@ esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len)
         return ESP_FAIL;
     }
     snprintf(buf, buf_len, "%s", s_stub_query_str);
-    return ESP_OK;
+    return strlen(s_stub_query_str) >= buf_len ? ESP_ERR_HTTPD_RESULT_TRUNC : ESP_OK;
 }
 esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size_t val_size)
 {
@@ -3790,6 +3791,99 @@ static esp_err_t run_profile_post(const char *body)
     return err;
 }
 
+// Strict input audit (2026-10-09): a non-numeric / trailing-garbage / overlong id must
+// be a 400, never slot 0 (overwrite) or "create new".
+static void test_profile_post_handler_rejects_malformed_id(void)
+{
+    TEST_SECTION("profile_post_handler() -- id=abc / id=1abc / overlong id / id=%00 are refused with 400");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    const char *rest = "&name=StrictId&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    const char *ids[] = { "id=abc", "id=1abc", "id=123456789", "id=-2", "id=100", "id=1%002" };
+    for (size_t k = 0; k < sizeof(ids) / sizeof(ids[0]); k++) {
+        char body[256];
+        snprintf(body, sizeof(body), "%s%s", ids[k], rest);
+        s_last_err_code = 0;
+        TEST_CHECK(run_profile_post(body) == ESP_OK, "handler replies itself");
+        TEST_CHECK(s_last_err_code == 400, "malformed id answers 400");
+        TEST_CHECK(!profiles_slot_used(0) && !profiles_slot_used(1), "nothing was written to any slot");
+    }
+}
+
+static void test_profile_name_nul_refused(void)
+{
+    TEST_SECTION("profile_post_handler() -- name=%00 is refused, not stored as an empty name");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    char body[256];
+    build_minimal_post_body(body, sizeof(body), "a%00b");
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":false") != NULL, "NUL in name answered ok:false");
+    TEST_CHECK(!profiles_slot_used(0), "nothing stored");
+}
+
+static void test_profile_rule_temp_nan_refused_even_with_cmp_none(void)
+{
+    TEST_SECTION("profile_post_handler() -- rule0_temp_c=nan refused even when temp_cmp is NONE");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    char body[320];
+    snprintf(body, sizeof(body),
+             "id=-1&name=NanRule&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5"
+             "&rule_count=1&rule0_zone=0&rule0_seg=0&rule0_temp_cmp=0&rule0_temp_c=nan");
+    run_profile_post(body);
+    TEST_CHECK(!profiles_slot_used(0), "a NaN rule threshold is never persisted");
+}
+
+static void test_profile_favorite_empty_slot_refused(void)
+{
+    TEST_SECTION("profile_favorite_post_handler() -- an empty slot or a bad favorite value is refused");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    const char *b1 = "id=3&favorite=1";
+    req.content_len = (long long)strlen(b1);
+    s_post_body = b1;
+    s_post_body_left = strlen(b1);
+    s_last_err_code = 0;
+    (void)profile_favorite_post_handler(&req);
+    TEST_CHECK(s_last_err_code == 404, "favoriting an empty slot answers 404");
+    TEST_CHECK(!profiles_favorites_is(3), "empty slot not marked favorite");
+    const char *b2 = "id=abc";
+    req.content_len = (long long)strlen(b2);
+    s_post_body = b2;
+    s_post_body_left = strlen(b2);
+    s_last_err_code = 0;
+    (void)profile_favorite_post_handler(&req);
+    TEST_CHECK(s_last_err_code == 400, "id=abc answers 400");
+    s_post_body = NULL;
+    s_post_body_left = 0;
+}
+
+static void test_profile_detail_long_query(void)
+{
+    TEST_SECTION("profile_detail_get_handler()/builtin_list -- a cache-buster query no longer becomes 'id missing'; "
+                 "a truncated query is refused 400");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 0);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_stub_query_str = "id=0&_=1728480000000000000000000000000000000";
+    s_last_err_code = 0;
+    (void)profile_detail_get_handler(&req);
+    TEST_CHECK(s_last_err_code != 400, "a 46-char query still resolves the id");
+    s_stub_query_str = "id=0&_=1234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    s_last_err_code = 0;
+    (void)profile_detail_get_handler(&req);
+    TEST_CHECK(s_last_err_code == 400, "an over-long query is refused 400");
+    s_last_err_code = 0;
+    (void)builtin_list_get_handler(&req);
+    TEST_CHECK(s_last_err_code == 400, "builtin_list: truncated query refused 400");
+    s_stub_query_str = "id=1abc";
+    s_last_err_code = 0;
+    (void)profile_detail_get_handler(&req);
+    TEST_CHECK(s_last_err_code == 404, "id=1abc is not slot 1");
+    s_stub_query_str = NULL;
+}
+
 static void test_profile_post_handler_collision_response_is_well_formed_json(void)
 {
     TEST_SECTION("profile_post_handler() -- a plain (no-quote) dup-name collision response is well-formed "
@@ -4559,6 +4653,11 @@ void run_test_profiles_http(void)
     test_profiles_http_save_allows_overwriting_a_slot_with_its_own_name();
     test_profiles_http_save_allows_builtin_name();
     test_profiles_http_save_allows_editing_existing_slot_named_like_builtin();
+    test_profile_post_handler_rejects_malformed_id();
+    test_profile_name_nul_refused();
+    test_profile_rule_temp_nan_refused_even_with_cmp_none();
+    test_profile_favorite_empty_slot_refused();
+    test_profile_detail_long_query();
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();
     test_profile_post_handler_collision_response_escapes_newline_in_name();

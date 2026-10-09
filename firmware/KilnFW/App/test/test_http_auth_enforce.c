@@ -717,7 +717,7 @@ static void test_f5_shared_helpers(void) {
     TEST_CHECK(!http_form_value_has_ctl("Zone 1 (top)", 12), "ordinary name clean");
     char dec[16];
     int n = http_form_find_field("name=a%00b", "name", dec, sizeof(dec));
-    TEST_CHECK(n == 3 && http_form_value_has_ctl(dec, n), "%00 decodes to NUL and is detected via length");
+    TEST_CHECK(n == -2, "%00 is refused by the decoder (-2), never decoded to an embedded NUL");
 }
 
 void run_test_http_auth_enforce(void) {
