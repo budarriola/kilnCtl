@@ -1696,14 +1696,15 @@ bool profiles_http_delete(uint8_t id)
                  esp_err_to_name(serr));
         return false;
     }
-    profiles_slot_clear(id);
-    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+    /* Persistent erase BEFORE dropping RAM state: on failure the slot stays fully
+     * live and the caller can retry; only after it succeeds is the slot cleared. */
     esp_err_t err = nvs_erase_slot((uint8_t)id);
     if (err != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- deleted live but may reappear after reboot", id,
-                 esp_err_to_name(err));
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- slot kept, retry", id, esp_err_to_name(err));
         return false;
     }
+    profiles_slot_clear(id);
+    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     return true;
 }
 

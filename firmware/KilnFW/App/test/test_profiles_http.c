@@ -1518,6 +1518,8 @@ static void test_profiles_http_delete_stats_and_erase_failures(void)
     s_profile_rev_unknown[8] = true; /* nvs_erase_slot() REFUSES -> ESP_ERR_INVALID_STATE */
     TEST_CHECK(!profiles_http_delete(8), "nvs_erase_slot() failure is propagated as false, not true");
     s_profile_rev_unknown[8] = false;
+    TEST_CHECK(profiles_slot_used(8) && s_profiles.profiles[8].segment_count == p.segment_count,
+               "a failed persistent erase leaves the RAM slot live (consistent, retryable)");
 
     s_profiles.profiles[8] = p;
     profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x100);
