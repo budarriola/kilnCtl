@@ -23,42 +23,6 @@ main board's.
 | **USB-TTL adapter → isolated UART** | Pico directly | For bring-up before the ESP side works, or when the ESP is the thing under suspicion. **Must invert** — see `firmware/SaftyFW/docs/HARDWARE.md` §1. **2026-09-05: this row is documentation only** — `link_hub.py` has no code path for a direct USB-TTL-to-Pico connection; every `RemoteUartLink`/hub client goes through the single ESP-attached serial port. Using this path today means a separate ad hoc script/terminal outside `kilnctrl`, not this tool. |
 | **SWD/RTT → Pico** | Pico directly | Development and flashing. Also the only path when the Pico will not talk |
 
-- [x] `Peer` abstraction — 2026-09-05 assessed: doesn't apply as written.
-      `protocol.Device` only ever has `ESP`/`HOST` (`protocol.py:148`); the
-      Pico is not a third wire-level device, it is task `UART_TASK_ID_SAFETY`
-      relayed through the ESP (`safety.py` always sends with
-      `dst_device=Device.ESP`, distinguished only by `task_id`). The peer
-      split already exists at the module level (`devices.py` = ESP tasks,
-      `devices_safety.py`/`safety.py` = the SAFETY task) rather than as a
-      runtime enum argument, so there is nothing to thread through
-      `link_hub.py`. "Every tool takes a peer argument" was also wrong: most
-      tools (thermo, display, zones, ...) can only ever address the ESP —
-      giving them a peer argument would let them accept a value they can
-      never honor. Pinned by `tests/test_link_hub_routing.py`'s negative
-      case: an unrecognized device id passes through `_as_device` unchanged
-      rather than being coerced onto a device that happens to exist.
-- [x] Every tool takes a peer argument — N/A, same 2026-09-05 assessment:
-      most tools can only ever address one processor, so a peer argument
-      would let them accept a value they can never honor
-- [x] Pico-through-the-ESP path working end to end (no second cable) —
-      unblocked 2026-08-23: the isolated link was capped at 9600 baud by the
-      TCMT1109 optocouplers (115200 delivered zero frames, ever), not dead.
-      With the baud corrected on both sides, `link_status` shows real frames
-      received and `safety_get_status()` returns live telemetry. See
-      `firmware/SaftyFW/docs/HARDWARE.md` §1
-- [x] GUI grows a safety column rather than a second application — 2026-09-05:
-      safety was already a mixin (`SafetyMixin` in `gui_safety.py`) inside the
-      single `KilnCtrlApp`, sharing its menu/link/event loop, so "a second
-      application" was already avoided. The literal "column" wasn't there
-      (safety was popup-only, `gui.py:320`), so added a compact one-line
-      always-on summary to the main window's status bar (`gui.py`
-      `_build_status_bar`, `Safety: OK / E-STOP / link down / TC fault`),
-      fed by the existing SAFETY poll now running independently of whether
-      the full popup is open (`gui_safety.py` `_safety_schedule_poll`).
-      Did not restructure the rest of the app (thermo/io/display/zones are
-      all popups too, in a deliberately tiny 640x210 main window) — a full
-      docked pane for safety alone would be the parallel-structure this
-      task's brief warned against.
 
 ## Capabilities to add, in priority order
 
@@ -136,17 +100,6 @@ is done and covers: program/reset/halt/resume/step/read/write memory/read
 registers, `openocd.exe` path resolution, halt refused on the ESP mid-profile,
 flash writes requiring explicit confirm, every halt/reset/write logged.
 
-- [x] `mcp_server_debug.debug_write_memory()`'s ARMED gate itself now has real
-      unit coverage (`tests/test_debug_write_memory_armed_gate.py`, mocks only
-      `debug_probe.pico_armed_state()`/`write_memory()`, calls the real gate
-      function): refusal on armed=True and armed=None (fail-closed), permitted
-      on armed=False, peer="esp" bypasses it, confirm=False still refuses
-      first. Negative-tested (inverted condition -> 3/5 red -> byte-restored ->
-      green). Still open: no live build+flash+arm run has confirmed the SWD
-      read itself reports true-ARMED correctly on real hardware (prior smoke
-      test only saw an invalid byte, i.e. fail-closed by accident, not by a
-      confirmed ARMED read) — do that before relying on this beyond
-      defense-in-depth.
 
 ⚠️ Standing hazard, not yet mitigated by anything in code: **any PC debug
 connection into the safety domain bonds `GND_Safty` to PC ground**, and if the
@@ -182,57 +135,18 @@ link, ~0.02% of capacity — see `telemetry_capture.py`'s module docstring for
 the full numbers and the shared-queue starvation risk from OTHER log
 traffic.
 
-- [x] Pico logs emitted as `kilnlink` LOG frames (device `SAFETY`, task 5),
-      relayed by the ESP — landed 2026-09-20: `SafetyLinkClass` registers a
-      dedicated `log_inbox` for `UART_TASK_ID_LOG` on the isolated link
-      (`firmware/KilnFW/App/drivers/safety/safety_link.h`/`.c`);
-      `safety_link_service_log_relay()` (`safety_link_poll.c`, called from
-      `safety_poll_task()`, bounded to 4 drains/pass, never blocks) forwards
-      each line into the existing ESP-side log-bridge queue via
-      `uart_log_bridge_relay_safety()` (`uart_log_bridge.c`/`.h`), tagged
-      with a `SAFETY ` prefix — no new task, reuses the bridge's existing
-      sender task/queue.
 - [ ] RTT-over-SWD console as the fallback path — **firmware side pending**
-- [x] Pico USB CDC explicitly reported as absent unless
-      `SAFTYFW_ENABLE_USB_STDIO` was built in — PC side done:
-      `console_capture.check_transport_availability()` reports
-      `TRANSPORT_SAFETY_NATIVE_USB_CDC` unconditionally absent (this tool
-      cannot query the build flag remotely), rather than silently offering a
-      port that isn't there
-- [x] Transport marked per line (relayed / probe-UART / RTT) — done for the
-      transports that exist today: `ConsoleEvent.transport`
-      (`TRANSPORT_ESP_USB_CDC` / `TRANSPORT_SAFETY_PROBE_UART`), separate
-      from the source-processor tag, shown in both per-source and
-      interleaved log lines. Relayed/RTT values slot in once those
-      transports exist (firmware side pending, see above)
-- [x] Per-peer level filter — landed 2026-09-20: the ESP-side RELAY floor
-      (`uart_log_bridge_set_safety_relay_level()`/`_get_safety_relay_level()`,
-      default WARN) is independent of the Pico's own runtime filter (next
-      item, unchanged) — two peers, two knobs, both settable through the
-      existing `POST /api/safety/log_level` route (no new route) via an
-      optional `peer` field: `peer=relay` sets the ESP-side relay floor
-      (local only, no wire traffic), `peer=safety`/omitted sets the Pico's
-      own filter as before
-      (`firmware/KilnFW/App/drivers/http/dashboard_settings_http.c`).
-- [x] Runtime log-level control for the safety processor over the link,
-      default warnings+errors — already implemented pre-existing:
-      `log_task_set_level()`/`_get_level()` (SaftyFW `log_task`, default
-      WARN) and the `SAFETY_CMD_SET_LOG_LEVEL` (0x1B) handler in
-      `link_task.c`; confirmed working, not touched this session.
-- [x] Transport availability shown honestly as build-time capability, not a
-      toggle — `console_capture.check_transport_availability()`, tested in
-      `tests/test_console_capture_transport.py`. `TRANSPORT_SAFETY_PROBE_UART`
-      is detected by USB VID:PID (`serial_link.DEBUG_PROBE_VID_PID`,
-      `list_debug_probe_ports()`), not by description text, since Windows
-      exposes composite interface strings there and pyserial strips `MI_xx`.
-- [x] Dropped-log-frame counter surfaced from the diagnostic frame —
-      `log_task.c`'s existing `log_task_get_dropped()` now rides the DIAG
-      frame (`kilnlink_diag_t.log_frames_dropped`, `KILNLINK_PROTOCOL_VERSION`
-      15 -> 16) and GET_DIAG's PC mirror (`UART_PROTOCOL_VERSION` 12 -> 13);
-      `SafetyDiag.log_frames_dropped` on the PC side
-- [x] Pico log emission best-effort and droppable — never blocking, per
-      no-hang rule 3 — already implemented (`log_task.c`'s non-blocking
-      enqueue/drop-and-count paths)
+      Premise check 2026-10-09: RTT is the RP2040 (SaftyFW) path only -- the ESP32-S3
+      has no SWD (JTAG/USB-Serial-JTAG), and SaftyFW has no RTT code today (only a
+      UART console, `console_uart.h`). Firmware side = vendor the SEGGER RTT control
+      block (BSD) into SaftyFW behind a CMake option default OFF, route `log_task`
+      output to up-channel 0 when ON; PC side = read the block via OpenOCD
+      `rtt setup/start/server` through `debug_probe`. Bench steps once built: (1) build
+      with the option ON, flash via `debug_program(peer="pico")`; (2) find
+      `_SEGGER_RTT` in the ELF map, `rtt setup <addr> 0x30 "SEGGER RTT"`, `rtt start`,
+      `rtt server start 9090 0`; (3) connect to 9090 and confirm log lines appear;
+      (4) confirm link/safety timing unchanged with the option OFF (identical image
+      size/behavior).
 
 ## Firmware updates from here
 
@@ -263,20 +177,6 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 
 - [ ] Live-hardware verification of all of the above (needs a board, see first
       step above)
-- [x] `min_compatible` field/cross-check: re-checked 2026-09-20, this note was
-      stale — `UPDATE_PROTOCOL.md`'s own checklist was already `[x]` done (wire
-      field, both-directions formula, ESP fault flag, Pico
-      DEGRADED_NO_CONTEXT, all host-tested). The real gap found instead: on
-      SaftyFW, `link_task_handle_announce_version()` (`link_task.c`, not
-      compiled into host tests — pulls in FreeRTOS/pico-sdk) called the
-      already-tested formula but its own decode-to-verdict wiring had zero
-      coverage. Extracted to a pure `link_task_evaluate_announce_version()`
-      (`link_task_announce_eval.c/.h`, same split pattern as
-      `link_task_commit_reject.c`), host-tested
-      (`test_link_task_announce_eval.c`, 4 cases both directions), negative-
-      tested (inverted verdict -> red -> byte-restored -> green). No protocol
-      version bump needed — this was a test-coverage gap, not a wire-format
-      gap.
 
 ## What this does not become
 
@@ -295,72 +195,13 @@ to confirm PENDING_VERIFY → confirmed actually happens as documented.
 ## Completion checklist
 
 **Two peers**
-- [x] `Peer` abstraction — N/A, see 2026-09-05 note above (not a wire-level
-      Device; already split at the module level)
-- [x] Every tool takes a peer argument — N/A, see same note: most tools can
-      only ever address one processor
-- [x] Pico-through-the-ESP path working (no second cable)
-- [x] Direct USB-TTL path documented, **with the inversion requirement stated**
-      — 2026-09-06 closed by inspection: the doc row exists (Three transports
-      table above) and states the inversion requirement; `link_hub.py`
-      implementing no code path for it is a separate, already-tracked item
-      (the table's own note), not what this checklist line asked for
-- [x] SWD/RTT path documented for flashing and for a Pico that will not talk
-      — 2026-09-06 closed by inspection: `firmware/SaftyFW/docs/HARDWARE.md`
-      ("SWD — 3 wires", "RTT over the SWD wires is the alternative") and
-      `docs/COMMISSIONING.md` cover this in full
-- [x] GUI grows a safety column rather than a second application — see
-      2026-09-05 note above (status-bar summary, `gui.py`/`gui_safety.py`)
 
 **Capabilities**
-- [x] 1c. Coordinated two-board test: both halves confirmed electrically
-      2026-08-23. A reusable script now exists —
-      `tools/PcTools/scripts/coordinated_gpio_test.py` drives Steps A and B
-      of `firmware/SaftyFW/docs/HARDWARE.md` section 1 end to end (Step C is
-      deliberately not implemented: ESP GPIO6 is permanently deny-listed by
-      `gpio_probe.c`). It has not been run on hardware since this line was
-      last touched.
-- [x] 2. `kilnlink` frame decoding for a Saleae capture — landed 2026-09-20
-      as `kilnctrl.kilnlink_capture` / `saleae_decode_kilnlink()`; still
-      unvalidated against a real capture, see section 2 above.
-- [x] 3. GUI-vs-MCP capability audit — DONE 2026-09-05, full page-by-page
-      pass (see "3. Everything reachable headlessly" above): one real gap
-      (bare factory reset), closed via a new `press_button` action.
-- [x] 4. `get_board_state()` — both processors reported (`safety_status`/
-      `safety_link_stats` alongside the ESP sections); this closed for free
-      once the isolated link's baud fix landed.
 
 **Logging and consoles**
-- [x] Pico logs emitted as `kilnlink` LOG frames, relayed by the ESP — landed 2026-09-20 (see "Logging and consoles" above)
 - RTT-over-SWD console as the fallback path -- still open; single tracker is the "Logging and consoles" item above (duplicate checkbox merged 2026-10-07)
-- [x] Pico USB CDC **not** offered as a transport; reported as absent unless built in
-- [x] Transport marked per line (relayed / probe-UART / RTT) — for the transports that exist today
-- [x] Per-peer level filter — landed 2026-09-20 (see "Logging and consoles" above)
-- [x] Runtime log-level control for the safety processor over the link, default warnings+errors — already implemented pre-existing (`log_task`)
-- [x] Transport availability shown honestly
-- [x] Dropped-log-frame counter surfaced from the diagnostic frame — landed 2026-09-20, `KILNLINK_PROTOCOL_VERSION` 15 -> 16 / `UART_PROTOCOL_VERSION` 12 -> 13
-- [x] Pico log emission best-effort and droppable — never blocking — already implemented pre-existing (non-blocking `xQueueSend`/enqueue in `log_task`)
 
 **Firmware updates**
-- [x] `ota_status`, `ota_update_esp`, `ota_update_pico`
-- [x] Tools call the ESP's endpoints; no second transfer implementation
-- [x] Image SHA-256 logged on every call, refusals included
-- [x] Password never persisted to log or settings
-- [x] `ota_status()` surfaces a Pico protocol-version mismatch as an explicit
-      `INCOMPATIBLE` flag, not folded into normal-status prose — the actual
-      version-negotiation enforcement (`peer.protocol >= self.min_compatible`
-      on both sides) is firmware work, tracked in `UPDATE_PROTOCOL.md`, not
-      here
 - Live-hardware verification of the firmware-update tools -- still open; single tracker is the "Firmware updates from here" item above (duplicate checkbox merged 2026-10-07). OT-E-series bench evidence: `firmware/KilnFW/TODO.md` 9.7
 
 **Integrity**
-- [x] Python codec checked against `firmware/CommonFW/test/vectors/` --
-      `tools/PcTools/tests/test_kilnlink_commonfw_vectors.py`
-- [x] No relay path here bypasses `relay_authority_on_blocked()` -- audited
-      2026-09-06 (`49de63a2`): every relay-write call site under
-      `tools/PcTools/src`/`scripts` went through `IoClient`'s refusal-aware
-      `set_relay`/`set_relay_mask`/`all_relays_off`, except
-      `current_sense_commissioning.py`, which bypassed it via a bare
-      `io.send(devices.io_set_relay(...))` and so never saw a firmware
-      refusal. Fixed, and `tools/check_relay_authority_paths.py` (+ `.ps1`
-      wrapper, in `run_all_checks.ps1`) now catches a regression.
