@@ -1,4 +1,6 @@
 # Gate to negative-test evidence
+| `tools/check_commit_guard.ps1` | NEGATIVE-TESTED | 10-09 | `tools\negtest.ps1 -Preset check`, three mutations in `commit_guard.ps1`: (1) the `git fetch` of the target branch (F8) -> `$LASTEXITCODE = 0`; (2) binary numstat detection (F17) `if ($fields[0] -eq '-' ...` -> `if ($false)` | (1) CAUGHT (exit 1, `FAIL: stale working copy of b.txt is flagged, not UNCHANGED`, `FAIL: unfetchable branch -> exit 1`); (2) CAUGHT (`FAIL: binary change with a declared budget refused`); baseline PASS; real tree unchanged |
+| `tools/check_push_verify.ps1` | NEGATIVE-TESTED | 10-09 | `tools\negtest.ps1 -Preset check`: `refs/remotes/$remote/$branchName` -> `$branchName` in `push_verify.ps1` (F7: verdict taken against a bare, possibly local, ref) | CAUGHT (exit 1, 4 FAILs incl. `a local branch named origin/dev cannot shadow the remote ref`); baseline PASS; real tree unchanged |
 
 Consolidated table for `docs/RELEASE_HARDENING.md` section 3, acceptance step 4.
 One row per check that `tools/run_all_checks.ps1 -ListOnly` discovers (plus the guard that
@@ -23,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 189.
+Gate rows: 191.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 175 |
+| NEGATIVE-TESTED | 177 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |
