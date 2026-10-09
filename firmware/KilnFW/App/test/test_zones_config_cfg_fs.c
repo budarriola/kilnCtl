@@ -1231,7 +1231,7 @@ static void test_save_persists_locked_snapshot(void)
     stage("snap", 7.0f);
     uint32_t a0 = s_zones_cfg_lock_acquires;
     TEST_CHECK(nvs_save() == ESP_OK, "save ok");
-    TEST_CHECK(s_zones_cfg_lock_acquires > a0, "nvs_save took the zones lock to snapshot RAM");
+    TEST_CHECK(s_zones_cfg_lock_acquires - a0 >= 2, "nvs_save took the zones lock to snapshot RAM and to publish the rev");
     uint32_t a1 = s_zones_cfg_lock_acquires;
     {
         /* What reached the file is the stamped snapshot: version/CRC on disk match the RAM mirror. */
