@@ -28,6 +28,7 @@ through `_exit_only`.
 Fix: return FAIL whenever `word == "FAILED"`, whatever the exit code.
 
 ### MEDIUM-1: release gate bench-evidence can pass vacuously, and can never pass for the safety suite (215ef8e2, 4be2ab67, 36d9f6a9)
+**Status: fixed in tools/release_gates.py (full-suite coverage, per-case verdicts, EXPECTED_INCONCLUSIVE allowlist, tagged dirs); wiring into make_release.ps1 is still pending.**
 `tools/release_gates.py:217-237,247`.
 - Line 227 requires `exit_code == 0`. The runner returns exit 3 for any
   SKIP/INCONCLUSIVE/NOT_RUN result, so the `"SKIP"` allowance on that line is dead code.

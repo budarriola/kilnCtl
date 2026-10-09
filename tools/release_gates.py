@@ -19,7 +19,8 @@ Commands (stdlib only):
                                (no -suffix) with open gates and --allow-open is absent.
                                A pre-release tag (v1.0.0-pre.1) never refuses.
   bench-evidence --fw-build B [--logs-dir D] [--max-age-days 7] [--suites ota,lcd,safety]
-                               release gate bench-pass-7d: newest qualifying summary.json per suite;
+                               release gate bench-pass-7d: newest qualifying summary.json per suite
+                               (full suite case list, all PASS bar designed-INCONCLUSIVE, see EXPECTED_INCONCLUSIVE);
                                exit 1 if any suite has none (names the nearest miss). Read-only.
   notes  --root R --tag T [--out FILE] [--max N]
                                default release body: git log --oneline since the previous
@@ -214,9 +215,28 @@ def _load_summary(path):
     return doc if isinstance(doc, dict) else None
 
 
-def _evaluate_run(doc, fw_build, max_age_s, now):
-    """Return (reasons, counts, age_s). reasons is empty for a qualifying run."""
+#: Per-suite cases whose INCONCLUSIVE verdict is by design and does not disqualify a run.
+#: Everything else must PASS: SKIP, NOT_RUN and any other INCONCLUSIVE mean the case was not
+#: actually proven. SP-10 (safety) is INCONCLUSIVE by design (acc9944a).
+EXPECTED_INCONCLUSIVE = {"safety": frozenset({"SP-10"})}
+
+
+def _registry_suites():
+    """Full case list per suite, from the bench_test registry (the runner's own source of truth)."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "PcTools", "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from kilnctrl.bench_test import SUITES
+    return {k: list(v) for k, v in SUITES.items()}
+
+
+def _evaluate_run(doc, fw_build, max_age_s, now, suite_cases):
+    """Return (reasons, counts, age_s). reasons is empty for a qualifying run.
+
+    Judged from per-case verdicts, not exit code: the runner exits 3 for any
+    SKIP/INCONCLUSIVE/NOT_RUN, so exit code alone cannot tell a designed INCONCLUSIVE from a gap."""
     reasons = []
+    suite = doc.get("suite")
     cases = doc.get("cases") if isinstance(doc.get("cases"), dict) else {}
     counts = {}
     for c in cases.values():
@@ -224,8 +244,30 @@ def _evaluate_run(doc, fw_build, max_age_s, now):
         counts[str(v)] = counts.get(str(v), 0) + 1
     if doc.get("tainted") is not False:
         reasons.append("tainted")
-    if doc.get("exit_code") != 0 or any(v not in ("PASS", "SKIP") for v in counts):
-        reasons.append("failed")
+    if doc.get("preflight_ok") is not True:
+        reasons.append("preflight refused")
+    if not cases:
+        reasons.append("zero cases")
+    full = list(suite_cases.get(suite, []))
+    if not full:
+        reasons.append("unknown suite")
+    else:
+        requested = doc.get("requested_cases")
+        if not isinstance(requested, list) or set(requested) != set(full):
+            reasons.append("partial run (requested %s of %d cases)" % (
+                len(requested) if isinstance(requested, list) else "?", len(full)))
+        missing = [c for c in full if c not in cases]
+        if missing:
+            reasons.append("cases not run: %s" % ",".join(missing[:5]))
+    allowed = EXPECTED_INCONCLUSIVE.get(suite, frozenset())
+    bad = []
+    for cid, c in cases.items():
+        v = c.get("verdict") if isinstance(c, dict) else None
+        if v == "PASS" or (v == "INCONCLUSIVE" and cid in allowed):
+            continue
+        bad.append("%s=%s" % (cid, v))
+    if bad:
+        reasons.append("not PASS: %s" % ",".join(bad[:5]))
     before = doc.get("board_before") if isinstance(doc.get("board_before"), dict) else {}
     if before.get("esp_fw_build") != fw_build:
         reasons.append("other build (%s)" % before.get("esp_fw_build"))
@@ -236,19 +278,24 @@ def _evaluate_run(doc, fw_build, max_age_s, now):
     return reasons, counts, age
 
 
-def bench_evidence(logs_dir, fw_build, suites, max_age_days, now=None):
+def bench_evidence(logs_dir, fw_build, suites, max_age_days, now=None, suite_cases=None):
     """Return (exit_code, lines). One line per suite; nonzero if any suite has no qualifying run."""
     import glob
     now = time.time() if now is None else now
+    if suite_cases is None:
+        suite_cases = _registry_suites()
     max_age_s = max_age_days * 86400.0
     lines, bad = [], False
     for suite in suites:
         best, near = None, None
-        for path in glob.glob(os.path.join(logs_dir, "*_%s" % suite, "summary.json")):
+        # run dirs are <ts>_<suite> or <ts>_<suite>_<tag>; the summary's own "suite" field is authoritative
+        paths = set(glob.glob(os.path.join(logs_dir, "*_%s" % suite, "summary.json")))
+        paths |= set(glob.glob(os.path.join(logs_dir, "*_%s_*" % suite, "summary.json")))
+        for path in sorted(paths):
             doc = _load_summary(path)
             if doc is None or doc.get("suite") != suite:
                 continue
-            reasons, counts, age = _evaluate_run(doc, fw_build, max_age_s, now)
+            reasons, counts, age = _evaluate_run(doc, fw_build, max_age_s, now, suite_cases)
             rec = (doc.get("ended") if isinstance(doc.get("ended"), (int, float)) else 0,
                    doc.get("run_id") or os.path.basename(os.path.dirname(path)), counts, age, reasons)
             if not reasons:
@@ -264,7 +311,7 @@ def bench_evidence(logs_dir, fw_build, suites, max_age_days, now=None):
             if near:
                 _, rid, counts, age, reasons = near
                 lines.append("%-8s FAIL  nearest miss %s: %s (cases=%s)" % (
-                    suite, rid, ", ".join(reasons), _fmt_counts(counts)))
+                    suite, rid, "; ".join(reasons), _fmt_counts(counts)))
             else:
                 lines.append("%-8s FAIL  no runs found for suite under %s" % (suite, logs_dir))
     return (1 if bad else 0), lines

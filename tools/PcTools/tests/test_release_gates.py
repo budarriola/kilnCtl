@@ -213,30 +213,40 @@ class SchemaDiffNotes(unittest.TestCase):
 class BenchEvidence(unittest.TestCase):
     NOW = 1_800_000_000.0
     BUILD = "Oct 01 2026 10:00:00"
+    SUITES = {"ota": ["OT-1", "OT-2"], "lcd": ["L-1", "L-2"], "safety": ["SP-1", "SP-10"]}
 
-    def _run(self, root, suite, age_days=1, build=None, tainted=False, exit_code=0, verdicts=("PASS", "SKIP"), name=None):
-        d = os.path.join(root, "%s_%s" % (name or "20261001T000000Z", suite))
+    def _run(self, root, suite, age_days=1, build=None, tainted=False, verdicts=None, requested=None,
+             preflight_ok=True, name=None, dirsuffix=None):
+        """Writes a summary shaped like the real runner's: exit 3 whenever anything is not PASS."""
+        full = self.SUITES[suite]
+        if verdicts is None:
+            verdicts = {c: ("INCONCLUSIVE" if c == "SP-10" else "PASS") for c in full}
+        vs = set(verdicts.values())
+        exit_code = 2 if not preflight_ok else 1 if ("FAIL" in vs or tainted) else 3 if vs - {"PASS"} else 0
+        d = os.path.join(root, "%s_%s%s" % (name or "20261001T000000Z", suite, dirsuffix or ""))
         os.makedirs(d)
         doc = {"suite": suite, "run_id": os.path.basename(d), "tainted": tainted, "exit_code": exit_code,
+               "preflight_ok": preflight_ok,
+               "requested_cases": list(full if requested is None else requested),
                "ended": self.NOW - age_days * 86400,
                "board_before": {"esp_fw_build": build or self.BUILD},
-               "cases": {"C%d" % i: {"verdict": v} for i, v in enumerate(verdicts)}}
+               "cases": {c: {"verdict": v} for c, v in verdicts.items()}}
         with open(os.path.join(d, "summary.json"), "w") as f:
             json.dump(doc, f)
 
     def _go(self, root, suites=("ota", "lcd", "safety")):
-        return rg.bench_evidence(root, self.BUILD, list(suites), 7, now=self.NOW)
+        return rg.bench_evidence(root, self.BUILD, list(suites), 7, now=self.NOW, suite_cases=self.SUITES)
 
     def _all(self, root, skip=None, **bad):
         for s in ("ota", "lcd", "safety"):
             if s != skip:
-                self._run(root, s, **(bad if s == "safety" else {}))
+                self._run(root, s, **(bad if s == "ota" else {}))
 
-    def test_happy(self):
+    def test_happy_safety_with_designed_inconclusive(self):
         with tempfile.TemporaryDirectory() as d:
             self._all(d)
             code, lines = self._go(d)
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 0, lines)
             self.assertEqual(len(lines), 3)
 
     def _expect(self, reason, **bad):
@@ -256,7 +266,48 @@ class BenchEvidence(unittest.TestCase):
         self._expect("tainted", tainted=True)
 
     def test_failed_case(self):
-        self._expect("failed", verdicts=("PASS", "FAIL"))
+        self._expect("not PASS", verdicts={"OT-1": "PASS", "OT-2": "FAIL"})
+
+    def test_skip_disqualifies(self):
+        self._expect("OT-2=SKIP", verdicts={"OT-1": "PASS", "OT-2": "SKIP"})
+
+    def test_undesigned_inconclusive_disqualifies(self):
+        self._expect("OT-2=INCONCLUSIVE", verdicts={"OT-1": "PASS", "OT-2": "INCONCLUSIVE"})
+
+    def test_not_run_disqualifies(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._all(d, skip="safety")
+            self._run(d, "safety", verdicts={"SP-1": "NOT_RUN", "SP-10": "INCONCLUSIVE"})
+            code, lines = self._go(d)
+            self.assertEqual(code, 1)
+            self.assertIn("SP-1=NOT_RUN", "\n".join(lines))
+
+    def test_partial_requested_cases(self):
+        self._expect("partial run", requested=["OT-1"], verdicts={"OT-1": "PASS"})
+
+    def test_requested_full_but_case_missing(self):
+        self._expect("cases not run", verdicts={"OT-1": "PASS"})
+
+    def test_zero_cases(self):
+        self._expect("zero cases", verdicts={}, requested=[])
+
+    def test_preflight_refused(self):
+        self._expect("preflight refused", preflight_ok=False)
+
+    def test_inconclusive_allowlist_is_per_case(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._all(d, skip="safety")
+            self._run(d, "safety", verdicts={"SP-1": "INCONCLUSIVE", "SP-10": "PASS"})
+            code, lines = self._go(d)
+            self.assertEqual(code, 1)
+            self.assertIn("SP-1=INCONCLUSIVE", "\n".join(lines))
+
+    def test_tagged_run_dir_found(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._all(d, skip="lcd")
+            self._run(d, "lcd", dirsuffix="_post_flash_abc")
+            code, lines = self._go(d)
+            self.assertEqual(code, 0, lines)
 
     def test_missing_suite(self):
         with tempfile.TemporaryDirectory() as d:
@@ -275,8 +326,14 @@ class BenchEvidence(unittest.TestCase):
             code, _ = self._go(d)
             self.assertEqual(code, 0)
 
+    def test_real_registry_safety_matches_allowlist(self):
+        suites = rg._registry_suites()
+        self.assertIn("SP-10", suites["safety"])
+        self.assertIn("SP-10", rg.EXPECTED_INCONCLUSIVE["safety"])
+
     def test_cli_main_end_to_end(self):
         import io, contextlib, time
+        suites = rg._registry_suites()
         with tempfile.TemporaryDirectory() as d:
             now = time.time()
             for s in ("ota", "lcd"):
@@ -284,20 +341,21 @@ class BenchEvidence(unittest.TestCase):
                 os.makedirs(dd)
                 with open(os.path.join(dd, "summary.json"), "w") as f:
                     json.dump({"suite": s, "run_id": "r_" + s, "tainted": False, "exit_code": 0, "ended": now - 3600,
-                               "board_before": {"esp_fw_build": "B1"}, "cases": {"C": {"verdict": "PASS"}}}, f)
-            def run(suites):
+                               "preflight_ok": True, "requested_cases": suites[s],
+                               "board_before": {"esp_fw_build": "B1"},
+                               "cases": {c: {"verdict": "PASS"} for c in suites[s]}}, f)
+
+            def run(sl):
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    code = rg.main(["bench-evidence", "--fw-build", "B1", "--logs-dir", d, "--suites", suites])
+                    code = rg.main(["bench-evidence", "--fw-build", "B1", "--logs-dir", d, "--suites", sl])
                 return code, buf.getvalue()
             code, out = run("ota,lcd")
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 0, out)
             self.assertIn("r_ota", out)
-            self.assertIn("r_lcd", out)
             code, out = run("ota,safety")
             self.assertEqual(code, 1)
             self.assertIn("no runs found", out)
-
 
 if __name__ == "__main__":
     unittest.main()
