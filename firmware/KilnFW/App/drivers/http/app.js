@@ -1570,9 +1570,8 @@
   // filesystem silently never mounted, with nothing on the dashboard saying
   // so. Hours went into diagnosing symptoms of a state the board already
   // knew it was in. This banner sources `recovery_mode` from the ALREADY
-  // EXISTING GET /api/ota/esp/status route (ota_http_esp.c's
-  // ota_esp_status_get_handler(), boot_guard_is_recovery_mode()) -- no new
-  // endpoint, no new JSON field, so no json_cap headroom is spent.
+  // GET /api/status (dashboard_status_http.c, boot_guard_is_recovery_mode());
+  // /api/ota/esp/status is ADMIN-tier since 2026-10-09 (route tier review LOW-3).
   //
   // recovery_mode is decided once at boot and never changes within a boot
   // (see that handler's own doc comment), so this does not need the
@@ -1661,7 +1660,7 @@
 
   function pollRecoveryMode() {
     if (document.visibilityState === 'hidden') return;
-    fetch('/api/ota/esp/status')
+    fetch('/api/status')
       .then(function (r) {
         if (!r.ok) throw new Error('http ' + r.status);
         return r.json();

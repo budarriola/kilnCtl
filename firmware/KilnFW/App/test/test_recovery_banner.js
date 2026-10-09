@@ -1,7 +1,7 @@
 /* Node-only test harness for app.js's recovery-mode dashboard banner
  * (owner request 2026-09-08: "when in recovery mode it should show a banner
  * on the Dashboard"): buildRecoveryBanner / setRecoveryBanner /
- * pollRecoveryMode, sourced from the ALREADY EXISTING GET /api/ota/esp/status
+ * pollRecoveryMode, sourced from the ALREADY EXISTING GET /api/status
  * route's `recovery_mode` field (ota_http_esp.c's
  * ota_esp_status_get_handler()) -- no new endpoint, no new JSON field.
  *
@@ -77,7 +77,7 @@ function makeEl() {
 }
 
 // fetchQueue: an array of {ok, json} (or a rejection) consumed in order by
-// successive fetch('/api/ota/esp/status') calls, so each test controls
+// successive fetch('/api/status') calls, so each test controls
 // exactly what the "board" answers on that tick without a real server.
 function makeContext(opts) {
   opts = opts || {};
@@ -147,7 +147,7 @@ function flush() {
   // -------------------------------------------------------------------
   // Group 2: pollRecoveryMode() with recovery_mode:true shows the banner;
   // this is the exact field/endpoint the owner asked to be verified, not
-  // assumed -- GET /api/ota/esp/status, field "recovery_mode".
+  // assumed -- GET /api/status, field "recovery_mode".
   // -------------------------------------------------------------------
   {
     const { ctx, fetchCalls } = makeContext({ fetchQueue: [{ json: { recovery_mode: true, phase: 'idle' } }] });
@@ -156,7 +156,7 @@ function flush() {
     vm.runInContext('recoveryBannerEl = bannerEl', Object.assign(ctx, { bannerEl }));
     vm.runInContext('pollRecoveryMode()', ctx);
     await flush();
-    assert(fetchCalls[0] === '/api/ota/esp/status', 'pollRecoveryMode fetches GET /api/ota/esp/status');
+    assert(fetchCalls[0] === '/api/status', 'pollRecoveryMode fetches GET /api/status');
     assert(!bannerEl.hasAttribute('hidden'), 'recovery_mode:true -- banner is shown');
   }
 

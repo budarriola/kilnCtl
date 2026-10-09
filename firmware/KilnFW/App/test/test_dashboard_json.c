@@ -912,6 +912,7 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
         }
     }
 
+    STATUS_APPEND(",\"recovery_mode\":%s", "false");
     STATUS_APPEND(",\"safety_build_known\":%s", "true");
     {
         char commit_raw[65], commit_esc[65 * 2 + 1];

@@ -154,7 +154,7 @@ independent route cap. Overflowing it fails closed, but the result would be an
 unexplained 404 that looks like the old `max_uri_handlers` bug. Fix: extend
 `check_uri_handler_cap.ps1` to assert `KILN_HTTP_MAX_ROUTES >= max_uri_handlers`.
 
-**LOW-3. `/api/ota/esp/status` is OPEN but is not a dashboard read.** Its
+**LOW-3 (RESOLVED 2026-10-09). `/api/ota/esp/status` is OPEN but is not a dashboard read.** Resolved: `recovery_mode` is now emitted by `GET /api/status` (OPEN), app.js `pollRecoveryMode()` reads it there, and `/api/ota/esp/status` is ROUTE_TIER_ADMIN. Original finding: Its
 payload is redacted for non-admins. `recovery_mode` is deliberately left
 unredacted for app.js's `pollRecoveryMode()`. Either confirm that every field
 an unauthenticated caller receives is dashboard-necessary, or split
@@ -169,7 +169,7 @@ an unauthenticated caller receives is dashboard-necessary, or split
 
 Fix: correct both lines.
 
-**LOW-5. Legacy `POST /api/ota/esp` and `POST /api/ota/esp/rollback` in the
+**LOW-5 (kept by owner decision 2026-10-09; routes, `ota_rollback_esp` and the OTA matrix cases stay as they are). Legacy `POST /api/ota/esp` and `POST /api/ota/esp/rollback` in the
 application image are dead.** Each always answers 409 and adds attack surface
 for no benefit. Fix: once the ota_page.html buttons are gone (another agent is
 removing them now) and the PcTools callers (`ota_rollback_esp`, the OTA matrix
