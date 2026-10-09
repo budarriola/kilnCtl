@@ -1136,6 +1136,12 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
     memset(&best_reject, 0, sizeof(best_reject));
     bool have_rejected = false;
 
+    // Known limitation: v1 firmware wrote 256 B records (16 slots), but this
+    // scan uses the current 512 B stride, so odd v1 slots are never seen when
+    // migrating an unrewritten v1 sector (an older even slot, or defaults, is
+    // loaded instead). Low impact: migration forces calibration_missing, so
+    // commissioning is required again anyway, and only pre-2026-08-21 v1
+    // sectors are affected. Accepted; see docs/audits/SAFTYFW_REVIEW_2026-10-09.md.
     for (size_t i = 0; i < CONFIG_STORE_SLOTS_PER_SECTOR; i++) {
         const uint8_t *rec_bytes = &sector[i * CONFIG_STORE_RECORD_LEN];
         config_store_record_t candidate;

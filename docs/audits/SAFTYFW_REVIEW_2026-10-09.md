@@ -38,7 +38,7 @@ No high or medium findings.
 
 ### Low
 
-1. **Pre-existing, not introduced in range: v1 odd slots are invisible to the
+1. **Known limitation (accepted, documented in `config_store.c`): pre-existing, not introduced in range: v1 odd slots are invisible to the
    migration scan.** v1 firmware wrote 256 B records, 16 slots per sector
    (`config_store.h:26-27`, `bootloader/flash_layout.h:85-86`).
    `config_store_find_latest_ex()` walks the sector at the current 512 B
@@ -54,7 +54,7 @@ No high or medium findings.
    see this. Nothing documents the gap. Fix: either scan v1 records at a
    256 B stride when slot 0's format_version is 1, or record the gap as
    accepted.
-2. **Wrong provenance commit in the frozen-blob comment.**
+2. **FIXED: wrong provenance commit in the frozen-blob comment.**
    `firmware/SaftyFW/test/test_config_store.c:1221` says the v1 layout is
    `config_store_pack()` at `901256e0`. That commit introduced v2 (512 B
    records). The v1 layout is at `901256e0^`. The bytes themselves are right:
@@ -62,7 +62,7 @@ No high or medium findings.
    @16, CRC @248), and both CRCs were recomputed independently (v1 `0xAAB0FE42`
    over [0,248), v2 `0x53E67DB5` over [0,504), both equal to the stored
    values). Fix the comment to `901256e0^`.
-3. **The truncation test only exercises an erased CRC.**
+3. **FIXED (torn-data-byte case added): the truncation test only exercises an erased CRC.**
    `test_frozen_blob_truncated_rejected()` (`test_config_store.c:1389`, cuts
    at `:1394`) erases from byte 100 (v1) and 300 (v2) onward, which also erases
    the stored CRC. For v1 the cut changes no payload byte at all (bytes 43-247
@@ -70,7 +70,7 @@ No high or medium findings.
    real torn-write shape, because the CRC is written last, so this is not a
    protection gap. Still, the test name overstates what it covers. Consider
    adding a case that corrupts the payload but keeps the old CRC.
-4. **Fuzz failure lost its reproduction hint.** Before `613a9b72`, a fuzz
+4. **FIXED: fuzz failure lost its reproduction hint.** Before `613a9b72`, a fuzz
    failure threw "rerun with KILNLINK_FUZZ_SEED set to the seed printed
    above". The pooled path (`build_host_tests.ps1:392` and the exit chain at
    the end) now exits with the exe's code and no hint. The seed is still

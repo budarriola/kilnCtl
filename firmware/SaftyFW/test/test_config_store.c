@@ -1218,7 +1218,7 @@ static void test_v1_migration(void)
 // literals. NEVER REGENERATE THEM from today's config_store_pack(): that would
 // make the migration test tautological. The point is that these bytes are what
 // OLD firmware wrote, independent of the current layout.
-//   v1: layout of config_store_pack() at 901256e0 (header 16 B, ct_cal[3] x 9 B
+//   v1: layout of config_store_pack() at 901256e0^ (header 16 B, ct_cal[3] x 9 B
 //       at offset 16, CRC32 over [0,248) at 248, rest 0xFF).
 //   v2: layout before 5dcea99b (fields_set u16 at 12, field block from
 //       tc_source at 14, reserved from 235, CRC32 over [0,504) at 504).
@@ -1411,6 +1411,19 @@ static void test_frozen_blob_truncated_rejected(void)
                    "truncated old blob in a sector: no valid slot");
         TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
                    "truncated old blob in a sector: *out untouched");
+    }
+    // Torn DATA byte with the stored CRC intact (v2 offset 50 is inside the
+    // CRC-covered payload): must be rejected by the CRC check alone.
+    for (int i = 0; i < 2; i++) {
+        uint8_t torn[CONFIG_STORE_RECORD_LEN];
+        memcpy(torn, blobs[i], sizeof(torn));
+        torn[20] ^= 0x5Au; // inside both v1 ([0,248)) and v2 ([0,504)) CRC ranges
+        config_store_record_t sentinel;
+        memset(&sentinel, 0xAA, sizeof(sentinel));
+        config_store_record_t out = sentinel;
+        TEST_CHECK(!config_store_unpack(torn, &out), "data byte torn, CRC intact: refused");
+        TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+                   "data byte torn, CRC intact: *out untouched");
     }
     config_store_record_t fallback;
     config_store_default(&fallback);

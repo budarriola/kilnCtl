@@ -523,6 +523,7 @@ try {
         exit $mainExit
     }
     if ($fuzzExit -ne 0) {
+        Write-Host "kilnlink_fuzz_payloads.exe failed: rerun with KILNLINK_FUZZ_SEED=<seed printed above> to reproduce."
         exit $fuzzExit
     }
     if ($halSpiPicoExit -ne 0) {
