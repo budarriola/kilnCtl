@@ -187,7 +187,7 @@ recovery,     app,  factory,   0xA10000, 0x1E0000,   # unchanged
 
 **Size headroom (measured 2026-10-04, clean worktree, `check_00_kilnfw_target_build.ps1`):** `KilnCtrl.bin` = 2,582,608 B (0x276850) against 4,194,304 B: 1,611,696 B (38%) free. `tools/check_app_image_size.py` (called by that check, also `tools/check_app_image_size.ps1`) fails the build if the `app` row exceeds 0x400000 or the image exceeds it. IDF's own `check_sizes.py` cannot do this (see section 1: it only hard-fails when the image fits no app partition).
 
-**Old-offset sweep:** `templates/KilnFW.tasks.json.in` `program_esp` used 0x810000 (long-dead `factory` offset), now 0x210000. `check_flash_partition_map.ps1` and `test_flash_board_pinning.py` pins updated. Comments in `pico_image_manifest.h`, `KilnFW_recovery/sdkconfig.defaults`, `FLASH_BUDGET.md`, `PICO_AUTO_UPDATE_PLAN.md` annotated. `flash_firmware()` reads the `app` offset from `partitions.csv` and needs no change; `stage` is deliberately NOT in its `ERASABLE_DATA_PARTITIONS`.
+**Old-offset sweep:** `templates/KilnFW.tasks.json.in` `program_esp` used 0x810000 (long-dead `factory` offset), now 0x210000. `check_flash_partition_map.ps1` and `test_flash_board_pinning.py` pins updated. Comments in `pico_image_manifest.h`, `KilnFW_recovery/sdkconfig.defaults`, `FLASH_BUDGET.md`, `PICO_AUTO_UPDATE.md` annotated. `flash_firmware()` reads the `app` offset from `partitions.csv` and needs no change; `stage` is deliberately NOT in its `ERASABLE_DATA_PARTITIONS`.
 
 ### One-time JTAG procedure (per board, cable-attached, owner/bench only)
 

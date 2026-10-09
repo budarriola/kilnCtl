@@ -313,7 +313,7 @@ Required work, and it is a prerequisite for the first step, not a follow-up:
 
 ## 2. The Pico half, and the CT normals
 
-`docs/PICO_AUTO_UPDATE_PLAN.md` (referenced, not edited here — another session
+`docs/PICO_AUTO_UPDATE.md` (referenced, not edited here — another session
 owns it) records that the Pico's config store lives outside both application
 slots, so an automatic update preserves `abs_max_temp_c`, the arming state and
 the CT normals `i_normal_a` by construction, with one residual: a
