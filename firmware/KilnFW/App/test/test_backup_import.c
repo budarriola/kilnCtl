@@ -2592,6 +2592,7 @@ static void test_group_a_pass1_range_checks(void)
     TEST_SECTION("backup_import_apply -- non-finite/over-ceiling gains and tuning fields refuse in pass 1");
     reset_stub_state();
     TEST_CHECK(backup_zone_refused("\"pid_kp\":1e300,\"pid_ki\":0,\"pid_kd\":0", "gain ceiling"), "kp 1e300 refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1001,\"pid_ki\":0,\"pid_kd\":0", "gain ceiling"), "kp > max refused");
     TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":1001,\"pid_kd\":0", "gain ceiling"), "ki > max refused");
     TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":2000000", "gain ceiling"), "kd > max refused");
     const char *tv = "\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"tuning_valid\":1,\"tuning_settled\":1,"
@@ -2650,6 +2651,7 @@ static bool header_case_refused_400(void)
 {
     reset_backup_import_post_stubs();
     g_total_write_calls = 0;
+    s_send_last_err_msg[0] = 0;
     httpd_req_t req;
     memset(&req, 0, sizeof(req));
     req.content_len = 10;
