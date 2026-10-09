@@ -11,6 +11,7 @@
 #include "hal_time.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "persist_scratch.h"
 
 static const char *TAG = "setup_wiz_progress";
 
@@ -519,7 +520,7 @@ void setup_wizard_progress_get_dualwrite_status(bool *file_valid, uint32_t *file
         setup_wizard_progress_blob_t f;
         setup_wizard_progress_blob_t n;
         setup_wizard_progress_v3_legacy_t raw;
-    } *w = malloc(sizeof(*w));
+    } *w = persist_scratch_alloc(sizeof(*w));
     uint32_t f_rev = 0;
     bool f_valid = false;
     bool n_valid = false;
