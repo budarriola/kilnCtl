@@ -100,7 +100,11 @@ Missing test: idle executor, aux output ON, safety snapshot reporting a fresh TR
 - one with `diag_ever_received=false`;
 - one that is not tripped.
 
-### 3. MEDIUM: the zones 409 lost-update leaves the Pico ceiling raised (defect plus gap)
+### 3. FIXED: the zones 409 lost-update leaves the Pico ceiling raised (defect plus gap)
+
+**Fixed (2026-10-09):** the 409 path now snapshots the live zone maxima under the lock and calls `zones_post_track_ceiling_lower()` (the same helper as the post-commit lower), which lowers the Pico back to exactly the live maximum. `test_zones_post_refuses_lost_update_on_concurrent_generation_bump` now asserts the second write targets the live max and the cached Pico ceiling reads it back. Negative-tested with `tools/negtest.ps1` (restore call removed: CAUGHT).
+
+Original finding (MEDIUM):
 
 This is a code defect, not only a missing test. I confirmed it by reading the code; it has not been reproduced on the board.
 
@@ -221,7 +225,7 @@ Missing test: inject a failure into one setter. Assert the 500, `partial_write`,
 - The fault-drop function itself (see gap 2 for its caller).
 - Factory reset legacy erase per scope: kiln, profiles, wifi and all (`test_ota_http.c` around line 1480), and an open failure (around line 1507).
 - relay_cycles and run_state migration erase-after-verified-copy (`test_relay_cycles.c`, `test_run_state.c`).
-- The zones generation re-check: the 409, the untouched config and the guard release (`test_zones_http.c:1777`). See gap 3 for the missing ceiling assertion.
+- The zones generation re-check: the 409, the untouched config, the guard release and (since the gap 3 fix) the Pico ceiling restore (`test_zones_http.c:1777`).
 - The core update modules: stage, policy, settings, url, release, fetch_heap, and the writer/timeout arbiter `update_wr_arb.h` (through `test_update_stage.c`).
 - Backup import:
   - aux phase-1 revert;
