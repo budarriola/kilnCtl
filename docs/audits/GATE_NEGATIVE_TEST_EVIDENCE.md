@@ -1,4 +1,4 @@
-# Gate to negative-test evidence
+﻿# Gate to negative-test evidence
 
 Consolidated table for `docs/RELEASE_HARDENING_PLAN.md` section 3, acceptance step 4.
 One row per check that `tools/run_all_checks.ps1 -ListOnly` discovers (plus the guard that
@@ -23,14 +23,14 @@ Not exercisable locally, by design: `check_01_kilnfw_pushed_build.ps1` and `chec
 
 ## Counts
 
-Gate rows: 171.
+Gate rows: 178.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 97 |
-| PARTIAL | 1 |
+| NEGATIVE-TESTED | 109 |
+| PARTIAL | 2 |
 | REVIEWED, NOT MUTATED | 9 |
-| NOT AUDITED | 71 |
+| NOT AUDITED | 58 |
 | NOT AUDITED (pass 12 pending) | 0 |
 
 ## Table
@@ -41,20 +41,20 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 |---|---|---|---|---|
 | `firmware/CommonFW/test/check_commonfw_ctest.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1, after the Ninja/parallel speedup) | kilnlink_set_config.c: OFF_TC_TYPE 1u -> 0u | RED (test_set_config, test_fuzz_payloads failed); real tree unchanged |
 | `firmware/CommonFW/test/check_commonfw_diag_vectors.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1) | kilnlink_diag.c: log_frames_dropped encoded as 0u | RED (test_diag: 2 failures); real tree unchanged |
-| `firmware/hwAbstraction/test/compile_esp_backends.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/hwAbstraction/test/compile_pico_backends.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/hwAbstraction/test/test_host_fakes.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/hwAbstraction/test/compile_esp_backends.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | hal_spi_esp.c: appended a function using an undeclared identifier (build artifacts copied from an existing checkbuild) | RED (undeclared identifier, FAILED, exit 1); restored by hand; PASS |
+| `firmware/hwAbstraction/test/compile_pico_backends.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | hal_spi_pico.c: appended a function using an undeclared identifier (build.ninja/rules.ninja copied from an existing checkbuild) | RED (undeclared identifier, FAILED, exit 1); restored by hand; PASS |
+| `firmware/hwAbstraction/test/test_host_fakes.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | fake_gpio.c: bounds check `num < FAKE_GPIO_NUM_PINS` changed to `<=` (via tools/negtest.ps1, -NoBaseline because the unmutated baseline exceeded 25 min under load) | CAUGHT: `fake_gpio: FAILED (pass=36 fail=1)`, all 11 other fakes OK in the same run; real tree unchanged |
 | `firmware/KilnFW/App/test/check_00_kilnfw_host_tests.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_00_kilnfw_recovery_target_build.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_00_kilnfw_target_build.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_01_kilnfw_pushed_build.ps1` | PARTIAL | 09-18 | cannot be driven locally (builds origin/main in a throwaway worktree); 09-16e saw it genuinely FAIL on a real -Werror=format-truncation defect on origin/main | FAIL path propagated incidentally; no deliberate mutation |
-| `firmware/KilnFW/App/test/check_all_task_stack_budgets.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_all_task_stack_budgets.ps1` | PARTIAL | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | real ELFs from existing checkbuilds; check-input mutation via its own -ForceCeiling zone_sweep=1000 (no source mutation) | RED on the real ELFs (bx_flash_worker 3808 B > 3792 B ceiling, a genuine finding); -ForceCeiling adds zone_sweep to the failing set. No source mutation of a measured task was run |
 | `firmware/KilnFW/App/test/check_approach_rate_cap_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16 | production divisor 3600.0f changed to 1800.0f in the real cap loop | RED, both fragments shown; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_boot_guard_reset_reachability.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_cfg_convert_field_mirror_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_cfg_fs_tie_break.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_cfgfs_nvs_only_drift.ps1` | NEGATIVE-TESTED | 09-16 | empty persist/zz_audit_dummy_cfg_fs.c created | RED, names the new bridge file; file deleted |
-| `firmware/KilnFW/App/test/check_embedded_pico_image_fresh.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_embedded_pico_image_fresh.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | fabricated slot bins from real ones: identical slots, truncated slotB, commit changed in both / in one slot, config_format_version changed in slotB, missing file | each RED with its named reason (SKIP exit 3 for missing); baseline PASS |
 | `firmware/KilnFW/App/test/check_executor_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16b | 1024 B volatile local injected in zone_coupling_gauss_solve_partial_pivot_vec, real rebuild | +1024 B exactly, RED at 2800 B > 1936 B; fullclean rebuild back to baseline |
 | `firmware/KilnFW/App/test/check_flash_partition_map.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_flash_worker_lint.ps1` | NOT AUDITED | - | none | NOT AUDITED |
@@ -63,7 +63,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_heater_output_pwm_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_httpd_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 1024 B volatile local in profile_decode_blob, real rebuild | +1024 B exactly, RED 5328 B > 4832 B; fullclean rebuild back to 4304 B |
 | `firmware/KilnFW/App/test/check_js_host_tests.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_kilnfw_ccache_no_stale.ps1` | NOT AUDITED | - | none (author's 2026-10-08 negative tests are in the script header, no audit file) | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_kilnfw_ccache_no_stale.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | lib_kilnfw_ccache.ps1: CCACHE_NODIRECT removed (direct mode on), via tools/negtest.ps1 | CAUGHT: stale hit(direct) at the shadowing-header step and direct_mode 'true'; baseline PASS; real tree unchanged |
 | `firmware/KilnFW/App/test/check_kilnfw_dram_bss_budget.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_kv_narrow_stack.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_label_column_overflow_wrap.ps1` | NOT AUDITED | - | none | NOT AUDITED |
