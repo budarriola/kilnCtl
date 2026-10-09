@@ -569,6 +569,54 @@ void force_aux_relays_off(void)
     }
 }
 
+/* Audit AUX_OUTPUTS_SAFETY_REVIEW_2026-10-09 F1/F2. Called every executor
+ * tick while NOT RUNNING, with s_exec.lock held. When a safety fault is
+ * asserted (relay_authority_on_blocked(), or a fresh Pico TRIPPED report passed
+ * in as pico_tripped), every aux output that is on is driven OFF:
+ *  - PAUSED (F1): a pause otherwise holds the last commanded aux state; that
+ *    hold only lasts while nothing is faulted. Goes through aux_apply_relay()
+ *    so switch_count/on_time bookkeeping stays coherent.
+ *  - IDLE/DONE/FAULTED (F2): a manually switched-on aux is dropped too. There
+ *    is no separate manual-on memory (the relay itself is the state), so it
+ *    stays OFF after the fault clears; the operator must switch it on again.
+ * Firmware does this for every wiring: aux outputs are NOT assumed to sit
+ * behind K4, so K4 / the heat claim release is never what protects them. */
+void profile_executor_aux_fault_drop(bool pico_tripped)
+{
+    uint32_t sources = 0;
+    bool blocked = relay_authority_on_blocked(s_exec.safety, &sources) || pico_tripped;
+    if (!blocked) {
+        return;
+    }
+    uint8_t cand = (uint8_t)(aux_outputs_cfg_enabled_mask() | s_exec.aux_claim_mask);
+    uint8_t shadow = s_exec.io ? kiln_io_get_relay_shadow(s_exec.io) : 0;
+    uint8_t on_mask = 0;
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        if (!(cand & bit)) continue;
+        if ((shadow & bit) || s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) on_mask |= bit;
+    }
+    if (on_mask == 0) {
+        return;
+    }
+    ESP_LOGW(PE_TAG, "safety fault while not running (sources 0x%02X, pico_tripped=%d): dropping aux mask 0x%02X",
+             (unsigned)sources, (int)pico_tripped, (unsigned)on_mask);
+    for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+        if (!(on_mask & (1u << i))) continue;
+        if (s_exec.aux_claim_mask & (1u << i)) {
+            aux_apply_relay(i, false);
+        } else {
+            /* manual (unclaimed) aux: plain authorized OFF write */
+            if (s_exec.io &&
+                kiln_io_owner_command_set_relay_mask_authorized((uint8_t)(1u << i), 0) == ESP_OK) {
+                relay_off_tracker_note_write((uint8_t)(1u << i), 0);
+                relay_cycles_add((uint8_t)(1u << i), 1u);
+            }
+        }
+        s_exec.aux[i].actuated_on = false;
+    }
+}
+
 bool profile_executor_on_off_temp_unusable(const on_off_trigger_rule_t *rule, bool temp_ok)
 {
     return rule->enable && rule->temp_cmp != ON_OFF_TEMP_CMP_NONE && !temp_ok;

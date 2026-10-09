@@ -1291,6 +1291,7 @@ void force_all_relays_off(void);
  * s_exec.lock held. */
 void aux_apply_relay(uint8_t aux_idx, bool want_on);
 void force_aux_relays_off(void);
+void profile_executor_aux_fault_drop(bool pico_tripped); /* F1/F2: not-RUNNING fault drop, lock held */
 void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap);
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);

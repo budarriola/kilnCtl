@@ -43,6 +43,8 @@ There are no HIGH findings. Questions (c) and (e) came out clean apart from F5.
 
 ### F1 (MED): PAUSED holds aux through faults that do not escalate
 
+Fixed in FIXSHA: `profile_executor_aux_fault_drop()` runs every not-RUNNING tick and drops every ON aux (via `aux_apply_relay`) whenever `relay_authority_on_blocked()` or a fresh Pico TRIPPED holds. Firmware does not assume aux sits behind K4 (owner 2026-10-09: wiring varies).
+
 Evidence:
 - `control/profile_executor.c:729-745`: when the state is not RUNNING, the executor calls `force_all_relays_off()`. That function iterates active zones only (`profile_executor_relay_io.c:460-469`). The aux tick is not reached, and `force_aux_relays_off()` is skipped while PAUSED.
 - `control/profile_executor_status.c:283-316`: pause hands `claimed_relay_mask`, aux bits included, to MANUAL. An existing ON is not re-evaluated.
@@ -62,6 +64,8 @@ Mitigation: pause releases the heat claim (`profile_executor_status.c` `heat_ena
 Proposed fix: in the not-RUNNING branch at `control/profile_executor.c:729-745`, when the state is PAUSED and `relay_authority_on_blocked()` is true, call `aux_apply_relay(i, false)` for every claimed aux that is commanded or actuated ON. The aux stays held only while authority is clear. Add a host test that pauses with an aux ON and then asserts each fault source.
 
 ### F2 (LOW): a manual aux ON made while idle survives a Pico trip
+
+Fixed in FIXSHA: same helper; idle manual aux is switched OFF on a fault/trip. There is no manual-on memory, so it stays OFF when the fault clears.
 
 - The watchdog's idle Pico trip is `LOG_IDLE_TRIP` only (`control/profile_executor.c:2240`). No relay is dropped.
 - `owners/kiln_io_owner.c:238-306` blocks only new ONs.

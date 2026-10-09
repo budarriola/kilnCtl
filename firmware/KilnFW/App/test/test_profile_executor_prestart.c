@@ -10068,6 +10068,55 @@ static void on_off_input_assert_equal(const on_off_trigger_input_t *a, const on_
 #undef EQ_FIELD
 }
 
+/* Audit AUX_OUTPUTS_SAFETY_REVIEW_2026-10-09 F1/F2: not-RUNNING aux fault drop. */
+static char s_aux_fd_dummy_io;
+static void aux_fd_setup(profile_exec_state_t st, bool aux_on_shadow, bool claimed)
+{
+    profile_t p = aux_test_profile();
+    aux_test_setup(&p);
+    if (!s_exec.io) s_exec.io = (kiln_io_t *)&s_aux_fd_dummy_io;
+    s_exec.state = st;
+    s_exec.aux_claim_mask = claimed ? 0x01 : 0;
+    s_exec.aux[0].commanded_on = claimed;
+    s_exec.aux[0].actuated_on = claimed;
+    g_stub_relay_shadow = aux_on_shadow ? 0x01 : 0;
+    g_aux_write_log_n = 0;
+}
+
+static void test_paused_aux_on_fault_drops_aux_within_one_tick(void)
+{
+    TEST_SECTION("F1: PAUSED + aux ON + fault -> aux OFF in one tick");
+    aux_fd_setup(PROFILE_EXEC_PAUSED, true, true);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "OFF written to aux mask 0x01");
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "commanded_on cleared");
+    s_test_relay_authority_blocked = false;
+}
+
+static void test_paused_aux_on_no_fault_stays_on(void)
+{
+    TEST_SECTION("F1: PAUSED + aux ON + no fault -> aux stays ON");
+    aux_fd_setup(PROFILE_EXEC_PAUSED, true, true);
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_aux_write_log_n == 0, "no write while nothing is faulted");
+    TEST_CHECK(s_exec.aux[0].commanded_on, "commanded_on kept");
+}
+
+static void test_idle_manual_aux_dropped_by_pico_trip_and_stays_off(void)
+{
+    TEST_SECTION("F2: idle manual aux ON + Pico trip -> OFF, stays OFF after trip clears");
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    profile_executor_aux_fault_drop(true);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "manual aux OFF written on trip");
+    g_stub_relay_shadow = 0; /* the write landed */
+    g_aux_write_log_n = 0;
+    profile_executor_aux_fault_drop(false); /* trip cleared */
+    TEST_CHECK(g_aux_write_log_n == 0, "nothing rewritten (no ON) after the trip clears");
+    TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, "no remembered ON state");
+}
+
 static void test_on_off_zone_and_aux_input_builders_agree(void)
 {
     TEST_SECTION("on/off input: zone and aux producers share one builder (field-for-field equivalence)");
@@ -11188,6 +11237,9 @@ static void run_test_on_off_actuation(void)
     test_on_off_zone_tick_inverted_rule_turns_relay_off_through_owner();
     test_on_off_zone_invalid_sensor_fails_safe();
     test_on_off_zone_and_aux_input_builders_agree();
+    test_paused_aux_on_fault_drops_aux_within_one_tick();
+    test_paused_aux_on_no_fault_stays_on();
+    test_idle_manual_aux_dropped_by_pico_trip_and_stays_off();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();
