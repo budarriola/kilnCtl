@@ -419,6 +419,20 @@ static void test_aux_target_byte_round_trips_through_import(void)
               "an old-style zone-targeted rule still imports as zone 2");
 }
 
+static void test_busy_save_refusal_is_409(void)
+{
+    reset_state();
+    s_save_should_fail = true;
+    snprintf(s_save_fail_msg, sizeof(s_save_fail_msg), "busy: zone conversion running, retry");
+    run_import(MAKE_BODY("30"));
+    TEST_CHECK(s_response_status == 409, "a busy: save refusal is answered with 409");
+    snprintf(s_save_fail_msg, sizeof(s_save_fail_msg), "stub refusal");
+    reset_state();
+    s_save_should_fail = true;
+    run_import(MAKE_BODY("30"));
+    TEST_CHECK(s_response_status == 400, "any other save refusal stays 400");
+}
+
 int main(void)
 {
     TEST_SECTION("profile_export_import");
@@ -432,6 +446,7 @@ int main(void)
     test_old_export_without_rules_key_imports_as_rules_free();
     test_new_export_with_rules_key_round_trips_every_field();
     test_out_of_range_temp_c_is_not_stored_unbounded();
+    test_busy_save_refusal_is_409();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

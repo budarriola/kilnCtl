@@ -449,7 +449,8 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         profiles_http_json_escape(err_msg, err_escaped, sizeof(err_escaped));
         char errjson[192 + sizeof(err_escaped)];
         int en = snprintf(errjson, sizeof(errjson), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
-        httpd_resp_set_status(req, "400 Bad Request");
+        /* "busy:" = a zone conversion holds the profile store; a conflict, not a bad body. */
+        httpd_resp_set_status(req, strncmp(err_msg, "busy:", 5) == 0 ? "409 Conflict" : "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_send(req, errjson, en < 0 ? 0 : (size_t)en);
     }

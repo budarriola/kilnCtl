@@ -965,6 +965,8 @@ try {
                  "`"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
                  "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
                  "`"$(Join-Path $driversDir 'control/profile_feasibility.c')`" ")
+    # profiles_http.c includes <stdatomic.h> (s_convert_busy): MSVC needs this flag.
+    if (-not $cmdSl.Contains('/experimental:c11atomics')) { $cmdSl = $cmdSl.Replace('/std:c11 ', '/std:c11 /experimental:c11atomics ') }
     # Guard: $cmdSl is a chain of string Replace()s over $cmd4. If a future edit to $cmd4
     # stops matching a Replace, it would silently build a renamed copy of the prestart test.
     if ($cmdSl -eq $cmd4 -or -not $cmdSl.Contains('test_profile_executor_store_link.c')) {

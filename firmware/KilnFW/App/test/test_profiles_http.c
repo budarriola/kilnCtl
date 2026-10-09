@@ -488,14 +488,27 @@ bool zones_config_get_zone_type(uint8_t zone_index, zone_type_t *out_type)
 // ---- aux_outputs_cfg.h -- spare-relay aux outputs (WP-4). Controllable per test;
 // default: every aux disabled (today's behaviour). g_stub_aux[i] = relay i+1.
 static aux_output_t g_stub_aux[AUX_OUTPUTS_COUNT];
+/* Seam: when armed, the first aux read made while the save lock is held disables
+ * the aux first, as a convert commit landing between pre-validate and lock would. */
+static bool g_aux_flip_under_lock_armed;
+static uint8_t g_aux_flip_relay;
+static void aux_flip_under_lock_hook(void)
+{
+    if (g_aux_flip_under_lock_armed && g_test_stub_lock_depth > 0) {
+        g_aux_flip_under_lock_armed = false;
+        g_stub_aux[g_aux_flip_relay - 1].enabled = false;
+    }
+}
 bool aux_outputs_cfg_get(uint8_t relay, aux_output_t *out)
 {
+    aux_flip_under_lock_hook();
     if (relay < 1 || relay > AUX_OUTPUTS_COUNT || !out) return false;
     *out = g_stub_aux[relay - 1];
     return true;
 }
 uint8_t aux_outputs_cfg_enabled_mask(void)
 {
+    aux_flip_under_lock_hook();
     uint8_t m = 0;
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         if (g_stub_aux[i].enabled && !g_stub_aux[i].conflicted) m |= (uint8_t)(1u << i);
@@ -3159,6 +3172,37 @@ static void test_retarget_commit_rechecks_plan_refusals(void)
     TEST_CHECK(g_test_stub_lock_depth == 0, "lock released after the refusal");
 }
 
+static void test_save_revalidates_under_lock(void)
+{
+    TEST_SECTION("profiles_http_save -- a rule target that became invalid between pre-validate and the lock is refused; busy flag refuses at once");
+    rt_seed();
+    profile_t p = make_stored_profile();
+    snprintf(p.name, sizeof(p.name), "RevalProf");
+    rt_rule(&p, 0, RT_DEST, 0, 0, 0); /* aux relay is enabled by rt_seed */
+    char err[160] = "";
+    uint8_t out_id = 0, warn = 0;
+    g_aux_flip_relay = RT_RELAY;
+    g_aux_flip_under_lock_armed = true;
+    bool ok = profiles_http_save(0xFF, &p, &out_id, &warn, err, sizeof(err));
+    g_aux_flip_under_lock_armed = false;
+    TEST_CHECK(!ok, "save refused when the aux turned invalid before the assign");
+    TEST_CHECK(err[0] != '\0', "a validation error is reported");
+    int used = 0;
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+        if (profiles_slot_used(i) && strcmp(s_profiles.profiles[i].name, "RevalProf") == 0) used++;
+    }
+    TEST_CHECK(used == 0, "nothing was assigned");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "lock released");
+
+    g_stub_aux[RT_RELAY - 1].enabled = true;
+    profiles_http_set_convert_busy(true);
+    err[0] = '\0';
+    ok = profiles_http_save(0xFF, &p, &out_id, &warn, err, sizeof(err));
+    profiles_http_set_convert_busy(false);
+    TEST_CHECK(!ok && strstr(err, "busy") != NULL, "save refuses with a busy error while a convert is running");
+    TEST_CHECK(profiles_http_save(0xFF, &p, &out_id, &warn, err, sizeof(err)), "save works again once the flag is lowered");
+}
+
 static void test_retarget_resume_and_whole_blob_verify(void)
 {
     TEST_SECTION("profiles_retarget_zone_to_aux_resume -- finishes a half-done rewrite; slot verify compares the whole blob");
@@ -4441,6 +4485,7 @@ void run_test_profiles_http(void)
     test_retarget_commit_rollback_at_every_write();
     test_retarget_commit_and_revert_hold_save_lock();
     test_retarget_commit_rechecks_plan_refusals();
+    test_save_revalidates_under_lock();
     test_retarget_resume_and_whole_blob_verify();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();

@@ -599,6 +599,16 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return ret;
     }
 
+    if (profiles_http_convert_busy()) {
+        char json[96];
+        int bn = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"busy: zone conversion running, retry\"}");
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t ret = httpd_resp_send(req, json, bn < 0 ? 0 : (size_t)bn);
+        free(warn_json);
+        free(tmp);
+        return ret;
+    }
     /* Slot allocation, duplicate-name check, assign and save are one section
      * under the save mutex (two creates must not pick the same free slot). */
     profiles_save_lock();
@@ -659,6 +669,19 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         }
     }
 
+    /* Re-validate under the lock: a zone/aux conversion may have committed since
+     * the unlocked validation above. */
+    if (!validate_on_off_rules(tmp, validate_err, sizeof(validate_err))) {
+        profiles_save_unlock();
+        char json[256];
+        int vn = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", validate_err);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t ret = httpd_resp_send(req, json, vn < 0 ? 0 : (size_t)vn);
+        free(warn_json);
+        free(tmp);
+        return ret;
+    }
     s_profiles.profiles[target_id] = *tmp;
     free(tmp);
     profiles_slot_set(target_id);
