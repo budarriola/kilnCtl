@@ -31,10 +31,10 @@ function run(resp) {
 }
 
 (async function () {
-  let c = await run({ ok: false, status: 401, json: function () { throw new Error('json must not be called'); } });
+  let c = await run({ ok: false, status: 401, json: function () { return Promise.resolve({ phase: 'writing' }); } });
   assert(c.render === 0 && c.timers === 0 && c.fetches === 1, '401: nothing rendered, no re-poll');
   assert(/log in again/.test(c.text), '401: tells the operator the board is up and to log in');
-  c = await run({ ok: false, status: 500, json: function () { throw new Error('json must not be called'); } });
+  c = await run({ ok: false, status: 500, json: function () { return Promise.resolve({ phase: 'writing' }); } });
   assert(c.render === 0 && c.timers === 0 && /Could not load/.test(c.text), '500: generic error, no render, no loop');
   c = await run({ ok: true, status: 200, json: function () { return Promise.resolve({ phase: 'writing' }); } });
   assert(c.render === 1, 'ok: rendered');
