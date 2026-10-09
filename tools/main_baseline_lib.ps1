@@ -13,8 +13,11 @@
 #   <dir>\latest-<mode>.json           (pointer: origin/main commit, tree, file)
 # <dir> is C:\wt\.mainbaseline, override KILNCTL_MAINBASELINE_DIR (the unit test).
 #
-# LINEAGE RULE. A baseline only counts if its commit is an ANCESTOR of HEAD. A baseline
-# from another lineage (or a commit this repo cannot resolve) is ignored. Among the
+# LINEAGE RULE. A baseline only counts if its commit is an ANCESTOR of HEAD, OR (dev flow, review
+# F6) its recorded TREE equals the tree of a commit in HEAD's recent history: a promote commit on
+# main is a single-parent squash that shares its tree with the dev commit it names, so it is never
+# an ancestor of dev but its tree is. Such a baseline is Exact when that tree is origin/main's
+# current tree. A baseline from another lineage (or a commit this repo cannot resolve) is ignored. Among the
 # usable baselines the one for the merge-base with origin/main is preferred; otherwise
 # the newest (by commit date), with a warning that it is from an older main sha.
 #
@@ -201,22 +204,36 @@ function Select-MainBaseline {
     $mb = (& git -C $RepoRoot merge-base HEAD $MainRef 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { $mb = "" }
     $usable = New-Object System.Collections.ArrayList
+    $histTrees = $null
+    $mainTree = (& git -C $RepoRoot rev-parse "$MainRef^{tree}" 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { $mainTree = "" }
     foreach ($f in $files) {
         $b = Read-MainBaselineFile -Path $f.FullName
         if ($null -eq $b -or $b.mode -cne $Mode) { $r.Ignored++; continue }
+        $treeMatch = $false
         & git -C $RepoRoot merge-base --is-ancestor ([string]$b.commit) HEAD 2>$null
-        if ($LASTEXITCODE -ne 0) { $r.Ignored++; continue }   # other lineage / unknown commit
+        if ($LASTEXITCODE -ne 0) {
+            # Not an ancestor: usable only through an equal tree somewhere in HEAD's history.
+            $bt = if ($b.PSObject.Properties['tree']) { [string]$b.tree } else { "" }
+            if ($null -eq $histTrees) {
+                $histTrees = @{}
+                foreach ($t in @(& git -C $RepoRoot log -n 2000 --format=%T HEAD 2>$null)) { if ($t) { $histTrees[[string]$t] = $true } }
+            }
+            if (-not $bt -or -not $histTrees.ContainsKey($bt)) { $r.Ignored++; continue }   # other lineage / unknown commit
+            $treeMatch = $true
+        }
         $ct = 0
         $ctText = (& git -C $RepoRoot show -s --format=%ct ([string]$b.commit) 2>$null | Out-String).Trim()
         [void][long]::TryParse($ctText, [ref]$ct)
-        [void]$usable.Add([PSCustomObject]@{ B = $b; Ct = $ct })
+        $isExact = ($mb -and $b.commit -ceq $mb) -or ($mainTree -and $b.PSObject.Properties['tree'] -and ([string]$b.tree) -ceq $mainTree)
+        [void]$usable.Add([PSCustomObject]@{ B = $b; Ct = $ct; Exact = [bool]$isExact })
     }
     if ($usable.Count -eq 0) {
         $r.Reason = "no $Mode baseline is from an ancestor of HEAD ($($r.Ignored) from other lineages ignored)"
         return $r
     }
     $pick = $null
-    if ($mb) { $pick = @($usable | Where-Object { $_.B.commit -ceq $mb })[0] }
+    $pick = @($usable | Where-Object { $_.Exact })[0]
     if ($null -ne $pick) { $r.Exact = $true }
     else {
         $pick = @($usable | Sort-Object Ct -Descending)[0]

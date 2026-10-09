@@ -39,7 +39,7 @@ Things checked and found sound are listed at the end.
 
 ## Findings
 
-### F1 HIGH -- land.ps1 can put an untested commit on main
+### F1 HIGH -- land.ps1 can put an untested commit on main [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/land.ps1:64` (`[ValidateSet('dev','main')][string]$Target = 'dev'`),
   `tools/land.ps1:172-248` (check-log gate runs only when `-CheckLog` is passed),
@@ -58,7 +58,7 @@ Things checked and found sound are listed at the end.
   recorded HEAD/tree equals the commit being pushed (see F9). Change the test
   default to `-Target dev`.
 
-### F2 MED -- dev_promote.ps1 has no test-evidence gate
+### F2 MED -- dev_promote.ps1 has no test-evidence gate [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/dev_promote.ps1:48-56` (Test-RealPromote), `:59-70` (offender
   check), `:91-96` (commit-tree), `:107` (push).
@@ -74,7 +74,7 @@ Things checked and found sound are listed at the end.
   recorded in the promote commit message. Add a `check_dev_promote.ps1` case
   for "untested commit refused".
 
-### F3 MED -- land.ps1 -RestartMcp always fails and never restarts
+### F3 MED -- land.ps1 -RestartMcp always fails and never restarts [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/land.ps1:327` and `:330` call `Run-Bounded`. That function is
   not defined anywhere in the script or in anything it dot-sources. It has been
@@ -135,7 +135,7 @@ Things checked and found sound are listed at the end.
   the session), since PowerShell 5.1 cannot read another process's cwd cheaply.
   Flip the `stale_ignored` test to expect KEEP.
 
-### F6 MED -- main baseline lineage is inert in the dev flow
+### F6 MED -- main baseline lineage is inert in the dev flow [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/main_baseline_lib.ps1:258-292` (Select-MainBaseline requires the
   baseline commit to be an ancestor of HEAD and prefers the merge-base with
@@ -154,7 +154,7 @@ Things checked and found sound are listed at the end.
   the coordinator full-runs. Add a `check_main_baseline.ps1` case with a
   squash-promoted main.
 
-### F7 MED -- push_verify.ps1 can report LANDED for an unpushed commit
+### F7 MED -- push_verify.ps1 can report LANDED for an unpushed commit [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/push_verify.ps1:46` (default `origin/dev`), `:73` (remote parsed
   from an `x/` prefix), `:95` (`git merge-base --is-ancestor $fullHash $Branch`
@@ -169,7 +169,7 @@ Things checked and found sound are listed at the end.
   `git ls-remote <remote> refs/heads/<branch>` so the check does not depend on
   the local tracking ref at all.
 
-### F8 MED -- commit_guard.ps1 compares against a stale origin/dev
+### F8 MED -- commit_guard.ps1 compares against a stale origin/dev [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/commit_guard.ps1` has no `git fetch`; `:104` compares against
   `rev-parse "${Branch}:${p}"` from the local tracking ref.
@@ -182,7 +182,7 @@ Things checked and found sound are listed at the end.
   fails (check `$LASTEXITCODE`, not `$?`, and do not redirect native stderr
   into the pipeline under PowerShell 5.1).
 
-### F9 LOW -- land.ps1 check log is not bound to the commit
+### F9 LOW -- land.ps1 check log is not bound to the commit [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/land.ps1:126` (`$SummaryRe`, first match wins), `:172-248`.
 - Scenario: an agent passes a check log from an earlier run in another
@@ -192,7 +192,7 @@ Things checked and found sound are listed at the end.
   summary, and have `land.ps1` require that the tree matches the pre-rebase
   HEAD tree. Use the last summary in the file, not the first.
 
-### F10 LOW -- land.ps1 FAIL-line parsing can under-count
+### F10 LOW -- land.ps1 FAIL-line parsing can under-count [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/land.ps1:205` (the FAIL regex requires a `(`), `:244` (the
   failedCount fallback fires only when zero FAIL lines were parsed).
@@ -203,7 +203,7 @@ Things checked and found sound are listed at the end.
 - Fix: compare the parsed count against the summary's failedCount and refuse on
   any mismatch.
 
-### F11 LOW -- land.ps1 retries a hook or protected-branch rejection
+### F11 LOW -- land.ps1 retries a hook or protected-branch rejection [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/land.ps1:302-304` (retry when the push output matches
   `rejected`).
@@ -214,7 +214,7 @@ Things checked and found sound are listed at the end.
 - Fix: retry only on `(fetch first)` or `(non-fast-forward)`. Fail immediately
   with the remote's message on `remote rejected`.
 
-### F12 LOW -- promote/release post-push verify is tautological
+### F12 LOW -- promote/release post-push verify is tautological [FIXED 2026-10-09, see flowfix1 commit]
 
 - Where: `tools/dev_promote.ps1:110`, `tools/release_merge.ps1:126`.
 - Scenario: a successful `git push` already updates

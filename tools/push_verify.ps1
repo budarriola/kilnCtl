@@ -26,6 +26,7 @@
 #
 # USAGE
 #   powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/dev]
+#   (-Branch is always resolved on the remote: "dev" and "origin/dev" both mean refs/remotes/origin/dev)
 #
 # OUTPUT: exactly one unambiguous verdict line, prefixed "VERDICT: ", plus
 # supporting detail above it. On "no", also names the local branch(es) the
@@ -68,11 +69,17 @@ if (-not $Commit) {
 
 $repoRoot = Get-RepoRoot
 
-# Resolve the remote side of $Branch (e.g. "origin/main" -> remote "origin").
+# Resolve the remote side of $Branch (e.g. "origin/main" -> remote "origin"). F7: the verdict is
+# ALWAYS taken against refs/remotes/<remote>/<branch>, never a bare name that could resolve to a
+# LOCAL branch ("-Branch dev" means origin/dev, and a local refs/heads/origin/dev cannot shadow it).
 $remote = "origin"
-if ($Branch -match '^([^/]+)/') {
+$branchName = $Branch
+$remoteList = @(git -C $repoRoot remote 2>$null)
+if ($Branch -match '^([^/]+)/(.+)$' -and ($remoteList -contains $Matches[1])) {
     $remote = $Matches[1]
+    $branchName = $Matches[2]
 }
+$Branch = "refs/remotes/$remote/$branchName"
 
 Write-Host "Fetching $remote ..."
 git -C $repoRoot fetch $remote *>$null
@@ -86,6 +93,12 @@ if ($LASTEXITCODE -ne 0) {
 $fullHash = git -C $repoRoot rev-parse --verify "$Commit^{commit}" 2>$null
 if ($LASTEXITCODE -ne 0 -or -not $fullHash) {
     Write-Host "VERDICT: NOT LANDED -- '$Commit' does not resolve to a commit in this repo." -ForegroundColor Red
+    exit 1
+}
+
+git -C $repoRoot rev-parse --verify --quiet "$Branch^{commit}" *>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "VERDICT: UNKNOWN -- $Branch does not exist after fetching $remote." -ForegroundColor Red
     exit 1
 }
 

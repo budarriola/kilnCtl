@@ -19,7 +19,18 @@ function CommitFile([string]$dir, [string]$name, [string]$text, [string]$msg) {
     git -C $dir add -- $name *>$null
     git -C $dir commit -m $msg *>$null
 }
+function MakeLog([string]$x, [string[]]$lines, [string]$treeOverride = "") {
+    $t = if ($treeOverride) { $treeOverride } else { (git -C $work rev-parse "$x^{tree}").Trim() }
+    $p = Join-Path $tmp ("log_" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".log")
+    @("Run tree: $t dirty=0 partial=0", "Run mode: full") + $lines | Set-Content -LiteralPath $p -Encoding Unicode
+    return $p
+}
 function Run([string[]]$more) {
+    if (($more -contains "-Push") -and -not ($more -contains "-CheckLog") -and -not ($more -contains "-NoAutoLog")) {
+        $xi = [array]::IndexOf($more, "-Commit")
+        $more = $more + @("-CheckLog", (MakeLog $more[$xi + 1] @("5 passed, 0 skipped (0 due to -Fast), 0 failed.")))
+    }
+    $more = @($more | Where-Object { $_ -ne "-NoAutoLog" })
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $promote -RepoPath $work @more 2>&1 | Out-String
     return [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
 }
@@ -54,6 +65,28 @@ try {
     Assert ($subj -match ('^Promote dev ' + $x1 + ': dev change A; dev change B$')) "subject names full sha and dev subjects (got: $subj)"
     Assert (@(git -C $origin tag --list).Count -eq 0) "no tag created"
 
+    Write-Host "case: -Push evidence gate (F2)"
+    CommitFile $work "g.txt" "g" "dev change G"
+    git -C $work push origin dev *>$null
+    $xg = (git -C $work rev-parse HEAD).Trim()
+    $mainBefore = Rev main
+    $r = Run @("-Commit", $xg, "-Push", "-NoAutoLog")
+    Assert ($r.Code -eq 1 -and $r.Out -match 'requires -CheckLog' -and (Rev main) -eq $mainBefore) "no -CheckLog refused, main untouched"
+    $bad = MakeLog $xg @("5 passed, 0 skipped (0 due to -Fast), 0 failed.") ((git -C $work rev-parse "$x1^{tree}").Trim())
+    $r = Run @("-Commit", $xg, "-Push", "-CheckLog", $bad)
+    Assert ($r.Code -eq 1 -and (Rev main) -eq $mainBefore) "log for another tree refused"
+    $bad = MakeLog $xg @("  FAIL  tools\check_x.ps1 (exit 1)", "vs main baseline", "  NEW (fails here, passed on main): 1", "0 passed, 0 skipped (0 due to -Fast), 1 failed.")
+    $r = Run @("-Commit", $xg, "-Push", "-CheckLog", $bad)
+    Assert ($r.Code -eq 1 -and (Rev main) -eq $mainBefore) "log with NEW failure refused"
+    $bad = MakeLog $xg @("FAILED: 1 of 3 checks", "5 passed, 0 skipped (0 due to -Fast), 0 failed.")
+    $r = Run @("-Commit", $xg, "-Push", "-CheckLog", $bad)
+    Assert ($r.Code -eq 1 -and (Rev main) -eq $mainBefore) "log with FAILED line refused"
+    $bad = MakeLog $xg @("no summary here")
+    $r = Run @("-Commit", $xg, "-Push", "-CheckLog", $bad)
+    Assert ($r.Code -eq 1 -and (Rev main) -eq $mainBefore) "log without summary refused"
+    $r = Run @("-Commit", $xg)
+    Assert ($r.Code -eq 0 -and $r.Out -match 'DRY RUN') "dry run needs no log"
+
     Write-Host "case: second promote lists only new subjects"
     CommitFile $work "c.txt" "c" "dev change C"
     git -C $work push origin dev *>$null
@@ -61,7 +94,7 @@ try {
     $r = Run @("-Commit", $x2, "-Push")
     Assert ($r.Code -eq 0) "second promote exits 0"
     $subj = (git -C $origin log -1 --format=%s main)
-    Assert ($subj -match ('^Promote dev ' + $x2 + ': dev change C$')) "only new subject listed (got: $subj)"
+    Assert ($subj -match ('^Promote dev ' + $x2 + ': dev change G; dev change C$')) "only new subject listed (got: $subj)"
 
     Write-Host "case: X not on dev refused"
     git -C $work checkout -b off *>$null

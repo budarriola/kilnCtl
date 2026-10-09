@@ -674,6 +674,10 @@ $script:CheckCacheCtx = Initialize-CheckCache -RepoRoot $repoRoot -Fast:$Fast -N
 
 Write-Host ""
 Write-Host "Running $($checks.Count) guard scripts from $repoRoot (parallel, throttle $MaxParallel)"
+# Evidence line for tools/land.ps1 and tools/dev_promote.ps1 (they bind a log to a tree).
+$script:RunTreeHash = (& git -C $repoRoot rev-parse 'HEAD^{tree}' 2>$null | Out-String).Trim()
+$script:RunTreeDirty = if ($null -ne $script:MainBaselineStart -and -not $script:MainBaselineStart.Status.Trim()) { 0 } else { 1 }
+Write-Host "Run tree: $($script:RunTreeHash) dirty=$($script:RunTreeDirty) partial=$(if ($Only -or $Skip) { 1 } else { 0 })"
 Write-Host "Run mode: $(if ($Fast) { 'fast' } else { 'full' })"
 if ($script:CheckCacheCtx.Enabled) {
     Write-Host "Check cache: on (tree $($script:CheckCacheCtx.Tree.Substring(0,12)), $($script:CheckCacheCtx.Mode))" -ForegroundColor Cyan

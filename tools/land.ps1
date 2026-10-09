@@ -14,7 +14,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\land.ps1
 #       [-WaitPid <pid>] [-CheckLog <file>] [-AllowFail <regex>[,<regex>]]
 #       [-AllowKnownFailures]
-#       [-PostRebaseChecks <regex>] [-RestartMcp] [-RemoveWorktree] [-Target dev|main] [-DryRun]
+#       [-PostRebaseChecks <regex>] [-RestartMcp] [-RemoveWorktree] [-Target dev|main] [-Coordinator] [-DryRun]
 #
 #   -WaitPid / -CheckLog  wait (bounded by -WaitTimeoutMin, default 120) for a
 #       run_all_checks run to finish, then parse its summary. UTF-16 logs (what
@@ -37,6 +37,12 @@
 #       (fast-forward it first) or the restart just reloads old code; warned.
 #   -Target dev|main      branch to rebase onto and push to (default dev). Agents land on dev;
 #                         the coordinator promotes dev to main with tools\dev_promote.ps1.
+#                         -Target main is REFUSED unless -Coordinator AND -CheckLog are both given
+#                         (review F1): main normally only moves through dev_promote.ps1.
+#   -CheckLog binding     the log must carry the "Run tree: <hash> dirty=0 partial=0" line that
+#                         run_all_checks.ps1 prints, and <hash> must equal HEAD^{tree} (review F9);
+#                         when a file holds several runs, the LAST run is the one judged. The count
+#                         of parsed FAIL lines must equal the summary's failed count (review F10).
 #   -RemoveWorktree       after LANDED only: cd out, worktree_mint -Remove.
 #   -DryRun               do the refusals + log gate + fetch, report what would
 #       happen, change nothing (no rebase, no push).
@@ -63,6 +69,7 @@ param(
     [switch]$RemoveWorktree,
     [ValidateSet('dev','main')][string]$Target = 'dev',
     [switch]$DryRun,
+    [switch]$Coordinator,
     [double]$WaitTimeoutMin = 120,
     [string]$ChecksScript,
     [switch]$AllowStandaloneClone,
@@ -105,6 +112,21 @@ function Test-WorktreeRegistered([string]$root, [string]$wt) {
     }
     return $false
 }
+function Run-Bounded([string]$script, [string]$verb, [double]$timeoutMin) {
+    # Run `powershell -File <script> <verb>` with a wall-clock cap. Returns the exit code, or -1
+    # after killing the whole process tree on timeout, or -2 when it could not be started.
+    try {
+        $psi = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $script + '"'), $verb)
+        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $psi -PassThru -NoNewWindow
+    } catch { return -2 }
+    if ($null -eq $p) { return -2 }
+    [void]$p.Handle   # cache the handle so ExitCode is readable after exit (PS 5.1)
+    if (-not $p.WaitForExit([int][Math]::Max(1000, $timeoutMin * 60000))) {
+        & taskkill.exe /PID $p.Id /T /F *>$null
+        return -1
+    }
+    return [int]$p.ExitCode
+}
 function Step([string]$s) { [void]$script:steps.Add($s); Write-Host "[step] $s" -ForegroundColor Cyan }
 
 function Read-TextAuto([string]$path) {
@@ -137,6 +159,11 @@ function Abort-Rebase {
     if ((Test-Path $rm) -or (Test-Path $ra)) { Finish 1 "git rebase --abort did not clear the rebase state; fix by hand" }
     $p = git status --porcelain --untracked-files=no 2>$null
     if ($p) { Finish 1 "tree not clean after rebase --abort: $($p -join '; ')" }
+}
+
+# F1: main only moves through dev_promote.ps1; the direct path is a coordinator escape hatch.
+if ($Target -eq 'main' -and (-not $Coordinator -or -not $CheckLog)) {
+    Finish 1 "-Target main is refused: main moves only through tools\dev_promote.ps1. The direct path needs BOTH -Coordinator and -CheckLog <full run_all_checks log of this tree>."
 }
 
 # ---------------------------------------------------------------- step 1
@@ -198,11 +225,22 @@ if ($WaitPid -gt 0 -or $CheckLog) {
         Start-Sleep -Seconds 5
     }
     if (-not $text) { Finish 1 "check log '$CheckLog' missing or empty" }
-    $sm = [regex]::Match($text, $SummaryRe)
-    if (-not $sm.Success) { Finish 1 "check log '$CheckLog' has no run_all_checks summary line (run unfinished or died)" }
+    # F9: judge only the LAST run in the file (a log with several appended runs), and bind it to
+    # the tree being landed. run_all_checks.ps1 prints "Run tree: <hash> dirty=<0|1> partial=<0|1>".
+    $treeMs = @([regex]::Matches($text, '(?m)^Run tree: ([0-9a-f]{40}) dirty=(\d) partial=(\d)'))
+    if ($treeMs.Count -eq 0) { Finish 1 "check log '$CheckLog' has no 'Run tree:' line; it cannot be tied to this tree (re-run run_all_checks.ps1 from this checkout)" }
+    $lastRun = $treeMs[$treeMs.Count - 1]
+    $text = $text.Substring($lastRun.Index)
+    $headTree = (git rev-parse 'HEAD^{tree}').Trim()
+    if ($lastRun.Groups[1].Value -ne $headTree) { Finish 1 "check log '$CheckLog' was run on tree $($lastRun.Groups[1].Value), but HEAD's tree is $headTree; run the checks on exactly what you are landing" }
+    if ($lastRun.Groups[2].Value -ne '0') { Finish 1 "check log '$CheckLog' was run on a dirty working tree; its result does not describe a commit" }
+    if ($lastRun.Groups[3].Value -ne '0') { Finish 1 "check log '$CheckLog' is a partial (-Only/-Skip) run" }
+    $sms = @([regex]::Matches($text, $SummaryRe))
+    if ($sms.Count -eq 0) { Finish 1 "check log '$CheckLog' has no run_all_checks summary line (run unfinished or died)" }
+    $sm = $sms[$sms.Count - 1]
     $failedCount = [int]$sm.Groups[1].Value
     if ($text -match '(?m)^\s*\d+ passed,[^\r\n]*?, [1-9]\d* BUSY \(not run\)') { Finish 1 "check log reports BUSY checks that never ran" }
-    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\(') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\((?:exit|killed)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
     $failedLines = @([regex]::Matches($text, '(?m)^FAILED:.*$') | ForEach-Object { $_.Value.Trim() })
     $blocked = @()
     foreach ($n in $failNames) {
@@ -241,7 +279,8 @@ if ($WaitPid -gt 0 -or $CheckLog) {
         }
         $script:newFails = @($blocked)
     } elseif ($blocked.Count -gt 0) { $script:newFails = @($blocked) }
-    if ($failedCount -gt 0 -and $failNames.Count -eq 0) { $blocked += "summary reports $failedCount failed but no FAIL lines could be parsed" }
+    # F10: the parsed FAIL lines must account for exactly the summary's failed count.
+    if ($failNames.Count -ne $failedCount) { $blocked += "summary reports $failedCount failed but $($failNames.Count) FAIL line(s) were parsed; cannot classify them" }
     foreach ($a in $script:allowedFails) { Write-Host "!!! ALLOWED FAIL (-AllowFail): $a" -ForegroundColor Yellow }
     if ($blocked.Count -gt 0) { Finish 1 ("check log has unallowed FAIL: " + ($blocked -join '; ')) }
     Write-Host "check log OK ($failedCount failed, all allowed)" -ForegroundColor Green
@@ -301,7 +340,8 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     Step "push origin HEAD:$Target (attempt $try)"
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
-    if ($pout -match 'non-fast-forward|fetch first|\[rejected\]|rejected') {
+    if ($pout -match '\[remote rejected\]') { Finish 1 "git push was refused by the remote (hook / protected branch), not a race: $($pout.Trim())" }
+    if ($pout -match 'non-fast-forward|fetch first|\[rejected\]') {
         Write-Host "push rejected as non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow
         continue
     }

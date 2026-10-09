@@ -74,6 +74,17 @@ function Get-RepoRoot {
 
 $repoRoot = Get-RepoRoot
 
+# F8: compare against the CURRENT remote branch, never a stale local tracking ref.
+$gRemote = "origin"
+$gBranchName = $Branch
+$gRemoteList = @(git -C $repoRoot remote 2>$null)
+if ($Branch -match '^([^/]+)/(.+)$' -and ($gRemoteList -contains $Matches[1])) { $gRemote = $Matches[1]; $gBranchName = $Matches[2] }
+git -C $repoRoot fetch $gRemote $gBranchName *>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: git fetch $gRemote $gBranchName failed (exit $LASTEXITCODE); refusing to compare against a stale $Branch." -ForegroundColor Red
+    exit 1
+}
+
 if ($null -ne $ExpectedMaxLines -and $ExpectedMaxLines.Count -ne $Path.Count) {
     Write-Host "ERROR: -ExpectedMaxLines, if given, must have one entry per -Path (got $($ExpectedMaxLines.Count) for $($Path.Count) paths)." -ForegroundColor Red
     exit 1

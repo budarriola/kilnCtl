@@ -748,6 +748,8 @@ it exists to prevent). None of them assert anything standing about the
 repository's current state, so none is wired into `run_all_checks.ps1` --
 they are invoked by hand at the workflow moment they apply.
 
+**Landing and promotion evidence (2026-10-09, `docs/audits/DEV_FLOW_SCRIPTS_REVIEW_2026-10-09.md` F1-F3, F6-F12).** `run_all_checks.ps1` prints a `Run tree: <HEAD^{tree}> dirty=<0|1> partial=<0|1>` line before `Run mode:`; `land.ps1 -CheckLog` and `dev_promote.ps1 -CheckLog` bind a log to a tree through it (last run in the file wins; missing line, other tree, dirty or filtered run is refused). `land.ps1 -Target main` is refused unless `-Coordinator` AND `-CheckLog` are both given; the parsed FAIL-line count must equal the summary count; a `[remote rejected]` push is not retried. `dev_promote.ps1 -Push` requires `-CheckLog` (full, clean, unfiltered run of exactly that commit tree, no NEW failures) and checks afterwards that origin/main CONTAINS the promote commit. `push_verify.ps1` resolves `-Branch` against `origin/<branch>` after a fetch; `commit_guard.ps1` fetches before comparing. Baseline lookup (`main_baseline_lib.ps1`) also accepts a baseline whose recorded tree equals a tree in HEAD history (squash-promoted main). `land -RestartMcp` runs `mcp_servers.ps1 restart|status` through `Run-Bounded`, which now exists.
+
 **`tools/worktree_mint.ps1`** -- mint or remove a short-lived worktree at
 `origin/dev` (default; `-Base <ref>` overrides, e.g. `-Base origin/main` for the coordinator) under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
 concurrent session on this machine, and two constraints have bitten
