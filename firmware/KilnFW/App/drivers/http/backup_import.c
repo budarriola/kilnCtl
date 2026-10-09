@@ -62,6 +62,7 @@
 #include "live_profile.h" /* live_edit_name_collides() -- Opus review finding B, the pass-1
                             * dup-name pre-check below (before pass 2 writes anything) */
 #include "ota_http.h" /* ota_http_check_interlocks() -- see backup_http.h's header comment */
+#include "persist_scratch.h" /* persist_scratch_alloc() -- pass-1 validation scratch */
 #include "profiles_http.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- see the system_mode_gate check below */
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
@@ -3238,16 +3239,32 @@ typedef struct {
     profile_t p;
 } backup_import_precheck_scratch_t;
 
+/* Prepend "profile entry N: " to the message already in err_msg, in place and truncating safely
+ * (no bounce buffer, so no -Wformat-truncation and no stack cost). */
+static void backup_import_prefix_entry(char *err_msg, size_t err_cap, unsigned entry)
+{
+    char prefix[32];
+    int n = snprintf(prefix, sizeof(prefix), "profile entry %u: ", entry);
+    if (err_cap == 0 || n < 0 || (size_t)n >= err_cap) {
+        return;
+    }
+    size_t len = strlen(err_msg);
+    size_t avail = err_cap - 1u - (size_t)n;
+    if (len > avail) {
+        len = avail;
+    }
+    memmove(err_msg + n, err_msg, len);
+    memcpy(err_msg, prefix, (size_t)n);
+    err_msg[(size_t)n + len] = '\0';
+}
+
 static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *body, char *err_msg, size_t err_cap)
 {
     const char *profiles_arr = backup_json_obj_find(body, "profiles");
     if (profiles_arr == NULL || backup_json_arr_first(profiles_arr) == NULL) {
         return true;
     }
-    backup_import_precheck_scratch_t *sc = heap_caps_malloc(sizeof(*sc), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (sc == NULL) {
-        sc = malloc(sizeof(*sc));
-    }
+    backup_import_precheck_scratch_t *sc = persist_scratch_alloc(sizeof(*sc));
     if (sc == NULL) {
         snprintf(err_msg, err_cap, "out of memory (profile validation scratch)");
         return false;
@@ -3333,9 +3350,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *b
             }
             if (sg->seg_kind == PROFILE_SEG_KIND_RELAY_IO &&
                 !validate_io_segment_in_state(sg, (uint8_t)(seg_i + 1u), st, err_msg, err_cap)) {
-                char why[160];
-                snprintf(why, sizeof(why), "%s", err_msg);
-                snprintf(err_msg, err_cap, "profile entry %u: %s", (unsigned)entry, why);
+                backup_import_prefix_entry(err_msg, err_cap, (unsigned)entry);
                 goto done;
             }
             seg_i++;
@@ -3355,9 +3370,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *b
         }
         p->on_off_rule_count = rule_i;
         if (!validate_on_off_rules_in_state(p, st, err_msg, err_cap)) {
-            char why[160];
-            snprintf(why, sizeof(why), "%s", err_msg);
-            snprintf(err_msg, err_cap, "profile entry %u: %s", (unsigned)entry, why);
+            backup_import_prefix_entry(err_msg, err_cap, (unsigned)entry);
             goto done;
         }
     }
