@@ -83,7 +83,8 @@ def _log_path(tag: str) -> str:
 
 def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
                elapsed: float,
-               output_check: "Optional[Callable[[str], list[str]]]" = None) -> str:
+               output_check: "Optional[Callable[[str], list[str]]]" = None,
+               kill_reason: Optional[str] = None) -> str:
     """Exit status, the lines that explain it, and where the rest lives."""
     path = _log_path(tag)
     try:
@@ -108,6 +109,8 @@ def _summarize(tag: str, argv: "Sequence[str]", rc: Optional[int], output: str,
         status = f"FAILED (exit {rc}, but output check failed)"
         shown = [f"OUTPUT CHECK FAILED: {p}" for p in problems] + shown
     head = f"{tag}: {status} in {elapsed:.1f}s ({len(lines)} log lines)"
+    if kill_reason:
+        head = f"{head}\nKILLED: {kill_reason}"
     body = "\n".join(shown) if shown else "(no output)"
     result = f"{head}\nfull log: {where}\n--\n{body}"
     if rc != 0:
@@ -162,7 +165,15 @@ def _contention_note(output: str) -> "Optional[str]":
 
 def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
          timeout: int = 900, env: "Optional[dict[str, str]]" = None,
-         output_check: "Optional[Callable[[str], list[str]]]" = None) -> str:
+         output_check: "Optional[Callable[[str], list[str]]]" = None,
+         stall_seconds: Optional[float] = None,
+         poll_seconds: float = 1.0) -> str:
+    """Run ``argv``; ``timeout`` is the absolute ceiling.
+
+    With ``stall_seconds`` set, the child is also killed when neither stdout
+    nor stderr has grown for that long (a progress-based timeout, like
+    tools/build_lock.ps1's -StallSeconds), and the kill reason is reported.
+    """
     argv = list(argv)
     started = time.monotonic()
     if env is None:
@@ -188,6 +199,9 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
             register_compile_pid(proc.pid)
         except Exception:  # pragma: no cover - registration is best effort
             pass
+        if stall_seconds is not None:
+            return _watch_stall(tag, argv, proc, started, timeout, stall_seconds,
+                                poll_seconds, output_check)
         out, err = proc.communicate(timeout=timeout)
         completed = subprocess.CompletedProcess(argv, proc.returncode, out, err)
     except FileNotFoundError:
@@ -205,6 +219,60 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
     output = (completed.stdout or "") + (completed.stderr or "")
     return _summarize(tag, argv, completed.returncode, output, time.monotonic() - started,
                       output_check=output_check)
+
+
+def _watch_stall(tag: str, argv: "Sequence[str]", proc: "subprocess.Popen", started: float,
+                 ceiling: float, stall_seconds: float, poll_seconds: float,
+                 output_check: "Optional[Callable[[str], list[str]]]") -> str:
+    """Drain ``proc``'s pipes on threads; kill on stall or on the ceiling."""
+    import threading
+    chunks: "list[str]" = []
+    state = {"last": time.monotonic()}
+    lock = threading.Lock()
+
+    def drain(stream: Any) -> None:
+        for line in iter(stream.readline, ""):
+            with lock:
+                chunks.append(line)
+                state["last"] = time.monotonic()
+
+    threads = [threading.Thread(target=drain, args=(s,), daemon=True)
+               for s in (proc.stdout, proc.stderr)]
+    for t in threads:
+        t.start()
+    reason: Optional[str] = None
+    while proc.poll() is None:
+        now = time.monotonic()
+        with lock:
+            idle = now - state["last"]
+        if now - started > ceiling:
+            reason = f"absolute ceiling of {ceiling:.0f}s exceeded (build was still running)"
+        elif idle > stall_seconds:
+            reason = (f"stalled: no build output for {idle:.0f}s "
+                      f"(stall limit {stall_seconds:.0f}s, ran {now - started:.0f}s total)")
+        if reason:
+            proc.kill()
+            break
+        time.sleep(poll_seconds)
+    try:
+        proc.wait(timeout=10)
+    except Exception:  # pragma: no cover
+        pass
+    for t in threads:
+        t.join(timeout=10)
+    with lock:
+        output = "".join(chunks)
+    rc = None if reason else proc.returncode
+    return _summarize(tag, argv, rc, output, time.monotonic() - started,
+                      output_check=output_check, kill_reason=reason)
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+        return value if value > 0 else default
+    except ValueError:
+        return default
 
 
 def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
@@ -496,7 +564,9 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     kilnfw_report = _run_locked(
         f"kilnfw-{target}", build_dir,
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        timeout=1800, gate_label=f"kilnfw-{target}", gate_wait=wait_result)
+        timeout=_env_seconds("KILNCTL_BUILD_CEILING_S", 10800),
+        stall_seconds=_env_seconds("KILNCTL_BUILD_STALL_S", 900),
+        gate_label=f"kilnfw-{target}", gate_wait=wait_result)
     if "FAILED (lock contention)" in kilnfw_report and saftyfw_report:
         return f"{saftyfw_report}\n\n{kilnfw_report}"
     if wait_result.waited_seconds > 0:
