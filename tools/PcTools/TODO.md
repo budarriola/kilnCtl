@@ -151,7 +151,7 @@ traffic.
 ## Firmware updates from here
 
 Design: [`../../firmware/CommonFW/docs/UPDATE_PROTOCOL.md`](../../firmware/CommonFW/docs/UPDATE_PROTOCOL.md).
-`ota_get_challenge()`, `ota_update_esp()`, `ota_update_pico()`, `ota_status()`,
+`ota_update_esp()`, `ota_update_pico()`, `ota_status()`,
 `ota_rollback_esp()`, and `ota_recovery_exit_esp()` all exist
 (`mcp_server_ota.py`, backed by `ota_http_client.py`) and are unit-tested
 against mocked HTTP (`tests/test_ota_http_client.py`,
