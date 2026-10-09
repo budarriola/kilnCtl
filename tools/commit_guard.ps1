@@ -54,7 +54,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string[]]$Path,
 
-    [int[]]$ExpectedMaxLines,
+    [string[]]$ExpectedMaxLines,
 
     [switch]$Confirm,
 
@@ -85,6 +85,21 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# F17: under `powershell -File`, `-Path a,b` arrives as ONE string "a,b" (same for the budgets), so
+# split on commas explicitly; budgets are parsed as ints here, a non-integer is a usage error.
+$Path = @($Path | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($null -ne $ExpectedMaxLines) {
+    $budgets = @()
+    foreach ($e in @($ExpectedMaxLines | ForEach-Object { $_ -split ',' } | Where-Object { $_.Trim() })) {
+        $n = 0
+        if (-not [int]::TryParse($e.Trim(), [ref]$n)) {
+            Write-Host "ERROR: -ExpectedMaxLines entry '$e' is not an integer." -ForegroundColor Red
+            exit 1
+        }
+        $budgets += $n
+    }
+    $ExpectedMaxLines = $budgets
+}
 if ($null -ne $ExpectedMaxLines -and $ExpectedMaxLines.Count -ne $Path.Count) {
     Write-Host "ERROR: -ExpectedMaxLines, if given, must have one entry per -Path (got $($ExpectedMaxLines.Count) for $($Path.Count) paths)." -ForegroundColor Red
     exit 1
@@ -101,15 +116,22 @@ for ($i = 0; $i -lt $Path.Count; $i++) {
     # Repo-relative path is what git wants for both hash-object and the
     # origin/main:<path> object form.
     $full = Join-Path $repoRoot $p
-    if (-not (Test-Path $full)) {
-        Write-Host "ERROR: '$p' does not exist in the working tree." -ForegroundColor Red
-        exit 1
-    }
-
-    $workingHash = git -C $repoRoot hash-object -- $p 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $workingHash) {
-        Write-Host "ERROR: git hash-object failed for '$p'." -ForegroundColor Red
-        exit 1
+    # F17: a path deleted in the working tree is guardable when the branch has it.
+    $deleted = $false
+    if (-not (Test-Path -LiteralPath $full)) {
+        git -C $repoRoot cat-file -e "${Branch}:${p}" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: '$p' does not exist in the working tree or in $Branch." -ForegroundColor Red
+            exit 1
+        }
+        $deleted = $true
+        $workingHash = "deleted"
+    } else {
+        $workingHash = git -C $repoRoot hash-object -- $p 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $workingHash) {
+            Write-Host "ERROR: git hash-object failed for '$p'." -ForegroundColor Red
+            exit 1
+        }
     }
 
     $originHash = git -C $repoRoot rev-parse "${Branch}:${p}" 2>$null
@@ -137,24 +159,34 @@ for ($i = 0; $i -lt $Path.Count; $i++) {
     # Insertion/deletion counts -- the tell that was read past in the real
     # incident. --numstat prints "<ins>\t<del>\t<path>".
     $numstat = git -C $repoRoot diff --numstat "${Branch}" -- $p 2>$null
-    $ins = 0; $del = 0
+    $ins = 0; $del = 0; $binary = $false
     if ($numstat) {
-        $fields = ($numstat -split "`t")
+        $fields = (@($numstat)[0] -split "`t")
         if ($fields.Count -ge 2) {
-            [void][int]::TryParse($fields[0], [ref]$ins)
-            [void][int]::TryParse($fields[1], [ref]$del)
+            # F17: binary files report "-<TAB>-"; the size is unknowable, never 0.
+            if ($fields[0] -eq '-' -or $fields[1] -eq '-') { $binary = $true }
+            else {
+                [void][int]::TryParse($fields[0], [ref]$ins)
+                [void][int]::TryParse($fields[1], [ref]$del)
+            }
         }
     }
+    if ($deleted) { Write-Host ("{0}: DELETED in the working tree." -f $p) -ForegroundColor Yellow }
+    if ($binary) { Write-Host ("{0}: BINARY change, line counts unavailable; must be confirmed." -f $p) -ForegroundColor Yellow }
     Write-Host ("{0}: {1} insertion(s), {2} deletion(s) vs {3}." -f $p, $ins, $del, $Branch) -ForegroundColor Yellow
 
     $status = "changed"
-    if ($null -ne $budget -and ($ins + $del) -gt $budget) {
+    if ($binary -and $null -ne $budget) {
+        $anyBudgetExceeded = $true
+        $status = "over-budget"
+        Write-Host ("{0}: binary change cannot be measured against the declared budget of {1} line(s) -- refusing." -f $p, $budget) -ForegroundColor Red
+    } elseif ($null -ne $budget -and ($ins + $del) -gt $budget) {
         $anyBudgetExceeded = $true
         $status = "over-budget"
         Write-Host ("{0}: EXCEEDS declared budget of {1} line(s) (actual {2}) -- this is exactly the shape of the stale-working-copy incidents (a much larger change than the caller intended). Re-check this file before proceeding." -f $p, $budget, ($ins + $del)) -ForegroundColor Red
     }
 
-    $rows += [pscustomobject]@{ Path = $p; Status = $status; Ins = $ins; Del = $del }
+    $rows += [pscustomobject]@{ Path = $p; Status = $status; Ins = $(if ($binary) { "bin" } else { $ins }); Del = $(if ($binary) { "bin" } else { $del }) }
 }
 
 Write-Host ""
