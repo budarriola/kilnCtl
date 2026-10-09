@@ -823,7 +823,11 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
         bool used_file = false;
         profile_t none;
         memset(&none, 0, sizeof(none));
-        bool have = profiles_cfg_fs_resolve(id, &none, false, floors[id], &resolved, &resolved_rev, &used_file);
+        /* Floor 0 on purpose: with nvs_valid=false resolve() deletes a file whose rev is
+         * <= a nonzero nvs_rev as stale, and the dual-write-era rev array equals the
+         * file rev for every slot not re-saved since. This degraded path must never
+         * delete; the floor only seeds s_profile_rev below. */
+        bool have = profiles_cfg_fs_resolve(id, &none, false, 0, &resolved, &resolved_rev, &used_file);
         if (have) {
             out->profiles[id] = resolved;
             profiles_slot_bitmap_set(&out->used_bitmap, id);
@@ -884,7 +888,14 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     uint32_t nvs_rev[PROFILES_MAX_COUNT];
     memset(nvs_rev, 0, sizeof(nvs_rev));
     size_t rev_len = sizeof(nvs_rev);
-    hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len); /* ignore result -- see above */
+    hal_status_t rev_err = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len);
+    /* NOT_FOUND = never written = genuine "no opinion". Any other failure, or a short
+     * blob, means the floors are unknown: slots without a file get refused saves. */
+    bool rev_floors_known = (rev_err == HAL_NOT_FOUND) || (rev_err == HAL_OK && rev_len == sizeof(nvs_rev));
+    if (!rev_floors_known) {
+        memset(nvs_rev, 0, sizeof(nvs_rev));
+    }
+    bool slot_rev_unknown[PROFILES_MAX_COUNT] = {0};
 
     bool nvs_slot_valid[PROFILES_MAX_COUNT] = {0};
 
@@ -972,11 +983,12 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
              * the next boot's resolve() deleted the new file as "stale" (bench
              * 2026-10-08, B1 soak). */
             s_profile_rev[id] = trustworthy ? resolved_rev : nvs_rev[id];
+            slot_rev_unknown[id] = !trustworthy && !rev_floors_known;
         }
     } else {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
     }
-    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    memcpy(s_profile_rev_unknown, slot_rev_unknown, sizeof(s_profile_rev_unknown));
 
     return ESP_OK;
 }
@@ -1111,13 +1123,18 @@ esp_err_t nvs_erase_slot(uint8_t id)
         } else {
             memset(nvs_rev, 0, sizeof(s_profile_rev));
             size_t rev_len = sizeof(s_profile_rev);
-            if (hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len) != HAL_OK) {
-                /* Missing/short/unreadable: the same all-zero "no opinion"
-                 * default nvs_load_all_from() uses -- never the RAM array. */
-                memset(nvs_rev, 0, sizeof(s_profile_rev));
+            hal_status_t rget = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len);
+            if (rget == HAL_NOT_FOUND) {
+                memset(nvs_rev, 0, sizeof(s_profile_rev)); /* never written: genuine no-opinion */
+            } else if (rget != HAL_OK || rev_len != sizeof(s_profile_rev)) {
+                /* Unreadable/short: writing zeros for the other slots would erase
+                 * their floors. Refuse the rev-array write (and so the erase). */
+                kv_err = HAL_IO;
             }
-            nvs_rev[id] = new_rev;
-            kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, sizeof(s_profile_rev));
+            if (kv_err == HAL_OK) {
+                nvs_rev[id] = new_rev;
+                kv_err = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, sizeof(s_profile_rev));
+            }
             free(nvs_rev);
         }
     }
@@ -1137,11 +1154,13 @@ esp_err_t nvs_erase_slot(uint8_t id)
         return ferr;
     }
     /* docs/PROFILE_SLOTS_100.md section 7 task 10: prune this id's firing
-     * history too (erase-first as well; see firing_stats_erase()). A failure
-     * there is reported but does not undo the slot delete. */
+     * history too (erase-first as well; see firing_stats_erase()). The slot is
+     * already gone by now; the error is propagated so the HTTP delete reports
+     * the incomplete prune instead of claiming a clean delete. */
     esp_err_t serr = firing_stats_erase(id);
     if (serr != ESP_OK) {
-        ESP_LOGW(PROFILES_TAG, "nvs_erase_slot(%u): firing stats prune failed: %s", (unsigned)id, esp_err_to_name(serr));
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): firing stats prune failed: %s", (unsigned)id, esp_err_to_name(serr));
+        return serr;
     }
     return ESP_OK;
 }

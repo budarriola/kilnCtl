@@ -607,13 +607,14 @@ uint32_t profile_executor_last_run_started_unix_s(uint8_t profile_id)
 // above. This fake only records the call (last id + count) so tests below
 // can assert nvs_erase_slot() reaches it with the right id, exactly once,
 // without needing a real firing-stats store here.
+static esp_err_t g_firing_stats_erase_result = ESP_OK;
 static int     g_firing_stats_erase_calls = 0;
 static uint8_t g_firing_stats_erase_last_id = 0xFF;
 esp_err_t firing_stats_erase(uint8_t profile_id)
 {
     g_firing_stats_erase_calls++;
     g_firing_stats_erase_last_id = profile_id;
-    return ESP_OK;
+    return g_firing_stats_erase_result;
 }
 
 // ---- profile_executor.h -- fake profile_executor_get_status(): Opus review
@@ -1109,6 +1110,92 @@ static void test_pcfg_files_only_unknown_floor_refuses_save(void)
     profiles_cfg_fs_load_raw(3, &fp, &file_rev, &valid);
     TEST_CHECK(!valid, "no file was written for slot 3");
     TEST_CHECK(nvs_save_slot(0) == ESP_OK, "slot 0 still saves");
+}
+
+static void test_pcfg_files_only_keeps_files_when_rev_array_equals_file_rev(void)
+{
+    TEST_SECTION("profiles boot load -- corrupt bitmap + rev array == file rev must KEEP and adopt the file, next save rev 6");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    uint32_t revs[PROFILES_MAX_COUNT];
+    memset(revs, 0, sizeof(revs));
+    revs[0] = 5;
+    pcfg_corrupt_used_bitmap_and_set_revs(revs, false);
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    (void)profiles_boot_load();
+    profile_t fp;
+    TEST_CHECK(pcfg_file_profile(0, &fp), "the file was NOT deleted");
+    TEST_CHECK(profiles_slot_bitmap_test(&s_profiles.used_bitmap, 0), "slot 0 adopted");
+    TEST_CHECK(s_profile_rev[0] == 5, "rev seeded at 5");
+    TEST_CHECK(nvs_save_slot(0) == ESP_OK, "save slot 0");
+    uint32_t file_rev = 0;
+    bool valid = false;
+    profiles_cfg_fs_load_raw(0, &fp, &file_rev, &valid);
+    TEST_CHECK(valid && file_rev == 6, "next save is rev 6");
+}
+
+static void test_pcfg_full_load_short_rev_blob_marks_fileless_slots_unknown(void)
+{
+    TEST_SECTION("nvs_load_all_from -- short rev blob (valid bitmap) marks file-less slots rev-unknown");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    TEST_CHECK(s_profile_rev_unknown[3], "file-less slot 3 is rev-unknown");
+    TEST_CHECK(!s_profile_rev_unknown[0], "file-backed slot 0 is fine");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
+static void test_nvs_erase_slot_refuses_when_rev_array_unreadable(void)
+{
+    TEST_SECTION("nvs_erase_slot -- unreadable rev array is refused, other slots' floors not zeroed");
+    pcfg_reset_all();
+    profile_t p = make_stored_profile();
+    s_profiles.profiles[3] = p;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(nvs_erase_slot(3) != ESP_OK, "erase refused");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[16] = {0};
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(junk), "rev blob not overwritten");
+}
+
+static void test_nvs_erase_slot_propagates_firing_stats_error(void)
+{
+    TEST_SECTION("nvs_erase_slot -- firing_stats_erase failure is propagated");
+    pcfg_reset_all();
+    profile_t p = make_stored_profile();
+    s_profiles.profiles[3] = p;
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+    g_firing_stats_erase_result = ESP_FAIL;
+    esp_err_t e = nvs_erase_slot(3);
+    g_firing_stats_erase_result = ESP_OK;
+    TEST_CHECK(e == ESP_FAIL, "error propagated");
 }
 
 static void test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted(void)
@@ -3828,6 +3915,10 @@ void run_test_profiles_http(void)
     test_pcfg_boot_load_failure_still_resolves_files();
     test_pcfg_files_only_seeds_floor_from_persisted_revs();
     test_pcfg_files_only_unknown_floor_refuses_save();
+    test_pcfg_files_only_keeps_files_when_rev_array_equals_file_rev();
+    test_pcfg_full_load_short_rev_blob_marks_fileless_slots_unknown();
+    test_nvs_erase_slot_refuses_when_rev_array_unreadable();
+    test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
     test_pcfg_stale_file_after_delete_is_not_resurrected();
     test_pcfg_delete_does_not_revert_or_drop_other_file_only_slots();
