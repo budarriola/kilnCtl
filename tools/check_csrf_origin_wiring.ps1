@@ -1,3 +1,4 @@
+# checkcache: ok
 # check_csrf_origin_wiring.ps1 -- source-level proof that the CSRF origin check
 # (ROUTE_TIER_REVIEW MED-1, http_origin_check.h) is actually WIRED where it
 # matters. The decision helpers have host tests; the recovery image

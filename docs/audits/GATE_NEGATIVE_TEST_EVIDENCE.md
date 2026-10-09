@@ -23,11 +23,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 186.
+Gate rows: 187.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 172 |
+| NEGATIVE-TESTED | 173 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |
@@ -197,6 +197,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_stack_margin_registration.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] create-vs-register sub-check only: unrecognized xTaskCreatePinnedToCore added in kiln_io_owner.c ; [09-16f] four remaining sub-checks: required name renamed, duplicate registration added, cap lowered 48 to 20, stack_margin.h included from a HAL backend | [09-16e] RED; hand-restored; other four sub-checks tested in 09-16f ; [09-16f] all four RED; each hand-restored; PASS ; [a62d5c42] recovery-image task coverage added (-RecoveryDir, test_stack_margin_registration_recovery.py); [10-09] recovery section: appended `xTaskCreate(rec_audit_fn, "rec_audit", ...)` to firmware/KilnFW_recovery/main/recovery_hold.c (no uxTaskGetStackHighWaterMark in file) | [10-09] RED: `RECOVERY STACK-MARGIN CHECK FAILED: rec_audit (in recovery_hold.c): xTaskCreate*() with no uxTaskGetStackHighWaterMark() reporting...`; hand-restored; PASS (5 call sites) |
 | `tools/check_stack_task_table_consistency.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | removed backlight_pwm from $requiredNames; added ghost CEILING_BYTES entry (two mutations) | RED both; check returned to PASS on restore |
 | `tools/check_stop_path_requires_pin.ps1` | NEGATIVE-TESTED | 10-02 | stop path ungated in ui_page_home_actions.c | RED; restored |
+| `tools/check_csrf_origin_wiring.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (`negtest.ps1`, throwaway worktree) | `-Preset check -PresetArg tools/check_csrf_origin_wiring.ps1`: recovery_http.c `wrapped.handler = origin_guard;` -> `wrapped.handler = wrapped.handler;`; http_auth_http.c `request_is_cross_origin(req)` -> `request_is_cross_origin_x(req)` | both CAUGHT (exit 1, named FAIL line); baseline PASS; real tree unchanged |
 | `tools/check_test_c_files_wired.ps1` | NEGATIVE-TESTED | 09-16e, 09-16g | [09-16e] untracked orphan test_negtest_orphan_zzz.c created ; [09-16g] untracked zz_audit_orphan.c created | [09-16e] RED; file deleted (re-tested in 09-16g) ; [09-16g] RED; removed; PASS |
 | `tools/check_test_has_assertions.ps1` | NEGATIVE-TESTED | 09-16, 09-16e | [09-16] read in full (negative-tested later in 09-16e) ; [09-16e] dispatched assertion-free test function appended to test_adaptive_tune.c | [09-16] see 09-16e ; [09-16e] RED, names the function; hand-restored; fresh host-test rebuild 47/47 |
 | `tools/check_uart_version_independence.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] UART_PROTOCOL_VERSION re-derived from KILNLINK_PROTOCOL_VERSION ; [09-16g] alias to KILNLINK_PROTOCOL_VERSION again | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; hand-restored; PASS |
