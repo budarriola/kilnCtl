@@ -653,10 +653,12 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         }
     }
 
+    profiles_save_lock();
     s_profiles.profiles[target_id] = *tmp;
     free(tmp);
     profiles_slot_set(target_id);
-    esp_err_t err = nvs_save_slot(target_id);
+    esp_err_t err = nvs_save_slot_locked(target_id);
+    profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));

@@ -1557,6 +1557,48 @@ static void test_pcfg_files_only_junk_rev_is_repaired(void)
     TEST_CHECK(s_profile_rev[3] == 5, "slot 3 floor = max observed file rev");
 }
 
+/* Save mutex (coordinator 2026-10-09): the rev read, file write and rev bump
+ * happen under profiles_save_lock(); successive saves get distinct,
+ * monotonic revs. The host semaphore stub is single-threaded, so lock
+ * ownership is observed through g_test_stub_lock_depth at the cfg write seam. */
+static int s_sm_depth_at_write[16];
+static unsigned s_sm_writes;
+static esp_err_t sm_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    if (s_sm_writes < 16) {
+        s_sm_depth_at_write[s_sm_writes] = g_test_stub_lock_depth;
+    }
+    s_sm_writes++;
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
+static void test_save_mutex_serializes_rev_write_bump(void)
+{
+    TEST_SECTION("nvs_save_slot -- rev read, file write, rev bump run under the save mutex; revs distinct and monotonic");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    s_sm_writes = 0;
+    memset(s_sm_depth_at_write, 0, sizeof(s_sm_depth_at_write));
+    profiles_cfg_fs_set_write_fn(sm_write_fn);
+    uint32_t prev = s_profile_rev[3];
+    bool monotonic = true;
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+        if (s_profile_rev[3] != prev + 1) {
+            monotonic = false;
+        }
+        prev = s_profile_rev[3];
+    }
+    TEST_CHECK(monotonic, "each save bumps the rev by exactly one (no two saves share a rev)");
+    TEST_CHECK(s_sm_writes == 3, "three file writes");
+    TEST_CHECK(s_sm_depth_at_write[0] > 0 && s_sm_depth_at_write[1] > 0 && s_sm_depth_at_write[2] > 0,
+               "the file write ran with the save mutex held");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "mutex released after the saves");
+    profiles_cfg_fs_reset_write_fn_for_test();
+}
 static void test_nvs_erase_slot_refuses_when_rev_array_unreadable(void)
 {
     TEST_SECTION("nvs_erase_slot -- unreadable rev array is refused, other slots' floors not zeroed");
@@ -4351,6 +4393,7 @@ void run_test_profiles_http(void)
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_boot_fallback_keeps_rev_unknown_marks();
+    test_save_mutex_serializes_rev_write_bump();
     test_pcfg_junk_repair_load_error_fails_closed();
     test_pcfg_junk_rev_repair_deferred_without_cfg();
     test_pcfg_truncated_rev_blob_not_known_lengths();

@@ -276,6 +276,10 @@ extern bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
  * (read-only), profiles_edit_http.c's post/delete/builtin-hide handlers do. */
 esp_err_t nvs_save_slot(uint8_t id);
 esp_err_t nvs_erase_slot(uint8_t id);
+/* Save mutex: bracket RAM assignment + nvs_save_slot_locked() in one section. */
+void profiles_save_lock(void);
+void profiles_save_unlock(void);
+esp_err_t nvs_save_slot_locked(uint8_t id); /* caller holds profiles_save_lock() */
 
 /* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY
  * configured max_temp_c of one of its zone_mask zones -- advisory-only

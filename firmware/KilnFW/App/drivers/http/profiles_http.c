@@ -10,6 +10,7 @@
 #include "esp_crc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h" /* portMUX_TYPE -- profiles_storage_ensure()'s once-guard below */
+#include "freertos/semphr.h" /* s_save_mutex -- profiles_save_lock() */
 #include "freertos/task.h" /* vTaskDelay() -- same once-guard, the losing task's wait */
 #include "esp_heap_caps.h" /* heap_caps_malloc()/MALLOC_CAP_* -- profiles_storage_ensure()'s
                             * PSRAM allocation (docs/PROFILE_SLOTS_100.md section 7 task 3) */
@@ -688,6 +689,43 @@ static void profile_nvs_key(uint8_t id, char *out, size_t out_cap)
 
 esp_err_t nvs_save_slot(uint8_t id);
 
+/* SAVE MUTEX. nvs_save_slot()/nvs_erase_slot() read-modify-write
+ * s_profile_rev[id] and the slot's cfg file, and the HTTP save handlers assign
+ * s_profiles.profiles[id] just before. Two concurrent saves of one slot could
+ * both read the same s_profile_rev[id], both write rev+1 and have RAM end up
+ * holding one body while the file holds the other. One static mutex makes the
+ * rev read, RAM assignment (handlers), file write and rev bump one critical
+ * section. Held across flash I/O only; never across producer calls. NULL-safe:
+ * before the first take the handle is created under the once-guard (static
+ * storage, so creation is idempotent); a failed create degrades to no lock. */
+static StaticSemaphore_t s_save_mutex_storage;
+static SemaphoreHandle_t s_save_mutex = NULL;
+static portMUX_TYPE s_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void profiles_save_lock(void)
+{
+    if (s_save_mutex == NULL) {
+        portENTER_CRITICAL(&s_save_mutex_mux);
+        if (s_save_mutex == NULL) {
+            s_save_mutex = xSemaphoreCreateMutexStatic(&s_save_mutex_storage);
+        }
+        portEXIT_CRITICAL(&s_save_mutex_mux);
+    }
+    if (s_save_mutex != NULL) {
+        (void)xSemaphoreTake(s_save_mutex, portMAX_DELAY);
+    }
+}
+
+void profiles_save_unlock(void)
+{
+    if (s_save_mutex != NULL) {
+        (void)xSemaphoreGive(s_save_mutex);
+    }
+}
+
+/* Caller holds profiles_save_lock(). */
+esp_err_t nvs_save_slot_locked(uint8_t id);
+
 /* Brings up one NVS partition, erasing ONLY that partition if its contents
  * are unusable. Copied/adapted from wifi_prov.c's nvs_partition_init() (see
  * that file for the full rationale) -- NO_FREE_PAGES / NEW_VERSION_FOUND
@@ -1183,6 +1221,14 @@ static bool caller_stack_is_external(void)
 
 esp_err_t nvs_save_slot(uint8_t id)
 {
+    profiles_save_lock();
+    esp_err_t r = nvs_save_slot_locked(id);
+    profiles_save_unlock();
+    return r;
+}
+
+esp_err_t nvs_save_slot_locked(uint8_t id)
+{
     if (caller_stack_is_external()) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot: REFUSING -- calling task's stack is in external RAM "
                       "(PSRAM). A flash/NVS write from here would abort the whole board "
@@ -1226,7 +1272,26 @@ esp_err_t nvs_save_slot(uint8_t id)
  * handlers) run on httpd_worker, an internal-SRAM stack, so this cannot fire
  * the crash today; added so a future audit does not read this file as fully
  * covered when it was not. */
+static esp_err_t nvs_erase_slot_locked(uint8_t id);
+
 esp_err_t nvs_erase_slot(uint8_t id)
+{
+    profiles_save_lock();
+    esp_err_t r = nvs_erase_slot_locked(id);
+    profiles_save_unlock();
+    if (r != ESP_OK) {
+        return r;
+    }
+    /* Stats prune runs OUTSIDE the save mutex (another module's flash I/O). */
+    esp_err_t serr = firing_stats_erase(id);
+    if (serr != ESP_OK) {
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): firing stats prune failed: %s", (unsigned)id, esp_err_to_name(serr));
+        return serr;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t nvs_erase_slot_locked(uint8_t id)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot: REFUSING -- calling task's stack is in external RAM "
@@ -1336,15 +1401,6 @@ esp_err_t nvs_erase_slot(uint8_t id)
     if (ferr != ESP_OK && ferr != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): cfg file delete failed: %s", (unsigned)id, esp_err_to_name(ferr));
         return ferr;
-    }
-    /* docs/PROFILE_SLOTS_100.md section 7 task 10: prune this id's firing
-     * history too (erase-first as well; see firing_stats_erase()). The slot is
-     * already gone by now; the error is propagated so the HTTP delete reports
-     * the incomplete prune instead of claiming a clean delete. */
-    esp_err_t serr = firing_stats_erase(id);
-    if (serr != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): firing stats prune failed: %s", (unsigned)id, esp_err_to_name(serr));
-        return serr;
     }
     return ESP_OK;
 }
@@ -1703,9 +1759,11 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         return false; /* live_edit_name_collides_ex already filled err_msg */
     }
 
+    profiles_save_lock();
     s_profiles.profiles[target_id] = *candidate;
     profiles_slot_set(target_id);
-    esp_err_t err = nvs_save_slot(target_id);
+    esp_err_t err = nvs_save_slot_locked(target_id);
+    profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
@@ -2205,9 +2263,12 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
             fail = "rewritten profile failed validation";
             break;
         }
+        profiles_save_lock();
         s_profiles.profiles[id] = *trial;
         journal[jn++] = id;
-        if (nvs_save_slot(id) != ESP_OK) {
+        esp_err_t rt_save = nvs_save_slot_locked(id);
+        profiles_save_unlock();
+        if (rt_save != ESP_OK) {
             fail = "persisting the rewritten profile failed";
             break;
         }
