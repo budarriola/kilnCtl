@@ -174,8 +174,7 @@ $requiredNames = @(
     # allocated kiln_cfg_swap_pending_t is ~1.7 kB on its own frame), which
     # is precisely why it is not allowed on the shared httpd worker stack --
     # so its live margin has to stay measurable.
-    "kiln_cfg_swap"
-,
+    "kiln_cfg_swap",
 
     # Review finding at 4ddad119 (CLAUDE.md "Register every new task for
     # stack-margin reporting"): zones_current_sweep_task.c's one-shot,
@@ -214,6 +213,10 @@ $requiredNames = @(
     # this fix, on a heap-allocated stack that carries no .dram0.bss cost).
     "wifi_prov_owner"  # liveness: always
 )
+# A stray unary comma / line-ending slip turns an entry into a nested Object[] (DEV_TOOLS_REVIEW_2026-10-09 LOW-1);
+# -contains and task_liveness.py would then silently miss it. Every entry must be a plain string.
+$nonStringRequired = @($requiredNames | Where-Object { $_ -isnot [string] })
+if ($nonStringRequired.Count -gt 0) { throw "check_stack_margin_registration.ps1: `$requiredNames has $($nonStringRequired.Count) non-string entr(ies) (a stray comma line?); fix the list." }
 # 2026-09-08: the six UART bridge tasks above (thermo/touch/ui_test/io/
 # uart_log/safety) were long-lived (`while (true)`, never self-deleting)
 # peers of system_uart_bridge/info_uart_bridge that existed and ran every

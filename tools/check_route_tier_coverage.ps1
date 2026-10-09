@@ -192,9 +192,17 @@ function Invoke-RouteTierCoverageScan {
     foreach ($r in $allRoutes) {
         if ($null -ne $r.Method) { [void]$registeredKeys.Add("$($r.Method) $($r.Uri)") }
     }
+    # A route whose method could not be parsed is already reported in Missing (fail-closed); its URI's
+    # table rows must not ALSO be reported stale (DEV_TOOLS_REVIEW_2026-10-09 LOW-4), since that would
+    # point the reader at deleting a row that is in fact needed.
+    $unparsedUris = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($r in $allRoutes) {
+        if ($null -eq $r.Method) { [void]$unparsedUris.Add($r.Uri) }
+    }
     $stale = New-Object System.Collections.Generic.List[string]
     foreach ($k in $tieredKeys.Keys) {
-        if (-not $registeredKeys.Contains($k)) { $stale.Add($k) }
+        $keyUri = $k.Substring($k.IndexOf(' ') + 1)
+        if (-not $registeredKeys.Contains($k) -and -not $unparsedUris.Contains($keyUri)) { $stale.Add($k) }
     }
 
     return [PSCustomObject]@{

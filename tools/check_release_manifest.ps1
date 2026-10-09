@@ -90,6 +90,17 @@ $ErrorActionPreference = "Stop"
 if ($rc -ne 1 -or $o -notmatch "-NotesFile .* does not exist") { Note-Fail "missing -NotesFile was not refused (exit $rc)" }
 else { Write-Host "ok: missing -NotesFile refused" }
 
+# 2b2. the .dram0.bss gate must refuse (exit 1, REFUSED) when the checker cannot measure/passes nothing ----
+$ErrorActionPreference = "Continue"
+$bogusElf = Join-Path ([System.IO.Path]::GetTempPath()) ("no_such_" + [guid]::NewGuid().ToString("N") + ".elf")
+$cmd = ". '$(Join-Path $PSScriptRoot "make_release.ps1")' -LoadFunctionsOnly; Test-DramBssBudget '$python' '$bogusElf' 0; Write-Host REACHED_AFTER_GATE"
+$o = & powershell -NoProfile -ExecutionPolicy Bypass -Command $cmd 2>&1 | Out-String
+$rc = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($rc -ne 1 -or $o -notmatch "dram0.bss budget check failed" -or $o -match "REACHED_AFTER_GATE") { Note-Fail "Test-DramBssBudget did not refuse an unmeasurable ELF (exit $rc):`n
+$o" }
+else { Write-Host "ok: .dram0.bss gate refuses an unmeasurable ELF" }
+
 # 2c. real Get-AssetToFile against a local redirect server ------------------------
 . (Join-Path $PSScriptRoot "make_release.ps1") -LoadFunctionsOnly
 $srvPy = Join-Path ([System.IO.Path]::GetTempPath()) ("relsrv_" + [guid]::NewGuid().ToString("N") + ".py")
