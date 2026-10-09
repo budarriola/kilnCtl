@@ -140,7 +140,7 @@ begin, before aborting.
 
 ### L4. `rev_repair_junk()` adds an unmeasured boot-path stack frame
 
-**Fixed in @@SHA@@.** `has_file`/`back`/the `profile_t` moved to one `persist_scratch_alloc()` struct, freed on every path, repair returns false (fail closed) on alloc failure; `profiles_cfg_fs_load_raw()`'s `raw[]`/`cand` moved to the heap too; unused `frev` kept only as the load_raw out-parameter. Host test: `test_pcfg_junk_rev_repair_scratch_oom_fails_closed`. Not marked `noinline` (no stack frame of note remains).
+**Fixed in 602309d0.** `has_file`/`back`/the `profile_t` moved to one `persist_scratch_alloc()` struct, freed on every path, repair returns false (fail closed) on alloc failure; `profiles_cfg_fs_load_raw()`'s `raw[]`/`cand` moved to the heap too; unused `frev` kept only as the load_raw out-parameter. Host test: `test_pcfg_junk_rev_repair_scratch_oom_fails_closed`. Not marked `noinline` (no stack frame of note remains).
 
 - Where: `firmware/KilnFW/App/drivers/http/profiles_http.c:844-895` (512cb4e3).
 
@@ -158,7 +158,7 @@ mark the function `noinline`, and either use `frev` in `maxrev` or drop the out-
 
 ### L5. `nvs_save()` mirrors the CRC into RAM outside the snapshot critical section
 
-**Fixed in @@SHA@@ (CRC write-back only).** The second locked section now writes the CRC back only if RAM still equals the snapshot, so a setter in between is never stamped with a stale CRC. Host test `test_save_crc_writeback_skipped_when_ram_changed` (seam: `s_zones_cfg_unlock_test_hook`). **Still open:** the concurrent-save same-rev race (two `nvs_save()` callers both deriving `rev + 1`) needs a save mutex; not done here. The RAM CRC mirror itself is kept because existing tests and the migration log read it.
+**Fixed in 602309d0 (CRC write-back only).** The second locked section now writes the CRC back only if RAM still equals the snapshot, so a setter in between is never stamped with a stale CRC. Host test `test_save_crc_writeback_skipped_when_ram_changed` (seam: `s_zones_cfg_unlock_test_hook`). **Still open:** the concurrent-save same-rev race (two `nvs_save()` callers both deriving `rev + 1`) needs a save mutex; not done here. The RAM CRC mirror itself is kept because existing tests and the migration log read it.
 
 - Where: `firmware/KilnFW/App/drivers/persist/zones_config_store.c:780-790` (667578a9).
 
