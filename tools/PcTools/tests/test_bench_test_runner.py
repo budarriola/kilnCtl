@@ -276,6 +276,32 @@ class RunnerLifecycleTest(unittest.TestCase):
             self.assertIn("allow_heat not set; OT-E07/E08/G04 start their own heat", outcome.results[cid].reason)
         self.assertIs(runner.ctx.get("ota_allow_heat"), False)
 
+    def test_run_start_probe_stores_baseline_before_first_case(self):
+        import dataclasses
+        seen = {}
+        def judge(ctx):
+            seen["v"] = ctx.get("_k")
+            return R.CaseResult(R.Verdict.PASS)
+        self._saved_specs.setdefault("ST-05", R.REGISTRY["ST-05"])
+        R.REGISTRY["ST-05"] = dataclasses.replace(R.REGISTRY["ST-05"], judge=judge,
+                                                  run_start_probe=("_k", lambda ctx: 42))
+        BenchTestRunner(self.ctx, logs_root=self.tmpdir).run(suite="smoke", cases=["ST-05"])
+        self.assertEqual(seen["v"], 42)
+
+    def test_run_start_probe_failure_leaves_key_unset(self):
+        import dataclasses
+        seen = {}
+        def judge(ctx):
+            seen["v"] = ctx.get("_k", "unset")
+            return R.CaseResult(R.Verdict.PASS)
+        def boom(ctx):
+            raise RuntimeError("x")
+        self._saved_specs.setdefault("ST-05", R.REGISTRY["ST-05"])
+        R.REGISTRY["ST-05"] = dataclasses.replace(R.REGISTRY["ST-05"], judge=judge, run_start_probe=("_k", boom))
+        out = BenchTestRunner(self.ctx, logs_root=self.tmpdir).run(suite="smoke", cases=["ST-05"])
+        self.assertEqual(seen["v"], "unset")
+        self.assertEqual(out.results["ST-05"].verdict, R.Verdict.PASS)
+
     def test_case_raising_becomes_a_fail_not_a_crash(self):
         def _boom(ctx):
             raise RuntimeError("synthetic case blowup")

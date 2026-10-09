@@ -333,6 +333,11 @@ _TCP_KEYS = ("xmit", "recv", "drop", "chkerr", "lenerr", "memerr", "rterr", "pro
 
 
 def _case_diag10(ctx: dict) -> CaseResult:
+    # Wire contracts, verified against firmware 2026-10-09:
+    #  timing: diagnostics_http.c:1128-1141 (display_flush_us/thermo_read_us
+    #    {count,last,min,max,mean}; link_reply_us adds timeouts).
+    #  board_temps: board_temps_http.c:40-54 {"esp32_c":f|null,"thermo_cj_c":[f|null..]}.
+    #  lwip_stats: diagnostics_http.c:698-722 200 {"ok":true,"tcp":{ten uints}} or 501.
     problems: List[str] = []
     obs: Dict[str, Any] = {}
     st, t = _get_json(ctx, "/api/diagnostics/timing")

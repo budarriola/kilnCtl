@@ -75,6 +75,11 @@ class CaseSpec:
     window_probe: Optional[Tuple[str, Callable[[dict], dict]]] = None
     #: Further (window, fn) probes for an observer that reads several windows.
     extra_window_probes: Tuple[Tuple[str, Callable[[dict], dict]], ...] = ()
+    #: Optional (ctx key, fn): the runner calls fn(ctx) once after a passing
+    #: preflight, before the first case, and stores the result in
+    #: ctx[key] as a start-of-run baseline. fn must be READ-ONLY; an
+    #: exception leaves the key unset (judge falls back to its own path).
+    run_start_probe: Optional[Tuple[str, Callable[[dict], Any]]] = None
 
 
 def _c(id: str, area: str, description: str, **kw) -> CaseSpec:

@@ -511,6 +511,20 @@ class BenchTestRunner:
                 lock.release()
         return outcome
 
+    def _run_start_probes(self, requested) -> None:
+        """Take read-only start-of-run baselines (CaseSpec.run_start_probe).
+        A failing probe leaves its key unset and never affects a verdict."""
+        for cid in requested:
+            probe = get_case(cid).run_start_probe
+            if probe is None:
+                continue
+            key, fn = probe
+            ok, val = _safe_call(fn, self.ctx)
+            if ok and val is not None:
+                self.ctx[key] = val
+            else:
+                self._log(f"run-start probe for {cid} yielded no baseline")
+
     def _run_locked(self, *, suite: str, requested: List[str], run_id: str, started: float,
                      dry_run: bool, allow_heat: bool) -> RunOutcome:
         """The actual preflight/execute/teardown/report body, run only once
@@ -527,6 +541,8 @@ class BenchTestRunner:
         self.ctx["_results"] = results
         windows.register_probes(self.ctx, requested, get_case)
         executed: List[str] = []
+        if preflight_ok:
+            self._run_start_probes(requested)
 
         if not preflight_ok:
             for cid in requested:

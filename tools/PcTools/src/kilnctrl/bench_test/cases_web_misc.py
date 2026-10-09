@@ -188,6 +188,14 @@ def _wifi_tuple(ctx: dict) -> Optional[tuple]:
     return tuple(s.get(k) for k in ("mode", "state", "ssid", "ip_mode"))
 
 
+def _sec06_admin_probe(ctx: dict) -> Optional[bool]:
+    """Run-start baseline for WEB-SEC-06 (read-only GET /api/auth/config)."""
+    st, cfg = _get_json(ctx, "/api/auth/config")
+    if st != 200 or not isinstance(cfg, dict) or "admin_password_set" not in cfg:
+        return None
+    return cfg["admin_password_set"]
+
+
 def _case_wifi05(ctx: dict) -> CaseResult:
     # The guard probes run with the real (or faked) transport seams; a denied
     # path raises before any transport call, so nothing is ever sent.
@@ -564,10 +572,12 @@ def _case_log02(ctx: dict) -> CaseResult:
             else:
                 sleep(ctx.get("log02_wait_s", 6.0))
                 gst, gcookie = client.login(user, pw)
+                # Flags dict from _SecHttpClient.login (web_auth_login_http.c:556
+                # sends "; HttpOnly; SameSite=Strict; Path=/"); never the value.
                 attrs = getattr(client, "last_login_set_cookie", None)
                 if gst != 200 or not gcookie:
                     verdict = _R(Verdict.FAIL, reason=f"good login returned {gst} / cookie={bool(gcookie)}")
-                elif isinstance(attrs, str) and "httponly" not in attrs.lower():
+                elif isinstance(attrs, dict) and attrs.get("httponly") is not True:
                     verdict = _R(Verdict.FAIL, reason="session cookie lacks HttpOnly")
                 else:
                     sst, sess = client.get_session(gcookie)
@@ -575,7 +585,7 @@ def _case_log02(ctx: dict) -> CaseResult:
                         verdict = _R(Verdict.FAIL, reason=f"session after good login not authenticated (status={sst})")
                     else:
                         verdict = _R(Verdict.PASS, observed={"role": sess.get("role"),
-                                                             "httponly_checked": isinstance(attrs, str)})
+                                                             "httponly_checked": isinstance(attrs, dict)})
     finally:
         restored = _close_window(client, orig)
     if not restored:
@@ -670,3 +680,5 @@ _CASE_FUNCS = {
 
 for _cid, _fn in _CASE_FUNCS.items():
     get_case(_cid).judge = _fn
+get_case("WEB-WIFI-05").run_start_probe = ("_wifi_status_start", _wifi_tuple)
+get_case("WEB-SEC-06").run_start_probe = ("_sec06_admin_start", _sec06_admin_probe)

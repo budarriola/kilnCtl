@@ -201,9 +201,13 @@ class FakeKcfg:
         return 404, None
 
     def text(self, path):
-        return 200, json.dumps({"name": "x"})
+        # Envelope per kiln_package.c:250-266 (kiln_package_export_json).
+        return 200, json.dumps({"kind": "kilnctl-kiln-config", "pkg_schema": 1, "name": "BENCH_tmp_r",
+                                "esp_blob_len": 0, "esp_blob_hex": "", "source_board_id": "0x00000000",
+                                "pico": [], "pkg_hash": "0x00000000"})
 
     def body(self, path, pkg):
+        assert pkg["name"] == "BENCH_tmp_i" and "esp_blob_hex" in pkg  # case renames the envelope's top-level name
         self.cfgs[self.next] = pkg["name"]
         self.next += 1
         return 200, json.dumps({"id": self.next - 1})
@@ -262,6 +266,7 @@ class FakeSec:
         self.sessions = list(sessions or [])
         self.restore_ok = restore_ok
         self.policies = []
+        self.last_login_set_cookie = {"httponly": True, "secure": False, "samesite": "Strict"}
 
     def get_config(self):
         return 200, dict(self.cfg)
@@ -296,6 +301,31 @@ class LogX(unittest.TestCase):
         f = FakeSec(sessions=[{"role": "admin"}])
         self.assertEqual(run("WEB-LOG-02", _auth_ctx(f)).verdict, PASS)
         self.assertEqual(f.cfg, f.orig)
+
+    def test_log02_fail_no_httponly(self):
+        f = FakeSec(sessions=[{"role": "admin"}])
+        f.last_login_set_cookie = {"httponly": False, "secure": False, "samesite": "Strict"}
+        r = run("WEB-LOG-02", _auth_ctx(f))
+        self.assertEqual(r.verdict, FAIL)
+        self.assertIn("HttpOnly", r.reason)
+
+    def test_real_client_exposes_cookie_flags_not_value(self):
+        from email.message import Message
+        from unittest import mock
+        from kilnctrl.bench_test import cases_web_rw as RW
+        h = Message()
+        h["Set-Cookie"] = "kiln_sid=abc123; HttpOnly; SameSite=Strict; Path=/"
+        with mock.patch.object(RW, "_http_post_raw", return_value=(200, "{}", h)):
+            c = RW._SecHttpClient("h")
+            st, ck = c.login("u", "p")
+        self.assertEqual(ck, "abc123")
+        self.assertEqual(c.last_login_set_cookie, {"httponly": True, "secure": False, "samesite": "Strict"})
+        self.assertNotIn("abc123", repr(c.last_login_set_cookie))
+        h2 = Message()
+        h2["Set-Cookie"] = "kiln_sid=abc123; Path=/"
+        with mock.patch.object(RW, "_http_post_raw", return_value=(200, "{}", h2)):
+            c.login("u", "p")
+        self.assertFalse(c.last_login_set_cookie["httponly"])
 
     def test_log02_fail_bad_login_cookie(self):
         f = FakeSec(bad=(200, "kiln_sid=y"), sessions=[{"role": "admin"}])
@@ -357,3 +387,16 @@ class LogX(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunStartWiring(unittest.TestCase):
+    def test_probes_wired(self):
+        from kilnctrl.bench_test.registry import get_case
+        self.assertEqual(get_case("WEB-WIFI-05").run_start_probe[0], "_wifi_status_start")
+        self.assertEqual(get_case("WEB-SEC-06").run_start_probe[0], "_sec06_admin_start")
+        key, fn = get_case("WEB-SEC-06").run_start_probe
+        self.assertIs(fn(ctx_for({"/api/auth/config": {"admin_password_set": True}})), True)
+        self.assertIsNone(fn(ctx_for({})))
+        key, fn = get_case("WEB-WIFI-05").run_start_probe
+        s = {"mode": "sta", "state": "up", "ssid": "x", "ip_mode": "dhcp"}
+        self.assertEqual(fn(ctx_for({"/status": s})), ("sta", "up", "x", "dhcp"))

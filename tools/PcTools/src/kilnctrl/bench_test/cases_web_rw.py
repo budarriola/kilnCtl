@@ -360,6 +360,17 @@ def _case_diag08(ctx: dict) -> CaseResult:
 _NoRedirectHandler = cases_web._NoRedirect
 
 
+def _cookie_attr_flags(set_cookie_rest: str) -> Dict[str, Any]:
+    """Attribute flags of a Set-Cookie header (the part after ``name=``).
+    The value is dropped here and never stored or logged. Firmware sends
+    ``kiln_sid=<hex>; HttpOnly; SameSite=Strict; Path=/``
+    (web_auth_login_http.c:556)."""
+    attrs = [a.strip() for a in set_cookie_rest.split(";")[1:]]
+    low = [a.lower() for a in attrs]
+    same = next((a.split("=", 1)[1] for a in attrs if a.lower().startswith("samesite=") and "=" in a), None)
+    return {"httponly": "httponly" in low, "secure": "secure" in low, "samesite": same}
+
+
 class _SecHttpClient:
     """Thin, real-HTTP implementation of the seam ``_case_web_sec03`` needs.
     Tests inject a fake object with the same method names via
@@ -373,6 +384,10 @@ class _SecHttpClient:
         # _NoRedirectHandler above. Tests patch ``client._opener.open``
         # rather than ``urllib.request.urlopen``.
         self._opener = urllib.request.build_opener(_NoRedirectHandler)
+        #: Attribute flags of the last login's kiln_sid Set-Cookie, e.g.
+        #: {"httponly": True, "samesite": "Strict", "secure": False}. Never the
+        #: cookie value. None until a login returned a kiln_sid cookie.
+        self.last_login_set_cookie: "Optional[Dict[str, Any]]" = None
 
     def _get(self, path: str, cookie: Optional[str] = None) -> "Tuple[Optional[int], Optional[str], Any]":
         url = f"http://{self.host}{path}"
@@ -457,11 +472,13 @@ class _SecHttpClient:
             "username": username, "password": password,
         })
         cookie = None
+        self.last_login_set_cookie = None
         if headers is not None:
             for raw in (headers.get_all("Set-Cookie") or []) if hasattr(headers, "get_all") else []:
                 name, _, rest = raw.partition("=")
                 if name.strip() == "kiln_sid":
                     cookie = rest.split(";", 1)[0].strip()
+                    self.last_login_set_cookie = _cookie_attr_flags(rest)
                     break
         return status, cookie
 
