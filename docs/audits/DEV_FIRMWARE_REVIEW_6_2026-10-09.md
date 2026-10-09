@@ -75,6 +75,11 @@ point when the suite is `web`. Assert that it does post under `suite="web"`, the
 nothing when the suite is absent or `smoke`. Derive the ID list from the judges that call a POST seam,
 rather than keeping it by hand.
 
+**Fixed in 0a6e8c75** (test only). Every writing judge now reaches its gate and must report the refusal;
+WRITING_IDS adds DASH-05/07, PROF-03..07 and ZONE-09 and is checked against a code-derived writer scan;
+a permanent test proves that removing the gate fails all 23 cases. Gap found, not changed here:
+WEB-ZONE-10 POSTs `current_sweep/abort` with no `write_refusal()` gate (listed in EXEMPT_WRITERS).
+
 ## LOW
 
 ### L1. Comments still say the legacy Wi-Fi copy is never deleted (7551d44a)
