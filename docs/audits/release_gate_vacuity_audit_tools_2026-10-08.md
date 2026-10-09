@@ -17,7 +17,7 @@ Not covered here: `tools/PcTools/check_zones_per_zone_field_drift.ps1`, `tools/P
 | `tools/check_ct_cal_write_surface.ps1` | safety.py: reintroduced `def set_ct_cal(` | RED (CT_CAL WRITE SURFACE CHECK: FAILED) |
 | `tools/check_config_migration_steps.ps1` | zones_config_json.h: ZONES_CFG_VERSION 26 -> 27 with no step | RED (3 problems) |
 | `tools/check_disclosure_gate_call_sites.ps1` | wifi_provision_http.c and readiness_http.c: `may_disclose = true` (two mutations) | RED both |
-| `tools/check_doc_citations.ps1` | RELEASE_HARDENING_PLAN.md: added citation zones_config_json.h:999999 (past EOF) | RED (exit 1) |
+| `tools/check_doc_citations.ps1` | RELEASE_HARDENING_PLAN.md: added a citation to line 999999 of zones_config_json.h (past EOF) | RED (exit 1) |
 | `tools/check_flash_partition_offset_guard.ps1` | mcp_server_flash.py: guard call result assignment replaced by None | RED (call site gone) |
 | `tools/check_host_embed_symbols_defined.ps1` | test_zones_http.c: removed tuning_recommendations_json_start definition | RED (HOST EMBED SYMBOLS CHECK FAILED) |
 | `tools/check_iter_tune_write_surface.ps1` | profile_executor.c calls iter_tune_enable; iter_tune.c calls nvs_set_blob (two mutations; a first try with undeclared iter_tune_reset stayed GREEN by design, name list is parsed from the header) | RED both |
