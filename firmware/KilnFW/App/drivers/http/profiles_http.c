@@ -695,32 +695,42 @@ esp_err_t nvs_save_slot(uint8_t id);
  * both read the same s_profile_rev[id], both write rev+1 and have RAM end up
  * holding one body while the file holds the other. One static mutex makes the
  * rev read, RAM assignment (handlers), file write and rev bump one critical
- * section. Held across flash I/O only; never across producer calls. NULL-safe:
- * before the first take the handle is created under the once-guard (static
- * storage, so creation is idempotent); a failed create degrades to no lock. */
+ * section. Held across the module's own NVS plus cfg-file I/O only; never across
+ * producer calls (firing_stats_erase runs after the unlock). Created on first use
+ * under a claim flag, so every take sees a non-NULL handle. */
 static StaticSemaphore_t s_save_mutex_storage;
 static SemaphoreHandle_t s_save_mutex = NULL;
 static portMUX_TYPE s_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
 
+static bool s_save_mutex_claimed = false;
+
 void profiles_save_lock(void)
 {
     if (s_save_mutex == NULL) {
+        /* Same once-guard as profiles_storage_ensure(): only the claim is inside
+         * the critical section; the create runs after it (no FreeRTOS object
+         * creation with interrupts disabled). The loser waits for the winner. */
+        bool mine = false;
         portENTER_CRITICAL(&s_save_mutex_mux);
-        if (s_save_mutex == NULL) {
-            s_save_mutex = xSemaphoreCreateMutexStatic(&s_save_mutex_storage);
+        if (!s_save_mutex_claimed) {
+            s_save_mutex_claimed = true;
+            mine = true;
         }
         portEXIT_CRITICAL(&s_save_mutex_mux);
+        if (mine) {
+            s_save_mutex = xSemaphoreCreateMutexStatic(&s_save_mutex_storage);
+        } else {
+            while (s_save_mutex == NULL) {
+                vTaskDelay(1);
+            }
+        }
     }
-    if (s_save_mutex != NULL) {
-        (void)xSemaphoreTake(s_save_mutex, portMAX_DELAY);
-    }
+    (void)xSemaphoreTake(s_save_mutex, portMAX_DELAY);
 }
 
 void profiles_save_unlock(void)
 {
-    if (s_save_mutex != NULL) {
-        (void)xSemaphoreGive(s_save_mutex);
-    }
+    (void)xSemaphoreGive(s_save_mutex);
 }
 
 /* Caller holds profiles_save_lock(). */
@@ -1272,7 +1282,7 @@ esp_err_t nvs_save_slot_locked(uint8_t id)
  * handlers) run on httpd_worker, an internal-SRAM stack, so this cannot fire
  * the crash today; added so a future audit does not read this file as fully
  * covered when it was not. */
-static esp_err_t nvs_erase_slot_locked(uint8_t id);
+esp_err_t nvs_erase_slot_locked(uint8_t id);
 
 esp_err_t nvs_erase_slot(uint8_t id)
 {
@@ -1291,7 +1301,7 @@ esp_err_t nvs_erase_slot(uint8_t id)
     return ESP_OK;
 }
 
-static esp_err_t nvs_erase_slot_locked(uint8_t id)
+esp_err_t nvs_erase_slot_locked(uint8_t id)
 {
     if (caller_stack_is_external()) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot: REFUSING -- calling task's stack is in external RAM "
@@ -1665,32 +1675,6 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         return false;
     }
 
-    /* SAVE-VS-COPY, for a save aimed at a builtin catalogue id: the catalogue
-     * lives in .rodata and cannot be written, so "overwrite it" is not a
-     * thing that can happen. Rather than fail, this redirects to "save a copy
-     * into a user slot" -- which is exactly what the existing API shape
-     * already does with any id >= PROFILES_MAX_COUNT ("first free slot"), so
-     * builtin ids need no special case to land on the right behaviour, only
-     * this note saying it is deliberate. The caller learns the real slot from
-     * *out_id, so nothing is silent about it. */
-    uint8_t target_id;
-    if (requested_id < PROFILES_MAX_COUNT) {
-        target_id = requested_id;
-    } else {
-        /* profiles_http_first_free_slot() (Opus review nit N5) -- shared with
-         * backup_import.c's pass-1 commit simulation so the two allocation
-         * scans cannot silently drift apart. A callback straight onto
-         * profiles_slot_used(), not a materialized bool[PROFILES_MAX_COUNT]
-         * array -- see the helper's own comment: that array once pushed
-         * bx_flash_worker over its stack ceiling. */
-        int free_slot = profiles_http_first_free_slot(profiles_http_slot_used_cb, NULL);
-        if (free_slot < 0) {
-            snprintf(err_msg, err_cap, "profile storage full");
-            return false;
-        }
-        target_id = (uint8_t)free_slot;
-    }
-
     /* Feasibility check (TODO.md section 5), same rule profile_post_handler
      * runs: every participating zone's max-ramp ceiling must accommodate
      * every ramped segment, or the whole submission is rejected. */
@@ -1737,6 +1721,34 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         warn_count++;
     }
 
+    /* SAVE-VS-COPY, for a save aimed at a builtin catalogue id: the catalogue
+     * lives in .rodata and cannot be written, so "overwrite it" is not a
+     * thing that can happen. Rather than fail, this redirects to "save a copy
+     * into a user slot" -- which is exactly what the existing API shape
+     * already does with any id >= PROFILES_MAX_COUNT ("first free slot"), so
+     * builtin ids need no special case to land on the right behaviour, only
+     * this note saying it is deliberate. The caller learns the real slot from
+     * *out_id, so nothing is silent about it. */
+    profiles_save_lock(); /* slot allocation, duplicate-name check, assign and save: one section */
+    uint8_t target_id;
+    if (requested_id < PROFILES_MAX_COUNT) {
+        target_id = requested_id;
+    } else {
+        /* profiles_http_first_free_slot() (Opus review nit N5) -- shared with
+         * backup_import.c's pass-1 commit simulation so the two allocation
+         * scans cannot silently drift apart. A callback straight onto
+         * profiles_slot_used(), not a materialized bool[PROFILES_MAX_COUNT]
+         * array -- see the helper's own comment: that array once pushed
+         * bx_flash_worker over its stack ceiling. */
+        int free_slot = profiles_http_first_free_slot(profiles_http_slot_used_cb, NULL);
+        if (free_slot < 0) {
+            profiles_save_unlock();
+            snprintf(err_msg, err_cap, "profile storage full");
+            return false;
+        }
+        target_id = (uint8_t)free_slot;
+    }
+
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
      * duplicate name. Reuses live_edit_name_collides_ex() (live_profile.c),
      * same case/whitespace normalization as the live-edit SAVE_AS path.
@@ -1756,10 +1768,10 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
      * doc comment. */
     if (live_edit_name_collides_ex(candidate->name, profiles_http_name_at, NULL, target_id, false, err_msg,
                                     err_cap)) {
+        profiles_save_unlock();
         return false; /* live_edit_name_collides_ex already filled err_msg */
     }
 
-    profiles_save_lock();
     s_profiles.profiles[target_id] = *candidate;
     profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot_locked(target_id);
@@ -1827,13 +1839,19 @@ bool profiles_http_delete(uint8_t id)
     }
     /* Persistent erase BEFORE dropping RAM state: on failure the slot stays fully
      * live and the caller can retry; only after it succeeds is the slot cleared. */
-    esp_err_t err = nvs_erase_slot((uint8_t)id);
+    profiles_save_lock();
+    esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
+    if (err == ESP_OK) {
+        profiles_slot_clear(id);
+        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+    }
+    profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- slot kept, retry", id, esp_err_to_name(err));
         return false;
     }
-    profiles_slot_clear(id);
-    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+    /* Stats were pruned above; this second prune is idempotent and outside the lock. */
+    (void)firing_stats_erase((uint8_t)id);
     return true;
 }
 
@@ -2221,10 +2239,12 @@ static bool retarget_revert(const uint8_t *journal, uint8_t n, uint8_t from, uin
     bool clean = true;
     while (n > 0) {
         uint8_t id = journal[--n];
+        profiles_save_lock(); /* swap + save + verify of one slot is one section */
         (void)retarget_swap_rules(&s_profiles.profiles[id], from, to);
-        if (nvs_save_slot(id) != ESP_OK || !retarget_verify_slot(id)) {
+        if (nvs_save_slot_locked(id) != ESP_OK || !retarget_verify_slot(id)) {
             clean = false;
         }
+        profiles_save_unlock();
     }
     return clean;
 }
@@ -2253,17 +2273,19 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
     char why[96] = "";
     uint8_t fail_id = 0;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT && !fail; id++) {
+        profiles_save_lock(); /* read, swap, validate, assign and save of one slot is one section */
         if (!profiles_slot_used(id) || retarget_count_rules(&s_profiles.profiles[id], zone) == 0) {
+            profiles_save_unlock();
             continue;
         }
         *trial = s_profiles.profiles[id];
         uint16_t n = retarget_swap_rules(trial, zone, dest);
         fail_id = id;
         if (!validate_on_off_rules(trial, why, sizeof(why))) {
+            profiles_save_unlock();
             fail = "rewritten profile failed validation";
             break;
         }
-        profiles_save_lock();
         s_profiles.profiles[id] = *trial;
         journal[jn++] = id;
         esp_err_t rt_save = nvs_save_slot_locked(id);
@@ -2277,7 +2299,10 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
     }
     free(trial);
     for (uint8_t k = 0; !fail && k < jn; k++) {
-        if (!retarget_verify_slot(journal[k])) {
+        profiles_save_lock();
+        bool verified = retarget_verify_slot(journal[k]);
+        profiles_save_unlock();
+        if (!verified) {
             fail = "read-back of a rewritten profile did not match";
             fail_id = journal[k];
         }

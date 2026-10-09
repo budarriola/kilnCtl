@@ -279,6 +279,7 @@ esp_err_t nvs_erase_slot(uint8_t id);
 /* Save mutex: bracket RAM assignment + nvs_save_slot_locked() in one section. */
 void profiles_save_lock(void);
 void profiles_save_unlock(void);
+esp_err_t nvs_erase_slot_locked(uint8_t id); /* caller holds profiles_save_lock(); no stats prune */
 esp_err_t nvs_save_slot_locked(uint8_t id); /* caller holds profiles_save_lock() */
 
 /* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY

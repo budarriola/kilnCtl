@@ -525,25 +525,6 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
     long requested_id = (id_len > 0) ? strtol(id_val, NULL, 10) : -1;
 
-    uint8_t target_id;
-    if (requested_id >= 0 && requested_id < PROFILES_MAX_COUNT) {
-        target_id = (uint8_t)requested_id;
-    } else {
-        int free_slot = -1;
-        for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!profiles_slot_used(i)) {
-                free_slot = i;
-                break;
-            }
-        }
-        if (free_slot < 0) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile storage full");
-            free(body);
-            return ESP_OK;
-        }
-        target_id = (uint8_t)free_slot;
-    }
-
     /* check_httpd_task_stack_budget.py: profile_t (~428 B) used to be a
      * plain local (`tmp`) here, contributing to this handler's own
      * httpd_worker frame for the whole function (it stays live until the
@@ -618,6 +599,30 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return ret;
     }
 
+    /* Slot allocation, duplicate-name check, assign and save are one section
+     * under the save mutex (two creates must not pick the same free slot). */
+    profiles_save_lock();
+    uint8_t target_id;
+    if (requested_id >= 0 && requested_id < PROFILES_MAX_COUNT) {
+        target_id = (uint8_t)requested_id;
+    } else {
+        int free_slot = -1;
+        for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+            if (!profiles_slot_used(i)) {
+                free_slot = i;
+                break;
+            }
+        }
+        if (free_slot < 0) {
+            profiles_save_unlock();
+            free(warn_json);
+            free(tmp);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "profile storage full");
+            return ESP_OK;
+        }
+        target_id = (uint8_t)free_slot;
+    }
+
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
      * duplicate name. Same check/helper profiles_http_save() now runs --
      * see that function's comment. exclude_id lets overwriting a slot with
@@ -644,6 +649,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
             profiles_http_json_escape(name_err, name_err_escaped, sizeof(name_err_escaped));
             char json[192 + sizeof(name_err_escaped)];
             int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", name_err_escaped);
+            profiles_save_unlock();
             httpd_resp_set_status(req, "400 Bad Request");
             httpd_resp_set_type(req, "application/json");
             esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
@@ -653,7 +659,6 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         }
     }
 
-    profiles_save_lock();
     s_profiles.profiles[target_id] = *tmp;
     free(tmp);
     profiles_slot_set(target_id);
@@ -757,9 +762,14 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
     if (firing_stats_erase((uint8_t)id) != ESP_OK) {
         return cfg_fs_http_persist_failed(req);
     }
+    profiles_save_lock();
     profiles_slot_clear(id);
     memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
-    esp_err_t err = nvs_erase_slot((uint8_t)id);
+    esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
+    profiles_save_unlock();
+    if (err == ESP_OK) {
+        err = firing_stats_erase((uint8_t)id); /* idempotent re-prune, outside the lock */
+    }
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- deleted live but may reappear after reboot", id,
                  esp_err_to_name(err));
