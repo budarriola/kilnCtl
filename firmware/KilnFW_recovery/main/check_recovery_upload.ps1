@@ -110,6 +110,8 @@ try {
         -Replacement "RECOVERY_UPLOAD_CHUNK) {" -Tag "floor"
     # recv timeouts: retry budget, and the reset on progress.
     Test-Mutant -Needle "++timeouts > RECV_TIMEOUT_RETRIES" -Replacement "++timeouts > 100" -Tag "retrybudget"
+    # Overall upload deadline (slow-drip).
+    Test-Mutant -Needle "if (esp_timer_get_time() > deadline_us) {" -Replacement "if (0) {" -Tag "deadline"
     Test-Mutant -Needle "timeouts = 0;<NL>        got += (size_t)n;" -Replacement "got += (size_t)n;" -Tag "noreset"
     # Short body.
     # (the mutant pretends the short read was complete; a bare "ignore the check" would loop forever)

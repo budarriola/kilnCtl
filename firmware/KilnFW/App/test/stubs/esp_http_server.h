@@ -54,6 +54,7 @@ typedef enum {
 typedef enum {
     HTTPD_400_BAD_REQUEST = 400,
     HTTPD_401_UNAUTHORIZED = 401, /* added for web_auth_login_http.c's host tests (Findings 4/5) */
+    HTTPD_408_REQ_TIMEOUT = 408, /* added for the overall upload deadline (ota_http_esp/pico) */
     HTTPD_403_FORBIDDEN = 403, /* added 2026-08-27 for ota_http.c's host tests */
     HTTPD_404_NOT_FOUND = 404, /* added 2026-09-27 for kiln_cfg_http.c's host tests (test_kiln_cfg_http.c) */
     HTTPD_500_INTERNAL_SERVER_ERROR = 500,

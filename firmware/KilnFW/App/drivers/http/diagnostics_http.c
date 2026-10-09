@@ -391,16 +391,27 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     crash_report_record_t rec;
     bool present = crash_report_get(&rec);
 
-    char json[768];
+    /* HEAP, not stack (httpd_worker 8 KB, "httpd stack blob class"): freed on
+     * every return path below. */
+    const size_t json_cap = 768;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/crash_report: malloc(768) failed for the response buffer");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     int n;
 
     if (!present) {
-        n = snprintf(json, sizeof(json), "{\"present\":false,\"clear_in_progress\":%s}",
+        n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s}",
                      s_crash_clear_in_progress ? "true" : "false");
         o = (n > 0) ? (size_t)n : 0;
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, o);
+        esp_err_t sent = httpd_resp_send(req, json, o);
+        free(json);
+        return sent;
     }
 
     char task_esc[sizeof(rec.exc_task) * 2 + 1];
@@ -414,8 +425,8 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
+        n = snprintf(json + o, json_cap - o, __VA_ARGS__);                                       \
+        if (n < 0 || (size_t)n >= json_cap - o) {                                                 \
             goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)n;                                                                            \
@@ -447,7 +458,11 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     APPEND("],\"backtrace_corrupted\":%s}", rec.bt_corrupted ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    {
+        esp_err_t sent = httpd_resp_send(req, json, o);
+        free(json);
+        return sent;
+    }
 
 overflow:
     /* Buffer overflow while building the crash-report JSON: never send the
@@ -458,7 +473,8 @@ overflow:
      * -- do not enlarge json[] to "fix" it (house rule: never enlarge httpd
      * stack buffers). */
     ESP_LOGE(TAG, "crash_report JSON overflowed %u-byte buffer at o=%u",
-             (unsigned)sizeof(json), (unsigned)o);
+             (unsigned)json_cap, (unsigned)o);
+    free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, "{\"ok\":false,\"error\":\"crash report too large to encode\"}", HTTPD_RESP_USE_STRLEN);

@@ -104,6 +104,16 @@ bool ota_http_esp_target_usable(const void *target, const void *running)
     return target != NULL && target != running;
 }
 
+uint64_t ota_http_upload_budget_ms(size_t content_len)
+{
+    return (uint64_t)OTA_HTTP_UPLOAD_BASE_MS + ((uint64_t)content_len * 1000u) / OTA_HTTP_UPLOAD_MIN_RATE_BPS;
+}
+
+bool ota_http_upload_deadline_passed(uint64_t start_ms, uint64_t now_ms, uint64_t budget_ms)
+{
+    return now_ms > start_ms && (now_ms - start_ms) > budget_ms;
+}
+
 ota_http_drain_verdict_t ota_http_drain_verdict(int recv_ret, uint32_t elapsed_ms, uint32_t cap_ms)
 {
     if (recv_ret == 0) {

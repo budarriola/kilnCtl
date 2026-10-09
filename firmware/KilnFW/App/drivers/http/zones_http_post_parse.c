@@ -13,6 +13,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "http_form.h"
@@ -1039,10 +1040,17 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
              * this function's call site's loop and before that handler's
              * commit point -- see the comment there. */
             {
-                zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
-                memcpy(probe, s_zones.cfg.zones, sizeof(probe));
+                /* Heap, not stack: zone_cfg_t[3] is well over 1 KB on the httpd stack. */
+                zone_cfg_t *probe = malloc(sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT);
+                if (probe == NULL) {
+                    *err_reason = "out of memory";
+                    return false;
+                }
+                memcpy(probe, s_zones.cfg.zones, sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT);
                 probe[i].settings_source[g] = src_raw;
-                if (zones_config_json_settings_source_chain_has_cycle(probe, g, i, thermo_count)) {
+                bool cycle = zones_config_json_settings_source_chain_has_cycle(probe, g, i, thermo_count);
+                free(probe);
+                if (cycle) {
                     *err_reason = "zone settings_source would create an inheritance cycle";
                     return false;
                 }

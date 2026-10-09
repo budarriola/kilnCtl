@@ -2302,11 +2302,15 @@ static esp_err_t rate_guard_auto_post_locked(httpd_req_t *req)
     bool confirm = false;
     if (req->content_len > 0) {
         char body[32];
-        if (read_body(req, body, sizeof(body))) {
-            char value[4] = {0};
-            confirm = http_form_find_field(body, "confirm", value, sizeof(value)) >= 0 &&
-                      strcmp(value, "1") == 0;
+        if (!read_body(req, body, sizeof(body))) {
+            /* Oversize or unreadable body: never silently treat as confirm=false
+             * (the caller meant something we could not read). */
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body too large or read failed");
+            return ESP_OK;
         }
+        char value[4] = {0};
+        confirm = http_form_find_field(body, "confirm", value, sizeof(value)) >= 0 &&
+                  strcmp(value, "1") == 0;
     }
 
     float candidate = 0.0f, current = 0.0f;

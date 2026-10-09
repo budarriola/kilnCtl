@@ -2649,8 +2649,20 @@ static void test_ota_pico_do_stage_refuses_oversize_with_http_400(void)
 
 // ---------------------------------------------------------------------------
 
+static void test_upload_deadline_helpers(void)
+{
+    TEST_SECTION("ota_http_upload_budget_ms / deadline_passed -- overall upload cap");
+    TEST_CHECK(ota_http_upload_budget_ms(0) == 60000u, "zero-length budget is the 60 s base");
+    TEST_CHECK(ota_http_upload_budget_ms(2048u * 100u) == 60000u + 100000u, "2 KB/s minimum rate adds len/2048 s");
+    TEST_CHECK(ota_http_upload_budget_ms((size_t)4u * 1024u * 1024u) == 60000u + 2048000u, "4 MiB does not overflow");
+    TEST_CHECK(!ota_http_upload_deadline_passed(1000, 1000 + 60000, 60000), "exactly at budget is not yet past");
+    TEST_CHECK(ota_http_upload_deadline_passed(1000, 1000 + 60001, 60000), "one ms past budget is past");
+    TEST_CHECK(!ota_http_upload_deadline_passed(5000, 1000, 60000), "clock going backwards never trips");
+}
+
 void run_test_ota_http(void)
 {
+    test_upload_deadline_helpers();
     esp_err_t start_err = ota_http_start(NULL, NULL, NULL);
     // ESP_ERR_INVALID_STATE is expected (wifi_provision_http_get_server()
     // stubbed to NULL) -- s_ota_lock and every lockout/nonce state are

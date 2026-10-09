@@ -539,6 +539,52 @@ static void test_login_body_split_across_recv_calls(void)
                "a body delivered one byte at a time is still fully read and the login succeeds");
 }
 
+// HTTP audit LOW (group E1 #4/#5/#6): a maximal 128-char all-symbol password,
+// fully percent-encoded (3x), must log in; a lock timeout while recording the
+// attempt must fail closed.
+static void test_max_length_symbol_password_logs_in(void)
+{
+    TEST_SECTION("login_post_handler -- 128-char all-symbol password (percent-encoded 3x) logs in");
+    reset_all();
+    char pw[SECURITY_HTTP_PASSWORD_MAX + 1];
+    char enc[SECURITY_HTTP_PASSWORD_MAX * 3 + 1];
+    for (size_t i = 0; i < SECURITY_HTTP_PASSWORD_MAX; i++) {
+        pw[i] = "!@#$%^&*+=;:,/?"[i % 15];
+        snprintf(enc + i * 3, 4, "%%%02X", (unsigned)(unsigned char)pw[i]);
+    }
+    pw[SECURITY_HTTP_PASSWORD_MAX] = '\0';
+    set_admin_credential("admin", pw);
+
+    static char body[600];
+    snprintf(body, sizeof(body), "username=admin&password=%s", enc);
+    TEST_CHECK(strlen(body) > 256, "test setup: body exceeds the old 256-byte cap");
+    recv_stage(body, 999);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(body);
+    s_last_set_cookie[0] = '\0';
+    esp_err_t err = login_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_last_set_cookie, HTTP_SESSION_COOKIE_NAME "=") != NULL,
+               "the maximal percent-encoded password logs in");
+}
+
+static void test_attempt_record_lock_timeout_fails_closed(void)
+{
+    TEST_SECTION("login_post_handler -- lock timeout while recording the attempt fails closed");
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+    // Second xSemaphoreTake (the post-KDF recording take) times out.
+    g_test_stub_semaphore_fail_nth = 2;
+    s_last_err_status = 0;
+    s_last_set_cookie[0] = '\0';
+    esp_err_t err = do_login("admin", "correct-horse-battery-staple");
+    g_test_stub_semaphore_fail_nth = 0;
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_last_err_status != 0, "an unrecordable attempt is refused with an error status");
+    TEST_CHECK(s_last_set_cookie[0] == '\0', "no session is minted when the attempt cannot be recorded");
+}
+
 // *** 2026-09-18 follow-up to d2c51f55: with correct credentials but an
 // unresolvable client address (ota_http_get_client_ip_checked() reporting
 // false), login_post_handler() must refuse to mint a session -- and that
@@ -1121,6 +1167,8 @@ void run_test_web_auth_login_http(void)
     test_lockout_eviction_never_evicts_a_locked_slot();
     test_lockout_eviction_still_works_for_unlocked_slots();
     test_login_body_split_across_recv_calls();
+    test_max_length_symbol_password_logs_in();
+    test_attempt_record_lock_timeout_fails_closed();
     test_unresolvable_ip_refuses_to_mint_a_session();
     test_may_mint_session_pure_function();
     test_ladder_retry_after_steps();

@@ -523,10 +523,18 @@ esp_err_t kiln_http_register(httpd_handle_t server, const httpd_uri_t *uri_handl
     ctx->tier = tier;
     ctx->method = uri_handler->method;
     strncpy(ctx->uri, uri_handler->uri, sizeof(ctx->uri) - 1);
-    s_route_count++;
 
     httpd_uri_t wrapped = *uri_handler;
     wrapped.handler = kiln_http_prehandler;
     wrapped.user_ctx = ctx;
-    return httpd_register_uri_handler(server, &wrapped);
+    esp_err_t reg = httpd_register_uri_handler(server, &wrapped);
+    if (reg != ESP_OK) {
+        // Failed registration must not burn a slot: the slot is not published
+        // (s_route_count unchanged), so a retry reuses it and the cap counts
+        // only live routes.
+        memset(ctx, 0, sizeof(*ctx));
+        return reg;
+    }
+    s_route_count++;
+    return ESP_OK;
 }

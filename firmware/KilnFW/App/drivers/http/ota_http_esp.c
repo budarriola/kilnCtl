@@ -295,7 +295,16 @@ static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
         size_t written = sizeof(esp_image_header_t);
         int last_logged_decile = 0;
         esp_progress_set(OTA_HTTP_ESP_PHASE_WRITING, 0);
+        const uint64_t upload_start_ms = hal_time_now_us() / 1000u;
+        const uint64_t upload_budget_ms = ota_http_upload_budget_ms(content_len);
         while (written < content_len) {
+            if (ota_http_upload_deadline_passed(upload_start_ms, hal_time_now_us() / 1000u, upload_budget_ms)) {
+                ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "upload exceeded its overall deadline at %u/%u bytes",
+                         (unsigned)written, (unsigned)content_len);
+                ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
+                httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "upload too slow");
+                goto cleanup;
+            }
             size_t want = content_len - written;
             if (want > sizeof(s_ota_esp_chunk)) {
                 want = sizeof(s_ota_esp_chunk);

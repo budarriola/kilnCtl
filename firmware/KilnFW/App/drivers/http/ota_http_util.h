@@ -101,6 +101,16 @@ typedef enum {
 
 ota_http_drain_verdict_t ota_http_drain_verdict(int recv_ret, uint32_t elapsed_ms, uint32_t cap_ms);
 
+/* Overall upload deadline (HTTP audit LOW, group C 7): the per-recv socket
+ * timeout alone lets a slow-drip client hold the update claim and the single
+ * httpd task for as long as it keeps sending a byte inside each window.
+ * Budget = 60 s + content_len at a 2 KB/s minimum rate. */
+#define OTA_HTTP_UPLOAD_BASE_MS 60000u
+#define OTA_HTTP_UPLOAD_MIN_RATE_BPS 2048u
+uint64_t ota_http_upload_budget_ms(size_t content_len);
+/* True once now_ms - start_ms exceeds budget_ms (clock going backwards: false). */
+bool ota_http_upload_deadline_passed(uint64_t start_ms, uint64_t now_ms, uint64_t budget_ms);
+
 #ifdef __cplusplus
 }
 #endif

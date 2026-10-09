@@ -2411,6 +2411,43 @@ static void test_rate_guard_auto_post_handler_loosen_without_confirm_never_write
     TEST_CHECK(s_stub_rate_guard_meta_set_calls == 0, "the provenance record is untouched -- nothing was written");
 }
 
+static void test_rate_guard_auto_post_oversize_body_is_400(void)
+{
+    TEST_SECTION("rate_guard_auto_post_handler -- an oversize (or unreadable) body is a 400, never a "
+                 "silent confirm=false");
+    reset_all();
+    reset_rate_guard_stubs();
+    set_current_rate_guard(true, 15.0f);
+    s_stub_zone_has_model[0] = true;
+    s_stub_zone_k_dc[0] = 20.0f;
+    s_stub_zone_tau_s[0] = 60.0f;
+    s_stub_zone_has_fit_ctx[0] = true;
+    s_stub_zone_fit_temp_c[0] = 20.0f;
+
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_link = &fake_link;
+
+    static char body[64];
+    memset(body, 'x', sizeof(body) - 1);
+    body[sizeof(body) - 1] = '\0';
+    s_stub_req_body = body;
+    s_stub_req_body_sent = 0;
+    s_stub_httpd_err_calls = 0;
+    s_stub_last_httpd_err[0] = '\0';
+    s_stub_last_httpd_resp[0] = '\0';
+    httpd_req_t req = { .content_len = (int)strlen(body) }; // > the 32-byte body buffer
+    esp_err_t err = rate_guard_auto_post_handler(&req);
+    s_link = NULL;
+    s_stub_req_body = NULL;
+
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK (refusal sent via httpd_resp_send_err)");
+    TEST_CHECK(s_stub_httpd_err_calls == 1, "exactly one error response (the 400)");
+    TEST_CHECK(strstr(s_stub_last_httpd_err, "body") != NULL, "error text names the body");
+    TEST_CHECK(s_stub_last_httpd_resp[0] == '\0', "no normal JSON suggestion/apply response was sent");
+    TEST_CHECK(s_stub_set_param_calls == 0 && s_stub_commit_calls == 0, "nothing was written");
+}
+
 static void test_rate_guard_auto_get_handler_never_writes(void)
 {
     TEST_SECTION("rate_guard_auto_get_handler -- pure preview, never calls SET_PARAM/commit regardless "
@@ -2965,6 +3002,7 @@ int main(void)
     test_build_json_rate_guard_provenance_manual();
     test_rate_guard_auto_post_handler_dormant_applies_and_tags_auto();
     test_rate_guard_auto_post_handler_loosen_without_confirm_never_writes();
+    test_rate_guard_auto_post_oversize_body_is_400();
     test_rate_guard_auto_get_handler_never_writes();
 
     test_parse_single_pair_no_commit();

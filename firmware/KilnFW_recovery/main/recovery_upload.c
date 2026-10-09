@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_task_wdt.h"
+#include "esp_timer.h"
 
 static const char *TAG = "recovery_upload";
 
@@ -30,11 +31,14 @@ static uint8_t *alloc_chunk_buffer(void)
 
 // Fills buf[0..want) from the request body. Returns bytes read (== want on
 // success, less on a dead/timed-out connection).
-static size_t read_exact(httpd_req_t *req, uint8_t *buf, size_t want)
+static size_t read_exact(httpd_req_t *req, uint8_t *buf, size_t want, int64_t deadline_us)
 {
     size_t got = 0;
     int timeouts = 0;
     while (got < want) {
+        if (esp_timer_get_time() > deadline_us) {
+            break; // overall upload deadline: a slow-drip client must not hold httpd forever
+        }
         esp_task_wdt_reset(); // harmless ESP_ERR_NOT_FOUND if this task is not subscribed
         int n = httpd_req_recv(req, (char *)buf + got, want - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
@@ -68,6 +72,7 @@ recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery
         return RECOVERY_UPLOAD_REJECTED;
     }
 
+    const int64_t deadline_us = esp_timer_get_time() + recovery_upload_budget_us(total);
     buf = alloc_chunk_buffer();
     if (!buf) {
         *http_status = 503;
@@ -76,7 +81,7 @@ recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery
     }
 
     size_t first = total < RECOVERY_UPLOAD_CHUNK ? total : RECOVERY_UPLOAD_CHUNK;
-    size_t got = read_exact(req, buf, first);
+    size_t got = read_exact(req, buf, first, deadline_us);
     if (got < first) {
         *http_status = 400;
         *msg = "connection lost before the first chunk completed";
@@ -115,7 +120,7 @@ recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery
         if (want > RECOVERY_UPLOAD_CHUNK) {
             want = RECOVERY_UPLOAD_CHUNK;
         }
-        got = read_exact(req, buf, want);
+        got = read_exact(req, buf, want, deadline_us);
         if (got < want) {
             sink->abort(sink->ctx);
             *http_status = 400;

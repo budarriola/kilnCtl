@@ -204,7 +204,16 @@ static bool ota_pico_do_stage(httpd_req_t *req, const char *ip)
     // no faster than it can be written to flash is the same principle
     // applied to this (fast) staging step.
     int last_logged_decile = 0;
+    const uint64_t upload_start_ms = hal_time_now_us() / 1000u;
+    const uint64_t upload_budget_ms = ota_http_upload_budget_ms(content_len);
     while (stage.written < content_len) {
+        if (ota_http_upload_deadline_passed(upload_start_ms, hal_time_now_us() / 1000u, upload_budget_ms)) {
+            snprintf(fail_reason, sizeof(fail_reason), "upload exceeded its overall deadline at %u/%u bytes",
+                     (unsigned)stage.written, (unsigned)content_len);
+            ESP_LOGW(OTA_HTTP_TAG, "OTA pico update from %s: %s", ip, fail_reason);
+            httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "upload too slow");
+            goto cleanup;
+        }
         size_t want = content_len - stage.written;
         if (want > sizeof(s_ota_pico_chunk)) {
             want = sizeof(s_ota_pico_chunk);

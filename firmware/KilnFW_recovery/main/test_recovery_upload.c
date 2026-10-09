@@ -41,11 +41,15 @@ char g_last_status[64];
 char g_last_hdr_field[32], g_last_hdr_value[32];
 int g_send_calls;
 static size_t s_script_pos;
+int64_t g_now_us;           // esp_timer_get_time() stub
+int64_t g_recv_advance_us;  // clock advance per httpd_req_recv() call (slow-drip simulation)
+int64_t esp_timer_get_time(void) { return g_now_us; }
 
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t len)
 {
     (void)r;
     size_t cap = len;
+    g_now_us += g_recv_advance_us;
     if (g_recv_script) {
         if (s_script_pos >= g_recv_script_len) {
             return -1; // script over: connection closed
@@ -217,6 +221,8 @@ static void reset_all(size_t body_len)
     g_recv_script = NULL;
     g_recv_script_len = 0;
     s_script_pos = 0;
+    g_now_us = 1000000;
+    g_recv_advance_us = 0;
     for (size_t i = 0; i < sizeof(s_body); i++) {
         s_body[i] = (uint8_t)(i * 31u + 7u);
     }
@@ -385,6 +391,34 @@ static void test_short_body_and_timeouts(void)
     CHECK(run(8192, &st, &msg) == RECOVERY_UPLOAD_READ_ERROR && k_abort == 1, "hard recv error aborts");
 }
 
+static void test_overall_deadline(void)
+{
+    int st;
+    const char *msg;
+    // Budget for a 10000-byte upload is 60 s + 10000/2048 s ~= 64.9 s. A
+    // client that drips 1 byte per call with 10 s of clock per call (each
+    // call "succeeds", so the timeout-retry budget never trips) must be cut off.
+    static host_recv_step_t drip[64];
+    for (size_t i = 0; i < 64; i++) {
+        drip[i].kind = 0;
+        drip[i].max_bytes = 1;
+    }
+    reset_all(10000);
+    g_recv_script = drip;
+    g_recv_script_len = 64;
+    g_recv_advance_us = 10000000LL;
+    CHECK(run(10000, &st, &msg) == RECOVERY_UPLOAD_READ_ERROR && st == 400, "slow-drip first chunk: cut off by the overall deadline");
+    CHECK(k_begin == 0, "slow-drip first chunk: nothing written");
+    CHECK(s_script_pos <= 8, "slow-drip first chunk: stopped reading once the deadline passed (not by script end)");
+
+    // Fast client with a large clock budget is unaffected.
+    reset_all(10000);
+    g_recv_advance_us = 1000;
+    CHECK(run(10000, &st, &msg) == RECOVERY_UPLOAD_OK, "normal-speed upload is not cut off");
+    CHECK(recovery_upload_budget_us(0) == 60000000LL, "budget base is 60 s");
+    CHECK(recovery_upload_budget_us(2048) == 61000000LL, "2 KB adds 1 s");
+}
+
 static void test_esp_sink(void)
 {
     int st;
@@ -472,6 +506,7 @@ int main(void)
     test_alloc();
     test_sink_failures();
     test_short_body_and_timeouts();
+    test_overall_deadline();
     test_esp_sink();
     test_send_error();
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);

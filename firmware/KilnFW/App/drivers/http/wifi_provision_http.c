@@ -406,25 +406,33 @@ static esp_err_t scan_get_handler(httpd_req_t *req)
     /* Bounded by MAX_SCAN entries above, each contributing a fixed-size
      * chunk -- no per-request allocation sized from anything a client sent,
      * this is entirely device-controlled. */
-    char json[20 * 64 + 16];
+    /* HEAP, not stack (httpd 8 KB stack); freed on every return path. */
+    const size_t json_cap = 20 * 64 + 16;
+    char *json = malloc(json_cap);
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
     size_t o = 0;
     json[o++] = '[';
     for (size_t i = 0; i < count; i++) {
         char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
         json_escape(results[i].ssid, ssid_escaped, sizeof(ssid_escaped));
-        int n = snprintf(json + o, sizeof(json) - o, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
+        int n = snprintf(json + o, json_cap - o, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
                          i == 0 ? "" : ",", ssid_escaped, (int)results[i].rssi,
                          results[i].secure ? "true" : "false");
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+        if (n < 0 || (size_t)n >= json_cap - o) {
             break; /* ran out of room -- stop here rather than overrun */
         }
         o += (size_t)n;
     }
-    if (o + 1 < sizeof(json)) {
+    if (o + 1 < json_cap) {
         json[o++] = ']';
     }
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t sent = httpd_resp_send(req, json, o);
+    free(json);
+    return sent;
 }
 
 /* WIFI_PROV_MAX_SAVED_NETWORKS is a .c-file-private define in wifi_prov.c,

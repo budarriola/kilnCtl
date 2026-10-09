@@ -841,10 +841,15 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
 static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
 {
     size_t got = 0;
+    // Overall cap on top of the no-progress stall limit: 60 s + want at 2 KB/s.
+    const int64_t deadline_us = esp_timer_get_time() + recovery_upload_budget_us(want);
     // Wall-clock deadline with no progress: one stalled client must not hold
     // the single httpd task (status, abort) for ~100 s.
     int64_t last_progress_us = esp_timer_get_time();
     while (got < want) {
+        if (esp_timer_get_time() > deadline_us) {
+            break;
+        }
         int n = httpd_req_recv(req, (char *)buf + got, want - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
             if (esp_timer_get_time() - last_progress_us > (int64_t)BODY_STALL_LIMIT_MS * 1000) {

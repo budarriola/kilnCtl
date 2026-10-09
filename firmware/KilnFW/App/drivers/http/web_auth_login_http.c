@@ -52,15 +52,16 @@
 // header comment has the full reasoning and the accepted DoS tradeoff for
 // the case where every slot ends up locked at once).
 //
-// STACK: no locals here approach the httpd 8 KB stack blob class this
-// codebase watches for (project_httpd_stack_blob_class) -- the largest
-// local is LOGIN_BODY_MAX (256) bytes, well under the ~256-byte budget
+// STACK: the request body (LOGIN_BODY_MAX, 512 bytes) lives on the heap and is
+// wiped and freed before the KDF runs; the largest remaining local is the
+// 129-byte password, well under the ~256-byte budget
 // WEB_AUTH_PLAN.md section 4 documents for the KDF's own locals, and no
 // buffer here is enlarged beyond that.
 #include "web_auth_login_http.h"
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -328,9 +329,20 @@ static esp_err_t login_page_get_handler(httpd_req_t *req)
                             (size_t)(login_page_html_gz_end - login_page_html_gz_start));
 }
 
-// "username"/"password" form fields, well under the httpd stack budget
-// this codebase enforces -- see this file's header comment.
-#define LOGIN_BODY_MAX 256
+// "username"/"password" form fields. Sized for the worst legal body: "username="
+// (9) + a 32-char username and a 128-char password both fully percent-encoded
+// (3x each = 480) + "&password=" (10) = 499, rounded up. Too large for the
+// 8 KB httpd stack, so the body buffer lives on the heap (see the handler).
+#define LOGIN_BODY_MAX 512
+
+// Explicit wipe the optimizer cannot drop (volatile stores).
+static void login_wipe(void *buf, size_t len)
+{
+    volatile uint8_t *p = (volatile uint8_t *)buf;
+    while (len--) {
+        *p++ = 0;
+    }
+}
 
 static esp_err_t login_post_handler(httpd_req_t *req)
 {
@@ -420,11 +432,17 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     // split it across TCP segments, corrupting username/password field
     // parsing rather than failing loud. Loop until content_len bytes are
     // read, same shape as security_http.c's security_post_handler().
-    char body[LOGIN_BODY_MAX];
+    char *body = (char *)malloc(LOGIN_BODY_MAX);
+    if (body == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
     size_t received = 0;
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
         if (ret <= 0) {
+            login_wipe(body, LOGIN_BODY_MAX);
+            free(body);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
             return ESP_OK;
         }
@@ -436,7 +454,12 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     char password[SECURITY_HTTP_PASSWORD_MAX + 1];
     int username_len = http_form_find_field(body, "username", username, sizeof(username));
     int password_len = http_form_find_field(body, "password", password, sizeof(password));
+    // The plaintext body is no longer needed once the fields are parsed.
+    login_wipe(body, LOGIN_BODY_MAX);
+    free(body);
+    body = NULL;
     if (username_len < 0 || password_len < 0) {
+        login_wipe(password, sizeof(password));
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username and password are required");
         return ESP_OK;
     }
@@ -460,9 +483,18 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     // longer needed -- same discipline web_auth_store.h documents for its
     // own callers ("never logged, never stored, discarded ... immediately
     // after this call").
-    memset(password, 0, sizeof(password));
+    login_wipe(password, sizeof(password));
 
-    if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (xSemaphoreTake(s_login_lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+        // Fail closed: an attempt whose outcome cannot be recorded must not
+        // be answered (a success would mint nothing, a failure would go
+        // uncounted -- unlimited free guesses under contention). Same
+        // response for ok and !ok so it is not an oracle.
+        ESP_LOGW(TAG, "login from %s: lock timeout recording attempt, refused", ip);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "busy");
+        return ESP_OK;
+    }
+    {
         uint32_t now = now_ms();
         login_lockout_slot_t *slot = login_backoff_slot_for(ip, ip_known, now);
         // Finding 2 fix (kept under the new ladder): the pre-check above
@@ -550,7 +582,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     // The previous 96-byte buffer was too small to hold a real cookie and
     // made every successful login fail with a spurious 500 (found by this
     // pass's host tests, not itself one of the seven audit findings, but
-    // blocking their test coverage). Still well under LOGIN_BODY_MAX (256),
+    // blocking their test coverage). Still well under the stack budget,
     // this file's stated httpd-stack budget.
     char cookie[128];
     int cookie_len = snprintf(cookie, sizeof(cookie), HTTP_SESSION_COOKIE_NAME "=%s; HttpOnly; SameSite=Strict; Path=/",

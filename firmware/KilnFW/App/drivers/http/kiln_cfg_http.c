@@ -146,14 +146,23 @@ static esp_err_t list_get_handler(httpd_req_t *req)
     /* KILN_CFG_MAX_COUNT rows * (~60 bytes/row headroom for id+escaped name)
      * plus a small fixed header -- generous over what 8 rows of a <=23-char
      * name could ever need. */
-    char json[KILN_CFG_MAX_COUNT * 96 + 96];
+    /* HEAP, not stack (httpd 8 KB stack, "httpd stack blob class"); freed on
+     * every return path. */
+    const size_t json_cap = KILN_CFG_MAX_COUNT * 96 + 96;
+    char *json = malloc(json_cap);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "kiln_configs list: malloc(%u) failed", (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     int written;
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        written = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                             \
-        if (written < 0 || (size_t)written >= sizeof(json) - o) {                                \
+        written = snprintf(json + o, json_cap - o, __VA_ARGS__);                                 \
+        if (written < 0 || (size_t)written >= json_cap - o) {                                    \
             goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)written;                                                                      \
@@ -175,7 +184,11 @@ static esp_err_t list_get_handler(httpd_req_t *req)
            safety_cfg_store_has_data() ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    {
+        esp_err_t sent = httpd_resp_send(req, json, o);
+        free(json);
+        return sent;
+    }
 
 overflow:
     /* Never send the truncated, malformed partial buffer as a 200 -- that
@@ -185,7 +198,8 @@ overflow:
      * sized generously already; do not enlarge it to "fix" this (house
      * rule: never enlarge httpd stack buffers). */
     ESP_LOGE(TAG, "kiln_configs list JSON overflowed %u-byte buffer at o=%u",
-             (unsigned)sizeof(json), (unsigned)o);
+             (unsigned)json_cap, (unsigned)o);
+    free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, "{\"ok\":false,\"error\":\"kiln configs list too large to encode\"}", HTTPD_RESP_USE_STRLEN);

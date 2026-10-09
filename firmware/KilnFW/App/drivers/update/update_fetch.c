@@ -1055,46 +1055,61 @@ static const char *state_name(fetch_state_t s)
 
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
-    char a[320];
-    char b[768];
-    char rp[UPDATE_REPO_MAX + 48];
-    char repo_now[UPDATE_REPO_MAX];
-    char running[UPDATE_VERSION_STR_MAX];
-    char reason[FETCH_JSON_REASON_MAX];
+    /* HEAP, not stack (httpd 8 KB stack, "httpd stack blob class"): the JSON
+     * pieces and copies together are well over 1 KB. One allocation, freed on
+     * every return path. */
+    typedef struct {
+        char a[320];
+        char b[768];
+        char rp[UPDATE_REPO_MAX + 48];
+        char repo_now[UPDATE_REPO_MAX];
+        char running[UPDATE_VERSION_STR_MAX];
+        char reason[FETCH_JSON_REASON_MAX];
+    } status_bufs_t;
+    status_bufs_t *bf = heap_caps_malloc(sizeof(*bf), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (bf == NULL) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     st_lock();
     const job_status_t *s = &s_c->st;
-    snprintf(a, sizeof(a),
+    snprintf(bf->a, sizeof(bf->a),
              "{\"ok\":true,\"state\":\"%s\",\"kind\":\"%s\",\"stage\":\"%s\",\"error\":\"%s\","
              "\"http_status\":%d,\"bytes_done\":%u,\"bytes_total\":%u,\"busy\":%s,",
              state_name(s->state), s->kind == KIND_CHECK ? "check" : "download", s->stage ? s->stage : "",
              s->error ? s->error : "", s->http_status, (unsigned)s->done, (unsigned)s->total,
              s_c->busy ? "true" : "false");
-    json_safe_copy(repo_now, sizeof(repo_now), s->repo);
-    json_safe_copy(running, sizeof(running), s->running);
-    json_safe_copy(reason, sizeof(reason), s->reason);
-    snprintf(b, sizeof(b),
+    json_safe_copy(bf->repo_now, sizeof(bf->repo_now), s->repo);
+    json_safe_copy(bf->running, sizeof(bf->running), s->running);
+    json_safe_copy(bf->reason, sizeof(bf->reason), s->reason);
+    snprintf(bf->b, sizeof(bf->b),
              "\"tag\":\"%s\",\"prerelease\":%s,\"app_size\":%u,\"running\":\"%s\",\"commit\":\"%s\","
              "\"sha256\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\",\"allowed\":%s,"
              "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s}",
-             s->tag, s->prerelease ? "true" : "false", (unsigned)s->app_size, running, s->commit, s->sha256,
-             s->verdict ? s->verdict : "", reason, s->allowed ? "true" : "false",
+             s->tag, s->prerelease ? "true" : "false", (unsigned)s->app_size, bf->running, s->commit, s->sha256,
+             s->verdict ? s->verdict : "", bf->reason, s->allowed ? "true" : "false",
              s->needs_typed_confirm ? "true" : "false", s->zones_cfg_lower ? "true" : "false");
     st_unlock();
     // Before any job has run the repo is the configured setting.
-    if (repo_now[0] == '\0') {
+    if (bf->repo_now[0] == '\0') {
         char cur[UPDATE_SETTINGS_REPO_MAX_LEN + 1];
         if (update_settings_repo_copy(cur, sizeof(cur))) {
-            json_safe_copy(repo_now, sizeof(repo_now), cur);
+            json_safe_copy(bf->repo_now, sizeof(bf->repo_now), cur);
         }
     }
-    snprintf(rp, sizeof(rp), "\"repo\":\"%s\",", repo_now);
+    snprintf(bf->rp, sizeof(bf->rp), "\"repo\":\"%s\",", bf->repo_now);
     httpd_resp_set_type(req, "application/json");
-    if (httpd_resp_send_chunk(req, a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
-        httpd_resp_send_chunk(req, rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
-        httpd_resp_send_chunk(req, b, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
-        return ESP_FAIL;
+    esp_err_t rc;
+    if (httpd_resp_send_chunk(req, bf->a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+        httpd_resp_send_chunk(req, bf->rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+        httpd_resp_send_chunk(req, bf->b, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
+        rc = ESP_FAIL;
+    } else {
+        rc = httpd_resp_send_chunk(req, NULL, 0);
     }
-    return httpd_resp_send_chunk(req, NULL, 0);
+    heap_caps_free(bf);
+    return rc;
 }
 
 static bool fetch_busy_probe(void)
