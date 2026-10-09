@@ -1143,7 +1143,7 @@ over to it with a JTAG probe.
   (`tools/PcTools/src/kilnctrl/mcp_server_flash.py:353-490`): the running-
   partition mismatch branch (line 450) raises with the actual `running`
   value, names `app_partition_name`, explains the `otadata` gap is a KNOWN
-  GAP (`docs/OTA_SINGLE_SLOT_PLAN.md`), states `ota_rollback_esp()` does not
+  GAP (`docs/OTA_SINGLE_SLOT.md`), states `ota_rollback_esp()` does not
   fix it, and says what a from-scratch board needs. This exact raise path
   is exercised by `test_flash_firmware_verify.py` (asserts `"KNOWN GAP"` in
   the message). The docstring paragraph (lines 777-786) sits on
