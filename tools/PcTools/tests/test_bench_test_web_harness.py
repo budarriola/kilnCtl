@@ -173,6 +173,7 @@ class SmokeStashTest(unittest.TestCase):
         ctx = {"host": "h", "partitions_csv_path": os.devnull}
         with mock.patch.object(partition_http_client, "get_partitions", return_value=[]), \
                 mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=data), \
+                mock.patch.object(dashboard_http_client, "get_cfgfs_format_pending", return_value={}), \
                 mock.patch.object(S.J, "judge_cfgfs_state", return_value=R.CaseResult(R.Verdict.PASS)):
             S._case_fl07(ctx)
         self.assertEqual(ctx["_fl07_cfgfs"], data)
