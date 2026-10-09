@@ -129,6 +129,7 @@ $scanText = ""
 $typedInit = ""
 $typedVars = @()
 $typedCode = ""
+$typedFiles = @()
 foreach ($f in $sourceFiles) {
     $fileText = ((Get-CodeOnlyLines -Path $f.FullName) -join "`n") + "`n"
     $scanText += $fileText
@@ -139,6 +140,7 @@ foreach ($f in $sourceFiles) {
         $typedInit += $t.Init
         $typedCode += $fileText
         $typedVars += $t.Vars
+        $typedFiles += [pscustomobject]@{ Init = $t.Init; Vars = $t.Vars; Code = $fileText }
     }
 }
 $typedVars = @($typedVars | Select-Object -Unique)
@@ -150,7 +152,7 @@ if ($scanText -notmatch 'thermal_guard_cfg_t') {
 $missing = @()
 foreach ($field in $fields) {
     $escaped = [regex]::Escape($field)
-    $assigned = Test-FieldProducedInText -InitText $typedInit -Vars $typedVars -Field $field -CodeText $typedCode -ChainMembers @()
+    $assigned = Test-FieldProducedInFiles -Files $typedFiles -Field $field -ChainMembers @()
     if (-not $assigned) {
         $missing += $field
     }

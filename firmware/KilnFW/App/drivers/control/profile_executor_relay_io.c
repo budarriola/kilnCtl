@@ -282,7 +282,7 @@ static const char *on_off_axis_reason(const on_off_trigger_input_t *in, bool on_
         return "guard5_6_trip";
     }
     if (!in->run_running) {
-        return (in->run_paused && !in->failsafe_on_pause) ? "paused_hold_last" : "run_not_active_failsafe";
+        return in->run_paused ? "paused_hold_last" : "run_not_active_failsafe";
     }
     if (!in->rule.enable) {
         return "no_rule_for_segment";
@@ -596,7 +596,6 @@ on_off_trigger_input_t profile_executor_build_on_off_input(const on_off_input_pa
         .guard_5_6_tripped = p->src_guard_5_6_tripped,
         .run_running = run_running,
         .run_paused = (s_exec.state == PROFILE_EXEC_PAUSED),
-        .failsafe_on_pause = false, /* no per-output override field yet */
         .min_on_s = p->src_min_on_s,
         .min_off_s = p->src_min_off_s,
         .rule = p->rule,

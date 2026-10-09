@@ -9416,7 +9416,6 @@ static on_off_trigger_input_t make_healthy_running_unconditional_on_oin(void)
         .guard_5_6_tripped = false,
         .run_running = true,
         .run_paused = false,
-        .failsafe_on_pause = false,
         .min_on_s = 0,
         .min_off_s = 0,
         .rule = {
@@ -9581,21 +9580,19 @@ typedef struct {
     bool guard_5_6_tripped;
     bool run_running;
     bool run_paused;
-    bool failsafe_on_pause;
 } run_ending_case_t;
 
 static void test_on_off_zone_tick_every_run_ending_path_applies_failsafe(void)
 {
     TEST_SECTION("on/off zone: EVERY run-ending path -- fault/abort/safety-trip/authority-block "
-                 "(failsafe_override), guard 5/6 trip, halt/IDLE/DONE, and PAUSE with failsafe_on_pause -- "
+                 "(failsafe_override), guard 5/6 trip, halt/IDLE/DONE -- "
                  "drives the configured fail-safe state, bypassing the actuation-layer hold entirely "
                  "(min_on_s/min_off_s=9999 must not matter)");
     run_ending_case_t cases[] = {
-        { "global FAULTED (fault escalation / abort)", true,  false, true,  false, false },
-        { "authority-block (safety trip / relay_authority_zone_blocked)", true, false, true, false, false },
-        { "guard 5/6 trip (MAX_TEMP/MIN_TEMP)",         false, true,  true,  false, false },
-        { "run IDLE/DONE (halt)",                       false, false, false, false, false },
-        { "run PAUSED with failsafe_on_pause set",      false, false, false, true,  true  },
+        { "global FAULTED (fault escalation / abort)", true,  false, true,  false },
+        { "authority-block (safety trip / relay_authority_zone_blocked)", true, false, true, false },
+        { "guard 5/6 trip (MAX_TEMP/MIN_TEMP)",         false, true,  true,  false },
+        { "run IDLE/DONE (halt)",                       false, false, false, false },
     };
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         on_off_trigger_state_t decide_state;
@@ -9612,7 +9609,6 @@ static void test_on_off_zone_tick_every_run_ending_path_applies_failsafe(void)
         oin.guard_5_6_tripped = cases[i].guard_5_6_tripped;
         oin.run_running = cases[i].run_running;
         oin.run_paused = cases[i].run_paused;
-        oin.failsafe_on_pause = cases[i].failsafe_on_pause;
         oin.min_on_s = 9999;
         oin.min_off_s = 9999; /* huge hold -- must still be bypassed on every one of these paths */
 
@@ -9629,7 +9625,7 @@ static void test_on_off_zone_tick_every_run_ending_path_applies_failsafe(void)
 
 static void test_on_off_zone_tick_plain_pause_without_override_holds_last_state(void)
 {
-    TEST_SECTION("on/off zone: PAUSE WITHOUT failsafe_on_pause holds the last commanded state -- this is "
+    TEST_SECTION("on/off zone: PAUSE holds the last commanded state -- this is "
                  "the one run-ending-shaped transition that is deliberately NOT a fail-safe path (plan sec 3 "
                  "level 3), distinguishing it from every case in the enumeration above");
     on_off_trigger_state_t decide_state;
@@ -9641,11 +9637,10 @@ static void test_on_off_zone_tick_plain_pause_without_override_holds_last_state(
     on_off_trigger_input_t oin = make_healthy_running_unconditional_on_oin();
     oin.run_running = false;
     oin.run_paused = true;
-    oin.failsafe_on_pause = false; /* the distinguishing bit */
     bool bypass_hold = !oin.run_running; /* run not RUNNING -> still bypass the hold */
     on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(&decide_state, &actuated_on, &actuated_held_s,
                                                                      &oin, bypass_hold, 0, 0);
-    TEST_CHECK(r.actuated_on, "plain PAUSE (no failsafe_on_pause) must HOLD the last commanded state (ON), "
+    TEST_CHECK(r.actuated_on, "plain PAUSE must HOLD the last commanded state (ON), "
                              "not force fail-safe");
 }
 
@@ -10051,7 +10046,6 @@ static void on_off_input_assert_equal(const on_off_trigger_input_t *a, const on_
     EQ_FIELD(guard_5_6_tripped);
     EQ_FIELD(run_running);
     EQ_FIELD(run_paused);
-    EQ_FIELD(failsafe_on_pause);
     EQ_FIELD(min_on_s);
     EQ_FIELD(min_off_s);
     EQ_FIELD(rule.enable);

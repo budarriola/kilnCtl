@@ -37,15 +37,37 @@ function Get-TypedProducerText {
     return [pscustomobject]@{ Init = $init.ToString(); Vars = @($vars | Select-Object -Unique) }
 }
 
+# A value that is a pure constant is a placeholder, not a producer.
+function Test-ConstantValue {
+    param([string]$Value)
+    return ($Value.Trim() -match '^(?:\(\s*[A-Za-z_]\w*\s*\)\s*)?(?:0[xX]?0*[uUlL]*|0*\.0*[fF]?|0\.0+[fF]?|false|NULL|[A-Za-z_]\w*_NONE|\{\s*0?\s*\})$')
+}
+
+# Credits a field only for a NON-constant producing write. Initializer
+# entries `.f = <v>` and statements `var.f = <v>;` with constant <v> do not count.
 function Test-FieldProducedInText {
     param([string]$InitText, [string[]]$Vars, [string]$Field, [string]$CodeText, [string[]]$ChainMembers = @())
     $f = [regex]::Escape($Field)
-    if ($InitText -match "\.\s*$f\s*=") { return $true }
+    foreach ($m in [regex]::Matches($InitText, "\.\s*$f\s*=(?!=)\s*([^,}]*)")) {
+        if (-not (Test-ConstantValue $m.Groups[1].Value)) { return $true }
+    }
     foreach ($v in $Vars) {
         $ve = [regex]::Escape($v)
         $chain = ""
         foreach ($cm in $ChainMembers) { $chain += "(?:" + [regex]::Escape($cm) + "\s*\.\s*)?" }
-        if ($CodeText -match "\b$ve\s*(?:\.|->)\s*$chain$f\s*=[^=]") { return $true }
+        foreach ($m in [regex]::Matches($CodeText, "\b$ve\s*(?:\.|->)\s*$chain$f\s*=(?!=)\s*([^;]*);")) {
+            if (-not (Test-ConstantValue $m.Groups[1].Value)) { return $true }
+        }
+    }
+    return $false
+}
+
+# Per-file crediting: $Files is a list of objects {Init; Vars; Code}, one per
+# source file; a variable's writes count only in the file that declared it.
+function Test-FieldProducedInFiles {
+    param([object[]]$Files, [string]$Field, [string[]]$ChainMembers = @())
+    foreach ($ff in $Files) {
+        if (Test-FieldProducedInText -InitText $ff.Init -Vars $ff.Vars -Field $Field -CodeText $ff.Code -ChainMembers $ChainMembers) { return $true }
     }
     return $false
 }
