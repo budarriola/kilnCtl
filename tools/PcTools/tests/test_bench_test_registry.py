@@ -225,5 +225,156 @@ class HeatFlagTest(unittest.TestCase):
             self.assertFalse(R.get_case(cid).heat, f"{cid} must not be heat=True in the smoke suite")
 
 
+# Ratchet: ids registered without a judge function. Frozen from origin/dev;
+# implementing a case may remove it from here but a NEW judge-less id fails.
+_KNOWN_UNIMPLEMENTED = frozenset({
+    "LCD-05",
+    "LCD-06",
+    "LCD-07",
+    "LCD-10",
+    "LCD-11",
+    "LCD-12",
+    "LCD-13",
+    "LCD-15",
+    "LCD-17",
+    "LCD-18",
+    "LCD-20",
+    "OT-B02",
+    "OT-E11",
+    "SP-10",
+    "SP-11",
+    "ST-01",
+    "ST-02",
+    "ST-03",
+    "ST-04",
+    "WEB-BAK-02",
+    "WEB-BAK-03",
+    "WEB-BAK-04",
+    "WEB-COMM-02",
+    "WEB-COMM-03",
+    "WEB-COMM-04",
+    "WEB-COMM-05",
+    "WEB-COMM-06",
+    "WEB-COMM-07",
+    "WEB-DASH-02",
+    "WEB-DASH-03",
+    "WEB-DASH-04",
+    "WEB-DASH-05",
+    "WEB-DASH-06",
+    "WEB-DASH-07",
+    "WEB-DASH-08",
+    "WEB-DASH-09",
+    "WEB-DASH-10",
+    "WEB-DASH-11",
+    "WEB-DASH-12",
+    "WEB-DIAG-02",
+    "WEB-DIAG-03",
+    "WEB-DIAG-04",
+    "WEB-DIAG-05",
+    "WEB-DIAG-06",
+    "WEB-DIAG-09",
+    "WEB-DIAG-10",
+    "WEB-DIAG-11",
+    "WEB-DISP-02",
+    "WEB-DISP-03",
+    "WEB-DISP-04",
+    "WEB-KCFG-02",
+    "WEB-KCFG-03",
+    "WEB-KCFG-04",
+    "WEB-KCFG-05",
+    "WEB-LOG-02",
+    "WEB-LOG-03",
+    "WEB-OTA-02",
+    "WEB-OTA-03",
+    "WEB-OTA-04",
+    "WEB-OTA-05",
+    "WEB-OTA-06",
+    "WEB-OTA-07",
+    "WEB-OTA-08",
+    "WEB-PROF-02",
+    "WEB-PROF-03",
+    "WEB-PROF-04",
+    "WEB-PROF-05",
+    "WEB-PROF-06",
+    "WEB-PROF-07",
+    "WEB-PROF-08",
+    "WEB-PROF-09",
+    "WEB-PROF-10",
+    "WEB-PROF-11",
+    "WEB-RDY-02",
+    "WEB-RDY-03",
+    "WEB-RDY-04",
+    "WEB-SAF-02",
+    "WEB-SAF-03",
+    "WEB-SAF-04",
+    "WEB-SEC-02",
+    "WEB-SEC-06",
+    "WEB-SET-02",
+    "WEB-SET-03",
+    "WEB-SET-04",
+    "WEB-STIM-02",
+    "WEB-WIFI-02",
+    "WEB-WIFI-03",
+    "WEB-WIFI-04",
+    "WEB-WIFI-05",
+    "WEB-WIZ-02",
+    "WEB-WIZ-03",
+    "WEB-WIZ-04",
+    "WEB-WIZ-05",
+    "WEB-WIZ-06",
+    "WEB-WIZ-07",
+    "WEB-WIZ-08",
+    "WEB-WIZ-09",
+    "WEB-WIZ-10",
+    "WEB-WIZ-11",
+    "WEB-X-02",
+    "WEB-ZONE-02",
+    "WEB-ZONE-03",
+    "WEB-ZONE-04",
+    "WEB-ZONE-05",
+    "WEB-ZONE-06",
+    "WEB-ZONE-07",
+    "WEB-ZONE-08",
+    "WEB-ZONE-09",
+    "WEB-ZONE-10",
+    "WEB-ZONE-11",
+    "WEB-ZONE-12",
+    "WEB-ZONE-13",
+})
+
+
+def _judgeless_ids():
+    return {cid for cid, spec in R.REGISTRY.items() if spec.judge is None}
+
+
+def _new_unimplemented(known=_KNOWN_UNIMPLEMENTED):
+    """Judge-less ids not in the frozen list (must be empty)."""
+    return sorted(_judgeless_ids() - set(known))
+
+
+def _suite_ids_missing(suite_ids):
+    return sorted(set(suite_ids) - set(R.REGISTRY))
+
+
+class RatchetTest(unittest.TestCase):
+    def test_no_new_judgeless_ids(self):
+        self.assertEqual(_new_unimplemented(), [])
+
+    def test_nightly_and_full_ids_exist_in_registry(self):
+        for name in ("nightly", "full"):
+            self.assertEqual(_suite_ids_missing(R.SUITES[name]), [], name)
+
+    def test_negative_fake_judgeless_id_is_caught(self):
+        R.REGISTRY["ZZ-FAKE"] = R.CaseSpec(id="ZZ-FAKE", area="ZZ", description="fake")
+        try:
+            self.assertEqual(_new_unimplemented(), ["ZZ-FAKE"])
+        finally:
+            del R.REGISTRY["ZZ-FAKE"]
+        self.assertEqual(_new_unimplemented(), [])
+
+    def test_negative_bogus_nightly_id_is_caught(self):
+        self.assertEqual(_suite_ids_missing(list(R.SUITES["nightly"]) + ["ZZ-BOGUS"]), ["ZZ-BOGUS"])
+
+
 if __name__ == "__main__":
     unittest.main()
