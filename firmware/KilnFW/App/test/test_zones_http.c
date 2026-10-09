@@ -1811,10 +1811,16 @@ static void test_zones_cfg_lock_covers_commit_and_setters(void)
                  "is TAKEN around the write, not real mutual exclusion)");
     seed_two_zone_pid_baseline();
     const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    /* nvs_save() snapshots RAM under the same lock (LOW-4), so measure its own acquisitions
+     * first and expect the commit's single acquisition on top of that. */
+    uint32_t s0 = s_zones_cfg_lock_acquires;
+    (void)nvs_save();
+    uint32_t save_acq = s_zones_cfg_lock_acquires - s0;
+    TEST_CHECK(save_acq >= 1, "nvs_save takes the zones lock to snapshot");
     uint32_t a0 = s_zones_cfg_lock_acquires;
     run_zones_post(body);
     TEST_CHECK(s_test_ok_called && !s_test_err_called, "submit commits");
-    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1, "the successful commit took the lock exactly once");
+    TEST_CHECK(s_zones_cfg_lock_acquires == a0 + 1 + save_acq, "the successful commit took the lock once, plus its save's snapshot");
 
     a0 = s_zones_cfg_lock_acquires;
     TEST_CHECK(zones_config_set_max_ramp_no_save(0, 100.0f), "setter succeeds");

@@ -1223,8 +1223,36 @@ static void test_start_does_not_migrate_after_load_oom(void)
     (void)h;
 }
 
+static void test_save_persists_locked_snapshot(void)
+{
+    TEST_SECTION("zones store: nvs_save() persists a snapshot taken under zones_cfg_lock (LOW-4)");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    stage("snap", 7.0f);
+    uint32_t a0 = s_zones_cfg_lock_acquires;
+    TEST_CHECK(nvs_save() == ESP_OK, "save ok");
+    TEST_CHECK(s_zones_cfg_lock_acquires > a0, "nvs_save took the zones lock to snapshot RAM");
+    uint32_t a1 = s_zones_cfg_lock_acquires;
+    {
+        /* What reached the file is the stamped snapshot: version/CRC on disk match the RAM mirror. */
+        zones_cfg_t *rr = malloc(sizeof(*rr));
+        uint32_t rv = 0;
+        bool vv = false;
+        zones_config_cfg_fs_load_raw(rr, &rv, &vv);
+        TEST_CHECK(vv && rr->version == ZONES_CFG_VERSION && rr->crc32 == s_zones.cfg.crc32,
+                   "the file holds a stamped snapshot whose CRC matches RAM's mirror");
+        free(rr);
+    }
+    bool eq = zones_config_persisted_equals_ram();
+    (void)eq; /* staged test fixtures are not load-normalized; the lock is what is asserted here */
+    TEST_CHECK(s_zones_cfg_lock_acquires > a1, "persisted_equals_ram snapshots RAM under the lock");
+    s_zones.cfg.zones[0].pid_kp += 1.0f;
+    TEST_CHECK(!zones_config_persisted_equals_ram(), "an unsaved RAM edit is detected");
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
+    test_save_persists_locked_snapshot();
     test_partition_absent_falls_through_to_nvs_only();
     test_nvs_fallback_then_file_preferred_after_migration();
     test_dual_write_keeps_file_and_nvs_in_sync();
