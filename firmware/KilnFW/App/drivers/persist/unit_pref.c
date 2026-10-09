@@ -6,6 +6,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_save_lock.h"
 
 static const char *TAG = "unit_pref";
 
@@ -139,6 +140,9 @@ unit_pref_t unit_pref_get(void)
     return s_unit_pref;
 }
 
+/* Callers: httpd, LCD task, UART bridge task -- rev read + commit + bump is one section. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 esp_err_t unit_pref_set(unit_pref_t pref)
 {
     if (pref != UNIT_PREF_CELSIUS && pref != UNIT_PREF_FAHRENHEIT) {
@@ -150,6 +154,7 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     // below succeeds (same "in-RAM truth first" reasoning zones_http.c's
     // zones_config_set_pid()/set_model() use).
     s_unit_pref = pref;
+    cfg_save_lock_take(&s_save_lock);
     uint32_t new_rev = s_unit_pref_rev + 1;
     uint8_t raw = (uint8_t)pref;
 
@@ -160,6 +165,9 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     esp_err_t err = pref_cfg_fs_commit(UNIT_PREF_FILE_PATH, &raw, sizeof(raw), new_rev, "unit preference");
     if (err == ESP_OK) {
         s_unit_pref_rev = new_rev;
+    }
+    cfg_save_lock_give(&s_save_lock);
+    if (err == ESP_OK) {
         ESP_LOGI(TAG, "unit preference saved: %s", pref == UNIT_PREF_FAHRENHEIT ? "Fahrenheit" : "Celsius");
     }
     return err;

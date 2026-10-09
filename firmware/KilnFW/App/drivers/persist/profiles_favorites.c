@@ -12,6 +12,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_save_lock.h"
 #include "profiles_builtin.h"
 #include "profiles_types.h"
 
@@ -231,6 +232,10 @@ bool profiles_favorites_is(uint8_t id)
     return (s_fav_builtin & builtin_bit) != 0;
 }
 
+/* Callers: httpd and the LCD picker task. Covers the bitmap edit too, so the blob
+ * committed is never a mix of two callers' edits. Leaf lock. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
 {
     bool is_user = false;
@@ -239,6 +244,7 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
         return ESP_ERR_INVALID_ARG;
     }
 
+    cfg_save_lock_take(&s_save_lock);
     bool changed;
     if (is_user) {
         bool was = profiles_slot_bitmap_test(&s_fav_user, id);
@@ -257,6 +263,7 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
     if (!changed) {
         /* No change -- nothing to write. Saying OK here keeps an unfavorite
          * of something that was never favorited from reporting a failure. */
+        cfg_save_lock_give(&s_save_lock);
         return ESP_OK;
     }
 
@@ -266,11 +273,11 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
     fav_item_t item = { .user = s_fav_user, .builtin = s_fav_builtin };
     uint32_t new_rev = s_fav_rev + 1;
     esp_err_t err = pref_cfg_fs_commit(PROFILES_FAVORITES_FILE_PATH, &item, sizeof(item), new_rev, "profile favorites");
-    if (err != ESP_OK) {
-        return err;
+    if (err == ESP_OK) {
+        s_fav_rev = new_rev;
     }
-    s_fav_rev = new_rev;
-    return ESP_OK;
+    cfg_save_lock_give(&s_save_lock);
+    return err;
 }
 
 void profiles_favorites_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,

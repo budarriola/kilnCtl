@@ -410,6 +410,38 @@ static void test_start_nvs_error_but_file_fallback_returns_ok_with_file_value(vo
     cfg_fs_deinit();
 }
 
+static pref_cfg_fs_write_fn_t g_up_orig_write_fn;
+static int g_up_depth_at_write = -1;
+static esp_err_t up_depth_probe_write(const char *rel_path, const void *data, size_t len)
+{
+    g_up_depth_at_write = g_test_stub_lock_depth;
+    return g_up_orig_write_fn(rel_path, data, len);
+}
+
+/* Same-rev race guard: the rev read, the commit and the rev bump are one section under
+ * the save lock (unit_pref_set runs on httpd, the LCD task and the UART bridge task). */
+static void test_save_holds_lock_across_rev_read_and_commit(void)
+{
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    simulate_reboot();
+    unit_pref_start();
+    int base = g_test_stub_lock_depth;
+
+    g_up_orig_write_fn = pref_cfg_fs_get_write_fn();
+    pref_cfg_fs_set_write_fn(up_depth_probe_write);
+    uint32_t r0 = s_unit_pref_rev;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "first save ok");
+    TEST_CHECK(g_up_depth_at_write == base + 1, "save lock is held while the file is written");
+    TEST_CHECK(g_test_stub_lock_depth == base, "save lock released after the save");
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_OK, "second save ok");
+    TEST_CHECK(s_unit_pref_rev == r0 + 2, "two saves get distinct, consecutive revs");
+    pref_cfg_fs_set_write_fn(g_up_orig_write_fn);
+    cfg_fs_deinit();
+}
+
 void run_test_unit_pref(void)
 {
     TEST_SECTION("unit_pref");
@@ -423,6 +455,7 @@ void run_test_unit_pref(void)
     test_divergence_tie_break_higher_rev_wins();
     test_dualwrite_status_reports_divergence();
     test_mount_failed_falls_through_to_nvs_only();
+    test_save_holds_lock_across_rev_read_and_commit();
 
     test_start_partition_init_failure_returns_error_and_defaults();
     test_start_open_error_without_file_returns_error();
