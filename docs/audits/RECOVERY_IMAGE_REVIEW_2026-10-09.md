@@ -36,7 +36,9 @@ Checked and found correct:
 
 ## Findings
 
-### M1 (MED): an apply whose boot_guard clear cannot succeed erases `app` and leaves the board in recovery
+Fix status: M1, M2, L1-L4 and I5 fixed in the commit that adds this note (see git log); I1-I4 are informational and unchanged.
+
+### M1 (MED): an apply whose boot_guard clear cannot succeed erases `app` and leaves the board in recovery -- FIXED (apply_staged_post clears boot_guard (an unusable kiln_nvs counts as nothing to clear) before the first erase of `app`; refuses 500 otherwise)
 
 Where:
 - `firmware/KilnFW_recovery/main/recovery_apply_esp.c:131-133`. `cb_set_boot` calls `pre_boot` first and returns -1 if it fails.
@@ -60,7 +62,7 @@ Suggested fix (either):
 
 Either way, failing before the first erase is strictly better than failing after it.
 
-### M2 (MED): direct ESP upload selects the new image before clearing boot_guard, and reboots even if the clear failed
+### M2 (MED): direct ESP upload selects the new image before clearing boot_guard, and reboots even if the clear failed -- FIXED (ota_esp_post clears boot_guard before set_boot; a failed clear refuses with no set_boot and no reboot)
 
 Where: `firmware/KilnFW_recovery/main/recovery_http.c:219-237`. `recovery_boot_partition_set_and_verify(target)` runs, then `clear_boot_guard` (line 230). Its result only changes the response text. `restart_soon(500)` runs unconditionally.
 
@@ -74,7 +76,7 @@ This is the opposite order from `recovery_exit_post` (line 672), which clears fi
 
 Suggested fix: clear boot_guard before `recovery_boot_partition_set_and_verify`, as the exit route does. On a failed clear, return 500 and do not reboot. `app` already holds the verified image, so a later `/api/recovery/exit` can select it once the clear works. Applying the M1 pre-check here too covers the case where the upload has already erased `app`.
 
-### L1 (LOW): `erase_key_in` creates the namespace it is erasing from
+### L1 (LOW): `erase_key_in` creates the namespace it is erasing from -- FIXED (erase_key_in opens READONLY first; a missing namespace/key is success and nothing is created)
 
 Where: `firmware/KilnFW_recovery/main/recovery_http.c:592-611`. `nvs_open_from_partition(..., NVS_READWRITE, ...)` creates the namespace when it is absent, so the `ESP_ERR_NVS_NOT_FOUND` branch at line 596 is effectively unreachable for READWRITE. `clear_boot_guard` (line 635) calls it for both the current key (`kiln_cfg`/`bootguard`) and the legacy key (`boot_guard`/`count`), and the legacy namespace is normally absent.
 
@@ -84,7 +86,7 @@ Failure scenario:
 
 Suggested fix: open READONLY first. Treat `ESP_ERR_NVS_NOT_FOUND`, or a missing key found with `nvs_find_key`, as success with nothing to erase. Only reopen READWRITE to erase a key that exists.
 
-### L2 (LOW): one stalled client can hold the single httpd task for about 100 s
+### L2 (LOW): one stalled client can hold the single httpd task for about 100 s -- FIXED (read_body_exact uses a 15 s no-progress wall-clock deadline)
 
 Where:
 - `firmware/KilnFW_recovery/main/recovery_http.c:792-811`. `read_body_exact` allows up to 20 consecutive recv timeouts, each at the default `recv_wait_timeout` of 5 s.
@@ -96,7 +98,7 @@ Failure scenario: a client starts a Pico upload over a weak SoftAP link and stop
 
 Suggested fix: use a wall-clock deadline (for example 15-20 s with no progress) instead of a count of timeouts. Alternatively, lower the Pico retry count to match the ESP path.
 
-### L3 (LOW): the stage stays VERIFIED after a direct upload, and recovery will later apply it with no version check
+### L3 (LOW): the stage stays VERIFIED after a direct upload, and recovery will later apply it with no version check -- FIXED (ota_esp_post erases the stage header after a successful upload; a failure is logged and reported, not fatal)
 
 Where:
 - `firmware/KilnFW_recovery/main/recovery_http.c:183-237`. `ota_esp_post` never touches the stage.
@@ -113,7 +115,7 @@ Suggested fix (any of):
 - Have the app's Install path re-run `update_policy_decide` against the running version before `recovery_boot`.
 - Show the staged version next to the running version on the recovery page's Apply box, with a warning when it is older.
 
-### L4 (LOW): Pico relay task stack is tight and unmeasured
+### L4 (LOW): Pico relay task stack is tight and unmeasured -- FIXED (RELAY_STACK raised to 6144)
 
 Where: `firmware/KilnFW_recovery/main/recovery_pico.c:48` (`RELAY_STACK 4096`). The task uses `char t[256]` in `handle_frame` (line 305) and `char m[240]` in `run_transfer`. It also makes vsnprintf-family calls (about 1 KB+ on ESP-IDF newlib) and UART driver calls.
 
@@ -141,7 +143,7 @@ Apply and direct upload accept any image that passes structural checks, chip id,
 
 When an old Pico bootloader reports no trailer, the operator picks the slot. A wrong pick leaves the Pico unbootable until SWD. The refusal text says so. No change suggested beyond keeping that text.
 
-### I5 (INFO): "done" visible for 1.5 s
+### I5 (INFO): "done" visible for 1.5 s -- FIXED (recovery_apply_staged reports PROBABLE-OK when contact is lost after the finalizing phase)
 
 `recovery_apply_esp.c:173-174` waits 1.5 s then restarts. A poller slower than that sees the SoftAP drop and has to infer success from the app coming up. The MCP `recovery_apply_status` tool should treat "connection lost after `verify`/`set_boot` progress" as probable success and confirm through the app.
 
