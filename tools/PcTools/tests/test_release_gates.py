@@ -210,5 +210,71 @@ class SchemaDiffNotes(unittest.TestCase):
             self.assertNotIn("ROLLBACK HAZARD", n)
 
 
+class BenchEvidence(unittest.TestCase):
+    NOW = 1_800_000_000.0
+    BUILD = "Oct 01 2026 10:00:00"
+
+    def _run(self, root, suite, age_days=1, build=None, tainted=False, exit_code=0, verdicts=("PASS", "SKIP"), name=None):
+        d = os.path.join(root, "%s_%s" % (name or "20261001T000000Z", suite))
+        os.makedirs(d)
+        doc = {"suite": suite, "run_id": os.path.basename(d), "tainted": tainted, "exit_code": exit_code,
+               "ended": self.NOW - age_days * 86400,
+               "board_before": {"esp_fw_build": build or self.BUILD},
+               "cases": {"C%d" % i: {"verdict": v} for i, v in enumerate(verdicts)}}
+        with open(os.path.join(d, "summary.json"), "w") as f:
+            json.dump(doc, f)
+
+    def _go(self, root, suites=("ota", "lcd", "safety")):
+        return rg.bench_evidence(root, self.BUILD, list(suites), 7, now=self.NOW)
+
+    def _all(self, root, skip=None, **bad):
+        for s in ("ota", "lcd", "safety"):
+            if s != skip:
+                self._run(root, s, **(bad if s == "safety" else {}))
+
+    def test_happy(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._all(d)
+            code, lines = self._go(d)
+            self.assertEqual(code, 0)
+            self.assertEqual(len(lines), 3)
+
+    def _expect(self, reason, **bad):
+        with tempfile.TemporaryDirectory() as d:
+            self._all(d, **bad)
+            code, lines = self._go(d)
+            self.assertEqual(code, 1)
+            self.assertIn(reason, "\n".join(lines))
+
+    def test_stale(self):
+        self._expect("stale", age_days=8)
+
+    def test_other_build(self):
+        self._expect("other build", build="Sep 01 2026 00:00:00")
+
+    def test_tainted(self):
+        self._expect("tainted", tainted=True)
+
+    def test_failed_case(self):
+        self._expect("failed", verdicts=("PASS", "FAIL"))
+
+    def test_missing_suite(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._all(d, skip="lcd")
+            code, lines = self._go(d)
+            self.assertEqual(code, 1)
+            self.assertIn("no runs found", "\n".join(lines))
+
+    def test_malformed_json_skipped(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._all(d)
+            bad = os.path.join(d, "20261002T000000Z_ota")
+            os.makedirs(bad)
+            with open(os.path.join(bad, "summary.json"), "w") as f:
+                f.write("{not json")
+            code, _ = self._go(d)
+            self.assertEqual(code, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

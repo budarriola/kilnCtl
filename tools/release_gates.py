@@ -18,6 +18,9 @@ Commands (stdlib only):
                                print open gates; exit 1 if the tag is a stable tag
                                (no -suffix) with open gates and --allow-open is absent.
                                A pre-release tag (v1.0.0-pre.1) never refuses.
+  bench-evidence --fw-build B [--logs-dir D] [--max-age-days 7] [--suites ota,lcd,safety]
+                               release gate bench-pass-7d: newest qualifying summary.json per suite;
+                               exit 1 if any suite has none (names the nearest miss). Read-only.
   notes  --root R --tag T [--out FILE] [--max N]
                                default release body: git log --oneline since the previous
                                semver tag merged into HEAD, or the last N (default 50)
@@ -29,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 SEMVER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.]+))?$")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -201,6 +205,75 @@ def build_notes(root, tag, max_commits=50):
     return "\n".join(out)
 
 
+def _load_summary(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _evaluate_run(doc, fw_build, max_age_s, now):
+    """Return (reasons, counts, age_s). reasons is empty for a qualifying run."""
+    reasons = []
+    cases = doc.get("cases") if isinstance(doc.get("cases"), dict) else {}
+    counts = {}
+    for c in cases.values():
+        v = c.get("verdict") if isinstance(c, dict) else None
+        counts[str(v)] = counts.get(str(v), 0) + 1
+    if doc.get("tainted") is not False:
+        reasons.append("tainted")
+    if doc.get("exit_code") != 0 or any(v not in ("PASS", "SKIP") for v in counts):
+        reasons.append("failed")
+    before = doc.get("board_before") if isinstance(doc.get("board_before"), dict) else {}
+    if before.get("esp_fw_build") != fw_build:
+        reasons.append("other build (%s)" % before.get("esp_fw_build"))
+    ended = doc.get("ended")
+    age = now - ended if isinstance(ended, (int, float)) else None
+    if age is None or age > max_age_s:
+        reasons.append("stale")
+    return reasons, counts, age
+
+
+def bench_evidence(logs_dir, fw_build, suites, max_age_days, now=None):
+    """Return (exit_code, lines). One line per suite; nonzero if any suite has no qualifying run."""
+    import glob
+    now = time.time() if now is None else now
+    max_age_s = max_age_days * 86400.0
+    lines, bad = [], False
+    for suite in suites:
+        best, near = None, None
+        for path in glob.glob(os.path.join(logs_dir, "*_%s" % suite, "summary.json")):
+            doc = _load_summary(path)
+            if doc is None or doc.get("suite") != suite:
+                continue
+            reasons, counts, age = _evaluate_run(doc, fw_build, max_age_s, now)
+            rec = (doc.get("ended") if isinstance(doc.get("ended"), (int, float)) else 0,
+                   doc.get("run_id") or os.path.basename(os.path.dirname(path)), counts, age, reasons)
+            if not reasons:
+                if best is None or rec[0] > best[0]:
+                    best = rec
+            elif near is None or (len(rec[4]), -rec[0]) < (len(near[4]), -near[0]):
+                near = rec
+        if best:
+            _, rid, counts, age, _ = best
+            lines.append("%-8s OK    %s age=%.1fd cases=%s" % (suite, rid, age / 86400.0, _fmt_counts(counts)))
+        else:
+            bad = True
+            if near:
+                _, rid, counts, age, reasons = near
+                lines.append("%-8s FAIL  nearest miss %s: %s (cases=%s)" % (
+                    suite, rid, ", ".join(reasons), _fmt_counts(counts)))
+            else:
+                lines.append("%-8s FAIL  no runs found for suite under %s" % (suite, logs_dir))
+    return (1 if bad else 0), lines
+
+
+def _fmt_counts(counts):
+    return ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts)) or "none"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -216,6 +289,11 @@ def main(argv=None):
     n.add_argument("--tag", required=True)
     n.add_argument("--out")
     n.add_argument("--max", type=int, default=50)
+    b = sub.add_parser("bench-evidence")
+    b.add_argument("--fw-build", required=True)
+    b.add_argument("--logs-dir", default="logs/bench_test")
+    b.add_argument("--max-age-days", type=float, default=7)
+    b.add_argument("--suites", default="ota,lcd,safety")
     a = ap.parse_args(argv)
     try:
         if a.cmd == "status":
