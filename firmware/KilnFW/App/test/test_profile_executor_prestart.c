@@ -10501,6 +10501,46 @@ static void test_aux_relay_io_refusal_is_logged(void)
     TEST_CHECK(esp_log_test_capture_contains("RELAY_IO targets relay"), "refusal logged by name");
 }
 
+static void test_aux_on_time_and_switch_count(void)
+{
+    TEST_SECTION("aux: per-run on_time_s and switch_count; never-switched 0/0; second run resets");
+    char err[192];
+    profile_t p = aux_test_profile();
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = ON_OFF_TEMP_CMP_BELOW;
+    p.on_off_rules[0].temp_threshold_c = 100.0f;
+    aux_test_setup(&p);
+    g_stub_aux[0].tc_zone = 0;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run starts");
+    s_exec.zones[0].actual_valid = true;
+    s_exec.zones[0].faulted = false;
+    TEST_CHECK(s_exec.aux[0].switch_count == 0 && s_exec.aux[0].on_time_s == 0.0f, "fresh run reads 0/0");
+    TEST_CHECK(s_exec.aux[1].switch_count == 0 && s_exec.aux[1].on_time_s == 0.0f, "never-switched aux 2 reads 0/0");
+    float expect = 0.0f;
+    float temps[] = {50.0f, 50.0f, 50.0f, 150.0f, 150.0f, 150.0f, 50.0f, 50.0f, 50.0f};
+    for (unsigned i = 0; i < sizeof(temps) / sizeof(temps[0]); i++) {
+        s_exec.zones[0].actual_c = temps[i];
+        aux_test_tick(2.0f);
+        if (s_exec.aux[0].commanded_on) expect += 2.0f;
+    }
+    TEST_CHECK(s_exec.aux[0].commanded_on, "aux is ON at the end");
+    TEST_CHECK(s_exec.aux[0].switch_count == 2, "two off->on transitions counted");
+    TEST_CHECK(expect > 0.0f && s_exec.aux[0].on_time_s == expect, "on_time_s equals the commanded-ON tick time");
+    profile_exec_status_t st;
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.aux[0].switch_count == 2 && st.aux[0].on_time_s == (uint32_t)expect, "status snapshot carries both");
+    TEST_CHECK(s_exec.aux[1].switch_count == 0 && s_exec.aux[1].on_time_s == 0.0f, "unclaimed aux still 0/0");
+    profile_executor_halt();
+
+    aux_test_setup(&p);
+    g_stub_aux[0].tc_zone = 0;
+    s_exec.aux[0].switch_count = 5; /* stale values the run start must clear */
+    s_exec.aux[0].on_time_s = 9.0f;
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "second run starts");
+    TEST_CHECK(s_exec.aux[0].switch_count == 0 && s_exec.aux[0].on_time_s == 0.0f, "second run resets both counters");
+    profile_executor_halt();
+}
+
 static void test_aux_contact_cycles_are_counted(void)
 {
     TEST_SECTION("aux WP-3: every aux relay transition adds a contact cycle for that relay's mask");
@@ -11121,6 +11161,7 @@ static void run_test_aux_wp3(void)
     test_aux_start_refused_when_cap_unsatisfiable();
     test_aux_relay_io_refusal_is_logged();
     test_aux_contact_cycles_are_counted();
+    test_aux_on_time_and_switch_count();
     test_aux_handoff_write_failure_sets_pending();
     test_aux_status_reports_claimed_aux();
     test_aux_off_pending_retried_by_task_loop();

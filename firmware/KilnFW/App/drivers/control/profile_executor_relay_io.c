@@ -509,6 +509,7 @@ void aux_apply_relay(uint8_t aux_idx, bool want_on)
          * zone relays (heater_output.c note_transition()): an aux relay
          * switching is a contact cycle like any other. */
         relay_cycles_add(mask, 1u);
+        if (want_on) s_exec.aux[aux_idx].switch_count++;
     }
     s_exec.aux[aux_idx].commanded_on = want_on;
 }
@@ -744,6 +745,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
         }
         aux_apply_relay(i, r.actuated_on);
+        if (s_exec.aux[i].commanded_on && dt_s > 0.0f) s_exec.aux[i].on_time_s += dt_s;
     }
 }
 

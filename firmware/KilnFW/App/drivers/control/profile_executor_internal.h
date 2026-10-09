@@ -970,6 +970,8 @@ typedef struct {
         float held_s;
         bool commanded_on; /* last level actually written (post authority gate) */
         uint8_t rule_reason; /* profile_exec_relay_denied_t, latest tick; status JSON only */
+        float on_time_s;     /* seconds commanded ON this run; zeroed at run start only, not persisted */
+        uint32_t switch_count; /* off->on commanded transitions this run; zeroed at run start only */
     } aux[AUX_OUTPUTS_COUNT];
 
     /* TODO relay/IO segments (owner's request, see profiles_http.h's

@@ -700,6 +700,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * tracker), not a flat "settled": a stop followed by a quick restart
          * must still wait out min_off_s. */
         profile_executor_aux_reset_runtime(ai);
+        s_exec.aux[ai].on_time_s = 0.0f;
+        s_exec.aux[ai].switch_count = 0;
     }
     /* Same "starts owing nothing" reasoning as claimed_relay_mask just above,
      * for the relay/IO segment machinery: a previous run's io_segs[] state

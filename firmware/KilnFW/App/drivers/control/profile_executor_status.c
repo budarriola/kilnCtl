@@ -475,6 +475,8 @@ void profile_executor_get_status(profile_exec_status_t *out)
             out->aux[ai].commanded_on = s_exec.aux[ai].commanded_on;
             out->aux[ai].actuated_on = s_exec.aux[ai].actuated_on;
             out->aux[ai].rule_reason = s_exec.aux[ai].rule_reason;
+            out->aux[ai].on_time_s = (uint32_t)s_exec.aux[ai].on_time_s;
+            out->aux[ai].switch_count = s_exec.aux[ai].switch_count;
         }
 
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
