@@ -32,8 +32,20 @@ $rows = @{}
 foreach ($l in (Get-Content $table)) {
     if ($l -match '^\|\s*`([^`]+)`\s*\|\s*([^|]+?)\s*\|') { $rows[$Matches[1]] = $Matches[2] }
 }
-$valid = 'NEGATIVE-TESTED', 'PARTIAL', 'REVIEWED, NOT MUTATED', 'NOT AUDITED'
+# A non-blank line that directly follows a table row but does not start with '|' is a row
+# split by a mangled escape (e.g. a backslash-n path written as "tools" + newline).
 $bad = @()
+$inTable = $false
+$ln = 0
+foreach ($l in (Get-Content $table)) {
+    $ln++
+    if ($l -match '^\|') { $inTable = $true }
+    elseif ($inTable) {
+        if ($l.Trim() -eq '') { $inTable = $false }
+        else { $bad += "line ${ln}: non-table line inside the table block (split row?): $l" }
+    }
+}
+$valid = 'NEGATIVE-TESTED', 'PARTIAL', 'REVIEWED, NOT MUTATED', 'NOT AUDITED'
 foreach ($d in $discovered) {
     if (-not $rows.ContainsKey($d)) { $bad += "no row for discovered check: $d" }
 }

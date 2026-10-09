@@ -150,9 +150,9 @@ def _http_get_raw_authed(host: str, path: str, timeout: float = 5.0) -> "Tuple[O
     except urllib.error.HTTPError as exc:
         try:
             detail = _decode_body(exc.read(), exc.headers) if exc.fp else None
-        except BodyDecodeError as dexc:
-            return None, str(dexc)
         except Exception:  # noqa: BLE001
+            # Includes BodyDecodeError: the HTTP status is real and decisive
+            # (a 409/403 refusal); only the body is unusable.
             detail = None
         return exc.code, detail
     except (urllib.error.URLError, OSError, http_auth.HttpAuthError) as exc:
@@ -437,17 +437,7 @@ class _SecHttpClient:
             req.add_header("Cookie", f"kiln_sid={cookie}")
         try:
             with self._opener.open(req, timeout=self.timeout) as resp:
-                raw = resp.read()
-                if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
-                    try:
-                        raw = gzip.decompress(raw)
-                    except (EOFError, zlib.error, OSError):
-                        # A Content-Encoding: gzip header with a body that
-                        # doesn't actually decompress (truncated read,
-                        # misbehaving proxy) must not crash the case --
-                        # report "no body", not an unhandled exception.
-                        return resp.getcode(), None, resp.headers
-                return resp.getcode(), raw.decode("utf-8", errors="replace"), resp.headers
+                return resp.getcode(), _decode_body(resp.read(), resp.headers), resp.headers
         except urllib.error.HTTPError as exc:
             try:
                 raw = exc.read()
@@ -460,6 +450,8 @@ class _SecHttpClient:
                 detail = None
             return exc.code, detail, exc.headers
         except (urllib.error.URLError, OSError) as exc:
+            # OSError includes BodyDecodeError (bad gzip on a 2xx): a transport
+            # problem -> (None, reason) so the judge reports INCONCLUSIVE.
             return None, str(exc), None
 
     def get_config(self) -> "Tuple[Optional[int], Optional[dict]]":

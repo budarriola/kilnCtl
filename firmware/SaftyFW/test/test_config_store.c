@@ -1412,7 +1412,7 @@ static void test_frozen_blob_truncated_rejected(void)
         TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
                    "truncated old blob in a sector: *out untouched");
     }
-    // Torn DATA byte with the stored CRC intact (v2 offset 50 is inside the
+    // Torn DATA byte with the stored CRC intact (v2 offset 20 is inside the
     // CRC-covered payload): must be rejected by the CRC check alone.
     for (int i = 0; i < 2; i++) {
         uint8_t torn[CONFIG_STORE_RECORD_LEN];

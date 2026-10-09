@@ -72,6 +72,37 @@ class DecodeBodyTest(unittest.TestCase):
         self.assertEqual(C._decode_body(gzip.compress(b"hi"), {"Content-Encoding": "gzip"}), "hi")
 
 
+def _truncated_gzip():
+    return gzip.compress(b"hello world " * 50)[:-12]
+
+
+def _corrupt_deflate_gzip():
+    good = bytearray(gzip.compress(b"hello world " * 50))
+    good[10] = 0xFF  # invalid deflate block -> zlib.error, not OSError
+    return bytes(good)
+
+
+class BadGzipStatusTest(unittest.TestCase):
+    def test_authed_get_http_error_with_bad_gzip_keeps_status(self):
+        headers = _FakeHeaders({"Content-Encoding": "gzip"})
+        err = urllib.error.HTTPError(
+            url="http://1.2.3.4/x", code=409, msg="Conflict", hdrs=headers,
+            fp=io.BytesIO(_truncated_gzip()))
+        with mock.patch.object(C.http_auth, "urlopen", side_effect=err):
+            status, text = C._http_get_raw_authed("1.2.3.4", "/x")
+        self.assertEqual(status, 409)
+        self.assertIsNone(text)
+
+    def test_cases_web_get_raw_maps_zlib_error_to_no_status(self):
+        from kilnctrl.bench_test import cases_web as W
+        for body in (_truncated_gzip(), _corrupt_deflate_gzip()):
+            resp = _FakeHttpResponse(200, body, {"Content-Encoding": "gzip"})
+            with mock.patch.object(W._NO_REDIRECT_OPENER, "open", return_value=resp):
+                status, text = W._http_get_raw("1.2.3.4", "/nav.js")
+            self.assertIsNone(status)
+            self.assertTrue(text)
+
+
 class SecHttpClientGetTest(unittest.TestCase):
     def test_sends_accept_encoding_gzip(self):
         client = C._SecHttpClient("1.2.3.4")
@@ -100,8 +131,9 @@ class SecHttpClientGetTest(unittest.TestCase):
         self.assertEqual(text, "<html>hello</html>")
 
     def test_malformed_gzip_body_does_not_crash_and_returns_no_body(self):
-        """Advisory fix: a Content-Encoding: gzip header on a body that
-        doesn't actually decompress must not raise out of _get()."""
+        """A Content-Encoding: gzip header on a body that doesn't actually
+        decompress must not raise out of _get(), and must NOT look like a
+        decisive 200: (None, reason) so the judge reports INCONCLUSIVE."""
         client = C._SecHttpClient("1.2.3.4")
 
         def fake_open(req, timeout=None):
@@ -109,8 +141,8 @@ class SecHttpClientGetTest(unittest.TestCase):
 
         with mock.patch.object(client._opener, "open", side_effect=fake_open):
             status, text, _headers = client._get("/")
-        self.assertEqual(status, 200)
-        self.assertIsNone(text)
+        self.assertIsNone(status)
+        self.assertIn("gzip decode failed", text)
 
     def test_http_error_branch_decodes_gzip_body_and_reports_status(self):
         client = C._SecHttpClient("1.2.3.4")
