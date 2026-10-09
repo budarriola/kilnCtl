@@ -31,6 +31,15 @@ try {
     Assert ((Mint @()) -eq $devSha) "default worktree HEAD == origin/dev"
     Write-Host "case: -Base origin/main"
     Assert ((Mint @("-Base", "origin/main")) -eq $mainSha) "-Base origin/main worktree HEAD == origin/main"
+    Write-Host "case: dev advances in origin after the clone"
+    $other = Join-Path $tmp "other"
+    git clone $origin $other *>$null
+    git -C $other checkout dev *>$null
+    Set-Content -LiteralPath (Join-Path $other "e.txt") -Value "e" -Encoding ascii
+    git -C $other add e.txt *>$null; git -C $other commit -m devadvance *>$null; git -C $other push origin dev *>$null
+    $newDev = (git -C $other rev-parse HEAD).Trim()
+    Assert ($newDev -ne $devSha) "scratch origin dev advanced"
+    Assert ((Mint @()) -eq $newDev) "mint lands on the advanced origin/dev tip"
     Write-Host "case: guard defaults"
     foreach ($f in "commit_guard.ps1", "push_verify.ps1", "wt_status.ps1") {
         $t = Get-Content -Raw -LiteralPath (Join-Path $here $f)

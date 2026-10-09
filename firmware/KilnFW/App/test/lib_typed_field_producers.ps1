@@ -48,7 +48,7 @@ function Test-ConstantValue {
 function Test-FieldProducedInText {
     param([string]$InitText, [string[]]$Vars, [string]$Field, [string]$CodeText, [string[]]$ChainMembers = @())
     $f = [regex]::Escape($Field)
-    foreach ($m in [regex]::Matches($InitText, "\.\s*$f\s*=(?!=)\s*([^,}]*)")) {
+    foreach ($m in [regex]::Matches($InitText, "\.\s*$f\s*=(?!=)\s*(\{[^}]*\}|[^,}]*)")) {
         if (-not (Test-ConstantValue $m.Groups[1].Value)) { return $true }
     }
     foreach ($v in $Vars) {

@@ -179,9 +179,9 @@ if (-not (Test-Path $WtRoot)) {
     New-Item -ItemType Directory -Path $WtRoot -Force | Out-Null
 }
 
-git fetch origin main *>$null
+git fetch origin *>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: git fetch origin main failed." -ForegroundColor Red
+    Write-Host "ERROR: git fetch origin failed." -ForegroundColor Red
     exit 1
 }
 

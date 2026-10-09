@@ -208,9 +208,8 @@ each tick; the first level that decides, wins:
    state (§5). Nothing below can override this.
 2. **Guard 5/6 trip on this zone** — fail-safe state.
 3. **Run not `RUNNING`** (IDLE / PAUSED / DONE) — fail-safe state on
-   FAULTED/halt; on PAUSE, hold last commanded state *unless*
-   `failsafe_on_pause` is set (default: go to fail-safe, matching how
-   `io_segs_force_all_off()` treats PAUSE today).
+   FAULTED/halt; on PAUSE, hold the last commanded state
+   for zones and aux (SPARE_RELAY_ONOFF_PLAN Q4; `failsafe_on_pause` was removed in 56d1d9c0).
 4. **Minimum on/off dwell not yet satisfied** — hold current state. This sits
    *above* the rule evaluation so no rule can chatter the relay, and *below*
    the safety levels so safety is never delayed by it.
