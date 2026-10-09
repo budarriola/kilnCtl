@@ -12,7 +12,11 @@ predicts from the duty cycle, and reports the implied first-order sensor tau
 with a 95% confidence interval across windows.
 
 A_model = G * (2/pi) * sin(pi*D): the fundamental of a 0/1 PWM of duty D times
-G, the steady rise in C per unit duty (estimated from the dwell unless given).
+G, the ripple gain in C per unit duty. G is NOT computed here: (mean minus
+ambient)/duty is the total DC rise, not the ripple gain. Obtain it from the
+plant-model k in the zones config, or from a step response, and pass it as
+gain_c / --gain-c. Without it the report carries the measured per-window ripple
+amplitudes and status NEEDS_GAIN, with no tau.
 
 DIAGNOSTIC ONLY: never writes any tune or config. Refuses (exit 4) any capture
 whose id is in the sec 6.5 gate set
@@ -155,8 +159,7 @@ def tau_from_amplitudes(a_model: float, a_meas: float, omega: float) -> float:
 
 
 def estimate_zone(ts: Sequence[float], temp: Sequence[float], duty: Sequence[float],
-                  window_s: float, gain_c: Optional[float] = None,
-                  ambient_c: Optional[float] = None) -> dict:
+                  window_s: float, gain_c: Optional[float] = None) -> dict:
     omega = 2.0 * math.pi / window_s
     wins: List[Tuple[int, int]] = []
     s = 0
@@ -166,6 +169,7 @@ def estimate_zone(ts: Sequence[float], temp: Sequence[float], duty: Sequence[flo
             s = i
     detr = linear_detrend(ts, temp)
     taus: List[float] = []
+    amps: List[dict] = []
     rejected = 0
     for a, b in wins:
         tw, xw, dw = ts[a:b], temp[a:b], duty[a:b]
@@ -173,21 +177,27 @@ def estimate_zone(ts: Sequence[float], temp: Sequence[float], duty: Sequence[flo
         if not 0.05 <= d <= 0.95:
             rejected += 1
             continue
-        g = gain_c
-        if g is None:
-            amb = ambient_c if ambient_c is not None else 25.0
-            g = (sum(xw) / len(xw) - amb) / d
         am = ripple_amplitude(tw, detr[a:b], omega)
-        if am is None or g <= 0:
+        if am is None:
             rejected += 1
             continue
         amp, se = am
-        if se <= 0 or amp < SNR_MIN * se:
+        if gain_c is None:
+            amps.append({"t_start": tw[0], "duty": d, "ripple_amp_c": amp,
+                         "amp_se_c": se})
+            continue
+        if gain_c <= 0 or se <= 0 or amp < SNR_MIN * se:
             rejected += 1
             continue
+        g = gain_c
         taus.append(tau_from_amplitudes(model_amplitude(d, g), amp, omega))
     out = {"windows_total": len(wins), "windows_used": len(taus),
            "windows_rejected": rejected}
+    if gain_c is None:
+        out.update(status="NEEDS_GAIN", windows_used=0, window_amplitudes=amps,
+                   reason="no --gain-c: the ripple gain G is not derivable from the "
+                          "capture, so no tau is reported")
+        return out
     if len(taus) < 3:
         out.update(status="INCONCLUSIVE", tau_s=None, ci95_s=None,
                    reason="fewer than 3 windows with ripple above the noise floor")
@@ -200,8 +210,7 @@ def estimate_zone(ts: Sequence[float], temp: Sequence[float], duty: Sequence[flo
 
 
 def analyse(path: str, gate_ids: Sequence[str] = (), window_s: float = 60.0,
-            gain_c: Optional[float] = None,
-            ambient_c: Optional[float] = None) -> Tuple[int, dict]:
+            gain_c: Optional[float] = None) -> Tuple[int, dict]:
     cid = capture_id(path)
     if is_gate_capture(path, gate_ids):
         return EXIT_GATE_REFUSED, {
@@ -224,9 +233,11 @@ def analyse(path: str, gate_ids: Sequence[str] = (), window_s: float = 60.0,
                                            "reason": "invalid sensor samples"}
                 continue
             entry["zones"][str(zn)] = estimate_zone(
-                sg["t"], zd["temp"], zd["duty"], window_s, gain_c, ambient_c)
+                sg["t"], zd["temp"], zd["duty"], window_s, gain_c)
         report["segments"].append(entry)
     ok = [z for s in report["segments"] for z in s["zones"].values()
           if z["status"] == "OK"]
-    report["status"] = "OK" if ok else "INCONCLUSIVE"
+    needs = any(z["status"] == "NEEDS_GAIN" for s in report["segments"]
+                for z in s["zones"].values())
+    report["status"] = "OK" if ok else ("NEEDS_GAIN" if needs else "INCONCLUSIVE")
     return EXIT_OK, report

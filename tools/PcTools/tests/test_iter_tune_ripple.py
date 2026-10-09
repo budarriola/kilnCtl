@@ -90,6 +90,16 @@ class T(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(rep["status"], "NO_DWELL")
 
+    def test_no_gain_needs_gain(self):
+        p = self.mk("ng", tau=20.0)
+        code, rep = r.analyse(p, window_s=W)
+        z = self.zone(rep)
+        self.assertEqual(code, 0)
+        self.assertEqual(rep["status"], "NEEDS_GAIN")
+        self.assertEqual(z["status"], "NEEDS_GAIN")
+        self.assertNotIn("tau_s", z)
+        self.assertGreater(len(z["window_amplitudes"]), 3)
+
     def test_noise_inconclusive(self):
         p = self.mk("noise", tau=0, noise_only=True)
         _, rep = r.analyse(p, window_s=W, gain_c=RIPPLE_GAIN)
