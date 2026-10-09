@@ -7,7 +7,7 @@
 // reset erases kiln_nvs/profiles_nvs wholesale but must never erase the default
 // partition wholesale (kiln_auth, TOTP and the Wi-Fi driver share it), so a
 // never-migrated pre-split board could resurrect old data through those
-// migrations after a reset. These two functions erase exactly the legacy keys.
+// migrations after a reset. These functions erase exactly the legacy keys.
 // Erase-first, checked: any failure other than "not found" is returned.
 #ifndef LEGACY_DEFAULT_NVS_H
 #define LEGACY_DEFAULT_NVS_H
@@ -22,6 +22,13 @@ extern "C" {
 esp_err_t legacy_default_nvs_erase_kiln(void);
 /* "profiles" scope: prof_used, prof0..prof7 legacy keys. */
 esp_err_t legacy_default_nvs_erase_profiles(void);
+/* "wifi" and "all" scopes: every key of the default partition's "wifi_cfg"
+ * namespace (names shared via net/wifi_prov_nvs_keys.h). Without this the Wi-Fi
+ * migration re-adopts the old credentials after a wifi reset. */
+esp_err_t legacy_default_nvs_erase_wifi(void);
+/* Erase only the run_state key (used by the run_state migration after a
+ * verified copy). */
+esp_err_t legacy_default_nvs_erase_run_state(void);
 /* Erase only the relay cycle count key (used by the relay_cycles migration
  * after a verified copy). */
 esp_err_t legacy_default_nvs_erase_relay_cycles(void);

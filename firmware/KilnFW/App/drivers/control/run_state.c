@@ -11,6 +11,7 @@
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t this
                               * module's callers already branch on */
 #include "nvs_key_check.h"
+#include "legacy_default_nvs.h" /* erase of the legacy default-partition record after a verified migration */
 
 static const char *TAG = "run_state";
 
@@ -102,10 +103,13 @@ static bool caller_stack_is_external(void);
 
 /* One-time, one-directional copy of the old default-partition record into
  * KILN_NVS_PARTITION, for boards provisioned by firmware predating the
- * split. The old copy is left in place (never deleted) so a rollback to
- * pre-split firmware still finds its breadcrumb -- see wifi_prov.c's
- * migrate_from_default_partition() for the fuller rationale. Only called
- * when KILN_NVS_PARTITION has nothing under NVS_KEY_RUN yet. The record's
+ * split. Copies ONLY when KILN_NVS_PARTITION holds nothing under NVS_KEY_RUN
+ * (a record already there, valid or not, is the source of truth), reads the
+ * copy back, and only then erases the legacy key -- otherwise a stale
+ * interrupted-firing breadcrumb was recopied over the live one on every boot
+ * (DEV_FIRMWARE_REVIEW_2 finding 3). Same verified-copy-then-erase pattern as
+ * relay_cycles.c. Trade-off accepted (as for relay_cycles): a rollback to
+ * pre-split firmware no longer finds the old breadcrumb. The record's
  * existing version check (RUN_STATE_RECORD_VERSION) is reused unchanged --
  * this function does not add any versioning logic of its own.
  *
@@ -123,6 +127,20 @@ static bool caller_stack_is_external(void);
  * not because a live path was found. */
 static void migrate_from_default_partition(void)
 {
+    hal_kv_handle_t dh;
+    hal_status_t derr = hal_kv_open(&dh, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (derr == HAL_OK) {
+        uint8_t probe[sizeof(run_state_record_t) + 8];
+        size_t plen = sizeof(probe);
+        hal_status_t perr = hal_kv_get_blob(&dh, NVS_KEY_RUN, probe, &plen);
+        hal_kv_close(&dh);
+        if (perr != HAL_NOT_FOUND) {
+            return; /* destination already holds (or may hold) a record -- never overwrite it */
+        }
+    } else if (derr != HAL_NOT_FOUND) {
+        return; /* cannot tell whether the destination is empty -- do nothing */
+    }
+
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL);
     if (err != HAL_OK) {
@@ -158,6 +176,24 @@ static void migrate_from_default_partition(void)
     hal_kv_close(&hw);
     if (err == HAL_OK) {
         ESP_LOGI(TAG, "migrated run-state record from default NVS partition to '%s'", KILN_NVS_PARTITION);
+        /* Read the copy back before touching the old one. */
+        hal_kv_handle_t vh;
+        run_state_record_t back;
+        size_t back_len = sizeof(back);
+        bool verified = false;
+        if (hal_kv_open(&vh, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            verified = hal_kv_get_blob(&vh, NVS_KEY_RUN, &back, &back_len) == HAL_OK && back_len == sizeof(old_rec) &&
+                       memcmp(&back, &old_rec, sizeof(old_rec)) == 0;
+            hal_kv_close(&vh);
+        }
+        if (!verified) {
+            ESP_LOGW(TAG, "run-state migration read-back did not match -- keeping the old default-partition copy");
+        } else {
+            esp_err_t eerr = legacy_default_nvs_erase_run_state();
+            if (eerr != ESP_OK) {
+                ESP_LOGE(TAG, "could not erase the old default-partition run-state copy: %s", esp_err_to_name(eerr));
+            }
+        }
     } else {
         ESP_LOGW(TAG, "run-state record migration to '%s' failed: %s", KILN_NVS_PARTITION, hal_status_to_name(err));
     }

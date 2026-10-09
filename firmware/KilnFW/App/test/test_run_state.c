@@ -171,11 +171,121 @@ static void test_migration_resurrects_without_legacy_erase_and_not_with(void)
     TEST_CHECK(!kiln_run_record_present(), "after the legacy erase nothing is migrated: fallback yields defaults");
 }
 
+static void test_migration_erases_source_and_never_overwrites_destination(void)
+{
+    TEST_SECTION("run_state migrate_from_default_partition -- copies once, verifies, erases the legacy key; "
+                 "never overwrites an existing kiln_nvs record (DEV_FIRMWARE_REVIEW_2 finding 3)");
+    reset_all();
+    stage_default_run_record();
+    migrate_from_default_partition();
+    TEST_CHECK(kiln_run_record_present(), "first boot: record migrated into kiln_nvs");
+    hal_kv_handle_t h;
+    run_state_record_t rb;
+    size_t len = sizeof(rb);
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL) == HAL_OK, "default ns still opens");
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_RUN, &rb, &len) == HAL_NOT_FOUND, "legacy source erased after verified copy");
+    hal_kv_close(&h);
+
+    /* The live record then moves on (a newer firing); a second boot must not resurrect the stale one. */
+    run_state_record_t live = make_sample_record();
+    live.profile_id = 5;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "open kiln");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_RUN, &live, sizeof(live)) == HAL_OK, "write newer live record");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    stage_default_run_record(); /* a stale legacy copy reappears (e.g. rollback+reflash) */
+    migrate_from_default_partition();
+    len = sizeof(rb);
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK, "reopen kiln");
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_RUN, &rb, &len) == HAL_OK && rb.profile_id == 5,
+               "destination already populated: stale legacy record did NOT overwrite it");
+    hal_kv_close(&h);
+}
+
+/* legacy_default_nvs.h promises key-name drift fails a host test. The
+ * run_state/relay_cycles names are exercised by the real migrations above; the
+ * zones and profiles migrations live in files that cannot be linked here, so
+ * pin their literal key names by scanning the source of truth. */
+static bool source_contains(const char *rel_from_test_dir, const char *needle)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s", __FILE__);
+    char *slash = strrchr(path, '\\');
+    char *slash2 = strrchr(path, '/');
+    if (slash2 && (!slash || slash2 > slash)) {
+        slash = slash2;
+    }
+    if (!slash) {
+        return false;
+    }
+    snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "%s", rel_from_test_dir);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false; /* fail loud: a missing source is a failed check, never a skip */
+    }
+    static char buf[1 << 20];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
+}
+
+static void test_legacy_key_names_match_zones_and_profiles_sources(void)
+{
+    TEST_SECTION("legacy_default_nvs key names -- zones and profiles names match their migrating modules");
+    TEST_CHECK(source_contains("../drivers/persist/zones_http_internal.h", "#define NVS_KEY_ZONES \"zones_cfg\""),
+               "zones_cfg key name matches zones_http_internal.h");
+    TEST_CHECK(source_contains("../drivers/http/profiles_http.c", "#define NVS_KEY_USED \"prof_used\""),
+               "prof_used key name matches profiles_http.c");
+    TEST_CHECK(source_contains("../drivers/http/profiles_http.c", "snprintf(out, out_cap, \"prof%u\", id)"),
+               "profN key format matches profile_nvs_key()");
+    TEST_CHECK(source_contains("../drivers/http/profiles_http.c", "#define NVS_NAMESPACE \"kiln_cfg\""),
+               "kiln_cfg namespace matches profiles_http.c");
+    /* And the erase really removes exactly those keys. */
+    reset_all();
+    hal_kv_init_partition(NULL);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open");
+    uint8_t one = 1;
+    hal_kv_set_blob(&h, "zones_cfg", &one, 1);
+    hal_kv_set_u8(&h, "prof_used", 1);
+    hal_kv_set_blob(&h, "prof0", &one, 1);
+    hal_kv_set_blob(&h, "prof7", &one, 1);
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    TEST_CHECK(legacy_default_nvs_erase_kiln() == ESP_OK && legacy_default_nvs_erase_profiles() == ESP_OK, "erases");
+    TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, NULL) == HAL_OK, "reopen");
+    uint8_t b[4];
+    size_t l = sizeof(b);
+    uint8_t u = 0;
+    TEST_CHECK(hal_kv_get_blob(&h, "zones_cfg", b, &l) == HAL_NOT_FOUND, "zones_cfg erased");
+    TEST_CHECK(hal_kv_get_u8(&h, "prof_used", &u) == HAL_NOT_FOUND, "prof_used erased");
+    l = sizeof(b);
+    TEST_CHECK(hal_kv_get_blob(&h, "prof0", b, &l) == HAL_NOT_FOUND, "prof0 erased");
+    l = sizeof(b);
+    TEST_CHECK(hal_kv_get_blob(&h, "prof7", b, &l) == HAL_NOT_FOUND, "prof7 erased");
+    hal_kv_close(&h);
+}
+
+static void test_legacy_erase_does_not_create_missing_namespace(void)
+{
+    TEST_SECTION("legacy_default_nvs erase -- a missing kiln_cfg namespace is left missing (finding 7)");
+    reset_all();
+    hal_kv_init_partition(NULL);
+    TEST_CHECK(legacy_default_nvs_erase_kiln() == ESP_OK, "erase on missing namespace is OK");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, NULL) == HAL_NOT_FOUND,
+               "the erase did not create an empty namespace");
+}
+
 void run_test_run_state(void)
 {
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
     test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
     test_migration_resurrects_without_legacy_erase_and_not_with();
+    test_migration_erases_source_and_never_overwrites_destination();
+    test_legacy_key_names_match_zones_and_profiles_sources();
+    test_legacy_erase_does_not_create_missing_namespace();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

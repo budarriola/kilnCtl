@@ -2515,6 +2515,7 @@ try {
     $cmd51 = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$wifiProvObjDir\\`" /Fe:`"$exe51`" `"$(Join-Path $testDir 'test_wifi_prov.c')`" " +
             "`"$(Join-Path $driversDir 'common/startup_faults.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 

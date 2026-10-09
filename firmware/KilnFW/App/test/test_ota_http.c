@@ -1433,6 +1433,23 @@ static void seed_legacy_default_keys(void)
     }
     TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit legacy keys");
     hal_kv_close(&h);
+    TEST_CHECK(hal_kv_open(&h, "wifi_cfg", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "setup: open legacy wifi ns");
+    TEST_CHECK(hal_kv_set_str(&h, "ssid", "oldnet") == HAL_OK, "setup: seed legacy wifi ssid");
+    TEST_CHECK(hal_kv_set_u8(&h, "has_creds", 1) == HAL_OK, "setup: seed legacy wifi has_creds");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "setup: commit legacy wifi keys");
+    hal_kv_close(&h);
+}
+
+static bool legacy_wifi_key_present(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, "wifi_cfg", HAL_KV_MODE_READ_ONLY, NULL) != HAL_OK) {
+        return false;
+    }
+    uint8_t u = 0;
+    hal_status_t st = hal_kv_get_u8(&h, "has_creds", &u);
+    hal_kv_close(&h);
+    return st == HAL_OK;
 }
 
 static bool legacy_key_present(const char *key)
@@ -1463,9 +1480,13 @@ static void test_factory_reset_erases_legacy_default_partition_keys(void)
     TEST_SECTION("factory_reset_execute -- legacy default-partition kiln_cfg keys are erased per scope");
     seed_legacy_default_keys();
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK, "wifi scope succeeds");
-    check_legacy_state("wifi scope leaves every legacy key", false, false);
+    check_legacy_state("wifi scope leaves every kiln/profile legacy key", false, false);
+    TEST_CHECK(!legacy_wifi_key_present(), "wifi scope erases the legacy default-partition wifi_cfg keys");
+    assert_webauth12b_credential_survived("kiln_auth survives the legacy erase (wifi)");
 
+    seed_legacy_default_keys();
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_OK, "kiln scope succeeds");
+    TEST_CHECK(legacy_wifi_key_present(), "kiln scope leaves the legacy wifi_cfg keys");
     check_legacy_state("kiln scope erases zones_cfg/run_state/relay_cyc only", true, false);
     assert_webauth12b_credential_survived("kiln_auth survives the legacy erase (kiln)");
 
@@ -1476,6 +1497,7 @@ static void test_factory_reset_erases_legacy_default_partition_keys(void)
 
     seed_legacy_default_keys();
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_ALL) == ESP_OK, "all scope succeeds");
+    TEST_CHECK(!legacy_wifi_key_present(), "all scope erases the legacy wifi_cfg keys");
     check_legacy_state("all scope erases both sets", true, true);
     assert_webauth12b_credential_survived("kiln_auth survives the legacy erase (all)");
 }
@@ -1494,6 +1516,7 @@ static void test_factory_reset_wifi_scope_calls_esp_wifi_restore(void)
     TEST_SECTION("factory_reset_execute(WIFI) must call esp_wifi_restore() exactly once");
     fake_kv_reset_all();
     TEST_CHECK(hal_kv_init_partition("wifi_nvs") == HAL_OK, "setup: init wifi_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default partition (always mounted on target; the wifi scope legacy erase opens it)");
     reset_wifi_restore_stub_counters();
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK,
               "factory_reset_execute(WIFI) must succeed");

@@ -7,6 +7,7 @@
 
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "../net/wifi_prov_nvs_keys.h" /* NVS_NAMESPACE "wifi_cfg" + every NVS_KEY_* the wifi migration reads */
 
 static const char *TAG = "legacy_nvs";
 
@@ -17,12 +18,19 @@ static const char *TAG = "legacy_nvs";
 #define LEGACY_NAMESPACE "kiln_cfg"
 #define PROFILES_MAX 8 /* the legacy default-partition bitmap is a u8: ids 0..7 only (profiles_http.c migrate_from_default_partition) */
 
-static esp_err_t erase_keys(const char *const *keys, size_t n)
+static esp_err_t erase_keys(const char *ns, const char *const *keys, size_t n)
 {
     hal_kv_handle_t h;
-    hal_status_t st = hal_kv_open(&h, LEGACY_NAMESPACE, HAL_KV_MODE_READ_WRITE, NULL);
+    /* Probe READ_ONLY first: a READ_WRITE open creates a missing namespace on
+     * target, so the NOT_FOUND branch could never run and a reset on a
+     * never-split board added an empty namespace. */
+    hal_status_t st = hal_kv_open(&h, ns, HAL_KV_MODE_READ_ONLY, NULL);
     if (st == HAL_NOT_FOUND) {
         return ESP_OK; /* namespace never existed on the default partition */
+    }
+    if (st == HAL_OK) {
+        hal_kv_close(&h);
+        st = hal_kv_open(&h, ns, HAL_KV_MODE_READ_WRITE, NULL);
     }
     if (st != HAL_OK) {
         ESP_LOGE(TAG, "cannot open default-partition namespace: %s", hal_status_to_name(st));
@@ -52,13 +60,13 @@ static esp_err_t erase_keys(const char *const *keys, size_t n)
 esp_err_t legacy_default_nvs_erase_kiln(void)
 {
     static const char *const keys[] = { "zones_cfg", "run_state", "relay_cyc" };
-    return erase_keys(keys, sizeof(keys) / sizeof(keys[0]));
+    return erase_keys(LEGACY_NAMESPACE, keys, sizeof(keys) / sizeof(keys[0]));
 }
 
 esp_err_t legacy_default_nvs_erase_relay_cycles(void)
 {
     static const char *const keys[] = { "relay_cyc" };
-    return erase_keys(keys, 1);
+    return erase_keys(LEGACY_NAMESPACE, keys, 1);
 }
 
 esp_err_t legacy_default_nvs_erase_profiles(void)
@@ -71,5 +79,17 @@ esp_err_t legacy_default_nvs_erase_profiles(void)
         snprintf(names[i + 1], sizeof(names[i + 1]), "prof%d", i);
         keys[i + 1] = names[i + 1];
     }
-    return erase_keys(keys, PROFILES_MAX + 1);
+    return erase_keys(LEGACY_NAMESPACE, keys, PROFILES_MAX + 1);
+}
+
+esp_err_t legacy_default_nvs_erase_run_state(void)
+{
+    static const char *const keys[] = { "run_state" };
+    return erase_keys(LEGACY_NAMESPACE, keys, 1);
+}
+
+esp_err_t legacy_default_nvs_erase_wifi(void)
+{
+    static const char *const keys[] = WIFI_PROV_NVS_ALL_KEYS_INIT;
+    return erase_keys(NVS_NAMESPACE, keys, sizeof(keys) / sizeof(keys[0]));
 }

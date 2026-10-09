@@ -126,6 +126,7 @@ typedef struct {
      * wholesale (kiln_auth/TOTP/Wi-Fi driver share it). */
     bool erase_legacy_default_kiln;
     bool erase_legacy_default_profiles;
+    bool erase_legacy_default_wifi; /* default partition "wifi_cfg" namespace */
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -134,10 +135,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly, false, false, false, false, false, false },
-    { "kiln", kKilnOnly, false, false, true, false, true, false },
-    { "profiles", kProfilesOnly, true, false, false, true, false, true },
-    { "all", kAll, true, true, false, false, true, true },
+    { "wifi", kWifiOnly, false, false, false, false, false, false, true },
+    { "kiln", kKilnOnly, false, false, true, false, true, false, false },
+    { "profiles", kProfilesOnly, true, false, false, true, false, true, false },
+    { "all", kAll, true, true, false, false, true, true, true },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -257,6 +258,16 @@ static void execute_scope_job(void *arg)
         esp_err_t lerr = legacy_default_nvs_erase_profiles();
         if (lerr != ESP_OK) {
             ESP_LOGE(TAG, "legacy default-partition profiles erase failed: %s", esp_err_to_name(lerr));
+            if (first_err == ESP_OK) {
+                first_err = lerr;
+            }
+        }
+    }
+
+    if (scope->erase_legacy_default_wifi) {
+        esp_err_t lerr = legacy_default_nvs_erase_wifi();
+        if (lerr != ESP_OK) {
+            ESP_LOGE(TAG, "legacy default-partition wifi erase failed: %s", esp_err_to_name(lerr));
             if (first_err == ESP_OK) {
                 first_err = lerr;
             }
