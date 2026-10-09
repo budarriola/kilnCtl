@@ -589,6 +589,72 @@ static void test_legacy_default_wifi_erase_keeps_board_unprovisioned(void)
     hal_kv_close(&h);
 }
 
+static bool legacy_wifi_key_present(const char *key)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL) != HAL_OK) {
+        return false;
+    }
+    char b[8];
+    size_t l = sizeof(b);
+    bool present = hal_kv_get_blob(&h, key, b, &l) != HAL_NOT_FOUND;
+    hal_kv_close(&h);
+    return present;
+}
+
+// A reboot: RAM state is lost, both NVS partitions persist.
+static void simulate_reboot_state(void)
+{
+    reset_state();
+    memset(&s_legacy_single, 0, sizeof(s_legacy_single));
+}
+
+static void test_legacy_wifi_migration_is_one_shot(void)
+{
+    TEST_SECTION("legacy wifi_cfg migration is one-shot: legacy keys are erased after a verified copy and "
+                 "a second boot does not re-adopt (DEV_FIRMWARE_REVIEW_5 M2)");
+    seed_legacy_default_wifi();
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.saved_nets.count == 1 && strcmp(s_wifi.saved_nets.nets[0].ssid, "oldnet") == 0,
+               "first boot adopts the legacy network");
+    TEST_CHECK(!legacy_wifi_key_present(NVS_KEY_SSID) && !legacy_wifi_key_present(NVS_KEY_HAS_CREDS) &&
+                   !legacy_wifi_key_present(NVS_KEY_MODE),
+               "legacy keys are gone after the verified migration");
+    simulate_reboot_state();
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.saved_nets.count == 1, "second boot keeps the migrated list");
+    TEST_CHECK(!s_legacy_single.has, "second boot finds no legacy credential to adopt");
+}
+
+static void test_forget_last_network_survives_reboot(void)
+{
+    TEST_SECTION("forget the last saved network, then reboot: zero saved nets, legacy copy does not return");
+    seed_legacy_default_wifi();
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.saved_nets.count == 1, "setup: migrated network present");
+    TEST_CHECK(do_forget_network("oldnet") == ESP_OK, "forget succeeds");
+    TEST_CHECK(s_wifi.saved_nets.count == 0, "list is empty");
+    simulate_reboot_state();
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.saved_nets.count == 0, "after reboot there are still zero saved nets");
+}
+
+static void test_mode_and_ap_name_change_survives_reboot(void)
+{
+    TEST_SECTION("a mode / AP-name change made after migration survives a reboot (adopt must not revert it)");
+    seed_legacy_default_wifi();
+    boot_wifi_migration();
+    s_wifi.mode = WIFI_PROV_MODE_AP;
+    strcpy(s_wifi.ap_ssid, "MyKiln");
+    s_wifi.has_ap_ssid_override = true;
+    TEST_CHECK(nvs_save_mode() == ESP_OK && nvs_save_ap_ssid() == ESP_OK, "setup: persist the change");
+    simulate_reboot_state();
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.mode == WIFI_PROV_MODE_AP, "mode change survives the reboot");
+    TEST_CHECK(s_wifi.has_ap_ssid_override && strcmp(s_wifi.ap_ssid, "MyKiln") == 0,
+               "AP-name change survives the reboot");
+}
+
 static void test_apply_sta_config_dns(void)
 {
     TEST_SECTION("apply_sta_config -- static mode pushes DNS: dns else gateway as MAIN, dns2 else the same as MAIN for BACKUP (never 0.0.0.0)");
@@ -1547,6 +1613,9 @@ void run_test_wifi_prov(void)
     test_set_static_ip_stores_and_clears_dns();
     test_dns_nvs_round_trip();
     test_legacy_default_wifi_erase_keeps_board_unprovisioned();
+    test_legacy_wifi_migration_is_one_shot();
+    test_forget_last_network_survives_reboot();
+    test_mode_and_ap_name_change_survives_reboot();
     test_apply_sta_config_dns();
     test_set_dhcp_resets_confirmation();
     test_reply_slot_normal_roundtrip();

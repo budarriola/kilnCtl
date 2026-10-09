@@ -6,6 +6,7 @@
  * call directly. */
 
 #include "wifi_prov_internal.h"
+#include "../persist/legacy_default_nvs.h"
 
 #include <string.h>
 
@@ -81,6 +82,13 @@
  * wifi_prov_internal.h: wifi_prov.c's wifi_prov_start() also sets it
  * directly on the no-cross-partition-migration path. */
 struct wifi_prov_legacy_single s_legacy_single;
+
+/* Set by wifi_prov_migrate_from_default_partition() once the mode/AP-identity
+ * fields it adopted read back identically from WIFI_NVS_PARTITION; consumed by
+ * nvs_load_saved_nets(), which erases the legacy default-partition keys only
+ * after the credential list is persisted and read back too (one-shot
+ * migration, DEV_FIRMWARE_REVIEW_5 M2). */
+static bool s_legacy_erase_pending;
 
 /* ---- NVS -------------------------------------------------------------- */
 
@@ -520,8 +528,15 @@ void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
      * and still has its real network sitting in the old partition. Anything
      * the new partition has already recorded otherwise wins outright; the new
      * location is the source of truth from the moment it holds credentials. */
-    bool adopt = !found_in_wifi_nvs || (default_has_legacy && !wifi_nvs_has_legacy);
+    bool adopt = !found_in_wifi_nvs;
     if (!adopt) {
+        /* The destination already holds data: it is the source of truth and the
+         * legacy copy is stale. Drop it so no reset path (recovery wifi reset,
+         * forget-last-network) can ever resurrect it. Best effort. */
+        esp_err_t stale_err = legacy_default_nvs_erase_wifi();
+        if (stale_err != ESP_OK) {
+            ESP_LOGW(WIFI_PROV_TAG, "erasing stale legacy wifi_cfg failed: %s", esp_err_to_name(stale_err));
+        }
         s_wifi = from_wifi_nvs;
         s_legacy_single.has = wifi_nvs_has_legacy;
         s_legacy_single.net = wifi_nvs_legacy_net;
@@ -549,6 +564,24 @@ void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
     }
     if (save_err == ESP_OK && s_wifi.has_ap_password_override) {
         save_err = nvs_save_ap_password();
+    }
+    if (save_err == ESP_OK) {
+        /* Read back and compare before the legacy copy may be erased. */
+        struct wifi_prov_state adopted = s_wifi;
+        bool rb_found = false;
+        esp_err_t rb_err = wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &rb_found);
+        bool same = rb_err == ESP_OK && rb_found && s_wifi.mode == adopted.mode &&
+                    s_wifi.has_ap_ssid_override == adopted.has_ap_ssid_override &&
+                    s_wifi.has_ap_password_override == adopted.has_ap_password_override &&
+                    strcmp(s_wifi.ap_ssid, adopted.ap_ssid) == 0 &&
+                    strcmp(s_wifi.ap_password, adopted.ap_password) == 0;
+        s_wifi = adopted;
+        if (same) {
+            s_legacy_erase_pending = true;
+        } else {
+            ESP_LOGE(WIFI_PROV_TAG, "migration read-back from '%s' differs -- keeping the legacy copy, will retry",
+                     WIFI_NVS_PARTITION);
+        }
     }
     if (save_err != ESP_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "migration write to '%s' failed: %s -- running from the old copy this boot, will retry",
@@ -587,6 +620,25 @@ void nvs_load_saved_nets(void)
         if (save_err != ESP_OK) {
             ESP_LOGE(WIFI_PROV_TAG, "saving migrated saved_nets list to '%s' failed: %s -- will retry next boot",
                      WIFI_NVS_PARTITION, esp_err_to_name(save_err));
+            s_legacy_erase_pending = false;
+        } else {
+            saved_nets_blob_t rb;
+            if (nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &rb) != ESP_OK || rb.count != 1 ||
+                strcmp(rb.nets[0].ssid, s_legacy_single.net.ssid) != 0 ||
+                strcmp(rb.nets[0].password, s_legacy_single.net.password) != 0) {
+                ESP_LOGE(WIFI_PROV_TAG, "saved_nets read-back differs -- keeping the legacy copy, will retry");
+                s_legacy_erase_pending = false;
+            }
+        }
+    }
+
+    if (s_legacy_erase_pending) {
+        s_legacy_erase_pending = false;
+        esp_err_t er = legacy_default_nvs_erase_wifi();
+        if (er == ESP_OK) {
+            ESP_LOGI(WIFI_PROV_TAG, "legacy default-partition wifi_cfg migrated and erased");
+        } else {
+            ESP_LOGW(WIFI_PROV_TAG, "legacy wifi_cfg erase failed: %s -- will retry next boot", esp_err_to_name(er));
         }
     }
 }
