@@ -27,10 +27,10 @@ Gate rows: 178.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 109 |
+| NEGATIVE-TESTED | 154 |
 | PARTIAL | 2 |
-| REVIEWED, NOT MUTATED | 9 |
-| NOT AUDITED | 58 |
+| REVIEWED, NOT MUTATED | 14 |
+| NOT AUDITED | 9 |
 | NOT AUDITED (pass 12 pending) | 0 |
 
 ## Table
@@ -44,55 +44,55 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/hwAbstraction/test/compile_esp_backends.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | hal_spi_esp.c: appended a function using an undeclared identifier (build artifacts copied from an existing checkbuild) | RED (undeclared identifier, FAILED, exit 1); restored by hand; PASS |
 | `firmware/hwAbstraction/test/compile_pico_backends.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | hal_spi_pico.c: appended a function using an undeclared identifier (build.ninja/rules.ninja copied from an existing checkbuild) | RED (undeclared identifier, FAILED, exit 1); restored by hand; PASS |
 | `firmware/hwAbstraction/test/test_host_fakes.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | fake_gpio.c: bounds check `num < FAKE_GPIO_NUM_PINS` changed to `<=` (via tools/negtest.ps1, -NoBaseline because the unmutated baseline exceeded 25 min under load) | CAUGHT: `fake_gpio: FAILED (pass=36 fail=1)`, all 11 other fakes OK in the same run; real tree unchanged |
-| `firmware/KilnFW/App/test/check_00_kilnfw_host_tests.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_00_kilnfw_recovery_target_build.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_00_kilnfw_target_build.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_00_kilnfw_host_tests.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy aggregator; runs the host tests individually audited elsewhere | see audit |
+| `firmware/KilnFW/App/test/check_00_kilnfw_recovery_target_build.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy target build; compile failure is the check | see audit |
+| `firmware/KilnFW/App/test/check_00_kilnfw_target_build.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy target build; compile failure is the check | see audit |
 | `firmware/KilnFW/App/test/check_01_kilnfw_pushed_build.ps1` | PARTIAL | 09-18 | cannot be driven locally (builds origin/main in a throwaway worktree); 09-16e saw it genuinely FAIL on a real -Werror=format-truncation defect on origin/main | FAIL path propagated incidentally; no deliberate mutation |
 | `firmware/KilnFW/App/test/check_all_task_stack_budgets.ps1` | PARTIAL | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | real ELFs from existing checkbuilds; check-input mutation via its own -ForceCeiling zone_sweep=1000 (no source mutation) | RED on the real ELFs (bx_flash_worker 3808 B > 3792 B ceiling, a genuine finding); -ForceCeiling adds zone_sweep to the failing set. No source mutation of a measured task was run |
 | `firmware/KilnFW/App/test/check_approach_rate_cap_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16 | production divisor 3600.0f changed to 1800.0f in the real cap loop | RED, both fragments shown; hand-restored; PASS |
-| `firmware/KilnFW/App/test/check_boot_guard_reset_reachability.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_cfg_convert_field_mirror_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_cfg_fs_tie_break.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_boot_guard_reset_reachability.ps1` | NEGATIVE-TESTED | rest-10-08 | added a boot_guard_reset_counter() call in boot_guard.c | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_cfg_convert_field_mirror_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | BACKUP_FORMAT_VERSION 5 to 6 | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_cfg_fs_tie_break.ps1` | NEGATIVE-TESTED | rest-10-08 | > to >= in firing_stats_cfg_fs.c | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_cfgfs_nvs_only_drift.ps1` | NEGATIVE-TESTED | 09-16 | empty persist/zz_audit_dummy_cfg_fs.c created | RED, names the new bridge file; file deleted |
 | `firmware/KilnFW/App/test/check_embedded_pico_image_fresh.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | fabricated slot bins from real ones: identical slots, truncated slotB, commit changed in both / in one slot, config_format_version changed in slotB, missing file | each RED with its named reason (SKIP exit 3 for missing); baseline PASS |
 | `firmware/KilnFW/App/test/check_executor_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16b | 1024 B volatile local injected in zone_coupling_gauss_solve_partial_pivot_vec, real rebuild | +1024 B exactly, RED at 2800 B > 1936 B; fullclean rebuild back to baseline |
-| `firmware/KilnFW/App/test/check_flash_partition_map.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_flash_worker_lint.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_frame_a_offset_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_flash_partition_map.ps1` | NEGATIVE-TESTED | rest-10-08 | stage overlap, cfg overrun, app misalignment | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_flash_worker_lint.ps1` | NEGATIVE-TESTED | rest-10-08 | nvs_commit added in backup_export.c | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_frame_a_offset_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | literal out[5] in link_frame.c | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_fuzzy_gain_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | kp/ki argument order swapped in the real pid_fuzzy_adjust call | RED, first divergent line shown; hand-restored; PASS |
-| `firmware/KilnFW/App/test/check_heater_output_pwm_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_heater_output_pwm_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | on_ms + 1u | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_httpd_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 1024 B volatile local in profile_decode_blob, real rebuild | +1024 B exactly, RED 5328 B > 4832 B; fullclean rebuild back to 4304 B |
 | `firmware/KilnFW/App/test/check_js_host_tests.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_kilnfw_ccache_no_stale.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | lib_kilnfw_ccache.ps1: CCACHE_NODIRECT removed (direct mode on), via tools/negtest.ps1 | CAUGHT: stale hit(direct) at the shadowing-header step and direct_mode 'true'; baseline PASS; real tree unchanged |
-| `firmware/KilnFW/App/test/check_kilnfw_dram_bss_budget.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_kv_narrow_stack.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_label_column_overflow_wrap.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_littlefs_component_pinned.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_kilnfw_dram_bss_budget.ps1` | NEGATIVE-TESTED | rest-10-08 | main-tree ELF: PASS; -CeilingBytes 1000 FAIL | hand test |
+| `firmware/KilnFW/App/test/check_kv_narrow_stack.ps1` | NEGATIVE-TESTED | rest-10-08 | min-width removed from .kv dd | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_label_column_overflow_wrap.ps1` | NEGATIVE-TESTED | rest-10-08 | overflow-wrap added to .kv dt | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_littlefs_component_pinned.ps1` | NEGATIVE-TESTED | rest-10-08 | yml dependency renamed | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_main_task_stack_budget.ps1` | NEGATIVE-TESTED | 09-16, 09-16b | [09-16] --stack-bytes 100 override against a real ELF (compare arithmetic only) ; [09-16b] 2048 B then 4096 B volatile local injected in profile_encode_current_blob, real idf.py rebuild | [09-16] RED, names the worst path ; [09-16b] measured +2048 B exactly, then RED at 7728 B > 6144 B; forced fullclean rebuild back to 3632 B |
-| `firmware/KilnFW/App/test/check_no_duplicate_commissioning_impl.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_no_duplicate_commissioning_impl.ps1` | NEGATIVE-TESTED | rest-10-08 | marker text duplicated in app.js | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_on_off_trigger_input_producers.ps1` | NEGATIVE-TESTED | - | scoped scan to on_off_trigger_input_t/rule_t initializers and typed vars (shared lib_typed_field_producers.ps1); tools/negtest.ps1 deleted `.min_off_s = p->src_min_off_s,` (previously masked by unrelated `e.min_off_s =`) and `.temp_measurement_c`, each RED; baseline PASS, real tree unchanged | NEGATIVE-TESTED |
-| `firmware/KilnFW/App/test/check_partition_labels_vs_firmware.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_partition_labels_vs_firmware.ps1` | NEGATIVE-TESTED | rest-10-08 | logs label renamed, cfg subtype changed | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_pid_fuzzy_drift.ps1` | NEGATIVE-TESTED | - | absolute 1e-4 tolerance replaced by per-gain relative 1e-5; tools/negtest.ps1 changed fuzzy_band_probe.py rate-STEADY cell (1.0,0.0,0.0)->(1.0,0.5,0.0) (ki delta 7.5e-5, previously MISSED), RED; baseline PASS (worst rel diff 1.4e-7) | NEGATIVE-TESTED |
 | `firmware/KilnFW/App/test/check_power_diag_flag_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | safety_link.h POWER_FLAG_ANY_CHANNEL_CLIPPED 0x02 changed to 0x04 | RED, names both values; hand-restored; PASS |
-| `firmware/KilnFW/App/test/check_profile_executor_wd_input_producers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_profile_executor_wd_input_producers.ps1` | NEGATIVE-TESTED | rest-10-08 | new field added to the struct | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_ramp_lock_decision_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | fabsf() wrapped around the ramp-lock subtraction; also > changed to >= | RED (fail-closed extraction error, not a semantic diff); hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_ramp_stepping_gate_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | ramp step sign + flipped to - in profile_executor.c | RED, semantic diff shown; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_readiness_ct_channel_map_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | readiness_http.h ct_topology test == 0u flipped to != 0u | RED, two disagreeing truth-table rows named; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_readiness_gate_display_agreement.ps1` | REVIEWED, NOT MUTATED | 09-18 | screen A: Python check signals failure as return 1 with sys.exit(main()) | failure path present; no mutation |
 | `firmware/KilnFW/App/test/check_safety_cfg_param_table_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16b | abs_max_temp_c declared type F32 changed to U16 in safety_cfg_store.c | RED, type mismatch named; hand-restored; PASS |
-| `firmware/KilnFW/App/test/check_safety_fault_hold_mirror_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_safety_link_status_producers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_sdkconfig_defaults_applied.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_setup_wizard_step_count_mirror_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_setup_wizard_zones_post_helper.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_safety_fault_hold_mirror_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | 300u to 350u | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_safety_link_status_producers.ps1` | NEGATIVE-TESTED | rest-10-08 | new field added to the struct | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_sdkconfig_defaults_applied.ps1` | NEGATIVE-TESTED | rest-10-08 | fabricated sdkconfig with stale RX_BA_WIN FAIL; defaults missing watched key FAIL; real sdkconfig PASS | hand test |
+| `firmware/KilnFW/App/test/check_setup_wizard_step_count_mirror_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | SETUP_WIZARD_STEP_COUNT 12 to 13 | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_setup_wizard_zones_post_helper.ps1` | NEGATIVE-TESTED | rest-10-08 | second fetch(/api/zones line added | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_sim_iter_tune_bars.ps1` | REVIEWED, NOT MUTATED | 09-18 | left alone as settled (A8 cross-profile bar deliberately outside its exit code) | no mutation |
-| `firmware/KilnFW/App/test/check_sim_scenarios.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_source_path_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_stop_bar_body_padding.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_stub_signature_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_sim_scenarios.ps1` | NEGATIVE-TESTED | rest-10-08 | S0 sep_expected false to true | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_source_path_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | nonexistent allowlist entry added | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_stop_bar_body_padding.ps1` | NEGATIVE-TESTED | rest-10-08 | updateBodyPadding renamed in nav.js | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/check_stub_signature_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | esp_partition_erase_range arity changed in stubs | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_system_uart_bridge_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 512 B volatile local in cfg_fs.c sweep_tmp, real rebuild | +512 B exactly, RED 2448 B > 1936 B; fullclean rebuild back to baseline |
 | `firmware/KilnFW/App/test/check_thermal_guard_cfg_producers.ps1` | NEGATIVE-TESTED | - | scoped scan to thermal_guard_cfg_t initializers/typed vars; tools/negtest.ps1 deleted `.cross_zone_period_s = cross_zone_period_s,` in profile_executor_run.c (previously masked by backup_import.c `tp->cross_zone_period_s =`), RED; baseline PASS, real tree unchanged | NEGATIVE-TESTED |
-| `firmware/KilnFW/App/test/check_thermal_guard_input_producers.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_thermal_guard_input_producers.ps1` | NEGATIVE-TESTED | rest-10-08 | new field added to the struct | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_uart_log_bridge_stack_budget.ps1` | NEGATIVE-TESTED | 09-16c | 256 B volatile local in uart_protocol.c frame_and_send, real rebuild | +256 B exactly, RED 1456 B > 1200 B; fullclean rebuild back to baseline |
 | `firmware/KilnFW/App/test/check_ui_budget_asserts.ps1` | NEGATIVE-TESTED | 09-16f | _Static_assert in ui_page_temperature.c wrapped in a comment | RED, names the missing assertion; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_ui_relay_reset_removed.ps1` | NOT AUDITED | - | none | NOT AUDITED |
@@ -100,35 +100,35 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_ui_shell_layout.ps1` | NOT AUDITED | - | none | NOT AUDITED |
 | `firmware/KilnFW/App/test/check_ui_status_color.ps1` | NEGATIVE-TESTED | 09-16f | --ok colour in main_page.html changed to a low-contrast value | RED below 3:1 floor; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_ui_test_click_result_mirror_drift.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/check_wire_protocol_fingerprint.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/test_check_config_migration_steps.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/test_check_hal_include_boundary.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/check_wire_protocol_fingerprint.ps1` | NEGATIVE-TESTED | rest-10-08 | KILNLINK_ANNOUNCE_CMD 0x0F to 0x0E | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/test_check_config_migration_steps.ps1` | NEGATIVE-TESTED | rest-10-08 | expectedFrom = current - 2 | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/test_check_hal_include_boundary.ps1` | NEGATIVE-TESTED | rest-10-08 | baseline comparison disabled | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-08 | `return ($viaGate -and -not $direct)` -> `return $viaGate` in check_lcd_home_nav_gated.ps1 was MISSED (assertion 7 also removed the gated callback); added assertion 7b (gate kept + direct kiln_ui_show) | CAUGHT after fix (negtest -IncludeDirty); restored |
-| `firmware/KilnFW/App/test/test_check_route_tier_coverage.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/test_check_stop_path_requires_pin.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/test_check_ui_responsive_sweep.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/test_sdkconfig_sibling_pair_guard.py` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW/App/test/test_stack_budget_symbol_bounds.py` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW/App/test/test_check_route_tier_coverage.ps1` | NEGATIVE-TESTED | rest-10-08 | missing-route branch disabled in the check | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/test_check_stop_path_requires_pin.ps1` | NEGATIVE-TESTED | rest-10-08 | StopBranchGated forced true (same redo) | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/test_check_ui_responsive_sweep.ps1` | NEGATIVE-TESTED | rest-10-08 | harness-error regex replaced by false in ui_responsive_sweep.mjs | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/test_sdkconfig_sibling_pair_guard.py` | NEGATIVE-TESTED | rest-10-08 | sibling/parent diff comparison disabled | RED; hand-restored |
+| `firmware/KilnFW/App/test/test_stack_budget_symbol_bounds.py` | NEGATIVE-TESTED | rest-10-08 | cur_end bound disabled in stack_budget_lib.py and check_main_task_stack_budget.py | RED both; hand-restored |
 | `firmware/KilnFW_recovery/main/check_recovery_apply.ps1` | NEGATIVE-TESTED | 10-08 | `sha_finish(io->ctx, out) == 0 ? 0 : 2` -> `? 0 : 0` in recovery_apply.c was MISSED; added fail_sha_update/fail_sha_finish test cases and mutants shafinish/shaupdate | CAUGHT after fix (`FAIL: sha_finish fails`); restored |
-| `firmware/KilnFW_recovery/main/check_recovery_boot_verify.ps1` | NOT AUDITED | - | none (added 2026-10-04, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `firmware/KilnFW_recovery/main/check_recovery_health.ps1` | NOT AUDITED | - | none (added 2026-10-03, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `firmware/KilnFW_recovery/main/check_recovery_hold.ps1` | NOT AUDITED | - | none (added 2026-10-02, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `firmware/KilnFW_recovery/main/check_recovery_image_check.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW_recovery/main/check_recovery_lcd_policy.ps1` | NOT AUDITED | - | none (added 2026-10-03, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
+| `firmware/KilnFW_recovery/main/check_recovery_boot_verify.ps1` | NEGATIVE-TESTED | rest-10-08 | subtype comparison dropped | RED; hand-restored; PASS |
+| `firmware/KilnFW_recovery/main/check_recovery_health.ps1` | NEGATIVE-TESTED | rest-10-08 | >= to > | RED; hand-restored; PASS |
+| `firmware/KilnFW_recovery/main/check_recovery_hold.ps1` | NEGATIVE-TESTED | rest-10-08 | dir/data mask test inverted | RED; hand-restored; PASS |
+| `firmware/KilnFW_recovery/main/check_recovery_image_check.ps1` | NEGATIVE-TESTED | rest-10-08 | chip-id test inverted | RED; hand-restored; PASS |
+| `firmware/KilnFW_recovery/main/check_recovery_lcd_policy.ps1` | NEGATIVE-TESTED | rest-10-08 | <= instead of < | RED; hand-restored; PASS |
 | `firmware/KilnFW_recovery/main/check_recovery_page_crc.ps1` | NEGATIVE-TESTED | 10-07 | three real-source mutants on top of the built-in battery | all RED for the right reason; restored |
-| `firmware/KilnFW_recovery/main/check_recovery_passphrase.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW_recovery/main/check_recovery_pico_proto.ps1` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/KilnFW_recovery/main/check_recovery_upload.ps1` | NOT AUDITED | - | none (added 2026-10-02, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `firmware/KilnFW_recovery/main/check_recovery_wifi_policy.ps1` | NOT AUDITED | - | none (added 2026-10-02, after the 10-02 pass; pass 12 pending) | NOT AUDITED (pass 12 pending) |
-| `firmware/SaftyFW/test/check_00_saftyfw_host_tests.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/KilnFW_recovery/main/check_recovery_passphrase.ps1` | NEGATIVE-TESTED | rest-10-08 | alphabet mask - 2u | RED; hand-restored; PASS |
+| `firmware/KilnFW_recovery/main/check_recovery_pico_proto.ps1` | NEGATIVE-TESTED | rest-10-08 | SRAM upper bound widened | RED; hand-restored; PASS |
+| `firmware/KilnFW_recovery/main/check_recovery_upload.ps1` | NEGATIVE-TESTED | rest-10-08 | max_len + 1 | RED; hand-restored; PASS |
+| `firmware/KilnFW_recovery/main/check_recovery_wifi_policy.ps1` | NEGATIVE-TESTED | rest-10-08 | storage_rc >= 0 | RED; hand-restored; PASS |
+| `firmware/SaftyFW/test/check_00_saftyfw_host_tests.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy aggregator of individually audited host tests | see audit |
 | `firmware/SaftyFW/test/check_00_saftyfw_target_build.ps1` | NEGATIVE-TESTED | 09-17 | garbage top-level token inserted in link_frame.c | RED, ninja errors, exit 1; hand-restored; deleted build/ and rebuilt PASS 477/477 |
 | `firmware/SaftyFW/test/check_01_saftyfw_pushed_build.ps1` | REVIEWED, NOT MUTATED | 09-18 | cannot be driven locally (builds origin/main) | not exercised; a deliberate FAIL would need a broken commit pushed to origin/main |
-| `firmware/SaftyFW/test/check_no_sim_plant_guard_disable.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/SaftyFW/test/check_no_sim_plant_guard_disable.ps1` | NEGATIVE-TESTED | rest-10-08 | fabricated header: macro 0 PASS, macro 1 FAIL, macro absent FAIL | hand test |
 | `firmware/SaftyFW/test/check_saftyfw_task_count.ps1` | REVIEWED, NOT MUTATED | 09-18 | wrapper reference changed to prove the orphan guard (the check itself was not mutated) | its .py has a return-1 failure path (screen A) |
 | `firmware/SaftyFW/test/check_saftyfw_task_stack_budgets.ps1` | NEGATIVE-TESTED | 09-16c | 128 B volatile local in log_task_fn, from-scratch ARM rebuild | +128 B exactly, RED 600 B > 472 B; rebuilt from deleted build/ to 472 B |
-| `firmware/SaftyFW/test/test_regsp_margin_against_declared.py` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/SaftyFW/test/test_regsp_stale_literal.py` | NOT AUDITED | - | none | NOT AUDITED |
-| `firmware/SaftyFW/tools/check_bootloader_builds.ps1` | NOT AUDITED | - | none | NOT AUDITED |
+| `firmware/SaftyFW/test/test_regsp_margin_against_declared.py` | NEGATIVE-TESTED | rest-10-08 | margin compared to 10**9 | RED; hand-restored |
+| `firmware/SaftyFW/test/test_regsp_stale_literal.py` | NEGATIVE-TESTED | rest-10-08 | _invalidate_clobbered_regs call removed | RED; hand-restored |
+| `firmware/SaftyFW/tools/check_bootloader_builds.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | full cmake/ninja pico bootloader build; not mutated in time | build failure propagates via throw/exit 1 |
 | `firmware/SaftyFW/tools/check_guard_input_producers.ps1` | NEGATIVE-TESTED | 09-16c | tc_valid initializer line commented out in safety_core_build_input | RED, field named as having no producer; hand-restored; PASS |
 | `firmware/SaftyFW/tools/check_isolation.ps1` | NEGATIVE-TESTED | 09-16c | (a) link_task.h include in safety_core.c; (b) GPIO6 reference in link_task.c | both RED naming file and line; hand-restored; PASS |
 | `firmware/SaftyFW/tools/check_link_impl_isolation.ps1` | NEGATIVE-TESTED | 09-16c | CRC-named function added to safety_core.c | RED; hand-restored; PASS |
