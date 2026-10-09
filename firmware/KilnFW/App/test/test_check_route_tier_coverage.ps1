@@ -99,6 +99,16 @@ if ($resultBad.Missing.Count -ne 1) {
     Write-Host "Assertion 2 OK: untiered route detected and named -- $($resultBad.Missing[0].Method) $($resultBad.Missing[0].Uri)"
 }
 
+# --- Assertion 2b: a table row with no registered route -> Stale names it. ---
+$tableStaleFile = Join-Path $scratchDir "table_stale.h"
+Set-Content -Path $tableStaleFile -Value ($tableOkContent.Replace("};", "    ROUTE_TIER(`"/gone`", HTTP_GET, ROUTE_TIER_ADMIN),`n};")) -Encoding utf8
+$resultStale = Invoke-RouteTierCoverageScan -DriversDir $synthDriversDir -TableFile $tableStaleFile -BlindnessFloor 2
+if ($resultStale.Stale.Count -ne 1 -or $resultStale.Stale[0] -ne "HTTP_GET /gone" -or $resultOk.Stale.Count -ne 0) {
+    $failures += "Assertion 2b FAILED: stale row not detected exactly (stale=$($resultStale.Stale -join ',') okStale=$($resultOk.Stale.Count))."
+} else {
+    Write-Host "Assertion 2b OK: stale table row detected and named."
+}
+
 # --- Assertion 3: blindness floor still trips on an implausibly small tree,
 # proving the guard itself has teeth (this is the same class of gap the
 # HAL boundary test's assertion 3/3b covers for its own ratchet function). ---

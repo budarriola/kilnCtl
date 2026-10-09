@@ -914,7 +914,7 @@ no key -- reachable only over its own WPA2 SoftAP, whose random per-boot
 passphrase is shown only on the LCD. See `docs/RECOVERY_IMAGE_PLAN.md`.)
 `flash_firmware()`'s result reports the counter's before value, the clear result, and the
 verified-or-not after value, never a silent clear. A `GET /api/boot_guard` diagnostics route
-also landed in the same commit, exposing `{"boot_count","recovery_mode"}` unauthenticated so
+also landed in the same commit, exposing `{"boot_count","recovery_mode"}` (ROUTE_TIER_ADMIN in the main firmware; unauthenticated only in the recovery image) so
 this class of fix no longer needs a JTAG read of `s_bg` to verify. **2026-09-30 fix:** both that
 route and `POST /api/ota/esp/boot_guard_reset` now also report `persisted_count` -- a live
 re-read of NVS via the new read-only `boot_guard_get_persisted_count()` accessor
@@ -951,9 +951,10 @@ a 200 ms-capable queue wait and four interrupts-disabled heap walks): cache a
 snapshot outside the lock instead (`7a8594d`).
 
 **The URI handler cap has essentially no headroom left.** `check_uri_handler_cap.ps1`
-(as of 2026-10-02, recounted at `cf5cbbde`) reports 163 `httpd_uri_t` routes
+(as of 2026-10-09) reports 175 `httpd_uri_t` routes
 registered under `firmware/KilnFW/App/drivers/*.c` against
-`wifi_provision_http.c`'s `config.max_uri_handlers = 170` — 7 spare slots.
+`wifi_provision_http.c`'s `config.max_uri_handlers = 184` — 9 spare slots (it
+also now requires `http_auth_http.c`'s `KILN_HTTP_MAX_ROUTES` >= both).
 The next route added
 anywhere under `drivers/` will need that cap bumped in the same change, or
 the check fails; see the check script's own header comment for why this is a
