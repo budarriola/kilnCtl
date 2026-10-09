@@ -48,11 +48,11 @@ Context that shapes the findings:
 | L21 | LOW | cost | Home and Diagnostics refresh callbacks keep calling `dashboard_get_status()` (and a thermocouple read-all) while hidden. |
 | L22 | LOW | misc | Start confirm re-resolves the profile at Confirm time, not the one shown; picker id cache can go stale (mislabel only); live-decide Save As has no confirm. **FIXED in ef99c327.** |
 | L23 | INFO | threads | Debug flags and 64-bit flush stats shared across tasks without atomics; startup `lv_*` calls on app_main are an undocumented exception. |
-| L24 | MED | chart | Home chart looks up history by `t / 30 s` as a ring index; once the 640-sample ring wraps (5 h 20 min) the actual trace is time-shifted and then flat. |
-| L25 | LOW | chart | The dashed planned-line hook never runs: `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS` is never set, so the plan draws solid (home and profile detail). |
-| L26 | LOW | chart | The time axis ends at the plan's nominal horizon; a run that outlasts its plan stops drawing the actual trace and pins the now-dot to the last bucket. |
-| L27 | LOW | cost | Each home tick makes up to 31 `s_exec.lock` acquisitions (`portMAX_DELAY`) plus a plan-curve rebuild on the LVGL task, also while hidden. |
-| L28 | LOW | overflow | A valid but tiny ramp rate gives a horizon above 2^31 s; `lroundf()` into a 32-bit `long` then overflows in the tick labels and history index. |
+| L24 | MED | chart | Home chart looks up history by `t / 30 s` as a ring index; once the 640-sample ring wraps (5 h 20 min) the actual trace is time-shifted and then flat. **Fixed** (LCD chart commit, see Third pass fix note). |
+| L25 | LOW | chart | The dashed planned-line hook never runs: `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS` is never set, so the plan draws solid (home and profile detail). **Fixed** (LCD chart commit, see Third pass fix note). |
+| L26 | LOW | chart | The time axis ends at the plan's nominal horizon; a run that outlasts its plan stops drawing the actual trace and pins the now-dot to the last bucket. **Fixed** (LCD chart commit, see Third pass fix note). |
+| L27 | LOW | cost | Each home tick makes up to 31 `s_exec.lock` acquisitions (`portMAX_DELAY`) plus a plan-curve rebuild on the LVGL task, also while hidden. **Fixed** (LCD chart commit, see Third pass fix note). |
+| L28 | LOW | overflow | A valid but tiny ramp rate gives a horizon above 2^31 s; `lroundf()` into a 32-bit `long` then overflows in the tick labels and history index. **Fixed** (LCD chart commit, see Third pass fix note). |
 | L29 | INFO | geometry | Tick and legend positions add the chart's content offset twice (2 px); the top Y label sits 3 px above the content box. |
 | L30 | INFO | rail | Rail zone name/temp labels are rewritten every tick; zone names are read without the zones lock; aux caption table hard-codes 4 relays. |
 
@@ -556,3 +556,15 @@ covered `ui/ui_page_home_chart.c`, `ui/ui_page_home_graph.c`,
 `ui/ui_page_home_rail.c` and `ui/ui_page_home_internal.h`. L12, L15, L19, the
 Trip detail part of L20 and L24-L29 are estimates from source, not reproduced
 on the panel.
+
+### Third pass fix note (L24-L28)
+
+Fixed together: history is matched by each entry's `elapsed_s` inside one
+executor-lock pass (`profile_executor_history_sample_actual()`, search in
+`control/profile_history_search.h`, host-tested with a wrapped ring and a
+sampling gap); both charts set `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS`; the active
+axis is `max(plan, elapsed)` clamped to 99 h (`ui_page_home_active_horizon_s()`)
+and the planned line stops at the plan end; the plan curve is rebuilt only
+when a hash of the segments changes. Not done: the chart block still runs
+while the page is hidden (one lock pass, cached plan; the hidden-page skip for
+the rest of the callback is L21's).

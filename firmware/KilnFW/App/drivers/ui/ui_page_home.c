@@ -878,6 +878,8 @@ lv_obj_t *ui_page_home_build(void)
         lv_chart_add_series(s_ui_home_chart, lv_color_hex(UI_PAGE_HOME_PLAN_COLOR_HEX), LV_CHART_AXIS_PRIMARY_Y);
     /* Dashing hook -- see ui_home_chart_draw_event_cb()'s own comment for why this is
      * the only way to get a dashed lv_chart series line in LVGL 9.5. */
+    /* LVGL 9.5 sends DRAW_TASK_ADDED only to objects carrying this flag (LCD audit L25). */
+    lv_obj_add_flag(s_ui_home_chart, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS);
     lv_obj_add_event_cb(s_ui_home_chart, ui_home_chart_draw_event_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
     for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
         s_ui_home_chart_actual_pts[i] = LV_CHART_POINT_NONE;

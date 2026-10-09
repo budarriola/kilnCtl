@@ -358,6 +358,21 @@ bool ui_page_home_lag_notice_active(bool have_rich_zone_data, bool any_zone_sust
 size_t ui_page_home_lagging_zone_indices(uint8_t mask, uint8_t max_zones, uint8_t *out_indices,
                                           size_t out_cap);
 
+
+/* Display maximum for the chart time axis (99 h). A valid but tiny ramp rate
+ * gives a plan horizon above 2^31 s (LCD audit L28); clamping here keeps the
+ * tick math and the lroundf() into a 32-bit long defined. */
+#define UI_PAGE_HOME_GRAPH_MAX_HORIZON_S 356400.0f
+
+/* Axis horizon for an active run: the larger of the plan's nominal length and
+ * the elapsed time (LCD audit L26, a run that outlasts its plan keeps drawing),
+ * clamped to [1, UI_PAGE_HOME_GRAPH_MAX_HORIZON_S]. NaN reads as 1. */
+float ui_page_home_active_horizon_s(float plan_horizon_s, float elapsed_s);
+
+/* Tolerance (s) for matching a chart bucket to a history sample by elapsed_s:
+ * half a bucket, never under one sample period. */
+float ui_page_home_history_tolerance_s(float horizon_s, size_t point_count, float sample_period_s);
+
 #ifdef __cplusplus
 }
 #endif

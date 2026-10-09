@@ -496,7 +496,15 @@ lag_notice_done:;
      * still needed for the chart's planned-ahead series and time-axis label,
      * so the call stays -- only its total-seconds return value is now
      * discarded. */
-    profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
+    /* static: LVGL-task-only, keeps the plan curve between ticks so it is
+     * rebuilt only when the run's segments change (LCD audit L27) and takes
+     * this callback's deepest-stack frame down by the array size. */
+    static profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
+    static size_t s_plan_cache_n = 0;
+    static uint32_t s_plan_cache_key = 0;
+    static bool s_plan_cache_valid = false;
+    static float s_hist_t[UI_PAGE_HOME_CHART_POINTS];
+    static float s_hist_c[UI_PAGE_HOME_CHART_POINTS];
     size_t plan_n = 0;
     if (st->state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
         for (uint32_t i = 1; i < UI_PAGE_HOME_CHART_POINTS; i++) {
@@ -632,13 +640,28 @@ lag_notice_done:;
              * state != IDLE (profile_executor.h's own field comments) --
              * profile_feasibility_plan_curve() is pure math over that copy,
              * safe to call from this refresh timer every tick. */
-            (void)profile_feasibility_plan_curve(st->segments, st->segment_count, st->run_start_c,
-                                                  plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
-                                                  &plan_n);
-            horizon_s = (plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f;
-            if (horizon_s < 1.0f) {
-                horizon_s = 1.0f; /* guard div-by-zero below; a real profile always has segments */
+            uint32_t plan_key = 2166136261u; /* FNV-1a over the plan's inputs */
+            {
+                const uint8_t *kb = (const uint8_t *)st->segments;
+                size_t kn = (size_t)st->segment_count * sizeof(st->segments[0]);
+                for (size_t k = 0; k < kn; k++) { plan_key = (plan_key ^ kb[k]) * 16777619u; }
+                const uint8_t *rb = (const uint8_t *)&st->run_start_c;
+                for (size_t k = 0; k < sizeof(st->run_start_c); k++) { plan_key = (plan_key ^ rb[k]) * 16777619u; }
+                plan_key = (plan_key ^ (uint32_t)st->segment_count) * 16777619u;
             }
+            if (!s_plan_cache_valid || plan_key != s_plan_cache_key) {
+                s_plan_cache_n = 0;
+                (void)profile_feasibility_plan_curve(st->segments, st->segment_count, st->run_start_c,
+                                                      plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
+                                                      &s_plan_cache_n);
+                s_plan_cache_key = plan_key;
+                s_plan_cache_valid = true;
+            }
+            plan_n = s_plan_cache_n;
+            /* L26/L28: the axis follows a run that outlasts its plan, and is
+             * clamped so a tiny ramp rate cannot overflow the tick math. */
+            horizon_s = ui_page_home_active_horizon_s((plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f,
+                                                      (float)st->total_elapsed_s);
         } else {
             /* IDLE with leftover history (count>0 is guaranteed here -- the
              * outer gate that chose this else-branch already ruled out
@@ -665,12 +688,33 @@ lag_notice_done:;
          * chart -- see that function's header comment in
          * ui_page_home_graph.h). */
         size_t actual_point_count = 0;
+        /* L24/L27: one executor-lock acquisition for every bucket, matched by
+         * each entry's own elapsed_s (not ring index * period). Idle-with-
+         * history buckets are measured from the oldest retained sample. */
+        for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+            s_hist_t[i] = (float)i * horizon_s / (float)(UI_PAGE_HOME_CHART_POINTS - 1);
+        }
+        if (!state_active && count > 0) {
+            profile_history_entry_t oldest_e;
+            if (profile_executor_get_history(&oldest_e, 0, 1) == 1) {
+                for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+                    s_hist_t[i] += (float)oldest_e.elapsed_s;
+                }
+            }
+        }
+        (void)profile_executor_history_sample_actual(
+            hist_zone, s_hist_t, UI_PAGE_HOME_CHART_POINTS,
+            ui_page_home_history_tolerance_s(horizon_s, UI_PAGE_HOME_CHART_POINTS, (float)HISTORY_SAMPLE_PERIOD_S),
+            s_hist_c);
         for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
             float t_i = (UI_PAGE_HOME_CHART_POINTS > 1)
                             ? (float)i * horizon_s / (float)(UI_PAGE_HOME_CHART_POINTS - 1)
                             : 0.0f;
 
             float planned_c = ui_home_plan_lookup(plan_pts, plan_n, t_i);
+            if (plan_n > 0 && t_i > plan_pts[plan_n - 1].t) {
+                planned_c = NAN; /* past the plan's end there is nothing planned (L26) */
+            }
             float planned_disp = unit_pref_convert(planned_c, unit, UNIT_PREF_KIND_ABSOLUTE);
             s_ui_home_chart_planned_pts[i] = isnan(planned_disp) ? LV_CHART_POINT_NONE : (int32_t)lroundf(planned_disp);
             if (!isnan(planned_disp)) {
@@ -690,16 +734,9 @@ lag_notice_done:;
             float actual_c = NAN;
             if (!state_active || t_i <= (float)st->total_elapsed_s + (float)HISTORY_SAMPLE_PERIOD_S / 2.0f) {
                 if (count > 0) {
-                    /* Samples are recorded every HISTORY_SAMPLE_PERIOD_S
-                     * seconds of real time, so ring index and elapsed time
-                     * are proportional -- this avoids paging the whole ring
-                     * (up to HISTORY_MAX_SAMPLES=2880 entries, far too big
-                     * for a local buffer here) for a single-entry lookup. */
-                    size_t idx = (size_t)lroundf(t_i / (float)HISTORY_SAMPLE_PERIOD_S);
-                    if (idx >= count) idx = count - 1;
-                    profile_history_entry_t entry;
-                    if (profile_executor_get_history(&entry, idx, 1) == 1) {
-                        actual_c = entry.actual_c[hist_zone];
+                    /* s_hist_c[] came from one locked, elapsed_s-keyed pass above. */
+                    if (!isnan(s_hist_c[i])) {
+                        actual_c = s_hist_c[i];
                         have_actual = true;
                     }
                 } else if (i == 0) {

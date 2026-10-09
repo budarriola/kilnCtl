@@ -264,3 +264,30 @@ size_t ui_page_home_lagging_zone_indices(uint8_t mask, uint8_t max_zones, uint8_
     }
     return n;
 }
+
+float ui_page_home_active_horizon_s(float plan_horizon_s, float elapsed_s)
+{
+    float h = 1.0f;
+    if (plan_horizon_s > h) {
+        h = plan_horizon_s;
+    }
+    if (elapsed_s > h) {
+        h = elapsed_s;
+    }
+    if (!(h <= UI_PAGE_HOME_GRAPH_MAX_HORIZON_S)) {
+        h = UI_PAGE_HOME_GRAPH_MAX_HORIZON_S;
+    }
+    return h;
+}
+
+float ui_page_home_history_tolerance_s(float horizon_s, size_t point_count, float sample_period_s)
+{
+    float tol = sample_period_s;
+    if (point_count > 1 && horizon_s > 0.0f) {
+        float half_bucket = horizon_s / (float)(point_count - 1) * 0.5f;
+        if (half_bucket > tol) {
+            tol = half_bucket;
+        }
+    }
+    return tol;
+}

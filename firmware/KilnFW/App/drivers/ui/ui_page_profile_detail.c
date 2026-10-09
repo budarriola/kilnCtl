@@ -629,6 +629,7 @@ lv_obj_t *ui_page_profile_detail_build(void)
     lv_chart_set_point_count(s_plan_chart, UI_PAGE_PROFILE_DETAIL_CHART_POINTS);
     s_plan_series =
         lv_chart_add_series(s_plan_chart, lv_color_hex(UI_PAGE_PROFILE_DETAIL_PLAN_COLOR_HEX), LV_CHART_AXIS_PRIMARY_Y);
+    lv_obj_add_flag(s_plan_chart, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS); /* LCD audit L25 */
     lv_obj_add_event_cb(s_plan_chart, plan_chart_draw_event_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
     for (uint32_t i = 0; i < UI_PAGE_PROFILE_DETAIL_CHART_POINTS; i++) {
         s_plan_pts[i] = LV_CHART_POINT_NONE;

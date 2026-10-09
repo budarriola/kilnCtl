@@ -480,6 +480,14 @@ size_t profile_executor_get_history_count(void);
  * its own -- at 2880 entries that's real memory, worth not doubling up. */
 size_t profile_executor_get_history(profile_history_entry_t *out, size_t start_index, size_t max_entries);
 
+/* Samples zone `zone`'s actual_c at n ascending run-relative times t_s[] with
+ * ONE acquisition of the executor lock (LCD audit L24/L27). Each time is matched
+ * to the retained entry whose elapsed_s is nearest (not ring index * period, so
+ * a wrapped ring or a sampling gap stays correct); out_c[i] is NAN when no entry
+ * lies within tol_s, the sample is invalid, or the ring is empty. Returns how
+ * many out_c values are non-NAN. */
+size_t profile_executor_history_sample_actual(uint8_t zone, const float *t_s, size_t n, float tol_s, float *out_c);
+
 /* Brings the module up and starts its control task plus a second,
  * independent watchdog task (guard 9 -- "a control loop cannot be its own
  * watchdog", TODO.md 6A.3). Matches every other driver's

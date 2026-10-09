@@ -6,6 +6,7 @@
  * multi-way split this is one piece of. */
 
 #include "profile_executor_internal.h"
+#include "profile_history_search.h"
 
 #include <math.h>
 #include <stdlib.h> /* free() -- firing-history blob is heap-allocated, see get_firing_history() */
@@ -757,4 +758,47 @@ size_t profile_executor_get_history(profile_history_entry_t *out, size_t start_i
     }
     xSemaphoreGive(s_exec.lock);
     return count;
+}
+
+typedef struct {
+    size_t oldest;
+} history_search_ctx_t;
+
+static uint32_t history_elapsed_at(const void *ctx, size_t index)
+{
+    const history_search_ctx_t *c = (const history_search_ctx_t *)ctx;
+    profile_history_entry_t e;
+    history_unpack(&s_exec.history[(c->oldest + index) % HISTORY_MAX_SAMPLES], &e);
+    return e.elapsed_s;
+}
+
+size_t profile_executor_history_sample_actual(uint8_t zone, const float *t_s, size_t n, float tol_s, float *out_c)
+{
+    if (!out_c) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        out_c[i] = NAN;
+    }
+    if (!t_s || zone >= MAX31856_CHANNEL_COUNT || s_exec.lock == NULL) {
+        return 0;
+    }
+    size_t found = 0;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (s_exec.history != NULL && s_exec.history_count > 0) {
+        history_search_ctx_t ctx = { .oldest = (s_exec.history_count < HISTORY_MAX_SAMPLES) ? 0u : s_exec.history_head };
+        for (size_t i = 0; i < n; i++) {
+            size_t idx;
+            if (profile_history_find_nearest(s_exec.history_count, history_elapsed_at, &ctx, t_s[i], tol_s, &idx)) {
+                profile_history_entry_t e;
+                history_unpack(&s_exec.history[(ctx.oldest + idx) % HISTORY_MAX_SAMPLES], &e);
+                out_c[i] = e.actual_c[zone];
+                if (!isnan(out_c[i])) {
+                    found++;
+                }
+            }
+        }
+    }
+    xSemaphoreGive(s_exec.lock);
+    return found;
 }

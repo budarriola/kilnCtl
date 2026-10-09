@@ -4,10 +4,16 @@
 // current-position bucket index) can be checked without LVGL/esp_log stubs.
 #include "test_common.h"
 #include "../drivers/ui/ui_page_home_graph.h"
+#include "../drivers/control/profile_history_search.h"
 
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+
+static uint32_t test_elapsed_at(const void *ctx, size_t i)
+{
+    return ((const uint32_t *)ctx)[i];
+}
 
 void run_test_ui_page_home_graph(void)
 {
@@ -531,5 +537,44 @@ void run_test_ui_page_home_graph(void)
         n = ui_page_home_lagging_zone_indices(0xFFu, 8, small, 2);
         TEST_CHECK(n == 2 && small[0] == 0 && small[1] == 1,
                    "out_cap=2 truncates to the first 2 zones, does not overflow");
+    }
+
+    TEST_SECTION("ui_page_home_graph: history search by elapsed_s (L24)");
+    {
+        // Wrapped ring: oldest retained sample is at elapsed 19230 s, not 0.
+        uint32_t e[640];
+        for (size_t i = 0; i < 640; i++) e[i] = 19230u + (uint32_t)i * 30u;
+        size_t idx = 999;
+        TEST_CHECK(profile_history_find_nearest(640, test_elapsed_at, e, 19230.0f + 300.0f, 30.0f, &idx) && idx == 10,
+                   "wrapped ring: t=oldest+300 -> index 10, not t/30");
+        TEST_CHECK(!profile_history_find_nearest(640, test_elapsed_at, e, 600.0f, 30.0f, &idx),
+                   "wrapped ring: bucket before the oldest retained sample is empty");
+        TEST_CHECK(profile_history_find_nearest(640, test_elapsed_at, e, e[639] + 10.0f, 30.0f, &idx) && idx == 639,
+                   "newest sample matches a bucket just past it");
+        TEST_CHECK(!profile_history_find_nearest(640, test_elapsed_at, e, e[639] + 500.0f, 30.0f, &idx),
+                   "bucket far past the newest sample is empty");
+        // Gap: samples at 0,30,60 then 600,630 (faulted ticks skipped).
+        uint32_t g[5] = {0, 30, 60, 600, 630};
+        TEST_CHECK(profile_history_find_nearest(5, test_elapsed_at, g, 600.0f, 30.0f, &idx) && idx == 3,
+                   "gap: t=600 is the post-gap sample (t/30 would say index 20 -> clamp)");
+        TEST_CHECK(!profile_history_find_nearest(5, test_elapsed_at, g, 330.0f, 30.0f, &idx),
+                   "gap: bucket inside the gap draws nothing");
+        TEST_CHECK(!profile_history_find_nearest(0, test_elapsed_at, g, 0.0f, 30.0f, &idx), "empty ring");
+    }
+
+    TEST_SECTION("ui_page_home_graph: active horizon (L26, L28)");
+    {
+        TEST_CHECK_NEAR(ui_page_home_active_horizon_s(1000.0f, 400.0f), 1000.0f, 0.01f, "plan longer than elapsed");
+        TEST_CHECK_NEAR(ui_page_home_active_horizon_s(1000.0f, 1500.0f), 1500.0f, 0.01f, "run outlasts plan extends axis");
+        TEST_CHECK_NEAR(ui_page_home_active_horizon_s(0.0f, 0.0f), 1.0f, 0.01f, "floor of 1 s");
+        TEST_CHECK_NEAR(ui_page_home_active_horizon_s(7.2e9f, 0.0f), UI_PAGE_HOME_GRAPH_MAX_HORIZON_S, 0.01f,
+                        "huge horizon clamps to 99 h");
+        TEST_CHECK_NEAR(ui_page_home_active_horizon_s(NAN, 5.0f), 5.0f, 0.01f, "NaN plan horizon ignored");
+        char lbl[64];
+        TEST_CHECK(ui_page_home_build_x_label(ui_page_home_active_horizon_s(7.2e9f, 0.0f), true, lbl, sizeof(lbl)) &&
+                       strstr(lbl, "5940:00") != NULL,
+                   "clamped horizon labels as 5940:00");
+        TEST_CHECK_NEAR(ui_page_home_history_tolerance_s(300.0f, 31, 30.0f), 30.0f, 0.01f, "small bucket -> one period");
+        TEST_CHECK_NEAR(ui_page_home_history_tolerance_s(30000.0f, 31, 30.0f), 500.0f, 0.01f, "big bucket -> half bucket");
     }
 }
