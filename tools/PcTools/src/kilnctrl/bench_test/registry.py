@@ -348,6 +348,10 @@ get_case("WEB-DASH-03").depends_on = "HP-01"
 get_case("WEB-DASH-09").depends_on = "HP-01"
 get_case("WEB-OTA-02").depends_on = "HP-01"
 get_case("WEB-DASH-06").depends_on = "HP-04"
+# WEB-ZONE observers follow the autotune / firing hosts they read.
+get_case("WEB-ZONE-06").depends_on = "AT-03"
+get_case("WEB-ZONE-08").depends_on = "AT-05"
+get_case("WEB-ZONE-11").depends_on = "HP-01"
 # Post-run alias of the pinned-last lockout case (_ALWAYS_LAST).
 get_case("WEB-LOG-03").depends_on = "WEB-SEC-05"
 
@@ -501,6 +505,7 @@ _NIGHTLY_ORDER: List[str] = [
     "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
     "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
     "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
+    "WEB-PROF-10", "WEB-STIM-02", "WEB-ZONE-04", "WEB-ZONE-07", "WEB-ZONE-13",
     "WEB-BAK-02", "WEB-BAK-03",
     "WEB-KCFG-02", "WEB-KCFG-03",
     "WEB-DIAG-07", "WEB-DIAG-08",
@@ -513,7 +518,7 @@ _NIGHTLY_ORDER: List[str] = [
     "LCD-09", "LCD-14", "LCD-16",
     # WEB-DASH-09 directly after HP-01, before HP-02: a new run clears the
     # history ring.
-    "HP-01", "SP-06", "LCD-02", "WEB-DASH-09", "WEB-DASH-03", "WEB-OTA-02",
+    "HP-01", "SP-06", "LCD-02", "WEB-DASH-09", "WEB-DASH-03", "WEB-OTA-02", "WEB-ZONE-11",
     "HP-02", "SP-03",
     "HP-04", "LCD-03", "WEB-DASH-06", "HP-05", "HP-06", "HP-08",
     "SK-02",

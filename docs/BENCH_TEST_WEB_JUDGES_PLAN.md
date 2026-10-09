@@ -351,7 +351,7 @@ NEEDS OWNER ids: WEB-DASH-04, WEB-DASH-07, WEB-DASH-12 (resolved 2026-10-09: acc
   - Write: one profile `BT_PROF03` with `zone_mask=1`, `seg_count=1`, `seg0_kind=0`, `seg0_target=30`, `seg0_ramp=0`, `seg0_dwell=1`.
   - Restore in `finally`: `POST /api/profile/delete id=N` must return plain `ok` (`profiles_edit_http.c:761`). Then `GET /api/profile?id=N` must return 404 (`profiles_catalog_http.c:397`), and the user list must equal the snapshot.
   - Needs a raw-text authed POST seam such as `_http_post_raw_authed` (`cases_web_rw.py:136`).
-  - Plan §6 rule 12 conflict: rule 12 limits writes to the hidden bench slot 101, which HTTP cannot reach (POST only accepts ids below 100). This case therefore uses a transient free user slot, as the caller allowed. Owner sign-off is noted.
+  - Plan §6 rule 12 conflict: rule 12 limits writes to the hidden bench slot 101, which HTTP cannot reach (POST only accepts ids below 100). This case therefore uses a transient free user slot (owner ruling 2026-10-09, now recorded as the rule 12 exception in BENCH_TEST_SYSTEM_PLAN.md): the slot is read from `/api/profiles` and verified empty (`GET /api/profile?id=N` 404) before any write, the profile is named `BT_PROF*`, INCONCLUSIVE if no slot is free, and `finally` deletes only what the case created and reads back that the slot is empty (a leftover is FAIL with an "ERROR:" reason). Implemented in `cases_web_prof.py`.
 - **Fake-board test:**
   - Positive: the snapshot has ids `[0,1]`, the POST returns `id:2`, the detail matches, the delete returns `ok`, and the GET returns 404.
   - Negative: the POST returns `id:0` (an occupied slot). This must be a FAIL.
@@ -805,7 +805,7 @@ NEEDS OWNER ids: WEB-STIM-02. Owner should also sign off on the plan §6 rule 12
 - **INCONCLUSIVE:** `committed_mask == 0` (Pico not commissioned), or `mask & committed_mask == 0` (no sweep ever run, nothing to compare).
 - **Fake-board test:** positive: mask 7, zone [0,1,2], committed_mask 7, committed_zone [0,1,2]. Negative: committed_zone [0,2,1] with both masks 7 (must FAIL).
 
-NEEDS OWNER ids: WEB-ZONE-02, WEB-ZONE-03, WEB-ZONE-05
+Resolved: WEB-ZONE-02, WEB-ZONE-03, WEB-ZONE-05 - Owner 2026-10-09: accepted recommendation.
 
 ### 4.4 Safety, commissioning, readiness (WEB-SAF, WEB-COMM, WEB-RDY)
 
@@ -1738,11 +1738,11 @@ recommended form unless the owner rules otherwise.
 | WEB-KCFG-03 | Self-apply writes abs_max, the CT keys, zones and Pico flash. | The read-only apply_status reduction. |
 | WEB-KCFG-04 | A live 428 probe risks a real swap. | The static reduction plus host-test coverage. |
 
-The owner should also sign off on two things:
+Owner 2026-10-09: every NEEDS OWNER row above takes its Recommended entry (WEB-STIM-02, WEB-ZONE-02, WEB-ZONE-03, WEB-ZONE-05: accepted recommendation). Still open for the owner:
 
-- **WEB-PROF-03..07 (plan section 6, rule 12).** These cases create, edit and delete transient
-  `BT_PROF*` profiles in a free user slot, then restore the profile list in `finally`. Rule 12
-  limits profile writes to hidden bench slot 101, but HTTP accepts only ids below 100.
+- **WEB-PROF-03..07 (resolved, owner 2026-10-09).** These cases create, edit and delete transient
+  `BT_PROF*` profiles in a verified-empty free user slot below 100, then delete and read back in
+  `finally`; BENCH_TEST_SYSTEM_PLAN.md rule 12 carries the exception.
 - **Aliases of NEEDS OWNER cases.** These inherit the ruling on their target:
   - WEB-WIZ-07 aliases WEB-COMM-03.
   - WEB-WIZ-09 aliases WEB-ZONE-05.
