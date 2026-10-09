@@ -114,5 +114,7 @@ assert(SRC.indexOf('espUpdateBtn') < 0 && SRC.indexOf('espRollbackBtn') < 0, 're
 assert(!/pushImage\(\s*'\/api\/ota\/esp'/.test(SRC), 'page has no push call to /api/ota/esp');
 assert(SRC.indexOf('/api/ota/esp/rollback') < 0, 'page does not reference /api/ota/esp/rollback');
 
+assert(SRC.indexOf('espFile') < 0 && SRC.indexOf('espPicker') < 0 && SRC.indexOf('updateOrderHint') < 0, 'orphaned ESP picker and order hint are gone');
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);

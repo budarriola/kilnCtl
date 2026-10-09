@@ -121,27 +121,6 @@ route.</p>
      merely disabled) until loadInterlock() confirms idle, and re-hidden the
      moment a later poll finds the kiln no longer idle. -->
 
-<!-- UPDATE_PROTOCOL.md sec 6a: "GUI states the order -- ESP first -- when
-     both need updating." Both processors have no shared queue this page can
-     read back (the Pico has no A/B slot/pending-update concept at all, see
-     renderPicoInfo()'s own comment), so "both need updating" is read
-     directly off operator intent: a file chosen in BOTH pickers at once.
-     Hidden until both are chosen; re-hidden the moment either picker is
-     cleared or a file is picked in only one -- see updateOrderHintFilesChanged()
-     below. -->
-<div id="updateOrderHint" class="card" style="display:none">
-  Both an ESP and a Pico image are selected. Update the <b>ESP first</b>,
-  confirm it booted the new image, and only then push the Pico image --
-  the safety link the Pico update relies on comes up as part of the ESP's
-  own boot, so relaying to the Pico first (or mid-ESP-reboot) risks the
-  relay running over a link that is about to drop.
-</div>
-
-<div id="espPicker" style="display:none">
-  <label for="espFile">New ESP image (.bin)</label>
-  <input type="file" id="espFile" accept=".bin">
-  <p>Direct ESP upload and rollback are retired under the single-slot layout. Use the &quot;Stage an update&quot; / GitHub card on this page, then the Install button, to update the ESP.</p>
-</div>
 <!-- Only shown when GET /api/ota/esp/status reports recovery_mode:true --
      see renderEspInfo() below. POST /api/ota/esp/recovery_exit is
      authenticated the same way as every other mutating OTA route
@@ -291,7 +270,6 @@ function readFileBytes(fileInput) {
  * Named blocker shown right at the top, refreshed on a slow timer so an
  * operator watching this page sees the kiln become idle without reloading. */
 function setPickersVisible(visible) {
-  document.getElementById('espPicker').style.display = visible ? '' : 'none';
   document.getElementById('picoPicker').style.display = visible ? '' : 'none';
   document.getElementById('stagePicker').style.display = visible ? '' : 'none';
 }
@@ -387,7 +365,7 @@ function renderEspInfo(s) {
   // other than via an actual reboot, but it CAN flip true->false the moment
   // the board self-clears and the operator reboots it themselves (from this
   // very button) or via the background self-confirm task -- so this box is
-  // re-hidden every poll, same as espPicker's idle-dependent visibility
+  // re-hidden every poll, same as the pickers' idle-dependent visibility
   // above, not just shown once.
   document.getElementById('recoveryExitBox').style.display = s.recovery_mode ? '' : 'none';
 
@@ -664,15 +642,6 @@ function pollSafetyBuildInfo() {
     }
   }).catch(function () {});
 }
-
-/* ---- Update-order hint (UPDATE_PROTOCOL.md sec 6a) ------------------------ */
-function updateOrderHintFilesChanged() {
-  var espChosen = !!(document.getElementById('espFile').files || []).length;
-  var picoChosen = !!(document.getElementById('picoFile').files || []).length;
-  document.getElementById('updateOrderHint').style.display = (espChosen && picoChosen) ? '' : 'none';
-}
-document.getElementById('espFile').addEventListener('change', updateOrderHintFilesChanged);
-document.getElementById('picoFile').addEventListener('change', updateOrderHintFilesChanged);
 
 /* ---- Stage (WP6, docs/GITHUB_RELEASE_UPDATE_PLAN.md) ----------------------
  * GET /api/update/stage, POST /api/update/stage (raw body), POST
