@@ -1365,6 +1365,7 @@ static void test_pcfg_junk_rev_repair_deferred_without_cfg(void)
 {
     TEST_SECTION("junk rev blob with cfg NOT mounted: repair deferred, stays fail-closed, prof_rev untouched");
     pcfg_reset_all();
+    cfg_fs_deinit();
     TEST_CHECK(!cfg_fs_is_available(), "cfg not mounted");
     uint8_t junk[5] = {1, 2, 3, 4, 5};
     pcfg_set_rev_blob(junk, sizeof(junk));
