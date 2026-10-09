@@ -34,6 +34,12 @@
 
 #include "cfg_fs.h"
 
+#include "ota_image_crc.h"
+/* LOW-3 probe: record the stub lock depth every time start() validates a blob. */
+static int g_probe_crc_max_depth = -1;
+#define ota_image_crc32(p, n) \
+    (g_probe_crc_max_depth = (g_test_stub_lock_depth > g_probe_crc_max_depth ? g_test_stub_lock_depth : g_probe_crc_max_depth), \
+     ota_image_crc32((p), (n)))
 #include "../drivers/persist/aux_outputs_cfg.c"
 #include "../drivers/safety/safety_pico_relay_mask.h"
 
@@ -526,8 +532,22 @@ static void test_raw_verify_and_journal(void)
     TEST_CHECK(aux_convert_journal_clear() && !aux_convert_journal_read(&j), "clear removes the marker");
 }
 
+static void test_start_holds_no_lock_during_io(void)
+{
+    fresh_board();
+    aux_outputs_blob_t blob = make_blob_one_enabled(1);
+    stash_blob(&blob, sizeof(blob), 3);
+    g_probe_crc_max_depth = -1;
+    g_test_stub_lock_depth = 0;
+    TEST_CHECK(aux_outputs_cfg_start(0) == ESP_OK, "start ok");
+    TEST_CHECK(g_probe_crc_max_depth == 0, "no lock held while start() reads/validates NVS and cfg-fs");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "start() releases its lock");
+    TEST_CHECK(s_rev == 3 && s_entries[1].enabled == 1, "start() still publishes the loaded value");
+}
+
 void run_test_aux_outputs_store(void)
 {
+    test_start_holds_no_lock_during_io();
     test_predicate();
     test_defaults_all_disabled();
     test_set_round_trip();

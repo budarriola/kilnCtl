@@ -142,9 +142,7 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     if (!s_set_lock) {
         s_set_lock = xSemaphoreCreateMutex();
     }
-    ao_lock(s_lock);
-    apply_defaults();
-
+    /* All NVS / cfg-fs I/O below runs into locals; s_lock is taken only to publish. */
     aux_outputs_blob_t nvs_blob;
     memset(&nvs_blob, 0, sizeof(nvs_blob));
     bool nvs_valid = false;
@@ -194,6 +192,8 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
                                           aux_validate, &resolved, &resolved_rev, &used_file);
+    ao_lock(s_lock);
+    apply_defaults();
     if (nvs_newer) {
         s_quarantined = true;
     } else if (have_value) {
