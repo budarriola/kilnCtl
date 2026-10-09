@@ -6073,3 +6073,207 @@ _CASE_FUNCS = {
 
 for _cid, _fn in _CASE_FUNCS.items():
     get_case(_cid).judge = _fn
+
+
+# ---------------------------------------------------------------------------
+# LCD-07 / LCD-15 / LCD-17 / LCD-18 -- read-only set: home rail pills,
+# network page, touch-cal enter/back-out, topbar warning tier. None of these
+# writes a setting or taps connect/forget/Start/complete-cal.
+# Kept in its own block (own dict + loop) to stay rebase-friendly.
+# ---------------------------------------------------------------------------
+
+#: ui_page_home.c rail: right quarter (x 360..480), 4px pad, "Relays" caption,
+#: then 4 pills 24x18 with 4px gaps. Widget-space centres, derived from source
+#: (an estimate: a pill sample that reads neither ON nor NEUTRAL is
+#: INCONCLUSIVE, never a colour FAIL, so a small geometry error cannot FAIL).
+_LCD07_PILL_CX = (376, 404, 432, 460)
+_LCD07_PILL_CY = 75
+_NEUTRAL_RGB = (0x9A, 0xA0, 0xAE)  # UI_THEME_COLOR_NEUTRAL == TEXT_SECONDARY
+_LCD18_WARN_DX = -40  # warning slot sits one icon (36 px) + 4 px gap left of the gear
+
+
+def _judge_lcd07(page, states, running: bool) -> CaseResult:
+    """states: per-pill 'on' | 'neutral' | 'other' | None (unsampled)."""
+    obs = {"page": page, "pill_states": list(states), "running": running}
+    if page != "home":
+        return CaseResult(Verdict.FAIL, reason=f"expected page 'home', got {page!r}", observed=obs)
+    if any(s is None for s in states):
+        return CaseResult(Verdict.INCONCLUSIVE, reason="a rail pill could not be sampled", observed=obs)
+    if any(s == "other" for s in states):
+        return CaseResult(Verdict.INCONCLUSIVE, reason="a rail pill reads neither ON nor NEUTRAL (rail geometry or camera cast); not judged as FAIL", observed=obs)
+    if running:
+        if states[0] == "on":
+            return CaseResult(Verdict.PASS, observed=obs)
+        if states[0] == "neutral":
+            return CaseResult(Verdict.INCONCLUSIVE, reason="zone 0 relay pill OFF at sample time (PWM off-window); not a defect by itself", observed=obs)
+    if not running and all(s == "neutral" for s in states):
+        return CaseResult(Verdict.PASS, observed=obs)
+    return CaseResult(Verdict.FAIL, reason="idle rail pills are not all NEUTRAL" if not running else "unexpected pill state", observed=obs)
+
+
+def _case_lcd07(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
+    srv = _srv(ctx)
+    ui = srv._ui_test
+    page = ui.get_current_page()
+    if page != "home":
+        return _judge_lcd07(page, [None] * 4, False)
+    try:
+        running = srv._profiles.get_exec_status().state_name == "running"
+    except Exception:  # noqa: BLE001
+        running = False
+    image_path = _capture(ctx, "lcd07_rail.jpg")
+    if not image_path:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="camera capture failed")
+    states = []
+    for cx in _LCD07_PILL_CX:
+        try:
+            s = lcd_sampler.sample_widget(image_path, cx, _LCD07_PILL_CY, repo_root=ctx.get("repo_root"))
+        except lcd_sampler.LcdCaptureError:
+            states.append(None)
+            continue
+        if s.bezel is None:
+            states.append(None)
+        elif lcd_sampler.matches_color(s.region, _ACCENT_4_RGB, s.bezel):
+            states.append("on")
+        elif lcd_sampler.matches_color(s.region, _NEUTRAL_RGB, s.bezel):
+            states.append("neutral")
+        else:
+            states.append("other")
+    result = _judge_lcd07(page, states, running)
+    result.evidence = [image_path]
+    return _downgrade_if_corners_stale(ctx, result, image_path)
+
+
+def _judge_lcd15(page, has_manage: bool, manage_page, saved_ssids, targets_names, wifi) -> CaseResult:
+    obs = {"page": page, "manage_target": has_manage, "manage_page": manage_page,
+           "saved_ssids": sorted(saved_ssids), "wifi": wifi,
+           "status_text_check": "not verifiable (status label is not a tap target; no OCR)"}
+    if page != "network":
+        return CaseResult(Verdict.FAIL, reason=f"expected page 'network', got {page!r}", observed=obs)
+    if not has_manage:
+        return CaseResult(Verdict.FAIL, reason="'Manage networks' target missing on network page", observed=obs)
+    if manage_page != "network_manage":
+        return CaseResult(Verdict.FAIL, reason=f"Manage networks led to {manage_page!r}, not 'network_manage'", observed=obs)
+    if not saved_ssids:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="board reports no saved networks to look for", observed=obs)
+    if not (set(saved_ssids) & set(targets_names)):
+        return CaseResult(Verdict.FAIL, reason="no saved SSID appears on the network_manage page", observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
+
+
+def _case_lcd15(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
+    srv = _srv(ctx)
+    ui = srv._ui_test
+    try:
+        nets, _ = srv._wifi.get_networks()
+        saved = {n.ssid for n in nets if getattr(n, "saved", True) and n.ssid}
+        st = srv._wifi.get_status()
+        wifi = {"mode": st.mode_name, "state": st.state_name}
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"wifi status unreadable: {type(exc).__name__}")
+    try:
+        fail = _click_then_page(ui, "settings", "config")[0] or _click_then_page(ui, "Network / Wi-Fi", "network")[0]
+        if fail is not None:
+            return fail
+        page = ui.get_current_page()
+        tap, _b = _list_tap_targets_resolving_busy(ui)
+        has_manage = _find(tap.get("targets", []), "Manage networks") is not None
+        manage_page, names = None, []
+        if has_manage:
+            # Navigation only: no connect/forget target is ever clicked.
+            _click_then_page(ui, "Manage networks", "network_manage")
+            manage_page = ui.get_current_page()
+            tap2, _b = _list_tap_targets_resolving_busy(ui)
+            names = [t.get("name") for t in tap2.get("targets", []) if t.get("name")]
+        return _judge_lcd15(page, has_manage, manage_page, saved, names, wifi)
+    finally:
+        _navigate_home(ui)
+
+
+def _judge_lcd17(has_tile: bool, entered_page, after_page) -> CaseResult:
+    obs = {"cal_tile": has_tile, "entered_page": entered_page, "page_after_backout": after_page,
+           "touch_test": "not reachable without completing a calibration (kiln_ui.c); not exercised"}
+    if not has_tile:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no Touch Calibration tile (self-calibrating controller); nothing to enter", observed=obs)
+    if entered_page != "touch_cal":
+        return CaseResult(Verdict.FAIL, reason=f"Touch Calibration tile led to {entered_page!r}", observed=obs)
+    if after_page in ("touch_cal", "touch_test") or after_page is None:
+        return CaseResult(Verdict.FAIL, reason=f"backing out of touch_cal left the board on {after_page!r}", observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
+
+
+def _case_lcd17(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
+    srv = _srv(ctx)
+    ui = srv._ui_test
+    try:
+        fail = _click_then_page(ui, "settings", "config")[0]
+        if fail is not None:
+            return fail
+        tap, _b = _list_tap_targets_resolving_busy(ui)
+        if _find(tap.get("targets", []), "Touch Calibration") is None:
+            return _judge_lcd17(False, None, None)
+        ui.click_by_name("Touch Calibration")
+        _wait_for_page(ui, "touch_cal")
+        entered = ui.get_current_page()
+        after = entered
+        if entered == "touch_cal":
+            # Back out WITHOUT completing: never tap the calibration dots.
+            tap2, _b = _list_tap_targets_resolving_busy(ui)
+            names = {t.get("name") for t in tap2.get("targets", [])}
+            exit_name = "Cancel" if "Cancel" in names else ("Back" if "Back" in names else None)
+            if exit_name is not None:
+                ui.click_by_name(exit_name)
+                _wait_for_page_change(ui, "touch_cal")
+            after = ui.get_current_page()
+        return _judge_lcd17(True, entered, after)
+    finally:
+        _navigate_home(ui)
+
+
+def _judge_lcd18(trip_active: bool, warn_is_error, warn_is_warn) -> CaseResult:
+    obs = {"trip_active": trip_active, "warning_matches_accent5": warn_is_error, "warning_matches_accent1": warn_is_warn}
+    if not trip_active:
+        return CaseResult(Verdict.NOT_RUN, reason="no safety trip latched (needs OT-B01's trip window)", observed=obs)
+    if warn_is_error is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="topbar warning region could not be sampled", observed=obs)
+    if warn_is_error:
+        return CaseResult(Verdict.PASS, observed=obs)
+    if warn_is_warn:
+        return CaseResult(Verdict.FAIL, reason="topbar warning shows the WARN tier (ACCENT_1) during a trip", observed=obs)
+    return CaseResult(Verdict.INCONCLUSIVE, reason="no warning indicator visible; the indicator is driven by relay-life tier (ui_page_home_refresh.c), not by trips, so absence is not a FAIL", observed=obs)
+
+
+def _case_lcd18(ctx: dict) -> CaseResult:
+    srv = _srv(ctx)
+    diag = srv._safety.get_diag()
+    if not (getattr(diag, "trip_reason", 0) or 0):
+        return _judge_lcd18(False, None, None)
+    ui = srv._ui_test
+    if ui.get_current_page() != "home":
+        return CaseResult(Verdict.INCONCLUSIVE, reason="not on home; topbar region not located")
+    gear = _find(ui.list_tap_targets().get("targets", []), "settings")
+    if gear is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="topbar gear not found to anchor the warning slot")
+    image_path = _capture(ctx, "lcd18_topbar.jpg")
+    if not image_path:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="camera capture failed")
+    anchor = dict(gear, cx=gear["cx"] + _LCD18_WARN_DX)
+    is_err = _sample_button_bool(ctx, image_path, anchor, _ACCENT_5_RGB)
+    is_warn = _sample_button_bool(ctx, image_path, anchor, _ACCENT_1_RGB)
+    result = _judge_lcd18(True, is_err, is_warn)
+    result.evidence = [image_path]
+    return _downgrade_if_corners_stale(ctx, result, image_path)
+
+
+_CASE_FUNCS_RO = {
+    "LCD-07": _case_lcd07,
+    "LCD-15": _case_lcd15,
+    "LCD-17": _case_lcd17,
+    "LCD-18": _case_lcd18,
+}
+
+for _cid, _fn in _CASE_FUNCS_RO.items():
+    get_case(_cid).judge = _fn

@@ -241,14 +241,10 @@ class HeatFlagTest(unittest.TestCase):
 _KNOWN_UNIMPLEMENTED = frozenset({
     "LCD-05",
     "LCD-06",
-    "LCD-07",
     "LCD-10",
     "LCD-11",
     "LCD-12",
     "LCD-13",
-    "LCD-15",
-    "LCD-17",
-    "LCD-18",
     "OT-B02",
     "WEB-ZONE-11",
 })
