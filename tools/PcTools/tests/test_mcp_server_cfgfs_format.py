@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Unit tests for mcp_server_info.cfgfs_format() -- the MCP tool wrapping
+GET /api/cfgfs + POST /api/cfgfs/format_confirm. All against mocked
+dashboard_http_client/ota_http_client calls; no real socket, no live board.
+
+Run with: python -m pytest tools/PcTools/tests/test_mcp_server_cfgfs_format.py -q
+"""
+from __future__ import annotations
+
+import os
+import sys
+import unittest
+import unittest.mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from kilnctrl import mcp_server_ota  # noqa: E402
+from kilnctrl import mcp_server_info as msi  # noqa: E402
+from kilnctrl import dashboard_http_client  # noqa: E402
+from kilnctrl import ota_http_client as ota_http  # noqa: E402
+
+
+_BEFORE = {"mounted": True, "status": "mounted", "file_count": 7, "files": []}
+_AFTER = {"mounted": True, "status": "mounted", "file_count": 0, "files": []}
+
+
+class _Base(unittest.TestCase):
+    def _resolve_host_patch(self):
+        return unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5")
+
+
+class DryRunTest(_Base):
+    """Without confirm=True this must be a pure read -- no POST at all."""
+
+    def test_dry_run_reports_file_count_and_never_posts(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs") as format_mock:
+            result = msi.cfgfs_format(confirm=False)
+        self.assertIn("DRY RUN", result)
+        self.assertIn("7", result)
+        format_mock.assert_not_called()
+
+
+class ConfirmedFormatTest(_Base):
+    def test_confirmed_format_posts_once_and_reports_before_after(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status",
+                                         side_effect=[_BEFORE, _AFTER]), \
+             unittest.mock.patch.object(
+                 ota_http, "format_cfgfs",
+                 return_value={"ok": True, "status_code": 200,
+                               "detail": "ok -- cfg partition formatted and mounted"}) as format_mock:
+            result = msi.cfgfs_format(confirm=True)
+        format_mock.assert_called_once_with("10.0.0.5")
+        self.assertIn("ok - cfg partition formatted", result)
+        self.assertIn("before file_count=7", result)
+        self.assertIn("after file_count=0", result)
+
+    def test_500_format_failed_is_surfaced(self):
+        err = ota_http.OtaHttpError("refused", status=500, detail="format failed: ESP_ERR_INVALID_STATE")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs", side_effect=err):
+            result = msi.cfgfs_format(confirm=True)
+        self.assertIn("error", result.lower())
+        self.assertNotIn("ok - cfg partition formatted", result)
+
+    def test_system_mode_gate_409_is_surfaced_distinct_from_428(self):
+        """system_mode_gate_http_send_refusal() sends a 409 whose plain-text
+        body names a firing/autotune run -- must be reported distinctly from
+        a generic error and never look like the OTA 428 interlock refusal."""
+        err = ota_http.OtaHttpError(
+            "refused", status=409,
+            detail="refused -- a firing or autotune run is active; this action is not available "
+                   "until it ends")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(dashboard_http_client, "get_cfgfs_status", return_value=_BEFORE), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs", side_effect=err):
+            result = msi.cfgfs_format(confirm=True)
+        self.assertIn("refused", result.lower())
+        self.assertIn("system_mode_gate", result)
+        self.assertIn("409", result)
+        self.assertNotIn("HTTP 428", result)
+
+    def test_readback_failure_after_post_does_not_claim_success(self):
+        """The POST succeeded but the confirming re-read failed -- must be
+        reported as an unverified after-state, never a plain 'ok'."""
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(
+                 dashboard_http_client, "get_cfgfs_status",
+                 side_effect=[_BEFORE, dashboard_http_client.DashboardHttpError("unreachable")]), \
+             unittest.mock.patch.object(
+                 ota_http, "format_cfgfs",
+                 return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
+            result = msi.cfgfs_format(confirm=True)
+        self.assertIn("re-read failed", result)
+        self.assertIn("UNKNOWN", result)
+        self.assertTrue(result.startswith("WARNING:"))
+        self.assertNotIn("ok - cfg partition formatted", result)
+
+    def test_readback_shows_nonzero_file_count_is_graded_error(self):
+        """The POST reported success but the re-read shows files still
+        present -- must not be reported as 'ok'."""
+        after_nonzero = {"mounted": True, "status": "mounted", "file_count": 3, "files": []}
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(
+                 dashboard_http_client, "get_cfgfs_status",
+                 side_effect=[_BEFORE, after_nonzero]), \
+             unittest.mock.patch.object(
+                 ota_http, "format_cfgfs",
+                 return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
+            result = msi.cfgfs_format(confirm=True)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("file_count=3", result)
+        self.assertNotIn("ok - cfg partition formatted", result)
+
+    def test_readback_shows_unmounted_is_graded_error(self):
+        """The POST reported success but the re-read shows the partition not
+        mounted -- must not be reported as 'ok'."""
+        after_unmounted = {"mounted": False, "status": "unmounted", "file_count": 0, "files": []}
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(
+                 dashboard_http_client, "get_cfgfs_status",
+                 side_effect=[_BEFORE, after_unmounted]), \
+             unittest.mock.patch.object(
+                 ota_http, "format_cfgfs",
+                 return_value={"ok": True, "status_code": 200, "detail": "ok -- formatted"}):
+            result = msi.cfgfs_format(confirm=True)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("mounted=False", result)
+        self.assertNotIn("ok - cfg partition formatted", result)
+
+
+class UnreadableInitialFetchTest(_Base):
+    def test_unreadable_initial_status_errors_before_any_post(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(
+                 dashboard_http_client, "get_cfgfs_status",
+                 side_effect=dashboard_http_client.DashboardHttpError("unreachable")), \
+             unittest.mock.patch.object(ota_http, "format_cfgfs") as format_mock:
+            result = msi.cfgfs_format(confirm=True)
+        self.assertIn("error", result.lower())
+        format_mock.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

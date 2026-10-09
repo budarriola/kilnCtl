@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Security</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- docs/WEB_AUTH_PLAN.md section 6: the ADMIN-only page for setting/changing
+     the web password (admin + user), both LCD PINs, the web/LCD auth-enabled
+     switches, the two inactivity timeouts, and item 12b's "Clear login
+     credentials" action. Follows settings_display_page.html's
+     structure/token idiom (theme.css does all the real styling; this block is
+     only the page-local --bg/--fg/etc names theme.css's shared rules read).
+
+     This page is fully wired on the device. The four items this comment once
+     listed as DEFERRED pending item 5's session/enforcement point have all
+     landed:
+       - Route registration: security_http.c's security_http_start() registers
+         GET /settings/security, GET /api/auth/config and POST
+         /api/auth/security through kiln_http_register(), and is called from
+         main_network_http.c.
+       - security_http.c itself -- the ESP HTTP layer that parses those
+         requests and dispatches them into security_http_core.c's
+         security_http_dispatch().
+       - App/drivers/CMakeLists.txt: this file is in KILNCTL_GZIP_ASSETS (it is
+         served pre-gzipped), and security_http.c plus security_http_core.c are
+         in that component's SRCS.
+       - nav.js's NAV_LINKS entry, so the page is reachable from the menu.
+     All three routes are ROUTE_TIER_ADMIN in route_tier_table.h, so
+     kiln_http_register()'s pre-handler refuses a non-admin caller before any
+     handler body runs; security_http_dispatch() then re-checks ADMIN on its
+     own terms (defence in depth). See the wire-contract comment on the inline
+     <script> below for the exact JSON shape this page expects from
+     /api/auth/config and posts to /api/auth/security -- security_http.c
+     implements that contract, so the two sides must be changed together. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999;
+    /* --bad/--fault-color/--ok: the same names and the same values
+       settings_page.html and backup_page.html already carry. This page READ
+       --fault-color and --ok (.kc-sec-status.err/.ok below) and now also
+       reaches theme.css's shared button.danger-btn, which reads
+       --fault-color -- but it never DEFINED either name, so all three
+       resolved to nothing. That is the identical mismatch recorded in
+       diagnostics_page.html's own --fault-color comment (owner report: "the
+       dissable panic button ... does not match the theme of anything else"):
+       the shared rule was fine, the page simply never supplied the token the
+       rule reads. No new colour is introduced here -- these are the existing
+       palette values, aliased the same way every other page aliases them. */
+    --bad: #b00; --fault-color: var(--bad); --ok: #1a7a1a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+      --bad: var(--ui-accent-5); --fault-color: var(--bad); --ok: var(--ui-accent-4);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+    --bad: var(--ui-accent-5); --fault-color: var(--bad); --ok: var(--ui-accent-4);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
+         background: var(--bg); color: var(--fg); }
+  h1 { font-size: 1.2em; }
+  p { color: var(--muted); }
+  h2 { font-size: 1em; margin-top: 1.6em; }
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type="text"], input[type="password"] {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  select {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
+  .kc-sec-check { display: inline-flex; align-items: center; min-height: 32px; gap: 0.4em;
+                  font-weight: normal; margin-top: 0.6em; }
+  .kc-sec-check input[type="checkbox"] { width: auto; margin: 0; }
+  .kc-sec-status { font-size: 0.85em; margin-left: 0.6em; }
+  .kc-sec-status.err { color: var(--fault-color); }
+  .kc-sec-status.ok { color: var(--ok); }
+  .kc-sec-badge { font-size: 0.8em; font-weight: normal; color: var(--muted); }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+
+<h1>Security</h1>
+<p>Set the administrator and user web passwords, the two LCD PINs, and how long each
+interface waits before locking. Changing a password signs out every session that was
+using it, including this one.</p>
+
+<!-- First-boot / field-upgrade state: this banner is hidden by default and only
+     shown once loadCurrent() confirms (from GET /api/auth/config) that auth is
+     off AND no credential exists for either role -- it must never appear (or
+     disappear) based on a guess, only on what the board actually reports. -->
+<p class="hint" id="kcSecFirstBoot" hidden>Security is not set up yet on this board: no
+password or PIN has ever been configured, and authentication is currently off. Set a
+password below for at least the administrator account before turning authentication on.</p>
+
+<h2>Administrator password <span class="kc-sec-badge" id="kcSecAdminPwBadge"></span></h2>
+<div class="card">
+  <label for="kcSecAdminUser">Username</label>
+  <input type="text" id="kcSecAdminUser" autocomplete="username" maxlength="32">
+
+  <label for="kcSecAdminPw">New password</label>
+  <input type="password" id="kcSecAdminPw" autocomplete="new-password" maxlength="64">
+  <label for="kcSecAdminPw2">Confirm new password</label>
+  <input type="password" id="kcSecAdminPw2" autocomplete="new-password" maxlength="64">
+  <!-- Rule text mirrors web_auth_store.h's web_auth_password_check() comment
+       verbatim -- see this page's inline <script> for how the JS copy of the
+       rule itself (not just this text) is kept in step with that function. -->
+  <p class="hint">10-64 characters, not all lowercase, and not "password", "kiln", the
+    username, the Wi-Fi network name, or the Wi-Fi password.</p>
+
+  <!-- class="button" -- theme.css's shared neutral-action treatment (the same
+       rule backup_page.html's "Download backup" control uses). These five Save
+       controls previously carried no class at all, so they inherited only
+       theme.css's bare `button { min-height }` rule and rendered as native UA
+       buttons: light-grey chrome on the dark theme, matching nothing else on
+       the site. The destructive control at the bottom of this page uses
+       .danger-btn instead, deliberately -- see its own comment. -->
+  <button type="button" class="button" id="kcSecAdminPwSave">Save administrator password</button>
+  <span id="kcSecAdminPwStatus" class="kc-sec-status"></span>
+</div>
+
+<h2>User password <span class="kc-sec-badge" id="kcSecUserPwBadge"></span></h2>
+<div class="card">
+  <label for="kcSecUserPw">New password</label>
+  <input type="password" id="kcSecUserPw" autocomplete="new-password" maxlength="64">
+  <label for="kcSecUserPw2">Confirm new password</label>
+  <input type="password" id="kcSecUserPw2" autocomplete="new-password" maxlength="64">
+  <p class="hint">Same rules as the administrator password above, checked against the
+    fixed word list and the Wi-Fi credentials (the user account has no separate
+    username to check against).</p>
+
+  <button type="button" class="button" id="kcSecUserPwSave">Save user password</button>
+  <span id="kcSecUserPwStatus" class="kc-sec-status"></span>
+</div>
+
+<h2>LCD PINs</h2>
+<div class="card">
+  <label for="kcSecUserPin">User PIN <span class="kc-sec-badge" id="kcSecUserPinBadge"></span></label>
+  <input type="password" id="kcSecUserPin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
+  <button type="button" class="button" id="kcSecUserPinSave">Save user PIN</button>
+  <span id="kcSecUserPinStatus" class="kc-sec-status"></span>
+
+  <label for="kcSecAdminPin">Administrator PIN <span class="kc-sec-badge" id="kcSecAdminPinBadge"></span></label>
+  <input type="password" id="kcSecAdminPin" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off">
+  <button type="button" class="button" id="kcSecAdminPinSave">Save administrator PIN</button>
+  <span id="kcSecAdminPinStatus" class="kc-sec-status"></span>
+
+  <p class="hint">4-8 digits. The user and administrator PINs must be different from
+    each other. These PINs are for the LCD panel only and are set here, not on the panel.</p>
+</div>
+
+<h2>Authentication</h2>
+<div class="card">
+  <label class="kc-sec-check"><input type="checkbox" id="kcSecWebEnabled">Require sign-in for the web interface</label>
+  <label class="kc-sec-check"><input type="checkbox" id="kcSecLcdEnabled">Require a PIN on the LCD panel</label>
+  <p class="hint" id="kcSecEnableHint">Each switch needs its own credential set first: web
+    sign-in needs both the administrator and user passwords, and the LCD PIN needs both PINs.</p>
+
+  <label for="kcSecWebTimeout">Web inactivity lock (minutes)</label>
+  <select id="kcSecWebTimeout">
+    <option value="1">1</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+    <option value="15">15</option>
+    <option value="30">30</option>
+    <option value="60">60</option>
+    <option value="-1">Never</option>
+  </select>
+
+  <label for="kcSecLcdTimeout">LCD inactivity lock (minutes)</label>
+  <select id="kcSecLcdTimeout">
+    <option value="1">1</option>
+    <option value="5">5</option>
+    <option value="10">10</option>
+    <option value="15">15</option>
+    <option value="30">30</option>
+    <option value="60">60</option>
+    <option value="-1">Never</option>
+  </select>
+
+  <!-- aria-label, not a longer visible label: the visible text stays "Save"
+       (unchanged), but "Save" alone is the only control on this page whose
+       accessible name does not say what it saves -- the other four name their
+       credential. The label supplies that for a screen reader without
+       changing the rendered button. -->
+  <button type="button" class="button" id="kcSecPolicySave"
+          aria-label="Save authentication settings">Save</button>
+  <span id="kcSecPolicyStatus" class="kc-sec-status"></span>
+  <p class="hint">The Dashboard and stopping a running firing never require a password,
+    regardless of these settings.</p>
+</div>
+
+<div class="kc-sec-block" id="kcTotpBlock">
+  <h2>Two-factor reset (authenticator app) <span class="kc-sec-badge" id="kcTotpBadge"></span></h2>
+  <p class="hint">Lets a locked-out operator reset the web password from the login screen's
+    "Forgot password?" link using a 6-digit code from an authenticator app, without another
+    admin session. Enroll here first; the reset itself is only available from the login screen.</p>
+  <p id="kcTotpClockLine" class="hint"></p>
+
+  <div id="kcTotpNotEnrolled">
+    <button type="button" class="button" id="kcTotpBeginBtn">Set up</button>
+  </div>
+
+  <div id="kcTotpEnrolling" hidden>
+    <p class="hint">Scan this with an authenticator app (or enter the key manually), then type
+      the 6-digit code it shows to confirm.</p>
+    <!-- Fixed white canvas + 4-module quiet zone drawn by renderQr(): a QR
+         symbol needs a light border to scan, and the page background is
+         dark in the dark theme. max-width keeps it inside a phone viewport. -->
+    <canvas id="kcTotpQrCanvas" width="200" height="200"
+            style="background:#fff;border-radius:var(--ui-radius);max-width:100%;"></canvas>
+    <p class="hint">Manual key:
+      <code id="kcTotpSecretText" style="user-select:all;word-break:break-all;"></code>
+      <button type="button" class="button" id="kcTotpCopySecret">Copy</button>
+    </p>
+    <label for="kcTotpConfirmCode">6-digit code</label>
+    <input id="kcTotpConfirmCode" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6">
+    <button type="button" class="button" id="kcTotpConfirmBtn">Confirm</button>
+    <button type="button" class="button" id="kcTotpCancelEnrollBtn">Cancel</button>
+    <span id="kcTotpEnrollStatus" class="kc-sec-status"></span>
+  </div>
+
+  <div id="kcTotpEnrolled" hidden>
+    <p>Status: <strong>Enrolled</strong></p>
+    <label for="kcTotpDisableCode">6-digit code (required to disable)</label>
+    <input id="kcTotpDisableCode" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6">
+    <!-- danger-btn: same reasoning as "Clear login credentials" below -- this
+         removes the operator's only non-admin-session password-reset path. -->
+    <button type="button" class="danger-btn" id="kcTotpDisableBtn">Disable</button>
+    <span id="kcTotpDisableStatus" class="kc-sec-status"></span>
+  </div>
+</div>
+
+<div class="kc-sec-block kc-sec-danger">
+  <h2>Clear login credentials</h2>
+  <p class="hint">Resets the administrator and user web passwords and both LCD PINs to
+    unconfigured. This is separate from a factory reset -- a factory reset does not touch
+    login credentials at all. Use this only when every password/PIN is lost.</p>
+  <!-- class="danger-btn" -- theme.css's shared dangerous-action button, the
+       same class settings_page.html's Reset/Factory-default controls and
+       diagnostics_page.html's Danger Zone toggles already use. This control
+       clears both web passwords and both LCD PINs and cannot be undone from
+       this page, so it must NOT read as another Save: .danger-btn is
+       `display: block; width: 100%`, left-aligned, outlined and lettered in
+       --fault-color, and fills solid red on hover -- full-width and red
+       against the four inline, neutral, --button-bg Save controls above. The
+       shape difference (full-width block vs inline) and the button's own text
+       carry the distinction, not colour alone. Its confirm() gate in the
+       script below is unchanged; this pass touched no behaviour. -->
+  <button type="button" class="danger-btn" id="kcSecClearCreds">Clear login credentials</button>
+  <span id="kcSecClearCredsStatus" class="kc-sec-status"></span>
+</div>
+
+<script>
+(function () {
+  // ---------------------------------------------------------------------
+  // Wire contract -- implemented on the device by security_http.c's
+  // security_config_get_handler() and security_post_handler(); that file's
+  // own comments point back here, and the two must be changed together:
+  //
+  //   GET /api/auth/config ->
+  //     { web_enabled, lcd_enabled,           // effective booleans, already
+  //                                            // collapsed via
+  //                                            // web_auth_policy_effective_enabled()
+  //                                            // on the device side
+  //       web_timeout_min, lcd_timeout_min,   // minutes, -1 = never
+  //       admin_username,                     // "" if never set
+  //       admin_password_set, user_password_set,
+  //       user_pin_set, admin_pin_set }
+  //   -- never a hash, salt, or password/PIN value; this endpoint only
+  //      reports *whether* a credential exists, never what it is.
+  //
+  //   POST /api/auth/security (x-www-form-urlencoded, one action per call --
+  //   same "small, single-purpose POST" shape as settings_display_power's
+  //   handler): one of
+  //     cmd=set_web_password&role=admin|user&username=...&password=...
+  //     cmd=set_lcd_pin&role=admin|user&pin=...
+  //     cmd=set_policy&web_enabled=0|1&lcd_enabled=0|1&web_timeout_min=N&lcd_timeout_min=N
+  //     cmd=clear_credentials (item 12b -- no other fields; clears both roles'
+  //       web passwords and both LCD PINs; distinct from a factory reset,
+  //       which never touches credentials, and from the physical four-corner
+  //       E-stop-gated reset gesture, which is the other way to clear them)
+  //   -> { ok: true } or { ok: false, error: "..." }. The password/PIN value
+  //   travels only in the POST body, never the URL, and the response never
+  //   echoes it back.
+  // ---------------------------------------------------------------------
+
+  // --- Client-side rule mirror -------------------------------------------
+  // These two functions are a deliberate SECOND COPY of
+  // web_auth_store.h's web_auth_password_check()/web_auth_pin_check() rules,
+  // kept only so the page can reject an obviously-doomed submission before a
+  // round trip -- CLAUDE.md's "reset one side of a pair" class names exactly
+  // this shape of bug (two copies of one fact, joined only by a comment).
+  // To keep them from drifting silently:
+  //   1. Each function's body is commented line-by-line with the exact
+  //      web_auth_store.h line/comment it mirrors (see below), so a diff to
+  //      that header is easy to notice when re-reading this file.
+  //   2. Neither function is authoritative. The server call
+  //      (web_auth_backend_set_web_password/set_lcd_pin, reached through
+  //      security_http.c) always re-runs the real web_auth_password_check()/
+  //      web_auth_pin_check() before writing anything -- this page's checks
+  //      only ever produce an early "that will be rejected" message, never a
+  //      bypass. A drift between the two copies can make this page too
+  //      strict or too lax about when it *offers* the Save button, but it
+  //      can never let a bad credential actually get stored, because the
+  //      backend re-checks unconditionally.
+  //   3. Both rule sets are restated in the <p class="hint"> text next to
+  //      each field (see the markup above), so a human editing one side has
+  //      a visible, redundant prompt to check the other.
+  //
+  // web_auth_store.h, web_auth_password_check(): "Minimum 10 characters, at
+  // most 64, at least one character that is not a lowercase letter, and not
+  // on the rejection list: the literal strings "password" and "kiln"
+  // (case-insensitive), the username being set, the AP SSID, and the AP
+  // password... case-insensitive for the fixed words, case-SENSITIVE for
+  // username/SSID/AP password."
+  function checkPassword(password, username, apSsid, apPassword) {
+    if (!password || password.length < 10) return 'Must be at least 10 characters.';
+    if (password.length > 64) return 'Must be at most 64 characters.';
+    if (/^[a-z]+$/.test(password)) return 'Cannot be all lowercase letters.';
+    var lower = password.toLowerCase();
+    if (lower === 'password' || lower === 'kiln') return 'Too common -- choose another.';
+    if (username && password === username) return 'Cannot be the same as the username.';
+    if (apSsid && password === apSsid) return 'Cannot be the same as the Wi-Fi network name.';
+    if (apPassword && password === apPassword) return 'Cannot be the same as the Wi-Fi password.';
+    return null; // null == passes, matches WEB_AUTH_PW_OK
+  }
+
+  // web_auth_store.h, web_auth_pin_check(): "4-8 digits... must equal the
+  // other role's PIN" is the one rejection (WEB_AUTH_PIN_SAME_AS_OTHER) in
+  // addition to length/digits-only.
+  function checkPin(pin, otherPin) {
+    if (!pin || pin.length < 4) return 'Must be at least 4 digits.';
+    if (pin.length > 8) return 'Must be at most 8 digits.';
+    if (!/^[0-9]+$/.test(pin)) return 'Digits only.';
+    if (otherPin && pin === otherPin) return 'Must be different from the other PIN.';
+    return null;
+  }
+
+  // --- Element lookups -----------------------------------------------------
+  var adminUser = document.getElementById('kcSecAdminUser');
+  var adminPw = document.getElementById('kcSecAdminPw');
+  var adminPw2 = document.getElementById('kcSecAdminPw2');
+  var adminPwSave = document.getElementById('kcSecAdminPwSave');
+  var adminPwStatus = document.getElementById('kcSecAdminPwStatus');
+  var adminPwBadge = document.getElementById('kcSecAdminPwBadge');
+
+  var userPw = document.getElementById('kcSecUserPw');
+  var userPw2 = document.getElementById('kcSecUserPw2');
+  var userPwSave = document.getElementById('kcSecUserPwSave');
+  var userPwStatus = document.getElementById('kcSecUserPwStatus');
+  var userPwBadge = document.getElementById('kcSecUserPwBadge');
+
+  var userPin = document.getElementById('kcSecUserPin');
+  var userPinSave = document.getElementById('kcSecUserPinSave');
+  var userPinStatus = document.getElementById('kcSecUserPinStatus');
+  var userPinBadge = document.getElementById('kcSecUserPinBadge');
+
+  var adminPin = document.getElementById('kcSecAdminPin');
+  var adminPinSave = document.getElementById('kcSecAdminPinSave');
+  var adminPinStatus = document.getElementById('kcSecAdminPinStatus');
+  var adminPinBadge = document.getElementById('kcSecAdminPinBadge');
+
+  var webEnabled = document.getElementById('kcSecWebEnabled');
+  var lcdEnabled = document.getElementById('kcSecLcdEnabled');
+  var webTimeout = document.getElementById('kcSecWebTimeout');
+  var lcdTimeout = document.getElementById('kcSecLcdTimeout');
+  var policySave = document.getElementById('kcSecPolicySave');
+  var policyStatus = document.getElementById('kcSecPolicyStatus');
+
+  var firstBoot = document.getElementById('kcSecFirstBoot');
+
+  // Server-reported state, refreshed by loadCurrent(); used both to render
+  // badges/hints honestly and to feed the "differs from the other PIN"
+  // client-side check (the store's PIN records are one-way hashed, so the
+  // OTHER role's *current* PIN is never available here in plaintext -- this
+  // only tracks whatever the two PIN fields on THIS page currently hold, the
+  // same limitation security_http_core.c's security_pin_is_valid() has).
+  var state = {
+    ap_ssid: '', ap_password: '', admin_username: '',
+    admin_password_set: false, user_password_set: false,
+    user_pin_set: false, admin_pin_set: false,
+  };
+
+  function setStatus(el, msg, isErr) {
+    el.textContent = msg;
+    el.className = 'kc-sec-status' + (isErr ? ' err' : msg ? ' ok' : '');
+  }
+
+  function badgeText(isSet) { return isSet ? '(configured)' : '(not set)'; }
+
+  function loadCurrent() {
+    fetch('/api/auth/config')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        state.admin_username = d.admin_username || '';
+        state.admin_password_set = !!d.admin_password_set;
+        state.user_password_set = !!d.user_password_set;
+        state.user_pin_set = !!d.user_pin_set;
+        state.admin_pin_set = !!d.admin_pin_set;
+
+        adminUser.value = state.admin_username;
+        adminPwBadge.textContent = badgeText(state.admin_password_set);
+        userPwBadge.textContent = badgeText(state.user_password_set);
+        userPinBadge.textContent = badgeText(state.user_pin_set);
+        adminPinBadge.textContent = badgeText(state.admin_pin_set);
+
+        webEnabled.checked = !!d.web_enabled;
+        lcdEnabled.checked = !!d.lcd_enabled;
+        webTimeout.value = String(d.web_timeout_min != null ? d.web_timeout_min : -1);
+        lcdTimeout.value = String(d.lcd_timeout_min != null ? d.lcd_timeout_min : -1);
+
+        // First-boot / field-upgrade case: auth off AND nothing configured
+        // anywhere -- read this honestly from the server, never imply a
+        // password exists just because the fields have placeholders.
+        var nothingConfigured = !state.admin_password_set && !state.user_password_set &&
+                                 !state.user_pin_set && !state.admin_pin_set;
+        firstBoot.hidden = !(nothingConfigured && !d.web_enabled && !d.lcd_enabled);
+      })
+      .catch(function (authErr) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        policyStatus.textContent = '(could not load current settings)';
+      });
+  }
+  loadCurrent();
+
+  // --- Admin password ------------------------------------------------------
+  adminPwSave.addEventListener('click', function () {
+    var user = adminUser.value.trim();
+    if (!user) { setStatus(adminPwStatus, 'Username is required.', true); return; }
+    if (adminPw.value !== adminPw2.value) { setStatus(adminPwStatus, 'Passwords do not match.', true); return; }
+    var err = checkPassword(adminPw.value, user, state.ap_ssid, state.ap_password);
+    if (err) { setStatus(adminPwStatus, err, true); return; }
+    setStatus(adminPwStatus, 'Saving...', false);
+    var body = 'cmd=set_web_password&role=admin&username=' + encodeURIComponent(user) +
+               '&password=' + encodeURIComponent(adminPw.value);
+    fetch('/api/auth/security', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'save failed');
+        adminPw.value = ''; adminPw2.value = '';
+        setStatus(adminPwStatus, 'Saved. You will be signed out.', false);
+        loadCurrent();
+      })
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(adminPwStatus, 'Save failed: ' + e.message, true); });
+  });
+
+  // --- User password ---------------------------------------------------------
+  userPwSave.addEventListener('click', function () {
+    if (userPw.value !== userPw2.value) { setStatus(userPwStatus, 'Passwords do not match.', true); return; }
+    var err = checkPassword(userPw.value, null, state.ap_ssid, state.ap_password);
+    if (err) { setStatus(userPwStatus, err, true); return; }
+    setStatus(userPwStatus, 'Saving...', false);
+    var body = 'cmd=set_web_password&role=user&password=' + encodeURIComponent(userPw.value);
+    fetch('/api/auth/security', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'save failed');
+        userPw.value = ''; userPw2.value = '';
+        setStatus(userPwStatus, 'Saved.', false);
+        loadCurrent();
+      })
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(userPwStatus, 'Save failed: ' + e.message, true); });
+  });
+
+  // --- LCD PINs ----------------------------------------------------------
+  function savePin(role, input, statusEl, otherInput) {
+    var err = checkPin(input.value, otherInput.value);
+    if (err) { setStatus(statusEl, err, true); return; }
+    setStatus(statusEl, 'Saving...', false);
+    var body = 'cmd=set_lcd_pin&role=' + role + '&pin=' + encodeURIComponent(input.value);
+    fetch('/api/auth/security', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'save failed');
+        input.value = '';
+        setStatus(statusEl, 'Saved.', false);
+        loadCurrent();
+      })
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(statusEl, 'Save failed: ' + e.message, true); });
+  }
+  userPinSave.addEventListener('click', function () { savePin('user', userPin, userPinStatus, adminPin); });
+  adminPinSave.addEventListener('click', function () { savePin('admin', adminPin, adminPinStatus, userPin); });
+
+  // --- Policy (enable switches + timeouts) --------------------------------
+  policySave.addEventListener('click', function () {
+    if (webEnabled.checked && !(state.admin_password_set && state.user_password_set)) {
+      setStatus(policyStatus, 'Set both passwords before enabling web sign-in.', true);
+      return;
+    }
+    if (lcdEnabled.checked && !(state.user_pin_set && state.admin_pin_set)) {
+      setStatus(policyStatus, 'Set both PINs before enabling the LCD PIN.', true);
+      return;
+    }
+    setStatus(policyStatus, 'Saving...', false);
+    var body = 'cmd=set_policy' +
+               '&web_enabled=' + (webEnabled.checked ? '1' : '0') +
+               '&lcd_enabled=' + (lcdEnabled.checked ? '1' : '0') +
+               '&web_timeout_min=' + encodeURIComponent(webTimeout.value) +
+               '&lcd_timeout_min=' + encodeURIComponent(lcdTimeout.value);
+    fetch('/api/auth/security', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+    })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) throw new Error(d.error || 'save failed');
+        setStatus(policyStatus, 'Saved.', false);
+        loadCurrent();
+      })
+      .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(policyStatus, 'Save failed: ' + e.message, true); });
+  });
+
+  var clearCredsBtn = document.getElementById('kcSecClearCreds');
+  var clearCredsStatus = document.getElementById('kcSecClearCredsStatus');
+  clearCredsBtn.addEventListener('click', function () {
+    window.kcConfirm('Clear the administrator password, user password, and both LCD PINs? ' +
+                 'This cannot be undone from this page.').then(function (ok) {
+      if (!ok) return;
+      setStatus(clearCredsStatus, 'Clearing...', false);
+      return fetch('/api/auth/security', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'cmd=clear_credentials',
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (!d.ok) throw new Error(d.error || 'clear failed');
+          setStatus(clearCredsStatus, 'Cleared. You will be signed out.', false);
+          loadCurrent();
+        })
+        .catch(function (e) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return; setStatus(clearCredsStatus, 'Clear failed: ' + e.message, true); });
+    });
+  });
+})();
+</script>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀ Theme: Dark (switch to light)'
+                                : '🌙 Theme: Light (switch to dark)';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+<script id="kcQrEncoderScript">
+// qrcode_encoder_src.js -- canonical source for the small, self-written QR
+// encoder used by security_page.html's TOTP enrollment card
+// (docs/TOTP_PASSWORD_RESET_PLAN.md section 2/WT-B). No CDN, no external
+// library: byte-mode-only QR encoding (RFC 6238 otpauth:// URIs always need
+// byte mode -- they contain lowercase letters and '&'/'=', which are outside
+// QR's alphanumeric character set), error-correction level L, versions 1-10
+// (comfortably covers a ~100-140 char otpauth URI per the plan's own
+// capacity note), full 8-pattern mask penalty scoring (matches what a real
+// QR library picks, for maximum scanner compatibility) rather than a fixed
+// mask.
+//
+// THIS FILE IS THE SINGLE SOURCE OF TRUTH. security_page.html embeds this
+// exact text inside a `<script id="kcQrEncoderScript">` block (copy kept in
+// sync deliberately -- see that file's comment at the embed site).
+// test_qrcode_encoder.js extracts that same block from the HTML and runs it
+// through Node's `vm` module, so a change to one without the other is
+// caught by the test rather than silently drifting (CLAUDE.md's "reset one
+// side of a pair" bug class -- this is the mirrored-copy variant of it,
+// guarded by re-extraction instead of by hand-review).
+//
+// UMD-ish export: usable as an inline browser <script> (attaches
+// `window.kcQrEncode`) or via Node `require()` (module.exports) for the
+// test.
+(function (root) {
+  'use strict';
+
+  // ---- Fixed capacity table, byte mode, EC level L, versions 1-10 -------
+  // (max byte count per version; well-established public QR capacity
+  // numbers, cross-checked here against the codeword table below: for each
+  // version, (dataCodewords*8 - 4 - countBits) / 8, floored, reproduces
+  // this exact table.)
+  var BYTE_CAPACITY_L = [17, 32, 53, 78, 106, 134, 154, 192, 230, 271];
+
+  // Total data codewords in the symbol (all blocks combined), EC level L.
+  var DATA_CODEWORDS_L = [19, 34, 55, 80, 108, 136, 156, 194, 232, 274];
+
+  // EC codewords per block, EC level L.
+  var EC_PER_BLOCK_L = [7, 10, 15, 20, 26, 18, 20, 24, 30, 18];
+
+  // Block structure, EC level L: [[count, dataCodewordsPerBlock], ...].
+  // Only version 10 splits into two differently-sized groups in this range.
+  var BLOCKS_L = [
+    [[1, 19]],
+    [[1, 34]],
+    [[1, 55]],
+    [[1, 80]],
+    [[1, 108]],
+    [[2, 68]],
+    [[2, 78]],
+    [[2, 97]],
+    [[2, 116]],
+    [[2, 68], [2, 69]],
+  ];
+
+  // Remainder bits appended after all codeword bits, per version.
+  var REMAINDER_BITS = [0, 7, 7, 7, 7, 7, 0, 0, 0, 0];
+
+  // Alignment pattern center coordinates per version (version 1 has none).
+  var ALIGNMENT_COORDS = [
+    [],
+    [6, 18],
+    [6, 22],
+    [6, 26],
+    [6, 30],
+    [6, 34],
+    [6, 22, 38],
+    [6, 24, 42],
+    [6, 26, 46],
+    [6, 28, 50],
+  ];
+
+  // ---- GF(256) arithmetic, primitive polynomial 0x11D -------------------
+  var GF_EXP = new Array(512);
+  var GF_LOG = new Array(256);
+  (function buildGfTables() {
+    var x = 1;
+    for (var i = 0; i < 255; i++) {
+      GF_EXP[i] = x;
+      GF_LOG[x] = i;
+      x <<= 1;
+      if (x & 0x100) x ^= 0x11d;
+    }
+    for (i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
+  })();
+  function gfMul(a, b) {
+    if (a === 0 || b === 0) return 0;
+    return GF_EXP[GF_LOG[a] + GF_LOG[b]];
+  }
+
+  // Generator polynomial for `degree` EC codewords: product of (x - a^i)
+  // for i in [0, degree), coefficients highest-degree-first.
+  function rsGeneratorPoly(degree) {
+    var poly = [1];
+    for (var i = 0; i < degree; i++) {
+      var next = new Array(poly.length + 1).fill(0);
+      for (var j = 0; j < poly.length; j++) {
+        next[j] ^= poly[j];
+        next[j + 1] ^= gfMul(poly[j], GF_EXP[i]);
+      }
+      poly = next;
+    }
+    return poly;
+  }
+
+  // Reed-Solomon remainder (the EC codewords) for one block's data bytes.
+  function rsEncodeBlock(dataBytes, ecLen) {
+    var generator = rsGeneratorPoly(ecLen);
+    var buf = dataBytes.concat(new Array(ecLen).fill(0));
+    for (var i = 0; i < dataBytes.length; i++) {
+      var coef = buf[i];
+      if (coef === 0) continue;
+      for (var j = 0; j < generator.length; j++) {
+        buf[i + j] ^= gfMul(generator[j], coef);
+      }
+    }
+    return buf.slice(dataBytes.length);
+  }
+
+  // ---- Bit buffer ---------------------------------------------------------
+  function BitBuffer() {
+    this.bits = [];
+  }
+  BitBuffer.prototype.put = function (value, length) {
+    for (var i = length - 1; i >= 0; i--) {
+      this.bits.push((value >>> i) & 1);
+    }
+  };
+  BitBuffer.prototype.length = function () { return this.bits.length; };
+
+  function utf8Bytes(str) {
+    var bytes = [];
+    for (var i = 0; i < str.length; i++) {
+      var code = str.charCodeAt(i);
+      if (code < 0x80) {
+        bytes.push(code);
+      } else if (code < 0x800) {
+        bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+      } else {
+        bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+      }
+    }
+    return bytes;
+  }
+
+  function chooseVersion(byteLen) {
+    for (var v = 1; v <= 10; v++) {
+      if (byteLen <= BYTE_CAPACITY_L[v - 1]) return v;
+    }
+    return -1; // caller refuses: too long for this encoder's supported range
+  }
+
+  function buildDataCodewords(bytes, version) {
+    var buf = new BitBuffer();
+    buf.put(0x4, 4); // byte-mode indicator
+    var countBits = version < 10 ? 8 : 16;
+    buf.put(bytes.length, countBits);
+    for (var i = 0; i < bytes.length; i++) buf.put(bytes[i], 8);
+
+    var totalDataBits = DATA_CODEWORDS_L[version - 1] * 8;
+    // Terminator: up to 4 zero bits.
+    for (var t = 0; t < 4 && buf.length() < totalDataBits; t++) buf.put(0, 1);
+    // Pad to a byte boundary.
+    while (buf.length() % 8 !== 0) buf.put(0, 1);
+    // Pad bytes, alternating 0xEC/0x11, until the symbol's data capacity is full.
+    var padToggle = true;
+    while (buf.length() < totalDataBits) {
+      buf.put(padToggle ? 0xec : 0x11, 8);
+      padToggle = !padToggle;
+    }
+    var codewords = [];
+    for (var b = 0; b < buf.bits.length; b += 8) {
+      var byteVal = 0;
+      for (var k = 0; k < 8; k++) byteVal = (byteVal << 1) | buf.bits[b + k];
+      codewords.push(byteVal);
+    }
+    return codewords;
+  }
+
+  function interleave(version, dataCodewords) {
+    var blocks = BLOCKS_L[version - 1];
+    var ecLen = EC_PER_BLOCK_L[version - 1];
+    var dataBlocks = [];
+    var ecBlocks = [];
+    var offset = 0;
+    var maxDataLen = 0;
+    blocks.forEach(function (group) {
+      var count = group[0], len = group[1];
+      maxDataLen = Math.max(maxDataLen, len);
+      for (var i = 0; i < count; i++) {
+        var block = dataCodewords.slice(offset, offset + len);
+        offset += len;
+        dataBlocks.push(block);
+        ecBlocks.push(rsEncodeBlock(block, ecLen));
+      }
+    });
+    var out = [];
+    for (var col = 0; col < maxDataLen; col++) {
+      for (var bi = 0; bi < dataBlocks.length; bi++) {
+        if (col < dataBlocks[bi].length) out.push(dataBlocks[bi][col]);
+      }
+    }
+    for (col = 0; col < ecLen; col++) {
+      for (bi = 0; bi < ecBlocks.length; bi++) out.push(ecBlocks[bi][col]);
+    }
+    return out;
+  }
+
+  // ---- Module matrix construction ---------------------------------------
+  function makeMatrix(version) {
+    var size = version * 4 + 17;
+    var m = [];
+    for (var r = 0; r < size; r++) m.push(new Array(size).fill(null));
+    return m;
+  }
+
+  function placeFinder(m, row, col) {
+    for (var r = -1; r <= 7; r++) {
+      for (var c = -1; c <= 7; c++) {
+        var rr = row + r, cc = col + c;
+        if (rr < 0 || rr >= m.length || cc < 0 || cc >= m.length) continue;
+        var dark = (r >= 0 && r <= 6 && (c === 0 || c === 6)) ||
+                   (c >= 0 && c <= 6 && (r === 0 || r === 6)) ||
+                   (r >= 2 && r <= 4 && c >= 2 && c <= 4);
+        m[rr][cc] = dark ? 1 : 0;
+      }
+    }
+  }
+
+  function placeAlignment(m, row, col) {
+    for (var r = -2; r <= 2; r++) {
+      for (var c = -2; c <= 2; c++) {
+        var dark = Math.max(Math.abs(r), Math.abs(c)) !== 1;
+        m[row + r][col + c] = dark ? 1 : 0;
+      }
+    }
+  }
+
+  function reservedForFormatOrVersion(size, version, row, col) {
+    // Finder + separators (top-left 9x9, top-right 8x9, bottom-left 9x8).
+    if (row < 9 && col < 9) return true;
+    if (row < 9 && col >= size - 8) return true;
+    if (row >= size - 8 && col < 9) return true;
+    // Timing patterns.
+    if (row === 6 || col === 6) return true;
+    // Version info blocks (v>=7): 6x3 near top-right and bottom-left.
+    if (version >= 7) {
+      if (row < 6 && col >= size - 11 && col <= size - 9) return true;
+      if (col < 6 && row >= size - 11 && row <= size - 9) return true;
+    }
+    return false;
+  }
+
+  function placeStaticPatterns(m, version) {
+    var size = m.length;
+    placeFinder(m, 0, 0);
+    placeFinder(m, 0, size - 7);
+    placeFinder(m, size - 7, 0);
+    // Separators (already 0 by the placeFinder border loop above where in range).
+    // Timing patterns.
+    for (var i = 8; i < size - 8; i++) {
+      var val = i % 2 === 0 ? 1 : 0;
+      if (m[6][i] === null) m[6][i] = val;
+      if (m[i][6] === null) m[i][6] = val;
+    }
+    // Alignment patterns: all combinations of the coordinate list, skipping
+    // only centers that overlap one of the three finder-pattern zones
+    // (NOT a generic "already non-null" check -- a center legitimately
+    // coincides with the timing-pattern line for some versions, e.g.
+    // version 10's (6, 28), and must still be placed there, overriding the
+    // timing pixel; only the finder corners are truly forbidden).
+    function overlapsFinderZone(r, c) {
+      return (r < 9 && c < 9) || (r < 9 && c >= size - 9) || (r >= size - 9 && c < 9);
+    }
+    var coords = ALIGNMENT_COORDS[version - 1];
+    for (var a = 0; a < coords.length; a++) {
+      for (var b = 0; b < coords.length; b++) {
+        var r = coords[a], c = coords[b];
+        if (overlapsFinderZone(r, c)) continue;
+        placeAlignment(m, r, c);
+      }
+    }
+    // Dark module (always present, position depends on version).
+    m[4 * version + 9][8] = 1;
+    // Reserve (but do not fill) format-info cells and version-info cells --
+    // filled later by fillFormatInfo/fillVersionInfo once the mask is chosen.
+    for (var rr = 0; rr < size; rr++) {
+      for (var cc = 0; cc < size; cc++) {
+        if (m[rr][cc] === null && reservedForFormatOrVersion(size, version, rr, cc)) {
+          m[rr][cc] = 'reserved';
+        }
+      }
+    }
+  }
+
+  function dataPlacementOrder(size) {
+    // Standard zigzag: two-columns-wide, moving bottom-to-top then
+    // top-to-bottom, right to left, skipping the vertical timing column.
+    var order = [];
+    var col = size - 1;
+    var upward = true;
+    while (col > 0) {
+      if (col === 6) col--; // skip the timing column
+      for (var i = 0; i < size; i++) {
+        var row = upward ? size - 1 - i : i;
+        for (var dc = 0; dc < 2; dc++) {
+          order.push([row, col - dc]);
+        }
+      }
+      col -= 2;
+      upward = !upward;
+    }
+    return order;
+  }
+
+  function maskFn(pattern, row, col) {
+    switch (pattern) {
+      case 0: return (row + col) % 2 === 0;
+      case 1: return row % 2 === 0;
+      case 2: return col % 3 === 0;
+      case 3: return (row + col) % 3 === 0;
+      case 4: return (Math.floor(row / 2) + Math.floor(col / 3)) % 2 === 0;
+      case 5: return ((row * col) % 2) + ((row * col) % 3) === 0;
+      case 6: return (((row * col) % 2) + ((row * col) % 3)) % 2 === 0;
+      case 7: return (((row + col) % 2) + ((row * col) % 3)) % 2 === 0;
+      default: return false;
+    }
+  }
+
+  function placeData(matrix, size, codewordBits, maskPattern) {
+    var m = matrix.map(function (row) { return row.slice(); });
+    var order = dataPlacementOrder(size);
+    var bi = 0;
+    for (var i = 0; i < order.length; i++) {
+      var row = order[i][0], col = order[i][1];
+      if (m[row][col] !== null) continue; // static pattern or reserved cell
+      var bit = bi < codewordBits.length ? codewordBits[bi] : 0;
+      bi++;
+      if (maskFn(maskPattern, row, col)) bit ^= 1;
+      m[row][col] = bit;
+    }
+    return m;
+  }
+
+  // BCH(15,5) format-info encoding, generator 0x537, XOR mask 0x5412.
+  function formatInfoBits(maskPattern) {
+    // EC level L = 0b01 in the 2-bit field, per the standard's level->bits
+    // mapping (L=01, M=00, Q=11, H=10).
+    var data = (0x1 << 3) | maskPattern;
+    var g = 0x537;
+    var value = data << 10;
+    for (var i = 4; i >= 0; i--) {
+      if (value & (1 << (i + 10))) value ^= g << i;
+    }
+    var bits = ((data << 10) | value) ^ 0x5412;
+    return bits & 0x7fff;
+  }
+
+  function fillFormatInfo(m, maskPattern) {
+    var size = m.length;
+    var bits = formatInfoBits(maskPattern);
+    function bit(i) { return (bits >> i) & 1; }
+    // Vertical strip at column 8: bits 0-5 at rows 0-5, bits 6-7 at rows
+    // 7-8 (row 6 -- the timing row -- is skipped), bits 8-14 at rows
+    // size-7..size-1 (bottom-left copy).
+    for (var i = 0; i < 6; i++) m[i][8] = bit(i);
+    m[7][8] = bit(6);
+    m[8][8] = bit(7);
+    for (i = 8; i < 15; i++) m[size - 15 + i][8] = bit(i);
+    // Horizontal strip at row 8: bits 0-7 at columns size-1..size-8
+    // (top-right copy), bit 8 at column 7, bits 9-14 at columns 5..0 (the
+    // timing column, 6, is skipped) -- this is the top-left copy's other
+    // half; column 8 at row 8 is already set by the vertical strip above.
+    for (i = 0; i < 8; i++) m[8][size - 1 - i] = bit(i);
+    m[8][7] = bit(8);
+    for (i = 9; i < 15; i++) m[8][15 - i - 1] = bit(i);
+  }
+
+  // BCH(18,6) version-info encoding, generator 0x1F25, for versions >= 7.
+  function versionInfoBits(version) {
+    var value = version << 12;
+    var g = 0x1f25;
+    for (var i = 5; i >= 0; i--) {
+      if (value & (1 << (i + 12))) value ^= g << i;
+    }
+    return (version << 12) | value;
+  }
+
+  function fillVersionInfo(m, version) {
+    if (version < 7) return;
+    var size = m.length;
+    var bits = versionInfoBits(version);
+    for (var i = 0; i < 18; i++) {
+      var bit = (bits >> i) & 1;
+      var row = Math.floor(i / 3);
+      var col = i % 3;
+      m[row][size - 11 + col] = bit;
+      m[size - 11 + col][row] = bit;
+    }
+  }
+
+  // ---- Mask penalty scoring (ISO/IEC 18004 4 rules) ----------------------
+  function penaltyScore(m) {
+    var size = m.length;
+    var score = 0;
+    // Rule 1: runs of 5+ same-color modules in a row/column.
+    function runPenalty(getCell) {
+      var p = 0;
+      for (var i = 0; i < size; i++) {
+        var run = 1;
+        var prev = getCell(i, 0);
+        for (var j = 1; j < size; j++) {
+          var v = getCell(i, j);
+          if (v === prev) {
+            run++;
+          } else {
+            if (run >= 5) p += 3 + (run - 5);
+            run = 1;
+            prev = v;
+          }
+        }
+        if (run >= 5) p += 3 + (run - 5);
+      }
+      return p;
+    }
+    score += runPenalty(function (i, j) { return m[i][j]; });
+    score += runPenalty(function (i, j) { return m[j][i]; });
+    // Rule 2: 2x2 blocks of the same color.
+    for (var r = 0; r < size - 1; r++) {
+      for (var c = 0; c < size - 1; c++) {
+        var v = m[r][c];
+        if (v === m[r][c + 1] && v === m[r + 1][c] && v === m[r + 1][c + 1]) score += 3;
+      }
+    }
+    // Rule 3: finder-like patterns (1:1:3:1:1 dark-light ratio with 4 light
+    // either side) found in a row or column.
+    var patternA = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0];
+    var patternB = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1];
+    function matchesAt(getCell, i, start, pattern) {
+      for (var k = 0; k < pattern.length; k++) {
+        if (getCell(i, start + k) !== pattern[k]) return false;
+      }
+      return true;
+    }
+    function findPenalty(getCell) {
+      var p = 0;
+      for (var i = 0; i < size; i++) {
+        for (var j = 0; j <= size - 11; j++) {
+          if (matchesAt(getCell, i, j, patternA) || matchesAt(getCell, i, j, patternB)) p += 40;
+        }
+      }
+      return p;
+    }
+    score += findPenalty(function (i, j) { return m[i][j]; });
+    score += findPenalty(function (i, j) { return m[j][i]; });
+    // Rule 4: overall dark-module proportion vs 50%. Spec method: take the
+    // multiples of five immediately below and above the actual percentage,
+    // score each candidate's deviation from 50, and use the smaller one
+    // (NOT a single floor(...) of the raw deviation -- that under-counts
+    // some percentages by one step and disagrees with reference encoders
+    // on the resulting best-mask tie-break).
+    var dark = 0;
+    for (r = 0; r < size; r++) for (c = 0; c < size; c++) if (m[r][c]) dark++;
+    var percent = (dark * 100) / (size * size);
+    var prevMultiple = Math.floor(percent / 5) * 5;
+    var nextMultiple = prevMultiple + 5;
+    var prevDiff = Math.abs(prevMultiple - 50) / 5;
+    var nextDiff = Math.abs(nextMultiple - 50) / 5;
+    score += Math.min(prevDiff, nextDiff) * 10;
+    return score;
+  }
+
+  // ---- Public entry point -------------------------------------------------
+  // Returns { size, matrix } where matrix[row][col] is 1 (dark) or 0
+  // (light). Throws if `text`'s byte length exceeds this encoder's
+  // supported range (version 10 / EC level L / byte mode -- ample headroom
+  // for a fixed-parameter otpauth:// URI per the plan's own capacity note).
+  function kcQrEncode(text) {
+    var bytes = utf8Bytes(String(text));
+    var version = chooseVersion(bytes.length);
+    if (version === -1) {
+      throw new Error('kcQrEncode: input too long for this encoder (max ' +
+        BYTE_CAPACITY_L[BYTE_CAPACITY_L.length - 1] + ' bytes, got ' + bytes.length + ')');
+    }
+    var dataCodewords = buildDataCodewords(bytes, version);
+    var allCodewords = interleave(version, dataCodewords);
+    var codewordBits = [];
+    for (var i = 0; i < allCodewords.length; i++) {
+      for (var b = 7; b >= 0; b--) codewordBits.push((allCodewords[i] >> b) & 1);
+    }
+    for (i = 0; i < REMAINDER_BITS[version - 1]; i++) codewordBits.push(0);
+
+    var base = makeMatrix(version);
+    placeStaticPatterns(base, version);
+
+    var best = null, bestScore = Infinity, bestMask = 0;
+    for (var mask = 0; mask < 8; mask++) {
+      var candidate = placeData(base, base.length, codewordBits, mask);
+      fillFormatInfo(candidate, mask);
+      fillVersionInfo(candidate, version);
+      var s = penaltyScore(candidate);
+      if (s < bestScore) {
+        bestScore = s;
+        best = candidate;
+        bestMask = mask;
+      }
+    }
+    // Normalize 'reserved' placeholders (should not remain -- format/version
+    // fill above overwrites every reserved cell) to 0 defensively.
+    for (var r2 = 0; r2 < best.length; r2++) {
+      for (var c2 = 0; c2 < best.length; c2++) {
+        if (best[r2][c2] === 'reserved' || best[r2][c2] === null) best[r2][c2] = 0;
+      }
+    }
+    return { size: best.length, version: version, mask: bestMask, matrix: best };
+  }
+
+  var api = { encode: kcQrEncode };
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  } else {
+    root.kcQr = api;
+  }
+})(typeof window !== 'undefined' ? window : this);
+
+</script>
+<script>
+(function () {
+  // ---------------------------------------------------------------------
+  // TOTP enrollment wire contract (WT-B's choice, recorded in
+  // docs/TOTP_PASSWORD_RESET_PLAN.md section 6b -- that section and this
+  // script must be changed together, same rule as the wire-contract
+  // comment on the other <script> above):
+  //
+  //   GET /api/auth/totp_status (ROUTE_TIER_ADMIN, WT-A/WT-C's route) ->
+  //     { enrolled: bool, board_time_utc?: string, sntp_synced?: bool }
+  //
+  //   POST /api/auth/security (existing ROUTE_TIER_ADMIN cmd= dispatch --
+  //   reused rather than three new routes, to spend zero extra
+  //   `max_uri_handlers` slots; see check_uri_handler_cap.ps1's own
+  //   "essentially no headroom left" note):
+  //     cmd=totp_enroll_begin ->
+  //       { secret_base32, otpauth_uri, board_time_utc, sntp_synced }
+  //       Generates a new pending secret but does NOT commit it to NVS --
+  //       only totp_enroll_confirm below does that, and only on a valid code.
+  //     cmd=totp_enroll_confirm&code=NNNNNN -> { ok: bool }
+  //       Validates code against the pending secret from totp_enroll_begin
+  //       and, only if valid, commits it as the enrolled secret.
+  //     cmd=totp_disable&code=NNNNNN -> { ok: bool }
+  //       Requires a currently-valid code (not just an admin session) so a
+  //       hijacked web session alone cannot silently turn off the reset
+  //       path a locked-out owner would need.
+  //   Transport status is always 200 (this route's existing convention);
+  //   an unsynced board clock is { ok: false, clock_unsynced: true } on any
+  //   of the three (plan section 3's specific "board clock not synced"
+  //   refusal), shown as its own message rather than "incorrect code".
+  //   2026-09-25 owner decision: cmd=totp_enroll_begin and
+  //   cmd=totp_enroll_confirm are ALSO refused, distinctly, while web login
+  //   is off -- transport status 409, body
+  //   { ok: false, web_auth_disabled: true } -- shown as its own message
+  //   ("Turn on web login before enrolling an authenticator."), never
+  //   folded into the generic "incorrect code" case. cmd=totp_disable is
+  //   NOT gated this way; it must keep working regardless of the web-auth
+  //   toggle.
+  // ---------------------------------------------------------------------
+  var totpBadge = document.getElementById('kcTotpBadge');
+  var clockLine = document.getElementById('kcTotpClockLine');
+  var notEnrolledEl = document.getElementById('kcTotpNotEnrolled');
+  var enrollingEl = document.getElementById('kcTotpEnrolling');
+  var enrolledEl = document.getElementById('kcTotpEnrolled');
+  var beginBtn = document.getElementById('kcTotpBeginBtn');
+  var qrCanvas = document.getElementById('kcTotpQrCanvas');
+  var secretText = document.getElementById('kcTotpSecretText');
+  var copySecretBtn = document.getElementById('kcTotpCopySecret');
+  var confirmCodeInput = document.getElementById('kcTotpConfirmCode');
+  var confirmBtn = document.getElementById('kcTotpConfirmBtn');
+  var cancelEnrollBtn = document.getElementById('kcTotpCancelEnrollBtn');
+  var enrollStatus = document.getElementById('kcTotpEnrollStatus');
+  var disableCodeInput = document.getElementById('kcTotpDisableCode');
+  var disableBtn = document.getElementById('kcTotpDisableBtn');
+  var disableStatus = document.getElementById('kcTotpDisableStatus');
+
+  function setStatus(el, text, ok) {
+    el.textContent = text || '';
+    el.className = 'kc-sec-status' + (text ? (ok ? ' ok' : ' err') : '');
+  }
+
+  function showClockLine(boardTimeUtc, sntpSynced) {
+    if (typeof sntpSynced === 'undefined') { clockLine.textContent = ''; return; }
+    var line = 'Board UTC time: ' + (boardTimeUtc || 'unknown');
+    if (sntpSynced === false) {
+      line += ' -- WARNING: board clock is not SNTP-synced. Codes will not validate ' +
+              'until it is.';
+    }
+    clockLine.textContent = line;
+  }
+
+  var QR_TARGET_PX = 200;
+  var QR_QUIET_MODULES = 4; // ISO/IEC 18004 minimum light border
+  function renderQr(otpauthUri) {
+    var res = window.kcQr.encode(otpauthUri);
+    var total = res.size + 2 * QR_QUIET_MODULES;
+    // Size from the fixed target, never from qrCanvas.width: that is
+    // rewritten below, so a second render would otherwise shrink.
+    var scale = Math.max(1, Math.floor(QR_TARGET_PX / total));
+    var pixel = total * scale;
+    var off = QR_QUIET_MODULES * scale;
+    qrCanvas.width = pixel;
+    qrCanvas.height = pixel;
+    var ctx = qrCanvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, pixel, pixel);
+    ctx.fillStyle = '#000';
+    for (var r = 0; r < res.size; r++) {
+      for (var c = 0; c < res.size; c++) {
+        if (res.matrix[r][c]) ctx.fillRect(off + c * scale, off + r * scale, scale, scale);
+      }
+    }
+  }
+
+  // Drop the secret from the DOM once it is no longer needed (Cancel, or a
+  // confirmed enrollment): the base32 key and the QR both encode it.
+  function clearEnrollmentSecret() {
+    secretText.textContent = '';
+    qrCanvas.width = QR_TARGET_PX;   // resetting width also clears the bitmap
+    qrCanvas.height = QR_TARGET_PX;
+    confirmCodeInput.value = '';
+  }
+
+  var CLOCK_UNSYNCED_MSG = 'Board clock is not synced yet -- codes cannot be checked. Try again shortly.';
+  var WEB_AUTH_OFF_MSG = 'Turn on web login before enrolling an authenticator.';
+  function isAuthCancelled(err) {
+    return !!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err));
+  }
+
+  function loadTotpStatus() {
+    return fetch('/api/auth/totp_status').then(function (resp) {
+      if (!resp.ok) throw new Error('status ' + resp.status);
+      return resp.json();
+    }).then(function (data) {
+      totpBadge.textContent = data.enrolled ? 'Enrolled' : 'Not enrolled';
+      showClockLine(data.board_time_utc, data.sntp_synced);
+      notEnrolledEl.hidden = !!data.enrolled;
+      enrollingEl.hidden = true;
+      enrolledEl.hidden = !data.enrolled;
+      return data;
+    }).catch(function () {
+      totpBadge.textContent = '';
+    });
+  }
+
+  beginBtn.addEventListener('click', function () {
+    beginBtn.disabled = true;
+    fetch('/api/auth/security', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'cmd=totp_enroll_begin'
+    }).then(function (resp) {
+      // 409 (web_auth_disabled) and the clock_unsynced 200 both carry a
+      // JSON body this handler must inspect -- parse first, and only
+      // treat a non-JSON failure as an error below.
+      return resp.json();
+    }).then(function (data) {
+      if (data && data.web_auth_disabled) {
+        setStatus(enrollStatus, WEB_AUTH_OFF_MSG, false);
+        return;
+      }
+      if (data && data.clock_unsynced) {
+        showClockLine(data.board_time_utc, false);
+        setStatus(enrollStatus, CLOCK_UNSYNCED_MSG, false);
+        return;
+      }
+      if (!data || !data.secret_base32 || !data.otpauth_uri) throw new Error('begin failed');
+      secretText.textContent = data.secret_base32;
+      renderQr(data.otpauth_uri);
+      showClockLine(data.board_time_utc, data.sntp_synced);
+      confirmCodeInput.value = '';
+      setStatus(enrollStatus, '', false);
+      notEnrolledEl.hidden = true;
+      enrollingEl.hidden = false;
+    }).catch(function (err) {
+      if (isAuthCancelled(err)) return;
+      setStatus(enrollStatus, 'Could not start enrollment.', false);
+    }).then(function () {
+      beginBtn.disabled = false;
+    });
+  });
+
+  copySecretBtn.addEventListener('click', function () {
+    var text = secretText.textContent;
+    if (!text) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(function () {});
+    }
+  });
+
+  cancelEnrollBtn.addEventListener('click', function () {
+    enrollingEl.hidden = true;
+    notEnrolledEl.hidden = false;
+    clearEnrollmentSecret();
+    setStatus(enrollStatus, '', false);
+  });
+
+  confirmBtn.addEventListener('click', function () {
+    var code = confirmCodeInput.value.trim();
+    if (!/^[0-9]{6}$/.test(code)) {
+      setStatus(enrollStatus, 'Enter the 6-digit code.', false);
+      return;
+    }
+    confirmBtn.disabled = true;
+    fetch('/api/auth/security', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'cmd=totp_enroll_confirm&code=' + encodeURIComponent(code)
+    }).then(function (resp) { return resp.json(); }).then(function (data) {
+      if (data && data.ok) {
+        clearEnrollmentSecret();
+        setStatus(enrollStatus, 'Enrolled.', true);
+        loadTotpStatus();
+      } else if (data && data.web_auth_disabled) {
+        setStatus(enrollStatus, WEB_AUTH_OFF_MSG, false);
+      } else if (data && data.clock_unsynced) {
+        setStatus(enrollStatus, CLOCK_UNSYNCED_MSG, false);
+      } else {
+        setStatus(enrollStatus, 'Incorrect code -- try again.', false);
+      }
+    }).catch(function (err) {
+      if (isAuthCancelled(err)) return;
+      setStatus(enrollStatus, 'Network error.', false);
+    }).then(function () {
+      confirmBtn.disabled = false;
+      confirmCodeInput.value = '';
+    });
+  });
+
+  disableBtn.addEventListener('click', function () {
+    var code = disableCodeInput.value.trim();
+    if (!/^[0-9]{6}$/.test(code)) {
+      setStatus(disableStatus, 'Enter the 6-digit code.', false);
+      return;
+    }
+    window.kcConfirm('Disable two-factor password reset? A locked-out operator will need ' +
+                 'another admin session to regain access.').then(function (ok) {
+      if (!ok) return;
+      disableBtn.disabled = true;
+      return fetch('/api/auth/security', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'cmd=totp_disable&code=' + encodeURIComponent(code)
+      }).then(function (resp) { return resp.json(); }).then(function (data) {
+        if (data && data.ok) {
+          setStatus(disableStatus, 'Disabled.', true);
+          loadTotpStatus();
+        } else if (data && data.clock_unsynced) {
+          setStatus(disableStatus, CLOCK_UNSYNCED_MSG, false);
+        } else {
+          setStatus(disableStatus, 'Incorrect code.', false);
+        }
+      }).catch(function (err) {
+        if (isAuthCancelled(err)) return;
+        setStatus(disableStatus, 'Network error.', false);
+      }).then(function () {
+        disableBtn.disabled = false;
+        disableCodeInput.value = '';
+      });
+    });
+  });
+
+  loadTotpStatus();
+})();
+</script>
+</body>
+</html>

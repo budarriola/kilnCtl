@@ -1,0 +1,235 @@
+{
+  "captured_at_utc": "2026-09-24T07:52:10Z",
+  "condition": "mid_firing",
+  "entries": [
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 2956,
+      "level": "OK",
+      "name": "httpd_worker"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2792,
+      "level": "OK",
+      "name": "i2c_owner_sx1509"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 2304,
+      "level": "OK",
+      "name": "boot_button"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 3048,
+      "level": "OK",
+      "name": "spi_owner"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2664,
+      "level": "OK",
+      "name": "thermo_owner"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 6144,
+      "hwm_bytes": 3072,
+      "level": "OK",
+      "name": "screen_idle"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 896,
+      "level": "LOW",
+      "name": "backlight_pwm"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 1144,
+      "level": "OK",
+      "name": "safety_owner_evt"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 3556,
+      "level": "OK",
+      "name": "safety_proto_rx"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 5224,
+      "level": "OK",
+      "name": "safety_poll"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 2300,
+      "level": "OK",
+      "name": "danger_mode"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2708,
+      "level": "OK",
+      "name": "kiln_io_owner"
+    },
+    {
+      "alive": false,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 0,
+      "level": "OK",
+      "name": "pico_auto_update"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 10240,
+      "hwm_bytes": 5296,
+      "level": "OK",
+      "name": "bx_flash_worker"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 612,
+      "level": "CRITICAL",
+      "name": "profile_executor"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2988,
+      "level": "OK",
+      "name": "profile_exec_wdt"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 3284,
+      "level": "OK",
+      "name": "autotune_engine"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 5784,
+      "level": "OK",
+      "name": "kiln_cfg_swap"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 2336,
+      "level": "OK",
+      "name": "uart_owner_evt_task"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 3620,
+      "level": "OK",
+      "name": "uart_proto_rx"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1616,
+      "level": "OK",
+      "name": "uart_log_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3584,
+      "hwm_bytes": 1088,
+      "level": "OK",
+      "name": "info_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 1136,
+      "level": "OK",
+      "name": "system_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1680,
+      "level": "OK",
+      "name": "thermo_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2548,
+      "level": "OK",
+      "name": "io_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 1344,
+      "level": "LOW",
+      "name": "lvgl"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 440,
+      "level": "CRITICAL",
+      "name": "touch_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 3672,
+      "level": "OK",
+      "name": "ui_test_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1640,
+      "level": "OK",
+      "name": "safety_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 6144,
+      "hwm_bytes": 4308,
+      "level": "OK",
+      "name": "telemetry_log"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 6144,
+      "hwm_bytes": 5052,
+      "level": "OK",
+      "name": "gpio_probe"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 1080,
+      "level": "OK",
+      "name": "link_watchdog"
+    }
+  ],
+  "fw_built": "unknown (not re-queried this capture; board access restricted to get_stack_margin/get_heap_status)",
+  "fw_commit": "75a5e459",
+  "fw_dirty": false,
+  "load": null,
+  "notes": "SK-01 committed baseline. Captured via read-only kiln_call(name=\"get_stack_margin\") on 2026-09-24 while a heat/profile firing was active on the board (bench board memory: ESP firmware 75a5e459, per project memory project_bench_board_firmware_state; not independently re-queried here since board access was restricted to get_stack_margin and get_heap_status). A firing-active capture is deliberately the more conservative baseline per stack_margin_baseline.py's module docstring (mid_firing exercises profile_executor's tick path, relay/firing_stats writes, and the safety-link watchdog path that an idle capture never reaches). get_heap_status at capture time reported reset_reason=software (esp_restart), uptime_s=4138 -- consistent with the board having been up and running the observed firing continuously; it does not itself report an fw build/commit field, so the 75a5e459 commit above is carried from project memory rather than re-verified live. Two tasks read CRITICAL under this load: profile_executor (612 B / 4096 B, 14.9% headroom) and touch_uart_bridge (440 B / 3072 B, 14.3% headroom) -- both recorded as-is; SK-01 compares a live reading against whatever is committed here, it does not gate on this file being clean."
+}

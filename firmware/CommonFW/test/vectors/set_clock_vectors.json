@@ -1,0 +1,21 @@
+{
+  "frame": "SAFETY_CMD_SET_CLOCK",
+  "cmd": "0x0C",
+  "vectors": [
+    {
+      "name": "real_epoch",
+      "fields": {
+        "epoch_ms": 1700000000000
+      },
+      "bytes_hex": "0c0068e5cf8b010000"
+    },
+    {
+      "name": "zero",
+      "fields": {
+        "epoch_ms": 0
+      },
+      "bytes_hex": "0c0000000000000000"
+    }
+  ],
+  "note": "bytes_hex fields here are documentation only -- the authoritative byte-exact expectations live inline in test/test_set_clock.c (mirroring status/power/context/announce/diag/trip's own convention). Purely diagnostic -- LINK_PROTOCOL.md sec 4 is explicit that no guard may ever read this clock, so this codec has no opinion on how (or whether) SaftyFW uses the decoded value."
+}

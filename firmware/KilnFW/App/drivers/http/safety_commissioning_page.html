@@ -1,0 +1,2394 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Safety Commissioning</title>
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- 2026-08-22: this page used zones_page.html as its model and inherited
+     that file's one real defect -- no theme.css link. theme.css carries the
+     RULES for the chrome nav.js and app.js inject (.kc-topbar, .kc-home-btn/
+     .kc-menu-btn, .kc-menu-overlay, .card, [hidden]), not just the --ui-*
+     custom properties, so without it this page rendered the shared topbar
+     markup unstyled: measured in a headless browser, its Home link computed
+     to `display: inline; min-height: 0` at 17px tall against 40px everywhere
+     else. The local --fault-color note further down still stands; a local
+     token definition is harmless alongside the stylesheet. -->
+<link rel="stylesheet" href="/theme.css">
+<!-- SaftyFW/docs/COMMISSIONING.md section 4 is this page's spec; section 3.1
+     is the exact HTTP contract this page's JS is written against (GET/POST
+     /api/safety/commissioning, POST /api/safety/commissioning/bench_preset);
+     CONFIG_REFERENCE.md sections 1-5 supply the field grouping, units,
+     defaults and risk ratings this page renders. Both files are read-only
+     inputs here -- this page does not implement any of the mechanism they
+     describe (config_store, SET_PARAM/COMMIT_CONFIG framing, the three-
+     outcome load) -- it only speaks the HTTP surface those docs fix.
+     Not yet wired: the route/handler that serves this page and the two
+     endpoints above are being built in parallel against the same contract;
+     see the file-level comment at the bottom of the inline <script> for the
+     precise list of what the coordinator still has to connect. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<!-- 2026-09-08 retrofit (review 5d03f8c2): the confirm+read-back contract for
+     the Advanced-view save (findCriticalChanges/checkFiringOrAutotuneRunning/
+     commit-and-verify) now lives once, in commissioning_shared.js, shared with
+     setup_wizard_page.html's step 7 -- see that file's own header comment.
+     Served from the same httpd handle as this page (wifi_provision_http.c's
+     commissioning_shared_js_uri, registered once for the whole server), so no
+     route/embedding change was needed beyond this <script> tag. -->
+<script defer src="/commissioning_shared.js"></script>
+<style>
+  /* Shared KlipperScreen-derived palette, duplicated verbatim per page --
+     see zones_page.html's identical comment for why (EMBED_TXTFILES'd
+     independently, no shared static-asset route today). */
+  :root {
+    --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+    --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+    --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+    --ui-radius: 10px; --ui-padding: 8px; --ui-touch: 72px; --ui-status-bar: 32px;
+  }
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --ok: #1a7f37; --warn: #9a6700; --bad: #c0392b;
+    /* --fault-color already exists on theme.css / the LCD side for a hard
+       fault state; defined locally here too since this page (like
+       zones_page.html) carries no <link rel="stylesheet" href="/theme.css">
+       of its own. Deliberately distinct from --bad: --bad is "this reading
+       is a warning/error", --fault-color is reserved for "the data on
+       screen cannot be trusted at all" (stale telemetry, link down) so the
+       two states are never visually confusable with each other. */
+    --fault-color: #c0392b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+      --fault-color: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --ok: var(--ui-accent-4); --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+    --fault-color: var(--ui-accent-5);
+  }
+  /* WEB_UI_RESPONSIVE.md sec 6: shared shell width instead of a fixed
+     620px cap -- see main_page.html's identical comment for the rationale. */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  a { color: var(--link); }
+  .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1.05em; margin-top: 1.6em; border-top: 1px solid var(--border); padding-top: 0.8em; }
+  p { color: var(--muted); }
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type=text], input[type=number], select {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  button { margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+           border-radius: var(--ui-radius); cursor: pointer; }
+  #msg { margin-top: 1em; font-weight: bold; }
+  .empty { color: var(--muted); font-style: italic; }
+
+  /* ---- field cards, grouped exactly as CONFIG_REFERENCE.md sections 1-5,
+     one .field per row so risk badge / unset state / guard-disabled note
+     all attach to the same visual block instead of scattering across a
+     bare table (COMMISSIONING.md section 4 item 1: "not forty-five
+     identical-looking number boxes"). ---- */
+  .field { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+           padding: 0.6em 0.9em; margin-bottom: 0.6em; }
+  .field-head { display: flex; align-items: baseline; gap: 0.5em; flex-wrap: wrap; }
+  .field-head label { margin: 0; flex: 1 1 auto; min-width: 0; }
+  .risk-badge { display: inline-block; border-radius: 999px; padding: 0.1em 0.55em; font-size: 0.75em;
+                font-weight: bold; white-space: nowrap; flex: 0 0 auto; }
+  .risk-dangerous { background: var(--fault-color); color: #fff; }
+  .risk-nuisance  { background: var(--warn); color: #fff; }
+  .risk-cosmetic  { background: var(--border); color: var(--fg); }
+  .field .note { font-size: 0.8em; color: var(--muted); margin: 0.3em 0 0; }
+  .field .guardnames { font-size: 0.78em; color: var(--muted); margin: 0.2em 0 0; }
+
+  /* ---- Task 3 (COMMISSIONING_UX.md sec 2.2): current-monitor calibration,
+     displayed but not reassignable -- an <output> row, styled to read as
+     inert data rather than an editable box, with the "from zones" note
+     immediately under it. ---- */
+  .field-readonly { opacity: 0.85; }
+  .readonly-field { display: block; padding: 0.3em 0.5em; border-radius: 6px;
+    background: var(--card-bg-alt, var(--border)); font-family: monospace; }
+
+  /* Task 2 (COMMISSIONING_UX.md sec 2.1): the mains-voltage dropdown and its
+     hidden "Other..." number box share the field row the same way any other
+     single-field input would. */
+  .voltage-select { width: 100%; }
+  .voltage-other { width: 100%; margin-top: 0.3em; }
+
+  /* ---- UNSET rendering (COMMISSIONING.md section 4 / CONFIG_REFERENCE.md
+     section 7: "an unset field renders as unset, never as a plausible
+     zero"). The whole card gets a visibly different treatment, not just the
+     input box, since the guard-disabled statement below the input is just
+     as important as the blank value itself. ---- */
+.field.ct-not-applicable { opacity: .45; }
+.field.ct-not-applicable label, .field.ct-not-applicable .note { text-decoration: line-through; }
+.field.ct-not-applicable .ct-na-note { text-decoration: none; font-weight: bold; opacity: 1; }
+  .field.unset { border-color: var(--warn); border-width: 2px; }
+  .field.unset .field-head::after { content: 'NOT SET'; font-size: 0.72em; font-weight: bold;
+    color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 0.05em 0.4em; }
+  .field.unset input, .field.unset select { border-color: var(--warn); }
+  .field.unset .guard-disabled { color: var(--warn); font-weight: bold; }
+
+  /* ---- disabled-guard rendering, distinct from "unset": a guard can be
+     explicitly zero/off (e.g. max_rate_c_per_min ships 0=off) with the
+     field itself fully SET -- CONFIG_REFERENCE.md section 7: "a disabled
+     guard that looks enabled is worse than no guard, because someone is
+     relying on it." A visible banner on the field, not a color change to
+     the number alone, so it survives a quick glance. ---- */
+  .field .guard-off-banner { display: none; margin-top: 0.35em; padding: 0.3em 0.5em;
+    border-radius: 6px; background: var(--warn); color: #fff; font-size: 0.78em; font-weight: bold; }
+  .field.guard-off .guard-off-banner { display: block; }
+
+  /* ---- stale / link-down: page-wide, unmissable, never rendered as
+     ordinary data (COMMISSIONING.md section 3.1 / section 4). A banner
+     plus a persistent tint on every value field, not a small icon that can
+     be missed on a phone screen. ---- */
+  #staleBanner, #linkDownBanner { display: none; margin: 0.8em 0; padding: 0.7em 0.9em;
+    border-radius: var(--ui-radius); background: var(--fault-color); color: #fff; font-weight: bold; }
+  body.kc-cfg-stale #staleBanner, body.kc-cfg-linkdown #linkDownBanner { display: block; }
+  /* Every value input dims/tints red while stale so a half-read screen
+     can't be mistaken for a trustworthy one even if the banner scrolls
+     out of view. */
+  body.kc-cfg-stale .field input,
+  body.kc-cfg-stale .field select,
+  body.kc-cfg-linkdown .field input,
+  body.kc-cfg-linkdown .field select { border-color: var(--fault-color); opacity: 0.65; }
+
+  .crcline { font-family: monospace; font-size: 0.85em; padding: 0.5em 0.8em;
+             background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius); }
+  .crc-mismatch { color: var(--fault-color); font-weight: bold; }
+
+  details.section-details summary { cursor: pointer; font-weight: bold; }
+
+  /* Bug fix 2026-08-22 (headless-Chromium 390px sweep): a bool-type field's
+     checkbox measured 13x13px -- far under the ~32px fingertip minimum, and
+     on a page that WRITES safety-commissioning parameters a mis-tap here is
+     not cosmetic, it is a wrong guard value silently staged. The fix is the
+     usual one: the label wraps the checkbox (see .bool-label / fieldBlock's
+     bool branch below) so the whole row -- name, unit, whitespace included
+     -- is the hit target, not just the 13px box, and the box itself is
+     enlarged and given explicit min dimensions so it still reads as a
+     checkbox even at a glance. Verified in both themes: --fg/--border only,
+     no new colors introduced. */
+  label.bool-label { display: flex; align-items: center; gap: 0.6em; cursor: pointer;
+    min-height: 32px; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  label.bool-label input[type=checkbox] { width: 1.5em; height: 1.5em; min-width: 32px;
+    min-height: 32px; flex: 0 0 auto; accent-color: var(--link); }
+  label.bool-label .hint { font-weight: normal; }
+
+  /* Phone-width pass: cards already stack (flex-wrap on field-head, no
+     fixed-width side-by-side rows anywhere on this page) so nothing extra
+     is needed there, but the risk badge would otherwise crowd a long field
+     label on a ~360px viewport -- forcing it to wrap onto its own line
+     below the label fixes exactly the "controls overlapping on a narrow
+     viewport" class of bug this repo hit before. */
+  @media (max-width: 420px) {
+    .field-head { flex-direction: column; align-items: flex-start; }
+  }
+
+  /* ---- Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
+     parameters, shown by default; the full 59-field list below moves into
+     an Advanced disclosure. Deliberately reuses the same .field/.card/.hint
+     tokens as the Advanced view so the two do not read as different apps. ---- */
+  .gstepper { display: flex; gap: 0.4em; margin: 0.8em 0; flex-wrap: wrap; }
+  .gstepper span { font-size: 0.75em; padding: 0.2em 0.6em; border-radius: 999px;
+    background: var(--card-bg); border: 1px solid var(--border); color: var(--muted); }
+  .gstepper span.current { border-color: var(--link); color: var(--fg); font-weight: bold; }
+  .gstepper span.done { color: var(--ok); border-color: var(--ok); }
+  .gscreen { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+    padding: 1em 1.2em; margin-bottom: 1em; }
+  .gscreen h3 { margin-top: 0; }
+  .radio-card { display: block; border: 1px solid var(--input-border); border-radius: var(--ui-radius);
+    padding: 0.7em 0.9em; margin: 0.6em 0; cursor: pointer; }
+  .radio-card input { width: 1.2em; height: 1.2em; margin-right: 0.6em; vertical-align: middle; }
+  .radio-card .consequence { display: block; margin: 0.4em 0 0 1.9em; font-size: 0.85em; color: var(--muted); }
+  .radio-card.selected { border-color: var(--link); border-width: 2px; }
+  .radio-card.disabled { opacity: 0.55; cursor: not-allowed; }
+  .radio-card.disabled .consequence { color: var(--bad); font-weight: bold; }
+  .gnav { display: flex; gap: 0.6em; margin-top: 1em; }
+  .gnav button { margin-top: 0; }
+  .review-row { display: flex; justify-content: space-between; gap: 1em; padding: 0.35em 0;
+    border-bottom: 1px dotted var(--border); font-size: 0.92em; }
+  .review-row:last-child { border-bottom: none; }
+  .review-row .rv { font-family: monospace; text-align: right; }
+  .writewindow { border-radius: var(--ui-radius); padding: 0.8em 1em; margin: 0.8em 0; font-weight: bold; }
+  .writewindow.ww-unknown { background: var(--card-bg); border: 1px solid var(--border); color: var(--muted); font-weight: normal; }
+  .writewindow.ww-armed { background: var(--fault-color); color: #fff; }
+  .writewindow.ww-waiting { background: var(--warn); color: #fff; }
+  .writewindow.ww-ok { background: var(--ok); color: #fff; }
+  #guidedMsg { font-weight: bold; margin-top: 0.6em; }
+  details#advancedDetails { margin-top: 1.6em; border-top: 2px solid var(--border); padding-top: 0.6em; }
+  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE.md
+     sec 4, WCAG 2.5.8): measured 620x20 at every width the disclosure's
+     content is actually reachable (sweep now springs every <details> open
+     before asserting, so a closed accordion no longer hides this from the
+     check). Unlike the native <input type=file> exemption in backup_page.html
+     or WCAG's own inline-text-link exemption, a <summary> is an ordinary
+     block-level element the page already styles (font-size/cursor above) --
+     nothing platform-locked stops it from meeting the floor, so this is a
+     real fix, not an exemption: min-height plus flex centering, same
+     pattern as label.bool-label above. */
+  details#advancedDetails > summary { font-size: 1.05em; cursor: pointer;
+    min-height: 32px; display: flex; align-items: center; }
+  /* Same 32px touch-target floor and fix shape as details#advancedDetails
+     just above, for the relay-type disclosure (RELAY_LIFE_BUDGET.md
+     step 3). */
+  details#relayTypeDetails > summary { font-size: 1.05em; cursor: pointer;
+    min-height: 32px; display: flex; align-items: center; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+
+<p>Commissions the RP2040 safety processor's own thresholds -- the values here
+are stored on the Pico, outside both OTA slots, and enforced there regardless
+of what this page or the main board thinks they are.
+This page is a front end onto that store, not the store itself: it reads and
+stages values, but every write is validated and committed by the Pico, which
+independently refuses anything this page fails to catch.</p>
+
+<div id="linkDownBanner">Safety-processor link is DOWN. Values below are the
+ESP's last cached copy from before the link dropped -- they may no longer
+match what the Pico is enforcing, or the Pico may be enforcing nothing
+correctly commissioned at all. Do not treat anything on this page as current
+until the link banner clears.</div>
+
+<div id="staleBanner">STALE: the ESP's cached values do not match the safety
+processor's live <code>config_crc</code>. The Pico is enforcing something
+different from what is shown below. This is refetching now; if it does not
+clear shortly, treat every value on this page as unknown until it does.</div>
+
+<p class="crcline">Live config_crc (from telemetry): <b id="crcLive">&mdash;</b>
+&nbsp;|&nbsp; Cached at: <b id="crcCached">&mdash;</b>
+&nbsp;|&nbsp; <span id="crcMatch"></span></p>
+<p class="hint">"Which thresholds is the safety processor actually enforcing?"
+is answered by the <b>live</b> value only -- the cached value is what these
+form fields were last fetched at, shown purely so a mismatch is visible.</p>
+
+<p id="commissionedLine" class="hint"></p>
+<p id="unsetReliabilityLine" class="hint guard-disabled" hidden>Safety processor firmware is too old
+(or has never reported in) to say which fields below are genuinely unset -- every "set" badge on this
+page is UNKNOWN, not a real confirmation, until it reports a newer build.</p>
+<!-- Owner request 2026-09-08: a non-zero safety-TC calibration offset must be
+     visible somewhere persistent, not just at the moment it is set -- a
+     forgotten offset makes a later temperature reading inexplicable. This
+     banner is populated by loadCommissioning() below on every load, not only
+     right after a save, so it survives a page reload/new session. -->
+<p id="tcOffsetBanner" class="hint guard-disabled" hidden></p>
+
+
+<!-- RELAY_LIFE_BUDGET.md: the safety relay (K4) type. Deliberately
+     OUTSIDE the guided flow/Advanced-fields section below -- unlike every
+     field there, this is never a Pico param, never staged, and never part
+     of the SET_PARAM/COMMIT_CONFIG round trip; it is a local ESP setting
+     saved immediately, on its own, with its own tiny POST endpoint. -->
+<details id="relayTypeDetails">
+<summary>Safety relay (K4) type</summary>
+<p class="hint">Sets K4's rated contact-life budget for the dashboard/LCD relay-life
+indication (contactor: 100,000 cycles; mercury: 1,000,000 cycles) -- indication only,
+never enforced and never blocks firing. This is an ESP-only setting: the safety
+processor is never told and does not enforce it. The safety relay does not offer
+"ssr" -- only the zones/heater relays do.</p>
+<select id="relayTypeSelect">
+  <option value="contactor">Contactor</option>
+  <option value="mercury">Mercury</option>
+</select>
+<p id="relayTypeMsg" class="hint"></p>
+</details>
+
+<!-- ============================================================
+     Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
+     parameters (abs_max_temp_c, safety_tc_installed, tc_source,
+     tc_placement_mode, mains_voltage_v, max_expected_power_w). Everything
+     else stays defaulted/derived and is only reachable in Advanced below.
+     ============================================================ -->
+<div id="guided">
+  <div class="gstepper" id="gstepper"></div>
+
+  <div class="gscreen" id="gscreen0">
+    <h3>Before you start</h3>
+    <p id="gPreflightStatus" class="hint">Loading current status&hellip;</p>
+    <!-- F4 fix (opus review): this used to be a static string dressed as
+         live state -- gSetWriteWindowBanner() only ever targeted
+         #gWriteWindow2. It now updates in step with #gWriteWindow2 on every
+         commit attempt (see gSetWriteWindowBanner()); this initial text is
+         only shown before the first attempt. -->
+    <div id="gWriteWindow" class="writewindow ww-unknown">Write window: unknown until you try to save.</div>
+    <p class="hint">Config writes are refused unless the safety processor's relay owner is still
+    in its ~60&nbsp;second boot-grace window. You can fill in every answer below at any time --
+    the values are only staged in this browser tab. The commit step at the end tells you if the
+    write window is closed and walks you through reopening it (power-cycle the safety processor).</p>
+    <p id="gLoadFailedMsg" class="hint guard-disabled" hidden></p>
+    <div class="gnav"><button type="button" id="gStartBtn" onclick="gStart()">Start</button></div>
+  </div>
+
+  <div class="gscreen" id="gscreen1" hidden>
+    <h3>Q1-Q3: This kiln</h3>
+    <label for="gAbsMax">What is the highest temperature this kiln may ever reach?</label>
+    <p class="hint">The highest temperature the kiln's furniture, elements and brick can survive --
+    not the hottest firing you plan to do. Required. No "unlimited" option.</p>
+    <input type="number" step="any" min="0.0001" id="gAbsMax" placeholder="°C, e.g. 1300">
+    <p class="hint" id="gAbsMaxTcHint"></p>
+
+    <label for="gMainsSelect">Mains supply voltage</label>
+    <select id="gMainsSelect"></select>
+    <input type="number" step="any" id="gMainsOther" hidden placeholder="voltage, V">
+
+    <label for="gPower">Roughly how much power does this kiln draw at full output? (optional)</label>
+    <p class="hint">Used only to sanity-check wiring. No guard reads it.</p>
+    <input type="number" step="any" min="0" id="gPower" placeholder="W, e.g. 10900">
+
+    <div class="gnav"><button type="button" onclick="gGoto(0)">Back</button>
+      <button type="button" onclick="gValidateScreen1() &amp;&amp; gGoto(2)">Next</button></div>
+    <p id="g1msg" class="hint"></p>
+  </div>
+
+  <div class="gscreen" id="gscreen2" hidden>
+    <h3>Q4: Where is the safety processor's own thermocouple?</h3>
+    <label class="radio-card" id="gCardNotFitted">
+      <input type="radio" name="gq2" value="not_fitted">Not fitted
+      <span class="consequence">Borrows one zone's own thermocouple reading instead (`tc_source`
+      BORROWED_ZONE) -- this trades away the sensor independence S13 exists to protect: if that
+      zone's channel ever goes bad, the safety processor loses its only temperature reading too.
+      `tc_placement_mode` is forced to CHAMBER_AGREED (S2/S10 active, same as the chamber option).
+      S13 watches the borrowed zone's own sample counter and trips if it stops advancing.</span>
+      <select id="gBorrowedZoneSelect" hidden>
+        <option value="">-- Choose the zone to borrow --</option>
+      </select>
+    </label>
+    <label class="radio-card" id="gCardChamber">
+      <input type="radio" name="gq2" value="chamber">In the kiln chamber
+      <span class="consequence">S2 and S10 active. S1's ceiling may be tightened by the running
+      profile's peak + margin.</span>
+    </label>
+    <label class="radio-card" id="gCardExternal">
+      <input type="radio" name="gq2" value="external">External overheat sensor (shell, exhaust, enclosure)
+      <span class="consequence">S2 and S10 are OFF -- an external sensor has no obligation to agree
+      with the zone readings. S1 uses your kiln maximum as a flat ceiling.</span>
+    </label>
+    <div class="gnav"><button type="button" onclick="gGoto(1)">Back</button>
+      <button type="button" onclick="gValidateScreen2() &amp;&amp; gGoto(3)">Next</button></div>
+    <p id="g2msg" class="hint"></p>
+  </div>
+
+  <div class="gscreen" id="gscreen3" hidden>
+    <h3>Review what you told us</h3>
+    <div id="gReview"></div>
+    <div class="gnav"><button type="button" onclick="gGoto(2)">Back</button>
+      <button type="button" onclick="gGoto(4)">Looks right -- continue</button></div>
+  </div>
+
+  <div class="gscreen" id="gscreen4" hidden>
+    <h3>Save to the safety processor</h3>
+    <p class="hint">This stages all six answered parameters and issues one commit. A write is
+    never assumed to have landed -- it is only reported as saved after a live read-back from the
+    safety processor confirms every value.</p>
+    <button type="button" id="gCommitBtn" onclick="gCommit()">Stage &amp; commit</button>
+    <div id="gWriteWindow2" class="writewindow ww-unknown" hidden></div>
+    <p id="guidedMsg"></p>
+    <div class="gnav"><button type="button" onclick="gGoto(3)">Back</button></div>
+  </div>
+</div>
+
+<details id="advancedDetails">
+<summary>Advanced -- every parameter the safety processor holds</summary>
+<p class="hint">Defaults are documented and safe -- change one only with a measurement in hand.
+The four questions above already cover the fields most commissioning passes need.</p>
+
+<div id="fields"><p class="empty">Loading&hellip;</p></div>
+
+<button id="saveBtn" type="button">Stage &amp; commit changes</button>
+<button id="benchBtn" type="button" style="display:none">Apply test preset (test values, dev only)</button>
+<p id="msg"></p>
+</details>
+
+<script>
+/* ---- CONFIG_REFERENCE.md sections 1-5, restated here as data so the DOM
+ * build below is one loop instead of forty-five hand-written blocks. Every
+ * field carries:
+ *   id       - wire param_id, COMMISSIONING.md section 2.1 (hex in comments
+ *              there, decimal here since that's what the JSON `id` uses)
+ *   name     - matches CONFIG_REFERENCE.md's field name and the JSON `name`
+ *   type     - 'f32' | 'u16' | 'u8' | 'enum' | 'bool' -- drives the input
+ *              widget and value coercion on save. u8 with an `enum` list
+ *              renders as a <select>; a bare 'u8'/'u16'/'f32' is a number
+ *              box. Every temperature field stays in raw Celsius input per
+ *              this repo's kcUnit convention (see app.js's comment on
+ *              window.kcUnit) -- kcUnit is used for DISPLAY of the live
+ *              telemetry-derived text only, never for what gets typed into
+ *              or posted from a form field.
+ *   unit     - display suffix only, never affects the posted value
+ *   risk     - 'dangerous' | 'nuisance' | 'cosmetic', CONFIG_REFERENCE.md's
+ *              legend (🔴/🟠/⚪ badges)
+ *   guards   - array of guard names this field affects, for the
+ *              "which guards are disabled" line on an unset commissioning
+ *              field
+ *   noDefault- true for the section-1 fields that ship with no compiled-in
+ *              default (CONFIG_REFERENCE.md section 1 / section 7): the
+ *              guards named in `guards` stay disabled until this is set.
+ *              NOTE ON THE "four" VS six section-1 rows: COMMISSIONING.md's
+ *              checklist says "the four section 1 commissioning fields have
+ *              no compiled-in default", but section 1's table lists six
+ *              rows. Read literally against section 1's own prose
+ *              ("borrowed_zone_index... only meaningful when tc_source !=
+ *              OWN_J7" and tc_placement_mode's forced-default relationship
+ *              to tc_source), the four with no sensible default at all are
+ *              tc_source, abs_max_temp_c, tc_type and ct_channel_map[0..2]
+ *              (grouped as one commissioning item); borrowed_zone_index and
+ *              tc_placement_mode are treated here as defaultable (0 /
+ *              CHAMBER_AGREED) since a value always exists for them even
+ *              before tc_source picks BORROWED_ZONE. This is this page's
+ *              best reading of an internally inconsistent doc, not a
+ *              verified firmware fact -- flagged for the coordinator/
+ *              firmware author to confirm against config_store.c's actual
+ *              defaults, and the two are visually distinguished below
+ *              (noDefault:true vs a plain `default` value) so a correction
+ *              is a one-line data change, not a rewrite.
+ *   offColor - value that means "guard shipped/left disabled", e.g. 0 for
+ *              max_rate_c_per_min. Only sensible for numeric off-switches;
+ *              renders the guard-off-banner when the current value equals
+ *              it.
+ *   note     - short "what/why" shown under the field, condensed from
+ *              CONFIG_REFERENCE.md's Notes column.
+ */
+var GROUPS = [
+  { title: '1. Commissioning -- required, no safe default',
+    hint: 'These fields have no defensible compiled-in default. Until each ' +
+      'is set, the guards named under it stay disabled and the Pico reports ' +
+      'calibration_missing.',
+    fields: [
+      { id: 257, name: 'tc_source', type: 'enum', risk: 'dangerous', noDefault: true,
+        guards: ['S1', 'S2', 'S5', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13'],
+        enumOpts: [ [0, 'OWN_J7'], [1, 'BORROWED_ZONE'], [2, 'BOTH'] ],
+        note: 'Where the safety processor gets its temperature. BORROWED_ZONE trades ' +
+          'away sensor independence -- weigh that carefully before choosing it. ' +
+          '(Numeric codes here -- OWN_J7=0/BORROWED_ZONE=1/BOTH=2 -- are this page\'s ' +
+          'assumption, not independently confirmed; the safety processor\'s own reply is ' +
+          'the tie-breaker if these ever disagree.)' },
+      { id: 258, name: 'borrowed_zone_index', type: 'u8', risk: 'dangerous', unit: '0-2',
+        guards: ['S13'],
+        note: 'Only meaningful when tc_source is not OWN_J7. Must name a zone the ESP ' +
+          'actually reports.' },
+      { id: 259, name: 'tc_placement_mode', type: 'enum', risk: 'dangerous',
+        guards: ['S1 (ceiling mode)', 'S2', 'S10'],
+        enumOpts: [ [0, 'CHAMBER_AGREED'], [1, 'EXTERNAL_OVERHEAT'] ],
+        note: 'A statement about where the sensor physically is, not a preference. Wrong ' +
+          'in one direction silences the only cross-check; wrong the other way makes S10 ' +
+          'fire constantly on correct readings. Forced to CHAMBER_AGREED when tc_source is ' +
+          'BORROWED_ZONE (enforced client-side below AND independently by the Pico at ' +
+          'commit -- see the contradiction-check comment near the bottom of this script).' },
+      { id: 260, name: 'abs_max_temp_c', type: 'f32', risk: 'dangerous', unit: '°C', noDefault: true,
+        guards: ['S1'], prefillFromTcMax: true,
+        note: 'In CHAMBER_AGREED: what the furniture/elements survive (~1300 for cone 10). ' +
+          'In EXTERNAL_OVERHEAT: what that location must never exceed -- unrelated to any ' +
+          'firing temperature. Must be a real positive ceiling -- there is no "no limit" ' +
+          'value any more; 0 is refused by the safety processor at commit exactly like NaN, ' +
+          'never stored as meaning unlimited. This pre-fills from the selected ' +
+          'sensor type\'s maximum as a STARTING POINT, not a derivation -- it is one of ' +
+          'the four fields nobody may derive from a guess, ' +
+          'because a kiln physical ceiling is usually well below what the sensor can report. ' +
+          'Lower it to what this kiln furniture and elements actually survive; raising it above ' +
+          'the sensor maximum is refused.' },
+      { id: 261, name: 'tc_type', type: 'enum', risk: 'dangerous', noDefault: true,
+        guards: ['every guard that reads the safety processor\'s own thermocouple'],
+        enumOpts: [ [0,'Type B'], [1,'Type E'], [2,'Type J'], [3,'Type K'], [4,'Type N'],
+                    [5,'Type R'], [6,'Type S'], [7,'Type T'] ],
+        note: 'Must match the thermocouple physically fitted to J7 on the safety board -- ' +
+          'a different, physically separate sensor from any zone thermocouple on the main ' +
+          'board. A mismatch reads plausible and wrong, usually low.',
+        confirmOnChange: true },
+      { id: 266, name: 'tc_offset_c', type: 'f32', risk: 'dangerous', unit: '°C', def: 0,
+        guards: ['every guard that reads the safety processor\'s own thermocouple'],
+        confirmOnChange: true,
+        note: 'A calibration correction ADDED to the safety board\'s own MAX31856 reading, ' +
+          'before any guard sees it -- NOT the same field as tc_disagreement/tc_expected_offset_c ' +
+          'below, which only ever compare against a zone reading and never change what the ' +
+          'safety processor believes its own sensor says. 0 means no correction. A wrong value ' +
+          'here silently shifts every reading the independent over-temperature protection relies ' +
+          'on. No fixed cap beyond a finite number -- the safety processor rejects NaN/Infinity; ' +
+          'an unusually large correction is your own responsibility to cross-check, the same as ' +
+          'this page\'s sibling tc_expected_offset_c field.' },
+      { id: 265, name: 'ct_installed', type: 'enum', risk: 'dangerous', noDefault: true,
+        guards: ['S3', 'S4', 'S9', 'S14'],
+        enumOpts: [ [1, 'Yes -- current transformers are fitted'],
+                    [0, 'No -- this board has no CTs'] ],
+        note: '0x0109. Are current transformers physically clamped around the element ' +
+          'feeds on this board? Deliberately an explicit question with no default: the ' +
+          'firmware cannot see whether a CT is fitted, and BOTH wrong answers are bad. ' +
+          'Answer "No" and S3/S4/S9/S14 are switched OFF and reported off -- the three ' +
+          'ct_channel_map rows below stop being required, and the board can be ' +
+          'commissioned and can heat without them. Answer "Yes" and the mapping below is ' +
+          'required before this board will grant heat, exactly as before. Leaving it ' +
+          'unanswered is the same as "Yes" for safety purposes, but the board stays ' +
+          'uncommissioned until you answer.' },
+      { id: 262, name: 'ct_channel_map[0]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
+        guards: ['S3', 'S4', 'S14'], derivedCt: 0,
+        note: 'Which relay CT0 actually watches. Derived by the ' +
+          '"Measure Zone Normal Current" sweep on the zones page -- that sweep IS the one-relay-at-a-time ' +
+          'check needed to confirm this, so it is the one thing on this ' +
+          'board that can confirm the mapping rather than restate it. Typed here only when ' +
+          'the sweep has not been run, or could not tell which channel responded.' },
+      { id: 263, name: 'ct_channel_map[1]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
+        guards: ['S3', 'S4', 'S14'], derivedCt: 1, note: 'Same as ct_channel_map[0], for CT1.' },
+      { id: 264, name: 'ct_channel_map[2]', type: 'u8', risk: 'dangerous', unit: 'zone/relay id', noDefault: true,
+        guards: ['S3', 'S4', 'S14'], derivedCt: 2, note: 'Same as ct_channel_map[0], for CT2.' },
+      { id: 529, name: 'safety_tc_installed', type: 'bool', risk: 'dangerous', noDefault: true,
+        guards: ['S2', 'S10', 'S13'],
+        note: 'The boolean form of ' +
+          '"where is the safety processor\'s own thermocouple": true whenever ' +
+          'tc_source is OWN_J7 or BOTH, false only for BORROWED_ZONE. Written by the guided ' +
+          'flow\'s second question, not typed here directly.' },
+    ] },
+
+  { title: '2. Temperature guards', fields: [
+      { id: 513, name: 'firing_margin_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 100,
+        guards: ['S1'], note: 'Inert: the firing-ceiling tightening was retired 2026-09-24; S1 always uses abs_max_temp_c.' },
+      { id: 514, name: 'overshoot_margin_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 75,
+        guards: ['S2'], note: 'Generous on purpose -- ramp-end overshoot and TC placement spread ' +
+          'both live inside this.' },
+      { id: 515, name: 'overshoot_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 120,
+        guards: ['S2'], note: 'Two minutes of sustained excess, not a transient.' },
+      { id: 516, name: 'max_rate_c_per_min', type: 'f32', risk: 'nuisance', unit: '°C/min', def: 0,
+        guards: ['S8'], offColor: 0,
+        note: 'Ships disabled (0). Enable only after logging a real full-power ramp; set at ' +
+          '~2x the measured maximum.' },
+      { id: 517, name: 'rate_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 60, guards: ['S8'] },
+      { id: 518, name: 'blind_grace_s', type: 'u16', risk: 'dangerous', unit: 's', def: 60,
+        guards: ['S5'], note: 'WARN immediately, TRIP after this. Long enough for a connector ' +
+          'wiggle, short enough that a whole firing cannot run blind.' },
+      { id: 519, name: 'frozen_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 600,
+        guards: ['S11'], note: 'Only armed while heat is happening.' },
+      { id: 520, name: 'tc_disagreement_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 200,
+        guards: ['S10'], note: 'Vs the nearest valid zone, not the mean. CHAMBER_AGREED only.' },
+      { id: 521, name: 'tc_disagreement_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 300, guards: ['S10'] },
+      { id: 522, name: 'tc_expected_offset_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 0,
+        guards: ['S10'], note: 'Optional captured steady-state offset; compares the change, not ' +
+          'the raw difference.' },
+      { id: 523, name: 'cj_warn_c', type: 'f32', risk: 'cosmetic', unit: '°C', def: 60,
+        guards: ['S12'], note: 'Enclosure warning.' },
+      { id: 524, name: 'cj_max_c', type: 'f32', risk: 'nuisance', unit: '°C', def: 85,
+        guards: ['S12'], note: 'Well inside the MAX31856\'s +-125 °C limit.' },
+      { id: 525, name: 'cj_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 60, guards: ['S12'] },
+      { id: 526, name: 'borrowed_stale_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
+        guards: ['S13'], note: 'sample_counter not advancing => reading treated as invalid. ' +
+          'BORROWED_ZONE/BOTH only.' },
+      { id: 527, name: 'borrowed_stale_trip_s', type: 'u16', risk: 'dangerous', unit: 's', def: 60,
+        guards: ['S13'], note: '...and then trip.' },
+      { id: 528, name: 'borrowed_type_expected', type: 'enum', risk: 'nuisance', guards: ['S13'],
+        enumOpts: [ [0,'Type B'], [1,'Type E'], [2,'Type J'], [3,'Type K'], [4,'Type N'],
+                    [5,'Type R'], [6,'Type S'], [7,'Type T'] ],
+        note: 'The tc_type the borrowed channel is expected to report. A change means ' +
+          'someone reconfigured the main board\'s channel underneath us.' },
+    ] },
+
+  { title: '3. Current channels',
+    hint: 'Scope limit: load-active detection and a power estimate only. There is no ' +
+      'over-current guard.',
+    fields: [
+      { id: 769, name: 'i_present_a', type: 'f32', risk: 'nuisance', unit: 'A', def: 2.0,
+        guards: ['S3', 'S4', 'S9'], note: 'A load-active threshold -- only has to separate noise ' +
+          'from a conducting element.' },
+      /* A_fs/zero_mv are NOT Pico param ids (see fieldInputHtml's 'ct_cal'
+       * branch) -- they live on this ESP and reach the wire only as
+       * k_ct_v_per_a/zero_counts via POST /api/safety/commissioning/ct_cal.
+       * Their `id` here is a DISPLAY key: it names the DOM node and the
+       * <label for=...>, nothing more.
+       *
+       * These three used to be 800/801/802, which is decimal for 0x0320-
+       * 0x0322 -- unallocated param space at the time, and allocated to
+       * zone_ct_channel[0..2] by docs/CT_CHANNEL_MASK.md step 2. That
+       * collision was never visible as a wrong number (the ct_cal branch
+       * ignores paramsById entirely, and these inputs deliberately carry no
+       * data-id so the save pass cannot SET_PARAM them), but fieldBlock()
+       * reads paramsById[f.id] for `isSet` -- so once an operator committed
+       * a per-zone channel map, all three probe-rating rows would have
+       * dropped their "unset" styling and their "Disabled while unset: S3,
+       * S4, S9" banner while no probe rating had ever been entered. An
+       * uncommissioned CT calibration reading as commissioned is exactly the
+       * "disabled guard that looks enabled" this page's own banner text
+       * calls worse than no guard.
+       *
+       * Display-only keys now live at 900000+, which is outside the 16-bit
+       * param id space entirely and therefore cannot be allocated to a real
+       * param by any future append. Do not give a display-only row an id
+       * that could ever be a wire id. */
+      { id: 900800, name: 'CT0 probe rating (A_fs)', type: 'ct_cal', chIndex: 0, unit: 'A', risk: 'nuisance',
+        guards: ['S3', 'S4', 'S9'],
+        note: 'The number printed on the probe: amps at 1V full-scale output ' +
+          '(typically 10-100A on a real kiln -- any rating is accepted). Also asks the probe\'s own zero-current ' +
+          'output (zero_mv, mV) -- both are converted here into k_ct_v_per_a and zero_counts below, ' +
+          'which is what actually gets sent to the safety processor. A value you type here (source ' +
+          '"manual") is never silently overwritten by the zone-current sweep\'s own calibration.' },
+      { id: 900801, name: 'CT1 probe rating (A_fs)', type: 'ct_cal', chIndex: 1, unit: 'A', risk: 'nuisance',
+        guards: ['S3', 'S4', 'S9'], note: 'Same as CT0, for channel 1.' },
+      { id: 900802, name: 'CT2 probe rating (A_fs)', type: 'ct_cal', chIndex: 2, unit: 'A', risk: 'nuisance',
+        guards: ['S3', 'S4', 'S9'], note: 'Same as CT0, for channel 2.' },
+      { id: 770, name: 'zero_counts[0]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true,
+        guards: ['S3', 'S4', 'S9'], note: 'Re-measured at runtime after >=5 min idle. Not zero -- ' +
+          'single-supply offset. DERIVED from CT0\'s zero_mv above (or by the auto-zero action) -- ' +
+          'not typed here directly.' },
+      { id: 771, name: 'zero_counts[1]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true, guards: ['S3', 'S4', 'S9'] },
+      { id: 772, name: 'zero_counts[2]', type: 'u16', risk: 'nuisance', unit: 'ADC counts', readonly: true, guards: ['S3', 'S4', 'S9'] },
+      { id: 773, name: 'correlation_window_s', type: 'u16', risk: 'nuisance', unit: 's', def: 150,
+        guards: ['S3', 'S4'], note: '>= 2x the ESP\'s 60s heater window + decay. Shortening this ' +
+          'is the fastest way to make S4 fire on every healthy low-duty firing.' },
+      { id: 774, name: 'stuck_on_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 20, guards: ['S3'] },
+      { id: 775, name: 'trip_verify_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
+        guards: ['S9'], note: 'Past the 1s peak-hold decay and the contactor\'s drop-out. Too ' +
+          'short -> false "trip ineffective"; too long -> delayed alarm on a genuinely live kiln.' },
+      // NOT "power estimate only" either, for exactly the reason the gain
+      // rows below give: current_presence_policy.c:19 computes
+      //   v_present = i_present_a * gain * sqrt(2) * k_ct_v_per_a
+      // and tests counts_avg - zero_counts > v_present * 4096 / vref, so
+      // k_ct_v_per_a and gain are two factors of ONE product and share the
+      // same guard reach. Conditional: only in the commissioned branch
+      // (k_ct_v_per_a > 0 && i_present_a > 0 && gain > 0) -- with
+      // k_ct_v_per_a <= 0 the fixed 25-count fallback margin applies and
+      // neither field matters. S11 is armed from the same fact through
+      // safety_core.c's .heat_commanded = any_current_present.
+      { id: 776, name: 'k_ct_v_per_a[0]', type: 'f32', risk: 'nuisance', unit: 'V/A', readonly: true,
+        guards: ['S3', 'S4', 'S9'], derivedK: 0,
+        note: 'M12b: CALIBRATED by the zone current-sweep, from the mains voltage and ' +
+              'full-output power already answered above -- or DERIVED from CT0\'s probe rating ' +
+              '(A_fs) above (k_ct_v_per_a = 1/A_fs), whichever was entered manually most recently. ' +
+              'Not typed in V/A directly.' },
+      { id: 777, name: 'k_ct_v_per_a[1]', type: 'f32', risk: 'nuisance', unit: 'V/A', readonly: true,
+        guards: ['S3', 'S4', 'S9'], derivedK: 1, note: 'Same as k_ct_v_per_a[0], for CT1.' },
+      { id: 778, name: 'k_ct_v_per_a[2]', type: 'f32', risk: 'nuisance', unit: 'V/A', readonly: true,
+        guards: ['S3', 'S4', 'S9'], derivedK: 2, note: 'Same as k_ct_v_per_a[0], for CT2.' },
+      // Owner request: "The circuit has a fixed gain but clamp ratios change.
+      // Allow the user to enter clamp ratio and offset/gain tuneing to get
+      // more accurate." gain is the SCALE trim that sits beside the clamp
+      // ratio (A_fs) and the offset (zero_mv), both already operator-entered
+      // above: end to end the Pico computes
+      //   I = [counts * 3.3/(4096*gain) - zero_mv/1000] * A_fs / sqrt(2),
+      // so gain scales the slope and nothing else. (The host multiplies by
+      // gain to reach counts, safety_cfg_store.c:856; the Pico divides by it
+      // to come back, current_sense.c:288 -- once each, deliberately. Do NOT
+      // "fix" k_ct_v_per_a to also carry gain: it would cancel against that
+      // divider and turn this into an offset control. See
+      // docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md.)
+      //
+      // NOT "power estimate only", despite what these rows used to claim.
+      // (CURRENT_SENSE.md section 5's table said the same and was corrected
+      // 2026-09-18, as were CONFIG_REFERENCE.md's k_ct_v_per_a/gain rows.)
+      // gain is a
+      // parameter of current_presence_is_flowing() (current_presence_policy.h:120),
+      // whose verdict feeds current_any_present() and therefore S3/S4/S9 and
+      // S6b's current-gated trip. A wrong gain moves a guard input.
+      { id: 779, name: 'gain[0]', type: 'f32', risk: 'nuisance', def: 0.715, min: 0.05, max: 2.0,
+        guards: ['S3', 'S4', 'S9'],
+        note: 'Front-end divider R46/R43 (nominal 0.715), the SCALE trim for CT0. Raise it if ' +
+          'the board reads high against a reference meter, lower it if it reads low. Leave it ' +
+          'at the default unless you have measured a disagreement -- this is a trim, not a ' +
+          'nameplate: the clamp\'s own ratio belongs in "CT0 probe rating (A_fs)" above. ' +
+          'Accepted range 0.05 to 2.0; a value outside it is refused, never quietly defaulted.' },
+      { id: 780, name: 'gain[1]', type: 'f32', risk: 'nuisance', def: 0.715, min: 0.05, max: 2.0,
+        guards: ['S3', 'S4', 'S9'], note: 'Same as gain[0], for CT1.' },
+      { id: 781, name: 'gain[2]', type: 'f32', risk: 'nuisance', def: 0.715, min: 0.05, max: 2.0,
+        guards: ['S3', 'S4', 'S9'], note: 'Same as gain[0], for CT2.' },
+      { id: 782, name: 'mains_voltage_v', type: 'voltage', risk: 'cosmetic', unit: 'V', guards: ['(power estimate only)'],
+        note: 'Nominal. Power goes as V^2, so a 5% sag is a 10% error. Unset means report ' +
+          '"--", never assume. "Not set" stays selectable at any time -- picking it is a ' +
+          'clear, not merely a one-way door reachable only before the first commit.' },
+      { id: 783, name: 'power_window_s', type: 'u16', risk: 'cosmetic', unit: 's', def: 120,
+        guards: ['(power estimate only)'], note: 'Conduction-fraction averaging window.' },
+      { id: 793, name: 'max_expected_power_w', type: 'f32', risk: 'cosmetic', unit: 'W',
+        guards: ['(sanity check only -- no guard trips on this)'],
+        note: 'The operator\'s own estimate of the kiln\'s expected power draw, ' +
+          'used only to sanity-check commissioning against wiring/breaker assumptions. ' +
+          'Breakers are assumed sized for the full kiln load at 100% duty -- this is NOT a ' +
+          'derating input and no safety guard reads it.' },
+      { id: 784, name: 'ct_cal[0].gain', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 785, name: 'ct_cal[1].gain', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 786, name: 'ct_cal[2].gain', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 787, name: 'ct_cal[0].offset', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 788, name: 'ct_cal[1].offset', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 789, name: 'ct_cal[2].offset', type: 'f32', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 790, name: 'ct_cal[0].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 791, name: 'ct_cal[1].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 792, name: 'ct_cal[2].calibrated', type: 'bool', risk: 'cosmetic', readonly: true, guards: ['(power estimate only)'] },
+      { id: 794, name: 'i_normal_a[0]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true,
+        guards: ['S14'], note: 'S14 over-current guard is NOT ARMED on any channel today. The ' +
+          'zones page\'s per-zone current sweep measures and persists a normal-current value, but ' +
+          'nothing yet pushes that measurement to the safety processor as this param -- there is no ' +
+          'writer for 0x031A-0x031C, so i_normal_valid[] is always false and S14 can never warn. ' +
+          'A channel with no measurement here is skipped entirely by S14, never treated as 0 A.' },
+      { id: 795, name: 'i_normal_a[1]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true, guards: ['S14'] },
+      { id: 796, name: 'i_normal_a[2]', type: 'f32', risk: 'nuisance', unit: 'A', readonly: true, guards: ['S14'] },
+      { id: 797, name: 'overcurrent_pct', type: 'u16', risk: 'nuisance', unit: '%', def: 150, guards: ['S14'],
+        note: 'S14 (NEW, WARN only): a channel\'s current above this percentage of its own ' +
+          'measured normal, sustained for overcurrent_time_s, warns -- never trips. Over-current ' +
+          'protection remains the breakers\' job by design; this guard ' +
+          'exists to catch a CT on the wrong jack or an element/wiring change.' },
+      { id: 798, name: 'overcurrent_time_s', type: 'u16', risk: 'nuisance', unit: 's', def: 30, guards: ['S14'] },
+      { id: 799, name: 'ct_topology', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'Per-zone (one CT per zone -- default)'], [1, 'Summed (one shared CT, channel 2, reads every zone)'] ],
+        note: 'SUPERSEDED by the three per-zone "zone N CT channel" selectors below, ' +
+          'which say the same thing and more: ' +
+          'per-zone is every zone on its own channel, summed is every zone on channel 2. ' +
+          'Kept, still written, and still what the guards use on any board that has not ' +
+          'answered the per-zone selectors -- answer those three and this one stops ' +
+          'deciding anything. It cannot describe a kiln where only SOME zones share a CT.' },
+      /* docs/CT_CHANNEL_MASK.md step 6: the per-zone selector surface.
+       * These are real wire params (0x0320-0x0322 = 800-802), U8, range-
+       * checked to 0-2 by the Pico's own config_params.c.
+       *
+       * All three must be answered: the ESP sweep and the Pico's S14/S15 both
+       * gate their generalised arm on a map where EVERY zone is set, in range,
+       * and committed -- a partial answer is ignored entirely and the legacy
+       * ct_topology branch keeps running, which is what protects a board
+       * mid-commissioning from a half-entered map. */
+      { id: 800, name: 'zone 0 CT channel', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'CT channel 0'], [1, 'CT channel 1'], [2, 'CT channel 2'] ],
+        note: 'Which current-transformer channel zone 0\'s current is actually read on. Two or ' +
+          'more zones naming the SAME channel means that CT is shared and reads all of them at ' +
+          'once: S15 (open-heater deficit) then applies to those zones, and the sweep derives ' +
+          'their normals from that one channel minus its idle draw. The two common kilns are ' +
+          'one CT per zone -- answer 0, 1, 2 -- and one shared CT -- answer 2, 2, 2, matching ' +
+          'today\'s "summed". A genuine split (say zones 0 and 1 on one clamp, zone 2 on its ' +
+          'own) is now expressible too, and was not before. This says only WHICH channel a ' +
+          'zone is read on; the normal-current numbers the guards compare against still come ' +
+          'only from the zone-current sweep, never from a value typed here. Getting it wrong ' +
+          'is a hardware-truth error no readiness check can catch -- it points a guard at ' +
+          'another zone\'s conductor.' },
+      { id: 801, name: 'zone 1 CT channel', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'CT channel 0'], [1, 'CT channel 1'], [2, 'CT channel 2'] ],
+        note: 'Same as zone 0. One CT per zone: answer 1 here. One shared CT: answer 2.' },
+      { id: 802, name: 'zone 2 CT channel', type: 'enum', risk: 'dangerous', guards: ['S14', 'S15'],
+        enumOpts: [ [0, 'CT channel 0'], [1, 'CT channel 1'], [2, 'CT channel 2'] ],
+        note: 'Same as zone 0. One CT per zone: answer 2 here. One shared CT: answer 2 as well.' },
+    ] },
+
+  { title: '4. Link and liveness', fields: [
+      { id: 1025, name: 'context_max_age_s', type: 'u16', risk: 'nuisance', unit: 's', def: 5,
+        guards: ['S2', 'S3', 'S4'], note: 'Stale context makes those guards go inactive, never ' +
+          'pessimistic.' },
+      { id: 1026, name: 'link_timeout_s', type: 'u16', risk: 'nuisance', unit: 's', def: 10,
+        guards: ['S6b'], note: 'Trips only if current is also flowing.' },
+      { id: 1027, name: 'link_dead_hard_s', type: 'u16', risk: 'dangerous', unit: 's', def: 120,
+        guards: ['S6b'], note: 'Unconditional backstop.' },
+      { id: 1028, name: 'mainfault_debounce_ms', type: 'u16', risk: 'nuisance', unit: 'ms', def: 200, guards: ['S6a'] },
+      { id: 1029, name: 'telemetry_period_ms', type: 'u16', risk: 'dangerous', unit: 'ms', def: 500,
+        guards: ['ESP liveness detector'], note: 'The ESP\'s liveness detector keys on this. ' +
+          'Changing it means changing the main board\'s 1.5s window too.' },
+    ] },
+
+  { title: '5. Timing and system', fields: [
+      { id: 1281, name: 'startup_grace_s', type: 'u16', risk: 'nuisance', unit: 's', def: 60,
+        guards: ['all thermal/correlation guards (arming delay)'], note: 'No thermal or ' +
+          'correlation guard arms before this.' },
+      { id: 1282, name: 'estop_debounce_ms', type: 'u16', risk: 'nuisance', unit: 'ms', def: 50,
+        guards: ['E-stop'], note: 'Contact bounce only.' },
+      { id: 1283, name: 'watchdog_timeout_ms', type: 'u16', risk: 'dangerous', unit: 'ms', def: 1000,
+        guards: ['hardware watchdog'] },
+      { id: 1284, name: 'config_check_period_s', type: 'u16', risk: 'dangerous', unit: 's', def: 10,
+        guards: ['in-RAM config re-CRC'] },
+    ] },
+];
+
+var RISK_BADGE = { dangerous: '🔴 dangerous', nuisance: '🟠 nuisance', cosmetic: '⚪ cosmetic' };
+
+/* ---- Thermocouple maximum, INFERRED from tc_type (field 261), never
+ * entered -- ROADMAP.md M12: "the operator should not be asked for a number
+ * that follows from [tc_type] -- and cannot contradict the sensor." Values
+ * are the upper end of the MAX31856's own per-type "TTC" range from its
+ * datasheet (hardware/datasheets/ThermocoupleBoard_Sensor_Temperature/
+ * MAX31856.pdf, page 4, Electrical Characteristics table, the "Thermocouple
+ * Linearity Correction Error" row's CONDITIONS column -- these are the same
+ * limits Table 1 / the Fault Status register's TC Range bit (page 15/26)
+ * describe as the hot-junction out-of-range clamp). Keyed by the SAME
+ * numeric code tc_type's own enumOpts above uses (0=B..7=T per max31856.h's
+ * MAX31856_TC_TYPE_* order), so this table and that one can never disagree
+ * about which code means which letter. */
+/* SECOND SOURCE, deliberately not unified: SaftyFW/src/max31856_tc_range_
+ * policy.c's TC_RANGES holds the same eight per-type ceilings, host-tested,
+ * and is what S5's plausibility check actually enforces. Unifying the two
+ * would mean generating this table from that C file across two languages and
+ * two build systems for eight numbers -- out of proportion to the risk. They
+ * agree on seven of eight rows. They DIVERGE on type B: 1798 here vs 1820
+ * there, because the two cite different pages of the same datasheet (page
+ * 4's TTC linearity-correction range vs page 12's Table 1 temperature
+ * range). This page keeps the lower, stricter number on purpose -- it is a
+ * client-side pre-check whose only failure mode should be refusing a value
+ * the Pico would have accepted, never the reverse. */
+var TC_MAX_C_BY_TYPE = {
+  0: 1798, // Type B, TTC 95..1798 C
+  1: 1000, // Type E, TTC -200..1000 C
+  2: 1200, // Type J, TTC -210..1200 C
+  3: 1372, // Type K, TTC -200..1372 C
+  4: 1300, // Type N, TTC -200..1300 C
+  5: 1768, // Type R, TTC -50..1768 C
+  6: 1768, // Type S, TTC -50..1768 C
+  7: 400,  // Type T, TTC -200..400 C
+};
+
+/* ---- M2 (2026-08-27 audit review): TC_MAX_C_BY_TYPE above used to be
+ * defined and never read anywhere else in this file -- a table that LOOKED
+ * like a safety cross-check but did nothing. The actual requirement
+ * (ROADMAP.md M12, this table's own header comment) is "abs_max_temp_c
+ * cannot contradict the sensor [tc_type]": wired here, client-side, same
+ * "advisory-and-enforced on THIS side only for immediacy, NOT the safety
+ * boundary" status applyContradictionRule() above already documents for the
+ * tc_source/tc_placement_mode pair -- the Pico's own COMMIT_CONFIG range
+ * check is what actually enforces abs_max_temp_c (CONFIG_REFERENCE.md sec 1),
+ * this only stops an obviously-contradictory pair from ever being submitted
+ * and catches the mistake immediately, by name, with both numbers, instead
+ * of a generic Pico rejection several seconds later. */
+function checkTcMaxContradiction() {
+  var tcTypeSel = document.querySelector('select[data-id="261"]');   // tc_type
+  var maxInput = document.querySelector('[data-id="260"]');          // abs_max_temp_c
+  if (!tcTypeSel || !maxInput) return null; // fields not rendered -- nothing to check
+  if (tcTypeSel.value === '' || maxInput.value === '') return null;  // neither is being submitted
+  var tcType = parseInt(tcTypeSel.value, 10);
+  var maxVal = parseFloat(maxInput.value);
+  var limit = TC_MAX_C_BY_TYPE[tcType];
+  if (limit === undefined || isNaN(maxVal)) return null; // unrecognised code or unparsable -- let the Pico judge
+  if (maxVal > limit) {
+    return 'abs_max_temp_c (' + maxVal + ' °C) exceeds the selected thermocouple type\'s own maximum ' +
+      '(' + limit + ' °C) -- the kiln ceiling cannot exceed what the sensor itself can report.';
+  }
+  return null;
+}
+
+/* Refuse an out-of-range entry for any field that declares its own accepted
+ * range (f.min/f.max), before a request body is ever sent. Same advisory
+ * status as checkTcMaxContradiction() above -- the ESP's own handler
+ * (safety_cfg_http.c) is what actually enforces this; catching it here names
+ * the field and both bounds immediately instead of surfacing a generic 400.
+ *
+ * Operates on bodyPairs, not the DOM: the save walk has already applied the
+ * empty-means-skip rule, so a field the operator left blank is simply absent
+ * here and cannot be mistaken for a zero entry. Returns a message, or null. */
+function checkFieldRanges(bodyPairs) {
+  for (var i = 0; i < bodyPairs.length; i++) {
+    var pair = bodyPairs[i];
+    var f = FIELD_BY_ID[pair.id];
+    if (!f || (f.min === undefined && f.max === undefined)) continue;
+    var v = parseFloat(pair.value);
+    if (!isFinite(v)) {
+      return (f.name || ('id ' + pair.id)) + ' must be a number, not "' + pair.value + '".';
+    }
+    if ((f.min !== undefined && v < f.min) || (f.max !== undefined && v > f.max)) {
+      return (f.name || ('id ' + pair.id)) + ' (' + pair.value + ') is outside the accepted range ' +
+        f.min + ' to ' + f.max + ' -- refused. Correct the value; it will not be defaulted for you.';
+    }
+  }
+  return null;
+}
+
+/* Flat lookup by id, built once, used by both the render pass and the save
+ * pass so the two never iterate the GROUPS tree independently and risk
+ * disagreeing about a field's shape. */
+var FIELD_BY_ID = {};
+GROUPS.forEach(function (g) { g.fields.forEach(function (f) { FIELD_BY_ID[f.id] = f; }); });
+
+var latest = null; // last /api/safety/commissioning response, kept for the save pass
+
+// M12: what the zones page's current sweep derived, from
+// GET /api/zones/ct_channel_map (zones_http.c). The commissioning wire
+// carries only ct_channel_map's VALUES, never their provenance -- a number
+// somebody typed and a number the sweep measured look identical coming back
+// from the Pico -- so this separate, ESP-side record is the only thing that
+// can tell the two apart, and it is what decides whether the three fields
+// below render as DERIVED or as manual entry. Defaults to "nothing derived"
+// so a failed fetch degrades to the manual-entry form this page has always
+// had, never to a blank row with no way to set the field.
+var ctMapDerived = { mask: 0, zone: [0, 0, 0] };
+
+// M12b: the CT volts-per-amp scale the same sweep calibrated, from the same
+// endpoint and for exactly the same reason as ctMapDerived above -- the wire
+// carries k_ct_v_per_a's VALUE and nothing about where it came from, so this
+// ESP-side record is the only thing that can say "the sweep measured this"
+// rather than "somebody typed this". Defaults to "nothing derived", which
+// leaves the field rendering exactly as it did before this existed.
+var ctKDerived = { k_mask: 0, k: [0, 0, 0] };
+
+// Standard mains voltages, COMMISSIONING_UX.md section 2.1's table --
+// distinct entries for 400V/415V (a 4% difference is an 8% power error,
+// both in current use) and for 208V (the three-phase line-to-line voltage
+// most likely to be mistaken for 240V -- 13% lower, which at power ~ V^2 is
+// a 25% power error). Value -1 is the sentinel for "Other..." (reveals the
+// free-number fallback); it is never written to the wire -- see the
+// fieldInputHtml voltage branch below.
+var MAINS_VOLTAGE_OPTIONS = [
+  [120, '120 V'], [208, '208 V (3-phase line-to-line)'], [240, '240 V'],
+  [277, '277 V'], [380, '380 V'], [400, '400 V'], [415, '415 V'], [460, '460 V'],
+];
+
+// M12: the selected thermocouple type's own ceiling, or undefined when
+// tc_type is unset/unrecognised. Reads the SERVER's tc_type rather than the
+// live <select>, because this runs during the render pass that builds that
+// select -- keeping the pre-fill a function of committed state means a page
+// reload never silently changes a number the operator already looked at.
+function tcTypeMaxFor(paramsById) {
+  var p = paramsById[261];
+  if (!p || !p.set) return undefined;
+  return TC_MAX_C_BY_TYPE[Number(p.value)];
+}
+
+function fieldInputHtml(f, paramsById) {
+  var p = paramsById[f.id];
+  var isSet = !!(p && p.set);
+  var val = isSet ? p.value : undefined;
+  // Task 3 (COMMISSIONING_UX.md sec 2.2): current-monitor calibration is
+  // read-only here, sourced from the zones page's per-zone measurement --
+  // an <output>-style row with no data-id, so it can never appear in the
+  // save pass's `#fields [data-id]` walk and can never be typed over.
+  // M12b: k_ct_v_per_a[0..2] -- CALIBRATED by that same sweep whenever it
+  // ran to completion and the operator had already answered the mains
+  // voltage and full-output power questions (zones_http.c's
+  // zone_sweep_derive_k_ct()). This branch sits AHEAD of the readonly one
+  // below on purpose: an uncalibrated channel keeps the old read-only
+  // presentation exactly as it was, and a calibrated one gains both its
+  // provenance and the hand-entry escape hatch CURRENT_SENSE.md sec 5 step 3
+  // describes (compare against a clamp meter and adjust), which a purely
+  // read-only field never had.
+  if (f.derivedK !== undefined && (ctKDerived.k_mask & (1 << f.derivedK)) !== 0) {
+    var dk = ctKDerived.k[f.derivedK];
+    var kh = '<output class="readonly-field">' + window.kcEscapeHtml(dk) + ' V/A</output>';
+    kh += '<p class="note">DERIVED by the zone current-sweep on the ' +
+      '<a href="/settings/zones">zones page</a>: the whole-kiln current it measured was ' +
+      'compared against the nameplate current implied by the mains voltage and ' +
+      'full-output power answered above, and CT' + f.derivedK + '’s scale was corrected by ' +
+      'that ratio and written to the safety processor.';
+    if (isSet && Number(val) !== Number(dk)) {
+      kh += ' <b>The safety processor currently holds ' + window.kcEscapeHtml(val) +
+        ', which disagrees with what the sweep calibrated -- re-run the sweep, or override below.</b>';
+    }
+    kh += '</p>';
+    // Same empty-means-skip contract as the ct_channel_map override: the
+    // input carries the data-id but starts empty, so the save pass leaves
+    // this id alone until somebody actually types a clamp-meter figure.
+    kh += '<label class="bool-label"><input type="checkbox" class="ct-manual" data-ct-for="' +
+      f.id + '"><span>Override with a clamp-meter measurement</span></label>';
+    kh += '<input type="number" step="any" hidden data-id="' + f.id + '" data-type="' + f.type +
+      '" placeholder="V per A">';
+    return kh;
+  }
+  if (f.readonly) {
+    var text;
+    if (!isSet) {
+      text = 'not measured';
+    } else if (f.type === 'bool') {
+      text = val ? 'true' : 'false';
+    } else {
+      text = window.kcEscapeHtml(val) + (f.unit ? ' ' + window.kcEscapeHtml(f.unit) : '');
+    }
+    return '<output class="readonly-field">' + text + '</output>' +
+      '<p class="note">From the zones configuration -- set on the ' +
+      '<a href="/settings/zones">zones page</a>, not here.</p>';
+  }
+  // Task 2 (COMMISSIONING_UX.md sec 2.1): mains_voltage_v is a dropdown, not
+  // a number box, with "Not set" as a first-class, reachable, initially-
+  // selected option (CONFIG_REFERENCE.md sec 3: unset => report "--", never
+  // assume) and an "Other..." escape hatch for a voltage not on the list.
+  if (f.type === 'voltage') {
+    var knownValues = MAINS_VOLTAGE_OPTIONS.map(function (o) { return o[0]; });
+    var isKnown = isSet && knownValues.indexOf(Number(val)) !== -1;
+    var isOther = isSet && !isKnown;
+    // The <select> itself carries NO data-id -- it is a UI-only picker.
+    // The actual wire field (f32, id unchanged) lives entirely on the
+    // <input> below, which IS the element the save pass's `[data-id]` walk
+    // finds -- exactly one SET_PARAM candidate for this id no matter which
+    // path (known voltage vs "Other...") was used. wireVoltageSelects()
+    // (called after every render, same as applyContradictionRule()) keeps
+    // the input's value in sync with the select and toggles its visibility.
+    var html = '<select class="voltage-select" data-voltage-for="' + f.id + '">';
+    html += '<option value="unset"' + (!isSet ? ' selected' : '') + '>-- Not set --</option>';
+    MAINS_VOLTAGE_OPTIONS.forEach(function (opt) {
+      var sel = (isKnown && Number(val) === opt[0]) ? ' selected' : '';
+      html += '<option value="' + opt[0] + '"' + sel + '>' + window.kcEscapeHtml(opt[1]) + '</option>';
+    });
+    html += '<option value="other"' + (isOther ? ' selected' : '') + '>Other…</option>';
+    html += '</select>';
+    // "Not set" leaves this input's value empty, so the save pass's
+    // `el.value === ''` check skips it entirely, same as every other
+    // genuinely-unset numeric field on this page -- see OQ3 in
+    // COMMISSIONING_UX.md for the still-open "how do you CLEAR an
+    // already-set field" question this does not attempt to solve.
+    var otherValueAttr = isSet ? (' value="' + window.kcEscapeHtml(val) + '"') : '';
+    html += '<input type="number" step="any" class="voltage-other"' +
+      (isOther ? '' : ' hidden') +
+      ' data-id="' + f.id + '" data-type="f32"' + otherValueAttr +
+      ' placeholder="voltage, V">';
+    return html;
+  }
+  // M12: ct_channel_map[0..2] -- DERIVED from the zones page's current
+  // sweep once that sweep has run and resolved this channel unambiguously
+  // (COMMISSIONING_UX.md sec 1.2's condition, enforced on the board in
+  // zones_http.c's zone_sweep_derive_ct_channel()). Rendered read-only in
+  // that case, because a measured mapping being retyped by hand is how a
+  // confirmed value gets quietly replaced by a remembered one -- but the
+  // manual path is NOT removed: an un-run or ambiguous sweep falls straight
+  // through to the ordinary number input below, and even a derived channel
+  // keeps an explicit override, since a fixture the sweep cannot resolve
+  // (two zones sharing a CT) still has to be commissionable.
+  if (f.derivedCt !== undefined && (ctMapDerived.mask & (1 << f.derivedCt)) !== 0) {
+    var dz = ctMapDerived.zone[f.derivedCt];
+    var h = '<output class="readonly-field">' + window.kcEscapeHtml(dz) + '</output>';
+    h += '<p class="note">DERIVED from the zone current-sweep on the ' +
+      '<a href="/settings/zones">zones page</a>: CT' + f.derivedCt + ' was the only channel ' +
+      'carrying load while zone ' + (dz + 1) + ' was energized, and that value was written ' +
+      'to the safety processor at the end of the sweep.';
+    if (isSet && Number(val) !== dz) {
+      h += ' <b>The safety processor currently holds ' + window.kcEscapeHtml(val) +
+        ', which disagrees with what the sweep measured -- re-run the sweep, or override below.</b>';
+    }
+    h += '</p>';
+    // The input carries the data-id (so it, and only it, is what the save
+    // pass finds) but starts EMPTY, which is exactly what makes the save
+    // pass skip this id while the override is unchecked -- the same
+    // empty-means-skip rule the mains-voltage "Not set" path relies on.
+    h += '<label class="bool-label"><input type="checkbox" class="ct-manual" data-ct-for="' +
+      f.id + '"><span>Override and enter by hand</span></label>';
+    h += '<input type="number" step="1" hidden data-id="' + f.id + '" data-type="' + f.type +
+      '" placeholder="zone/relay id, 0-2">';
+    return h;
+  }
+  // CT_COMMISSIONING_PLAN.md step 1: A_fs/zero_mv are NOT Pico param ids --
+  // they live entirely on this ESP (safety_cfg_store's ct_cal record) and
+  // are converted here into the real wire fields (k_ct_v_per_a/zero_counts)
+  // by POST /api/safety/commissioning/ct_cal, not by this page's ordinary
+  // "Save all" pass. Deliberately NO data-id on these two inputs, so the
+  // generic save() below (`#fields input[data-id]`) can never sweep them up
+  // and try to SET_PARAM a param id that does not exist -- ctCalApply()
+  // (wired by wireCtCalButtons()) is the only thing that ever reads them.
+  if (f.type === 'ct_cal') {
+    var ch = f.chIndex;
+    var c = (window.kcCtCal && window.kcCtCal[ch]) || {};
+    var afsVal = c.has_value ? c.a_fs : '';
+    var zmvVal = c.has_value ? c.zero_mv : '';
+    var sourceWord = c.has_value ? c.source : 'not commissioned';
+    var html = '<div class="ct-cal-row" data-ct-cal-ch="' + ch + '">' +
+      '<label>A_fs <input type="number" step="any" min="' + 0.1 + '" max="2000" ' +
+      'class="ct-cal-afs" value="' + window.kcEscapeHtml(String(afsVal)) + '" placeholder="e.g. 1, 20, 100"> A</label> ' +
+      '<label>zero_mv <input type="number" step="any" min="-200" max="200" ' +
+      'class="ct-cal-zeromv" value="' + window.kcEscapeHtml(String(zmvVal)) + '" placeholder="e.g. 0, 59"> mV</label> ' +
+      '<button type="button" class="ct-cal-apply">Apply</button>' +
+      ' <button type="button" class="ct-cal-auto-zero">Auto-zero</button>' +
+      ' <span class="ct-cal-source">source: ' + window.kcEscapeHtml(sourceWord) + '</span>' +
+      ' <span class="ct-cal-result"></span>' +
+      ' <span class="ct-auto-zero-result"></span>' +
+      '</div>' +
+      ctTrimRowHtml(ch, c);
+    return html;
+  }
+  if (f.type === 'enum') {
+    var html = '<select data-id="' + f.id + '" data-type="' + f.type + '">';
+    if (!isSet) html += '<option value="" selected disabled>-- not set --</option>';
+    f.enumOpts.forEach(function (opt) {
+      var sel = (isSet && Number(val) === opt[0]) ? ' selected' : '';
+      html += '<option value="' + opt[0] + '"' + sel + '>' + window.kcEscapeHtml(opt[1]) + '</option>';
+    });
+    html += '</select>';
+    return html;
+  }
+  if (f.type === 'bool') {
+    // Rendered by fieldBlock's bool branch instead (label-wraps-checkbox,
+    // see the .bool-label comment above) -- this function still owns the
+    // <input> markup itself so there is exactly one place that builds a
+    // bool field's checked/data-id/data-type attributes.
+    var checked = (isSet && val) ? ' checked' : '';
+    return '<input type="checkbox" data-id="' + f.id + '" data-type="bool"' + checked + '>';
+  }
+  // f32 / u16 / u8: a plain number input. isSet false -> leave the value
+  // attribute OFF entirely (no "0", no placeholder-as-value) so an unset
+  // field cannot be mistaken for, or accidentally saved as, a real zero --
+  // COMMISSIONING.md section 3.1 / CONFIG_REFERENCE.md section 7.
+  var step = (f.type === 'f32') ? 'any' : '1';
+  // M12: abs_max_temp_c is SUGGESTED from the selected thermocouple type's
+  // own ceiling when nothing is stored yet, and carries that ceiling as a
+  // `max` so the browser refuses a higher one before checkTcMaxContradiction()
+  // ever has to. This is a starting number for a field COMMISSIONING_UX.md
+  // sec 1.4 explicitly forbids deriving, and the number that matters -- what
+  // this kiln's furniture and elements survive -- is almost always LOWER than
+  // what the sensor can report.
+  //
+  // It is a PLACEHOLDER, never a `value` (opus review, 2026-08-28). As a
+  // value it was indistinguishable from something the operator had typed:
+  // the save pass below walks `#fields input[data-id]` and posts every non-empty
+  // one, so pressing Save for some OTHER field on this page silently
+  // committed the suggestion as an operator-confirmed absolute maximum --
+  // precisely what "nothing commits it on the operator's behalf" forbids. A
+  // placeholder is visible and is not a value: the input stays genuinely
+  // empty, and the same empty-means-skip rule the mains-voltage "Not set"
+  // path relies on keeps it out of the POST body until somebody types a
+  // number. A value already committed (isSet) renders as a real value and
+  // saves normally, exactly as before.
+  var tcMax = f.prefillFromTcMax ? tcTypeMaxFor(paramsById) : undefined;
+  var valueAttr = isSet ? (' value="' + window.kcEscapeHtml(val) + '"') : '';
+  var maxAttr = (tcMax !== undefined) ? (' max="' + tcMax + '"') : '';
+  // A field may declare its own accepted range (f.min/f.max). The browser
+  // then refuses an out-of-range entry before checkFieldRanges() does, the
+  // same belt-and-braces shape the tcMax `max` above uses -- neither is the
+  // authority, the ESP handler is. tcMax keeps precedence when both exist so
+  // this can never emit two `max` attributes for one input.
+  var rangeAttr = (f.min !== undefined ? ' min="' + f.min + '"' : '') +
+    ((f.max !== undefined && tcMax === undefined) ? ' max="' + f.max + '"' : '');
+  var placeholder = isSet ? ''
+    : (tcMax !== undefined
+        ? (' placeholder="not set -- ' + tcMax + ' is the selected thermocouple\'s own limit"')
+        : (' placeholder="not set' + (f.def !== undefined ? ' -- firmware default ' + f.def : '') + '"'));
+  return '<input type="number" step="' + step + '" data-id="' + f.id + '" data-type="' + f.type + '"' +
+    valueAttr + maxAttr + rangeAttr + placeholder + '>';
+}
+
+function fieldBlock(f, paramsById) {
+  var p = paramsById[f.id];
+  var isSet = !!(p && p.set);
+  var unsetHere = f.noDefault && !isSet;
+
+  var div = document.createElement('div');
+  div.className = 'field' + (unsetHere ? ' unset' : '') + (f.readonly ? ' field-readonly' : '');
+  // Read-only rows (Task 3, COMMISSIONING_UX.md sec 2.2) deliberately do NOT
+  // carry data-id on the wrapper. The save pass below is now tag-restricted
+  // (`#fields input[data-id], #fields select[data-id]`), so a wrapper's
+  // data-id can no longer be swept up by it the way the earlier bare
+  // `#fields [data-id]` descendant selector did -- but a read-only row has
+  // no input/select at all (fieldInputHtml's readonly branch returns a plain
+  // <output>), and leaving data-id off the wrapper too keeps "no
+  // participation in the page's POST body" true of the ROW as a whole rather
+  // than resting on the selector alone.
+  if (!f.readonly) {
+    div.dataset.id = f.id;
+  }
+
+  // bool fields: the label WRAPS the checkbox (fieldInputHtml still builds
+  // the <input> itself) so the entire name+unit row is the hit target, not
+  // the checkbox alone -- see the .bool-label comment above the field-head
+  // style. Every other type keeps the plain label + separate input/select
+  // it already had, since those widgets are full-width and don't have this
+  // page's small-target problem.
+  var headHtml;
+  var bodyHtml;
+  if (f.type === 'bool' && !f.readonly) {
+    headHtml = '<label class="bool-label">' + fieldInputHtml(f, paramsById) +
+      '<span>' + window.kcEscapeHtml(f.name) +
+      (f.unit ? ' <span class="hint">(' + window.kcEscapeHtml(f.unit) + ')</span>' : '') +
+      '</span></label>' +
+      '<span class="risk-badge risk-' + f.risk + '">' + RISK_BADGE[f.risk] + '</span>';
+    bodyHtml = '';
+  } else {
+    headHtml = '<label for="f' + f.id + '">' + window.kcEscapeHtml(f.name) +
+      (f.unit ? ' <span class="hint">(' + window.kcEscapeHtml(f.unit) + ')</span>' : '') + '</label>' +
+      '<span class="risk-badge risk-' + f.risk + '">' + RISK_BADGE[f.risk] + '</span>';
+    bodyHtml = fieldInputHtml(f, paramsById);
+  }
+
+  var noteHtml = f.note ? '<p class="note">' + window.kcEscapeHtml(f.note) + '</p>' : '';
+  if (f.def !== undefined && isSet) {
+    noteHtml += '<p class="note">Firmware default: ' + window.kcEscapeHtml(f.def) + '</p>';
+  }
+
+  var guardHtml = '';
+  if (unsetHere && f.guards && f.guards.length) {
+    guardHtml = '<p class="note guard-disabled">Disabled while unset: ' +
+      window.kcEscapeHtml(f.guards.join(', ')) + '.</p>';
+  }
+
+  div.innerHTML = '<div class="field-head">' + headHtml + '</div>' + bodyHtml + noteHtml + guardHtml +
+    '<p class="guard-off-banner">GUARD DISABLED: this value leaves ' +
+    window.kcEscapeHtml((f.guards || []).join(', ')) + ' turned off. A disabled guard that ' +
+    'looks enabled is worse than no guard, because someone is relying on it.</p>';
+
+  // "Disabled guard shown as disabled" -- CONFIG_REFERENCE.md section 7,
+  // for the SET-but-off case (offColor), independent of the unset/noDefault
+  // styling above which covers the "never commissioned" case.
+  if (f.offColor !== undefined && isSet && Number(val_of(p)) === f.offColor) {
+    div.classList.add('guard-off');
+  }
+  return div;
+}
+function val_of(p) { return p ? p.value : undefined; }
+
+function renderGroups(data) {
+  var paramsById = {};
+  (data.params || []).forEach(function (p) { paramsById[p.id] = p; });
+  var el = document.getElementById('fields');
+  el.innerHTML = '';
+  GROUPS.forEach(function (g) {
+    var h2 = document.createElement('h2');
+    h2.textContent = g.title;
+    el.appendChild(h2);
+    if (g.hint) {
+      var hint = document.createElement('p');
+      hint.className = 'hint';
+      hint.textContent = g.hint;
+      el.appendChild(hint);
+    }
+    g.fields.forEach(function (f) {
+      el.appendChild(fieldBlock(f, paramsById));
+    });
+  });
+  applyContradictionRule();
+  wireVoltageSelects();
+  wireCtManualToggles();
+  wireCtInstalledToggle();
+  wireCtCalButtons();
+  wireCtTrimButtons();
+  wireCtAutoZeroButtons();
+}
+
+// CT_COMMISSIONING_PLAN.md step 2 -- each ct_cal row's "Auto-zero" button.
+// Two-request flow, both going to the SAME POST /api/safety/commissioning/
+// ct_auto_zero (see that handler's own comment for why there is no server-
+// side session between them): the first request (confirm omitted) measures
+// and returns a preview -- proposed zero_mv-at-probe, the previous value,
+// and the delta -- WITHOUT committing anything; kcConfirm() then shows that
+// preview to the operator, and only on "OK" does a second request (confirm=1)
+// re-run the same measurement and actually commit it. A manual-conflict
+// preview additionally offers an "override manual" checkbox before the
+// operator can confirm, per the handler's own manual-wins-unless-override
+// rule. 32px+ touch targets: this file's own `button { padding: 0.7em
+// 1.5em }` base rule already clears the floor, no extra CSS needed.
+function wireCtAutoZeroButtons() {
+  document.querySelectorAll('.ct-cal-row').forEach(function (row) {
+    var ch = row.getAttribute('data-ct-cal-ch');
+    var btn = row.querySelector('.ct-cal-auto-zero');
+    var result = row.querySelector('.ct-auto-zero-result');
+    if (!btn) return;
+    var overrideManual = false;
+    function postAutoZero(confirm) {
+      var body = 'channel=' + encodeURIComponent(ch) +
+        (confirm ? '&confirm=1' : '') +
+        (overrideManual ? '&override_manual=1' : '');
+      return fetch('/api/safety/commissioning/ct_auto_zero', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
+      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); });
+    }
+    btn.onclick = function () {
+      btn.disabled = true;
+      overrideManual = false;
+      result.textContent = 'measuring (this takes about 10 seconds, every heater relay must stay off)...';
+      result.className = 'ct-auto-zero-result';
+      postAutoZero(false).then(function (j) {
+        if (!j.ok) {
+          btn.disabled = false;
+          result.textContent = 'REFUSED: ' + (j.reason || 'unknown error');
+          result.className = 'ct-auto-zero-result crc-mismatch';
+          return;
+        }
+        var confirmMsg = 'Auto-zero channel ' + ch + '?\n\n' +
+          'Measured zero: ' + j.measured_zero_mv.toFixed(2) + ' mV\n' +
+          'Previous stored value: ' + j.previous_zero_mv.toFixed(2) + ' mV\n' +
+          'Delta: ' + j.delta_mv.toFixed(2) + ' mV\n\n' +
+          (j.manual_conflict
+            ? 'This channel is currently MANUALLY calibrated. Confirming will ' +
+              'OVERRIDE that manual value with this measurement.\n\n'
+            : '') +
+          'Every heater relay must stay off during this action -- do not start ' +
+          'a firing until it completes.';
+        window.kcConfirm(confirmMsg).then(function (confirmed) {
+          if (!confirmed) {
+            btn.disabled = false;
+            result.textContent = 'cancelled';
+            result.className = 'ct-auto-zero-result';
+            return;
+          }
+          overrideManual = !!j.manual_conflict;
+          result.textContent = 'committing...';
+          postAutoZero(true).then(function (j2) {
+            btn.disabled = false;
+            if (j2.ok) {
+              result.textContent = 'ok -- zero_mv=' + j2.zero_mv.toFixed(2) +
+                (j2.persisted ? '' : ' (WARNING: not persisted -- ' + (j2.err || 'NVS error') + ')');
+              result.className = 'ct-auto-zero-result';
+              loadCommissioning();
+            } else {
+              result.textContent = 'FAILED: ' + (j2.reason || 'unknown error');
+              result.className = 'ct-auto-zero-result crc-mismatch';
+            }
+          }).catch(function (authErr) {
+            btn.disabled = false;
+            if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+            result.textContent = 'FAILED: request error';
+            result.className = 'ct-auto-zero-result crc-mismatch';
+          });
+        });
+      }).catch(function (authErr) {
+        btn.disabled = false;
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        result.textContent = 'FAILED: request error';
+        result.className = 'ct-auto-zero-result crc-mismatch';
+      });
+    };
+  });
+}
+
+// CT_COMMISSIONING_PLAN.md step 1: each ct_cal row's "Apply" button posts
+// straight to POST /api/safety/commissioning/ct_cal (source=manual always --
+// see that handler's own comment) and reports the derived k_ct_v_per_a/
+// zero_counts inline, then reloads the whole commissioning page so every
+// other row (the readonly k_ct_v_per_a/zero_counts displays, the source
+// badge) reflects the just-applied values. Separate from the page's big
+// "Save all" pass on purpose: A_fs/zero_mv are not Pico param ids at all
+// (fieldInputHtml's 'ct_cal' comment), so they cannot ride that pass.
+// The operator-entered scale trim, docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md
+// owner decision 3: "The circuit has a fixed gain but clamp ratios change.
+// Allow the user to enter clamp ratio and offset/gain tuneing to get more
+// accurate." A_fs above IS the clamp ratio; these two are the correction on
+// top of it, measured against a reference meter.
+//
+// Rendered as its own row rather than two more inputs in the ct-cal-row
+// because they commit to a DIFFERENT endpoint: A_fs/zero_mv convert into
+// real Pico wire params (k_ct_v_per_a/zero_counts) and need that commit to
+// land, while the trim is ESP-local and has no wire parameter at all. One
+// Apply button covering both would have claimed a Pico round-trip for two
+// fields that never make one.
+//
+// Same deliberate omission of data-id as the ct-cal inputs: the generic
+// "Save all" pass walks `#fields input[data-id]`, and a data-id here would
+// make it SET_PARAM a param id that does not exist.
+//
+// Values come from the commissioning JSON UNCONDITIONALLY -- unlike
+// a_fs/zero_mv there is no has_value gate, because a channel that was never
+// commissioned still has a real, meaningful trim (the identity). The `!= null`
+// fallbacks cover an older firmware whose JSON predates these two fields, not
+// a fresh board.
+function ctTrimRowHtml(ch, c) {
+  var offVal = (c && c.trim_offset_a != null) ? c.trim_offset_a : 0;
+  var gainVal = (c && c.trim_gain != null) ? c.trim_gain : 1;
+  return '<div class="ct-trim-row" data-ct-trim-ch="' + ch + '">' +
+    '<label>offset trim <input type="number" step="any" min="-50" max="50" ' +
+    'class="ct-trim-offset" value="' + window.kcEscapeHtml(String(offVal)) +
+    '" placeholder="e.g. 0, -0.4"> A</label> ' +
+    '<label>gain trim <input type="number" step="any" min="0.5" max="2" ' +
+    'class="ct-trim-gain" value="' + window.kcEscapeHtml(String(gainVal)) +
+    '" placeholder="e.g. 1, 1.04"> x</label> ' +
+    '<button type="button" class="ct-trim-apply">Apply trim</button>' +
+    ' <span class="ct-trim-result"></span>' +
+    '</div>';
+}
+
+function wireCtTrimButtons() {
+  document.querySelectorAll('.ct-trim-row').forEach(function (row) {
+    var ch = row.getAttribute('data-ct-trim-ch');
+    var btn = row.querySelector('.ct-trim-apply');
+    var result = row.querySelector('.ct-trim-result');
+    if (!btn) return;
+    btn.onclick = function () {
+      var off = row.querySelector('.ct-trim-offset').value;
+      var gain = row.querySelector('.ct-trim-gain').value;
+      if (off === '' || gain === '') {
+        result.textContent = 'enter both offset trim and gain trim first';
+        result.className = 'ct-trim-result crc-mismatch';
+        return;
+      }
+      btn.disabled = true;
+      result.textContent = 'applying...';
+      result.className = 'ct-trim-result';
+      var body = 'ch=' + encodeURIComponent(ch) + '&trim_offset_a=' + encodeURIComponent(off) +
+        '&trim_gain=' + encodeURIComponent(gain);
+      fetch('/api/safety/commissioning/ct_trim', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
+      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); })
+        .then(function (j) {
+          btn.disabled = false;
+          // persisted:false means the value took effect in RAM but the NVS
+          // write failed -- shown as a failure, since it will not survive a
+          // reboot and the operator would otherwise believe it was stored.
+          if (j.ok && j.persisted) {
+            result.textContent = 'ok -- offset=' + j.trim_offset_a + ' A, gain=' + j.trim_gain + 'x';
+            result.className = 'ct-trim-result';
+            loadCommissioning();
+          } else if (j.ok) {
+            result.textContent = 'NOT SAVED: applied but not persisted (' + (j.err || 'unknown') + ')';
+            result.className = 'ct-trim-result crc-mismatch';
+          } else {
+            result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
+            result.className = 'ct-trim-result crc-mismatch';
+          }
+        }).catch(function (authErr) {
+          btn.disabled = false;
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+          result.textContent = 'FAILED: request error';
+          result.className = 'ct-trim-result crc-mismatch';
+        });
+    };
+  });
+}
+
+function wireCtCalButtons() {
+  document.querySelectorAll('.ct-cal-row').forEach(function (row) {
+    var ch = row.getAttribute('data-ct-cal-ch');
+    var btn = row.querySelector('.ct-cal-apply');
+    var result = row.querySelector('.ct-cal-result');
+    if (!btn) return;
+    btn.onclick = function () {
+      var afs = row.querySelector('.ct-cal-afs').value;
+      var zmv = row.querySelector('.ct-cal-zeromv').value;
+      if (afs === '' || zmv === '') {
+        result.textContent = 'enter both A_fs and zero_mv first';
+        result.className = 'ct-cal-result crc-mismatch';
+        return;
+      }
+      btn.disabled = true;
+      result.textContent = 'applying...';
+      result.className = 'ct-cal-result';
+      var body = 'ch=' + encodeURIComponent(ch) + '&a_fs=' + encodeURIComponent(afs) +
+        '&zero_mv=' + encodeURIComponent(zmv) + '&commit=1';
+      fetch('/api/safety/commissioning/ct_cal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body,
+      }).then(function (r) { return r.json().catch(function () { return { ok: false, reason: 'bad response' }; }); })
+        .then(function (j) {
+          btn.disabled = false;
+          if (j.ok) {
+            result.textContent = 'ok -- k_ct_v_per_a=' + j.k_ct_v_per_a + ', zero_counts=' + j.zero_counts;
+            result.className = 'ct-cal-result';
+            loadCommissioning();
+          } else {
+            result.textContent = 'FAILED: ' + (j.reason || 'unknown error');
+            result.className = 'ct-cal-result crc-mismatch';
+          }
+        }).catch(function (authErr) {
+          btn.disabled = false;
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+          result.textContent = 'FAILED: request error';
+          result.className = 'ct-cal-result crc-mismatch';
+        });
+    };
+  });
+}
+
+// ROADMAP.md M12, "CTs are optional hardware". ct_installed (0x0109) answered
+// "No" makes the three ct_channel_map rows below it meaningless -- they are
+// not merely optional then, they are unanswerable, since there is no CT to
+// map. Leaving them looking like ordinary blank required fields is exactly
+// the "a page that asks a question the hardware cannot answer" confusion this
+// pass exists to remove, so they are visibly struck out and their inputs
+// disabled.
+//
+// Disabling the inputs is not enough on its own: the save pass's
+// `#fields input[data-id], #fields select[data-id]` walk matches a disabled
+// element too. So the inputs are additionally CLEARED here, which is what
+// makes that pass's empty-means-skip rule drop them. Both, deliberately -- a
+// stale typed value
+// silently restaged under an answer of "no CTs" would write a mapping nobody
+// confirmed, the precise failure the backup-map mechanism was retired for.
+// 262-264 are ct_channel_map[0..2] (channel -> relay); 800-802 are
+// zone_ct_channel[0..2] (zone -> channel, docs/CT_CHANNEL_MASK.md).
+// Both are CT wiring answers, and both are unanswerable on a board that
+// declares no CTs, so both are struck out and CLEARED together -- leaving
+// the per-zone map typed-but-hidden under an answer of "no CTs" would
+// restage a mapping nobody confirmed, the exact failure described above.
+var CT_MAP_FIELD_IDS = [262, 263, 264, 800, 801, 802];
+function wireCtInstalledToggle() {
+  var sel = document.querySelector('#fields select[data-id="265"]');
+  if (!sel) return;
+  function apply() {
+    var absent = (sel.value === '0');
+    CT_MAP_FIELD_IDS.forEach(function (id) {
+      var row = document.querySelector('#fields div.field[data-id="' + id + '"]');
+      if (!row) return;
+      row.classList.toggle('ct-not-applicable', absent);
+      row.querySelectorAll('input, select').forEach(function (el) {
+        el.disabled = absent;
+        if (absent && el.type !== 'checkbox') { el.value = ''; }
+        if (absent && el.type === 'checkbox') { el.checked = false; }
+      });
+      var banner = row.querySelector('.ct-na-note');
+      if (absent && !banner) {
+        var pnode = document.createElement('p');
+        pnode.className = 'note ct-na-note';
+        pnode.textContent = 'Not applicable -- CTs are declared absent on this board, so ' +
+          'S3, S4, S9 and S14 are switched off and this mapping is not required.';
+        row.appendChild(pnode);
+      } else if (!absent && banner) {
+        banner.remove();
+      }
+    });
+  }
+  sel.addEventListener('change', apply);
+  apply();
+}
+
+// M12: the override on a DERIVED ct_channel_map row. Unchecked, the number
+// input stays hidden AND empty, which is what makes the save pass skip the
+// id entirely (same empty-means-skip rule as the mains-voltage "Not set"
+// path) so a derived value is never restaged as if it had been typed.
+// Checked, it becomes an ordinary manual field again -- the fallback
+// COMMISSIONING_UX.md sec 1.2 requires for a mapping the sweep refused to
+// derive, kept reachable even after a successful derivation.
+function wireCtManualToggles() {
+  document.querySelectorAll('.ct-manual').forEach(function (cb) {
+    var input = document.querySelector('input[type="number"][data-id="' + cb.dataset.ctFor + '"]');
+    if (!input) return;
+    cb.addEventListener('change', function () {
+      input.hidden = !cb.checked;
+      if (!cb.checked) { input.value = ''; } else { input.focus(); }
+    });
+  });
+}
+
+// Task 2 (COMMISSIONING_UX.md sec 2.1): wires every mains-voltage <select>
+// (there is exactly one, mains_voltage_v, but this walks all of them the
+// same way applyContradictionRule() above walks a fixed pair, in case a
+// second voltage-typed field is ever added) to its own hidden numeric
+// input -- picking a known voltage writes that number into the input and
+// hides it; picking "Other..." reveals it empty (or keeps whatever it
+// already held) for free entry; picking "Not set" clears it, which is what
+// makes the save pass skip this id entirely (fieldInputHtml's own comment).
+function wireVoltageSelects() {
+  document.querySelectorAll('.voltage-select').forEach(function (sel) {
+    var input = document.querySelector('input[data-id="' + sel.dataset.voltageFor + '"]');
+    if (!input) return;
+    sel.addEventListener('change', function () {
+      if (sel.value === 'unset') {
+        input.hidden = true;
+        input.value = '';
+      } else if (sel.value === 'other') {
+        input.hidden = false;
+        input.focus();
+      } else {
+        input.hidden = true;
+        input.value = sel.value;
+      }
+    });
+  });
+}
+
+function setBodyFlags(data) {
+  document.body.classList.toggle('kc-cfg-stale', !!data.stale);
+  document.body.classList.toggle('kc-cfg-linkdown', !data.link_up);
+}
+
+function renderCrcLine(data) {
+  document.getElementById('crcLive').textContent = (data.link_up ? data.live_config_crc : '— (link down)');
+  document.getElementById('crcCached').textContent = data.cached_config_crc;
+  var m = document.getElementById('crcMatch');
+  if (!data.link_up) {
+    m.textContent = 'cannot verify -- no live telemetry';
+    m.className = 'crc-mismatch';
+  } else if (data.stale) {
+    m.textContent = 'MISMATCH -- Pico is enforcing a different config than shown';
+    m.className = 'crc-mismatch';
+  } else {
+    m.textContent = 'matches live telemetry';
+    m.className = '';
+  }
+  var commissioned = document.getElementById('commissionedLine');
+  commissioned.textContent = data.commissioned
+    ? 'Board reports commissioned (calibration_missing is clear).'
+    : 'Board reports NOT COMMISSIONED (calibration_missing is set) -- at least one required ' +
+      'section-1 field above is unset, or only a test preset has been applied.';
+  commissioned.className = data.commissioned ? 'hint' : 'hint guard-disabled';
+  var benchBtn = document.getElementById('benchBtn');
+  if (benchBtn) {
+    benchBtn.style.display = data.dev_tools_enabled ? '' : 'none';
+  }
+
+  // M1: unset_reporting_reliable is false when the peer is too old (or
+  // unknown) to have ever set KILNLINK_CONFIG_PAGE_UNSET_BIT -- the ESP
+  // itself already forced every "set" below to false in that case
+  // (safety_cfg_http.c's build_commissioning_json()); this banner just makes
+  // that visible instead of the page silently looking like every field is
+  // unset with no explanation.
+  document.getElementById('unsetReliabilityLine').hidden = data.unset_reporting_reliable !== false;
+}
+
+// Owner request 2026-09-08: "a non-zero offset should be visible somewhere
+// persistent, not just at the moment it is set". Reads the live GET response
+// directly (not the <input> the operator may be mid-edit), so this reflects
+// what the safety processor actually reports right now, same "committed
+// state, not a form draft" discipline crcLine/commissionedLine already
+// follow. Hidden whenever the field is unset, 0, or this build's peer is too
+// old to report it reliably (unset_reporting_reliable:false) -- an unknown
+// value must never be rendered as "no correction".
+function renderTcOffsetBanner(data) {
+  var el = document.getElementById('tcOffsetBanner');
+  if (!el) return;
+  var p = (data.params || []).filter(function (pp) { return pp.id === 266; })[0];
+  if (!data.unset_reporting_reliable || !p || !p.set || Number(p.value) === 0) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  el.hidden = false;
+  el.textContent = 'Safety thermocouple calibration offset is currently ' + window.kcEscapeHtml(p.value) +
+    ' °C (non-zero) -- every reading from the safety processor\'s own sensor is shifted by ' +
+    'this amount before any guard sees it. Clear it on the Advanced panel below if this was left ' +
+    'over from a prior calibration pass.';
+}
+
+// Owner request 2026-09-08: tc_type (261) and tc_offset_c (266) both change
+// what the safety processor believes its own thermocouple reading means --
+// wrong in either direction is a silent misread of temperature, the same
+// hazard class COMMISSIONING.md's "confident, plausible, WRONG" language
+// describes for tc_type alone. Both fields carry `confirmOnChange: true`
+// (GROUPS above) so this logic stays data-driven instead of hardcoding two
+// ids in three different places.
+var CRITICAL_CONFIRM_FIELD_IDS = GROUPS.reduce(function (acc, g) {
+  g.fields.forEach(function (f) { if (f.confirmOnChange) acc.push(f.id); });
+  return acc;
+}, []);
+
+// Returns the subset of CRITICAL_CONFIRM_FIELD_IDS that are actually present
+// in `body` (the id=/value= pairs about to be POSTed) AND whose staged value
+// differs from what `latest` last reported -- i.e. fields this specific save
+// would actually change, not merely re-submit unchanged. Each entry carries
+// old/new as DISPLAY strings (never touching what actually gets posted) so
+// the confirm dialog can name both without re-deriving formatting rules.
+// Retrofitted 2026-09-08 (review 5d03f8c2) onto commissioning_shared.js's
+// kcCommissioningFindCriticalChanges() -- this used to be a second,
+// independently-maintained copy of the same logic setup_wizard_page.html's
+// step 7 needs. `enumLabelFor` reproduces this page's own enum-lookup rule
+// ("only replace the display string if a matching enumOpts entry exists",
+// same as the old inline version) so the two callers cannot silently diverge
+// on how an enum id renders in the confirm dialog.
+function enumLabelForField(id, display) {
+  var f = FIELD_BY_ID[id];
+  if (!f || !f.enumOpts) return null;
+  var opt = f.enumOpts.filter(function (o) { return String(o[0]) === display; })[0];
+  return opt ? opt[1] : null;
+}
+function findCriticalChanges(body) {
+  return window.kcCommissioningFindCriticalChanges(
+    latest && latest.params, CRITICAL_CONFIRM_FIELD_IDS, body, enumLabelForField);
+}
+
+// Retrofitted onto commissioning_shared.js's kcCommissioningCheckBusy() --
+// same mcp_server_safety.py-mirroring reasoning as before (see that
+// function's own header comment), no longer duplicated here.
+function checkFiringOrAutotuneRunning() {
+  return window.kcCommissioningCheckBusy();
+}
+
+function loadCurrent() {
+  // Sequenced, not parallel: renderGroups() reads ctMapDerived synchronously,
+  // so the map has to be in hand before the commissioning response is
+  // rendered. A failed/absent CT-map fetch is not fatal -- it just leaves
+  // ctMapDerived at "nothing derived" (see its own comment).
+  fetch('/api/zones/ct_channel_map').then(function (r) { return r.json(); }).then(function (m) {
+    if (m && typeof m.mask === 'number' && m.zone && m.zone.length === 3) ctMapDerived = m;
+    // M12b: the CT scale rides the same response, and is validated
+    // independently -- an older board that predates it answers with no
+    // k_mask at all, and must keep rendering the map half normally.
+    if (m && typeof m.k_mask === 'number' && m.k && m.k.length === 3) ctKDerived = m;
+  }).catch(function () { /* leave ctMapDerived alone -- manual entry stays available */ })
+    .then(loadZoneNames)
+    .then(loadCommissioning);
+}
+
+// Names for the "Not fitted" zone picker (gCardNotFitted's <select>),
+// indices 0-2 only -- see gZoneNames's own comment on why. A failed fetch
+// (or an older firmware predating GET /api/zones) is not fatal: gPrefill()
+// falls back to "Zone N" placeholders, same "manual entry stays available"
+// degrade-gracefully rule loadCurrent()'s CT-map fetch already follows.
+function loadZoneNames() {
+  return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (z) {
+    if (z && Array.isArray(z.zones)) {
+      gZoneNames = z.zones.slice(0, 3).map(function (zz) { return zz.name; });
+    }
+  }).catch(function () { /* leave gZoneNames empty -- gPrefill() falls back to "Zone N" */ });
+}
+
+function loadCommissioning() {
+  fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (data) {
+    latest = data;
+    gLoadFailed = false;
+    // CT_COMMISSIONING_PLAN.md step 1: stash ct_cal BEFORE renderGroups(),
+    // since fieldInputHtml()'s 'ct_cal' branch reads window.kcCtCal
+    // synchronously during that render pass -- same "has to be in hand
+    // first" ordering ctMapDerived/ctKDerived above already follow.
+    window.kcCtCal = Array.isArray(data.ct_cal) ? data.ct_cal : [];
+    setBodyFlags(data);
+    renderCrcLine(data);
+    renderGroups(data);
+    renderTcOffsetBanner(data);
+    // RELAY_LIFE_BUDGET.md: reflect the stored safety relay
+    // type -- ESP-only, always present in this response (never gated on
+    // link_up/commissioned the way the Pico-fetched fields above are).
+    var relaySel = document.getElementById('relayTypeSelect');
+    if (relaySel && data.relay_type) { relaySel.value = data.relay_type; }
+    gPrefill(data);
+    if (typeof gRenderPreflight === 'function') gRenderPreflight(data);
+    if (typeof gRenderLoadFailure === 'function') gRenderLoadFailure();
+  }).catch(function (authErr) {
+    // The F5 refusal below is a guard, not just a message: it must latch
+    // even when the operator cancelled sign-in, or the guided flow could
+    // proceed on data it never loaded. Only the error text is suppressed.
+    if (typeof gRenderLoadFailure === 'function') { gLoadFailed = true; gRenderLoadFailure(); }
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('fields').innerHTML = '<p class="empty">Could not load commissioning data.</p>';
+    // F5 fix (opus review): on this failure gPrefill() never runs -- so
+    // #gMainsSelect stays unpopulated (gMainsValue() would return '' for it,
+    // not undefined, which gBuildAnswers() would stage as an empty
+    // mains_voltage_v that gValidateScreen1() does not catch) and the
+    // "Not fitted" radio is reachable with none of gPrefill()'s disabling
+    // logic ever having run. Rather than let the guided flow proceed on data
+    // it never actually has, refuse explicitly -- see gRenderLoadFailure()
+    // and its call from the Start button below.
+    if (typeof gRenderLoadFailure === 'function') { gLoadFailed = true; gRenderLoadFailure(); }
+  });
+}
+
+/* ---- Client-side contradiction check (COMMISSIONING.md section 4 / 3.1):
+ * tc_placement_mode is forced to CHAMBER_AGREED when tc_source is
+ * BORROWED_ZONE. This is advisory-and-enforced on THIS side only for
+ * immediacy -- disabling the control and showing why -- but it is NOT the
+ * safety boundary. The Pico validates the whole staged set again at
+ * COMMIT_CONFIG independently of whatever this page did or failed to do,
+ * and a browser bug, a hand-crafted POST, or a stale page here must not be
+ * able to commission a contradictory pair -- see COMMISSIONING.md section 2.1's
+ * "validation happens at COMMIT_CONFIG, not at SET_PARAM" and CONFIG_REFERENCE.md
+ * section 1's "rejected, not silently reconciled". */
+function applyContradictionRule() {
+  var srcSel = document.querySelector('select[data-id="257"]'); // tc_source
+  var modeSel = document.querySelector('select[data-id="259"]'); // tc_placement_mode
+  if (!srcSel || !modeSel) return;
+  function sync() {
+    var forced = srcSel.value === '1'; // BORROWED_ZONE, per this page's enum-code note above
+    if (forced) {
+      modeSel.value = '0'; // CHAMBER_AGREED
+      modeSel.disabled = true;
+      modeSel.title = 'Forced to CHAMBER_AGREED because tc_source is BORROWED_ZONE.';
+    } else {
+      modeSel.disabled = false;
+      modeSel.title = '';
+    }
+  }
+  srcSel.addEventListener('change', sync);
+  sync();
+}
+
+// RELAY_LIFE_BUDGET.md: saved immediately on change, independent
+// of the guided flow's/Advanced section's own staged-and-committed writes --
+// see this control's own HTML comment for why. "ssr" is never an option in
+// this <select> at all, so there is nothing for this handler itself to
+// reject; the POST endpoint still validates server-side (safety_cfg_http.c's
+// relay_type_post_handler()) as the actual boundary.
+document.getElementById('relayTypeSelect').addEventListener('change', function () {
+  var sel = this, msg = document.getElementById('relayTypeMsg');
+  msg.textContent = 'Saving…';
+  fetch('/api/safety/commissioning/relay_type', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'type=' + encodeURIComponent(sel.value)
+  }).then(function (r) {
+    if (!r.ok) { throw new Error('save failed'); }
+    msg.textContent = 'Saved.';
+  }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; msg.textContent = 'Save failed -- try again.'; });
+});
+
+document.getElementById('saveBtn').addEventListener('click', function () {
+  var msg = document.getElementById('msg');
+  // M2: refuse client-side before ever building the request body -- see
+  // checkTcMaxContradiction()'s own comment for why this is advisory, not
+  // the safety boundary (the Pico's COMMIT_CONFIG still validates for real).
+  var tcMaxProblem = checkTcMaxContradiction();
+  if (tcMaxProblem) {
+    msg.textContent = 'Rejected: ' + tcMaxProblem;
+    return;
+  }
+  // id=<n>&value=<v> pairs per COMMISSIONING.md section 3.1 -- one SET_PARAM
+  // worth of form fields per param, `commit=1` triggers COMMIT_CONFIG after
+  // every SET_PARAM has staged. The exact wire shape (id=<n>&value=<v> pairs,
+  // not id/value arrays) is spelled out in that section; this just builds it.
+  var body = [];
+  // The wrapper <div> fieldBlock() builds also carries data-id (it is what
+  // the unset/guard-off styling keys off), so a bare `[data-id]` walk
+  // matched it too and pushed `value=undefined` for every rendered field.
+  // Restricted to the actual widgets, which are the only elements that were
+  // ever meant to be found here.
+  document.querySelectorAll('#fields input[data-id], #fields select[data-id]').forEach(function (el) {
+    var id = el.dataset.id, type = el.dataset.type, v;
+    if (type === 'bool') { v = el.checked ? 1 : 0; }
+    else if (el.value === '') { return; }
+    else { v = el.value; }
+    body.push('id=' + encodeURIComponent(id) + '&value=' + encodeURIComponent(v));
+  });
+  // id-shaped pairs (not just the joined string) so findCriticalChanges()
+  // can inspect them before the body is flattened for the wire.
+  // `name` is carried alongside id/value so commissioning_shared.js's
+  // findCriticalChanges() (which names a change from bodyPairs, not from a
+  // page-specific field table it has no knowledge of) can report "tc_type"
+  // rather than falling back to "id 261".
+  var bodyPairs = body.map(function (s) {
+    var m = /^id=(\d+)&value=(.*)$/.exec(s);
+    if (!m) return null;
+    var id = Number(m[1]);
+    var f = FIELD_BY_ID[id];
+    return { id: id, value: decodeURIComponent(m[2]), name: f && f.name };
+  }).filter(Boolean);
+
+  // Owner request 2026-09-08: tc_type/tc_offset_c change what the safety
+  // processor believes its own thermocouple reading means -- a wrong value
+  // silently misreads temperature to the one guard layer meant to be
+  // independent of everything else on this board. Treat any such change as
+  // the safety-critical write it is: refuse mid-run, then require an
+  // explicit, NAMED confirmation before this ever reaches the wire.
+  // Refuse an out-of-range entry (e.g. a gain of 0) before anything is sent,
+  // and before the confirm prompt below -- an operator must not be asked to
+  // confirm a value that was never going to be accepted. See
+  // checkFieldRanges() for why this is advisory and not the boundary.
+  var rangeProblem = checkFieldRanges(bodyPairs);
+  if (rangeProblem) {
+    msg.textContent = 'Rejected: ' + rangeProblem;
+    return;
+  }
+
+  var criticalChanges = findCriticalChanges(bodyPairs);
+  // Retrofitted 2026-09-08 (review 5d03f8c2) onto commissioning_shared.js's
+  // kcCommissioningCommitAndVerify() -- was this page's own second copy of
+  // the busy-check/confirm/POST/rejection-vs-success/independent-read-back
+  // contract setup_wizard_page.html's step 7 also needs. No opts overrides:
+  // this page's wording is the shared module's default (it is the older,
+  // proven-on-hardware behaviour the defaults were set to match), so nothing
+  // here should ever read differently than it did before this retrofit.
+  window.kcCommissioningCommitAndVerify(bodyPairs, criticalChanges, {
+    setMsg: function (t) { msg.textContent = t; },
+  }).then(function (res) {
+    msg.textContent = res.message;
+    // Matches the original's own rule: reload after any outcome where the
+    // write itself was accepted by the safety processor, regardless of
+    // whether this page's own independent read-back then agreed with it --
+    // never after a rejection, a busy refusal, or an operator cancel.
+    if (res.posted) { loadCurrent(); }
+  });
+});
+
+document.getElementById('benchBtn').addEventListener('click', function () {
+  // COMMISSIONING.md section 4.1: a bench preset must be visibly a bench
+  // preset. kcConfirm's message says so explicitly, and the request itself
+  // leaves calibration_missing set (the Pico's own behaviour, per that
+  // section) rather than this page pretending the board is now commissioned.
+  window.kcConfirm(
+    'Apply the test preset?\n\n' +
+    'This loads test values for exercising the link and the commissioning ' +
+    'flow with no kiln attached. It is NOT a commissioning: the ' +
+    'board stays marked calibration_missing (not commissioned) afterward, ' +
+    'and every real guard threshold above still needs to be set for an ' +
+    'actual kiln before it is fired.').then(function (ok) {
+    if (!ok) return;
+    var msg = document.getElementById('msg');
+    msg.textContent = 'Applying test preset…';
+    fetch('/api/safety/commissioning/bench_preset', { method: 'POST' }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      msg.textContent = 'Test preset applied -- board remains NOT commissioned (test values only).';
+      loadCurrent();
+    }).catch(function (e) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+      msg.textContent = 'Test preset failed: ' + e.message;
+    });
+  });
+});
+
+/* ============================================================
+ * Guided flow (COMMISSIONING_UX.md sec 4): four questions writing six
+ * parameters. This is a thin layer over the same fetch/POST contract the
+ * Advanced view already uses -- it does not talk to the Pico any
+ * differently, it just asks for a smaller, ordered subset of the same
+ * SET_PARAM/COMMIT_CONFIG body and reuses confirm_commit_landed() on the
+ * server for the same read-back guarantee.
+ *
+ * Field ids used here (must match GROUPS above -- kept in one place so a
+ * typo shows up as "field not rendered" instead of a silent wrong id):
+ *   260 abs_max_temp_c        (Q1)
+ *   529 safety_tc_installed   (Q2, 0x0211)
+ *   257 tc_source             (Q2, 0x0101)
+ *   258 borrowed_zone_index   (Q2, 0x0102 -- "Not fitted" branch only)
+ *   259 tc_placement_mode     (Q2, 0x0103)
+ *   782 mains_voltage_v       (Q3, 0x030E)
+ *   793 max_expected_power_w  (Q4, 0x0319)
+ * ============================================================ */
+var G_IDS = { ABS_MAX: 260, TC_INSTALLED: 529, TC_SOURCE: 257, TC_PLACEMENT: 259,
+              BORROWED_ZONE_INDEX: 258, MAINS: 782, POWER: 793 };
+var gCurrentScreen = 0;
+var gPrefilled = false;
+// F5 fix (opus review): true whenever the last /api/safety/commissioning GET
+// failed -- gPrefill() never ran in that case, so #gMainsSelect is
+// unpopulated and "Not fitted" is reachable with none of gPrefill()'s
+// disabling logic applied. gStart() below refuses to leave screen 0 while
+// this is true, rather than let the guided flow proceed on device state it
+// never actually loaded.
+var gLoadFailed = false;
+var gQ2Choice = null; // 'chamber' | 'external' | 'not_fitted'
+// Populated from GET /api/zones (zones_http.c) -- name-by-index for the
+// "Not fitted" zone picker. borrowed_zone_index is validated 0-2 server-side
+// (config_params.c CHECK_U8_MAX(2u)), matching CONTEXT_SNAPSHOT_MAX_ZONES
+// (SaftyFW's snapshots.h) -- the safety link's context frame only ever
+// carries the three heated zones, regardless of how many thermocouple
+// channels this board has configured -- so only indices 0-2 are ever
+// offered here even on a 5-channel board.
+var gZoneNames = [];
+var GSTEP_NAMES = ['Start', 'This kiln', 'TC location', 'Review', 'Save'];
+
+function gGoto(n) {
+  for (var i = 0; i <= 4; i++) {
+    var el = document.getElementById('gscreen' + i);
+    if (el) el.hidden = (i !== n);
+  }
+  gCurrentScreen = n;
+  if (n === 3) gRenderReview();
+  gRenderStepper();
+}
+
+// F5 fix (opus review): the Start button's handler, replacing a bare
+// gGoto(1). Refuses to leave screen 0 while gLoadFailed is true -- see
+// gLoadFailed's own comment for why proceeding without a loaded gPrefill()
+// is unsafe, not just cosmetically incomplete.
+function gStart() {
+  if (gLoadFailed) {
+    gRenderLoadFailure();
+    return;
+  }
+  gGoto(1);
+}
+
+function gRenderLoadFailure() {
+  var msg = document.getElementById('gLoadFailedMsg');
+  var btn = document.getElementById('gStartBtn');
+  if (!msg || !btn) return;
+  msg.hidden = !gLoadFailed;
+  btn.disabled = gLoadFailed;
+  if (gLoadFailed) {
+    msg.textContent = 'Could not load the safety processor\'s current configuration -- the guided ' +
+      'flow needs it (for example, to populate the mains-voltage list and the thermocouple-location ' +
+      'options) and will not start until a load succeeds. Check the link and retry.';
+  }
+}
+
+function gRenderStepper() {
+  var el = document.getElementById('gstepper');
+  el.innerHTML = '';
+  GSTEP_NAMES.forEach(function (name, i) {
+    var span = document.createElement('span');
+    span.textContent = (i + 1) + '. ' + name;
+    if (i === gCurrentScreen) span.className = 'current';
+    else if (i < gCurrentScreen) span.className = 'done';
+    el.appendChild(span);
+  });
+}
+
+function gValidateScreen1() {
+  var msg = document.getElementById('g1msg');
+  var v = parseFloat(document.getElementById('gAbsMax').value);
+  if (!isFinite(v) || v <= 0) {
+    msg.textContent = 'Enter the kiln\'s highest survivable temperature -- a positive number, no unlimited option.';
+    return false;
+  }
+  var mainsSel = document.getElementById('gMainsSelect');
+  if (mainsSel.value === 'other' && document.getElementById('gMainsOther').value === '') {
+    msg.textContent = 'Enter the mains voltage, or pick a listed value / "Not set".';
+    return false;
+  }
+  msg.textContent = '';
+  return true;
+}
+
+function gValidateScreen2() {
+  var msg = document.getElementById('g2msg');
+  var checked = document.querySelector('input[name="gq2"]:checked');
+  if (!checked) {
+    msg.textContent = 'Choose where the safety processor\'s own thermocouple is fitted.';
+    return false;
+  }
+  if (checked.value === 'not_fitted' && document.getElementById('gBorrowedZoneSelect').value === '') {
+    msg.textContent = 'Choose which zone\'s thermocouple to borrow.';
+    return false;
+  }
+  gQ2Choice = checked.value;
+  msg.textContent = '';
+  return true;
+}
+
+function gMainsValue() {
+  var sel = document.getElementById('gMainsSelect');
+  if (!sel) return undefined;
+  if (sel.value === 'unset') return undefined;
+  if (sel.value === 'other') {
+    var o = document.getElementById('gMainsOther').value;
+    return o === '' ? undefined : o;
+  }
+  return sel.value;
+}
+
+function gBuildAnswers() {
+  var absMax = document.getElementById('gAbsMax').value;
+  var power = document.getElementById('gPower').value;
+  var mains = gMainsValue();
+  var pairs = [];
+  if (absMax !== '') pairs.push({ id: G_IDS.ABS_MAX, value: absMax, label: 'abs_max_temp_c' });
+  if (mains !== undefined) pairs.push({ id: G_IDS.MAINS, value: mains, label: 'mains_voltage_v' });
+  if (power !== '') pairs.push({ id: G_IDS.POWER, value: power, label: 'max_expected_power_w' });
+  if (gQ2Choice === 'chamber') {
+    pairs.push({ id: G_IDS.TC_INSTALLED, value: 1, label: 'safety_tc_installed' });
+    pairs.push({ id: G_IDS.TC_SOURCE, value: 0, label: 'tc_source (OWN_J7)' });
+    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 0, label: 'tc_placement_mode (CHAMBER_AGREED)' });
+  } else if (gQ2Choice === 'external') {
+    pairs.push({ id: G_IDS.TC_INSTALLED, value: 1, label: 'safety_tc_installed' });
+    pairs.push({ id: G_IDS.TC_SOURCE, value: 0, label: 'tc_source (OWN_J7)' });
+    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 1, label: 'tc_placement_mode (EXTERNAL_OVERHEAT)' });
+  } else if (gQ2Choice === 'not_fitted') {
+    var zoneIdx = document.getElementById('gBorrowedZoneSelect').value;
+    var zoneLabel = gZoneNames[Number(zoneIdx)] || ('Zone ' + Number(zoneIdx));
+    pairs.push({ id: G_IDS.TC_INSTALLED, value: 0, label: 'safety_tc_installed' });
+    pairs.push({ id: G_IDS.TC_SOURCE, value: 1, label: 'tc_source (BORROWED_ZONE)' });
+    pairs.push({ id: G_IDS.TC_PLACEMENT, value: 0, label: 'tc_placement_mode (forced CHAMBER_AGREED)' });
+    pairs.push({ id: G_IDS.BORROWED_ZONE_INDEX, value: zoneIdx, label: 'borrowed_zone_index (' + zoneLabel + ')' });
+  }
+  return pairs;
+}
+
+// F4 fix (opus review): #gAbsMaxTcHint was rendered on screen 1 but never
+// assigned any text. Populates it with the same currently-configured
+// thermocouple type's own ceiling that gRenderReview()'s warning and
+// gCommit()'s hard block (via checkTcMaxContradiction()) both use, so the
+// operator sees the constraint on screen 1 -- while filling the field in --
+// instead of only finding out about it on the review screen or at commit
+// time. tc_type itself is not one of the four guided questions, so this is
+// informational only; nothing here is the enforcement path.
+function gUpdateAbsMaxTcHint() {
+  var el = document.getElementById('gAbsMaxTcHint');
+  if (!el) return;
+  var tcTypeParam = latest && (latest.params || []).filter(function (p) { return p.id === 261; })[0];
+  if (!tcTypeParam || !tcTypeParam.set) {
+    el.textContent = '';
+    return;
+  }
+  var limit = TC_MAX_C_BY_TYPE[Number(tcTypeParam.value)];
+  el.textContent = (limit !== undefined)
+    ? ('The currently-configured thermocouple type tops out at ' + limit + ' °C -- ' +
+       'this value cannot exceed that.')
+    : '';
+}
+
+function gRenderReview() {
+  var el = document.getElementById('gReview');
+  var pairs = gBuildAnswers();
+  var html = '';
+  pairs.forEach(function (p) {
+    html += '<div class="review-row"><span>' + window.kcEscapeHtml(p.label) + '</span>' +
+      '<span class="rv">' + window.kcEscapeHtml(String(p.value)) + '</span></div>';
+  });
+  if (!html) html = '<p class="empty">Nothing answered yet -- go back and fill in the questions.</p>';
+  // Same tc_type cross-check the Advanced view enforces server-side too
+  // (checkTcMaxContradiction's comment) -- shown here as information, not
+  // as a blocker, since tc_type itself is not one of the four questions.
+  var tcTypeParam = latest && (latest.params || []).filter(function (p) { return p.id === 261; })[0];
+  var absMaxVal = parseFloat(document.getElementById('gAbsMax').value);
+  if (tcTypeParam && tcTypeParam.set && isFinite(absMaxVal)) {
+    var limit = TC_MAX_C_BY_TYPE[Number(tcTypeParam.value)];
+    if (limit !== undefined && absMaxVal > limit) {
+      html += '<p class="note guard-disabled">Warning: ' + absMaxVal + ' °C exceeds the ' +
+        'currently-configured thermocouple type\'s own maximum (' + limit + ' °C) -- the kiln ' +
+        'ceiling cannot exceed what the sensor can report. Fix this before committing.</p>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+function gPrefill(data) {
+  if (gPrefilled) return;
+  gPrefilled = true;
+  var byId = {};
+  (data.params || []).forEach(function (p) { byId[p.id] = p; });
+
+  var absMax = byId[G_IDS.ABS_MAX];
+  var gAbsMaxEl = document.getElementById('gAbsMax');
+  var tcMax = tcTypeMaxFor(byId);
+  // M12: same suggestion the Advanced form's field 260 makes, for the same
+  // reason and with the same limits -- a starting number the operator lowers
+  // to what this kiln survives, never a derivation (COMMISSIONING_UX.md sec
+  // 1.4 lists abs_max_temp_c among the four fields nobody may derive). A
+  // committed value always wins over it; `max` blocks raising it past the
+  // sensor's ceiling before gCommit()'s checkTcMaxContradiction() has to.
+  //
+  // As in the Advanced form, the suggestion is a PLACEHOLDER, never a
+  // `value` (opus review, 2026-08-28): gBuildAnswers() commits abs_max_temp_c
+  // whenever the field is non-empty, so a pre-filled value made "Commit" on
+  // the review screen write a number nobody had chosen. Empty-and-suggested
+  // instead means the guided flow simply carries no abs_max_temp_c pair
+  // until the operator types one -- and this being a REQUIRED question,
+  // gValidateScreen1()'s own "a positive number" check is what then stops
+  // them skipping it (screen 1 will not advance on an empty field),
+  // rather than a silent default sliding through.
+  if (tcMax !== undefined) gAbsMaxEl.max = tcMax;
+  if (absMax && absMax.set) {
+    gAbsMaxEl.value = absMax.value;
+  } else if (tcMax !== undefined) {
+    gAbsMaxEl.placeholder = '°C -- ' + tcMax + ' is the selected thermocouple\'s own limit';
+  }
+  gUpdateAbsMaxTcHint();
+  document.getElementById('gAbsMax').addEventListener('input', gUpdateAbsMaxTcHint);
+
+  var mainsSel = document.getElementById('gMainsSelect');
+  mainsSel.innerHTML = '<option value="unset">-- Not set --</option>';
+  MAINS_VOLTAGE_OPTIONS.forEach(function (opt) {
+    mainsSel.innerHTML += '<option value="' + opt[0] + '">' + window.kcEscapeHtml(opt[1]) + '</option>';
+  });
+  mainsSel.innerHTML += '<option value="other">Other&hellip;</option>';
+  var mains = byId[G_IDS.MAINS];
+  var knownValues = MAINS_VOLTAGE_OPTIONS.map(function (o) { return o[0]; });
+  if (mains && mains.set && knownValues.indexOf(Number(mains.value)) !== -1) {
+    mainsSel.value = String(mains.value);
+  } else if (mains && mains.set) {
+    mainsSel.value = 'other';
+    document.getElementById('gMainsOther').hidden = false;
+    document.getElementById('gMainsOther').value = mains.value;
+  }
+  mainsSel.addEventListener('change', function () {
+    document.getElementById('gMainsOther').hidden = (mainsSel.value !== 'other');
+  });
+
+  var power = byId[G_IDS.POWER];
+  if (power && power.set) document.getElementById('gPower').value = power.value;
+
+  var tcInstalled = byId[G_IDS.TC_INSTALLED];
+  var tcSource = byId[G_IDS.TC_SOURCE];
+  var tcPlacement = byId[G_IDS.TC_PLACEMENT];
+  var borrowedZone = byId[G_IDS.BORROWED_ZONE_INDEX];
+
+  // "Not fitted" zone picker -- populated from gZoneNames (loadZoneNames(),
+  // GET /api/zones), falling back to a plain "Zone N" label if that fetch
+  // failed or predates this firmware. 2026-08-30: this option used to be
+  // shown-disabled ("S13 is dormant, sample_counter_advancing is hardcoded
+  // false") per spec section 2.4/OQ7 -- now that safety_core_build_input()
+  // has a real producer for it (see SAFETY_MODEL.md's guard table), the
+  // option is reachable like the other two.
+  var zoneSel = document.getElementById('gBorrowedZoneSelect');
+  for (var zi = 0; zi < 3; zi++) {
+    var opt = document.createElement('option');
+    opt.value = String(zi);
+    opt.textContent = gZoneNames[zi] || ('Zone ' + zi);
+    zoneSel.appendChild(opt);
+  }
+
+  if (tcInstalled && tcInstalled.set && tcSource && tcSource.set && tcPlacement && tcPlacement.set) {
+    if (Number(tcInstalled.value) === 0) {
+      // safety_tc_installed==0 is Q2's "Not fitted" branch (COMMISSIONING_UX.md
+      // section 2.4) regardless of tc_source/tc_placement's own values -- those
+      // two are FORCED (BORROWED_ZONE / CHAMBER_AGREED) by this branch, not
+      // independently meaningful facts to re-derive the choice from.
+      gQ2Choice = 'not_fitted';
+      document.querySelector('#gCardNotFitted input').checked = true;
+      zoneSel.hidden = false;
+      if (borrowedZone && borrowedZone.set) {
+        zoneSel.value = String(borrowedZone.value);
+      }
+    } else if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 0) {
+      gQ2Choice = 'chamber';
+      document.querySelector('#gCardChamber input').checked = true;
+    } else if (Number(tcInstalled.value) === 1 && Number(tcPlacement.value) === 1) {
+      gQ2Choice = 'external';
+      document.querySelector('#gCardExternal input').checked = true;
+    }
+  }
+  document.querySelectorAll('input[name="gq2"]').forEach(function (r) {
+    r.addEventListener('change', function () {
+      document.querySelectorAll('.radio-card').forEach(function (c) { c.classList.remove('selected'); });
+      if (r.checked) r.closest('.radio-card').classList.add('selected');
+      // Zone picker is only meaningful for the "Not fitted" branch -- shown
+      // exactly while that radio is the checked one, same discipline
+      // #gMainsOther's own change handler uses for "Other..." mains voltage.
+      zoneSel.hidden = !(r.checked && r.value === 'not_fitted');
+    });
+  });
+
+  gRenderPreflight(data);
+}
+
+function gRenderPreflight(data) {
+  var status = document.getElementById('gPreflightStatus');
+  var lines = [];
+  lines.push(data.link_up ? 'Safety processor: LINK UP' : 'Safety processor: LINK DOWN');
+  lines.push(data.commissioned ? 'Commissioned: YES' : 'Commissioned: NO');
+  status.textContent = lines.join(' · ');
+}
+
+/* ---- The write window (COMMISSIONING_UX.md sec 5): config_store_write()
+ * refuses whenever the relay owner is ARMED, which is the steady state
+ * ~startup_grace_s (default 60s) after Pico boot; GRACE is only the FIRST
+ * ~startup_grace_s after Pico boot. Nothing before this screen ever talks to
+ * the Pico (every prior screen is browser-local), and there is no telemetry
+ * field today that reports GRACE seconds-remaining or boot time, so this can
+ * only detect ARMED by trying the real commit and reading
+ * KILNLINK_COMMIT_CONFIG_REJECT_ARMED back (commit_reject_reason_words() in
+ * safety_cfg_http.c already renders it as "relay is ARMED -- config writes
+ * are refused while ARMED").
+ *
+ * F2 fix (opus review): this used to wait the FULL startup_grace_s duration
+ * (default 60s) before retrying once -- since GRACE is the first ~60s after
+ * boot, that single retry fired exactly when the window was closing, not
+ * while it was open. There is no way from here to know how much of GRACE (if
+ * any) is left, or whether a power-cycle has even happened yet, so instead of
+ * asserting a countdown this cannot back up, retry promptly and repeatedly
+ * (every GRETRY_INTERVAL_S seconds, up to GRETRY_MAX_ATTEMPTS times) so that
+ * whenever the operator does power-cycle the processor, a retry lands inside
+ * the window rather than after it. The banner states only what is actually
+ * known -- the write was refused because the processor is ARMED, the
+ * operator needs to power-cycle it, and retries are in progress -- never a
+ * countdown of a window this code cannot observe opening or closing. */
+var gRetryTimer = null;
+var gRetryCount = 0;
+var GRETRY_INTERVAL_S = 3;
+var GRETRY_MAX_ATTEMPTS = 15; // 15 * 3s = 45s of retrying, comfortably inside a 60s-default GRACE
+
+// F4 fix (opus review): #gWriteWindow on screen 0 carried the same
+// ww-unknown/armed/waiting/ok class vocabulary as #gWriteWindow2 but this
+// function only ever targeted #gWriteWindow2 -- screen 0's copy was a static
+// string dressed up as live state. Both elements now track the same commit
+// attempt's outcome; #gWriteWindow2 also starts hidden (only meaningful once
+// a commit has actually been tried) while #gWriteWindow is always visible.
+function gSetWriteWindowBanner(cls, text) {
+  ['gWriteWindow', 'gWriteWindow2'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.hidden = false;
+    el.className = 'writewindow ' + cls;
+    el.textContent = text;
+  });
+}
+
+function gCommit() {
+  var msg = document.getElementById('guidedMsg');
+  var btn = document.getElementById('gCommitBtn');
+  // F3 fix (opus review): saveBtn's Advanced handler hard-blocks on this same
+  // check (~line 948); the guided flow only ever rendered it as advisory text
+  // on the review screen (gRenderReview()) and never re-checked here, so a
+  // contradictory pair could be committed straight past the warning. Enforce
+  // it the same way the Advanced flow does.
+  var tcMaxProblem = checkTcMaxContradiction();
+  if (tcMaxProblem) {
+    msg.textContent = 'Rejected: ' + tcMaxProblem;
+    return;
+  }
+  var pairs = gBuildAnswers();
+  if (gRetryTimer) { clearTimeout(gRetryTimer); gRetryTimer = null; }
+  btn.disabled = true;
+  msg.textContent = 'Staging and committing…';
+  gSetWriteWindowBanner('ww-unknown', 'Attempting commit…');
+
+  var body = pairs.map(function (p) { return 'id=' + encodeURIComponent(p.id) + '&value=' + encodeURIComponent(p.value); });
+  body.push('commit=1');
+  fetch('/api/safety/commissioning', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.join('&'),
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; }).then(function (j) { return { ok: r.ok, j: j }; });
+  }).then(function (res) {
+    btn.disabled = false;
+    // F1 fix (opus review): POST /api/safety/commissioning answers a
+    // REJECTED commit with HTTP 200 and body {"ok":false,"reason":"..."} --
+    // see safety_cfg_http.c:703-723, which calls httpd_resp_send() with no
+    // httpd_resp_set_status(). Only four malformed-body cases are non-200.
+    // So HTTP status alone (res.ok) can never distinguish an ARMED refusal, a
+    // RANGE/CONTRADICTION rejection, or a confirm_commit_landed() read-back
+    // failure from a real success -- the parsed body's own ok field is the
+    // only place that guarantee lives, and it must be checked too.
+    if (res.ok && res.j && res.j.ok === true) {
+      msg.textContent = 'Committed and confirmed by read-back.';
+      gSetWriteWindowBanner('ww-ok', 'Write window was open -- saved.');
+      gRetryCount = 0;
+      loadCurrent();
+      return;
+    }
+    var reason = (res.j && res.j.field ? res.j.field + ' -- ' : '') +
+      ((res.j && (res.j.reason || res.j.error)) || 'commit failed');
+    if (/ARMED/i.test(reason)) {
+      gStartWriteWindowRetry(reason);
+    } else {
+      msg.textContent = 'Rejected: ' + reason;
+      gSetWriteWindowBanner('ww-armed', 'Commit refused (not a write-window problem): ' + reason);
+    }
+  }).catch(function (e) {
+    btn.disabled = false;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Save failed: ' + e.message;
+  });
+}
+
+function gStartWriteWindowRetry(reason) {
+  var msg = document.getElementById('guidedMsg');
+  gRetryCount++;
+  if (gRetryCount > GRETRY_MAX_ATTEMPTS) {
+    msg.textContent = 'Still refused after ' + GRETRY_MAX_ATTEMPTS + ' attempts: ' + reason +
+      '. If the safety processor has not been power-cycled, do so now, then press ' +
+      '"Stage & commit" again once it has finished booting.';
+    gSetWriteWindowBanner('ww-armed', 'Write window closed -- ' + reason);
+    gRetryCount = 0;
+    return;
+  }
+  // F2 fix (opus review): no countdown here -- this code cannot see whether
+  // GRACE is open, closed, or has not started yet (no power-cycle so far).
+  // State only what is known: the write was refused because the processor is
+  // ARMED, and retries are being attempted in case the operator power-cycles
+  // it (or already has, and GRACE just hasn't caught this attempt yet).
+  msg.textContent = 'Refused: ' + reason + '. Power-cycle the safety processor now if you have not ' +
+    'already -- retrying automatically (attempt ' + gRetryCount + '/' + GRETRY_MAX_ATTEMPTS + ').';
+  gSetWriteWindowBanner('ww-waiting', 'Refused (ARMED) -- retrying every ' + GRETRY_INTERVAL_S +
+    's, attempt ' + gRetryCount + '/' + GRETRY_MAX_ATTEMPTS + '. Power-cycle the safety processor ' +
+    'if you have not already.');
+  if (gRetryTimer) clearTimeout(gRetryTimer);
+  gRetryTimer = setTimeout(function () {
+    gRetryTimer = null;
+    gSetWriteWindowBanner('ww-waiting', 'Retrying commit now…');
+    gCommit();
+  }, GRETRY_INTERVAL_S * 1000);
+}
+
+gGoto(0);
+
+loadCurrent();
+// Refetch periodically so a `stale` flag that clears on its own (the ESP's
+// own cache refetch, COMMISSIONING.md section 3) is reflected here without
+// a manual reload -- same cadence class as zones_page.html's autotune poll.
+setInterval(loadCurrent, 5000);
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+
+<!-- ============================================================
+     STILL UNWIRED -- for the coordinator, not touched by this file:
+     1. This page is not in any gzip/EMBED_TXTFILES list yet, so it is not
+        built into the firmware image at all.
+     2. No httpd route registers it (compare zones_http.c's registration of
+        zones_page.html) -- needs a GET handler for whatever path nav.js's
+        new entry below points at (this page assumes /safety/commissioning).
+     3. GET /api/safety/commissioning and POST /api/safety/commissioning and
+        POST /api/safety/commissioning/bench_preset (the three endpoints this
+        script calls) have no server-side implementation in this codebase yet
+        -- they are being built in parallel against COMMISSIONING.md section
+        3.1's contract, which is the exact shape this file's fetch/render/
+        POST code was written against.
+     4. The tc_source / tc_placement_mode integer-to-enum mapping used above
+        is this page's best reading of COMMISSIONING.md's one worked example,
+        not a confirmed firmware fact -- see the long comment on the GROUPS
+        array's tc_source entry. Whoever wires the handler should confirm (or
+        correct) those codes against config_store.c.
+     ============================================================ -->
+</body>
+</html>

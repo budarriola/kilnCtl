@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Per-session GUI logs and the local retention setting (see session_log.py)
+logs/
+src/kilnctrl/settings.json

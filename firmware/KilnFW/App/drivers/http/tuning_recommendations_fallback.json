@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "generated_from": "fallback-no-campaign-artifact-yet",
+  "sim_confidence": {"held_out_rms_c": [], "discrimination_threshold_c": [], "extrapolation_boundary_c": 0},
+  "recommendations": [],
+  "caveats": [
+    "This is a build-time placeholder, not campaign output. The real tools/PcTools/config_presets/tuning_recommendations.json was not present when firmware was built, so no recommendations are available."
+  ]
+}

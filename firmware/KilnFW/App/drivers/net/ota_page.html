@@ -1,0 +1,1194 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Firmware Update</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Same page-local-palette convention as rules_page.html/readiness_page.html
+     -- see theme.css's header comment. Only what's specific to this page
+     lives here. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --warn: #b00; --ok: #1a7a1a; --accent: #06c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --warn: var(--ui-accent-5); --ok: var(--ui-accent-4); --accent: var(--ui-accent-3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --warn: var(--ui-accent-5); --ok: var(--ui-accent-4); --accent: var(--ui-accent-3);
+  }
+  /* WEB_UI_RESPONSIVE.md sec 6: shared shell width instead of a fixed
+     560px cap -- see main_page.html's identical comment for the rationale. */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1.05em; border-top: 1px solid var(--border); padding-top: 0.8em; margin-top: 1.4em; }
+  p { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.8em 1em; margin: 0.6em 0; }
+  /* 2026-09-01, owner report: "the RP2040 section of the fw update looks
+     smashed on the phone". Root cause: an `auto` grid track sizes to its
+     items' max-content width, and a grid item's own default min-width is
+     `auto` too (its own min-content) -- for the RP2040 block's longer
+     labels ("Safety processor (RP2040) build commit / date", written out
+     in renderPicoInfo() below because unlike the ESP block this is a
+     SECOND processor's identity, not this board's own) that pushed the
+     `dt` column wide enough on a narrow phone to force `dd` into a sliver,
+     with nothing letting either column give up width gracefully.
+     `dt` deliberately does NOT get `min-width: 0` -- see diagnostics_page.
+     html's/safety_page.html's identical-in-spirit `.row .label` fix: a
+     label column that can shrink pre-emptively is the bug, not the fix.
+     Labels here are short-ish, known, multi-word strings, so plain word
+     wrapping (no explicit overflow-wrap override) already keeps them from
+     forcing the row wider than necessary without collapsing the column.
+     `dd` gets `min-width: 0` (it did not have one before) so the value
+     column -- the one that legitimately carries unbreakable tokens
+     (commit hashes, version strings) -- can actually shrink and rely on
+     its existing `word-break: break-all` to avoid overflowing sideways.
+     Below ~420px even a wrapped two-word label plus a hash value gets
+     tight enough to look cramped rather than merely narrow, so `.kv`
+     collapses to a single stacked column there -- dt above its dd, both
+     full width, no column fight left to lose. */
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 0.15em 0.8em; font-size: 0.92em; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; min-width: 0; word-break: break-all; }
+  @media (max-width: 420px) {
+    .kv { grid-template-columns: 1fr; gap: 0; }
+    .kv dt { margin-top: 0.5em; }
+    .kv dt:first-child { margin-top: 0; }
+    .kv dd { margin-bottom: 0.15em; }
+  }
+  .blocker { background: var(--card-bg); border: 1px solid var(--warn); color: var(--warn);
+             border-radius: var(--ui-radius); padding: 0.7em 1em; font-weight: bold; }
+  .ready { background: var(--card-bg); border: 1px solid var(--ok); color: var(--ok);
+           border-radius: var(--ui-radius); padding: 0.7em 1em; font-weight: bold; }
+  .progress-outer { background: var(--input-bg); border: 1px solid var(--input-border);
+                     border-radius: var(--ui-radius); height: 1.6em; overflow: hidden; margin: 0.5em 0; }
+  .progress-inner { background: var(--accent); height: 100%; width: 0%; transition: width 0.3s ease;
+                     color: #fff; font-size: 0.8em; line-height: 1.6em; text-align: center; white-space: nowrap; }
+  input[type="password"], input[type="file"], input[type="text"] { width: 100%; box-sizing: border-box; font-size: 1em;
+             background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+             border-radius: var(--ui-radius); padding: 0.5em; margin: 0.3em 0; }
+  label { display: block; margin-top: 0.6em; font-size: 0.9em; color: var(--muted); }
+  button { margin-top: 0.8em; margin-right: 0.5em; padding: 0.7em 1.5em;
+           font-size: 1em; background: var(--button-bg); color: var(--fg);
+           border: 1px solid var(--input-border); border-radius: var(--ui-radius); cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { border-color: var(--warn); color: var(--warn); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .msg { margin-top: 0.6em; font-weight: bold; }
+  .note { font-size: 0.85em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<!-- Ad-hoc "&larr; Dashboard" back-link retired: nav.js's shared topbar
+     (Home button) provides this on every page. The <h1> that used to sit
+     here is also gone (2026-08-21 rework item 5) -- nav.js's topbar now
+     shows this page's name ("Firmware Update", from <title> above) in the
+     brand's old spot, so the heading was pure duplication. -->
+<p>Push a new image to the ESP32-S3 main controller or relay one to the RP2040
+safety processor over the isolated UART link. Every action below requires an
+administrator session (Settings &rarr; Security), the same as any other admin
+route.</p>
+
+<h2>Kiln state</h2>
+<div id="interlockBox" class="card">Checking…</div>
+
+<h2>ESP32-S3 (main controller)</h2>
+<div id="espInfo" class="card kv">Loading…</div>
+<div id="espLastUpdate" class="card note" style="display:none"></div>
+
+<!-- TODO.md 9.6: "reachable only when the kiln is idle" -- the file
+     picker/upload controls for BOTH processors are hidden entirely (not
+     merely disabled) until loadInterlock() confirms idle, and re-hidden the
+     moment a later poll finds the kiln no longer idle. -->
+
+<!-- UPDATE_PROTOCOL.md sec 6a: "GUI states the order -- ESP first -- when
+     both need updating." Both processors have no shared queue this page can
+     read back (the Pico has no A/B slot/pending-update concept at all, see
+     renderPicoInfo()'s own comment), so "both need updating" is read
+     directly off operator intent: a file chosen in BOTH pickers at once.
+     Hidden until both are chosen; re-hidden the moment either picker is
+     cleared or a file is picked in only one -- see updateOrderHintFilesChanged()
+     below. -->
+<div id="updateOrderHint" class="card" style="display:none">
+  Both an ESP and a Pico image are selected. Update the <b>ESP first</b>,
+  confirm it booted the new image, and only then push the Pico image --
+  the safety link the Pico update relies on comes up as part of the ESP's
+  own boot, so relaying to the Pico first (or mid-ESP-reboot) risks the
+  relay running over a link that is about to drop.
+</div>
+
+<div id="espPicker" style="display:none">
+  <label for="espFile">New ESP image (.bin)</label>
+  <input type="file" id="espFile" accept=".bin">
+  <div>
+    <button id="espUpdateBtn" type="button" class="primary">Update ESP</button>
+    <button id="espRollbackBtn" type="button" class="danger">Roll back ESP to previous image</button>
+  </div>
+</div>
+<!-- Only shown when GET /api/ota/esp/status reports recovery_mode:true --
+     see renderEspInfo() below. POST /api/ota/esp/recovery_exit is
+     authenticated the same way as every other mutating OTA route
+     (ROUTE_TIER_ADMIN) -- App/drivers/http/ota_http.c's
+     ota_recovery_exit_post_handler() doc comment has the full reasoning. -->
+<div id="recoveryExitBox" class="blocker" style="display:none">
+  This board is running in RECOVERY MODE (a recent update did not
+  self-confirm within its window). It will self-clear and boot normally next
+  reboot on its own, but you can reboot right now instead of waiting.
+  <div><button id="recoveryExitBtn" type="button" class="danger">Exit recovery mode &amp; reboot now</button></div>
+</div>
+<div id="espProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="espProgressBar" class="progress-inner">0%</div></div>
+</div>
+<p id="espMsg" class="msg"></p>
+
+<h2>RP2040 (safety processor)</h2>
+<div id="picoInfo" class="card kv">Loading…</div>
+
+<div id="picoPicker" style="display:none">
+  <label for="picoFile">New Pico image (.bin)</label>
+  <input type="file" id="picoFile" accept=".bin">
+  <div>
+    <button id="picoUpdateBtn" type="button" class="primary">Update Pico</button>
+    <button id="picoRollbackBtn" type="button" class="danger">Roll back Pico to previous image</button>
+  </div>
+</div>
+<div id="picoProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="picoProgressBar" class="progress-inner">0%</div></div>
+</div>
+<p id="picoMsg" class="msg"></p>
+
+<h2>Stage an update (upload now, install later)</h2>
+<p>Send a firmware image from this PC or phone into the board's
+<b>stage</b> partition. Staging only stores and verifies the image; it does
+not change what is running and does not reboot. Installing a staged image is
+done by the recovery image: <b>Install</b> below reboots the board into it.</p>
+<div id="stageInfo" class="card kv">Loading&hellip;</div>
+<div id="stageUnsigned" class="blocker" style="display:none">
+  UNSIGNED: this image is verified by its sha256 only, which catches
+  corruption but does not prove who published it. Install only an image you
+  built or obtained from a source you trust.
+</div>
+<div id="stagePicker">
+  <label for="stageFile">New application image (KilnCtrl.bin)</label>
+  <input type="file" id="stageFile" accept=".bin">
+  <div>
+    <button id="stageUploadBtn" type="button" class="primary">Upload to stage</button>
+    <button id="stageClearBtn" type="button" class="danger">Clear stage</button>
+    <button id="stageInstallBtn" type="button" disabled
+            title="Needs a verified staged image">Install (reboots into recovery)</button>
+  </div>
+  <p class="note">Install restarts the board into the recovery image, where you
+  join its Wi-Fi (the passphrase is shown on the LCD) and press
+  <i>Apply staged update</i>. Uploading erases any previously staged image first.</p>
+</div>
+<div id="stageProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="stageProgressBar" class="progress-inner">0%</div></div>
+</div>
+<p id="stageMsg" class="msg"></p>
+
+<h2>Update from GitHub</h2>
+<p>Ask GitHub for the newest release of the repository below and, if you
+choose, download it into the stage. The board does the download itself and
+needs its Wi-Fi connected to the internet with the clock synced. Nothing is
+installed until you press Install above. Not possible during a firing or an
+autotune run.</p>
+<div id="ghBusyBox" class="blocker" style="display:none"></div>
+<div id="ghInfo" class="card kv">Loading&hellip;</div>
+<div id="ghUnsigned" class="blocker" style="display:none">
+  UNSIGNED: releases are not signature-checked yet. The board verifies the
+  download against the release's own sha256 manifest, which catches corruption
+  but does not prove who published it. Only use a repository you trust.
+</div>
+<div id="ghProgressWrap" style="display:none">
+  <div class="progress-outer"><div id="ghProgressBar" class="progress-inner">0%</div></div>
+</div>
+<div>
+  <label><input type="checkbox" id="ghPre"> Include pre-releases</label>
+  <label><input type="checkbox" id="ghForce"> Reinstall the same version (force)</label>
+  <label><input type="checkbox" id="ghDown"> Allow an older version (downgrade)</label>
+  <div id="ghTypedWrap" style="display:none">
+    <label for="ghTyped">Downgrade, or force on a dev build: type the release tag to confirm</label>
+    <input type="text" id="ghTyped" maxlength="40" autocomplete="off" autocapitalize="off" spellcheck="false">
+  </div>
+  <button id="ghCheckBtn" type="button" class="primary">Check for updates</button>
+  <button id="ghDownloadBtn" type="button">Download to stage</button>
+  <button id="ghCancelBtn" type="button" class="danger" style="display:none">Cancel</button>
+</div>
+<p id="ghMsg" class="msg"></p>
+
+<h2>Update source repository</h2>
+<p>The GitHub repository (<code>owner/name</code>) this board checks for
+releases. Leave it at the default unless you publish your own builds. A
+release from any other repository is shown as UNSIGNED. Cannot be changed
+while a firing or autotune is running.</p>
+<div id="repoInfo" class="card kv">Loading&hellip;</div>
+<div>
+  <label for="repoInput">Repository (owner/name, empty = default)</label>
+  <input type="text" id="repoInput" maxlength="62" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button id="repoSaveBtn" type="button" class="primary">Save repository</button>
+  <button id="repoResetBtn" type="button">Reset to default</button>
+</div>
+<p id="repoMsg" class="msg"></p>
+
+<script>
+/* ---- OTA-family fetch -----------------------------------------------------
+ * This page used to sign every mutating request with an AP-password HMAC
+ * challenge/response handshake (CommonFW/docs/UPDATE_PROTOCOL.md section 2
+ * step 2, shared with app.js's kcOtaAuthedFetch, since 2026-09-18). That
+ * scheme was retired 2026-09-29 (WEB_AUTH_PLAN.md item 2b, owner decision
+ * "Retire; open when login off") -- ROUTE_TIER_ADMIN (the session cookie) is
+ * now the only gate on every route below, same as any other admin route. */
+
+/* ---- Fetch helpers ------------------------------------------------------ */
+function pushImage(endpoint, fileBytes, extraHeaders) {
+  var headers = { 'Content-Type': 'application/octet-stream' };
+  if (extraHeaders) {
+    for (var k in extraHeaders) { if (extraHeaders.hasOwnProperty(k)) { headers[k] = extraHeaders[k]; } }
+  }
+  return window.kcOtaAuthedFetch(endpoint, {
+    method: 'POST',
+    headers: headers,
+    body: fileBytes,
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      var body = {};
+      try { body = JSON.parse(text); } catch (e) { /* plain-text error body -- see below */ }
+      if (!r.ok) {
+        var e2 = new Error(text || ('HTTP ' + r.status));
+        e2.status = r.status;
+        e2.body = body;
+        throw e2;
+      }
+      return body;
+    });
+  });
+}
+
+function readFileBytes(fileInput) {
+  var file = fileInput.files && fileInput.files[0];
+  if (!file) return Promise.reject(new Error('choose a file first'));
+  return file.arrayBuffer().then(function (buf) { return new Uint8Array(buf); });
+}
+
+/* ---- Interlock (before the file picker matters) -------------------------
+ * GET /api/ota/interlock (App/drivers/http/ota_http.c, added this session) --
+ * unauthenticated, same exposure level as GET /api/status already has.
+ * Named blocker shown right at the top, refreshed on a slow timer so an
+ * operator watching this page sees the kiln become idle without reloading. */
+function setPickersVisible(visible) {
+  document.getElementById('espPicker').style.display = visible ? '' : 'none';
+  document.getElementById('picoPicker').style.display = visible ? '' : 'none';
+  document.getElementById('stagePicker').style.display = visible ? '' : 'none';
+}
+
+// Whether the kiln is idle right now is exactly a live device reading (a
+// firing that starts a second after this loads makes "Idle" wrong
+// immediately) -- kc-live-value on the box's text, same class the box
+// itself already carries for its ready/blocker styling.
+function loadInterlock() {
+  var box = document.getElementById('interlockBox');
+  box.classList.add('kc-live-value');
+  return fetch('/api/ota/interlock').then(function (r) { return r.json(); }).then(function (s) {
+    // ok:false with needs_ack:true is not a hard refusal -- it means the
+    // safety processor isn't answering, and the operator can proceed past
+    // it via the 428/X-Ota-Ack-No-Safety warning dialog when they actually
+    // try the action. Only a plain ok:false (needs_ack absent or false --
+    // firing running, zone hot, another update in flight) disables the
+    // controls here.
+    var allowed = s.ok || s.needs_ack === true;
+    if (s.ok) {
+      box.className = 'ready kc-live-value';
+      box.textContent = 'Idle -- updates are allowed.';
+    } else if (s.needs_ack) {
+      box.className = 'blocker kc-live-value';
+      box.textContent = 'Warning: ' + (s.reason || 'safety processor is not answering');
+    } else {
+      box.className = 'blocker kc-live-value';
+      box.textContent = 'Blocked: ' + (s.reason || 'kiln is not idle');
+    }
+    setPickersVisible(allowed);
+    return allowed;
+  }).catch(function () {
+    box.className = 'blocker kc-live-value';
+    box.textContent = 'Could not read interlock state -- assume blocked.';
+    setPickersVisible(false);
+    return false;
+  });
+}
+
+/* ---- ESP status ----------------------------------------------------------
+ * GET /api/ota/esp/status -- phase/percent/version/commit/dirty/build_date/
+ * active_slot/inactive_slot/inactive_version/last_update (App/drivers/
+ * ota_http.c, extended this session -- see TODO.md 9.6). */
+// version/commit/build_date are exactly the "build-time constants like
+// firmware version" the live-reading definition excludes explicitly -- they
+// don't change between polls of a board that hasn't been reflashed, so no
+// kc-live-value. active_slot/inactive_slot are also which-partition-is-
+// which config, not a moment-to-moment reading. last_update is a report on
+// an update that already finished -- same "already over" reasoning as
+// main_page.html's renderLastRun, so it stays unmarked too. The progress bar
+// (phase/percent) is the one thing here that is genuinely live: it only
+// exists while a write/verify is actively in flight and is meaningless the
+// instant the connection to report it drops.
+function esc(v) {
+  return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function renderEspInfo(s) {
+  var info = document.getElementById('espInfo');
+  info.innerHTML =
+    '<dt>Running version</dt><dd>' + esc(s.version || '(unknown)') + '</dd>' +
+    '<dt>Build commit</dt><dd>' + esc(s.commit || '(hidden)') + (s.dirty ? ' (dirty)' : '') + '</dd>' +
+    '<dt>Build date</dt><dd>' + esc(s.build_date || '(hidden)') + '</dd>' +
+    '<dt>Active slot</dt><dd>' + esc(s.active_slot) + '</dd>' +
+    '<dt>Inactive slot</dt><dd>' + esc(s.inactive_slot) +
+      ' (' + esc(s.inactive_version ? s.inactive_version : '(empty)') + ')</dd>';
+
+  var lu = document.getElementById('espLastUpdate');
+  if (s.last_update) {
+    lu.style.display = '';
+    lu.textContent = 'Last update: ' + s.last_update.version_before + ' -> ' +
+      (s.last_update.version_after || '(unknown)') + ', ' +
+      (s.last_update.success ? 'succeeded' : 'FAILED (' + s.last_update.reason + ')') +
+      ', ' + s.last_update.uptime_s + 's after boot.';
+  } else {
+    lu.style.display = 'none';
+  }
+
+  var wrap = document.getElementById('espProgressWrap');
+  var bar = document.getElementById('espProgressBar');
+  bar.classList.add('kc-live-value');
+  if (s.phase === 'writing' || s.phase === 'verifying' || s.phase === 'finalizing') {
+    wrap.style.display = '';
+    bar.style.width = s.percent + '%';
+    bar.textContent = s.phase + ' ' + s.percent + '%';
+  } else {
+    wrap.style.display = 'none';
+  }
+
+  // recovery_mode is decided once at boot (boot_guard_is_recovery_mode())
+  // and cannot flip false->true or back within this same poll session
+  // other than via an actual reboot, but it CAN flip true->false the moment
+  // the board self-clears and the operator reboots it themselves (from this
+  // very button) or via the background self-confirm task -- so this box is
+  // re-hidden every poll, same as espPicker's idle-dependent visibility
+  // above, not just shown once.
+  document.getElementById('recoveryExitBox').style.display = s.recovery_mode ? '' : 'none';
+
+  return s.phase;
+}
+
+function pollEspStatus() {
+  fetch('/api/ota/esp/status').then(function (r) { return r.json(); }).then(function (s) {
+    var phase = renderEspInfo(s);
+    if (phase === 'writing' || phase === 'verifying' || phase === 'finalizing') {
+      setTimeout(pollEspStatus, 1000);
+    }
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('espInfo').textContent = 'Could not load ESP status.';
+  });
+}
+
+/* ---- Pico status ----------------------------------------------------------
+ * GET /api/ota/pico/status -- phase/percent/last_error plus protocol_version*
+ * fields (App/drivers/http/ota_http.c, extended this session). There is no A/B
+ * "active/inactive slot" concept on the Pico side in this protocol at all --
+ * the RP2040 has one firmware image, not two OTA partitions -- so this
+ * section has no slot row, unlike the ESP one.
+ *
+ * Build commit/dirty/date come from a SEPARATE endpoint, GET /api/status
+ * (dashboard_http.c's safety_build_* fields) -- those are parsed off the
+ * safety processor's own SAFETY_CMD_FW_VERSION broadcast
+ * (safety_link.h's safety_link_get_peer_build_status(), TODO.md owner-report
+ * item 5) and retained there, not part of this ota_http.c relay status.
+ * Stashed in s_safetyBuild by pollSafetyBuildInfo() below (which polls
+ * /api/status every 3s) and merged in here so a single render function
+ * still owns all of #picoInfo's markup. */
+var s_safetyBuild = null; // { known, dirty, commit, datetime } or null before the first /api/status reply
+var s_lastPicoStatus = null;
+
+// Same live/static split as renderEspInfo above: protocol_version and the
+// safety build identity are fixed per firmware build (not moment-to-moment
+// readings), so unmarked; relay phase and the last relay error are current
+// link/relay state and get kc-live-value.
+function renderPicoInfo(s) {
+  s_lastPicoStatus = s;
+  var info = document.getElementById('picoInfo');
+  var html = '<dt>Relay phase</dt><dd class="kc-live-value">' + esc(s.phase) + '</dd>';
+  if (s.protocol_version_known) {
+    html += '<dt>Protocol version</dt><dd>' + esc(s.protocol_version) +
+      ' (min compatible ' + esc(s.protocol_min_compatible) + ')</dd>' +
+      '<dt>Compatible with this ESP</dt><dd>' + (s.protocol_compatible ? 'yes' : 'NO -- mismatch') + '</dd>';
+  } else {
+    html += '<dt>Protocol version</dt><dd>not yet known (no FW_VERSION frame received)</dd>';
+  }
+  if (s_safetyBuild && s_safetyBuild.known) {
+    html += '<dt>Safety processor (RP2040) build commit</dt><dd>' + esc(s_safetyBuild.commit) +
+      (s_safetyBuild.dirty ? ' (dirty)' : '') + '</dd>' +
+      '<dt>Safety processor (RP2040) build date</dt><dd>' + esc(s_safetyBuild.datetime) + '</dd>';
+  } else {
+    html += '<dt>Safety processor (RP2040) build commit / date</dt><dd>not reported yet' +
+      ' (no FW_VERSION frame parsed from the safety link)</dd>';
+  }
+  if (s.last_error) {
+    html += '<dt>Last relay error</dt><dd class="kc-live-value">' + esc(s.last_error) + '</dd>';
+  }
+  info.innerHTML = html;
+
+  var wrap = document.getElementById('picoProgressWrap');
+  var bar = document.getElementById('picoProgressBar');
+  bar.classList.add('kc-live-value');
+  var active = ['begin', 'erasing', 'sending', 'retransmit', 'finishing'].indexOf(s.phase) !== -1;
+  if (active) {
+    wrap.style.display = '';
+    bar.style.width = s.percent + '%';
+    bar.textContent = s.phase + ' ' + s.percent + '%';
+  } else {
+    wrap.style.display = 'none';
+  }
+  return s.phase;
+}
+
+function pollPicoStatus() {
+  fetch('/api/ota/pico/status').then(function (r) { return r.json(); }).then(function (s) {
+    var phase = renderPicoInfo(s);
+    if (['begin', 'erasing', 'sending', 'retransmit', 'finishing'].indexOf(phase) !== -1) {
+      setTimeout(pollPicoStatus, 1000);
+    }
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('picoInfo').textContent = 'Could not load Pico status.';
+  });
+}
+
+/* ---- Button wiring -------------------------------------------------------- */
+document.getElementById('espUpdateBtn').addEventListener('click', function () {
+  var msg = document.getElementById('espMsg');
+  msg.textContent = 'Reading file…';
+  readFileBytes(document.getElementById('espFile')).then(function (bytes) {
+    msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
+    return pushImage('/api/ota/esp', bytes);
+  }).then(function (body) {
+    msg.textContent = 'ESP update accepted: ' + body.bytes + ' bytes written to ' + body.partition +
+      ', version ' + body.version + '. Reboot the board to run it (stays PENDING_VERIFY until confirmed).';
+    pollEspStatus();
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'ESP update failed: ' + e.message;
+  });
+});
+
+document.getElementById('espRollbackBtn').addEventListener('click', function () {
+  var msg = document.getElementById('espMsg');
+  window.kcConfirm('Roll back the ESP to its previous image and reboot now?').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting rollback…';
+    return window.kcOtaAuthedFetch('/api/ota/esp/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(0),
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+      return JSON.parse(text);
+    });
+  }).then(function (body) {
+    msg.textContent = 'Rollback accepted (was running ' + body.version_before + ') -- board is rebooting now.';
+  }).catch(function (e) {
+    if (e && e.__kcHandled) return;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Rollback failed: ' + e.message;
+  });
+});
+
+// opus-review finding 3: POST /api/ota/pico/rollback used to block for up
+// to ~6.3s (App/drivers/http/ota_http.c's own comment on ota_pico_rollback_task()
+// explains why -- one httpd worker, a multi-second send-burst/reply-window
+// plus boot_id-reconnect watch). It now returns a 202 "pending" promptly and
+// the actual outcome is polled from GET /api/ota/pico/rollback/status, same
+// poll-for-progress shape pollPicoStatus() above already uses for the plain
+// Pico update. renderPicoRollbackStatus() below never collapses "refused"
+// and "unknown outcome" into a single "done" message -- both are real,
+// distinct possibilities here, same as the old synchronous handler's body.
+function renderPicoRollbackStatus(msg, body) {
+  if (body.status === 'rebooting') {
+    msg.textContent = 'Rollback accepted -- the safety processor rebooted into a different image.';
+  } else if (body.status === 'unknown') {
+    msg.textContent = 'Rollback sent, but the outcome is unknown: ' + (body.detail || '');
+  } else if (body.status === 'pending') {
+    msg.textContent = 'Rollback in progress -- waiting for the safety processor…';
+  } else {
+    msg.textContent = 'Rollback: ' + (body.detail || JSON.stringify(body));
+  }
+}
+
+function pollPicoRollbackStatus() {
+  var msg = document.getElementById('picoMsg');
+  fetch('/api/ota/pico/rollback/status').then(function (r) { return r.json(); }).then(function (body) {
+    renderPicoRollbackStatus(msg, body);
+    if (body.status === 'pending') {
+      setTimeout(pollPicoRollbackStatus, 500);
+    }
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    msg.textContent = 'Could not load rollback status.';
+  });
+}
+
+document.getElementById('picoRollbackBtn').addEventListener('click', function () {
+  var msg = document.getElementById('picoMsg');
+  window.kcConfirm('Roll back the SAFETY PROCESSOR (Pico) to its previous image and reboot it now? ' +
+               'This reboots the safety processor mid-session.').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting rollback…';
+    return window.kcOtaAuthedFetch('/api/ota/pico/rollback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(0),
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      var body = null;
+      try { body = JSON.parse(text); } catch (parseErr) { /* fall through to the raw-text error below */ }
+      if (!r.ok) throw new Error((body && body.detail) || text || ('HTTP ' + r.status));
+      return body || {};
+    });
+  }).then(function (body) {
+    // Request accepted (202, status "pending") -- start polling for the
+    // real outcome rather than treating this response as the final word.
+    renderPicoRollbackStatus(msg, body);
+    setTimeout(pollPicoRollbackStatus, 500);
+  }).catch(function (e) {
+    if (e && e.__kcHandled) return;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Rollback failed: ' + e.message;
+  });
+});
+
+document.getElementById('recoveryExitBtn').addEventListener('click', function () {
+  var msg = document.getElementById('espMsg');
+  window.kcConfirm('Reboot the board now to exit recovery mode?').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting recovery-mode exit…';
+    return window.kcOtaAuthedFetch('/api/ota/esp/recovery_exit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: new Uint8Array(0),
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+      return JSON.parse(text);
+    });
+  }).then(function () {
+    msg.textContent = 'Recovery-mode exit accepted -- board is rebooting now.';
+  }).catch(function (e) {
+    if (e && e.__kcHandled) return;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Recovery-mode exit failed: ' + e.message;
+  });
+});
+
+// UPDATE_PROTOCOL.md sec 6/6a: "warn, and require a second confirmation,
+// when the uploaded image's protocol version differs from the running
+// one." App/drivers/http/ota_http_pico.c's ota_pico_do_stage() already
+// refuses this with 409 {"error":"protocol_version_mismatch",...} unless
+// the request carries X-Ota-Force-Version: 1 (see that file's own header
+// comment for why a header, not a body/query field) -- this is the page-
+// side half: catch that specific refusal, show an in-page, theme-following
+// confirmation (#forceProtoModal, confirmForceProtocol() below) naming both
+// protocol versions, and only on an explicit "Relay anyway" retry the SAME
+// upload with the force header set. Any OTHER failure (staging error, a
+// plain non-JSON body) falls through to the ordinary catch below unchanged
+// -- this only special-cases the one 409 shape this route emits for a
+// protocol mismatch specifically.
+function isProtocolMismatch(e) {
+  return e && e.status === 409 && e.body && e.body.error === 'protocol_version_mismatch';
+}
+
+// Resolves true only on "Relay anyway"; Cancel, Escape and a backdrop
+// click resolve false. Never rejects. Thin wrapper over app.js's shared
+// kcConfirm (owner rule: every confirmation popup is one themed, in-page,
+// cancellable modal) -- this page used to carry its own copy of that modal
+// (built before kcConfirm supported this shape); it now just supplies the
+// wording.
+function confirmForceProtocol(paragraphs) {
+  return window.kcConfirm(paragraphs.join('\n\n'),
+    { title: 'Protocol version mismatch', okLabel: 'Relay anyway' });
+}
+
+document.getElementById('picoUpdateBtn').addEventListener('click', function () {
+  var msg = document.getElementById('picoMsg');
+  msg.textContent = 'Reading file…';
+  var fileBytes;
+  readFileBytes(document.getElementById('picoFile')).then(function (bytes) {
+    fileBytes = bytes;
+    msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
+    return pushImage('/api/ota/pico', bytes);
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) throw e;
+    if (!isProtocolMismatch(e)) throw e;
+    var b = e.body;
+    msg.textContent = 'This image speaks a different link protocol -- confirm to relay it anyway.';
+    return confirmForceProtocol([
+      'This image declares link protocol ' + b.image_protocol_version +
+        ', but this board currently speaks protocol ' + b.esp_protocol_version + '.',
+      'Relaying it anyway may leave the safety processor unable to talk to this ESP ' +
+        '(DEGRADED_NO_CONTEXT -- context-dependent guards disabled) until a compatible ' +
+        'image is pushed to one side or the other.',
+      'Relay it anyway?'
+    ]).then(function (proceed) {
+      if (!proceed) {
+        msg.textContent = 'Pico update cancelled (protocol version mismatch not confirmed).';
+        throw { __kcHandled: true };
+      }
+      msg.textContent = 'Confirmed -- retrying with the protocol mismatch forced…';
+      return pushImage('/api/ota/pico', fileBytes, { 'X-Ota-Force-Version': '1' });
+    });
+  }).then(function (body) {
+    msg.textContent = 'Pico image staged (' + body.bytes + ' bytes, crc32 ' + body.crc32 +
+      '), relaying over the safety UART link now -- watch the progress bar below.';
+    pollPicoStatus();
+  }).catch(function (e) {
+    if (e && e.__kcHandled) return;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Pico update failed: ' + e.message;
+  });
+});
+
+/* ---- Safety-processor build info poll --------------------------------
+ * GET /api/status (dashboard_http.c) is already the shared status endpoint
+ * every other page in this app polls -- this page has never needed it
+ * before (it drives everything else off the /api/ota/... status routes
+ * instead), so this is a small dedicated poll just for the safety_build_*
+ * fields. (Used to also drive a BOOT-button OTA-auth-bypass banner here;
+ * that banner and the boot_button.h module it read from were both retired
+ * 2026-09-29 along with the AP-password HMAC scheme.) */
+function pollSafetyBuildInfo() {
+  fetch('/api/status').then(function (r) { return r.json(); }).then(function (data) {
+    // safety_build_* -- dashboard_http.c's parse of the RP2040's own
+    // SAFETY_CMD_FW_VERSION broadcast (TODO.md owner-report item 5). Only
+    // trust the commit/dirty/datetime fields when known is true -- see
+    // dashboard_http.h's field comment and safety_link.h's peer_build_known
+    // doc: every other peer_build_* field is meaningless until a FW_VERSION
+    // frame has actually parsed, so "not reported yet" beats showing a stale
+    // or zeroed build. renderPicoInfo() re-runs against the last-seen pico
+    // status so the build row updates without waiting for the next
+    // /api/ota/pico/status poll.
+    s_safetyBuild = {
+      known: !!data.safety_build_known,
+      dirty: !!data.safety_build_dirty,
+      commit: data.safety_build_commit,
+      datetime: data.safety_build_datetime,
+    };
+    if (s_lastPicoStatus) {
+      renderPicoInfo(s_lastPicoStatus);
+    }
+  }).catch(function () {});
+}
+
+/* ---- Update-order hint (UPDATE_PROTOCOL.md sec 6a) ------------------------ */
+function updateOrderHintFilesChanged() {
+  var espChosen = !!(document.getElementById('espFile').files || []).length;
+  var picoChosen = !!(document.getElementById('picoFile').files || []).length;
+  document.getElementById('updateOrderHint').style.display = (espChosen && picoChosen) ? '' : 'none';
+}
+document.getElementById('espFile').addEventListener('change', updateOrderHintFilesChanged);
+document.getElementById('picoFile').addEventListener('change', updateOrderHintFilesChanged);
+
+/* ---- Stage (WP6, docs/GITHUB_RELEASE_UPDATE_PLAN.md) ----------------------
+ * GET /api/update/stage, POST /api/update/stage (raw body), POST
+ * /api/update/stage/clear -- update_http.c, all ROUTE_TIER_ADMIN. An upload
+ * holds the board's single httpd task for its whole duration, so status
+ * cannot be polled meanwhile: progress comes from the browser's own XHR
+ * upload events, and the status card is re-read only once the POST ends. */
+var STAGE_SOURCES = { 0: 'unknown', 1: 'upload', 2: 'github' };
+
+function renderStageInfo(s) {
+  var box = document.getElementById('stageInfo');
+  var rows = [];
+  function row(k, v) { rows.push('<div><b>' + esc(k) + '</b> ' + esc(v) + '</div>'); }
+  if (s.busy) {
+    row('Operation', s.phase + ' (' + s.bytes_done + ' / ' + s.bytes_total + ' bytes)');
+  }
+  if (s.staged && s.header === 'ok') {
+    row('Staged', 'yes (' + s.state + ')');
+    row('Version', s.semver);
+    if (s.commit) row('Commit', s.commit);
+    row('Length', s.image_length + ' bytes');
+    row('SHA-256', s.sha256);
+    row('Source', STAGE_SOURCES[s.source] || String(s.source));
+  } else {
+    row('Staged', 'no' + (s.reason ? ' (' + s.reason + ')' : ''));
+  }
+  row('Capacity', s.capacity + ' bytes');
+  box.innerHTML = rows.join('');
+  document.getElementById('stageUnsigned').style.display = (s.staged && s.header === 'ok') ? '' : 'none';
+  document.getElementById('stageInstallBtn').disabled = !stageInstallable(s);
+}
+
+function loadStageStatus() {
+  return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) {
+        throw new Error(r.status === 404 ? 'this board has no stage partition (older partition table)'
+                                         : (text || ('HTTP ' + r.status)));
+      }
+      renderStageInfo(JSON.parse(text));
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    document.getElementById('stageInfo').textContent = 'Could not load stage status: ' + e.message;
+  });
+}
+
+/* 401 mid-upload: open the shared login modal (via an authed GET) and replay once.
+ * 428 (safety processor not answering): ask, then replay once with the ack header,
+ * the same contract as app.js's kcFetchWithSafetyAck. */
+function stageXhrUpload(bytes, ack, relogged) {
+  return stageXhrOnce(bytes, ack).catch(function (e) {
+    if (e.status === 401 && !relogged) {
+      return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
+        if (!r.ok) throw e;
+        return stageXhrUpload(bytes, ack, true);
+      });
+    }
+    if (e.status === 428 && !ack) {
+      return window.kcConfirm((e.message ? e.message.trim() + '\n\n' : '') +
+        'Staging does not touch the running firmware, but the board refuses by default ' +
+        'while the safety processor is not answering. Continue anyway?').then(function (ok) {
+        if (!ok) throw e;
+        return stageXhrUpload(bytes, true, relogged);
+      });
+    }
+    throw e;
+  });
+}
+
+function stageXhrOnce(bytes, ack) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    var wrap = document.getElementById('stageProgressWrap');
+    var bar = document.getElementById('stageProgressBar');
+    xhr.open('POST', '/api/update/stage');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (ack) xhr.setRequestHeader('X-Ota-Ack-No-Safety', '1');
+    xhr.upload.onprogress = function (ev) {
+      if (!ev.lengthComputable) return;
+      var pct = Math.round(100 * ev.loaded / ev.total);
+      bar.style.width = pct + '%';
+      bar.textContent = pct + '%';
+    };
+    xhr.onload = function () {
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(xhr.responseText); return; }
+      var e = new Error(xhr.responseText || ('HTTP ' + xhr.status));
+      e.status = xhr.status;
+      reject(e);
+    };
+    xhr.onerror = function () { reject(new Error('connection lost mid-upload; read the status card')); };
+    xhr.ontimeout = xhr.onerror;
+    wrap.style.display = '';
+    bar.style.width = '0%';
+    bar.textContent = '0%';
+    xhr.send(bytes);
+  });
+}
+
+document.getElementById('stageUploadBtn').addEventListener('click', function () {
+  var msg = document.getElementById('stageMsg');
+  var btn = document.getElementById('stageUploadBtn');
+  msg.textContent = 'Reading file…';
+  readFileBytes(document.getElementById('stageFile')).then(function (bytes) {
+    if (bytes.length < 1 || bytes[0] !== 0xE9) {
+      throw new Error('not an ESP application image (first byte is not 0xE9)');
+    }
+    // Authed GET first so an expired session opens the login modal now,
+    // not as a failed multi-megabyte POST.
+    return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
+      if (!r.ok) throw new Error('stage not available (HTTP ' + r.status + ')');
+      return window.kcConfirm('Upload ' + bytes.length + ' bytes to the stage? ' +
+        'Any previously staged image is erased first. Nothing is installed.');
+    }).then(function (ok) {
+      if (!ok) { msg.textContent = ''; return null; }
+      btn.disabled = true;
+      msg.textContent = 'Uploading ' + bytes.length + ' bytes… (the board answers nothing else until this ends)';
+      return stageXhrUpload(bytes).then(function () {
+        msg.textContent = 'Upload finished; verifying on the board…';
+        return loadStageStatus();
+      }).then(function () { msg.textContent = 'Upload finished. See the status card for the verified state.'; });
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Stage upload failed: ' + e.message;
+    loadStageStatus();
+  }).then(function () {
+    btn.disabled = false;
+    document.getElementById('stageProgressWrap').style.display = 'none';
+  });
+});
+
+document.getElementById('stageClearBtn').addEventListener('click', function () {
+  var msg = document.getElementById('stageMsg');
+  window.kcConfirm('Erase the staged image header so it can never be installed?').then(function (ok) {
+    if (!ok) return null;
+    return window.kcOtaAuthedFetch('/api/update/stage/clear', { method: 'POST' }).then(function (r) {
+      return r.text().then(function (text) {
+        if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+        msg.textContent = 'Stage cleared.';
+        return loadStageStatus();
+      });
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Stage clear failed: ' + e.message;
+  });
+});
+
+/* ---- Update from GitHub (WP10, docs/GITHUB_RELEASE_UPDATE_PLAN.md) --------
+ * POST /api/update/check, POST /api/update/download, GET /api/update/fetch,
+ * POST /api/update/fetch/cancel -- update_fetch.c, all ROUTE_TIER_ADMIN. The
+ * board runs the TLS job itself; this page only starts it and polls. Unlike a
+ * manual upload the job does not hold the httpd task, so status can be polled. */
+/* UPDATE_CARD_PURE_BEGIN -- no DOM below this line until the matching END
+ * marker; test_update_page.js evaluates exactly this block. */
+var GH_ERRORS = {
+  fetch_busy: 'Another check or download is already running.',
+  clock_not_synced: 'The board clock is not synced yet (needs internet and SNTP). Try again in a minute.',
+  heat_run_active: 'Stopped: a firing or autotune run is active. Updates never run during a firing.',
+  low_heap: 'The board is low on memory right now. Try again when it is idle.',
+  no_memory: 'The board ran out of memory.',
+  connect_failed: 'Could not reach GitHub. Check the board internet connection.',
+  timeout: 'GitHub did not answer in time.',
+  cancelled: 'Cancelled.',
+  bad_repo: 'The configured repository is not valid.',
+  no_release: 'GitHub lists no usable release (pre-releases only count when "Include pre-releases" is ticked).',
+  too_large: 'The release image is larger than the stage.',
+  size_mismatch: 'The downloaded size does not match the release manifest.',
+  short_body: 'The download ended early.',
+  overrun: 'The download was larger than announced.',
+  sha256_mismatch: 'The download does not match the release sha256 and was discarded.',
+  hash_failed: 'The board could not hash the download.',
+  task_create_failed: 'The board could not start the download task.',
+  redirect_no_location: 'GitHub sent a redirect the board could not follow.',
+  redirect_location_refused: 'GitHub redirected to a host the board does not allow.'
+};
+
+var GH_VERDICTS = {
+  allow_upgrade: 'A newer release is available.',
+  allow_reinstall: 'Same version: reinstalling needs "Reinstall (force)".',
+  allow_downgrade: 'Older than the running version: needs "Allow an older version".',
+  up_to_date: 'You are up to date.',
+  refuse_downgrade: 'Older than the running version: refused.',
+  refuse_partitions: 'This release needs a different partition layout and cannot be installed over the air.',
+  refuse_too_old: 'This release is older than the oldest version this board can update from.',
+  refuse_dirty: 'This release is a development build and is refused.',
+  refuse_prerelease: 'This is a pre-release: tick "Include pre-releases" to allow it.',
+  refuse_malformed: 'The release data is malformed.',
+  refuse_needs_force: 'Same version but a different build (or an unknown running version): needs "Reinstall (force)".'
+};
+
+function ghErrorText(name) {
+  if (!name) return '';
+  return GH_ERRORS.hasOwnProperty(name) ? GH_ERRORS[name] : ('Failed: ' + name);
+}
+
+function ghVerdictText(v) {
+  return GH_VERDICTS.hasOwnProperty(v) ? GH_VERDICTS[v] : String(v || '');
+}
+
+/* The query string for POST /api/update/check: with pre-releases ticked the board reads the
+ * releases list instead of /releases/latest (which GitHub never fills with a pre-release). */
+function ghCheckQuery(opts) {
+  return opts.pre ? '?allow_prerelease=1' : '';
+}
+
+/* The query string for POST /api/update/download. Only flags the operator
+ * ticked are sent; the typed confirm goes with a downgrade or with force (a
+ * board whose running version is unknown needs it for force too). The tag
+ * alone never allows a downgrade: the board ANDs it with allow_downgrade=1. */
+function ghDownloadQuery(opts) {
+  var q = [];
+  if (opts.pre) q.push('allow_prerelease=1');
+  if (opts.force) q.push('force=1');
+  if (opts.down) q.push('allow_downgrade=1');
+  if (opts.typed && (opts.down || opts.force)) q.push('confirm_downgrade=' + encodeURIComponent(opts.typed));
+  return q.length ? '?' + q.join('&') : '';
+}
+
+/* Whether Download is worth offering for a finished check: allowed by the
+ * board's own policy, or blocked only by a flag the operator can tick. */
+function ghCanDownload(s, opts) {
+  if (!s || s.state !== 'done' || !s.tag) return false;
+  if (s.allowed) return true;
+  if (s.verdict === 'allow_reinstall' || s.verdict === 'refuse_needs_force') return !!opts.force;
+  if (s.verdict === 'allow_downgrade' || s.verdict === 'refuse_downgrade') return !!opts.down;
+  if (s.verdict === 'refuse_prerelease') return !!opts.pre;
+  return false;
+}
+
+/* Install is offered only for a verified stage. */
+function stageInstallable(s) {
+  return !!(s && s.staged === true && s.header === 'ok' && s.state === 'verified' && !s.busy);
+}
+
+/* A non-2xx reply is either {"ok":false,"error":name} or the plain-text
+ * mode-gate/interlock refusal; both end up as one readable sentence. */
+function ghRefusalText(status, text) {
+  var body = null;
+  try { body = JSON.parse(text); } catch (e) { body = null; }
+  if (body && typeof body.error === 'string') return ghErrorText(body.error);
+  if (status === 409 || status === 428) return text ? String(text).trim() : 'Refused (HTTP ' + status + ').';
+  return text ? String(text).trim() : ('HTTP ' + status);
+}
+/* UPDATE_CARD_PURE_END */
+
+var ghPoll = null;
+var ghLast = null;
+
+function ghOpts() {
+  return {
+    pre: document.getElementById('ghPre').checked,
+    force: document.getElementById('ghForce').checked,
+    down: document.getElementById('ghDown').checked,
+    typed: document.getElementById('ghTyped').value.trim()
+  };
+}
+
+function renderGh(s) {
+  ghLast = s;
+  var rows = [];
+  function row(k, v) { rows.push('<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>'); }
+  row('Repository', s.repo || '(unknown)');
+  if (s.state === 'checking' || s.state === 'downloading') {
+    row('Working', (s.kind === 'check' ? 'checking' : 'downloading') + (s.stage ? ' (' + s.stage + ')' : ''));
+  } else if (s.state === 'failed') {
+    row('Last job', ghErrorText(s.error));
+  }
+  if (s.tag) {
+    row('Latest release', s.tag + (s.prerelease ? ' (pre-release)' : ''));
+    row('Running', s.running || '(unknown)');
+    row('Image size', s.app_size + ' bytes');
+    if (s.sha256) row('SHA-256', s.sha256);
+    row('Verdict', ghVerdictText(s.verdict) + (s.reason ? ' ' + s.reason : ''));
+    if (s.zones_cfg_lower) row('Warning', 'This release has an older zones config version: installing it can reset PID gains to defaults.');
+  }
+  document.getElementById('ghInfo').innerHTML = rows.join('');
+  document.getElementById('ghUnsigned').style.display = s.unsigned ? '' : 'none';
+  var busy = !!s.busy;
+  var opts = ghOpts();
+  document.getElementById('ghCheckBtn').disabled = busy;
+  document.getElementById('ghDownloadBtn').disabled = busy || !ghCanDownload(s, opts);
+  document.getElementById('ghCancelBtn').style.display = busy ? '' : 'none';
+  document.getElementById('ghTypedWrap').style.display = (opts.down || opts.force) ? '' : 'none';
+  var wrap = document.getElementById('ghProgressWrap');
+  if (busy && s.kind === 'download' && s.bytes_total > 0) {
+    var pct = Math.min(100, Math.floor(100 * s.bytes_done / s.bytes_total));
+    wrap.style.display = '';
+    document.getElementById('ghProgressBar').style.width = pct + '%';
+    document.getElementById('ghProgressBar').textContent = pct + '%';
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+
+function loadGh() {
+  return window.kcOtaAuthedFetch('/api/update/fetch', { method: 'GET' }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(r.status === 404 ? 'this board has no GitHub update support' : (text || ('HTTP ' + r.status)));
+      var s = JSON.parse(text);
+      renderGh(s);
+      if (s.busy) {
+        if (!ghPoll) ghPoll = setInterval(loadGh, 1500);
+      } else if (ghPoll) {
+        clearInterval(ghPoll); ghPoll = null;
+        // A finished download changes the stage; a finished check has a verdict.
+        loadStageStatus();
+        var m = document.getElementById('ghMsg');
+        if (s.state === 'failed') m.textContent = ghErrorText(s.error);
+        else if (s.kind === 'download') m.textContent = 'Downloaded and staged ' + s.tag + '. Press Install above to apply it.';
+        else m.textContent = ghVerdictText(s.verdict);
+      }
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    document.getElementById('ghInfo').textContent = 'Could not load GitHub update status: ' + e.message;
+  });
+}
+
+function ghStart(path, label) {
+  var msg = document.getElementById('ghMsg');
+  var box = document.getElementById('ghBusyBox');
+  box.style.display = 'none';
+  msg.textContent = label;
+  return window.kcOtaAuthedFetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: new Uint8Array(0)
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) {
+        msg.textContent = '';
+        box.textContent = 'Refused: ' + ghRefusalText(r.status, text);
+        box.style.display = '';
+      }
+      return loadGh();
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Request failed: ' + e.message;
+  });
+}
+
+document.getElementById('ghCheckBtn').addEventListener('click', function () {
+  ghStart('/api/update/check' + ghCheckQuery(ghOpts()), 'Checking GitHub…');
+});
+document.getElementById('ghDownloadBtn').addEventListener('click', function () {
+  var s = ghLast;
+  var opts = ghOpts();
+  if (!ghCanDownload(s, opts)) return;
+  if ((opts.down || (opts.force && s.needs_typed_confirm)) && opts.typed !== s.tag) {
+    document.getElementById('ghMsg').textContent = 'Type the release tag (' + s.tag + ') exactly to confirm.';
+    return;
+  }
+  window.kcConfirm('Download ' + s.tag + ' (' + s.app_size + ' bytes) into the stage? ' +
+    'Any previously staged image is erased. This image is UNSIGNED. Nothing is installed.').then(function (ok) {
+    if (!ok) return;
+    return ghStart('/api/update/download' + ghDownloadQuery(opts), 'Starting download…');
+  });
+});
+document.getElementById('ghCancelBtn').addEventListener('click', function () {
+  window.kcOtaAuthedFetch('/api/update/fetch/cancel', {
+    method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(0)
+  }).then(function () { return loadGh(); }).catch(function () {});
+});
+['ghPre', 'ghForce', 'ghDown', 'ghTyped'].forEach(function (id) {
+  document.getElementById(id).addEventListener('input', function () { if (ghLast) renderGh(ghLast); });
+  document.getElementById(id).addEventListener('change', function () { if (ghLast) renderGh(ghLast); });
+});
+
+/* Install: POST /api/ota/esp/recovery_boot (ADMIN, mode gate, interlock) points the
+ * bootloader at the recovery image and reboots. Applying is then done on the
+ * recovery image's own page; this page cannot reach it. */
+document.getElementById('stageInstallBtn').addEventListener('click', function () {
+  var msg = document.getElementById('stageMsg');
+  window.kcConfirm('Restart the board into the recovery image to install the staged update? ' +
+    'This page will stop responding. Join the recovery Wi-Fi (passphrase on the LCD), open ' +
+    'its page and press "Apply staged update". The kiln cannot fire while in recovery.').then(function (ok) {
+    if (!ok) throw { __kcHandled: true };
+    msg.textContent = 'Requesting recovery boot…';
+    return window.kcOtaAuthedFetch('/api/ota/esp/recovery_boot', {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(0)
+    });
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(ghRefusalText(r.status, text));
+      msg.textContent = 'Rebooting into the recovery image. Join its Wi-Fi (passphrase on the LCD), open its page and press "Apply staged update". Afterwards rejoin your normal Wi-Fi.';
+    });
+  }).catch(function (e) {
+    if (e && e.__kcHandled) return;
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Install refused: ' + e.message;
+  });
+});
+
+/* ---- Update repo setting ---------------------------------------------------
+ * GET/POST /api/update/settings -- update_settings_http.c, ROUTE_TIER_ADMIN.
+ * POST is form-encoded `repo=owner/name`; empty resets to the default. */
+function renderRepo(s) {
+  document.getElementById('repoInfo').innerHTML =
+    '<dt>Current</dt><dd>' + esc(s.repo) + (s.is_default ? ' (default)' : '') + '</dd>' +
+    '<dt>Default</dt><dd>' + esc(s.default_repo) + '</dd>';
+  document.getElementById('repoInput').value = s.is_default ? '' : s.repo;
+}
+
+function loadRepo() {
+  return window.kcOtaAuthedFetch('/api/update/settings', { method: 'GET' }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
+      renderRepo(JSON.parse(text));
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    document.getElementById('repoInfo').textContent = 'Could not load the update repository: ' + e.message;
+  });
+}
+
+function saveRepo(value) {
+  var msg = document.getElementById('repoMsg');
+  return window.kcOtaAuthedFetch('/api/update/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: 'repo=' + encodeURIComponent(value)
+  }).then(function (r) {
+    return r.text().then(function (text) {
+      if (!r.ok) {
+        throw new Error(r.status === 400 ? 'not a valid owner/name repository'
+                        : r.status === 409 ? 'refused while a firing or autotune is running'
+                        : (text || ('HTTP ' + r.status)));
+      }
+      renderRepo(JSON.parse(text));
+      msg.textContent = 'Saved.';
+    });
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    msg.textContent = 'Save failed: ' + e.message;
+  });
+}
+
+document.getElementById('repoSaveBtn').addEventListener('click', function () {
+  saveRepo(document.getElementById('repoInput').value.trim());
+});
+document.getElementById('repoResetBtn').addEventListener('click', function () { saveRepo(''); });
+
+/* ---- Boot ------------------------------------------------------------------ */
+loadInterlock();
+setInterval(loadInterlock, 15000);
+pollEspStatus();
+pollPicoStatus();
+pollSafetyBuildInfo();
+setInterval(pollSafetyBuildInfo, 3000);
+loadStageStatus();
+loadRepo();
+loadGh();
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

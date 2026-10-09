@@ -1,0 +1,366 @@
+EESchema-LIBRARY Version 2.3
+#encoding utf-8
+#SamacSys ECAD Model NE555DR
+#/6648/2/2.37/8/4/Integrated Circuit
+DEF NE555DR IC 0 30 Y Y 1 F N
+F0 "IC" 1050 600 50 H V L CNN
+F1 "NE555DR" 1050 500 50 H V L CNN
+F2 "SOIC127P600X175-8N" 1050 400 50 H I L CNN
+F3 "http://www.ti.com/lit/ds/symlink/ne555.pdf" 1050 300 50 H I L CNN
+F4 "Single Precision Timer" 1050 200 50 H I L CNN "Description"
+F5 "1.75" 1050 100 50 H I L CNN "Height"
+F6 "Texas Instruments" 1050 0 50 H I L CNN "Manufacturer_Name"
+F7 "NE555DR" 1050 -100 50 H I L CNN "Manufacturer_Part_Number"
+F8 "595-NE555DR" 1050 -200 50 H I L CNN "Mouser Part Number"
+F9 "https://www.mouser.com/Search/Refine.aspx?Keyword=595-NE555DR" 1050 -300 50 H I L CNN "Mouser Price/Stock"
+F10 "1218414" 1050 -400 50 H I L CNN "RS Part Number"
+F11 "http//uk.rs-online.com/web/p/products/1218414" 1050 -500 50 H I L CNN "RS Price/Stock"
+DRAW
+X GND 1 600 -1000 200 U 50 50 0 0 B
+X TRIG 2 0 -400 200 R 50 50 0 0 B
+X OUT 3 1200 -200 200 L 50 50 0 0 B
+X ~RESET 4 0 0 200 R 50 50 0 0 B
+X CONT 5 500 600 200 D 50 50 0 0 B
+X THRES 6 0 -300 200 R 50 50 0 0 B
+X DISCH 7 0 -100 200 R 50 50 0 0 B
+X VCC 8 700 600 200 D 50 50 0 0 B
+P 5 0 1 6 200 400 1000 400 1000 -800 200 -800 200 400 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model PS2702-1-F3-A
+#/1901026/960482/2.50/4/2/Integrated Circuit
+DEF PS2702-1-F3-A IC 0 30 Y Y 1 F N
+F0 "IC" 1350 300 50 H V L CNN
+F1 "PS2702-1-F3-A" 1350 200 50 H V L CNN
+F2 "SOP254P700X230-4N" 1350 100 50 H I L CNN
+F3 "https://datasheet.datasheetarchive.com/originals/distributors/Datasheets_SAMA/3022c2dbaac3cc6b21c36d10f6d411c4.pdf" 1350 0 50 H I L CNN
+F4 "The PS2702-1 is an optically coupled isolator containing a GaAs light emitting diode and an NPN silicon darlington-connected phototransistor. This is mounted in a plastic SOP (Small Out-line Package) for high density applications. This package has shield effect to cut off ambient light." 1350 -100 50 H I L CNN "Description"
+F5 "2.3" 1350 -200 50 H I L CNN "Height"
+F6 "551-PS2702-1-F3-A" 1350 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Renesas-Electronics/PS2702-1-F3-A?qs=5N444vrM9tf1xGpPQDiXGA%3D%3D" 1350 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Renesas Electronics" 1350 -500 50 H I L CNN "Manufacturer_Name"
+F9 "PS2702-1-F3-A" 1350 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X ANODE 1 0 0 200 R 50 50 0 0 P
+X CATHODE 2 0 -100 200 R 50 50 0 0 P
+X COLLECTOR 4 1500 0 200 L 50 50 0 0 P
+X EMITTER 3 1500 -100 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1300 100 1300 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model 1935161
+#/264705/960482/2.50/2/2/Connector
+DEF 1935161 J 0 30 Y Y 1 F N
+F0 "J" 650 300 50 H V L CNN
+F1 "1935161" 650 200 50 H V L CNN
+F2 "1935161" 650 100 50 H I L CNN
+F3 "https://datasheet.datasheetarchive.com/originals/distributors/SFDatasheet-2/sf-00057459.pdf" 650 0 50 H I L CNN
+F4 "Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon" 650 -100 50 H I L CNN "Description"
+F5 "11.55" 650 -200 50 H I L CNN "Height"
+F6 "651-1935161" 650 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935161?qs=W3wJikR1%252BS6eKzfFl8Rbew%3D%3D" 650 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Phoenix Contact" 650 -500 50 H I L CNN "Manufacturer_Name"
+F9 "1935161" 650 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X 1 1 0 0 200 R 50 50 0 0 P
+X 2 2 0 -100 200 R 50 50 0 0 P
+P 5 0 1 6 200 100 600 100 600 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model SS16FP
+#/1280360/960482/2.50/2/2/Schottky Diode
+DEF SS16FP D 0 30 Y Y 1 F N
+F0 "D" 500 350 50 H V L CNN
+F1 "SS16FP" 500 250 50 H V L CNN
+F2 "SS12FP" 500 150 50 H I L CNN
+F3 "https://www.onsemi.com/pub/Collateral/S110FP-D.pdf" 500 50 50 H I L CNN
+F4 "* See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound" 500 -50 50 H I L CNN "Description"
+F5 "1" 500 -150 50 H I L CNN "Height"
+F6 "512-SS16FP" 500 -250 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/onsemi-Fairchild/SS16FP?qs=R26iFe%2FkX%2FKRV%252BrcKNWlOg%3D%3D" 500 -350 50 H I L CNN "Mouser Price/Stock"
+F8 "onsemi" 500 -450 50 H I L CNN "Manufacturer_Name"
+F9 "SS16FP" 500 -550 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X ~ 1 100 0 100 R 50 50 0 0 P
+X ~ 2 700 0 100 L 50 50 0 0 P
+P 2 0 1 6 300 100 300 -100 N
+P 3 0 1 6 300 100 340 100 340 60 N
+P 3 0 1 6 300 -100 260 -100 260 -60 N
+P 2 0 1 6 200 0 300 0 N
+P 2 0 1 6 500 0 600 0 N
+P 4 0 1 10 300 0 500 100 500 -100 300 0 F
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model 1935174
+#/12704403/960482/2.50/3/2/Connector
+DEF 1935174 J 0 30 Y Y 1 F N
+F0 "J" 650 300 50 H V L CNN
+F1 "1935174" 650 200 50 H V L CNN
+F2 "1935174" 650 100 50 H I L CNN
+F3 "" 650 0 50 H I L CNN
+F4 "PCB terminal block, Nominal current: 17.5 A, Nom. voltage: 400 V, Pitch: 5 mm, Number of positions: 3, Connection method: Screw connection with wire protector, Mounting: Wave soldering, Conductor/PCB connection direction: 0 , Color: green, Also possible: Connection of a 1.5 mm conductor with ferrule, then however with reduction in rated voltage or degree of pollution / surge category." 650 -100 50 H I L CNN "Description"
+F5 "11.55" 650 -200 50 H I L CNN "Height"
+F6 "651-1935174" 650 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Phoenix-Contact/1935174?qs=QWULklcAmSR8B7o4YouITA%3D%3D" 650 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Phoenix Contact" 650 -500 50 H I L CNN "Manufacturer_Name"
+F9 "1935174" 650 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X 1 1 0 0 200 R 50 50 0 0 P
+X 2 2 0 -100 200 R 50 50 0 0 P
+X 3 3 0 -200 200 R 50 50 0 0 P
+P 5 0 1 6 200 100 600 100 600 -300 200 -300 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model SJ2-35813B-SMT-TR
+#/645358/960482/2.50/4/2/Connector
+DEF SJ2-35813B-SMT-TR J 0 30 Y Y 1 F N
+F0 "J" 1350 300 50 H V L CNN
+F1 "SJ2-35813B-SMT-TR" 1350 200 50 H V L CNN
+F2 "SJ235813BSMTTR" 1350 100 50 H I L CNN
+F3 "https://www.sameskydevices.com/product/resource/sj2-3581x-smt.pdf" 1350 0 50 H I L CNN
+F4 "3.50mm (0.141\", 1/8\", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~ 85C" 1350 -100 50 H I L CNN "Description"
+F5 "5.3" 1350 -200 50 H I L CNN "Height"
+F6 "490-SJ2-35813BSMT-TR" 1350 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Same-Sky/SJ2-35813B-SMT-TR?qs=DXv0QSHKF4w%2FyLjMGhzATw%3D%3D" 1350 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Same Sky" 1350 -500 50 H I L CNN "Manufacturer_Name"
+F9 "SJ2-35813B-SMT-TR" 1350 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X SLEEVE 1 0 0 200 R 50 50 0 0 P
+X TIP 2 0 -100 200 R 50 50 0 0 P
+X RING 3 1500 0 200 L 50 50 0 0 P
+X TIP_SWITCH 10 1500 -100 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1300 100 1300 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model LMV358AIDR
+#/1029834/960482/2.50/8/3/Integrated Circuit
+DEF LMV358AIDR IC 0 30 Y Y 1 F N
+F0 "IC" 1150 300 50 H V L CNN
+F1 "LMV358AIDR" 1150 200 50 H V L CNN
+F2 "SOIC127P600X175-8N" 1150 100 50 H I L CNN
+F3 "http://www.ti.com/lit/gpn/lmv358a" 1150 0 50 H I L CNN
+F4 "Dual Low-Voltage Cost-Optimized Rail-to-Rail Output Operational Amplifier" 1150 -100 50 H I L CNN "Description"
+F5 "1.75" 1150 -200 50 H I L CNN "Height"
+F6 "595-LMV358AIDR" 1150 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Texas-Instruments/LMV358AIDR?qs=W0yvOO0ixfGm9Q3tgag7Lw%3D%3D" 1150 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Texas Instruments" 1150 -500 50 H I L CNN "Manufacturer_Name"
+F9 "LMV358AIDR" 1150 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X OUT_A 1 0 0 200 R 50 50 0 0 O
+X -_IN_A 2 0 -100 200 R 50 50 0 0 I
+X +IN_A 3 0 -200 200 R 50 50 0 0 I
+X V- 4 0 -300 200 R 50 50 0 0 W
+X V+ 8 1300 0 200 L 50 50 0 0 W
+X OUT_B 7 1300 -100 200 L 50 50 0 0 O
+X -IN_B 6 1300 -200 200 L 50 50 0 0 I
+X +IN_B 5 1300 -300 200 L 50 50 0 0 I
+P 5 0 1 6 200 100 1100 100 1100 -400 200 -400 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model LT8631IFE#PBF
+#/1634292/960482/2.50/21/2/Integrated Circuit
+DEF LT8631IFE#PBF IC 0 30 Y Y 1 F N
+F0 "IC" 1450 300 50 H V L CNN
+F1 "LT8631IFE#PBF" 1450 200 50 H V L CNN
+F2 "SOP65P640X120-21N" 1450 100 50 H I L CNN
+F3 "https://www.analog.com/media/en/technical-documentation/data-sheets/lt8631.pdf" 1450 0 50 H I L CNN
+F4 "Switching Voltage Regulators 100V, 1A Sync uP Buck Reg" 1450 -100 50 H I L CNN "Description"
+F5 "1.2" 1450 -200 50 H I L CNN "Height"
+F6 "584-LT8631IFE#PBF" 1450 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Analog-Devices/LT8631IFEPBF?qs=oahfZPh6IALt9hCBxhtB7A%3D%3D" 1450 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Analog Devices" 1450 -500 50 H I L CNN "Manufacturer_Name"
+F9 "LT8631IFE#PBF" 1450 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X VIN 1 0 0 200 R 50 50 0 0 P
+X NO_PIN_1 2 0 -100 200 R 50 50 0 0 P
+X EN/UV 3 0 -200 200 R 50 50 0 0 P
+X NO_PIN_2 4 0 -300 200 R 50 50 0 0 P
+X PG 5 0 -400 200 R 50 50 0 0 P
+X NC_1 6 0 -500 200 R 50 50 0 0 P
+X SYNC/MODE 7 0 -600 200 R 50 50 0 0 P
+X RT 8 0 -700 200 R 50 50 0 0 P
+X NC_2 9 0 -800 200 R 50 50 0 0 P
+X TR/SS 10 0 -900 200 R 50 50 0 0 P
+X GND 21 800 -1500 200 U 50 50 0 0 P
+X SW 20 1600 0 200 L 50 50 0 0 P
+X NO_PIN_4 19 1600 -100 200 L 50 50 0 0 P
+X BST 18 1600 -200 200 L 50 50 0 0 P
+X NO_PIN_3 17 1600 -300 200 L 50 50 0 0 P
+X INTVCC 16 1600 -400 200 L 50 50 0 0 P
+X NC_4 15 1600 -500 200 L 50 50 0 0 P
+X IND 14 1600 -600 200 L 50 50 0 0 P
+X NC_3 13 1600 -700 200 L 50 50 0 0 P
+X VOUT 12 1600 -800 200 L 50 50 0 0 P
+X FB 11 1600 -900 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1400 100 1400 -1300 200 -1300 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model BSP296NH6327XTSA1
+#/422207/960482/2.50/4/3/Transistor
+DEF BSP296NH6327XTSA1 Q 0 30 Y Y 1 F N
+F0 "Q" 1250 300 50 H V L CNN
+F1 "BSP296NH6327XTSA1" 1250 200 50 H V L CNN
+F2 "SOT230P700X170-4N" 1250 100 50 H I L CNN
+F3 "https://www.infineon.com/dgdl/Infineon-BSP296N-DS-v02_00-en.pdf?fileId=db3a30433dd58def013dd5af675d001f" 1250 0 50 H I L CNN
+F4 "Infineon BSP296NH6327XTSA1 N-channel MOSFET Transistor, 1.2 A, 100 V, 4-Pin SOT-223" 1250 -100 50 H I L CNN "Description"
+F5 "1.7" 1250 -200 50 H I L CNN "Height"
+F6 "726-BSP296NH6327XTSA" 1250 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Infineon-Technologies/BSP296NH6327XTSA1?qs=wqPJ3MBjhrj3V6YdzlkuvA%3D%3D" 1250 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Infineon" 1250 -500 50 H I L CNN "Manufacturer_Name"
+F9 "BSP296NH6327XTSA1" 1250 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X GATE 1 0 0 200 R 50 50 0 0 P
+X DRAIN_1 2 0 -100 200 R 50 50 0 0 P
+X SOURCE 3 0 -200 200 R 50 50 0 0 P
+X DRAIN_2 4 1400 0 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1200 100 1200 -300 200 -300 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model 7447779004
+#/465879/960482/2.50/2/2/Inductor
+DEF 7447779004 L 0 30 Y Y 1 F N
+F0 "L" 650 250 50 H V L CNN
+F1 "7447779004" 650 150 50 H V L CNN
+F2 "WE-PD_7332/7345_PLASTIC_BASE54" 650 50 50 H I L CNN
+F3 "https://www.we-online.com/catalog/datasheet/7447779004.pdf" 650 -50 50 H I L CNN
+F4 "WE-PD Robust SMT Shielded Power Inductor Size 7345; L = 4.7 H +/-20%; IR = 3.16 A; Isat = 4.4 A; RDC = 32 m" 650 -150 50 H I L CNN "Description"
+F5 "3.2" 650 -250 50 H I L CNN "Height"
+F6 "710-7447779004" 650 -350 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Wurth-Elektronik/7447779004?qs=E%2F%2FhvbtCqpPUIu9NVFt5TQ%3D%3D" 650 -450 50 H I L CNN "Mouser Price/Stock"
+F8 "Wurth Elektronik" 650 -550 50 H I L CNN "Manufacturer_Name"
+F9 "7447779004" 650 -650 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X ~ 1 0 0 200 R 50 50 0 0 P
+X ~ 2 800 0 200 L 50 50 0 0 P
+A 250 -2 50 1777 -23 0 1 6 N 300 0 200 0
+A 350 -2 50 1777 -23 0 1 6 N 400 0 300 0
+A 450 -2 50 1777 -23 0 1 6 N 500 0 400 0
+A 550 -2 50 1777 -23 0 1 6 N 600 0 500 0
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model LMV321SQ3T2G
+#/4669754/960482/2.50/5/2/Integrated Circuit
+DEF LMV321SQ3T2G IC 0 30 Y Y 1 F N
+F0 "IC" 1050 300 50 H V L CNN
+F1 "LMV321SQ3T2G" 1050 200 50 H V L CNN
+F2 "SOT65P210X110-5N" 1050 100 50 H I L CNN
+F3 "https://www.onsemi.com/pub/Collateral/LMV321-D.PDF" 1050 0 50 H I L CNN
+F4 "Operation from 2.7 V to 5.0 V Single-Sided Power Supply; No Output Crossover Distortion; Industrial temperature Range: -40C to +85C or Automotive -40C to +125C; Rail-to-Rail Output; Low Quiescent Current; No Output Phase-Reversal from Overdriven Input; NCV prefix for Automotive Qualified Version" 1050 -100 50 H I L CNN "Description"
+F5 "1.1" 1050 -200 50 H I L CNN "Height"
+F6 "863-LMV321SQ3T2G" 1050 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/onsemi/LMV321SQ3T2G?qs=yU2N9dt%252BrfkDEebkfLT8KQ%3D%3D" 1050 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "onsemi" 1050 -500 50 H I L CNN "Manufacturer_Name"
+F9 "LMV321SQ3T2G" 1050 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X +IN 1 0 0 200 R 50 50 0 0 P
+X V- 2 0 -100 200 R 50 50 0 0 P
+X -IN 3 0 -200 200 R 50 50 0 0 P
+X OUTPUT 4 1200 0 200 L 50 50 0 0 P
+X V+ 5 1200 -100 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1000 100 1000 -300 200 -300 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model BZX84C3V3LT1G
+#/305633/960482/2.50/3/2/Zener Diode
+DEF BZX84C3V3LT1G Z 0 30 Y Y 1 F N
+F0 "Z" 750 300 50 H V L CNN
+F1 "BZX84C3V3LT1G" 750 200 50 H V L CNN
+F2 "SOT96P237X111-3N" 750 100 50 H I L CNN
+F3 "https://www.onsemi.com/pub/Collateral/BZX84C2V4LT1-D.PDF" 750 0 50 H I L CNN
+F4 "250 mW Rating on FR-4 or FR-5 Board; Zener Breakdown Voltage Range - 2.4 V to 75 V; Package Designed for Optimal Automated Board Assembly; Small Package Size for High Density Applications; ESD Rating of Class 3 (>16 KV) per Human Body Model; Mechanical Characteristics:; CASE: Void-free, transfer-molded, thermosetting plastic case; FINISH: Corrosion resistant finish, easily solderable; MAXIMUM CASE TEMPERATURE FOR SOLDERING PURPOSES: 260C for 10 Seconds; POLARITY: Cathode indicated by polarity band; FLAMMAB" 750 -100 50 H I L CNN "Description"
+F5 "1.11" 750 -200 50 H I L CNN "Height"
+F6 "863-BZX84C3V3LT1G" 750 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/onsemi/BZX84C3V3LT1G?qs=vNc2DXHODiIKL62%252Be6h8Pg%3D%3D" 750 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "onsemi" 750 -500 50 H I L CNN "Manufacturer_Name"
+F9 "BZX84C3V3LT1G" 750 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X A 1 0 0 200 R 50 50 0 0 P
+X NC 2 0 -100 200 R 50 50 0 0 N
+X K 3 900 0 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 700 100 700 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model MSD1048-223MED
+#/1078050/960482/2.50/4/4/Inductor
+DEF MSD1048-223MED L 0 30 Y Y 1 F N
+F0 "L" 1050 300 50 H V L CNN
+F1 "MSD1048-223MED" 1050 200 50 H V L CNN
+F2 "MSD1048223MED" 1050 100 50 H I L CNN
+F3 "" 1050 0 50 H I L CNN
+F4 "Coupled Inductors 22uH Shld 20% 1.9A 98mOhms" 1050 -100 50 H I L CNN "Description"
+F5 "5" 1050 -200 50 H I L CNN "Height"
+F6 "994-MSD1048-223MED" 1050 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Coilcraft/MSD1048-223MED?qs=W%252BCsJ1hlA%252Bd7MKFvGjopUQ%3D%3D" 1050 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "COILCRAFT" 1050 -500 50 H I L CNN "Manufacturer_Name"
+F9 "MSD1048-223MED" 1050 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X L1+ 1 1200 0 200 L 50 50 0 0 P
+X L2+ 2 0 0 200 R 50 50 0 0 P
+X L1-_1 3 0 -100 200 R 50 50 0 0 P
+X L1-_2 4 1200 -100 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 1000 100 1000 -200 200 -200 200 100 N
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model UCM1H471MNJ1MS
+#/11831754/960482/2.50/2/3/Capacitor Polarised
+DEF UCM1H471MNJ1MS C 0 30 Y Y 1 F N
+F0 "C" 350 250 50 H V L CNN
+F1 "UCM1H471MNJ1MS" 350 150 50 H V L CNN
+F2 "CAPAE1360X1450N" 350 50 50 H I L CNN
+F3 "" 350 -50 50 H I L CNN
+F4 "Aluminum Electrolytic Capacitors - SMD 50V 470uf 20% AEC-Q200" 350 -150 50 H I L CNN "Description"
+F5 "14.5" 350 -250 50 H I L CNN "Height"
+F6 "647-UCM1H471MNJ1MS" 350 -350 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Nichicon/UCM1H471MNJ1MS?qs=Cb2nCFKsA8pFhOKoUHIICQ%3D%3D" 350 -450 50 H I L CNN "Mouser Price/Stock"
+F8 "Nichicon" 350 -550 50 H I L CNN "Manufacturer_Name"
+F9 "UCM1H471MNJ1MS" 350 -650 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X ~ 1 0 0 100 R 50 50 0 0 P
+X ~ 2 500 0 100 L 50 50 0 0 P
+P 5 0 1 6 200 100 200 -100 230 -100 230 100 200 100 N
+P 2 0 1 6 180 50 140 50 N
+P 2 0 1 6 160 70 160 30 N
+P 2 0 1 6 100 0 200 0 N
+P 2 0 1 6 300 0 400 0 N
+P 5 0 1 10 300 100 300 -100 270 -100 270 100 300 100 F
+ENDDRAW
+ENDDEF
+#
+#SamacSys ECAD Model SI3474DV-T1-GE3
+#/235376/960482/2.50/6/4/Integrated Circuit
+DEF SI3474DV-T1-GE3 IC 0 30 Y Y 1 F N
+F0 "IC" 850 300 50 H V L CNN
+F1 "SI3474DV-T1-GE3" 850 200 50 H V L CNN
+F2 "SOP95P284X110-6N" 850 100 50 H I L CNN
+F3 "http://www.vishay.com/docs/62875/si3474dv.pdf" 850 0 50 H I L CNN
+F4 "P-Channel 12 V (D-S) MOSFET" 850 -100 50 H I L CNN "Description"
+F5 "1.1" 850 -200 50 H I L CNN "Height"
+F6 "78-SI3474DV-T1-GE3" 850 -300 50 H I L CNN "Mouser Part Number"
+F7 "https://www.mouser.co.uk/ProductDetail/Vishay-Siliconix/SI3474DV-T1-GE3?qs=IcBct1gTIwxCtuXyVRELiQ%3D%3D" 850 -400 50 H I L CNN "Mouser Price/Stock"
+F8 "Vishay" 850 -500 50 H I L CNN "Manufacturer_Name"
+F9 "SI3474DV-T1-GE3" 850 -600 50 H I L CNN "Manufacturer_Part_Number"
+DRAW
+X D_1 1 0 0 200 R 50 50 0 0 P
+X D_2 2 0 -100 200 R 50 50 0 0 P
+X G 3 0 -200 200 R 50 50 0 0 P
+X D_4 6 1000 0 200 L 50 50 0 0 P
+X D_3 5 1000 -100 200 L 50 50 0 0 P
+X S 4 1000 -200 200 L 50 50 0 0 P
+P 5 0 1 6 200 100 800 100 800 -300 200 -300 200 100 N
+ENDDRAW
+ENDDEF
+#
+#End Library

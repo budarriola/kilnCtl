@@ -1,0 +1,82 @@
+A/B compare: A=../../logs/coupling/easeoff_ab_20260904_2p0_run2.jsonl  B=../../logs/coupling/easeoff_ab_20260904_3p0_run2.jsonl
+NOISE FLOOR: measured (tools/PcTools/config_presets/noise_floor.json, see noise_floor.py / PID_EXPANSION_PLAN.md SS3.3). A per-(zone, metric, segment) difference smaller than its measured floor is reported INDISTINGUISHABLE below, not PROVISIONAL -- it is not attributable to whatever this A/B comparison is testing. A key with no floor entry (never covered by the repeat campaign) still falls back to PROVISIONAL.
+START-TEMP UNIT NOTE: the per-zone deltas below (and the 1.5C confound gate) use each zone's own first-valid actual_c. noise_floor.py's separate 'like-for-like' check (a DIFFERENT threshold, LIKE_FOR_LIKE_THRESHOLD_C=1.0C) uses a DIFFERENT quantity too -- the mean across ALL status channels from the raw capture. Neither the threshold nor the quantity are interchangeable between the two checks; do not read a pass/fail on one as a pass/fail on the other.
+
+zone 0: start_temp A=40.20C B=39.57C delta=0.63C
+zone 1: start_temp A=40.19C B=39.80C delta=0.39C
+zone 2: start_temp A=40.03C B=39.97C delta=0.06C
+
+MULTIPLICITY: 27 keys evaluated, 18 DISTINGUISHABLE, no correction applied to the per-key verdicts below.
+  per-key false-positive rate of the range floor (Monte Carlo): n=3: 30.5%, n=6: 12.0%
+  expected spurious DISTINGUISHABLE keys by chance alone: 3.42
+  P(>=1 spurious DISTINGUISHABLE), independence assumed (overstated): 97.5%
+  P(>=1 spurious DISTINGUISHABLE), effective family size 10-15 (correlation-adjusted): 72.0%-85.2%
+  CONSISTENT PATTERN(S) -- same metric, same direction, across multiple keys (potentially actionable):
+    iae_normalized_c               B better in 3 keys (zones [0, 1, 2], segments [1])
+    ramp_worst_error_c             B better in 3 keys (zones [0, 1, 2], segments [1])
+    dwell_entry_overshoot_peak_c   B better in 3 keys (zones [0, 1, 2], segments [1])
+    settle_time_s                  B better in 3 keys (zones [0, 1, 2], segments [1])
+  27 (zone, metric, segment) keys evaluated, no multiplicity correction applied to the raw per-key verdicts above. The range floor's own per-key false-positive rate is NOT 5% -- it depends on n (see per_n_alpha) and is roughly 12% at n=6. A SINGLE DISTINGUISHABLE key in a report this size is close to the expected outcome under pure chance -- read it as PROVISIONAL AT BEST, not a finding. prob_at_least_one_independent assumes every key is an independent test and OVERSTATES the true risk (keys share zones, segments, and underlying physics); prob_at_least_one_effective_low/high use the review's estimated effective family size of 10-15 independent tests instead -- still approximate, since the correlation structure between keys is not itself measured. The one pattern treated as potentially actionable here: the SAME metric DISTINGUISHABLE in the SAME direction across >= 3 zones/segments -- see consistent_patterns.
+
+metric floor reliability (per-metric spread of the measured floor across zones/segments):
+  dwell_entry_overshoot_peak_c   floor 0.110-0.720C (ratio 6.5x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+  dwell_entry_time_to_peak_s     floor 11.000-52.000C (ratio 4.7x) -> reliable
+  dwell_steady_state_offset_c    floor 0.060-0.840C (ratio 14.0x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+  iae_normalized_c               floor 0.066-0.285C (ratio 4.3x) -> reliable
+  iae_normalized_whole_c         floor 0.077-0.147C (ratio 1.9x) -> reliable
+  ramp_mean_error_c              floor 0.094-0.514C (ratio 5.5x) -> reliable
+  ramp_worst_error_c             floor 0.230-0.590C (ratio 2.6x) -> reliable
+  settle_time_s                  floor 11.000-168.000C (ratio 15.3x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+
+
+  z0 whole-run  iae_normalized_whole_c         A=  +1.121 B=  +0.808  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.313 exceeds measured floor 0.116 -- not a confirmed result)
+  z0 seg1       iae_normalized_c               A=  +1.204 B=  +0.723  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.481 exceeds measured floor 0.248 -- not a confirmed result)
+  z0 seg2       iae_normalized_c               A=  +1.077 B=  +0.869  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z0 seg3       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z0 seg1       ramp_mean_error_c              A=  -1.138 B=  -0.726  INDISTINGUISHABLE: |delta|=0.413 is below the measured noise floor 0.514 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z0 seg2       ramp_mean_error_c              A=  -0.525 B=  -0.221  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z0 seg1       ramp_worst_error_c             A=  +1.750 B=  +1.080  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.670 exceeds measured floor 0.330 -- not a confirmed result)
+  z0 seg2       ramp_worst_error_c             A=  +2.890 B=  +2.050  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z0 seg1       dwell_entry_overshoot_peak_c   A=  +3.280 B=  +1.980  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=1.300 exceeds measured floor 0.110 -- not a confirmed result)
+  z0 seg2       dwell_entry_overshoot_peak_c   A=  +2.250 B=  +1.230  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z0 seg1       dwell_entry_time_to_peak_s     A= +94.000 B= +73.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=21.000 exceeds measured floor 16.000 -- not a confirmed result)
+  z0 seg2       dwell_entry_time_to_peak_s     A=+110.000 B= +84.000  PROVISIONAL: B lower (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z0 seg1       dwell_steady_state_offset_c    A=  +1.078 B=  +0.529  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.549 exceeds measured floor 0.302 -- not a confirmed result)
+  z0 seg2       dwell_steady_state_offset_c    A=  +0.550 B=  +0.281  INDISTINGUISHABLE: |delta|=0.269 is below the measured noise floor 0.840 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z0 seg3       dwell_steady_state_offset_c    A=  +0.300 B=  +0.600  PROVISIONAL: A lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z0 seg1       settle_time_s                  A=+204.000 B=+142.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=62.000 exceeds measured floor 48.000 -- not a confirmed result)
+  z0 seg2       settle_time_s                  A=+288.000 B=+131.000  PROVISIONAL: B lower (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z1 whole-run  iae_normalized_whole_c         A=  +0.898 B=  +0.750  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.148 exceeds measured floor 0.077 -- not a confirmed result)
+  z1 seg1       iae_normalized_c               A=  +1.085 B=  +0.769  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.316 exceeds measured floor 0.114 -- not a confirmed result)
+  z1 seg2       iae_normalized_c               A=  +0.772 B=  +0.735  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z1 seg3       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z1 seg1       ramp_mean_error_c              A=  -1.444 B=  -1.008  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.436 exceeds measured floor 0.094 -- not a confirmed result)
+  z1 seg2       ramp_mean_error_c              A=  -0.395 B=  -0.436  PROVISIONAL: A lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z1 seg1       ramp_worst_error_c             A=  +1.940 B=  +1.260  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.680 exceeds measured floor 0.270 -- not a confirmed result)
+  z1 seg2       ramp_worst_error_c             A=  +2.130 B=  +2.130  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z1 seg1       dwell_entry_overshoot_peak_c   A=  +2.230 B=  +1.450  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.780 exceeds measured floor 0.140 -- not a confirmed result)
+  z1 seg2       dwell_entry_overshoot_peak_c   A=  +1.760 B=  +1.370  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z1 seg1       dwell_entry_time_to_peak_s     A= +99.000 B= +79.000  INDISTINGUISHABLE: |delta|=20.000 is below the measured noise floor 26.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z1 seg2       dwell_entry_time_to_peak_s     A=+120.000 B=+126.000  PROVISIONAL: A lower (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z1 seg1       dwell_steady_state_offset_c    A=  +0.366 B=  +0.220  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.147 exceeds measured floor 0.098 -- not a confirmed result)
+  z1 seg2       dwell_steady_state_offset_c    A=  +0.439 B=  +0.476  INDISTINGUISHABLE: |delta|=0.037 is below the measured noise floor 0.210 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z1 seg3       dwell_steady_state_offset_c    A=  +0.390 B=  +0.500  PROVISIONAL: A lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z1 seg1       settle_time_s                  A=+314.000 B=+225.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=89.000 exceeds measured floor 68.000 -- not a confirmed result)
+  z1 seg2       settle_time_s                  A=+188.000 B=+178.000  PROVISIONAL: B lower (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z2 whole-run  iae_normalized_whole_c         A=  +0.844 B=  +0.798  INDISTINGUISHABLE: |delta|=0.047 is below the measured noise floor 0.147 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       iae_normalized_c               A=  +0.833 B=  +0.662  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.171 exceeds measured floor 0.067 -- not a confirmed result)
+  z2 seg2       iae_normalized_c               A=  +0.857 B=  +0.893  PROVISIONAL: A lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z2 seg3       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z2 seg1       ramp_mean_error_c              A=  -1.186 B=  -1.087  INDISTINGUISHABLE: |delta|=0.099 is below the measured noise floor 0.110 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg2       ramp_mean_error_c              A=  -0.360 B=  -0.414  PROVISIONAL: A lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z2 seg1       ramp_worst_error_c             A=  +1.650 B=  +1.420  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.230 exceeds measured floor 0.230 -- not a confirmed result)
+  z2 seg2       ramp_worst_error_c             A=  +2.140 B=  +2.460  PROVISIONAL: A lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z2 seg1       dwell_entry_overshoot_peak_c   A=  +2.000 B=  +1.300  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.700 exceeds measured floor 0.210 -- not a confirmed result)
+  z2 seg2       dwell_entry_overshoot_peak_c   A=  +2.110 B=  +1.810  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z2 seg1       dwell_entry_time_to_peak_s     A= +89.000 B= +89.000  INDISTINGUISHABLE: |delta|=0.000 is below the measured noise floor 16.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg2       dwell_entry_time_to_peak_s     A=+120.000 B=+136.000  PROVISIONAL: A lower (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z2 seg1       dwell_steady_state_offset_c    A=  +0.485 B=  +0.466  INDISTINGUISHABLE: |delta|=0.019 is below the measured noise floor 0.060 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg2       dwell_steady_state_offset_c    A=  +0.720 B=  +0.754  INDISTINGUISHABLE: |delta|=0.034 is below the measured noise floor 0.270 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg3       dwell_steady_state_offset_c    A=  +0.620 B=  +0.550  PROVISIONAL: B lower-magnitude (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)
+  z2 seg1       settle_time_s                  A=+162.000 B=+131.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=31.000 exceeds measured floor 11.000 -- not a confirmed result)
+  z2 seg2       settle_time_s                  A=+204.000 B=+210.000  PROVISIONAL: A lower (noise floor unknown -- distinguishability cannot be assessed -- not a confirmed result)

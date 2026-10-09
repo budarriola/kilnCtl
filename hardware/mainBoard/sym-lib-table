@@ -1,0 +1,5 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "SamacSys_Parts") (type "Legacy") (uri "${KIPRJMOD}/parts/SamacSys_Parts.lib") (options "") (descr ""))
+	(lib (name "MAXM17572AMC+T") (type "KiCad") (uri "${KIPRJMOD}/../lib/MAXM17572AMC+T.kicad_sym") (options "") (descr ""))
+)

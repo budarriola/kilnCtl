@@ -1,0 +1,43 @@
+{
+  "_comment": "Every CSS rule that ui_status_color_check.mjs's colour-only scan flags (a status-ish selector whose declaration block is only color/background/border-color pointing at --ok/--warn/--bad/--neutral) has to be listed here with a one-line note on why it's already safe -- usually because a sibling text/glyph at the call site carries the same information. The scan can't see the JS/HTML side, only the CSS shape, so it can't verify these notes itself; a human added them during the 2026-09 colour-dependence audit by reading each call site. A NEW rule of this shape is NOT in this file and fails the build until reviewed the same way.",
+  "diagnostics_page.html": [
+    { "selector": ".chan .subrow .bad", "note": "always renders next to its own text, e.g. 'FAULT pin: yes' -- the word carries the state, colour is reinforcement." }
+  ],
+  "main_page.html": [
+    { "selector": "#profileFeasIcon.feas-icon-warn", "note": "introduced by commit 165a017 (2026-09, profile feasibility warnings). Genuinely not colour-only in practice: updateProfileFeasIcon() (main_page.html) sets icon.textContent to a warning-triangle glyph ('⚠') for the has-problem case (info glyph 'ⓘ' for the unknown/not-assessed case, class feas-icon-unknown, which this scan doesn't flag since it targets --muted not a status token) and sets icon.title to the full warning/unassessed sentence -- both cues are DOM/JS-injected, not present in static markup, which is exactly what this CSS-shape scan cannot see. Allowlisted rather than fixed at the call site because main_page.html is owned by another concurrent change right now." },
+    { "selector": "#relayLifeIcon.feas-icon-warn", "note": "introduced by commit be67a2a4 (RELAY_LIFE_BUDGET.md, relay contact-life indication), same shape as #profileFeasIcon.feas-icon-warn above. Genuinely not colour-only: renderRelayLife() (main_page.html) sets icon.textContent to the warning-triangle glyph ('⚠') and icon.title to the specific 'Relay N (type): NN% of rated life...' sentence any time this class is active -- both DOM/JS-injected cues this CSS-shape scan cannot see. The sibling error state (class relay-life-error) also bolds the icon (font-weight, in the CSS rule itself), which is why only the warn class trips this scan." },
+    { "selector": "#profileLimitIcon.limit-icon-warn", "note": "2026-09-08, configured-limit headroom warning (owner policy: warn instead of clamp). Same shape as #profileFeasIcon.feas-icon-warn/#relayLifeIcon.feas-icon-warn above: updateProfileLimitIcon() (main_page.html) sets icon.textContent to '⚠' and icon.title to the at-limit sentence ('no margin against a configured limit') for this class, distinct from the exceeds tier's '⛔' + bold (class limit-icon-danger, which bolds in the CSS rule itself so it doesn't trip this scan) and the near-limit tier's 'ⓘ' + --muted (class limit-icon-info, not targeted since it points at --muted not a status token). Both textContent and title are DOM/JS-injected, not visible to this CSS-shape scan." },
+    { "selector": "#profilePickerStatus.status-fault", "note": "2026-09-27, #profileSelect load-status line (owner report: the picker used to stay silently empty on a background 401). showProfilePickerError() (main_page.html) sets this class AND el.textContent to the plain sentence 'Could not load profiles.' in the same call; the sibling login-prompt state (showProfilePickerLoginPrompt()) never applies this class and instead appends a distinct 'Log in to load profiles' button -- the two states are already text-distinct, not colour-only, and both cues are DOM/JS-injected so this CSS-shape scan can't see them." }
+  ],
+  "kiln_configs_page.html": [
+    { "selector": "#kcConfigMsg.kc-error", "note": "moved here from main_page.html 2026-09-18 along with the kiln-config selector/management UI itself; unchanged reasoning: the element's text content is the error message itself, the class only recolours it." }
+  ],
+  "profiles_page.html": [
+    { "selector": "#msg .warn", "note": "wraps a full warning sentence set by JS; colour only recolours existing text." },
+    { "selector": ".s-ramp.near-ceiling", "note": "2026-09 audit fix: checkRamp() now also sets input.title on this state (see profiles_page.html), a non-colour cue this CSS-only scan can't see." }
+  ],
+  "readiness_page.html": [
+    { "selector": ".item.status-ok .mark", "note": "readiness_page.html's MARK[] map gives every status (ok/not_done/deliberately_off/cannot_yet) its own glyph (✓/✗/—/⋯); colour only reinforces an already-distinct glyph." }
+  ],
+  "safety_commissioning_page.html": [
+    { "selector": ".field.unset input, .field.unset select", "note": "co-occurs with a '⚠ not set' badge (.field.unset::before-style label in the same rule block) and border-width 2px -- not colour alone." }
+  ],
+  "safety_page.html": [
+    { "selector": ".row .value.ok", "note": "the value text itself differs per state (e.g. 'linked'/'OK' vs 'not linked'/'INCOMPATIBLE'); colour only reinforces text that already differs." },
+    { "selector": ".row .value.near", "note": "2026-09 audit fix: render() now appends ' -- WARN'/' -- NEAR LIMIT' etc. to the value text for this class (see safety_page.html), a non-colour cue this CSS-only scan can't see." },
+    { "selector": ".card.ineffective", "note": "always paired with the bold '!! TRIP_INEFFECTIVE !!' row text and a separate breaker-warning banner -- not colour alone." }
+  ],
+  "security_page.html": [
+    { "selector": ".kc-sec-status.ok", "note": "same meaning and same token as safety_page.html's '.row .value.ok' above -- an OK/success confirmation, not a distinct status. setStatus() (security_page.html) always sets el.textContent to the outcome sentence ('Saved.', 'Saved. You will be signed out.', etc.) in the same call that sets this class; the .err sibling class (color: var(--fault-color), not a tracked token) covers the failure case with its own differing text ('Passwords do not match.', 'Save failed: ...', etc.). Both cues are DOM/JS-injected and not visible to this CSS-shape scan." }
+  ],
+  "zones_page.html": [
+    { "selector": "table.coupling td.rga-ok", "note": "commit c8c3b64 (2026-08-31) made classifyRga()'s call site inject a glyph suffix (✓/!/✗) into the cell text alongside the colour, resolving the prior colour-only proposal -- but the CSS rule itself (color: var(--ok) only) is unchanged, so this CSS-shape scan still flags it and still can't see the glyph, which is injected by JS (see zones_page.html's classifyRga()/glyph map) rather than present in static markup. Kept allowlisted because the check will always flag this selector shape regardless of the glyph; the note now records the real (non-colour) cue instead of the stale 'not yet fixed' text." },
+    { "selector": "table.coupling td.rga-warn", "note": "see rga-ok above." },
+    { "selector": "table.coupling td.rga-bad", "note": "see rga-ok above." },
+    { "selector": "p.verdict-ok", "note": "full explanatory sentence, e.g. 'Every diagonal element is within...'; colour only reinforces text." },
+    { "selector": "p.verdict-warn, div.verdict-warn", "note": "full explanatory sentence; colour only reinforces text." },
+    { "selector": "p.verdict-bad", "note": "full explanatory sentence; colour only reinforces text." },
+    { "selector": ".kg-badge.kg-bad", "note": "2026-09-18, kiln zone graphic (docs/ZONE_GRAPHIC_PLAN.md). Genuinely not colour-only: kgBadge() (zones_page.html) picks a SHAPE-distinct glyph in the same call that picks this class -- an octagon (#kgIconError) for bad, a triangle (#kgIconWarn) for warn, a dashed hollow circle carrying '?' (#kgIconUnknown) for unknown -- and emits an SVG <title> holding the full state sentence, plus data-kgtitle/data-kgbody that the delegated click/keydown handler renders into #kilnGraphicPopup. Glyph and title are JS-injected into an inline <svg>, exactly what this CSS-shape scan cannot see; the CSS rule only recolours an already shape-distinct badge." },
+    { "selector": ".kg-badge.kg-warn", "note": "see .kg-badge.kg-bad above -- same kgBadge() call site, triangle glyph (#kgIconWarn) instead of the octagon." }
+  ]
+}

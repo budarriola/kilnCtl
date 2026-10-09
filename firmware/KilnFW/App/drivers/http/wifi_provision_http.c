@@ -1,0 +1,1363 @@
+#include "wifi_provision_http.h"
+
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+
+#include "esp_heap_caps.h" /* heap_caps_malloc() -- networks_get_handler() below */
+#include "esp_log.h"
+#include "esp_http_server.h"
+#include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
+#include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
+#include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+#include "http_form.h"
+#include "web_encoding.h"
+#include "wifi_prov.h"
+#include "stack_margin.h"
+#include "httpd_socket_budget.h"
+
+static const char *TAG = "wifi_prov_http";
+
+/* Every socket held open for this app's entire lifetime by something OTHER
+ * than this file's own httpd instance -- currently just wifi_prov.c's
+ * dns_hijack_task() UDP responder (started unconditionally at boot; see its
+ * own header comment in wifi_prov.c). Kept as one named constant, rather
+ * than a bare 1 in the _Static_assert below, so the next permanent socket
+ * this firmware adds anywhere has one obvious place to bump. */
+#define WIFI_PROV_OTHER_PERMANENT_SOCKETS 1
+
+/* See httpd_socket_budget.h's header comment and sdkconfig.defaults'
+ * CONFIG_LWIP_MAX_SOCKETS comment for the full 2026-09-01 incident this
+ * guards against: CONFIG_LWIP_MAX_SOCKETS silently falling one socket short
+ * of what this file's max_open_sockets (below) plus every other permanent
+ * consumer actually needs disables lru_purge_enable's recovery path without
+ * any build-time signal -- it only shows up live, as a socket-exhaustion
+ * wedge under sustained load. This turns that into a build failure instead. */
+_Static_assert(HTTPD_SOCKET_BUDGET_HAS_HEADROOM(CONFIG_LWIP_MAX_SOCKETS, /*max_open_sockets=*/13,
+                                                 WIFI_PROV_OTHER_PERMANENT_SOCKETS),
+               "CONFIG_LWIP_MAX_SOCKETS no longer covers max_open_sockets + httpd's 3 internal "
+               "sockets + every other permanent socket this firmware holds open -- see "
+               "httpd_socket_budget.h");
+
+/* application/x-www-form-urlencoded body, worst case ~3x expansion from
+ * percent-encoding on both fields plus the "ssid=&password=" framing --
+ * generous headroom over that. Content-Length is checked against this
+ * *before* a single byte is read, so an attacker claiming a huge body just
+ * gets a 400, never a read into memory sized from their own claim. */
+#define PROV_BODY_MAX 384
+
+/* Embedded via EMBED_TXTFILES in CMakeLists.txt -- symbol names are the
+ * filename with non-alnum characters replaced by '_', plus a NUL the build
+ * system appends for a text file. TODO.md 10.6a: these three are embedded
+ * pre-gzipped (CMakeLists.txt gzips them at configure time before
+ * idf_component_register runs), so the filename -- and therefore the
+ * symbol -- carries a trailing "_gz". theme.css is the new shared-palette
+ * route from TODO.md 10.6's follow-up pass; it lives here (not a 7th .c
+ * file) because this module is the one that calls httpd_start() and owns
+ * the single httpd_handle_t every other *_http.c module registers routes
+ * onto (see wifi_provision_http_get_server() below) -- registering it here
+ * means it's reachable on the SAME server instance regardless of whether
+ * the device is in AP-only provisioning mode or fully provisioned, so a
+ * phone on the fallback AP during first-boot setup can load it same as a
+ * browser on the home network. */
+extern const uint8_t wifi_provision_page_html_gz_start[] asm("_binary_wifi_provision_page_html_gz_start");
+extern const uint8_t wifi_provision_page_html_gz_end[] asm("_binary_wifi_provision_page_html_gz_end");
+extern const uint8_t main_page_html_gz_start[] asm("_binary_main_page_html_gz_start");
+extern const uint8_t main_page_html_gz_end[] asm("_binary_main_page_html_gz_end");
+extern const uint8_t theme_css_gz_start[] asm("_binary_theme_css_gz_start");
+extern const uint8_t theme_css_gz_end[] asm("_binary_theme_css_gz_end");
+/* UI_PLAN.md Web "page structure rework" section 4 item 1's shared-nav
+ * follow-up to theme.css: /nav.js and /app.js, registered here for exactly
+ * the same reason theme.css is -- this module owns s_server, so both are
+ * reachable during AP-only provisioning as well as once fully provisioned. */
+extern const uint8_t nav_js_gz_start[] asm("_binary_nav_js_gz_start");
+extern const uint8_t nav_js_gz_end[] asm("_binary_nav_js_gz_end");
+extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
+extern const uint8_t app_js_gz_end[] asm("_binary_app_js_gz_end");
+/* SETUP_WIZARD.md step 8 (safety processor commissioning): the
+ * client-side confirm-and-read-back logic shared between
+ * safety_commissioning_page.html and setup_wizard_page.html's step 7, so
+ * that step could embed inline (owner decision) without duplicating that
+ * logic a second time -- see commissioning_shared.js's own header comment. */
+extern const uint8_t commissioning_shared_js_gz_start[] asm("_binary_commissioning_shared_js_gz_start");
+extern const uint8_t commissioning_shared_js_gz_end[] asm("_binary_commissioning_shared_js_gz_end");
+
+static httpd_handle_t s_server;
+
+/* TODO.md 10.6a: content negotiation now lives in web_encoding.h's shared
+ * web_client_accepts_gzip() -- absent Accept-Encoding means "anything is
+ * acceptable" (RFC 9110 s12.5.3) and is served gzip without a warning; a
+ * header that explicitly excludes gzip gets an uncompressed 406 instead of
+ * a body it cannot decode. */
+static esp_err_t send_embedded_gzip_html(httpd_req_t *req, const char *page_name,
+                                          const uint8_t *start, const uint8_t *end)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, page_name);
+    }
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)start, (size_t)(end - start));
+}
+
+static esp_err_t theme_css_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "theme.css");
+    }
+    httpd_resp_set_type(req, "text/css");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)theme_css_gz_start,
+                           (size_t)(theme_css_gz_end - theme_css_gz_start));
+}
+
+/* text/javascript per RFC 9239 (obsoletes the older application/javascript
+ * recommendation) -- both are gzip-only embedded assets like theme.css, so
+ * this shares web_client_accepts_gzip()'s 406 path rather than reimplementing
+ * the negotiation, same as every other handler in this file. */
+static esp_err_t nav_js_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "nav.js");
+    }
+    httpd_resp_set_type(req, "text/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)nav_js_gz_start,
+                           (size_t)(nav_js_gz_end - nav_js_gz_start));
+}
+
+static esp_err_t app_js_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "app.js");
+    }
+    httpd_resp_set_type(req, "text/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)app_js_gz_start,
+                           (size_t)(app_js_gz_end - app_js_gz_start));
+}
+
+static esp_err_t commissioning_shared_js_get_handler(httpd_req_t *req)
+{
+    if (!web_client_accepts_gzip(req)) {
+        return web_send_gzip_not_acceptable(req, TAG, "commissioning_shared.js");
+    }
+    httpd_resp_set_type(req, "text/javascript");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    web_set_asset_cache_headers(req);
+    return httpd_resp_send(req, (const char *)commissioning_shared_js_gz_start,
+                           (size_t)(commissioning_shared_js_gz_end - commissioning_shared_js_gz_start));
+}
+
+static esp_err_t wifi_page_get_handler(httpd_req_t *req)
+{
+    /* 2026-08-21, TODO.md section 1 fix: a direct hit on /wifi is one of the
+     * ways an operator proves a static IP is actually reachable -- see
+     * wifi_prov_note_possible_static_reachability()'s doc comment. Cheap
+     * no-op unless ip_mode is STATIC and unconfirmed. */
+    wifi_prov_note_possible_static_reachability(httpd_req_to_sockfd(req));
+    return send_embedded_gzip_html(req, "wifi_provision_page.html",
+                                   wifi_provision_page_html_gz_start, wifi_provision_page_html_gz_end);
+}
+
+/* "/" is the landing page a client actually lands on -- both a phone
+ * joining the fallback AP fresh (expects setup) and a browser reaching the
+ * board over the home network once it's already provisioned (expects the
+ * main page, not to be walked through setup again). Same server, same
+ * routes underneath either way; this just decides which one "/" means. */
+static esp_err_t index_get_handler(httpd_req_t *req)
+{
+    /* 2026-08-21, TODO.md section 1 fix: this is the single most likely hit
+     * an operator makes right after typing a newly-configured static IP into
+     * a browser, so it's the primary confirmation point -- see
+     * wifi_prov_note_possible_static_reachability()'s doc comment. */
+    wifi_prov_note_possible_static_reachability(httpd_req_to_sockfd(req));
+    if (wifi_prov_is_sta_connected()) {
+        return send_embedded_gzip_html(req, "main_page.html", main_page_html_gz_start, main_page_html_gz_end);
+    }
+    return send_embedded_gzip_html(req, "wifi_provision_page.html",
+                                   wifi_provision_page_html_gz_start, wifi_provision_page_html_gz_end);
+}
+
+static const char *state_name(wifi_prov_state_t s)
+{
+    switch (s) {
+    case WIFI_PROV_STATE_AP_MODE:
+        return "ap";
+    case WIFI_PROV_STATE_UNPROVISIONED:
+        return "unprovisioned";
+    case WIFI_PROV_STATE_CONNECTING:
+        return "connecting";
+    case WIFI_PROV_STATE_CONNECTED:
+        return "connected";
+    case WIFI_PROV_STATE_RECONNECTING:
+        return "reconnecting";
+    default:
+        return "unknown";
+    }
+}
+
+static const char *mode_name(wifi_prov_mode_t m)
+{
+    return m == WIFI_PROV_MODE_AP ? "ap" : "home";
+}
+
+/* 2026-08-20, web-GUI-only static-IP addition (see wifi_prov.h). */
+static const char *ip_mode_name(wifi_prov_ip_mode_t m)
+{
+    return m == WIFI_PROV_IP_MODE_STATIC ? "static" : "dhcp";
+}
+
+/* Escapes '"' and '\\' for embedding an untrusted-ish string (a saved SSID,
+ * which came from a POST body at some point) into a JSON string literal.
+ * Anything else is passed through -- this is a status readout, not a strict
+ * validator, so it favors not truncating a legitimate SSID over rejecting
+ * one with unusual characters. out_cap includes the closing NUL. */
+static void json_escape(const char *src, char *out, size_t out_cap)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 2 < out_cap; p++) {
+        if (*p == '"' || *p == '\\') {
+            if (o + 3 >= out_cap) {
+                break;
+            }
+            out[o++] = '\\';
+        }
+        out[o++] = *p;
+    }
+    out[o] = '\0';
+}
+
+static esp_err_t status_get_handler(httpd_req_t *req)
+{
+    /* 2026-08-21, TODO.md section 1 fix: /status is polled periodically by
+     * every page's nav/status widget, so this is the confirmation path for a
+     * tab that was already open (or a bookmark) before a static-IP join
+     * landed -- see wifi_prov_note_possible_static_reachability()'s doc
+     * comment. Cheap no-op unless ip_mode is STATIC and unconfirmed. */
+    wifi_prov_note_possible_static_reachability(httpd_req_to_sockfd(req));
+
+    /* 2026-09-17 disclosure fix: the saved home network's SSID, and (below)
+     * the STA static-IP topology, were unconditionally readable by any
+     * unauthenticated caller on the LAN even though this route is one of
+     * the ones a client had to already be ON the LAN to reach at all. This
+     * route stays ROUTE_TIER_OPEN on purpose -- an unprovisioned board has
+     * to answer /status before anyone can authenticate -- so the fix is in
+     * the payload, same as the ap_password narrowing just above and the
+     * on_ap gate two fixes of this class already landed for other routes.
+     *
+     * 2026-09-17 adversarial-review follow-up: the disjunction used to be
+     * spelled out inline here (and independently in readiness_http.c) with
+     * 661 lines of tests that never actually executed either call site --
+     * see http_auth_disclosure_gate.h's header comment for the full
+     * negative-test writeup. It is now the one shared
+     * http_auth_may_disclose() function, real object code linked into the
+     * host tests, so the call sites and the tests exercise the same
+     * function. Do not re-inline the disjunction here. */
+    bool may_disclose = http_auth_may_disclose(req);
+
+    char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+    json_escape(may_disclose ? wifi_prov_get_saved_ssid() : "", ssid_escaped, sizeof(ssid_escaped));
+    char ssid_field[WIFI_PROV_SSID_MAX_LEN * 2 + 3];
+    wifi_prov_status_redact_field(may_disclose, ssid_escaped, ssid_field, sizeof(ssid_field));
+
+    char ap_ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+    json_escape(wifi_prov_get_ap_ssid(), ap_ssid_escaped, sizeof(ap_ssid_escaped));
+
+    /* 2026-08-13: the board's OWN AP password, deliberately exposed here --
+     * unlike any *saved network's* password (never sent by this server,
+     * anywhere -- see wifi_prov_get_saved_networks()'s doc comment), an
+     * operator on the setup page needs to see what they configured for the
+     * board's own identity. See wifi_prov_get_ap_password()'s doc comment
+     * for the full reasoning.
+     *
+     * 2026-08-22: narrowed to requests that arrived ON the SoftAP. That
+     * original reasoning holds exactly there and nowhere else -- a client
+     * associated to the AP had to know the password to associate at all, so
+     * echoing it back discloses nothing. Served over the STA interface, the
+     * same field handed the board's AP password to every unauthenticated
+     * device on the house LAN, which is a real disclosure and was never the
+     * intent. Off-AP callers get an empty string; ap_password_known tells
+     * the page which case it is, so it can render "hidden -- open this page
+     * from the board's own Wi-Fi to see it" rather than "no password set",
+     * which would be a lie about an AP that is in fact protected. */
+    const bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
+    char ap_password_escaped[WIFI_PROV_PASSWORD_MAX_LEN * 2 + 1];
+    json_escape(on_ap ? wifi_prov_get_ap_password() : "", ap_password_escaped,
+                sizeof(ap_password_escaped));
+
+    char sta_ip[16];
+    bool sta_connected = wifi_prov_is_sta_connected();
+    if (!sta_connected || wifi_prov_get_sta_ip(sta_ip, sizeof(sta_ip)) != ESP_OK) {
+        sta_ip[0] = '\0';
+    }
+    /* 2026-09-17 disclosure fix, part 2 (adversarial review of 6de75575):
+     * sta_ip is the board's own home-LAN address. The original reasoning --
+     * "a caller able to reach this route at all already used an address to
+     * get here" -- holds for a caller on the home LAN, but not for one
+     * associated to the board's own SoftAP: WIFI_MODE_APSTA (wifi_prov.c)
+     * keeps both interfaces up whenever saved credentials exist, so such a
+     * caller reaches this route at 192.168.4.x and learns nothing about the
+     * home LAN from that connection alone. Unconditionally disclosing sta_ip
+     * handed that caller exactly the home-LAN-subnet fact the ssid/
+     * static_ip/static_netmask/static_gateway redactions above exist to
+     * withhold, undoing them. Gated on `on_ap` (computed above for
+     * ap_password) independently of may_disclose, same disjunction shape as
+     * that field: an admin always sees it; a non-admin sees it only when
+     * they did NOT arrive over the SoftAP, since such a caller already used
+     * a station-side address to get here. */
+    char sta_ip_field[sizeof(sta_ip) + 3];
+    wifi_prov_status_redact_field(may_disclose || !on_ap, sta_ip, sta_ip_field, sizeof(sta_ip_field));
+
+    int8_t sta_rssi = wifi_prov_get_sta_rssi();
+    uint8_t ap_clients = wifi_prov_get_ap_client_count();
+
+    /* 2026-08-20, web-GUI-only: current STA IP mode and, if static, the
+     * configured values -- so the page can prefill its static-IP fields on
+     * load without a separate round trip. Dotted-quad strings, never
+     * user-supplied at read time (they came from a prior POST this same
+     * server validated), so no json_escape() needed -- same as sta_ip just
+     * above. */
+    const char *ip_mode = ip_mode_name(wifi_prov_get_ip_mode());
+    /* static_ip/netmask/gateway describe the home network's addressing
+     * scheme (and, via the gateway, likely the router's admin address) --
+     * redacted to JSON null under the same may_disclose gate as ssid above.
+     * sta_ip is gated separately, on `on_ap` rather than may_disclose alone
+     * -- see sta_ip_field's own comment above. */
+    char static_ip_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    char static_netmask_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    char static_gateway_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_ip(), static_ip_field,
+                                   sizeof(static_ip_field));
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_netmask(), static_netmask_field,
+                                   sizeof(static_netmask_field));
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_gateway(), static_gateway_field,
+                                   sizeof(static_gateway_field));
+
+    /* mode is the one explicit toggle the page renders; state is the
+     * finer-grained detail of what's happening while home mode acts on a
+     * join (unprovisioned/connecting/connected/reconnecting) -- both are
+     * sent so the page can show one coherent switch plus a status line
+     * without guessing at either from the other. */
+    /* 2026-09-28 owner request follow-up: expose whether the fallback AP is
+     * being deliberately kept up (a logged-in user, or an AP client with
+     * auth off) instead of adding a new route -- reusing this existing GET
+     * per this file's near-full max_uri_handlers cap. Never redacted: it
+     * carries no home-network detail, just a fact about the board's own AP
+     * radio, same disclosure class as ap_clients just above it. */
+    bool ap_pending_teardown = wifi_prov_get_ap_pending_teardown();
+
+    /* +64 over the previous size for the two new booleans and their keys, +24
+     * more for ap_pending_teardown's own key+value. */
+    /* 2026-10-03: static_dns/static_dns2 added (+63 B worst case). Measured
+     * worst-case rendered length with every escaped field at its maximum is
+     * 677 B + NUL = 678 B, so this buffer grew 672 -> 680 B (+8 B, kept rather
+     * than streaming the response: it is well inside the httpd stack budget,
+     * check_httpd_task_stack_budget.ps1). dns/dns2 are formatted inline below
+     * instead of through wifi_prov_status_redact_field(): that helper needs a
+     * caller-supplied buffer per field, and two more 19 B buffers on this
+     * handler's stack buy nothing since the values are already quote-safe
+     * dotted quads (validated before storage). */
+    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24 + 8];
+    int n = snprintf(json, sizeof(json),
+                     "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
+                     "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
+                     "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
+                     "\"static_netmask\":%s,\"static_gateway\":%s,"
+                     "\"static_dns\":%s%s%s,\"static_dns2\":%s%s%s,"
+                     "\"ap_password_known\":%s,\"ap_password_set\":%s,"
+                     "\"ap_pending_teardown\":%s}",
+                     mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
+                     sta_connected ? "true" : "false", sta_ip_field, ap_ssid_escaped, ap_password_escaped,
+                     (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
+                     static_gateway_field,
+                     /* dns fields: same redaction rule as the three above (JSON null unless
+                      * may_disclose), written inline to avoid two more stack buffers. */
+                     may_disclose ? "\"" : "", may_disclose ? wifi_prov_get_static_dns() : "null",
+                     may_disclose ? "\"" : "", may_disclose ? "\"" : "",
+                     may_disclose ? wifi_prov_get_static_dns2() : "null", may_disclose ? "\"" : "",
+                     on_ap ? "true" : "false",
+                     wifi_prov_get_ap_password()[0] ? "true" : "false",
+                     ap_pending_teardown ? "true" : "false");
+    if (n < 0) {
+        n = 0;
+    }
+    if ((size_t)n >= sizeof(json)) {
+        n = (int)sizeof(json) - 1; /* truncated is fine for a status readout; never overrun */
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n);
+}
+
+static esp_err_t scan_get_handler(httpd_req_t *req)
+{
+    static wifi_prov_scan_result_t results[20];
+    size_t count = 0;
+    esp_err_t err = wifi_prov_scan(results, sizeof(results) / sizeof(results[0]), &count);
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "AP mode: scanning is disabled");
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan failed");
+        return ESP_OK;
+    }
+
+    /* Bounded by MAX_SCAN entries above, each contributing a fixed-size
+     * chunk -- no per-request allocation sized from anything a client sent,
+     * this is entirely device-controlled. */
+    char json[20 * 64 + 16];
+    size_t o = 0;
+    json[o++] = '[';
+    for (size_t i = 0; i < count; i++) {
+        char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+        json_escape(results[i].ssid, ssid_escaped, sizeof(ssid_escaped));
+        int n = snprintf(json + o, sizeof(json) - o, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
+                         i == 0 ? "" : ",", ssid_escaped, (int)results[i].rssi,
+                         results[i].secure ? "true" : "false");
+        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+            break; /* ran out of room -- stop here rather than overrun */
+        }
+        o += (size_t)n;
+    }
+    if (o + 1 < sizeof(json)) {
+        json[o++] = ']';
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, o);
+}
+
+/* WIFI_PROV_MAX_SAVED_NETWORKS is a .c-file-private define in wifi_prov.c,
+ * not exposed via wifi_prov.h -- 8 is a literal mirror of that value, kept
+ * generous (wifi_prov_get_saved_networks() truncates to whatever bound is
+ * passed here, it doesn't care if this is exact). */
+#define NETWORKS_SAVED_MAX 8
+
+static esp_err_t networks_get_handler(httpd_req_t *req)
+{
+    static wifi_prov_saved_network_t saved[NETWORKS_SAVED_MAX];
+    size_t saved_count = 0;
+    wifi_prov_get_saved_networks(saved, sizeof(saved) / sizeof(saved[0]), &saved_count);
+
+    static wifi_prov_scan_result_t scanned[20];
+    size_t scan_count = 0;
+    esp_err_t scan_err = wifi_prov_scan(scanned, sizeof(scanned) / sizeof(scanned[0]), &scan_count);
+    if (scan_err != ESP_OK) {
+        /* AP-mode (ESP_ERR_NOT_SUPPORTED) or any other transient scan
+         * failure -- this is a merged status readout, not a scan endpoint,
+         * so it degrades to saved-only (all in_range:false) rather than
+         * failing the whole response. */
+        if (scan_err != ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGW(TAG, "wifi_prov_scan failed in /networks: %s", esp_err_to_name(scan_err));
+        }
+        scan_count = 0;
+    }
+
+    const char *active_ssid = wifi_prov_get_saved_ssid();
+    bool sta_connected = wifi_prov_is_sta_connected();
+
+    /* Bounded by NETWORKS_SAVED_MAX + MAX_SCAN entries above, each
+     * contributing a fixed-size chunk -- no per-request allocation sized
+     * from anything a client sent. Sized generously over
+     * (20 scan + 8 saved) * ~80 bytes/entry for the extra fields this
+     * response carries versus /scan's plain entries.
+     *
+     * HEAP, not stack: this runs on the same httpd_worker task as every
+     * other handler in this file (8 KB total, CLAUDE.md's "httpd stack blob
+     * class") -- this 2704 B buffer is far too large to add to the same
+     * high-water mark those handlers do. Same size and shape as before;
+     * only where the buffer lives changed. Freed on every return path. */
+    const size_t json_cap = (20 + NETWORKS_SAVED_MAX) * 96 + 16;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /networks: malloc(%u) failed for the response buffer", (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
+    size_t o = 0;
+    json[o++] = '[';
+    bool first = true;
+
+    for (size_t i = 0; i < saved_count; i++) {
+        const char *ssid = saved[i].ssid;
+        bool in_range = false;
+        int8_t rssi = 0;
+        bool secure = false;
+        for (size_t j = 0; j < scan_count; j++) {
+            if (strcmp(ssid, scanned[j].ssid) == 0) {
+                in_range = true;
+                rssi = scanned[j].rssi;
+                secure = scanned[j].secure;
+                break;
+            }
+        }
+        bool connected = sta_connected && strcmp(ssid, active_ssid) == 0;
+
+        char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+        json_escape(ssid, ssid_escaped, sizeof(ssid_escaped));
+
+        int n;
+        if (in_range) {
+            /* rssi/secure key omitted entirely (not emitted as null) when a
+             * saved network isn't currently in scan range -- simplest to
+             * parse client-side, documented here and in the endpoint doc. */
+            n = snprintf(json + o, json_cap - o,
+                         "%s{\"ssid\":\"%s\",\"saved\":true,\"in_range\":true,\"rssi\":%d,"
+                         "\"secure\":%s,\"connected\":%s}",
+                         first ? "" : ",", ssid_escaped, (int)rssi, secure ? "true" : "false",
+                         connected ? "true" : "false");
+        } else {
+            n = snprintf(json + o, json_cap - o,
+                         "%s{\"ssid\":\"%s\",\"saved\":true,\"in_range\":false,\"connected\":%s}",
+                         first ? "" : ",", ssid_escaped, connected ? "true" : "false");
+        }
+        if (n < 0 || (size_t)n >= json_cap - o) {
+            break; /* ran out of room -- stop here rather than overrun */
+        }
+        o += (size_t)n;
+        first = false;
+    }
+
+    for (size_t j = 0; j < scan_count; j++) {
+        bool already_saved = false;
+        for (size_t i = 0; i < saved_count; i++) {
+            if (strcmp(scanned[j].ssid, saved[i].ssid) == 0) {
+                already_saved = true;
+                break;
+            }
+        }
+        if (already_saved) {
+            continue; /* already emitted above with saved:true, in_range:true */
+        }
+
+        bool connected = sta_connected && strcmp(scanned[j].ssid, active_ssid) == 0;
+        char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
+        json_escape(scanned[j].ssid, ssid_escaped, sizeof(ssid_escaped));
+
+        int n = snprintf(json + o, json_cap - o,
+                         "%s{\"ssid\":\"%s\",\"saved\":false,\"in_range\":true,\"rssi\":%d,"
+                         "\"secure\":%s,\"connected\":%s}",
+                         first ? "" : ",", ssid_escaped, (int)scanned[j].rssi,
+                         scanned[j].secure ? "true" : "false", connected ? "true" : "false");
+        if (n < 0 || (size_t)n >= json_cap - o) {
+            break; /* ran out of room -- stop here rather than overrun */
+        }
+        o += (size_t)n;
+        first = false;
+    }
+
+    if (o + 1 < json_cap) {
+        json[o++] = ']';
+    }
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json, o);
+    free(json);
+    return ret;
+}
+
+static esp_err_t forget_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > PROV_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[PROV_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            ESP_LOGW(TAG, "forget body read failed/short: %d", ret);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    int ssid_len = http_form_find_field(body, "ssid", ssid, sizeof(ssid));
+    if (ssid_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid missing or too long");
+        return ESP_OK;
+    }
+
+    esp_err_t err = wifi_prov_forget_network(ssid, (size_t)ssid_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_forget_network failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not forget network");
+        return ESP_OK;
+    }
+    return httpd_resp_sendstr(req, "ok");
+}
+
+/* 2026-08-20, web-GUI-only: POST /ip_config -- switches the STA interface
+ * between DHCP and a static IP. mode=dhcp needs no other fields; mode=static
+ * requires ip/netmask/gateway (optional dns/dns2), each validated as dotted-quad IPv4 by
+ * wifi_prov_set_static_ip() itself (ESP_ERR_INVALID_ARG on anything else) --
+ * this handler never passes an unvalidated string to esp_netif. Deliberately
+ * a separate endpoint from /provision: that one's body-field dispatch
+ * (mode=home|ap, ap_ssid/ap_password, ssid/password) is already a 3-way
+ * branch on which fields are present, and ip_config's "mode" value space
+ * (dhcp/static) is unrelated to and easily confused with /provision's own
+ * "mode" field (home/ap) if merged into the same handler. */
+/* Longest legal body: "mode=static&ip=..&netmask=..&gateway=..&dns=..&dns2=.." with every
+ * address 15 chars is 119 B, so the 128 B cap is unchanged. */
+#define IP_CONFIG_BODY_MAX 128
+
+static esp_err_t ip_config_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > IP_CONFIG_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[IP_CONFIG_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            ESP_LOGW(TAG, "ip_config body read failed/short: %d", ret);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char mode_val[8]; /* "dhcp" (4) or "static" (6), plus NUL */
+    int mode_len = http_form_find_field(body, "mode", mode_val, sizeof(mode_val));
+    if (mode_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "mode missing or too long");
+        return ESP_OK;
+    }
+
+    if (mode_len == 4 && strncmp(mode_val, "dhcp", 4) == 0) {
+        esp_err_t err = wifi_prov_set_dhcp();
+        if (err != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not switch to DHCP");
+            return ESP_OK;
+        }
+        return httpd_resp_sendstr(req, "ok");
+    }
+    if (mode_len != 6 || strncmp(mode_val, "static", 6) != 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "mode must be 'dhcp' or 'static'");
+        return ESP_OK;
+    }
+
+    char ip[WIFI_PROV_IPV4_STR_MAX];
+    char netmask[WIFI_PROV_IPV4_STR_MAX];
+    char gateway[WIFI_PROV_IPV4_STR_MAX];
+    int ip_len = http_form_find_field(body, "ip", ip, sizeof(ip));
+    int netmask_len = http_form_find_field(body, "netmask", netmask, sizeof(netmask));
+    int gateway_len = http_form_find_field(body, "gateway", gateway, sizeof(gateway));
+    if (ip_len < 0 || netmask_len < 0 || gateway_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "static mode requires ip, netmask, and gateway");
+        return ESP_OK;
+    }
+
+    /* Optional dns/dns2 (2026-10-03). Absent or empty == unset (the primary then
+     * follows the gateway, and re-posting without them clears stored ones).
+     * Malformed/too-long is a 400 here; wifi_prov_set_static_ip() re-validates
+     * (dotted quad, not 0.0.0.0, dns2 only with dns) and its INVALID_ARG maps
+     * to the same 400 below. */
+    char dns[WIFI_PROV_IPV4_STR_MAX];
+    char dns2[WIFI_PROV_IPV4_STR_MAX];
+    int dns_len = http_form_find_field(body, "dns", dns, sizeof(dns));
+    int dns2_len = http_form_find_field(body, "dns2", dns2, sizeof(dns2));
+    if (dns_len == -2 || dns2_len == -2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "dns/dns2 must each be a valid dotted-quad IPv4 address");
+        return ESP_OK;
+    }
+    if (dns_len < 0) {
+        dns[0] = '\0';
+    }
+    if (dns2_len < 0) {
+        dns2[0] = '\0';
+    }
+
+    if (wifi_prov_ip_in_ap_subnet(ip)) {
+        /* Distinct from the generic dotted-quad message below: this ip DOES
+         * parse fine, it's just refused because it sits inside the fallback
+         * AP's own 192.168.4.0/24 subnet (see wifi_prov_ip_in_ap_subnet()'s
+         * comment in wifi_prov_link.c for why). Checked here, ahead of
+         * wifi_prov_set_static_ip(), purely so the HTTP layer can report
+         * the more specific reason -- the setter enforces the same rule on
+         * its own regardless of caller. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "ip must not be in 192.168.4.0/24 (the setup AP's subnet)");
+        return ESP_OK;
+    }
+
+    esp_err_t err = wifi_prov_set_static_ip(ip, netmask, gateway, dns, dns2);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_set_static_ip failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_INVALID_ARG) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                "ip/netmask/gateway (and dns/dns2 if given; dns2 needs dns) must each be a valid dotted-quad IPv4 address");
+        } else {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not set static IP");
+        }
+        return ESP_OK;
+    }
+    return httpd_resp_sendstr(req, "ok");
+}
+
+static esp_err_t provision_post_handler(httpd_req_t *req)
+{
+    if (req->content_len <= 0 || req->content_len > PROV_BODY_MAX) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    char body[PROV_BODY_MAX + 1];
+    size_t received = 0;
+    while (received < (size_t)req->content_len) {
+        int ret = httpd_req_recv(req, body + received, req->content_len - received);
+        if (ret <= 0) {
+            /* Client went away or the socket errored mid-body -- log and
+             * bail without ever trusting the partial buffer. */
+            ESP_LOGW(TAG, "provision body read failed/short: %d", ret);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body read failed");
+            return ESP_OK;
+        }
+        received += (size_t)ret;
+    }
+    body[received] = '\0';
+
+    char mode_val[5]; /* "home" (4) or "ap" (2), plus NUL */
+    int mode_len = http_form_find_field(body, "mode", mode_val, sizeof(mode_val));
+    if (mode_len >= 0) {
+        /* The provisioning page's single toggle: "home" or "ap". Switching
+         * to "home" leaves AP mode without requiring new credentials in the
+         * same request -- e.g. "go back to trying the network I already
+         * have saved" -- distinct from submitting a brand new ssid/password
+         * below (which also leaves AP mode, per wifi_prov_set_credentials()). */
+        wifi_prov_mode_t want_mode;
+        if (mode_len == 4 && strncmp(mode_val, "home", 4) == 0) {
+            want_mode = WIFI_PROV_MODE_HOME;
+        } else if (mode_len == 2 && strncmp(mode_val, "ap", 2) == 0) {
+            want_mode = WIFI_PROV_MODE_AP;
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "mode must be 'home' or 'ap'");
+            return ESP_OK;
+        }
+        esp_err_t err = wifi_prov_set_mode(want_mode);
+        if (err != ESP_OK) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not change mode");
+            return ESP_OK;
+        }
+        return httpd_resp_sendstr(req, "ok");
+    }
+
+    /* ap_ssid and/or ap_password change the fallback AP's OWN identity, not
+     * station credentials -- see wifi_prov_set_ap_ssid()/
+     * wifi_prov_set_ap_password(). Distinct field names from "ssid"/
+     * "password" below (the *station* network's credentials) so the two
+     * intents can never collide in one request. The AP-mode page submits
+     * both fields together in one POST, so both are applied here rather
+     * than treating them as mutually exclusive like "mode" above. */
+    char ap_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    int ap_ssid_len = http_form_find_field(body, "ap_ssid", ap_ssid, sizeof(ap_ssid));
+    if (ap_ssid_len == -2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_ssid too long");
+        return ESP_OK;
+    }
+
+    char ap_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+    int ap_password_len = http_form_find_field(body, "ap_password", ap_password, sizeof(ap_password));
+    if (ap_password_len == -2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_password too long");
+        return ESP_OK;
+    }
+
+    if (ap_ssid_len >= 0 || ap_password_len >= 0) {
+        if (ap_ssid_len >= 0) {
+            esp_err_t err = wifi_prov_set_ap_ssid(ap_ssid, (size_t)ap_ssid_len);
+            if (err != ESP_OK) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_ssid must be 1-32 characters");
+                return ESP_OK;
+            }
+        }
+        if (ap_password_len >= 0) {
+            esp_err_t err = wifi_prov_set_ap_password(ap_password, (size_t)ap_password_len);
+            if (err != ESP_OK) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                     "ap_password must be empty (open) or 8-63 characters");
+                return ESP_OK;
+            }
+        }
+        return httpd_resp_sendstr(req, "ok");
+    }
+
+    char ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+    char password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
+    int ssid_len = http_form_find_field(body, "ssid", ssid, sizeof(ssid));
+    if (ssid_len < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid missing or too long");
+        return ESP_OK;
+    }
+    int password_len = http_form_find_field(body, "password", password, sizeof(password));
+    if (password_len == -2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "password too long");
+        return ESP_OK;
+    }
+    if (password_len < 0) {
+        password[0] = '\0';
+        password_len = 0;
+    }
+
+    esp_err_t err = wifi_prov_add_network(ssid, (size_t)ssid_len, password, (size_t)password_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "wifi_prov_add_network failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_NO_MEM) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "saved network list is full");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not save credentials");
+        }
+        return ESP_OK;
+    }
+    return httpd_resp_sendstr(req, "ok");
+}
+
+/* Captive-portal redirect, 2026-08-19 (explicit user report of phones
+ * joining the fallback AP then giving up -- see wifi_prov.c's
+ * dns_hijack_task() header comment for the full mechanism). Every phone
+ * OS's connectivity-check probe (Android's /generate_204, Apple's
+ * /hotspot-detect.html, Windows' /connecttest.txt, etc.) asks for a
+ * specific, never-registered path -- none of them are routes this server
+ * knows, so they all land here already, with no per-OS special-casing
+ * needed. A plain 302 to "/" is enough: index_get_handler() there already
+ * serves wifi_provision_page.html whenever the board isn't STA-connected,
+ * which is a different response than every probe expects (a 204 with no
+ * body, or specific known text) -- that mismatch is exactly what makes
+ * every major OS treat the network as "captive" and pop its own sign-in
+ * browser, no captive-portal-specific content negotiation required on this
+ * end. */
+static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t err)
+{
+    (void)err;
+    /* The captive-portal redirect is for BROWSERS. An unknown /api/ path is a
+     * programmatic client that asked for JSON, and redirecting it to "/"
+     * answered with 200 and 90 kB of dashboard HTML -- so a typo in an
+     * endpoint name looks like a successful request returning unparseable
+     * data, instead of the 404 that would name the mistake. No OS
+     * connectivity probe uses an /api/ path, so exempting the prefix costs
+     * the portal nothing. */
+    if (strncmp(req->uri, "/api/", 5) == 0) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"no such endpoint\"}");
+        return ESP_OK;
+    }
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
+}
+
+/* ROADMAP.md "HTTP connection resets under concurrency", 2026-09-04 pass:
+ * the previous pass's reproducer (tools/PcTools/scripts/
+ * http_concurrency_reproducer.py) measured resets starting at concurrency 8
+ * against a configured max_open_sockets of 13 -- a gap the previous pass
+ * flagged but could not explain without either vendoring esp_http_server's
+ * source (not in this repo) or instrumenting this file, which it didn't own
+ * yet. httpd_sess.c's own LRU-purge decision (httpd_is_sess_available()
+ * comparing hd->hd_sd_active_count against config.max_open_sockets, both
+ * private to esp_http_server) can't be read from outside, but
+ * httpd_config_t exposes exactly the pair of hooks that make the same fact
+ * observable from here: open_fn/close_fn fire on every socket admitted to
+ * and evicted from httpd's session pool (including LRU-purge evictions --
+ * they go through the same close path). Counting them gives the real
+ * concurrent-session count at the moment a request starts failing, without
+ * needing hd_sd_active_count itself.
+ *
+ * close_fn REPLACES the server's default close behavior (a plain close()) --
+ * skipping the close() call here would leak the fd, so this wrapper must
+ * call it itself.
+ *
+ * 2026-09-04 follow-up: the counter above (s_httpd_open_sockets) is
+ * decremented on ENTRY to this hook, before close(sockfd) is called --
+ * meaning it reads "closed" the instant httpd hands the fd back, not when
+ * the OS-level socket-table slot (lwIP's sockets[], CONFIG_LWIP_MAX_SOCKETS
+ * entries) actually becomes free. netconn_delete() (what close() drives
+ * down into) is an async round trip to lwIP's tcpip thread, not instant, so
+ * a session that's slow to actually release its slot would read as "closed"
+ * here while still occupying sockets[]. s_lwip_table_occupied below instead
+ * brackets the real close() return -- incremented in on_open (same moment
+ * a slot is known taken, right after accept() handed it to httpd) and
+ * decremented only AFTER close() returns, so it measures table occupancy
+ * rather than inferring it from the session-pool hook timing. If this
+ * counter runs higher than s_httpd_open_sockets during a burst, that's
+ * direct evidence of lingering close() latency holding sockets[] slots the
+ * session-pool counter has already released. */
+static _Atomic int s_httpd_open_sockets;
+static _Atomic int s_lwip_table_occupied;
+
+static esp_err_t wifi_provision_http_on_open(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+    int now = atomic_fetch_add(&s_httpd_open_sockets, 1) + 1;
+    int table_now = atomic_fetch_add(&s_lwip_table_occupied, 1) + 1;
+    ESP_LOGI(TAG, "httpd socket open: fd=%d active=%d/%d table=%d", sockfd, now,
+             /*max_open_sockets=*/13, table_now);
+    return ESP_OK;
+}
+
+static void wifi_provision_http_on_close(httpd_handle_t hd, int sockfd)
+{
+    (void)hd;
+    int now = atomic_fetch_sub(&s_httpd_open_sockets, 1) - 1;
+    ESP_LOGI(TAG, "httpd socket close: fd=%d active=%d/%d", sockfd, now, /*max_open_sockets=*/13);
+    /* Bracket the actual close() return -- this is the line the 2026-09-04
+     * follow-up above exists to measure. Do not decrement s_lwip_table_occupied
+     * before this call returns. */
+    close(sockfd);
+    int table_now = atomic_fetch_sub(&s_lwip_table_occupied, 1) - 1;
+    ESP_LOGI(TAG, "httpd socket table-free: fd=%d table=%d/%d", sockfd, table_now,
+             CONFIG_LWIP_MAX_SOCKETS);
+}
+
+esp_err_t wifi_provision_http_start(void)
+{
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.lru_purge_enable = true; /* recycle the oldest connection under
+                                     * pressure instead of refusing new ones
+                                     * -- keeps a stuck/slow client from
+                                     * locking a phone out permanently. */
+    /* Socket-pool sizing, 2026-08-20 (live-tested wedge). Confirmed on the
+     * bench: a burst of 10 near-simultaneous `curl` GETs to /status hit the
+     * DEFAULT (7) open-socket cap -- 3 connection-refused outright, the rest
+     * queue behind httpd's single worker task and stall to their client
+     * timeout. A second burst right after times out entirely, and the
+     * server doesn't recover until ~5 s of idle time lets lru_purge_enable
+     * (above) age out the backlog. Real-world trigger: a phone and a PC
+     * both polling the dashboard at once. max_open_sockets must satisfy
+     * ESP-IDF's own invariant (max_open_sockets <= CONFIG_LWIP_MAX_SOCKETS
+     * - 3, checked inside httpd_start()), so this bump is paired with
+     * raising CONFIG_LWIP_MAX_SOCKETS 10 -> 16 in sdkconfig -- see that
+     * file's comment at the same line. 13 (16-3) gives real headroom over
+     * the 10-connection burst that wedged the board without chasing the
+     * internal-SRAM-per-socket cost too far (see this project's earlier
+     * SRAM-starvation history -- 10-13 sockets is the sane range, not
+     * dozens). backlog_conn (kernel-level pending-accept queue, separate
+     * from httpd's own open-socket cap) is also bumped from its default of
+     * 5 so a burst larger than max_open_sockets still gets queued by the OS
+     * instead of refused at the TCP level.
+     *
+     * 2026-09-01 correction: the "13 (16-3)" math above assumed httpd was
+     * the ONLY consumer of CONFIG_LWIP_MAX_SOCKETS. It isn't -- wifi_prov.c's
+     * dns_hijack_task() holds one more permanent UDP socket from boot for
+     * the captive-portal DNS responder, which this file's original 16-socket
+     * budget never subtracted. That silently cut the real ceiling to 12,
+     * one below max_open_sockets, which meant httpd's own session-count
+     * bookkeeping could never reach its cap to trigger lru_purge_enable's
+     * LRU-close -- the purge safety net went unreachable and a saturated
+     * pool could only clear by outside load happening to drop, observed on
+     * the bench as a ~20-minute-long "httpd_accept_conn: error in accept
+     * (23)" wedge during sustained dashboard polling. Fixed by raising
+     * CONFIG_LWIP_MAX_SOCKETS 16 -> 18 (sdkconfig.defaults, see that file's
+     * comment at the same line for the full accounting and why 18, not 17,
+     * leaves one spare) rather than lowering max_open_sockets here -- 13 is
+     * still the number proven necessary against the 10-connection burst
+     * above. */
+    config.max_open_sockets = 13;
+    /* 2026-09-04: tested raising this 10 -> 32 alone, on the strength of
+     * ROADMAP.md's "HTTP connection resets under concurrency" previous
+     * pass, which flagged it as the untested next lead. RESULT: refuted,
+     * and in the wrong direction -- reset rate got WORSE (22.5% -> 45.0%
+     * at the same concurrency levels), because a deeper SYN-stage queue
+     * let more handshakes complete only to be aborted just past that
+     * point by CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE's fixed accept mailbox
+     * (see sdkconfig.defaults' comment at that setting, added this same
+     * pass, for the actual mechanism and its own fix). Reverted to 10 --
+     * see ROADMAP.md for the full before/after numbers. */
+    config.backlog_conn = 10;
+    /* Same burst: sockets sitting idle-but-stuck (e.g. a client that opened
+     * a connection but is slow to send/read) held their slot for the full
+     * 5 s default recv/send timeout, which is most of what made the second
+     * burst hang instead of failing fast. Shortened to 3 s so a stuck
+     * socket is recycled faster under load. Safe to do server-wide: the OTA
+     * upload handlers (ota_http.c, ota_esp_do_transfer()/pico equivalent)
+     * do NOT rely on this default -- they set their own 30 s per-recv
+     * setsockopt(SO_RCVTIMEO) directly on the connection's socket fd
+     * specifically so a global default bump/cut here can't affect them
+     * (see ota_http.c's comment at that setsockopt() call). */
+    config.recv_wait_timeout = 3;
+    config.send_wait_timeout = 3;
+    /* Default (8) is one short of this file's own 5 routes plus
+     * dashboard_http.c's 2 -- bumped with headroom rather than tuned to the
+     * exact current count, so the next route added here doesn't silently
+     * fail httpd_register_uri_handler. Bumped to 24 when
+     * zones_http.c/rules_http.c/profiles_http.c added 11 more routes
+     * (TODO.md sections 3/5). **Found the hard way (2026-08-11)**: 24
+     * turned out to be exactly one too few once dashboard_http.c's
+     * autotune/control/history routes (TODO.md 6A.4/6A.9) landed --
+     * registration order is wifi_prov(5) -> dashboard_http(14) ->
+     * zones_http(3) -> rules_http(3) -> profiles_http(5) = 30 total, so
+     * profiles_http.c's routes (registered last) all failed silently
+     * (logged, not fatal) and /profiles + /api/profiles came back 404
+     * against the live board. Bumped to 40 -- headroom over the current 30,
+     * not tuned to it, same reasoning as every bump before this one, so the
+     * next route added anywhere doesn't quietly repeat this exact bug.
+     *
+     * **Found the hard way again (2026-08-18)**: 40 was itself exactly one
+     * short. Full current count, in main.c's registration order: wifi_prov
+     * (this file, 8: index/wifi_page/status/scan/provision/networks/forget/
+     * theme.css) + dashboard_http.c (14) + board_temps.c (1) + zones_http.c
+     * (3) + rules_http.c (3) + profiles_http.c (5) + factory_reset.c (1) +
+     * readiness_http.c (2) + ota_http.c (4) = 41 -- one over the 40 cap, in
+     * a normal (non-sim) build, no Kconfig option required to hit it. Since
+     * ota_http.c registers last (main.c, after readiness_http_start()), and
+     * /api/ota/pico/status is the last of its 4 routes, THAT is the handler
+     * that silently lost the race: httpd_register_uri_handler returned an
+     * error ota_http_start() does check and log (ota_http.c logs
+     * ESP_LOGE and bails), so this one was not silent, but the next route
+     * added anywhere past 41 would be. Bumped to 56 -- generous headroom
+     * over 41, not tuned to it, same reasoning as every bump before this
+     * one. This did NOT explain a hang on /status or /scan (both register
+     * within this file's first 8, far under either cap) -- see the
+     * still-missing-error-check note on this file's own
+     * httpd_register_uri_handler() calls just below for the other half of
+     * this pass's fix. */
+    /* **Recounted 2026-08-21, by hand, `grep -n '\.uri = "'` over every .c
+     * file under App/drivers/ (plus board_temps.c, factory_reset.c,
+     * sim_backend.c, the other files that also register routes on this
+     * s_server): 59 URI registrations exist in the tree today --
+     * 57 in a normal build plus 2 more (`/api/sim` GET+POST, sim_backend.c)
+     * only compiled in under CONFIG_KILNCTL_SIM_PLANT. That is already 3
+     * over the previous 56, meaning the 2026-08-18 comment's own math was
+     * already stale before this pass (it undercounted by not tracking
+     * ip_config_uri, and then diagnostics_http.c's 3 new routes
+     * (/diagnostics, /diagnostics/thermo, /safety) plus this pass's /nav.js
+     * and /app.js pushed it over). Every one of those registrations DOES
+     * check httpd_register_uri_handler()'s return value and ESP_LOGEs the
+     * failing URI (verified across all of board_temps.c, dashboard_http.c,
+     * diagnostics_http.c, factory_reset.c, ota_http.c, profiles_http.c,
+     * readiness_http.c, rules_http.c, sim_backend.c, zones_http.c, and this
+     * file's own REGISTER_OR_LOG macro below) -- so an overflow is at least
+     * logged, never truly silent, but ESP_LOGE only helps if someone is
+     * watching the log at that exact boot; a page 404ing with no visible
+     * cause otherwise is still the actual user-facing symptom, which is why
+     * the cap itself has to stay ahead of the real count rather than relying
+     * on the log line to save anyone.
+     *
+     * Set to 72: rounds the current 59 up with headroom for the next couple
+     * of routes, same reasoning as every bump before this one -- not set to
+     * an arbitrary large number, because each slot in this table costs a
+     * small fixed amount of RAM (esp_http_server allocates the
+     * config.max_uri_handlers array up front at httpd_start()), so doubling
+     * or hard-coding a huge cap "to be safe" is a real, if small, per-slot
+     * cost paid on every boot whether or not those slots are ever used. */
+    /* 2026-08-21: raised 72 -> 80. The kiln-config store added 6 routes,
+     * taking the real count to 71 of 72 -- one spare. That is too thin to
+     * be safe here, because over-cap registration is NOT fatal: the failure
+     * shows up only as a 404 on whichever page lost the race, which is
+     * exactly the kind of defect that gets diagnosed as "the web UI is
+     * broken" rather than "the table was full". Worse, enabling
+     * CONFIG_KILNCTL_SIM_PLANT adds 2 more and would have put the build 1
+     * over immediately. 80 restores real headroom while keeping the
+     * per-slot RAM reasoning below intact. */
+    /* 2026-08-21 follow-up: raised 80 -> 84. safety_cfg_http.c (this pass's
+     * ESP-side commissioning surface, docs/COMMISSIONING.md sec 3.1) adds 3
+     * routes (GET/POST /api/safety/commissioning, POST .../bench_preset),
+     * which would have left only ~4-6 spare slots against the prior cap
+     * (71 real routes + 2 more under CONFIG_KILNCTL_SIM_PLANT, per the
+     * comment above) -- thin enough that the NEXT small addition anywhere in
+     * the tree silently 404s a page again, exactly the failure mode the
+     * 72->80 bump above was already fixing. 84 restores the same few-routes
+     * headroom this cap has been kept at every time before.
+     *
+     * **Found the hard way a FOURTH time (2026-08-24, bench, commit
+     * 750dc33)**: 84 was already one short by the time it shipped. Boot log:
+     * `httpd_register_uri_handler(/api/safety/commissioning/bench_preset)
+     * failed: ESP_ERR_HTTPD_HANDLERS_FULL`. Recounted by machine this time
+     * (tools/check_uri_handler_cap.ps1, see below), not by hand: every
+     * `.uri = "..."` literal under firmware/KilnFW/App/drivers (every .c file
+     * there), comments
+     * stripped. Per-file, in a normal build: wifi_provision_http.c (11) +
+     * dashboard_http.c (20) + board_temps.c (2) + zones_http.c (3) +
+     * rules_http.c (4) + profiles_http.c (8) + factory_reset.c (1) +
+     * readiness_http.c (2) + diagnostics_http.c (9) + settings_http.c (3) +
+     * ota_http.c (9) + kiln_cfg_http.c (6) + backup_http.c (3) +
+     * safety_cfg_http.c (4) = 85. safety_cfg_http.c actually carries 4
+     * routes today, not the 3 the paragraph above counted (it also has the
+     * page route, GET /safety/commissioning) -- that single miscount plus
+     * backup_http.c's 3 routes (kiln_cfg_http.c's config-store surface,
+     * added since the 72->80 bump but never rolled into this comment) is
+     * most of how 84 went stale: nobody re-derived the number from source,
+     * they trusted the running total. Add sim_backend.c's 2
+     * CONFIG_KILNCTL_SIM_PLANT-only routes for the true worst case: 87.
+     *
+     * RAM cost of a bump here: esp_http_server allocates
+     * `hd->hd_calls = calloc(config.max_uri_handlers, sizeof(httpd_uri_t *))`
+     * once at httpd_start() (esp-idf components/esp_http_server/src/
+     * httpd_main.c) -- an array of POINTERS, not of httpd_uri_t structs (the
+     * structs themselves are static const in each driver file already, cap-
+     * independent). sizeof(httpd_uri_t *) is 4 bytes on this target's 32-bit
+     * Xtensa pointers, so each extra slot costs 4 bytes, not the several-
+     * hundred-byte size of the struct it points to. Bumping 84 -> 95 (below)
+     * costs 11 * 4 = 44 bytes -- against the 12483-byte dram_free this
+     * project has measured at the uart_bridges_1 heap stage (and the
+     * documented ~11.9 kB failure floor where HTTP sockets start resetting
+     * and /app.js comes back truncated), 44 bytes is noise, not a threat.
+     *
+     * Set to 95: 87 plus 8 spare slots, the same order of headroom every
+     * bump above used (7-13), not double the real count. This time the
+     * "keep it ahead of the real count" promise is backed by
+     * tools/check_uri_handler_cap.ps1, which recounts `.uri = "..."` under
+     * every .c file in drivers/ and fails the moment this cap falls behind again --
+     * because after three prose-comment-only bumps still missing the real
+     * count, and now a fourth, a comment alone has a 0% success rate on
+     * this exact bug. */
+    /* 2026-09-01: raised 95 -> 108. log_http.c (/api/logs endpoints, on-flash
+     * log storage) added 2 routes and an in-flight adaptive-tuning endpoint
+     * (adaptive_tune_http.c) added 2 more, taking the real count to 99 --
+     * 4 over the 95 cap. tools/check_uri_handler_cap.ps1 caught this exactly
+     * as designed (99 routes counted vs cap 95) rather than letting
+     * registration fail silently. Set to 108: 99 plus 9 spare slots, the
+     * same order of headroom as every bump above (7-13). RAM cost: 13 extra
+     * pointer slots * 4 bytes = 52 bytes, against the ~12483-byte dram_free
+     * measured at the uart_bridges_1 heap stage and the documented ~11.9 kB
+     * failure floor -- noise, not a threat. */
+    /* 2026-09-06: raised 108 -> 118. diagnostics_http.c's new POST
+     * /api/relay_cycles/reset route (RELAY_LIFE_BUDGET.md, commit
+     * 4a940b89) took diagnostics_http.c from 17 routes to 18, and the real
+     * count from 108 to 109 -- one over the 108 cap.
+     * tools/check_uri_handler_cap.ps1 caught it exactly as designed (109
+     * routes counted vs cap 108) rather than letting registration fail
+     * silently. Set to 118: 109 plus 9 spare slots, the same order of
+     * headroom as every bump above (7-13). RAM cost: 10 extra pointer slots *
+     * 4 bytes = 40 bytes, against the ~12483-byte dram_free measured at the
+     * uart_bridges_1 heap stage and the documented ~11.9 kB failure floor --
+     * noise, not a threat. There is no separate Kconfig/sdkconfig knob for
+     * this -- checked firmware/KilnFW/sdkconfig for a CONFIG_HTTPD_* cap on
+     * the URI table itself and found none (CONFIG_HTTPD_MAX_URI_LEN etc. cap
+     * the length of one URI string, not the count of registered handlers);
+     * config.max_uri_handlers here IS the only real cap, and
+     * check_uri_handler_cap.ps1 parses this exact line rather than carrying
+     * a second hardcoded number of its own -- so there is only ever one
+     * value to keep in lockstep, this one.
+     *
+     * Bumped 118 -> 130, 2026-09-07: cfg_fs_format_http.c's two new routes
+     * (GET /api/cfgfs/format_pending, POST /api/cfgfs/format_confirm --
+     * the ask-first confirmation surface for cfg_fs_mount.c's auto-format
+     * gate) plus dualwrite_window_http.c's two (concurrent, unrelated pass)
+     * took the real count from 118 to 121 -- three over this cap.
+     * check_uri_handler_cap.ps1 caught it exactly as designed. Set to 130:
+     * 121 plus 9 spare slots, same headroom as every bump above. RAM cost:
+     * 12 extra pointer slots * 4 bytes = 48 bytes, noise against the
+     * documented ~11.9 kB DRAM failure floor.
+     *
+     * Bumped 130 -> 140, 2026-09-10: safety_cfg_http.c's two new routes
+     * (GET+POST /api/safety/rate_guard/auto -- the S8 auto-calc write path,
+     * docs/audits/s8_auto_calc_design_2026-09-09.md "Part 3") took the real
+     * count from 129 to 131 -- one over this cap. check_uri_handler_cap.ps1
+     * caught it exactly as designed. Set to 140: 131 plus 9 spare slots,
+     * same headroom convention as every bump above. RAM cost: 10 extra
+     * pointer slots * 4 bytes = 40 bytes, noise against the documented
+     * ~11.9 kB DRAM failure floor.
+     *
+     * Bumped 140 -> 151, 2026-09-17: WEB_AUTH_PLAN.md section 8's two new
+     * routes (GET /api/auth/session, POST /api/auth/session/extend --
+     * web_auth_session_status_http.c) took the real count from 140 to 142
+     * -- two over this cap. check_uri_handler_cap.ps1 caught it exactly as
+     * designed. Set to 151: 142 plus 9 spare slots, same headroom
+     * convention as every bump above. RAM cost: 11 extra pointer slots * 4
+     * bytes = 44 bytes, noise against the documented ~11.9 kB DRAM failure
+     * floor.
+     *
+     * Bumped 151 -> 160, 2026-09-19: docs/LIVE_PROFILE_EDIT_PLAN.md pass 2's
+     * five new routes (GET /live_profile, GET+POST /api/profile/live, POST
+     * /api/profile/live/fork, POST /api/profile/live/decide --
+     * profiles_live_http.c) plus two favorites routes that landed
+     * concurrently (GET /api/profiles/favorites, POST /api/profile/favorite)
+     * left only two spare slots against 151. check_uri_handler_cap.ps1's own
+     * count is the actual authority here, not this comment's arithmetic --
+     * set to 160 for the same ~9-slot headroom convention as every bump
+     * above; re-verify with a fresh run of that check rather than trusting
+     * this number if it drifts.
+     *
+     * Bumped 160 -> 165, 2026-09-21: check_uri_handler_cap.ps1 counted 156
+     * routes against this cap (4 spare) before this change; the new
+     * GET /api/nvs/keys route (diagnostics_http.c's nvs_keys_get_handler())
+     * would have left only 3, below the check's own 4-slot warning
+     * threshold. Set to 165 for the same ~9-slot headroom convention.
+     *
+     * Bumped 165 -> 170, 2026-09-23: iter_tune_http.c added two routes
+     * (GET /api/iter_tune/status, POST /api/iter_tune/restore_commissioned,
+     * ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7), which would have left only 5
+     * spare against the 165 cap. Set to 170 for the same ~9-slot headroom
+     * convention as every bump above.
+     *
+     * Bumped 170 -> 175, 2026-10-04: aux_outputs_http.c added three routes (GET/POST
+     * /api/aux_outputs, POST /api/aux_outputs/manual, SPARE_RELAY_ONOFF_PLAN.md WP-2),
+     * leaving 4 spare against 170. Set to 175 for the same ~9-slot headroom convention.
+     *
+     * Bumped 175 -> 180, 2026-10-05: update_fetch.c added four routes (POST /api/update/check,
+     * POST /api/update/download, GET /api/update/fetch, POST /api/update/fetch/cancel,
+     * GITHUB_RELEASE_UPDATE_PLAN.md WP8), leaving too few spare against 175.
+     *
+     * Bumped 180 -> 184, 2026-10-05: after merging WP8 onto WP9 (settings routes) 175 routes
+     * were registered, leaving 5 spare against 180; 184 restores the ~9-slot headroom. */
+    config.max_uri_handlers = 184;
+    /* Default (4096) is tight for the largest POST handlers on this server:
+     * zones_post_handler (zones_http.c) alone stacks a 2561-byte body
+     * buffer plus a ~170-byte zones_cfg_t scratch copy on top of whatever
+     * headroom httpd's own request-parsing call chain has already used
+     * before a handler even runs. Bumped to 8192 after that handler was
+     * observed to hang/reset under load rather than crash outright (the
+     * usual signature of a stack overflow corrupting FreeRTOS/lwIP state
+     * quietly instead of tripping an assert) -- see docs/PROJECT_STATUS.md
+     * for the date/context. */
+    config.stack_size = 8192;
+
+    /* See wifi_provision_http_on_open()/_on_close() above -- makes the
+     * effective concurrent-session count observable at the exact moment a
+     * request starts failing, instead of only inferred from
+     * max_open_sockets. */
+    config.open_fn = wifi_provision_http_on_open;
+    config.close_fn = wifi_provision_http_on_close;
+
+    esp_err_t err = httpd_start(&s_server, &config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* TODO.md section 13/14: the httpd worker's own stack margin under the
+     * 8192-byte config.stack_size above was arithmetic ("~900 bytes of
+     * confirm_commit_landed() stack against 8192 bytes of headroom"), never
+     * measured. esp_http_server doesn't hand back its worker's TaskHandle_t
+     * (no such field on httpd_handle_t, no getter in esp_http_server.h), but
+     * it names that task "httpd" unconditionally (httpd_main.c's
+     * httpd_os_thread_create() call), so it is reachable the same way any
+     * other FreeRTOS task would be looked up by name. xTaskGetHandle() is
+     * called once, right after the task exists, and the resulting handle is
+     * stored in a static slot that stack_margin_register() reads through at
+     * report time -- same indirection contract every other registration in
+     * this file's sibling call sites (main.c) already uses, so a future
+     * httpd_stop()/httpd_start() cycle re-resolving the handle is a matter of
+     * calling this again, not of changing the registry's contract. */
+    static TaskHandle_t s_httpd_task_handle;
+    s_httpd_task_handle = xTaskGetHandle("httpd");
+    if (s_httpd_task_handle == NULL) {
+        ESP_LOGW(TAG, "could not resolve httpd worker task handle for stack_margin "
+                      "registration -- httpd worker stack headroom will not be reported");
+    } else {
+        stack_margin_register("httpd_worker", &s_httpd_task_handle, (uint32_t)config.stack_size);
+    }
+
+    static const httpd_uri_t index_uri = {
+        .uri = "/", .method = HTTP_GET, .handler = index_get_handler,
+    };
+    static const httpd_uri_t wifi_page_uri = {
+        .uri = "/wifi", .method = HTTP_GET, .handler = wifi_page_get_handler,
+    };
+    static const httpd_uri_t status_uri = {
+        .uri = "/status", .method = HTTP_GET, .handler = status_get_handler,
+    };
+    static const httpd_uri_t scan_uri = {
+        .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler,
+    };
+    static const httpd_uri_t provision_uri = {
+        .uri = "/provision", .method = HTTP_POST, .handler = provision_post_handler,
+    };
+    static const httpd_uri_t networks_uri = {
+        .uri = "/networks", .method = HTTP_GET, .handler = networks_get_handler,
+    };
+    static const httpd_uri_t forget_uri = {
+        .uri = "/forget", .method = HTTP_POST, .handler = forget_post_handler,
+    };
+    /* 2026-08-20, web-GUI-only DHCP/static IP toggle -- see
+     * ip_config_post_handler()'s comment. */
+    static const httpd_uri_t ip_config_uri = {
+        .uri = "/ip_config", .method = HTTP_POST, .handler = ip_config_post_handler,
+    };
+    /* TODO.md 10.6's shared-theme follow-up: registered here, not a 7th
+     * *_http.c file, because this is the module that owns s_server -- see
+     * the extern-symbol block's comment above for why that also makes it
+     * reachable during AP-only provisioning, not just once fully
+     * provisioned. */
+    static const httpd_uri_t theme_css_uri = {
+        .uri = "/theme.css", .method = HTTP_GET, .handler = theme_css_get_handler,
+    };
+    /* UI_PLAN.md Web section 4 item 1 -- shared nav/app JS, same reasoning
+     * and same module as theme_css_uri above. This file now registers 11
+     * routes (was 9 before this pass); see config.max_uri_handlers above for
+     * the 2026-08-21 recount across the whole tree (59 total, cap now 72). */
+    static const httpd_uri_t nav_js_uri = {
+        .uri = "/nav.js", .method = HTTP_GET, .handler = nav_js_get_handler,
+    };
+    static const httpd_uri_t app_js_uri = {
+        .uri = "/app.js", .method = HTTP_GET, .handler = app_js_get_handler,
+    };
+    /* SETUP_WIZARD.md step 8 -- see commissioning_shared.js's own
+     * header comment. Same module/reasoning as nav_js_uri/app_js_uri above. */
+    static const httpd_uri_t commissioning_shared_js_uri = {
+        .uri = "/commissioning_shared.js", .method = HTTP_GET, .handler = commissioning_shared_js_get_handler,
+    };
+    /* Unlike every other *_http.c module's registration block, these 8 were
+     * firing-and-forgetting httpd_register_uri_handler()'s return value --
+     * the one gap in the codebase's own convention (see e.g. ota_http.c's
+     * ESP_LOGE-and-bail after every one of its calls). That gap is exactly
+     * how the max_uri_handlers overflow above stayed invisible until it was
+     * chased down by hand: a route that loses the registration race here
+     * (this module's own 8, or a later module's, since they all share this
+     * one table) still 404s cleanly against a real client (esp_http_server's
+     * own not-found handler answers anything it never matched) -- but the
+     * failure itself was never logged anywhere, so diagnosing "this one path
+     * came back 404, all its siblings work" meant re-deriving this exact
+     * headcount by hand instead of reading one ESP_LOGE line. Checked and
+     * logged now, matching every other module, so the next overflow says so
+     * instead of just going quiet. */
+#define REGISTER_OR_LOG(uri_ptr)                                                                \
+    do {                                                                                        \
+        esp_err_t reg_err = kiln_http_register(s_server, (uri_ptr));                    \
+        if (reg_err != ESP_OK) {                                                                \
+            ESP_LOGE(TAG, "httpd_register_uri_handler(%s) failed: %s", (uri_ptr)->uri,          \
+                     esp_err_to_name(reg_err));                                                 \
+        }                                                                                        \
+    } while (0)
+
+    REGISTER_OR_LOG(&index_uri);
+    REGISTER_OR_LOG(&wifi_page_uri);
+    REGISTER_OR_LOG(&status_uri);
+    REGISTER_OR_LOG(&scan_uri);
+    REGISTER_OR_LOG(&provision_uri);
+    REGISTER_OR_LOG(&networks_uri);
+    REGISTER_OR_LOG(&forget_uri);
+    REGISTER_OR_LOG(&ip_config_uri);
+    REGISTER_OR_LOG(&theme_css_uri);
+    REGISTER_OR_LOG(&nav_js_uri);
+    REGISTER_OR_LOG(&app_js_uri);
+    REGISTER_OR_LOG(&commissioning_shared_js_uri);
+
+#undef REGISTER_OR_LOG
+
+    httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, captive_portal_404_handler);
+
+    ESP_LOGI(TAG, "provisioning HTTP server up");
+    return ESP_OK;
+}
+
+void *wifi_provision_get_httpd_handle(void)
+{
+    return s_server;
+}
+
+httpd_handle_t wifi_provision_http_get_server(void)
+{
+    return (httpd_handle_t)wifi_provision_get_httpd_handle();
+}

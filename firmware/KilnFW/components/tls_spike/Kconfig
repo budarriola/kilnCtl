@@ -1,0 +1,40 @@
+menu "TLS network spike (GitHub release fetch, WP7)"
+
+    config KILNCTL_TLS_SPIKE
+        bool "Build the one-shot GitHub HTTPS fetch spike (measurement only)"
+        default n
+        help
+            docs/GITHUB_RELEASE_UPDATE_PLAN.md M2 WP7. When y, a self-starting task
+            waits for a STA IP and valid wall time, then performs ONE HTTPS GET
+            chain (api.github.com, then any redirect) and logs internal-heap
+            numbers under the log tag TLS_SPIKE. It writes no flash and takes no
+            route. Default n: the component compiles to nothing.
+
+    config KILNCTL_TLS_SPIKE_URL
+        string "First URL"
+        depends on KILNCTL_TLS_SPIKE
+        default "https://api.github.com/repos/budarriola/kilnCtl/releases/latest"
+        help
+            Set this to a /releases/assets/<id> URL (Accept octet-stream is sent
+            for it) or a github.com/.../releases/download/... URL to exercise the
+            302 to release-assets.githubusercontent.com.
+
+    config KILNCTL_TLS_SPIKE_DELAY_S
+        int "Seconds to wait after IP + time sync before fetching"
+        depends on KILNCTL_TLS_SPIKE
+        default 90
+        range 10 600
+
+    config KILNCTL_TLS_SPIKE_MAX_BYTES
+        int "Stop reading the body after this many bytes"
+        depends on KILNCTL_TLS_SPIKE
+        default 524288
+        range 4096 16777216
+
+    config KILNCTL_TLS_SPIKE_REPEAT
+        int "Number of full fetch chains (1 = single shot)"
+        depends on KILNCTL_TLS_SPIKE
+        default 1
+        range 1 10
+
+endmenu

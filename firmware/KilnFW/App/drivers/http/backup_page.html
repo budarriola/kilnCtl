@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Backup &amp; Restore</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- TODO.md 0.5's settings import/export item and UI_PLAN.md's separately
+     named import/export item, built as ONE page -- see backup_http.h's
+     header comment for the full scope note (what is and is not included,
+     and why Wi-Fi credentials never are). Same shared chrome as every other
+     page: nav.js derives the header from <title>, app.js supplies the
+     sticky Stop banner + kcConfirm this page's destructive Restore action
+     uses. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --bad: #b00; --fault-color: var(--bad);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --bad: var(--ui-accent-5); --fault-color: var(--bad);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --bad: var(--ui-accent-5); --fault-color: var(--bad);
+  }
+  /* box-sizing reset -- page-local only (not touching theme.css). Without
+     this, a.button's own padding (below) is added ON TOP OF whatever width
+     the flex/grid layout gives it, which is exactly how "Download backup"
+     ran past the right edge on a phone but not a PC: a PC's wide viewport
+     had enough slack for the overflow to land inside the scrollbar gutter
+     unnoticed, a phone's didn't. border-box makes padding count INSIDE the
+     box a flex/grid track hands an element, so it can never do that again. */
+  *, *::before, *::after { box-sizing: border-box; }
+  /* Fluid width, capped so a line of the Restore prose below doesn't run
+     the full width of a 27" monitor -- `min()` rather than a breakpoint:
+     shrinks to fit 320px phones automatically, holds at 640px on anything
+     wider. Reasoned about 320/360/390 (phones), 768/820 (tablets) and
+     1280/1920 (desktop): all of them just resolve to whichever side of the
+     min() is smaller, no breakpoint needed. */
+  /* WEB_UI_RESPONSIVE.md sec 6: the min() shrink-to-fit stays, but the
+     fixed 640px cap is now the shared --kc-shell-max so this page widens on
+     desktop like main_page.html/zones_page.html instead of stopping at 640px. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
+         background: var(--bg); color: var(--fg); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 6px;
+          padding: 1em; margin: 1em 0; }
+  /* Export/Restore controls each sit in their own row so they can go full-
+     width on a phone (a big, unmissable tap target) without needing a fixed
+     pixel width that would either overflow a 320px screen or look tiny on a
+     1920px one. `flex-wrap: wrap` plus `min-width: 0` on the children is the
+     fix for the trap this codebase keeps getting bitten by: a flex item
+     defaults to `min-width: auto`, which floors it at its own min-content
+     width and can shove a sibling off-screen -- see theme.css's
+     .kc-page-title comment for the earlier instance of this exact bug. */
+  .action-row { display: flex; flex-wrap: wrap; gap: 0.6em; align-items: center; }
+  .action-row > * { min-width: 0; }
+  a.button, button { display: inline-flex; align-items: center; justify-content: center;
+         max-width: 100%; padding: 0.6em 1.2em; border-radius: 4px; min-height: 44px;
+         border: 1px solid var(--border); background: var(--button-bg); color: var(--fg);
+         text-decoration: none; cursor: pointer; font-size: 1em; white-space: normal; }
+  /* Restore's file-picker + button: on a narrow phone these stack (one per
+     line, each full width so both stay comfortably tap-sized); at any width
+     wide enough for both to sit side by side without squeezing either one
+     under its min-content size, they do. auto-fit/minmax rather than a
+     breakpoint -- same reasoning as .action-row above, but grid instead of
+     flex because these two controls should size independently, not share
+     leftover space. */
+  .restore-controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+         gap: 0.6em; margin: 0.8em 0; }
+  /* ui_responsive_sweep.mjs's 32px touch-target floor: measured 254x21 at
+     320px, up to 324x21 at 390px -- height was the failing dimension, same
+     as width already being fine. Padding grows a file input's overall box
+     even though its internal "Choose file" button chrome is UA-controlled
+     (unlike that inner button, the padding IS ordinary CSS the page
+     controls) -- ota_page.html's own input[type=file] rule already does
+     this (0.5em padding) and passes the sweep; matching it here rather than
+     exempting the element, since this one turned out fixable after all. */
+  .restore-controls input[type="file"] { max-width: 100%; box-sizing: border-box; padding: 0.5em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<h1>Backup &amp; Restore</h1>
+
+<div class="card">
+  <h2 style="margin-top:0;border-top:none;padding-top:0;">Export</h2>
+  <p>Downloads a single JSON file: your saved fire profiles, plus every zone
+  setting on the <a href="/settings/zones">Thermocouples &amp; Zones</a>
+  page -- PID gains, the fitted plant model, thermocouple type, name,
+  relay/thermocouple assignment, calibration offset, max ramp ceiling,
+  sanity-rate threshold, control mode, temperature limits, heater timing,
+  and the guard-threshold overrides.</p>
+  <p><strong>This file does NOT include Wi-Fi credentials</strong> (see
+  Restore below for why).</p>
+  <p>It also includes every saved <a href="/settings/kiln_configs">kiln
+  configuration</a> slot -- the named snapshots that let this controller be
+  moved between kilns. Each one can still be downloaded and uploaded
+  individually on that page instead, if you only need one. The web login
+  password is never included, on either side.</p>
+  <div class="action-row">
+    <a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a>
+  </div>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0;border-top:none;padding-top:0;">Restore</h2>
+  <p>Restoring OVERWRITES the profiles/zone-tuning fields named above with
+  whatever the file contains -- an existing profile in the same slot ID is
+  replaced. <strong>Wi-Fi credentials are never touched by this</strong>: a
+  backup made on one board and restored onto another does not carry that
+  first board's Wi-Fi network over, on purpose -- a kiln that changed
+  physical location very likely also changed which Wi-Fi network it should
+  join, and this page has no way to know whether that's true, so it never
+  guesses. Set up Wi-Fi on the <a href="/wifi">Wi-Fi</a> page after
+  restoring, same as on a brand-new board.</p>
+  <p>Restoring also brings in every kiln configuration slot the file
+  contains, matched to your existing slots by identity, never by name. It
+  never changes which kiln configuration is currently active. Two modes
+  control what happens to slots on this board that are NOT in the file:</p>
+  <ul>
+    <li><strong>Merge (default, safer):</strong> slots only in the file are
+    created here; slots only on this board are left alone.</li>
+    <li><strong>Mirror:</strong> in addition to Merge's behavior, any slot on
+    this board that is not in the file is <strong>deleted</strong>, so this
+    board ends up holding exactly the file's set of kiln configurations.</li>
+  </ul>
+  <p>Restore is refused outright (nothing is written) while a profile is
+  running, the heaters are commanded on, or a firmware update is already in
+  progress -- the same check this board's own OTA update uses before writing
+  anything. The whole file is validated before any single field is written;
+  a malformed or truncated upload changes nothing and reports why. Before
+  anything is written, this page always previews the exact plan (every
+  create, rename, and -- in Mirror mode -- delete, named) and asks you to
+  confirm it.</p>
+  <div class="restore-controls">
+    <input type="file" id="restoreFile" accept="application/json,.json">
+    <button type="button" id="restoreBtn">Restore from file</button>
+  </div>
+  <div class="action-row" role="radiogroup" aria-label="Kiln config restore mode">
+    <label><input type="radio" name="kcRestoreMode" value="merge" id="kcModeMerge" checked>
+      Merge (default) -- only add/update, never delete a slot</label>
+    <label><input type="radio" name="kcRestoreMode" value="mirror" id="kcModeMirror">
+      Mirror -- also delete any slot on this board not in the file</label>
+  </div>
+  <p id="restoreStatus"></p>
+</div>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+
+function kcRestoreMode() {
+  return document.getElementById('kcModeMirror').checked ? 'mirror' : 'merge';
+}
+
+// Two-step flow: a dry-run POST first (X-Kiln-Config-Dry-Run: 1) computes and
+// returns the exact kiln-config plan (every create/rename/delete, named,
+// plain text one line per line -- see backup_import.c's own comment on this
+// response shape) WITHOUT writing anything, so the confirm dialog can name
+// every Mirror-mode deletion instead of a generic warning. Only on
+// confirmation is the same body POSTed again for real, with the same mode
+// and an X-Kiln-Config-Ack-Delete count derived from the dry-run's own
+// "delete " lines -- never a value the operator typed by hand.
+document.getElementById('restoreBtn').addEventListener('click', function () {
+  var input = document.getElementById('restoreFile');
+  var status = document.getElementById('restoreStatus');
+  if (!input.files || !input.files[0]) {
+    status.textContent = 'Choose a backup file first.';
+    return;
+  }
+  var mode = kcRestoreMode();
+  status.textContent = 'Reading file...';
+  var reader = new FileReader();
+  reader.onload = function () {
+    var body = reader.result;
+    status.textContent = 'Checking what this restore would do...';
+    window.kcFetchWithSafetyAck('/api/backup/import', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Kiln-Config-Mode': mode,
+        'X-Kiln-Config-Dry-Run': '1',
+      },
+      body: body,
+    }).then(function (r) {
+      return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+    }).then(function (dry) {
+      if (!dry.ok) {
+        status.textContent = 'Restore refused: ' + dry.text;
+        return;
+      }
+      var planLines = dry.text.split('\n').filter(function (l) { return l.length > 0; });
+      var deleteCount = planLines.filter(function (l) { return l.indexOf('delete "') === 0; }).length;
+      var planText = planLines.length > 0
+        ? ('Kiln configuration changes:\n' + planLines.map(function (l) { return '  - ' + l; }).join('\n') + '\n\n')
+        : 'No kiln configuration slots are created, renamed, or deleted by this restore.\n\n';
+      var msg = 'This overwrites saved profiles and every zone setting (PID/model/thermocouple type, ' +
+        'name, wiring, calibration, limits, timing, guard thresholds) with the contents of this file. ' +
+        'Wi-Fi credentials are not affected.\n\nRestore mode: ' + mode + '.\n\n' + planText +
+        'Continue?';
+      kcConfirm(msg).then(function (ok) {
+        if (!ok) {
+          status.textContent = 'Restore cancelled.';
+          return;
+        }
+        status.textContent = 'Uploading...';
+        var headers = { 'Content-Type': 'application/json', 'X-Kiln-Config-Mode': mode };
+        if (deleteCount > 0) {
+          headers['X-Kiln-Config-Ack-Delete'] = String(deleteCount);
+        }
+        return window.kcFetchWithSafetyAck('/api/backup/import', {
+          method: 'POST',
+          headers: headers,
+          body: body,
+        }).then(function (r) {
+          return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+        }).then(function (res) {
+          status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
+        }).catch(function (authErr) {
+          // Quiet note, never a stale "Uploading...".
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
+            status.textContent = 'Sign-in cancelled -- nothing was restored.';
+            return;
+          }
+          status.textContent = 'Upload failed -- check the connection and try again.';
+        });
+      });
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
+        status.textContent = 'Sign-in cancelled -- nothing was restored.';
+        return;
+      }
+      status.textContent = 'Could not check the restore plan -- check the connection and try again.';
+    });
+  };
+  reader.onerror = function () {
+    status.textContent = 'Could not read that file.';
+  };
+  reader.readAsText(input.files[0]);
+});
+</script>
+</body>
+</html>

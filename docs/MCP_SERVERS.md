@@ -1,0 +1,949 @@
+# MCP servers
+
+Three MCP servers serve this repo. Two of them — `kilnctrl` and
+`kicad` — are this project's own and were rebuilt around two decisions worth
+understanding before using them.
+
+| server     | transport | port | endpoint | what it drives                                      |
+|------------|-----------|------|----------|-----------------------------------------------------|
+| `kilnctrl` | HTTP      | 8767 | `/mcp`   | the main board (ESP32-S3) + RP2040 safety processor  |
+| `kicad`    | HTTP      | 8766 | `/`      | the KiCad project, via the `mykicadMcp` submodule    |
+| `pdf-mcp`  | stdio     | —    | —        | datasheet reading                                    |
+
+`pdf-mcp` is untouched: it is a third-party server with a small tool surface and
+no hardware to hold open, so neither decision below buys anything there.
+
+Port 8765 is not free: it belongs to `kilnctrl`'s own `link_hub`
+(`tools/PcTools/src/kilnctrl/link_hub.py`), which is how the GUI and the MCP
+server share one physical serial port.
+
+## Starting and stopping
+
+```powershell
+.\tools\PcTools\scripts\mcp_servers.ps1 start      # both; no-op if already up
+.\tools\PcTools\scripts\mcp_servers.ps1 status     # what is listening
+.\tools\PcTools\scripts\mcp_servers.ps1 restart    # after editing server code
+.\tools\PcTools\scripts\mcp_servers.ps1 stop  -Server kilnctrl   # or kicad
+```
+
+In the editor these are the **MCP Start / Stop / Restart / Status** buttons in
+the status bar, defined in `kilnCtl.code-workspace` (not `/.vscode/`, which is
+gitignored).
+
+Two things start them without being asked, because an HTTP MCP entry simply
+fails to connect if nothing is listening:
+
+* a `SessionStart` hook in `.claude/settings.json`, which covers every session
+  including a plain terminal one
+* the `MCP: Start servers` task in the workspace file, on folder open
+
+Both call the same script, and the script is idempotent — it polls `/health`
+first and does nothing if the servers are already up, so neither one restarts a
+server that is mid-session on a serial link.
+
+`.claude/settings.json` also lists both in `enabledMcpjsonServers`, so a
+new session connects without stopping to ask for approval.
+
+`tools/mykicadMcp/start_mcp_http_server.ps1` still starts the KiCad server on its own,
+for anyone using that submodule outside this repo. Inside the repo the script
+above is the one to use — same server, plus stop and status.
+
+Two plain HTTP routes sit beside the MCP endpoint on each server:
+
+* `GET /health` — liveness, pid, port, and the tool names it publishes
+* `POST /shutdown` — graceful stop; the server releases its serial port first
+
+Both are loopback-only and unauthenticated. Anything that can reach them can
+already reach the MCP endpoint, which can flash firmware — a token on
+`/shutdown` would protect nothing.
+
+Stopping through `/shutdown` rather than killing the process matters: a COM port
+left open by a dead process stays unusable on Windows until the device is
+replugged.
+
+### Stale-server self-announcing
+
+Both `kilnctrl` and `kicad` are long-running, so each keeps serving whatever
+code it started with — a source fix landed after the server came up is
+invisible to it until a restart. That has twice sent debugging down the wrong
+path: an MCP call reported a defect ("field not in the allowlist", say) that
+the current source plainly did not have, because the process answering was
+serving a build from before the fix landed.
+
+Each server now knows this about itself and says so instead of leaving it to
+be discovered by accident. At startup it snapshots the mtime of every source
+file under its own package tree (`mcpkit.registry.take_snapshot`, kept out of
+the hot path — the file list is walked once, then only re-stat'd) along with
+the `git rev-parse` commit it started at. From then on:
+
+* **`kiln_help()` / `kicad_help()`** prepend one line to their output. Fresh,
+  it is quiet — `server code fresh: started <time>, at commit <hash>` — so
+  freshness is checkable at a glance. Stale, it is loud:
+  `SERVER CODE IS STALE: N files changed since this process started (started
+  <time>, at commit <hash>). Restart via mcp_servers.ps1 restart.`
+* **`mcp_servers.ps1 status`** shows the same fresh/stale line per server,
+  read off `/health` (which now carries `fresh`, `changed_files`,
+  `started_at`, and `commit` whenever the server was started with a
+  `source_root`) rather than re-deriving it in PowerShell.
+* **`tools/PcTools/selfcheck.py`** exercises `take_snapshot`/`check_staleness`
+  against a real temp directory as a smoke test that the two halves still
+  agree when wired together; `tools/PcTools/tests/test_mcpkit_freshness.py`
+  covers the comparison logic itself against an injected fake clock.
+
+If either `help()` or `status` reports stale, restart:
+`.\tools\PcTools\scripts\mcp_servers.ps1 restart` (or `kiln_call(name=
+"close_server")` followed by `... start` for `kilnctrl` specifically). The
+start command can exceed a 120s tool timeout and finish in the background;
+re-check with `status` rather than assuming it failed.
+
+### Restart checklist
+
+1. **Preconditions — nothing is mid-build/mid-flash, nothing is firing.**
+   `build_kilnfw`/`build_saftyfw_host_tests`/`flash_firmware` all serialize
+   through the cross-process lock in `tools/PcTools/src/mcpkit/buildlock.py`;
+   a live one holds a `*.lock` file under
+   `%TEMP%\kilnctl-builds\locks\` (age vs. the 2100s stale timeout tells you
+   if it's a live holder or an abandoned one — see that file's docstring).
+   Tail the newest `tools/PcTools/logs/session_*.log` for recent
+   `flash_firmware`/`build_kilnfw` activity as a second signal. Then call
+   `safety_get_status` — restart only once it shows no active firing (heating
+   disabled / relays off).
+2. **Restart and confirm freshness.** `.\tools\PcTools\scripts\mcp_servers.ps1
+   restart`, then confirm via either `kiln_help()` (top line reads `server
+   code fresh: started <time>, at commit <hash>`, no `STALE` line) or
+   `mcp_servers.ps1 status`, which shows the same fresh/stale line per server
+   off `/health` — e.g. today, before restart: `STALE  12 file(s) changed
+   since started 2026-09-06 00:38:32 (commit 484846d) -- restart to pick up
+   the change`. Confirm the commit hash now matches current `HEAD`.
+3. **Post-restart smoke test (kilnctrl):**
+   - `kiln_find(query="reset reason")` returns `safety_get_diag` among the
+     results (it's indexed under `"reset reason"`/`"boot reason"` in
+     `tools/PcTools/src/kilnctrl/mcp_facade.py`).
+   - `safety_get_diag` decodes the Pico's last-boot reason live
+     (`tools/PcTools/src/kilnctrl/mcp_server_safety.py`).
+   - `safety_get_status` again first — proceed to `debug_reset(peer="pico")`
+     only once it shows no firing and relays off. Then verify the link comes
+     back up in ~100 ms and `boot_id` changes.
+   - `safety_get_rate_guard` reads back cleanly (paired with
+     `safety_set_rate_guard` — don't call the setter as part of a smoke test).
+4. **pdf-mcp — separate from the above, not part of `mcp_servers.ps1`.**
+   `pdf-mcp` is launched by the editor via `.mcp.json`
+   (`"command": "tools/pdfMcp/.venv/Scripts/pdf-mcp.exe"`), so picking up a
+   rebuilt venv is an editor/session reload, not a `mcp_servers.ps1` action.
+   The queued fix (CLAUDE.md, "Where to start" section further up in this
+   repo's root docs): kill the six live `pdf-mcp.exe` processes, rebuild
+   `tools/pdfMcp/.venv` from scratch (`pip install pdf-mcp==2.0.0`), then
+   delete the stale root-level `pdfMcp/` copy that the current venv's shims
+   still point at.
+
+### Decision 1 — HTTP instead of stdio
+
+A stdio server is spawned by, and dies with, whichever client launched it. For a
+server that owns a *physical port* that is the wrong lifetime: reconnecting a
+client power-cycles the link, two clients cannot share one board, and there is
+no way to ask a running server how it is doing without going through the
+protocol it is currently blocked on.
+
+`--transport stdio` still works, for headless and CI runs that want a private,
+disposable server with no port to collide on:
+
+```powershell
+tools\PcTools\.venv\Scripts\python.exe -m kilnctrl.mcp_server --transport stdio
+```
+
+### Decision 2 — a search facade instead of 221 published tools
+
+`kilnctrl` registers 229 tools (228 before `profile_save_bench_aux_rule` was added 2026-10-06 (`mcp_server_aux.py`; confirm-gated, read-back-verified writer of the single `BENCH_AUX_RULE` bench profile carrying an aux on/off rule, `docs/SPARE_RELAY_ONOFF_PLAN.md` sec 12a); 227 before `control_convert_onoff_zone_to_aux` was added 2026-10-06 (`mcp_server_aux.py`; wraps the firmware `move_zone_to_aux` field on `POST /api/zones`); 221 before `update_check`/`update_fetch_status`/`update_get_settings` (read-only) and `update_stage_release`/`update_fetch_cancel`/`update_set_settings` (confirm-gated) were added 2026-10-06 (`mcp_server_update.py`, WP10 of `docs/GITHUB_RELEASE_UPDATE_PLAN.md`; `update_stage_release` and `update_set_settings` are verified by read-back, every release is UNSIGNED); 220 before `control_set_relay_type` was added 2026-10-06 (`mcp_server_control.py`; POST key `relay<N>_type`, N 1-based, enum 0-6 unset/damper/outlet/valve/fan/light/other; `control_get_zones` also prints `relay_types`); 217 before `control_get_aux_outputs`/`control_set_aux_output`/`control_set_aux_manual` were added 2026-10-05 (`mcp_server_aux.py`); 214 before `bench_test_start`/`bench_test_job_status`/`ota_matrix_start` were added 2026-10-05; 212 before `recovery_apply_status`/`recovery_apply_staged` were added 2026-10-05; 209 before `update_status`/`update_stage_upload`/`update_stage_clear` were added 2026-10-04; 207 before `build_kilnfw_start`/`build_job_status` were added 2026-10-04; 206 before `recovery_enter` was added 2026-10-02; 203 before `recovery_pico_abort`/`recovery_sw_reset`/`recovery_push_esp_image` were added 2026-10-02; 198 before the five `recovery_*` tools were added 2026-10-02; 197 before `flash_recovery` was added 2026-10-02; 195 before `network_get_ip_config`/`network_set_ip_config` were added 2026-10-01; 196 before `ota_get_challenge` was deleted
+2026-09-29 along with `GET /api/ota/challenge`, see the AP-password HMAC
+retirement note further down this file) and `kicad` 86. Published as MCP
+schemas that is roughly 20,000 tokens each for `kilnctrl` and `kicad`, spent in
+*every* context window before the model has read a word of the request.
+
+Each server now publishes six tools instead (seven for `kicad`). The rest stay registered, callable,
+and importable — only their advertisement is withdrawn.
+
+`network_set_ip_config(mode, ip, netmask, gateway, confirm, host, verify_timeout_s, dns, dns2)`
+and `network_get_ip_config` (2026-10-03, ROADMAP M18): `dns`/`dns2` are optional
+resolvers for `mode="static"` only (strict dotted quads, non-zero, `dns2` only with
+`dns`; refused PC-side for DHCP). They map to the firmware's `POST /ip_config`
+fields `dns`/`dns2` (NVS keys `static_dns`/`static_dns2`, separate string keys, no
+blob and no version bump) and are applied with `esp_netif_set_dns_info` (MAIN =
+`dns`, else the gateway; BACKUP = `dns2`, else the same address as MAIN). A static POST always
+overwrites both, so omitting them clears earlier resolvers, and the tool's
+already-configured check and read-back verification compare them (`GET /status`
+`static_dns`/`static_dns2`, redacted to null like the other static fields; a board
+on older firmware that omits the keys verifies only when no dns was requested).
+Switching back to DHCP also empties the lwIP BACKUP resolver. No new tool, so the counts above are unchanged.
+
+| tool | what it does |
+|------|--------------|
+| `<p>help()` | groups with counts, plus the recipes that actually get run on this bench |
+| `<p>find(query, group, limit, detail)` | ranked signatures for a plain-language query |
+| `<p>describe(names)` | full schemas for named tools, batched |
+| `<p>call(name, args)` | invoke one |
+| `<p>batch(calls, stop_on_error)` | invoke several in one round trip |
+| the `KEEP` set | kept published — always the first call of a session |
+
+`<p>` is `kiln_` for kilnctrl, `kicad_` for kicad. The
+`KEEP` set is `connect` / (`inspect_kicad_project`,
+`get_kicad_ipc_status`).
+
+Measured manifest cost:
+
+| server | before | after | saved |
+|--------|--------|-------|-------|
+| `kilnctrl` | ~21,000 tokens | ~697 | 96.7% |
+| `kicad` | ~20,237 tokens | ~799 | 96.1% |
+
+The obvious risk of a dispatcher is that indirection costs reliability — a model
+has to guess a name it has never seen a schema for. Everything in
+`tools/PcTools/src/mcpkit/registry.py` is built to pay that back:
+
+* `find` returns a rendered signature *and* a paste-ready `call` line, so the
+  next step needs no invention.
+* A wrong name is answered with ranked suggestions, not an error.
+* A wrong argument is answered with the tool's signature.
+* Arguments are coerced rather than rejected: `"3"` for an int, `"true"` for a
+  bool, `"0x1f"` for a register address, a JSON string for an object.
+* `batch` reports per-step status and stops at the first failure, so a
+  half-applied hardware sequence is visible rather than silent.
+
+Search is a small weighted BM25-style index built once at startup over tool
+names, groups, curated keywords, summaries and parameter names, with a synonym
+table that bridges the words a caller uses to the words the code uses
+(`temperature` → `thermo`, `relay` → `io`/`expander`, `swd` → `debug`). The
+tables live in `kilnctrl/mcp_facade.py` and
+`tools/mykicadMcp/kicad_facade.py`. Query stopwords ("what", "how", "the") are dropped
+before scoring, so a question-shaped query ranks on its nouns.
+
+### The KiCad server is plumbed differently
+
+`kilnctrl` is an `MCPServer` (FastMCP) application, so
+`mcpkit.registry.collapse()` withdraws its tools from the framework's tool
+manager. `mykicadMcp` hand-rolls its own JSON-RPC loop over a plain
+`{name: {description, inputSchema, handler}}` dict, so it uses
+`collapse_table()` instead — same registry, same five facade implementations,
+different adapter.
+
+Because that submodule is published on its own and must work outside this
+checkout, it cannot import `mcpkit`. It carries a byte-for-byte copy at
+`tools/mykicadMcp/mcpkit_registry.py`. Edit the PcTools original and copy it over;
+`tools/PcTools/tests/test_mcpkit_vendored_copy.py` fails if the two drift.
+
+## Build and test tools
+
+The PcTools server also carries the build steps this repo's agents were
+re-deriving by hand every session (`mcpkit/workbench.py`, group `build`). The
+KiCad server has no equivalent -- there is nothing to compile there:
+
+| tool | server | notes |
+|------|--------|-------|
+| `build_kilnfw(target, jobs, skip_saftyfw)` | kilnctrl | sources the Espressif PowerShell profile; `jobs>0` calls ninja directly because idf.py rejects `-- -j N`. **2026-09-20:** for a `build`/`reconfigure` target it now builds SaftyFW first (via `build_saftyfw()`) and aborts before starting the KilnFW build if that fails, reporting both build reports -- the KilnFW application build `EMBED_FILES`s both SaftyFW slot images (`docs/PICO_AUTO_UPDATE_PLAN.md`) and needs a fresh pair present in `firmware/SaftyFW/build/`. Pass `skip_saftyfw=True` to opt out (e.g. a caller that just ran `build_saftyfw()` itself); `fullclean` and other non-build targets never trigger it. |
+| `build_kilnfw_start(target, jobs, skip_saftyfw, kiln_fw_root)` | kilnctrl | **2026-10-04:** runs `build_kilnfw` on a background thread (`mcpkit/build_jobs.py`) and returns a job id immediately. A full build (SaftyFW first) can exceed the client's 300 s idle watchdog, which dropped the result while the build finished unseen. Same gate/lock as `build_kilnfw`; the synchronous tool is unchanged. |
+| `build_job_status(job_id, wait_s)` | kilnctrl | RUNNING/OK/FAILED, artifact sizes and ages (`KilnCtrl.bin/.elf`, SaftyFW slot bins) and the full report once finished. `wait_s` blocks up to 120 s. Results persist to `<tmp>/kilnctl-builds/job-<id>.json` so they survive a registry eviction or server restart; a job running at restart reports unknown. |
+| `build_saftyfw(jobs, saftyfw_root)` | kilnctrl | ninja in `firmware/SaftyFW/build` (or `<saftyfw_root>/build`); auto-configures from scratch via `mcpkit.pico_sdk.resolve_pico_sdk_path()` if no `CMakeCache.txt` exists yet -- see "Building from a clean worktree" below |
+| `build_saftyfw_host_tests()` | kilnctrl | off-target MSVC unit tests |
+| `run_pctools_tests(pattern)` | kilnctrl | the pytest suite |
+| `bench_test_run(suite, cases, dry_run, allow_heat, tag, host, attended, allow_flash)` | kilnctrl | standardized bench regression testing (docs/BENCH_TEST_SYSTEM_PLAN.md); Wave 0 only runs read-only cases -- calls existing tool functions in-process, never a second MCP server or hardware directly. No `ap_password` parameter -- the AP-password HMAC it used to need for the nine OTA/reset routes was retired 2026-09-29 |
+| `bench_test_start(<same args as bench_test_run>)` | kilnctrl | **2026-10-05:** runs `bench_test_run` on a background thread (`mcpkit/build_jobs.py`, same registry as `build_kilnfw_start`) and returns a job id at once, because the MCP client aborts a call after 300 s of silence while a long suite keeps running server-side. The job calls the real `bench_test_run` with every argument unchanged, so the board lock, preflight, `allow_heat`/`lcd_*_heat`/`ota_allow_heat`/`allow_flash` all apply exactly as before; a refusal comes back as the job's FAILED report. `bench_test_run` itself is unchanged. |
+| `ota_matrix_start(<same args as ota_matrix_run>)` | kilnctrl | Background twin of `ota_matrix_run`. A `dry_run=True` call or one without `confirm is True` exactly is answered synchronously by `ota_matrix_run` (no job); otherwise the job calls `ota_matrix_run(confirm=..., allow_heat=..., ...)` unchanged, so the run-level preflight and board lock still apply. |
+| `bench_test_job_status(job_id, wait_s)` | kilnctrl | For jobs from `bench_test_start`/`ota_matrix_start`: RUNNING plus the tail of the newest matching `logs/bench_test/<run>/runner.log` (credential-redacted), then OK (exit_code 0) / INCOMPLETE (exit_code 3: SKIP/INCONCLUSIVE/NOT_RUN) / FAILED (anything else, including `error:` refusals) and the full report. `wait_s` clamped to 120 s; results persist like `build_job_status`'s; a run still going at a server restart reports unknown (read runner.log). |
+| `bench_test_list(suite)` | kilnctrl | lists known suites, or one suite's case ids/descriptions and whether each has a judge function implemented yet |
+| `bench_test_last(n)` | kilnctrl | the most recent run(s)' `summary.json`, read back from `logs/bench_test/` |
+
+**A PcTools pytest run is not green on its exit code alone.** `run_pctools_tests` and `tools/regression_suite.py`'s `pctools_pytest` gate pass the captured output through `mcpkit.pytest_verdict.pytest_output_problems()`, which fails the run even when pytest exited 0 with "0 failed" if (1) the output contains `node down`, `replacing crashed worker` or `worker ... crashed` (an xdist worker killed externally, e.g. by memory pressure from parallel sessions, silently drops the tests it owned -- seen twice with `-n 4`), or (2) the "collected N items" count exceeds passed+failed+skipped+xfailed+xpassed+error in the final summary line (the message names both numbers), or the summary line or count is missing. Both runners also pass `--timeout=300` (pytest-timeout; below the runners' 600 s whole-run limit so it can fire, and above the slowest known test, `test_ramp_assist_cone_scale.py`, at 20 to 100 s under load) so a stuck test fails loud instead of losing a node, and they no longer pass `-q`, because `-q` suppresses the collected-count header the shortfall check needs. Anyone running `pytest -n N` by hand should apply the same two checks to the output.
+
+**Slow tests are opt-in (`@pytest.mark.slow`, `KILNCTL_SLOW_TESTS=1`).** `tools/PcTools/tests/conftest.py` registers a `slow` marker and skips every test carrying it unless the environment variable `KILNCTL_SLOW_TESTS` is exactly `1` (skip reason: "slow test: set KILNCTL_SLOW_TESTS=1 to run it ..."), so the default developer run stays fast. The heavy classes of `test_ramp_assist_cone_scale.py` (about 12 minutes at `-n 0`, ~4 at `-n 4`) are marked; its light-load 1x "credit fires at all" tests are not. `run_pctools_tests` and `tools/regression_suite.py`'s `pctools_pytest` gate both export `KILNCTL_SLOW_TESTS=1`, pass `-rfEs` (`-rs` alone would drop pytest's default failure lines), and `pytest_output_problems()` fails the run if the string `KILNCTL_SLOW_TESTS` appears in the output (a skipped slow test), so the standing gate cannot go vacuous. An explicit `-m slow` (or any `-m` expression naming `slow`) also runs them without the variable. By hand: `KILNCTL_SLOW_TESTS=1 python -m pytest tools/PcTools/tests -n 4`.
+
+They run their PowerShell scripts through `subprocess`, deliberately. Those
+scripts set `$ErrorActionPreference = "Stop"` and `vcvarsall.bat` writes a
+benign `vswhere.exe` line to stderr; a PowerShell host that wraps native stderr
+in ErrorRecords turns that into a terminating error before a single test runs,
+which reads exactly like a regression that is not there.
+
+Output is summarized, never echoed whole: exit status, the diagnostic lines, and
+a path to the full log under the system temp directory.
+
+Flashing is not in this table on purpose. It already exists as
+`debug_program(peer=...)` with `esp` / `pico` peers, each pinned to the
+right probe serial (`kilnctrl/debug_probe.py`).
+
+`debug_reset(peer="esp")` (mode `run`) no longer trusts OpenOCD's exit 0: by
+default (`verify=True`, `verify_window_s=60`) it polls `GET /api/boot_guard`
+(candidate hosts as in `flash_firmware()`'s verify) and the UART link, reports
+time-to-answer and `boot_count`/`persisted_count`/`recovery_mode`, and returns
+a loud WARNING if the board is silent (it may be halted, in ROM or in recovery
+mode; no ANNOUNCE_REBOOT was sent, so the Pico trips S6b after 120 s) or in
+recovery mode. It only reports, never resumes or resets. Every `debug_reset`
+call appends a JSON line to `logs/debug_reset/history.jsonl` (gitignored, not
+rotated; `kilnctrl/reset_probe.py`).
+
+**Post-reset state check (2026-10-04).** OpenOCD exit 0 does not mean the core resumed (bench: board dark ~69 min after a `reset run`). For `peer="esp"`, `mode="run"`, the same OpenOCD session now polls each target's `curstate` for up to ~2 s, prints `KCTL_STATE <target> <state>`, and if a target is still `halted` issues `resume` (`KCTL_RESUMED`) and re-reads it (`KCTL_FINAL`). The result text lists the states and notes any fallback resume; the history line gains `post_reset_states` and `resumed_targets`. A target still halted after the fallback makes the tool fail loudly with `openocd_ok: false`. `halt`/`init` modes never resume. `debug_resume` now reports per target (`cpu0: running (no resume needed)` is informational, not an error), and `debug_read_registers`/`debug_read_memory`/`debug_read_symbol` `catch` a mid-dump error (surfaced as the failure text) so the resume tail always runs. Register lists are per peer: Cortex-M0+ names for the Pico, Xtensa `pc ps a0..a15` for the ESP (the Cortex-M list made `get_reg` fail on the ESP and left it halted).
+
+**Dark-rereset guard.** `debug_reset(peer="esp")` (any mode) REFUSES, before
+touching OpenOCD, if the previous ESP reset in that history was a run-mode
+reset whose probe never got an HTTP answer and it is less than 120 s old
+(`reset_probe.LINK_DEAD_HARD_S_DEFAULT`, the firmware default of the Pico's
+configurable `link_dead_hard_s`, `firmware/SaftyFW/src/safety_guards.c`; the
+tool does not read the live value). Reason: a JTAG reset sends no
+ANNOUNCE_REBOOT grace, so stacking resets on an ESP that is still dark
+extends the link silence toward S6b (SAFETY_TRIP_LINK_DEAD, mask 0x0040), and
+clearing S6b needs owner authorization. It refuses rather than warns because
+an output warning is easily missed by an agent, and uses the same
+explicit-override convention as `debug_program`'s `confirm`/`allow_stale`:
+pass `allow_dark_rereset=True` (exactly `True`). The refusal reports the
+previous reset's age, measured from the reset itself (the history `ts` is
+written after the probe, so the probe's `elapsed_s` is added), and the seconds
+left in the window. If UART answered but HTTP did not, it says so (possibly a
+Wi-Fi/host issue) but still refuses. Only the last ESP
+record counts; a record with no probe (`verify=False`, halt/init mode, a probe
+that raised, a failed reset) is unknown, not dark; a missing or corrupt
+history never blocks. Pico resets are not gated (they do not lengthen ESP
+link silence).
+
+**Dual reflash (both processors reset close together) trips S6a only if the
+ESP is up and asserting `mainFault` while its link handshake comes up; an ESP
+that stays silent for more than 120 s trips S6b instead. The S6a case is
+correct, not a bug.** The Pico starts polling `mainFault` almost immediately
+on its own reset; the ESP takes longer to reach `safety_link_init()` and
+complete the FW_VERSION handshake, and correctly drives GPIO6 (asserted)
+for that whole window per its own link-down policy (`safety_link_poll.c`).
+See `docs/audits/s6a_startup_grace_revert_2026-09-07.md` -- a guard-side
+suppression of this was tried and reverted as unsafe. Procedure:
+
+1. Flash/reset both processors as needed.
+2. Call `safety_get_status()` and confirm link is up and FW_VERSION has
+   been exchanged (not just that the tool call succeeded).
+3. Confirm the trip is this one, not something else: `trip_reason` /
+   `trip_mask` should show only `SAFETY_TRIP_MAIN_FAULT` (`trip_reason 6`,
+   `trip_mask` bit 5 = `0x0020` -- `trip_mask` is `1 << (trip_reason - 1)`,
+   see CLAUDE.md's dual-reflash note; `0x0040` is bit 6, `trip_reason 7`
+   `SAFETY_TRIP_LINK_DEAD`/S6b, a DIFFERENT guard)
+   -- if any other bit is set, do not clear, investigate instead.
+4. Only then call `safety_clear_trip()`. Clearing before the link is
+   actually up just re-trips (`safety_guards_try_clear()` re-checks live
+   inputs and refuses while the condition still holds).
+
+## Default host resolution (`kilnctrl.host_resolve`)
+
+Every `*_http_client.py` used to hardcode its own `*_AP_DEFAULT_HOST =
+"192.168.4.1"` (the board's softAP fallback address) as the default `host`
+argument -- correct only for a board that has never joined a LAN, and wrong
+for a board already provisioned onto the bench LAN (e.g. 192.168.1.156),
+which cost one session a `/24` sweep to rediscover. `kilnctrl/host_resolve.py`
+centralizes the default in one resolution order: the `KILNCTL_HOST`
+environment variable if set, else the last host any client actually got a
+response from (persisted in the same gitignored `settings.json` the GUI
+already uses for the last serial port and OpenOCD path, via
+`kilnctrl.settings.get_last_host`/`set_last_host`), else `192.168.4.1`
+unchanged. Every module's `*_AP_DEFAULT_HOST` constant now calls
+`host_resolve.resolve_default_host()` instead of hardcoding the literal, and
+`http_auth.urlopen()` -- the seam nearly every client's request already goes
+through -- calls `host_resolve.record_host_seen()` after any request that
+gets a real HTTP response (success or a non-401 error), so the cache updates
+itself from ordinary tool use with no extra wiring, including inside
+`flash_firmware()`'s own post-flash verification (which calls
+`partition_http_client.get_partitions()`, itself routed through
+`http_auth.urlopen`). An explicit `host=` argument, or `flash_firmware()`'s
+own ordered candidate list, is untouched by any of this and always wins.
+Tests: `tools/PcTools/tests/test_host_resolve.py`.
+
+## Flash provenance and the sensitive-dirty-file guard
+
+`get_fw_version()`'s `tree: dirty` has always been a single bit -- true or
+false, no list. On 2026-09-04 that bit hid a real incident: an agent
+authorised only to build+flash `KilnCtrl.bin` for a display/watchdog
+diagnosis picked up *another* session's uncommitted, in-progress
+`zones_config_*` schema-migration edits from the shared working tree and
+flashed them, running an unplanned schema migration against the live board
+config. It happened to land correctly -- a good migration plus luck, not
+process -- and left a second live consequence (a client/firmware field
+mismatch on `/api/zones` that blocks `load_config_preset` for every preset).
+
+`flash_firmware()` (`kilnctrl/mcp_server_flash.py`, guard logic in
+`kilnctrl/flash_provenance.py`) now:
+
+1. **Always records** `git status --porcelain` (unscoped -- the whole repo,
+   not just KilnFW/CommonFW the way `stale_check.py`'s staleness comparison
+   is scoped, because the risk is cross-session) and HEAD at the moment of
+   the flash. This is reported in the tool result and persisted to
+   `KilnFW/flash_provenance.json` (a sibling of `build/` since 2026-09-15,
+   not inside it -- see `elf_archive.kiln_provenance_path()`), so "what was actually on the board
+   at `<time>`" is answerable from disk later, not just from a chat
+   transcript that may have scrolled away.
+2. **Refuses only when the dirty set touches a narrow, named sensitive
+   list** (`flash_provenance.SENSITIVE_PATTERNS`: `zones?_config`,
+   `_migrat`, `safety_cfg`, `safety_link`, `kiln_cfg_store`, `schema`),
+   naming the offending files. An ordinary dirty tree -- this project's
+   normal state, since several sessions share one working tree by design --
+   is never refused; only that named list gates the flash. Override with
+   `allow_sensitive_dirty=True` after actually reviewing the named files.
+
+Two other guard shapes were considered and rejected:
+
+- **A blanket `allow_dirty` toggle on "any dirty file"** (default True =
+  report-only, False = refuse): a default-refuse would trip on ordinary,
+  unrelated dirty files within a day of shipping and get switched off
+  permanently -- worse than not existing, and it would not have
+  distinguished today's incident from routine work anyway.
+- **Caller-declares-its-own-scope** ("I'm only touching display code,
+  ignore the rest"): this trusts the caller to know the full uncommitted
+  footprint of every session sharing the tree at that instant -- exactly
+  the information the agent in the incident did not have. It would have
+  declared "display code", the guard would have checked declared-vs-dirty
+  and found no conflict, and the same flash would have gone out.
+
+A fixed sensitive-path list catches the incident regardless of what the
+caller believes it is doing, stays silent on the other dirty files that make
+a blanket gate unworkable here, and is bypassable only by an explicit,
+logged opt-in rather than a setting people learn to leave on. Extend
+`SENSITIVE_PATTERNS` (not a broader directory match) if another
+schema/migration/safety surface needs the same protection.
+
+Unit-tested in `tests/test_flash_provenance.py` against synthetic
+`git status --porcelain` output -- clean tree, dirty-but-benign, and the
+exact incident's mixed dirty set (schema files plus an unrelated edit) --
+with a required negative test that drops the `zones?_config` pattern and
+confirms the assertions fail, naming the file that slipped through.
+
+**2026-09-20: the provenance report also names the embedded Pico (SaftyFW)
+image identity.** Since the ESP application now embeds both SaftyFW slot
+images (`docs/PICO_AUTO_UPDATE_PLAN.md`), `flash_firmware()`'s provenance
+note gains one more line reading the `saftyfw_image_identity_t` record(s)
+found by scanning the app binary about to be flashed (same scanning parser
+as `check_embedded_pico_image_fresh.ps1`,
+`kilnctrl/pico_image_freshness.py`) -- the commit and dirty flag the
+embedded Pico image was built from, or a plain statement that no record was
+found (a KilnFW build predating this feature, or one built without the
+embedding wired up). This is read-only and purely informational: it never
+blocks or changes a flash, it only puts the Pico expectation on the same
+record as the rest of the flash's provenance.
+
+Two ESP32-S3 boards are now permanently on the bench (2026-09-05: the main
+board and the UnitTestFixture), and both share USB VID:PID 303A:1001 on
+their native USB-Serial-JTAG interface -- indistinguishable to OpenOCD's
+`board/esp32s3-builtin.cfg` without an `adapter serial`. `flash_firmware()`
+now pins `adapter serial` to the main board's USB serial number and refuses,
+before calling OpenOCD at all, if that serial isn't currently enumerated
+(naming whichever 303A:1001 serial(s) are seen instead); a parallel
+`fixture_flash()` tool does the same pinned to the fixture's serial.
+`serial_link.recommend_port()` (the main board's own port picker) and
+`fixture.recommend_fixture_port()` got the same serial/VID:PID-anchored
+identity check, since either picker returning the other board's port
+misdirects UART traffic just as badly as an unpinned JTAG flash.
+
+**Post-flash boot_guard counter reset is default-on (owner decision
+2026-09-19).** `flash_firmware()` calls `POST /api/ota/esp/boot_guard_reset`
+after post-flash verification confirms full, unambiguous success (never on a
+raise, a WARNING, or `verify=False`) -- see
+`docs/audits/boot_guard_post_flash_recovery_footgun_2026-09-08.md`. It is
+attempted whenever an administrator web session is available (or web auth is
+off entirely); `reset_boot_guard=False` still opts out unconditionally. The
+result always names the counter's before/after values (or, if no session
+could be established, the skip reason). No credential of any kind is logged
+or echoed.
+
+**Owner decision 2026-09-29, "Retire; open when login off": the AP-password
+HMAC on this route and the other eight is retired outright, not merely
+supplemented.** `boot_guard_reset_esp()` (and `format_cfgfs()`, `sw_reset()`,
+`rollback_esp()`, `rollback_pico()`, `recovery_exit_esp()`,
+`push_esp_image()`, `push_pico_image()`) call only `http_auth.urlopen()`,
+which logs in with `KILNCTL_WEB_USERNAME`/`KILNCTL_WEB_PASSWORD` on a 401 and
+resends. None of these functions takes an `ap_password` argument any more,
+and `KILNCTL_AP_PASSWORD` is no longer read anywhere in this path. On the
+firmware side, all nine routes are still `ROUTE_TIER_ADMIN` in
+`route_tier_table.h`, but `ota_http_authenticate_request()` (`ota_http.c`)
+was deleted outright (`f0643c98`), along with `GET /api/ota/challenge`
+and the HMAC verify path. **This supersedes the "named
+exception" text in `docs/WEB_AUTH_PLAN.md` item 2b** ("with web auth off,
+these nine routes keep the legacy AP-password-only gate"): with web auth
+off, these nine routes are now exactly as open as every other ADMIN route,
+same as the rest of the auth-off collapse. The separate, standalone recovery
+firmware image (`firmware/KilnFW_recovery/`) was unaffected that day but
+dropped its own AP-password HMAC on 2026-10-02: it is now unauthenticated
+(see "Recovery image is unauthenticated" below).
+
+**`recovery_enter` (2026-10-02):** wraps `POST /api/ota/esp/recovery_boot` (`ROUTE_TIER_ADMIN`), the deliberate way from the
+application into the recovery image once `ota_rollback_esp()` has nothing to roll back to
+(`docs/OTA_SINGLE_SLOT_PLAN.md` section 4). Lives in `mcp_server_ota.py` (it talks to the APPLICATION, unlike the
+`recovery_*` tools below). Refuses unless `confirm is True` exactly, before any network access, and prints no
+credential. The board refuses 409 while a firing/autotune runs or any relay is on/unreadable, on an unmet OTA
+interlock, with another update in flight, on the old single-image layout, and when the recovery partition does not
+verify; if selecting recovery fails part-way it restores the running boot target and answers 500 (reporting the
+restore result), since `esp_ota_set_boot_partition` may already have erased `otadata`. Selecting recovery leaves
+`otadata` pointing at factory with no OTA history, so the known `flash_firmware()` `otadata` gap (CLAUDE.md flash
+section) is reachable: a later JTAG flash boots `recovery` until `recovery_exit` runs. Never run against real
+hardware as of this entry (mocked HTTP only).
+
+**Recovery-image tools (2026-10-02):** `recovery_status` (READ-ONLY: `GET /api/recovery/status` plus
+`GET /api/recovery/pico/status`; it renders `app_image_size` as "app image N bytes of M partition" (`app_size` is the partition size; null = unverified image) and also renders the image's diagnostic keys -- `auth_mode` (always `lcd_passphrase`), `uptime_s`, `reset_reason`/`reset_reason_name`, `app_ota_state`, `coredump_present`, `otadata_blank`, the Wi-Fi AP counters (`wifi_up`, `ap_*`, `wifi_last_event*`) and the `relay_hold_*` task state -- one group per line, saying "not reported (older recovery image)" for any key the board omits and never inventing a value; it adds a `WARNING:` line for `ap_stop_count>0`, `relay_hold_fault=true`, a `relay_hold_task` that is not running, `otadata_blank=true` and `coredump_present=true`), `recovery_exit`, `recovery_wifi_reset`, `recovery_boot_guard_reset`,
+`recovery_pico_upload`, `recovery_pico_abort`, `recovery_sw_reset` and `recovery_push_esp_image`, in `tools/PcTools/src/kilnctrl/mcp_server_recovery.py`. They talk ONLY to
+`firmware/KilnFW_recovery/` and refuse (404 or `running` not `recovery`) against the main app. Every mutator refuses
+unless `confirm is True` exactly, before any network access; sign nothing and read no credential (the image is
+unauthenticated, see below); read both status routes before acting and refuses while the Pico relay
+is busy or has no PSRAM; and read status back afterward, failing loud on disagreement. `recovery_pico_upload`
+reports the relay's terminal phase honestly: success only for phase done with bytes_sent equal to total_bytes equal
+to the image length; `outcome_unknown` (the relay stopped after END was sent) is reported as NOT success, as is a
+timeout or lost contact. The wifi-reset credential clear is not readable from status, so that tool verifies only
+the restart. `recovery_pico_abort` (POST `/api/recovery/pico/abort`) sends no POST when the
+relay is not busy, and reports `aborted` as ok, a transfer that finished first as NOT ABORTED, and
+`outcome_unknown`, a lost reply or lost contact as UNKNOWN. `recovery_sw_reset` (POST `/api/sw_reset`;
+the recovery image's route, not the main app's) needs the board to drop off and answer again; a lost
+reply is UNKNOWN. `recovery_push_esp_image` (POST `/api/ota/esp`) refuses a file that is not an
+absolute path, does not start with the ESP image magic 0xE9, or exceeds the board's reported `max_upload` (the `app`
+partition size), refuses while the Pico relay is busy, and counts success only when the recovery routes then answer
+404 (the application is up); back-as-recovery or never restarted is FAILED, and a lost reply or silent board is
+UNKNOWN/UNVERIFIED. Hardening (2026-10-02): `recovery_pico_abort` reports UNVERIFIED, not ok, when the relay's
+`aborted` phase carries the error text "browser stopped polling" (`recovery_pico.c` `should_stop()`: the relay aborted
+itself, not necessarily because of this POST). `recovery_push_esp_image` appends a loud "`app` may be partly erased"
+warning, with a fresh `app_valid` read from the status route, to any board-reported failure other than the
+pre-erase refusals (409/413/503), and reports `ok-with-warning` (never plain ok) when the 200 reply does not say
+"boot_guard cleared and verified". `recovery_apply_status` (READ-ONLY, `GET /api/recovery/apply_status`) renders the apply task's phase/result/
+bytes/`app_modified`/`stage_cleared`/stack-free and the staged image's state/semver/commit/sha256/length/source.
+`recovery_apply_staged(confirm=False, host, wait_s=120, poll_interval_s=2)` wraps `POST /api/recovery/apply_staged`
+(202, async; `docs/GITHUB_RELEASE_UPDATE_PLAN.md` WP5): refuses unless `confirm is True` exactly (before any network
+access), reads recovery status and apply status, refuses while the Pico relay is busy, an apply is running or nothing
+is staged, and reports the stage identity (commit, sha256, length) it is about to install. A board 409 is reported
+with the server's own text. After the 202 it polls apply_status up to `wait_s` (0 = no polling): `done` is ok (with
+the apply task's stack high-water; the board then reboots into the application, so a lost connection after done is
+EXPECTED), `failed` is FAILED with the error name and `app_modified`, a lost connection before done or a timeout is
+UNKNOWN/UNVERIFIED. It does not prove the new application booted healthy. No tool joins the AP.
+Unit tests use a fake board only
+(`tools/PcTools/tests/test_mcp_server_recovery.py`); never run against hardware.
+
+**Recovery image is unauthenticated (owner decision 2026-10-02):** no password, no key, no challenge, no signature
+header, no lockout. The only access control is physical: the recovery image brings up its own WPA2 SoftAP only (no
+station interface; STA is disabled because the routes are open, so only a client that joined the AP may reach them)
+with a fresh random 12-character passphrase per boot, drawn from an unambiguous alphabet, shown on the board's LCD
+together with the SSID and `192.168.4.1`, kept in RAM only (never in HTTP, JSON, logs, serial or NVS; a stored `ap_pass`
+is ignored). `esp_http_server` cannot bind to one interface; with STA never created the AP is the only one.
+`GET /api/recovery/status` reports `auth_mode:"lcd_passphrase"`. The main app's route tiers and web-auth story are
+unchanged.
+
+**Recovery POST client in PcTools:** `tools/PcTools/src/kilnctrl/recovery_post_client.py` (formerly the HMAC signer
+`recovery_ota_auth_client.py`) is plain, unsigned urllib: `recovery_push_esp_image()`, `recovery_sw_reset()`,
+`recovery_exit()`, `recovery_wifi_reset()`, `recovery_boot_guard_reset()`, `recovery_pico_upload()`,
+`recovery_pico_abort()`, for a board that has fallen back to the recovery image and cannot be reached through the
+main app's routes. The Pico upload query (`crc`, `slot`) is validated locally (at most 95 chars, printable, no
+space). `KILNCTL_AP_PASSWORD` is no longer read by any recovery tool. No PcTools tool joins the AP: the PC must
+already be associated with the recovery SoftAP, using the passphrase read off the LCD. Whatever automation joins it
+should read the passphrase from the environment variable `KILNCTL_RECOVERY_AP_PASSPHRASE` (never a tool parameter,
+never echoed or logged; report presence as a bool only). `recovery_exit` and `recovery_push_esp_image` verify over an ordered candidate list, because the AP address disappears when the application boots onto the LAN: the `host` the call used, then the optional `app_host` parameter (when given it is the only extra candidate), else `KILNCTL_HOST`, then `flash_firmware`'s verify candidates (STA IP, remembered last-reachable host, AP fallback). Success is a candidate answering `GET /api/recovery/status` with 404 AND the application's own `no such endpoint` JSON body (a bare 404 from a router or NAS is ignored), and a non-primary candidate counts only after the recovery AP address has dropped; the report names the answering host and, where readable with the current session, the running partition and boot_guard values (those routes are admin-tier, so an unreadable one is said so, never invented). `recovery_push_esp_image` also compares a readable `fw_build` with the pushed image's embedded `esp_app_desc_t` build time (mismatch is FAILED). Nothing answering within `wait_s` stays UNVERIFIED and lists the candidates tried; still answering or coming back as recovery is FAILED, as is a readable running partition other than `app`.
+Standing host checks:
+`check_recovery_passphrase.ps1` (generator) and `check_recovery_page_crc.ps1` (the browser page carries the Pico CRC
+and no auth code).
+
+**Data-partition erase during a commission reflash (owner decision
+2026-09-21).** `flash_firmware()` takes `erase_partitions: list[str] = None`
+plus a required `confirm_erase: bool = False` gate. This exists for one
+specific case first: the board's web-auth admin record has an unknown
+password, and `web_auth_store.c:18-31`'s `kiln_auth` namespace lives in the
+DEFAULT `nvs` partition (`partitions.csv`'s `nvs,data,nvs,0x9000,0x6000`
+row) -- so resetting that record means erasing that partition, not guessing
+or brute-forcing a credential. No tool erased any data partition before
+this: a hand `flash erase_sector` once wiped the WHOLE chip (see this
+module's header comment), which is exactly the failure mode this parameter
+is built to avoid repeating.
+
+Each requested name is resolved fresh from `<kiln_fw_root>/partitions.csv`
+(the same parser `_resolve_app_flash_target()` already uses, so a
+`kiln_fw_root` worktree override's own table is what is consulted, never a
+hardcoded offset) and refused -- before OpenOCD is touched at all -- unless
+it is BOTH in the allowlist `ERASABLE_DATA_PARTITIONS` (`nvs`, `kiln_nvs`,
+`wifi_nvs`, `profiles_nvs`, `cfg`) and actually present in that CSV.
+`app`/`recovery`/`otadata`/`bootloader`/the partition table/`coredump` can
+never be named here -- requesting one of those, or any name outside the
+allowlist, refuses immediately, naming the offending partition.
+`confirm_erase=True` must be passed alongside `erase_partitions`; omitting
+it refuses too, naming every requested partition, so an erase can never
+happen as a side effect of a call that only meant to flash firmware.
+
+Each resolved partition gets a 0xFF-filled file (erased flash's read-back
+value) written to a temp directory, sized to exactly that partition's
+`size`, and appended to the SAME OpenOCD session as the app image -- as its
+own `program_esp <file> <offset> verify` line, after the app image's write
+and before the session's final `reset exit` -- never a separate session,
+and never a bare `flash erase_sector`. The temp directory is removed after
+the session ends regardless of outcome. The result names each erased
+partition's name/offset/size and the write's verify outcome, and this is
+persisted to `flash_provenance.json` under `erased_partitions` -- an erase
+is never silent, and a failed flash still records what erase was attempted
+rather than dropping it from the record.
+
+Erasing `nvs` destroys: the web-auth admin record for BOTH roles
+(`web_auth_store.c`'s `kiln_auth` namespace -- the LCD PIN and the web admin
+password both revert to unset/first-run), the auth policy stored alongside
+it (auth reverts to OFF until reconfigured), any pre-2026-08-13 legacy
+remnants still stored in that namespace, and the Wi-Fi driver's own
+`nvs.net80211` data plus PHY calibration data that the ESP-IDF Wi-Fi/RF
+stack also keeps in this same default `nvs` partition -- both are
+regenerated automatically (a fresh scan/associate and a fresh calibration
+pass) and are not a credential, so this is a cosmetic one-time delay, not a
+config loss. It does NOT touch: Wi-Fi
+credentials (`wifi_nvs`), zones/profiles config (`kiln_nvs`/`profiles_nvs`),
+boot_guard or crash_report state (also `kiln_nvs`), or the `cfg` LittleFS
+partition's own data -- each of those is erased only if separately named in
+`erase_partitions`.
+
+**Three binaries, not one.** `flash_firmware()` now hard-requires and flashes
+`bootloader.bin` and `partition-table.bin` alongside `KilnCtrl.bin`, refusing
+before touching OpenOCD if either is missing from `<kiln_fw_root>/build` --
+pre-2026-09-23 checkbuild output did not publish those two files, so a
+`kiln_fw_root` pointed at an older build directory is refused rather than
+silently flashing an app image over a stale bootloader/partition table.
+`partition-table.bin`'s write offset is resolved from
+`CONFIG_PARTITION_TABLE_OFFSET` in `<kiln_fw_root>/sdkconfig`, falling back to
+`<kiln_fw_root>/build/sdkconfig` only if the root copy is genuinely absent,
+and finally to IDF's own default (0x8000) if neither file sets the key --
+`_resolve_partition_table_offset()`, whose result note always says which
+path was used or why the default applied. `fixture_flash()` shares the same
+resolver for its own partition-table image.
+
+**Recovery partition: `flash_recovery()` (2026-10-02).** `flash_firmware()` never
+writes `recovery` (and its erase allowlist forbids it), so the recovery image
+(`firmware/KilnFW_recovery`, published by `check_00_kilnfw_recovery_target_build.ps1`
+as `firmware/KilnFW_recovery/build/recovery.bin`, the default `recovery_bin`) has
+its own tool, a separate one rather than a mode because none of
+`flash_firmware()`'s landing verification, boot_guard reset or three-image
+sequence applies. It resolves offset/size from the partition named `recovery`
+in `<kiln_fw_root>/partitions.csv`, pins OpenOCD to the main board's adapter
+serial, and sends exactly one `program_esp ... verify` over that range (never
+otadata/app/nvs). Refuses: `confirm` not exactly True; a duplicate or non-factory
+`recovery` CSV row; image path containing any of `[ ] $ { } "` or a backtick (Tcl
+injection); image missing, empty or larger than the partition; magic not 0xE9;
+chip id not ESP32-S3; esp_app_desc_t missing or `project_name` not `recovery`;
+image mtime older than the newest git-tracked file (all files if git cannot
+answer) under the `KilnFW_recovery` tree that holds the image (derived from
+`<tree>/build/recovery.bin`, else `<kiln_fw_root>/../KilnFW_recovery`), excluding
+`build/` (`allow_stale=True`, and the image age is always printed);
+adapter absent. Board state is split: a positively observed hazard (profile
+running/paused, ARMED with autotune active/relay energized/latched trip, OTA
+interlock busy, link down) ALWAYS refuses and no flag waives it, with one narrow
+exception below; only reasons that are merely "could not be read" (including
+the armed-latch reader's "could not be read/confirmed"/"no diag received yet"
+strings) are waived, by `allow_unreadable_board_state=True` (the old
+`skip_board_state_check` is gone). `allow_link_down=True` (a separate flag,
+`is not True` gate) waives ONLY a down safety link: `link_up` False and an OTA
+interlock refusal that is `needs_ack` with reason "safety link is down" (the
+one acknowledgeable refusal; it short-circuits the interlock's later checks).
+With the link down heat is already cut (a live Pico trips S6b and drops K4; a
+dead one cannot drive K4) and a broken Pico would otherwise block recovery
+forever. Because the interlock skipped its heater-commanded and over-temperature
+checks, in this mode the tool reads autotune idle and expander relays off live,
+and checks K4 off and no latched trip against the CACHED Pico status/diag (last
+values before the link dropped, not live; age unknown), whether or not ARMED, keeps the UART profile-idle check a
+hazard, and says in the result that heater-commanded/over-temperature were not
+checked. It never waives a running profile, an energized relay or any other
+interlock refusal.
+Before writing it reads the board's live `/api/partitions`: a readable table
+whose single `recovery` row disagrees with the CSV in offset/size/type/subtype
+always refuses; an unreachable board or a recovery-image-shaped answer refuses
+unless `allow_unconfirmed_partition_table=True`. It also reads the RUNNING
+partition: `recovery` or unreadable refuses unless `allow_reset_into_recovery=True`
+(otadata is untouched and a blank otadata boots the factory-subtype partition,
+i.e. `recovery`, so the post-write reset would boot the brand-new image).
+`dry_run=True` needs no board and no confirm. After the write it polls
+`/api/partitions` and reports what actually booted (`app`, `recovery`, `other`
+or `unreachable`); the write itself is read-back-verified over JTAG. The reset
+may latch S6a: before `safety_clear_trip()` the status must show trip_reason 6
+(`SAFETY_TRIP_MAIN_FAULT`) with trip_mask 0x0020 only; anything else (e.g. reason
+7, `SAFETY_TRIP_LINK_DEAD`, S6b) needs investigating, not clearing. Provenance goes to
+`firmware/KilnFW/recovery_flash_provenance.json`; a `recovery.elf` beside the
+image is archived to `firmware/KilnFW/recovery_elf_archive/` only when its
+embedded app descriptor's build timestamp and version match the image's (else a
+warning, nothing archived). Logic: `kilnctrl/recovery_flash.py`; tests:
+`tests/test_flash_recovery.py`.
+
+## Building from a clean worktree for `kiln_fw_root`
+
+`flash_firmware(kiln_fw_root=...)` exists for exactly the "build from a clean
+git worktree at HEAD" case (the main tree carries another session's WIP that
+would ride along or trip the sensitive-dirty guard above). A fresh
+`git worktree add` there hits two traps, both hit and fixed 2026-09-11:
+
+1. **The `lvgl` submodule is not checked out in a fresh worktree.**
+   `git worktree add` does not initialize submodules on its own, and `idf.py
+   build` fails with `Failed to resolve component 'lvgl' required by
+   component 'drivers'` -- a plausible-looking but wrong lead (it reads like
+   a missing/renamed component, not a missing submodule checkout). Fix:
+   `git submodule update --init firmware/KilnFW/components/lvgl` before the
+   first build in the new worktree.
+2. **`sdkconfig` is gitignored**, so a fresh worktree has none, and `idf.py
+   build` silently defaults to plain `esp32` (`-- IDF_TARGET not set, using
+   default target: esp32`) instead of this board's `esp32s3`. The failure
+   this produces is a confusing one: the build proceeds a long way (dependency
+   resolution, most of the component list) before dying deep in a target-only
+   header (`temperature_sensor.h: 'TEMPERATURE_SENSOR_CLK_SRC_DEFAULT'
+   undeclared`) -- nothing in the error names "esp32 vs esp32s3" directly.
+   This is the same "gitignored config hides a mismatch" class as
+   `feedback_gitignored_config_hides_mismatch` (that one was the FT6336U
+   touch panel; this is the build target). Fix: after any `fullclean` or a
+   from-scratch worktree, run `idf.py -C <worktree>/firmware/KilnFW
+   set-target esp32s3` explicitly before `build` -- do not rely on a stale
+   `sdkconfig` or the tool's own default.
+
+`build_kilnfw()` (`tools/PcTools/src/mcpkit/workbench.py`) now also takes an
+optional `kiln_fw_root` (absolute path to a `firmware/KilnFW`-shaped
+directory, mirroring `flash_firmware`'s own `kiln_fw_root` and
+`build_saftyfw`'s `saftyfw_root`) so this "build from a clean worktree" flow
+goes through the build gate and the per-directory lock like every other build
+in this repo, instead of the bare `idf.py -C <worktree>\firmware\KilnFW
+build` invocation this section used to tell agents to run directly outside
+either (opus review of 7f6d3db5: that direct call also contradicted
+`docs/agent_rules/COMMON.md`'s "never invoke idf.py/cmake/ninja/cl.exe
+directly" rule). Pass it as
+`build_kilnfw(kiln_fw_root="<worktree>\firmware\KilnFW")`: it derives the
+companion SaftyFW build's root as the sibling `firmware\SaftyFW` under the
+same worktree (so the embedded slot images come from that worktree, not the
+main tree), and on a from-scratch or `fullclean`'d build directory it runs
+the `git submodule update --init components/lvgl` and `idf.py set-target
+esp32s3` steps above itself before building -- neither is a full build, so
+neither goes through the gate. Hand a successful build's directory straight
+to `flash_firmware(kiln_fw_root=...)`.
+
+`build_saftyfw()` is different: it now takes an optional `saftyfw_root`
+(absolute path to a `firmware/SaftyFW`-shaped directory, mirroring
+`flash_firmware`'s `kiln_fw_root`) and, when that root's `build/` has no
+`CMakeCache.txt` yet, configures it itself (`cmake -S <root> -B <root>/build
+-G Ninja`) before building -- including resolving `PICO_SDK_PATH` on its own
+(see below), so a caller building SaftyFW from a fresh worktree no longer
+needs to configure by hand first. The equivalent by-hand invocation, if ever
+needed outside the tool, is the same as `check_00_saftyfw_target_build.ps1`
+uses against its own private checkbuild worktree: a first-time configure with
+`cmake -G Ninja -B build .` run from `<worktree>\firmware\SaftyFW` followed by
+a `ninja` build in that `build` directory (equivalently, `cmake -S
+<worktree>\firmware\SaftyFW -B <worktree>\firmware\SaftyFW\build -G Ninja`
+then `cmake --build <worktree>\firmware\SaftyFW\build`).
+
+**`PICO_SDK_PATH` resolution.** The Pico SDK is unvendored on this bench
+machine, at `C:\pico-tools\pico-sdk` -- nothing in `tools/` used to know that
+path except `check_00_saftyfw_target_build.ps1`'s own hardcoded fallback, so
+any SaftyFW build from a fresh worktree failed unless a human set the
+environment variable by hand first. `tools/PcTools/src/mcpkit/pico_sdk.py`'s
+`resolve_pico_sdk_path()` is now the single source of truth both
+`build_saftyfw()`'s configure-from-scratch step and that PowerShell check's
+fallback comment point at: `PICO_SDK_PATH` from the environment if set, else
+`C:\pico-tools\pico-sdk` if it contains `pico_sdk_init.cmake`, else a clear
+error naming both. `build_saftyfw()` injects the resolved value into only its
+own configure subprocess's environment -- it is never written into this
+process's environment or persisted anywhere.
+
+There is also no bare `factory_reset` MCP tool: the ESP-side factory-reset
+request (`devices.system_factory_reset(scope)`) is only ever sent as part of
+a larger tool (e.g. the preset-loading flow in `mcp_server_ui_test.py`), not
+exposed standalone. The commission-flash NVS-erase path instead goes through
+`flash_firmware(erase_partitions=["nvs"], confirm_erase=True)` (or any other
+name from the `ERASABLE_DATA_PARTITIONS` allowlist -- `nvs`, `kiln_nvs`,
+`wifi_nvs`, `profiles_nvs`, `cfg` -- see `mcp_server_flash.py`), which refuses
+unless the named partition is both in that allowlist and actually present in
+`partitions.csv`, and unless `confirm_erase=True` is also passed.
+
+## Git workflow guards (`tools/worktree_mint.ps1`, `tools/push_verify.ps1`, `tools/commit_guard.ps1`)
+
+Three small PowerShell tools under `tools/` close three recurring, expensive
+failure modes seen repeatedly in this project's development workflow (each
+with real damage on record -- see each script's own header for the incidents
+it exists to prevent). None of them assert anything standing about the
+repository's current state, so none is wired into `run_all_checks.ps1` --
+they are invoked by hand at the workflow moment they apply.
+
+**`tools/worktree_mint.ps1`** -- mint or remove a short-lived worktree at
+`origin/main` under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
+concurrent session on this machine, and two constraints have bitten
+repeatedly: the path must be SHORT (a nested `.claude/worktrees/...` path
+overflows the MSVC command line building SaftyFW host tests) and the name
+must be UNIQUE (generic names collide between live sessions).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature
+    # fetches origin, creates C:\wt\myfeature_<random> at origin/main,
+    # refuses rather than reusing an existing directory, prints
+    # "WORKTREE: <path>"
+
+powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Remove -Path C:\wt\myfeature_ab12cd
+    # removes cleanly; refuses if the worktree has uncommitted changes
+    # (tracked or untracked) unless -Force is also passed
+```
+
+As of 2026-09-19 the mint step also runs `git submodule update --init
+--recursive` in the new worktree by default (`-NoSubmodules` opts out).
+`git worktree add` never initializes submodules on its own, so a fresh mint
+used to leave `firmware/KilnFW/components/lvgl` and `tools/mykicadMcp` as
+empty directories -- failing every KilnFW target build
+(`check_00_kilnfw_target_build.ps1` / its `_recovery_` sibling, "Failed to
+resolve component 'lvgl'") and both mykicadMcp-dependent checks
+(`check_mcp_facade_coverage.ps1`, `check_mykicad_golden_suite_runs.ps1`)
+until someone ran that command by hand. A submodule-init failure is printed
+loudly but never fails the mint itself -- the worktree is still handed back.
+
+`check_00_kilnfw_recovery_target_build.ps1` separately picked up the same
+per-tree stale-directory prune that `check_00_kilnfw_target_build.ps1`
+already had (2026-09-19): it reuses one persistent
+`C:\wt\checkbuild_recovery_<hash-of-tree-path>` directory per invoking tree
+(good for incremental build speed) but, before this fix, never cleaned one up
+once its owning tree (a removed agent worktree) was gone -- 29 accumulated,
+~4.8 GB. It now writes the same kind of `.checkbuild_source` ownership marker
+and prunes a stale directory only once its named owner no longer exists on
+disk and its per-tree build lock is not currently held, exactly mirroring the
+main check's existing logic. Separately, `check_00_kilnfw_target_build.ps1`'s
+own "am I the main worktree" test used to ask the invoking tree's own `git
+worktree list` whether it was the first (therefore "main") entry -- true for
+ANY standalone clone of its own accord, so an unrelated private repo copy
+could claim the shared, pre-warmed `C:\wt\checkbuild` directory and mix its
+source into the real main tree's build (a bogus undefined-reference link
+failure was traced to exactly this). It now compares against one fixed,
+known absolute path for the real shared tree instead of a self-reported
+claim, so a distinct source tree always gets its own hash-tagged directory
+and never shares a mirror with another tree.
+
+**Stale cached build config self-heals (2026-09-19).** A reviewer found that
+`check_00_kilnfw_target_build.ps1`'s persistent per-tree checkbuild directory
+(`C:\wt\checkbuild_<hash>`, above) could carry a `build/` configured against
+an OLDER sdkconfig than the one just copied in from the invoking tree, with
+nothing comparing the two -- every downstream ELF-grading check then graded a
+binary built against the wrong config (observed: `CONFIG_KILNCTL_ENABLE_GPIO_PROBE`
+cached `n` while the copied sdkconfig said `y`). Both `check_00_kilnfw_target_build.ps1`
+and `check_00_kilnfw_recovery_target_build.ps1` now hash the config that
+actually governs the build (`sdkconfig` for the main target, `sdkconfig.defaults`
+for recovery) and compare it against a marker file left by the last build that
+used this checkbuild directory (`build\.sdkconfig_built.sha256` /
+`build\.sdkconfig_defaults_built.sha256`). A mismatch (or no marker, on an
+already-configured `build/`) runs `idf.py reconfigure` before building, printing
+both the previous and current hash; the marker is rewritten only after the
+freshness check passes, so a build that fails never reports a false "known
+good against this hash." The PASS line itself now names the sdkconfig hash the
+graded ELF was built from, e.g. `PASS: KilnFW target build succeeded, ...
+(built against sdkconfig hash D72984E5...)`, so a later reader/check does not
+have to trust that the checkbuild directory happened to be current -- it can
+compare that hash against the invoking tree's own `sdkconfig`. Net effect:
+**a stale checkbuild directory is no longer something an agent needs to
+hand-delete before trusting a stack-margin or other ELF-derived measurement --
+the check now detects and corrects it itself.** `check_00_saftyfw_target_build.ps1`
+needed no equivalent change: it already runs `cmake .` (an unconditional
+reconfigure) on every invocation, never trusting a cached configure across runs.
+
+**`tools/push_verify.ps1`** -- verify a commit actually landed on
+`origin/main`, in one unambiguous verdict line. This project has produced
+four false "landed" reports from two specific causes: (1) running the
+ancestry check backwards -- `git merge-base --is-ancestor origin/main HEAD`
+asks "is origin/main an ancestor of my branch", which succeeds even for a
+commit stranded on an unpushed local branch, not `git merge-base
+--is-ancestor <mine> origin/main`, the question that actually matters; and
+(2) trusting `$?` after a native `git push` in PowerShell 5.1, which is set
+to `$false` on any command that wrote to stderr -- and `git push`'s own
+progress banner does that on a successful push. This script uses the correct
+argument order and reads only `$LASTEXITCODE`, never `$?`, never push output.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/main]
+    # prints "VERDICT: LANDED -- ..." or "VERDICT: NOT LANDED -- ...",
+    # and on NOT LANDED also names the local branch(es) the commit IS
+    # reachable from, if any (the actual common root cause)
+```
+
+**`tools/commit_guard.ps1`** -- guard a commit against the stale-working-copy
+trap before it happens. `git commit -o <path>` (and `--amend` without a
+pathspec) commits the WORKING COPY of a path whole, not your edit
+specifically; in a tree several sessions edit concurrently, a stale working
+copy silently reverts everyone else's changes to that file. This has
+happened twice for real here: a stale doc commit reverted 113 lines of
+another session's work, and a bare `--amend` pushed a 1067-line revert of
+live work. The script compares `git hash-object <path>` against
+`git rev-parse origin/main:<path>` for each path about to be committed, shows
+the diff, reports insertion/deletion counts, and refuses by default until
+the caller passes `-Confirm`. An optional `-ExpectedMaxLines` per path flags
+any path whose actual insertion+deletion count exceeds what the caller
+declared -- that count was the available tell in the real 113-line incident
+and was read past unlooked-at.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\commit_guard.ps1 -Path CLAUDE.md -ExpectedMaxLines 40
+    # refuses (exit 1) unless -Confirm is also passed, or the path is
+    # unchanged/new vs origin/main; also refuses if actual changed lines
+    # exceed the declared budget, regardless of -Confirm
+```
+
+## Confirm-gate flags are never coerced (2026-10-02)
+
+The facade coerces stringly-typed arguments (`"yes"`/`"1"`/`"true"` to a bool), which on 2026-10-02
+let `kiln_call(name="recovery_exit", args={"confirm":"yes"})` pass every per-tool `confirm is True`
+gate. `mcpkit.registry.ToolRegistry.invoke` now refuses, before the tool runs, any boolean-typed
+parameter named `confirm`, `force` or `allow_*` whose value is not a real JSON boolean, with an error naming
+the type received. `kiln_batch` shares `invoke`, so it is covered; `*_describe` never dispatches. Other bool
+parameters are still coerced. `tools/mykicadMcp/mcpkit_registry.py` is a vendored copy and needs re-vendoring.
+
+## Adding a tool
+
+For `kilnctrl`, write it in the server module with the existing
+`@_tool()` decorator; for `kicad`, add an entry to `self.tools` as before.
+Registration did not change on either. Then, if the tool's name does not make it
+findable, add a keyword row to that server's facade module
+(`kilnctrl/mcp_facade.py`, `tools/mykicadMcp/kicad_facade.py`)
+and, for `kicad`, a `GROUP_OVERRIDES` row so it does not land in a junk group.
+That is the whole change; the facade picks it up at import.
+
+A useful check after adding one: call `<p>find` with the question a person would
+actually ask, and confirm the new tool comes back first. If it does not, that is
+a missing keyword, not a search bug.
+
+### `check_task_liveness` (READ-ONLY)
+
+`check_stack_margin_registration.ps1` only proves every required KilnFW task
+has a `stack_margin_register()` call site in the firmware source -- it says
+nothing about whether `xTaskCreate*()` actually succeeded for each one on a
+given boot. Every task-creation failure is log-only (`ESP_LOGE`, non-fatal,
+no counter, nothing HTTP-visible), so a board that silently failed to start a
+required task at boot looks perfectly healthy everywhere else in `/api/
+status`. `stack_margin_read()` (`App/drivers/common/stack_margin.c`) is the
+one place that failure stays visible: the task's registry slot is present
+(registered by name at compile time) but its handle is NULL, so `alive`
+reads false.
+
+`check_task_liveness` calls the same `GET_STACK_MARGIN` path as
+`get_stack_margin`, then diffs the reply against the `$requiredNames` list
+parsed live out of `tools/check_stack_margin_registration.ps1` (via
+`tools/PcTools/src/kilnctrl/task_liveness.py`, unit-tested in isolation with
+no board involved) -- one expected-task list, in one place, rather than a
+second hand-copied one that can drift. It reports expected-and-alive,
+expected-but-DEAD (registered, `alive=False` -- creation failed this boot),
+expected-but-ABSENT (never registered -- older firmware or a code
+regression), and extra (alive, not in the expected list -- informational).
+
+Not every required task is expected alive on every boot. Each
+`$requiredNames` entry carries a liveness tag as a trailing
+`# liveness: <tag>` comment on its own source line -- `always` (the
+default, no comment needed: a plain long-lived service, DEAD or ABSENT is
+always a fault), `config` (conditional on a Kconfig option or a runtime
+hardware probe, e.g. `gpio_probe`/`i2c_owner_ns2009` -- DEAD or ABSENT is
+informational), `on-demand` (a transient task an HTTP handler creates per
+request, e.g. `ota_pico_rollback`/`recovery_exit`/`ota_rollback_reboot` --
+DEAD or ABSENT between requests is informational), and `boot-once` (a
+one-shot boot-time task that self-deletes once it has a verdict, e.g.
+`pico_auto_update` -- DEAD after boot is normal, but ABSENT is still a
+fault: its `stack_margin_register()` call site never fired at all). This
+was added after the first live run reported six false positives that were
+all by design; the tag lives on the same source line as the name, one
+source of truth, same discipline as the required-name list itself.
+`pico_auto_update` is also gated on not-recovery-mode and a healthy safety
+link (`App/main_control_bringup.c:240`), so ABSENT there in recovery mode is
+expected and `capability_preflight` already refuses that run for other
+reasons.
+
+`capability_preflight_check` runs this same cross-check over the link before
+every preflight and refuses the run (same as an unacknowledged crash report)
+if any `always`/untagged task is dead or absent, or any `boot-once` task is
+absent -- unless `allow_missing_tasks=True` is passed. A `config`/
+`on-demand`/`boot-once`-tagged task's by-design gap is reported but never
+blocks.
+
+### `crash_report_clear` and the async job (2026-10-02)
+
+`POST /api/crash_report/clear` no longer erases the `coredump` partition on `httpd_worker` (bench: about 3.4 s,
+during which `GET /api/status` took 2067 ms and `GET /api/readiness` 1378 ms). The handler hands the erase to the
+shared single-flight `http_async_job` task and the job replies on the async request copy, so the wire bodies are the
+same `{"ok":true}` 200 / `{"ok":false,"error":...}` 500 as before; a job already running answers 503 immediately.
+`GET /api/crash_report` adds `clear_in_progress` to its `present:false` reply (true until the erase has returned).
+The MCP tool retries a 503 each second, polls the read-back after a 202 or a POST socket timeout, and gives up
+after a 30 s deadline; a record or image still present, or `clear_in_progress` still true, is reported as FAILED.
+The POST timeout in `crash_report_clear_http_client.py` is 20 s. Host-unit-tested with a fake board only; the
+after-change stall has not been measured on the bench.

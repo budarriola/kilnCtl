@@ -1,0 +1,9 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP MAXM17572AMC+T
+D ADI 4.5V to 60V, 1.2 A High Efficiency Step-Down Power Module with Integrated Inductor
+K
+F https://www.analog.com/en/products/maxm17572.html
+$ENDCMP
+#
+#End Doc Library

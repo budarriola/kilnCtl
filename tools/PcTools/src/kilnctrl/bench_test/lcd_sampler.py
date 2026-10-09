@@ -1,0 +1,653 @@
+"""LCD capture + sampling pipeline for the `lcd` suite (plan §8 Wave 1c).
+
+Wraps two existing scripts rather than reimplementing them:
+
+* ``tools/PcTools/scripts/capture_lcd.ps1`` grabs one frame from the bench
+  webcam. Wave 1c always calls it with ``-Full`` -- the CLAUDE.md corner
+  measurements (2026-09-19 camera aim) are in full 1280x720 frame
+  coordinates, and composing them through the default crop+scale would
+  just add another transform to get wrong.
+* ``tools/PcTools/scripts/sample_lcd_region.ps1`` (this wave adds a
+  ``-Json`` switch, backwards compatible -- the plain-text output is
+  unchanged when it is omitted) reports a region's mean RGB plus a bezel
+  reference sample.
+
+The other half of this module is the widget-centre -> camera-frame
+transform: LVGL reports tap-target centres in the display's own 480x320
+landscape coordinate space (``list_tap_targets()``, ``ui_test_client.py``).
+The board sits at a perspective skew in front of the camera (CLAUDE.md
+"Camera aim": the right edge measures shorter than the left and slants,
+the top edge is longer than the bottom -- not a simple in-plane rotation),
+so a plain per-axis scale, or even a full affine map, is wrong -- this
+fits a 4-point homography (projective transform) from the four measured
+screen corners, which is exact at all four corners by construction, unlike
+a least-squares affine fit. A point off the four corners is still not
+automatically exact for a real (imperfectly measured) quadrilateral, which
+is why tolerance work below is calibrated against the bezel, not against
+an assumed-perfect transform.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import subprocess
+from typing import List, Optional, Sequence, Tuple
+
+#: The kilnCtl LCD's native landscape resolution (ILI9488/ST7796, 480x320 --
+#: firmware/KilnFW/docs/ILI9488.md, DISPLAY_ST7796_PLAN.md). Tap-target
+#: centres from list_tap_targets() are in this space.
+LCD_WIDTH = 480
+LCD_HEIGHT = 320
+
+#: The four screen corners in the LCD's own coordinate space, matched 1:1
+#: (by list index) with FRAME_CORNERS below: top-left, top-right,
+#: bottom-left, bottom-right.
+WIDGET_CORNERS: Tuple[Tuple[float, float], ...] = (
+    (0.0, 0.0),
+    (float(LCD_WIDTH), 0.0),
+    (0.0, float(LCD_HEIGHT)),
+    (float(LCD_WIDTH), float(LCD_HEIGHT)),
+)
+
+#: The same four corners, in the bench camera's full 1280x720 frame.
+#: Re-derived 2026-09-24 (round 4 of the LCD bench-runner fixes) from
+#: ``logs/bench_test/20260924T191429Z_lcd/captures/lcd01_start_pause.jpg``
+#: by numeric luminance/color edge scans (PIL pixel sampling, never by eye):
+#: the round-3 bottom-right corner below, (985, 628), was stale -- a column
+#: scan at x=950 shows the panel's own lit content (bright blue-green) runs
+#: down to y~=660 before the luminance drops into the dark bezel, not y=628
+#: (that value was this capture's Start-button-to-background internal edge,
+#: not the true bezel boundary), so ``widget_to_frame(423, 289)`` (the Start
+#: button target) landed on the button's own top edge instead of its centre.
+#: Method: for each edge, scan rows/columns from a point known to be off-
+#: panel toward the panel, and take the first point where several
+#: consecutive samples read below a fixed dark-luminance floor (this
+#: "sustained dark" rule replaces round 3's "biggest single-step jump",
+#: which the bottom edge's own internal button/background transition could
+#: trigger before the real bezel edge was ever reached); fit a line through
+#: the resulting crossings along each edge (dropping points in the low-
+#: signal region right at a corner, per round 3's note below) and intersect
+#: adjacent edges' fitted lines for each corner:
+#:   top-left corner:     (179, 68)
+#:   top-right corner:    (1045, 125)
+#:   bottom-left corner:  (177, 627)
+#:   bottom-right corner: (981, 662)
+#: Three of the four corners moved by 1-7px from round 3 (within the noise
+#: of the method); only the bottom-right corner moved materially (628 -> 662,
+#: the stale value this round exists to fix). Geometry is still a
+#: perspective skew, not a simple rotation: the right edge remains shorter
+#: than the left and slants, while the left edge runs near-vertical
+#: (x ~= 177-179 across y = 100..620).
+#: Superseded 2026-09-24 (round 3) corners, kept for history: TL=(180,69)
+#: TR=(1038,121) BL=(178,627) BR=(985,628). Superseded 2026-09-24 (round 1)
+#: corners: TL=(160,52) TR=(1044,116) BL=(161,645) BR=(983,624). Superseded
+#: 2026-09-19 corners: TL=(298,86) TR=(1145,60) BL=(323,635) BR=(1147,617).
+FRAME_CORNERS: Tuple[Tuple[float, float], ...] = (
+    (179.0, 68.0),
+    (1045.0, 125.0),
+    (177.0, 627.0),
+    (981.0, 662.0),
+)
+
+#: Four points, inset from the widget-space corners toward the panel's
+#: centre, used only to sanity-check at runtime that FRAME_CORNERS (and
+#: thus DEFAULT_TRANSFORM) has not gone stale again the way the corners
+#: above just had -- see frame_corners_look_stale(). This check only needs
+#: each point to land distinctly off the bezel (panel content, of whatever
+#: color), never specifically on dark background: frame_corners_look_stale()
+#: compares each sample only to the bezel, never to a target background
+#: color, so it tolerates whatever is actually drawn there.
+#:
+#: 2026-09-25 update: the LEFT two points, (5,5) and (5,315), were
+#: documented as landing on "dark background... never covered by a widget"
+#: -- that stopped being true once ui_page_home.c grew a temperature-graph
+#: widget spanning most of the left half of the home page (confirmed: those
+#: two points now read the graph's gradient fill, bright, on every capture
+#: examined, home page or not). That is harmless for THIS function (still
+#: clearly off-bezel, so still a valid "not stale" vote), but it broke the
+#: separate, stricter diagnostic in cases_lcd.py that DOES compare against a
+#: specific dark target color at the same (5, 5) point -- see
+#: cases_lcd.py's _BG_REFERENCE_XY, which was moved off this same spot for
+#: that reason. Left as-is here since moving it buys nothing: the graph
+#: covers effectively the whole left edge (checked y=5..315 at x=2..20 on
+#: seven captures spanning three pages), so no reliably-dark LEFT-side point
+#: exists on the home page any more to move to instead, and this function
+#: never needed "dark" in the first place.
+CORNER_CHECK_POINTS: Tuple[Tuple[float, float], ...] = (
+    (5.0, 5.0),
+    (float(LCD_WIDTH) - 5.0, 5.0),
+    (5.0, float(LCD_HEIGHT) - 5.0),
+    (float(LCD_WIDTH) - 5.0, float(LCD_HEIGHT) - 5.0),
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class AffineTransform:
+    """A perspective (projective) map, fit exactly through 4 point
+    correspondences -- a plain affine map cannot represent the panel's
+    perspective skew (CLAUDE.md "Camera aim": the right edge measures ~14%
+    shorter than the left and slants 61px while the left edge is vertical,
+    and the top edge is ~8% longer than the bottom), so 4 corners are fit
+    with a full homography instead of a 6-parameter least-squares affine
+    fit:
+
+        x' = (a*x + b*y + c) / (g*x + h*y + 1)
+        y' = (d*x + e*y + f) / (g*x + h*y + 1)
+
+    The class name is kept as ``AffineTransform`` for callers, even though
+    the map is now projective, to avoid touching call sites outside this
+    module (``widget_to_frame``/``sample_widget`` are the only other
+    consumers, and they only ever call ``.apply()``).
+    """
+
+    a: float
+    b: float
+    c: float
+    d: float
+    e: float
+    f: float
+    g: float = 0.0
+    h: float = 0.0
+
+    def apply(self, x: float, y: float) -> Tuple[float, float]:
+        w = self.g * x + self.h * y + 1.0
+        if abs(w) < 1e-12:
+            raise ValueError("degenerate homography apply() (w ~= 0)")
+        return ((self.a * x + self.b * y + self.c) / w, (self.d * x + self.e * y + self.f) / w)
+
+    @classmethod
+    def fit(cls, src: Sequence[Tuple[float, float]], dst: Sequence[Tuple[float, float]]) -> "AffineTransform":
+        """Exact 4-point homography fit (8 unknowns from 4 correspondences,
+        8 equations -- not a least-squares over-determined solve). No numpy
+        dependency (memory project_pctools_numpy_undeclared_dependency) --
+        plain Gaussian elimination on the 8x8 linear system, generalising
+        the previous 3x3 ``_solve3`` pattern.
+
+        Requires exactly 4 point correspondences (the classic 4-point DLT
+        case); a caller needing more or fewer points would need a genuine
+        least-squares homography solve, which this does not implement.
+        """
+        if len(src) != len(dst):
+            raise ValueError("src and dst must have the same number of points")
+        if len(src) != 4:
+            raise ValueError("homography fit requires exactly 4 point correspondences")
+
+        # Build the 8x8 system A p = b for p = [a,b,c,d,e,f,g,h].
+        rows: List[List[float]] = []
+        rhs: List[float] = []
+        for (x, y), (xp, yp) in zip(src, dst):
+            rows.append([x, y, 1.0, 0.0, 0.0, 0.0, -x * xp, -y * xp])
+            rhs.append(xp)
+            rows.append([0.0, 0.0, 0.0, x, y, 1.0, -x * yp, -y * yp])
+            rhs.append(yp)
+
+        a, b, c, d, e, f, g, h = _solve_n(rows, rhs)
+        return cls(a=a, b=b, c=c, d=d, e=e, f=f, g=g, h=h)
+
+
+def _solve_n(m: List[List[float]], v: List[float]) -> Tuple[float, ...]:
+    """Solve an NxN linear system m @ x = v via Gaussian elimination with
+    partial pivoting. Raises ValueError on a singular system (e.g. the 4
+    corners are collinear -- would mean the calibration itself is broken,
+    not something to silently paper over)."""
+    n = len(v)
+    m = [row[:] + [v[i]] for i, row in enumerate(m)]
+    for col in range(n):
+        pivot_row = max(range(col, n), key=lambda r: abs(m[r][col]))
+        if abs(m[pivot_row][col]) < 1e-9:
+            raise ValueError("singular system fitting perspective transform (degenerate corner points)")
+        m[col], m[pivot_row] = m[pivot_row], m[col]
+        pivot = m[col][col]
+        m[col] = [val / pivot for val in m[col]]
+        for r in range(n):
+            if r == col:
+                continue
+            factor = m[r][col]
+            if factor:
+                m[r] = [a - factor * b for a, b in zip(m[r], m[col])]
+    return tuple(row[n] for row in m)
+
+
+#: The transform fit once, from the CLAUDE.md corners, at import time. A
+#: fresh camera re-aim only ever needs the constants above updated (same
+#: place capture_lcd.ps1's own defaults get updated) -- this recomputes
+#: itself from them rather than caching a stale fit.
+DEFAULT_TRANSFORM = AffineTransform.fit(WIDGET_CORNERS, FRAME_CORNERS)
+
+
+def widget_to_frame(cx: float, cy: float, transform: Optional[AffineTransform] = None) -> Tuple[int, int]:
+    """Map a widget-space point (list_tap_targets()' cx/cy, 480x320
+    landscape) to a pixel coordinate in the camera's full 1280x720 frame."""
+    t = transform or DEFAULT_TRANSFORM
+    fx, fy = t.apply(float(cx), float(cy))
+    return (int(round(fx)), int(round(fy)))
+
+
+# ---------------------------------------------------------------------------
+# Script wrappers. Kept thin and mockable -- tests patch _run(), never
+# subprocess itself, per the existing bench_test convention of separating
+# "I/O" from "judgment" (judgments.py's docstring).
+# ---------------------------------------------------------------------------
+
+def _scripts_dir(repo_root: Optional[str] = None) -> str:
+    root = repo_root or os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "..")
+    )
+    return os.path.join(root, "tools", "PcTools", "scripts")
+
+
+def _run(args: List[str], timeout: float = 20.0) -> "subprocess.CompletedProcess[str]":
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
+
+
+class LcdCaptureError(RuntimeError):
+    """Raised when capture_lcd.ps1/sample_lcd_region.ps1 fail or the frame
+    could not be produced -- e.g. ffmpeg exit -5 (camera busy, CLAUDE.md:
+    "check for another process holding the C920 first"). Callers translate
+    this to SKIP/INCONCLUSIVE, never to a fabricated PASS."""
+
+
+def capture_full_frame(out_path: str, repo_root: Optional[str] = None, device: Optional[str] = None) -> str:
+    """Run capture_lcd.ps1 -Full -Out out_path. Returns out_path on success."""
+    script = os.path.join(_scripts_dir(repo_root), "capture_lcd.ps1")
+    args = ["powershell", "-ExecutionPolicy", "Bypass", "-File", script, "-Full", "-Out", out_path]
+    if device:
+        args += ["-Device", device]
+    proc = _run(args, timeout=30.0)
+    if proc.returncode != 0:
+        raise LcdCaptureError(f"capture_lcd.ps1 -Full failed (exit {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
+    if not os.path.isfile(out_path):
+        raise LcdCaptureError(f"capture_lcd.ps1 reported success but {out_path} was not written")
+    return out_path
+
+
+@dataclasses.dataclass
+class RegionSample:
+    region: Tuple[int, int, int]
+    bezel: Optional[Tuple[int, int, int]]
+
+
+def sample_region(image_path: str, x: int, y: int, w: int = 8, h: int = 8,
+                   bezel_x: int = 100, bezel_y: int = 100,
+                   repo_root: Optional[str] = None) -> RegionSample:
+    """Run sample_lcd_region.ps1 -Json and parse its output."""
+    script = os.path.join(_scripts_dir(repo_root), "sample_lcd_region.ps1")
+    args = [
+        "powershell", "-ExecutionPolicy", "Bypass", "-File", script,
+        "-Image", image_path, "-X", str(x), "-Y", str(y), "-W", str(w), "-H", str(h),
+        "-BezelX", str(bezel_x), "-BezelY", str(bezel_y), "-Json",
+    ]
+    proc = _run(args, timeout=20.0)
+    if proc.returncode != 0:
+        raise LcdCaptureError(f"sample_lcd_region.ps1 failed (exit {proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
+    return parse_sample_json(proc.stdout)
+
+
+def parse_sample_json(stdout: str) -> RegionSample:
+    """Pulled out of sample_region() so a fake-subprocess unit test can
+    feed captured stdout text directly (plan's test requirement) without
+    invoking powershell at all."""
+    text = stdout.strip()
+    if not text:
+        raise LcdCaptureError("sample_lcd_region.ps1 -Json produced no output")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LcdCaptureError(f"sample_lcd_region.ps1 -Json produced unparseable output: {text!r}") from exc
+    region = data.get("region")
+    if not region or "R" not in region:
+        raise LcdCaptureError(f"sample_lcd_region.ps1 -Json missing 'region': {data!r}")
+    bezel = data.get("bezel")
+    return RegionSample(
+        region=(int(region["R"]), int(region["G"]), int(region["B"])),
+        bezel=(int(bezel["R"]), int(bezel["G"]), int(bezel["B"])) if bezel else None,
+    )
+
+
+def sample_widget(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
+                   bezel_x: int = 100, bezel_y: int = 100,
+                   transform: Optional[AffineTransform] = None,
+                   repo_root: Optional[str] = None) -> RegionSample:
+    """Convenience: widget-space centre -> frame coords -> sample_region()."""
+    fx, fy = widget_to_frame(cx, cy, transform)
+    # Sample a small box centred on the mapped point, same convention as
+    # sample_lcd_region.ps1's own X/Y (top-left of the box).
+    return sample_region(image_path, fx - w // 2, fy - h // 2, w, h, bezel_x, bezel_y, repo_root)
+
+
+#: LVGL button/label pattern (ui_home_build_button(), ui_page_home_actions.c):
+#: lv_button_create() + lv_label_create() + lv_obj_center(label) -- the
+#: caption is drawn dead-centre on the button, so list_tap_targets()'s
+#: reported centre point (kiln_ui.c's log_tap_targets(), which only reports
+#: a clickable widget's own bounding-box centre, never its width/height) is
+#: exactly the label's own centre, not just the button's. A sample taken
+#: exactly there risks landing on the label's (differently-coloured) text
+#: rather than the button's own fill.
+#:
+#: Measured on both 2026-09-24 LCD-01 captures (Start button, target
+#: (423, 289)): sampling dead-centre reads RGB(100,193,164) on
+#: 20260924T191429Z_lcd (color_distance to _ACCENT_4_RGB (0x5C,0xC0,0x6E) =
+#: 54.6, FAIL against COLOR_MATCH_TOLERANCE=45.0) and RGB(100,205,157) on
+#: 20260924T162517Z_lcd (distance 49.4, over tolerance, but its chroma offset
+#: 0.077 passes matches_color()'s CHROMA_MATCH_TOLERANCE fallback) -- both
+#: are pulled off the fill by the white
+#: "Start" label glyph. Offsetting 10 widget-space px downward (away from
+#: the label, still inside the button's own fill) reads RGB(67,181,132)
+#: (distance 35.1, PASS) and RGB(68,192,130) (distance 31.2, PASS)
+#: respectively. A horizontal offset of similar magnitude was tried and
+#: rejected: it was inconsistent across the two captures (some points still
+#: failed tolerance, or landed near the button's rounded-corner edge
+#: anti-aliasing), where a vertical offset was reliable on both.
+#:
+#: 10px is safe against every button height in the app that uses this
+#: pattern: ui_page_home.c's Start/Pause buttons are the shortest at 36px
+#: (ui_home_build_button(..., 36, ...)), ui_page_profile_builder_zones.c's
+#: "Next" button is 44px, and ui_page_touch_cal.c's "Back" button is
+#: UI_THEME_MIN_TOUCH_TARGET_PX (72px) -- a 10px offset from centre stays
+#: well inside even the 36px case's own padded fill. Worked margins for
+#: that case: the label is LV_FONT_DEFAULT montserrat_14 (line_height 16,
+#: base_line 3), so "Start"/"Pause" glyph pixels (no descenders) end at
+#: about cy+5; the default 8x8 frame-px patch spans ~5 widget px at this
+#: camera scale (~1.6 frame px per widget px vertically), i.e. about
+#: cy+7.5..cy+12.5; the button's bottom edge is cy+18 (radius 10 only
+#: rounds the corners, not the centre column).
+LABEL_AVOID_OFFSET_PX = 10.0
+
+
+def sample_widget_body(image_path: str, cx: float, cy: float, w: int = 8, h: int = 8,
+                        bezel_x: int = 100, bezel_y: int = 100,
+                        transform: Optional[AffineTransform] = None,
+                        repo_root: Optional[str] = None,
+                        offset_px: float = LABEL_AVOID_OFFSET_PX) -> RegionSample:
+    """Like sample_widget(), but for a button whose caption is centred on it
+    (see LABEL_AVOID_OFFSET_PX's comment) -- samples ``offset_px`` below the
+    given centre in widget space instead of exactly on it, so the sample
+    lands on the button's own fill colour rather than its label text. Never
+    use this for a widget whose caption is NOT centred on the tap target
+    (e.g. a full-width status strip whose own box is only as tall as its
+    text -- ui_page_home.c's trip strip), since the same offset there can
+    walk the sample straight past the widget's own short edge."""
+    return sample_widget(image_path, cx, cy + offset_px, w, h, bezel_x, bezel_y, transform, repo_root)
+
+
+#: frame_corners_look_stale()'s own gate. Reuses MIN_BEZEL_CONTRAST's value
+#: (defined below) rather than a second constant, but is read at call time
+#: -- module order below is preserved (MIN_BEZEL_CONTRAST is a plain float,
+#: no forward-reference issue at import time since this function's body
+#: only reads the name at *call* time).
+def frame_corners_look_stale(image_path: str, transform: Optional[AffineTransform] = None,
+                              repo_root: Optional[str] = None,
+                              min_bezel_contrast: Optional[float] = None) -> Optional[bool]:
+    """Runtime self-check for FRAME_CORNERS/DEFAULT_TRANSFORM going stale
+    again the way the 2026-09-24 round-3 fix found them (widget_to_frame(5,5)
+    landing on bezel instead of the home page's own background).
+
+    Samples the four CORNER_CHECK_POINTS (widget-space points just inside
+    each corner, over a patch of background no LCD page in this suite ever
+    covers with a widget), each compared against sample_widget()'s bezel
+    reference (the one fixed frame point, (100, 100) by default -- NOT a
+    per-corner local sample). Returns True when ANY of the four reads
+    indistinguishable from bezel: a correctly-aimed transform maps every
+    inset point onto the lit panel, so even one landing on bezel means that
+    part of the geometry (or the panel as a whole -- a dark/blanked screen
+    looks the same) cannot be trusted. Requiring all four was rejected on
+    measured evidence: against the motivating capture
+    (20260924T162517Z_lcd/captures/lcd01_start_pause.jpg) the superseded
+    corners put only TWO of the four check points on bezel ((5,5) and
+    (5,315) read ~7-8 from bezel; (475,5) and (475,315) read 162 and 133),
+    so an all-four rule would have returned False on the very incident it
+    exists to catch. None of these points is a widget, so no widget's own
+    color mismatch can move them -- and callers only ever downgrade a FAIL
+    to INCONCLUSIVE on True, never to PASS. Returns False when all four read
+    as panel content. Returns None if any sample could not be taken at all
+    (capture/parse failure) -- callers must not treat None as either stale
+    or sound.
+
+    A fixed absolute luminance threshold was considered and rejected: the
+    theme's own darkest background color is not much brighter than the
+    bezel itself (see MIN_BEZEL_CONTRAST's own comment), so a point that is
+    legitimately on-screen-but-dark could false-positive against an
+    absolute threshold. Comparing against a bezel reference sampled from
+    the same frame keeps exposure/white-balance drift out of it.
+    """
+    threshold = MIN_BEZEL_CONTRAST if min_bezel_contrast is None else min_bezel_contrast
+    stale_votes = 0
+    for cx, cy in CORNER_CHECK_POINTS:
+        try:
+            sample = sample_widget(image_path, cx, cy, transform=transform, repo_root=repo_root)
+        except LcdCaptureError:
+            return None
+        if sample.bezel is None:
+            return None
+        if is_off(sample.region, sample.bezel, tol=threshold):
+            stale_votes += 1
+        # Deliberately NO second "reads too far from theme BG" vote here
+        # (tried and reverted 2026-09-24 in review): this camera renders the
+        # theme's dark BG (0x1a1f2b) as a bright blue -- every CORNER_CHECK_POINTS
+        # sample on 20260924T162517Z/191429Z's lcd01/lcd08/lcd14 captures read
+        # 92-304 from the theme constant while sitting squarely on the panel,
+        # so such a vote fired on every real frame and downgraded every FAIL
+        # to INCONCLUSIVE. Same CLAUDE.md rule: never judge a sampled pixel
+        # against a theme source constant.
+    return stale_votes >= 1
+
+
+# ---------------------------------------------------------------------------
+# Tolerance math (plan §8: "the bezel-calibrated tolerance"). CLAUDE.md is
+# explicit that colors are judged by numeric sampling, never by eye and
+# never by trusting the theme source constants blindly -- so every check
+# here is relative to an actually-sampled bezel reference, not an assumed-
+# perfect camera/color pipeline.
+# ---------------------------------------------------------------------------
+
+#: Minimum Euclidean RGB distance from the bezel reference for a region to
+#: be considered "distinctly different from off" -- i.e. actually lit,
+#: not just camera/JPEG noise around the same dark bezel level. Chosen
+#: generously (JPEG compression + auto-exposure noise on this webcam has
+#: been observed to vary a dark region by a few counts per channel; 15 in
+#: quadrature is comfortably above that floor while still well below the
+#: 40-100 count swings between the theme's actual accent colors).
+MIN_BEZEL_CONTRAST = 25.0
+
+#: Tolerance for "this region approximately matches this target color",
+#: applied on top of (never instead of) the bezel-contrast check above.
+COLOR_MATCH_TOLERANCE = 45.0
+
+#: Minimum Euclidean RGB distance between a widget's own TEXT region and a
+#: local no-text reference sample in the SAME row band, for that row to be
+#: judged as having rendered content at all -- see cases_lcd.py's
+#: ``_sample_row_contrast()`` (LCD-14). Comparing either sample alone
+#: against the (dark) bezel reference (``is_off()``) cannot tell a rendered
+#: row's own CARD background (``UI_THEME_COLOR_CARD``, 0x242a3a) apart from
+#: a MISSING row's page background (``UI_THEME_COLOR_BG``, 0x1a1f2b): both
+#: read similarly far from bezel (Euclidean distance ~80-90), so a
+#: bezel-only check reads a missing row as "rendered" -- only a fully
+#: dark/blanked panel would ever fail it. A local contrast check is immune
+#: to which of those two backgrounds the reference point lands on, since a
+#: missing row makes BOTH the text point and the reference point read the
+#: *same* background (contrast ~0) while a genuinely rendered row's text
+#: (``UI_THEME_COLOR_TEXT_PRIMARY``, 0xf0f0f0) against its own CARD
+#: background is ~336 on paper; measured on the real bench capture
+#: (20260924T191429Z_lcd/captures/lcd14_temperature.jpg, three rendered
+#: rows) it read 213-228 through the camera. Chosen well below that but
+#: comfortably above JPEG/auto-exposure noise between two same-frame
+#: samples (a few counts per channel, same class of noise
+#: MIN_BEZEL_CONTRAST's own comment measures).
+ROW_CONTENT_MIN_CONTRAST = 60.0
+
+#: Tolerance for the chromaticity fallback below, in normalised (r/sum,
+#: g/sum, b/sum) space -- see matches_color()'s docstring. Chosen from the
+#: 2026-09-24 bench evidence: a genuinely-lit ACCENT_4 (green Start button)
+#: sampled at RGB(60,138,92) against the theme's RGB(92,192,110) reference
+#: is only chroma-distance ~0.048 away (the camera's under-exposure/white-
+#: balance scaled all three channels together, which chromaticity cancels),
+#: while a wrong-hue red RGB(200,60,60) is ~0.50 away and a colorless grey
+#: RGB(150,150,150) is ~0.19 away -- both comfortably outside this
+#: threshold, so a genuinely wrong button color still fails.
+CHROMA_MATCH_TOLERANCE = 0.10
+
+#: Brightness floor for the chromaticity fallback only: the sample's channel
+#: sum must be at least this fraction of the target's own channel sum before
+#: its channel RATIOS are trusted at all. Chromaticity is scale-invariant by
+#: construction, so without this a near-black region -- a blanked panel, an
+#: unlit/hidden button, dark sensor noise with a faint green cast such as
+#: RGB(10,20,12) or RGB(3,6,4) -- has almost exactly ACCENT_4's ratios and
+#: would "match" whenever it clears the bezel-contrast gate (which a dark
+#: region does easily against a mis-exposed bright bezel like the
+#: 2026-09-24 RGB(160,233,253), and even against the normal dark bezel when
+#: the region reads darker than it). The 2026-09-24 genuine sample
+#: RGB(60,138,92) sums to 290, ~0.77 of ACCENT_4's 378, so 0.5 keeps that
+#: evidence passing while rejecting anything dimmer than half-exposure.
+CHROMA_MIN_BRIGHTNESS_RATIO = 0.5
+
+
+#: Threshold for judge_lcd_home_idle's background-reference diagnostic
+#: (annotates a FAIL reason only, never changes a verdict; 2026-09-24 bench evidence: a cyan-cast capture read the Start
+#: button at RGB(25,96,98) vs. ACCENT_4's RGB(92,192,110) -- chroma-distance
+#: 0.2121, outside even CHROMA_MATCH_TOLERANCE -- while the bezel sampled a
+#: plausible near-black (6,11,16), showing the cast affected lit/background
+#: regions unevenly rather than uniformly scaling every channel the way
+#: matches_color()'s own chroma fallback assumes). This is deliberately
+#: looser than CHROMA_MATCH_TOLERANCE: it exists only to flag "the capture
+#: itself looks untrustworthy," not to decide any single widget's color, so
+#: it must never substitute for -- or loosen -- COLOR_MATCH_TOLERANCE/
+#: CHROMA_MATCH_TOLERANCE themselves.
+CAST_CHROMA_THRESHOLD = 0.15
+
+#: Absolute-value floor, in the SAME dark background reference sample
+#: CAST_CHROMA_THRESHOLD gates on, for deciding a channel is not merely dim
+#: but CRUSHED (clipped, unrecoverable) this frame -- see matches_color()'s
+#: ``cast_channel`` parameter. The theme's own darkest background
+#: (UI_THEME_COLOR_BG_HEX, 0x1a1f2b) floors every channel at 26, so a
+#: channel reading below this on that same reference is camera clipping,
+#: not real signal -- 2026-09-25 bench evidence measured it at exactly 0.0
+#: on both cast captures examined. Chosen well below 26 so an ordinary,
+#: merely-dim (not clipped) dark reading under ordinary exposure variance
+#: never trips it.
+CAST_CHANNEL_CRUSH_MAX = 10.0
+
+
+def color_distance(a: Tuple[int, int, int], b: Tuple[int, int, int]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+def chroma_offset(rgb: Tuple[int, int, int], target: Tuple[int, int, int]) -> float:
+    """Chromaticity-space distance between `rgb` and `target`, exposed
+    standalone (matches_color() computes the same thing internally) for
+    callers that want the number itself rather than a match/no-match bool --
+    e.g. a whole-frame color-cast sanity check against a known-neutral
+    reference region."""
+    return color_distance(_chromaticity(rgb), _chromaticity(target))
+
+
+def _chromaticity(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
+    """Normalise `rgb` to (r/sum, g/sum, b/sum) -- a uniform-scale-invariant
+    "hue+saturation" descriptor. A camera's auto-exposure/white-balance
+    gain multiplies every channel by roughly the same factor (that is what
+    "under-exposed" or "warmer/cooler white balance" means physically), so
+    this cancels that factor out while a genuine hue difference (a red or
+    grey button instead of green) still survives it. Never used in place of
+    the absolute bezel-contrast floor -- a near-black sample's channel
+    ratios are noise, not signal, which is exactly why is_off()/
+    min_bezel_contrast still gate on the raw distance first."""
+    total = sum(rgb)
+    if total <= 0:
+        return (0.0, 0.0, 0.0)
+    return (rgb[0] / total, rgb[1] / total, rgb[2] / total)
+
+
+def is_off(rgb: Tuple[int, int, int], bezel: Tuple[int, int, int], tol: float = MIN_BEZEL_CONTRAST) -> bool:
+    """True if `rgb` reads indistinguishable from the (dark) bezel
+    reference -- i.e. this region is background/hidden, not lit."""
+    return color_distance(rgb, bezel) <= tol
+
+
+def _chromaticity_excluding(rgb: Tuple[float, float, float], channel: int) -> Tuple[float, float]:
+    """Like _chromaticity(), but normalises only the two channels other than
+    ``channel`` against each other -- see matches_color()'s ``cast_channel``
+    parameter. Never used unconditionally: dropping a channel throws away
+    real signal, and is only valid once a caller has independently proven
+    that channel's data is unusable this frame (not merely dark)."""
+    kept = [v for i, v in enumerate(rgb) if i != channel]
+    total = sum(kept)
+    if total <= 0:
+        return (0.0, 0.0)
+    return (kept[0] / total, kept[1] / total)
+
+
+def matches_color(rgb: Tuple[int, int, int], target: Tuple[int, int, int], bezel: Tuple[int, int, int],
+                   tol: float = COLOR_MATCH_TOLERANCE, min_bezel_contrast: float = MIN_BEZEL_CONTRAST,
+                   chroma_tol: float = CHROMA_MATCH_TOLERANCE,
+                   chroma_min_brightness_ratio: float = CHROMA_MIN_BRIGHTNESS_RATIO,
+                   cast_channel: Optional[int] = None) -> bool:
+    """True if `rgb` is close to `target` AND distinctly different from
+    the bezel -- a region cannot "match" a bright accent color while also
+    reading as indistinguishable from the dark bezel (a camera fault or a
+    badly mis-measured region would otherwise pass by accident if only the
+    target-distance half were checked).
+
+    "Close to `target`" is checked two ways, either sufficient once the
+    bezel-contrast gate above has passed:
+
+    1. The original absolute Euclidean RGB distance (`tol`) -- fine when
+       the camera's white balance happens to be neutral.
+    2. A chromaticity (hue/saturation, exposure-cancelled) distance
+       (`chroma_tol`) -- 2026-09-24 bench evidence (CLAUDE.md's ST7796
+       colour-order history) showed a real, correctly-lit ACCENT_4 button
+       sampled well outside `tol` under this camera's actual white balance
+       (the bezel reference itself sampled as sky-blue, not black, that
+       same run), while still being unmistakably green by hue. Only (1) can
+       tell a genuinely wrong hue (red, grey) apart from a merely exposure-
+       shifted correct one when both would otherwise pass a loose enough
+       absolute tolerance, so (2) is an OR added on top of (1), never a
+       replacement for it -- CLAUDE.md's "judge colors by numeric pixel
+       sampling, never by eye" still holds: this compares two sampled
+       numbers, never a theme source constant read informally. (2) only
+       applies once the sample is at least `chroma_min_brightness_ratio` as
+       bright (channel sum) as `target` -- a dark/blanked region has
+       noise-level channel ratios that can mimic any hue.
+
+    3. A degraded, two-channel chromaticity fallback, engaged only when the
+       caller passes ``cast_channel`` (0=R, 1=G, 2=B) -- see
+       cases_lcd.py's cast diagnostic. 2026-09-25 bench evidence: a severe
+       camera white-balance cast can crush one whole channel toward 0 across
+       the ENTIRE frame, bezel included (measured: a dark reference region
+       that should read the theme's near-black RGB(26,31,43) instead read
+       RGB(0,60,112) -- R clipped, not merely dim), which is destructive
+       information loss no per-channel gain correction can undo (verified:
+       multiplying the crushed channel by any recoverable gain derived from
+       a genuine near-white on-panel reference still left it near 0). (1)
+       and (2) both fail in this case for a genuinely-correct color, because
+       both still weigh the ruined channel. (3) drops that one channel
+       entirely and compares only the remaining two channels' ratio to each
+       other -- still comparing two *sampled* numbers, never a bare theme
+       constant, and still gated on the same brightness floor (applied to
+       the two surviving channels' own sum) so a near-black region can't
+       coast through on noise. This is deliberately NOT tried unconditionally:
+       a caller must first prove (independently of this widget's own sample)
+       that the named channel is unusable this frame -- otherwise a
+       genuinely wrong hue that happens to share the target's OTHER two
+       channels' ratio (e.g. a grey or blue button when the target is green)
+       would wrongly pass. See cases_lcd.py's cast_channel derivation and
+       test_bench_test_lcd_sampler.py's negative test (a red sample under
+       the same crushed-R condition must still fail)."""
+    if color_distance(rgb, bezel) < min_bezel_contrast:
+        return False
+    if color_distance(rgb, target) <= tol:
+        return True
+    # Chromaticity is meaningless for a dim sample (see
+    # CHROMA_MIN_BRIGHTNESS_RATIO): a blanked or unlit region must never
+    # reach the scale-invariant comparison below.
+    if sum(rgb) >= chroma_min_brightness_ratio * sum(target):
+        if color_distance(_chromaticity(rgb), _chromaticity(target)) <= chroma_tol:
+            return True
+    if cast_channel is not None:
+        kept_rgb = [v for i, v in enumerate(rgb) if i != cast_channel]
+        kept_target = [v for i, v in enumerate(target) if i != cast_channel]
+        if sum(kept_rgb) < chroma_min_brightness_ratio * sum(kept_target):
+            return False
+        return color_distance(
+            _chromaticity_excluding(rgb, cast_channel), _chromaticity_excluding(target, cast_channel)
+        ) <= chroma_tol
+    return False

@@ -1,0 +1,272 @@
+// Host test entry point. Builds and runs standalone (no ESP-IDF/FreeRTOS),
+// see build_host_tests.ps1. TODO.md 6A.8.
+#include <stdio.h>
+
+#include "test_common.h"
+
+int g_test_failures = 0;
+int g_test_count = 0;
+
+void run_test_pid(void);
+void run_test_thermal_guard(void);
+void run_test_on_off_trigger_decide(void);
+void run_test_heater_output(void);
+void run_test_closed_loop(void);
+void run_test_pid_autotune(void);
+void run_test_pid_fuzzy(void);
+void run_test_pid_fuzzy_confidence(void);
+void run_test_sim_kiln(void);
+void run_test_sim_plant_three_node(void);
+void run_test_sim_high_temp(void);
+void run_test_sim_mistune(void);
+void run_test_sim_factorial_design(void);
+void run_test_ota_auth(void);
+void run_test_login_backoff(void);
+void run_test_update_semver(void);       // GITHUB_RELEASE_UPDATE_PLAN.md update/* (WP3)
+void run_test_update_stage_header(void);
+void run_test_update_policy(void);
+void run_test_update_stage(void);
+void run_test_update_stale_stage(void);
+void run_test_update_settings(void);
+void run_test_update_url(void);      // WP8: GitHub fetch URL/allowlist rules
+void run_test_update_release(void);  // WP8: release JSON parsers + asset pick
+void run_test_ota_image_crc(void);
+void run_test_ota_esp_image_header(void);
+void run_test_auth_reset_gesture(void);
+void run_test_lcd_auth_state(void);
+void run_test_security_http_core(void);
+void run_test_web_auth(void);
+void run_test_ota_interlock(void);
+void run_test_heat_interlock(void);
+void run_test_heat_enable(void);
+void run_test_thermo_combine(void);
+void run_test_cone_table(void);
+void run_test_profile_feasibility(void);
+void run_test_profile_plan_curve(void);
+// run_test_wifi_prov() moved to its own executable 2026-09-28 (see
+// build_host_tests.ps1's "exe51"/test_wifi_prov.c comments) -- not called
+// from this main().
+void run_test_backup_import(void);
+void run_test_ota_record(void);
+void run_test_uart_log_bridge(void);
+void run_test_safety_watchdog(void);
+void run_test_safety_link(void);
+void run_test_dashboard_safety_ready(void);
+void run_test_readiness_commissioning(void);
+void run_test_startup_faults(void);
+void run_test_ct_leak_alarm(void);
+void run_test_readiness_ct_applicability(void);
+void run_test_readiness_ct_topology_applicability(void);
+void run_test_readiness_ct_installed_zero_reads_ok(void);
+void run_test_readiness_guard_max_temp(void);
+void run_test_readiness_safety_trip(void);
+void run_test_readiness_crash_report(void);
+void run_test_readiness_recovery_mode(void);
+void run_test_readiness_cfg_fs(void);
+void run_test_readiness_safety_context(void);
+void run_test_readiness_estop_verification(void);
+void run_test_kiln_cfg_store(void);
+void run_test_iter_tune_store(void);
+void run_test_firing_shadow(void);
+void run_test_safety_cfg_store(void);
+void run_test_boot_guard(void);
+void run_test_pico_auto_update_decision(void);
+void run_test_pico_auto_update_state(void);
+void run_test_pico_update_attempts(void);
+void run_test_pico_image_identity(void);
+void run_test_pico_image_embedded(void);
+void run_test_backlight_pwm(void);
+void run_test_display_power_policy(void);
+void run_test_display_power_cfg(void);
+void run_test_aux_outputs_store(void);
+void run_test_aux_outputs_http(void);
+void run_test_zone_aux_convert_core(void);
+void run_test_setup_wizard_progress(void);
+void run_test_display_power_wiring(void);
+void run_test_diagnostics_safety_tc_state(void);
+void run_test_dashboard_protocol_version(void);
+/* run_test_crash_report() moved to its own executable, see build_host_tests.ps1's
+ * "exe41" comment (2026-09-15, uart_bridge_ext_run_on_flash_worker() stub collision
+ * with test_safety_cfg_store.c's own definition) -- not called from this main(). */
+void run_test_estop_verification(void);
+void run_test_dualwrite_window(void);
+void run_test_watchdog_cfg(void);
+void run_test_ramp_assist_cfg(void);
+void run_test_ui_page_home_graph(void);
+void run_test_ui_page_home_rail(void);
+void run_test_ui_profile_list_order(void);
+void run_test_ui_page_temperature_safety(void);
+void run_test_ui_page_profile_picker_format(void);
+void run_test_max31856_codec(void);
+void run_test_panel_codec(void);
+void run_test_st7796_panel(void);
+void run_test_panel_detect(void);
+void run_test_owner_slot_pool(void);
+void run_test_dram_margin(void);
+void run_test_dram_watch(void);
+void run_test_httpd_socket_budget(void);
+void run_test_stack_margin(void);
+void run_test_stack_margin_registry(void);
+void run_test_http_async_job(void);
+void run_test_log_store(void);
+void run_test_cfg_fs(void);
+void run_test_cfg_fs_format_gate(void);
+void run_test_cfg_fs_status(void);
+void run_test_unit_pref(void);
+void run_test_esp_spi_owner(void);
+void run_test_touch_dev(void);
+void run_test_ramp_ident(void);
+void run_test_ramp_transient_ident(void);
+void run_test_bx_worker_reentrancy(void);
+void run_test_gpio_probe(void);
+void run_test_iter_tune(void);
+void run_test_ramp_lock_onesided(void);
+void run_test_approach_rate_cap(void);
+void run_test_zone_sweep_relay_off_wiring(void);
+void run_test_safety_ceiling_policy(void);
+void run_test_http_auth_enforce(void);
+void run_test_http_session_iface(void);
+void run_test_web_auth_safety_interaction(void);
+void run_test_web_auth_login(void);
+void run_test_totp(void);
+void run_test_totp_config_persist(void);
+void run_test_totp_http_core(void);
+// run_test_safety_cfg_http() is NOT called here -- test_safety_cfg_http.c is
+// its own separate executable (build_host_tests.ps1's third build+run step),
+// same reason test_zones_http.c is: it #includes safety_cfg_http.c directly
+// to reach its static parse_set_param_body()/build_commissioning_json()/
+// apply_pairs() helpers, which means it must define its own fake bodies for
+// safety_cfg_store_get_by_index() and friends -- and this executable already
+// links the REAL ones via test_safety_cfg_store.c's #include of safety_cfg_
+// store.c above. Linking both into one binary would multiply-define every
+// safety_cfg_store_* symbol.
+
+int main(void)
+{
+    run_test_pid();
+    run_test_thermal_guard();
+    run_test_on_off_trigger_decide();
+    run_test_heater_output();
+    run_test_closed_loop();
+    run_test_pid_autotune();
+    run_test_pid_fuzzy();
+    run_test_pid_fuzzy_confidence();
+    run_test_sim_kiln();
+    run_test_sim_plant_three_node();
+    run_test_sim_high_temp();
+    run_test_sim_mistune();
+    run_test_sim_factorial_design();
+    run_test_ota_auth();
+    run_test_login_backoff();
+    run_test_update_semver();
+    run_test_update_stage_header();
+    run_test_update_policy();
+    run_test_update_stage();
+    run_test_update_stale_stage();
+    run_test_update_settings();
+    run_test_update_url();
+    run_test_update_release();
+    run_test_ota_image_crc();
+    run_test_ota_esp_image_header();
+    run_test_auth_reset_gesture();
+    run_test_lcd_auth_state();
+    run_test_security_http_core();
+    run_test_web_auth();
+    run_test_ota_interlock();
+    run_test_heat_interlock();
+    run_test_heat_enable();
+    run_test_thermo_combine();
+    run_test_cone_table();
+    run_test_profile_feasibility();
+    run_test_profile_plan_curve();
+    run_test_backup_import();
+    run_test_ota_record();
+    run_test_uart_log_bridge();
+    run_test_safety_watchdog();
+    run_test_safety_link();
+    run_test_dashboard_safety_ready();
+    run_test_readiness_commissioning();
+    run_test_startup_faults();
+    run_test_ct_leak_alarm();
+    run_test_readiness_ct_applicability();
+    run_test_readiness_ct_topology_applicability();
+    run_test_readiness_ct_installed_zero_reads_ok();
+    run_test_readiness_guard_max_temp();
+    run_test_readiness_safety_trip();
+    run_test_readiness_crash_report();
+    run_test_readiness_recovery_mode();
+    run_test_readiness_cfg_fs();
+    run_test_readiness_safety_context();
+    run_test_readiness_estop_verification();
+    run_test_kiln_cfg_store();
+    run_test_iter_tune_store();
+    run_test_firing_shadow();
+    run_test_safety_cfg_store();
+    run_test_boot_guard();
+    run_test_pico_auto_update_decision();
+    run_test_pico_auto_update_state();
+    run_test_pico_update_attempts();
+    run_test_pico_image_identity();
+    run_test_pico_image_embedded();
+    run_test_backlight_pwm();
+    run_test_display_power_policy();
+    run_test_display_power_cfg();
+    run_test_aux_outputs_store();
+    run_test_aux_outputs_http();
+    run_test_zone_aux_convert_core();
+    run_test_setup_wizard_progress();
+    run_test_display_power_wiring();
+    run_test_diagnostics_safety_tc_state();
+    run_test_dashboard_protocol_version();
+    run_test_estop_verification();
+    run_test_dualwrite_window();
+    run_test_watchdog_cfg();
+    run_test_ramp_assist_cfg();
+    run_test_ui_page_home_graph();
+    run_test_ui_page_home_rail();
+    run_test_ui_profile_list_order();
+    run_test_ui_page_temperature_safety();
+    run_test_ui_page_profile_picker_format();
+    run_test_max31856_codec();
+    run_test_panel_codec();
+    run_test_st7796_panel();
+    run_test_panel_detect();
+    run_test_owner_slot_pool();
+    run_test_dram_margin();
+    run_test_dram_watch();
+    run_test_httpd_socket_budget();
+    run_test_stack_margin();
+    run_test_stack_margin_registry();
+    run_test_http_async_job();
+    run_test_log_store();
+    run_test_cfg_fs();
+    run_test_cfg_fs_format_gate();
+    run_test_cfg_fs_status();
+    run_test_unit_pref();
+    run_test_esp_spi_owner();
+    run_test_touch_dev();
+    run_test_ramp_ident();
+    run_test_ramp_transient_ident();
+    run_test_bx_worker_reentrancy();
+    run_test_gpio_probe();
+    run_test_iter_tune();
+    run_test_ramp_lock_onesided();
+    run_test_approach_rate_cap();
+    run_test_zone_sweep_relay_off_wiring();
+    run_test_safety_ceiling_policy();
+    run_test_http_auth_enforce();
+    run_test_http_session_iface();
+    run_test_web_auth_safety_interaction();
+    run_test_web_auth_login();
+    run_test_totp();
+    run_test_totp_config_persist();
+    run_test_totp_http_core();
+
+    printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
+    if (g_test_failures > 0) {
+        printf("%d FAILURE(S)\n", g_test_failures);
+        return 1;
+    }
+    printf("all passed\n");
+    return 0;
+}

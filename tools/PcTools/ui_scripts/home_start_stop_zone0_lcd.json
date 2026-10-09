@@ -1,0 +1,14 @@
+{
+  "name": "home_start_stop_zone0_lcd",
+  "description": "LCD home page: confirm the Start/Stop fire button is present, opens its confirm dialog, and Cancel dismisses it without starting a firing. Idempotent -- ends back on the home page with no dialog open.",
+  "backend": "lcd",
+  "preset": "ui_test_baseline",
+  "steps": [
+    {"action": "wait_for", "target": "home", "kind": "page", "timeout_ms": 3000},
+    {"action": "wait_for", "target": "Start", "timeout_ms": 3000},
+    {"action": "click", "target": "Start"},
+    {"action": "wait_for", "target": "Cancel", "timeout_ms": 3000},
+    {"action": "click", "target": "Cancel"},
+    {"action": "wait_for", "target": "home", "kind": "page", "timeout_ms": 3000}
+  ]
+}

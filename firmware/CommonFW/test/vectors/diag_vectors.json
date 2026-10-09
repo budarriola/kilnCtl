@@ -1,0 +1,43 @@
+{
+  "frame": "SAFETY_CMD_DIAG",
+  "cmd": "0x08",
+  "vectors": [
+    {
+      "name": "healthy_armed",
+      "fields": {
+        "trip_reason": 0,
+        "warn_mask": 0,
+        "trip_mask": 0,
+        "uptime_ms": 123456,
+        "boot_reason": "KILNLINK_DIAG_BOOT_POWERON",
+        "context_age_100ms": 255,
+        "context_frames_ok": 10,
+        "context_frames_bad": 0,
+        "tx_frames_dropped": 0,
+        "state": "KILNLINK_DIAG_STATE_ARMED",
+        "flags": "KILNLINK_DIAG_FLAG_CALIBRATION_MISSING",
+        "log_frames_dropped": 0
+      },
+      "bytes_hex": "08000000000040e2010001ff0a0000000000000000000000020200000000"
+    },
+    {
+      "name": "tripped_with_history",
+      "fields": {
+        "trip_reason": 3,
+        "warn_mask": 1,
+        "trip_mask": 4,
+        "uptime_ms": 999999,
+        "boot_reason": "KILNLINK_DIAG_BOOT_WATCHDOG",
+        "context_age_100ms": 12,
+        "context_frames_ok": 500,
+        "context_frames_bad": 2,
+        "tx_frames_dropped": 1,
+        "state": "KILNLINK_DIAG_STATE_TRIPPED",
+        "flags": "KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN | KILNLINK_DIAG_FLAG_CALIBRATION_MISSING",
+        "log_frames_dropped": 7
+      },
+      "bytes_hex": "0803010004003f420f00020cf40100000200000001000000040307000000"
+    }
+  ],
+  "note": "bytes_hex fields here are documentation only -- the authoritative byte-exact expectations live inline in test/test_diag.c (mirroring status/power/context/announce's own convention); this file records the field values that produced them for anyone re-deriving the vectors by hand."
+}

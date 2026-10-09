@@ -1,0 +1,451 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Live Profile Edit</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- Same load-order contract profiles_page.html documents: nav.js/app.js
+     are deferred, so this page's own inline <script> below may only touch
+     window.kcEscapeHtml/window.kcNav etc from inside an event-handler
+     callback, never at top level. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Same page-local palette convention as profiles_page.html/main_page.html
+     (docs/UI_THEME.md) -- kept identical rather than re-derived. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --warn: #b06a00; --bad: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+  }
+  /* WEB_UI_RESPONSIVE.md sec 6: shared shell width, same idiom every other
+     *_page.html uses instead of a fixed pixel cap. */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type=text], input[type=number] {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.6em 1em; margin-bottom: 0.5em; }
+  .seg { border-bottom: 1px dashed var(--border); padding-bottom: 0.6em; margin-top: 0.7em; }
+  .seg .fields { display: flex; flex-wrap: wrap; gap: 0.5em; margin-top: 0.4em; }
+  .seg .fields > div { flex: 1 1 130px; min-width: 130px; }
+  .seg label { font-size: 0.75em; margin-top: 0; }
+  .seg.frozen { opacity: 0.65; }
+  .seg .badge { font-size: 0.75em; font-weight: bold; color: var(--muted); }
+  button { padding: 0.6em 1.2em; font-size: 0.95em; min-height: 40px;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+           border-radius: var(--ui-radius); cursor: pointer; }
+  button.small { min-height: 32px; padding: 0.3em 0.7em; font-size: 0.85em; }
+  .err { color: var(--bad); font-weight: bold; }
+  .empty { color: var(--muted); font-style: italic; }
+  /* End-of-firing decision prompt (plan section 5/10) -- a banner, not a
+     browser-native modal, so it survives the same phone-width responsive
+     sweep every other page's cards do. */
+  #decisionCard { border-color: var(--warn); }
+  #refusalBanner { border-color: var(--bad); }
+  .decide-row { display: flex; flex-wrap: wrap; gap: 0.5em; margin-top: 0.6em; align-items: center; }
+  .decide-row input[type=text] { width: auto; flex: 1 1 160px; }
+</style>
+</head>
+<body>
+<h1>Live profile edit</h1>
+<p>Modify the profile that is running right now. The board forks it into a
+   working copy the moment you make a change -- the original recipe on disk
+   is never touched while this firing runs.</p>
+
+<div id="refusalBanner" class="card err" style="display:none;"></div>
+
+<div id="statusCard" class="card">
+  <div id="statusText" class="empty">Loadingâ€¦</div>
+</div>
+
+<div id="decisionCard" class="card" style="display:none;">
+  <strong>This firing has ended.</strong>
+  <p>Keep the changes you made as a new profile, overwrite the one this
+     firing started from, or discard the working copy.</p>
+  <div class="decide-row">
+    <input type="text" id="saveAsName" maxlength="16" placeholder="New profile name (16 chars max)">
+    <button id="saveAsBtn" type="button">Save as new</button>
+  </div>
+  <div class="decide-row">
+    <label style="display:inline;font-weight:normal;"><input type="checkbox" id="overwriteConfirm"> I understand this replaces the original</label>
+    <button id="overwriteBtn" type="button">Overwrite original</button>
+  </div>
+  <div class="decide-row">
+    <button id="discardBtn" type="button">Discard working copy</button>
+  </div>
+  <div id="decideMsg"></div>
+</div>
+
+<div id="forkCard" class="card" style="display:none;">
+  <p>No working copy exists yet for the running firing. Fork it to start
+     editing.</p>
+  <button id="forkBtn" type="button">Fork the running profile</button>
+  <div id="forkMsg"></div>
+</div>
+
+<div id="editorCard" class="card" style="display:none;">
+  <h2>Working copy: <span id="workingName"></span></h2>
+  <div id="segments"></div>
+  <button id="saveBtn" type="button">Save changes</button>
+  <button id="reloadBtn" type="button" class="small">Reload from board</button>
+  <div id="saveMsg"></div>
+</div>
+
+<script>
+'use strict';
+
+// ---------------------------------------------------------------------------
+// Section 8 of docs/LIVE_PROFILE_EDIT_PLAN.md calls for one shared segment
+// editor between this page and profiles_page.html, factored into a served
+// profile_editor.js. That refactor is explicitly sequenced to land AFTER the
+// kiln-profiles/favorites work settles (plan section 8, "Sequencing
+// dependency"), which is mid-flight in this tree right now, and app.js does
+// not yet expose any segment-editor helpers (window.kcEscapeHtml/kcUnit/etc
+// only). So this page carries its own minimal ramp/dwell-only segment
+// editor rather than reaching for a shared module that does not exist yet.
+// It deliberately covers only ZONE_RAMP fields (target_c/ramp_c_per_hr/
+// dwell_min) and renders relay/IO segments read-only regardless of
+// editable_from_segment -- seg_kind itself is never editable on a live
+// working copy (plan section 2), and this keeps the one genuinely new bit
+// of UI (frozen/partial/full editability per segment) small and reviewable
+// rather than porting the full relay/IO editor across two pages by hand.
+// When the shared profile_editor.js lands, this file's segment-rendering
+// functions are the ones to delete in favour of it.
+
+var pollTimer = null;
+var lastWorkingId = null;
+
+function escapeHtml(s) {
+  if (window.kcEscapeHtml) return window.kcEscapeHtml(s);
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+// ---------------------------------------------------------------------------
+// segmentEditableState: pure function, the one piece of new logic plan
+// section 2 actually requires -- given a segment's index and the executor's
+// editable_from_segment, says which of the three states it is in. Kept
+// separate from any DOM so it can be tested standalone.
+//   'frozen'  -- index < editable_from_segment: refused, rendered read-only
+//   'current' -- index === editable_from_segment: target/ramp/dwell editable,
+//                kind is not
+//   'future'  -- index > editable_from_segment: fully editable
+// A negative/undefined editable_from_segment (nothing running / no working
+// copy yet) makes every row 'future' -- there is no running index to freeze
+// against.
+// ---------------------------------------------------------------------------
+function segmentEditableState(index, editableFromSegment) {
+  if (typeof editableFromSegment !== 'number' || editableFromSegment < 0) return 'future';
+  if (index < editableFromSegment) return 'frozen';
+  if (index === editableFromSegment) return 'current';
+  return 'future';
+}
+
+function segFieldsHtml(seg, editable) {
+  var dis = editable ? '' : ' disabled';
+  return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' +
+    (seg.target_c || 0) + '"' + dis + '></div>' +
+    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' +
+    (seg.ramp_c_per_hr || 0) + '"' + dis + '></div>' +
+    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' +
+    (seg.dwell_min || 0) + '"' + dis + '></div>';
+}
+
+// buildSegmentRow: renders one segment row for the given editable state.
+// A relay/IO segment (seg_kind truthy) is always shown read-only, with its
+// numeric fields hidden entirely rather than shown-disabled -- there is
+// nothing in this page's minimal editor that can express an IO segment's
+// full field set (see header comment above), so pretending otherwise with
+// disabled inputs would invite an operator to think editing it might work.
+function buildSegmentRow(seg, index, editableFromSegment) {
+  var state = segmentEditableState(index, editableFromSegment);
+  var div = document.createElement('div');
+  div.className = 'seg' + (state === 'frozen' ? ' frozen' : '');
+  div.dataset.index = String(index);
+  div.dataset.kind = seg.seg_kind ? '1' : '0';
+  var badge = state === 'frozen' ? 'Already run -- locked'
+    : state === 'current' ? 'Running now -- target/ramp/dwell only'
+    : 'Not started yet -- fully editable';
+  var head = '<div class="badge">Step ' + (index + 1) + ' -- ' + escapeHtml(badge) + '</div>';
+  var fields;
+  if (seg.seg_kind) {
+    fields = '<p class="empty">Relay/IO segment -- not editable from this page.</p>';
+  } else {
+    fields = '<div class="fields">' + segFieldsHtml(seg, state !== 'frozen') + '</div>';
+  }
+  div.innerHTML = head + fields;
+  return div;
+}
+
+function renderSegments(segments, editableFromSegment) {
+  var container = document.getElementById('segments');
+  container.innerHTML = '';
+  (segments || []).forEach(function (seg, i) {
+    container.appendChild(buildSegmentRow(seg, i, editableFromSegment));
+  });
+}
+
+// collectSegmentParams: reads every rendered row back into the same
+// seg<i>_kind/target/ramp/dwell x-www-form-urlencoded shape
+// profiles_page.html's saveBtn handler builds for POST /api/profile (plan
+// section 10: "the same form POST /api/profile takes"). A frozen or
+// relay/IO row's original values are read back from the row's own data
+// attributes (set at render time from the fetched working copy) rather than
+// from any input, since those rows carry no editable target/ramp/dwell
+// inputs at all -- this is what makes an unedited frozen segment round-trip
+// unchanged rather than silently going missing from the submitted array.
+function collectSegmentParams(originalSegments) {
+  var rows = document.getElementById('segments').querySelectorAll('.seg');
+  var params = [];
+  params.push('seg_count=' + rows.length);
+  rows.forEach(function (row, i) {
+    var kind = row.dataset.kind === '1' ? '1' : '0';
+    params.push('seg' + i + '_kind=' + kind);
+    var orig = (originalSegments && originalSegments[i]) || {};
+    if (kind === '1') {
+      // Read-only in this editor -- round-trip the original IO fields
+      // verbatim so an unrelated ramp/dwell edit elsewhere in the profile
+      // cannot silently corrupt or drop this segment.
+      params.push('seg' + i + '_io_target=' + (orig.io_target || 0));
+      params.push('seg' + i + '_io_state=' + (orig.io_state ? 1 : 0));
+      params.push('seg' + i + '_io_blocking=' + (orig.io_blocking === 0 ? 0 : 1));
+      params.push('seg' + i + '_io_leave_on=' + (orig.io_leave_on_at_end ? 1 : 0));
+      params.push('seg' + i + '_dwell=' + (orig.dwell_min || 0));
+      return;
+    }
+    var targetEl = row.querySelector('.s-target');
+    var rampEl = row.querySelector('.s-ramp');
+    var dwellEl = row.querySelector('.s-dwell');
+    params.push('seg' + i + '_target=' + (targetEl ? targetEl.value : (orig.target_c || 0)));
+    params.push('seg' + i + '_ramp=' + (rampEl ? rampEl.value : (orig.ramp_c_per_hr || 0)));
+    params.push('seg' + i + '_dwell=' + (dwellEl ? dwellEl.value : (orig.dwell_min || 0)));
+  });
+  return params;
+}
+
+var currentWorking = null; // last-fetched /api/profile?id=working_id response
+
+function loadWorkingCopy(workingId, editableFromSegment) {
+  // Review fix (landing pass): the working copy is NOT in the ordinary
+  // profile catalogue (it deliberately lives outside profiles_http.c's slot
+  // array, so it can never show up in /api/profiles or favorites), so
+  // /api/profile?id=<working_id> 404s on it. The board serves the working
+  // copy's body on the live route itself, ?content=1.
+  return fetch('/api/profile/live?content=1').then(function (r) { return r.json(); }).then(function (p) {
+    currentWorking = p;
+    document.getElementById('workingName').textContent = p.name;
+    document.getElementById('saveBtn').dataset.zoneMask = p.zone_mask;
+    document.getElementById('saveBtn').dataset.name = p.name;
+    document.getElementById('saveBtn').dataset.id = workingId;
+    renderSegments(p.segments, editableFromSegment);
+    document.getElementById('editorCard').style.display = '';
+  });
+}
+
+function setStatusText(live) {
+  var el = document.getElementById('statusText');
+  if (!live.active) {
+    el.className = 'empty';
+    el.textContent = 'No firing is currently running.';
+    return;
+  }
+  el.className = '';
+  var originDesc = live.origin_is_builtin ? 'a built-in schedule' : 'profile ' + live.origin_id;
+  if (live.working_id === null || live.working_id === undefined || live.working_id < 0) {
+    el.textContent = 'Firing is running from ' + originDesc + '. No edits have been made yet.';
+  } else {
+    el.textContent = 'Firing is running from ' + originDesc + '. A working copy (profile ' +
+      live.working_id + ') has your edits.';
+  }
+}
+
+function showRefusal(text) {
+  var el = document.getElementById('refusalBanner');
+  if (text) {
+    el.style.display = '';
+    el.textContent = text;
+  } else {
+    el.style.display = 'none';
+    el.textContent = '';
+  }
+}
+
+// refreshLive: polls GET /api/profile/live (plan section 10) and reconciles
+// the page's three optional cards (fork / editor / end-of-firing decision)
+// against it. Only re-fetches and re-renders the segment editor when the
+// working_id actually changes, so an operator mid-edit is never clobbered
+// by the 2s poll (plan: "poll /api/profile/live every 2 s").
+function refreshLive() {
+  return fetch('/api/profile/live').then(function (r) { return r.json(); }).then(function (live) {
+    setStatusText(live);
+    // last_refusal is an object {generation,result,message} or null -- show
+    // its message, never the object itself.
+    showRefusal(live.last_refusal ? live.last_refusal.message : null);
+
+    var decisionCard = document.getElementById('decisionCard');
+    var forkCard = document.getElementById('forkCard');
+    var editorCard = document.getElementById('editorCard');
+    var overwriteBtn = document.getElementById('overwriteBtn');
+    var overwriteConfirm = document.getElementById('overwriteConfirm');
+
+    if (live.pending_decision) {
+      decisionCard.style.display = '';
+      // Section 6: the browser hiding the button is cosmetic, the server
+      // enforces the real refusal -- but there is no reason to show a
+      // control that can only ever come back 403.
+      overwriteBtn.style.display = live.origin_is_builtin ? 'none' : '';
+      overwriteConfirm.parentElement.style.display = live.origin_is_builtin ? 'none' : '';
+    } else {
+      decisionCard.style.display = 'none';
+    }
+
+    var hasWorking = live.working_id !== null && live.working_id !== undefined && live.working_id >= 0;
+    if (!live.active && !live.pending_decision) {
+      forkCard.style.display = 'none';
+      editorCard.style.display = 'none';
+      lastWorkingId = null;
+      return;
+    }
+    if (live.active && !hasWorking) {
+      forkCard.style.display = '';
+      editorCard.style.display = 'none';
+      lastWorkingId = null;
+      return;
+    }
+    forkCard.style.display = 'none';
+    if (hasWorking && live.working_id !== lastWorkingId) {
+      lastWorkingId = live.working_id;
+      return loadWorkingCopy(live.working_id, live.editable_from_segment);
+    }
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('statusText').className = 'err';
+    document.getElementById('statusText').textContent = 'Could not reach the board.';
+  });
+}
+
+document.getElementById('forkBtn').addEventListener('click', function () {
+  var msg = document.getElementById('forkMsg');
+  msg.textContent = 'Forkingâ€¦';
+  fetch('/api/profile/live/fork', { method: 'POST' })
+    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+    .then(function (res) {
+      if (!res.ok || res.data.ok === false) {
+        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'fork failed') + '</span>';
+        return;
+      }
+      msg.textContent = '';
+      lastWorkingId = null; // force the next refreshLive() to load the fresh working copy
+      refreshLive();
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      msg.innerHTML = '<span class="err">Fork failed -- could not reach the board.</span>';
+    });
+});
+
+document.getElementById('saveBtn').addEventListener('click', function () {
+  var msg = document.getElementById('saveMsg');
+  var btn = document.getElementById('saveBtn');
+  var params = ['id=' + btn.dataset.id, 'name=' + encodeURIComponent(btn.dataset.name || ''),
+    'zone_mask=' + (btn.dataset.zoneMask || '0')];
+  params = params.concat(collectSegmentParams(currentWorking ? currentWorking.segments : []));
+  msg.textContent = 'Savingâ€¦';
+  fetch('/api/profile/live', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+  }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; }); })
+    .then(function (res) {
+      if (!res.ok || res.data.ok === false) {
+        // 400 (bound violation) and 409 (running-segment conflict) both
+        // carry the server's own message (plan section 10) -- shown
+        // verbatim rather than replaced with a generic string, since it
+        // names the offending segment/value/limit.
+        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'save failed') + '</span>';
+        return;
+      }
+      msg.textContent = 'Saved.';
+      lastWorkingId = null;
+      refreshLive();
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      msg.innerHTML = '<span class="err">Save failed -- could not reach the board.</span>';
+    });
+});
+
+document.getElementById('reloadBtn').addEventListener('click', function () {
+  lastWorkingId = null;
+  refreshLive();
+});
+
+function decide(body) {
+  var msg = document.getElementById('decideMsg');
+  msg.textContent = 'Workingâ€¦';
+  return fetch('/api/profile/live/decide', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+  }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+    .then(function (res) {
+      if (!res.ok || res.data.ok === false) {
+        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'that failed') + '</span>';
+        return;
+      }
+      msg.textContent = 'Done.';
+      lastWorkingId = null;
+      refreshLive();
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      msg.innerHTML = '<span class="err">Could not reach the board.</span>';
+    });
+}
+
+document.getElementById('saveAsBtn').addEventListener('click', function () {
+  var name = document.getElementById('saveAsName').value;
+  if (!name) {
+    document.getElementById('decideMsg').innerHTML = '<span class="err">Enter a name first.</span>';
+    return;
+  }
+  decide('action=save_as&name=' + encodeURIComponent(name));
+});
+
+document.getElementById('overwriteBtn').addEventListener('click', function () {
+  if (!document.getElementById('overwriteConfirm').checked) {
+    document.getElementById('decideMsg').innerHTML =
+      '<span class="err">Check the confirmation box first.</span>';
+    return;
+  }
+  decide('action=overwrite&confirm=1');
+});
+
+document.getElementById('discardBtn').addEventListener('click', function () {
+  decide('action=discard');
+});
+
+refreshLive();
+pollTimer = setInterval(refreshLive, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,93 @@
+EESchema-DOCLIB  Version 2.0
+#
+$CMP NE555DR
+D Single Precision Timer
+K
+F http://www.ti.com/lit/ds/symlink/ne555.pdf
+$ENDCMP
+#
+$CMP PS2702-1-F3-A
+D The PS2702-1 is an optically coupled isolator containing a GaAs light emitting diode and an NPN silicon darlington-connected phototransistor. This is mounted in a plastic SOP (Small Out-line Package) for high density applications. This package has shield effect to cut off ambient light.
+K
+F https://datasheet.datasheetarchive.com/originals/distributors/Datasheets_SAMA/3022c2dbaac3cc6b21c36d10f6d411c4.pdf
+$ENDCMP
+#
+$CMP 1935161
+D Phoenix Contact COMBICON PT PCB Terminal Block, 2 Way/Pole, Screw Terminals, 26  14 AWG Through Hole, Nylon
+K
+F https://datasheet.datasheetarchive.com/originals/distributors/SFDatasheet-2/sf-00057459.pdf
+$ENDCMP
+#
+$CMP SS16FP
+D * See authorized use policy; Low Power Loss, High Efficiency; Ultra Thin Profile - Package Height < 1.0 mm; Larger Cathode Pad for Improved Power Dissipation; Industrial Device Qualified per AEC-Q101 Standards; High Surge Current Capability; MSL 1 per J-STD-020; UL Flammability 94V-0 Classification; RoHS Compliant / Green Molding Compound
+K
+F https://www.onsemi.com/pub/Collateral/S110FP-D.pdf
+$ENDCMP
+#
+$CMP 1935174
+D PCB terminal block, Nominal current: 17.5 A, Nom. voltage: 400 V, Pitch: 5 mm, Number of positions: 3, Connection method: Screw connection with wire protector, Mounting: Wave soldering, Conductor/PCB connection direction: 0 , Color: green, Also possible: Connection of a 1.5 mm conductor with ferrule, then however with reduction in rated voltage or degree of pollution / surge category.
+K
+F 
+$ENDCMP
+#
+$CMP SJ2-35813B-SMT-TR
+D 3.50mm (0.141", 1/8", Mini Plug) - Headphone Phone Jack Stereo (3 Conductor, TRS) Connector Solder , 12VDC , 1 A , -25C ~ 85C
+K
+F https://www.sameskydevices.com/product/resource/sj2-3581x-smt.pdf
+$ENDCMP
+#
+$CMP LMV358AIDR
+D Dual Low-Voltage Cost-Optimized Rail-to-Rail Output Operational Amplifier
+K
+F http://www.ti.com/lit/gpn/lmv358a
+$ENDCMP
+#
+$CMP LT8631IFE#PBF
+D Switching Voltage Regulators 100V, 1A Sync uP Buck Reg
+K
+F https://www.analog.com/media/en/technical-documentation/data-sheets/lt8631.pdf
+$ENDCMP
+#
+$CMP BSP296NH6327XTSA1
+D Infineon BSP296NH6327XTSA1 N-channel MOSFET Transistor, 1.2 A, 100 V, 4-Pin SOT-223
+K
+F https://www.infineon.com/dgdl/Infineon-BSP296N-DS-v02_00-en.pdf?fileId=db3a30433dd58def013dd5af675d001f
+$ENDCMP
+#
+$CMP 7447779004
+D WE-PD Robust SMT Shielded Power Inductor Size 7345; L = 4.7 H +/-20%; IR = 3.16 A; Isat = 4.4 A; RDC = 32 m
+K
+F https://www.we-online.com/catalog/datasheet/7447779004.pdf
+$ENDCMP
+#
+$CMP LMV321SQ3T2G
+D Operation from 2.7 V to 5.0 V Single-Sided Power Supply; No Output Crossover Distortion; Industrial temperature Range: -40C to +85C or Automotive -40C to +125C; Rail-to-Rail Output; Low Quiescent Current; No Output Phase-Reversal from Overdriven Input; NCV prefix for Automotive Qualified Version
+K
+F https://www.onsemi.com/pub/Collateral/LMV321-D.PDF
+$ENDCMP
+#
+$CMP BZX84C3V3LT1G
+D 250 mW Rating on FR-4 or FR-5 Board; Zener Breakdown Voltage Range - 2.4 V to 75 V; Package Designed for Optimal Automated Board Assembly; Small Package Size for High Density Applications; ESD Rating of Class 3 (>16 KV) per Human Body Model; Mechanical Characteristics:; CASE: Void-free, transfer-molded, thermosetting plastic case; FINISH: Corrosion resistant finish, easily solderable; MAXIMUM CASE TEMPERATURE FOR SOLDERING PURPOSES: 260C for 10 Seconds; POLARITY: Cathode indicated by polarity band; FLAMMAB
+K
+F https://www.onsemi.com/pub/Collateral/BZX84C2V4LT1-D.PDF
+$ENDCMP
+#
+$CMP MSD1048-223MED
+D Coupled Inductors 22uH Shld 20% 1.9A 98mOhms
+K
+F 
+$ENDCMP
+#
+$CMP UCM1H471MNJ1MS
+D Aluminum Electrolytic Capacitors - SMD 50V 470uf 20% AEC-Q200
+K
+F 
+$ENDCMP
+#
+$CMP SI3474DV-T1-GE3
+D P-Channel 12 V (D-S) MOSFET
+K
+F http://www.vishay.com/docs/62875/si3474dv.pdf
+$ENDCMP
+#
+#End Doc Library

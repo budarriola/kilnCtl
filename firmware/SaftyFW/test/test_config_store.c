@@ -1,0 +1,3126 @@
+// Host tests for firmware/SaftyFW/src/config_store.c -- the pure config
+// record pack/unpack/CRC/versioning logic and the ARMED-write-refusal
+// decision. No pico-sdk/FreeRTOS dependency, same discipline as
+// test_bootloader_metadata.c (config_store.c mirrors bootloader/metadata.c's
+// pattern almost exactly). config_store_flash.c (the real flash I/O and
+// relay_owner ARMED check) is NOT covered here -- it needs a real RP2040,
+// same reason update_task.c has no host test file.
+#include <math.h>
+#include <string.h>
+
+#include "test_common.h"
+
+#include "config_params.h"
+#include "config_store.h"
+#include "crc32.h" // bootloader/ -- to hand-assemble a legacy v1 record for the migration test
+#include "kilnlink/kilnlink_config_page.h"
+
+// S8 sanity-rate guard basis (2026-09-05, review fix): CONFIG_STORE_DEFAULT_
+// MAX_RATE_C_PER_MIN must stay reconciled with 2x the fastest RISING
+// built-in-profile ramp (999.0 C/hr, "FSCGB1" stepping 1075 C -> 1100 C --
+// see config_store.h's macro comment for why only rising segments count).
+// A _Static_assert was tried here first but this test binary is compiled by
+// cl.exe with no /std flag (see build_host_tests.ps1's main $cmd -- only the
+// separate fuzz-target line passes /std:c17), which does not recognize
+// _Static_assert at all; the runtime checks in test_default() below (which
+// independently recompute the 999.0/60*2 basis and compare it against both
+// the macro and the record it produces) are the reconciliation check
+// instead, per the review finding's "or a host-test check" alternative.
+
+static void test_pack_unpack_roundtrip(void)
+{
+    TEST_SECTION("config_store_pack/unpack -- roundtrip");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 42;
+    rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
+    rec.calibration_missing = false;
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        rec.ct_cal[i].calibrated = (i % 2u) == 0u;
+        rec.ct_cal[i].gain = 1.0f + (float)i * 0.25f;
+        rec.ct_cal[i].offset = -0.5f + (float)i * 0.1f;
+    }
+    for (size_t i = 0; i < sizeof(rec.reserved); i++) {
+        rec.reserved[i] = (uint8_t)(i + 1);
+    }
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    config_store_record_t back;
+    memset(&back, 0xAA, sizeof(back));
+    bool ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok, "well-formed record unpacks successfully");
+    TEST_CHECK(back.format_version == rec.format_version, "format_version roundtrips");
+    TEST_CHECK(back.seq == rec.seq, "seq roundtrips");
+    TEST_CHECK(back.tc_type == rec.tc_type, "tc_type roundtrips");
+    TEST_CHECK(back.calibration_missing == false, "calibration_missing (false) roundtrips");
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(back.ct_cal[i].calibrated == rec.ct_cal[i].calibrated,
+                   "ct_cal[i].calibrated roundtrips");
+        TEST_CHECK(back.ct_cal[i].gain == rec.ct_cal[i].gain, "ct_cal[i].gain roundtrips");
+        TEST_CHECK(back.ct_cal[i].offset == rec.ct_cal[i].offset, "ct_cal[i].offset roundtrips");
+    }
+    TEST_CHECK(memcmp(back.reserved, rec.reserved, sizeof(rec.reserved)) == 0,
+               "reserved bytes roundtrip byte-for-byte");
+
+    // safety_tc_installed -- explicit 0 must roundtrip too, not just 1
+    // (memset(0) above already made `rec` hold 0, so this is the meaningful
+    // direction to check: an explicit "not installed" declaration must
+    // survive a real pack/unpack, not just default to the safe value by
+    // accident of being zeroed).
+    TEST_CHECK(back.safety_tc_installed == 0u,
+               "safety_tc_installed (explicit 0, declared not installed) roundtrips");
+    rec.safety_tc_installed = 1u;
+    config_store_pack(&rec, record);
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok && back.safety_tc_installed == 1u, "safety_tc_installed = 1 roundtrips");
+
+    // Legacy-flash polarity -- THE CASE THAT ACTUALLY OCCURS ON REAL
+    // HARDWARE, not the 0xFF case an earlier version of this test asserted
+    // (confirmed live, 2026-08-23: that assertion was vacuous -- it proved
+    // the decoder handles a byte value real flash never contains). What a
+    // record written by firmware from BEFORE safety_tc_installed existed
+    // actually holds at this offset is 0x00: old config_store_pack() did
+    //     memcpy(&out[REC_OFF_RESERVED], rec->reserved, sizeof(rec->reserved))
+    // with the OLD REC_OFF_RESERVED == 204 (this field's offset today is 206, after the v3 +2 shift) and
+    // rec->reserved a 300-byte array that config_store_default() left at
+    // memset(0) -- so out[206] = rec.reserved[0] = 0x00, not 0xFF. This is
+    // simulated by hand below, calling this file's OWN pack() with the
+    // record's reserved[0] forced to 0 and then hand-writing 0x00 at
+    // offset 206 to stand in for "old firmware, which had no
+    // safety_tc_installed field at all, wrote whatever its own reserved[0]
+    // happened to be" -- CRC recomputed over it, matching how a real old
+    // record's CRC legitimately covers that 0x00 byte.
+    //
+    // config_store_unpack() must decode 0x00 as installed (1) -- the whole
+    // point of the positive-sentinel fix (SAFETY_TC_INSTALLED_MARKER_NOT_
+    // INSTALLED, 0xA5): 0x00 is emphatically NOT that sentinel.
+    rec.safety_tc_installed = 1u; // irrelevant to what gets written below -- overwritten by hand
+    config_store_pack(&rec, record);
+    record[206] = 0x00u; // REC_OFF_SAFETY_TC_INSTALLED -- the real legacy byte value
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok, "the simulated legacy record (0x00 at the safety_tc_installed offset, "
+                    "CRC recomputed over it, matching real pre-existing flash) unpacks");
+    TEST_CHECK(back.safety_tc_installed == 1u,
+               "0x00 at the safety_tc_installed offset -- what every pre-existing board's "
+               "flash actually contains -- decodes as installed (1), NOT as "
+               "declared-not-installed. This is the check that matters: a board with a "
+               "persisted config from before this field existed must come up as installed.");
+
+    // Erased flash (0xFF) must ALSO decode as installed -- a record that
+    // was never written at all (or genuinely does hold the old reserved-
+    // fill byte from some other offset/path) must not accidentally trip
+    // the not-installed sentinel either.
+    config_store_pack(&rec, record);
+    record[206] = 0xFFu;
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok && back.safety_tc_installed == 1u,
+               "0xFF (erased flash) at the safety_tc_installed offset also decodes as installed");
+
+    // Positive proof the sentinel itself still works: ONLY 0xA5 decodes as
+    // not-installed. Uses config_store_pack()'s real encode path (rec.
+    // safety_tc_installed = 0), not a hand-written byte, so this also
+    // proves the encoder emits the sentinel this decode check depends on.
+    rec.safety_tc_installed = 0u;
+    config_store_pack(&rec, record);
+    TEST_CHECK(record[206] == 0xA5u,
+               "config_store_pack() encodes declared-not-installed as the explicit "
+               "0xA5 sentinel, not as a bare 0x00");
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok && back.safety_tc_installed == 0u,
+               "the 0xA5 sentinel round-trips back to declared-not-installed");
+
+    // calibration_missing = true must roundtrip too, not just its zero value.
+    rec.calibration_missing = true;
+    config_store_pack(&rec, record);
+    ok = config_store_unpack(record, &back);
+    TEST_CHECK(ok, "record with calibration_missing=true unpacks");
+    TEST_CHECK(back.calibration_missing == true, "calibration_missing (true) roundtrips");
+}
+
+static void test_unpack_hostile(void)
+{
+    TEST_SECTION("config_store_unpack -- hostile inputs");
+
+    // Erased flash: all 0xFF. Must be rejected (wrong magic), not crash.
+    uint8_t erased[CONFIG_STORE_RECORD_LEN];
+    memset(erased, 0xFF, sizeof(erased));
+    config_store_record_t sentinel;
+    memset(&sentinel, 0xAA, sizeof(sentinel));
+    config_store_record_t out = sentinel;
+    TEST_CHECK(!config_store_unpack(erased, &out), "all-0xFF (erased) record rejected");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+               "*out untouched after rejecting erased record");
+
+    // All zero: wrong magic.
+    uint8_t zeroed[CONFIG_STORE_RECORD_LEN];
+    memset(zeroed, 0x00, sizeof(zeroed));
+    out = sentinel;
+    TEST_CHECK(!config_store_unpack(zeroed, &out), "all-zero record rejected (bad magic)");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0, "*out untouched after bad-magic reject");
+
+    // Valid record, then flip one payload bit -- CRC must catch it (torn
+    // write / flash corruption simulation).
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 7;
+    rec.tc_type = 0x03u;
+    rec.calibration_missing = true;
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+    record[20] ^= 0x01u; // corrupt one payload byte, well before the trailing CRC field
+    out = sentinel;
+    TEST_CHECK(!config_store_unpack(record, &out), "single-bit-flipped record rejected");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+               "*out untouched after CRC-mismatch reject");
+
+    // Wrong format_version.
+    config_store_pack(&rec, record); // re-pack clean
+    record[4] = 0xFF;
+    record[5] = 0xFF; // format_version -> 0xFFFF, unrecognised
+    out = sentinel;
+    TEST_CHECK(!config_store_unpack(record, &out), "unrecognised format_version rejected");
+
+    TEST_CHECK(!config_store_unpack(NULL, &out), "NULL in rejected");
+    TEST_CHECK(!config_store_unpack(record, NULL), "NULL out rejected");
+}
+
+static void test_default(void)
+{
+    TEST_SECTION("config_store_default -- safe defaults");
+
+    config_store_record_t rec;
+    memset(&rec, 0xAA, sizeof(rec));
+    config_store_default(&rec);
+    TEST_CHECK(rec.format_version == CONFIG_STORE_FORMAT_VERSION,
+               "default format_version is current");
+    TEST_CHECK(rec.seq == 0, "default seq is 0");
+    TEST_CHECK(rec.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE, "default tc_type is K");
+    TEST_CHECK(rec.tc_offset_c == 0.0f, "default tc_offset_c is 0.0 (no correction)");
+    // S8 sanity-rate guard (2026-09-05, review fix): the compiled record
+    // default must be exactly 2x the fastest RISING ramp_c_per_hr among
+    // KilnFW's built-in profiles -- S8 (safety_guards.c) only ever trips on
+    // a positive (climbing) delta, so a fast COOLING segment cannot be the
+    // basis even though its declared rate is a larger number (the four tied
+    // 9999.0 C/hr segments are all crash-cool). The fastest actual rising
+    // segment is 999.0 C/hr ("FSCGB1" stepping 1075 C -> 1100 C), converted
+    // to C/min -- 999.0 / 60 * 2 = 33.3. This does NOT arm S8 by itself
+    // (safety_core_load_guard_cfg() still forces 0.0f unless
+    // CONFIG_STORE_SET_MAX_RATE_C_PER_MIN is set -- see
+    // test_safety_core_s8_wiring.c), it only checks the at-rest record value
+    // documented in CONFIG_REFERENCE.md section 2.
+    {
+        const float max_shipped_rising_ramp_c_per_hr = 999.0f;
+        const float expected_default = max_shipped_rising_ramp_c_per_hr / 60.0f * 2.0f;
+        // Real check: the record's default must match both the macro itself
+        // and the independently recomputed expected value -- not just be
+        // nonzero. If either config_store_default() stops using the macro,
+        // or the macro drifts from the documented basis, this fails.
+        TEST_CHECK(rec.max_rate_c_per_min == CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN,
+                   "default max_rate_c_per_min comes from the compiled macro");
+        TEST_CHECK(rec.max_rate_c_per_min == expected_default,
+                   "default max_rate_c_per_min is 2x the fastest RISING shipped built-in "
+                   "profile ramp (33.3 C/min)");
+        // Both checks were proven capable of failing by temporarily changing
+        // CONFIG_STORE_DEFAULT_MAX_RATE_C_PER_MIN in config_store.h to an
+        // unrelated value, observing the failure, and restoring it by hand
+        // -- see the commit message for this pass.
+    }
+    TEST_CHECK(rec.calibration_missing == true, "default calibration_missing is true");
+    TEST_CHECK(rec.safety_tc_installed == 1u,
+               "default safety_tc_installed is 1 -- \"I expect a sensor and will trip if "
+               "it's missing\", not the reverse");
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(rec.ct_cal[i].calibrated == false,
+                   "default ct_cal[i].calibrated is false -- uncalibrated, not zero-gain");
+    }
+}
+
+static void test_ct_cal_defaults_on_blank(void)
+{
+    TEST_SECTION("ct_cal -- defaults-on-blank/corrupt sector");
+
+    // A fully erased sector: find_latest() finds nothing, and the caller
+    // (config_store_flash.c's read_latest_or_default(), mirrored here) must
+    // fall back to config_store_default() -- every channel uncalibrated,
+    // never a crash and never a plausible-looking wrong gain/offset.
+    uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector, 0xFF, sizeof(sector));
+
+    config_store_record_t out;
+    size_t slot = config_store_find_latest(sector, &out);
+    TEST_CHECK(slot == CONFIG_STORE_NO_SLOT, "erased sector: no valid record found");
+
+    config_store_record_t fallback;
+    config_store_default(&fallback);
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(fallback.ct_cal[i].calibrated == false,
+                   "erased-sector fallback: channel uncalibrated");
+    }
+
+    // A record written before this field existed: config_store_pack() with
+    // rec.ct_cal left zero-initialized (memset 0, exactly what every SET_
+    // CONFIG-authored record before this feature landed would have produced
+    // in the byte range this field now claims). Must unpack as calibrated ==
+    // false, not as a CRC failure and not as a stray "calibrated" reading.
+    config_store_record_t old_rec;
+    memset(&old_rec, 0, sizeof(old_rec));
+    old_rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    old_rec.seq = 3;
+    old_rec.tc_type = 0x03u;
+    old_rec.calibration_missing = true;
+    // old_rec.ct_cal left all-zero -- exactly what a pre-this-pass record's
+    // corresponding bytes held (config_store_default()'s memset).
+    uint8_t packed[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&old_rec, packed);
+
+    config_store_record_t unpacked;
+    bool ok = config_store_unpack(packed, &unpacked);
+    TEST_CHECK(ok, "pre-ct_cal-shaped record still unpacks (no format_version bump was needed)");
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(unpacked.ct_cal[i].calibrated == false,
+                   "pre-ct_cal record: every channel reads back uncalibrated, not corrupted");
+    }
+}
+
+static void test_ct_cal_corrupt_or_unknown_version(void)
+{
+    TEST_SECTION("ct_cal -- corrupt or unknown-version record never surfaces stale calibration");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 11;
+    rec.tc_type = 0x03u;
+    rec.calibration_missing = false;
+    rec.ct_cal[0].calibrated = true;
+    rec.ct_cal[0].gain = 2.5f;
+    rec.ct_cal[0].offset = 0.75f;
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    // Corrupt one payload byte inside the ct_cal region -- the record must
+    // be rejected WHOLESALE (CRC covers everything before it), not partially
+    // trusted with a flipped gain.
+    record[18] ^= 0x01u; // inside channel 0's ct_cal bytes (offset 16..24)
+    config_store_record_t sentinel;
+    memset(&sentinel, 0xAA, sizeof(sentinel));
+    config_store_record_t out = sentinel;
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "a corrupted ct_cal byte fails the whole record's CRC check");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+               "on CRC failure, *out is left completely untouched (caller must fall back to config_store_default())");
+
+    // Unknown format_version -- same wholesale-reject rule.
+    config_store_pack(&rec, record); // re-pack clean
+    record[4] = 0xFF;
+    record[5] = 0xFF; // format_version -> unrecognised
+    memset(&out, 0xAA, sizeof(out));
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "unrecognised format_version rejects the whole record, ct_cal included");
+}
+
+static void test_ct_cal_round_trip_and_independence(void)
+{
+    TEST_SECTION("ct_cal -- round trip through pack/unpack, per-channel independence");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.ct_cal[0].calibrated = true;
+    rec.ct_cal[0].gain = 1.02f;
+    rec.ct_cal[0].offset = -0.01f;
+    // Channel 1 left uncalibrated (config_store_default()'s shape).
+    rec.ct_cal[2].calibrated = true;
+    rec.ct_cal[2].gain = 0.98f;
+    rec.ct_cal[2].offset = 0.05f;
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    config_store_record_t back;
+    TEST_CHECK(config_store_unpack(record, &back), "mixed calibrated/uncalibrated record unpacks");
+
+    TEST_CHECK(back.ct_cal[0].calibrated == true, "channel 0: calibrated round-trips true");
+    TEST_CHECK(back.ct_cal[0].gain == 1.02f, "channel 0: gain round-trips exactly");
+    TEST_CHECK(back.ct_cal[0].offset == -0.01f, "channel 0: offset round-trips exactly");
+
+    TEST_CHECK(back.ct_cal[1].calibrated == false,
+               "channel 1: still uncalibrated -- setting channel 0/2 did not leak into it");
+
+    TEST_CHECK(back.ct_cal[2].calibrated == true, "channel 2: calibrated round-trips true");
+    TEST_CHECK(back.ct_cal[2].gain == 0.98f, "channel 2: its own gain, not channel 0's");
+    TEST_CHECK(back.ct_cal[2].offset == 0.05f, "channel 2: its own offset, not channel 0's");
+
+    // Now flip channel 1 on and channel 0 off, proving independence holds in
+    // both directions, not just "channel 0 happened to be first."
+    rec.ct_cal[0].calibrated = false;
+    rec.ct_cal[1].calibrated = true;
+    rec.ct_cal[1].gain = 3.0f;
+    rec.ct_cal[1].offset = 1.0f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back), "re-packed record unpacks");
+    TEST_CHECK(back.ct_cal[0].calibrated == false, "channel 0 now uncalibrated as set");
+    TEST_CHECK(back.ct_cal[1].calibrated == true, "channel 1 now calibrated as set");
+    TEST_CHECK(back.ct_cal[1].gain == 3.0f, "channel 1's own new gain");
+    TEST_CHECK(back.ct_cal[2].calibrated == true,
+               "channel 2 UNCHANGED by channel 0/1's flip -- true per-channel independence");
+    TEST_CHECK(back.ct_cal[2].gain == 0.98f, "channel 2's gain still its own original value");
+}
+
+static void test_find_latest(void)
+{
+    TEST_SECTION("config_store_find_latest -- sector scan");
+
+    uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector, 0xFF, sizeof(sector)); // fully erased sector
+
+    config_store_record_t out;
+    size_t slot = config_store_find_latest(sector, &out);
+    TEST_CHECK(slot == CONFIG_STORE_NO_SLOT, "fully erased sector: no valid record");
+
+    // Write three records at increasing seq, out of slot order, to prove
+    // this is a seq-scan, not "last slot wins" or "first slot wins".
+    config_store_record_t r5, r9, r2;
+    memset(&r5, 0, sizeof(r5));
+    r5.format_version = CONFIG_STORE_FORMAT_VERSION;
+    r5.seq = 5;
+    r5.tc_type = 0x03u;
+    r5.calibration_missing = true;
+
+    r9 = r5;
+    r9.seq = 9;
+    r9.tc_type = 0x07u;
+    r2 = r5;
+    r2.seq = 2;
+
+    config_store_pack(&r9, &sector[3 * CONFIG_STORE_RECORD_LEN]); // slot 3: seq 9
+    config_store_pack(&r2, &sector[0 * CONFIG_STORE_RECORD_LEN]); // slot 0: seq 2
+    config_store_pack(&r5, &sector[7 * CONFIG_STORE_RECORD_LEN]); // slot 7: seq 5
+
+    slot = config_store_find_latest(sector, &out);
+    TEST_CHECK(slot == 3, "highest-seq record found regardless of slot position");
+    TEST_CHECK(out.seq == 9, "returned record is the highest-seq record's contents");
+    TEST_CHECK(out.tc_type == 0x07u, "returned record's tc_type matches the winning record");
+
+    // Corrupt the winning record (slot 3) -- the next-highest (seq 5, slot 7)
+    // must now win, proving corrupt records are skipped, not just deprioritised.
+    sector[3 * CONFIG_STORE_RECORD_LEN + 20] ^= 0x01u;
+    slot = config_store_find_latest(sector, &out);
+    TEST_CHECK(slot == 7, "corrupted highest-seq record is skipped in favour of the next-best");
+    TEST_CHECK(out.seq == 5, "skips to the next-highest valid seq");
+
+    TEST_CHECK(config_store_find_latest(NULL, &out) == CONFIG_STORE_NO_SLOT, "NULL sector rejected");
+    TEST_CHECK(config_store_find_latest(sector, NULL) == CONFIG_STORE_NO_SLOT, "NULL out rejected");
+}
+
+static void test_next_write_slot(void)
+{
+    TEST_SECTION("config_store_next_write_slot / needs_erase");
+
+    TEST_CHECK(config_store_next_write_slot(CONFIG_STORE_NO_SLOT) == 0,
+               "never-written sector: next write is slot 0");
+    TEST_CHECK(!config_store_next_write_needs_erase(CONFIG_STORE_NO_SLOT),
+               "never-written sector: no erase needed for slot 0");
+
+    TEST_CHECK(config_store_next_write_slot(0) == 1, "slot 0 written -> next is slot 1");
+    TEST_CHECK(!config_store_next_write_needs_erase(0), "mid-sector: no erase needed");
+
+    size_t last = CONFIG_STORE_SLOTS_PER_SECTOR - 1;
+    TEST_CHECK(config_store_next_write_slot(last) == 0, "last slot written -> wraps to slot 0");
+    TEST_CHECK(config_store_next_write_needs_erase(last),
+               "wrap requires an erase before the slot-0 write");
+}
+
+static void test_plan_write(void)
+{
+    TEST_SECTION("config_store_plan_write -- A/B sector switch decision");
+
+    config_store_write_plan_t plan = config_store_plan_write(0, CONFIG_STORE_NO_SLOT);
+    TEST_CHECK(plan.sector_index == 0 && plan.slot_index == 0 && plan.needs_erase == false,
+               "never written: sector 0, slot 0, no assumed erase");
+
+    plan = config_store_plan_write(1, CONFIG_STORE_NO_SLOT);
+    TEST_CHECK(plan.sector_index == 0, "the CURRENT sector index is ignored on NO_SLOT -- always starts at 0");
+
+    // Mid-sector: stays in the SAME sector, no erase, exactly the old
+    // single-sector behaviour for 7 of every 8 writes.
+    plan = config_store_plan_write(0, 3);
+    TEST_CHECK(plan.sector_index == 0 && plan.slot_index == 4 && plan.needs_erase == false,
+               "room left in sector A: next slot, same sector, no erase");
+
+    plan = config_store_plan_write(1, 3);
+    TEST_CHECK(plan.sector_index == 1 && plan.slot_index == 4 && plan.needs_erase == false,
+               "room left in sector B: next slot, same sector, no erase");
+
+    // Sector full (last slot just written): SWITCH to the other sector,
+    // slot 0, and it DOES need an erase -- this is the only case where the
+    // plan crosses sectors.
+    size_t last = CONFIG_STORE_SLOTS_PER_SECTOR - 1;
+    plan = config_store_plan_write(0, last);
+    TEST_CHECK(plan.sector_index == 1 && plan.slot_index == 0 && plan.needs_erase == true,
+               "sector A full: switches to sector B, slot 0, erase required");
+
+    plan = config_store_plan_write(1, last);
+    TEST_CHECK(plan.sector_index == 0 && plan.slot_index == 0 && plan.needs_erase == true,
+               "sector B full: switches back to sector A, slot 0, erase required");
+}
+
+static void test_find_latest_multi(void)
+{
+    TEST_SECTION("config_store_find_latest_multi_ex -- A/B arbitration");
+
+    uint8_t sector_a[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    uint8_t sector_b[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector_a, 0xFF, sizeof(sector_a));
+    memset(sector_b, 0xFF, sizeof(sector_b));
+    const uint8_t *sectors[SAFTYFW_CONFIG_STORE_NUM_SECTORS] = {sector_a, sector_b};
+
+    config_store_record_t out;
+    size_t sector_index = 99; // poisoned, must stay untouched on NO_SLOT
+    size_t slot =
+        config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == CONFIG_STORE_NO_SLOT, "both sectors blank: no valid record anywhere");
+    TEST_CHECK(sector_index == 99, "*out_sector_index left untouched on NO_SLOT");
+
+    // Sector A alone holds a record -- exactly what a board running the OLD
+    // single-sector firmware looks like the first time this firmware reads
+    // it (sector B has never been written). This is the migration proof at
+    // the pure-logic layer; test_config_store_flash.c pins the same thing
+    // through the real flash-I/O path.
+    config_store_record_t rec_a;
+    memset(&rec_a, 0, sizeof(rec_a));
+    rec_a.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec_a.seq = 4;
+    rec_a.tc_type = 0x02u;
+    config_store_pack(&rec_a, &sector_a[2 * CONFIG_STORE_RECORD_LEN]);
+
+    slot = config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == 2 && sector_index == 0 && out.seq == 4,
+               "legacy single-sector board: sector A's record found, sector B ignored (blank)");
+
+    // Sector B holds a HIGHER seq (a completed switch) -- must win regardless
+    // of sector A still holding its own, now-stale, valid record.
+    config_store_record_t rec_b;
+    rec_b = rec_a;
+    rec_b.seq = 9;
+    rec_b.tc_type = 0x07u;
+    config_store_pack(&rec_b, &sector_b[0 * CONFIG_STORE_RECORD_LEN]);
+
+    slot = config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == 0 && sector_index == 1 && out.seq == 9,
+               "sector B's higher seq wins even though sector A still has a valid (stale) record");
+
+    // Corrupt sector B's only record -- must fall back to sector A's still-
+    // valid, lower-seq record, not to CONFIG_STORE_NO_SLOT. This is the
+    // "corrupt sector falls back to the good one" property at the pure-logic
+    // layer.
+    sector_b[20] ^= 0x01u;
+    slot = config_store_find_latest_multi_ex(sectors, &sector_index, &out, NULL);
+    TEST_CHECK(slot == 2 && sector_index == 0 && out.seq == 4,
+               "sector B corrupted: falls back silently to sector A's older valid record");
+
+    TEST_CHECK(config_store_find_latest_multi_ex(NULL, &sector_index, &out, NULL) ==
+                   CONFIG_STORE_NO_SLOT,
+               "NULL sectors array rejected");
+    TEST_CHECK(config_store_find_latest_multi_ex(sectors, NULL, &out, NULL) ==
+                   CONFIG_STORE_NO_SLOT,
+               "NULL out_sector_index rejected");
+    TEST_CHECK(config_store_find_latest_multi_ex(sectors, &sector_index, NULL, NULL) ==
+                   CONFIG_STORE_NO_SLOT,
+               "NULL out_rec rejected");
+}
+
+static void test_decide_write(void)
+{
+    TEST_SECTION("config_store_decide_write -- ARMED refusal");
+
+    TEST_CHECK(config_store_decide_write(false) == CONFIG_STORE_WRITE_OK,
+               "not ARMED: write allowed");
+    TEST_CHECK(config_store_decide_write(true) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "ARMED: write refused");
+
+    const char *ok_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_OK);
+    const char *refused_reason =
+        config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED);
+    TEST_CHECK(ok_reason != NULL && strlen(ok_reason) > 0, "OK reason is a non-empty string");
+    TEST_CHECK(refused_reason != NULL && strlen(refused_reason) > 0,
+               "refused reason is a non-empty string");
+    TEST_CHECK(strcmp(ok_reason, refused_reason) != 0, "OK and refused reasons differ");
+}
+
+static void test_decide_write_ex_tc_type_armed_relaxation(void)
+{
+    TEST_SECTION("config_store_decide_write_ex -- 2026-09-15 owner decision F1: tc_type-only "
+                 "change allowed through while ARMED, but only when heat is safe");
+
+    // config_store_decide_write(armed) must be EXACTLY config_store_decide_write_ex(armed, false, false)
+    // -- the header's own documented contract.
+    TEST_CHECK(config_store_decide_write(false) == config_store_decide_write_ex(false, false, false),
+               "decide_write(false) matches decide_write_ex(false, false, false)");
+    TEST_CHECK(config_store_decide_write(true) == config_store_decide_write_ex(true, false, false),
+               "decide_write(true) matches decide_write_ex(true, false, false)");
+
+    // Not ARMED at all: always OK, regardless of tc_type_only_change/heat_safe.
+    TEST_CHECK(config_store_decide_write_ex(false, true, false) == CONFIG_STORE_WRITE_OK,
+               "not ARMED: tc_type-only change allowed even if heat_safe is false");
+    TEST_CHECK(config_store_decide_write_ex(false, true, true) == CONFIG_STORE_WRITE_OK,
+               "not ARMED: tc_type-only change allowed with heat_safe true too");
+
+    // ARMED, tc_type-only change, heat safe (off): the F1 relaxation -- allowed.
+    TEST_CHECK(config_store_decide_write_ex(true, true, true) == CONFIG_STORE_WRITE_OK,
+               "ARMED + tc_type-only change + heat safe: allowed (F1)");
+
+    // ARMED, tc_type-only change, heat NOT safe (on, or a firing may be running): refused,
+    // with the distinct, clearly-named reason -- not the generic ARMED refusal.
+    TEST_CHECK(config_store_decide_write_ex(true, true, false) == CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON,
+               "ARMED + tc_type-only change + heat NOT safe: refused with the heat-on-specific reason");
+
+    // ARMED, NOT a tc_type-only change (some other field, or tc_type bundled with another
+    // field change) -- refused unconditionally, regardless of heat_safe. This is the "every
+    // other param keeps the existing ARMED refusal" requirement.
+    TEST_CHECK(config_store_decide_write_ex(true, false, true) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "ARMED + NOT tc_type-only + heat safe: still refused (only tc_type gets the relaxation)");
+    TEST_CHECK(config_store_decide_write_ex(true, false, false) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "ARMED + NOT tc_type-only + heat not safe: still refused");
+
+    // The two decisions must have distinguishable, non-empty reason strings.
+    const char *armed_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED);
+    const char *heat_on_reason =
+        config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON);
+    TEST_CHECK(armed_reason != NULL && strlen(armed_reason) > 0, "plain ARMED reason is non-empty");
+    TEST_CHECK(heat_on_reason != NULL && strlen(heat_on_reason) > 0, "heat-on reason is non-empty");
+    TEST_CHECK(strcmp(armed_reason, heat_on_reason) != 0,
+               "the heat-on refusal has its OWN distinct reason string, not the generic ARMED one");
+}
+
+static void test_only_tc_type_differs(void)
+{
+    TEST_SECTION("config_store_only_tc_type_differs -- pure comparator behind F1's relaxation");
+
+    config_store_record_t a;
+    memset(&a, 0, sizeof(a));
+    a.format_version = CONFIG_STORE_FORMAT_VERSION;
+    a.seq = 5;
+    a.tc_type = 0x03u; // MAX31856_TC_TYPE_K
+    a.abs_max_temp_c = 1200.0f;
+    a.fields_set = 0;
+
+    config_store_record_t b = a;
+
+    // Identical records: not a tc_type change at all (nothing differs).
+    TEST_CHECK(!config_store_only_tc_type_differs(&a, &b), "identical records: not a tc_type-only change");
+
+    // Only tc_type differs -- true, even across format_version/seq staleness (those are
+    // caller-overwritten before a real write and must be neutralized by the comparator).
+    b = a;
+    b.tc_type = 0x07u; // MAX31856_TC_TYPE_S
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b), "tc_type alone differs: true");
+
+    b = a;
+    b.tc_type = 0x07u;
+    b.format_version = (uint16_t)(a.format_version + 1u);
+    b.seq = a.seq + 1u;
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b),
+               "tc_type differs, format_version/seq also differ (caller-overwritten, not operator "
+               "content): still counts as tc_type-only");
+
+    // tc_type differs AND the CONFIG_STORE_SET_TC_TYPE fields_set bit flips too (legitimate
+    // first-time commissioning) -- still counts as tc_type-only.
+    b = a;
+    b.tc_type = 0x07u;
+    b.fields_set = a.fields_set | CONFIG_STORE_SET_TC_TYPE;
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b),
+               "tc_type differs, CONFIG_STORE_SET_TC_TYPE bit also flips: still tc_type-only");
+
+    // tc_type differs, but so does an unrelated field: NOT tc_type-only.
+    b = a;
+    b.tc_type = 0x07u;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_tc_type_differs(&a, &b),
+               "tc_type differs AND another field differs: NOT tc_type-only -- no relaxation");
+
+    // tc_type unchanged, but another field differs: false (not a tc_type change at all --
+    // the short-circuit at the top of the function, regardless of what else differs).
+    b = a;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_tc_type_differs(&a, &b),
+               "tc_type unchanged, another field differs: false (no tc_type change to relax for)");
+}
+
+static void test_only_ct_cal_differs(void)
+{
+    TEST_SECTION("config_store_only_ct_cal_differs -- 2026-09-18 CT-auto-zero deadlock fix, "
+                 "pure comparator behind decide_write_ex's narrow-change relaxation");
+
+    config_store_record_t a;
+    memset(&a, 0, sizeof(a));
+    a.format_version = CONFIG_STORE_FORMAT_VERSION;
+    a.seq = 5;
+    a.tc_type = 0x03u; // MAX31856_TC_TYPE_K
+    a.abs_max_temp_c = 1200.0f;
+    a.zero_counts[0] = 10u;
+    a.zero_counts[1] = 20u;
+    a.zero_counts[2] = 30u;
+    a.k_ct_v_per_a[0] = 1.0f;
+    a.k_ct_v_per_a[1] = 2.0f;
+    a.k_ct_v_per_a[2] = 3.0f;
+
+    config_store_record_t b = a;
+
+    // Identical records: nothing changed at all.
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b), "identical records: not a ct_cal-only change");
+
+    // Only channel 1's zero_counts differs -- true.
+    b = a;
+    b.zero_counts[1] = 63u;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b), "channel 1 zero_counts alone differs: true");
+
+    // Only channel 2's k_ct_v_per_a differs -- true.
+    b = a;
+    b.k_ct_v_per_a[2] = 0.715f;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b), "channel 2 k_ct_v_per_a alone differs: true");
+
+    // Both fields of the SAME channel differ (the real auto-zero commit shape: one
+    // SET_PARAM for k_ct_v_per_a[ch] and one for zero_counts[ch], then one COMMIT_CONFIG) --
+    // still counts as one channel's ct-cal-only change.
+    b = a;
+    b.zero_counts[2] = 63u;
+    b.k_ct_v_per_a[2] = 0.715f;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b),
+               "channel 2's zero_counts AND k_ct_v_per_a both differ: still ct_cal-only (one channel)");
+
+    // format_version/seq also differ (caller-overwritten before a real write, not operator
+    // content) -- still counts as ct_cal-only, same neutralization tc_type's comparator does.
+    b = a;
+    b.zero_counts[2] = 63u;
+    b.format_version = (uint16_t)(a.format_version + 1u);
+    b.seq = a.seq + 1u;
+    TEST_CHECK(config_store_only_ct_cal_differs(&a, &b),
+               "channel 2 zero_counts differs, format_version/seq also differ: still ct_cal-only");
+
+    // Two DIFFERENT channels change at once -- NOT narrowed for; the real caller (CT
+    // auto-zero) only ever proposes one channel per commit.
+    b = a;
+    b.zero_counts[0] = 11u;
+    b.zero_counts[2] = 63u;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "two channels' zero_counts differ at once: NOT ct_cal-only -- no relaxation");
+
+    // One channel's ct_cal fields differ AND an unrelated field also differs -- NOT
+    // ct_cal-only, same "bundled change" refusal shape as tc_type's own MIXED case.
+    b = a;
+    b.zero_counts[2] = 63u;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "channel 2 zero_counts differs AND an unrelated field differs: NOT ct_cal-only");
+
+    // No ct_cal field changed at all, but an unrelated field differs: false.
+    b = a;
+    b.abs_max_temp_c = 1300.0f;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "no ct_cal field changed, another field differs: false (nothing to relax for)");
+
+    // A tc_type-only change must NOT also read as a ct_cal-only change (the two
+    // comparators check disjoint field sets, by construction).
+    b = a;
+    b.tc_type = 0x07u;
+    TEST_CHECK(!config_store_only_ct_cal_differs(&a, &b),
+               "tc_type-only change: not a ct_cal-only change (disjoint comparators)");
+    TEST_CHECK(config_store_only_tc_type_differs(&a, &b),
+               "...and it IS a tc_type-only change, confirming the two comparators partition "
+               "correctly rather than one silently swallowing the other's case");
+}
+
+static void test_record_crc(void)
+{
+    TEST_SECTION("config_store_record_crc -- matches the packed record's trailing CRC");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 123;
+    rec.tc_type = 0x05u; // MAX31856_TC_TYPE_R
+    rec.calibration_missing = false;
+
+    uint8_t packed[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, packed);
+
+    // The CRC is the last 4 bytes before the trailing pad (config_store.c's
+    // REC_OFF_CRC = 504 as of format version 2), little-endian -- read
+    // directly rather than duplicating the offset constant here, since this
+    // test only needs to prove config_store_record_crc() agrees with what
+    // pack() actually wrote.
+    uint32_t expected = (uint32_t)packed[504] | ((uint32_t)packed[505] << 8) |
+                         ((uint32_t)packed[506] << 16) | ((uint32_t)packed[507] << 24);
+
+    uint32_t got = config_store_record_crc(&rec);
+    TEST_CHECK(got == expected, "config_store_record_crc() matches config_store_pack()'s trailing CRC");
+
+    // Changing any field the CRC covers must change the result -- otherwise
+    // it isn't actually protecting anything.
+    config_store_record_t rec2 = rec;
+    rec2.tc_type = 0x06u;
+    TEST_CHECK(config_store_record_crc(&rec2) != got,
+               "a changed field changes the computed CRC");
+}
+
+static void test_confirm_crc_ok(void)
+{
+    TEST_SECTION("config_store_confirm_crc_ok -- update_task's config_crc_ok gate");
+
+    // "config store never loaded": config_store_get_config_version() returns
+    // 0 both before config_store_boot_load() has run and after it runs but
+    // finds nothing valid (blank/corrupt sector) -- config_store_flash.c's
+    // getter contract. Either way, version 0 must gate CLOSED.
+    TEST_CHECK(!config_store_confirm_crc_ok(0u),
+               "version 0 (never loaded / nothing valid found): gate stays closed");
+
+    // "CRC mismatched" in practice can never surface as a version -- a
+    // record whose CRC does not validate is rejected wholesale by
+    // config_store_unpack() (test_unpack_hostile() above) and never becomes
+    // the cached record at all, so config_store_get_config_version() falls
+    // back to the default's seq (0), the same "never loaded" signal above.
+    // That fallback IS the mismatch case reads as "stay closed" -- covered
+    // by the version==0 check; there is no separate non-zero "mismatched"
+    // version to test, by construction of config_store_unpack()'s own
+    // wholesale-reject rule.
+
+    // "config CRC matches": any genuinely written, CRC-verified record's
+    // version is >= 1 (config_store_write() always assigns current+1,
+    // starting from the default's 0) -- must gate OPEN.
+    TEST_CHECK(config_store_confirm_crc_ok(1u),
+               "version 1 (first real write, CRC-verified): gate can open");
+    TEST_CHECK(config_store_confirm_crc_ok(255u),
+               "any other non-zero version: gate can open");
+}
+
+static void test_config_store_ram_integrity_ok(void)
+{
+    TEST_SECTION("config_store_ram_integrity_ok -- periodic in-RAM re-CRC (config_check_period_s)");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 42;
+    rec.tc_type = 0x05u;
+    rec.calibration_missing = false;
+    rec.config_check_period_s = 10u;
+
+    uint32_t good_crc = config_store_record_crc(&rec);
+
+    TEST_CHECK(config_store_ram_integrity_ok(&rec, good_crc),
+               "unmodified record still matches the CRC captured at its last install");
+
+    // Corrupt a single RAM byte (simulating bit rot / an overrun landing on
+    // this record, not a legitimate config_store_write()/write_volatile()
+    // update) and confirm it is detected against the ORIGINAL tracked CRC.
+    config_store_record_t corrupted = rec;
+    uint8_t *raw = (uint8_t *)&corrupted;
+    raw[10] ^= 0xFFu; // flip a byte inside the struct; exact field doesn't matter for this test
+    TEST_CHECK(!config_store_ram_integrity_ok(&corrupted, good_crc),
+               "a single corrupted byte is detected against the tracked CRC");
+
+    // The corrupted record's OWN freshly computed CRC naturally still
+    // matches itself -- this function is a self-consistency check against a
+    // CRC captured at an earlier, trusted moment, not a magic corruption
+    // detector on the bytes alone. Confirms the test is actually exercising
+    // config_store_ram_integrity_ok()'s comparison, not some other check.
+    uint32_t corrupted_crc = config_store_record_crc(&corrupted);
+    TEST_CHECK(config_store_ram_integrity_ok(&corrupted, corrupted_crc),
+               "a corrupted record matches its OWN freshly computed CRC (sanity: not a tautology)");
+
+    // A legitimate change (what config_store_write()/write_volatile() do,
+    // via config_store_seqlock_write() recomputing the tracked CRC in the
+    // same step) must not be flagged once compared against ITS OWN new CRC
+    // -- this is what keeps a live volatile install from reading as
+    // corruption, per config_store.h's header comment.
+    config_store_record_t updated = rec;
+    updated.config_check_period_s = 30u; // a real config change, e.g. a volatile install
+    uint32_t updated_crc = config_store_record_crc(&updated);
+    TEST_CHECK(config_store_ram_integrity_ok(&updated, updated_crc),
+               "a legitimate field change matches the CRC captured at that same update");
+}
+
+static void test_flash_rc_reason(void)
+{
+    TEST_SECTION("config_store_flash_rc_reason -- flash_safe_execute() failure surfacing");
+
+    const char *ok = config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_OK);
+    const char *timeout = config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_TIMEOUT);
+    const char *not_permitted =
+        config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_NOT_PERMITTED);
+    const char *insufficient_resources =
+        config_store_flash_rc_reason(CONFIG_STORE_FLASH_RC_INSUFFICIENT_RESOURCES);
+    const char *unrecognised = config_store_flash_rc_reason(-999);
+
+    TEST_CHECK(ok != NULL && strcmp(ok, "ok") == 0, "PICO_OK reason is exactly \"ok\"");
+    TEST_CHECK(timeout != NULL && strlen(timeout) > 0, "TIMEOUT reason is non-empty");
+    TEST_CHECK(not_permitted != NULL && strlen(not_permitted) > 0,
+               "NOT_PERMITTED reason is non-empty");
+    TEST_CHECK(insufficient_resources != NULL && strlen(insufficient_resources) > 0,
+               "INSUFFICIENT_RESOURCES reason is non-empty");
+    TEST_CHECK(unrecognised != NULL && strlen(unrecognised) > 0,
+               "unrecognised rc still returns a non-NULL, non-empty reason");
+
+    // Every failure reason must be distinguishable from every other one --
+    // this is the entire point of config_store_flash_rc_reason() existing
+    // instead of one generic "flash write failed" string: a caller (or a
+    // bench log) must be able to tell a transient timeout apart from a
+    // firmware init-order bug (NOT_PERMITTED) apart from resource exhaustion.
+    TEST_CHECK(strcmp(timeout, not_permitted) != 0, "TIMEOUT reason differs from NOT_PERMITTED");
+    TEST_CHECK(strcmp(timeout, insufficient_resources) != 0,
+               "TIMEOUT reason differs from INSUFFICIENT_RESOURCES");
+    TEST_CHECK(strcmp(not_permitted, insufficient_resources) != 0,
+               "NOT_PERMITTED reason differs from INSUFFICIENT_RESOURCES");
+    TEST_CHECK(strcmp(timeout, unrecognised) != 0, "TIMEOUT reason differs from unrecognised-rc reason");
+    TEST_CHECK(strcmp(ok, timeout) != 0, "ok reason differs from a failure reason");
+}
+
+// --- v2: full-surface round trip, three-outcome load, unset-vs-zero -------
+//
+// These tests cover the format-version-2 growth pass (CONFIG_REFERENCE.md
+// sections 1-5): a fully-populated record round-tripping through pack/
+// unpack, a v1 record migrating forward with tc_type/ct_cal preserved and
+// calibration_missing forced true, a hypothetical v3 record being refused
+// rather than reinterpreted, and the fields_set bitmask keeping "nobody set
+// this" distinguishable from "somebody set this to zero".
+
+static void test_v2_full_roundtrip(void)
+{
+    TEST_SECTION("config_store v2 -- full-surface pack/unpack round trip");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 77;
+    rec.fields_set = (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_BORROWED_ZONE_INDEX |
+                                 CONFIG_STORE_SET_TC_PLACEMENT_MODE | CONFIG_STORE_SET_ABS_MAX_TEMP_C |
+                                 CONFIG_STORE_SET_CT_CHANNEL_MAP | CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
+                                 CONFIG_STORE_SET_MAINS_VOLTAGE_V);
+
+    rec.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
+    rec.borrowed_zone_index = 2;
+    rec.tc_placement_mode = CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT;
+    rec.abs_max_temp_c = 1310.5f;
+    rec.tc_type = 0x07u; // MAX31856_TC_TYPE_T
+    rec.ct_channel_map[0] = 0;
+    rec.ct_channel_map[1] = 1;
+    rec.ct_channel_map[2] = 2;
+    rec.calibration_missing = false;
+
+    rec.firing_margin_c = 111.0f;
+    rec.overshoot_margin_c = 66.0f;
+    rec.overshoot_time_s = 121u;
+    rec.max_rate_c_per_min = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
+    rec.rate_window_s = 61u;
+    rec.blind_grace_s = 62u;
+    rec.frozen_window_s = 601u;
+    rec.tc_disagreement_c = 199.0f;
+    rec.tc_disagreement_time_s = 301u;
+    rec.tc_expected_offset_c = 3.5f;
+    rec.cj_warn_c = 59.0f;
+    rec.cj_max_c = 84.0f;
+    rec.cj_time_s = 61u;
+    rec.borrowed_stale_s = 11u;
+    rec.borrowed_stale_trip_s = 61u;
+    rec.borrowed_type_expected = 0x05u; // MAX31856_TC_TYPE_R
+    rec.tc_offset_c = -4.25f; // owner request 2026-09-08 -- deliberately
+                              // negative and non-integer, same "not a value
+                              // that would roundtrip by accident" discipline
+                              // as tc_expected_offset_c's 3.5f above
+
+    rec.i_present_a = 2.5f;
+    rec.zero_counts[0] = 1000;
+    rec.zero_counts[1] = 2000;
+    rec.zero_counts[2] = 3000;
+    rec.correlation_window_s = 151u;
+    rec.stuck_on_time_s = 21u;
+    rec.trip_verify_s = 11u;
+    rec.k_ct_v_per_a[0] = 0.1f;
+    rec.k_ct_v_per_a[1] = 0.2f;
+    rec.k_ct_v_per_a[2] = 0.3f;
+    rec.gain[0] = 0.700f;
+    rec.gain[1] = 0.710f;
+    rec.gain[2] = 0.720f;
+    rec.mains_voltage_v = 240.0f;
+    rec.power_window_s = 121u;
+
+    rec.context_max_age_s = 6u;
+    rec.link_timeout_s = 11u;
+    rec.link_dead_hard_s = 121u;
+    rec.mainfault_debounce_ms = 201u;
+    rec.telemetry_period_ms = 501u;
+
+    rec.startup_grace_s = 61u;
+    rec.estop_debounce_ms = 51u;
+    rec.watchdog_timeout_ms = 1001u;
+    rec.config_check_period_s = 11u;
+
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        rec.ct_cal[i].calibrated = true;
+        rec.ct_cal[i].gain = 1.0f + (float)i * 0.1f;
+        rec.ct_cal[i].offset = 0.01f * (float)i;
+    }
+    for (size_t i = 0; i < sizeof(rec.reserved); i++) {
+        rec.reserved[i] = (uint8_t)(i + 3);
+    }
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    config_store_record_t back;
+    memset(&back, 0xAA, sizeof(back));
+    TEST_CHECK(config_store_unpack(record, &back), "fully-populated v2 record unpacks");
+
+    TEST_CHECK(back.format_version == rec.format_version, "format_version roundtrips");
+    TEST_CHECK(back.seq == rec.seq, "seq roundtrips");
+    TEST_CHECK(back.fields_set == rec.fields_set, "fields_set roundtrips");
+    // This test's own `rec.fields_set` (set up above) never includes
+    // CONFIG_STORE_SET_TC_TYPE even though rec.tc_type carries a real,
+    // deliberately-chosen value (0x07u, T) -- exactly the shape of a
+    // genuine pre-existing v2 record written by firmware from before this
+    // bit existed. It must decode as NOT commissioned (this bit clear) and,
+    // just as importantly, must NOT be confused with a corrupt record: the
+    // unpack above already succeeded (CRC valid) and every other field
+    // above/below still roundtrips correctly -- an absent bit is a fact
+    // about commissioning history, never a decode failure.
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_TC_TYPE) == 0,
+               "a real value in tc_type (T, not the K default) with the commissioning bit "
+               "absent still decodes cleanly as NOT commissioned -- simulates a real record "
+               "written before CONFIG_STORE_SET_TC_TYPE existed");
+    TEST_CHECK(back.tc_type == 0x07u,
+               "...and the value itself is untouched by that -- decoding 'not commissioned' "
+               "never rewrites the stored byte");
+    TEST_CHECK(back.tc_source == rec.tc_source, "tc_source roundtrips");
+    TEST_CHECK(back.borrowed_zone_index == rec.borrowed_zone_index, "borrowed_zone_index roundtrips");
+    TEST_CHECK(back.tc_placement_mode == rec.tc_placement_mode, "tc_placement_mode roundtrips");
+    TEST_CHECK(back.abs_max_temp_c == rec.abs_max_temp_c, "abs_max_temp_c roundtrips");
+    TEST_CHECK(back.tc_type == rec.tc_type, "tc_type roundtrips");
+    TEST_CHECK(memcmp(back.ct_channel_map, rec.ct_channel_map, sizeof(rec.ct_channel_map)) == 0,
+               "ct_channel_map roundtrips");
+    TEST_CHECK(back.calibration_missing == rec.calibration_missing, "calibration_missing roundtrips");
+
+    TEST_CHECK(back.firing_margin_c == rec.firing_margin_c, "firing_margin_c roundtrips");
+    TEST_CHECK(back.overshoot_margin_c == rec.overshoot_margin_c, "overshoot_margin_c roundtrips");
+    TEST_CHECK(back.overshoot_time_s == rec.overshoot_time_s, "overshoot_time_s roundtrips");
+    TEST_CHECK(back.max_rate_c_per_min == rec.max_rate_c_per_min, "max_rate_c_per_min roundtrips");
+    TEST_CHECK(back.rate_window_s == rec.rate_window_s, "rate_window_s roundtrips");
+    TEST_CHECK(back.blind_grace_s == rec.blind_grace_s, "blind_grace_s roundtrips");
+    TEST_CHECK(back.frozen_window_s == rec.frozen_window_s, "frozen_window_s roundtrips");
+    TEST_CHECK(back.tc_disagreement_c == rec.tc_disagreement_c, "tc_disagreement_c roundtrips");
+    TEST_CHECK(back.tc_disagreement_time_s == rec.tc_disagreement_time_s,
+               "tc_disagreement_time_s roundtrips");
+    TEST_CHECK(back.tc_expected_offset_c == rec.tc_expected_offset_c, "tc_expected_offset_c roundtrips");
+    TEST_CHECK(back.cj_warn_c == rec.cj_warn_c, "cj_warn_c roundtrips");
+    TEST_CHECK(back.cj_max_c == rec.cj_max_c, "cj_max_c roundtrips");
+    TEST_CHECK(back.cj_time_s == rec.cj_time_s, "cj_time_s roundtrips");
+    TEST_CHECK(back.borrowed_stale_s == rec.borrowed_stale_s, "borrowed_stale_s roundtrips");
+    TEST_CHECK(back.borrowed_stale_trip_s == rec.borrowed_stale_trip_s,
+               "borrowed_stale_trip_s roundtrips");
+    TEST_CHECK(back.borrowed_type_expected == rec.borrowed_type_expected,
+               "borrowed_type_expected roundtrips");
+    TEST_CHECK(back.tc_offset_c == rec.tc_offset_c, "tc_offset_c roundtrips");
+
+    TEST_CHECK(back.i_present_a == rec.i_present_a, "i_present_a roundtrips");
+    TEST_CHECK(memcmp(back.zero_counts, rec.zero_counts, sizeof(rec.zero_counts)) == 0,
+               "zero_counts roundtrips");
+    TEST_CHECK(back.correlation_window_s == rec.correlation_window_s,
+               "correlation_window_s roundtrips");
+    TEST_CHECK(back.stuck_on_time_s == rec.stuck_on_time_s, "stuck_on_time_s roundtrips");
+    TEST_CHECK(back.trip_verify_s == rec.trip_verify_s, "trip_verify_s roundtrips");
+    for (size_t i = 0; i < 3; i++) {
+        TEST_CHECK(back.k_ct_v_per_a[i] == rec.k_ct_v_per_a[i], "k_ct_v_per_a[i] roundtrips");
+        TEST_CHECK(back.gain[i] == rec.gain[i], "gain[i] roundtrips");
+    }
+    TEST_CHECK(back.mains_voltage_v == rec.mains_voltage_v, "mains_voltage_v roundtrips");
+    TEST_CHECK(back.power_window_s == rec.power_window_s, "power_window_s roundtrips");
+
+    TEST_CHECK(back.context_max_age_s == rec.context_max_age_s, "context_max_age_s roundtrips");
+    TEST_CHECK(back.link_timeout_s == rec.link_timeout_s, "link_timeout_s roundtrips");
+    TEST_CHECK(back.link_dead_hard_s == rec.link_dead_hard_s, "link_dead_hard_s roundtrips");
+    TEST_CHECK(back.mainfault_debounce_ms == rec.mainfault_debounce_ms,
+               "mainfault_debounce_ms roundtrips");
+    TEST_CHECK(back.telemetry_period_ms == rec.telemetry_period_ms, "telemetry_period_ms roundtrips");
+
+    TEST_CHECK(back.startup_grace_s == rec.startup_grace_s, "startup_grace_s roundtrips");
+    TEST_CHECK(back.estop_debounce_ms == rec.estop_debounce_ms, "estop_debounce_ms roundtrips");
+    TEST_CHECK(back.watchdog_timeout_ms == rec.watchdog_timeout_ms, "watchdog_timeout_ms roundtrips");
+    TEST_CHECK(back.config_check_period_s == rec.config_check_period_s,
+               "config_check_period_s roundtrips");
+
+    for (size_t i = 0; i < CONFIG_STORE_CT_CAL_NUM_CHANNELS; i++) {
+        TEST_CHECK(back.ct_cal[i].calibrated == rec.ct_cal[i].calibrated,
+                   "ct_cal[i].calibrated roundtrips (v2 full record)");
+        TEST_CHECK(back.ct_cal[i].gain == rec.ct_cal[i].gain, "ct_cal[i].gain roundtrips (v2 full record)");
+        TEST_CHECK(back.ct_cal[i].offset == rec.ct_cal[i].offset,
+                   "ct_cal[i].offset roundtrips (v2 full record)");
+    }
+    TEST_CHECK(memcmp(back.reserved, rec.reserved, sizeof(rec.reserved)) == 0,
+               "reserved bytes roundtrip byte-for-byte (v2 full record)");
+}
+
+// A hand-assembled legacy v1 record: format_version 1, magic, seq, tc_type,
+// calibration_missing, ct_cal[3], CRC over bytes [0, 248) -- exactly the
+// byte layout the original (pre-this-pass) config_store_pack() produced.
+// Kept local to this test file (not shared with config_store.c) because its
+// entire purpose is to construct bytes that today's config_store_pack() can
+// no longer produce, so the migration path has something real to migrate.
+static void pack_legacy_v1_record(uint32_t seq, uint8_t tc_type, bool calibration_missing,
+                                   const config_store_ct_channel_cal_t ct_cal[3],
+                                   uint8_t out[CONFIG_STORE_RECORD_LEN])
+{
+    memset(out, 0xFF, CONFIG_STORE_RECORD_LEN);
+    out[0] = (uint8_t)(CONFIG_STORE_MAGIC & 0xFFu);
+    out[1] = (uint8_t)((CONFIG_STORE_MAGIC >> 8) & 0xFFu);
+    out[2] = (uint8_t)((CONFIG_STORE_MAGIC >> 16) & 0xFFu);
+    out[3] = (uint8_t)((CONFIG_STORE_MAGIC >> 24) & 0xFFu);
+    out[4] = (uint8_t)(CONFIG_STORE_FORMAT_VERSION_V1 & 0xFFu);
+    out[5] = (uint8_t)((CONFIG_STORE_FORMAT_VERSION_V1 >> 8) & 0xFFu);
+    out[6] = 0;
+    out[7] = 0;
+    out[8] = (uint8_t)(seq & 0xFFu);
+    out[9] = (uint8_t)((seq >> 8) & 0xFFu);
+    out[10] = (uint8_t)((seq >> 16) & 0xFFu);
+    out[11] = (uint8_t)((seq >> 24) & 0xFFu);
+    out[12] = tc_type;
+    out[13] = calibration_missing ? 1u : 0u;
+    out[14] = 0;
+    out[15] = 0;
+    for (unsigned ch = 0; ch < 3u; ch++) {
+        size_t off = 16u + (size_t)ch * 9u;
+        union {
+            float    f;
+            uint32_t u;
+        } g, o;
+        g.f = ct_cal[ch].gain;
+        o.f = ct_cal[ch].offset;
+        out[off] = ct_cal[ch].calibrated ? 1u : 0u;
+        out[off + 1] = (uint8_t)(g.u & 0xFFu);
+        out[off + 2] = (uint8_t)((g.u >> 8) & 0xFFu);
+        out[off + 3] = (uint8_t)((g.u >> 16) & 0xFFu);
+        out[off + 4] = (uint8_t)((g.u >> 24) & 0xFFu);
+        out[off + 5] = (uint8_t)(o.u & 0xFFu);
+        out[off + 6] = (uint8_t)((o.u >> 8) & 0xFFu);
+        out[off + 7] = (uint8_t)((o.u >> 16) & 0xFFu);
+        out[off + 8] = (uint8_t)((o.u >> 24) & 0xFFu);
+    }
+    uint32_t crc = bootloader_crc32(out, 248u);
+    out[248] = (uint8_t)(crc & 0xFFu);
+    out[249] = (uint8_t)((crc >> 8) & 0xFFu);
+    out[250] = (uint8_t)((crc >> 16) & 0xFFu);
+    out[251] = (uint8_t)((crc >> 24) & 0xFFu);
+}
+
+static void test_v1_migration(void)
+{
+    TEST_SECTION("config_store -- v1 -> v2 migration");
+
+    config_store_ct_channel_cal_t ct_cal[3];
+    ct_cal[0].calibrated = true;
+    ct_cal[0].gain = 1.05f;
+    ct_cal[0].offset = -0.02f;
+    ct_cal[1].calibrated = false;
+    ct_cal[1].gain = 0.0f;
+    ct_cal[1].offset = 0.0f;
+    ct_cal[2].calibrated = true;
+    ct_cal[2].gain = 0.97f;
+    ct_cal[2].offset = 0.03f;
+
+    uint8_t v1_record[CONFIG_STORE_RECORD_LEN];
+    // A v1 record that was NEVER commissioned (calibration_missing false in
+    // this test's own input) still must migrate to calibration_missing ==
+    // true -- proving the flag is FORCED true by the migration path itself,
+    // not merely carried through from whatever v1 happened to hold.
+    pack_legacy_v1_record(15u, 0x07u /* MAX31856_TC_TYPE_T */, false, ct_cal, v1_record);
+
+    config_store_record_t out;
+    memset(&out, 0xAA, sizeof(out));
+    bool ok = config_store_unpack(v1_record, &out);
+    TEST_CHECK(ok, "a well-formed legacy v1 record migrates successfully");
+    TEST_CHECK(out.format_version == CONFIG_STORE_FORMAT_VERSION,
+               "migrated record reads back as the current format_version");
+    TEST_CHECK(out.seq == 15u, "migrated record's seq is preserved from v1");
+    TEST_CHECK(out.tc_type == 0x07u, "migrated record's tc_type is preserved from v1");
+    TEST_CHECK(out.calibration_missing == true,
+               "migrated record has calibration_missing forced true, even though the v1 "
+               "record it came from held false -- a migrated record was never commissioned "
+               "against the fields this pass added");
+    TEST_CHECK(out.ct_cal[0].calibrated == true && out.ct_cal[0].gain == 1.05f &&
+                   out.ct_cal[0].offset == -0.02f,
+               "migrated record's ct_cal[0] is preserved from v1");
+    TEST_CHECK(out.ct_cal[1].calibrated == false, "migrated record's ct_cal[1] (uncalibrated) preserved");
+    TEST_CHECK(out.ct_cal[2].calibrated == true && out.ct_cal[2].gain == 0.97f &&
+                   out.ct_cal[2].offset == 0.03f,
+               "migrated record's ct_cal[2] is preserved from v1");
+
+    // Everything v1 never had must come back at config_store_default()'s
+    // compiled default, not at zero-that-happens-to-look-like-a-default.
+    config_store_record_t def;
+    config_store_default(&def);
+    TEST_CHECK(out.firing_margin_c == def.firing_margin_c,
+               "migrated record's firing_margin_c takes the v2 compiled default");
+    TEST_CHECK(out.watchdog_timeout_ms == def.watchdog_timeout_ms,
+               "migrated record's watchdog_timeout_ms takes the v2 compiled default");
+    TEST_CHECK(out.tc_offset_c == 0.0f,
+               "migrated record's tc_offset_c is 0.0 (no correction) -- v1 predates this "
+               "field entirely, and pack_legacy_v1_record() never wrote anything at this "
+               "now-carved-out reserved offset, so migration goes through config_store_"
+               "default()'s compiled 0.0f the same way every other v1-absent field does");
+    TEST_CHECK(out.fields_set == 0,
+               "migrated record has fields_set == 0 -- none of the no-safe-default fields "
+               "were ever commissioned, v1 could not have set them");
+    // Explicit, named check for tc_type specifically (2026-08-24): a v1
+    // record's tc_type byte is preserved (checked above, out.tc_type ==
+    // 0x07u), but that value must NOT be mistaken for a commissioning event
+    // -- v1 predates CONFIG_STORE_SET_TC_TYPE entirely, so no migration path
+    // may ever set it, regardless of what value tc_type itself carries.
+    TEST_CHECK((out.fields_set & CONFIG_STORE_SET_TC_TYPE) == 0,
+               "a v1 record's real, preserved tc_type value still decodes as NOT commissioned "
+               "-- v1 never had a concept of commissioning this field");
+
+    // Prove this check can actually fail: corrupt the v1 record's CRC and
+    // confirm migration is refused, not silently accepted with garbage.
+    uint8_t corrupted[CONFIG_STORE_RECORD_LEN];
+    memcpy(corrupted, v1_record, sizeof(corrupted));
+    corrupted[20] ^= 0x01u; // inside ct_cal, well before the v1 CRC at byte 248
+    config_store_record_t sentinel;
+    memset(&sentinel, 0xAA, sizeof(sentinel));
+    config_store_record_t out2 = sentinel;
+    TEST_CHECK(!config_store_unpack(corrupted, &out2),
+               "a corrupted legacy v1 record is refused, not migrated with garbage");
+    TEST_CHECK(memcmp(&out2, &sentinel, sizeof(out2)) == 0,
+               "*out untouched after a corrupted v1 record is refused");
+}
+
+static void test_future_version_refused(void)
+{
+    TEST_SECTION("config_store -- a future (v3) record is refused, never reinterpreted");
+
+    // Build a record that is perfectly well-formed EXCEPT its format_version
+    // claims a version newer than anything this firmware understands. Its
+    // CRC is computed over the actual bytes (including that version field),
+    // so this is NOT a CRC-mismatch case -- it must be refused specifically
+    // because of the version, proving the two checks are independent.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.format_version = (uint16_t)(CONFIG_STORE_FORMAT_VERSION + 1u); // "v3"
+    rec.seq = 999u;
+    rec.abs_max_temp_c = 1234.0f; // a plausible-looking value a v2 reader
+                                  // must NOT be tempted to trust if it
+                                  // ignored the version check
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    config_store_record_t sentinel;
+    memset(&sentinel, 0xAA, sizeof(sentinel));
+    config_store_record_t out = sentinel;
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "a record with a newer-than-known format_version is refused");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+               "*out is left completely untouched when a future version is refused");
+
+    // Also prove find_latest() treats a too-new slot the same as corrupt --
+    // skipped, never chosen, even when it has the highest seq in the sector.
+    uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector, 0xFF, sizeof(sector));
+    memcpy(&sector[0], record, CONFIG_STORE_RECORD_LEN); // slot 0: seq 999, v3 -- must be skipped
+
+    config_store_record_t older;
+    config_store_default(&older);
+    older.format_version = CONFIG_STORE_FORMAT_VERSION;
+    older.seq = 5u;
+    uint8_t older_record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&older, older_record);
+    memcpy(&sector[1 * CONFIG_STORE_RECORD_LEN], older_record, CONFIG_STORE_RECORD_LEN);
+
+    config_store_record_t found;
+    size_t slot = config_store_find_latest(sector, &found);
+    TEST_CHECK(slot == 1, "the too-new slot (higher seq) is skipped; the valid v2 slot wins");
+    TEST_CHECK(found.seq == 5u, "find_latest() returns the older, valid record's contents");
+}
+
+static void test_unset_fields_distinguishable_from_zero(void)
+{
+    TEST_SECTION("config_store -- fields_set keeps 'unset' distinguishable from 'set to zero'");
+
+    // A field that is explicitly set to a value equal to what an unset
+    // field would numerically read as (0 / 0.0f) must still be
+    // distinguishable via fields_set -- proving this is a real flag, not a
+    // sentinel value that happens to collide with a valid reading.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) == 0,
+               "default record: abs_max_temp_c starts unset");
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) == 0,
+               "default record: max_rate_c_per_min starts unset");
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_MAINS_VOLTAGE_V) == 0,
+               "default record: mains_voltage_v starts unset");
+
+    // Deliberately commission max_rate_c_per_min to exactly 0.0 -- the one
+    // value that would be indistinguishable from "unset" under a sentinel
+    // scheme using 0 as the sentinel. abs_max_temp_c can no longer stand in
+    // for this demonstration: ROADMAP.md M12's owner ruling ("do not allow
+    // an unlimited max temp with the safety processor") makes a COMMITTED
+    // (bit-set) abs_max_temp_c of 0.0 an outright invalid record -- 0 on
+    // that specific field used to mean "S1's ceiling never trips", which is
+    // exactly the state that is no longer offered (see CHECK_F32_POS /
+    // RANGE_F32_POS in config_params.c). max_rate_c_per_min has no such
+    // "0 is a disabled-guard sentinel" trap, so it is the field that proves
+    // the bit -- not the numeric value -- is what a caller must trust.
+    rec.max_rate_c_per_min = 0.0f;
+    rec.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN;
+    // mains_voltage_v deliberately left at 0.0f AND unset, to prove the two
+    // "reads as 0.0" cases differ only in the bit.
+    TEST_CHECK(rec.mains_voltage_v == 0.0f && (rec.fields_set & CONFIG_STORE_SET_MAINS_VOLTAGE_V) == 0,
+               "mains_voltage_v: value 0.0 but genuinely unset");
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+    config_store_record_t back;
+    TEST_CHECK(config_store_unpack(record, &back), "record with a zero-but-set field unpacks");
+
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0,
+               "max_rate_c_per_min==0.0-but-SET roundtrips as set");
+    TEST_CHECK(back.max_rate_c_per_min == 0.0f, "max_rate_c_per_min's value (0.0) roundtrips too");
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_MAINS_VOLTAGE_V) == 0,
+               "mains_voltage_v==0.0-and-UNSET still roundtrips as unset -- proves the bit, "
+               "not the numeric value, is what a caller must trust");
+
+    // Prove config_store_field_is_set() itself can fail: flip a bit off and
+    // confirm the helper reports not-set; flip it back on and confirm set.
+    uint32_t fields_set = back.fields_set; // u32 since v3 -- config_store_field_is_set() reads four bytes through this pointer
+    TEST_CHECK(config_store_field_is_set(&fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN),
+               "config_store_field_is_set(): true when the bit is present");
+    fields_set = (uint32_t)(fields_set & ~(uint32_t)CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);
+    TEST_CHECK(!config_store_field_is_set(&fields_set, CONFIG_STORE_SET_MAX_RATE_C_PER_MIN),
+               "config_store_field_is_set(): false once the bit is cleared -- proves the "
+               "check can actually fail, not just always return true");
+}
+
+static void test_unpack_validates_ranges_on_load(void)
+{
+    TEST_SECTION("config_store_unpack -- range-validates on LOAD, not only at COMMIT_CONFIG");
+
+    // Build a record that is CRC-valid (this build's own config_store_pack()
+    // computed a correct CRC over it) but whose tc_source byte is a value no
+    // enum in this table names -- exactly the "CRC-valid record from a
+    // different build with different semantics" scenario TODO.md's audit
+    // item describes: the CRC proves the bytes are intact, it says nothing
+    // about whether tc_source == 99 means anything to THIS build.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.seq = 41u;
+    rec.tc_source = 99u; // CONFIG_STORE_TC_SOURCE_BOTH is 2 -- 99 is out of range
+    // fields_set left at 0 -- irrelevant to this check: config_params_
+    // validate_ranges() re-checks every field's OWN value unconditionally,
+    // it does not gate on whether the field was ever "set" (that gating is
+    // config_params_validate_ex()'s separate cross-field contradiction
+    // check, deliberately NOT run here -- see config_params.h's header
+    // comment on config_params_validate_ranges()).
+
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+
+    config_store_record_t sentinel;
+    memset(&sentinel, 0xAA, sizeof(sentinel));
+    config_store_record_t out = sentinel;
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "a CRC-valid v2 record with an out-of-range tc_source is refused at LOAD time, "
+               "not merely accepted and left for a guard to misinterpret");
+    TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+               "*out is left completely untouched when load-time range validation refuses "
+               "the record -- same contract as a bad magic/CRC/format_version");
+
+    // The same check must also gate config_store_find_latest()'s sector
+    // scan: an out-of-range slot is skipped in favour of the next-best
+    // valid one, exactly like a corrupt or too-new slot.
+    uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+    memset(sector, 0xFF, sizeof(sector));
+    memcpy(&sector[0], record, CONFIG_STORE_RECORD_LEN); // slot 0: seq 41, out-of-range tc_source
+
+    config_store_record_t older;
+    config_store_default(&older);
+    older.seq = 3u; // in range, lower seq
+    uint8_t older_record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&older, older_record);
+    memcpy(&sector[1 * CONFIG_STORE_RECORD_LEN], older_record, CONFIG_STORE_RECORD_LEN);
+
+    config_store_record_t found;
+    size_t slot = config_store_find_latest(sector, &found);
+    TEST_CHECK(slot == 1, "the higher-seq but out-of-range slot is skipped; the valid slot wins");
+    TEST_CHECK(found.seq == 3u, "find_latest() returns the in-range record's contents");
+
+    // A NaN float anywhere in this table must be refused too -- the single
+    // most dangerous value this surface can carry (config_params.c's own
+    // header comment on CHECK_F32_FINITE explains why: every `x > threshold`
+    // guard comparison against a NaN threshold is silently false).
+    config_store_record_t rec_nan;
+    config_store_default(&rec_nan);
+    rec_nan.seq = 42u;
+    rec_nan.firing_margin_c = NAN;
+    uint8_t record_nan[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec_nan, record_nan);
+    out = sentinel;
+    TEST_CHECK(!config_store_unpack(record_nan, &out),
+               "a CRC-valid v2 record with a NaN float field is refused at LOAD time");
+
+    // Prove the same load-time check applies to the v1 migration path, not
+    // only the v2 one: a legacy record whose preserved tc_type byte is
+    // already handled by the separate voltage-mode clamp, but whose
+    // migration path shares the same config_params_validate_ranges() call --
+    // this reuses test_v1_migration()'s own ct_cal fixture and confirms a
+    // WELL-FORMED v1 record (nothing here is out of range) still migrates
+    // successfully, i.e. that wiring the check into this path did not break
+    // the ordinary case.
+    config_store_ct_channel_cal_t ct_cal[3];
+    memset(ct_cal, 0, sizeof(ct_cal));
+    uint8_t v1_record[CONFIG_STORE_RECORD_LEN];
+    pack_legacy_v1_record(9u, 0x03u, true, ct_cal, v1_record);
+    config_store_record_t v1_out;
+    TEST_CHECK(config_store_unpack(v1_record, &v1_out),
+               "an in-range v1 record still migrates successfully once load-time range "
+               "validation is wired into that path too");
+}
+
+// docs/audits/s8_rate_guard_retune_2026-09-09.md: max_rate_c_per_min now
+// carries a hard [CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, _CEILING] bound,
+// enforced both at SET_PARAM time (config_params_set(), CHECK_F32_RANGE_OR_
+// ZERO) and again at load time (config_params_validate_ranges(),
+// RANGE_F32_RANGE_OR_ZERO) -- same belt-and-suspenders pattern as
+// abs_max_temp_c above. 0.0f (disabled/not-commissioned) is the one
+// exception: it always bypasses both bounds, since it is the sentinel, not a
+// rate. This check was proven capable of failing (RED) by temporarily
+// raising CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR above 20.0 in config_store.h,
+// observing every test below (and every other test in this file staging
+// max_rate_c_per_min=20.0 for an unrelated reason) fail, then restoring the
+// constant by hand -- confirmed via an empty `git diff` on that file.
+static void test_s8_rate_guard_bounds(void)
+{
+    TEST_SECTION("max_rate_c_per_min -- CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR/_CEILING bound "
+                 "any commissioned (nonzero) value, at both SET_PARAM time and load time");
+
+    config_store_record_t rec;
+    kilnlink_param_value_t v;
+
+    // --- SET_PARAM-time gate (config_params_set(), 0x0204) ------------------
+    config_store_default(&rec);
+    v.f32_val = 0.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "0.0 (disabled sentinel) is accepted -- it always bypasses the bound");
+
+    config_store_default(&rec);
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR;
+    TEST_CHECK(config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "exactly the floor is accepted (inclusive bound)");
+
+    config_store_default(&rec);
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING;
+    TEST_CHECK(config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "exactly the ceiling is accepted (inclusive bound)");
+
+    config_store_default(&rec);
+    config_store_record_t before = rec;
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR - 0.1f;
+    TEST_CHECK(!config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "a nonzero value just below the floor is refused -- would nuisance-trip on "
+               "ordinary recorded bench operation (audit's measured 7.69-13.5 C/min peak)");
+    TEST_CHECK(memcmp(&rec, &before, sizeof(rec)) == 0, "rec untouched by the refused write");
+
+    config_store_default(&rec);
+    before = rec;
+    v.f32_val = CONFIG_STORE_MAX_RATE_C_PER_MIN_CEILING + 0.1f;
+    TEST_CHECK(!config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v),
+               "a value above the ceiling is refused -- an absurd magnitude (units slip, or a "
+               "runaway auto-derivation) must not silently disarm S8");
+    TEST_CHECK(memcmp(&rec, &before, sizeof(rec)) == 0, "rec untouched by the refused write");
+
+    // --- Load-time re-check (config_params_validate_ranges(), via unpack) --
+    // A record that bypassed SET_PARAM's gate entirely (direct struct write,
+    // simulating a record committed by a different/older build or a bit
+    // flip) must still be refused when loaded.
+    config_store_default(&rec);
+    rec.max_rate_c_per_min = CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR - 1.0f;
+    rec.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN;
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, record);
+    config_store_record_t out;
+    TEST_CHECK(!config_store_unpack(record, &out),
+               "a CRC-valid record with a too-tight committed max_rate_c_per_min is refused at "
+               "LOAD time too, not only at commissioning");
+
+    config_store_default(&rec);
+    rec.max_rate_c_per_min = 0.0f;
+    rec.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &out),
+               "a committed-but-0.0 (disabled) max_rate_c_per_min still loads fine -- the "
+               "sentinel is exempt from the bound at load time too");
+}
+
+static void test_reject_info_distinguishes_fresh_from_rejected(void)
+{
+    TEST_SECTION("config_store_unpack_ex/find_latest_ex -- fresh board vs. committed-and-"
+                 "rejected are NOT the same outcome");
+
+    // This is the assertion that would have caught the 2026-08-27 fail-open
+    // regression: config_store_find_latest() alone cannot tell "the sector
+    // was empty/corrupt" (ordinary; a fresh board looks exactly like this)
+    // apart from "a committed, CRC-intact record was found and REFUSED"
+    // (never ordinary -- it means the guards are about to run on
+    // config_store_default() instead of a real, previously-approved config).
+    // Both return CONFIG_STORE_NO_SLOT identically; conflating them is
+    // exactly the defect config_store.h's "Load-time rejection diagnostics"
+    // comment and config_store_get_config_crc()'s fix both exist to close.
+    // If a future edit merges the two branches below back into "just check
+    // CONFIG_STORE_NO_SLOT", this test fails on the out_reject.rejected
+    // checks even though CONFIG_STORE_NO_SLOT is still correctly returned in
+    // both cases -- proving the two cases really are being told apart, not
+    // merely proving the existing NO_SLOT behaviour still works.
+
+    // --- Case 1: fresh board, nothing ever committed -- an erased (all-0xFF)
+    // sector. Ordinary; must NOT be reported as rejected.
+    {
+        uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+        memset(sector, 0xFF, sizeof(sector));
+
+        config_store_record_t found;
+        config_store_reject_info_t reject_info;
+        memset(&reject_info, 0xAA, sizeof(reject_info)); // poison: must be fully overwritten
+        size_t slot = config_store_find_latest_ex(sector, &found, &reject_info);
+
+        TEST_CHECK(slot == CONFIG_STORE_NO_SLOT, "an erased sector has no valid slot");
+        TEST_CHECK(!reject_info.rejected,
+                   "an erased sector is the ORDINARY fresh-board case -- rejected must be false, "
+                   "never conflated with a record that was found and refused");
+        TEST_CHECK(reject_info.field == NULL && reject_info.rule == NULL && reject_info.seq == 0u,
+                   "the rest of out_reject stays zeroed for the ordinary case, nothing to log");
+    }
+
+    // --- Case 2: a committed, CRC-intact record whose tc_source byte this
+    // build's range table refuses -- config_store_write()'s own seq
+    // convention (first real write is seq 1) is irrelevant here; what
+    // matters is that the record is otherwise well-formed and only fails
+    // config_params_validate_ranges(). Must be reported as rejected, with
+    // the offending field/rule/seq actually populated for the log line.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        rec.seq = 7u;
+        rec.tc_source = 99u; // out of range -- CONFIG_STORE_TC_SOURCE_BOTH is 2
+
+        uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_SIZE];
+        memset(sector, 0xFF, sizeof(sector));
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        memcpy(&sector[0], record, CONFIG_STORE_RECORD_LEN);
+        // every other slot stays erased -- no valid fallback slot exists,
+        // matching config_store_find_latest()'s own "no other slot" contract
+        // for this scenario.
+
+        config_store_record_t found;
+        config_store_reject_info_t reject_info;
+        memset(&reject_info, 0, sizeof(reject_info));
+        size_t slot = config_store_find_latest_ex(sector, &found, &reject_info);
+
+        TEST_CHECK(slot == CONFIG_STORE_NO_SLOT,
+                   "the only record in the sector is refused, so no slot survives -- same "
+                   "CONFIG_STORE_NO_SLOT a fresh board would also return");
+        TEST_CHECK(reject_info.rejected,
+                   "unlike case 1, this sector DID hold a committed record -- rejected must be "
+                   "true, this is the distinction case 1's test above proves is not vacuous");
+        TEST_CHECK(reject_info.field != NULL && strcmp(reject_info.field, "tc_source") == 0,
+                   "the specific offending field is named, not just \"validation failed\"");
+        TEST_CHECK(reject_info.rule != NULL && strlen(reject_info.rule) > 0,
+                   "the specific rule text is carried too, for a self-contained log line");
+        TEST_CHECK(reject_info.seq == 7u,
+                   "the rejected record's own seq is carried, so a log line can name WHICH "
+                   "commit was refused");
+    }
+
+    // --- config_store_unpack_ex() directly, one level below find_latest_ex():
+    // confirms the plain "false but not rejected" (bad magic) case also
+    // leaves out_reject cleanly zeroed, not just find_latest_ex()'s
+    // aggregation of it.
+    {
+        uint8_t erased_record[CONFIG_STORE_RECORD_LEN];
+        memset(erased_record, 0xFF, sizeof(erased_record));
+        config_store_record_t out;
+        config_store_reject_info_t reject_info;
+        memset(&reject_info, 0xAA, sizeof(reject_info));
+        TEST_CHECK(!config_store_unpack_ex(erased_record, &out, &reject_info),
+                   "an erased record still fails to unpack");
+        TEST_CHECK(!reject_info.rejected,
+                   "bad magic (erased flash) is case 1, not case 2 -- unpack_ex must not report "
+                   "it as a refused record");
+    }
+}
+
+static void test_seq_to_version(void)
+{
+    TEST_SECTION("config_store_seq_to_version -- never lands on 0 for a real commit");
+
+    // seq == 0 is config_store_default()'s own seq -- a board that has never
+    // committed a real config. It MUST keep mapping to 0: that is the
+    // sentinel config_store_confirm_crc_ok() reads as "no valid config was
+    // ever loaded". Getting this direction wrong (seq 0 mapping to a
+    // non-zero byte) would be a worse bug than the one this function fixes.
+    TEST_CHECK(config_store_seq_to_version(0u) == 0u,
+               "seq 0 (never committed) maps to version 0, the 'unloaded' sentinel");
+
+    // The first real commit (config_store_write() always assigns
+    // cached_seq + 1u, and the cache starts at seq 0) is seq == 1, and must
+    // map to a non-zero byte.
+    TEST_CHECK(config_store_seq_to_version(1u) != 0u,
+               "seq 1 (first real commit) never reports version 0");
+    TEST_CHECK(config_store_seq_to_version(1u) == 1u, "seq 1 maps to version 1");
+
+    // The specific values that broke the old `(uint8_t)(seq & 0xFFu)`
+    // truncation: seq == 256 is the 256th commit, and every further multiple
+    // of 256. Every one of these must now come back non-zero.
+    TEST_CHECK(config_store_seq_to_version(256u) != 0u,
+               "seq 256 -- collided with 0 under the old 8-bit truncation -- no longer does");
+    TEST_CHECK(config_store_seq_to_version(512u) != 0u, "seq 512 also never reports 0");
+    TEST_CHECK(config_store_seq_to_version(768u) != 0u, "seq 768 also never reports 0");
+    TEST_CHECK(config_store_seq_to_version(0xFFFFFFFFu) != 0u,
+               "the largest possible seq (uint32_t max) never reports 0 either");
+
+    // Exhaustive-ish sweep: no seq in a wide range should ever map to 0,
+    // except seq == 0 itself. This is the property update_task.c's
+    // PENDING_VERIFY -> VALID gate actually depends on.
+    bool any_unexpected_zero = false;
+    for (uint32_t seq = 1u; seq <= 2000u; seq++) {
+        if (config_store_seq_to_version(seq) == 0u) {
+            any_unexpected_zero = true;
+            break;
+        }
+    }
+    TEST_CHECK(!any_unexpected_zero,
+               "no seq in [1, 2000] (covering several full 255-wide rotations) ever maps to "
+               "version 0");
+}
+
+// --- config_params.c: SET_PARAM/GET_PARAM/COMMIT_CONFIG/GET_CONFIG_PAGE's
+// pure id<->field mapping, cross-field validation, and the ct_channel_map
+// group-bit derivation (docs/COMMISSIONING.md section 2/2.1).
+
+static void test_config_params_get_set_roundtrip(void)
+{
+    TEST_SECTION("config_params_get/set -- roundtrip across every wire type");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+
+    // U8, gated (tc_source).
+    kilnlink_param_value_t v;
+    v.u8_val = CONFIG_STORE_TC_SOURCE_BOTH;
+    TEST_CHECK(config_params_set(&rec, 0x0101u, KILNLINK_PARAM_TYPE_U8, v), "set tc_source (U8)");
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_TC_SOURCE) != 0, "tc_source gates fields_set");
+    uint8_t type = 0;
+    kilnlink_param_value_t got;
+    TEST_CHECK(config_params_get(&rec, 0x0101u, &type, &got), "get tc_source");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_U8 && got.u8_val == CONFIG_STORE_TC_SOURCE_BOTH,
+               "tc_source value/type roundtrips");
+
+    // F32, gated (abs_max_temp_c).
+    v.f32_val = 1305.25f;
+    TEST_CHECK(config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v), "set abs_max_temp_c (F32)");
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0, "abs_max_temp_c gates fields_set");
+    TEST_CHECK(config_params_get(&rec, 0x0104u, &type, &got), "get abs_max_temp_c");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_F32 && got.f32_val == 1305.25f, "abs_max_temp_c roundtrips");
+
+    // U8, gated (tc_type) -- 2026-08-24: unlike the other gated fields
+    // above, tc_type's VALUE does not change here (it was already K by
+    // compiled default); only the bit should flip, proving SET_PARAM
+    // actually distinguishes "committed as K" from "defaulted to K".
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_TC_TYPE) == 0,
+               "tc_type starts unset on a fresh default record");
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE; // K -- same value the default already holds
+    TEST_CHECK(config_params_set(&rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v), "set tc_type (U8)");
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_TC_TYPE) != 0,
+               "tc_type gates fields_set even though the VALUE did not change");
+    TEST_CHECK(config_params_get(&rec, 0x0105u, &type, &got), "get tc_type");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_U8 && got.u8_val == CONFIG_STORE_DEFAULT_TC_TYPE,
+               "tc_type value/type roundtrips");
+
+    // U16 wire <-> u32 record (blind_grace_s), NOT gated.
+    v.u16_val = 42u;
+    TEST_CHECK(config_params_set(&rec, 0x0206u, KILNLINK_PARAM_TYPE_U16, v), "set blind_grace_s (U16)");
+    TEST_CHECK(rec.blind_grace_s == 42u, "blind_grace_s stored as the record's own u32");
+    TEST_CHECK(config_params_get(&rec, 0x0206u, &type, &got), "get blind_grace_s");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_U16 && got.u16_val == 42u, "blind_grace_s roundtrips as U16");
+
+    // BOOL (ct_cal[1].calibrated).
+    v.bool_val = 1u;
+    TEST_CHECK(config_params_set(&rec, 0x0317u, KILNLINK_PARAM_TYPE_BOOL, v), "set ct_cal[1].calibrated (BOOL)");
+    TEST_CHECK(rec.ct_cal[1].calibrated == true, "ct_cal[1].calibrated stored");
+    TEST_CHECK(config_params_get(&rec, 0x0317u, &type, &got), "get ct_cal[1].calibrated");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_BOOL && got.bool_val == 1u, "ct_cal[1].calibrated roundtrips");
+}
+
+static void test_config_params_unknown_id_refused(void)
+{
+    TEST_SECTION("config_params_get/set -- unknown param_id refused, not guessed at");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    config_store_record_t sentinel = rec;
+
+    kilnlink_param_value_t v;
+    v.u8_val = 5u;
+    TEST_CHECK(!config_params_set(&rec, 0xFFFFu, KILNLINK_PARAM_TYPE_U8, v),
+               "an id nothing in this table names is refused by set()");
+    TEST_CHECK(memcmp(&rec, &sentinel, sizeof(rec)) == 0, "set() leaves rec untouched on an unknown id");
+
+    uint8_t type = 0xAAu;
+    kilnlink_param_value_t got;
+    memset(&got, 0xAA, sizeof(got));
+    TEST_CHECK(!config_params_get(&rec, 0xFFFFu, &type, &got),
+               "an id nothing in this table names is refused by get() -- "
+               "the wire's GET_PARAM reply turns this into found=0");
+}
+
+static void test_config_params_type_mismatch_refused(void)
+{
+    TEST_SECTION("config_params_set -- wrong wire type for a real id is refused, not coerced");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    config_store_record_t sentinel = rec;
+
+    // blind_grace_s (0x0206) is U16 -- sending an F32 for it must be refused
+    // wholesale, never reinterpreted as some other numeric value.
+    kilnlink_param_value_t v;
+    v.f32_val = 3.14f;
+    TEST_CHECK(!config_params_set(&rec, 0x0206u, KILNLINK_PARAM_TYPE_F32, v),
+               "an F32 value for a U16 field is refused");
+    TEST_CHECK(memcmp(&rec, &sentinel, sizeof(rec)) == 0, "rec is untouched on a type mismatch");
+}
+
+static void test_config_params_set_range_validation(void)
+{
+    TEST_SECTION("config_params_set -- range/finiteness validation at SET_PARAM time");
+
+    config_store_record_t rec;
+    kilnlink_param_value_t v;
+
+    // --- Enums: an out-of-range value is refused, rec left untouched -------
+    config_store_default(&rec);
+    config_store_record_t sentinel = rec;
+    v.u8_val = 3u; // tc_source only has 0/1/2 (OWN_J7/BORROWED_ZONE/BOTH)
+    TEST_CHECK(!config_params_set(&rec, 0x0101u, KILNLINK_PARAM_TYPE_U8, v),
+               "tc_source = 3 (one past BOTH) is refused");
+    TEST_CHECK(memcmp(&rec, &sentinel, sizeof(rec)) == 0, "rec untouched by the refused tc_source");
+
+    // Prove it can PASS too: every named tc_source member is accepted.
+    for (uint8_t ok = CONFIG_STORE_TC_SOURCE_OWN_J7; ok <= CONFIG_STORE_TC_SOURCE_BOTH; ok++) {
+        v.u8_val = ok;
+        TEST_CHECK(config_params_set(&rec, 0x0101u, KILNLINK_PARAM_TYPE_U8, v),
+                   "every named tc_source value is accepted");
+    }
+
+    config_store_default(&rec);
+    v.u8_val = 3u; // CONFIG_REFERENCE.md sec1: borrowed_zone_index is "0-2"
+    TEST_CHECK(!config_params_set(&rec, 0x0102u, KILNLINK_PARAM_TYPE_U8, v),
+               "borrowed_zone_index = 3 is refused (documented range is 0-2)");
+    for (uint8_t ok = 0u; ok <= 2u; ok++) {
+        v.u8_val = ok;
+        TEST_CHECK(config_params_set(&rec, 0x0102u, KILNLINK_PARAM_TYPE_U8, v),
+                   "borrowed_zone_index 0, 1, and 2 are all accepted");
+    }
+
+    config_store_default(&rec);
+    v.u8_val = 2u; // only CHAMBER_AGREED(0)/EXTERNAL_OVERHEAT(1) exist
+    TEST_CHECK(!config_params_set(&rec, 0x0103u, KILNLINK_PARAM_TYPE_U8, v),
+               "tc_placement_mode = 2 (past EXTERNAL_OVERHEAT) is refused");
+    v.u8_val = CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT;
+    TEST_CHECK(config_params_set(&rec, 0x0103u, KILNLINK_PARAM_TYPE_U8, v),
+               "tc_placement_mode = EXTERNAL_OVERHEAT (the boundary value) is accepted");
+
+    config_store_default(&rec);
+    v.u8_val = 8u; // MAX31856_TC_TYPE_* only runs 0-7 (B..T)
+    TEST_CHECK(!config_params_set(&rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v),
+               "tc_type = 8 (past T) is refused");
+    v.u8_val = 7u;
+    TEST_CHECK(config_params_set(&rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v),
+               "tc_type = 7 (T, the boundary value) is accepted");
+
+    config_store_default(&rec);
+    v.u8_val = 8u;
+    TEST_CHECK(!config_params_set(&rec, 0x0210u, KILNLINK_PARAM_TYPE_U8, v),
+               "borrowed_type_expected = 8 (past T) is refused");
+    v.u8_val = 7u;
+    TEST_CHECK(config_params_set(&rec, 0x0210u, KILNLINK_PARAM_TYPE_U8, v),
+               "borrowed_type_expected = 7 (T, the boundary value) is accepted");
+
+    // safety_tc_installed (0x0211) -- 0/1 only, no third state.
+    config_store_default(&rec);
+    v.u8_val = 2u;
+    TEST_CHECK(!config_params_set(&rec, 0x0211u, KILNLINK_PARAM_TYPE_U8, v),
+               "safety_tc_installed = 2 is refused (0/1 only)");
+    v.u8_val = 1u;
+    TEST_CHECK(config_params_set(&rec, 0x0211u, KILNLINK_PARAM_TYPE_U8, v),
+               "safety_tc_installed = 1 (installed, the boundary/default value) is accepted");
+    v.u8_val = 0u;
+    TEST_CHECK(config_params_set(&rec, 0x0211u, KILNLINK_PARAM_TYPE_U8, v),
+               "safety_tc_installed = 0 (declared not installed) is accepted");
+    TEST_CHECK(rec.safety_tc_installed == 0u, "the declared-not-installed value actually lands in the record");
+
+    // --- Floats: NaN/+Inf/-Inf refused for EVERY F32 field ------------------
+    // abs_max_temp_c is the single most dangerous field in this table -- a
+    // NaN ceiling is a guard (S1) that can never trip, since `x > NaN` is
+    // always false. Prove all three non-finite bit patterns are refused,
+    // then prove a normal in-range value still works (not an over-tight
+    // validator).
+    static const uint16_t f32_ids[] = {
+        0x0104u, // abs_max_temp_c
+        0x0201u, // firing_margin_c
+        0x0202u, // overshoot_margin_c
+        0x0204u, // max_rate_c_per_min
+        0x0208u, // tc_disagreement_c
+        0x020Au, // tc_expected_offset_c
+        0x020Bu, // cj_warn_c
+        0x020Cu, // cj_max_c
+        0x0301u, // i_present_a
+        0x0308u, // k_ct_v_per_a[0]
+        0x0309u, // k_ct_v_per_a[1]
+        0x030Au, // k_ct_v_per_a[2]
+        0x030Bu, // gain[0]
+        0x030Cu, // gain[1]
+        0x030Du, // gain[2]
+        0x030Eu, // mains_voltage_v
+        0x0310u, // ct_cal[0].gain
+        0x0311u, // ct_cal[1].gain
+        0x0312u, // ct_cal[2].gain
+        0x0313u, // ct_cal[0].offset
+        0x0314u, // ct_cal[1].offset
+        0x0315u, // ct_cal[2].offset
+    };
+    for (size_t i = 0; i < sizeof(f32_ids) / sizeof(f32_ids[0]); i++) {
+        config_store_default(&rec);
+        config_store_record_t before = rec;
+        v.f32_val = NAN;
+        TEST_CHECK(!config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
+                   "NaN is refused for this F32 field");
+        TEST_CHECK(memcmp(&rec, &before, sizeof(rec)) == 0, "rec untouched by a refused NaN");
+
+        v.f32_val = INFINITY;
+        TEST_CHECK(!config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
+                   "+Inf is refused for this F32 field");
+
+        v.f32_val = -INFINITY;
+        TEST_CHECK(!config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
+                   "-Inf is refused for this F32 field");
+
+        // Sanity: a normal finite value is still accepted -- proves this
+        // isn't an over-tight validator rejecting legitimate values too.
+        // 20.0 (not 12.5) since max_rate_c_per_min now carries its own
+        // [CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, _CEILING] bound (15..60) --
+        // see that macro's doc comment (config_store.h) -- and this loop
+        // shares one value across every field in the table.
+        v.f32_val = 20.0f;
+        TEST_CHECK(config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
+                   "an ordinary finite value is still accepted for this F32 field");
+    }
+
+    // --- Negative ceilings/thresholds: the two fields CONFIG_REFERENCE.md ---
+    // explicitly bounds below by zero (abs_max_temp_c section 1,
+    // i_present_a section 3). safety_guards.c once accepted a finite
+    // NEGATIVE ceiling via `isfinite(x) && x < abs_max` with no lower bound
+    // -- this is the same class of bug, closed here instead.
+    config_store_default(&rec);
+    v.f32_val = -1.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v),
+               "a negative abs_max_temp_c ceiling is refused");
+    // ROADMAP.md M12 owner ruling: "do not allow an unlimited max temp with
+    // the safety processor" -- 0.0 used to mean "S1's ceiling never trips",
+    // a real reachable no-limit state; that state no longer exists, so 0.0
+    // must be refused exactly like a negative value, not accepted as a
+    // boundary.
+    v.f32_val = 0.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v),
+               "abs_max_temp_c = 0.0 is refused -- 0 used to mean 'never trips', "
+               "no no-limit state is offered any more (ROADMAP.md M12)");
+    v.f32_val = 1305.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v),
+               "a realistic positive abs_max_temp_c (~cone 10) is accepted");
+
+    config_store_default(&rec);
+    v.f32_val = -0.5f;
+    TEST_CHECK(!config_params_set(&rec, 0x0301u, KILNLINK_PARAM_TYPE_F32, v),
+               "a negative i_present_a threshold is refused");
+    v.f32_val = 2.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0301u, KILNLINK_PARAM_TYPE_F32, v),
+               "the documented default i_present_a (2.0 A) is accepted");
+
+    // --- Deliberately-unbounded floats: NOT rejected for being negative or -
+    // unusual, since CONFIG_REFERENCE.md documents no sign/magnitude bound
+    // for them (tc_expected_offset_c is explicitly a signed offset).
+    config_store_default(&rec);
+    v.f32_val = -15.0f;
+    TEST_CHECK(config_params_set(&rec, 0x020Au, KILNLINK_PARAM_TYPE_F32, v),
+               "tc_expected_offset_c is signed by design -- a negative value is NOT rejected");
+}
+
+static void test_config_params_validate_range_validation(void)
+{
+    TEST_SECTION("config_params_validate -- range re-check as a backstop against non-SET_PARAM records");
+
+    // Simulates a record that reached COMMIT_CONFIG without going through
+    // config_params_set() for every field (e.g. hand-built, or migrated
+    // forward from some future format) -- config_params_validate() must
+    // still catch an impossible value even though config_params_set() never
+    // saw it.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = NAN;
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    TEST_CHECK(!config_params_validate(&rec, &field, &rule),
+               "a NaN abs_max_temp_c fails validate() even without going through set()");
+    TEST_CHECK(field != NULL && strcmp(field, "abs_max_temp_c") == 0, "the offending field is named");
+
+    config_store_default(&rec);
+    rec.tc_source = 9u; // never a value SET_PARAM's own check would let through
+    field = NULL;
+    TEST_CHECK(!config_params_validate(&rec, &field, &rule),
+               "an out-of-range tc_source fails validate() even without going through set()");
+    TEST_CHECK(field != NULL && strcmp(field, "tc_source") == 0, "the offending field is named");
+
+    // Sanity: an ordinary, fully-defaulted record still validates -- this
+    // backstop must not turn into its own over-tight validator.
+    config_store_default(&rec);
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "an untouched, compiled-default record still validates");
+}
+
+static void test_config_params_validate_ex_reason_and_id_lookup(void)
+{
+    TEST_SECTION("config_params_validate_ex / config_params_id_for_field_name -- "
+                 "COMMIT_CONFIG_REJECTED's (0x20) wire-sized reason and param_id");
+
+    // A range failure reports CONFIG_PARAMS_REJECT_RANGE, and the offending
+    // field's name maps to its real COMMISSIONING.md sec 2.1 param_id.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = NAN;
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    config_params_reject_reason_t reason = CONFIG_PARAMS_REJECT_CONTRADICTION; // poison, must be overwritten
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "NaN abs_max_temp_c still fails validate_ex()");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_RANGE, "a range failure reports CONFIG_PARAMS_REJECT_RANGE");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0104u,
+               "abs_max_temp_c's name maps to its real param_id 0x0104");
+
+    // A contradiction reports CONFIG_PARAMS_REJECT_CONTRADICTION, not RANGE
+    // -- this is the check that actually distinguishes the two wire reasons;
+    // without it, every rejection would look identical to the ESP.
+    config_store_default(&rec);
+    rec.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
+    rec.tc_placement_mode = CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT;
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_TC_PLACEMENT_MODE);
+    field = NULL;
+    rule = NULL;
+    reason = CONFIG_PARAMS_REJECT_RANGE; // poison, must be overwritten
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "the tc_placement_mode/tc_source contradiction still fails validate_ex()");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_CONTRADICTION,
+               "a cross-field contradiction reports CONFIG_PARAMS_REJECT_CONTRADICTION, not RANGE");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0103u,
+               "tc_placement_mode's name maps to its real param_id 0x0103");
+
+    // A passing record leaves *out_reason untouched at NONE and old
+    // callers (out_reason == NULL, i.e. config_params_validate() itself)
+    // still work unchanged.
+    config_store_default(&rec);
+    field = NULL;
+    rule = NULL;
+    reason = CONFIG_PARAMS_REJECT_RANGE; // poison
+    TEST_CHECK(config_params_validate_ex(&rec, &field, &rule, &reason), "a clean record passes validate_ex()");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_NONE, "a passing validate_ex() reports CONFIG_PARAMS_REJECT_NONE");
+    TEST_CHECK(config_params_validate(&rec, &field, &rule), "config_params_validate() wrapper still works");
+
+    // An unknown/NULL name is the NO_PARAM_ID sentinel, never a 0 or a
+    // garbage id that could collide with a real one.
+    TEST_CHECK(config_params_id_for_field_name("not_a_real_field") == CONFIG_PARAMS_NO_PARAM_ID,
+               "an unrecognised field name maps to the NO_PARAM_ID sentinel");
+    TEST_CHECK(config_params_id_for_field_name(NULL) == CONFIG_PARAMS_NO_PARAM_ID,
+               "a NULL field name maps to the NO_PARAM_ID sentinel");
+    TEST_CHECK(config_params_id_for_field_name("rec") == CONFIG_PARAMS_NO_PARAM_ID,
+               "\"rec\" (the NULL-record guard's own out_field) is not a real param and maps to the sentinel");
+}
+
+static void test_config_params_id_table_self_consistent(void)
+{
+    TEST_SECTION("config_params -- every id in the enumeration table is get()/set()-able");
+
+    // Proves the id table config_params_count()/_id_at() expose for
+    // GET_CONFIG_PAGE agrees with the switch statements config_params_get()/
+    // _set() actually dispatch on -- a real risk in a hand-written table
+    // plus a hand-written switch, and exactly the kind of drift that would
+    // otherwise silently drop an id from every page dump while still
+    // accepting SET_PARAM for it (or vice versa).
+    config_store_record_t rec;
+    config_store_default(&rec);
+
+    size_t count = config_params_count();
+    TEST_CHECK(count > 0, "the id table is non-empty");
+    for (size_t i = 0; i < count; i++) {
+        uint16_t id = 0;
+        uint8_t table_type = 0;
+        TEST_CHECK(config_params_id_at(i, &id, &table_type), "id_at() succeeds for every in-range index");
+
+        uint8_t got_type = 0;
+        kilnlink_param_value_t got;
+        memset(&got, 0, sizeof(got));
+        TEST_CHECK(config_params_get(&rec, id, &got_type, &got),
+                   "every id the table lists is recognised by get()");
+        TEST_CHECK(got_type == table_type, "get()'s reported type matches the table's own type for this id");
+    }
+    TEST_CHECK(!config_params_id_at(count, NULL, NULL), "one past the end is out of range");
+}
+
+static void test_config_params_validate_contradiction_rejected(void)
+{
+    TEST_SECTION("config_params_validate -- tc_placement_mode vs tc_source contradiction rejected");
+
+    // Both staged, contradictory: BORROWED_ZONE forces CHAMBER_AGREED
+    // (CONFIG_REFERENCE.md sec1); EXTERNAL_OVERHEAT must be rejected, not
+    // silently reconciled to CHAMBER_AGREED.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
+    rec.tc_placement_mode = CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT;
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_TC_PLACEMENT_MODE);
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    TEST_CHECK(!config_params_validate(&rec, &field, &rule),
+               "BORROWED_ZONE + EXTERNAL_OVERHEAT, both staged, is rejected");
+    TEST_CHECK(field != NULL && strcmp(field, "tc_placement_mode") == 0,
+               "the offending field is named");
+    TEST_CHECK(rule != NULL && strlen(rule) > 0, "the violated rule is named");
+
+    // Prove this check can actually PASS too: same tc_source, but
+    // CHAMBER_AGREED -- the combination the rule forces -- must validate.
+    rec.tc_placement_mode = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "BORROWED_ZONE + CHAMBER_AGREED (the forced combination) validates");
+
+    // And prove the check does NOT fire when only ONE of the two fields has
+    // actually been staged -- an unset field cannot contradict anything, and
+    // a commit that only touches unrelated fields must not be blocked by
+    // whatever zero-initialised tc_placement_mode happens to read as.
+    config_store_record_t partial;
+    config_store_default(&partial);
+    partial.tc_source = CONFIG_STORE_TC_SOURCE_BORROWED_ZONE;
+    partial.fields_set |= CONFIG_STORE_SET_TC_SOURCE; // tc_placement_mode left UNSET
+    TEST_CHECK(config_params_validate(&partial, &field, &rule),
+               "tc_source alone (tc_placement_mode still unset) does not trip the contradiction check");
+}
+
+static void test_config_params_validate_abs_max_temp_vs_tc_type_contradiction_rejected(void)
+{
+    TEST_SECTION("config_params_validate -- abs_max_temp_c vs tc_type contradiction rejected (M2, "
+                 "2026-08-28 audit fix)");
+
+    // The live-bench-equivalent defect: a curl posting abs_max_temp_c=1500
+    // with tc_type=7 (Type T, whose own sensor tops out at 400 C per
+    // MAX31856.pdf) used to be accepted by CHECK_F32_POS alone -- S1 would
+    // then guard a threshold the sensor goes physically out of range 1100 C
+    // below. Both fields staged, contradictory: must be rejected.
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = 1500.0f;
+    rec.tc_type = 7u; // Type T, TTC -200..400 C
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_ABS_MAX_TEMP_C | CONFIG_STORE_SET_TC_TYPE);
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    config_params_reject_reason_t reason = CONFIG_PARAMS_REJECT_RANGE; // poison, must be overwritten
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "abs_max_temp_c=1500 with tc_type=Type T (max 400C), both staged, is rejected");
+    TEST_CHECK(field != NULL && strcmp(field, "abs_max_temp_c") == 0, "the offending field is named");
+    TEST_CHECK(rule != NULL && strlen(rule) > 0, "the violated rule is named");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_CONTRADICTION,
+               "reported as CONFIG_PARAMS_REJECT_CONTRADICTION, not RANGE");
+
+    // Prove this check can actually PASS: a value within Type T's own range.
+    rec.abs_max_temp_c = 350.0f;
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "abs_max_temp_c=350 with tc_type=Type T (max 400C) validates");
+
+    // Exactly AT the sensor's own maximum is still accepted (inclusive
+    // bound), same convention max31856_tc_range_is_plausible()'s own
+    // boundary tests use elsewhere in this suite.
+    rec.abs_max_temp_c = 400.0f;
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "abs_max_temp_c exactly AT the sensor's own maximum (400C for Type T) validates");
+
+    // A wide-range type (Type K, max 1372C) happily accepts the SAME 1500C
+    // that Type T rejected -- proves the check is genuinely per-type, not a
+    // single hard-coded ceiling that happened to catch the Type T case.
+    config_store_default(&rec);
+    rec.abs_max_temp_c = 1500.0f;
+    rec.tc_type = 0u; // Type B, TTC 95..1798 C -- 1500 is well within range
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_ABS_MAX_TEMP_C | CONFIG_STORE_SET_TC_TYPE);
+    field = NULL;
+    rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule),
+               "the SAME abs_max_temp_c=1500 validates against Type B (max 1798C) -- per-type, not a "
+               "single hard-coded ceiling");
+
+    // And prove the check does NOT fire when only ONE of the two fields has
+    // actually been staged -- the field-by-field commissioning case (M2's
+    // finding b): abs_max_temp_c alone, tc_type still at its zero-init
+    // default, must not be blocked by a field the operator has not yet sent.
+    config_store_record_t partial;
+    config_store_default(&partial);
+    partial.abs_max_temp_c = 1500.0f;
+    partial.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; // tc_type left UNSET
+    TEST_CHECK(config_params_validate(&partial, &field, &rule),
+               "abs_max_temp_c alone (tc_type still unset) does not trip the contradiction check -- "
+               "this is the field-by-field commissioning case M2 named as the common one");
+}
+
+static void test_config_params_ct_channel_map_two_of_three(void)
+{
+    TEST_SECTION("config_params -- ct_channel_map: two of three channels leaves the group bit unset");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+
+    kilnlink_param_value_t v;
+    v.u8_val = 0u;
+    TEST_CHECK(config_params_set(&rec, 0x0106u, KILNLINK_PARAM_TYPE_U8, v), "stage channel 0");
+    v.u8_val = 1u;
+    TEST_CHECK(config_params_set(&rec, 0x0107u, KILNLINK_PARAM_TYPE_U8, v), "stage channel 1");
+    // Channel 2 (0x0108) deliberately NOT staged.
+
+    config_params_finalize_ct_channel_map(&rec);
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_CT_CHANNEL_MAP) == 0,
+               "two of three channels staged: the group bit stays UNSET");
+    TEST_CHECK(!config_params_all_required_set(&rec),
+               "with the group bit unset, the board does not read back as fully commissioned");
+
+    // Now stage the third channel and finalize again -- the group bit must
+    // become set, proving this check can pass as well as fail.
+    v.u8_val = 2u;
+    TEST_CHECK(config_params_set(&rec, 0x0108u, KILNLINK_PARAM_TYPE_U8, v), "stage channel 2");
+    config_params_finalize_ct_channel_map(&rec);
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_CT_CHANNEL_MAP) != 0,
+               "all three channels staged: the group bit becomes set");
+
+    // Monotonic: finalizing again after nothing new changes must not clear
+    // an already-earned group bit.
+    config_params_finalize_ct_channel_map(&rec);
+    TEST_CHECK((rec.fields_set & CONFIG_STORE_SET_CT_CHANNEL_MAP) != 0,
+               "re-finalizing does not un-confirm an already-confirmed map");
+}
+
+static void test_ct_topology_legacy_decode(void)
+{
+    TEST_SECTION("ct_topology/i_present_a_manual -- legacy/erased bytes decode to the safe default");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_record_t back;
+
+    // A legacy record (built before these two fields existed) holds 0x00 at
+    // offsets 230/231, same hardware-confirmed reasoning as safety_tc_
+    // installed's own legacy test above (old config_store_pack() memcpy'd a
+    // memset(0) rec->reserved). Must decode as per_zone (0) / manual==false.
+    config_store_pack(&rec, record);
+    record[230] = 0x00u; // REC_OFF_CT_TOPOLOGY
+    record[231] = 0x00u; // REC_OFF_I_PRESENT_A_MANUAL
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    TEST_CHECK(config_store_unpack(record, &back), "simulated legacy record (0x00 at both new offsets) unpacks");
+    TEST_CHECK(back.ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE,
+               "0x00 at the ct_topology offset decodes as per_zone, the safe default");
+    TEST_CHECK(!back.i_present_a_manual,
+               "0x00 at the i_present_a_manual offset decodes as false (auto-derive allowed)");
+
+    // Erased flash (0xFF, never written by ANY build) must also decode to
+    // the safe default -- same "only the exact marker means non-default"
+    // rule as the ct_installed/safety_tc_installed sentinels.
+    config_store_pack(&rec, record);
+    record[230] = 0xFFu;
+    record[231] = 0xFFu;
+    {
+        uint32_t crc = bootloader_crc32(record, 504u);
+        record[504] = (uint8_t)(crc & 0xFFu);
+        record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+        record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+        record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    TEST_CHECK(config_store_unpack(record, &back), "simulated erased-flash record unpacks");
+    TEST_CHECK(back.ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE,
+               "0xFF (erased) at the ct_topology offset also decodes as per_zone");
+    TEST_CHECK(!back.i_present_a_manual, "0xFF (erased) at the i_present_a_manual offset also decodes as false");
+
+    // Positive proof the real encoder/decoder pair actually round-trips the
+    // non-default state -- proves this is not vacuously always-false.
+    rec.ct_topology = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+    rec.i_present_a_manual = true;
+    config_store_pack(&rec, record);
+    TEST_CHECK(record[230] == 1u, "config_store_pack() encodes summed topology as byte value 1");
+    TEST_CHECK(record[231] == 1u, "config_store_pack() encodes i_present_a_manual==true as byte value 1");
+    TEST_CHECK(config_store_unpack(record, &back), "record with both new fields set unpacks");
+    TEST_CHECK(back.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED, "summed topology round-trips");
+    TEST_CHECK(back.i_present_a_manual, "i_present_a_manual==true round-trips");
+}
+
+static void test_config_params_ct_topology_set(void)
+{
+    TEST_SECTION("config_params -- ct_topology (0x031F) SET_PARAM/GET_PARAM");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_PER_ZONE,
+               "a fresh default record starts at per_zone");
+
+    kilnlink_param_value_t v;
+    v.u8_val = 1u;
+    TEST_CHECK(config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v), "set ct_topology to summed (1)");
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED, "value took effect");
+
+    uint8_t type;
+    kilnlink_param_value_t out;
+    TEST_CHECK(config_params_get(&rec, 0x031Fu, &type, &out), "get ct_topology back");
+    TEST_CHECK(type == KILNLINK_PARAM_TYPE_U8 && out.u8_val == 1u, "GET_PARAM reads back the summed value");
+
+    // Negative test: only 0/1 are accepted -- CHECK_U8_MAX must actually
+    // refuse an out-of-range value, not merely happen to have never been
+    // asked for one (negative-test-every-check discipline).
+    v.u8_val = 2u;
+    TEST_CHECK(!config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v),
+               "ct_topology rejects a value outside {0,1}");
+    TEST_CHECK(rec.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED,
+               "a refused SET_PARAM leaves the previously staged value untouched");
+
+    // Wrong wire type is refused too, same discipline as every other field.
+    v.u8_val = 0u;
+    TEST_CHECK(!config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U16, v),
+               "ct_topology refuses a mismatched wire type");
+}
+
+static void test_config_params_finalize_i_present_a(void)
+{
+    TEST_SECTION("config_params_finalize_i_present_a -- half the smallest measured zone normal, unless set by hand");
+
+    // No zone normal ever measured: finalize is a no-op, i_present_a stays
+    // at whatever config_store_default() gave it (2.0A).
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        float before = rec.i_present_a;
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a == before, "no i_normal_a ever measured: i_present_a left untouched");
+    }
+
+    // One zone measured: auto-derives to half of it.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 10.03f; // deliberately not a round number -- quantized-counts style value
+        TEST_CHECK(config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[0]");
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(fabsf(rec.i_present_a - 5.015f) < 0.0005f, "auto-derives to half the single measured normal");
+    }
+
+    // Two zones measured: derives from the SMALLER of the two, not the
+    // first, not the average.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 10.03f;
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v); // i_normal_a[0], larger
+        v.f32_val = 4.11f;
+        config_params_set(&rec, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v); // i_normal_a[1], SMALLER
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(fabsf(rec.i_present_a - 2.055f) < 0.0005f,
+                   "auto-derives to half the SMALLEST of the measured normals, not the first-staged one");
+    }
+
+    // A manual write always wins, permanently -- even across a later
+    // i_normal_a change and re-finalize.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 1.23f; // operator's own hand-entered value
+        TEST_CHECK(config_params_set(&rec, 0x0301u, KILNLINK_PARAM_TYPE_F32, v), "operator sets i_present_a by hand");
+        TEST_CHECK(rec.i_present_a_manual, "SET_PARAM on 0x0301 marks i_present_a_manual");
+        v.f32_val = 50.0f; // a zone normal that would otherwise derive a very different value
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v);
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a == 1.23f,
+                   "a manual i_present_a is never overwritten by finalize, even after i_normal_a changes");
+    }
+
+    // Opus review of 51c084f/c49bb0e, finding 2: a zone commissioned at
+    // exactly 0.0A (CHECK_F32_NONNEG on 0x0301/0x031x allows 0 through --
+    // e.g. a zone measured with its element disconnected, or a mistake)
+    // must NOT win the smallest-search and drive i_present_a to 0.0f --
+    // current_sense.c:285's `conducting = (amps > i_present_a)` would then
+    // read "conducting" on pure ADC noise for every zone, since
+    // i_present_a is one shared scalar. Quantized-counts style values
+    // (not round numbers), matching this file's existing style.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 0.0f; // zone 0 commissioned at 0A -- must be skipped
+        TEST_CHECK(config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[0] = 0.0A");
+        v.f32_val = 6.07f; // zone 1's real, nonzero normal
+        TEST_CHECK(config_params_set(&rec, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[1] = 6.07A");
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(fabsf(rec.i_present_a - 3.035f) < 0.0005f,
+                   "a 0.0A zone normal is skipped; i_present_a derives from the smallest NONZERO normal instead");
+        TEST_CHECK(rec.i_present_a != 0.0f, "i_present_a is never driven to 0.0A by a 0A-commissioned zone");
+    }
+
+    // NEGATIVE TEST for the above: break the "skip <= 0.0f" gate (simulate
+    // the old buggy behavior, where a 0.0A zone was eligible to win the
+    // smallest-search) and confirm it would have produced a DIFFERENT,
+    // wrong answer -- proves the test above is not vacuous.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 0.0f;
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v);
+        v.f32_val = 6.07f;
+        config_params_set(&rec, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v);
+        float buggy_result = 0.0f * 0.5f; // what an ungated smallest-search would produce (0.0A wins)
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a != buggy_result,
+                   "the real function's result differs from what the pre-fix bug would have produced");
+    }
+
+    // NEGATIVE TEST (required, negative-test-every-check discipline): break
+    // the production "skip unmeasured/manual" comparison and confirm the
+    // test above would actually have caught it -- proves this is not a
+    // vacuous pass. Simulated here by directly re-deriving what an UNGATED
+    // (bug) version would produce and checking it disagrees with the real
+    // function's output for the manual case above.
+    {
+        config_store_record_t rec;
+        config_store_default(&rec);
+        kilnlink_param_value_t v;
+        v.f32_val = 1.23f;
+        config_params_set(&rec, 0x0301u, KILNLINK_PARAM_TYPE_F32, v);
+        v.f32_val = 50.0f;
+        config_params_set(&rec, 0x031Au, KILNLINK_PARAM_TYPE_F32, v);
+        float buggy_ungated_result = 50.0f * 0.5f; // what finalize would wrongly produce if it ignored the manual flag
+        config_params_finalize_i_present_a(&rec);
+        TEST_CHECK(rec.i_present_a != buggy_ungated_result,
+                   "the real function's manual-wins result differs from what an ungated bug would produce");
+    }
+}
+
+static void test_config_params_finalize_i_normal_a_invalidation(void)
+{
+    TEST_SECTION("config_params_finalize_i_normal_a_invalidation -- a topology/channel remap invalidates the "
+                 "per-zone normals measured under the OLD wiring, not the ones that did not move");
+
+    // Helper values reused below.
+    kilnlink_param_value_t v;
+
+    // Baseline "before": default record (ct_topology PER_ZONE, identity map
+    // {0,1,2} derived since zone_ct_channel's group bit is unset) with all
+    // three zone normals measured and confirmed.
+    config_store_record_t before;
+    config_store_default(&before);
+    v.f32_val = 3.10f;
+    TEST_CHECK(config_params_set(&before, 0x031Au, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[0]");
+    v.f32_val = 3.20f;
+    TEST_CHECK(config_params_set(&before, 0x031Bu, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[1]");
+    v.f32_val = 3.30f;
+    TEST_CHECK(config_params_set(&before, 0x031Cu, KILNLINK_PARAM_TYPE_F32, v), "stage i_normal_a[2]");
+    TEST_CHECK(config_store_field_is_set(&before.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0) &&
+               config_store_field_is_set(&before.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1) &&
+               config_store_field_is_set(&before.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+               "all three zone normals confirmed before the remap");
+
+    // Case 1: a topology flip PER_ZONE -> SUMMED. Effective map goes from
+    // {0,1,2} to {2,2,2} (config_store_derive_zone_ct_channel()) -- zones 0
+    // and 1 moved onto a different physical channel, zone 2 happened to
+    // already read channel 2 and did not move.
+    {
+        config_store_record_t to_write = before;
+        v.u8_val = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+        TEST_CHECK(config_params_set(&to_write, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v), "stage ct_topology = SUMMED");
+        config_params_finalize_zone_ct_channel(&to_write); // no-op: zone_ct_channel was never touched
+        config_params_finalize_i_normal_a_invalidation(&before, &to_write);
+
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "topology flip: zone 0's normal (moved 0 -> 2) is invalidated");
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1),
+                   "topology flip: zone 1's normal (moved 1 -> 2) is invalidated");
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+                   "topology flip: zone 2's normal (2 -> 2, did not move) survives");
+        TEST_CHECK(to_write.i_normal_a[0] == 0.0f && to_write.i_normal_a[1] == 0.0f,
+                   "invalidated zones' stored floats are zeroed (hygiene)");
+        TEST_CHECK(to_write.i_normal_a[2] == 3.30f, "the surviving zone's stored float is untouched");
+    }
+
+    // Case 2: a full, genuinely committed per-zone remap (all three
+    // zone_ct_channel bits set, so the group bit is derived) that moves two
+    // zones and leaves one in place -- proves this is keyed on the EFFECTIVE
+    // map, not merely "did ct_topology change", since ct_topology is never
+    // touched in this case at all.
+    {
+        config_store_record_t to_write = before;
+        v.u8_val = 2u;
+        TEST_CHECK(config_params_set(&to_write, 0x0320u, KILNLINK_PARAM_TYPE_U8, v), "stage zone_ct_channel[0] = 2");
+        v.u8_val = 1u;
+        TEST_CHECK(config_params_set(&to_write, 0x0321u, KILNLINK_PARAM_TYPE_U8, v), "stage zone_ct_channel[1] = 1 (unchanged)");
+        v.u8_val = 0u;
+        TEST_CHECK(config_params_set(&to_write, 0x0322u, KILNLINK_PARAM_TYPE_U8, v), "stage zone_ct_channel[2] = 0");
+        config_params_finalize_zone_ct_channel(&to_write);
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_ZONE_CT_CHANNEL),
+                   "all three per-zone bits present: group bit derived");
+        config_params_finalize_i_normal_a_invalidation(&before, &to_write);
+
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "per-zone remap: zone 0's normal (0 -> 2) is invalidated");
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1),
+                   "per-zone remap: zone 1's normal (1 -> 1, did not move) survives");
+        TEST_CHECK(!config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+                   "per-zone remap: zone 2's normal (2 -> 0) is invalidated");
+    }
+
+    // Case 3: no change at all -- every zone's normal survives.
+    {
+        config_store_record_t to_write = before;
+        config_params_finalize_zone_ct_channel(&to_write);
+        config_params_finalize_i_normal_a_invalidation(&before, &to_write);
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0) &&
+                   config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_1) &&
+                   config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_2),
+                   "no topology/channel change: all three normals survive untouched");
+    }
+
+    // NEGATIVE TEST (negative-test-every-check discipline): confirm this is
+    // not a vacuous pass by showing the PRE-FIX behavior (simply never
+    // calling the invalidation function, which is exactly what link_task.c
+    // did before this change) leaves the finding's stale value standing.
+    {
+        config_store_record_t to_write = before;
+        v.u8_val = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+        config_params_set(&to_write, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v);
+        config_params_finalize_zone_ct_channel(&to_write);
+        // Deliberately NOT calling config_params_finalize_i_normal_a_invalidation() here.
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "without the fix, a topology flip leaves zone 0's stale normal marked valid -- "
+                   "this is the exact defect the cases above prove is now closed");
+    }
+
+    // NEGATIVE TEST for NULL inputs: must not crash, must not touch to_write.
+    {
+        config_store_record_t to_write = before;
+        config_params_finalize_i_normal_a_invalidation(NULL, &to_write);
+        TEST_CHECK(config_store_field_is_set(&to_write.fields_set, CONFIG_STORE_SET_I_NORMAL_A_0),
+                   "NULL `before` is a no-op, not a crash or a spurious invalidation");
+        config_params_finalize_i_normal_a_invalidation(&before, NULL); // must not crash
+    }
+}
+
+static void test_config_params_all_required_set(void)
+{
+    TEST_SECTION("config_params_all_required_set -- every no-safe-default field, and only that set");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    TEST_CHECK(!config_params_all_required_set(&rec), "a fresh default record is not fully commissioned");
+
+    // Stage every no-safe-default field except mains_voltage_v.
+    kilnlink_param_value_t v;
+    v.u8_val = CONFIG_STORE_TC_SOURCE_OWN_J7;
+    config_params_set(&rec, 0x0101u, KILNLINK_PARAM_TYPE_U8, v); // tc_source
+    v.u8_val = 0u;
+    config_params_set(&rec, 0x0102u, KILNLINK_PARAM_TYPE_U8, v); // borrowed_zone_index
+    v.u8_val = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    config_params_set(&rec, 0x0103u, KILNLINK_PARAM_TYPE_U8, v); // tc_placement_mode
+    v.f32_val = 1300.0f;
+    config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v); // abs_max_temp_c
+    v.u8_val = 0u;
+    config_params_set(&rec, 0x0106u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 1u;
+    config_params_set(&rec, 0x0107u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 2u;
+    config_params_set(&rec, 0x0108u, KILNLINK_PARAM_TYPE_U8, v); // ct_channel_map, all 3
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
+    config_params_set(&rec, 0x0204u, KILNLINK_PARAM_TYPE_F32, v); // max_rate_c_per_min
+    config_params_finalize_ct_channel_map(&rec);
+
+    TEST_CHECK(!config_params_all_required_set(&rec),
+               "mains_voltage_v (and tc_type) still unset: NOT fully commissioned yet");
+
+    v.f32_val = 240.0f;
+    config_params_set(&rec, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v); // mains_voltage_v
+
+    // 2026-08-24: tc_type joined the required mask (config_store.h's
+    // CONFIG_STORE_SET_TC_TYPE) -- unlike the seven fields above it, tc_type
+    // already had a real compiled default (K), so a fresh record that never
+    // touches 0x0105 must still read back as NOT fully commissioned even
+    // once every other field is staged, proving this bit is actually
+    // consulted rather than vacuously always-set.
+    TEST_CHECK(!config_params_all_required_set(&rec),
+               "every ORIGINAL no-safe-default field set, but tc_type still untouched: "
+               "still NOT fully commissioned");
+
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE; // K -- the SAME value the record already
+                                              // holds by default; the point of this
+                                              // check is that committing it explicitly
+                                              // is what flips the bit, not the value
+    config_params_set(&rec, 0x0105u, KILNLINK_PARAM_TYPE_U8, v); // tc_type
+
+    // ct_installed (0x0109) joined the required mask on the "CTs are optional
+    // hardware" pass, for the SAME "prove the bit is consulted, not vacuously
+    // set" reason tc_type was checked above: the record already holds
+    // ct_installed == 1 by default, so only an explicit write can flip the
+    // bit, and until it does the record is not commissioned no matter how
+    // complete the rest of it looks.
+    TEST_CHECK(!config_params_all_required_set(&rec),
+               "every field set INCLUDING the full CT map, but ct_installed never answered: "
+               "still NOT fully commissioned");
+
+    v.u8_val = 1u; // installed -- the same value the record already defaults to
+    config_params_set(&rec, 0x0109u, KILNLINK_PARAM_TYPE_U8, v); // ct_installed
+    TEST_CHECK(config_params_all_required_set(&rec),
+               "every no-safe-default field now set, tc_type and ct_installed included: "
+               "fully commissioned");
+}
+
+// REC_OFF_CT_INSTALLED, mirrored from config_store.c's private layout table.
+// Deliberately a literal here rather than an exported constant: the offset is
+// part of the on-flash FORMAT, so a test that would silently follow the .c
+// file if someone moved the byte would prove nothing about compatibility with
+// records already written to real boards.
+#define CT_INSTALLED_TEST_OFFSET 229u
+
+// Recomputes the trailing CRC after a test has poked a raw byte -- otherwise
+// unpack rejects the record for the wrong reason and the check below passes
+// vacuously.
+static void repack_crc_for_test(uint8_t *record)
+{
+    uint32_t crc = bootloader_crc32(record, 504u);
+    record[504] = (uint8_t)(crc & 0xFFu);
+    record[505] = (uint8_t)((crc >> 8) & 0xFFu);
+    record[506] = (uint8_t)((crc >> 16) & 0xFFu);
+    record[507] = (uint8_t)((crc >> 24) & 0xFFu);
+}
+
+// --- ct_installed: "no CTs fitted" as a first-class commissioning state -----
+// The whole point of the field. The two NEGATIVE cases are what make the two
+// positive ones mean anything.
+static void test_ct_installed_gates_the_channel_map(void)
+{
+    TEST_SECTION("ct_installed -- declaring no CTs fitted drops the ct_channel_map requirement");
+
+    kilnlink_param_value_t v;
+
+    // A record with every required field EXCEPT the CT map -- exactly the
+    // bench board this pass was written for (no CT physically fitted, so
+    // nothing can honestly confirm which relay each channel watches).
+    config_store_record_t base;
+    config_store_default(&base);
+    v.u8_val = CONFIG_STORE_TC_SOURCE_OWN_J7;
+    config_params_set(&base, 0x0101u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 0u;
+    config_params_set(&base, 0x0102u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    config_params_set(&base, 0x0103u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 1300.0f;
+    config_params_set(&base, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
+    config_params_set(&base, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
+    config_params_set(&base, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
+    v.f32_val = 240.0f;
+    config_params_set(&base, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
+    config_params_finalize_ct_channel_map(&base);
+
+    // NEGATIVE 1: the question was never asked. This is the state every
+    // record was in before this field existed, and it must behave EXACTLY as
+    // it did then -- strict.
+    TEST_CHECK(!config_params_all_required_set(&base),
+               "no CT map and ct_installed never answered: NOT commissioned (unchanged behaviour)");
+
+    // NEGATIVE 2: the operator answered "yes, CTs are fitted". The map is
+    // still genuinely required -- the case that proves the new field is not a
+    // blanket escape hatch.
+    config_store_record_t installed = base;
+    v.u8_val = 1u;
+    config_params_set(&installed, 0x0109u, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(!config_params_all_required_set(&installed),
+               "ct_installed=1 with no CT map: still NOT commissioned, the map is still required");
+
+    // POSITIVE 1: the operator answered "no CTs fitted". Commissioning now
+    // completes with no ct_channel_map at all.
+    config_store_record_t absent = base;
+    v.u8_val = 0u;
+    config_params_set(&absent, 0x0109u, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(config_params_all_required_set(&absent),
+               "ct_installed=0: commissioned WITHOUT a ct_channel_map");
+
+    // POSITIVE 2: answering "yes" AFTER "no" re-arms the requirement. The
+    // relaxation must not be sticky -- fitting CTs to a board later must put
+    // the map back on the checklist.
+    config_store_record_t reinstalled = absent;
+    v.u8_val = 1u;
+    config_params_set(&reinstalled, 0x0109u, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(!config_params_all_required_set(&reinstalled),
+               "answering ct_installed=1 after =0 puts the ct_channel_map requirement BACK");
+
+    v.u8_val = 0u; config_params_set(&reinstalled, 0x0106u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 1u; config_params_set(&reinstalled, 0x0107u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 2u; config_params_set(&reinstalled, 0x0108u, KILNLINK_PARAM_TYPE_U8, v);
+    config_params_finalize_ct_channel_map(&reinstalled);
+    TEST_CHECK(config_params_all_required_set(&reinstalled),
+               "ct_installed=1 WITH a full CT map: commissioned");
+}
+
+// --- ct_topology == SUMMED: the map has nothing to resolve, so it is not
+// required ---------------------------------------------------------------
+// docs/audits/commissioning_gap_and_no_heat_2026-09-09.md: on a summed-CT
+// board, safety_core.c's S14/S15 input builder reads the shared CT by ZONE
+// id (relay_commanded_now_for_zone), never through ct_channel_map -- the
+// map only resolves "which relay does channel N watch," a question summed
+// mode has no per-channel answer to (only channel 2 has a CT at all).
+// CURRENT_SENSE.md section 0.2 documents this as deliberate ("the mapping
+// check ... is skipped entirely"). Before the 2026-09-09 fix, the gate
+// still demanded the three per-channel bits regardless of ct_topology,
+// making a fully-configured summed board permanently uncommissionable.
+static void test_ct_topology_summed_skips_the_channel_map(void)
+{
+    TEST_SECTION("ct_topology summed -- ct_channel_map is not required (CURRENT_SENSE.md 0.2)");
+
+    kilnlink_param_value_t v;
+
+    // Same base record as test_ct_installed_gates_the_channel_map: every
+    // required field except the CT map, ct_installed=1 (CTs ARE fitted --
+    // this is not the "no CTs" escape hatch, it is the summed-CT one).
+    config_store_record_t base;
+    config_store_default(&base);
+    v.u8_val = CONFIG_STORE_TC_SOURCE_OWN_J7;
+    config_params_set(&base, 0x0101u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = 0u;
+    config_params_set(&base, 0x0102u, KILNLINK_PARAM_TYPE_U8, v);
+    v.u8_val = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    config_params_set(&base, 0x0103u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 1300.0f;
+    config_params_set(&base, 0x0104u, KILNLINK_PARAM_TYPE_F32, v);
+    v.u8_val = CONFIG_STORE_DEFAULT_TC_TYPE;
+    config_params_set(&base, 0x0105u, KILNLINK_PARAM_TYPE_U8, v);
+    v.f32_val = 20.0f; // above CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR (15.0)
+    config_params_set(&base, 0x0204u, KILNLINK_PARAM_TYPE_F32, v);
+    v.f32_val = 240.0f;
+    config_params_set(&base, 0x030Eu, KILNLINK_PARAM_TYPE_F32, v);
+    v.u8_val = 1u;
+    config_params_set(&base, 0x0109u, KILNLINK_PARAM_TYPE_U8, v); // ct_installed=1
+    config_params_finalize_ct_channel_map(&base); // no-op: nothing staged
+
+    // NEGATIVE: still per_zone (the default topology) -- the map remains
+    // genuinely required, proving this fix did not weaken the per_zone path.
+    TEST_CHECK(!config_params_all_required_set(&base),
+               "ct_topology=per_zone (default), ct_installed=1, no map: still NOT commissioned");
+
+    // POSITIVE: answer ct_topology=summed. Commissioning now completes with
+    // no ct_channel_map at all, because summed mode's guards never index it.
+    config_store_record_t summed = base;
+    v.u8_val = CONFIG_STORE_CT_TOPOLOGY_SUMMED;
+    config_params_set(&summed, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(config_params_all_required_set(&summed),
+               "ct_topology=summed, ct_installed=1, no ct_channel_map: commissioned");
+
+    // NEGATIVE (not sticky the other way): switching back to per_zone puts
+    // the requirement back.
+    config_store_record_t back_to_per_zone = summed;
+    v.u8_val = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE;
+    config_params_set(&back_to_per_zone, 0x031Fu, KILNLINK_PARAM_TYPE_U8, v);
+    TEST_CHECK(!config_params_all_required_set(&back_to_per_zone),
+               "switching ct_topology back to per_zone re-requires the map");
+}
+
+// The record must survive a flash round trip with the answer intact, and --
+// the safety-critical half -- a record that never carried this byte must
+// decode to the STRICT state, never to "CTs disabled".
+static void test_ct_installed_round_trip_and_legacy_decode(void)
+{
+    TEST_SECTION("ct_installed -- pack/unpack round trip, and legacy bytes decode STRICT");
+
+    uint8_t buf[CONFIG_STORE_RECORD_LEN];
+    config_store_record_t rec, back;
+
+    config_store_default(&rec);
+    TEST_CHECK(rec.ct_installed == 1u,
+               "config_store_default(): ct_installed defaults to INSTALLED (strict)");
+
+    rec.ct_installed = 0u;
+    rec.fields_set |= CONFIG_STORE_SET_CT_INSTALLED;
+    config_store_pack(&rec, buf);
+    TEST_CHECK(config_store_unpack(buf, &back),
+               "a record declaring no CTs packs and unpacks");
+    TEST_CHECK(back.ct_installed == 0u, "ct_installed=0 survives the round trip");
+    TEST_CHECK((back.fields_set & CONFIG_STORE_SET_CT_INSTALLED) != 0u,
+               "the CONFIG_STORE_SET_CT_INSTALLED bit survives the round trip");
+
+    rec.ct_installed = 1u;
+    config_store_pack(&rec, buf);
+    TEST_CHECK(config_store_unpack(buf, &back) && back.ct_installed == 1u,
+               "ct_installed=1 survives the round trip");
+
+    // NEGATIVE: every byte value that is NOT the explicit "not installed"
+    // sentinel must decode as installed. 0x00 is what a legacy record's
+    // zeroed reserved byte holds; 0xFF is erased flash and the current
+    // reserved fill. If either ever decoded as "no CTs", an old board would
+    // silently disarm S3/S4/S9/S14 on its next boot.
+    static const uint8_t legacy_bytes[] = { 0x00u, 0xFFu, 0x01u, 0x5Au, 0x42u };
+    for (size_t i = 0; i < sizeof(legacy_bytes) / sizeof(legacy_bytes[0]); i++) {
+        config_store_record_t plain;
+        config_store_default(&plain);
+        plain.ct_installed = 1u;
+        config_store_pack(&plain, buf);
+        buf[CT_INSTALLED_TEST_OFFSET] = legacy_bytes[i];
+        repack_crc_for_test(buf);
+        TEST_CHECK(config_store_unpack(buf, &back) && back.ct_installed == 1u,
+                   "a non-sentinel byte at REC_OFF_CT_INSTALLED decodes as INSTALLED (strict)");
+    }
+
+    // ...and the one byte that does mean it, does mean it. Without this the
+    // loop above would pass vacuously if the decoder simply always returned 1.
+    config_store_record_t plain;
+    config_store_default(&plain);
+    plain.ct_installed = 1u;
+    config_store_pack(&plain, buf);
+    buf[CT_INSTALLED_TEST_OFFSET] = 0xA5u; // CT_INSTALLED_MARKER_NOT_INSTALLED
+    repack_crc_for_test(buf);
+    TEST_CHECK(config_store_unpack(buf, &back) && back.ct_installed == 0u,
+               "the 0xA5 sentinel at REC_OFF_CT_INSTALLED really does decode as NOT installed");
+}
+
+// GET_CONFIG_PAGE round trip: mirrors link_task_send_config_page()'s own
+// logic (build entries from every id via config_params, pack pages, replay
+// page_index from scratch each time) using only pure functions -- link_task.c
+// itself is not host-tested (RTOS/uart_owner-dependent), but everything it
+// calls to build this reply is, and this proves the composition actually
+// round-trips a real record through every page.
+static void test_config_params_get_config_page_roundtrip(void)
+{
+    TEST_SECTION("config_params + kilnlink_config_page -- GET_CONFIG_PAGE round trip");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = 1250.5f;
+    rec.firing_margin_c = 88.0f;
+    rec.watchdog_timeout_ms = 999u;
+    rec.ct_cal[2].calibrated = true;
+    rec.ct_cal[2].gain = 1.1f;
+
+    size_t total = config_params_count();
+    kilnlink_config_page_entry_t all[72];
+    memset(all, 0, sizeof(all));
+    TEST_CHECK(total <= sizeof(all) / sizeof(all[0]), "id table fits the test's own scratch array");
+    for (size_t i = 0; i < total; i++) {
+        uint16_t id = 0;
+        uint8_t type = 0;
+        config_params_id_at(i, &id, &type);
+        uint8_t got_type = 0;
+        kilnlink_param_value_t value;
+        memset(&value, 0, sizeof(value));
+        TEST_CHECK(config_params_get(&rec, id, &got_type, &value), "every table id reads back from rec");
+        all[i].param_id = id;
+        all[i].type = got_type;
+        all[i].value = value;
+        // 2026-08-27 audit fix (commissioning-write defect d) -- mirrors
+        // link_task_send_config_page()'s own new call exactly.
+        all[i].set = config_params_is_set(&rec, id);
+    }
+
+    // Pack and decode every page, page_index 0, 1, 2, ... until more == 0,
+    // collecting every (id, value) the wire actually carried.
+    size_t offset = 0;
+    uint8_t page_index = 0;
+    size_t total_seen = 0;
+    bool seen_abs_max_temp = false, seen_firing_margin = false, seen_watchdog = false, seen_ct_cal2 = false;
+    for (;;) {
+        uint8_t payload[KILNLINK_CONFIG_PAGE_HDR_LEN + KILNLINK_CONFIG_PAGE_ENTRY_MAX_LEN * 32u];
+        size_t packed = 0;
+        kilnlink_config_page_status_t pack_status;
+        size_t len = kilnlink_config_page_pack(page_index, &all[offset], total - offset, payload,
+                                                sizeof(payload), &packed, &pack_status);
+        TEST_CHECK(len > 0, "each page packs successfully");
+        offset += packed;
+
+        kilnlink_config_page_t decoded;
+        kilnlink_config_page_status_t decode_status = kilnlink_config_page_decode(payload, len, &decoded);
+        TEST_CHECK(decode_status == KILNLINK_CONFIG_PAGE_OK, "each packed page decodes cleanly");
+        TEST_CHECK(decoded.page_index == page_index, "decoded page_index echoes the request");
+
+        for (size_t i = 0; i < decoded.entry_count; i++) {
+            total_seen++;
+            if (decoded.entries[i].param_id == 0x0104u) {
+                seen_abs_max_temp = (decoded.entries[i].value.f32_val == 1250.5f);
+            }
+            if (decoded.entries[i].param_id == 0x0201u) {
+                seen_firing_margin = (decoded.entries[i].value.f32_val == 88.0f);
+            }
+            if (decoded.entries[i].param_id == 0x0503u) {
+                seen_watchdog = (decoded.entries[i].value.u16_val == 999u);
+            }
+            if (decoded.entries[i].param_id == 0x0318u) {
+                seen_ct_cal2 = (decoded.entries[i].value.bool_val == 1u);
+            }
+        }
+
+        if (!decoded.more) {
+            break;
+        }
+        page_index++;
+        TEST_CHECK(page_index < 32u, "the page loop terminates well within a sane bound"); // guards a runaway loop, never expected to fire
+        if (page_index >= 32u) {
+            break;
+        }
+    }
+
+    TEST_CHECK(total_seen == total, "every id in the table was carried across exactly one page each");
+    TEST_CHECK(seen_abs_max_temp, "abs_max_temp_c round-trips through GET_CONFIG_PAGE");
+    TEST_CHECK(seen_firing_margin, "firing_margin_c round-trips through GET_CONFIG_PAGE");
+    TEST_CHECK(seen_watchdog, "watchdog_timeout_ms round-trips through GET_CONFIG_PAGE");
+    TEST_CHECK(seen_ct_cal2, "ct_cal[2].calibrated round-trips through GET_CONFIG_PAGE");
+}
+
+// 2026-08-27 audit fix (commissioning-write defect d), "ok cannot fail":
+// config_params_is_set() and its one real caller, link_task_send_config_
+// page(), used to not exist at all -- every CONFIG_PAGE entry the Pico sent
+// was reported `set = true` unconditionally, and the ESP's cache
+// (safety_cfg_store.c) then trusted that unconditionally too. This is the
+// exact live-bench defect: abs_max_temp_c UNSET on the Pico (rec.fields_set
+// clear) but rec.abs_max_temp_c still holding a leftover/default 0.0f byte
+// pattern -- the wire must carry "unset", never "{set:true, value:0}", or
+// the overtemperature guard silently never trips. Proves BOTH directions:
+// a genuinely-staged field reads back set=true with its real value, and an
+// untouched no-safe-default field reads back set=false with its placeholder
+// value NEVER trusted.
+static void test_config_params_is_set_through_get_config_page(void)
+{
+    TEST_SECTION("config_params_is_set + GET_CONFIG_PAGE -- an UNSET no-safe-default field reports "
+                 "set=false, never a trusted 0.0 (the exact live-bench defect this closes)");
+
+    config_store_record_t rec;
+    config_store_default(&rec); // fields_set == 0 -- nothing commissioned, matches a fresh board
+    TEST_CHECK(!config_params_is_set(&rec, 0x0104u),
+               "abs_max_temp_c is UNSET on a fresh record (config_params_is_set() agrees with fields_set)");
+    TEST_CHECK(rec.abs_max_temp_c == 0.0f,
+               "setup: the raw struct field is 0.0 -- indistinguishable from a real ceiling of zero "
+               "without the fields_set bit config_params_is_set() actually checks");
+    TEST_CHECK(config_params_is_set(&rec, 0x0201u),
+               "firing_margin_c (a real compiled default, sec 2) is ALWAYS reported set, unlike the "
+               "no-safe-default sec-1 fields");
+
+    // Stage abs_max_temp_c for real via config_params_set(), same path a
+    // genuine SET_PARAM takes -- this is what a real commissioning pass does.
+    kilnlink_param_value_t v;
+    v.f32_val = 1300.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0104u, KILNLINK_PARAM_TYPE_F32, v), "setup: abs_max_temp_c stages");
+    TEST_CHECK(config_params_is_set(&rec, 0x0104u), "abs_max_temp_c now reports SET after config_params_set()");
+
+    // Build entries[] and round-trip through the SAME codec link_task_send_
+    // config_page() uses (KILNLINK_CONFIG_PAGE_UNSET_BIT), for exactly the
+    // two ids of interest.
+    kilnlink_config_page_entry_t entries[2];
+    memset(entries, 0, sizeof(entries));
+    uint8_t got_type = 0;
+    kilnlink_param_value_t got_value;
+    memset(&got_value, 0, sizeof(got_value));
+    TEST_CHECK(config_params_get(&rec, 0x0104u, &got_type, &got_value), "abs_max_temp_c reads back");
+    entries[0].param_id = 0x0104u;
+    entries[0].type = got_type;
+    entries[0].value = got_value;
+    entries[0].set = config_params_is_set(&rec, 0x0104u);
+
+    config_store_record_t rec_unset;
+    config_store_default(&rec_unset); // fresh, nothing staged
+    TEST_CHECK(config_params_get(&rec_unset, 0x0104u, &got_type, &got_value),
+               "an unset abs_max_temp_c STILL reads back a (placeholder) value -- it is `set` that says "
+               "not to trust it, never a missing entry");
+    entries[1].param_id = 0x0105u; // a different id (tc_type) so both entries survive pack() distinctly
+    entries[1].type = KILNLINK_PARAM_TYPE_U8;
+    entries[1].value.u8_val = 0;
+    entries[1].set = config_params_is_set(&rec_unset, 0x0105u);
+
+    uint8_t payload[KILNLINK_CONFIG_PAGE_HDR_LEN + KILNLINK_CONFIG_PAGE_ENTRY_MAX_LEN * 2u];
+    size_t packed = 0;
+    kilnlink_config_page_status_t pack_status;
+    size_t len = kilnlink_config_page_pack(0, entries, 2, payload, sizeof(payload), &packed, &pack_status);
+    TEST_CHECK(len > 0 && packed == 2, "both entries pack");
+
+    kilnlink_config_page_t decoded;
+    TEST_CHECK(kilnlink_config_page_decode(payload, len, &decoded) == KILNLINK_CONFIG_PAGE_OK,
+               "the page decodes cleanly");
+    TEST_CHECK(decoded.entries[0].param_id == 0x0104u && decoded.entries[0].set == true &&
+                   decoded.entries[0].value.f32_val == 1300.0f,
+               "abs_max_temp_c (staged) round-trips SET with its real 1300.0 value");
+    TEST_CHECK(decoded.entries[1].param_id == 0x0105u && decoded.entries[1].set == false,
+               "tc_type (never staged) round-trips UNSET -- this is the fix: an operator-facing page "
+               "must be able to tell this apart from a genuinely-committed value");
+}
+
+// Composed "commit while ARMED refused" check -- link_task_handle_commit_
+// config() itself is not host-tested (config_store_write() needs a real
+// RP2040, see config_store_flash.c's own header comment), but the pure
+// pieces that decide the outcome are: a fully-valid staged record still
+// must not be written while ARMED. This proves the composition a real
+// commit performs -- validate() passing does not override
+// config_store_decide_write()'s own unconditional ARMED refusal -- without
+// needing flash at all.
+static void test_config_params_commit_refused_while_armed(void)
+{
+    TEST_SECTION("commit_config composition -- ARMED refuses even a fully-valid staged record");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_source = CONFIG_STORE_TC_SOURCE_OWN_J7;
+    rec.tc_placement_mode = CONFIG_STORE_TC_PLACEMENT_CHAMBER_AGREED;
+    rec.fields_set |= (uint16_t)(CONFIG_STORE_SET_TC_SOURCE | CONFIG_STORE_SET_TC_PLACEMENT_MODE);
+
+    const char *field = NULL;
+    const char *rule = NULL;
+    TEST_CHECK(config_params_validate(&rec, &field, &rule), "this staged record passes validation on its own");
+
+    // 2026-09-15 correction (Opus review item 5): this comment used to say
+    // the real link_task_handle_commit_config() calls config_store_write()
+    // unconditionally -- stale since the F1/F2 rework: it actually calls
+    // config_store_write_ex(&to_write, link_task_heat_is_safe_for_tc_type_
+    // change(), &reason) (link_task.c), so the tc_type-only-while-ARMED
+    // carve-out below IS reachable from COMMIT_CONFIG, not just SET_CONFIG.
+    // Composing rec/tc_type_only_change here (not a bare `false`/`true`
+    // literal) so this test documents which fields differing, not merely
+    // the fact of ARMED, drives each outcome:
+    config_store_record_t persisted = rec;
+    persisted.tc_type = (uint8_t)((rec.tc_type + 1u) % (CONFIG_STORE_TC_TYPE_MAX_REAL + 1u));
+    bool tc_type_only = config_store_only_tc_type_differs(&persisted, &rec);
+    TEST_CHECK(tc_type_only, "fixture differs from `persisted` in tc_type only");
+
+    TEST_CHECK(config_store_decide_write_ex(true, tc_type_only, false) == CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON,
+               "COMMIT_CONFIG while ARMED: a tc_type-only change is refused with the "
+               "specific HEAT_ON reason, not the generic ARMED one, when heat is not "
+               "confirmed safe (link_task_heat_is_safe_for_tc_type_change() false)");
+    TEST_CHECK(config_store_decide_write_ex(true, tc_type_only, true) == CONFIG_STORE_WRITE_OK,
+               "COMMIT_CONFIG while ARMED: the same tc_type-only change IS accepted "
+               "once heat is confirmed safe -- the Pico never disarms to take it");
+    TEST_CHECK(config_store_decide_write_ex(true, false, true) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "COMMIT_CONFIG while ARMED: the staged record above (tc_source/"
+               "tc_placement_mode changed, not tc_type) is refused with the generic "
+               "ARMED reason regardless of heat state -- the carve-out is tc_type-only");
+
+    // The plain (non-tc_type-aware) decision this test originally covered,
+    // kept for regression coverage of config_store_decide_write()'s own
+    // ARMED/not-ARMED split:
+    TEST_CHECK(config_store_decide_write(true) == CONFIG_STORE_WRITE_REFUSED_ARMED,
+               "ARMED refuses the write regardless of validate()'s own outcome -- "
+               "nothing this module computes can override the store's own ARMED gate");
+    TEST_CHECK(config_store_decide_write(false) == CONFIG_STORE_WRITE_OK,
+               "the same record, not ARMED, would be allowed to write -- proves the "
+               "refusal above is really about ARMED, not some other property of the record");
+}
+
+// --- tc_type voltage-mode clamp (defense in depth, config_store.h's
+// CONFIG_STORE_TC_TYPE_MAX_REAL) -------------------------------------------
+//
+// max31856_configure() (max31856.c, via max31856_tc_type_policy.h) is the
+// primary enforcement point and already refuses tc_type > MAX31856_TC_TYPE_T
+// outright. This is the second, independent layer: config_store_unpack()
+// must never hand a CALLER (main.c, via config_store_get_tc_type()) a byte
+// that would trip that refusal, even for a record whose CRC validates --
+// e.g. a future writer that forgot to bound the field itself, or a record
+// whose tc_type byte was corrupted in a way that happens to leave the CRC
+// intact. Per this repo's "prove every new check can fail" rule, every one
+// of the eight voltage-mode bytes is tested individually, in both the v2
+// unpack path and the v1 migration path.
+static void test_tc_type_voltage_mode_clamp_v2(void)
+{
+    TEST_SECTION("config_store_unpack (v2) -- tc_type voltage-mode clamp");
+
+    config_store_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.format_version = CONFIG_STORE_FORMAT_VERSION;
+    rec.seq = 1;
+    rec.calibration_missing = true;
+
+    // Accept direction: every real type (0x00-0x07) round-trips unchanged.
+    for (uint8_t tc_type = 0x00u; tc_type <= 0x07u; tc_type++) {
+        rec.tc_type = tc_type;
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        config_store_record_t back;
+        bool ok = config_store_unpack(record, &back);
+        TEST_CHECK(ok, "record with a real tc_type unpacks");
+        TEST_CHECK(back.tc_type == tc_type, "real tc_type (0x00-0x07) passes through unchanged");
+    }
+
+    // Refuse direction: every voltage-mode byte (0x08-0x0F), individually,
+    // must be clamped to CONFIG_STORE_DEFAULT_TC_TYPE, NOT passed through --
+    // the record itself still unpacks (its CRC is valid), only the tc_type
+    // field is substituted.
+    uint8_t voltage_mode_bytes[8] = { 0x08u, 0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu };
+    for (size_t i = 0; i < 8u; i++) {
+        // config_store_pack() writes rec->tc_type verbatim (it does no
+        // validation of its own -- config_store.h's own doc comment) so this
+        // hand-assembles exactly the CRC-valid-but-out-of-range record the
+        // clamp exists to catch, standing in for "something upstream wrote
+        // an out-of-range byte and this module is the last line of defense."
+        rec.tc_type = voltage_mode_bytes[i];
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        config_store_record_t back;
+        bool ok = config_store_unpack(record, &back);
+        TEST_CHECK(ok, "a CRC-valid record with an out-of-range tc_type byte still unpacks "
+                        "(the record itself is not corrupt)");
+        TEST_CHECK(back.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE,
+                   "voltage-mode tc_type byte is clamped to CONFIG_STORE_DEFAULT_TC_TYPE, "
+                   "never passed through to a caller");
+    }
+
+    // A couple of bytes outside the 4-bit field's own range too.
+    uint8_t out_of_range_bytes[3] = { 0xFFu, 0x10u, 0x80u };
+    for (size_t i = 0; i < 3u; i++) {
+        rec.tc_type = out_of_range_bytes[i];
+        uint8_t record[CONFIG_STORE_RECORD_LEN];
+        config_store_pack(&rec, record);
+        config_store_record_t back;
+        bool ok = config_store_unpack(record, &back);
+        TEST_CHECK(ok, "record unpacks even with a wildly out-of-range tc_type byte");
+        TEST_CHECK(back.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE,
+                   "wildly out-of-range tc_type byte also clamped to the safe default");
+    }
+}
+
+static void test_tc_type_voltage_mode_clamp_v1_migration(void)
+{
+    TEST_SECTION("config_store_unpack (v1 migration) -- tc_type voltage-mode clamp");
+
+    config_store_ct_channel_cal_t ct_cal[3];
+    memset(ct_cal, 0, sizeof(ct_cal));
+
+    // Refuse direction on the v1 migration path too -- a legacy record
+    // predates this bound existing at all, so it gets no less scrutiny.
+    uint8_t voltage_mode_bytes[8] = { 0x08u, 0x09u, 0x0Au, 0x0Bu, 0x0Cu, 0x0Du, 0x0Eu, 0x0Fu };
+    for (size_t i = 0; i < 8u; i++) {
+        uint8_t v1_record[CONFIG_STORE_RECORD_LEN];
+        pack_legacy_v1_record(1u, voltage_mode_bytes[i], true, ct_cal, v1_record);
+        config_store_record_t out;
+        bool ok = config_store_unpack(v1_record, &out);
+        TEST_CHECK(ok, "a CRC-valid v1 record with an out-of-range tc_type byte still migrates");
+        TEST_CHECK(out.tc_type == CONFIG_STORE_DEFAULT_TC_TYPE,
+                   "migrated record's voltage-mode tc_type byte is clamped to the safe default, "
+                   "not carried through from v1");
+    }
+
+    // Accept direction, for completeness: a real v1 tc_type still migrates
+    // unchanged (already covered indirectly by test_v1_migration() above,
+    // repeated here so this test file proves both directions on its own).
+    uint8_t v1_record[CONFIG_STORE_RECORD_LEN];
+    pack_legacy_v1_record(2u, 0x03u /* MAX31856_TC_TYPE_K */, true, ct_cal, v1_record);
+    config_store_record_t out;
+    bool ok = config_store_unpack(v1_record, &out);
+    TEST_CHECK(ok, "a v1 record with a real tc_type migrates");
+    TEST_CHECK(out.tc_type == 0x03u, "real v1 tc_type passes through the clamp unchanged");
+}
+
+void run_test_config_store(void)
+{
+    test_pack_unpack_roundtrip();
+    test_unpack_hostile();
+    test_default();
+    test_find_latest();
+    test_next_write_slot();
+    test_plan_write();
+    test_find_latest_multi();
+    test_decide_write();
+    test_decide_write_ex_tc_type_armed_relaxation();
+    test_only_tc_type_differs();
+    test_only_ct_cal_differs();
+    test_record_crc();
+    test_ct_cal_defaults_on_blank();
+    test_ct_cal_corrupt_or_unknown_version();
+    test_ct_cal_round_trip_and_independence();
+    test_confirm_crc_ok();
+    test_config_store_ram_integrity_ok();
+    test_flash_rc_reason();
+    test_v2_full_roundtrip();
+    test_v1_migration();
+    test_future_version_refused();
+    test_unset_fields_distinguishable_from_zero();
+    test_unpack_validates_ranges_on_load();
+    test_s8_rate_guard_bounds();
+    test_reject_info_distinguishes_fresh_from_rejected();
+    test_seq_to_version();
+    test_tc_type_voltage_mode_clamp_v2();
+    test_tc_type_voltage_mode_clamp_v1_migration();
+
+    test_ct_installed_gates_the_channel_map();
+    test_ct_topology_summed_skips_the_channel_map();
+    test_ct_installed_round_trip_and_legacy_decode();
+
+    test_config_params_get_set_roundtrip();
+    test_config_params_unknown_id_refused();
+    test_config_params_type_mismatch_refused();
+    test_config_params_set_range_validation();
+    test_config_params_validate_range_validation();
+    test_config_params_id_table_self_consistent();
+    test_config_params_validate_contradiction_rejected();
+    test_config_params_validate_abs_max_temp_vs_tc_type_contradiction_rejected();
+    test_config_params_validate_ex_reason_and_id_lookup();
+    test_config_params_ct_channel_map_two_of_three();
+    test_ct_topology_legacy_decode();
+    test_config_params_ct_topology_set();
+    test_config_params_finalize_i_present_a();
+    test_config_params_finalize_i_normal_a_invalidation();
+    test_config_params_all_required_set();
+    test_config_params_get_config_page_roundtrip();
+    test_config_params_is_set_through_get_config_page();
+    test_config_params_commit_refused_while_armed();
+}

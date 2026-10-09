@@ -1,0 +1,205 @@
+{
+  // Multi-root workspace. Open this file (File -> Open Workspace from File),
+  // not the kilnCtl folder, so that:
+  //
+  //   - the ESP-IDF extension can find a CMakeLists.txt. It treats a workspace
+  //     folder as one project; with the repo root open as a single folder there
+  //     is no project at the top level and the extension has nothing to attach
+  //     to.
+  //   - each firmware keeps its own .vscode/settings.json, and ${workspaceFolder}
+  //     inside those files means that firmware's directory, which is what they
+  //     were written to assume.
+  //
+  // Cross-folder references use ${workspaceFolder:Name} with the names below.
+  // Settings that belong to the whole repo live here rather than in a root
+  // .vscode/settings.json, because /.vscode/ is gitignored and this file is not.
+  "folders": [
+    {
+      "name": "kilnCtl",
+      "path": ".",
+      // The other entries below surface these directories with their own
+      // settings, so hide them here rather than showing every file twice.
+      "//": "Docs, plans and anything not owned by a sub-project."
+    },
+    { "name": "KilnFW", "path": "firmware/KilnFW" },
+    { "name": "SaftyFW", "path": "firmware/SaftyFW" },
+    { "name": "CommonFW", "path": "firmware/CommonFW" },
+    { "name": "PcTools", "path": "tools/PcTools" },
+    { "name": "hardware", "path": "hardware" }
+  ],
+
+  "settings": {
+    // Shown only in the "kilnCtl" root folder, so the sub-projects listed above
+    // are not duplicated in the explorer. Each still has its own entry.
+    "files.exclude": {
+      "firmware/KilnFW": true,
+      "firmware/SaftyFW": true,
+      "firmware/CommonFW": true,
+      "tools/PcTools": true,
+      "hardware": true
+    },
+    "search.exclude": {
+      "**/.venv": true,
+      "**/build": true,
+      "**/managed_components": true,
+      "**/__pycache__": true,
+      "**/*-backups": true,
+      "**/parts/SamacSys_Parts.3dshapes": true
+    },
+    "files.associations": {
+      "*.kicad_sch": "lisp",
+      "*.kicad_pcb": "lisp",
+      "*.kicad_mod": "lisp",
+      "*.kicad_sym": "lisp",
+      "fp-lib-table": "lisp",
+      "sym-lib-table": "lisp"
+    },
+    // KiCad round-trips its own files byte for byte. Nothing here may reformat
+    // them or strip trailing whitespace - see docs/REPO_LAYOUT.md on the CRLF
+    // trap that nearly rewrote five schematics during the reorganisation.
+    "[lisp]": {
+      "files.trimTrailingWhitespace": false,
+      "files.insertFinalNewline": false,
+      "editor.formatOnSave": false
+    },
+    "python.defaultInterpreterPath": "${workspaceFolder:PcTools}/.venv/Scripts/python.exe",
+
+    // Status-bar buttons (seunlanlege.action-buttons). These live here, not in
+    // /.vscode/settings.json, for the reason given at the top of this file:
+    // that directory is gitignored, so a button defined there exists only on
+    // the machine that made it. ${workspaceFolder} alone is ambiguous in a
+    // multi-root workspace -- every path below names its folder explicitly.
+    //
+    // The MCP servers are HTTP now (see docs/MCP_SERVERS.md). An HTTP MCP
+    // entry in .mcp.json fails to connect if nothing is listening, so
+    // "MCP Start" is the button that makes the editor's kicad/kilnctrl
+    // tools work at all; the folderOpen task below normally gets there first.
+    // One button covers both -- mykicadMcp/start_mcp_http_server.ps1 is
+    // still there for using that submodule outside this repo.
+    "actionButtons.commands": [
+      {
+        "name": "$(play) MCP Start",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 start",
+        "color": "lightgreen",
+        "singleInstance": true,
+        "tooltip": "Start the kicad (8766) and kilnctrl (8767) HTTP MCP servers"
+      },
+      {
+        "name": "$(debug-stop) MCP Stop",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 stop",
+        "color": "orange",
+        "singleInstance": true,
+        "tooltip": "Graceful shutdown, so the serial ports are released cleanly"
+      },
+      {
+        "name": "$(refresh) MCP Restart",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 restart",
+        "color": "cyan",
+        "singleInstance": true,
+        "tooltip": "Pick up edits to kicad/kilnctrl server code"
+      },
+      {
+        "name": "$(pulse) MCP Status",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File ${workspaceFolder:kilnCtl}\\tools\\PcTools\\scripts\\mcp_servers.ps1 status",
+        "color": "white",
+        "singleInstance": true,
+        "tooltip": "Which servers are listening, and what each publishes"
+      },
+      {
+        "name": "$(window) KilnCtrl GUI",
+        "command": "${workspaceFolder:PcTools}\\.venv\\Scripts\\kilnctrl-gui.exe",
+        "color": "lightblue",
+        "singleInstance": true,
+        "tooltip": "Open the PC-side control GUI"
+      }
+    ]
+  },
+
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        // Lives here rather than in KilnFW/.vscode/tasks.json because PcTools
+        // serves both processors and is no longer inside that firmware.
+        "label": "PcTools: Open GUI",
+        "type": "shell",
+        "command": "${workspaceFolder:PcTools}/.venv/Scripts/kilnctrl-gui.exe",
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        // Runs on workspace open so the HTTP MCP entries in .mcp.json have
+        // something to connect to before an agent's first tool call. The
+        // script is idempotent -- it checks /health and does nothing if the
+        // servers are already up -- so a reload does not restart them and
+        // does not disturb a link that is mid-session.
+        "label": "MCP: Start servers",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile", "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder:kilnCtl}/tools/PcTools/scripts/mcp_servers.ps1", "start"
+        ],
+        "runOptions": { "runOn": "folderOpen" },
+        "presentation": { "reveal": "silent", "panel": "dedicated", "close": true },
+        "problemMatcher": []
+      },
+      {
+        "label": "MCP: Stop servers",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile", "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder:kilnCtl}/tools/PcTools/scripts/mcp_servers.ps1", "stop"
+        ],
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        "label": "MCP: Status",
+        "type": "shell",
+        "command": "powershell",
+        "args": [
+          "-NoProfile", "-ExecutionPolicy", "Bypass",
+          "-File", "${workspaceFolder:kilnCtl}/tools/PcTools/scripts/mcp_servers.ps1", "status"
+        ],
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        "label": "PcTools: Selfcheck",
+        "type": "shell",
+        "command": "${workspaceFolder:PcTools}/.venv/Scripts/python.exe",
+        "args": ["selfcheck.py"],
+        "options": { "cwd": "${workspaceFolder:PcTools}" },
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": []
+      },
+      {
+        // Toolchain locations come from environment variables that tools/setup.ps1
+        // discovers and sets, so this file stays the same on every machine.
+        // A bare `idf.py build` is deliberately not used: the ESP-IDF launcher
+        // is not reliably on PATH here, and it would pick up whichever project
+        // the shell happens to be sitting in.
+        "label": "KilnFW: Build",
+        "type": "shell",
+        "command": "${env:IDF_PYTHON_ENV_PATH}/Scripts/python.exe",
+        "args": ["${env:IDF_PATH}/tools/idf.py", "-C", "${workspaceFolder:KilnFW}", "build"],
+        "group": "build",
+        "presentation": { "reveal": "always", "panel": "dedicated" },
+        "problemMatcher": ["$gcc"]
+      }
+    ]
+  },
+
+  "extensions": {
+    "recommendations": [
+      "seunlanlege.action-buttons",
+      "espressif.esp-idf-extension",
+      "raspberry-pi.raspberry-pi-pico",
+      "marus25.cortex-debug",
+      "llvm-vs-code-extensions.vscode-clangd",
+      "ms-python.python"
+    ]
+  }
+}

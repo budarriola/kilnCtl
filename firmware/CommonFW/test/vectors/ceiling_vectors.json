@@ -1,0 +1,21 @@
+{
+  "frame": "SAFETY_CMD_SET_FIRING_CEILING",
+  "cmd": "0x09",
+  "vectors": [
+    {
+      "name": "bisque900",
+      "fields": {
+        "firing_max_c": 900.0
+      },
+      "bytes_hex": "0900006144"
+    },
+    {
+      "name": "none0",
+      "fields": {
+        "firing_max_c": 0.0
+      },
+      "bytes_hex": "0900000000"
+    }
+  ],
+  "note": "bytes_hex fields here are documentation only -- the authoritative byte-exact expectations live inline in test/test_ceiling.c (mirroring status/power/context/announce/diag/trip's own convention); this file records the field values that produced them for anyone re-deriving the vectors by hand. firing_max_c == 0 (or NaN) means \"no firing / no ceiling known\" per LINK_PROTOCOL.md sec 4; this codec passes either through unmodified."
+}

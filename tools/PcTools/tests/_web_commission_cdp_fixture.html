@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<!-- _web_commission_cdp_fixture.html -- static page used only by
+     web_commission_cdp_driver.test.mjs to exercise the CDP driver's
+     aria-label/css selector kinds and its --steps runner end to end,
+     against a throwaway local HTTP server, never the live board. Shapes
+     of the controls below are deliberately modelled on the two profiles_page.html
+     patterns that motivated those features: a per-item aria-label with no
+     id (favToggleBtn()) and a control that is created only after an
+     earlier click (segmentRow()/addSegBtn), including a fake POST so
+     wait-for-post has something real to observe. -->
+<html>
+<head><title>fixture</title></head>
+<body>
+  <button id="favBtn" aria-label='Add "Bisque Fast" to favorites'>&#9734;</button>
+  <button id="addSegBtn">+ Add segment</button>
+  <div id="segments"></div>
+  <div id="result"></div>
+  <button id="delBtn">Delete</button>
+  <!-- Same DOM shape app.js buildConfirmModal() creates for kcConfirm()
+       (overlay[hidden] > .kc-confirm-panel with #kc-confirm-title,
+       #kc-confirm-text, .kc-login-cancel, .kc-confirm-ok), so the driver's
+       in-page modal answering is tested against that exact shape. Keep in
+       step with app.js if it changes. -->
+  <div class="kc-login-overlay" id="modal" hidden>
+    <div class="kc-login-panel kc-confirm-panel" role="dialog">
+      <h2 id="kc-confirm-title">Confirm</h2>
+      <div id="kc-confirm-text"><p>Delete profile "Bisque Fast"?</p></div>
+      <button type="button" class="kc-login-cancel">Cancel</button>
+      <button type="button" class="kc-confirm-ok">OK</button>
+    </div>
+  </div>
+  <script>
+    function fixtureConfirm() {
+      var m = document.getElementById('modal');
+      m.removeAttribute('hidden');
+      return new Promise(function (resolve) {
+        function done(v) { m.setAttribute('hidden', ''); resolve(v); }
+        m.querySelector('.kc-confirm-ok').onclick = function () { done(true); };
+        m.querySelector('.kc-login-cancel').onclick = function () { done(false); };
+      });
+    }
+    document.getElementById('delBtn').addEventListener('click', function () {
+      fixtureConfirm().then(function (ok) {
+        fetch(ok ? '/api/confirmed_delete' : '/api/declined_delete', { method: 'POST' });
+      });
+    });
+    document.getElementById('favBtn').addEventListener('click', function () {
+      fetch('/api/fav_toggle', { method: 'POST' });
+    });
+    document.getElementById('addSegBtn').addEventListener('click', function () {
+      // Mirrors segmentRow()'s async-then-append shape (loadZones().then(...))
+      // so wait-for-selector has something genuine to wait on, not an
+      // instantly-present element.
+      setTimeout(function () {
+        var div = document.createElement('div');
+        div.className = 'seg';
+        div.innerHTML = '<select class="seg-kind"><option value="0">a</option><option value="1">b</option></select>' +
+                         '<button type="button" class="save">Save segment</button>';
+        // changeCount proves the driver's "fill" really dispatches a
+        // bubbling 'change' -- profiles_page.html's own segmentRow() hangs
+        // its kind-switch field rebuild off exactly this event, so a fill
+        // that set .value without firing it would look correct here and be
+        // inert on the real page. Reported back in the POST querystring so
+        // the test asserts on what the SERVER saw, not on the driver's own
+        // report.
+        var changeCount = 0;
+        div.querySelector('.seg-kind').addEventListener('change', function () { changeCount++; });
+        div.querySelector('.save').addEventListener('click', function () {
+          var kind = div.querySelector('.seg-kind').value;
+          fetch('/api/segment_save?kind=' + kind + '&chg=' + changeCount, { method: 'POST' });
+        });
+        document.getElementById('segments').appendChild(div);
+      }, 150);
+    });
+  </script>
+</body>
+</html>

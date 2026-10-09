@@ -1,0 +1,44 @@
+menu "KilnCtrl Application"
+
+    orsource "$IDF_PATH/examples/common_components/env_caps/$IDF_TARGET/Kconfig.env_caps"
+
+    config I2C_MASTER_FREQUENCY
+        int "I2C master clock (Hz)"
+        default 100000
+        help
+            SCL frequency for every device on the main board's I2C bus. The
+            SX1509 is the only part on it, but SDA/SCL are also carried out to
+            J2 (display) and J6 (thermocouple board), so standard mode
+            (100 kHz) is the default for the extra rise-time margin over that
+            wiring. The pin numbers themselves live under "KilnCtrl Hardware
+            Configuration".
+
+    config KILNCTL_DEV_TOOLS
+        bool "Enable developer-only tools (release firmware must leave this off)"
+        default n
+        help
+            Gates development-only affordances that have no place in
+            firmware shipped to an operator -- currently the safety
+            commissioning page's "Apply test preset" button and its
+            /api/safety/commissioning/bench_preset route, which stage a
+            fixed set of test values rather than anything derived from a
+            real kiln. When this is off, the route is not registered at
+            all and the button is hidden from the served page. Bench
+            builds enable this; a release build must not. See
+            docs/SETUP.md for how the bench build's sdkconfig sets it.
+
+    config KILNCTL_LOGS_LITTLEFS
+        bool "Mount the `logs` partition as LittleFS instead of SPIFFS"
+        default n
+        help
+            docs/FILESYSTEM_PLAN.md step 2. When off (default), log_store_
+            mount.c mounts the `logs` partition with esp_vfs_spiffs_register()
+            as before -- the bench keeps SPIFFS until step 3 flips this
+            default and step 4 changes partitions.csv's `logs` subtype from
+            spiffs to littlefs. Turning this on WITHOUT also changing that
+            partitions.csv subtype mounts LittleFS onto a SPIFFS-formatted
+            partition, which fails and (format_if_mount_failed=true)
+            reformats it -- fine on a bench, not something to flip alone
+            against a partition with logs already worth keeping.
+
+endmenu

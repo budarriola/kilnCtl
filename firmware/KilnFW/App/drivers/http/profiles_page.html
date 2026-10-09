@@ -1,0 +1,2310 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Fire Profiles</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Page-local palette (docs/UI_THEME.md / App/drivers/ui/ui_theme.h, TODO.md
+     10.6/10.6a). The shared --ui-* palette and .theme-btn now live in
+     /theme.css (linked above, EMBED_TXTFILES'd from App/drivers/http/theme.css) --
+     this block keeps only what's specific to this page: the --bg/--fg/etc
+     names the existing light/dark toggle uses as its interface (unchanged
+     behaviour); only the DARK variant points at the --ui-* values instead of
+     its own hex, so toggled-dark and default (no preference) match the LCD,
+     while explicit light mode is untouched. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999; --link: #06c;
+    --warn: #b06a00; --bad: #b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+      --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary); --link: var(--ui-accent-3);
+    --warn: var(--ui-accent-1); --bad: var(--ui-accent-5);
+  }
+  /* WEB_UI_RESPONSIVE.md sec 6: shared shell width instead of a fixed
+     560px cap -- see main_page.html's identical comment for the rationale. */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
+     rule in /theme.css (which loads first), and being `position: fixed`
+     made it overlap nav.js's topbar on a phone-width viewport -- see
+     theme.css's own comment on .theme-btn for the fix. */
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 1.5em; border-top: 1px solid var(--border); padding-top: 1em; }
+  p { color: var(--muted); }
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  input[type=text], input[type=number], select {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.6em 1em; margin-bottom: 0.5em; display: flex; justify-content: space-between;
+          align-items: center; }
+  /* Owner's request (2026-08-27): relay/IO segments live alongside ramp/dwell
+     ones now, each row picking its own kind -- so a row is no longer a fixed
+     3-field strip, it is a kind selector plus a variable field set
+     (.fields), rebuilt whenever the kind changes (see segmentRow()/
+     renderSegFields() below). */
+  .seg { border-bottom: 1px dashed var(--border); padding-bottom: 0.6em; margin-top: 0.7em; }
+  .seg .seg-head { display: flex; gap: 0.5em; align-items: flex-end; }
+  .seg .seg-head > div:first-child { flex: 1; }
+  .seg .fields { display: flex; flex-wrap: wrap; gap: 0.5em; margin-top: 0.4em; }
+  .seg .fields > div { flex: 1 1 130px; min-width: 130px; }
+  .seg .fields > .io-leave-wrap { flex-basis: 100%; }
+  .seg label { font-size: 0.75em; margin-top: 0; }
+  .seg .io-leave-wrap label { font-weight: normal; display: flex; align-items: center; gap: 0.4em; }
+  .seg .io-leave-wrap input[type=checkbox] { width: auto; }
+  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
+     Web item 2). */
+  button { padding: 0.6em 1.2em; font-size: 0.95em;
+           background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+           border-radius: var(--ui-radius); cursor: pointer; }
+  /* 2026-08-22: min-height raised 0 -> 32px. A headless-Chromium sweep at
+     390/1280px found EVERY pair of adjacent catalogue rows' "Use / Save a
+     copy"/"Remove" buttons reporting overlapping bounding boxes (e.g. one
+     row's buttons at y=690 h=25, the next row's at y=707 h=25 -- an 8px
+     overlap, with rows only ~17px apart). Reproduced locally: the real cause
+     turned out to be Chromium's closed-<details> rendering (see the
+     `.ci:not([open])` rule below for the actual fix for THAT), but while
+     chasing it down this file's own 25px .small height was also confirmed
+     under the 32px floor a fingertip needs -- and Remove/Delete/hide are the
+     only actions this class is ever used for on real content rows (the
+     catalogue's Use/Remove, the saved-profile list's Edit/Delete), so it
+     gets bumped here rather than left as the one destructive control on this
+     page smaller than the sitewide --ui-touch/40px floor everything else
+     converged on. */
+  button.small { min-height: 32px; min-width: 32px; padding: 0.3em 0.7em; font-size: 0.85em; }
+  /* 2026-08-22: the actual root cause of the "overlapping catalogue row
+     buttons" bug above. A CLOSED <details> (the normal/default state of
+     every "Shipped schedules" entry below) is not simply `display: none` on
+     its non-<summary> children in current Chromium -- it renders them via an
+     internal content-visibility optimization that skips PAINTING them but
+     still computes and retains a real, non-zero layout box for each
+     descendant (confirmed locally: a headless screenshot of several closed
+     entries shows only the summary lines, nothing else, yet
+     getBoundingClientRect() on the Use/Remove buttons inside them still
+     returns their full real size and position, sitting at roughly the
+     summary's own line-height spacing apart -- which is exactly the ~17px
+     gap against a 25px button that a rect-based sweep (or any other code
+     that queries the DOM without checking visibility, e.g. automated a11y
+     tooling) sees as physically overlapping). Nothing is actually visible on
+     screen because of this, but relying on an unspecified internal browser
+     optimization to also zero out descendant geometry is not safe to leave
+     alone -- an author rule that forces it explicitly removes the ambiguity
+     outright rather than hoping today's rendering quirk never changes.
+     Verified: adding this rule collapses every closed-row control's rect to
+     0x0/0,0 in the same local repro. */
+  details.ci:not([open]) > *:not(summary) { display: none; }
+  /* Saved-profile rows (owner request 2026-09-18: "I want the saved profiles
+     to display like the shiped profiles, with an folding object and the
+     table"). They reuse the shipped catalogue's <details class="ci"> shell
+     and its step table verbatim -- buildProfileItem() below (2026-09-18:
+     now the ONE builder for both a saved profile and a shipped schedule,
+     see its own header comment) renders both kinds through the one shared
+     segmentTableHtml() -- so the only thing a saved row's header adds is
+     the Export/Edit/Delete action group the shipped entries have no
+     equivalent of.
+     Originally floated right (the same idiom #restoreBtn uses in an <h2>
+     below) rather than making <summary> a flex container, since `display:
+     flex` on a <summary> drops its disclosure triangle in Chromium and that
+     triangle is the whole folding affordance -- but the float itself had no
+     clearfix anywhere on the page and staircased across rows (2026-09-19,
+     see the .pi-row/.pi-acts CSS comments below for the fix: an inner flex
+     span carries the row layout instead, leaving <summary>'s own display
+     untouched so the triangle survives). inline-flex + nowrap on .pi-acts is
+     what stops Export/Edit/Delete splitting across two lines -- the exact
+     defect in the phone screenshot that prompted this pass, where Delete had
+     wrapped onto a second row and left every card ragged and a third taller
+     than needed. */
+  /* 2026-09-19: was `float: right`, with no clearfix anywhere on this page
+     (introduced 49683b45). A <details>/<summary> row's own box does not
+     grow to contain a floated child unless something clears it, so each
+     row's box stayed as short as its text line while the floated button
+     group hung off the bottom-right, overlapping the *next* row -- and each
+     subsequent row's own float then laid out beside whatever of the
+     previous row's leftover float area intruded into its line box,
+     shifting it further left row over row (a classic uncleared-float
+     stacking bug, not a nesting bug -- buildProfileItem()'s rows are
+     confirmed DOM siblings). Fixed by giving the summary's real content one
+     flex row (.pi-row) instead: the label takes the flexible share via
+     flex:1/min-width:0 (so it ellipsizes rather than wrapping under the
+     actions), and the actions group sits after it, so it lands flush at
+     the row's true right edge on every row with no float needed at all.
+     Left `display: inline-flex` on the group itself (used to lay out its
+     own icon buttons in a row) but dropped `float`; `flex: 0 0 auto` below
+     keeps it from being compressed by the row's own flex layout. */
+  .pi-acts { display: inline-flex; flex: 0 0 auto; flex-wrap: nowrap; gap: 0.3em; margin-left: 0.6em; }
+  /* The one flex row holding a row's real summary content (checkbox, name,
+     badge, actions) -- see the .pi-acts comment above for why this replaced
+     float. Lives on a child <span>, not on <summary> itself: `display: flex`
+     directly on <summary> drops Chromium's disclosure triangle (existing
+     .pi-acts float comment above this, kept for that part), so the triangle
+     stays governed by summary's own untouched `display: list-item` and only
+     this inner span becomes the flex container. */
+  /* 2026-09-19: was `display: flex` at `width: 100%`. <summary>'s UA style is
+     `display: list-item; list-style: disclosure-closed inside`, so a
+     block-level flex child gets its own anonymous line ABOVE the disclosure
+     marker's line instead of sharing it -- every summary rendered at
+     marker-line-height (16px) + row-height (32px) = 48px, on every row,
+     regardless of width. `inline-flex` keeps this span inline with the
+     marker so both share one line and the summary collapses to the row's
+     own height; `width: calc(100% - 1.5em)` replaces the lost `width: 100%`
+     (an inline-level box does not stretch to its container) with a fixed
+     allowance for the marker's own rendered width, and `vertical-align:
+     middle` keeps the row centered on the marker's line rather than
+     baseline-aligned below it. */
+  .pi-row { display: inline-flex; align-items: center; width: calc(100% - 1.5em);
+            vertical-align: middle; gap: 0.4em; }
+  /* flex: 1 1 auto + min-width: 0 is what lets a long profile name ellipsize
+     instead of wrapping under the action icons (the "cpl_z1" three-line
+     wrap in the owner's screenshot) -- a flex item's default min-width is
+     `auto` (its content's natural width), which defeats overflow/ellipsis
+     entirely until this is set to 0. */
+  .pi-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; }
+  /* Per-card container query (WEB_UI_RESPONSIVE.md sec 6 idiom used by
+     .card elsewhere in this file -- reflow off the row's own rendered
+     width, not the viewport's) rather than a viewport @media breakpoint:
+     lets the actions drop below the name on a narrow phone without
+     depending on the whole page's width, which this row does not
+     necessarily track 1:1 with (page padding/margins). */
+  @container kc-pi (max-width: 420px) {
+    .pi-row { flex-wrap: wrap; }
+    .pi-label { flex-basis: 100%; white-space: normal; }
+  }
+  /* Icon-only, but deliberately NOT shrunk to the glyph: 40px square, above
+     both this page's own 32px .small floor and the responsive sweep's
+     minimum, because this UI is driven from a phone and from a panel at the
+     kiln. The <svg> inside is 18px; the remaining pixels are hit area. */
+  .icon-btn { min-width: 40px; min-height: 40px; padding: 0.2em;
+              display: inline-flex; align-items: center; justify-content: center; }
+  /* Delete sits beside Edit and a mis-tap destroys a saved firing profile,
+     so it is pushed away from its neighbour and drawn in the --bad colour
+     already declared at the top of this file (no new colour introduced).
+     Colour is not the only cue: it has a distinct glyph, its own aria-label
+     and title, and the kcConfirm() step this call site has carried since
+     UI_PLAN.md Web section 4 item 5. */
+  .icon-btn.danger { color: var(--bad); border-color: var(--bad); margin-left: 0.5em; }
+  /* Favorite star toggle (owner request 2026-09-18: "Add a separate section
+     ... called Favorites... favorites appear at the top of the list with a
+     star next to them"). Text glyph, not a new <symbol>, since a favorite
+     is not one of the three actions ("export, edit and delete") the owner
+     asked to be icon-ified -- reuses the existing --warn token for the
+     filled state rather than introducing a colour. */
+  .fav-btn { font-size: 1.1em; line-height: 1; color: var(--muted); }
+  .fav-btn.active { color: var(--warn); }
+  /* Bulk select/export/delete (owner request 2026-09-18, items 3/4/5/6): a
+     checkbox per row when a mode is active, plus an on-screen indicator of
+     which mode ("Export mode"/"Delete mode") is live -- reuses --link for
+     the active mode button the same way other active/selected states on
+     this page already borrow an existing token. */
+  #bulkBar { display: flex; flex-wrap: wrap; gap: 0.4em; align-items: center; margin-top: 0.6em; }
+  #modeExportBtn.active, #modeDeleteBtn.active { border-color: var(--link); color: var(--link); }
+  #modeIndicator { font-size: 0.85em; }
+  .sel-cb-wrap { display: inline-flex; align-items: center; justify-content: center;
+                 min-width: 32px; min-height: 32px; margin-right: 0.2em; }
+  .sel-cb-wrap input[type=checkbox] { width: 20px; height: 20px; }
+  #msg { margin-top: 1em; }
+  #msg .err { color: var(--bad); font-weight: bold; }
+  #msg .warn { color: var(--warn); }
+  .empty { color: var(--muted); font-style: italic; }
+  .hint { font-size: 0.8em; color: var(--muted); margin: 0.2em 0 0; }
+  .s-ramp.near-ceiling { border-color: var(--warn); }
+  .s-ramp.over-ceiling { border-color: var(--bad); }
+  /* Builtin catalogue + feasibility colouring. Colours come only from the
+     --bad/--muted names declared above, so both theme variants and the
+     light/dark toggle keep working -- no literal hex here on purpose.
+     Only the two verdicts a user can actually act on get marked at all:
+       too_fast    -> dark red card background (--bad); this kiln's tuned
+                      model says the commanded ramp can't be sustained.
+       unreachable -> same dark red background, plus bold + wavy underline
+                      on the offending text so the worse verdict is still
+                      distinguishable at a glance once both are red.
+     "unknown" (no autotune has run for a zone yet) gets NO marking at all --
+     an untuned kiln can't be told apart from a fine schedule, so lighting up
+     every single profile with a badge would just be noise; see the one-line
+     notice above the list instead. Text inside a marked card is forced to a
+     fixed light colour rather than inheriting --fg, because --fg is a DARK
+     colour in light mode -- dark text on a dark red card would be unreadable
+     there even though the same rule looks fine in dark mode. */
+  .ci.fz-too_fast, .ci.fz-unreachable {
+    background: var(--bad); border-radius: var(--ui-radius);
+    padding: 0.4em 0.6em; margin: 0.4em 0;
+  }
+  .ci.fz-too_fast, .ci.fz-unreachable,
+  .ci.fz-too_fast summary, .ci.fz-unreachable summary,
+  .ci.fz-too_fast .hint, .ci.fz-unreachable .hint,
+  .ci.fz-too_fast a, .ci.fz-unreachable a,
+  .ci.fz-too_fast .badge, .ci.fz-unreachable .badge,
+  .ci.fz-too_fast td, .ci.fz-unreachable td, .ci.fz-too_fast th, .ci.fz-unreachable th {
+    color: #fff;
+  }
+  .ci.fz-too_fast th, .ci.fz-unreachable th,
+  .ci.fz-too_fast td, .ci.fz-unreachable td { border-bottom-color: rgba(255,255,255,0.35); }
+  .ci.fz-unreachable summary, .ci.fz-unreachable .badge { font-weight: bold; text-decoration: underline wavy; }
+  .ci { margin: 0.25em 0; container-type: inline-size; container-name: kc-pi; }
+  .ci > summary { cursor: pointer; font-size: 0.9em; }
+  .ci table { width: 100%; border-collapse: collapse; font-size: 0.85em; margin: 0.4em 0; }
+  .ci th, .ci td { border-bottom: 1px solid var(--border); padding: 0.2em 0.4em; text-align: right; }
+  .ci th:first-child, .ci td:first-child { text-align: left; }
+  .badge { font-size: 0.75em; border: 1px solid currentColor; border-radius: var(--ui-radius);
+           padding: 0 0.4em; margin-left: 0.4em; white-space: nowrap; }
+  .tune-notice { background: var(--card-bg); border: 1px solid var(--border);
+                 border-left: 4px solid var(--warn); border-radius: var(--ui-radius);
+                 padding: 0.6em 0.9em; margin-bottom: 0.6em; font-size: 0.9em; }
+  .credits { font-size: 0.85em; color: var(--muted); }
+  /* Live segment preview graph (owner request 2026-09-02): sits directly
+     above the segment rows -- the first row's own "Segment type" label is
+     the first thing below it -- and is only ever in the DOM's flow when
+     segPreviewChart.js decides there is something worth drawing (see
+     renderSegPreview() below); an untouched "New profile" form shows no box
+     at all, not an empty one, so this wrapper is display:none by default
+     rather than an empty bordered area. width:100%/box-sizing keeps a
+     narrow phone viewport from growing a horizontal scrollbar the way a
+     fixed-px canvas would. */
+  #segPreviewWrap { display: none; background: var(--card-bg); border: 1px solid var(--border);
+                     border-radius: var(--ui-radius); padding: 0.5em 0.6em; margin-top: 0.8em;
+                     box-sizing: border-box; }
+  #segPreviewWrap canvas { display: block; width: 100%; height: 120px; box-sizing: border-box; }
+  #segPreviewWrap .hint { margin: 0.3em 0 0; }
+  /* On/off rule editor (owner request 2026-09-14/15) -- same row shape as
+     .seg above (a dashed-bottom block with a wrapping field strip) so the
+     new section reads as a sibling of the segment editor, not a bolted-on
+     extra. Checkboxes for phase/direction are kept at the sitewide 40px
+     touch floor via .oo-check, same reasoning as .sel-cb-wrap above. */
+  .oorule { border-bottom: 1px dashed var(--border); padding-bottom: 0.6em; margin-top: 0.7em; }
+  .oorule .oo-row2 { display: flex; flex-wrap: wrap; gap: 0.5em; margin-top: 0.4em; }
+  .oorule .oo-row2 > div { flex: 1 1 130px; min-width: 130px; }
+  .oorule label { font-size: 0.75em; margin-top: 0; }
+  .oo-checks { display: flex; flex-wrap: wrap; gap: 0.6em; margin-top: 0.2em; }
+  .oo-check { display: inline-flex; align-items: center; gap: 0.3em; min-height: 40px; font-size: 0.85em; }
+  .oo-check input[type=checkbox] { width: 20px; height: 20px; }
+  .oo-inline { display: flex; align-items: center; gap: 0.4em; font-weight: normal; min-height: 40px; }
+  .oo-inline input[type=checkbox] { width: auto; }
+  .oo-summary { font-size: 0.8em; color: var(--muted); margin: 0.3em 0 0; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<!-- Row-action glyphs, defined ONCE here and referenced per row by <use>
+     (the same mechanism and the same kgIcon* naming zones_page.html's kiln
+     graphic already uses -- one pattern on this board, not two). Defining
+     them once is what keeps this page's weight flat as the profile list
+     grows: an extra row costs three ~55-byte <use> wrappers, not three full
+     path definitions. Inline SVG on purpose -- these pages are served from
+     flash by a board with no internet access, so an icon font or a CDN link
+     is not an option (the CSP forbids it too). aria-hidden on the defs block
+     because it draws nothing itself; each BUTTON carries the accessible
+     name (see iconBtn() below), never the glyph. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="kgIconExport" viewBox="0 0 20 20"><path d="M10 2v9" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M6 7.5l4 4 4-4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 14v4h14v-4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></symbol>
+<symbol id="kgIconEdit" viewBox="0 0 20 20"><path d="M3 14.2V17h2.8l8.1-8.1-2.8-2.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12.4 4.7l2.8 2.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+<symbol id="kgIconDelete" viewBox="0 0 20 20"><path d="M3.5 5.5h13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5.5 5.5l1 11.5h7l1-11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M7.5 5.5V3h5v2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+</defs></svg>
+<!-- Ad-hoc "&larr; Dashboard" back-link retired: nav.js's shared topbar
+     (Home button) provides this on every page. The <h1> that used to sit
+     here is also gone (2026-08-21 rework item 5) -- nav.js's topbar now
+     shows this page's name ("Fire Profiles", from <title> above) in the
+     brand's old spot, so the heading was pure duplication. -->
+<p>Create and edit named firing profiles here. Run them from the Dashboard.
+A profile can target more than one zone; when it does, every selected zone
+shares one ramp/dwell schedule and the schedule waits for the slowest zone
+to catch up before advancing (ramp-lock) -- each zone still
+runs its own PID/bang-bang loop and thermal guards independently.</p>
+
+<h2>Favorites</h2>
+<p class="hint">A shortcut, not a move -- starring a profile below leaves it in its
+original place and also lists it here for quick access.</p>
+<div id="favList"><p class="empty">Loading&hellip;</p></div>
+
+<div id="recentSection" style="display:none">
+<h2>Recently fired</h2>
+<p class="hint">The profiles this kiln has run most recently, so a common
+choice is not buried in a long list.</p>
+<div id="recentList"></div>
+</div>
+
+<h2>Profiles <button id="restoreBtn" type="button" class="small" style="display:none;float:right">Restore removed</button></h2>
+<p class="hint">Saved profiles and read-only shipped schedules in one list. Expand a
+profile to see its steps. A schedule with a dark red background is not usable on
+this kiln as tuned -- its ramp is faster than a zone can sustain, or its target is
+above what a zone can reach.</p>
+<div>
+  <input type="file" id="importFile" accept="application/json,.json" style="display:none">
+  <button id="importBtn" type="button" class="small">Import profile&hellip;</button>
+</div>
+<div id="importMsg"></div>
+<div id="tuneNotice" class="tune-notice" style="display:none"></div>
+<div id="bulkBar">
+  <button id="modeExportBtn" type="button" class="small">Select to export</button>
+  <button id="modeDeleteBtn" type="button" class="small">Select to delete</button>
+  <span id="modeIndicator" class="badge" style="display:none"></span>
+</div>
+<div id="bulkActionBar" style="display:none;margin-top:0.4em">
+  <button id="bulkActionBtn" type="button" class="small"></button>
+  <button id="bulkCancelBtn" type="button" class="small">Cancel</button>
+</div>
+<label for="profileFilter">Filter by name</label>
+<input type="text" id="profileFilter" placeholder="Type to filter&hellip;" autocomplete="off">
+<div id="list"><p class="empty">Loading&hellip;</p></div>
+<div id="catMsg"></div>
+
+<h2 id="editorTitle">New profile</h2>
+<label for="pname">Name</label>
+<input type="text" id="pname" maxlength="15">
+<label>Zone(s) -- select more than one to run them together off a single shared
+ramp/dwell schedule (ramp-lock: the schedule only advances once every
+selected zone has caught up)</label>
+<div id="pzone"></div>
+<p class="hint" id="zoneCeiling"></p>
+
+<div id="segPreviewWrap">
+  <canvas id="segPreviewChart" width="600" height="120"></canvas>
+  <p class="hint">Preview only -- built from what's entered below, not a live reading.</p>
+</div>
+<div id="segments"></div>
+<button id="addSegBtn" type="button" class="small">+ Add segment</button>
+
+<h2 id="ooHeading">On/off devices <span id="ooInfoSlot"></span></h2>
+<p class="hint" id="ooNoZonesMsg" style="display:none">No zones are configured as On/off devices and no
+spare relay is enabled as an aux output yet -- set a zone's type to "On/off device", or enable an aux output, on the
+<a href="/settings/zones">Thermocouples &amp; Zones</a> page first, then come back here to add a rule for it.</p>
+<div id="oorules"></div>
+<button id="addOoBtn" type="button" class="small">+ Add on/off rule</button>
+
+<div style="margin-top:1em">
+  <button id="saveBtn" type="button">Save profile</button>
+  <button id="newBtn" type="button">New</button>
+</div>
+<div id="msg"></div>
+
+<h2>Credits</h2>
+<p class="credits">The shipped schedules above are third-party firing schedules published by
+Digital Fire and reproduced here for convenience. See
+<a href="https://digitalfire.com/schedule">digitalfire.com/schedule</a> for the originals
+and the notes that go with them. They are provided as a starting point only -- verify
+any schedule against your own kiln and clay before firing it.</p>
+
+<script>
+var editingId = null;
+var zones = [];
+var zoneCeilings = []; // max_ramp_c_per_hr per zone, parallel to `zones`; 0 = unset
+var RAMP_WARN_FRACTION = 0.8; // mirrors PROFILE_RAMP_WARN_FRACTION in profiles_http.c
+var MAX_SEGMENTS = 12;
+
+// Owner's request (2026-08-27): relay/IO segments. relayNames/relayOwnedMask
+// come from /api/zones ("relay_names" is dense over KILN_IO_RELAY_COUNT,
+// index r == relay r+1; "relay_zone_owned_mask" bit N-1 set iff relay N is
+// currently claimed by some zone's heater output -- see zones_http.c's
+// zones_get_handler comment). Only relays NOT in this mask may be offered as
+// a segment target: a relay a zone already drives must never also be
+// reachable from a profile segment, or the two would fight over the same
+// contact (profiles_http.c's validate_io_segment() refuses it server-side
+// too; this is the client-side half so the dropdown never even offers the
+// choice). relayOwnedMask/relayNames are refetched every time a row needs
+// them (see refreshZonesFor() below) rather than cached from page load,
+// because a relay can be reassigned to a zone at any time from the
+// Thermocouples & Zones page while this one stays open.
+var relayNames = [];
+var relayOwnedMask = 0;
+var relayCount = 4;
+var IO_DIGITAL_COUNT = 7; // KILN_IO_DIGITAL_COUNT (kiln_io.h); no live count in /api/zones today
+
+// docs/ON_OFF_ZONE_PLAN.md plan step 5's editor pass: zone_type comes back
+// on every zone in /api/zones (zones_http_get.c, ZONES_CFG_VERSION 22's
+// zone_type/failsafe_state/hyst_c/min_on_s/min_off_s block, "always
+// emitted" -- see that file's own comment) -- the same array the zone
+// checkboxes above already read, just one more field per entry. onOffZones
+// is the subset an on/off rule may ever target; validate_on_off_rules()
+// (profiles_http.c) refuses anything else server-side, this is only the
+// client-side "don't even offer it" half, same precedent as
+// ioTargetOptionsHtml()'s relay-ownership filter above.
+var onOffZones = []; // [{index, name, aux?, tcZone?}]
+
+// Spare-relay aux outputs (docs/SPARE_RELAY_ONOFF_PLAN.md WP-5): an enabled,
+// non-conflicted aux output is also a valid rule target. Wire encoding is the
+// same zone_index byte, 8..11 = aux relay 1..4 (profile_rule_target.h,
+// PROFILE_RULE_TARGET_AUX_BASE); 0..2 stay zones. GET /api/aux_outputs is
+// ADMIN-tier: a refusal or failure just means "no aux targets offered" -- a
+// stored aux rule then shows through the existing stale-target orphan option.
+var AUX_RULE_BASE = 8;
+var AUX_RULE_COUNT = 4;
+function ooIsValidTarget(z) {
+  return (typeof z === 'number' && z >= 0 && z < 3) ||
+    (typeof z === 'number' && z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT);
+}
+function ooIsAuxTarget(z) { return z >= AUX_RULE_BASE && z < AUX_RULE_BASE + AUX_RULE_COUNT; }
+function auxRuleTargetsFrom(aux) {
+  var out = [];
+  if (!aux || !Array.isArray(aux.relays) || aux.quarantined) return out;
+  aux.relays.forEach(function (a) {
+    if (!a || !a.enabled || a.conflicted) return;
+    if (typeof a.relay !== 'number' || a.relay < 1 || a.relay > AUX_RULE_COUNT) return;
+    var nm = relayNames[a.relay - 1];
+    out.push({
+      index: AUX_RULE_BASE + a.relay - 1,
+      name: (nm ? nm : 'Relay ' + a.relay) + ' (aux)',
+      aux: true,
+      tcZone: (typeof a.tc_zone === 'number') ? a.tc_zone : -1
+    });
+  });
+  return out;
+}
+var auxEnabledMask = 0; // bit N-1 set = relay N is an enabled aux output (not a RELAY_IO segment target)
+function loadAuxTargets() {
+  auxEnabledMask = 0;
+  return fetch('/api/aux_outputs').then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (aux) {
+    auxRuleTargetsFrom(aux).forEach(function (t) { onOffZones.push(t); });
+    auxEnabledMask = (aux && typeof aux.enabled_mask === 'number') ? aux.enabled_mask : 0;
+  }).catch(function () { /* no aux targets (not admin, or older firmware) */ });
+}
+
+// Client-side refusal for an aux rule whose temperature axis cannot work:
+// the server (profiles_http.c) refuses a temp rule on an aux output with no
+// thermocouple zone set. Returns an error string, or '' when fine.
+function ooAuxTempProblem(zone, tempCmp) {
+  if (!ooIsAuxTarget(zone) || !tempCmp) return '';
+  var tgt = null;
+  onOffZones.forEach(function (z) { if (z.index === zone) tgt = z; });
+  if (tgt && tgt.tcZone < 0) {
+    return tgt.name + ' has no thermocouple zone set -- pick one on the Thermocouples & Zones page or clear ' +
+      'the temperature condition.';
+  }
+  return '';
+}
+
+function loadZones() {
+  return fetch('/api/zones').then(function (r) { return r.json(); }).then(function (data) {
+    zones = [];
+    zoneCeilings = [];
+    onOffZones = [];
+    relayNames = data.relay_names || [];
+    relayOwnedMask = data.relay_zone_owned_mask || 0;
+    relayCount = data.relay_count || 4;
+    for (var i = 0; i < data.thermo_count; i++) {
+      var zname = data.zones[i].name || ('Zone ' + i);
+      zones.push(zname);
+      zoneCeilings.push(data.zones[i].max_ramp_c_per_hr || 0);
+      if (data.zones[i].zone_type === 1) {
+        onOffZones.push({ index: i, name: zname });
+      }
+    }
+    return loadAuxTargets();
+  }).then(function () {
+    var container = document.getElementById('pzone');
+    container.innerHTML = '';
+    zones.forEach(function (name, i) {
+      /* inline-FLEX with a 32px minimum, not inline-block: the label IS the
+         hit area for the checkbox inside it, and at inline-block it measured
+         81x19 on a 390px phone -- half the 32px minimum a finger needs, and
+         the only genuinely small tap target the UI sweep still reported.
+         (The similar-looking checkbox on the zones page was already fine at
+         358x35; this one was not, so they are not the same case.) */
+      var label = document.createElement('label');
+      label.style.display = 'inline-flex';
+      label.style.alignItems = 'center';
+      label.style.minHeight = '32px';
+      label.style.gap = '0.35em';
+      label.style.fontWeight = 'normal';
+      label.style.marginRight = '1em';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'pzone-cb';
+      cb.value = i;
+      cb.addEventListener('change', updateZoneCeiling);
+      label.appendChild(cb);
+      /* No leading space in the text node now that the label is a flex row with
+         a gap -- the gap does that job, and a stray space would double it. */
+      label.appendChild(document.createTextNode(i + ': ' + name));
+      container.appendChild(label);
+    });
+    if (zones.length === 0) {
+      container.innerHTML = '<span class="empty">No zones configured</span>';
+    }
+    updateZoneCeiling();
+    refreshOoUi();
+  }).catch(function () {
+    // Resolve rather than reject on failure: callers chain refreshAll() off
+    // this promise (see the page-boot call below), and a network hiccup
+    // reading /api/zones must not leave that stuck on
+    // "Loading..." forever just because this fetch failed first.
+    document.getElementById('pzone').innerHTML = '<span class="empty">Could not load zones.</span>';
+  });
+}
+
+function selectedZoneMask() {
+  var mask = 0;
+  document.querySelectorAll('.pzone-cb').forEach(function (cb) {
+    if (cb.checked) mask |= (1 << parseInt(cb.value, 10));
+  });
+  return mask;
+}
+
+function setSelectedZoneMask(mask) {
+  document.querySelectorAll('.pzone-cb').forEach(function (cb) {
+    cb.checked = (mask & (1 << parseInt(cb.value, 10))) !== 0;
+  });
+}
+
+/* Feasibility is only as good as its weakest zone (TODO.md 6A.5: a
+ * ramp-locked multi-zone profile is limited by whichever zone is slowest),
+ * so the ceiling shown/checked client-side is the MINIMUM across every
+ * currently-selected zone, matching profiles_http.c's authoritative
+ * per-zone loop. Zones with no ceiling configured (0) are excluded from the
+ * minimum rather than forcing it to 0 -- "not yet configured" and "genuinely
+ * zero headroom" are different states, same convention zones_http.c uses
+ * elsewhere. */
+function currentCeiling() {
+  var min = 0;
+  document.querySelectorAll('.pzone-cb').forEach(function (cb) {
+    if (!cb.checked) return;
+    var c = zoneCeilings[parseInt(cb.value, 10)] || 0;
+    if (c > 0 && (min === 0 || c < min)) min = c;
+  });
+  return min;
+}
+
+function updateZoneCeiling() {
+  var el = document.getElementById('zoneCeiling');
+  var ceiling = currentCeiling();
+  var anySelected = selectedZoneMask() !== 0;
+  if (!anySelected) {
+    el.textContent = 'Select at least one zone.';
+  } else {
+    el.textContent = ceiling > 0
+      ? 'Lowest max ramp rate ceiling among selected zones (Settings → Thermocouples & Zones): ' + ceiling + ' °C/hr.'
+      : 'No max ramp rate set for the selected zone(s) yet -- ramp feasibility can\'t be checked until one is.';
+  }
+  document.getElementById('segments').querySelectorAll('.s-ramp').forEach(checkRamp);
+}
+
+// Client-side preview only -- TODO.md section 5 explicitly requires the
+// authoritative check to stay on-device (profiles_http.c's
+// PROFILE_RAMP_WARN_FRACTION), which still runs on save regardless of what
+// this shows. This just surfaces the same rule earlier, before a round trip.
+function checkRamp(input) {
+  var ceiling = currentCeiling();
+  var rate = parseFloat(input.value) || 0;
+  input.classList.remove('near-ceiling', 'over-ceiling');
+  // near-ceiling/over-ceiling are colour-only in the CSS above (border-color,
+  // --warn vs --bad) -- WEB_UI_RESPONSIVE.md's colour-contrast audit
+  // flagged that pair as only 1.0-1.1:1 apart in luminance, so a border
+  // colour alone does not reliably tell the two states apart. `title` adds a
+  // non-colour cue (read by a screen reader, and on hover/long-press) without
+  // touching layout or repainting anything -- an empty title below is the
+  // "no warning" case and clears whatever the previous state left behind.
+  input.title = '';
+  if (ceiling <= 0 || rate <= 0) return;
+  if (rate > ceiling) {
+    input.classList.add('over-ceiling');
+    input.title = 'Over the ' + ceiling + ' °C/hr ramp ceiling for the selected zone(s).';
+  } else if (rate > RAMP_WARN_FRACTION * ceiling) {
+    input.classList.add('near-ceiling');
+    input.title = 'Near the ' + ceiling + ' °C/hr ramp ceiling for the selected zone(s).';
+  }
+}
+
+// Deliberately NOT run through kcUnit here (UI_PLAN.md item 2's own
+// "conversion is display-only" rule): this is a user-entered/edited form
+// input whose raw value gets POSTed straight to /api/profile as seg*_target,
+// and profiles_http.c has always taken that number as Celsius. Converting
+// what's typed here without also converting it back before the POST would
+// silently double-apply a °F/°C error into a real firing setpoint -- exactly
+// the hazard the task called out. The label spells out "&deg;C" explicitly
+// so an operator with the toggle set to °F still knows what unit to type.
+// Ramp/dwell fields -- unchanged from before this pass, just factored out so
+// segmentRow() can pick between this and ioFieldsHtml() by kind.
+function rampFieldsHtml(seg) {
+  return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (seg.target_c || 0) + '"></div>' +
+    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (seg.ramp_c_per_hr || 0) + '"></div>' +
+    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (seg.dwell_min || 0) + '"></div>';
+}
+
+// Builds the <option>s for the relay/IO target <select>. `selected` is the
+// io_target value to preselect (0 = none yet). A relay currently owned by a
+// zone is left OUT of the normal choices (item 2 of the brief) -- except
+// when it is the value already saved on this segment, in which case it is
+// still shown so editing an existing segment doesn't silently jump to a
+// different relay, but disabled and labelled so the operator can see why it
+// needs to change (profiles_http.c's validate_io_segment() would refuse a
+// save with it anyway).
+function ioTargetOptionsHtml(selected) {
+  var html = '<optgroup label="Relay">';
+  for (var r = 1; r <= relayCount; r++) {
+    var auxOwned = (auxEnabledMask & (1 << (r - 1))) !== 0;
+    var owned = auxOwned || (relayOwnedMask & (1 << (r - 1))) !== 0;
+    if (owned && r !== selected) continue;
+    var label = window.kcEscapeHtml(relayNames[r - 1] || ('Relay ' + r));
+    if (owned) label += auxOwned ? ' (aux output -- pick another)' : ' (assigned to a zone -- pick another)';
+    html += '<option value="' + r + '"' + (r === selected ? ' selected' : '') +
+            (owned ? ' disabled' : '') + '>' + label + '</option>';
+  }
+  html += '</optgroup><optgroup label="IO">';
+  for (var d = 1; d <= IO_DIGITAL_COUNT; d++) {
+    var v = 10 + d; // PROFILE_IO_TARGET_IO_BASE == 11
+    html += '<option value="' + v + '"' + (v === selected ? ' selected' : '') + '>IO_' + d + '</option>';
+  }
+  html += '</optgroup>';
+  return html;
+}
+
+// Relay/IO fields. "Timing" spells out the owner's own words ("runs with the
+// next segment or before") rather than a bare "blocking" checkbox (brief
+// item 4), and the leave-on-at-end control states its consequence in plain
+// language (item 5) since the default is force-off and the heaters are live
+// hardware. io_blocking defaults to 1 (blocking) here to match the
+// firmware's own "missing = blocking, the safer default" rule
+// (profiles_http.c's POST handler comment on seg%u_io_blocking).
+function ioFieldsHtml(seg) {
+  var target = seg.io_target || 0;
+  var state = seg.io_state ? 1 : 0;
+  var blocking = seg.io_blocking === 0 ? 0 : 1;
+  var leave = seg.io_leave_on_at_end ? 1 : 0;
+  return '<div><label>Relay / IO</label><select class="io-target">' + ioTargetOptionsHtml(target) + '</select></div>' +
+    '<div><label>Command</label><select class="io-state">' +
+      '<option value="1"' + (state ? ' selected' : '') + '>Turn ON</option>' +
+      '<option value="0"' + (!state ? ' selected' : '') + '>Turn OFF</option>' +
+    '</select></div>' +
+    '<div><label>Hold minutes</label><input type="number" step="1" class="io-dwell" value="' + (seg.dwell_min || 0) + '"></div>' +
+    '<div><label>Timing</label><select class="io-blocking">' +
+      '<option value="1"' + (blocking ? ' selected' : '') + '>Blocking -- profile waits here, runs BEFORE the next segment</option>' +
+      '<option value="0"' + (!blocking ? ' selected' : '') + '>Non-blocking -- runs WITH (alongside) the next segment</option>' +
+    '</select></div>' +
+    '<div class="io-leave-wrap"><label><input type="checkbox" class="io-leave"' + (leave ? ' checked' : '') + '>' +
+      ' Leave it in this state when the run ends</label>' +
+      '<p class="hint">Default: forced OFF like every other relay/IO when a run ends. Checking this ' +
+      'leaves it energized in its last commanded state instead -- only usable for a non-blocking ' +
+      'segment commanding ON, and only honored if the run finishes cleanly (a fault, halt or pause ' +
+      'still forces off). The heating elements on this board are live.</p></div>';
+}
+
+// Enforces the same combination validate_io_segment() enforces server-side
+// (io_leave_on_at_end only makes sense for a non-blocking, ON segment) --
+// disables and unchecks the checkbox rather than letting the operator set a
+// combination that would just be refused at save time.
+function updateIoLeaveEnabled(fields) {
+  var blocking = fields.querySelector('.io-blocking').value !== '0';
+  var isOn = fields.querySelector('.io-state').value !== '0';
+  var leave = fields.querySelector('.io-leave');
+  var eligible = !blocking && isOn;
+  leave.disabled = !eligible;
+  if (!eligible) leave.checked = false;
+}
+
+// Renders the field set for `kind` (0 = ramp/dwell, 1 = relay/IO) into
+// `fields`, replacing whatever was there. Called on initial row build AND on
+// every kind switch -- rebuilding from scratch (rather than hiding/showing
+// both sets) is what keeps a switched row from ever POSTing stale values
+// left over from the other kind: the other kind's inputs simply don't exist
+// in the DOM to be read back out (see the save handler below, which only
+// ever queries the classes the CURRENT kind's fields use).
+function renderSegFields(fields, kind, seg) {
+  if (kind === 1) {
+    fields.innerHTML = ioFieldsHtml(seg);
+    var blockingSel = fields.querySelector('.io-blocking');
+    var stateSel = fields.querySelector('.io-state');
+    blockingSel.addEventListener('change', function () { updateIoLeaveEnabled(fields); });
+    stateSel.addEventListener('change', function () { updateIoLeaveEnabled(fields); });
+    updateIoLeaveEnabled(fields);
+  } else {
+    fields.innerHTML = rampFieldsHtml(seg);
+    var rampInput = fields.querySelector('.s-ramp');
+    rampInput.addEventListener('input', function () { checkRamp(rampInput); });
+    checkRamp(rampInput);
+  }
+}
+
+// ---- Live segment preview graph (owner request 2026-09-02) ---------------
+// Pure data-shaping half lives here with no DOM access so it can be copied
+// verbatim into a standalone harness for testing (see the commit message /
+// task report for the harness run) -- segRowToData()/renderSegPreview()
+// below are the only DOM-touching pieces.
+//
+// clampNum: every numeric field on this page is free-typed by an operator,
+// so this is the one guard that keeps a blank box, a stray letter, or a
+// pasted negative from ever reaching Math -- non-finite collapses to `def`
+// rather than throwing or drawing NaN/Infinity garbage on the canvas.
+function clampNum(v, def) {
+  var n = parseFloat(v);
+  return isFinite(n) ? n : def;
+}
+
+// segProfileCurve: turns the parsed segment list into a temp-vs-time
+// polyline (time in minutes, temp in Celsius -- same unit convention as the
+// rest of this editor, UI_PLAN.md item 2). There is no live kiln
+// temperature available client-side without an extra round trip, so the
+// FIRST ramp/dwell segment with any real data is treated as the curve's
+// starting point (flat at its own target) rather than guessing a ramp up
+// from an unknown ambient -- every segment after that ramps from the
+// previous segment's target, same as the board will actually run it.
+//
+// Relay/IO segments contribute no temperature of their own: a blocking one
+// just holds the timeline flat at whatever temp came before it for its
+// dwell (the profile literally waits there before advancing); a
+// non-blocking one runs alongside the next segment and adds no time at all.
+// A row with no usable target yet (blank/non-numeric) is skipped outright --
+// "half-entered" must not throw, and must not fabricate a target of 0 for a
+// field the operator hasn't touched.
+function segProfileCurve(segs) {
+  var t = 0;
+  var temp = null;
+  var points = [];
+  var any = false;
+  (segs || []).forEach(function (s) {
+    if (s.kind === 1) {
+      var iDwell = Math.max(0, clampNum(s.dwell_min, 0));
+      if (iDwell > 0) any = true;
+      if (s.io_blocking !== 0 && iDwell > 0 && temp !== null) {
+        if (points.length === 0) points.push({ t: t, temp: temp });
+        t += iDwell;
+        points.push({ t: t, temp: temp });
+      }
+      return;
+    }
+    var target = clampNum(s.target_c, NaN);
+    if (!isFinite(target)) return; // no target entered on this row yet
+    var ramp = Math.max(0, clampNum(s.ramp_c_per_hr, 0));
+    var dwell = Math.max(0, clampNum(s.dwell_min, 0));
+    if (target !== 0 || ramp !== 0 || dwell !== 0) any = true;
+    if (temp === null) {
+      temp = target;
+      points.push({ t: t, temp: temp });
+    }
+    var rampMin = ramp > 0 ? Math.abs(target - temp) / ramp * 60 : 0;
+    t += rampMin;
+    temp = target;
+    points.push({ t: t, temp: temp });
+    if (dwell > 0) {
+      t += dwell;
+      points.push({ t: t, temp: temp });
+    }
+  });
+  // hasData gates the whole graph's visibility (brief: no box at all until
+  // there is something to draw) -- "any" alone isn't enough because a lone
+  // IO segment's dwell can set it true while producing zero drawable points
+  // (nothing ramp/dwell has set a starting temp yet).
+  return { points: points, hasData: any && points.length >= 2 };
+}
+
+// segRowToData: the only bit that touches the DOM, mapping one .seg row to
+// the plain-object shape segProfileCurve() consumes. Field lookups use the
+// same classes the save handler already reads (kind-specific, never both --
+// see renderSegFields()'s comment), so a row mid-kind-switch with fields not
+// yet rebuilt simply yields undefineds here, which clampNum() turns into
+// "skip this row" rather than a thrown error.
+function segRowToData(row) {
+  var kindSel = row.querySelector('.seg-kind');
+  var kind = kindSel ? parseInt(kindSel.value, 10) : 0;
+  if (kind === 1) {
+    var dwellEl = row.querySelector('.io-dwell');
+    var blockingEl = row.querySelector('.io-blocking');
+    return {
+      kind: 1,
+      dwell_min: dwellEl ? dwellEl.value : undefined,
+      io_blocking: blockingEl ? parseInt(blockingEl.value, 10) : 1,
+    };
+  }
+  var targetEl = row.querySelector('.s-target');
+  var rampEl = row.querySelector('.s-ramp');
+  var sDwellEl = row.querySelector('.s-dwell');
+  return {
+    kind: 0,
+    target_c: targetEl ? targetEl.value : undefined,
+    ramp_c_per_hr: rampEl ? rampEl.value : undefined,
+    dwell_min: sDwellEl ? sDwellEl.value : undefined,
+  };
+}
+
+// renderSegPreview: reads every current .seg row, builds the curve, and
+// shows/hides+draws #segPreviewWrap accordingly. Called after every edit
+// (delegated input/change listener below) and after every structural change
+// (add/remove/kind-switch/load-into-editor/reset) so it always reflects
+// exactly what the form holds right now -- brief's "must update live"
+// requirement.
+function renderSegPreview() {
+  var wrap = document.getElementById('segPreviewWrap');
+  var rows = document.getElementById('segments').querySelectorAll('.seg');
+  var segs = [];
+  rows.forEach(function (row) { segs.push(segRowToData(row)); });
+  var curve = segProfileCurve(segs);
+  if (!curve.hasData) {
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  drawSegPreview(curve.points);
+}
+
+// drawSegPreview: same canvas idiom main_page.html's history/autotune charts
+// use (devicePixelRatio-scaled backing store, CSS-pixel-sized layout,
+// strokeRect axes box) -- kept deliberately much simpler since this is a
+// small inline sketch, not the dashboard's multi-series chart. Colours come
+// only from this page's own --link/--muted/--border tokens (declared at the
+// top of the file), no new literals.
+function drawSegPreview(points) {
+  var canvas = document.getElementById('segPreviewChart');
+  var dpr = window.devicePixelRatio || 1;
+  var cssW = canvas.clientWidth || 600, cssH = 120;
+  canvas.width = cssW * dpr;
+  canvas.height = cssH * dpr;
+  var ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  var style = getComputedStyle(document.documentElement);
+  var line = style.getPropertyValue('--link').trim() || '#06c';
+  var muted = style.getPropertyValue('--muted').trim() || '#444';
+  var border = style.getPropertyValue('--border').trim() || '#888';
+
+  var padL = 34, padR = 6, padT = 6, padB = 14;
+  var plotW = Math.max(1, cssW - padL - padR);
+  var plotH = Math.max(1, cssH - padT - padB);
+
+  var tMax = 0, tMin = 0, vMax = 0, vMin = 0;
+  points.forEach(function (p, i) {
+    if (i === 0) { tMin = tMax = p.t; vMin = vMax = p.temp; }
+    if (p.t > tMax) tMax = p.t;
+    if (p.t < tMin) tMin = p.t;
+    if (p.temp > vMax) vMax = p.temp;
+    if (p.temp < vMin) vMin = p.temp;
+  });
+  if (tMax <= tMin) tMax = tMin + 1; // degenerate (all-flat/zero-duration) -- keep the axes finite
+  // Owner request 2026-09-28: never span less than 5 degrees vertically
+  // (this sketch labels in C, so 5 C) -- same rule as main_page.html's
+  // widenRangeToMinSpan(); also covers the old flat-data case.
+  if (vMax - vMin < 5) { var vMid = (vMax + vMin) / 2; vMin = vMid - 2.5; vMax = vMid + 2.5; }
+
+  function x(t) { return padL + (t - tMin) / (tMax - tMin) * plotW; }
+  function y(v) { return padT + plotH - (v - vMin) / (vMax - vMin) * plotH; }
+
+  ctx.strokeStyle = border; ctx.lineWidth = 1;
+  ctx.strokeRect(padL, padT, plotW, plotH);
+
+  ctx.fillStyle = muted; ctx.font = '9px sans-serif';
+  ctx.fillText(vMax.toFixed(0) + '°C', 2, padT + 8);
+  ctx.fillText(vMin.toFixed(0) + '°C', 2, padT + plotH);
+  ctx.fillText('0 min', padL, cssH - 3);
+  ctx.fillText(tMax.toFixed(0) + ' min', cssW - padR - 30, cssH - 3);
+
+  ctx.beginPath();
+  points.forEach(function (p, i) {
+    var px = x(p.t), py = y(p.temp);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  });
+  ctx.strokeStyle = line; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+// Delegated so it fires for every field in every row (present or future)
+// without a per-input listener to wire up and tear down on every kind
+// switch -- 'input' catches live typing in the number fields, 'change'
+// catches the <select> kind/state/timing pickers.
+document.getElementById('segments').addEventListener('input', renderSegPreview);
+document.getElementById('segments').addEventListener('change', renderSegPreview);
+
+function segmentRow(seg) {
+  var div = document.createElement('div');
+  div.className = 'seg';
+  var kind = seg.seg_kind ? 1 : 0;
+  div.innerHTML =
+    '<div class="seg-head">' +
+      '<div><label>Segment type</label><select class="seg-kind">' +
+        '<option value="0"' + (kind === 0 ? ' selected' : '') + '>Temperature ramp/dwell</option>' +
+        '<option value="1"' + (kind === 1 ? ' selected' : '') + '>Relay / IO</option>' +
+      '</select></div>' +
+      '<button type="button" class="small remove">&times;</button>' +
+    '</div>' +
+    '<div class="fields"></div>';
+  div.querySelector('.remove').addEventListener('click', function () { div.remove(); renderSegPreview(); refreshOoUi(); });
+  var fields = div.querySelector('.fields');
+  renderSegFields(fields, kind, seg);
+  div.querySelector('.seg-kind').addEventListener('change', function (ev) {
+    var newKind = parseInt(ev.target.value, 10);
+    // Owner didn't ask for cross-kind value carryover, and there's no sane
+    // mapping from "ramp to 950C over 3hr" to "hold Relay2 on for 3min" --
+    // switching kind starts that row's fields blank/default rather than
+    // guessing. Relay ownership can have changed since this row (or the
+    // page) was last loaded, so refetch it live before offering the
+    // relay/IO dropdown (brief item 2's "compute that live" requirement).
+    if (newKind === 1) {
+      loadZones().then(function () { renderSegFields(fields, newKind, {}); renderSegPreview(); });
+    } else {
+      renderSegFields(fields, newKind, {});
+      renderSegPreview();
+    }
+  });
+  return div;
+}
+
+// Segment rows are appended interactively (this button) as well as rebuilt
+// wholesale when loading a profile into the editor (loadIntoEditor()/
+// editProfile() below) -- both paths refresh zone/relay data first so a
+// freshly-added relay segment's dropdown reflects the CURRENT zone
+// assignments, not whatever was true when the page loaded (brief item 2).
+document.getElementById('addSegBtn').addEventListener('click', function () {
+  var container = document.getElementById('segments');
+  if (container.children.length >= MAX_SEGMENTS) return;
+  loadZones().then(function () { container.appendChild(segmentRow({})); renderSegPreview(); refreshOoUi(); });
+});
+
+// ---- On/off device rules (docs/ON_OFF_ZONE_PLAN.md plan step 5) ----------
+// The backend (profile_on_off_rule_t/validate_on_off_rules()/
+// profile_resolve_on_off_rule()) has carried this since plan step 5; this
+// editor is the piece that was still missing. One rule = one (segment,
+// on/off zone) pair, matching the sparse storage array 1:1. Wire encoding
+// on save is "ruleN_field=value" (profiles_edit_http.c's rule%u_* parser),
+// same indexed-field convention segments already use above; JSON load
+// (GET /api/profile's "on_off_rules") uses the long-form keys
+// (profiles_catalog_http.c) -- see ooRuleFromJson()/rulesToParams() below
+// for the two-way mapping.
+var MAX_OO_RULES = 8; // PROFILE_MAX_ON_OFF_RULES
+
+var OO_INFO_HTML = '<p>A rule commands one On/off device (a vent, damper or fan on an On/off zone or an ' +
+  'enabled aux relay -- never a heater; guards 1/2/3/4/9 are already disabled for that zone) ON or OFF for the duration of one segment, ' +
+  'whenever ALL of its configured conditions hold at once. Phase/direction with nothing checked means ' +
+  '"any" for that axis. "Invert" flips the result: the device is OFF while the conditions hold and ON ' +
+  'otherwise, instead of the usual ON-while-true. At most one rule may target a given (segment, zone) ' +
+  'pair -- profile_resolve_on_off_rule() only ever looks at the first match.</p>';
+
+function ooInfoOpenKey() { return 'profileOoInfoOpen'; }
+function isOoInfoOpen() {
+  try { return window.localStorage.getItem(ooInfoOpenKey()) === '1'; } catch (e) { return false; }
+}
+function setOoInfoOpen(open) {
+  try { window.localStorage.setItem(ooInfoOpenKey(), open ? '1' : '0'); } catch (e) { /* ignore */ }
+}
+document.getElementById('ooInfoSlot').innerHTML =
+  '<details class="info"' + (isOoInfoOpen() ? ' open' : '') + '><summary aria-label="About on/off devices">i</summary>' +
+  OO_INFO_HTML + '</details>';
+document.getElementById('ooInfoSlot').querySelector('details').addEventListener('toggle', function (e) {
+  setOoInfoOpen(e.target.open);
+});
+
+function ooZoneOptionsHtml(selected) {
+  var html = '';
+  var found = false;
+  onOffZones.forEach(function (z) {
+    if (z.index === selected) found = true;
+    html += '<option value="' + z.index + '"' + (z.index === selected ? ' selected' : '') + '>' +
+            window.kcEscapeHtml(z.name) + '</option>';
+  });
+  // A stored rule can name a zone that is no longer an on/off zone (retyped,
+  // deleted, or -- when onOffZones is empty -- simply because none exist on
+  // this board at all). Losing that value on the wire is worse than an
+  // orphan option: ooRulesToParams() would send rule*_zone= empty (or the
+  // first on/off zone's index picked by the browser's own <select> default),
+  // http_form_find_field() sees a present-but-blank field and
+  // profiles_edit_http.c silently drops the whole rule (empty) or
+  // validate_on_off_rules() silently retargets a different device (browser
+  // default) -- either way "Saved" lies. Keep the real value round-tripping
+  // and visibly flagged instead; save is refused client-side below while any
+  // row carries one of these.
+  if (selected != null && selected >= 0 && !found) {
+    // data-oo-stale="1" is the sanctioned way to detect this option --
+    // ooHasStaleZoneRow() below reads the attribute, not the label text, so
+    // a copy-editing change to the label alone can never silently disable
+    // the save-refusal guard.
+    html += '<option value="' + selected + '" selected data-oo-stale="1">' +
+            (ooIsAuxTarget(selected)
+              ? 'Aux relay ' + (selected - AUX_RULE_BASE + 1) + ' (not an enabled aux output)'
+              : 'Zone ' + selected + ' (no longer an on/off zone)') + '</option>';
+  }
+  if (html === '') html = '<option value="">(none)</option>';
+  return html;
+}
+
+// Segment options are labelled by 1-based position ("Step N"), same
+// numbering segmentTableHtml()'s preview table and this page's saved-list
+// preview use -- a rule's stored segment_index is 0-based, the label is not.
+function ooSegmentOptionsHtml(selected) {
+  var count = document.getElementById('segments').children.length;
+  if (count === 0) return '<option value="0">(no segments yet)</option>';
+  var html = '';
+  for (var i = 0; i < count; i++) {
+    html += '<option value="' + i + '"' + (i === selected ? ' selected' : '') + '>Step ' + (i + 1) + '</option>';
+  }
+  return html;
+}
+
+// Re-renders every existing rule row's segment <select> in place (options
+// change count when segments are added/removed) -- preserves the row's
+// current segment choice when it is still valid, clamps to the last segment
+// otherwise, exactly like a stale relay/IO choice would be refused at save
+// time rather than silently kept.
+function refreshOoUi() {
+  var maxSeg = Math.max(0, document.getElementById('segments').children.length - 1);
+  document.querySelectorAll('#oorules .oorule').forEach(function (row) {
+    var sel = row.querySelector('.oo-segment');
+    var cur = parseInt(sel.value, 10);
+    if (isNaN(cur) || cur > maxSeg) cur = maxSeg;
+    sel.innerHTML = ooSegmentOptionsHtml(cur);
+    var zsel = row.querySelector('.oo-zone');
+    var curZone = parseInt(zsel.value, 10);
+    zsel.innerHTML = ooZoneOptionsHtml(isNaN(curZone) ? -1 : curZone);
+  });
+  document.getElementById('ooNoZonesMsg').style.display = onOffZones.length === 0 ? '' : 'none';
+  document.getElementById('addOoBtn').style.display = onOffZones.length === 0 ? 'none' : '';
+  // Deliberately NOT clearing #oorules here when onOffZones is empty --
+  // loadZones()/refreshOoUi() run every time a segment is added, and wiping
+  // the DOM would silently destroy already-loaded rules that reference a
+  // zone this render just doesn't know about yet (or that no on/off zone
+  // exists at all). ooZoneOptionsHtml() above keeps each row's real stored
+  // value visible (flagged, if stale) instead.
+  document.querySelectorAll('#oorules .oorule').forEach(ooUpdateSummary);
+}
+
+function ooPhaseChecksHtml(mask) {
+  return '<label class="oo-check"><input type="checkbox" class="oo-phase" value="1"' +
+         ((mask & 1) ? ' checked' : '') + '> Ramp</label>' +
+         '<label class="oo-check"><input type="checkbox" class="oo-phase" value="2"' +
+         ((mask & 2) ? ' checked' : '') + '> Dwell</label>';
+}
+
+function ooDirChecksHtml(mask) {
+  return '<label class="oo-check"><input type="checkbox" class="oo-dir" value="1"' +
+         ((mask & 1) ? ' checked' : '') + '> Heating</label>' +
+         '<label class="oo-check"><input type="checkbox" class="oo-dir" value="2"' +
+         ((mask & 2) ? ' checked' : '') + '> Cooling</label>' +
+         '<label class="oo-check"><input type="checkbox" class="oo-dir" value="4"' +
+         ((mask & 4) ? ' checked' : '') + '> Flat</label>';
+}
+
+// rule fields from profile_on_off_rule_t (profiles_types.h), defaults match
+// profile_executor.c's on_off_trigger_rule_t zero-value ("no rule").
+function ooRuleFieldsHtml(r) {
+  r = r || {};
+  var zone = (r.zone != null) ? r.zone : (onOffZones[0] ? onOffZones[0].index : 0);
+  var segment = r.segment || 0;
+  var enable = (r.enable == null) ? 1 : r.enable;
+  var phase = r.phase_mask || 0;
+  var dir = r.direction_mask || 0;
+  var tempSource = r.temp_source || 0;
+  var tempCmp = (tempSource === 1) ? (r.temp_cmp || 0) : 0;
+  var tempC = (r.temp_c != null) ? r.temp_c : 0;
+  var startS = r.time_start_s || 0;
+  var stopS = r.time_stop_s || 0;
+  var invert = r.invert || 0;
+  return (
+    '<div class="oo-row2">' +
+      '<div><label>Device (on/off zone or aux relay) ' + infoIconHtml('ooZone', 'the target zone') + '</label>' +
+      '<select class="oo-zone">' + ooZoneOptionsHtml(zone) + '</select></div>' +
+      '<div><label>Segment</label><select class="oo-segment">' + ooSegmentOptionsHtml(segment) + '</select></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div><label>Phase ' + infoIconHtml('ooPhase', 'phase') + '</label><div class="oo-checks">' +
+      ooPhaseChecksHtml(phase) + '</div></div>' +
+      '<div><label>Direction ' + infoIconHtml('ooDir', 'direction') + '</label><div class="oo-checks">' +
+      ooDirChecksHtml(dir) + '</div></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div><label>Temperature condition ' + infoIconHtml('ooTemp', 'the temperature condition') + '</label>' +
+      '<select class="oo-tempcmp">' +
+        '<option value="0"' + (tempCmp === 0 ? ' selected' : '') + '>(none)</option>' +
+        '<option value="1"' + (tempCmp === 1 ? ' selected' : '') + '>This zone\'s measured T is ABOVE</option>' +
+        '<option value="2"' + (tempCmp === 2 ? ' selected' : '') + '>This zone\'s measured T is BELOW</option>' +
+      '</select></div>' +
+      '<div><label>Threshold &deg;C</label>' +
+      /* Deliberately NOT run through kcUnit, matching rampFieldsHtml's own
+         "Target °C" input above (that field's comment: this editor's numeric
+         inputs are Celsius-only; only READ-ONLY previews (segmentTableHtml())
+         convert for display) -- one convention for every editable degree
+         field on this page, not two. */
+      '<input type="number" step="1" class="oo-tempval" value="' + tempC +
+      '"' + (tempCmp === 0 ? ' disabled' : '') + '></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div><label>Time window start (s into segment)</label>' +
+      '<input type="number" step="1" min="0" class="oo-start" value="' + startS + '"></div>' +
+      '<div><label>Time window stop (s, 0 = end of segment) ' + infoIconHtml('ooTime', 'the time window') + '</label>' +
+      '<input type="number" step="1" min="0" class="oo-stop" value="' + stopS + '"></div>' +
+    '</div>' +
+    '<div class="oo-row2">' +
+      '<div class="oo-inline"><label><input type="checkbox" class="oo-enable"' + (enable ? ' checked' : '') +
+      '> Enabled</label></div>' +
+      '<div class="oo-inline"><label><input type="checkbox" class="oo-invert"' + (invert ? ' checked' : '') +
+      '> Invert ' + infoIconHtml('ooInvert', 'invert') + '</label></div>' +
+    '</div>' +
+    '<p class="hint oo-summary"></p>'
+  );
+}
+
+var OO_INFO = {
+  ooZone: 'Only zones set to "On/off device", plus spare relays enabled as aux outputs, on the ' +
+    'Thermocouples &amp; Zones page can be picked here -- validate_on_off_rules() refuses anything else ' +
+    'server-side, most importantly a heater. An aux output with a temperature condition needs a ' +
+    'thermocouple zone set on the aux output.',
+  ooPhase: 'Which part of the step this rule may fire in. Leave both unchecked to allow either.',
+  ooDir: 'Whether the shared ramp/dwell target is rising, falling, or unchanged tick-to-tick. Leave all ' +
+    'unchecked to allow any direction.',
+  ooTemp: 'Compares this device\'s OWN zone\'s measured temperature against a threshold. "(none)" drops ' +
+    'this axis out of the condition entirely (always true).',
+  ooTime: 'An offset window measured from the start of the segment, not a clock time. 0/0 means the whole segment.',
+  ooInvert: 'Without Invert, the device is ON while every checked condition holds. With Invert, that flips: ' +
+    'ON whenever they do NOT all hold, OFF while they do.'
+};
+function ooInfoOpenKeyFor(key) { return 'profileOoInfoOpen:' + key; }
+function isOoInfoOpenFor(key) {
+  try { return window.localStorage.getItem(ooInfoOpenKeyFor(key)) === '1'; } catch (e) { return false; }
+}
+function infoIconHtml(key, aboutLabel) {
+  var open = isOoInfoOpenFor(key) ? ' open' : '';
+  return '<details class="info" data-ooinfokey="' + key + '"' + open + '><summary aria-label="About ' +
+    aboutLabel + '">i</summary><p>' + OO_INFO[key] + '</p></details>';
+}
+document.getElementById('oorules').addEventListener('toggle', function (e) {
+  if (!e.target.classList || !e.target.classList.contains('info')) return;
+  var key = e.target.dataset.ooinfokey;
+  if (!key) return;
+  try { window.localStorage.setItem(ooInfoOpenKeyFor(key), e.target.open ? '1' : '0'); } catch (err) { /* ignore */ }
+}, true);
+
+var OO_PHASE_LABEL = { 1: 'ramp', 2: 'dwell', 3: 'ramp or dwell', 0: 'any phase' };
+var OO_DIR_NAMES = { 1: 'heating', 2: 'cooling', 4: 'flat' };
+
+// Plain-language summary line (brief item: "compact per-rule summary"),
+// recomputed from the row's OWN current inputs so it never drifts from what
+// Save will actually serialize -- no separate state to keep in sync.
+function ooUpdateSummary(row) {
+  var zoneIdx = parseInt(row.querySelector('.oo-zone').value, 10);
+  var zoneName = 'Zone ' + zoneIdx;
+  if (ooIsAuxTarget(zoneIdx)) zoneName = 'Aux relay ' + (zoneIdx - AUX_RULE_BASE + 1);
+  onOffZones.forEach(function (z) { if (z.index === zoneIdx) zoneName = z.name; });
+  var segIdx = parseInt(row.querySelector('.oo-segment').value, 10);
+  var phase = 0;
+  row.querySelectorAll('.oo-phase:checked').forEach(function (cb) { phase |= parseInt(cb.value, 10); });
+  var dir = 0;
+  var dirNames = [];
+  row.querySelectorAll('.oo-dir:checked').forEach(function (cb) {
+    var v = parseInt(cb.value, 10);
+    dir |= v;
+    dirNames.push(OO_DIR_NAMES[v]);
+  });
+  var tempCmp = parseInt(row.querySelector('.oo-tempcmp').value, 10);
+  var tempVal = row.querySelector('.oo-tempval').value;
+  var startS = parseInt(row.querySelector('.oo-start').value, 10) || 0;
+  var stopS = parseInt(row.querySelector('.oo-stop').value, 10) || 0;
+  var invert = row.querySelector('.oo-invert').checked;
+  var enabled = row.querySelector('.oo-enable').checked;
+
+  var cond = 'during ' + (OO_PHASE_LABEL[phase] || 'any phase');
+  cond += ' while ' + (dirNames.length ? dirNames.join(' or ') : 'any direction');
+  if (tempCmp === 1) cond += ', T ≥ ' + tempVal + '°C';
+  else if (tempCmp === 2) cond += ', T ≤ ' + tempVal + '°C';
+  if (startS > 0 || stopS > 0) {
+    cond += ', ' + startS + '-' + (stopS > 0 ? stopS : 'end') + 's into the step';
+  }
+  var verb = invert ? 'OFF' : 'ON';
+  var text = zoneName + ' (step ' + (segIdx + 1) + '): ' + verb + ' ' + cond +
+    (invert ? ' (ON otherwise)' : '');
+  if (!enabled) text = '[disabled] ' + text;
+  row.querySelector('.oo-summary').textContent = text;
+}
+
+function ooRuleRow(r) {
+  var div = document.createElement('div');
+  div.className = 'oorule';
+  div.innerHTML = ooRuleFieldsHtml(r) +
+    '<button type="button" class="small remove">Remove rule</button>';
+  div.querySelector('.remove').addEventListener('click', function () { div.remove(); });
+  div.querySelector('.oo-tempcmp').addEventListener('change', function (ev) {
+    div.querySelector('.oo-tempval').disabled = (ev.target.value === '0');
+    ooUpdateSummary(div);
+  });
+  div.addEventListener('input', function () { ooUpdateSummary(div); });
+  div.addEventListener('change', function () { ooUpdateSummary(div); });
+  ooUpdateSummary(div);
+  return div;
+}
+
+document.getElementById('addOoBtn').addEventListener('click', function () {
+  var container = document.getElementById('oorules');
+  if (container.children.length >= MAX_OO_RULES || onOffZones.length === 0) return;
+  container.appendChild(ooRuleRow({}));
+});
+
+// Populates the editor from GET /api/profile's "on_off_rules" (long-form
+// JSON keys -- profiles_catalog_http.c) -- used by editProfile()/
+// loadIntoEditor() below. copyBuiltin() never calls this: the shipped
+// catalogue has no on/off concept (builtin_profile_t carries no such field).
+function loadOoRulesIntoEditor(rules) {
+  var container = document.getElementById('oorules');
+  container.innerHTML = '';
+  (rules || []).forEach(function (jr) {
+    container.appendChild(ooRuleRow({
+      zone: jr.zone, segment: jr.segment, enable: jr.enable, phase_mask: jr.phase_mask,
+      direction_mask: jr.direction_mask, temp_source: jr.temp_source, temp_cmp: jr.temp_cmp,
+      temp_c: jr.temp_c, time_start_s: jr.time_start_s, time_stop_s: jr.time_stop_s, invert: jr.invert
+    }));
+  });
+}
+
+// Serializes every current rule row into the "ruleN_*" params
+// profiles_edit_http.c's parser expects, in the same array-push style the
+// segment loop above uses. temp_source is derived, not a field the operator
+// sets directly -- (none) means "no temperature axis" (temp_source 0), any
+// real comparison means "this zone's own measured TC" (temp_source 1), the
+// only source the executor honors today (profile_resolve_on_off_rule()'s
+// comment).
+function ooRulesToParams() {
+  var params = [];
+  var rows = document.getElementById('oorules').querySelectorAll('.oorule');
+  rows.forEach(function (row, i) {
+    var tempCmp = parseInt(row.querySelector('.oo-tempcmp').value, 10) || 0;
+    var tempSource = tempCmp === 0 ? 0 : 1;
+    var tempC = parseFloat(row.querySelector('.oo-tempval').value) || 0; // Celsius-only input, see ooRuleFieldsHtml()
+    var phase = 0;
+    row.querySelectorAll('.oo-phase:checked').forEach(function (cb) { phase |= parseInt(cb.value, 10); });
+    var dir = 0;
+    row.querySelectorAll('.oo-dir:checked').forEach(function (cb) { dir |= parseInt(cb.value, 10); });
+    params.push('rule' + i + '_zone=' + row.querySelector('.oo-zone').value);
+    params.push('rule' + i + '_segment=' + row.querySelector('.oo-segment').value);
+    params.push('rule' + i + '_enable=' + (row.querySelector('.oo-enable').checked ? 1 : 0));
+    params.push('rule' + i + '_phase=' + phase);
+    params.push('rule' + i + '_direction=' + dir);
+    params.push('rule' + i + '_temp_source=' + tempSource);
+    params.push('rule' + i + '_temp_cmp=' + tempCmp);
+    params.push('rule' + i + '_temp_c=' + tempC);
+    params.push('rule' + i + '_time_start_s=' + (parseInt(row.querySelector('.oo-start').value, 10) || 0));
+    params.push('rule' + i + '_time_stop_s=' + (parseInt(row.querySelector('.oo-stop').value, 10) || 0));
+    params.push('rule' + i + '_invert=' + (row.querySelector('.oo-invert').checked ? 1 : 0));
+  });
+  return params;
+}
+
+// Client-side validation of every rule row's target before save: the zone
+// byte must be a real target (zone 0..2 or aux 8..11) and an aux target's
+// temperature condition needs a thermocouple zone on the aux output. Returns
+// the first problem as a message, or '' when every row is fine. The server
+// re-validates (profiles_http.c); this only keeps an obviously bad rule from
+// being sent.
+function ooRuleProblem() {
+  var problem = '';
+  document.querySelectorAll('#oorules .oorule').forEach(function (row, i) {
+    if (problem) return;
+    var zone = parseInt(row.querySelector('.oo-zone').value, 10);
+    if (!ooIsValidTarget(zone)) {
+      problem = 'On/off rule ' + (i + 1) + ' has no valid target device.';
+      return;
+    }
+    var cmp = parseInt(row.querySelector('.oo-tempcmp').value, 10) || 0;
+    var t = ooAuxTempProblem(zone, cmp);
+    if (t) problem = 'On/off rule ' + (i + 1) + ': ' + t;
+  });
+  return problem;
+}
+
+// True when any on/off rule row's zone <select> is currently showing the
+// orphan option ooZoneOptionsHtml() emits for a stored zone_index that is
+// no longer among onOffZones -- extracted out of the saveBtn click handler
+// so it has one definition testable on its own (test_on_off_rules_editor.js
+// defects 1/2 coverage) instead of only being exercisable through a full
+// click simulation. Reads the data-oo-stale="1" attribute ooZoneOptionsHtml()
+// sets on the orphan option, not its label text -- a label-only wording
+// change must never disable this guard (Opus review N6).
+function ooHasStaleZoneRow() {
+  var stale = false;
+  document.querySelectorAll('#oorules .oorule').forEach(function (row) {
+    if (stale) return;
+    var opt = row.querySelector('.oo-zone').selectedOptions[0];
+    if (opt && opt.getAttribute('data-oo-stale') === '1') stale = true;
+  });
+  return stale;
+}
+
+/* Compact read-only summary for wherever a profile is displayed/previewed
+ * (the saved-profile list's expanded row -- see buildProfileItem() below).
+ * Reuses ooUpdateSummary()'s exact wording by building one throwaway
+ * detached row per rule rather than a second copy of the phrasing -- two
+ * independently-maintained summary strings is exactly the kind of drift
+ * this codebase's "reset one side of a pair" class warns about, so there is
+ * only ever one summary formatter. */
+function onOffRulesSummaryHtml(rules) {
+  if (!rules || rules.length === 0) return '';
+  var lines = rules.map(function (jr) {
+    var row = ooRuleRow({
+      zone: jr.zone, segment: jr.segment, enable: jr.enable, phase_mask: jr.phase_mask,
+      direction_mask: jr.direction_mask, temp_source: jr.temp_source, temp_cmp: jr.temp_cmp,
+      temp_c: jr.temp_c, time_start_s: jr.time_start_s, time_stop_s: jr.time_stop_s, invert: jr.invert
+    });
+    return window.kcEscapeHtml(row.querySelector('.oo-summary').textContent);
+  });
+  return '<p class="hint"><strong>On/off devices:</strong><br>' + lines.join('<br>') + '</p>';
+}
+
+function resetEditor() {
+  editingId = null;
+  document.getElementById('editorTitle').textContent = 'New profile';
+  document.getElementById('pname').value = '';
+  setSelectedZoneMask(0);
+  updateZoneCeiling();
+  document.getElementById('segments').innerHTML = '';
+  document.getElementById('addSegBtn').click();
+  document.getElementById('oorules').innerHTML = '';
+  document.getElementById('msg').innerHTML = '';
+}
+
+/* ---- Combined list state (owner request 2026-09-18, items 2/3/4/5/6/7) --
+ * Saved profiles and shipped schedules now render into one <div id="list">
+ * column instead of two, with an optional select mode (export/delete) that
+ * overlays a checkbox on eligible rows, and a Favorites section above it
+ * that is a SHORTCUT view, not a second copy of the data -- it filters the
+ * same two cached arrays rather than owning any state of its own. */
+var savedProfiles = null;  // array from /api/profiles, filtered to !builtin
+var catalogEntries = null; // array from /api/profiles/builtin?all=1, hidden ones excluded
+var favoriteIds = [];      // from /api/profiles/favorites
+var selectMode = null;     // null | 'export' | 'delete'
+var selectedIds = {};      // id -> true, only while selectMode is set
+var filterQuery = '';      // PROFILE_SLOTS_100_PLAN.md section 7 task 8
+
+function isFav(id) {
+  return favoriteIds.some(function (x) { return String(x) === String(id); });
+}
+
+/* PROFILE_SLOTS_100_PLAN.md section 7 task 8: pure, DOM-free filter/sort
+ * helpers, kept separate from renderList()/renderFavorites() so a host test
+ * can exercise the matching/ordering logic without a fake DOM at all. Named
+ * with a "Profiles" suffix rather than the generic "filter"/"sort" to avoid
+ * colliding with Array.prototype methods of the same short name when this
+ * file is extracted verbatim into a test's vm context. */
+function filterProfilesByName(items, query) {
+  var nfc = function (s) {
+    return (typeof s.normalize === 'function') ? s.normalize('NFC') : s;
+  };
+  var q = nfc(String(query || '').trim()).toLowerCase();
+  if (q === '') return items.slice();
+  return items.filter(function (p) { return nfc(String(p.name || '')).toLowerCase().indexOf(q) !== -1; });
+}
+
+/* Newest-first by last_run_started_unix_s, excluding anything in excludeIds
+ * (favorites: already pinned in their own section, so repeating them here
+ * would just be noise) and anything that has never fired (0 -- see the
+ * server-side field's own doc comment: this also covers "fired before the
+ * board had an RTC/SNTP fix", which is indistinguishable from never-fired
+ * and correctly does not count as recent). */
+function recentlyFiredProfiles(items, excludeIds, limit) {
+  var excl = excludeIds || {};
+  return items
+    .filter(function (p) { return p.last_run_started_unix_s && !excl[String(p.id)]; })
+    .sort(function (a, b) { return b.last_run_started_unix_s - a.last_run_started_unix_s; })
+    .slice(0, limit || 5);
+}
+
+function loadFavorites() {
+  return fetch('/api/profiles/favorites').then(function (r) {
+    return r.ok ? r.json() : { ids: [] };
+  }).then(function (d) {
+    return d.ids || [];
+  }).catch(function () {
+    // Old-firmware-safe: a board without this route degrades to "no
+    // favorites" rather than breaking the rest of the page.
+    return [];
+  });
+}
+
+function refreshAll() {
+  return Promise.all([
+    fetch('/api/profiles').then(function (r) { return r.json(); }),
+    fetch('/api/profiles/builtin?all=1').then(function (r) { return r.json(); }),
+    loadFavorites(),
+  ]).then(function (res) {
+    savedProfiles = res[0].filter(function (p) { return !p.builtin; });
+    var hiddenCount = 0;
+    var anyUnknown = false;
+    catalogEntries = [];
+    res[1].forEach(function (p) {
+      if (p.hidden) { hiddenCount++; return; }
+      if (p.feasibility === 'unknown') anyUnknown = true;
+      catalogEntries.push(p);
+    });
+    favoriteIds = res[2];
+
+    var rb = document.getElementById('restoreBtn');
+    rb.style.display = hiddenCount > 0 ? '' : 'none';
+    rb.textContent = 'Restore ' + hiddenCount + ' removed';
+
+    var notice = document.getElementById('tuneNotice');
+    if (anyUnknown) {
+      notice.style.display = '';
+      notice.innerHTML = 'This kiln has not been tuned yet, so these schedules can\'t be ' +
+        'checked against it. <a href="/settings/zones">Run autotune from the zone settings</a> ' +
+        'to enable that check.';
+    } else {
+      notice.style.display = 'none';
+    }
+
+    renderList();
+    renderFavorites();
+    renderRecent();
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('list').innerHTML = '<p class="empty">Could not load profiles.</p>';
+    document.getElementById('favList').innerHTML = '<p class="empty">Could not load favorites.</p>';
+  });
+}
+
+/* The name filter only narrows this section -- Favorites and Recently fired
+ * (above it) stay pinned and unaffected, so a filter never hides the shortcut
+ * views it was added next to. */
+function renderList() {
+  var el = document.getElementById('list');
+  if (savedProfiles === null || catalogEntries === null) return;
+  var items = filterProfilesByName(savedProfiles.concat(catalogEntries), filterQuery);
+  if (selectMode) {
+    // A name filter change can hide a row that's still checked in
+    // selectedIds -- drop those so the "Delete/Export selected (N)" count
+    // (and what actually gets acted on) never counts a row that isn't
+    // visible any more.
+    var visible = {};
+    items.forEach(function (p) { visible[String(p.id)] = true; });
+    Object.keys(selectedIds).forEach(function (id) {
+      if (!visible[id]) delete selectedIds[id];
+    });
+  }
+  if (items.length === 0) {
+    el.innerHTML = '<p class="empty">' + (filterQuery ? 'No profiles match &ldquo;' +
+      window.kcEscapeHtml(filterQuery) + '&rdquo;.' : 'No profiles.') + '</p>';
+  } else {
+    el.innerHTML = '';
+    items.forEach(function (p) { el.appendChild(buildProfileItem(p, true)); });
+  }
+  updateSelectionBar();
+}
+
+function renderFavorites() {
+  var el = document.getElementById('favList');
+  if (savedProfiles === null || catalogEntries === null) return;
+  var items = savedProfiles.concat(catalogEntries).filter(function (p) { return isFav(p.id); });
+  if (items.length === 0) {
+    el.innerHTML = '<p class="empty">No favorites yet -- tap the star on any profile below to add it here.</p>';
+    return;
+  }
+  el.innerHTML = '';
+  items.forEach(function (p) { el.appendChild(buildProfileItem(p, false)); });
+}
+
+/* PROFILE_SLOTS_100_PLAN.md section 4 item 3 / section 7 task 8. */
+function renderRecent() {
+  var section = document.getElementById('recentSection');
+  var el = document.getElementById('recentList');
+  if (savedProfiles === null || catalogEntries === null) return;
+  var favExcl = {};
+  favoriteIds.forEach(function (id) { favExcl[String(id)] = true; });
+  var items = recentlyFiredProfiles(savedProfiles.concat(catalogEntries), favExcl, 5);
+  if (items.length === 0) {
+    section.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  section.style.display = '';
+  el.innerHTML = '';
+  items.forEach(function (p) { el.appendChild(buildProfileItem(p, false)); });
+}
+
+/* ---- Bulk select mode (owner request 2026-09-18, items 3/4/6) ----------- */
+function toggleMode(m) {
+  selectMode = (selectMode === m) ? null : m;
+  selectedIds = {};
+  renderList();
+}
+
+function exitSelectMode() {
+  selectMode = null;
+  selectedIds = {};
+  renderList();
+}
+
+function updateSelectionBar() {
+  var indicator = document.getElementById('modeIndicator');
+  var bar = document.getElementById('bulkActionBar');
+  var actionBtn = document.getElementById('bulkActionBtn');
+  document.getElementById('modeExportBtn').classList.toggle('active', selectMode === 'export');
+  document.getElementById('modeDeleteBtn').classList.toggle('active', selectMode === 'delete');
+  if (!selectMode) {
+    indicator.style.display = 'none';
+    bar.style.display = 'none';
+    return;
+  }
+  indicator.style.display = '';
+  indicator.textContent = selectMode === 'export'
+    ? 'Export mode -- select profiles below, then Export selected.'
+    : 'Delete mode -- select saved profiles below, then Delete selected.';
+  bar.style.display = '';
+  var n = Object.keys(selectedIds).length;
+  actionBtn.disabled = n === 0;
+  actionBtn.textContent = selectMode === 'export'
+    ? ('Export selected (' + n + ')')
+    : ('Delete selected (' + n + ')');
+}
+
+document.getElementById('modeExportBtn').addEventListener('click', function () { toggleMode('export'); });
+document.getElementById('modeDeleteBtn').addEventListener('click', function () { toggleMode('delete'); });
+document.getElementById('bulkCancelBtn').addEventListener('click', exitSelectMode);
+document.getElementById('bulkActionBtn').addEventListener('click', function () {
+  var ids = Object.keys(selectedIds).map(function (s) { return parseInt(s, 10); });
+  if (ids.length === 0) return;
+  if (selectMode === 'export') bulkExport(ids);
+  else if (selectMode === 'delete') bulkDelete(ids);
+});
+
+function selectionCheckbox(p) {
+  if (!selectMode) return null;
+  if (selectMode === 'delete' && p.builtin) return null; // item 4: shipped profiles never get a delete checkbox
+  var wrap = document.createElement('label');
+  wrap.className = 'sel-cb-wrap';
+  wrap.addEventListener('click', function (ev) { ev.stopPropagation(); });
+  var cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = !!selectedIds[p.id];
+  cb.setAttribute('aria-label', (selectMode === 'export' ? 'Select "' : 'Select "') + p.name + '" for ' + selectMode);
+  cb.addEventListener('change', function () {
+    if (cb.checked) selectedIds[p.id] = true; else delete selectedIds[p.id];
+    updateSelectionBar();
+  });
+  wrap.appendChild(cb);
+  return wrap;
+}
+
+/* ---- Bundle export/delete, client-side (owner request 2026-09-18, items
+ * 5/6): GET /api/profile?id=N already serves full segment data uniformly
+ * for both a builtin and a user-slot id (profile_detail_get_handler), so
+ * bundling needs no new backend route -- just N of that existing fetch,
+ * reshaped into the same per-profile object /api/profile/export already
+ * produces, wrapped in one array and downloaded as one file. */
+function profileToExportObj(full) {
+  return {
+    kind: 'kilnctl_profile',
+    version: 2,
+    name: full.name,
+    zone_mask: full.zone_mask || 0,
+    segments: (full.segments || []).map(function (seg) {
+      return {
+        seg_kind: seg.seg_kind || 0,
+        target_c: seg.target_c,
+        ramp_c_per_hr: seg.ramp_c_per_hr,
+        dwell_min: seg.dwell_min,
+        io_target: seg.io_target,
+        io_state: seg.io_state,
+        io_blocking: seg.io_blocking,
+        io_leave_on_at_end: seg.io_leave_on_at_end,
+      };
+    }),
+    on_off_rules: full.on_off_rules || [],
+  };
+}
+
+function downloadJson(obj, filename) {
+  var blob = new Blob([JSON.stringify(obj)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+function bulkExport(ids) {
+  var msg = document.getElementById('catMsg');
+  msg.textContent = 'Preparing ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + ' for export…';
+  Promise.all(ids.map(function (id) {
+    return fetch('/api/profile?id=' + id).then(function (r) { return r.json(); });
+  })).then(function (fulls) {
+    var bundle = { kind: 'kilnctl_profile_bundle', version: 1, profiles: fulls.map(profileToExportObj) };
+    downloadJson(bundle, 'kilnctl_profiles_' + ids.length + '.json');
+    msg.textContent = 'Exported ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
+    exitSelectMode();
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    msg.innerHTML = '<span class="err">Export failed -- could not reach the board.</span>';
+  });
+}
+
+function bulkDelete(ids) {
+  // Item 6: the confirm must name the count being deleted.
+  kcConfirm('Delete ' + ids.length + ' fire profile' + (ids.length === 1 ? '' : 's') +
+      '? This cannot be undone.').then(function (ok) {
+    if (!ok) return;
+    var msg = document.getElementById('catMsg');
+    msg.textContent = 'Deleting…';
+    Promise.all(ids.map(function (id) {
+      return fetch('/api/profile/delete', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
+      }).then(function (r) {
+        // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
+        // response (e.g. 409 "profile is currently running") must not be
+        // reported as a success -- surface the board's own message text.
+        if (r.ok) return null;
+        return r.text().then(function (body) { return { id: id, body: body || (r.status + ' ' + r.statusText) }; });
+      });
+    })).then(function (results) {
+      var failures = results.filter(function (x) { return x; });
+      var failedIds = failures.map(function (f) { return f.id; });
+      if (ids.indexOf(editingId) !== -1 && failedIds.indexOf(editingId) === -1) resetEditor();
+      if (failures.length === 0) {
+        msg.textContent = 'Deleted ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + '.';
+      } else {
+        var okCount = ids.length - failures.length;
+        msg.innerHTML = '<span class="err">' +
+          (okCount > 0 ? 'Deleted ' + okCount + ', failed ' + failures.length + ': ' : 'Delete failed: ') +
+          failures.map(function (f) { return 'id ' + f.id + ': ' + window.kcEscapeHtml(f.body); }).join('; ') + '</span>';
+      }
+      exitSelectMode();
+      refreshAll();
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      msg.innerHTML = '<span class="err">Delete failed -- could not reach the board.</span>';
+    });
+  });
+}
+
+/* One icon button. Every one carries BOTH an aria-label (the accessible
+ * name, since there is no text) and a title (so a desktop hover still
+ * explains it) -- an unlabelled icon button must never ship. The glyph is a
+ * <use> reference to the single <symbol> definition at the top of <body>,
+ * not an inlined path, so N rows cost N references rather than N copies. */
+function iconBtn(glyph, name, extraClass) {
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'small icon-btn' + (extraClass ? ' ' + extraClass : '');
+  b.setAttribute('aria-label', name);
+  b.title = name;
+  b.innerHTML = '<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">' +
+                '<use href="#' + glyph + '"/></svg>';
+  return b;
+}
+
+/* The three per-row actions, as icons (owner request 2026-09-18: "Use icons
+ * insted of words for export, edit and delete"). They live inside the
+ * <summary>, so every handler must stop the click reaching the disclosure
+ * triangle -- without that, acting on a row would also fold or unfold it. */
+/* Favorite star toggle -- any profile, saved or shipped (owner request
+ * 2026-09-18, item 7: "Any profile can be favorited or unfavorited"). A
+ * favorite is a shortcut only: toggling it never removes/moves the profile
+ * from savedProfiles/catalogEntries, it just changes what renderFavorites()
+ * filters in. */
+function favToggleBtn(p) {
+  var fav = isFav(p.id);
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'small icon-btn fav-btn' + (fav ? ' active' : '');
+  var label = (fav ? 'Remove "' : 'Add "') + p.name + (fav ? '" from favorites' : '" to favorites');
+  b.setAttribute('aria-label', label);
+  b.title = label;
+  b.textContent = fav ? '★' : '☆';
+  b.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var newFav = !fav;
+    fetch('/api/profile/favorite', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'id=' + p.id + '&favorite=' + (newFav ? 1 : 0),
+    }).then(function () {
+      return loadFavorites();
+    }).then(function (ids) {
+      favoriteIds = ids;
+      renderList();
+      renderFavorites();
+    }).catch(function () {});
+  });
+  return b;
+}
+
+/* The per-row action group in the <summary>. A saved profile gets the
+ * existing Export/Edit/Delete icons (owner request 2026-09-18, item 9); a
+ * shipped one gets only the favorite star here -- its Use/Remove controls
+ * stay below the table, same as before, since those are not one of the
+ * three actions the owner asked to be icon-ified. */
+function profileActionsGroup(p) {
+  var g = document.createElement('span');
+  g.className = 'pi-acts';
+  g.appendChild(favToggleBtn(p));
+
+  if (!p.builtin) {
+    var exportBtn = iconBtn('kgIconExport', 'Export "' + p.name + '" as a .json file');
+    exportBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      /* This was a bare teal <a> sitting between two outlined buttons -- the
+       * inconsistency the owner's screenshot shows. Navigating from a real
+       * button makes all three controls siblings of the same shape; the
+       * server's own Content-Disposition header (profiles_export_http.c) is
+       * what names the saved file, exactly as it did for the <a download>. */
+      window.location.href = profileExportUrl(p.id);
+    });
+
+    var editBtn = iconBtn('kgIconEdit', 'Edit "' + p.name + '"');
+    editBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      editProfile(p.id);
+    });
+
+    var delBtn = iconBtn('kgIconDelete', 'Delete "' + p.name + '"', 'danger');
+    delBtn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      // UI_PLAN.md Web section 4 item 5: deleting a profile is destructive
+      // and irreversible (no undo endpoint exists), so it gets an explicit
+      // confirm. kcConfirm comes from app.js (deferred <script> in <head>);
+      // safe here because it only runs inside this click handler, not at
+      // page-load time. Now that the control is an icon rather than the word
+      // "Delete", this confirm is also the thing that makes a mis-tap
+      // recoverable -- it names the profile it is about to destroy.
+      kcConfirm('Delete fire profile "' + p.name + '"? This cannot be undone.').then(function (ok) {
+        if (!ok) return;
+        deleteProfile(p.id);
+      });
+    });
+
+    g.appendChild(exportBtn);
+    g.appendChild(editBtn);
+    g.appendChild(delBtn);
+  }
+  return g;
+}
+
+/* One combined-list row, for EITHER a saved profile or a shipped schedule
+ * (owner request 2026-09-18, items 1/2: "same way shipped profiles do" /
+ * "same column, one combined list") -- the same <details class="ci"> shell
+ * and the same step table (segmentTableHtml()) either way. `selectable`
+ * gates whether a bulk-mode checkbox can appear at all (the Favorites
+ * section never shows one -- selection only applies to the main list). A
+ * saved profile's steps are fetched on first expand (see the comment this
+ * replaced); a shipped entry's segments are already present from
+ * /api/profiles/builtin?all=1. */
+function buildProfileItem(p, selectable) {
+  var d = document.createElement('details');
+  d.className = 'ci pi';
+  fzMark(d, p.feasibility);
+
+  var s = document.createElement('summary');
+  /* All real content lives in one flex row (.pi-row), a child of <summary>
+     rather than the summary itself -- see the .pi-row CSS comment (this
+     page's <style>) for why: `display: flex` directly on <summary> drops
+     Chromium's disclosure triangle, so the triangle stays governed by
+     summary's own default `display: list-item` and only this inner span
+     opts into flex. This replaced a `float: right` action group that had
+     no clearfix anywhere on the page and staircased across rows -- see the
+     .pi-acts CSS comment for the mechanism. */
+  var row = document.createElement('span');
+  row.className = 'pi-row';
+  var cb = selectable ? selectionCheckbox(p) : null;
+  if (cb) row.appendChild(cb);
+
+  var label;
+  if (p.builtin) {
+    label = (p.title || p.name) + ' (' + p.segment_count + ' steps)';
+  } else {
+    var zoneList = [];
+    for (var zb = 0; zb < 8; zb++) { if (p.zone_mask & (1 << zb)) zoneList.push(zb); }
+    label = p.name + ' (zone' + (zoneList.length === 1 ? ' ' : 's ') + zoneList.join(',') +
+      ', ' + p.segment_count + ' steps)';
+  }
+  var lbl = document.createElement('span');
+  lbl.className = 'pi-label';
+  lbl.textContent = label;
+  row.appendChild(lbl);
+  if (isMarked(p.feasibility)) {
+    var b = document.createElement('span');
+    b.className = 'badge';
+    b.textContent = FZ_LABEL[p.feasibility] || p.feasibility;
+    row.appendChild(b);
+  }
+  row.appendChild(profileActionsGroup(p));
+  s.appendChild(row);
+  d.appendChild(s);
+
+  var body = document.createElement('div');
+  body.className = 'table-scroll';
+  if (p.segments) {
+    body.innerHTML = segmentTableHtml(p.segments);
+  } else {
+    body.innerHTML = '<p class="empty">Loading steps&hellip;</p>';
+    var loaded = false;
+    d.addEventListener('toggle', function () {
+      if (!d.open || loaded) return;
+      loaded = true;
+      fetch('/api/profile?id=' + p.id).then(function (r) { return r.json(); }).then(function (full) {
+        body.innerHTML = segmentTableHtml(full.segments) + onOffRulesSummaryHtml(full.on_off_rules);
+      }).catch(function (authErr) {
+        loaded = false; // let a retry happen on the next expand
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        body.innerHTML = '<p class="empty">Could not load steps.</p>';
+      });
+    });
+  }
+  d.appendChild(body);
+
+  if (isMarked(p.feasibility)) {
+    var cap = document.createElement('p');
+    cap.className = 'hint';
+    cap.textContent = FZ_WHY[p.feasibility] || '';
+    d.appendChild(cap);
+  }
+
+  if (p.builtin) {
+    var acts = document.createElement('div');
+    var useBtn = document.createElement('button');
+    useBtn.type = 'button';
+    useBtn.className = 'small';
+    useBtn.textContent = 'Use / Save a copy';
+    useBtn.addEventListener('click', function () { copyBuiltin(p); });
+    var hideBtn = document.createElement('button');
+    hideBtn.type = 'button';
+    hideBtn.className = 'small';
+    hideBtn.textContent = 'Remove';
+    hideBtn.addEventListener('click', function () { hideBuiltin(p.id); });
+    acts.appendChild(useBtn);
+    acts.appendChild(hideBtn);
+    if (p.url) {
+      var a = document.createElement('a');
+      a.href = p.url;
+      a.textContent = ' source';
+      a.style.marginLeft = '0.5em';
+      a.style.fontSize = '0.85em';
+      acts.appendChild(a);
+    }
+    d.appendChild(acts);
+  }
+  return d;
+}
+
+// "unknown" (no autotune run yet) is deliberately NOT in these tables: it is
+// not marked in the UI at all (see the .ci.fz-* CSS comment above), so there
+// is no label or per-item explanation for it -- just the one-time notice
+// above the list.
+var FZ_LABEL = { too_fast: 'too fast', unreachable: 'unreachable' };
+var FZ_WHY = {
+  too_fast: 'Commanded ramp exceeds what the zone can sustain (heating headroom, or -- on a falling ramp -- the kiln\'s natural cooling rate; there is no active cooling).',
+  unreachable: 'The kiln cannot reach this temperature at all with its tuned model.',
+};
+
+/* Matches the editor's "0=none" convention: 0 is not a rate, it means run
+ * with no rate limit at all. Spelling it "max" keeps a bare 0 from reading
+ * like "do not heat". */
+function rampText(r) { return (r > 0) ? String(r) : 'max'; }
+
+// Only these two verdicts are ever shown to the user (dark red card,
+// badge, tooltip). "unknown" is deliberately excluded -- see the FZ_LABEL
+// comment above -- so an untuned kiln renders every catalogue entry as an
+// ordinary, unmarked card instead of a wall of "untuned" noise.
+function isMarked(verdict) { return verdict === 'too_fast' || verdict === 'unreachable'; }
+
+function fzMark(el, verdict) {
+  if (isMarked(verdict)) {
+    el.classList.add('fz-' + verdict);
+    el.title = FZ_WHY[verdict] || verdict;
+  }
+}
+
+/* Plain-language description of a relay/IO segment, for the one table cell
+ * it gets below. Only a USER profile can hold one of these -- the shipped
+ * catalogue has no relay/IO concept at all (builtin_profile_t carries only
+ * ramp/dwell) -- but the renderer is shared, so the case is handled here
+ * rather than in a second, saved-only table builder. relayNames/relayCount
+ * come from loadZones(); before that resolves the fallback "Relay N" naming
+ * is used, which is also what the editor's own dropdown falls back to. */
+function ioSegmentText(seg) {
+  var t = seg.io_target || 0;
+  var name = (t >= 11) ? ('IO_' + (t - 10)) : (relayNames[t - 1] || ('Relay ' + t));
+  var txt = name + ' ' + (seg.io_state ? 'ON' : 'OFF');
+  if (seg.dwell_min) txt += ' for ' + seg.dwell_min + ' min';
+  txt += (seg.io_blocking === 0) ? ' (runs with the next step)' : ' (waits here)';
+  return txt;
+}
+
+/* The step table, shared by the shipped catalogue and the saved-profile list
+ * (owner request 2026-09-18 -- the two lists are meant to look the same, so
+ * there is one builder, not two that drift apart).
+ *
+ * Ramp rate stays in raw °C/hr -- it is a RATE, not a temperature reading,
+ * and this table's own header names the unit explicitly, so it is left out
+ * of the °C/°F toggle (UI_PLAN.md item 7 is about temperatures, not every
+ * number with a degree symbol in it anywhere). Target is a genuine
+ * temperature and does convert. Neither is a live device reading, so no
+ * kc-live-value here -- just unit-converted like every other on-screen °C
+ * figure. */
+function segmentTableHtml(segments) {
+  var rows = '';
+  (segments || []).forEach(function (seg, i) {
+    var v = seg.feasibility;
+    var cls = isMarked(v) ? ' class="fz-' + v + '" title="' + (FZ_WHY[v] || '') + '"' : '';
+    if (seg.seg_kind) {
+      rows += '<tr' + cls + '><td>' + (i + 1) + '</td><td colspan="3">' +
+              window.kcEscapeHtml(ioSegmentText(seg)) + '</td></tr>';
+      return;
+    }
+    rows += '<tr' + cls + '><td>' + (i + 1) + '</td><td>' + rampText(seg.ramp_c_per_hr) +
+            '</td><td>' + window.kcUnit.toDisplay(seg.target_c).toFixed(0) + '</td><td>' + seg.dwell_min + '</td></tr>';
+  });
+  return '<table><tr><th>Step</th><th>Ramp &deg;C/hr</th><th>Target ' + window.kcUnit.label() + '</th>' +
+         '<th>Hold min</th></tr>' + rows + '</table>';
+}
+
+/* Saving with a builtin id means "copy into the first free user slot" (the
+ * board picks the slot and reports it back). The catalogue itself is
+ * zone-agnostic -- zone_mask 0 -- and the board rejects that, so a copy needs
+ * the zone selection from the editor below; when none is picked yet, prefill
+ * the editor instead of posting something that would only be refused. */
+function copyBuiltin(p) {
+  var msg = document.getElementById('catMsg');
+  var mask = selectedZoneMask();
+  if (mask === 0) {
+    loadIntoEditor(p);
+    msg.innerHTML = '<span class="warn">Pick the zone(s) below, then press Save profile.</span>';
+    return;
+  }
+  var params = ['id=' + p.id, 'name=' + encodeURIComponent(p.name),
+                'zone_mask=' + mask, 'seg_count=' + p.segments.length];
+  p.segments.forEach(function (seg, i) {
+    params.push('seg' + i + '_target=' + seg.target_c);
+    params.push('seg' + i + '_ramp=' + seg.ramp_c_per_hr);
+    params.push('seg' + i + '_dwell=' + seg.dwell_min);
+  });
+  msg.textContent = 'Copying…';
+  fetch('/api/profile', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+  }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+    .then(function (res) {
+      if (!res.ok || res.data.ok === false) {
+        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.error || 'copy failed') + '</span>';
+        return;
+      }
+      msg.textContent = 'Saved a copy into profile slot ' + res.data.id + '.';
+      refreshAll();
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      msg.innerHTML = '<span class="err">Copy failed -- could not reach the board.</span>';
+    });
+}
+
+function loadIntoEditor(p) {
+  editingId = p.id; /* a builtin id: the board turns the save into a copy */
+  document.getElementById('editorTitle').textContent = 'Copy of: ' + (p.title || p.name);
+  document.getElementById('pname').value = p.name;
+  var container = document.getElementById('segments');
+  container.innerHTML = '';
+  // Refresh relay ownership live before building any relay/IO rows (brief
+  // item 2) -- builtin catalogue schedules are ramp/dwell-only today, but
+  // this keeps the same guarantee if that ever changes.
+  loadZones().then(function () {
+    p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+    renderSegPreview();
+    // Builtin catalogue entries never carry on/off rules of their own --
+    // clear the editor's rule list rather than leaving a previous edit's
+    // rules attached to this unrelated copy.
+    loadOoRulesIntoEditor([]);
+  });
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function builtinPost(path, body) {
+  return fetch(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
+  }).then(function () { refreshAll(); }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('catMsg').innerHTML = '<span class="err">Could not reach the board.</span>';
+  });
+}
+
+function hideBuiltin(id) { builtinPost('/api/profile/builtin/hide', 'id=' + id + '&hidden=1'); }
+
+document.getElementById('restoreBtn').addEventListener('click', function () {
+  builtinPost('/api/profile/builtin/restore', '');
+});
+
+function editProfile(id) {
+  // Fetch the profile and a fresh zone/relay snapshot together -- a saved
+  // relay segment's target dropdown must reflect CURRENT zone ownership, not
+  // whatever was true when this page first loaded (brief item 2).
+  Promise.all([
+    fetch('/api/profile?id=' + id).then(function (r) { return r.json(); }),
+    loadZones(),
+  ]).then(function (results) {
+    var p = results[0];
+    editingId = id;
+    document.getElementById('editorTitle').textContent = 'Edit: ' + p.name;
+    document.getElementById('pname').value = p.name;
+    setSelectedZoneMask(p.zone_mask);
+    updateZoneCeiling();
+    var container = document.getElementById('segments');
+    container.innerHTML = '';
+    p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
+    renderSegPreview();
+    loadOoRulesIntoEditor(p.on_off_rules || []);
+    document.getElementById('msg').innerHTML = '';
+    window.scrollTo(0, document.body.scrollHeight);
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('msg').innerHTML = '<span class="err">Could not load that profile.</span>';
+  });
+}
+
+function deleteProfile(id) {
+  fetch('/api/profile/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'id=' + id,
+  }).then(function (r) {
+    // Review fold-in (PROFILE_SLOTS_100_PLAN.md section 7): a non-OK
+    // response (e.g. 409 "profile is currently running") must not be
+    // treated as a successful delete.
+    if (r.ok) { refreshAll(); if (editingId === id) resetEditor(); return; }
+    return r.text().then(function (body) {
+      document.getElementById('msg').innerHTML = '<span class="err">' + window.kcEscapeHtml(body || (r.status + ' ' + r.statusText)) + '</span>';
+    });
+  }).catch(function (authErr) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    document.getElementById('msg').innerHTML = '<span class="err">Could not reach the board -- delete not confirmed.</span>';
+  });
+}
+
+// ---- Profile export/import (UI_PLAN.md "Profile import/export") ----------
+// Pure/extractable so App/test/test_profile_export_import.js can exercise
+// them without a DOM -- same split as segProfileCurve() above.
+
+function profileExportUrl(id) {
+  return '/api/profile/export?id=' + encodeURIComponent(id);
+}
+
+// Cheap client-side pre-check before spending a round trip: the file must at
+// least parse as JSON and look like a profile object (name/segments), so an
+// obviously-wrong file (a settings backup, a picture, garbage) is rejected
+// with a clear message here instead of via the server's generic 400. This is
+// NOT the authoritative validation -- profiles_http_save() on the board runs
+// the real range/feasibility checks the same way Save does; this only saves
+// a round trip for the common "wrong file" mistake.
+//
+// Owner request 2026-09-18, item 8: also accept a BUNDLE (the shape
+// bulkExport() above produces) -- `data.profiles`, an array of the same
+// name/segments-shaped objects, rather than one at top level. `bundle: true`
+// tells the caller which import path to take; every existing single-profile
+// caller/test only ever reads `ok`/`data`/`error`, so this is additive.
+function validateImportJson(text) {
+  var data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, error: 'Not a valid JSON file.' };
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, error: 'File does not contain a profile object.' };
+  }
+  if (data.kind === 'kilnctl_profile_bundle') {
+    if (!Array.isArray(data.profiles) || data.profiles.length === 0) {
+      return { ok: false, error: 'Bundle file has no profiles.' };
+    }
+    for (var i = 0; i < data.profiles.length; i++) {
+      var pr = data.profiles[i];
+      if (!pr || typeof pr.name !== 'string' || !Array.isArray(pr.segments)) {
+        return { ok: false, error: 'Bundle entry ' + (i + 1) + ' is missing "name" or "segments".' };
+      }
+    }
+    return { ok: true, bundle: true, data: data };
+  }
+  if (typeof data.name !== 'string' || !Array.isArray(data.segments)) {
+    return { ok: false, error: 'File is missing "name" or "segments" -- not a profile export.' };
+  }
+  return { ok: true, data: data };
+}
+
+// Owner request 2026-09-18, item 8: a bundle imports as N sequential calls
+// to the SAME single-profile /api/profile/import endpoint bulkExport() reads
+// from -- no new backend route, matching the "assembled client-side" bundle
+// export above. Sequential (not Promise.all) on purpose: this board's httpd
+// has few worker threads, and one profile save touching NVS per request is
+// cheap insurance against piling up N concurrent writes on a small MCU.
+function importBundle(profiles, msg) {
+  msg.textContent = 'Importing ' + profiles.length + ' profiles…';
+  var ok = 0, fail = 0;
+  function next(i) {
+    if (i >= profiles.length) {
+      msg.innerHTML = 'Imported ' + ok + ' of ' + profiles.length + ' profile' +
+        (profiles.length === 1 ? '' : 's') + (fail ? ' (' + fail + ' failed)' : '') + '.';
+      refreshAll();
+      return;
+    }
+    fetch('/api/profile/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(profiles[i]),
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+      .then(function (res) { if (res.ok && res.data.ok !== false) ok++; else fail++; })
+      .catch(function () { fail++; })
+      .then(function () { next(i + 1); });
+  }
+  next(0);
+}
+
+document.getElementById('importBtn').addEventListener('click', function () {
+  document.getElementById('importFile').click();
+});
+
+document.getElementById('importFile').addEventListener('change', function (evt) {
+  var msg = document.getElementById('importMsg');
+  var file = evt.target.files && evt.target.files[0];
+  evt.target.value = ''; // allow importing the same filename twice in a row
+  if (!file) return;
+  msg.textContent = 'Reading file…';
+  var reader = new FileReader();
+  reader.onload = function () {
+    var check = validateImportJson(String(reader.result));
+    if (!check.ok) {
+      msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(check.error) + '</span>';
+      return;
+    }
+    if (check.bundle) {
+      importBundle(check.data.profiles, msg);
+      return;
+    }
+    msg.textContent = 'Importing…';
+    fetch('/api/profile/import', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(check.data),
+    }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+      .then(function (res) {
+        if (!res.ok || res.data.ok === false) {
+          msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.error || 'Import failed.') + '</span>';
+          return;
+        }
+        msg.textContent = 'Imported into profile slot ' + res.data.id + '.';
+        refreshAll();
+      }).catch(function (authErr) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        msg.innerHTML = '<span class="err">Import failed -- could not reach the board.</span>';
+      });
+  };
+  reader.onerror = function () {
+    msg.innerHTML = '<span class="err">Could not read that file.</span>';
+  };
+  reader.readAsText(file);
+});
+
+document.getElementById('newBtn').addEventListener('click', resetEditor);
+
+document.getElementById('saveBtn').addEventListener('click', function () {
+  var msg = document.getElementById('msg');
+  var rows = document.getElementById('segments').querySelectorAll('.seg');
+  if (rows.length === 0) {
+    msg.innerHTML = '<span class="err">At least one segment is required.</span>';
+    return;
+  }
+  var params = [];
+  params.push('id=' + (editingId === null ? '-1' : editingId));
+  params.push('name=' + encodeURIComponent(document.getElementById('pname').value));
+  var zoneMask = selectedZoneMask();
+  if (zoneMask === 0) {
+    msg.innerHTML = '<span class="err">Select at least one zone.</span>';
+    return;
+  }
+  params.push('zone_mask=' + zoneMask);
+  params.push('seg_count=' + rows.length);
+  // Each row is serialized purely from the fields its CURRENT kind rendered
+  // (renderSegFields() tears down the other kind's inputs on every switch --
+  // see segmentRow() above), so there is never a stale ramp/target value
+  // sitting in the DOM to leak into a relay/IO segment's POST, or vice
+  // versa: the field simply doesn't exist to be read.
+  rows.forEach(function (row, i) {
+    var kind = row.querySelector('.seg-kind').value;
+    params.push('seg' + i + '_kind=' + kind);
+    if (kind === '1') {
+      params.push('seg' + i + '_io_target=' + row.querySelector('.io-target').value);
+      params.push('seg' + i + '_io_state=' + row.querySelector('.io-state').value);
+      params.push('seg' + i + '_io_blocking=' + row.querySelector('.io-blocking').value);
+      params.push('seg' + i + '_io_leave_on=' + (row.querySelector('.io-leave').checked ? '1' : '0'));
+      params.push('seg' + i + '_dwell=' + row.querySelector('.io-dwell').value);
+    } else {
+      params.push('seg' + i + '_target=' + row.querySelector('.s-target').value);
+      params.push('seg' + i + '_ramp=' + row.querySelector('.s-ramp').value);
+      params.push('seg' + i + '_dwell=' + row.querySelector('.s-dwell').value);
+    }
+  });
+  // Refuse client-side rather than silently saving a rule that still points
+  // at a zone ooZoneOptionsHtml() had to flag as "no longer an on/off zone"
+  // -- letting this through would either save a device the operator can no
+  // longer see/edit, or (if the browser instead falls back to the first
+  // real option) silently retarget the rule to a different device. Force
+  // the operator to look at the row and either repoint it or delete it.
+  if (ooHasStaleZoneRow()) {
+    msg.innerHTML = '<span class="err">One or more On/off device rules target a zone that is no ' +
+      'longer an on/off device -- fix or remove that rule before saving.</span>';
+    return;
+  }
+  var ooBad = ooRuleProblem();
+  if (ooBad) {
+    msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(ooBad) + '</span>';
+    return;
+  }
+  params = params.concat(ooRulesToParams());
+  msg.textContent = 'Saving…';
+  fetch('/api/profile', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+  }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+    .then(function (result) {
+      if (!result.ok || result.data.ok === false) {
+        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(result.data.error || 'save failed') + '</span>';
+        return;
+      }
+      var html = 'Saved.';
+      if (result.data.warnings && result.data.warnings.length > 0) {
+        html += '<br>' + result.data.warnings.map(function (w) { return '<span class="warn">' + w + '</span>'; }).join('<br>');
+      }
+      msg.innerHTML = html;
+      editingId = result.data.id;
+      refreshAll();
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      msg.innerHTML = '<span class="err">Save failed -- could not reach the board.</span>';
+    });
+});
+
+loadZones().then(function () { resetEditor(); refreshAll(); });
+
+// UI_PLAN.md item 7: re-render Target columns in the new unit immediately on
+// toggle. renderList()/renderFavorites() rebuild from the already-fetched
+// savedProfiles/catalogEntries caches (no round trip) -- segmentTableHtml()
+// re-reads window.kcUnit at render time, so a fresh build picks up the new
+// unit; any row expanded before the toggle just collapses back to unopened,
+// the same as it already did for the catalogue pre-combination.
+window.addEventListener('kcunitchange', function () { renderList(); renderFavorites(); renderRecent(); });
+
+document.getElementById('profileFilter').addEventListener('input', function (e) {
+  filterQuery = e.target.value;
+  renderList();
+});
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

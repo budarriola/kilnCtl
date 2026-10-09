@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "KilnFw",
+      "type": "gdbtarget",
+      "request": "attach",
+      "runOpenOCD": false,
+      "gdb": "${command:espIdf.getToolchainGdb}",
+      "initCommands": [
+        "set remotetimeout 20",
+        "set remote hardware-watchpoint-limit 2"
+      ],
+      "target": {
+        "connectCommands": [
+          "target extended-remote :3333"
+        ]
+      },
+      "preRunCommands": [
+        "monitor reset halt",
+        "thb app_main",
+        "continue"
+      ],
+      "preLaunchTask": "OpenOCD: Start and Flash",
+      "postDebugTask": "OpenOCD: Kill"
+    }
+  ]
+}

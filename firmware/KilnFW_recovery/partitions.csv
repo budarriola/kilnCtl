@@ -1,0 +1,19 @@
+# KilnFW_recovery's OWN build-time partition table -- NOT what ends up on a
+# real board. On hardware this image is written raw, by flash_firmware(),
+# into the `recovery` row of firmware/KilnFW/partitions.csv (offset
+# 0xA10000, size 0x1E0000, subtype factory) -- see
+# docs/OTA_SINGLE_SLOT_PLAN.md section 1/7. ESP-IDF resolves esp_ota_ops
+# partition lookups against whatever table is actually written to flash at
+# runtime, not against the table this project happened to build with, so
+# this file only has to be internally consistent for THIS project's own
+# `idf.py build`/size-check convenience -- it is deliberately never flashed
+# by itself.
+#
+# The `factory` row here is sized to match the real `recovery` slot so a
+# local `idf.py build` gets a meaningful (if secondary) size warning of its
+# own, on top of the authoritative one tools/check_recovery_image_size.py
+# computes from firmware/KilnFW/partitions.csv.
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000,
+phy_init,   data, phy,      0xf000,   0x1000,
+factory,    app,  factory,  0x10000,  0x1E0000,

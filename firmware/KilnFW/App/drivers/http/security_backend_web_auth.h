@@ -1,0 +1,54 @@
+// security_backend_web_auth -- the REAL security_backend_vtable_t
+// implementation for WEB_AUTH_PLAN.md item 6, wired to the landed
+// credential-storage module (items 2/3/11, firmware/KilnFW/App/drivers/
+// persist/web_auth_store.h).
+//
+// ESP-only (esp_fill_random() for per-write salt generation, plus whatever
+// web_auth_store.c itself needs) -- NOT part of the host test build. The
+// pure logic this replaces the placeholder for (security_http_core.c's
+// dispatch, security_pin_is_valid(), security_timeout_minutes_is_valid())
+// stays host-tested and untouched; only the vtable functions that actually
+// touch storage/entropy live here.
+//
+// Session invalidation (item 4/5, web_auth_session.h) has not landed on
+// main as of this writing -- invalidate_sessions_for_role() is a
+// documented no-op below, exactly like the placeholder it replaces, until
+// that module exists. Replacing that one function body is then a one-line
+// change, same seam discipline as the rest of this file.
+#ifndef SECURITY_BACKEND_WEB_AUTH_H
+#define SECURITY_BACKEND_WEB_AUTH_H
+
+#include "esp_err.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Installs this real backend via security_backend_set_vtable(). Call once
+// at startup (main_network_http.c bringup), after NVS is up. Safe to call
+// more than once (idempotent); not thread-safe, same contract as
+// security_backend_set_vtable() itself.
+void security_backend_web_auth_install(void);
+
+// Installs the real backend (calls security_backend_web_auth_install()) and
+// registers POST /api/auth/bootstrap_password -- the plan items 10/11
+// administrator-credential-bootstrap route, the one consumer of
+// web_auth_admin_bootstrap_needed() (net/web_auth_session.h). Gated at the
+// enforcement layer by ROUTE_TIER_ADMIN_BOOTSTRAP
+// (route_tier_table.h)/http_auth_check(), not by any check in this file's
+// handler alone -- see security_backend_web_auth.c's handler comment for
+// why it re-checks the same predicate anyway (defence in depth, not the
+// real gate). Resolves the HTTP server handle itself via
+// wifi_provision_http_get_server(), same "no server param, no
+// esp_http_server.h dependency in this header" convention as
+// settings_http_start(); follows the same start()-function/
+// kiln_http_register() pattern. Non-fatal ESP_LOGW on failure is the
+// caller's job, same convention as every other *_http_start() this
+// codebase's boot sequence calls.
+esp_err_t security_backend_web_auth_start(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SECURITY_BACKEND_WEB_AUTH_H

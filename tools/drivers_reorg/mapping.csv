@@ -1,0 +1,364 @@
+old_path,new_path,rationale
+firmware/KilnFW/App/drivers/CMakeLists.txt,firmware/KilnFW/App/drivers/CMakeLists.txt,STAY: single ESP-IDF component `drivers` retained (decision A) -- CMakeLists.txt stays at the component root regardless of internal layer subdirs.
+firmware/KilnFW/App/drivers/FT6336U.c,firmware/KilnFW/App/drivers/hw/FT6336U.c,plan census hw example / real device driver (FT6336U)
+firmware/KilnFW/App/drivers/FT6336U.h,firmware/KilnFW/App/drivers/hw/FT6336U.h,plan census hw example / real device driver (FT6336U)
+firmware/KilnFW/App/drivers/Kconfig,firmware/KilnFW/App/drivers/Kconfig,STAY: single ESP-IDF component `drivers` retained (decision A) -- Kconfig stays at the component root; options are not split per layer.
+firmware/KilnFW/App/drivers/MAX31856.c,firmware/KilnFW/App/drivers/hw/MAX31856.c,plan census hw example / real device driver (MAX31856)
+firmware/KilnFW/App/drivers/MAX31856.h,firmware/KilnFW/App/drivers/hw/MAX31856.h,plan census hw example / real device driver (MAX31856)
+firmware/KilnFW/App/drivers/NS2009.c,firmware/KilnFW/App/drivers/hw/NS2009.c,plan census hw example / real device driver (NS2009)
+firmware/KilnFW/App/drivers/NS2009.h,firmware/KilnFW/App/drivers/hw/NS2009.h,plan census hw example / real device driver (NS2009)
+firmware/KilnFW/App/drivers/README.md,firmware/KilnFW/App/drivers/README.md,STAY: single ESP-IDF component `drivers` retained (decision A) -- top-level component doc stays at the component root.
+firmware/KilnFW/App/drivers/SX1509.c,firmware/KilnFW/App/drivers/hw/SX1509.c,plan census hw example / real device driver (SX1509)
+firmware/KilnFW/App/drivers/SX1509.h,firmware/KilnFW/App/drivers/hw/SX1509.h,plan census hw example / real device driver (SX1509)
+firmware/KilnFW/App/drivers/SX1509_internal.h,firmware/KilnFW/App/drivers/hw/SX1509_internal.h,plan census hw example / real device driver (SX1509)
+firmware/KilnFW/App/drivers/adaptive_tune.c,firmware/KilnFW/App/drivers/control/adaptive_tune.c,plan census control example (adaptive_tune)
+firmware/KilnFW/App/drivers/adaptive_tune.h,firmware/KilnFW/App/drivers/control/adaptive_tune.h,plan census control example (adaptive_tune)
+firmware/KilnFW/App/drivers/adaptive_tune_http.c,firmware/KilnFW/App/drivers/http/adaptive_tune_http.c,"Decision C: *_http file, forced to http regardless of subject matter (was control: plan census control example (adaptive_tune))"
+firmware/KilnFW/App/drivers/adaptive_tune_http.h,firmware/KilnFW/App/drivers/http/adaptive_tune_http.h,"Decision C: *_http file, forced to http regardless of subject matter (was control: plan census control example (adaptive_tune))"
+firmware/KilnFW/App/drivers/adaptive_tune_internal.h,firmware/KilnFW/App/drivers/control/adaptive_tune_internal.h,plan census control example (adaptive_tune)
+firmware/KilnFW/App/drivers/adaptive_tune_ki.c,firmware/KilnFW/App/drivers/control/adaptive_tune_ki.c,plan census control example (adaptive_tune)
+firmware/KilnFW/App/drivers/adaptive_tune_model.c,firmware/KilnFW/App/drivers/control/adaptive_tune_model.c,plan census control example (adaptive_tune)
+firmware/KilnFW/App/drivers/app.js,firmware/KilnFW/App/drivers/http/app.js,static web asset served by the http layer alongside the .html pages
+firmware/KilnFW/App/drivers/autotune_engine.c,firmware/KilnFW/App/drivers/control/autotune_engine.c,plan census control example (autotune_engine)
+firmware/KilnFW/App/drivers/autotune_engine.h,firmware/KilnFW/App/drivers/control/autotune_engine.h,plan census control example (autotune_engine)
+firmware/KilnFW/App/drivers/autotune_engine_coupling.c,firmware/KilnFW/App/drivers/control/autotune_engine_coupling.c,plan census control example (autotune_engine)
+firmware/KilnFW/App/drivers/autotune_engine_guard.c,firmware/KilnFW/App/drivers/control/autotune_engine_guard.c,plan census control example (autotune_engine)
+firmware/KilnFW/App/drivers/autotune_engine_internal.h,firmware/KilnFW/App/drivers/control/autotune_engine_internal.h,plan census control example (autotune_engine)
+firmware/KilnFW/App/drivers/autotune_engine_relay.c,firmware/KilnFW/App/drivers/control/autotune_engine_relay.c,plan census control example (autotune_engine)
+firmware/KilnFW/App/drivers/autotune_engine_step_identify.c,firmware/KilnFW/App/drivers/control/autotune_engine_step_identify.c,plan census control example (autotune_engine)
+firmware/KilnFW/App/drivers/backlight_pwm.c,firmware/KilnFW/App/drivers/hw/backlight_pwm.c,plan census hw example / real device driver (backlight_pwm)
+firmware/KilnFW/App/drivers/backlight_pwm.h,firmware/KilnFW/App/drivers/hw/backlight_pwm.h,plan census hw example / real device driver (backlight_pwm)
+firmware/KilnFW/App/drivers/backup_export.c,firmware/KilnFW/App/drivers/http/backup_export.c,"Decision C: *_http file, forced to http regardless of subject matter (was persist: plan census persist example (backup_export))"
+firmware/KilnFW/App/drivers/backup_http.c,firmware/KilnFW/App/drivers/http/backup_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/backup_http.h,firmware/KilnFW/App/drivers/http/backup_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/backup_http_internal.h,firmware/KilnFW/App/drivers/http/backup_http_internal.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/backup_import.c,firmware/KilnFW/App/drivers/http/backup_import.c,"Decision C: *_http file, forced to http regardless of subject matter (was persist: plan census persist example (backup_import))"
+firmware/KilnFW/App/drivers/backup_json.c,firmware/KilnFW/App/drivers/persist/backup_json.c,plan census persist example (backup_json)
+firmware/KilnFW/App/drivers/backup_json.h,firmware/KilnFW/App/drivers/persist/backup_json.h,plan census persist example (backup_json)
+firmware/KilnFW/App/drivers/backup_page.html,firmware/KilnFW/App/drivers/http/backup_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/board_temps.c,firmware/KilnFW/App/drivers/hw/board_temps.c,"plan item 3 DONE: board_temps.c is hw, http split into board_temps_http.*"
+firmware/KilnFW/App/drivers/board_temps.h,firmware/KilnFW/App/drivers/hw/board_temps.h,"plan item 3 DONE: board_temps.c is hw, http split into board_temps_http.*"
+firmware/KilnFW/App/drivers/board_temps_http.c,firmware/KilnFW/App/drivers/http/board_temps_http.c,plan item 3 DONE: httpd handler/registration split out of board_temps.c
+firmware/KilnFW/App/drivers/board_temps_http.h,firmware/KilnFW/App/drivers/http/board_temps_http.h,plan item 3 DONE: httpd handler/registration split out of board_temps.c
+firmware/KilnFW/App/drivers/boot_button.c,firmware/KilnFW/App/drivers/bridge/boot_button.c,"physical button input handling, same role as gpio_probe (bridge)"
+firmware/KilnFW/App/drivers/boot_button.h,firmware/KilnFW/App/drivers/bridge/boot_button.h,"physical button input handling, same role as gpio_probe (bridge)"
+firmware/KilnFW/App/drivers/boot_guard.c,firmware/KilnFW/App/drivers/persist/boot_guard.c,plan census persist example (boot_guard)
+firmware/KilnFW/App/drivers/boot_guard.h,firmware/KilnFW/App/drivers/persist/boot_guard.h,plan census persist example (boot_guard)
+firmware/KilnFW/App/drivers/bx_worker_reentrancy.h,firmware/KilnFW/App/drivers/common/bx_worker_reentrancy.h,Decision B: pure leaf header/utility verified to include nothing above common (AMBIGUOUS: flash-worker re-entrancy guard is a safety-class hazard header (see CLAUDE.md flash worker re-entrancy note); grouped with safety)
+firmware/KilnFW/App/drivers/cone_table.c,firmware/KilnFW/App/drivers/control/cone_table.c,pyrometric cone lookup feeding profile/ramp logic
+firmware/KilnFW/App/drivers/cone_table.h,firmware/KilnFW/App/drivers/control/cone_table.h,pyrometric cone lookup feeding profile/ramp logic
+firmware/KilnFW/App/drivers/crash_report.c,firmware/KilnFW/App/drivers/safety/crash_report.c,plan census safety example (crash_report)
+firmware/KilnFW/App/drivers/crash_report.h,firmware/KilnFW/App/drivers/safety/crash_report.h,plan census safety example (crash_report)
+firmware/KilnFW/App/drivers/danger_mode.c,firmware/KilnFW/App/drivers/safety/danger_mode.c,plan census safety example (danger_mode)
+firmware/KilnFW/App/drivers/danger_mode.h,firmware/KilnFW/App/drivers/safety/danger_mode.h,plan census safety example (danger_mode)
+firmware/KilnFW/App/drivers/dashboard_autotune_http.c,firmware/KilnFW/App/drivers/http/dashboard_autotune_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/dashboard_exec_http.c,firmware/KilnFW/App/drivers/http/dashboard_exec_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/dashboard_http.c,firmware/KilnFW/App/drivers/http/dashboard_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/dashboard_http.h,firmware/KilnFW/App/drivers/http/dashboard_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/dashboard_http_internal.h,firmware/KilnFW/App/drivers/http/dashboard_http_internal.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/dashboard_json.c,firmware/KilnFW/App/drivers/http/dashboard_json.c,http-layer JSON/encoding/form helper shared by *_http.c handlers
+firmware/KilnFW/App/drivers/dashboard_json.h,firmware/KilnFW/App/drivers/http/dashboard_json.h,http-layer JSON/encoding/form helper shared by *_http.c handlers
+firmware/KilnFW/App/drivers/dashboard_settings_http.c,firmware/KilnFW/App/drivers/http/dashboard_settings_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/dashboard_status_http.c,firmware/KilnFW/App/drivers/http/dashboard_status_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/diagnostics_http.c,firmware/KilnFW/App/drivers/http/diagnostics_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/diagnostics_http.h,firmware/KilnFW/App/drivers/http/diagnostics_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/diagnostics_page.html,firmware/KilnFW/App/drivers/http/diagnostics_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/display_power_cfg.c,firmware/KilnFW/App/drivers/persist/display_power_cfg.c,plan census persist example (display_power_cfg)
+firmware/KilnFW/App/drivers/display_power_cfg.h,firmware/KilnFW/App/drivers/persist/display_power_cfg.h,plan census persist example (display_power_cfg)
+firmware/KilnFW/App/drivers/display_power_policy.c,firmware/KilnFW/App/drivers/persist/display_power_policy.c,plan census persist example (display_power_policy)
+firmware/KilnFW/App/drivers/display_power_policy.h,firmware/KilnFW/App/drivers/persist/display_power_policy.h,plan census persist example (display_power_policy)
+firmware/KilnFW/App/drivers/dram_margin.h,firmware/KilnFW/App/drivers/common/dram_margin.h,Decision B: pure leaf header/utility verified to include nothing above common (AMBIGUOUS: DRAM headroom check feeds stack_margin/safety monitoring; grouped with safety)
+firmware/KilnFW/App/drivers/espInterfaces/esp_spi_owner.c,firmware/KilnFW/App/drivers/owners/esp_spi_owner.c,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/espInterfaces/esp_spi_owner.h,firmware/KilnFW/App/drivers/owners/esp_spi_owner.h,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/espInterfaces/i2c_owner.c,firmware/KilnFW/App/drivers/owners/i2c_owner.c,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/espInterfaces/i2c_owner.h,firmware/KilnFW/App/drivers/owners/i2c_owner.h,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/espInterfaces/uart_owner.c,firmware/KilnFW/App/drivers/owners/uart_owner.c,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/espInterfaces/uart_owner.h,firmware/KilnFW/App/drivers/owners/uart_owner.h,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.c,firmware/KilnFW/App/drivers/owners/uart_protocol.c,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/espInterfaces/uart_protocol.h,firmware/KilnFW/App/drivers/owners/uart_protocol.h,plan census: espInterfaces/* is owners (bus/IO arbitration)
+firmware/KilnFW/App/drivers/event_log.c,firmware/KilnFW/App/drivers/persist/event_log.c,plan: misc -> persist (event_log folds into persist per plan's misc-folding note)
+firmware/KilnFW/App/drivers/event_log.h,firmware/KilnFW/App/drivers/persist/event_log.h,plan: misc -> persist (event_log folds into persist per plan's misc-folding note)
+firmware/KilnFW/App/drivers/event_log_emit.c,firmware/KilnFW/App/drivers/persist/event_log_emit.c,plan: misc -> persist (event_log folds into persist per plan's misc-folding note)
+firmware/KilnFW/App/drivers/factory_reset.c,firmware/KilnFW/App/drivers/http/factory_reset.c,"Coordinator decision 2026-09-05 (item 9): factory_reset.c registers an httpd route, so it moves to http like the rest of the *_http.c family (was persist: plan census persist example (factory_reset))"
+firmware/KilnFW/App/drivers/factory_reset.h,firmware/KilnFW/App/drivers/http/factory_reset.h,"Coordinator decision 2026-09-05 (item 9): factory_reset.c registers an httpd route, so it moves to http like the rest of the *_http.c family (was persist: plan census persist example (factory_reset))"
+firmware/KilnFW/App/drivers/gen_build_info.cmake,firmware/KilnFW/App/drivers/gen_build_info.cmake,"STAY: single ESP-IDF component `drivers` retained (decision A) -- build-info generation script stays at the component root, referenced by the unchanged CMakeLists.txt."
+firmware/KilnFW/App/drivers/gpio_probe.c,firmware/KilnFW/App/drivers/bridge/gpio_probe.c,plan census: gpio_probe is bridge
+firmware/KilnFW/App/drivers/gpio_probe.h,firmware/KilnFW/App/drivers/bridge/gpio_probe.h,plan census: gpio_probe is bridge
+firmware/KilnFW/App/drivers/gpio_probe_denylist.h,firmware/KilnFW/App/drivers/bridge/gpio_probe_denylist.h,plan census: gpio_probe is bridge
+firmware/KilnFW/App/drivers/heat_enable.c,firmware/KilnFW/App/drivers/control/heat_enable.c,"Coordinator-accepted placement: gates heating decisions alongside profile_executor, not a safety-processor link file"
+firmware/KilnFW/App/drivers/heat_enable.h,firmware/KilnFW/App/drivers/control/heat_enable.h,"Coordinator-accepted placement: gates heating decisions alongside profile_executor, not a safety-processor link file"
+firmware/KilnFW/App/drivers/heat_interlock.c,firmware/KilnFW/App/drivers/control/heat_interlock.c,"Coordinator-accepted placement: gates heating decisions alongside profile_executor, not a safety-processor link file"
+firmware/KilnFW/App/drivers/heat_interlock.h,firmware/KilnFW/App/drivers/control/heat_interlock.h,"Coordinator-accepted placement: gates heating decisions alongside profile_executor, not a safety-processor link file"
+firmware/KilnFW/App/drivers/heater_output.c,firmware/KilnFW/App/drivers/control/heater_output.c,plan census control example (heater_output)
+firmware/KilnFW/App/drivers/heater_output.h,firmware/KilnFW/App/drivers/control/heater_output.h,plan census control example (heater_output)
+firmware/KilnFW/App/drivers/http_form.h,firmware/KilnFW/App/drivers/common/http_form.h,Decision B: pure leaf header/utility verified to include nothing above common (http-layer JSON/encoding/form helper shared by *_http.c handlers)
+firmware/KilnFW/App/drivers/httpd_socket_budget.h,firmware/KilnFW/App/drivers/common/httpd_socket_budget.h,Decision B: pure leaf header/utility verified to include nothing above common (http-layer JSON/encoding/form helper shared by *_http.c handlers)
+firmware/KilnFW/App/drivers/i2c_scan.c,firmware/KilnFW/App/drivers/hw/i2c_scan.c,plan census hw example / real device driver (i2c_scan)
+firmware/KilnFW/App/drivers/i2c_scan.h,firmware/KilnFW/App/drivers/hw/i2c_scan.h,plan census hw example / real device driver (i2c_scan)
+firmware/KilnFW/App/drivers/iter_tune.c,firmware/KilnFW/App/drivers/control/iter_tune.c,plan census control example (iter_tune)
+firmware/KilnFW/App/drivers/iter_tune.h,firmware/KilnFW/App/drivers/control/iter_tune.h,plan census control example (iter_tune)
+firmware/KilnFW/App/drivers/kiln_cfg_http.c,firmware/KilnFW/App/drivers/http/kiln_cfg_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/kiln_cfg_http.h,firmware/KilnFW/App/drivers/http/kiln_cfg_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/kiln_cfg_store.c,firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c,config storage backend behind kiln_cfg_http
+firmware/KilnFW/App/drivers/kiln_cfg_store.h,firmware/KilnFW/App/drivers/persist/kiln_cfg_store.h,config storage backend behind kiln_cfg_http
+firmware/KilnFW/App/drivers/kiln_io.c,firmware/KilnFW/App/drivers/owners/kiln_io.c,Coordinator-accepted placement: kiln_io is the generic IO-arbitration facade over the owners; grouped with owners rather than control
+firmware/KilnFW/App/drivers/kiln_io.h,firmware/KilnFW/App/drivers/owners/kiln_io.h,Coordinator-accepted placement: kiln_io is the generic IO-arbitration facade over the owners; grouped with owners rather than control
+firmware/KilnFW/App/drivers/kiln_io_owner.c,firmware/KilnFW/App/drivers/owners/kiln_io_owner.c,plan census: bus/IO arbitration owner module
+firmware/KilnFW/App/drivers/kiln_io_owner.h,firmware/KilnFW/App/drivers/owners/kiln_io_owner.h,plan census: bus/IO arbitration owner module
+firmware/KilnFW/App/drivers/kiln_ui.c,firmware/KilnFW/App/drivers/ui/kiln_ui.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/kiln_ui.h,firmware/KilnFW/App/drivers/ui/kiln_ui.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/log_http.c,firmware/KilnFW/App/drivers/http/log_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/log_http.h,firmware/KilnFW/App/drivers/http/log_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/log_store.c,firmware/KilnFW/App/drivers/persist/log_store.c,plan census persist example (log_store)
+firmware/KilnFW/App/drivers/log_store.h,firmware/KilnFW/App/drivers/persist/log_store.h,plan census persist example (log_store)
+firmware/KilnFW/App/drivers/log_store_mount.c,firmware/KilnFW/App/drivers/persist/log_store_mount.c,plan census persist example (log_store)
+firmware/KilnFW/App/drivers/log_store_mount.h,firmware/KilnFW/App/drivers/persist/log_store_mount.h,plan census persist example (log_store)
+firmware/KilnFW/App/drivers/lvgl_mem_psram.c,firmware/KilnFW/App/drivers/ui/lvgl_mem_psram.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/lvgl_port.c,firmware/KilnFW/App/drivers/ui/lvgl_port.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/lvgl_port.h,firmware/KilnFW/App/drivers/ui/lvgl_port.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/main_page.html,firmware/KilnFW/App/drivers/http/main_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/max31856_codec.c,firmware/KilnFW/App/drivers/hw/max31856_codec.c,plan census hw example / real device driver (max31856_codec)
+firmware/KilnFW/App/drivers/max31856_codec.h,firmware/KilnFW/App/drivers/hw/max31856_codec.h,plan census hw example / real device driver (max31856_codec)
+firmware/KilnFW/App/drivers/nav.js,firmware/KilnFW/App/drivers/http/nav.js,static web asset served by the http layer alongside the .html pages
+firmware/KilnFW/App/drivers/nvs_report.c,firmware/KilnFW/App/drivers/persist/nvs_report.c,plan census persist example (nvs_report)
+firmware/KilnFW/App/drivers/nvs_report.h,firmware/KilnFW/App/drivers/persist/nvs_report.h,plan census persist example (nvs_report)
+firmware/KilnFW/App/drivers/ota_auth.c,firmware/KilnFW/App/drivers/net/ota_auth.c,plan census net example (ota_)
+firmware/KilnFW/App/drivers/ota_auth.h,firmware/KilnFW/App/drivers/net/ota_auth.h,plan census net example (ota_)
+firmware/KilnFW/App/drivers/ota_http.c,firmware/KilnFW/App/drivers/http/ota_http.c,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_http.h,firmware/KilnFW/App/drivers/http/ota_http.h,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_http_esp.c,firmware/KilnFW/App/drivers/http/ota_http_esp.c,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_http_internal.h,firmware/KilnFW/App/drivers/http/ota_http_internal.h,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_http_pico.c,firmware/KilnFW/App/drivers/http/ota_http_pico.c,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_http_recovery.c,firmware/KilnFW/App/drivers/http/ota_http_recovery.c,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_http_util.c,firmware/KilnFW/App/drivers/http/ota_http_util.c,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_http_util.h,firmware/KilnFW/App/drivers/http/ota_http_util.h,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (ota_))"
+firmware/KilnFW/App/drivers/ota_interlock.c,firmware/KilnFW/App/drivers/net/ota_interlock.c,plan census net example (ota_)
+firmware/KilnFW/App/drivers/ota_interlock.h,firmware/KilnFW/App/drivers/net/ota_interlock.h,plan census net example (ota_)
+firmware/KilnFW/App/drivers/ota_page.html,firmware/KilnFW/App/drivers/net/ota_page.html,plan census net example (ota_)
+firmware/KilnFW/App/drivers/ota_pico_relay.c,firmware/KilnFW/App/drivers/net/ota_pico_relay.c,plan census net example (ota_)
+firmware/KilnFW/App/drivers/ota_pico_relay.h,firmware/KilnFW/App/drivers/net/ota_pico_relay.h,plan census net example (ota_)
+firmware/KilnFW/App/drivers/ota_record.c,firmware/KilnFW/App/drivers/persist/ota_record.c,plan census persist example (ota_record)
+firmware/KilnFW/App/drivers/ota_record.h,firmware/KilnFW/App/drivers/persist/ota_record.h,plan census persist example (ota_record)
+firmware/KilnFW/App/drivers/ota_state.h,firmware/KilnFW/App/drivers/net/ota_state.h,plan census net example (ota_)
+firmware/KilnFW/App/drivers/owner_slot_pool.c,firmware/KilnFW/App/drivers/owners/owner_slot_pool.c,plan census: bus/IO arbitration owner module
+firmware/KilnFW/App/drivers/owner_slot_pool.h,firmware/KilnFW/App/drivers/owners/owner_slot_pool.h,plan census: bus/IO arbitration owner module
+firmware/KilnFW/App/drivers/panel_codec.c,firmware/KilnFW/App/drivers/hw/panel_codec.c,plan census hw example / real device driver (panel_codec)
+firmware/KilnFW/App/drivers/panel_codec.h,firmware/KilnFW/App/drivers/hw/panel_codec.h,plan census hw example / real device driver (panel_codec)
+firmware/KilnFW/App/drivers/panel_detect.c,firmware/KilnFW/App/drivers/hw/panel_detect.c,plan census hw example / real device driver (panel_detect)
+firmware/KilnFW/App/drivers/panel_detect.h,firmware/KilnFW/App/drivers/hw/panel_detect.h,plan census hw example / real device driver (panel_detect)
+firmware/KilnFW/App/drivers/panel_spi.c,firmware/KilnFW/App/drivers/hw/panel_spi.c,plan census hw example / real device driver (panel_spi)
+firmware/KilnFW/App/drivers/panel_spi.h,firmware/KilnFW/App/drivers/hw/panel_spi.h,plan census hw example / real device driver (panel_spi)
+firmware/KilnFW/App/drivers/panel_spi_blit.c,firmware/KilnFW/App/drivers/hw/panel_spi_blit.c,plan census hw example / real device driver (panel_spi)
+firmware/KilnFW/App/drivers/panel_spi_bringup.c,firmware/KilnFW/App/drivers/hw/panel_spi_bringup.c,plan census hw example / real device driver (panel_spi)
+firmware/KilnFW/App/drivers/panel_spi_draw.c,firmware/KilnFW/App/drivers/hw/panel_spi_draw.c,plan census hw example / real device driver (panel_spi)
+firmware/KilnFW/App/drivers/panel_spi_internal.h,firmware/KilnFW/App/drivers/hw/panel_spi_internal.h,plan census hw example / real device driver (panel_spi)
+firmware/KilnFW/App/drivers/partition_info_http.c,firmware/KilnFW/App/drivers/http/partition_info_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/partition_info_http.h,firmware/KilnFW/App/drivers/http/partition_info_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/pid.c,firmware/KilnFW/App/drivers/control/pid.c,plan census control example (pid)
+firmware/KilnFW/App/drivers/pid.h,firmware/KilnFW/App/drivers/control/pid.h,plan census control example (pid)
+firmware/KilnFW/App/drivers/pid_autotune.c,firmware/KilnFW/App/drivers/control/pid_autotune.c,plan census control example (pid)
+firmware/KilnFW/App/drivers/pid_autotune.h,firmware/KilnFW/App/drivers/control/pid_autotune.h,plan census control example (pid)
+firmware/KilnFW/App/drivers/pid_fuzzy.c,firmware/KilnFW/App/drivers/control/pid_fuzzy.c,plan census control example (pid)
+firmware/KilnFW/App/drivers/pid_fuzzy.h,firmware/KilnFW/App/drivers/control/pid_fuzzy.h,plan census control example (pid)
+firmware/KilnFW/App/drivers/profile_executor.c,firmware/KilnFW/App/drivers/control/profile_executor.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor.h,firmware/KilnFW/App/drivers/control/profile_executor.h,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_config_reload.c,firmware/KilnFW/App/drivers/control/profile_executor_config_reload.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_feedforward.c,firmware/KilnFW/App/drivers/control/profile_executor_feedforward.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_firing_stats.c,firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_internal.h,firmware/KilnFW/App/drivers/control/profile_executor_internal.h,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_pid_tick.c,firmware/KilnFW/App/drivers/control/profile_executor_pid_tick.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_ramp_assist.c,firmware/KilnFW/App/drivers/control/profile_executor_ramp_assist.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_relay_io.c,firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_run.c,firmware/KilnFW/App/drivers/control/profile_executor_run.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_start.c,firmware/KilnFW/App/drivers/control/profile_executor_start.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_state.h,firmware/KilnFW/App/drivers/control/profile_executor_state.h,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_executor_status.c,firmware/KilnFW/App/drivers/control/profile_executor_status.c,plan census control example (profile_executor)
+firmware/KilnFW/App/drivers/profile_feasibility.c,firmware/KilnFW/App/drivers/control/profile_feasibility.c,plan census control example (profile_feasibility)
+firmware/KilnFW/App/drivers/profile_feasibility.h,firmware/KilnFW/App/drivers/control/profile_feasibility.h,plan census control example (profile_feasibility)
+firmware/KilnFW/App/drivers/profiles_builtin.c,firmware/KilnFW/App/drivers/persist/profiles_builtin.c,plan census persist example (profiles_builtin)
+firmware/KilnFW/App/drivers/profiles_builtin.h,firmware/KilnFW/App/drivers/persist/profiles_builtin.h,plan census persist example (profiles_builtin)
+firmware/KilnFW/App/drivers/profiles_types.h,firmware/KilnFW/App/drivers/persist/profiles_types.h,"item 7 split: pure profile types out of profiles_http.h, home persist alongside profiles_builtin.h (DRYRUN.md section 5 Fix 1)"
+firmware/KilnFW/App/drivers/profiles_builtin_table.inc,firmware/KilnFW/App/drivers/persist/profiles_builtin_table.inc,plan census persist example (profiles_builtin)
+firmware/KilnFW/App/drivers/profiles_catalog_http.c,firmware/KilnFW/App/drivers/http/profiles_catalog_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/profiles_edit_http.c,firmware/KilnFW/App/drivers/http/profiles_edit_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/profiles_http.c,firmware/KilnFW/App/drivers/http/profiles_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/profiles_http.h,firmware/KilnFW/App/drivers/http/profiles_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/profiles_http_internal.h,firmware/KilnFW/App/drivers/http/profiles_http_internal.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/profiles_page.html,firmware/KilnFW/App/drivers/http/profiles_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/ramp_assist_cfg.c,firmware/KilnFW/App/drivers/control/ramp_assist_cfg.c,plan census control example (ramp_assist_cfg)
+firmware/KilnFW/App/drivers/ramp_assist_cfg.h,firmware/KilnFW/App/drivers/control/ramp_assist_cfg.h,plan census control example (ramp_assist_cfg)
+firmware/KilnFW/App/drivers/ramp_ident.c,firmware/KilnFW/App/drivers/control/ramp_ident.c,plan census control example (ramp_ident)
+firmware/KilnFW/App/drivers/ramp_ident.h,firmware/KilnFW/App/drivers/control/ramp_ident.h,plan census control example (ramp_ident)
+firmware/KilnFW/App/drivers/readiness_http.c,firmware/KilnFW/App/drivers/http/readiness_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/readiness_http.h,firmware/KilnFW/App/drivers/http/readiness_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/readiness_page.html,firmware/KilnFW/App/drivers/http/readiness_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/relay_authority.c,firmware/KilnFW/App/drivers/owners/relay_authority.c,"Coordinator-accepted placement: relay_authority arbitrates exclusive relay access like the other *_owner modules, not a control-loop file"
+firmware/KilnFW/App/drivers/relay_authority.h,firmware/KilnFW/App/drivers/owners/relay_authority.h,"Coordinator-accepted placement: relay_authority arbitrates exclusive relay access like the other *_owner modules, not a control-loop file"
+firmware/KilnFW/App/drivers/relay_cycles.c,firmware/KilnFW/App/drivers/persist/relay_cycles.c,"Coordinator-accepted placement: relay wear-cycle counters are persisted config/state, not live arbitration"
+firmware/KilnFW/App/drivers/relay_cycles.h,firmware/KilnFW/App/drivers/persist/relay_cycles.h,"Coordinator-accepted placement: relay wear-cycle counters are persisted config/state, not live arbitration"
+firmware/KilnFW/App/drivers/rtc_watchdog.c,firmware/KilnFW/App/drivers/safety/rtc_watchdog.c,plan census safety example (rtc_watchdog)
+firmware/KilnFW/App/drivers/rtc_watchdog.h,firmware/KilnFW/App/drivers/safety/rtc_watchdog.h,plan census safety example (rtc_watchdog)
+firmware/KilnFW/App/drivers/run_state.c,firmware/KilnFW/App/drivers/control/run_state.c,plan census control example (run_state)
+firmware/KilnFW/App/drivers/run_state.h,firmware/KilnFW/App/drivers/control/run_state.h,plan census control example (run_state)
+firmware/KilnFW/App/drivers/safety_cfg_http.c,firmware/KilnFW/App/drivers/http/safety_cfg_http.c,"Decision C: *_http file, forced to http regardless of subject matter (was safety: plan census safety example (safety_cfg))"
+firmware/KilnFW/App/drivers/safety_cfg_http.h,firmware/KilnFW/App/drivers/http/safety_cfg_http.h,"Decision C: *_http file, forced to http regardless of subject matter (was safety: plan census safety example (safety_cfg))"
+firmware/KilnFW/App/drivers/safety_cfg_store.c,firmware/KilnFW/App/drivers/safety/safety_cfg_store.c,plan census safety example (safety_cfg)
+firmware/KilnFW/App/drivers/safety_cfg_store.h,firmware/KilnFW/App/drivers/safety/safety_cfg_store.h,plan census safety example (safety_cfg)
+firmware/KilnFW/App/drivers/safety_commissioning_page.html,firmware/KilnFW/App/drivers/http/safety_commissioning_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/safety_config_page.html,firmware/KilnFW/App/drivers/http/safety_config_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/safety_link.c,firmware/KilnFW/App/drivers/safety/safety_link.c,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link.h,firmware/KilnFW/App/drivers/safety/safety_link.h,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_commands.c,firmware/KilnFW/App/drivers/safety/safety_link_commands.c,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_frame.c,firmware/KilnFW/App/drivers/safety/safety_link_frame.c,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_frame.h,firmware/KilnFW/App/drivers/safety/safety_link_frame.h,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_frames.c,firmware/KilnFW/App/drivers/safety/safety_link_frames.c,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_inbox.c,firmware/KilnFW/App/drivers/safety/safety_link_inbox.c,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_internal.h,firmware/KilnFW/App/drivers/safety/safety_link_internal.h,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_payload.c,firmware/KilnFW/App/drivers/safety/safety_link_payload.c,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_link_poll.c,firmware/KilnFW/App/drivers/safety/safety_link_poll.c,plan census safety example (safety_link)
+firmware/KilnFW/App/drivers/safety_page.html,firmware/KilnFW/App/drivers/http/safety_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/safety_trip_decision.c,firmware/KilnFW/App/drivers/safety/safety_trip_decision.c,plan census safety example (safety_trip)
+firmware/KilnFW/App/drivers/safety_trip_decision.h,firmware/KilnFW/App/drivers/safety/safety_trip_decision.h,plan census safety example (safety_trip)
+firmware/KilnFW/App/drivers/safety_trip_words.h,firmware/KilnFW/App/drivers/safety/safety_trip_words.h,plan census safety example (safety_trip)
+firmware/KilnFW/App/drivers/screen_idle.c,firmware/KilnFW/App/drivers/ui/screen_idle.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/screen_idle.h,firmware/KilnFW/App/drivers/ui/screen_idle.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/settings.h,firmware/KilnFW/App/drivers/hw/settings.h,"Correction 2026-09-05: NOT a common leaf -- includes driver/gpio.h, driver/spi_master.h, driver/uart.h (ESP-IDF peripheral headers), so it belongs in hw, not common"
+firmware/KilnFW/App/drivers/settings_display_page.html,firmware/KilnFW/App/drivers/http/settings_display_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/settings_http.c,firmware/KilnFW/App/drivers/http/settings_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/settings_http.h,firmware/KilnFW/App/drivers/http/settings_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/settings_page.html,firmware/KilnFW/App/drivers/http/settings_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/sim_backend.c,firmware/KilnFW/App/drivers/sim/sim_backend.c,plan census: sim backend
+firmware/KilnFW/App/drivers/sim_backend.h,firmware/KilnFW/App/drivers/sim/sim_backend.h,plan census: sim backend
+firmware/KilnFW/App/drivers/st7796_panel.c,firmware/KilnFW/App/drivers/hw/st7796_panel.c,plan census hw example / real device driver (st7796_panel)
+firmware/KilnFW/App/drivers/st7796_panel.h,firmware/KilnFW/App/drivers/hw/st7796_panel.h,plan census hw example / real device driver (st7796_panel)
+firmware/KilnFW/App/drivers/stack_margin.c,firmware/KilnFW/App/drivers/common/stack_margin.c,Decision B: pure leaf header/utility verified to include nothing above common (plan census safety example (stack_margin))
+firmware/KilnFW/App/drivers/stack_margin.h,firmware/KilnFW/App/drivers/common/stack_margin.h,Decision B: pure leaf header/utility verified to include nothing above common (plan census safety example (stack_margin))
+firmware/KilnFW/App/drivers/stack_margin_calc.h,firmware/KilnFW/App/drivers/common/stack_margin_calc.h,Decision B: pure leaf header/utility verified to include nothing above common (plan census safety example (stack_margin))
+firmware/KilnFW/App/drivers/telemetry_format.c,firmware/KilnFW/App/drivers/persist/telemetry_format.c,formatting companion to telemetry_log (persist); no control/http logic of its own
+firmware/KilnFW/App/drivers/telemetry_format.h,firmware/KilnFW/App/drivers/persist/telemetry_format.h,formatting companion to telemetry_log (persist); no control/http logic of its own
+firmware/KilnFW/App/drivers/telemetry_log.c,firmware/KilnFW/App/drivers/persist/telemetry_log.c,plan census persist example (telemetry_log)
+firmware/KilnFW/App/drivers/telemetry_log.h,firmware/KilnFW/App/drivers/persist/telemetry_log.h,plan census persist example (telemetry_log)
+firmware/KilnFW/App/drivers/theme.css,firmware/KilnFW/App/drivers/http/theme.css,static web asset served by the http layer alongside the .html pages
+firmware/KilnFW/App/drivers/thermal_guard.c,firmware/KilnFW/App/drivers/control/thermal_guard.c,plan census control example (thermal_guard)
+firmware/KilnFW/App/drivers/thermal_guard.h,firmware/KilnFW/App/drivers/control/thermal_guard.h,plan census control example (thermal_guard)
+firmware/KilnFW/App/drivers/thermo_combine.c,firmware/KilnFW/App/drivers/control/thermo_combine.c,Coordinator-accepted placement: combines multiple raw thermocouple readings into an effective zone temperature consumed by the control loop; not itself a hw driver or an owner
+firmware/KilnFW/App/drivers/thermo_combine.h,firmware/KilnFW/App/drivers/control/thermo_combine.h,Coordinator-accepted placement: combines multiple raw thermocouple readings into an effective zone temperature consumed by the control loop; not itself a hw driver or an owner
+firmware/KilnFW/App/drivers/thermo_owner.c,firmware/KilnFW/App/drivers/owners/thermo_owner.c,plan census: bus/IO arbitration owner module
+firmware/KilnFW/App/drivers/thermo_owner.h,firmware/KilnFW/App/drivers/owners/thermo_owner.h,plan census: bus/IO arbitration owner module
+firmware/KilnFW/App/drivers/time_sync.c,firmware/KilnFW/App/drivers/net/time_sync.c,plan census net example (time_sync)
+firmware/KilnFW/App/drivers/time_sync.h,firmware/KilnFW/App/drivers/net/time_sync.h,plan census net example (time_sync)
+firmware/KilnFW/App/drivers/time_sync_tz.c,firmware/KilnFW/App/drivers/net/time_sync_tz.c,plan census net example (time_sync)
+firmware/KilnFW/App/drivers/time_sync_tz.h,firmware/KilnFW/App/drivers/net/time_sync_tz.h,plan census net example (time_sync)
+firmware/KilnFW/App/drivers/touch_cal_store.c,firmware/KilnFW/App/drivers/persist/touch_cal_store.c,plan census persist example (touch_cal_store)
+firmware/KilnFW/App/drivers/touch_cal_store.h,firmware/KilnFW/App/drivers/persist/touch_cal_store.h,plan census persist example (touch_cal_store)
+firmware/KilnFW/App/drivers/touch_dev.c,firmware/KilnFW/App/drivers/hw/touch_dev.c,plan census hw example / real device driver (touch_dev)
+firmware/KilnFW/App/drivers/touch_dev.h,firmware/KilnFW/App/drivers/hw/touch_dev.h,plan census hw example / real device driver (touch_dev)
+firmware/KilnFW/App/drivers/tuning_recommendations_fallback.json,firmware/KilnFW/App/drivers/http/tuning_recommendations_fallback.json,Coordinator-accepted placement: static JSON fallback served by dashboard/adaptive_tune http handlers; grouped with the http static assets
+firmware/KilnFW/App/drivers/uart_bridge.c,firmware/KilnFW/App/drivers/bridge/uart_bridge.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge.h,firmware/KilnFW/App/drivers/bridge/uart_bridge.h,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_ext.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_ext.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_ext_autotune.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_ext_autotune.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_ext_control.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_ext_control.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_ext_internal.h,firmware/KilnFW/App/drivers/bridge/uart_bridge_ext_internal.h,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_ext_wifi.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_ext_wifi.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_info.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_info.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_internal.h,firmware/KilnFW/App/drivers/bridge/uart_bridge_internal.h,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_io.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_io.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_safety.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_safety.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_system.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_system.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_thermo.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_thermo.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_touch.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_touch.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_bridge_ui_test.c,firmware/KilnFW/App/drivers/bridge/uart_bridge_ui_test.c,plan census: uart_bridge_* is bridge
+firmware/KilnFW/App/drivers/uart_log_bridge.c,firmware/KilnFW/App/drivers/bridge/uart_log_bridge.c,uart bridge support file
+firmware/KilnFW/App/drivers/uart_log_bridge.h,firmware/KilnFW/App/drivers/bridge/uart_log_bridge.h,uart bridge support file
+firmware/KilnFW/App/drivers/uart_task_ids.h,firmware/KilnFW/App/drivers/common/uart_task_ids.h,Decision B: pure leaf header/utility verified to include nothing above common (uart bridge support file)
+firmware/KilnFW/App/drivers/ui_confirm.c,firmware/KilnFW/App/drivers/ui/ui_confirm.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_confirm.h,firmware/KilnFW/App/drivers/ui/ui_confirm.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_num_pad.c,firmware/KilnFW/App/drivers/ui/ui_num_pad.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_num_pad.h,firmware/KilnFW/App/drivers/ui/ui_num_pad.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_config.c,firmware/KilnFW/App/drivers/ui/ui_page_config.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_config.h,firmware/KilnFW/App/drivers/ui/ui_page_config.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_diagnostics.c,firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_diagnostics.h,firmware/KilnFW/App/drivers/ui/ui_page_diagnostics.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home.c,firmware/KilnFW/App/drivers/ui/ui_page_home.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home.h,firmware/KilnFW/App/drivers/ui/ui_page_home.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home_actions.c,firmware/KilnFW/App/drivers/ui/ui_page_home_actions.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home_chart.c,firmware/KilnFW/App/drivers/ui/ui_page_home_chart.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home_graph.c,firmware/KilnFW/App/drivers/ui/ui_page_home_graph.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home_graph.h,firmware/KilnFW/App/drivers/ui/ui_page_home_graph.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home_internal.h,firmware/KilnFW/App/drivers/ui/ui_page_home_internal.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_home_refresh.c,firmware/KilnFW/App/drivers/ui/ui_page_home_refresh.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_network.c,firmware/KilnFW/App/drivers/ui/ui_page_network.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_network.h,firmware/KilnFW/App/drivers/ui/ui_page_network.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_network_manage.c,firmware/KilnFW/App/drivers/ui/ui_page_network_manage.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_network_manage.h,firmware/KilnFW/App/drivers/ui/ui_page_network_manage.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_builder_review.c,firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_review.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_builder_review.h,firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_review.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_builder_segment.c,firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_segment.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_builder_segment.h,firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_segment.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_builder_zones.c,firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_zones.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_builder_zones.h,firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_zones.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_detail.c,firmware/KilnFW/App/drivers/ui/ui_page_profile_detail.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_detail.h,firmware/KilnFW/App/drivers/ui/ui_page_profile_detail.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_segments.c,firmware/KilnFW/App/drivers/ui/ui_page_profile_segments.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profile_segments.h,firmware/KilnFW/App/drivers/ui/ui_page_profile_segments.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles.c,firmware/KilnFW/App/drivers/ui/ui_page_profiles.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles.h,firmware/KilnFW/App/drivers/ui/ui_page_profiles.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles_builtin_list.c,firmware/KilnFW/App/drivers/ui/ui_page_profiles_builtin_list.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles_builtin_list.h,firmware/KilnFW/App/drivers/ui/ui_page_profiles_builtin_list.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles_family.c,firmware/KilnFW/App/drivers/ui/ui_page_profiles_family.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles_family.h,firmware/KilnFW/App/drivers/ui/ui_page_profiles_family.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles_mine.c,firmware/KilnFW/App/drivers/ui/ui_page_profiles_mine.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_profiles_mine.h,firmware/KilnFW/App/drivers/ui/ui_page_profiles_mine.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_temperature.c,firmware/KilnFW/App/drivers/ui/ui_page_temperature.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_temperature.h,firmware/KilnFW/App/drivers/ui/ui_page_temperature.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_touch_cal.c,firmware/KilnFW/App/drivers/ui/ui_page_touch_cal.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_touch_cal.h,firmware/KilnFW/App/drivers/ui/ui_page_touch_cal.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_touch_test.c,firmware/KilnFW/App/drivers/ui/ui_page_touch_test.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_page_touch_test.h,firmware/KilnFW/App/drivers/ui/ui_page_touch_test.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_theme.c,firmware/KilnFW/App/drivers/ui/ui_theme.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_theme.h,firmware/KilnFW/App/drivers/ui/ui_theme.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_topbar.c,firmware/KilnFW/App/drivers/ui/ui_topbar.c,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/ui_topbar.h,firmware/KilnFW/App/drivers/ui/ui_topbar.h,plan census: ui_page_*/lvgl_port/theme family
+firmware/KilnFW/App/drivers/unit_pref.c,firmware/KilnFW/App/drivers/persist/unit_pref.c,plan census persist example (unit_pref)
+firmware/KilnFW/App/drivers/unit_pref.h,firmware/KilnFW/App/drivers/persist/unit_pref.h,plan census persist example (unit_pref)
+firmware/KilnFW/App/drivers/watchdog_cfg.c,firmware/KilnFW/App/drivers/safety/watchdog_cfg.c,plan census safety example (watchdog_cfg)
+firmware/KilnFW/App/drivers/watchdog_cfg.h,firmware/KilnFW/App/drivers/safety/watchdog_cfg.h,plan census safety example (watchdog_cfg)
+firmware/KilnFW/App/drivers/web_encoding.c,firmware/KilnFW/App/drivers/common/web_encoding.c,Decision B: pure leaf header/utility verified to include nothing above common (http-layer JSON/encoding/form helper shared by *_http.c handlers)
+firmware/KilnFW/App/drivers/web_encoding.h,firmware/KilnFW/App/drivers/common/web_encoding.h,Decision B: pure leaf header/utility verified to include nothing above common (http-layer JSON/encoding/form helper shared by *_http.c handlers)
+firmware/KilnFW/App/drivers/wifi_prov.c,firmware/KilnFW/App/drivers/net/wifi_prov.c,plan census net example (wifi_prov)
+firmware/KilnFW/App/drivers/wifi_prov.h,firmware/KilnFW/App/drivers/net/wifi_prov.h,plan census net example (wifi_prov)
+firmware/KilnFW/App/drivers/wifi_prov_api.c,firmware/KilnFW/App/drivers/net/wifi_prov_api.c,plan census net example (wifi_prov)
+firmware/KilnFW/App/drivers/wifi_prov_internal.h,firmware/KilnFW/App/drivers/net/wifi_prov_internal.h,plan census net example (wifi_prov)
+firmware/KilnFW/App/drivers/wifi_prov_link.c,firmware/KilnFW/App/drivers/net/wifi_prov_link.c,plan census net example (wifi_prov)
+firmware/KilnFW/App/drivers/wifi_prov_nvs.c,firmware/KilnFW/App/drivers/net/wifi_prov_nvs.c,plan census net example (wifi_prov)
+firmware/KilnFW/App/drivers/wifi_provision_http.c,firmware/KilnFW/App/drivers/http/wifi_provision_http.c,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (wifi_prov))"
+firmware/KilnFW/App/drivers/wifi_provision_http.h,firmware/KilnFW/App/drivers/http/wifi_provision_http.h,"Decision C: *_http file, forced to http regardless of subject matter (was net: plan census net example (wifi_prov))"
+firmware/KilnFW/App/drivers/wifi_provision_page.html,firmware/KilnFW/App/drivers/net/wifi_provision_page.html,plan census net example (wifi_prov)
+firmware/KilnFW/App/drivers/wifi_status_ui.c,firmware/KilnFW/App/drivers/ui/wifi_status_ui.c,"Coordinator-accepted placement: renders wifi state as UI widget, not the provisioning/network stack itself -> ui"
+firmware/KilnFW/App/drivers/wifi_status_ui.h,firmware/KilnFW/App/drivers/ui/wifi_status_ui.h,"Coordinator-accepted placement: renders wifi state as UI widget, not the provisioning/network stack itself -> ui"
+firmware/KilnFW/App/drivers/zone_coupling_solve.c,firmware/KilnFW/App/drivers/control/zone_coupling_solve.c,plan census control example (zone_coupling_solve)
+firmware/KilnFW/App/drivers/zone_coupling_solve.h,firmware/KilnFW/App/drivers/control/zone_coupling_solve.h,plan census control example (zone_coupling_solve)
+firmware/KilnFW/App/drivers/zone_settings_source_chain.h,firmware/KilnFW/App/drivers/persist/zone_settings_source_chain.h,"Coordinator-accepted placement: config-layering/precedence header for zone settings, grouped with persist alongside zones_config_* (settings.h itself moved to hw 2026-09-05, see its own row -- no longer alongside this file)"
+firmware/KilnFW/App/drivers/zones_config_accessors.c,firmware/KilnFW/App/drivers/persist/zones_config_accessors.c,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_config_accessors.h,firmware/KilnFW/App/drivers/persist/zones_config_accessors.h,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_config_query.h,firmware/KilnFW/App/drivers/persist/zones_config_query.h,"New narrow header (landed 2026-09-05, item 11): query-only slice of zones_config_accessors.h for read-only callers (sim_backend.c); home is persist alongside zones_config_accessors.h/.c per plan census"
+firmware/KilnFW/App/drivers/zones_config_convert.c,firmware/KilnFW/App/drivers/persist/zones_config_convert.c,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_config_json.c,firmware/KilnFW/App/drivers/persist/zones_config_json.c,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_config_json.h,firmware/KilnFW/App/drivers/persist/zones_config_json.h,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_config_json_internal.h,firmware/KilnFW/App/drivers/persist/zones_config_json_internal.h,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_config_migrate.c,firmware/KilnFW/App/drivers/persist/zones_config_migrate.c,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_config_store.c,firmware/KilnFW/App/drivers/persist/zones_config_store.c,plan census persist example (zones_config)
+firmware/KilnFW/App/drivers/zones_current_sweep_engine.c,firmware/KilnFW/App/drivers/control/zones_current_sweep_engine.c,plan census control example (zones_current_sweep)
+firmware/KilnFW/App/drivers/zones_current_sweep_task.c,firmware/KilnFW/App/drivers/control/zones_current_sweep_task.c,plan census control example (zones_current_sweep)
+firmware/KilnFW/App/drivers/zones_http.c,firmware/KilnFW/App/drivers/http/zones_http.c,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/zones_http.h,firmware/KilnFW/App/drivers/http/zones_http.h,plan census: *_http.c handler family
+firmware/KilnFW/App/drivers/zones_http_get.c,firmware/KilnFW/App/drivers/http/zones_http_get.c,plan ambiguous-placement zones_http family resolved to http: thin registration (zones_http.c) plus its get/post/pid handler splits are httpd surface; config accessors already split out to persist/zones_config_accessors.*
+firmware/KilnFW/App/drivers/zones_http_internal.h,firmware/KilnFW/App/drivers/persist/zones_http_internal.h,Decision C exception: zones_http_internal.h holds the shared zones_config internals consumed by zones_config_store.c/zones_config_accessors.c (persist) as well as the zones_current_sweep_*/zones_http_* split files; per the coordinator's exception rule it goes to persist since zones_config_*.c is a consumer.
+firmware/KilnFW/App/drivers/zones_http_pid.c,firmware/KilnFW/App/drivers/http/zones_http_pid.c,plan ambiguous-placement zones_http family resolved to http: thin registration (zones_http.c) plus its get/post/pid handler splits are httpd surface; config accessors already split out to persist/zones_config_accessors.*
+firmware/KilnFW/App/drivers/zones_http_post.c,firmware/KilnFW/App/drivers/http/zones_http_post.c,plan ambiguous-placement zones_http family resolved to http: thin registration (zones_http.c) plus its get/post/pid handler splits are httpd surface; config accessors already split out to persist/zones_config_accessors.*
+firmware/KilnFW/App/drivers/zones_http_post_parse.c,firmware/KilnFW/App/drivers/http/zones_http_post_parse.c,plan ambiguous-placement zones_http family resolved to http: thin registration (zones_http.c) plus its get/post/pid handler splits are httpd surface; config accessors already split out to persist/zones_config_accessors.*
+firmware/KilnFW/App/drivers/zones_page.html,firmware/KilnFW/App/drivers/http/zones_page.html,"served page template, paired with its *_http.c handler"
+firmware/KilnFW/App/drivers/flash_worker.h,firmware/KilnFW/App/drivers/common/flash_worker.h,"New narrow header (item 10): sole declaration of uart_bridge_ext_run_on_flash_worker() for consumers (log_store_mount.c) that need only the flash-worker dispatch call, not the full UART bridge API. Includes only esp_err.h -- nothing above common -- so it goes in common per the persist-consumer note, not bridge."
+firmware/KilnFW/App/drivers/wifi_provision_state.h,firmware/KilnFW/App/drivers/net/wifi_provision_state.h,"item 9: narrow accessor header split out of wifi_provision_http.h for factory_reset.c/wifi_prov.c/sim_backend.c"
+firmware/KilnFW/App/drivers/profiles_store.h,firmware/KilnFW/App/drivers/persist/profiles_store.h,"item 9: mapping row added ahead of the file landing -- another agent is splitting profiles_store.h out of profile_executor_run.c's profiles_http.h residual; home is persist alongside profiles_builtin.h/profiles_types.h. NOTE: this file does not exist on disk yet, so section 0's new old_path-existence check (item 7) intentionally only hard-fails under -Apply, not -DryRun -- see DRYRUN.md."

@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "UART Control: Open GUI",
+      "type": "shell",
+      "command": "${workspaceFolder:PcTools}\\.venv\\Scripts\\kilnctrl-gui.exe",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "UART Control: Run MCP Server",
+      "type": "shell",
+      "command": "${workspaceFolder:PcTools}\\.venv\\Scripts\\kilnctrl-mcp-server.exe",
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

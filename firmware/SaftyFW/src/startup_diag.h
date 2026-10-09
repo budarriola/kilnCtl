@@ -1,0 +1,130 @@
+// startup_diag.h -- reset-surviving latches for the two failures that
+// otherwise reboot this board silently once a second.
+//
+// Both live in RP2040 watchdog scratch registers, not in RAM, for one
+// reason: they have to survive the reset they explain. A watchdog reset
+// re-zeroes .bss, so a static variable holding "which task failed to start"
+// is gone by the time anyone can read it, and this board has neither a log
+// sink (Phase 8) nor a fitted console header on GP16/GP17 (TODO.md 0.5a) to
+// have printed it on the way down. Scratch registers survive a watchdog
+// reset and are readable over SWD at any time, including from inside a
+// reboot loop, which is exactly the condition that needs diagnosing.
+//
+// Scratch register budget, so the next person adding one does not collide:
+//   [0] trip reason        -- src/boot_reason.c
+//   [1] trip reason magic  -- src/boot_reason.c
+//   [2] startup diag       -- this file
+//   [3] startup diag magic -- this file
+//   [4] watchdog_enable()  -- pico-sdk, do not touch (see main.c step 3)
+//   [5] overdue-task latch -- src/watchdog_overdue_diag.c (2026-08-23,
+//       repurposed from this file's own SAFTYFW_LAST_CHECKIN_MASK_SCRATCH,
+//       see below and that module's own header comment for why the
+//       repurposing was safe)
+//   [6] boot stage        -- this file
+//   [7] CLEAR_TRIP crash checkpoint -- src/clear_trip_diag.c (2026-08-23, one
+//       packed word: an 8-bit magic tag plus stage/reason/fault_bits/
+//       tc_valid/spi_failed/tc_c_is_nan/outcome -- see that file's own
+//       header comment for the exact bit layout; no register left free
+//       after this one)
+#ifndef SAFTYFW_STARTUP_DIAG_H
+#define SAFTYFW_STARTUP_DIAG_H
+
+#include <stdint.h>
+
+// HAL Phase 3 item 1: SAFTYFW_BOOT_STAGE() below is routed through
+// hal_scratch_write_u32() instead of poking watchdog_hw->scratch[]
+// directly -- see docs/HW_ABSTRACTION.md "hal_scratch -- pico
+// watchdog-scratch registry". This module (slot 6, boot-stage marker) and
+// the SAFTYFW_STARTUP_DIAG_SCRATCH/_MAGIC_SCRATCH pair (slots 2/3, written
+// directly by main.c) are all claimed together in main.c alongside the
+// other real owners.
+#include "hal_scratch.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Bitmask of tasks whose _start() returned false, written once by main()
+// just before the scheduler runs. Bit positions are the
+// watchdog_checkin_id_t values, so a set bit reads directly as "this
+// check-in bit can never be set, and the feed gate can never close".
+#define SAFTYFW_STARTUP_DIAG_SCRATCH       2u
+#define SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH 3u
+
+// watchdog_task has no check-in bit of its own (it is the feeder, not a
+// participant), so its start failure gets a bit above every
+// watchdog_checkin_id_t value. 31 is chosen to stay clear of the enum no
+// matter how many check-ins are added later.
+#define SAFTYFW_START_BIT_WATCHDOG_TASK 31u
+
+// Distinguishes "main() wrote a zero because nothing failed" from "this
+// register happens to read zero because nothing has written it this power
+// cycle". Same magic-word discipline as boot_reason.c's trip latch, and a
+// distinct word so a stale value from the other latch can never be mistaken
+// for this one.
+#define SAFTYFW_STARTUP_DIAG_MAGIC 0x53544152u // 'STAR'
+
+// --- Overdue check-in latch, scratch[5] -----------------------------------
+//
+// 2026-08-23: this register used to hold a raw ok_mask, rewritten
+// UNCONDITIONALLY every watchdog_task_fn() evaluation (live state, not a
+// latch) -- which turned out to be the wrong shape for exactly the question
+// it was meant to answer. The CLEAR_TRIP-reboots-the-Pico investigation
+// eventually proved the reboot it was supposed to help diagnose was a
+// watchdog timeout, not a fault -- but by the time anyone could read this
+// register over SWD after the reset, the fresh boot's OWN healthy
+// evaluations had already overwritten the pre-reset value several times
+// over (watchdog_task_fn() runs every 250ms; a human reading a debug probe
+// does not).
+//
+// Repurposed (src/watchdog_overdue_diag.c/.h) to the same magic-tagged,
+// write-only-on-the-interesting-event, read-then-clear-at-boot pattern
+// boot_reason.c/clear_trip_diag.c already use: written ONLY when
+// watchdog_task_fn() decides to withhold the feed, packing which task(s)
+// missed their own deadline (a bitmask) and, for the worst offender, by how
+// many milliseconds -- see watchdog_overdue_diag_codec.h for the exact bit
+// layout. Safe to repurpose: nothing in this firmware ever read the old
+// ok_mask value back at runtime, it existed purely as SWD-readable forensic
+// output, and the new format serves the identical purpose strictly better.
+
+// --- Boot-stage latch ----------------------------------------------------
+//
+// How far main() got before the board reset. Same reasoning as the two
+// latches above -- a reboot loop destroys every RAM breadcrumb on its way
+// round, and this board has no console header fitted to have printed one.
+//
+// This exists because "the board reboots once a second" is compatible with
+// two completely different faults: init hanging somewhere below (the 1 s
+// watchdog is armed at stage 1, before a long unbounded init sequence that
+// nothing feeds), or the scheduler starting and then starving. The stage
+// number tells those apart in one SWD read instead of an afternoon of
+// breakpoints.
+//
+// Stages are monotonic: each is written only after the step it names has
+// returned, so the stored value is the LAST step that COMPLETED. If the
+// board loops with SCHEDULER_ENTERED stored, main() ran to completion and
+// the fault is inside vTaskStartScheduler() or after it.
+#define SAFTYFW_BOOT_STAGE_SCRATCH 6u
+
+#define SAFTYFW_BOOT_STAGE_WATCHDOG_ARMED    1u
+#define SAFTYFW_BOOT_STAGE_CONFIG_LOADED     2u
+#define SAFTYFW_BOOT_STAGE_SPI_UP            3u
+#define SAFTYFW_BOOT_STAGE_UART_UP           4u
+#define SAFTYFW_BOOT_STAGE_THERMO_PROBED     5u
+#define SAFTYFW_BOOT_STAGE_TASKS_STARTED     6u
+#define SAFTYFW_BOOT_STAGE_SCHEDULER_ENTERED 7u
+
+// Written with a high tag so a stage number is never confused with a stale
+// or zero register: a valid record always reads 0x5A5A00nn.
+#define SAFTYFW_BOOT_STAGE_TAG 0x5A5A0000u
+#define SAFTYFW_BOOT_STAGE(stage)                                             \
+    do {                                                                     \
+        (void)hal_scratch_write_u32(SAFTYFW_BOOT_STAGE_SCRATCH,              \
+                                     SAFTYFW_BOOT_STAGE_TAG | (uint32_t)(stage)); \
+    } while (0)
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // SAFTYFW_STARTUP_DIAG_H

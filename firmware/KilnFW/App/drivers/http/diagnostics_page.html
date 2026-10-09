@@ -1,0 +1,1836 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Diagnostics</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  /* Page-local palette, same --bg/--fg/etc interface as every other page in
+     this component (theme.css's header comment / readiness_page.html) --
+     only the dark variant points at the shared --ui-* tokens so toggled-dark
+     and default-system-dark match the LCD. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --warn: #b00;
+    /* theme.css's shared button.danger-btn (the same class /settings's Reset
+       buttons use) reads --fault-color, a name this page never defined --
+       that mismatch, not a bespoke rule, is why the watchdog-panic toggle
+       below used to render as an unstyled native <button> instead of
+       matching every other dangerous-action control on the site (owner
+       report 2026-08-27: "the dissable panic button ... does not match the
+       theme of anything else"). Aliased to this page's own --warn rather
+       than given a second literal value, so it can never drift from it. */
+    --fault-color: var(--warn);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+      --fault-color: var(--warn);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+    --fault-color: var(--warn);
+  }
+  /* box-sizing reset, page-local only. Fluid width via min() rather than a
+     breakpoint: fills a 320px phone, caps at 640px so a row's value column
+     doesn't strand itself out at the far edge of a 1920px monitor. Reasoned
+     about 320/360/390 (phones), 768/820 (tablets), 1280/1920 (desktop) --
+     all just resolve to whichever side of min() is smaller. */
+  *, *::before, *::after { box-sizing: border-box; }
+  /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 640px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto 5em;
+         background: var(--bg); color: var(--fg); }
+  /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
+     rule in /theme.css (which loads first), and being `position: fixed`
+     made it overlap nav.js's topbar on a phone-width viewport -- see
+     theme.css's own comment on .theme-btn for the fix. */
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin: 1.4em 0 0.4em; }
+  p.lead { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.2em 0.9em; margin-bottom: 0.6em; }
+  .row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.3em 1em;
+         padding: 0.5em 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  /* min-width: 0 on both flex children -- the trap this codebase has hit
+     twice already (see theme.css's .kc-page-title comment): a flex item
+     defaults to min-width: auto, which floors it at its min-content width
+     and, combined with an unbreakable string (a long build commit, a NVS
+     section name), can push the sibling off-screen on a narrow phone
+     instead of wrapping. overflow-wrap lets a genuinely unbreakable token
+     (hex, a commit hash) break rather than force the row wider than its
+     card.
+     2026-09-01: two more bugs found in this same rule, both from the same
+     root cause -- `.row .label` and `.row .value` shrinking by the SAME
+     flex-shrink:1 ratio when a row runs out of room, which sounds fair but
+     isn't: flex distributes negative space proportional to each item's own
+     content width, so a long `.value` (e.g. Cause/Remedy prose, which can
+     run to a full sentence) drags a short `.label` ("Warning", "Reason")
+     down with it even though the label itself is nowhere near that wide --
+     the label can be shrunk to a sliver even on a desktop-width row, purely
+     because its sibling is huge. Two changes fix this:
+       1. `.row .label` no longer shares flex-shrink with `.value`: `flex: 0
+          1 auto` + `max-width: 55%` means it only shrinks against ITS OWN
+          content once it exceeds half the row, never because the value
+          needed room. `overflow-wrap` downgraded `anywhere` -> `break-word`
+          -- `anywhere` participates in min-content sizing (collapses the
+          column toward one character even when nothing overflows, which is
+          what turned "Warning" into "War/nin/g"); `break-word` only breaks
+          a word that would otherwise overflow the box `max-width: 55%`
+          already caps it to, so the label wraps at word boundaries first
+          and only mid-word as a last resort.
+       2. `.row` gained `flex-wrap: wrap`: the one case even a protected
+          label can't avoid is a genuinely long *sentence* standing in for a
+          label (row('No trip event received this boot', 'n/a')) paired
+          with real prose in `.value` (Cause/Remedy) -- letting the pair
+          drop to its own line, rather than fighting for one line, is a
+          multi-word wrap that reads as a sentence, not the vertical
+          letter-by-letter split "Last trip (Frame D)" was reported doing.
+     `.row .value` keeps `flex: 1 1 auto; min-width: 0; overflow-wrap:
+     anywhere` -- it is the column that legitimately carries unbreakable
+     tokens (hex, commit hashes, NVS section names) and is meant to give up
+     its width first. */
+  .row .label { color: var(--fg); flex: 0 1 auto; max-width: 55%; overflow-wrap: break-word; }
+  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
+                flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  /* The one number this page exists to surface -- see the "why this matters"
+     paragraph below it. Same visual weight as a warning row, not because it
+     IS a warning right now, but because it's the number to watch. */
+  .row.headline .value { color: var(--fg); font-weight: bold; font-size: 1.05em; }
+  .note { font-size: 0.82em; color: var(--muted); margin: 0.3em 0 0.8em; }
+  .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
+                  padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
+  .stale-banner.show { display: block; }
+  /* Bug fix 2026-08-22 (headless-Chromium 320px sweep): the "Safety" and
+     "Thermocouple Faults" links used to sit inline inside the closing <p>,
+     which measured 37x15 and 123x15 -- both under the ~32px fingertip
+     minimum, and at 320px the wrap point landed them on top of each other
+     (measured 37x15 overlapping 37x15). Pulling them out of the running
+     text into their own block list fixes both problems at once: each is
+     now a full-width row with real padding (comfortably over 32px tall
+     regardless of viewport, so 320/360/390/768/1280 all just get a wider
+     or narrower version of the same stacked list, never a wrap collision),
+     and stacking them removes the wrap point that caused the overlap in
+     the first place. */
+  .linklist { display: flex; flex-direction: column; gap: 0.5em; margin: 0.6em 0 1em; }
+  .linklist a { display: block; padding: 0.6em 0.9em; min-height: 32px; box-sizing: border-box;
+                background: var(--button-bg); border: 1px solid var(--border);
+                border-radius: var(--ui-radius); text-decoration: none; }
+  /* Crash-record backtrace: a monospace, horizontally-scrollable box so a
+     long PC list (up to 16 frames, 10 hex chars each) can never force the
+     page itself wider than the viewport -- same overflow-x:auto discipline
+     every other wide-content block on this site uses. */
+  .crash-bt { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.85em;
+              white-space: pre; overflow-x: auto; background: var(--bg); border: 1px solid var(--border);
+              border-radius: var(--ui-radius); padding: 0.5em 0.7em; margin: 0.4em 0; }
+  .crash-actions { display: flex; gap: 0.5em; margin: 0.5em 0 0.2em; flex-wrap: wrap; }
+  .crash-actions button { font: inherit; padding: 0.5em 0.9em; min-height: 32px; box-sizing: border-box;
+                background: var(--button-bg); border: 1px solid var(--border);
+                border-radius: var(--ui-radius); color: var(--fg); cursor: pointer; }
+  /* Relay-cycle reset (table cell, per relay row): was a bare native
+     <button> -- no class, no rule anywhere in this file or theme.css --
+     so it rendered in browser-default chrome (UA padding/border/font, no
+     theme colors) sitting inside an otherwise fully themed table, exactly
+     the same bug the watchdog-panic toggle had before it was pointed at
+     theme.css's shared button.danger-btn (comment above, owner report
+     2026-08-27). Reusing that button's outlined-red/solid-on-hover
+     treatment and its --fault-color token here too (no new colors) so a
+     destructive relay-history-erasing action still reads as one -- but not
+     the class itself: button.danger-btn is `display:block; width:100%`,
+     meant for a standalone settings row, and forcing that width onto a
+     table cell would blow the table out sideways on a narrow viewport.
+     This keeps the same border/background/hover/color declarations at a
+     size that fits inline in a td, with box-sizing so the explicit
+     min-height reserves a real tap target without adding to the padding
+     the way an unconstrained UA button would. Confirm step (kcConfirm) was
+     already present in the click handler below and is unchanged. */
+  .relay-reset-btn { font: inherit; padding: 0.4em 0.8em; min-height: 32px; box-sizing: border-box;
+                border: 1px solid var(--fault-color); border-radius: var(--ui-radius);
+                background: var(--button-bg); color: var(--fault-color); cursor: pointer;
+                white-space: nowrap; }
+  .relay-reset-btn:hover { background: var(--fault-color); color: #fff; }
+  .relay-reset-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  /* Relay-wear table -- narrow-phone fix (owner report, phone screenshot,
+     2026-09-18): this table had NO rules of its own anywhere in this file or
+     theme.css before this pass -- a bare native <table>, which is exactly why
+     it broke three ways on a ~900 CSS px (3x, portrait) phone: (1) with no
+     column width discipline the "Rated life" text ("n/a (SSR: no rated
+     life)") wrapped across five lines per row, making every row enormous;
+     (2) with no cell borders/padding, adjacent columns had no visual
+     separation, so a wrapped label ("Relay 5 (safety, K4)") ran straight
+     into the next column's text with nothing to show where one cell ended
+     and the next began; (3) with no width cap the table simply grew to fit
+     its widest row and pushed the last column's Reset button off the right
+     edge of the phone screen, with no way to reach it.
+     Fix follows this codebase's existing idiom for a wide table on a narrow
+     screen (UI_PLAN.md section 3, Web item 1 / theme.css's .table-scroll,
+     already used by zones_page.html's coupling/RGA matrices and
+     profiles_page.html's segment/history tables) rather than inventing a
+     second one: the table keeps its normal column layout and cell
+     white-space: nowrap (so "Rated life" and the relay label each stay on
+     one line -- and one line is legible even in the Reset-column-cut-off
+     case since the two problems shared one root cause, undeclared column
+     styling), and renderRelayWear() below wraps the whole <table> in a
+     `.table-scroll` div, which is what actually keeps the Reset button
+     reachable: on a phone too narrow for every column, the table scrolls
+     horizontally INSIDE that box (overflow-x: auto) rather than stretching
+     the page body itself sideways -- every column, reset button included, is
+     still one swipe away. table.coupling in theme.css uses the same
+     border/padding/header-background shape; reused verbatim (var(--border),
+     var(--card-bg)) rather than inventing new values, text-align left since
+     these rows read as label/value/action, not the coupling matrix's
+     symmetric numeric grid. */
+  .relay-life-table { border-collapse: collapse; width: 100%; font-size: 0.9em; }
+  .relay-life-table th, .relay-life-table td { border: 1px solid var(--border);
+                padding: 0.35em 0.6em; text-align: left; white-space: nowrap; }
+  .relay-life-table th { background: var(--card-bg); }
+  /* Danger Zone -- deliberately the loudest thing on this page, same
+     solid-fill treatment main_page.html's safety-trip banner uses (not the
+     border-only .card everything else here gets), so it never reads as just
+     another settings card. */
+  .danger-card { background: var(--warn); color: #fff; border-radius: var(--ui-radius);
+                 padding: 0.8em 1em; margin-bottom: 0.6em; }
+  .danger-card .row { border-bottom-color: rgba(255,255,255,0.35); }
+  .danger-card .row .label, .danger-card .row .value { color: #fff; }
+  .danger-card label.accept { display: flex; align-items: flex-start; gap: 0.6em; margin: 0.6em 0; cursor: pointer; }
+  .danger-card input[type=checkbox] { width: 1.2em; height: 1.2em; flex: none; margin-top: 0.15em; }
+  .danger-actions { display: flex; gap: 0.5em; margin: 0.6em 0 0.2em; flex-wrap: wrap; }
+  .danger-actions button { font: inherit; padding: 0.6em 1em; min-height: 32px; box-sizing: border-box;
+                background: var(--bg); color: var(--warn); border: none;
+                border-radius: var(--ui-radius); cursor: pointer; font-weight: bold; }
+  .danger-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .danger-actions button.exit { background: transparent; color: #fff; border: 1px solid #fff; }
+  .danger-timer { font-size: 1.4em; font-weight: bold; font-variant-numeric: tabular-nums; }
+  .relay-grid { display: flex; gap: 0.5em; flex-wrap: wrap; margin: 0.5em 0; }
+  .relay-grid button { font: inherit; padding: 0.6em 1em; min-height: 40px; min-width: 4.5em;
+                box-sizing: border-box; border: 1px solid #fff; border-radius: var(--ui-radius);
+                cursor: pointer; font-weight: bold; background: transparent; color: #fff; }
+  .relay-grid button.on { background: var(--bg); color: var(--warn); }
+  /* --- Thermocouple faults (folded in from thermo_faults_page.html, owner
+     request "Thermocouple Faults should also be combined into the
+     diagnostic page") -- CSS carried over byte-for-byte from that page. */
+  .chan { background: var(--card-bg); border: 1px solid var(--border); border-left: 4px solid var(--ok);
+          border-radius: var(--ui-radius); padding: 0.6em 0.9em; margin-bottom: 0.6em; }
+  .chan.faulted { border-left-color: var(--warn); }
+  /* Timed-out and absent channels get their own left-border color rather
+     than reusing --warn/--ok: a channel that never answered is a different
+     kind of "not fine" than one that answered with a real fault, and must
+     never be visually confusable with the healthy (green) state -- that
+     confusion is exactly the dangerous failure mode the owner flagged
+     ("a silent channel reported as healthy"). --muted is used rather than a
+     fourth custom property since it is already theme-aware and reads as
+     "unknown," not "ok" or "bad," at a glance. */
+  .chan.timeout, .chan.absent { border-left-color: var(--muted); }
+  .chan .title { font-weight: bold; margin-bottom: 0.3em; }
+  .chan .faults { margin-bottom: 0.2em; }
+  .chan .faults.faulted { color: var(--warn); }
+  .chan .faults.ok { color: var(--muted); }
+  .chan .faults.timeout { color: var(--muted); font-style: italic; }
+  .chan .subrow { font-size: 0.9em; color: var(--muted); }
+  .chan .subrow .bad { color: var(--warn); }
+  /* Flash partition table -- restyled 2026-09-03 (owner: "match the memory
+     table on that same page") to the plain .card/.row idiom the Memory
+     section above uses, instead of the .chan card-per-channel family it
+     borrowed at introduction (153f09d). Each partition becomes three .row
+     lines under one .card, exactly like Memory's "Internal DRAM --
+     free now" / "-- largest free block" / "-- worst-case free" trio under
+     one label prefix -- same flex-wrap .row .label/.value rules already
+     handle not overflowing a narrow phone, so no .table-scroll wrapper is
+     needed here (there is none on Memory's table either). The one fact
+     that idiom has no natural slot for -- which partition is RUNNING -- is
+     carried two ways: that partition's rows get .row.headline (the same
+     bold/larger treatment Memory uses for the one number that page exists
+     to surface), and its name row additionally gets an explicit
+     .running-badge, kept from the old markup and now just an inline span
+     rather than something scoped to the retired .part-row card. */
+  .running-badge { font-size: 0.75em; font-weight: bold; color: var(--ok);
+                    border: 1px solid var(--ok); border-radius: var(--ui-radius);
+                    padding: 0.05em 0.5em; margin-left: 0.4em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<!-- <h1>Diagnostics</h1> removed 2026-08-21 (rework item 5): nav.js's
+     topbar now shows this page's name in the brand's old spot (see that
+     file's pageTitle()). The ad-hoc "&larr; Dashboard" link that used to
+     sit here (predating the topbar's Home button) is removed as of
+     2026-08-22, matching readiness_page.html's own retirement of the same
+     kind of stray back-link once nav.js's shared topbar covers it --
+     measured 99x17 in the headless-Chromium sweep that flagged it. -->
+<p class="lead">The web twin of the LCD's Diagnostics, Board Health and
+Thermocouple Faults pages (Board Health and Thermocouple Faults are folded in
+here since most of that information belongs on this same page) --
+everything below reads GET /api/status, GET
+/api/board_temps and GET /api/thermo/faults, the same live snapshots each
+panel's own refresh timer reads, not a second implementation of any of
+them.</p>
+
+<div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
+
+<h2>Firmware</h2>
+<div class="card">
+  <div class="row"><span class="label">Version</span><span class="value" id="fwVersion">--</span></div>
+  <div class="row"><span class="label">Build date/time</span><span class="value" id="fwBuild">--</span></div>
+  <div class="row"><span class="label">Uptime</span><span class="value" id="uptime">--</span></div>
+  <div class="row"><span class="label">Last reset reason</span><span class="value" id="resetReason">--</span></div>
+</div>
+
+<h2>Last crash</h2>
+<div class="card" id="crashCard">
+  <div class="row"><span class="label">Loading&hellip;</span><span class="value">--</span></div>
+</div>
+
+<h2>Safety-processor build</h2>
+<div class="card" id="safetyBuildCard">
+  <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
+</div>
+<p class="note">This shows the safety processor's own build identity, not just
+the main board's -- two processors means two firmwares that can be out of
+sync. Same status fields the Safety page already renders, mirrored here
+since this is the page for "is this board healthy," not only the Wi-Fi-link-
+specific one. The safety processor does not yet always report a real build
+identity -- it can announce a modified build with an empty commit/date -- so
+an "unknown"/blank field here is this firmware honestly reporting what
+arrived, not a bug in this page.</p>
+
+<h2>Memory</h2>
+<div class="card">
+  <div class="row headline"><span class="label">Internal DRAM &mdash; largest free block</span><span class="value" id="heapIntLargest">--</span></div>
+  <div class="row"><span class="label">Internal DRAM &mdash; free now</span><span class="value" id="heapIntFree">--</span></div>
+  <div class="row"><span class="label">Internal DRAM &mdash; worst-case free</span><span class="value" id="heapIntMin">--</span></div>
+  <div class="row"><span class="label">PSRAM &mdash; free now</span><span class="value" id="heapSpiFree">--</span></div>
+  <div class="row"><span class="label">PSRAM &mdash; largest free block</span><span class="value" id="heapSpiLargest">--</span></div>
+  <div class="row"><span class="label">PSRAM &mdash; worst-case free</span><span class="value" id="heapSpiMin">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; chip size</span><span class="value" id="flashChip">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; allocated (partition table)</span><span class="value" id="flashAlloc">--</span></div>
+  <div class="row"><span class="label">Flash &mdash; running image used / its partition</span><span class="value" id="flashUsed">--</span></div>
+</div>
+<p class="note">"Largest free block" (not "free bytes") is the number that
+matters on this board: internal DRAM is its tight resource, not total heap.
+This firmware has measured a 9216-byte largest free block against LVGL's
+8192-byte task stack allocation -- about 1&nbsp;KB of margin. If the internal
+DRAM row above ever drops close to 8&nbsp;KB, LVGL's stack allocation is the
+thing at risk, not some other subsystem's heap use. PSRAM's numbers exist for
+completeness; this board's 8&nbsp;MB octal PSRAM has an order of magnitude
+more slack and is not the resource to watch.</p>
+
+<h2>Board health</h2>
+<div class="card">
+  <div class="row"><span class="label">ESP32-S3 die temp</span><span class="value" id="esp32Temp">--</span></div>
+  <div id="cjRows"></div>
+</div>
+<p class="note">Cold-junction temperatures are each thermocouple sensor's own
+local-ambient reading, a different number from the kiln-process
+temperature shown on the dashboard -- this is board/enclosure health, not
+firing progress.</p>
+
+<h2>Relay contact wear</h2>
+<!-- relay_cycles.h -- lifetime contact-cycle counts, persisted, already in
+     GET /api/status's "relay_cycles" array (dashboard_http.c). Tracked and
+     served since introduction but never rendered anywhere until now (2026-
+     09-03): this codebase's recurring producer-without-consumer bug class.
+     Same .card/.row idiom as Memory/Flash-partitions above. Index i in the
+     array is relay (i+1), matching relay_on's own 1-based-in/0-based-out
+     indexing in dashboard_http.c; the label uses "R" + i, the same 0-based
+     display convention this page's own Danger Zone relay grid uses
+     (renderDangerRelays below: 'R' + (r.relay - 1)) -- one numbering
+     convention across this page, not a second one invented here. -->
+<div id="relayWearCard"><p>Loading&hellip;</p></div>
+<p class="note">Budget is "on the order of 10^5 operations" for this board's
+EE2-12NUH relays -- an order-of-
+magnitude figure from the part's own life rating, not a datasheet guarantee
+for this specific unit, so the proportion below is shown rounded to the
+nearest whole percent, not as a precise remaining-life gauge. A 60&nbsp;s
+time-proportioning window can spend that budget in a few hundred hours of
+firing; a controller that silently exhausts a relay's contact life is one
+that can fail mid-firing at cone temperature.</p>
+
+<h2>Thermocouple faults</h2>
+<!-- Folded in from thermo_faults_page.html (owner request, 2026-08-27:
+     "Thermocouple Faults should also be combined into the diagnostic page")
+     -- every MAX31856 channel's fault-register bits, FAULT-pin state, and
+     SPI transport health, from GET /api/thermo/faults, which queries each
+     channel independently so one channel that never answers cannot hide the
+     others. Visibility only, same scope as the LCD page: no "clear faults"
+     action here either. Polled on its OWN independent timer (pollThermoFaults
+     below), same as this page's existing pollCrash()/pollWatchdogCfg() -- a
+     slow/failed fault poll must never delay or blank the status/board_temps
+     section above it, and vice versa. -->
+<p class="note" id="scopeNote"></p>
+<div id="thermoChannels"><p>Loading&hellip;</p></div>
+<p class="note">Each channel's "control fault_guard" line, where shown, comes
+from GET /api/profile_exec's per-zone status, matched to this channel by
+index -- this codebase's legacy convention of zone N reading channel N
+(zones_config_apply_cal()'s scope note). It reports the profile executor's
+own guard-trip reason for that zone's control loop, which is a <em>different</em>
+signal from the MAX31856 fault-register bits above it: a zone can show a
+control fault_guard with a perfectly healthy thermocouple (e.g. a cross-zone
+plausibility trip), and a channel can show OPEN/OVUV faults with no zone
+control fault at all (e.g. no profile running). They are shown together here
+because both answer "what's wrong with this channel," not because they are
+the same measurement.</p>
+
+<h2>Flash partitions</h2>
+<!-- GET /api/partitions (partition_info_http.c) -- the LIVE table
+     esp_partition_find() reads off this running app, plus which OTA slot
+     esp_ota_get_running_partition() says is actually running -- not a
+     parse of the repo's partitions.csv or a raw JTAG flash read of 0x8000
+     (that path was tried and does not work; see that file's header
+     comment). Own independent poll (pollPartitions below), same pattern
+     as pollCrash()/pollThermoFaults(): this table is effectively static
+     for a given running image, so it is fetched once on load rather than
+     on the 2s status timer, and a slow/failed fetch here must never delay
+     or blank any other section of this page. -->
+<div id="partitionsSection"><p>Loading&hellip;</p></div>
+<h2>Task-watchdog panic (dev only)</h2>
+<div class="card">
+  <div class="row"><span class="label">Panic on hung task</span><span class="value" id="wdPanicState">--</span></div>
+</div>
+<!-- class="danger-btn" -- theme.css's shared dangerous-action button, the
+     same one /settings's Reset buttons use (see this page's :root comment
+     on --fault-color above for why it did not already look like this). This
+     control disables a safety behaviour (the task-watchdog panic), so it
+     must keep reading as consequential, not become an ordinary button --
+     .danger-btn's outlined-red/solid-on-hover treatment is the site's own
+     "this is a dangerous control" language, legible in both themes since
+     --fault-color tracks --warn, which is itself already theme-aware. -->
+<button type="button" class="danger-btn" id="wdPanicToggleBtn">--</button>
+<p class="note">Disabling this stops a hung task from rebooting the board (developer debugging only,
+e.g. sitting at a breakpoint) -- it does NOT stop the hang itself. A disabled panic is written to
+flash and survives a reboot; the setting is shown here and in the dashboard status so it is never
+silently on. Starting a firing while this is disabled requires an extra confirmation.</p>
+
+<!-- ramp_assist_cfg.h -- the kiln-wide (not per-zone) on/off switch for the
+     "ramp assist" feature (sustained-lag detection driving auto-stretch of
+     ramps and a gated dwell credit), persisted and defaulting OFF.
+     Same GET/POST-toggle shape as the watchdog-panic control above, and the
+     same class="danger-btn" language: PID tuning and A/B controller
+     comparisons need this OFF so tracking-error numbers stay comparable
+     between runs (see the note below) -- toggling it is consequential enough
+     to read the same way every other "changes how the kiln actually runs"
+     control on this page does. -->
+<h2>Ramp assist</h2>
+<div class="card">
+  <div class="row"><span class="label">Ramp assist</span><span class="value" id="rampAssistState">--</span></div>
+</div>
+<button type="button" class="danger-btn" id="rampAssistToggleBtn">--</button>
+<p class="note">Ramp assist is for real firings, not PID tuning or A/B controller comparisons. When
+enabled, the executor may automatically stretch ramps and shorten dwells to keep up with the kiln's
+real capability -- a tuning or comparison run needs the RAW, unassisted schedule to produce
+comparable tracking-error numbers. Leave this OFF for tuning. The setting is written to flash and
+survives a reboot; it is shown here and in the dashboard status so it is never silently on.</p>
+
+<h2>Subsystems &amp; storage</h2>
+<div class="card">
+  <div class="row"><span class="label">I/O board</span><span class="value" id="ioReady">--</span></div>
+  <div class="row"><span class="label">Thermocouple bus</span><span class="value" id="thermoReady">--</span></div>
+  <div class="row"><span class="label">Safety link</span><span class="value" id="safetyReady">--</span></div>
+  <div class="row"><span class="label">Zone config</span><span class="value" id="zonesValid">--</span></div>
+  <div class="row"><span class="label">Power draw</span><span class="value" id="powerW">--</span></div>
+  <!-- 2026-08-27: touch_calibrated mirrors watchdog_panic_disabled above
+       (ota_auth_disabled/boot_button_bypass_active were retired 2026-09-29
+       along with the AP-password HMAC scheme) -- a degraded state
+       that must be visible here, not only in a boot log, because an
+       operator hitting dead LCD buttons goes to Diagnostics, not to curl.
+       false means this board is still running the known-inaccurate Kconfig
+       swap/invert bootstrap guess: small controls (the topbar back/home
+       icons in particular) may not register touches until a calibration
+       run completes -- but ONLY on a controller that supports calibration
+       at all. This row is rendered against touch_cal_supported as well (see
+       the script below): a self-calibrating panel and a board with no touch
+       controller each say so in their own words instead of demanding a
+       calibration run that is not on offer. -->
+  <div class="row"><span class="label">Touch calibration</span><span class="value" id="touchCal">--</span></div>
+</div>
+<div class="card" id="nvsCard"><div class="row"><span class="label">NVS sections</span><span class="value">loading&hellip;</span></div></div>
+
+<h2>Config filesystem</h2>
+<!-- docs/CONFIG_FILESYSTEM.md -- GET /api/cfgfs (diagnostics_http.c,
+     cfgfs_status_get_handler()) already exists and already reports
+     mounted/status/reason, capacity, file_count/files, tmp_entries_now and
+     dual_write -- this section is the first place any of that becomes
+     visible to an operator instead of only curl. Own independent poll
+     (pollCfgFs below), same pattern as pollPartitions()/pollCrash(): a
+     slow/failed fetch here must never delay or blank any other section.
+     UNMOUNTED-BANNER PLACEMENT: #cfgFsUnmountedBanner below is the loud,
+     always-checked-first element; #cfgFsFormatSlot right after it is the
+     deliberately-left-empty slot for the format/reformat control and its
+     confirmation dialog -- a separate pass owns that flow end to end
+     (button, confirmation copy, POST handler) and should render into that
+     slot rather than adding a new one. Nothing in this section writes to
+     cfg_fs_status.c, cfg_fs_format_gate.[ch] or pref_cfg_fs.c. -->
+<div class="card" id="cfgFsUnmountedBanner" style="display:none; background:var(--ui-accent-5); color:#fff;">
+  <div class="row" style="border-bottom-color:rgba(255,255,255,0.35);">
+    <span class="label" style="color:#fff;">Config filesystem is NOT mounted</span>
+    <span class="value" style="color:#fff;" id="cfgFsUnmountedReason">--</span>
+  </div>
+  <p style="margin:0.3em 0 0; color:#fff;">Every setting is running from NVS only right now.
+  Changes made while this banner is showing are <strong>not file-backed</strong> and will not
+  appear in a filesystem backup or the raw <code>cfg</code> files -- they still take effect and
+  still survive a reboot via NVS, this only affects the migration this page tracks.</p>
+</div>
+<!-- Left empty on purpose -- see the block comment above this section. -->
+<div id="cfgFsFormatSlot"></div>
+<div class="card" id="cfgFsCard"><div class="row"><span class="label">Config filesystem</span><span class="value">loading&hellip;</span></div></div>
+<p class="note">"Stale-temp reaped" above 0 means the last write to that item was interrupted
+(power cut or reset) before its atomic rename committed -- the previously-committed file is
+untouched and still what gets read, so this is not data loss, but a count that stays nonzero
+across repeated checks (rather than clearing itself) is worth a look. "Diverged" on any item
+means its file and NVS copies briefly disagreed; the newer revision wins and resyncs the older
+one automatically, so a diverged flag that keeps recurring rather than clearing is the thing to
+report, not a single occurrence.</p>
+
+<!-- GET /api/dualwrite_window (dualwrite_window_http.c, ROUTE_TIER_ADMIN) and
+     POST /api/dualwrite_window/restore_verified (same file) were found fully
+     built and registered with no client anywhere -- no HTML page, no JS, no
+     PcTools/MCP tool -- during the 2026-09-20 "no client" audit. This module
+     exists so the owner-approved cfg-migration exit criteria (20 clean
+     boots, one file-backed firing, one verified restore round trip) are
+     readable by a person; the measurement deliberately never auto-acts, so
+     this card only ever DISPLAYS progress and lets a person RECORD a restore
+     they personally verified -- it never decides that a restore succeeded on
+     its own. Own independent poll (pollDualwriteWindow below), same
+     slow-fetch-must-not-block-the-page pattern as pollCfgFs()/pollCrash(). -->
+<h2>Config Migration Exit Window</h2>
+<div class="card" id="dualwriteWindowCard"><div class="row"><span class="label">Migration exit window</span>
+  <span class="value">loading&hellip;</span></div></div>
+<p class="note">This exits only once all three
+criteria below are met: enough consecutive clean boots, at least one firing completed while
+file-backed, and one restore that a person has actually opened and checked byte-for-byte against
+what was backed up. "Record a verified restore" below is that attestation -- press it only after
+you have personally restored a backup onto a board (or a spare) and confirmed the restored
+config matches, never as a routine click.</p>
+
+<h2>Danger Zone</h2>
+<div class="danger-card" id="dangerCard">
+  <p><strong>Manual relay/heater/thermocouple hardware test.</strong> This section
+  turns off this board's own gate on its four heater relays -- you can force
+  any of them on or off directly, for testing a relay, a contactor, or a
+  thermocouple by hand. The safety processor (SaftyFW) is <strong>not</strong>
+  bypassed: entering this mode requests nothing from it on its own. The
+  "Firing mode" tile below the four relays sends it the same enable request a
+  real firing sends -- shown here as one more toggle even though it is not
+  actually one of the four ESP relays -- and its own independent guards
+  (over-temperature, E-stop, current sense, and the rest) decide whether the
+  safety relay actually closes, exactly as they would during a firing,
+  watching over you the whole time.</p>
+  <p>This mode auto-exits after 5 minutes with no activity in this section --
+  heat-enable released and the relay gate restored, same as if the firing it
+  stood in for had ended, no reboot. Every accepted command here resets that
+  5 minutes.</p>
+  <div id="dangerGate">
+    <label class="accept"><input type="checkbox" id="dangerAccept">I understand this bypasses this board's own relay safety gate, and I accept the risk of operating heaters/relays by hand.</label>
+    <div class="danger-actions"><button id="dangerEnterBtn" disabled>Enter Danger Mode</button></div>
+  </div>
+  <div id="dangerLive" style="display:none">
+    <div class="row"><span class="label">Auto-exit in</span><span class="value danger-timer" id="dangerTimer">--:--</span></div>
+    <div class="row"><span class="label">Safety relay (K4, safety-processor owned)</span><span class="value" id="dangerRelayState">--</span></div>
+    <div class="row"><span class="label">Safety processor armed (not tripped)</span><span class="value" id="dangerHeatState">--</span></div>
+    <h2 style="color:#fff">Thermocouples</h2>
+    <div id="dangerThermo"></div>
+    <h2 style="color:#fff">Relays</h2>
+    <div class="relay-grid" id="dangerRelays"></div>
+    <div class="danger-actions"><button class="exit" id="dangerExitBtn">Exit Danger Mode now</button></div>
+  </div>
+</div>
+
+<p class="note">More detail (safety-processor link stats) lives on its own
+page -- per-channel thermocouple fault registers used to be a second such
+page but are folded into the "Thermocouple faults"
+section above, so only one link remains
+here:</p>
+<div class="linklist">
+  <a href="/safety">Safety</a>
+</div>
+
+<script src="/nav.js"></script>
+<script src="/app.js"></script>
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+
+  function fmtKB(bytes) {
+    if (bytes == null) return 'n/a';
+    return (bytes / 1024).toFixed(1) + ' KB';
+  }
+  function fmtMB(bytes) {
+    if (bytes == null) return 'n/a';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+  // "value / total", e.g. "8.5 KB / 280.1 KB" -- owner request 2026-08-27,
+  // total on the same line as every other RAM/flash figure instead of its
+  // own row.
+  function fmtKBOfTotal(bytes, total) {
+    return fmtKB(bytes) + ' / ' + fmtKB(total);
+  }
+  function fmtMBOfTotal(bytes, total) {
+    return fmtMB(bytes) + ' / ' + fmtMB(total);
+  }
+  function fmtUptime(s) {
+    if (s == null) return 'n/a';
+    var d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+        m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return (d > 0 ? d + 'd ' : '') + pad(h) + ':' + pad(m) + ':' + pad(sec);
+  }
+  function set(id, text, live) {
+    var el = document.getElementById(id);
+    el.textContent = text;
+    el.classList.toggle('kc-live-value', !!live);
+  }
+  // safety-processor build card only -- escaped through kcEscapeHtml since
+  // the commit string and build datetime are server-supplied text, not this
+  // firmware's own compile-time constant (the stored-XSS fix from two days
+  // ago applies here too).
+  function buildRow(label, value) {
+    return '<div class="row"><span class="label">' + window.kcEscapeHtml(label) + '</span><span class="value kc-live-value">' +
+           window.kcEscapeHtml(String(value)) + '</span></div>';
+  }
+  function hex16(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(4, '0'); }
+
+  var lastGoodAt = null;
+  var failCount = 0;
+  var lastStatus = null, lastBoardTemps = null;
+  var partAllocBytes = null;  // sum of /api/partitions sizes
+
+
+  // set()'s third arg marks the value kc-live-value. fw_version/fw_build are
+  // exactly the "build-time constants like firmware version" the live-
+  // reading definition excludes -- unmarked. reset_reason describes a single
+  // past event (this boot's start), not a figure that changes poll to poll,
+  // so it stays unmarked too (same reasoning as main_page.html's last-run
+  // banner: a fact about something already over). Uptime, both heap
+  // sections, subsystem readiness, zone-config validity, and power draw are
+  // all named explicitly by the live-reading definition ("heap/uptime
+  // figures") or are clearly the board's current state -- all marked.
+  function renderStatus(st) {
+    set('fwVersion', st.fw_version_known ? (st.fw_version || 'n/a') : 'n/a');
+    set('fwBuild', st.fw_version_known ? (st.fw_build || 'n/a') : 'n/a');
+    set('uptime', fmtUptime(st.uptime_s), true);
+    set('resetReason', st.reset_reason || 'n/a');
+
+    var hi = st.heap_internal || {}, hs = st.heap_spiram || {};
+    set('heapIntFree', fmtKBOfTotal(hi.free, hi.total), true);
+    set('heapIntLargest', fmtKBOfTotal(hi.largest_free_block, hi.total), true);
+    set('heapIntMin', fmtKBOfTotal(hi.min_free, hi.total), true);
+    set('heapSpiFree', fmtKBOfTotal(hs.free, hs.total), true);
+    set('heapSpiLargest', fmtKBOfTotal(hs.largest_free_block, hs.total), true);
+    set('heapSpiMin', fmtKBOfTotal(hs.min_free, hs.total), true);
+
+    // Running image bytes out of the RUNNING partition's allocated size (read at
+    // runtime from the status JSON, never hardcoded -- the app partition size
+    // changes); chip size and partition-table total come from flash_size and
+    // the /api/partitions sum (partAllocBytes, set by renderPartitions).
+    var fp = st.flash_partition_size;
+    var fpct = (st.flash_used != null && fp) ? ' (' + Math.round(st.flash_used * 100 / fp) + '%)' : '';
+    set('flashUsed', fmtMB(st.flash_used) + ' of ' + (fp ? fmtMB(fp) : 'n/a') + fpct, true);
+    set('flashChip', fmtMB(st.flash_size));
+    set('flashAlloc', partAllocBytes == null ? 'n/a' : fmtMB(partAllocBytes) +
+        (st.flash_size ? ' of ' + fmtMB(st.flash_size) + ' (' + Math.round(partAllocBytes * 100 / st.flash_size) + '%)' : ''));
+
+    set('ioReady', st.io_ready ? 'ready' : 'not attached', true);
+    set('thermoReady', st.thermo_ready ? 'ready' : 'not attached', true);
+    set('safetyReady', st.safety_ready ? 'linked' : 'not linked', true);
+    set('zonesValid', st.zones_config_valid ? 'valid' : 'FAILED TO LOAD', true);
+    set('powerW', (st.power_w != null) ? st.power_w.toFixed(0) + ' W' : 'n/a', true);
+
+    // Same ok/warn color convention as the NVS-sections block below --
+    // false is the actionable state an operator with dead LCD buttons needs
+    // to see at a glance, not just read past.
+    // touch_cal_supported (firmware's shared predicate) decides what false
+    // MEANS here. Before it existed this row read "NOT CALIBRATED -- small
+    // controls may not respond" for a capacitive panel that self-calibrates
+    // and for a board with no touch controller at all, telling the operator
+    // to run a calibration the device does not offer on either. Each of the
+    // three states now says its own thing, and only the genuinely
+    // actionable one is painted as a warning.
+    // Older firmware that predates the field sends no touch_cal_supported;
+    // treating that as 'supported' keeps the original behaviour for it
+    // rather than silently reporting an unsupported panel.
+    var tcs = st.touch_cal_supported || 'supported';
+    if (tcs === 'self_calibrating') {
+      set('touchCal', 'not required (self-calibrating controller)', true);
+      document.getElementById('touchCal').style.color = 'var(--ok)';
+    } else if (tcs === 'no_touch') {
+      // A detection failure, deliberately NOT reported as "none needed":
+      // the controller that should be there may well be one calibration
+      // applies to -- it did not answer at startup.
+      set('touchCal', 'no touch controller detected', true);
+      document.getElementById('touchCal').style.color = 'var(--warn)';
+    } else {
+      set('touchCal', st.touch_calibrated ? 'calibrated' : 'NOT CALIBRATED -- small controls may not respond', true);
+      document.getElementById('touchCal').style.color = st.touch_calibrated ? 'var(--ok)' : 'var(--warn)';
+    }
+
+    // Same rendering as safety_page.html's buildCard -- kept as an inline
+    // row()/hex16() pair rather than a shared helper module because these
+    // two pages don't otherwise share a JS file (each is a standalone,
+    // gzipped-at-build page, per this project's convention).
+    var safetyBuildCard = document.getElementById('safetyBuildCard');
+    if (st.safety_build_known) {
+      safetyBuildCard.innerHTML =
+        buildRow('Commit', (st.safety_build_commit || 'unknown') + (st.safety_build_dirty ? ' (dirty)' : '')) +
+        buildRow('Built', st.safety_build_datetime || 'unknown') +
+        buildRow('Config version', st.safety_config_version) +
+        buildRow('Config CRC', '0x' + hex16(st.safety_config_crc) +
+            (st.safety_config_crc === 0 ? ' -- UNCOMMISSIONED (compiled-in defaults)' : ''));
+    } else {
+      safetyBuildCard.innerHTML = buildRow('Not yet announced this boot', 'n/a');
+    }
+
+    renderRelayWear(st.relay_cycles, st.relay_life);
+
+    var nvsCard = document.getElementById('nvsCard');
+    if (st.nvs_sections && st.nvs_sections.length) {
+      var html = '';
+      for (var i = 0; i < st.nvs_sections.length; i++) {
+        var s = st.nvs_sections[i];
+        var ok = s.present && s.mounted;
+        html += '<div class="row"><span class="label">' + window.kcEscapeHtml(s.name) + '</span>' +
+                '<span class="value kc-live-value" style="color:' + (ok ? 'var(--ok)' : 'var(--warn)') + '">' +
+                (s.present ? 'present' : 'MISSING') + (s.mounted ? ', mounted' : ', NOT MOUNTED') +
+                '</span></div>';
+      }
+      nvsCard.innerHTML = html;
+    } else {
+      nvsCard.innerHTML = '<div class="row"><span class="label">NVS sections</span><span class="value">n/a</span></div>';
+    }
+  }
+
+  // relay_cycles.h: "on the order of 10^5 operations" -- an order-of-
+  // magnitude figure, not a precise datasheet rating. Kept as a named
+  // constant here (not parsed out of the comment) since the source of
+  // truth is the physical part, and this page's <p class="note"> above
+  // already quotes and cites where the figure comes from.
+  var RELAY_CYCLE_BUDGET_ORDER = 100000;
+  // RELAY_LIFE_BUDGET.md: /api/status now carries "relay_life"
+  // (real per-relay type/rated/percent/tier, relay_cycles_budget()) --
+  // prefer that and only fall back to the old order-of-magnitude estimate
+  // off "relay_cycles" for a board whose firmware predates this field.
+  // Includes the 5th (safety, K4) slot relay_cycles[] never had.
+  function renderRelayWear(cycles, relayLife) {
+    var card = document.getElementById('relayWearCard');
+    if (relayLife && relayLife.length) {
+      var rows = '';
+      for (var i = 0; i < relayLife.length; i++) {
+        var r = relayLife[i];
+        var name = (r.relay === 4) ? 'Relay 5 (safety, K4)' : ('Relay ' + (r.relay + 1));
+        var pctStr = (r.percent == null) ? 'n/a' : (r.percent.toFixed(1) + ' %');
+        var ratedStr = (r.rated == null) ? 'n/a (SSR: no rated life)' : r.rated.toLocaleString();
+        var tierColor = r.tier === 'error' ? 'var(--warn)' : (r.tier === 'warn' ? 'var(--warn)' : 'inherit');
+        rows += '<tr>' +
+          '<td>' + window.kcEscapeHtml(name) + '</td>' +
+          '<td>' + window.kcEscapeHtml(r.type) + '</td>' +
+          '<td>' + r.cycles.toLocaleString() + '</td>' +
+          '<td>' + ratedStr + '</td>' +
+          '<td style="color:' + tierColor + '">' + pctStr + '</td>' +
+          '<td><button type="button" class="relay-reset-btn" data-relay="' + r.relay + '">Reset count</button></td>' +
+          '</tr>';
+      }
+      // .table-scroll (theme.css) -- same wide-table-on-a-phone wrapper
+      // zones_page.html/profiles_page.html already use: lets the table
+      // scroll horizontally inside its own box instead of the whole page
+      // scrolling sideways, so the Reset button in the last column stays
+      // reachable on a narrow phone. See the .relay-life-table CSS comment
+      // above for the full story.
+      card.innerHTML = '<div class="table-scroll"><table class="relay-life-table"><thead><tr>' +
+        '<th>Relay</th><th>Type</th><th>Cycles</th><th>Rated life</th><th>% of rated</th><th></th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+      return;
+    }
+    if (!cycles || !cycles.length) {
+      card.innerHTML = '<div class="row"><span class="label">Relay wear</span><span class="value">n/a</span></div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < cycles.length; i++) {
+      var n = cycles[i];
+      var pct = Math.round((n / RELAY_CYCLE_BUDGET_ORDER) * 100);
+      html += '<div class="row"><span class="label">Relay R' + i + '</span><span class="value kc-live-value">' +
+              n.toLocaleString() + ' cycles (~' + pct + '% of the ~10^5-cycle budget)</span></div>';
+    }
+    card.innerHTML = html;
+  }
+
+  // RELAY_LIFE_BUDGET.md "Reset": event delegation on the card (rows
+  // are rebuilt wholesale by renderRelayWear() above, so a per-button
+  // listener would leak/re-attach every poll) -- same kcConfirm() gate the
+  // Danger Zone's dangerEnterBtn handler above uses, and a POST through the
+  // flash worker on the server side (diagnostics_http.c), never a
+  // direct NVS write from the httpd task.
+  document.getElementById('relayWearCard').addEventListener('click', function (e) {
+    var btn = e.target.closest('.relay-reset-btn');
+    if (!btn) return;
+    var relay = btn.getAttribute('data-relay');
+    window.kcConfirm('Reset the lifetime contact-cycle count for relay ' + (Number(relay) + 1) +
+        '? This cannot be undone and does not replace the physical relay -- only use it after the relay ' +
+        'itself has actually been replaced.').then(function (ok) {
+      if (!ok) return;
+      btn.disabled = true;
+      fetch('/api/relay_cycles/reset', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'relay=' + encodeURIComponent(relay),
+      }).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+        });
+      }).then(function () {
+        poll();
+      }).catch(function (err) {
+        if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+          window.kcAlert('Could not reset relay count: ' + err.message);
+        }
+        btn.disabled = false;
+      });
+    });
+  });
+
+  // ESP32 die temp and each MAX31856's cold-junction reading are live board-
+  // health temperatures -- both kc-live-value and run through kcUnit.fmt for
+  // unit parity (UI_PLAN.md item 7), same as every other °C figure.
+  function renderBoardTemps(bt) {
+    set('esp32Temp', window.kcUnit.fmt(bt.esp32_c), true);
+    var rows = '';
+    var cj = bt.thermo_cj_c || [];
+    for (var i = 0; i < cj.length; i++) {
+      rows += '<div class="row"><span class="label">MAX31856 ch ' + i + ' cold-junction</span>' +
+              '<span class="value kc-live-value">' + window.kcUnit.fmt(cj[i]) + '</span></div>';
+    }
+    document.getElementById('cjRows').innerHTML = rows || '<div class="row"><span class="label">MAX31856 channels</span><span class="value">n/a</span></div>';
+  }
+
+  // watchdog_cfg.h -- own small poll/render loop, same pattern as pollCrash()
+  // below: independent of the main status/board_temps Promise.all() so a
+  // slow/failed fetch here never delays that poll's stale-banner logic.
+  function renderWatchdogCfg(disabled) {
+    var stateEl = document.getElementById('wdPanicState');
+    var btn = document.getElementById('wdPanicToggleBtn');
+    if (disabled) {
+      stateEl.textContent = 'DISABLED -- a hung task will NOT reboot the board';
+      stateEl.style.color = 'var(--warn)';
+      btn.textContent = 'Re-enable panic';
+    } else {
+      stateEl.textContent = 'enabled (default)';
+      stateEl.style.color = '';
+      btn.textContent = 'Disable panic (dev only)';
+    }
+    btn.onclick = function () {
+      var nextDisabled = !disabled;
+      (nextDisabled ? window.kcConfirm(
+          'Disable the task-watchdog panic? If a task hangs, the board will NOT reboot -- it will ' +
+          'sit hung with the relays in whatever state they were last commanded, instead of resetting. ' +
+          'This is for developer debugging only. Continue?') : Promise.resolve(true)).then(function (ok) {
+        if (!ok) return;
+        fetch('/api/watchdog_cfg', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'disabled=' + (nextDisabled ? '1' : '0'),
+        }).then(function (r) { return r.json(); }).then(function (result) {
+          renderWatchdogCfg(!!result.panic_disabled);
+        }).catch(function () {});
+      });
+    };
+  }
+  function pollWatchdogCfg() {
+    return fetch('/api/watchdog_cfg').then(function (r) { return r.json(); }).then(function (j) {
+      renderWatchdogCfg(!!j.panic_disabled);
+    }).catch(function () {});
+  }
+
+  // ramp_assist_cfg.h -- own small poll/render loop, same pattern as
+  // renderWatchdogCfg()/pollWatchdogCfg() just above. Unlike that one, a
+  // failed read here renders an explicit ERROR state rather than leaving the
+  // "--" placeholder in place -- the flag being toggled is the one that keeps
+  // a PID tuning run's ramp/dwell schedule raw and comparable, so this page
+  // must never let a fetch failure read as "confirmed off" when it is really
+  // "unknown". Always shows the board's ACTUAL current state, read fresh on
+  // load, never an assumed default.
+  function renderRampAssist(enabled) {
+    var stateEl = document.getElementById('rampAssistState');
+    var btn = document.getElementById('rampAssistToggleBtn');
+    if (enabled) {
+      stateEl.textContent = 'ENABLED -- the executor may stretch ramps and shorten dwells';
+      stateEl.style.color = 'var(--warn)';
+      btn.textContent = 'Disable ramp assist';
+    } else {
+      stateEl.textContent = 'disabled (default -- raw, unassisted schedule)';
+      stateEl.style.color = '';
+      btn.textContent = 'Enable ramp assist';
+    }
+    btn.disabled = false;
+    btn.onclick = function () {
+      var nextEnabled = !enabled;
+      (nextEnabled ? window.kcConfirm(
+          'Enable ramp assist? A PID tuning run or A/B controller comparison needs this OFF so ' +
+          'tracking-error numbers stay comparable between runs -- with it enabled, the executor may ' +
+          'automatically stretch ramps and shorten dwells during a firing. Continue?') : Promise.resolve(true)).then(function (ok) {
+        if (!ok) return;
+        fetch('/api/ramp_assist', {
+          method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'enabled=' + (nextEnabled ? '1' : '0'),
+        }).then(function (r) { return r.json(); }).then(function (result) {
+          if (result && result.ok) {
+            renderRampAssist(!!result.enabled);
+          } else {
+            renderRampAssistError();
+          }
+        }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
+      });
+    };
+  }
+  function renderRampAssistError() {
+    var stateEl = document.getElementById('rampAssistState');
+    var btn = document.getElementById('rampAssistToggleBtn');
+    stateEl.textContent = 'ERROR -- could not read the board (unknown, NOT confirmed off)';
+    stateEl.style.color = 'var(--warn)';
+    btn.textContent = 'Retry';
+    btn.disabled = false;
+    btn.onclick = function () { pollRampAssist(); };
+  }
+  function pollRampAssist() {
+    return fetch('/api/ramp_assist').then(function (r) {
+      if (!r.ok) { throw new Error('http ' + r.status); }
+      return r.json();
+    }).then(function (j) {
+      renderRampAssist(!!j.enabled);
+    }).catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; renderRampAssistError(); });
+  }
+
+  function setStale(staleSeconds) {
+    var banner = document.getElementById('staleBanner');
+    if (staleSeconds == null) {
+      banner.classList.remove('show');
+    } else {
+      document.getElementById('staleAge').textContent = staleSeconds;
+      banner.classList.add('show');
+    }
+  }
+
+  // Crash record: its own small, independent fetch -- not part of the
+  // Promise.all() below, deliberately, so a slow/failed crash_report fetch
+  // never delays or fails the live status/board_temps poll this page's
+  // stale-banner logic depends on. Rendered once on load and again after
+  // Acknowledge/Clear -- not on the 2s poll timer, since a crash record is a
+  // fact about the past (same "unmarked, not kc-live-value" treatment as
+  // resetReason above), not a figure that changes poll to poll.
+  function crashRow(label, value) {
+    return '<div class="row"><span class="label">' + window.kcEscapeHtml(label) + '</span><span class="value">' +
+           window.kcEscapeHtml(String(value)) + '</span></div>';
+  }
+  function renderCrash(cr) {
+    var card = document.getElementById('crashCard');
+    if (!cr || !cr.present) {
+      card.innerHTML = crashRow('Status', 'No crash recorded.');
+      return;
+    }
+    var html = '';
+    html += crashRow('Acknowledged', cr.acknowledged ? 'yes' : 'NO -- new since last seen');
+    html += crashRow('Exception cause', cr.exc_cause_str ? (cr.exc_cause_str + ' (' + cr.exc_cause + ')') : cr.exc_cause);
+    html += crashRow('Faulting task', cr.exc_task || 'unknown');
+    // exc_pc/exc_addr/backtrace arrive from the firmware already formatted as
+    // "0x........" strings -- they are code addresses whose only use is
+    // addr2line, and emitting them as JSON numbers rendered them as unusable
+    // decimals ("299" for 0x0000012b).
+    html += crashRow('Program counter', cr.exc_pc || 'unknown');
+    html += crashRow('Fault address', cr.exc_addr || 'unknown');
+    // a0 (return address) and a1 (STACK POINTER) of the crashing frame. a1 is
+    // the one that matters most: a small fault address like 0x18 means a NULL
+    // struct pointer dereferenced at field offset 0x18 ONLY IF a1 was a sane
+    // stack address. If a1 is itself 0 or garbage, the same 0x18 is just a
+    // local variable's frame offset and the null-struct reading is wrong.
+    html += crashRow('Frame a0 (return addr)', cr.exc_a0 || 'unknown');
+    html += crashRow('Frame a1 (stack ptr)', cr.exc_a1_sp || 'unknown');
+    if (cr.frame_trustworthy === false) {
+      html += crashRow('Warning',
+                       'The saved exception frame is NOT self-consistent -- its program counter is ' +
+                       'not a code address (0xfffffffd means the saved PC was 0). Do NOT read the ' +
+                       'fault address above as a struct field offset, and do not symbolize the PC. ' +
+                       'Decode the coredump partition with the crash-analysis tooling instead.');
+    }
+    // NOT the reset reason of the crash -- it is the reason for the boot on
+    // which this dump was first noticed. For a dump found after a reflash or
+    // a power cycle that says nothing about the crash, so it is labelled for
+    // what it actually is rather than left to be misread as the cause.
+    html += crashRow('Reset reason of the boot that found this',
+                     cr.found_on_boot_reset_reason || 'unknown');
+    var bt = (cr.backtrace || []).join('\n');
+    if (cr.backtrace_corrupted) {
+      // Say it in words, not just a parenthetical on the label. A corrupted
+      // frame chain is the NORMAL outcome of a stack overflow, and the
+      // addresses below are then meaningless -- an operator reading
+      // "0x0000012b" as a real program counter would chase a ghost. The
+      // faulting task name above survives this and is still trustworthy.
+      html += crashRow('Warning',
+                       'The saved backtrace is corrupted -- the addresses below are not reliable. ' +
+                       'This is expected after a stack overflow; the faulting task name above is ' +
+                       'still meaningful.');
+    }
+    html += '<div class="row"><span class="label">Backtrace' + (cr.backtrace_corrupted ? ' (corrupted)' : '') +
+            '</span><span class="value"></span></div>';
+    html += '<pre class="crash-bt">' + window.kcEscapeHtml(bt || '(empty)') + '</pre>';
+    html += '<div class="crash-actions">' +
+            '<button id="crashAckBtn"' + (cr.acknowledged ? ' disabled' : '') + '>Acknowledge</button>' +
+            '<button id="crashClearBtn">Clear crash log</button></div>';
+    card.innerHTML = html;
+
+    var ackBtn = document.getElementById('crashAckBtn');
+    if (ackBtn) {
+      ackBtn.addEventListener('click', function () {
+        fetch('/api/crash_report/ack', { method: 'POST' }).then(pollCrash);
+      });
+    }
+    document.getElementById('crashClearBtn').addEventListener('click', function () {
+      fetch('/api/crash_report/clear', { method: 'POST' }).then(pollCrash);
+    });
+  }
+  function pollCrash() {
+    return fetch('/api/crash_report').then(function (r) { return r.json(); }).then(renderCrash).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      document.getElementById('crashCard').innerHTML = crashRow('Status', 'unable to load crash record');
+    });
+  }
+
+  // --- Flash partitions (partition_info_http.c) ---------------------------
+  // esp_partition_type_t / the handful of subtypes this codebase's
+  // partitions.csv actually uses (FLASH_BUDGET.md) -- unrecognized
+  // values fall back to their raw number rather than guessing a name, since
+  // an unmapped subtype is exactly the kind of thing this table exists to
+  // surface honestly, not paper over.
+  var PART_TYPE_NAMES = { 0: 'app', 1: 'data' };
+  var PART_SUBTYPE_NAMES = {
+    0: { 0x00: 'factory', 0x10: 'ota_0', 0x11: 'ota_1', 0x20: 'test' },
+    1: { 0x00: 'ota', 0x01: 'phy', 0x02: 'nvs', 0x03: 'coredump', 0x04: 'nvs_keys',
+         0x05: 'efuse', 0x80: 'esphttpd', 0x81: 'fat', 0x82: 'spiffs' }
+  };
+  function partTypeName(type) { return PART_TYPE_NAMES[type] || ('type ' + type); }
+  function partSubtypeName(type, subtype) {
+    var table = PART_SUBTYPE_NAMES[type];
+    var name = table && table[subtype];
+    return name || ('0x' + subtype.toString(16).toUpperCase());
+  }
+  // Hex offset, not decimal -- offsets are how every other tool in this repo
+  // (partitions.csv, esptool, the removed JTAG-read path this endpoint
+  // replaces) already writes them, so this must match rather than force a
+  // mental decimal<->hex conversion. fmtKB/fmtMB above are reused for size
+  // rather than re-derived -- the endpoint sends raw offset/size integers
+  // (bytes), unformatted, so this is the one place in this poll that has to
+  // do the KB/MB conversion client-side rather than double-format a string
+  // the firmware already built.
+  function fmtOffset(n) { return '0x' + (n >>> 0).toString(16).toUpperCase().padStart(6, '0'); }
+  function fmtPartSize(bytes) {
+    if (bytes == null) return 'n/a';
+    return bytes >= 1024 * 1024 ? fmtMB(bytes) : fmtKB(bytes);
+  }
+  function renderPartitions(resp) {
+    var el = document.getElementById('partitionsSection');
+    var parts = (resp && resp.partitions) || [];
+    if (!parts.length) {
+      el.innerHTML = '<p>No partitions reported.</p>';
+      return;
+    }
+    // Same .card/.row idiom as the Memory section above: one .card holding
+    // a .row per fact, label prefixed with the partition name (mirrors
+    // "Internal DRAM -- free now" etc). The running partition's rows get
+    // .row.headline (Memory's own bold/larger treatment for the number
+    // that page most wants seen) plus an explicit RUNNING badge on its
+    // name row, since "which slot is live" has no other natural home in a
+    // label/value pair.
+    var allocSum = 0;
+    for (var k = 0; k < parts.length; k++) allocSum += (parts[k].size || 0);
+    partAllocBytes = allocSum;
+    if (lastStatus) renderStatus(lastStatus);
+    var html = '<div class="card">';
+    for (var i = 0; i < parts.length; i++) {
+      var p = parts[i];
+      var running = !!(resp.running && p.label === resp.running);
+      var name = window.kcEscapeHtml(p.label);
+      var rowClass = 'row' + (running ? ' headline' : '');
+      var typeStr = window.kcEscapeHtml(partTypeName(p.type)) + ' / ' +
+                    window.kcEscapeHtml(partSubtypeName(p.type, p.subtype)) +
+                    (p.encrypted ? ' &middot; encrypted' : '');
+      html += '<div class="' + rowClass + '"><span class="label">' + name +
+              (running ? ' <span class="running-badge">RUNNING</span>' : '') +
+              ' &mdash; type</span><span class="value">' + typeStr + '</span></div>';
+      html += '<div class="' + rowClass + '"><span class="label">' + name +
+              ' &mdash; offset</span><span class="value">' + fmtOffset(p.offset) + '</span></div>';
+      html += '<div class="' + rowClass + '"><span class="label">' + name +
+              ' &mdash; size</span><span class="value">' + fmtPartSize(p.size) + '</span></div>';
+    }
+    html += '</div>';
+    el.innerHTML = html;
+  }
+  function pollPartitions() {
+    return fetchJsonTimeout('/api/partitions', 4000).then(function (j) {
+      if (!j || !Array.isArray(j.partitions)) throw new Error('malformed /api/partitions response');
+      renderPartitions(j);
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      document.getElementById('partitionsSection').innerHTML =
+        '<p>Could not load the flash partition table (board unreachable, or the request failed/timed out).</p>';
+    });
+  }
+
+  // --- Config filesystem (docs/CONFIG_FILESYSTEM.md, GET /api/cfgfs) ------
+  // fmtBytes/renderCfgFs/pollCfgFs are new; everything else in this block
+  // (fetchJsonTimeout, the .card/.row idiom, kcEscapeHtml) is reused as-is.
+  function fmtBytes(n) {
+    if (n == null) return 'unknown';
+    if (n >= 1048576) return (n / 1048576).toFixed(2) + ' MiB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KiB';
+    return n + ' B';
+  }
+  // Named items this page knows how to explain rather than just echo --
+  // anything /api/cfgfs reports that ISN'T one of these still gets a row
+  // via the generic fallback path in renderCfgFs() below, so a newly
+  // migrated item shows up (as "file-backed") the moment the endpoint
+  // reports it, with no page-side allowlist edit required.
+  var CFG_FS_ITEM_LABELS = {
+    zones: 'Zone configuration',
+    kiln_cfg_store: 'Saved kiln configs',
+    unit_pref: 'Display units (C/F)',
+    ramp_assist: 'Ramp assist',
+    display_power: 'Display power settings',
+    tz: 'Timezone',
+    profile0: 'Fire profile slot 0', profile1: 'Fire profile slot 1',
+    profile2: 'Fire profile slot 2', profile3: 'Fire profile slot 3',
+    profile4: 'Fire profile slot 4', profile5: 'Fire profile slot 5',
+    profile6: 'Fire profile slot 6', profile7: 'Fire profile slot 7',
+    relay_cycles: 'Relay cycle counters',
+    adaptive_tune: 'Adaptive-tune Ki baseline',
+    firing_stats: 'Firing stats / history',
+  };
+  function cfgFsItemLabel(key) {
+    return CFG_FS_ITEM_LABELS[key] || key;
+  }
+  function renderCfgFs(j) {
+    var banner = document.getElementById('cfgFsUnmountedBanner');
+    if (!j.mounted) {
+      banner.style.display = 'block';
+      document.getElementById('cfgFsUnmountedReason').textContent = j.reason || j.status || 'unknown reason';
+    } else {
+      banner.style.display = 'none';
+    }
+
+    var rows = '';
+    rows += '<div class="row"><span class="label">Mounted</span><span class="value" style="color:' +
+            (j.mounted ? 'var(--ok)' : 'var(--ui-accent-5)') + '">' +
+            (j.mounted ? 'yes' : 'NO -- ' + window.kcEscapeHtml(j.status || 'unmounted')) + '</span></div>';
+
+    if (j.capacity && j.capacity.known) {
+      rows += '<div class="row"><span class="label">Used</span><span class="value">' +
+              fmtBytes(j.capacity.used_bytes) + ' of ' + fmtBytes(j.capacity.total_bytes) + '</span></div>';
+      rows += '<div class="row"><span class="label">Free</span><span class="value">' +
+              fmtBytes(j.capacity.free_bytes) + '</span></div>';
+    } else {
+      rows += '<div class="row"><span class="label">Capacity</span><span class="value">unknown</span></div>';
+    }
+
+    rows += '<div class="row"><span class="label">File count</span><span class="value">' +
+            (j.file_count != null ? j.file_count : 'n/a') + '</span></div>';
+
+    var tmp = j.tmp_entries_now;
+    var tmpColor = (tmp != null && tmp > 0) ? 'var(--ui-accent-1)' : 'var(--muted)';
+    rows += '<div class="row"><span class="label">Stale-temp reaped</span><span class="value" style="color:' +
+            tmpColor + '">' + (tmp != null ? tmp : 'n/a') + '</span></div>';
+
+    var dw = j.dual_write || {};
+    // 2026-09-08 widening: dual_write.items is now a flat array, one row per
+    // migrated item across EVERY persist/'*'_cfg_fs.c bridge (zones,
+    // kiln_cfg_store, the pref-backed items, one row per profile slot) --
+    // 70ed6514 fixed /api/cfgfs's stale lists but left this per-item detail
+    // zones-only; a divergence in profiles or prefs used to be invisible on
+    // this page even though the endpoint's OTHER lists were already correct.
+    var fileBacked = [];
+    // nvs_only: not yet migrated, still pending. nvs_permanent: KEEP in NVS
+    // forever by design (boot-order/safety reasons) -- rendered distinctly
+    // so "pending" and "working as intended" are never conflated (2026-09-08
+    // audit: this list used to also carry already-migrated items and misled
+    // readers into thinking finished migrations were still outstanding).
+    var nvsOnly = Array.isArray(dw.nvs_only) ? dw.nvs_only.slice() : [];
+    var nvsPermanent = Array.isArray(dw.nvs_permanent) ? dw.nvs_permanent.slice() : [];
+    var anyDiverged = false;
+    var items = Array.isArray(dw.items) ? dw.items : [];
+    for (var ix = 0; ix < items.length; ix++) {
+      var it = items[ix];
+      if (it && it.file_backed) {
+        fileBacked.push(it);
+        if (it.diverged) anyDiverged = true;
+      } else if (it && it.nvs_backed) {
+        // Has an NVS copy but no file yet -- genuinely pending migration.
+        // An item with NEITHER side populated (e.g. an unused profile slot)
+        // is not rendered at all -- there is nothing to report.
+        nvsOnly.push(it.name);
+      }
+    }
+    for (var i = 0; i < fileBacked.length; i++) {
+      var fb = fileBacked[i];
+      // A DIVERGED item is a data-integrity warning, not a routine status
+      // line -- bold, the existing accent-5 warning color (no new colours),
+      // AND its own bordered/background treatment so it cannot be skimmed
+      // past the way a same-colored plain word could be.
+      var divergedNote = fb.diverged ?
+        ' <span style="color:var(--ui-accent-5); font-weight:bold; border:1px solid var(--ui-accent-5); ' +
+        'border-radius:3px; padding:0 4px;">DIVERGED</span>' : '';
+      var nvsNote = fb.nvs_backed ? '' :
+        ' <span style="color:var(--muted)">(no NVS copy)</span>';
+      rows += '<div class="row"' + (fb.diverged ? ' style="background:rgba(255,0,0,0.08)"' : '') + '>' +
+              '<span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(fb.name)) +
+              '</span><span class="value">file-backed (rev ' + fb.file_rev + ')' + nvsNote + divergedNote +
+              '</span></div>';
+    }
+    for (var n = 0; n < nvsOnly.length; n++) {
+      rows += '<div class="row"><span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(nvsOnly[n])) +
+              '</span><span class="value" style="color:var(--muted)">NVS-only (migration pending)</span></div>';
+    }
+    for (var p = 0; p < nvsPermanent.length; p++) {
+      rows += '<div class="row"><span class="label">' + window.kcEscapeHtml(cfgFsItemLabel(nvsPermanent[p])) +
+              '</span><span class="value" style="color:var(--muted)">NVS by design (stays in NVS)</span></div>';
+    }
+    if (anyDiverged) {
+      rows += '<div class="row"><span class="label" style="color:var(--ui-accent-5)">Warning</span>' +
+              '<span class="value" style="color:var(--ui-accent-5)">at least one item diverged between its file ' +
+              'and NVS copies at last check -- see the note below.</span></div>';
+    }
+
+    document.getElementById('cfgFsCard').innerHTML = rows;
+  }
+  function pollCfgFs() {
+    return fetchJsonTimeout('/api/cfgfs', 4000).then(function (j) {
+      if (!j || typeof j.mounted !== 'boolean') throw new Error('malformed /api/cfgfs response');
+      renderCfgFs(j);
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      document.getElementById('cfgFsCard').innerHTML =
+        '<div class="row"><span class="label">Config filesystem</span><span class="value">' +
+        'could not load (board unreachable, or the request failed/timed out)</span></div>';
+    });
+  }
+
+  // --- Config migration exit window (dualwrite_window_http.c) -------------
+  // GET /api/dualwrite_window -> {consecutive_clean_boots, clean_boots_target,
+  // firing_complete, restore_verified, window_may_close}. Pure display plus
+  // one attestation button; this page never computes window_may_close
+  // itself, only shows the board's own answer.
+  var dwwSubmitting = false;
+  function renderDualwriteWindow(st) {
+    var bootsOk = st.consecutive_clean_boots >= st.clean_boots_target;
+    var rows = '';
+    rows += '<div class="row"><span class="label">Consecutive clean boots</span><span class="value" style="color:' +
+            (bootsOk ? 'var(--ok)' : 'var(--muted)') + '">' + st.consecutive_clean_boots + ' of ' +
+            st.clean_boots_target + '</span></div>';
+    rows += '<div class="row"><span class="label">File-backed firing completed</span><span class="value" style="color:' +
+            (st.firing_complete ? 'var(--ok)' : 'var(--muted)') + '">' +
+            (st.firing_complete ? 'yes' : 'not yet') + '</span></div>';
+    rows += '<div class="row"><span class="label">Restore verified</span><span class="value" style="color:' +
+            (st.restore_verified ? 'var(--ok)' : 'var(--muted)') + '">' +
+            (st.restore_verified ? 'yes' : 'not yet') + '</span></div>';
+    rows += '<div class="row headline"><span class="label">Window may close</span><span class="value">' +
+            (st.window_may_close ? 'YES -- all three criteria met' : 'not yet') + '</span></div>';
+    if (!st.restore_verified) {
+      rows += '<div class="row"><span class="label"></span><span class="value">' +
+              '<button id="dwwRecordRestoreBtn" class="danger-btn" style="width:auto;display:inline-block;">' +
+              'Record a verified restore</button></span></div>';
+    }
+    document.getElementById('dualwriteWindowCard').innerHTML = rows;
+    var btn = document.getElementById('dwwRecordRestoreBtn');
+    if (btn) {
+      btn.addEventListener('click', function () {
+        if (dwwSubmitting) return;
+        kcConfirm('Record a verified restore? Only confirm this after you have personally ' +
+                       'restored a backup and checked the result matches, byte for byte.').then(function (ok) {
+          if (!ok) return;
+          dwwSubmitting = true;
+          btn.disabled = true;
+          fetch('/api/dualwrite_window/restore_verified', { method: 'POST' }).then(function () {
+            dwwSubmitting = false;
+            return pollDualwriteWindow();
+          }).catch(function () {
+            dwwSubmitting = false;
+            btn.disabled = false;
+          });
+        });
+      });
+    }
+  }
+  function pollDualwriteWindow() {
+    return fetchJsonTimeout('/api/dualwrite_window', 4000).then(function (j) {
+      if (!j || typeof j.consecutive_clean_boots !== 'number') throw new Error('malformed /api/dualwrite_window response');
+      renderDualwriteWindow(j);
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      document.getElementById('dualwriteWindowCard').innerHTML =
+        '<div class="row"><span class="label">Migration exit window</span><span class="value">' +
+        'could not load (board unreachable, or the request failed/timed out)</span></div>';
+    });
+  }
+
+  // --- Thermocouple faults (folded in from thermo_faults_page.html) -------
+  // Same MAX31856_MASK_xxx / MAX31856_FAULT_xxx bit layout as MAX31856.h and
+  // ui_page_thermo_faults.c's format_fault_summary() -- SR shares bit
+  // positions/names with the register MASK for the low six bits, plus two
+  // SR-only bits for the top two (TCRANGE/CJRANGE).
+  //
+  // NOTE: write those constant names with "xxx", never with a "*" wildcard.
+  // "MAX31856_MASK_*" followed by "/" closes a block comment early -- see
+  // thermo_faults_page.html's history on this exact bug (git blame) before
+  // "simplifying" this comment.
+  var FAULT_BITS = [
+    [0x01, 'OPEN'], [0x02, 'OVUV'], [0x04, 'TCLOW'], [0x08, 'TCHIGH'],
+    [0x10, 'CJLOW'], [0x20, 'CJHIGH'], [0x40, 'TCRANGE'], [0x80, 'CJRANGE']
+  ];
+  function faultSummary(status) {
+    if (!status) return 'OK';
+    var names = [];
+    for (var i = 0; i < FAULT_BITS.length; i++) {
+      if (status & FAULT_BITS[i][0]) names.push(FAULT_BITS[i][1]);
+    }
+    return names.length ? names.join(', ') : 'OK';
+  }
+
+  // fetch() alone has NO timeout -- a stalled TCP connection (Wi-Fi hiccup, a
+  // wedged handler on the board) would otherwise leave this section on
+  // "Loading..." forever, independent of whether the rest of this page's
+  // /api/status poll is healthy. AbortController bounds every request
+  // client-side too, on top of GET /api/thermo/faults's own server-side
+  // per-channel bound (diagnostics_http.c's thermo_faults_get_handler() doc
+  // comment).
+  function fetchJsonTimeout(url, timeoutMs) {
+    var ctl = new AbortController();
+    var timer = setTimeout(function () { ctl.abort(); }, timeoutMs);
+    return fetch(url, { signal: ctl.signal }).then(function (r) {
+      clearTimeout(timer);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }, function (err) {
+      clearTimeout(timer);
+      throw err;
+    });
+  }
+
+  // Every field this section shows -- fault bits, FAULT pin/timeout/absent
+  // state, staleness, cold-junction temperature, and the matched zone's
+  // control fault_guard -- is a live per-channel reading straight off this
+  // poll's /api/thermo/faults and /api/profile_exec, so the whole per-channel
+  // card is marked kc-live-value (title excepted: "Channel N" is just the
+  // fixed channel index, not a reading). CJ temp also runs through
+  // kcUnit.fmt for unit parity (UI_PLAN.md item 7).
+  //
+  // Each channel is rendered from whatever state the server reported for
+  // THAT channel alone -- "timeout"/"absent" on one channel never blocks the
+  // others from showing their own state, because GET /api/thermo/faults
+  // already queried them independently (see the handler's doc comment).
+  // thermal_guard_trip_t decode now lives once, in app.js's
+  // window.thermalGuardWords -- see main_page.html's comment at the same
+  // spot for why this one was centralized instead of mirrored like
+  // SAFETY_TRIP_WORDS above. 2026-08-28: this used to be printed as a bare
+  // number (zone.fault_guard straight into the page) -- an undecoded enum,
+  // exactly the offender ROADMAP.md M13 calls out.
+  var thermalGuardWords = window.thermalGuardWords;
+
+  var lastFaults = null, lastExecSt = null;
+  function renderThermoFaults(faultsResp, execSt) {
+    lastFaults = faultsResp; lastExecSt = execSt;
+    var channels = (faultsResp && faultsResp.channels) || [];
+    var zones = (execSt && execSt.zones) || [];
+    var el = document.getElementById('thermoChannels');
+    var scopeNote = document.getElementById('scopeNote');
+    if (scopeNote) {
+      scopeNote.textContent = faultsResp && faultsResp.shown === 'wired_channels'
+        ? 'Showing all ' + channels.length + ' wired MAX31856 channel(s) this board ' +
+          'initializes at boot, not the zones-config thermocouple count (which can ' +
+          'under-report real hardware -- a channel with no zone assigned still shows ' +
+          'here if it is wired).'
+        : '';
+    }
+    if (!channels.length) {
+      el.innerHTML = '<p>No thermocouple channels reporting (bus not attached, or nothing initialized).</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < channels.length; i++) {
+      var c = channels[i];
+      var state = c.state || 'ok'; // 'ok' | 'timeout' | 'absent' | 'spi_failed'
+      var faulted = state === 'ok' && (c.fault_status !== 0);
+      var cardClass = 'chan kc-live-value';
+      var faultsClass = 'faults';
+      var summary;
+      if (state === 'timeout') {
+        cardClass += ' timeout';
+        faultsClass += ' timeout';
+        summary = 'TIMED OUT -- channel did not answer';
+      } else if (state === 'absent') {
+        cardClass += ' absent';
+        faultsClass += ' timeout';
+        summary = 'Not wired / never initialized';
+      } else if (state === 'spi_failed') {
+        cardClass += ' faulted';
+        faultsClass += ' faulted';
+        summary = 'SPI transport failed';
+      } else {
+        cardClass += faulted ? ' faulted' : '';
+        faultsClass += faulted ? ' faulted' : ' ok';
+        summary = faultSummary(c.fault_status);
+      }
+      var zone = null;
+      for (var z = 0; z < zones.length; z++) {
+        if (zones[z].zone === c.channel) { zone = zones[z]; break; }
+      }
+      html += '<div class="' + cardClass + '">' +
+              '<div class="title">Channel ' + c.channel + '</div>' +
+              '<div class="' + faultsClass + '">' + window.kcEscapeHtml(summary) + '</div>';
+      if (state === 'ok' || state === 'spi_failed') {
+        html += '<div class="subrow">FAULT pin: ' + (c.fault_pin ? '<span class="bad">yes</span>' : 'no') +
+                '  &middot;  SPI: ' + (state === 'spi_failed' ? '<span class="bad">FAILED</span>' : 'ok') +
+                '  &middot;  Stale: ' + (c.stale ? '<span class="bad">yes</span>' : 'no') +
+                '  &middot;  CJ: ' + window.kcUnit.fmt(c.cj_c) + '</div>';
+      }
+      html += (zone ? '<div class="subrow">Control fault: ' +
+                     (zone.faulted
+                       ? '<span class="bad">' + window.kcEscapeHtml(thermalGuardWords(zone.fault_guard)) +
+                         ' -- ' + window.kcEscapeHtml(zone.fault_reason || 'no detail reported') + '</span>'
+                       : 'none') +
+                     '</div>' : '') +
+              '</div>';
+    }
+    html += renderSafetyTcCard(faultsResp && faultsResp.safety);
+    el.innerHTML = html;
+  }
+
+  // Safety processor's own MAX31856 (RP2040-side), shown as one more card in
+  // the SAME #thermoChannels grid as the main-board channels above -- 2026-
+  // 09-08 owner request: "safety thermocouple faults should show next to the
+  // others in diagnostics", prompted by a night where the dashboard's cached
+  // safety_temp_c tile (renderStatus() below) read a plausible-looking
+  // temperature while the real safety TC was both open-loop and unreachable
+  // for a raw register read (link down). Reuses faultSummary()/FAULT_BITS
+  // above unchanged -- the safety MAX31856's SR register is bit-for-bit the
+  // same part with the same layout (firmware/SaftyFW/src/max31856.h's
+  // MAX31856_FAULT_* mirrors firmware/KilnFW/App/drivers/hw/MAX31856.h's
+  // MAX31856_MASK_*/MAX31856_FAULT_* exactly), so no second fault-name table
+  // to keep in sync.
+  //
+  // "not_converting" is deliberately NOT split into "chip stopped
+  // converting" vs. "commissioned tc_type failed CR1 readback": SaftyFW's
+  // max31856_tc_type_verified() result and its reconfig-retry gave_up flag
+  // (max31856_reconfig_retry.c) are never transmitted over the link, so both
+  // causes reach this page as the identical wire signature (TEMP_VALID
+  // clear, THERMO_FAULT_* bits all clear) and this label says so honestly
+  // rather than guessing which one it is.
+  function renderSafetyTcCard(s) {
+    if (!s) return '';
+    // 2026-09-08 owner request (this time): show this card next to the other
+    // TC fault cards ONLY when the safety processor has its own SEPARATE
+    // thermocouple -- hide it when the Pico borrows a zone TC
+    // (BORROWED_ZONE / BOTH wiring), same rule main_page.html (694) and
+    // zones_page.html (2311) already apply via the single shared predicate,
+    // window.kcSafetyTcIsSeparate() (app.js), mirroring
+    // safety_tc_is_separate_physical_sensor() (safety_link.h). Link-down
+    // behavior is unchanged: still shown as "LINK DOWN" below, since a dead
+    // link says nothing about which sensor is wired.
+    if (s.state !== 'no_link' && !window.kcSafetyTcIsSeparate({ link_up: true, tc_is_separate_sensor: s.tc_is_separate_sensor })) {
+      return '';
+    }
+    var cardClass = 'chan kc-live-value';
+    var faultsClass = 'faults';
+    var summary;
+    if (s.state === 'no_link') {
+      cardClass += ' timeout';
+      faultsClass += ' timeout';
+      summary = 'LINK DOWN -- no data from the safety processor';
+    } else if (s.state === 'faulted') {
+      cardClass += ' faulted';
+      faultsClass += ' faulted';
+      summary = faultSummary(s.fault_status);
+    } else if (s.state === 'not_converting') {
+      cardClass += ' faulted';
+      faultsClass += ' faulted';
+      summary = 'NOT CONVERTING -- both TC and cold junction unavailable, ' +
+                'zero fault bits (chip not converting, or its commissioned ' +
+                'type failed to verify -- cannot be distinguished with ' +
+                'current link data)';
+    } else {
+      faultsClass += ' ok';
+      summary = faultSummary(s.fault_status);
+    }
+    var html = '<div class="' + cardClass + '">' +
+                '<div class="title">Safety processor TC</div>' +
+                '<div class="' + faultsClass + '">' + window.kcEscapeHtml(summary) + '</div>';
+    if (s.state !== 'no_link') {
+      html += '<div class="subrow">TC: ' + window.kcUnit.fmt(s.tc_c) +
+              '  &middot;  CJ: ' + window.kcUnit.fmt(s.cj_c) +
+              '  &middot;  Link age: ' + s.link_age_ms + ' ms</div>';
+      if (s.not_installed || s.injected) {
+        html += '<div class="subrow">' +
+                (s.not_installed ? '<span class="bad">Declared not installed</span>' : '') +
+                (s.not_installed && s.injected ? '  &middot;  ' : '') +
+                (s.injected ? '<span class="bad">Reading is synthetic (test injection)</span>' : '') +
+                '</div>';
+      }
+    }
+    html += '</div>';
+    return html;
+  }
+
+  var thermoLastGoodAt = null;
+  var thermoFailCount = 0;
+  // The /api/thermo/faults fetch and the /api/profile_exec fetch are two
+  // INDEPENDENT failures, same principle as the per-channel independence
+  // above applied one level up: profile_exec is supplementary (just the
+  // "control fault_guard" subrow), so its failure/timeout must never stop
+  // the channel fault data -- the thing this section exists for -- from
+  // rendering. Only the faults fetch failing counts as a poll failure here.
+  function pollThermoFaults() {
+    var faultsPromise = fetchJsonTimeout('/api/thermo/faults', 4000);
+    var execPromise = fetchJsonTimeout('/api/profile_exec', 4000).catch(function () { return null; });
+    return Promise.all([faultsPromise, execPromise]).then(function (results) {
+      renderThermoFaults(results[0], results[1]);
+      thermoLastGoodAt = Date.now();
+      thermoFailCount = 0;
+    }).catch(function (authErr) {
+      thermoFailCount++;
+      // Requirement: this section must never sit on "Loading" forever. If
+      // this is the very first poll (no prior successful render at all),
+      // fall through to an explicit terminal state instead of leaving the
+      // "Loading..." placeholder from the initial HTML in place -- a
+      // transport failure is exactly as real a terminal result as a
+      // channel-level timeout is, just at a different layer. Once at least
+      // one poll has succeeded, a later failure leaves the last-known
+      // per-channel cards on screen (same "frozen, not live" treatment the
+      // page's own staleBanner gives the rest of this page) rather than
+      // wiping them.
+      if (thermoLastGoodAt == null) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        document.getElementById('thermoChannels').innerHTML =
+          '<p>Could not reach the board (request failed or timed out). Retrying&hellip;</p>';
+      }
+    });
+  }
+  var thermoTimer = null;
+  function scheduleThermoFaults() {
+    if (thermoTimer) clearTimeout(thermoTimer);
+    if (document.visibilityState === 'hidden') return;
+    var delay = 1500 * Math.min(1 + thermoFailCount, 8);
+    thermoTimer = setTimeout(function () { pollThermoFaults(); scheduleThermoFaults(); }, delay);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { pollThermoFaults(); scheduleThermoFaults(); }
+  });
+
+  function poll() {
+    Promise.all([
+      fetch('/api/status').then(function (r) { return r.json(); }),
+      fetch('/api/board_temps').then(function (r) { return r.json(); })
+    ]).then(function (results) {
+      lastStatus = results[0]; lastBoardTemps = results[1];
+      renderStatus(lastStatus);
+      renderBoardTemps(lastBoardTemps);
+      if (dangerActive) { renderDangerThermo(); renderDangerRelays(); }
+      lastGoodAt = Date.now();
+      failCount = 0;
+      setStale(null);
+    }).catch(function (authErr) {
+      failCount++;
+      if (lastGoodAt != null) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        setStale(Math.round((Date.now() - lastGoodAt) / 1000));
+      }
+    });
+  }
+
+  /* Pauses while the tab is hidden and backs off after consecutive failures
+     -- UI_PLAN.md section 4 item 3's shared-poller behavior; this page has
+     its own small poll loop rather than depending on /app.js's shared one
+     existing yet, since that module is landing in this same session's
+     parallel work. */
+  var timer = null;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    if (document.visibilityState === 'hidden') return;
+    var delay = 2000 * Math.min(1 + failCount, 8);
+    timer = setTimeout(function () { poll(); schedule(); }, delay);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { poll(); schedule(); }
+  });
+  poll();
+  schedule();
+  pollCrash();
+  pollWatchdogCfg();
+  pollRampAssist();
+  pollThermoFaults();
+  scheduleThermoFaults();
+  pollPartitions();
+  pollCfgFs();
+  pollDualwriteWindow();
+
+  // UI_PLAN.md item 7: re-render the board-health temperatures and the
+  // thermocouple-fault cards' CJ readings in the new unit immediately on
+  // toggle, from each section's own cached last-good payload.
+  window.addEventListener('kcunitchange', function () {
+    if (lastBoardTemps) renderBoardTemps(lastBoardTemps);
+    if (dangerActive) renderDangerThermo();
+    if (lastFaults) renderThermoFaults(lastFaults, lastExecSt);
+  });
+
+  // --- Danger Zone (danger_mode.h) ------------------------------------
+  // Server is the ONLY source of truth for both "is this active" and "how
+  // much time is left" -- fetched fresh on load and every dangerPoll() tick,
+  // so a page refresh (or a second browser tab) always shows the board's
+  // real state, never a client-side guess that could drift from it or
+  // survive past an exit/timeout that happened elsewhere. Between syncs, the
+  // on-screen countdown just interpolates locally off the last server
+  // answer (dangerDeadlineWallMs, a Date.now()-based local deadline) purely
+  // so the seconds tick smoothly instead of jumping once per poll.
+  var dangerActive = false;
+  var dangerDeadlineWallMs = null;
+
+  function fmtCountdown(ms) {
+    if (ms == null || ms < 0) ms = 0;
+    var totalSec = Math.floor(ms / 1000);
+    var m = Math.floor(totalSec / 60), s = totalSec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function renderDangerThermo() {
+    if (!lastStatus) return;
+    var rows = '';
+    var chans = (lastStatus.thermo_ready ? lastStatus.channels : []) || [];
+    for (var i = 0; i < chans.length; i++) {
+      var c = chans[i];
+      var val = (c.valid && !c.spi_failed) ? window.kcUnit.fmt(c.temp_c) : 'fault';
+      rows += '<div class="row"><span class="label">Channel ' + c.channel + '</span><span class="value">' + val + '</span></div>';
+    }
+    var safetyVal = (lastStatus.safety_temp_c != null) ? window.kcUnit.fmt(lastStatus.safety_temp_c) : 'n/a';
+    rows += '<div class="row"><span class="label">Safety processor thermocouple</span><span class="value">' + safetyVal + '</span></div>';
+    document.getElementById('dangerThermo').innerHTML = rows;
+  }
+
+  function dangerSetRelayBusy(relay, busy) {
+    var btn = document.getElementById('dangerRelayBtn' + relay);
+    if (btn) btn.disabled = busy;
+  }
+
+  function dangerSendRelay(relay, on) {
+    dangerSetRelayBusy(relay, true);
+    fetch('/api/diagnostics/danger/relay', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'relay=' + relay + '&on=' + (on ? '1' : '0'),
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function (result) {
+      if (typeof result.remaining_ms === 'number') {
+        dangerDeadlineWallMs = Date.now() + result.remaining_ms;
+      }
+      poll(); // refresh /api/status so the relay grid reflects the new state
+    }).catch(function (err) {
+      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+        window.kcAlert('Relay command failed: ' + err.message);
+      }
+    }).finally(function () { dangerSetRelayBusy(relay, false); });
+  }
+
+  // Set by dangerRenderStatusFields() (below, from /api/diagnostics/danger's
+  // heat_requested) -- read here so the "Firing mode" tile's initial label
+  // is right even before its own first poll tick. Deliberately NOT driven
+  // from heating_enabled (SAFETY_FLAG_ENABLED) -- that means "SaftyFW's
+  // relay_owner is ARMED / not tripped", true on any healthy Pico
+  // regardless of any request ever sent, not "was this request granted".
+  // Confusing the two was the 2026-08-27 bug: the tile showed ON with K4
+  // open, and every click computed "!already ON" = off, silently sending
+  // the opposite of what it displayed with no way to ever request true.
+  // heat_requested is this module's own ESP-local bookkeeping, so unlike
+  // the safety-link-sourced fields elsewhere on this page it is always
+  // known -- no separate "known" flag needed.
+  var dangerHeatRequested = false;
+  var dangerHeatBusy = false;
+
+  function dangerFiringTileHtml() {
+    // Owner request 2026-08-27: shown as one more tile in the same grid as
+    // the four ESP relays, even though it isn't actually one of them --
+    // this is the operator's explicit SAFETY_CMD_REQUEST_ENABLE toggle
+    // (danger_mode_set_heat_enable_request()), no longer sent automatically
+    // on entry. Labelled "Firing mode" rather than "K4"/"R?" so it reads as
+    // a request, not a direct relay -- SaftyFW's own guards still decide
+    // whether K4 actually closes (see dangerRelayState/dangerHeatState rows
+    // above for what it actually did).
+    var label = dangerHeatRequested ? 'Firing mode: ON' : 'Firing mode: off';
+    return '<button id="dangerFiringBtn" class="' + (dangerHeatRequested ? 'on' : '') + '">' + label + '</button>';
+  }
+
+  function renderDangerFiringTile() {
+    var btn = document.getElementById('dangerFiringBtn');
+    if (!btn) return; // relay grid not rendered yet (no relay board) -- dangerPoll's next tick catches up
+    btn.className = dangerHeatRequested ? 'on' : '';
+    btn.textContent = dangerHeatRequested ? 'Firing mode: ON' : 'Firing mode: off';
+    btn.disabled = dangerHeatBusy;
+  }
+
+  function dangerSendEnable(on) {
+    dangerHeatBusy = true;
+    renderDangerFiringTile();
+    fetch('/api/diagnostics/danger/enable', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'on=' + (on ? '1' : '0'),
+    }).then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+      return r.json();
+    }).then(function (result) {
+      if (typeof result.remaining_ms === 'number') {
+        dangerDeadlineWallMs = Date.now() + result.remaining_ms;
+      }
+      dangerPoll(); // refresh dangerHeatRequested from the board, not an optimistic guess
+    }).catch(function (err) {
+      if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+        window.kcAlert('Firing mode command failed: ' + err.message);
+      }
+    }).finally(function () { dangerHeatBusy = false; renderDangerFiringTile(); });
+  }
+
+  function renderDangerRelays() {
+    if (!lastStatus || !lastStatus.io_ready) {
+      document.getElementById('dangerRelays').innerHTML = '<p style="color:#fff">no relay board attached</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < lastStatus.relays.length; i++) {
+      var r = lastStatus.relays[i];
+      // Display-only R0-3 (owner request 2026-08-27, matches the
+      // thermocouple channels' 0-based numbering) -- element id and the
+      // click handler below both still use r.relay, the real 1-based
+      // number the API expects.
+      html += '<button id="dangerRelayBtn' + r.relay + '" class="' + (r.on ? 'on' : '') + '">' +
+              'R' + (r.relay - 1) + ': ' + (r.on ? 'ON' : 'off') + '</button>';
+    }
+    html += dangerFiringTileHtml();
+    document.getElementById('dangerRelays').innerHTML = html;
+    for (var j = 0; j < lastStatus.relays.length; j++) {
+      (function (r) {
+        document.getElementById('dangerRelayBtn' + r.relay).addEventListener('click', function () {
+          dangerSendRelay(r.relay, !r.on);
+        });
+      })(lastStatus.relays[j]);
+    }
+    document.getElementById('dangerFiringBtn').addEventListener('click', function () {
+      dangerSendEnable(!dangerHeatRequested);
+    });
+  }
+
+  function renderDangerLive(active) {
+    dangerActive = active;
+    document.getElementById('dangerGate').style.display = active ? 'none' : '';
+    document.getElementById('dangerLive').style.display = active ? '' : 'none';
+    if (active) {
+      renderDangerThermo();
+      renderDangerRelays();
+    }
+  }
+
+  function dangerRenderStatusFields(j) {
+    var relayEl = document.getElementById('dangerRelayState');
+    var heatEl = document.getElementById('dangerHeatState');
+    if (j.safety_relay_known) {
+      relayEl.textContent = j.safety_relay_energized ? 'ENERGIZED (closed)' : 'de-energized (open)';
+    } else {
+      relayEl.textContent = 'unknown -- safety link down';
+    }
+    if (j.heating_enabled_known) {
+      // "Safety processor armed (not tripped)" -- SAFETY_FLAG_ENABLED, true
+      // on any healthy Pico regardless of any request ever sent. NOT "was
+      // heat granted" -- that's the dangerFiringTile above (this module's
+      // own heat_requested) plus dangerRelayState (whether K4 actually
+      // closed) together.
+      heatEl.textContent = j.heating_enabled ? 'yes' : 'no';
+    } else {
+      heatEl.textContent = 'unknown -- safety link down';
+    }
+    dangerHeatRequested = !!j.heat_requested;
+    renderDangerFiringTile();
+  }
+
+  function dangerPoll() {
+    return fetch('/api/diagnostics/danger').then(function (r) { return r.json(); }).then(function (j) {
+      renderDangerLive(!!j.active);
+      dangerRenderStatusFields(j);
+      if (j.active && typeof j.remaining_ms === 'number') {
+        dangerDeadlineWallMs = Date.now() + j.remaining_ms;
+      } else if (!j.active) {
+        dangerDeadlineWallMs = null;
+      }
+    }).catch(function () {});
+  }
+
+  document.getElementById('dangerAccept').addEventListener('change', function (e) {
+    document.getElementById('dangerEnterBtn').disabled = !e.target.checked;
+  });
+  document.getElementById('dangerEnterBtn').addEventListener('click', function () {
+    window.kcConfirm(
+        'Enter Danger Mode? This board\'s own gate on its four heater relays turns off -- you will be ' +
+        'able to force any of them on or off directly. Nothing is requested from the safety processor ' +
+        'yet -- use the separate "Firing mode" toggle if you also want it to consider closing the ' +
+        'safety relay; its own guards decide either way. This auto-exits after 5 minutes of no ' +
+        'activity here (heat-enable released if it was requested, gate restored, no reboot). Continue?').then(function (ok) {
+      if (!ok) return;
+      fetch('/api/diagnostics/danger/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'accept=1',
+      }).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+        return r.json();
+      }).then(function () {
+        document.getElementById('dangerAccept').checked = false;
+        document.getElementById('dangerEnterBtn').disabled = true;
+        dangerPoll();
+      }).catch(function (err) {
+        if (!(window.kcIsAuthCancelled && window.kcIsAuthCancelled(err))) {
+          window.kcAlert('Could not enter danger mode: ' + err.message);
+        }
+      });
+    });
+  });
+  document.getElementById('dangerExitBtn').addEventListener('click', function () {
+    fetch('/api/diagnostics/danger/stop', { method: 'POST' }).then(dangerPoll).catch(function () {});
+  });
+
+  // 1s local countdown between server syncs; dangerPoll() below resyncs the
+  // real deadline every 3s, so this can never drift far even across a slow
+  // tab or a missed tick.
+  setInterval(function () {
+    if (!dangerActive || dangerDeadlineWallMs == null) return;
+    document.getElementById('dangerTimer').textContent = fmtCountdown(dangerDeadlineWallMs - Date.now());
+  }, 1000);
+  setInterval(dangerPoll, 3000);
+  dangerPoll(); // authoritative state on load/refresh, before any local countdown runs
+  // A failed mount / a stuck tmp_entries_now count is not something to only
+  // catch on page load -- 10s (slower than dangerPoll's 3s; this state is
+  // far less time-critical) so a mount that fails mid-session still shows
+  // up without a manual refresh.
+  setInterval(pollCfgFs, 10000);
+  // Same slow, non-time-critical cadence as pollCfgFs above -- this state
+  // changes at most once per boot/firing/attestation, never worth polling
+  // faster.
+  setInterval(pollDualwriteWindow, 10000);
+})();
+</script>
+</body>
+</html>

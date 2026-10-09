@@ -1,0 +1,286 @@
+// relay_owner.c -- Phase 5 ("Relay authority"): the INIT/GRACE/ARMED/TRIPPED
+// state machine and latching trip semantics, on top of the Phase 2 task/
+// queue/GPIO6-write skeleton.
+//
+// docs/ARCHITECTURE.md section 3: relay_owner is the ONLY code in the build
+// that writes GPIO6, and it is the highest-priority task in the system so a
+// command to de-energize can never be stuck behind anything else on its core.
+//
+// GRACE-entry judgement call: docs/ARCHITECTURE.md section 5 step 8 says
+// "enter GRACE" right after step 7 ("start tasks"), and main.c's own TODO at
+// steps 8-9 flagged this as unimplemented. Rather than adding a separate
+// "relay_owner_enter_grace()" call for main.c to remember to make -- one
+// more thing that can be wired in the wrong order or simply forgotten --
+// this file starts the GRACE timer as the literal first thing
+// relay_owner_task() does once it runs. Since relay_owner is both (a) the
+// highest-priority task in the system and (b) the first task main.c starts
+// in step 7, "GRACE begins when the task starts running" and "GRACE begins
+// right after step 7" are the same instant in practice, with no window
+// where some other command could be honoured before GRACE is active. See
+// relay_owner.h's header comment for the state summary.
+#include "relay_owner.h"
+
+#include "FreeRTOS.h"
+#include "queue.h"
+#include "task.h"
+
+#include "hal_gpio.h" // HAL Phase 1b -- relay_owner is a hal_gpio client now;
+                       // see docs/HW_ABSTRACTION.md's "hal_gpio" section
+                       // and this file's own comments below for the ordering
+                       // contract (latch-before-direction) this relies on.
+
+#include "board_pins.h"
+#include "relay_grace.h" // pure GRACE-timeout/TRIP-latch decisions, host-tested separately
+#include "task_priorities.h"
+#include "watchdog_task.h"
+
+#define RELAY_OWNER_STACK_WORDS      configMINIMAL_STACK_SIZE
+#define RELAY_OWNER_QUEUE_LEN        4 // small and non-blocking; a backlog here means something is wrong upstream
+// Bounded wait rather than portMAX_DELAY -- relay_owner must still check in
+// with watchdog_task even during a long idle stretch with no commands, or
+// its own liveness proof would depend on someone else calling it, which is
+// exactly backwards for the highest-priority task in the system.
+#define RELAY_OWNER_QUEUE_WAIT_MS    200
+
+// SAFETY_MODEL.md section 2, "startup is not steady state": 60s default.
+// Not yet commissionable (Phase 9, config_store) -- a fixed constant here is
+// the documented default, same status as safety_guards.h's other Phase-9-
+// pending thresholds.
+#define SAFTYFW_STARTUP_GRACE_MS     60000u
+
+typedef enum {
+    RELAY_OWNER_CMD_ENERGIZE,
+    RELAY_OWNER_CMD_TRIP,
+    RELAY_OWNER_CMD_CLEAR_TRIP,
+} relay_owner_cmd_type_t;
+
+typedef struct {
+    relay_owner_cmd_type_t type;
+    bool          energize; // RELAY_OWNER_CMD_ENERGIZE only
+    safety_trip_t reason;   // RELAY_OWNER_CMD_TRIP only
+} relay_owner_cmd_t;
+
+static QueueHandle_t s_cmd_queue = NULL;
+static TaskHandle_t s_task_handle = NULL;
+
+// volatile: written only by relay_owner_task, read from any task (the
+// energize-while-TRIPPED fast-refusal check below, and
+// relay_owner_get_state() for safety_core/telemetry) -- same single-writer/
+// volatile-read pattern discrete_task.c uses for its debounced outputs.
+static volatile relay_owner_state_t s_state = RELAY_OWNER_STATE_INIT;
+// True only while GPIO6 is actually driven high -- see relay_owner_is_
+// energized()'s doc comment. Written only by relay_owner_task, alongside
+// every hal_gpio_set(SAFTYFW_PIN_RELAY, ...) call below so the two can never
+// drift apart.
+static volatile bool s_energized = false;
+
+static void relay_owner_task(void *arg)
+{
+    (void)arg;
+
+    // GRACE begins here -- see this file's header comment for why that is
+    // the chosen entry point rather than a separate call from main.c.
+    s_state = RELAY_OWNER_STATE_GRACE;
+    TickType_t grace_start = xTaskGetTickCount();
+
+    for (;;) {
+        relay_owner_cmd_t cmd;
+        if (xQueueReceive(s_cmd_queue, &cmd, pdMS_TO_TICKS(RELAY_OWNER_QUEUE_WAIT_MS)) == pdTRUE) {
+            switch (cmd.type) {
+            case RELAY_OWNER_CMD_ENERGIZE:
+                if (s_state == RELAY_OWNER_STATE_ARMED) {
+                    // GPIO6 high = energized (docs/HARDWARE.md Pico I/O
+                    // map). This is the single line in the whole build that
+                    // is allowed to do this with a caller-requested "true".
+                    hal_gpio_set(SAFTYFW_PIN_RELAY, cmd.energize);
+                    s_energized = cmd.energize;
+                } else {
+                    // GRACE: command accepted/tracked but never actually
+                    // energizes (ARCHITECTURE.md section 5 step 8).
+                    // TRIPPED: refused entirely -- latched, per
+                    // SAFETY_MODEL.md section 6, "a trip latches ...
+                    // refused while latched". INIT: not reachable here,
+                    // s_state is set to GRACE above before the loop ever
+                    // runs. In every one of these cases GPIO6 must not go
+                    // high, so it is driven/left low explicitly rather than
+                    // relying on cmd.energize being false.
+                    hal_gpio_set(SAFTYFW_PIN_RELAY, false);
+                    s_energized = false;
+                }
+                break;
+
+            case RELAY_OWNER_CMD_TRIP:
+                // SAFETY_MODEL.md section 6, trip semantics step 1:
+                // de-energize first, before anything else. Latching the
+                // state (which is step 2's "reason latched" counterpart on
+                // this side -- safety_core.c latches the reason itself via
+                // boot_reason_latch_trip() immediately after this command
+                // is posted) happens in the same switch case so no other
+                // command can be interleaved between "off" and "latched".
+                hal_gpio_set(SAFTYFW_PIN_RELAY, false);
+                s_energized = false;
+                // Unconditional latch -- see relay_grace.h's doc comment on
+                // relay_trip_transition() for why this is not a bug.
+                s_state = relay_trip_transition(s_state);
+                break;
+
+            case RELAY_OWNER_CMD_CLEAR_TRIP:
+                // TRIPPED -> GRACE-or-ARMED, per the ORIGINAL boot-relative
+                // clock (grace_start, captured once above, never reset by a
+                // trip or a clear) -- see relay_grace.h's doc comment on
+                // relay_clear_trip_transition() for why resuming the
+                // original window (rather than granting a fresh one) is the
+                // deliberate choice here. Any state other than TRIPPED is
+                // returned unchanged by that function, so this is safe to
+                // call even though the caller-side checks in
+                // relay_owner_clear_trip() already gate on TRIPPED too --
+                // same defensive-recheck pattern the ENERGIZE case above
+                // uses against the same caller/task race. The "refused
+                // while the tripping condition still holds" check still
+                // does not belong here -- see relay_owner.h's doc comment
+                // on relay_owner_clear_trip().
+                s_state = relay_clear_trip_transition(
+                    s_state, (uint32_t)(xTaskGetTickCount() - grace_start),
+                    (uint32_t)pdMS_TO_TICKS(SAFTYFW_STARTUP_GRACE_MS));
+                break;
+            }
+        }
+
+        // GRACE -> ARMED, timer-driven, checked every loop iteration
+        // (whether or not a command arrived) so a quiet period with no
+        // commands still lets the timer expire on schedule.
+        s_state = relay_grace_tick(s_state, (uint32_t)(xTaskGetTickCount() - grace_start),
+                                    (uint32_t)pdMS_TO_TICKS(SAFTYFW_STARTUP_GRACE_MS));
+
+        watchdog_task_checkin(WATCHDOG_CHECKIN_RELAY_OWNER);
+    }
+}
+
+bool relay_owner_start(void)
+{
+    // HAL Phase 1b: re-assert the fail-safe default (de-energized) through
+    // the hal_gpio contract before this task's own command loop starts.
+    // main() (boot step 1) already drives GPIO6 low with raw pico-sdk calls
+    // before the scheduler exists, so the pin is already SIO-function,
+    // output-configured and low by the time this runs. We deliberately do
+    // NOT call hal_gpio_init_out() here: on the pico backend that calls
+    // gpio_init() first, which resets the pin to INPUT direction before
+    // re-latching it low+output -- a new sub-microsecond high-Z window on
+    // the relay driver gate that main.c's original put-then-set_dir
+    // sequence never had. A mechanical relay cannot actuate in that
+    // window, but it is a real behavior change from pre-HAL code, not the
+    // no-op this comment used to claim. Using set-then-set_direction
+    // instead re-asserts the same fail-safe state without re-running the
+    // gpio_init() reset, preserving the original glitch-free guarantee
+    // while still giving relay_owner ownership of the init property for
+    // host testing (fake_gpio, test/test_relay_owner_gpio_init.c).
+    // Both calls' hal_status_t results are checked: this is the relay's
+    // fail-safe de-energized latch, not a best-effort convenience, so a
+    // HAL failure here must abort THIS FUNCTION rather than let
+    // relay_owner_task start against a pin that may still be in an unknown
+    // state (e.g. still INPUT, or still HIGH). No console/log facility
+    // exists this early in boot (before the scheduler and console_uart's
+    // own task exist), so there is nothing to log to here.
+    //
+    // What the caller (main.c step 7's SAFTYFW_START_TASK macro) actually
+    // does with a false return is NOT fatal, despite an earlier version of
+    // this comment claiming otherwise: main.c latches every task-start
+    // failure into start_failures and continues starting the rest (same
+    // policy as firmware/KilnFW/App/main.c, documented in
+    // docs/ARCHITECTURE.md section 5, "Only uart_owner failing to
+    // initialise aborts the boot; everything else is logged and stepped
+    // over"). Concretely, if THIS function returns false: relay_owner_task
+    // never starts, so WATCHDOG_CHECKIN_RELAY_OWNER's bit in
+    // s_checkin_mask is never set, watchdog_task_fn() can never see every
+    // task checked in, and the 1 s hardware watchdog reboots the board in
+    // a loop -- with the relay pin left in whatever state the failed
+    // hal_gpio_set()/hal_gpio_set_direction() call above actually reached.
+    // If only the direction call fails, the output latch was already
+    // written LOW by the call above but the pad itself is still an INPUT
+    // (high-Z) -- hal_gpio_set()'s write to the latch does not by itself
+    // make the pin drive anything. Q4's gate (HARDWARE.md's GPIO6 row,
+    // high = energized) is then held LOW not by this pin at all, but by
+    // R65, a 10k pull-down to RelayGND (main schematic, SSD.kicad_sch's
+    // SaftyRelay sub-sheet -- drawn once as R34, instanced per relay
+    // channel; this channel's instance is R65), the same resistor that
+    // holds the gate low through RP2040 reset/boot before GPIO6 is ever
+    // configured at all. (If even the level call fails, the pin never
+    // reaches this function in a state to reason about -- pin range/
+    // direction checks failed before anything was written -- and the same
+    // R65 pull-down is what is holding the gate low regardless.) That
+    // reboot loop is fail-safe by construction (ARCHITECTURE.md section
+    // 4's "Fail-safe by construction" note about watchdog reboots
+    // generally: a hung/failed task can never leave K4 energized because
+    // it can never reach ARMED), not by an explicit halt-with-relay-held-
+    // low path -- there isn't one, and none is needed while R65 is fitted.
+    if (hal_gpio_set(SAFTYFW_PIN_RELAY, false) != HAL_OK) {
+        return false;
+    }
+    if (hal_gpio_set_direction(SAFTYFW_PIN_RELAY, HAL_GPIO_DIR_OUT) != HAL_OK) {
+        return false;
+    }
+
+    s_cmd_queue = xQueueCreate(RELAY_OWNER_QUEUE_LEN, sizeof(relay_owner_cmd_t));
+    if (s_cmd_queue == NULL) {
+        return false;
+    }
+
+    BaseType_t ok = xTaskCreate(relay_owner_task, "relay_owner", RELAY_OWNER_STACK_WORDS, NULL,
+                                 SAFTYFW_PRIO_RELAY_OWNER, &s_task_handle);
+    if (ok != pdPASS) {
+        return false;
+    }
+
+    vTaskCoreAffinitySet(s_task_handle, SAFTYFW_CORE_TRIP_PATH);
+    return true;
+}
+
+bool relay_owner_command_energize(bool energize)
+{
+    if (s_cmd_queue == NULL) {
+        return false;
+    }
+    if (s_state == RELAY_OWNER_STATE_TRIPPED) {
+        // Fast, synchronous refusal -- no point queuing a command
+        // relay_owner_task will refuse anyway (it re-checks state itself
+        // too, since s_state can change between this read and the task
+        // servicing the queue).
+        return false;
+    }
+
+    relay_owner_cmd_t cmd = { .type = RELAY_OWNER_CMD_ENERGIZE, .energize = energize };
+    // 0 ticks to wait: a full queue means relay_owner is not draining it,
+    // which is a bug worth surfacing as a dropped command rather than
+    // blocking the caller (never-block rule, ARCHITECTURE.md section 1).
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+bool relay_owner_command_trip(safety_trip_t reason)
+{
+    if (s_cmd_queue == NULL) {
+        return false;
+    }
+
+    relay_owner_cmd_t cmd = { .type = RELAY_OWNER_CMD_TRIP, .reason = reason };
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+bool relay_owner_clear_trip(void)
+{
+    if (s_cmd_queue == NULL) {
+        return false;
+    }
+
+    relay_owner_cmd_t cmd = { .type = RELAY_OWNER_CMD_CLEAR_TRIP };
+    return xQueueSend(s_cmd_queue, &cmd, 0) == pdTRUE;
+}
+
+relay_owner_state_t relay_owner_get_state(void)
+{
+    return s_state;
+}
+
+bool relay_owner_is_energized(void)
+{
+    return s_energized;
+}

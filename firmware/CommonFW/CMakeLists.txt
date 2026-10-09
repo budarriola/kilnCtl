@@ -1,0 +1,487 @@
+# CommonFW hosts two independent, sibling wire-protocol libraries, each its
+# own CMake target from this one file:
+#
+#   kilnlink   -- the shared link between KilnFW (ESP-IDF) and SaftyFW
+#                 (pico-sdk). See README.md for the freestanding-C11 rules
+#                 every file under src/ and include/ must follow: no
+#                 allocation, no I/O, no globals, every decoder
+#                 bounds-checked. Consumed three ways:
+#                   SaftyFW (pico-sdk):  add_subdirectory(../CommonFW kilnlink)
+#                                        target_link_libraries(SaftyFW PRIVATE kilnlink)
+#                   KilnFW (ESP-IDF):    a thin components/kilnlink/CMakeLists.txt
+#                                        wrapper pointing idf_component_register
+#                                        at this directory
+#                   host tests:          this file, built standalone
+#
+#   benchproto -- a *separate* protocol family for bench/instrument-fixture
+#                 firmwares talking to a PC (first consumer: SimFW's USB CDC
+#                 link, see docs/BENCHPROTO.md and
+#                 firmware/SimFW/docs/DESIGN_NOTES.md sec 4.4/5/12). Same
+#                 freestanding-C11 rules, same "host tests build standalone"
+#                 pattern, deliberately zero shared source with kilnlink --
+#                 see include/benchproto/benchproto_frame.h's file comment
+#                 for why the two are kept apart despite the family
+#                 resemblance.
+#
+# Host tests for both are only built when this file is the top-level CMake
+# project -- an embedded build (pico-sdk/ESP-IDF) pulling either library in
+# via add_subdirectory() gets just the library, not host-only test
+# executables it has no way to run.
+cmake_minimum_required(VERSION 3.16)
+project(kilnlink C)
+
+add_library(kilnlink STATIC
+    src/kilnlink_crc.c
+    src/kilnlink_frame.c
+    src/kilnlink_context.c
+    src/kilnlink_status.c
+    src/kilnlink_power.c
+    src/kilnlink_announce.c
+    src/kilnlink_diag.c
+    src/kilnlink_trip.c
+    src/kilnlink_ceiling.c
+    src/kilnlink_clear_trip.c
+    src/kilnlink_set_config.c
+    src/kilnlink_rollback.c
+    src/kilnlink_get_fw_version.c
+    src/kilnlink_set_clock.c
+    src/kilnlink_announce_reboot.c
+    src/kilnlink_set_ct_cal.c
+    src/kilnlink_get_ct_cal.c
+    src/kilnlink_ct_cal.c
+    src/kilnlink_set_log_level.c
+    src/kilnlink_param_value.c
+    src/kilnlink_set_param.c
+    src/kilnlink_commit_config.c
+    src/kilnlink_commit_config_rejected.c
+    src/kilnlink_apply_config_volatile.c
+    src/kilnlink_inject_tc.c
+    src/kilnlink_get_param.c
+    src/kilnlink_param.c
+    src/kilnlink_get_config_page.c
+    src/kilnlink_config_page.c
+    src/kilnlink_rollback_result.c
+    src/kilnlink_reboot.c
+    src/kilnlink_reboot_result.c
+    src/kilnlink_fw_version.c
+    src/kilnlink_ct_auto_zero_begin.c
+    src/kilnlink_get_ct_auto_zero.c
+    src/kilnlink_ct_auto_zero_status.c
+    src/kilnlink_get_stack_margin.c
+    src/kilnlink_stack_margin.c
+    # Not a wire codec: the pure scanner for the build-identity record every
+    # SaftyFW slot image carries inside itself. It lives here rather than in
+    # either firmware because BOTH sides need it -- SaftyFW to emit the record
+    # (src/update/saftyfw_image_identity_record.c) and KilnFW to find it in a
+    # staged image (App/drivers/net/pico_image_source.c) -- which is exactly
+    # what CommonFW is for. docs/PICO_AUTO_UPDATE_PLAN.md G1/G2.
+    src/saftyfw_image_identity.c
+)
+target_include_directories(kilnlink PUBLIC include)
+set_target_properties(kilnlink PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+if(MSVC)
+    target_compile_options(kilnlink PRIVATE /W4 /WX)
+else()
+    target_compile_options(kilnlink PRIVATE -Wall -Wextra -Werror)
+endif()
+
+add_library(benchproto STATIC
+    src/benchproto_crc.c
+    src/benchproto_frame.c
+    src/benchproto_link.c
+)
+target_include_directories(benchproto PUBLIC include)
+set_target_properties(benchproto PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+
+if(MSVC)
+    target_compile_options(benchproto PRIVATE /W4 /WX)
+else()
+    target_compile_options(benchproto PRIVATE -Wall -Wextra -Werror)
+endif()
+
+# Only build the host test binary when this is the top-level CMake project --
+# an embedded build (pico-sdk/ESP-IDF) pulling kilnlink in via
+# add_subdirectory() gets just the library, not a host-only test executable
+# it has no way to run.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    enable_testing()
+    add_executable(test_frame test/test_frame.c)
+    target_link_libraries(test_frame PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_frame PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_frame PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_frame COMMAND test_frame)
+
+    add_executable(test_fuzz test/test_fuzz.c)
+    target_link_libraries(test_fuzz PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_fuzz PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_fuzz PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_fuzz COMMAND test_fuzz)
+
+    add_executable(test_fuzz_payloads test/test_fuzz_payloads.c)
+    target_link_libraries(test_fuzz_payloads PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_fuzz_payloads PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_fuzz_payloads PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_fuzz_payloads COMMAND test_fuzz_payloads)
+
+    add_executable(test_context test/test_context.c)
+    target_link_libraries(test_context PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_context PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_context PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_context COMMAND test_context)
+
+    add_executable(test_status test/test_status.c)
+    target_link_libraries(test_status PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_status PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_status PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_status COMMAND test_status)
+
+    add_executable(test_power test/test_power.c)
+    target_link_libraries(test_power PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_power PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_power PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_power COMMAND test_power)
+
+    add_executable(test_announce test/test_announce.c)
+    target_link_libraries(test_announce PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_announce PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_announce PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_announce COMMAND test_announce)
+
+    add_executable(test_uart_protocol_delegate test/test_uart_protocol_delegate.c)
+    target_link_libraries(test_uart_protocol_delegate PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_uart_protocol_delegate PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_uart_protocol_delegate PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_uart_protocol_delegate COMMAND test_uart_protocol_delegate)
+
+    add_executable(test_uart_deframer_chunked test/test_uart_deframer_chunked.c)
+    target_link_libraries(test_uart_deframer_chunked PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_uart_deframer_chunked PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_uart_deframer_chunked PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_uart_deframer_chunked COMMAND test_uart_deframer_chunked)
+
+    add_executable(test_diag test/test_diag.c)
+    target_link_libraries(test_diag PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_diag PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_diag PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_diag COMMAND test_diag)
+
+    add_executable(test_trip test/test_trip.c)
+    target_link_libraries(test_trip PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_trip PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_trip PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_trip COMMAND test_trip)
+
+    add_executable(test_ceiling test/test_ceiling.c)
+    target_link_libraries(test_ceiling PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_ceiling PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_ceiling PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_ceiling COMMAND test_ceiling)
+
+    add_executable(test_clear_trip test/test_clear_trip.c)
+    target_link_libraries(test_clear_trip PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_clear_trip PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_clear_trip PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_clear_trip COMMAND test_clear_trip)
+
+    add_executable(test_set_config test/test_set_config.c)
+    target_link_libraries(test_set_config PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_config PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_config PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_config COMMAND test_set_config)
+
+    add_executable(test_get_fw_version test/test_get_fw_version.c)
+    target_link_libraries(test_get_fw_version PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_fw_version PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_fw_version PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_fw_version COMMAND test_get_fw_version)
+
+    add_executable(test_set_clock test/test_set_clock.c)
+    target_link_libraries(test_set_clock PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_clock PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_clock PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_clock COMMAND test_set_clock)
+
+    add_executable(test_rollback test/test_rollback.c)
+    target_link_libraries(test_rollback PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_rollback PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_rollback PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_rollback COMMAND test_rollback)
+
+    add_executable(test_announce_reboot test/test_announce_reboot.c)
+    target_link_libraries(test_announce_reboot PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_announce_reboot PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_announce_reboot PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_announce_reboot COMMAND test_announce_reboot)
+
+    add_executable(test_set_ct_cal test/test_set_ct_cal.c)
+    target_link_libraries(test_set_ct_cal PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_ct_cal PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_ct_cal PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_ct_cal COMMAND test_set_ct_cal)
+
+    add_executable(test_get_ct_cal test/test_get_ct_cal.c)
+    target_link_libraries(test_get_ct_cal PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_ct_cal PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_ct_cal PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_ct_cal COMMAND test_get_ct_cal)
+
+    add_executable(test_ct_auto_zero test/test_ct_auto_zero.c)
+    target_link_libraries(test_ct_auto_zero PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_ct_auto_zero PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_ct_auto_zero PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_ct_auto_zero COMMAND test_ct_auto_zero)
+
+    add_executable(test_ct_cal test/test_ct_cal.c)
+    target_link_libraries(test_ct_cal PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_ct_cal PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_ct_cal PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_ct_cal COMMAND test_ct_cal)
+
+    add_executable(test_set_log_level test/test_set_log_level.c)
+    target_link_libraries(test_set_log_level PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_log_level PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_log_level PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_log_level COMMAND test_set_log_level)
+
+    add_executable(test_param_value test/test_param_value.c)
+    target_link_libraries(test_param_value PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_param_value PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_param_value PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_param_value COMMAND test_param_value)
+
+    add_executable(test_set_param test/test_set_param.c)
+    target_link_libraries(test_set_param PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_set_param PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_set_param PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_set_param COMMAND test_set_param)
+
+    add_executable(test_commit_config test/test_commit_config.c)
+    target_link_libraries(test_commit_config PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_commit_config PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_commit_config PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_commit_config COMMAND test_commit_config)
+
+    add_executable(test_apply_config_volatile test/test_apply_config_volatile.c)
+    target_link_libraries(test_apply_config_volatile PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_apply_config_volatile PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_apply_config_volatile PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_apply_config_volatile COMMAND test_apply_config_volatile)
+
+    add_executable(test_commit_config_rejected test/test_commit_config_rejected.c)
+    target_link_libraries(test_commit_config_rejected PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_commit_config_rejected PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_commit_config_rejected PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_commit_config_rejected COMMAND test_commit_config_rejected)
+
+    add_executable(test_get_param test/test_get_param.c)
+    target_link_libraries(test_get_param PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_param PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_param PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_param COMMAND test_get_param)
+
+    add_executable(test_param test/test_param.c)
+    target_link_libraries(test_param PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_param PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_param PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_param COMMAND test_param)
+
+    add_executable(test_get_config_page test/test_get_config_page.c)
+    target_link_libraries(test_get_config_page PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_config_page PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_config_page PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_config_page COMMAND test_get_config_page)
+
+    add_executable(test_config_page test/test_config_page.c)
+    target_link_libraries(test_config_page PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_config_page PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_config_page PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_config_page COMMAND test_config_page)
+
+    add_executable(test_rollback_result test/test_rollback_result.c)
+    target_link_libraries(test_rollback_result PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_rollback_result PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_rollback_result PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_rollback_result COMMAND test_rollback_result)
+
+    add_executable(test_reboot test/test_reboot.c)
+    target_link_libraries(test_reboot PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_reboot PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_reboot PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_reboot COMMAND test_reboot)
+
+    add_executable(test_reboot_result test/test_reboot_result.c)
+    target_link_libraries(test_reboot_result PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_reboot_result PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_reboot_result PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_reboot_result COMMAND test_reboot_result)
+
+    add_executable(test_get_stack_margin test/test_get_stack_margin.c)
+    target_link_libraries(test_get_stack_margin PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_get_stack_margin PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_get_stack_margin PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_get_stack_margin COMMAND test_get_stack_margin)
+
+    add_executable(test_stack_margin test/test_stack_margin.c)
+    target_link_libraries(test_stack_margin PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_stack_margin PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_stack_margin PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_stack_margin COMMAND test_stack_margin)
+
+    add_executable(test_inject_tc test/test_inject_tc.c)
+    target_link_libraries(test_inject_tc PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_inject_tc PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_inject_tc PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_inject_tc COMMAND test_inject_tc)
+
+    add_executable(test_fw_version test/test_fw_version.c)
+    target_link_libraries(test_fw_version PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_fw_version PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_fw_version PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_fw_version COMMAND test_fw_version)
+
+    add_executable(test_saftyfw_image_identity test/test_saftyfw_image_identity.c)
+    target_link_libraries(test_saftyfw_image_identity PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_saftyfw_image_identity PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_saftyfw_image_identity PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_saftyfw_image_identity COMMAND test_saftyfw_image_identity)
+
+    # -- benchproto host tests (independent of everything above) --------------
+    add_executable(test_benchproto_frame test/test_benchproto_frame.c)
+    target_link_libraries(test_benchproto_frame PRIVATE benchproto)
+    if(MSVC)
+        target_compile_options(test_benchproto_frame PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_benchproto_frame PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_benchproto_frame COMMAND test_benchproto_frame)
+
+    add_executable(test_benchproto_link test/test_benchproto_link.c)
+    target_link_libraries(test_benchproto_link PRIVATE benchproto)
+    if(MSVC)
+        target_compile_options(test_benchproto_link PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_benchproto_link PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_benchproto_link COMMAND test_benchproto_link)
+endif()

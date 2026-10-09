@@ -1,0 +1,84 @@
+A/B compare: A=logs/coupling/ab_old_1.jsonl  B=logs/coupling/ab_new_1.jsonl
+NOISE FLOOR: measured (tools/PcTools/config_presets/noise_floor.json, see noise_floor.py / PID_EXPANSION_PLAN.md SS3.3). A per-(zone, metric, segment) difference smaller than its measured floor is reported INDISTINGUISHABLE below, not PROVISIONAL -- it is not attributable to whatever this A/B comparison is testing. A key with no floor entry (never covered by the repeat campaign) still falls back to PROVISIONAL.
+START-TEMP UNIT NOTE: the per-zone deltas below (and the 1.5C confound gate) use each zone's own first-valid actual_c. noise_floor.py's separate 'like-for-like' check (a DIFFERENT threshold, LIKE_FOR_LIKE_THRESHOLD_C=1.0C) uses a DIFFERENT quantity too -- the mean across ALL status channels from the raw capture. Neither the threshold nor the quantity are interchangeable between the two checks; do not read a pass/fail on one as a pass/fail on the other.
+
+zone 0: start_temp A=22.85C B=24.51C delta=1.66C  *** EXCEEDS 1.5C CONFOUND THRESHOLD ***
+zone 1: start_temp A=22.79C B=24.42C delta=1.63C  *** EXCEEDS 1.5C CONFOUND THRESHOLD ***
+zone 2: start_temp A=22.80C B=24.16C delta=1.36C
+
+MULTIPLICITY: 16 keys evaluated, 5 DISTINGUISHABLE, no correction applied to the per-key verdicts below.
+  per-key false-positive rate of the range floor (Monte Carlo): n=6: 12.0%
+  expected spurious DISTINGUISHABLE keys by chance alone: 1.91
+  P(>=1 spurious DISTINGUISHABLE), independence assumed (overstated): 87.0%
+  P(>=1 spurious DISTINGUISHABLE), effective family size 10-15 (correlation-adjusted): 72.0%-85.2%
+  no consistent same-metric/same-direction pattern found -- treat any lone DISTINGUISHABLE key with caution
+  16 (zone, metric, segment) keys evaluated, no multiplicity correction applied to the raw per-key verdicts above. The range floor's own per-key false-positive rate is NOT 5% -- it depends on n (see per_n_alpha) and is roughly 12% at n=6. A SINGLE DISTINGUISHABLE key in a report this size is close to the expected outcome under pure chance -- read it as PROVISIONAL AT BEST, not a finding. prob_at_least_one_independent assumes every key is an independent test and OVERSTATES the true risk (keys share zones, segments, and underlying physics); prob_at_least_one_effective_low/high use the review's estimated effective family size of 10-15 independent tests instead -- still approximate, since the correlation structure between keys is not itself measured. The one pattern treated as potentially actionable here: the SAME metric DISTINGUISHABLE in the SAME direction across >= 3 zones/segments -- see consistent_patterns.
+
+metric floor reliability (per-metric spread of the measured floor across zones/segments):
+  dwell_entry_overshoot_peak_c   floor 0.110-0.720C (ratio 6.5x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+  dwell_entry_time_to_peak_s     floor 11.000-52.000C (ratio 4.7x) -> reliable
+  dwell_steady_state_offset_c    floor 0.060-0.840C (ratio 14.0x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+  iae_normalized_c               floor 0.066-0.285C (ratio 4.3x) -> reliable
+  iae_normalized_whole_c         floor 0.077-0.147C (ratio 1.9x) -> reliable
+  ramp_mean_error_c              floor 0.094-0.514C (ratio 5.5x) -> reliable
+  ramp_worst_error_c             floor 0.230-0.590C (ratio 2.6x) -> reliable
+  settle_time_s                  floor 11.000-168.000C (ratio 15.3x) -> UNSTABLE -- treat distinguishability calls for this metric with caution
+
+
+  z0 whole-run  iae_normalized_whole_c         A=  +1.842 B=  +1.053  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+      start-temp sensitivity (n=6, slope=-0.0094C/C, r=-0.13100053409283877): raw_delta=-0.789 predicted_from_start_delta=-0.016 residual=-0.774 -- residual is the part of the delta the fitted start-temp sensitivity does NOT explain; this does not change the verdict above
+      (OLS fit, n=6 points, over the observed start-temp range 27.09-29.08C only. n this small means the slope's own precision is not established -- read it as a rough magnitude, not a calibrated per-degree correction.)
+  z0 seg0       iae_normalized_c               A=  +1.342 B=  +1.103  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg1       iae_normalized_c               A=  +2.460 B=  +0.998  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg2       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z0 seg0       ramp_mean_error_c              A=  +1.227 B=  -1.575  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg1       ramp_mean_error_c              A=  +1.950 B=  -0.176  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg0       ramp_worst_error_c             A=  +2.890 B=  +2.510  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg1       ramp_worst_error_c             A=  +4.560 B=  +2.640  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg0       dwell_entry_overshoot_peak_c   A=  +1.840 B=  +0.710  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg1       dwell_entry_overshoot_peak_c   A=  +4.110 B=  +2.210  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg0       dwell_entry_time_to_peak_s     A=  +0.000 B= +94.000  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg1       dwell_entry_time_to_peak_s     A= +89.000 B= +94.000  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg0       dwell_steady_state_offset_c    A=  +0.852 B=  -0.291  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg1       dwell_steady_state_offset_c    A=  +2.304 B=  +0.649  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg2       dwell_steady_state_offset_c    A=  +1.500 B=  -0.480  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg0       settle_time_s                  A=+246.000 B=+308.000  REFUSED: zone 0 start-temp delta 1.7C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z0 seg1       settle_time_s                  A=     n/a B=+188.000  n/a: missing data
+  z1 whole-run  iae_normalized_whole_c         A=  +1.276 B=  +0.573  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+      start-temp sensitivity (n=6, slope=+0.0189C/C, r=0.3941191921442112): raw_delta=-0.703 predicted_from_start_delta=+0.031 residual=-0.734 -- residual is the part of the delta the fitted start-temp sensitivity does NOT explain; this does not change the verdict above
+      (OLS fit, n=6 points, over the observed start-temp range 27.14-28.99C only. n this small means the slope's own precision is not established -- read it as a rough magnitude, not a calibrated per-degree correction.)
+  z1 seg0       iae_normalized_c               A=  +1.327 B=  +0.501  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg1       iae_normalized_c               A=  +1.221 B=  +0.659  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg2       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z1 seg0       ramp_mean_error_c              A=  +0.941 B=  -0.477  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg1       ramp_mean_error_c              A=  +0.628 B=  -0.414  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg0       ramp_worst_error_c             A=  +1.890 B=  +1.950  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg1       ramp_worst_error_c             A=  +2.370 B=  +1.640  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg0       dwell_entry_overshoot_peak_c   A=  +2.110 B=  +1.360  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg1       dwell_entry_overshoot_peak_c   A=  +2.070 B=  +1.530  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg0       dwell_entry_time_to_peak_s     A= +73.000 B= +89.000  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg1       dwell_entry_time_to_peak_s     A=+109.000 B=+141.000  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg0       dwell_steady_state_offset_c    A=  +1.224 B=  +0.489  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg1       dwell_steady_state_offset_c    A=  +1.105 B=  +0.400  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg2       dwell_steady_state_offset_c    A=  +0.620 B=  +0.180  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg0       settle_time_s                  A=+267.000 B=+141.000  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z1 seg1       settle_time_s                  A=+245.000 B=+198.000  REFUSED: zone 1 start-temp delta 1.6C exceeds the 1.5C confound threshold -- cannot attribute this difference to fuzzy strength
+  z2 whole-run  iae_normalized_whole_c         A=  +0.920 B=  +0.851  INDISTINGUISHABLE: |delta|=0.069 is below the measured noise floor 0.147 for this (zone, metric, segment) -- not attributable to whatever is being compared
+      start-temp sensitivity (n=6, slope=-0.1333C/C, r=-0.6786296748151316): raw_delta=-0.069 predicted_from_start_delta=-0.181 residual=+0.112 -- residual is the part of the delta the fitted start-temp sensitivity does NOT explain; this does not change the verdict above
+      (OLS fit, n=6 points, over the observed start-temp range 28.01-28.79C only. n this small means the slope's own precision is not established -- read it as a rough magnitude, not a calibrated per-degree correction.)
+  z2 seg0       iae_normalized_c               A=  +0.984 B=  +0.913  INDISTINGUISHABLE: |delta|=0.071 is below the measured noise floor 0.285 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       iae_normalized_c               A=  +0.850 B=  +0.781  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.069 exceeds measured floor 0.067 -- not a confirmed result)
+  z2 seg2       iae_normalized_c               A=    +nan B=    +nan  n/a: missing data
+  z2 seg0       ramp_mean_error_c              A=  +0.620 B=  +0.373  INDISTINGUISHABLE: |delta|=0.247 is below the measured noise floor 0.364 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       ramp_mean_error_c              A=  +0.077 B=  -0.206  PROVISIONAL: A lower-magnitude (DISTINGUISHABLE: |delta|=0.283 exceeds measured floor 0.110 -- not a confirmed result)
+  z2 seg0       ramp_worst_error_c             A=  +1.430 B=  +1.750  INDISTINGUISHABLE: |delta|=0.320 is below the measured noise floor 0.590 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       ramp_worst_error_c             A=  +1.600 B=  +1.670  INDISTINGUISHABLE: |delta|=0.070 is below the measured noise floor 0.230 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg0       dwell_entry_overshoot_peak_c   A=  +1.940 B=  +2.070  INDISTINGUISHABLE: |delta|=0.130 is below the measured noise floor 0.190 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       dwell_entry_overshoot_peak_c   A=  +1.510 B=  +1.740  PROVISIONAL: A lower-magnitude (DISTINGUISHABLE: |delta|=0.230 exceeds measured floor 0.210 -- not a confirmed result)
+  z2 seg0       dwell_entry_time_to_peak_s     A= +73.000 B= +67.000  INDISTINGUISHABLE: |delta|=6.000 is below the measured noise floor 11.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       dwell_entry_time_to_peak_s     A=+172.000 B=+151.000  PROVISIONAL: B lower (DISTINGUISHABLE: |delta|=21.000 exceeds measured floor 16.000 -- not a confirmed result)
+  z2 seg0       dwell_steady_state_offset_c    A=  +1.075 B=  +0.967  INDISTINGUISHABLE: |delta|=0.108 is below the measured noise floor 0.143 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       dwell_steady_state_offset_c    A=  +0.756 B=  +0.678  PROVISIONAL: B lower-magnitude (DISTINGUISHABLE: |delta|=0.078 exceeds measured floor 0.060 -- not a confirmed result)
+  z2 seg2       dwell_steady_state_offset_c    A=  +0.520 B=  +0.550  INDISTINGUISHABLE: |delta|=0.030 is below the measured noise floor 0.270 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg0       settle_time_s                  A=+215.000 B=+198.000  INDISTINGUISHABLE: |delta|=17.000 is below the measured noise floor 32.000 for this (zone, metric, segment) -- not attributable to whatever is being compared
+  z2 seg1       settle_time_s                  A=+240.000 B=+235.000  INDISTINGUISHABLE: |delta|=5.000 is below the measured noise floor 11.000 for this (zone, metric, segment) -- not attributable to whatever is being compared

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KilnFW Recovery</title>
+<style>
+body{font:15px system-ui,sans-serif;max-width:640px;margin:0 auto;padding:12px;background:#1b1b1b;color:#e8e8e8}
+h1{font-size:20px}h2{font-size:16px;margin:0 0 8px}
+fieldset{border:1px solid #555;border-radius:6px;margin:12px 0;padding:10px}
+input,button{font:inherit;margin:3px 0;max-width:100%}
+button{padding:6px 12px}
+pre{background:#000;padding:8px;overflow:auto;font-size:12px;max-height:240px;white-space:pre-wrap}
+progress{width:100%}
+.w{color:#f90}
+</style></head><body>
+<h1>KilnFW Recovery</h1>
+<p class="w">The main application is not running. Upload a KilnCtrl.bin to restore it.</p>
+<fieldset><h2>Status</h2><pre id="st">loading...</pre>
+<button onclick="status()">Refresh</button></fieldset>
+<fieldset><h2>Upload ESP application</h2>
+<input id="f" type="file" accept=".bin"><br>
+<button id="up" onclick="upload()">Upload and boot</button>
+<progress id="pr" value="0" max="100"></progress><div id="pp"></div></fieldset>
+<fieldset id="apl"><h2>Apply staged update</h2>
+<div>Applies an image already uploaded and verified in the application's update stage. The board re-checks it, copies it over the application, verifies the copy, then restarts into it. The recovery image itself is never changed.</div>
+<pre id="ast">loading...</pre>
+<button id="abtn" onclick="applyStaged()">Apply staged update</button>
+<progress id="apr" value="0" max="100"></progress><div id="apw" class="w"></div></fieldset>
+<fieldset id="pico"><h2>Upload Pico firmware</h2>
+<div>Choose SaftyFW_slotA.bin or SaftyFW_slotB.bin. The board buffers the image, checks it, then writes it to the safety processor over its UART (a few minutes).</div>
+<input id="pf" type="file" accept=".bin"><br>
+<label>Target slot <select id="ps"><option value="">auto</option><option value="A">A</option><option value="B">B</option></select></label>
+<div>Auto reads the slot from the running Pico application. If the Pico is in its bootloader, the target slot is read from the bootloader's status trailer when it sends one. Only an older bootloader that does not report it leaves the target unverified: then you must choose A or B (the slot that is not the one the Pico last booted), and the transfer will say "target unverified". A wrong choice leaves the Pico unbootable until it is reprogrammed over SWD.</div>
+<button id="pup" onclick="picoUpload()">Upload to Pico</button>
+<button id="pab" onclick="picoAbort()">Abort</button>
+<progress id="ppr" value="0" max="100"></progress><div id="ppp"></div>
+<div id="pst"></div><div id="pwarn" class="w"></div></fieldset>
+<fieldset><h2>Actions</h2>
+<button onclick="act('/api/recovery/exit','Exit recovery and boot the application?')">Exit Recovery</button>
+<button onclick="act('/api/recovery/wifi_reset','Forget the saved home Wi-Fi network and restart?')">Wi-Fi Reset</button></fieldset>
+<pre id="log"></pre>
+<script>
+/*CRC-BEGIN*/
+function crc32(d){var c=-1,i,j;for(i=0;i<d.length;i++){c^=d[i];for(j=0;j<8;j++)c=c>>>1^-(c&1)&0xEDB88320}return(~c)>>>0}
+/*CRC-END*/
+var $=function(i){return document.getElementById(i)};
+function log(s){$("log").textContent+=s+"\n"}
+function xhr(m,u,h,body,prog){return new Promise(function(ok,no){
+var x=new XMLHttpRequest();x.open(m,u);
+for(var k in h)x.setRequestHeader(k,h[k]);
+if(prog)x.upload.onprogress=function(e){if(e.lengthComputable)prog(e.loaded,e.total)};
+x.onload=function(){ok({s:x.status,t:x.responseText})};
+x.onerror=function(){no(new Error("network error (board may have rejected the upload or restarted)"))};
+x.send(body)})}
+function status(){xhr("GET","/api/recovery/status").then(function(r){
+try{var j=JSON.parse(r.t);$("st").textContent=(j.nvs_unavailable?"NVS UNAVAILABLE (never erased by recovery; config unreadable, Wi-Fi settings not loaded)\n":"")+JSON.stringify(j,null,1)}catch(e){$("st").textContent=r.t}
+},function(e){$("st").textContent=e.message})}
+function post(path,body,prog){return xhr("POST",path,{},body,prog)}
+function done(r){log(r.s+" "+r.t);if(r.s==200)log("The board is restarting; reload this page in a few seconds.")}
+function act(path,q){if(!confirm(q))return;
+post(path,null).then(done,function(e){log(e.message)})}
+function upload(){var f=$("f").files[0];
+if(!f)return log("choose a .bin file first");
+$("up").disabled=true;$("pr").value=0;
+post("/api/ota/esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
+var pt=null,punk=false;
+function pshow(j){punk=j.phase=="outcome_unknown";var ab=document.getElementById("pab");if(ab)ab.textContent=(j.phase=="finishing"||j.phase=="retransmit")?"Stop (END sent: outcome will be UNKNOWN)":"Abort";var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
+if(j.total_bytes)t+=" "+j.bytes_sent+"/"+j.total_bytes+" bytes";
+if(j.gap_count)t+=", "+j.gap_count+" gaps (round "+j.gap_rounds+")";
+if(j.target_slot!="unknown")t+=", target slot "+j.target_slot+(j.target_source=="operator"?" (TARGET UNVERIFIED: chosen by you)":" ["+j.target_source+"]");
+$("pst").textContent=t;
+if(j.total_bytes)$("ppr").value=100*j.bytes_sent/j.total_bytes;
+var w=[];if(j.refusal)w.push("Refused: "+j.refusal+".");
+if(j.error&&j.error!=j.refusal)w.push(j.error+".");
+if(j.message)w.push(j.message);
+if(punk)w.push("OUTCOME UNKNOWN: the Pico may or may not have taken the new image. Power-cycle the board and check the Pico version BEFORE doing anything else. Do NOT retry blindly.");
+else if(j.power_cycle&&j.phase!="done")w.push("Power-cycle the board before retrying (recovery cannot clear a safety trip).");
+$("pwarn").textContent=w.join(" ")}
+function ppoll(){if(pt)clearTimeout(pt);pt=null;
+xhr("GET","/api/recovery/pico/status").then(function(r){var j=JSON.parse(r.t);pshow(j);
+if(j.busy){pt=setTimeout(ppoll,1000)}else{$("pup").disabled=false}},
+function(e){$("pst").textContent=e.message;pt=setTimeout(ppoll,2000)})}
+function picoUpload(){var f=$("pf").files[0];
+if(!f)return log("choose a Pico .bin file first");
+if(punk&&!confirm("The last Pico transfer's outcome is UNKNOWN. Power-cycle the board and check the Pico version first. Retry anyway?"))return;
+$("pup").disabled=true;$("ppr").value=0;$("pwarn").textContent="";
+f.arrayBuffer().then(function(ab){var b=new Uint8Array(ab);
+var c=("0000000"+crc32(b).toString(16)).slice(-8);
+var q="?crc="+c;var s=$("ps").value;if(s){if(!confirm("Write Pico slot "+s+"? The target cannot be verified. A wrong choice leaves the Pico unbootable until SWD."))return Promise.reject(new Error("cancelled"));q+="&slot="+s}
+log("Pico image "+b.length+" bytes, CRC32 "+c);
+return post("/api/recovery/pico/upload"+q,b,function(a,t){$("ppr").value=100*a/t;$("ppp").textContent="uploading "+a+" / "+t+" bytes"})})
+.then(function(r){log(r.s+" "+r.t);
+if(r.s==202){$("ppp").textContent="uploaded; Pico transfer running";ppoll()}
+else{$("pwarn").textContent=r.t;$("pup").disabled=false}},
+function(e){log(e.message);$("pup").disabled=false})}
+function picoAbort(){post("/api/recovery/pico/abort",null).then(function(r){log(r.s+" "+r.t);ppoll()},function(e){log(e.message)})}
+var at=null;
+function ashow(j){var s=j.staged,t="";
+if(s)t="staged: "+s.state+", "+(s.semver||"no version")+", commit "+(s.commit||"unknown")+"\nsha256 "+s.sha256+"\n"+s.length+" bytes, source "+s.source;
+else t="nothing installable staged (stage header: "+j.stage_header+")";
+t+="\napply: "+j.phase+(j.phase=="failed"?" ("+j.result+")":"");
+var busy=j.phase=="checking"||j.phase=="copying"||j.phase=="verifying"||j.phase=="finalizing";
+if(j.total_bytes)t+=" "+j.done_bytes+"/"+j.total_bytes+" bytes";
+$("ast").textContent=t;
+if(j.total_bytes)$("apr").value=100*j.done_bytes/j.total_bytes;
+var w="";
+if(j.phase=="failed")w="Apply failed: "+j.result+"."+(j.app_modified?" The application slot was modified; do not exit recovery until a good image is applied or uploaded.":" The application slot was not modified.");
+if(j.phase=="done")w="Applied. The board is restarting into the new image; reload this page in a few seconds.";
+$("apw").textContent=w;
+$("abtn").disabled=busy||!(s&&s.state=="verified");
+return busy}
+function apoll(){if(at)clearTimeout(at);at=null;
+xhr("GET","/api/recovery/apply_status").then(function(r){var b=false;
+try{b=ashow(JSON.parse(r.t))}catch(e){$("ast").textContent=r.t}
+at=setTimeout(apoll,b?1000:5000)},
+function(e){$("apw").textContent="status unavailable ("+e.message+"). The board may be restarting after the apply; reload in a few seconds.";at=setTimeout(apoll,2000)})}
+function applyStaged(){
+if(!confirm("Overwrite the application with the staged image and restart? An interrupted apply is safe: the board returns to this recovery image."))return;
+$("abtn").disabled=true;$("apw").textContent="";
+post("/api/recovery/apply_staged",null).then(function(r){log(r.s+" "+r.t);
+if(r.s==409)$("apw").textContent="Not started: "+r.t;
+else if(r.s!=202)$("apw").textContent="Refused: "+r.t;
+apoll()},function(e){log(e.message);apoll()})}
+status();ppoll();apoll();
+</script></body></html>

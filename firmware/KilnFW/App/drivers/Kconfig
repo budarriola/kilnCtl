@@ -1,0 +1,1152 @@
+menu "KilnCtrl Hardware Configuration"
+
+    menu "I2C Bus (SX1509 I/O expander)"
+        config KILNCTL_I2C_SDA_IO
+            int "I2C SDA GPIO"
+            default 8
+            range 0 48
+
+        config KILNCTL_I2C_SCL_IO
+            int "I2C SCL GPIO"
+            default 9
+            range 0 48
+    endmenu
+
+    menu "SPI Bus (MAX31856 x3 + ILI9488 display)"
+        choice KILNCTL_SPI_HOST_CHOICE
+            prompt "SPI host peripheral"
+            default KILNCTL_SPI_HOST_SPI2
+
+        config KILNCTL_SPI_HOST_SPI2
+            bool "SPI2"
+        config KILNCTL_SPI_HOST_SPI3
+            bool "SPI3"
+        endchoice
+
+        # Hazard for whoever flips the host away from the default: SPI2 has
+        # 6 hardware CS lines (soc_caps.h SOC_SPI_PERIPH_CS_NUM(1) == 6),
+        # comfortably more than this bus's 4 devices (display + 3x MAX31856).
+        # SPI3 has only 3 (SOC_SPI_PERIPH_CS_NUM(2) == 3) -- one short of the
+        # 4 devices here. KILNCTL_SPI_HARDWARE_CS (below) hands each device's
+        # real GPIO to spics_io_num, which only works if the host has enough
+        # hardware CS slots for all of them; on SPI3 the 4th device would
+        # have no hardware CS to claim. DISPLAY_ST7796_PLAN.md Sec.9's "Facts
+        # established" table assumes SPI2 throughout -- do not enable
+        # KILNCTL_SPI_HARDWARE_CS on SPI3 without re-deriving that.
+
+        config KILNCTL_SPI_SCLK_IO
+            int "SPI SCLK GPIO"
+            default 12
+            range 0 48
+
+        config KILNCTL_SPI_MOSI_IO
+            int "SPI MOSI GPIO"
+            default 11
+            range 0 48
+
+        config KILNCTL_SPI_MISO_IO
+            int "SPI MISO GPIO"
+            default 13
+            range 0 48
+
+        config KILNCTL_SPI_DMA_USE_PSRAM
+            bool "Set SPI_TRANS_DMA_USE_PSRAM on display flush transactions"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.3. LVGL's two draw buffers live in
+                PSRAM (lvgl_port.c). Today every flush transaction handed to
+                spi_device_transmit() (esp_spi_owner.c's non-polling path,
+                display flushes only -- thermocouple transfers use
+                spi_device_polling_transmit() and are unaffected either way)
+                lets the driver bounce-copy through an internal-DRAM buffer
+                because it cannot assume the source survives a cache flush.
+                Setting this flag tells the driver the PSRAM source is safe
+                to DMA from directly, which the plan's own §10 accounting
+                calls "permitted and actively good" because it REMOVES a
+                per-transaction internal-DRAM bounce buffer rather than
+                costing one -- internal DRAM is the tight resource on this
+                board (§10: ~1.6 kB headroom above the policy floor).
+
+                Off by default: not yet flash-verified. What could go wrong
+                if enabled: the ESP-IDF driver call site must check
+                ESP_ERR_INVALID_ARG / a failed SPI_TRANS_DMA_TX_FAIL
+                completion after enabling this, since a PSRAM buffer that
+                fails an implicit alignment/cache-writeback requirement the
+                driver did not have to satisfy before now surfaces as a
+                transfer error the display flush path must handle instead of
+                silently corrupting the panel. Confirming it works: compare
+                the 9.1 flush-duration measurement (§4) with this on vs off
+                on the bench, between profiles with nothing energized --
+                enabling this should shorten flush time (no bounce copy) and
+                must not raise the internal-DRAM trough recorded in
+                dram_margin.h (it should fall, since a bounce buffer is
+                being removed).
+
+        config KILNCTL_SPI_HARDWARE_CS
+            bool "Drive display and thermocouple ~CS from spics_io_num, not spi_owner"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.4. Today every device on this bus
+                (ILI9488/ST7796 display, three MAX31856 channels) is added
+                with spics_io_num = -1 and esp_spi_owner.c's spi_owner_task()
+                bit-bangs the matching GPIO around each transfer by hand.
+                With this on, each device's real ~CS GPIO (display GPIO21;
+                thermo GPIO14/17/18, KILNCTL_THERMO_CSn_IO above) is instead
+                handed to the SPI peripheral itself via spics_io_num, which
+                asserts/deasserts it with correct setup/hold timing relative
+                to SCLK automatically; the driver-level bit-banging is
+                skipped for that device (esp_spi_owner.c only drives
+                request.cs_pin when it is >= 0 -- callers built under this
+                option pass -1 instead of the real GPIO number, the same
+                sentinel spi_owner_transfer() already treats as "hardware
+                handles it").
+
+                What could go wrong if enabled: this changes WHO toggles a
+                pin shared with three live MAX31856 channels while heaters
+                are energized. A CS pin double-driven (bit-banged AND
+                claimed by the peripheral) or a device left on the old path
+                while another on this bus moved to the new one would be a
+                bus-arbitration bug on the same wire the closed-loop control
+                reads its temperatures from -- this is exactly the risk this
+                pass declines to enable blind. Confirming it works: with
+                nothing energized, verify RDDID / MAX31856 register reads
+                still return the expected identity bytes with this on, then
+                take a fresh 9.1 flush-duration measurement (hardware CS
+                removes a per-transaction GPIO round trip, so flush time
+                should not regress) before ever enabling it on a board with
+                elements connected.
+
+                SPI host hazard: this bus has 4 devices (display + 3x
+                MAX31856). SPI2 (the default above) has 6 hardware CS lines,
+                room to spare. SPI3 has only 3 -- do not enable this option
+                if KILNCTL_SPI_HOST_SPI3 is selected; the 4th device has
+                nowhere to go.
+
+        config KILNCTL_SPI_ASYNC_FLUSH
+            bool "Let the display flush hand off to the SPI owner without blocking the caller"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.6. Today spi_owner_transfer()
+                blocks its caller (the LVGL flush callback) until the owner
+                task finishes the whole SPI transfer -- the double LVGL draw
+                buffer therefore buys nothing, since the task that would fill
+                the other buffer is the same one sitting blocked.
+
+                With this on, esp_spi_owner.c's new spi_owner_transfer_async()
+                is allowed to enqueue a request and return immediately; the
+                owner task still issues every transfer -- sync or async,
+                display or thermocouple -- strictly one at a time in queue
+                order (the single-owner/no-interleaving invariant in section
+                8 is unaffected), and fires the caller's completion callback
+                itself once the transfer finishes, from its own task thread
+                (never an ISR). This is deliberately NOT ESP-IDF's
+                spi_device_queue_trans()/get_trans_result() plus a hardware
+                completion interrupt -- see spi_owner_transfer_async()'s own
+                comment in esp_spi_owner.c for exactly what is and is not
+                implemented, and why the fuller ISR-driven design cannot be
+                host-tested off-target the way this flag's plumbing was.
+
+                Off by default: with this false, spi_owner_transfer_async()
+                returns ESP_ERR_NOT_SUPPORTED without touching the queue, and
+                no caller in today's tree calls it -- lvgl_port.c's flush
+                path still calls spi_owner_transfer() exactly as before.
+                Written and host-tested for the flag plumbing only (like
+                9.3/9.4); NOT flash-verified -- confirming it works needs the
+                same bench sequence 9.3/9.4 call for: nothing energized, a
+                fresh 9.1 flush-duration measurement, and confirmation the
+                MAX31856 channels still answer correctly with a display flush
+                in flight, since this is new control flow on the exact bus
+                arbitration DISPLAY_ST7796_PLAN.md section 13 flags as the
+                standing async risk.
+
+        config KILNCTL_DISPLAY_ZERO_COPY_FLUSH
+            bool "Skip the display driver's scratch-buffer copy on a 16bpp panel"
+            default n
+            help
+                DISPLAY_ST7796_PLAN.md 9.7. On the ST7796 (COLMOD 0x55,
+                bytes_per_pixel == 2) the wire's RGB565 bytes already ARE the
+                panel's RAMWR byte stream -- panel_spi.c's blit path already
+                skips the per-pixel conversion loop for this panel (a
+                memcpy() into the driver's DMA scratch buffer stands in for
+                it), but that memcpy is itself unnecessary: the source bytes
+                (BLIT_DATA's UART payload, or on a real zero-copy caller
+                LVGL's own draw buffer) can be handed to spi_owner_transfer()
+                directly.
+
+                With this on and only on a panel descriptor with
+                bytes_per_pixel == 2, the driver DMAs straight out of the
+                caller-supplied buffer, chunked the same as always, with no
+                scratch copy. Costs nothing extra in RAM (it REMOVES the
+                scratch copy step); does not remove the scratch buffer's
+                allocation itself, since the ILI9488 (bytes_per_pixel == 3,
+                the only panel that has ever run on this board) still needs
+                it for the RGB565->RGB666 widening and this option never
+                touches that path.
+
+                Off by default, and inert on the ILI9488 regardless of this
+                setting (it is gated on bytes_per_pixel == 2, which only the
+                never-yet-bench-verified ST7796 descriptor sets). NOT
+                flash-verified -- there is no working ST7796 bring-up yet
+                (see the plan doc's STOP block) for a zero-copy flush to be
+                measured against; this option exists so the code path is
+                ready the moment there is.
+    endmenu
+
+    menu "MAX31856 Thermocouple Channels (via J6)"
+        config KILNCTL_THERMO_CS0_IO
+            int "Channel 0 ~CS GPIO"
+            default 14
+            range 0 48
+
+        config KILNCTL_THERMO_CS1_IO
+            int "Channel 1 ~CS GPIO"
+            default 17
+            range 0 48
+
+        config KILNCTL_THERMO_CS2_IO
+            int "Channel 2 ~CS GPIO"
+            default 18
+            range 0 48
+
+        config KILNCTL_THERMO_FAULT0_IO
+            int "Channel 0 ~FAULT GPIO"
+            default 38
+            range 0 48
+
+        config KILNCTL_THERMO_FAULT1_IO
+            int "Channel 1 ~FAULT GPIO"
+            default 47
+            range 0 48
+
+        config KILNCTL_THERMO_FAULT2_IO
+            int "Channel 2 ~FAULT GPIO"
+            default 48
+            range 0 48
+
+        config KILNCTL_THERMO_SPI_CLOCK_HZ
+            int "MAX31856 SPI clock (Hz)"
+            default 4000000
+            range 100000 4000000
+            help
+                4 MHz is a CEILING, not just a default -- the range above
+                will not let you raise it, and MAX31856.c repeats the limit
+                as a _Static_assert in case sdkconfig is hand-edited.
+
+                The part itself is rated to 5 MHz, so the cap is not the
+                silicon. It is the SimFW bench fixture: its PIO/DMA MAX31856
+                slave emulation must present the first response byte before
+                the master's MISO sample point, which is one SCLK period
+                minus setup -- about 250 ns at 4 MHz, tightening to about
+                200 ns at 5 MHz. The implemented DMA-fed path takes about
+                150-215 ns at the RP2040's stock 125 MHz sysclk. That has
+                margin at 4 MHz and largely none at 5 MHz. See
+                firmware/SimFW/docs/SPI_ACCESS_AUDIT.md section 9 for the
+                derivation.
+
+                Missing that deadline does not look like a fault. The whole
+                burst shifts by one byte position and returns plausible
+                temperatures that are wrong, which is why this is enforced
+                rather than merely commented.
+
+                This does not constrain the ILI9488, which is a separate
+                device on the same bus with its own clock
+                (KILNCTL_DISPLAY_SPI_CLOCK_HZ) and is unaffected by this cap.
+
+                The signals also cross a ribbon cable to the daughterboard,
+                so back this off further if reads come back corrupted.
+
+        config KILNCTL_THERMO_DEFAULT_AUTO_CONVERT
+            bool "Start channels in automatic conversion mode"
+            default y
+            help
+                Automatic mode converts continuously (~100 ms with one
+                sample averaged) and asserts ~DRDY each time. With this off
+                the channels come up idle and each reading needs an explicit
+                one-shot.
+    endmenu
+
+    menu "SX1509 I/O Expander (relays + digital I/O + display control)"
+        config KILNCTL_SX1509_I2C_ADDR
+            hex "SX1509 I2C address"
+            default 0x3E
+            help
+                ADDR1/ADDR0 both strapped to GND on this board, giving 0x3E.
+                The part also answers at 0x3F/0x70/0x71 when strapped
+                differently; the running firmware can be re-targeted from the
+                PC without reflashing.
+
+        config KILNCTL_SX1509_IRQ_IO
+            int "SX1509 ~INT GPIO"
+            default 7
+            range 0 48
+
+        config KILNCTL_SX1509_RESET_IO
+            int "SX1509 ~RESET GPIO"
+            default 10
+            range 0 48
+
+        config KILNCTL_SX1509_RELAYS_OFF_ON_LINK_LOSS
+            bool "Drop all relays when the PC link goes away"
+            default y
+            help
+                A kiln element left on by a crashed or unplugged controller
+                is the failure this exists to prevent. Turn it off only for
+                bench work where the board is expected to run unattached.
+
+        config KILNCTL_PC_LINK_LOSS_ASSERTS_FAULT
+            bool "Assert the isolated fault line when the PC link goes away"
+            default n
+            help
+                Whether losing the PC control link also asserts the isolated
+                fault line to the safety processor, which trips it.
+
+                Off by default, deliberately. The PC link is a debug and
+                control channel for the MCP tooling, not something the kiln
+                needs in order to run: this board has its own LCD and web UI
+                and is expected to fire without a host attached. With this on,
+                a board sitting on the bench with nothing plugged into it
+                asserts the fault line five seconds after boot, trips the
+                safety processor with S6a, and stays tripped -- the trip
+                latches, so it survives the link coming back. That is what a
+                standalone board did before this option existed, and it made
+                the panel show a permanent fault for no hazard.
+
+                Turn it on for a setup where the PC genuinely is the operator
+                interface and its absence really does mean the kiln is
+                unattended. The relay drop above is a separate switch and is
+                still on by default either way.
+    endmenu
+
+    menu "ILI9488 Display (BIGTREETECH TFT35 SPI V2.1, J2)"
+        choice KILNCTL_DISPLAY_PANEL
+            prompt "Panel driven by panel_spi.c"
+            default KILNCTL_DISPLAY_PANEL_ST7796
+            help
+                2026-09-04: the bench board's J2 now physically carries the
+                LCDWIKI/Elecrow MSP4031 (ST7796S + FT6336U) in place of the
+                BIGTREETECH TFT35 (ILI9488) -- the default follows the
+                physically attached hardware. Which INIT SEQUENCE this
+                choice selects is independent of KILNCTL_TOUCH_FT6336U below
+                (which controls the touch driver) -- see that symbol's help
+                for why they were split into two choices this same day.
+
+                2026-09-04 postscript, after the ST7796 path was actually
+                debugged rather than abandoned: colors initially looked
+                wrong on this real module under EVERY MADCTL bit combination
+                tried, which briefly (and wrongly) pointed at "the ILI9488
+                sequence just suits this glass better". The real bug was
+                unrelated to the panel choice or MADCTL at all --
+                panel_codec_rgb565_passthrough() and panel_spi.c's ST7796
+                fast path were sending RGB565 pixels in the CPU's native
+                little-endian byte order instead of the MIPI-DCS wire's
+                MSB-first order (now fixed, see that function's comment) --
+                plus one missing INVON (st7796_panel.c). With both fixed,
+                ST7796 (COLMOD 0x55, real RGB565, two-thirds the bytes of
+                ILI9488's RGB666 widening) is the correct, working choice
+                for this hardware, camera-verified (DISPLAY_ST7796_PLAN.md
+                2026-09-04 entries have every capture).
+
+                DISPLAY_ST7796_PLAN.md Sec.6 Step 3 / Sec.12 Phase 4: the
+                detection MECHANISM (panel_detect.c) exists, but its ID
+                table is still EMPTY -- Sec.4's bench-recorded RDDID bytes
+                for either panel, on this wiring, do not exist yet, so
+                "auto" cannot yet distinguish the two panels and is not the
+                default. See the TODO block above panel_detect_choose() in
+                panel_detect.h for exactly which measurement that is.
+
+                "auto" probes RDDID (0x04) and corroborates with the I2C
+                touch address, then falls back to whichever of ILI9488/
+                ST7796 is selected below it in this same choice if nothing
+                matches -- which, with an empty ID table, is EVERY boot
+                today. A kiln controller with a blank screen is worse than
+                one with a wrong gamma table, so that fallback is loud
+                (WARN, naming the bytes actually read) rather than silent.
+                Until the bench measurements land, "auto" and the explicit
+                default behave identically except for the extra probe reads
+                and log line -- there is no reason to select it yet, and it
+                is not the default.
+
+            config KILNCTL_DISPLAY_PANEL_ILI9488
+                bool "ILI9488 (BIGTREETECH TFT35 SPI V2.1)"
+
+            config KILNCTL_DISPLAY_PANEL_ST7796
+                bool "ST7796 (LCDWIKI/Elecrow MSP4031) -- UNTESTED, see STOP block"
+
+            config KILNCTL_DISPLAY_PANEL_AUTO
+                bool "auto -- probe RDDID + touch address, empty ID table today (see help)"
+        endchoice
+
+        config KILNCTL_DISPLAY_CS_IO
+            int "Display ~CS GPIO"
+            default 21
+            range 0 48
+
+        config KILNCTL_DISPLAY_SPI_CLOCK_HZ
+            int "Display SPI clock (Hz)"
+            default 20000000
+
+        config KILNCTL_DISPLAY_WIDTH
+            int "Display width (pixels, unrotated)"
+            default 320
+
+        config KILNCTL_DISPLAY_HEIGHT
+            int "Display height (pixels, unrotated)"
+            default 480
+
+        config KILNCTL_DISPLAY_SWAP_DC_RESET
+            bool "Take the schematic's LCD_IORQ/LCD_Reset naming literally"
+            default n
+            help
+                The main board calls J2 pin 1 LCD_IORQ and pin 4 LCD_Reset,
+                but every available pinout for the BIGTREETECH TFT35 SPI
+                module says pin 1 is the touch controller's interrupt and
+                pin 4 is RS (data/command), with no panel reset brought out.
+                Off (the default) follows the module: data/command on
+                expander IO15 (J2 pin 4). Turn this on to use the
+                schematic's naming instead: data/command on IO14 (pin 1).
+                If the panel shows nothing but its ID reads back correctly,
+                this is the first thing to flip.
+
+        config KILNCTL_DISPLAY_ROTATION
+            int "Startup rotation (0-3)"
+            default 1
+            range 0 3
+            help
+                0/2 are portrait 320x480, 1/3 landscape 480x320.
+
+        config KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
+            bool "Drive D/C and ~RESET from ESP32 GPIOs directly (bench wiring)"
+            default n
+            help
+                Bench-wiring override for bring-up when the SX1509 expander
+                isn't available or isn't trusted yet: instead of D/C and
+                ~RESET going through the expander (IO14/IO15, the normal main
+                board wiring -- see KILNCTL_DISPLAY_SWAP_DC_RESET), drive them
+                from two bare ESP32 GPIOs, same as ~CS already is. With this
+                on, the display no longer needs the expander at all -- it will
+                come up even if the SX1509 is dead or unwired, unlike the
+                normal (off) wiring where the expander is required just to
+                send a single command. Off (the default) matches the main
+                board as designed. All other display connections (SPI,
+                ~CS, power) are unaffected either way.
+
+        config KILNCTL_DISPLAY_DC_GPIO
+            int "D/C GPIO (direct-wired bench mode)"
+            default 0
+            range 0 48
+            depends on KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
+
+        config KILNCTL_DISPLAY_RESET_GPIO
+            int "~RESET GPIO (direct-wired bench mode)"
+            default 1
+            range 0 48
+            depends on KILNCTL_DISPLAY_DC_RESET_DIRECT_GPIO
+    endmenu
+
+    menu "Backlight PWM (flying-wire bodge, DISPLAY_ST7796_PLAN.md 3.4.1)"
+        config KILNCTL_BACKLIGHT_PWM_ENABLE
+            bool "Drive the panel backlight via LEDC PWM"
+            default y
+            help
+                DISPLAY_ST7796_PLAN.md 3.4.1: neither panel this board has
+                ever run (ILI9488 or the anticipated ST7796/MSP4031 module)
+                has a backlight control line reaching the main board -- the
+                module's backlight pin (module pin 8) is left open, so the
+                backlight is permanently on and screen_idle.c can only ever
+                paint the frame black, never actually dim anything
+                (screen_idle.h/.c explain why at length). The plan's fix is
+                an 11th flying wire from a spare ESP32 GPIO (15 or 16
+                preferred) straight to that pin, through the module's own
+                3.3V push-pull / 10k-pulled-up MOSFET gate.
+
+                That wire IS fitted on this bench unit -- GPIO15, confirmed
+                with a meter (be02d34's commit message) -- which is why this
+                option now defaults to y, with duty following
+                display_power_cfg's brightness_percent (see that header's
+                BRIGHTNESS note). A DIFFERENT board that does NOT have the
+                wire soldered must override this off in its own local
+                sdkconfig, and leave it off until KILNCTL_BACKLIGHT_GPIO
+                below is set to whichever pin its own wire actually lands
+                on -- leaving the y default on such a board drives LEDC PWM
+                onto whatever KILNCTL_BACKLIGHT_GPIO points at even though
+                nothing is wired there. With this off, backlight_pwm.c's
+                init/start calls are no-ops that return
+                ESP_ERR_NOT_SUPPORTED and never touch a GPIO or the LEDC
+                peripheral -- a board with this overridden off is
+                bit-for-bit unaffected by this option existing.
+
+                When on, backlight_pwm.c polls screen_idle_get_state() (the
+                same screen_on flag TOUCH_CMD_GET_STATE already reports) and
+                drives LEDC duty to KILNCTL_BACKLIGHT_ON_PERCENT while the
+                screen is on, KILNCTL_BACKLIGHT_IDLE_PERCENT once
+                CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS has elapsed with no
+                touch -- the timeout that Kconfig help text has said "closes
+                to a real blank" was still waiting on this option since
+                2026-08-18. A touch (real or MCP-injected) waking the screen
+                restores ON-percent on the very next poll, same edge
+                screen_idle_mark_active() already reacts to.
+
+                Not flash-verified -- there is no flying wire on the bench
+                board to drive (same posture as 9.3/9.4/9.6/9.7 in
+                DISPLAY_ST7796_PLAN.md: written and host-tested ahead of the
+                hardware, not bench-confirmed).
+
+        config KILNCTL_BACKLIGHT_GPIO
+            int "Backlight PWM GPIO (flying wire target)"
+            default 15
+            range 0 48
+            depends on KILNCTL_BACKLIGHT_PWM_ENABLE
+            help
+                Where the flying wire from 3.4.1 actually lands.
+                GPIO15 is now VERIFIED free, not a guess: U4 pad 8 reads
+                unconnected-(U4-GPIO15...-Pad8) in kiln.kicad_pcb's
+                pad-to-net map, it is not a strapping pin (0/3/45/46) and
+                not one of the octal-PSRAM pins (35-37), and J6 carries no
+                GPIO15 at all -- which is why this must be a flying wire to
+                the DevKitC header rather than a J2 harness circuit. Checked
+                2026-09-03; see docs/MSP4031_WIRING.md, "Why GPIO15 is the
+                backlight pin", for the full pad-by-pad derivation.
+                GPIO16 (pad 9) is free by the same check and is the
+                fallback if GPIO15 is awkward to reach.
+
+        config KILNCTL_BACKLIGHT_ON_PERCENT
+            int "Backlight duty while the screen is on (%)"
+            default 100
+            range 1 100
+            depends on KILNCTL_BACKLIGHT_PWM_ENABLE
+
+        config KILNCTL_BACKLIGHT_IDLE_PERCENT
+            int "Backlight duty after the idle timeout (%, 0 = fully off)"
+            default 0
+            range 0 100
+            depends on KILNCTL_BACKLIGHT_PWM_ENABLE
+            help
+                Applied once CONFIG_KILNCTL_TOUCH_IDLE_TIMEOUT_MS has
+                elapsed with no real or injected touch. 0 is a genuine
+                backlight-off, unlike screen_idle.c's paint-it-black
+                fallback -- the actual point of fitting the flying wire.
+    endmenu
+
+    menu "Touch controller selection (independent of the display panel choice)"
+        config KILNCTL_TOUCH_FT6336U
+            bool "Touch controller is the FT6336U (MSP4031), not the NS2009 (TFT35)"
+            default y
+            help
+                2026-09-04: split off KILNCTL_DISPLAY_PANEL on purpose,
+                same day, mid color-regression bisect on this board. The
+                two used to be one choice (ST7796 selected -> FT6336U
+                touch, anything else -> NS2009) until the bisect needed the
+                ILI9488 init table (pixels) running against the real
+                ST7796/MSP4031 hardware while FT6336U stayed the only touch
+                chip actually wired up -- panel driver and touch controller
+                are independent facts about this board's firmware
+                configuration, not one fact with two names.
+
+                Defaults to y because FT6336U is the physical chip on this
+                board's actual J2 hardware regardless of which panel init
+                table is driving the glass -- main.c's touch bring-up reads
+                THIS symbol, not KILNCTL_DISPLAY_PANEL, precisely so that
+                bringing up the display and touch controller can be
+                debugged/bisected independently, which is exactly what this
+                split let this session's own color bug get isolated and
+                fixed (a byte-order bug in panel_codec.c/panel_spi.c, not a
+                panel-choice problem -- see KILNCTL_DISPLAY_PANEL's own help
+                for the postscript, and DISPLAY_ST7796_PLAN.md's 2026-09-04
+                entries for the full bisect log with camera captures).
+
+                On: main.c constructs an FT6336UClass and builds its
+                touch_dev_t from FT6336U_touch_dev_read() (self_calibrating
+                = true) plus the KILNCTL_TOUCH_CAP_* swap/invert knobs
+                below. Off (only correct on the BIGTREETECH TFT35 board):
+                constructs an NS2009Class instead, self_calibrating = false,
+                KILNCTL_TOUCH_CAL_* knobs.
+    endmenu
+
+    menu "NS2009 Touch Controller (on the TFT35 SPI panel, J2)"
+        config KILNCTL_TOUCH_IDLE_TIMEOUT_MS
+            int "Screen auto-blank timeout (ms, 0 = disabled)"
+            default 0
+            range 0 3600000
+            help
+                How long the panel goes with no touch -- real, from the
+                NS2009, or synthetic, injected over the UART bridge's
+                TOUCH_CMD_INJECT -- before screen_idle_task paints the frame
+                solid black (ILI9488_clear). This board has no backlight
+                control line, so that -- not ILI9488_set_power(false), which
+                blanks to a bright WHITE page on this panel -- is the closest
+                to "dark" firmware can manage; the backlight itself stays
+                lit. Saving the panel's useful life is still the point. A
+                touch of either kind wakes it again immediately (screen_on
+                goes back to true; repainting real content is the PC/
+                dashboard's job, same as any other redraw).
+
+                Set to 0 to disable auto-blank entirely -- the screen simply
+                stays on (2026-08-18: made the default per user request).
+                screen_idle_task still polls the touch controller and still
+                services injected touches harmlessly when disabled; it just
+                never blanks. Touch activity tracking (TOUCH_CMD_GET_STATE's
+                idle_ms) keeps working either way.
+
+        config KILNCTL_TOUCH_Z1_MAX_THRESHOLD
+            int "Touch pressure threshold (raw NS2009 Z1 ADC counts, 0-4095)"
+            default 200
+            range 0 4095
+            help
+                NS2009_read treats a Z1 reading above this as "pressed".
+                The NS2009 datasheet's typical application (and this
+                driver's original assumption) has a touch drive Z1 *low*,
+                with an untouched panel floating near full scale -- that
+                does NOT hold on this board revision. Bench testing
+                2026-08-19 (device log, NS2009's raw_x/raw_y/z1 diagnostic)
+                found the opposite: Z1 floats at 0-30 with nothing touching
+                the panel, and a real firm press drove it to 1047 -- either
+                a wiring difference (see the SDA/SCL-swap question in
+                docs/HARDWARE.md) or this panel's Z1 behaves differently in
+                the "short driver, auto power-down" mode this driver uses.
+                The 200 default sits well above the observed idle-noise
+                ceiling (30) and well below the one observed real press
+                (1047), with margin on both sides since only one bench
+                sample of a real press exists so far. If touches are missed
+                or the panel reports phantom presses with nothing touching
+                it, this is the first thing to tune, the same way
+                KILNCTL_DISPLAY_SWAP_DC_RESET is the first thing to flip for
+                a blank panel.
+    endmenu
+
+    menu "LVGL Touchscreen UI (TODO.md section 10)"
+        config KILNCTL_LVGL_BUF_ROWS
+            int "LVGL draw buffer height (panel rows)"
+            default 40
+            range 4 480
+            help
+                Each of LVGL's two draw buffers is this many rows tall (at
+                the panel's current rotated width) x 2 bytes/pixel (RGB565),
+                allocated in PSRAM (see TODO.md 9.1a's 2026-08-17 reversal).
+                Smaller means more, smaller flush calls (finer partial
+                redraws, more SPI transaction overhead); larger means fewer,
+                bigger flushes. 40 rows at 480px wide is 2 x 38.4 KB -- a
+                rounding error against 8 MB of PSRAM, so raise this freely if
+                flush overhead ever shows up as sluggish.
+
+        config KILNCTL_TOUCH_CAL_SWAP_XY
+            bool "Touch: swap raw X/Y axes before mapping to pixels"
+            default n
+            help
+                Resistive touch panels have no fixed relationship between
+                their raw X/Y axes and the panel's rotated pixel axes -- it
+                depends on how the film is oriented under the glass, which is
+                not documented for this module. Like
+                KILNCTL_DISPLAY_SWAP_DC_RESET and KILNCTL_TOUCH_Z1_MAX_THRESHOLD,
+                this is a bench-calibration knob, not a datasheet value: if
+                touches land rotated 90 degrees from where they should,
+                this is the first thing to flip.
+
+        config KILNCTL_TOUCH_CAL_INVERT_X
+            bool "Touch: invert raw X axis"
+            default n
+
+        config KILNCTL_TOUCH_CAL_INVERT_Y
+            bool "Touch: invert raw Y axis"
+            default n
+
+        config KILNCTL_TOUCH_CAP_SWAP_XY
+            bool "Capacitive touch (FT6336U): swap raw X/Y axes before mapping to pixels"
+            default y if KILNCTL_DISPLAY_PANEL_ST7796
+            default n
+            help
+                Separate from KILNCTL_TOUCH_CAL_SWAP_XY above on purpose: the
+                FT6336U (MSP4031) reports coordinates already in panel space
+                (touch_dev.h's self_calibrating=true path,
+                touch_dev_map_uncalibrated()), and its raw axis convention
+                relative to this panel's mounting has nothing to do with the
+                NS2009's ADC wiring on the other board -- reusing one knob for
+                both would detune whichever controller was tuned second.
+
+                Default derived from arithmetic, not yet confirmed by a real
+                finger (2026-09-04): the vendor's own reference driver for
+                this exact module (Datasheets/..._Keep/Demo_ESP32/
+                FT6336-arduino/FT6336.cpp, readPoint()) reports raw X/Y in
+                the touch panel's NATIVE (unrotated, 320x480 portrait)
+                frame and always swaps the axes for any 90-degree-class
+                rotation (its ROTATION_LEFT/ROTATION_RIGHT cases both swap;
+                only ROTATION_NORMAL/INVERTED, 0/180 degrees, pass X/Y
+                straight through). This board's KILNCTL_DISPLAY_ROTATION is
+                1 (a 90-degree-class landscape rotation, panel_spi.c), so
+                swap_xy=y is the arithmetically-motivated starting point --
+                not the default-off "untried combination" an earlier
+                revision of this help text described (that revision's claim
+                that swap=true "landed touches in the wrong place" predates
+                any of this session's other fixes and was never confirmed
+                against a real physical press; treat it as unverified, not
+                as evidence against this default). INVERT_X/INVERT_Y below
+                still need a real bench pass to pick the sign for whichever
+                physical mounting direction this module was wired in
+                (LEFT vs RIGHT in the vendor's own terms) -- verify with all
+                four corners plus center once a finger is available; a
+                single point can look correct by coincidence on a symmetric
+                layout.
+
+        config KILNCTL_TOUCH_CAP_INVERT_X
+            bool "Capacitive touch (FT6336U): invert raw X axis"
+            default n if KILNCTL_DISPLAY_PANEL_ST7796
+            default n
+
+        config KILNCTL_TOUCH_CAP_INVERT_Y
+            bool "Capacitive touch (FT6336U): invert raw Y axis"
+            default y if KILNCTL_DISPLAY_PANEL_ST7796
+            default n
+            help
+                Like every other panel-specific knob in this menu, the
+                capacitive touch orientation belongs to the DISPLAY TYPE, not
+                to the board -- the film's orientation under the glass is a
+                property of the module. Each default above is therefore
+                written "default <v> if KILNCTL_DISPLAY_PANEL_<panel>", so
+                selecting a panel selects its touch orientation with it and a
+                future second panel gets its own line rather than silently
+                inheriting this one's.
+
+                ST7796 (LCDWIKI/Elecrow MSP4031, FT6336U), confirmed by a real
+                finger on the glass 2026-09-04: swap_xy=y, invert_x=n,
+                invert_y=y. Before invert_y was set, pressing the BOTTOM-right
+                corner activated the menu button drawn at the TOP-right corner
+                -- X landed correctly, Y was mirrored. touch_dev.c's
+                touch_dev_map_uncalibrated() derives out_py from ay (the
+                post-swap axis) through invert_y, which is why the vertical
+                mirror is this knob and not invert_x.
+
+                Verify all four corners plus centre after changing any of
+                these -- a single point can look correct by coincidence on a
+                symmetric layout.
+
+    endmenu
+
+    menu "Safety Processor Link (opto-isolated UART to the RP2040)"
+        config KILNCTL_SAFETY_TX_IO
+            int "Safety UART TX GPIO"
+            default 5
+            range 0 48
+            help
+                Drives U2's optocoupler LED through R12 (390R) via net
+                DataToSafty, whose collector is the Pico's RX (GP5, PicoRx).
+
+        config KILNCTL_SAFETY_RX_IO
+            int "Safety UART RX GPIO"
+            default 4
+            range 0 48
+            help
+                U3's collector, net DataFromSafty (the Pico's TX, GP4,
+                drives U3's LED through R7). R15 (1k to 3.3V_Main) is fitted
+                externally on this net; the internal pull-up is belt-and-braces.
+
+        config KILNCTL_SAFETY_FAULT_IO
+            int "Isolated fault line GPIO (output)"
+            default 6
+            range 0 48
+            help
+                Output, not input: driving it high lights U1's LED and pulls
+                the safety processor's mainFault input low.
+
+        config KILNCTL_SAFETY_BAUD_RATE
+            int "Safety link baud rate"
+            default 230400
+            help
+                Must stay equal to SaftyFW's UART_OWNER_BAUD_RATE
+                (src/tasks/uart_owner.c) AND to the bootloader's recovery-mode
+                uart_init (bootloader/main.c) -- all three hardcode it, there
+                is no negotiation. A mismatch does not degrade, it produces
+                framing errors and nothing else.
+
+                HISTORY, because the old number here was widely quoted and is
+                now wrong. Until 2026-08-25 this was 9600, and that ceiling
+                was a property of the TCMT1109 optocouplers, not of either
+                firmware. Measured 2026-08-23 across the opto pair:
+
+                  115200 -- zero frames received, ever
+                   57600 -- zero frames received, ever
+                   38400 -- about 80% received (53 of 66), errors climbing
+                   19200 -- clean over a short window, but over a longer one
+                            received lagged sent (107 of 118, then 117 of
+                            134): about 10% of frames still lost
+                    9600 -- received tracks sent one for one over minutes
+
+                Those optocouplers were replaced on 2026-08-25 by a single
+                ADuM1201WT digital isolator (U6, hardware/mainBoard/
+                SaftyProcessor.kicad_sch), which is non-inverting, has one
+                unidirectional channel per direction, and is rated far past
+                anything this UART needs. The inversions both firmwares used
+                to apply to cancel the optos' own inversion were removed in
+                the same change -- see safety_link.c's comment at
+                uart_owner_init, and uart_owner.c's at uart_owner_init.
+
+                MEASURED SWEEP RESULTS, against U6, 60 seconds continuous per
+                rate, both sides rebuilt and reflashed for each rate. A rate
+                passes only if NONE of these four counters gain a single count
+                during the window -- crc/framing errors, length mismatch, crc
+                mismatch, resync -- AND status replies keep answering the
+                500 ms poll. `timeouts` and `config_page` are deliberately
+                excluded from the verdict: both are dominated by the separate
+                open safety_cfg_store_refetch defect (page 0 failed /
+                ESP_ERR_TIMEOUT), which climbs identically at every baud rate
+                and would fail all of them for a reason that has nothing to
+                do with baud.
+
+                  921600 -- PASS. 0 new crc/framing, 0 length mismatch,
+                            0 crc mismatch, 0 resync. Status +124 in 62 s
+                            (2.00/s).
+                  460800 -- PASS. 0 new crc/framing, 0 length mismatch,
+                            0 crc mismatch, 0 resync. Status +123 in 62 s
+                            (2.00/s).
+                  230400 -- PASS. 0 new crc/framing, 0 length mismatch,
+                            0 crc mismatch, 0 resync. Status +124 in 62 s
+                            (2.01/s).
+
+                Negative control, proving the test can fail: ESP at 230400
+                against a Pico deliberately left at 115200 failed in 3 s,
+                crc/framing errors rising 941 -> 1062 (+121) and length
+                mismatch 58 -> 69.
+
+                CHOSEN VALUE: 230400, i.e. this default. Rule used: the
+                fastest passing rate was 921600; one standard step down from
+                that is 460800; the chosen value is the slower of that step
+                and the requested 230400 -- so 230400, two full standard
+                steps below a rate that soaks clean.
+
+                Two methodology traps this sweep ran into, worth remembering
+                if it is ever re-run:
+
+                1. `sent` and `received` (from GET_LINK_STATS) are NOT a loss
+                   metric and must never be compared to each other. `sent`
+                   counts outbound requests of several kinds; `received`
+                   counts status replies only, and equals the histogram's
+                   `status` count exactly. Comparing them shows ~50% "loss"
+                   at every rate, including a deliberately mismatched pair --
+                   that is the metric being wrong, not the link.
+                2. Flashing resets the Pico while the ESP keeps running, and
+                   that reset throws a genuine burst of framing errors (plus
+                   `break condition on uart1` / `frame length mismatch` log
+                   lines). The measurement window must start after a settle
+                   delay following any flash, or every rate fails on reset
+                   residue rather than its own behavior -- an earlier sweep
+                   attempt misread exactly this residue as a 921600 failure;
+                   921600 in fact passes cleanly once measured past the
+                   reset.
+
+                Do not raise this above 921600 (the fastest rate measured to
+                pass) without re-running the sweep.
+
+                Still true, and still the trap that hid the opto ceiling for
+                weeks: static GPIO high/low tests pass at ANY baud rate,
+                because both an optocoupler and a digital isolator carry a DC
+                level perfectly. A verified-by-GPIO-test wire proves nothing
+                about the rate it can carry.
+
+        config KILNCTL_SAFETY_POLL_PERIOD_MS
+            int "Safety processor poll period (ms)"
+            default 500
+            range 0 60000
+            help
+                How often the firmware asks the safety processor for its
+                status. 0 disables polling entirely (the link then only
+                carries explicit PING/REQUEST_ENABLE traffic).
+    endmenu
+
+    menu "UART Link (PC control interface)"
+        choice KILNCTL_UART_PORT_CHOICE
+            prompt "UART port"
+            default KILNCTL_UART_PORT_0
+            help
+                Which hardware UART peripheral to use for the PC link.
+                UART1 is taken by the safety processor link, so this should
+                stay on UART0 unless that link is disabled.
+
+        config KILNCTL_UART_PORT_0
+            bool "UART0"
+        config KILNCTL_UART_PORT_1
+            bool "UART1"
+        endchoice
+
+        config KILNCTL_UART_TX_IO
+            int "UART TX GPIO"
+            default 43
+            range 0 48
+            help
+                GPIO43/44 are the dev board's own UART0 pins, routed through
+                its USB-UART bridge and its dedicated USB-C port -- distinct
+                from the native USB / USB-Serial-JTAG port (GPIO19/20) used
+                for flashing and debugging. The main board leaves both
+                unconnected.
+
+        config KILNCTL_UART_RX_IO
+            int "UART RX GPIO"
+            default 44
+            range 0 48
+
+        config KILNCTL_UART_BAUD_RATE
+            int "UART baud rate"
+            default 921600
+            help
+                PC link only (UART_OWNER_PORT_NUM), not the isolated safety
+                link (KILNCTL_SAFETY_BAUD_RATE, separate UART, unchanged).
+                Bumped from 115200 -- the CH343 USB-UART bridge on this board
+                is rated well past this, and every frame is still CRC'd and
+                retried (protocol.py's Frame/UartLink), so a bad byte at the
+                higher rate is a retry, not silent corruption. The dominant
+                cost in a DISPLAY blit is still the per-frame stop-and-wait
+                ACK round trip (UART_PROTO_MAX_PAYLOAD=128 B/frame, one ACK
+                each), so this helps but does not fix that; pipelining
+                multiple in-flight frames would need a wire-protocol change,
+                not a config one. Must match pc_tools's DEFAULT_BAUD_RATE
+                (protocol.py) -- both sides hardcode the same value rather
+                than negotiating it.
+
+        config KILNCTL_UART_OWNER_QUEUE_LEN
+            int "uart_owner request queue length (unused)"
+            default 8
+            help
+                Historical: sized uart_owner_transfer()'s request queue.
+                That queue/worker-task pair was deleted 2026-09-06 (uart
+                collapse -- uart_owner_transfer() had zero real callers left,
+                see uart_owner.h). This value is now accepted but ignored by
+                uart_owner_init(); kept only so existing sdkconfigs don't
+                need editing.
+
+        config KILNCTL_UART_OWNER_TASK_PRIORITY
+            int "uart_owner task priority"
+            default 5
+
+        config KILNCTL_UART_OWNER_STACK_SIZE
+            int "uart_owner task stack size (bytes)"
+            # 4096 -> 3072 (2026-08-27), on measurement rather than by feel.
+            # This one number sizes FOUR tasks: main.c's PC-link uart_owner
+            # pair and safety_link.c's safety-link pair. (2026-09-06 uart
+            # collapse deleted the request-queue worker half of each pair --
+            # each owner is now just one event task -- but this stack size
+            # still gates that surviving event task and the margin numbers
+            # below were measured against the four-task era, so they remain
+            # a valid, if now generous, floor.) All four are now
+            # registered for high-water reporting (they were not before -- the
+            # safety pair, the one carrying the telemetry that gates heating,
+            # was measured by nobody), and after a firing that ran to
+            # completion with rules active the worst of the four had used 904
+            # bytes. 3072 leaves 2168 free above that, ~70% headroom.
+            #
+            # Not cut closer on purpose: a Pico OTA relay transfer streams
+            # through the safety-link pair and has never been measured, so the
+            # margin has to cover a path the numbers do not yet include. Re-read
+            # the high-water marks after a real Pico update before going lower.
+            default 3072
+
+        config KILNCTL_UART_PROTOCOL_TASK_PRIORITY
+            int "uart_protocol RX task priority"
+            default 6
+
+        config KILNCTL_UART_PROTOCOL_STACK_SIZE
+            int "uart_protocol RX task stack size (bytes)"
+            default 8192
+            help
+                Raised 6144 -> 8192 on 2026-08-28, second move the same
+                day: chunk[] grew again, STUFFED_FRAME_MAX (528) ->
+                UART_PROTOCOL_RX_CHUNK_BYTES (2048), at the owner's
+                request. That is +1520 bytes of stack, and the whole point
+                of the 6144 note below is that the stack must move WITH the
+                locals rather than after the crash. 8192 restores roughly
+                the ~3 kB free the 6144 bump bought.
+
+                Raised 4096 -> 6144 on 2026-08-28. uart_protocol_rx_task's
+                chunk[] buffer grew from 32 bytes to STUFFED_FRAME_MAX
+                (~530) to fix a live commissioning defect -- page 1 of a
+                CONFIG_PAGE fetch timed out on every attempt because
+                assembling it took 5-8 scheduler round trips. That buffer
+                plus raw[] (~265) lives on this task's stack, and the stack
+                did not move with them: stack_margin then measured
+                safety_proto_rx at 1024 B free of 4096 (25%, LOW) -- the
+                thinnest margin on the board.
+
+                This is the same shape as the safety_poll crash the same
+                day: locals grew, the stack did not, and nothing was
+                watching until the task died with IllegalInstruction. Fixed
+                before the crash rather than after it.
+
+                NOTE this default is only what a FRESH clone gets --
+                sdkconfig is gitignored and wins over it (see the build's
+                own "Kconfig defaults policy: use sdkconfig" note), so an
+                existing checkout needs its sdkconfig updated too.
+    endmenu
+
+    menu "Wi-Fi Provisioning"
+        config KILNCTL_WIFI_AP_SSID
+            string "Fallback AP SSID"
+            default "kilnCtl"
+            help
+                SSID the board advertises whenever it has no working station
+                connection -- no credentials saved, saved credentials that
+                fail to join, or AP mode is selected (AP mode still uses
+                this AP, permanently instead of as a fallback). Overridden
+                at runtime, without a rebuild, by wifi_prov_set_ap_ssid()
+                (the GUI's Access Point mode "Save" control) once that has
+                been called at least once.
+
+        config KILNCTL_WIFI_AP_DEFAULT_PASSWORD
+            string "Fallback AP password"
+            default "password"
+            help
+                Compile-time default so a fresh board is usable without an
+                existing network. WPA2-PSK requires 8-63 characters. Change
+                this before fielding a board outside a bench/lab setting.
+                Overridden at runtime, without a rebuild, by
+                wifi_prov_set_ap_password() (the GUI's "Set AP Password"
+                control) once that has been called at least once.
+
+        config KILNCTL_WIFI_AP_CHANNEL
+            int "Fallback AP channel"
+            default 6
+            range 1 13
+
+        config KILNCTL_WIFI_STA_CONNECT_TIMEOUT_MS
+            int "Station join timeout (ms)"
+            default 60000
+            help
+                How long to wait for a station join (association + DHCP)
+                before giving up and falling back to (or staying on) the AP.
+                Raised from 15000 to 60000 on 2026-09-28 per owner request
+                ("fall back to AP mode if connection to home wifi fails")
+                specifying roughly a minute of failed retries as the bound;
+                15s was tuned for a bench link that is either up or visibly
+                down, not for a real home AP needing a few DHCP/auth retries
+                before landing.
+    endmenu
+
+    config KILNCTL_LOG_TEE_CONSOLE
+        bool "Also print log lines to the console UART"
+        default y
+        help
+            uart_log_bridge replaces console logging with a push to the PC
+            link. That queue drops lines when full, which it reliably is
+            during the boot burst -- so the board's own account of a failed
+            bring-up is exactly what gets lost. With this on, every line also
+            goes to the console UART (GPIO43/44), where nothing can drop it.
+
+            Costs a blocking console write per log line. Turn it off if a
+            logging-heavy path ever needs the microseconds back.
+
+    menu "Simulated plant (development only)"
+
+        config KILNCTL_SIM_PLANT
+            bool "Run the control stack against a simulated kiln"
+            default n
+            help
+                Feeds the profile executor, autotune engine, and dashboard
+                from App/test/sim_plant.c's thermal model instead of the
+                MAX31856 thermocouples, and lets faults (dead element,
+                welded relay, detached/frozen/open thermocouple) be injected
+                over POST /api/sim. This is how the thermal guards get
+                exercised end to end without a kiln -- and without the
+                thermocouple daughterboard or relay expander, neither of
+                which is attached to the bench unit.
+
+                LEAVE THIS OFF FOR ANYTHING THAT WILL BE NEAR A REAL KILN.
+                With it on the board reports fabricated temperatures and
+                will happily claim a healthy firing with nothing plugged in.
+                Relay writes still go out to the real expander if one is
+                present, so a sim build must not be flashed to a board wired
+                to elements.
+
+        config KILNCTL_SIM_AMBIENT_C
+            int "Simulated ambient temperature (degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 20
+
+        config KILNCTL_SIM_THERMAL_MASS_J_PER_C
+            int "Simulated zone thermal mass (J per degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 50000
+            help
+                With the default loss coefficient this sets the zone's time
+                constant tau = mass/loss = 10000s, which is kiln-like.
+
+        config KILNCTL_SIM_HEATER_POWER_W
+            int "Simulated element power per zone (W, at duty 1.0)"
+            depends on KILNCTL_SIM_PLANT
+            default 2000
+
+        config KILNCTL_SIM_LOSS_W_PER_C
+            int "Simulated linear heat loss (W per degC above ambient)"
+            depends on KILNCTL_SIM_PLANT
+            default 5
+            help
+                Sets the duty-1.0 ceiling: ambient + power/loss (420 degC
+                with the defaults here). Raise the power or lower this to
+                simulate a kiln that can reach cone temperature.
+
+        config KILNCTL_SIM_RADIATIVE_COEFF_E12
+            int "Simulated radiative loss coefficient (units of 1e-12 W per K^4)"
+            depends on KILNCTL_SIM_PLANT
+            default 2000
+            help
+                Adds a Stefan-Boltzmann loss term on top of the linear one,
+                so plant gain falls with temperature the way a real kiln's
+                does. 0 disables it (purely linear plant). Expressed in
+                1e-12 units because Kconfig has no float type; the default
+                2000 means 2e-9 W/K^4.
+
+        config KILNCTL_SIM_COUPLING_W_PER_C
+            int "Simulated inter-zone conductance (W per degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 3
+            help
+                How strongly each zone heats its neighbors. 0 makes the
+                zones independent, which is the one thing a real
+                multi-zone kiln is not.
+
+        config KILNCTL_SIM_SENSOR_DELAY_S
+            int "Simulated sensor transport delay (s)"
+            depends on KILNCTL_SIM_PLANT
+            default 5
+
+        config KILNCTL_SIM_SENSOR_LAG_S
+            int "Simulated thermocouple lag time constant (s)"
+            depends on KILNCTL_SIM_PLANT
+            default 8
+
+        config KILNCTL_SIM_SENSOR_NOISE_MC
+            int "Simulated sensor noise, peak-to-peak (milli-degC)"
+            depends on KILNCTL_SIM_PLANT
+            default 0
+            help
+                0 for a clean reading. 1000 (i.e. 1 degC) is a reasonable
+                value for checking that the guards do not false-trip on
+                noise alone.
+
+    endmenu
+
+    config KILNCTL_HEARTBEAT_LED_GPIO
+        int "Heartbeat LED GPIO (-1 to disable)"
+        default -1
+        range -1 48
+        help
+            The main board has no MCU-driven LED -- D25/D28 are rail
+            indicators tied straight to 3.3V/5V -- and the dev board's
+            addressable RGB LED is removed on this build. Left at -1 the
+            monitor task still runs and still reports over the log link; it
+            just doesn't blink anything.
+
+    config KILNCTL_ENABLE_GPIO_PROBE
+        bool "Enable raw GPIO probe over UART (debug only)"
+        default n
+        help
+            Adds UART_TASK_ID_GPIO_PROBE: set-mode/write/read on ESP32-S3
+            pins from the PC, gated by a hard deny-list (SPI, I2C, the
+            SX1509 IRQ/RESET pins, the display CS, the PC-link UART pins,
+            and every safety-link pin including GPIO6/SAFETY_FAULT_IO) and
+            refused outright while a profile is running. Exists to answer
+            "is this net where the schematic says" without a one-off
+            firmware -- tools/PcTools/TODO.md capability 1.
+
+            Leave this OFF for any build going near a real heater. It is a
+            bench/bring-up tool, not a production capability: a debug tool
+            that can twiddle arbitrary pins on a board that drives mains
+            relays is exactly the hazard docs/SAFETY_MODEL.md exists to
+            avoid, and the deny-list is enforced in this firmware, not by
+            whoever is holding the PC end.
+
+endmenu

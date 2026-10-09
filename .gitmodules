@@ -1,0 +1,9 @@
+[submodule "parts/TFT35-SPI"]
+	path = hardware/mainBoard/parts/TFT35-SPI
+	url = https://github.com/bigtreetech/TFT35-SPI.git
+[submodule "mykicadMcp"]
+	path = tools/mykicadMcp
+	url = https://github.com/budarriola/mykicadMcp.git
+[submodule "firmware/KilnFW/components/lvgl"]
+	path = firmware/KilnFW/components/lvgl
+	url = https://github.com/lvgl/lvgl.git

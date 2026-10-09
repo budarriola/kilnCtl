@@ -1,0 +1,526 @@
+/* route_tier_table.h -- the authoritative OPEN/USER/ADMIN classification of
+ * every HTTP route this firmware registers.
+ *
+ * See docs/WEB_AUTH_PLAN.md section 1 for the design and the rule that
+ * decides ambiguous cases: a route is OPEN only if its response cannot be
+ * used to change the kiln's behaviour and reveals nothing an onlooker at the
+ * kiln cannot already see. Anything that writes is at least USER.
+ *
+ * This file is data, not wiring: it does not itself gate any request. It is
+ * the single source of truth that two things are built against --
+ *   - tools/check_route_tier_coverage.ps1 (mechanical, fail-closed: any
+ *     `.uri = "..."` registered anywhere under App/drivers with no matching
+ *     row here fails the build);
+ *   - the enforcement pre-handler (docs/WEB_AUTH_PLAN.md item 5,
+ *     kiln_http_register()), which is expected to consult this same table
+ *     rather than maintain a second one -- a second, independently
+ *     maintained tier table would be exactly the "reset one side of a pair"
+ *     bug class CLAUDE.md warns about: two copies of the same fact that can
+ *     silently drift apart.
+ *
+ * KEEP THIS FILE IN SYNC WITH THE REAL ROUTE TABLE. Adding a new
+ * httpd_uri_t anywhere under firmware/KilnFW/App/drivers (any .c file) requires an
+ * ROUTE_TIER() row here in the SAME change -- the mechanical check exists
+ * specifically so a route added without one is caught at check time rather
+ * than shipping open by default. A route present here that no longer exists
+ * in the tree is harmless (the check only complains about the reverse
+ * direction: a real route with no row) but should still be deleted when
+ * noticed, so this file does not accumulate stale entries.
+ *
+ * Route count, and why it is 138 and not the plan's stated 140: the plan's
+ * "140 registered routes" figure counts three `.uri = "..."` occurrences in
+ * firmware/KilnFW/App/drivers/http/wifi_provision_http.c's own comment block
+ * (the recount history above its route table, e.g. "`grep -n '.uri = ""'`")
+ * -- those are prose showing the pattern, not real registrations. Comment-
+ * stripped, the same way check_uri_handler_cap.ps1 and this table's own
+ * coverage check strip comments, the real count as of this writing is 137
+ * registered (uri, method) pairs, plus ONE the plan's route tables never
+ * named at all: POST /api/dualwrite_window/restore_verified
+ * (dualwrite_window_http.c) -- present in code, absent from every table in
+ * docs/WEB_AUTH_PLAN.md section 1. It is classified ADMIN below: it mutates
+ * persisted dual-write/config-migration state, the same class as its
+ * sibling GET /api/dualwrite_window (ADMIN) and the other cfgfs/OTA-adjacent
+ * routes in that section.
+ *
+ * One more correction found while building this table: the plan's OPEN list
+ * (section 1) names "GET /api/unit_pref" as a route the dashboard fetches.
+ * No such route exists -- dashboard_http.c registers only
+ * `POST /api/unit_pref` (unit_pref_post_handler); the temperature-unit
+ * value the dashboard actually reads arrives inside GET /api/status's JSON
+ * body (dashboard_status_http.c's "temp_unit" field), which is already
+ * OPEN. There is nothing to classify for the nonexistent GET variant; the
+ * real POST route is classified ADMIN below per the plan's own ambiguous-
+ * routes resolution ("OPEN for GET, ADMIN for POST").
+ */
+#ifndef ROUTE_TIER_TABLE_H
+#define ROUTE_TIER_TABLE_H
+
+#include "esp_http_server.h"
+
+typedef enum {
+    ROUTE_TIER_OPEN = 0,   /* no credential, ever */
+    ROUTE_TIER_USER,       /* `user` or `administrator` */
+    ROUTE_TIER_ADMIN,      /* `administrator` only */
+    /* Reachable with NO credential and regardless of lockout/session state,
+     * same as OPEN, but distinct from OPEN because it is not "public read"
+     * -- it is "this route only ever REDUCES heat/risk, so authentication
+     * must never be able to make it harder to reach than an unauthenticated
+     * board" (plan section 9). Kept as its own tier, not folded into OPEN,
+     * so route_tier_table.h stays the single legible record of *why* a
+     * route needs no session: OPEN means "safe to reveal/costs nothing",
+     * this means "safe (indeed necessary) to always allow because it can
+     * only make the kiln safer". http_auth_check() and
+     * kiln_http_prehandler() both key off THIS enum value rather than a
+     * URI string match, so there remains exactly one place a route's
+     * always-reachable status is decided. */
+    ROUTE_TIER_SAFETY_REDUCE,
+    /* Exactly one route belongs to this tier: POST /api/auth/bootstrap_password
+     * (WEB_AUTH_PLAN.md items 10/11's administrator-bootstrap state,
+     * web_auth_admin_bootstrap_needed() in net/web_auth_session.h). Distinct
+     * from ROUTE_TIER_ADMIN on purpose: this route must be reachable with NO
+     * session at all (none can exist pre-bootstrap) but ONLY while bootstrap
+     * is needed -- the inverse gating shape of every other tier here, which
+     * all gate on role, never on this kind of one-shot system state. Kept as
+     * its own tier rather than folded into ROUTE_TIER_ADMIN or ROUTE_TIER_OPEN
+     * so http_auth_check() (the one place that interprets it) has a single
+     * named case to key off, not a URI string match. */
+    ROUTE_TIER_ADMIN_BOOTSTRAP,
+    /* Owner decision 2026-09-28: /wifi (the provisioning page) and its two
+     * JSON reads, /networks and /scan, stay reachable with NO session ONLY
+     * while the board is unprovisioned (no STA credentials saved / AP
+     * provisioning mode) -- the AP captive-portal first-time-setup flow must
+     * work end to end before any credential can exist. Once provisioned,
+     * these three routes require an administrator session, same as the rest
+     * of Wi-Fi management (/provision, /forget, /ip_config, all already
+     * ROUTE_TIER_ADMIN below). Same inverse-gating shape as
+     * ROUTE_TIER_ADMIN_BOOTSTRAP (state-keyed, not role-keyed) but a
+     * DIFFERENT predicate -- "unprovisioned" is not "bootstrap needed" -- so
+     * it is its own tier rather than reusing that one, again so
+     * http_auth_check() has a single named case to key off instead of a URI
+     * string match. */
+    ROUTE_TIER_WIFI_SETUP,
+} route_tier_t;
+
+typedef struct {
+    const char *uri;
+    httpd_method_t method;
+    route_tier_t tier;
+} route_tier_entry_t;
+
+#define ROUTE_TIER(uri_lit, http_method, route_tier) \
+    { (uri_lit), (http_method), (route_tier) }
+
+/* One row per httpd_uri_t registered anywhere under App/drivers, keyed by
+ * (uri, method) -- the same key the plan's session/enforcement layer uses,
+ * since a single uri can carry different tiers per method (e.g.
+ * /api/unit_pref, /api/settings/display_power, /api/zones). Grouped by
+ * plan section for review, not by file. */
+static const route_tier_entry_t kRouteTierTable[] = {
+
+    /* ---- OPEN -- the always-viewable dashboard (plan section 1, "OPEN") --
+     * page shells and static assets needed to load the dashboard before
+     * anyone can log in, plus the reads app.js actually issues to render
+     * it. */
+    ROUTE_TIER("/", HTTP_GET, ROUTE_TIER_OPEN),
+    /* WEB_AUTH_PLAN.md section 6: the login page and the credential-check
+     * route it submits to. Both OPEN -- a caller with no session yet must
+     * still be able to reach the login form and submit credentials; the
+     * real gate is web_auth_store_verify_password() inside the handler
+     * itself, not this classification. */
+    ROUTE_TIER("/login", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/auth/login", HTTP_POST, ROUTE_TIER_OPEN),
+    /* WEB_AUTH_PLAN.md section 8: the web-GUI inactivity lock's status poll.
+     * OPEN, not USER -- deliberately excluded from
+     * http_auth_decision_counts_as_activity()'s activity set (see that
+     * function's own comment): a poll that extends the very session it
+     * reports on would defeat the lock. POST .../extend, the explicit
+     * "stay unlocked" action, is the real USER-tier row below, grouped with
+     * the rest of that tier so its activity-touch behaviour is the ordinary
+     * one every other USER route already gets. */
+    ROUTE_TIER("/api/auth/session", HTTP_GET, ROUTE_TIER_OPEN),
+    /* Any authenticated session may end its own session -- USER covers
+     * both roles (this header's own USER doc comment: "user OR
+     * administrator"). Unauthenticated callers get the ordinary 401 the
+     * shared pre-handler already produces for USER-tier routes; there is no
+     * reason to log out a session that does not exist. */
+    ROUTE_TIER("/api/auth/logout", HTTP_POST, ROUTE_TIER_USER),
+    /* docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2, section 6a: an
+     * unauthenticated caller must be able to reach the password-reset flow
+     * with no session, same reasoning as /api/auth/login above -- the real
+     * gates are the clock-sync check, the per-IP/board-wide backoff and
+     * totp_config_verify_and_consume()/the reset-token table inside the
+     * handlers themselves, not this classification. Neither route discloses
+     * anything beyond a token-shaped opaque value or a bare ok/fail. */
+    ROUTE_TIER("/api/auth/forgot", HTTP_POST, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/auth/reset", HTTP_POST, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/app.js", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/nav.js", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/theme.css", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/commissioning_shared.js", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/status", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/profile_exec", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/readiness", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/history.csv", HTTP_GET, ROUTE_TIER_OPEN),
+    ROUTE_TIER("/api/profile_plan", HTTP_GET, ROUTE_TIER_OPEN),
+    /* NOTE: the plan also lists "GET /api/unit_pref" here -- that route
+     * does not exist in the tree (see file header comment). No row for it. */
+    ROUTE_TIER("/status", HTTP_GET, ROUTE_TIER_OPEN),
+    /* Owner decision 2026-09-28: open only while unprovisioned -- see
+     * ROUTE_TIER_WIFI_SETUP's own comment above. */
+    ROUTE_TIER("/scan", HTTP_GET, ROUTE_TIER_WIFI_SETUP),
+    ROUTE_TIER("/networks", HTTP_GET, ROUTE_TIER_WIFI_SETUP),
+    ROUTE_TIER("/wifi", HTTP_GET, ROUTE_TIER_WIFI_SETUP),
+
+    /* ---- USER -- start and stop a firing, and nothing else (plan section
+     * 1, "USER").
+     *
+     * Owner decision, 2026-09-28 (verbatim: "stop needs login. there is an
+     * estop button."), which supersedes plan section 9's "stop must be
+     * reachable with no session" for THIS route specifically: the physical
+     * E-stop interlock (SaftyFW, firmware-mediated -- see
+     * project_estop_jumper_is_fitted notes) is now the always-reachable,
+     * no-credential safety backstop for the web GUI, so
+     * POST /api/profile_exec/stop is ordinary ROUTE_TIER_USER, matching
+     * /api/profile_exec/start below -- an operator who can start a firing
+     * from this GUI can also stop it, and neither is reachable pre-login.
+     * Owner decision, 2026-09-28 (follow-up): current_sweep/abort,
+     * autotune/abort and danger/stop now ALSO require login, same tightening
+     * as profile_exec/stop above and for the same reason -- the physical
+     * E-stop (SaftyFW, firmware-mediated) is the unauthenticated safety
+     * backstop for all of them, so none of these three needs to be reachable
+     * pre-login on safety grounds. Each moves to ROUTE_TIER_ADMIN, not
+     * ROUTE_TIER_USER, because each is the abort/stop counterpart of a
+     * START action that is already ADMIN on an ADMIN-tier page shell
+     * (current_sweep/start, autotune/start, diagnostics/danger/enable all
+     * ADMIN; zones_page.html/autotune settings/diagnostics_page.html are all
+     * ADMIN-tier pages) -- unlike profile_exec/{start,stop}, which are the
+     * USER-tier dashboard's own pair. ROUTE_TIER_SAFETY_REDUCE now has no
+     * user in this table; the enum itself is left in place, documented as
+     * unused, in case a future route needs the "always reachable, reduces
+     * risk only" shape again -- deleting it would just have to be re-added
+     * verbatim. */
+    /* WEB_AUTH_PLAN.md section 8: the explicit "stay unlocked" action. USER
+     * tier so the shared pre-handler's own activity-touch (see
+     * http_auth_decision_counts_as_activity()) extends the session on this
+     * route exactly the same way it does for every other ordinary
+     * authenticated request -- no special-case touch code lives in the
+     * handler itself. */
+    ROUTE_TIER("/api/auth/session/extend", HTTP_POST, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile_exec/start", HTTP_POST, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile_exec/stop", HTTP_POST, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile_exec/pause", HTTP_POST, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile_exec/resume", HTTP_POST, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile_exec/ack_last_run", HTTP_POST, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile", HTTP_GET, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profiles", HTTP_GET, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profiles/builtin", HTTP_GET, ROUTE_TIER_USER),
+    /* Reads which profiles the operator marked favorite. Same tier as the
+     * profile listings it annotates -- it reports marks on those same
+     * profiles and nothing else. */
+    ROUTE_TIER("/api/profiles/favorites", HTTP_GET, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/profile/export", HTTP_GET, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/kiln_configs", HTTP_GET, ROUTE_TIER_USER),
+
+    /* ---- ADMIN_BOOTSTRAP -- the one-route exception (plan items 10/11):
+     * reachable with no session, gated instead on
+     * web_auth_admin_bootstrap_needed() at the enforcement point. ---- */
+    ROUTE_TIER("/api/auth/bootstrap_password", HTTP_POST, ROUTE_TIER_ADMIN_BOOTSTRAP),
+
+    /* ---- ADMIN -- everything else (plan section 1, "ADMIN"). ---- */
+
+    /* Config and zones */
+    ROUTE_TIER("/api/zones", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/zones", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/zones/pid", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/zones/current_sweep/start", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* ADMIN, not SAFETY_REDUCE: aborts the current-sweep task
+     * (zones_current_sweep_abort(), zones_current_sweep_task.c), which drives
+     * relays to measure per-zone current. Owner decision, 2026-09-28
+     * (follow-up to profile_exec/stop's move): now requires login, matching
+     * /api/zones/current_sweep/start above and zones_page.html's ADMIN-tier
+     * page -- see the note at the top of the USER section. */
+    ROUTE_TIER("/api/zones/current_sweep/abort", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/zones/current_sweep/status", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/settings/tz", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/settings/display_power", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/settings/display_power", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/aux_outputs", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/aux_outputs", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/aux_outputs/manual", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/unit_pref", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/watchdog_cfg", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/watchdog_cfg", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ramp_assist", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ramp_assist", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/sim", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/sim", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/setup/progress", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/setup/progress", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/zones/ct_channel_map", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/zones_diag", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/control", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/kiln_configs/export", HTTP_GET, ROUTE_TIER_ADMIN),
+
+    /* Profiles as data (not execution) */
+    ROUTE_TIER("/api/profile", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/delete", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/import", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/builtin/hide", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/builtin/restore", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* Writes a persisted favorite mark. A write, so at least USER; ADMIN to
+     * match its sibling persisted-preference writes above (builtin hide/
+     * restore), which likewise only change what the UI shows. */
+    ROUTE_TIER("/api/profile/favorite", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/kiln_configs/apply", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* Read-only progress/outcome of the apply the ADMIN route above starts
+     * (the apply is asynchronous since item 5's worker landed, so its result
+     * needs a route of its own). USER, matching GET /api/kiln_configs
+     * itself: it reports a state enum, the target id and the board's own
+     * refusal text, discloses no configuration content, and cannot start,
+     * alter or cancel a swap. */
+    ROUTE_TIER("/api/kiln_configs/apply_status", HTTP_GET, ROUTE_TIER_USER),
+    ROUTE_TIER("/api/kiln_configs/clone", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/kiln_configs/delete", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/kiln_configs/import", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/kiln_configs/rename", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/kiln_configs/save", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* The one way out of a quarantined store (kiln_cfg_store.c's
+     * set_quarantine()) -- discards whatever could not be read and starts a
+     * fresh, empty store. Same tier as the other mutating kiln_configs
+     * routes above. */
+    ROUTE_TIER("/api/kiln_configs/quarantine_clear", HTTP_POST, ROUTE_TIER_ADMIN),
+
+    /* Safety and calibration */
+    ROUTE_TIER("/api/safety/clear_trip", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning/bench_preset", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning/ct_auto_zero", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning/ct_cal", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning/ct_trim", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/commissioning/relay_type", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/log_level", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/rate_guard/auto", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/rate_guard/auto", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/estop/verify", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/relay_cycles/reset", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/relay_cycles/restore", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/thermo/faults", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Owner decision, 2026-09-28 (web-auth gate tightening): only reader is
+     * diagnostics_page.html (ADMIN-tier page shell); the dashboard never
+     * fetches this. Moved out of OPEN -- it was reachable data for a page
+     * the dashboard doesn't itself need. */
+    ROUTE_TIER("/api/board_temps", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Owner decision, 2026-09-28: only reader is zones_page.html's
+     * per-profile firing history card (ADMIN-tier /settings/zones shell);
+     * the dashboard does not fetch this route. Moved out of OPEN. */
+    ROUTE_TIER("/api/firing_history", HTTP_GET, ROUTE_TIER_ADMIN),
+
+    /* Tuning */
+    ROUTE_TIER("/api/autotune/start", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/autotune/accept", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* ADMIN, not SAFETY_REDUCE: aborts a running autotune
+     * (autotune_engine_abort() -> abort_locked() -> force_relays_off(),
+     * autotune_engine_guard.c), which drives relays for the relay-step test.
+     * Owner decision, 2026-09-28 (follow-up): now requires login, matching
+     * /api/autotune/start above -- see the note at the top of the USER
+     * section. */
+    ROUTE_TIER("/api/autotune/abort", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/adaptive_tune/enable", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/adaptive_tune/revert", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/autotune", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/autotune/matrix", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/autotune/trace.csv", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/adaptive_tune", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/tuning_recommendations", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/logs/autotune", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/logs/firing", HTTP_GET, ROUTE_TIER_ADMIN),
+
+    /* Danger zone */
+    ROUTE_TIER("/api/diagnostics/danger/enable", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/diagnostics/danger/relay", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/diagnostics/danger/start", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* ADMIN, not SAFETY_REDUCE: exits the danger-mode relay window
+     * (danger_mode_stop() -> kiln_io_owner_command_all_relays_off() plus
+     * releasing heat-enable, danger_mode.c), which is a window explicitly
+     * armed to drive relays outside the normal safety-gated path. Owner
+     * decision, 2026-09-28 (follow-up): now requires login, matching
+     * /api/diagnostics/danger/enable above -- see the note at the top of the
+     * USER section. */
+    ROUTE_TIER("/api/diagnostics/danger/stop", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/diagnostics/danger", HTTP_GET, ROUTE_TIER_ADMIN),
+
+    /* OTA, reset, filesystem -- includes the nine routes that used to also
+     * authenticate via ota_auth/AP-password (plan item 2b) on top of this
+     * table's classification; that scheme was retired 2026-09-29 (owner
+     * decision "Retire; open when login off"), so these are now ordinary
+     * ADMIN routes with no second, in-handler check. */
+    ROUTE_TIER("/api/ota/esp", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/esp/rollback", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/esp/recovery_exit", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/esp/recovery_boot", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/esp/boot_guard_reset", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/pico", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/pico/rollback", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/factory_reset", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/cfgfs/format_confirm", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/sw_reset", HTTP_POST, ROUTE_TIER_ADMIN),
+    /* GITHUB_RELEASE_UPDATE_PLAN.md WP4: the update stage. The status read is
+     * ADMIN too -- it names the staged build's version, commit and hash. */
+    ROUTE_TIER("/api/update/stage", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/stage/clear", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/stage", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/settings", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/settings", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/check", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/download", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/fetch", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/update/fetch/cancel", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/cfgfs/file", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/cfgfs/file", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/backup/import", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/crash_report/ack", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/crash_report/clear", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/interlock", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/pico/status", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/ota/pico/rollback/status", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/cfgfs", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/cfgfs/format_pending", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/dualwrite_window", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Not in any plan table -- found while cross-checking the plan's route
+     * enumeration against the real tree (dualwrite_window_http.c); it
+     * mutates the same persisted dual-write/migration state its sibling GET
+     * route above reads, so it is classified ADMIN on the same basis. */
+    ROUTE_TIER("/api/dualwrite_window/restore_verified", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/partitions", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/backup/export", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/crash_report", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/boot_guard", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/iter_tune/status", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/iter_tune/restore_commissioned", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/coredump/info", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/coredump/chunk", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/debug/lwip_stats", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/diagnostics/timing", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/saftyfw_stack_margin", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Lists NVS key NAMES AND TYPES ONLY (never a value or blob), and
+     * refuses the kiln_auth namespace outright -- see diagnostics_http.c's
+     * nvs_keys_get_handler() comment. ADMIN like every other diagnostics
+     * route that can name internal storage layout. */
+    ROUTE_TIER("/api/nvs/keys", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* docs/TOTP_PASSWORD_RESET_PLAN.md WT-A part 2 / section 6b: TOTP
+     * status. ADMIN like every other credential-management route in this
+     * section. Enrollment (begin/confirm) and disable ride the existing
+     * POST /api/auth/security cmd= dispatch instead of their own routes
+     * (section 6b, WT-B's chosen shape) -- no separate tier row needed for
+     * them, since that route is already ROUTE_TIER_ADMIN below. */
+    ROUTE_TIER("/api/auth/totp_status", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* GET /api/ota/challenge -- the nonce-issuing route this row used to
+     * classify OPEN -- no longer exists (removed with the AP-password HMAC
+     * scheme, 2026-09-29, WEB_AUTH_PLAN.md item 2b). */
+    ROUTE_TIER("/api/ota/esp/status", HTTP_GET, ROUTE_TIER_OPEN),
+
+    /* Network writes */
+    ROUTE_TIER("/provision", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/forget", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/ip_config", HTTP_POST, ROUTE_TIER_ADMIN),
+
+    /* Page shells other than / */
+    /* NOTE (2026-09-17 audit finding 7): GET /status is intentionally NOT
+     * re-listed here. It already has a ROUTE_TIER_OPEN row above (the Wi-Fi
+     * status page has both a page-shell and status role, one (uri, method)
+     * key). This file is a flat C array, not a keyed map -- nothing
+     * prevented a second literal entry for the same key from actually being
+     * present here for a time, and the two readers of this table
+     * (http_auth_lookup_tier(), which takes the first match, and
+     * check_route_tier_coverage.ps1's Get-TieredKeys, which used to take the
+     * last) disagreed about which row would win the moment a future edit
+     * ever gave the two different tiers. Both rows happened to be OPEN, so
+     * the disagreement was inert -- see the audit for the failure scenario.
+     * Fixed by deleting this duplicate (the surviving row above wins under
+     * both readers) and by check_route_tier_coverage.ps1 now refusing to
+     * build a tier map at all when it finds a repeated (method, uri) key. */
+    ROUTE_TIER("/settings", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/settings/backup", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/settings/display", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/settings/zones", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* Kiln-config selector + management page, split out of main_page.html
+     * 2026-09-18 (kiln_cfg_http.c). Same tier as every other settings page
+     * shell. */
+    ROUTE_TIER("/settings/kiln_configs", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/settings/safety", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* WEB_AUTH_PLAN.md section 6: the admin password/settings page
+     * (security_http.c) and the two API routes it calls -- GET returns only
+     * boolean/timeout status (never a hash/salt/PIN value), POST is the one
+     * dispatch route every Save button on that page submits to. ADMIN, same
+     * as every other /settings page shell and /api/settings writer. */
+    ROUTE_TIER("/settings/security", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/auth/config", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/auth/security", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/safety", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/safety/commissioning", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/profiles", HTTP_GET, ROUTE_TIER_ADMIN),
+    /* docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 (section 10) -- all five routes
+     * ADMIN, matching /profiles: this edits a firing already running on this
+     * kiln, right now, so it is at least as sensitive as profile creation. */
+    ROUTE_TIER("/live_profile", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/live", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/live/fork", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/live", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/profile/live/decide", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/diagnostics", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/readiness", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/setup", HTTP_GET, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/ota", HTTP_GET, ROUTE_TIER_ADMIN),
+};
+
+#define ROUTE_TIER_TABLE_COUNT \
+    (sizeof(kRouteTierTable) / sizeof(kRouteTierTable[0]))
+
+/* Page shells served WITHOUT a session even when their own ROUTE_TIER row
+ * above is USER/ADMIN (owner report 2026-09-24: opening the web UI must
+ * never show a login; the login is asked for, in a cancelable modal, only
+ * when an action actually needs it). An explicit allowlist -- NOT "any GET
+ * outside /api/" -- so a future non-/api GET route (a download, an export,
+ * anything that returns board state) still gets the ordinary fail-closed
+ * 401/403 unless someone deliberately adds it here. Every entry must be a
+ * static, compiled-in HTML document whose handler embeds no per-board data
+ * server-side (fw_build, MAC, SSID, hostname, ...): the page's own
+ * /api/... fetches keep their real tier gate unchanged.
+ *
+ * http_auth_is_page_shell_get() (http_auth_enforce.c) is the only reader on
+ * the firmware side; test_http_auth_enforce.c pins the count and that every
+ * entry has a GET row above. PcTools' WEB-X-03 bench case parses every
+ * PAGE_SHELL_URI call with a quoted "/..." argument out of this file's raw
+ * text (comments included), so keep one entry per macro call and never
+ * write that shape in a comment. */
+#define PAGE_SHELL_URI(uri) (uri)
+
+static const char *const kPageShellUris[] = {
+    PAGE_SHELL_URI("/settings"),
+    PAGE_SHELL_URI("/settings/backup"),
+    PAGE_SHELL_URI("/settings/display"),
+    PAGE_SHELL_URI("/settings/zones"),
+    PAGE_SHELL_URI("/settings/kiln_configs"),
+    PAGE_SHELL_URI("/settings/safety"),
+    PAGE_SHELL_URI("/settings/security"),
+    PAGE_SHELL_URI("/safety"),
+    PAGE_SHELL_URI("/safety/commissioning"),
+    PAGE_SHELL_URI("/profiles"),
+    PAGE_SHELL_URI("/live_profile"),
+    PAGE_SHELL_URI("/diagnostics"),
+    PAGE_SHELL_URI("/readiness"),
+    PAGE_SHELL_URI("/setup"),
+    PAGE_SHELL_URI("/ota"),
+    /* ROUTE_TIER_WIFI_SETUP, not USER/ADMIN: open outright while
+     * unprovisioned; once provisioned the shell is still served so nav.js's
+     * "Network settings" link lands on the page and app.js raises the login
+     * modal, instead of a bare 401 body. Static embedded HTML, no per-board
+     * data; /scan and /networks keep their real tier gate. */
+    PAGE_SHELL_URI("/wifi"),
+};
+
+#define PAGE_SHELL_URI_COUNT \
+    (sizeof(kPageShellUris) / sizeof(kPageShellUris[0]))
+
+#endif /* ROUTE_TIER_TABLE_H */

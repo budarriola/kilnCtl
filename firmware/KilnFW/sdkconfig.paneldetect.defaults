@@ -1,0 +1,30 @@
+# DEBUG-ONLY, one-shot bench fragment -- DISPLAY_ST7796_PLAN.md Sec.4 /
+# Sec.12 Phase 4. Not applied by default: sdkconfig.defaults does not
+# reference this file, so a normal `idf.py build` never picks it up.
+#
+# Selects CONFIG_KILNCTL_DISPLAY_PANEL_AUTO instead of the shipped
+# CONFIG_KILNCTL_DISPLAY_PANEL_ILI9488 default. This is the ONLY way to make
+# ILI9488_start() (panel_spi.c) actually call ILI9488_read_id() at boot --
+# the explicit-ILI9488 branch never reads RDDID at all (see the corrected
+# TODO comment in panel_detect.h). AUTO's own bootstrap panel is ILI9488, so
+# this needs no wiring change to read the currently-attached ILI9488's ID;
+# to read the ST7796's ID instead, wire the MSP4031 to J2 (only after the
+# STOP-block 5V hazard check in the plan) and use
+# CONFIG_KILNCTL_DISPLAY_PANEL_ST7796 directly, not this file.
+#
+# One-time procedure:
+#   1. idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.paneldetect.defaults" build
+#   2. flash_firmware() (or the usual OpenOCD flash path), then read the
+#      boot log for the "panel auto-detect: no RDDID match (read 0x.. 0x..
+#      0x.. ...)" WARN from panel_spi.c -- an all-0x00/all-0xFF read means
+#      MISO is not driven, not a real ID (see ILI9488_read_id()'s comment).
+#   3. Record the three bytes in DISPLAY_ST7796_PLAN.md Sec.4, then rebuild
+#      WITHOUT this fragment (plain `idf.py build`) before flashing again --
+#      AUTO is a detection tool, not the shipped configuration, and this
+#      file must never be added to sdkconfig.defaults itself.
+#
+# This changes only which panel_desc_t boots and whether RDDID gets read; it
+# does not touch SPI timing, CS behaviour, or the MAX31856 thermocouple
+# path -- ILI9488_read_id() goes through the same spi_owner_transfer()
+# arbitration every other display SPI transaction already uses.
+CONFIG_KILNCTL_DISPLAY_PANEL_AUTO=y

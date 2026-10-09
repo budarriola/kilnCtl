@@ -1,0 +1,35 @@
+# cplval75 (user slot #0) hardware capture, 2026-09-10, 07:55-10:33 local.
+# Raw capture: logs/coupling/cplval75_20260910.jsonl (5 s /api/profile_exec poll,
+# HH:MM:SS {json} format) + logs/coupling/cplval75_20260910_ambient.tsv (60 s
+# enclosure/safety-tc/trip/relay/ct_counts sidecar). Both stay local
+# (.gitignore:100 excludes logs/**/*.jsonl; the ambient tsv is also left local
+# here as raw sidecar data -- this file is the derived, committed summary).
+# Firmware: see docs/audits/cplval75_settled_holds_2026-09-10.md for identity.
+#
+# Each plateau's window is the FINAL 600s (10 min) of its dwell, confirmed
+# settled by temp_std_c (all <=0.33C) -- not assumed from elapsed time.
+#
+# target_c  zone  dwell_duration_s  dwell_tau_count  mean_temp_c  temp_std_c  mean_duty
+62.0	0	1796	6.78	62.119	0.287	0.1680
+62.0	1	1796	6.78	62.036	0.147	0.3714
+62.0	2	1796	6.78	62.123	0.115	0.5905
+70.0	0	1799	6.79	69.969	0.267	0.1764
+70.0	1	1799	6.79	69.938	0.101	0.4792
+70.0	2	1799	6.79	70.003	0.105	0.7589
+75.0	0	2692	10.16	75.090	0.325	0.1756
+75.0	1	2692	10.16	75.013	0.126	0.5453
+75.0	2	2692	10.16	75.023	0.077	0.8533
+#
+# Note: 62C/70C dwells (30 min config'd) came in at ~6.8 tau against the
+# 265s time-constant reference used to size this profile -- short of the 8 tau
+# guideline, though the measured temp_std (<=0.29C) and duty flatness over the
+# window show they were empirically settled at these bench conditions. The
+# 75C dwell (45 min) reached 10.2 tau, comfortably past the guideline.
+#
+# Coupling-matrix self-check (coupled_ident_report against this capture,
+# 6 joint dwell observations): current on-board matrix's predicted vs
+# observed steady duty (u_pred - u_actual):
+#   zone0: mean=-0.047 rms=0.055
+#   zone1: mean=+0.009 rms=0.016
+#   zone2: mean=+0.303 rms=0.305  <- matrix substantially underpredicts z2's
+#                                    required hold duty

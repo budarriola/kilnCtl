@@ -1,0 +1,614 @@
+# Applied on a fresh `idf.py` reconfigure/fullclean when no local `sdkconfig`
+# exists yet (sdkconfig itself is gitignored -- generated, machine-local).
+#
+# CONFIG_COMPILER_OPTIMIZATION_SIZE (-Os, not the ESP-IDF default -Og debug
+# build): the `factory` app partition is fixed at 1500K (partitions.csv --
+# resizing it means touching the offsets of every partition after it, which
+# holds live NVS data on a real board, so it stays fixed rather than growing
+# to fit the binary). Under -Og, KilnCtrl.bin already fills that partition to
+# ~1% free before TODO.md 10.9 (LCD network page + QR codes); with 10.9's code
+# added it overflows outright. -Os alone reclaims ~125K, landing at ~9% free
+# with 10.9 included -- see TODO.md 10.9's "Build-config note" for the full
+# story. Without this file, a fresh checkout silently regresses to -Og and
+# fails to build once 10.9's code is present.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# CONFIG_LV_USE_BUILTIN_MALLOC (LVGL's default) reserves a static 64K pool
+# (CONFIG_LV_MEM_SIZE_KILOBYTES) carved permanently out of internal DRAM,
+# unrelated to the PSRAM configured for LVGL's draw buffers earlier this
+# project (that only covers frame-buffer memory, not LVGL's own object
+# allocator). Found the hard way 2026-08-18: after TODO.md 10.9 added
+# ui_page_network.c, real hardware showed "Failed to start io/lvgl_port/
+# safety/control/profiles/autotune/wifi uart bridge task" at boot --
+# internal DRAM was chronically exhausted (only ~104K free of 341K), not
+# a transient WiFi-bringup spike (see App/drivers/owners/
+# uart_protocol.c's registration-retry comment for that adjacent, real but
+# insufficient-by-itself fix). Switching to CONFIG_LV_USE_CLIB_MALLOC lets
+# LVGL's allocations go through the system malloc(), which is PSRAM-aware
+# (CONFIG_SPIRAM_USE_MALLOC=y) -- reclaimed the full ~64-68K, landing at
+# ~172K free. Every UART bridge task and the LVGL display task itself
+# start successfully with this set; without it, the LCD does not
+# initialize at all on this build.
+#
+# Do NOT switch this to CONFIG_LV_USE_BUILTIN_MALLOC. Tried 2026-08-20 and
+# reverted: LVGL's many small object allocations were (correctly) identified
+# as the thing fragmenting the internal DRAM heap -- the largest contiguous
+# DRAM block is a healthy 163840 bytes at 1.4s into boot and has collapsed to
+# ~2560 bytes by 2.9s, which is when the UI is built -- and the built-in
+# allocator looked like the fix, since it confines LVGL to one arena instead
+# of scattering allocations through the shared heap. On hardware, enabling it
+# (64KB pool, LV_MEM_ADR=0) made the board stop responding entirely: no boot
+# log, no PC link, dead. Reverting restored it. The pool is a static array,
+# so with LV_MEM_ADR=0 it lands in .bss/DRAM on top of everything else rather
+# than relieving anything.
+#
+# The idea is still sound -- LVGL is the fragmenter -- but making it work
+# needs the pool placed in PSRAM (EXT_RAM_BSS_ATTR / a custom
+# LV_MEM_POOL_ALLOC), not merely switched to the built-in allocator. Until
+# someone does that carefully, CLIB malloc plus the explicit
+# xTaskCreatePinnedToCoreWithCaps()/xQueueCreateWithCaps() moves in
+# lvgl_port.c, uart_bridge.c and uart_protocol.c is what keeps this board
+# booting.
+# SUPERSEDED 2026-08-20 by CONFIG_LV_USE_CUSTOM_MALLOC below. CLIB malloc was
+# a real improvement over the built-in pool (the paragraph above is accurate
+# for what it fixed), but it only makes LVGL's allocations PSRAM-*aware*: they
+# still land in internal DRAM whenever they fall under
+# CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL, which is every LVGL object. The custom
+# allocator sends them to PSRAM unconditionally.
+# CONFIG_LV_USE_CLIB_MALLOC is not set
+
+# LVGL allocates from PSRAM via App/drivers/ui/lvgl_mem_psram.c, which implements
+# the LV_STDLIB_CUSTOM hooks (lv_malloc_core/lv_realloc_core/lv_free_core/...)
+# on top of heap_caps_malloc(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT).
+#
+# The problem it solves, measured on hardware: the largest contiguous internal
+# DRAM block is 163840 bytes 1.4s into boot and collapses to ~2560 bytes by
+# 2.9s -- the window in which the UI is built. Nothing leaks; LVGL's hundreds
+# of small, long-lived object allocations simply shred the DRAM heap into
+# pieces too small for any multi-KB request. That is what stopped the 8KB LVGL
+# task stack, the 3KB PC-link safety watchdog stack and the UART inbox queues
+# from being created, each of which had to be moved to PSRAM individually just
+# to keep the firmware booting. Moving the fragmenter itself is the fix those
+# were working around.
+#
+# Result: largest contiguous DRAM block at bridge-task creation went from 2560
+# to 7680 bytes, with no PSRAM-allocation fallbacks logged (i.e. every LVGL
+# allocation is served from PSRAM), LVGL up, watchdog up, no failed task
+# starts, and touch navigation verified working through the paged config hub.
+#
+# Note this is a 3x improvement, not the full 160KB back -- LVGL was a major
+# fragmenter but demonstrably not the only one. Whatever else runs between
+# 1.4s and 2.9s still costs a large contiguous block; that is the next thread
+# to pull if DRAM pressure returns.
+#
+# If this is ever switched away from CUSTOM, App/drivers/ui/lvgl_mem_psram.c
+# compiles to an empty object (it is guarded on LV_USE_STDLIB_MALLOC ==
+# LV_STDLIB_CUSTOM) and the build still succeeds -- it just silently loses the
+# benefit, so change it deliberately, not incidentally.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
+
+# CONFIG_LV_USE_QRCODE: off by default in upstream LVGL. ui_page_network.c
+# and ui_page_home.c (TODO.md 10.9) call lv_qrcode_create()/_update() for the
+# AP-join/dashboard/IP QR codes -- without this, those calls don't exist and
+# the build fails. It was flipped on in the local, gitignored `sdkconfig`
+# during 10.9's original pass but never carried forward into this file, so a
+# fresh checkout silently lost it (found while auditing 10.9 for this pass --
+# see TODO.md 10.9's checklist status note).
+CONFIG_LV_USE_QRCODE=y
+
+# CONFIG_LV_USE_TJPGD: DISPLAY_ST7796_PLAN.md Phase 7 ("LV_USE_TJPGD if
+# images are wanted"). Off in upstream LVGL by default; the decoder itself
+# is already vendored (components/lvgl's bundled tjpgd), so this is a pure
+# Kconfig flip, no new source. Flash cost measured 2026-09-03 via
+# build_kilnfw, same build tree, only this flag toggled: KilnCtrl.bin
+# 0x1e3f90 bytes (off) -> 0x1e52c0 bytes (on), +4,912 bytes (~4.8 KB, +0.25%
+# of the 0x300000 factory app partition). No caller decodes a JPEG yet --
+# lv_img/lv_tjpgd's own decoder registration runs at LVGL init regardless,
+# so the cost lands whether or not any page ever loads a .jpg.
+CONFIG_LV_USE_TJPGD=y
+
+# CONFIG_ESP_MAIN_TASK_STACK_SIZE: found the hard way 2026-08-19, on real
+# hardware. Board booted, printed ILI9488's "kilnCtl ready" boot banner to
+# the panel (App/drivers/ILI9488.c), then hung there forever -- looked from
+# the outside like a frozen splash screen, and was invisible over this
+# app's own PC link (the reliable-UART log bridge never gets to start; see
+# uart_log_bridge.c) because the bench's separate PC<->ESP USB-serial UART
+# (COM9) was independently dead this same session. Read live boot output
+# instead over the ESP32-S3's native USB-Serial-JTAG port (a second, always-
+# present serial device distinct from COM9 -- CONFIG_ESP_CONSOLE_SECONDARY_
+# USB_SERIAL_JTAG is already on, so ESP-IDF's own console mirrors there
+# regardless of whether this app's own link is up), which showed the real
+# fault: "***ERROR*** A stack overflow in task main has been detected",
+# repeating every ~1s in an unbroken reboot loop, always after the ILI9488
+# banner and always around PC-link (uart_owner_init) bring-up. `main_task`
+# (the FreeRTOS task app_main() runs on) never got a config here before --
+# ESP-IDF's plain default, 3584 bytes, sized for a typical minimal app_main,
+# not one that chains I2C + SPI + Wi-Fi/mDNS + several HTTP server
+# registrations + SX1509 + three MAX31856 channels + ILI9488 + NS2009 touch
+# + LVGL setup + a dozen UART bridge task starts, all inline, all before
+# returning. Raised generously (8192, 2.3x the old value) rather than to
+# the bare minimum that happens to survive this one boot path -- a tight
+# margin here is exactly the kind of thing that comes back the next time
+# this function grows. Not yet reprofiled to find the true peak usage; a
+# future pass could measure it precisely (uxTaskGetStackHighWaterMark) and
+# right-size this rather than carry a guessed margin indefinitely.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# CONFIG_LWIP_MAX_SOCKETS: found the hard way 2026-08-20 auditing this file
+# after wifi_provision_http.c's `config.max_open_sockets = 13` fix (see that
+# file's comment at the same line, added the same pass) -- this project's
+# `sdkconfig` had CONFIG_LWIP_MAX_SOCKETS raised 10 -> 16 to satisfy it, but
+# that edit was made through menuconfig, which only ever writes the
+# gitignored, machine-local `sdkconfig`, never this file. A fresh checkout
+# regenerates `sdkconfig` from this file plus ESP-IDF's own defaults, which
+# means CONFIG_LWIP_MAX_SOCKETS would silently fall back to 10 -- verified by
+# deleting `sdkconfig` and running `idf.py reconfigure` with this fix absent.
+# ESP-IDF enforces max_open_sockets <= CONFIG_LWIP_MAX_SOCKETS - 3 inside
+# httpd_start() (see wifi_provision_http.c); with the default of 10 that caps
+# max_open_sockets at 7, so httpd_start() for the dashboard/captive-portal
+# server returns ESP_ERR_INVALID_ARG and the board boots with NO web server
+# at all -- no dashboard, no AP-join page, nothing reachable over WiFi. This
+# is a hard dependency, not a tuning knob: do NOT lower this back toward 10
+# without also lowering wifi_provision_http.c's max_open_sockets to match
+# (and re-checking it still survives the ~10-connection dashboard-polling
+# burst documented there), or the server will fail to start on next boot.
+#
+# Raised again, 16 -> 18, 2026-09-01 (live wedge during a firing: sustained
+# dashboard polling drove httpd into a continuous "httpd_accept_conn: error
+# in accept (23)" (ENFILE) loop that did not clear for ~20 minutes). Root
+# cause was an accounting gap in the 16 = 13 + 3 math above, not a leak:
+# lwIP's accept() path (components/lwip/lwip/src/api/sockets.c,
+# lwip_accept() -> alloc_socket()) returns ENFILE purely because its
+# `sockets[NUM_SOCKETS]` table -- a fixed-size static array, NOT a heap
+# allocation, so this is independent of internal-DRAM headroom (see
+# dram_margin.h; a real DRAM/memp failure surfaces as ERR_MEM -> ENOMEM via
+# lwIP's err_to_errno_table in api/err.c, a different errno, and was ruled
+# out on that basis) -- is completely full. wifi_prov.c's dns_hijack_task()
+# opens one more permanent UDP socket (unconditionally at boot, for the
+# captive-portal DNS responder) that the "13 sessions + 3 httpd-internal =
+# 16" reservation above never accounted for. With that 17th permanent
+# consumer, the true ceiling for concurrent httpd sessions was actually 12,
+# one below max_open_sockets=13 -- so httpd's OWN bookkeeping
+# (hd_sd_active_count, in httpd_sess.c) could never reach its configured
+# cap, httpd_is_sess_available() kept reporting "space free", and
+# lru_purge_enable's safety net (httpd_main.c's httpd_accept_conn(), which
+# only closes the LRU session when httpd's own count is at max) never
+# engaged -- accept() just kept hitting the OS-level wall directly. Recovery
+# was possible only by the load itself dropping enough that concurrent
+# connections happened to fall back under 16 system-wide, which is slow and
+# unbounded under continuous polling, not a guarantee. 18 restores one
+# spare socket of real headroom above the dns_hijack + httpd-internal + 13-
+# session total (3 + 1 + 13 = 17 <= 18), so httpd's own accounting is
+# guaranteed to hit its cap and trigger lru_purge_enable's LRU close no
+# later than the OS would refuse a new accept() -- the purge path is now
+# always reachable, so a legitimately full pool self-recovers by closing its
+# oldest session instead of wedging until external load happens to subside.
+CONFIG_LWIP_MAX_SOCKETS=18
+
+# CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE: 6 -> 16, 2026-09-04, ROADMAP.md's
+# "HTTP connection resets under concurrency" item. This is a mailbox
+# entirely separate from wifi_provision_http.c's `config.backlog_conn`
+# (that one is lwIP's SYN/pending-accept queue depth, checked in
+# tcp_listen_input() against `pcb->accepts_pending`; this one is the
+# fixed-size queue between a *completed* handshake and the application
+# actually calling accept()/netconn_accept() -- see lwip's
+# src/api/api_msg.c accept_function(): when sys_mbox_trypost() into
+# conn->acceptmbox fails because it's full, the new pcb is aborted (an
+# RST), not queued or retried. Left at ESP-IDF's Kconfig default (6,
+# components/lwip/Kconfig) until this pass, undiscovered because every
+# prior pass in this item's history was looking at httpd's session-pool
+# cap (13) and the OS socket table (18), not at this mailbox. Confirmed
+# live: raising backlog_conn 10 -> 32 alone (no other change) did NOT
+# reduce the reset rate -- it raised it, 22.5% -> 45.0%, because a wider
+# SYN-stage backlog let MORE handshakes complete only to be aborted
+# post-handshake by this same fixed mailbox instead of being refused
+# earlier at the SYN stage. The smoking gun: at every concurrency level
+# from 8 through 16, exactly 6 of N concurrent requests succeeded per
+# burst, every single time -- the mailbox size, not the client count,
+# was setting the ceiling. Range is 1-64 without window scaling
+# (LWIP_WND_SCALE, not enabled in this build) per the Kconfig entry;
+# 16 gives real headroom over the reproducer's failing range (8-16
+# concurrent) without chasing it needlessly high -- same "headroom, not
+# exact-fit" reasoning as every other socket-budget number in this file.
+# Fixed per-mailbox cost, not a heap pool (mbox slots are pointer-sized
+# entries in a small fixed array) -- see ROADMAP.md for the before/after
+# measurement this justifies.
+CONFIG_LWIP_TCP_ACCEPTMBOX_SIZE=16
+
+# CONFIG_LWIP_STATS: on, 2026-08-28, for ROADMAP.md M10's open item -- an
+# 8-parallel-fetch /app.js burst resets one connection, and two mechanisms
+# (heap exhaustion, socket-timeout) are already ruled out by measurement.
+# This turns on lwIP's own pool/error counters (mem does NOT actually exist
+# on this port -- see diagnostics_http.c's lwip_stats_get_handler() comment
+# for why, found by the build refusing to compile it). tcp is read directly
+# into GET /api/debug/lwip_stats' JSON response (diagnostics_http.c) without
+# a JTAG halt that would perturb the timing being measured, and without
+# stats_display() -- that macro only routes through ESP_LOG when
+# CONFIG_LWIP_DEBUG_ESP_LOG is also on, and even then is hardcoded to
+# ESP_LOG_DEBUG, stripped at compile time by CONFIG_LOG_MAXIMUM_LEVEL=3
+# elsewhere in this file. Small, fixed RAM cost (the counter fields
+# themselves, always-allocated struct members, not a pool) and no CPU cost
+# outside a STATS_INC() per event lwIP already does the surrounding work for
+# -- left on rather than toggled per-investigation because a counter nobody
+# is reading is exactly this project's recurring "instrumentation existed
+# and nobody looked" shape (see M10's own opening paragraph). Revisit only
+# if a real DRAM-budget reason to remove it shows up; none has so far.
+CONFIG_LWIP_STATS=y
+
+# CONFIG_SPIRAM and friends: found the hard way 2026-08-20, same audit pass
+# as CONFIG_LWIP_MAX_SOCKETS above and for the identical reason -- this
+# board's octal PSRAM is enabled only in the gitignored, machine-local
+# `sdkconfig` (set once through menuconfig years ago) and was never carried
+# into this file. Verified by deleting `sdkconfig` and running
+# `idf.py reconfigure`: with this block absent, the regenerated sdkconfig
+# comes back "# CONFIG_SPIRAM is not set" -- PSRAM off entirely. That is not
+# a minor regression on this board: CONFIG_LV_USE_CLIB_MALLOC above depends
+# on CONFIG_SPIRAM_USE_MALLOC=y to route LVGL's allocator to PSRAM (without
+# it the LCD does not initialize -- see that entry's comment), and
+# App/drivers/bridge/uart_bridge_ext.c's xTaskCreatePinnedToCoreWithCaps(...,
+# MALLOC_CAP_SPIRAM) calls for the UART bridge tasks have nowhere to
+# allocate from without PSRAM present, so those tasks would fail to start
+# too. CLK_IO/CS_IO/mode/speed below are this board's actual wiring (copied
+# from the working `sdkconfig`), not guesses -- do not change them without
+# confirming against the schematic.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_CLK_IO=30
+CONFIG_SPIRAM_CS_IO=26
+CONFIG_SPIRAM_SPEED_40M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MEMTEST=y
+#
+# Internal-SRAM pressure, measured 2026-08-20. The board booted reporting
+# ~243KB of internal heap free but a largest contiguous internal block of
+# only 992 bytes (uart_bridge_ext.c logs both at each bridge-task creation).
+# Any allocation bigger than that fails regardless of the free total, which
+# is exactly what UART task 12 (gpio_probe) hit: its uart_protocol inbox
+# xQueueCreate() failed every boot with "internal SRAM genuinely exhausted",
+# leaving the task running with no inbox and NACKing every request.
+#
+# Two knobs drive that, and both were working against this board:
+#
+#   ALWAYSINTERNAL is the size BELOW which an allocation is forced into
+#   internal RAM. At 16384 essentially every routine allocation in the
+#   firmware -- queues, small buffers, driver state -- was pinned to internal
+#   RAM and none of it could ever spill to the 8MB of PSRAM sitting idle.
+#   4096 keeps genuinely small/hot allocations internal (where PSRAM's
+#   latency would hurt) while letting anything mid-sized use PSRAM.
+#
+#   TRY_ALLOCATE_WIFI_LWIP lets the Wi-Fi and lwIP stacks take their buffer
+#   pools from PSRAM. Those pools are among the largest internal consumers on
+#   this board, and this project made them bigger on the same day: the httpd
+#   concurrency fix raised max_open_sockets to 13 and CONFIG_LWIP_MAX_SOCKETS
+#   to 16 (see the LWIP_MAX_SOCKETS comment above), so leaving this off meant
+#   paying for that fix entirely out of the scarcest pool.
+#
+# DMA-capable allocations are unaffected either way -- those request
+# MALLOC_CAP_DMA explicitly and always come from internal RAM, and
+# MALLOC_RESERVE_INTERNAL below keeps a floor for them.
+# ALWAYSINTERNAL: DRAM_PSRAM_PLAN.md Phase 1 (2026-09-02) calls for stepping
+# this down 16384 -> 8192 -> 4096 -> 2048, soaking and measuring at each step.
+# Only the first step is landed here. Jumping straight to 4096 was tried
+# BEFORE that plan existed and reverted, 2026-08-20 -- recorded above (this
+# comment used to say ALWAYSINTERNAL "stays at" 16384 for that reason) -- on
+# real hardware the LVGL display task stopped starting at all ("Failed to
+# start lvgl_port_task"), more UART task inboxes failed than before, and the
+# PC-link safety watchdog failed with ESP_ERR_NO_MEM. That prior attempt
+# changed TRY_ALLOCATE_WIFI_LWIP in the same experiment (see the paragraph
+# below), so it is not a clean data point against 4096 alone, but it is real
+# evidence against jumping there without an intermediate step and a soak --
+# which is exactly what the plan's stepped approach (8192 first) is for. Do
+# NOT advance past 8192 without a hardware soak per DRAM_PSRAM_PLAN.md section
+# 5's soak definition (a full firing plus 24h idle-with-Wi-Fi), and do not run
+# that soak while a real firing is already in progress on the board.
+#
+# TRY_ALLOCATE_WIFI_LWIP is ON, enabled 2026-08-20 after being measured
+# properly. IMPORTANT correction to the earlier record: this knob was
+# originally changed in the SAME experiment as ALWAYSINTERNAL 16384 -> 4096,
+# so when that experiment broke the board both were reverted and both were
+# written up here as failures. Only one of them deserved it. Retested ALONE,
+# with ALWAYSINTERNAL left at 16384, this knob is a clear improvement and
+# nothing regressed -- so the confounded conclusion above was wrong about this
+# half, and this comment supersedes it.
+#
+# The evidence for enabling it is main.c's heap_stage() boot probe, which
+# prints the largest contiguous internal 8-bit block at each bring-up step.
+# wifi_prov_start() was by a wide margin the single largest consumer -- every
+# other stage costs 1-14KB:
+#
+#   stage              before        after
+#   entry              163840        163840
+#   wifi_prov           61440 (-100K) 73728 (-88K)
+#   ...
+#   lvgl_start (final)   7680        17408
+#   dram_free (final)   14075        26319
+#
+# 2.27x the largest contiguous block at the end of boot, for one line of
+# config. The Wi-Fi/lwIP buffer pools are also bigger on this board than the
+# IDF default assumes: the httpd concurrency fix raised max_open_sockets to 13
+# and CONFIG_LWIP_MAX_SOCKETS to 16 (see that comment above), so leaving this
+# off meant paying for that fix entirely out of the scarcest pool.
+#
+# DMA-capable allocations are unaffected: Wi-Fi's DMA descriptors and rx
+# buffers request internal memory explicitly (PSRAM is not DMA-reachable for
+# the Wi-Fi peripheral on the ESP32-S3), and this option only redirects the
+# allocations for which PSRAM is a legal backing store.
+#
+# The wider lesson from that day still holds and is worth keeping: the
+# shortage here is FRAGMENTATION, not total free bytes -- the board reports
+# ~243KB internal free at boot while the largest contiguous block collapses to
+# single-digit KB. Global allocator knobs mostly shift which pool SMALL
+# allocations come from and do nothing for a multi-KB contiguous request.
+# TRY_ALLOCATE_WIFI_LWIP is the exception because what it moves is genuinely
+# large. The rest of the recovery came from moving specific large, long-lived
+# allocations to PSRAM at their call sites -- task stacks via
+# xTaskCreatePinnedToCoreWithCaps(), the UART inbox queues via
+# xQueueCreateWithCaps(), and LVGL's entire allocator via lvgl_mem_psram.c.
+# See lvgl_port.c, uart_bridge.c, uart_bridge_ext.c and
+# espInterfaces/uart_protocol.c.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+# MALLOC_RESERVE_INTERNAL: re-examined per DRAM_PSRAM_PLAN.md section 5
+# ("re-examine ... in the same pass") and left at 32768 -- this is the floor
+# reserved for MALLOC_CAP_DMA/INTERNAL requests, which ALWAYSINTERNAL does not
+# affect, so there is no reason tied to this step to move it. Revisit only if
+# a DMA-capable allocation failure shows up under soak.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+# 2026-09-05, DRAM_PSRAM_PLAN.md "seventh pass, sixth pass" DRAM floor work:
+# needed for EXT_RAM_BSS_ATTR to actually place a .bss/.data symbol in PSRAM
+# (safety_cfg_http.c's three httpd-handler scratch buffers, ~12.8 kB) rather
+# than silently keeping it internal. sdkconfig is gitignored (see this file's
+# own top-of-file note) -- this line is the only place a clean clone learns
+# to turn this on. Also relocates lwIP/Wi-Fi .bss into PSRAM (~15 kB, see
+# dram_margin.h) -- do not turn off casually, that gain silently regresses.
+CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y
+
+# CONFIG_PARTITION_TABLE_CUSTOM: found the hard way 2026-08-20, same audit
+# pass, same root cause as the two entries above (a menuconfig-only change
+# that never made it into this file) -- and this one reproduces immediately.
+# Deleting `sdkconfig` and running `idf.py reconfigure` + a full ninja build
+# with this line absent fails at the partition-size-check step:
+#   Error: app partition is too small for binary KilnCtrl.bin size 0x15f490:
+#   - Part 'factory' 0/0 @ 0x10000 size 0x100000 (overflow 0x5f490)
+# Without CONFIG_PARTITION_TABLE_CUSTOM=y, ESP-IDF falls back to
+# CONFIG_PARTITION_TABLE_SINGLE_APP (partitions_singleapp.csv, a fixed 1MB
+# factory partition) instead of this project's partitions.csv (factory
+# fixed at 1500K -- see CONFIG_COMPILER_OPTIMIZATION_SIZE's comment above
+# for why that size is fixed rather than grown). The 1MB default is smaller
+# than KilnCtrl.bin even with -Os, so a fresh checkout fails to link a
+# flashable image at all, not just at boot. Without CUSTOM_FILENAME here,
+# CONFIG_PARTITION_TABLE_FILENAME does not get set to partitions.csv either.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# CONFIG_ESPTOOLPY_FLASHSIZE: found the hard way 2026-08-20, same audit pass,
+# same root cause again -- reproduces immediately and is even more fatal than
+# the two entries above. Deleting `sdkconfig` and reconfiguring+building with
+# this absent fails during partition-table generation itself, before any app
+# code is even linked:
+#   Partitions tables occupies 6.9MB of flash (7274496 bytes) which does not
+#   fit in configured flash size 2MB.
+# ESP-IDF's default flash size is 2MB; partitions.csv (see its own header
+# comment, "CONFIG_ESPTOOLPY_FLASHSIZE was corrected from 2MB to 16MB earlier
+# this session") lays out the OTA dual-app-slot table across the first
+# ~7.28 MB of this board's real 16 MB (N16R8 module) flash chip. Without this
+# pinned to 16MB, a fresh checkout cannot even generate a partition table,
+# let alone build or flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# CONFIG_ESP_COREDUMP_*: spontaneous-reboot diagnosability pass, 2026-08-20
+# (see firmware/KilnFW/TODO.md and partitions.csv's "coredump partition,
+# added 2026-08-20" comment). The board was seen rebooting on the bench with
+# no panic text recoverable -- the panic handler writes straight to the
+# USB-Serial-JTAG console, which re-enumerates across the reset and drops
+# whatever was captured on the PC side in that window. Writing the panic
+# reason, backtrace, and task states to the new `coredump` flash partition
+# instead means they survive the reset and can be read back afterward with
+# espcoredump.py, no serial capture window to lose.
+#
+# Following this file's own established pattern (CONFIG_LWIP_MAX_SOCKETS /
+# CONFIG_SPIRAM / CONFIG_PARTITION_TABLE_CUSTOM above): put it here, not only
+# in the gitignored local `sdkconfig`, or a fresh checkout silently loses
+# crash diagnosability entirely -- exactly the class of bug this file's
+# preceding three entries were all found fixing.
+#
+# ESP_COREDUMP_DATA_FORMAT_ELF / _CHECKSUM_SHA256 are deliberately NOT set
+# here: checked against components/espcoredump/Kconfig in this repo's pinned
+# IDF v6.0.2 (C:\esp\v6.0.2\esp-idf) -- `ESP_COREDUMP_ENABLE` (itself
+# selected by ENABLE_TO_FLASH below) unconditionally `select`s both, and
+# neither has a Kconfig `bool`/prompt of its own in this IDF version (the
+# legacy binary-format and CRC32-checksum choices from older IDF releases
+# no longer exist as user-facing options). Setting them here produced a
+# `NOTE: unknown kconfig symbol` build warning -- harmless, but noise this
+# file should not carry. ELF is what espcoredump.py's
+# `info_corefile`/`dbg_corefile` expect; SHA256 is this IDF version's only
+# integrity check for a partially-written/torn dump (e.g. a second panic
+# before the flash write completes) -- both are on by construction via the
+# select chain, not by anything in this file.
+# CONFIG_ESP_COREDUMP_MAX_TASKS_NUM: this app starts on the order of a few
+# dozen FreeRTOS tasks (I2C/SPI drivers, HTTP handlers, every UART bridge
+# task in App/main.c, LVGL, safety link, etc.). 64 is this Kconfig's own
+# default in v6.0.2 already -- pinned explicitly here so a dump taken with
+# everything running still captures every task's state rather than silently
+# truncating the list, regardless of what a future IDF version's default
+# becomes.
+# CONFIG_ESP_COREDUMP_CAPTURE_DRAM: on, added 2026-08-20 after decoding a real
+# dump showed the diagnostic was only half working. Without it the dump holds
+# per-task stacks but NOT the TCBs, which live in .bss/heap. Every decoded
+# thread then came back as:
+#
+#   0x3fcc0c08 Corrupted TCB data
+#   ==== THREAD 3 (TCB: 0x3fcb8b28, name: '') ====
+#
+# -- empty task names and nonsense stack figures, because GDB was reading
+# memory that simply was not in the file. Backtraces resolved correctly, but
+# nothing identified WHICH task died, and for a spontaneous reboot that is
+# most of the value.
+#
+# Costs dump size: ESP-IDF's Kconfig help asks for at least 128K more, and the
+# coredump partition was grown 512K -> 1024K to cover it (partitions.csv).
+#
+# PSRAM task stacks are NOT a problem here, checked rather than assumed.
+# espcoredump/Kconfig warns "sections located in external RAM will not be
+# stored", which reads like bad news for this firmware -- several task stacks
+# were deliberately moved to PSRAM to survive internal-DRAM exhaustion (see
+# the SPIRAM entries above, lvgl_port.c, uart_bridge.c, uart_bridge_ext.c).
+# That warning is about .bss/.data placed in external RAM, not about task
+# stacks, which are captured per task via snapshots wherever they live.
+# Verified on a real dump: `lvgl` and `link_watchdog` -- both created with
+# xTaskCreatePinnedToCoreWithCaps(..., MALLOC_CAP_SPIRAM) -- resolved full,
+# correct backtraces into lvgl_port.c and uart_bridge.c. So the DRAM fix cost
+# nothing in crash diagnosability.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_CAPTURE_DRAM=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
+
+# CONFIG_ESP_TASK_WDT_PANIC (ROADMAP.md watchdog-recovery pass, 2026-08-22):
+# without this, CONFIG_ESP_TASK_WDT_EN=y + CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
+# (both ESP-IDF defaults this project already inherits -- see sdkconfig) only
+# LOG a hung task; nothing resets the board. A wedged task with the relays
+# left in whatever state they were last commanded is a kiln nobody is
+# controlling, silently, for as long as the process happens to sit there.
+# PANIC turns that log into a panic -> reset, which boot_guard.c's counter
+# then sees and counts toward recovery mode like any other reset.
+#
+# Checked before adding this (grepped the entire App/ tree for
+# esp_task_wdt_add(): zero call sites) -- no application task subscribes to
+# the task WDT explicitly. The only subscribers are the two idle tasks
+# (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1=y, also inherited defaults),
+# so this only panics if BOTH idle tasks are starved of CPU time for the
+# full 5 s on their core -- i.e. some higher-priority task monopolized a
+# core for 5+ seconds without ever yielding. NOT exhaustively verified
+# against every blocking call in this codebase (a long flash erase inside
+# esp_ota_write()/nvs_commit(), or an LVGL redraw that legitimately runs
+# long, could in principle do this) -- FLAGGED FOR OWNER REVIEW: watch the
+# first few real boots after this change for an unexpected TASK_WDT reset
+# reason (esp_reset_reason() is already logged at ERROR on every boot, see
+# main.c) that correlates with a known-long operation rather than a genuine
+# hang, and raise CONFIG_ESP_TASK_WDT_TIMEOUT_S or bracket that operation
+# with esp_task_wdt_add()/_delete() if one turns up.
+CONFIG_ESP_TASK_WDT_PANIC=y
+
+# --- OTA rollback safety net -------------------------------------------------
+# These were set ONLY in the generated `sdkconfig`, which is gitignored (see
+# .gitignore), so a fresh clone regenerated it from this file and silently
+# built with rollback DISABLED -- found by audit 2026-08-27.
+#
+# With rollback off, esp_ota_mark_app_valid_cancel_rollback() in main.c fails
+# and the whole boot-confirm machinery (boot_guard.c) degrades to a logged
+# no-op: an OTA image that boots but never passes its health check simply
+# keeps running broken forever instead of being rolled back to the previous
+# slot. That is the one mechanism protecting a two-processor kiln controller
+# from a bad update, and it was one clean clone away from not existing.
+#
+# Same class as the sdkconfig-hides-a-mismatch problem already recorded in
+# this project's notes: if a setting matters, it belongs in a tracked file.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_APP_ROLLBACK_ENABLE=y
+
+# LVGL small font, for the home chart's 11 temperature-axis tick labels
+# (UI_PLAN.md 5.3 -- owner asked for all 11 labelled, "smaller font if
+# needed"). Only MONTSERRAT_14 was compiled in, so the first implementation
+# faked a smaller font with lv_obj_set_style_transform_scale(), which scales
+# the already-rendered 14px bitmap and aliases badly at ~60% on a real panel.
+# Enabling the real 10px face costs a few KB of flash and renders cleanly.
+#
+# In sdkconfig.defaults rather than sdkconfig for the reason the rollback
+# block above spells out: sdkconfig is gitignored, so a setting left only
+# there means a clean clone builds a different binary -- here, one whose
+# chart labels silently fall back to the 14px font and overlap.
+CONFIG_LV_FONT_MONTSERRAT_10=y
+
+# CONFIG_IDF_TARGET: without this line a fresh worktree with no generated
+# sdkconfig defaults to plain `esp32`, and the build then fails deep inside
+# ESP-IDF rather than anywhere in this repo -- the observed symptom is
+# `TEMPERATURE_SENSOR_CLK_SRC_DEFAULT undeclared` out of
+# esp_driver_tsens/include/driver/temperature_sensor.h while compiling
+# firmware/hwAbstraction/esp/sysinfo/hal_sysinfo_esp.c, whose compiler line
+# reads xtensa-esp32-elf-gcc. That error names an ESP-IDF header and no repo
+# file, so it reads convincingly as a pre-existing mainline break; it has
+# already cost more than one session a full investigation. The board is an
+# ESP32-S3 and always has been, so pin it here rather than relying on every
+# fresh tree remembering an explicit `idf.py set-target esp32s3`.
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Pin WiFi/lwIP internal-DRAM tuning to the hand-set bench values --------
+# The shared main tree's gitignored, hand-tuned sdkconfig
+# (firmware/KilnFW/sdkconfig) carries four values below that a fresh
+# worktree's regenerated sdkconfig silently
+# drops back to plain IDF Kconfig defaults -- the same "gitignored config
+# hides mismatch" class already recorded elsewhere in this project's notes,
+# and the same reasoning as the rollback/font blocks above: if a setting
+# matters, it belongs in a tracked file, not only in the one gitignored copy
+# every prior bench flash happened to be built from.
+#
+# CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM / CONFIG_ESP_WIFI_RX_BA_WIN: IDF's
+# esp_wifi/Kconfig defaults BOTH to 16 (not 10/6) once
+# CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y, which this project sets. Per that
+# Kconfig's own help text, each static RX buffer costs ~1.6 KB and is
+# allocated from internal DRAM at esp_wifi_init() (freed only at
+# esp_wifi_deinit(), i.e. never in this firmware) -- so building with the
+# regenerated 16/16 instead of the bench's proven 10/6 costs roughly
+# (16-10)*1.6KB =~ 9.6 KB more internal DRAM, against a running build that
+# has already measured heap_internal min_free as low as 6,675 B
+# (project_esp_internal_dram_exhaustion). 10/6 is what every prior bench
+# flash was actually built and proven stable with; pin it rather than let a
+# clean worktree quietly regenerate the larger, unproven pair.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+
+# CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS: IDF's lwip/Kconfig defaults this to 0 (not
+# 4) under the same SPIRAM_TRY_ALLOCATE_WIFI_LWIP condition above; per that
+# Kconfig's help text, 0 means "TCP will not control the number of OOSEQ
+# pbufs" queued per pcb, which in a poor network environment can let
+# out-of-order TCP pbufs consume the WiFi MAC layer's entire RX buffer pool.
+# 4 (the non-SPIRAM default, and the value the bench has actually run under
+# every prior flash, though not isolated by a dedicated experiment the way
+# the DRAM numbers above were) bounds that queue instead. Pinning 4 here
+# keeps the proven bench behavior; if a future session isolates this value
+# specifically, update this comment rather than the number alone.
+CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS=4
+
+# CONFIG_KILNCTL_ENABLE_GPIO_PROBE: the bench MCP tooling's gpio_probe
+# capability depends on this being enabled (check_all_task_stack_budgets.py's
+# per-task rows already declare Kconfig gating since 3ec08793 and grade
+# correctly either way, so enabling it does not break that check) -- pin it
+# on so a clean worktree build supports the same bench tooling the hand-set
+# sdkconfig always has.
+#
+# 2026-09-23 review note: pinning this unconditionally does reverse this
+# symbol's own Kconfig help text ("Leave this OFF for any build going near a
+# real heater") for every clean-worktree build, not just bench/debug ones. A
+# gate on a KILNCTL_ENABLE_DEV_AFFORDANCES-style symbol (default y only for
+# dev/bench builds) would be the better shape, but no such symbol exists
+# anywhere in this Kconfig tree today and the bench's own gitignored
+# sdkconfig has no `dev_affordances`-named key either -- there is nothing to
+# gate on yet. Kept as an unconditional pin for now; owner should decide
+# whether a KILNCTL_ENABLE_DEV_AFFORDANCES-style umbrella symbol is worth
+# adding, and this pin should move behind it if so.
+CONFIG_KILNCTL_ENABLE_GPIO_PROBE=y
+
+# NOTE: CONFIG_KILNCTL_TOUCH_CAL_SWAP_XY is deliberately NOT pinned here. It
+# is inert on this board's FT6336U capacitive touch panel (it only feeds the
+# legacy resistive NS2009 path) -- see firmware/KilnFW/docs/PROJECT_STATUS.md
+# "Hardware present on this bench unit". Pinning an inert value would just be
+# noise.
+
+# GitHub release fetch (docs/GITHUB_RELEASE_UPDATE_PLAN.md WP7/WP8, section 11 option D): the TLS
+# contexts and record buffers live in PSRAM, so a handshake costs the internal heap only a few KB
+# instead of 35-45 KB. The fetch task itself runs off core 0 (update_fetch.c). Existing build
+# trees keep their old value until sdkconfig is regenerated (delete sdkconfig or run
+# `idf.py reconfigure` after removing these keys from it).
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+# DELIBERATELY NOT SET: CONFIG_MBEDTLS_HAVE_TIME_DATE. Without it mbedTLS does not compare the
+# certificate validity dates with the wall clock (chain, signature and hostname are still
+# verified). update_fetch.c instead refuses check and download until SNTP has synced (plan item 11),
+# so the clock is at least real, but an EXPIRED chain would be accepted. Turning it on is a
+# firmware-wide TLS behaviour change that cannot be proven here without a board (crt_bundle
+# against github.com with a synced clock, and every other TLS client). See
+# docs/GITHUB_RELEASE_UPDATE_PLAN.md WP8 status, "Clock".

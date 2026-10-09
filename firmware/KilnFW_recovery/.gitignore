@@ -1,0 +1,99 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Directory metadata
+.directory
+
+# Temporary files
+*~
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Log files
+*.log
+
+# Build artifacts and directories
+**/build/
+build/
+
+# ELF archive (kilnctrl elf_archive.py) -- deliberately a SIBLING of build/,
+# not inside it, so `idf.py fullclean`/a build-dir wipe can never take the
+# only symbolizable copy of a flashed ELF with it (see kiln_archive_dir()'s
+# 2026-09-15 docstring note and docs/audits/profile_executor_coredump_2026-09-15.md).
+# Still never committed -- manifest.json/superseded.json are generated
+# indices, and *.elf below already covers the binaries themselves.
+elf_archive/
+
+# flash_provenance.json (kilnctrl flash_provenance.py/elf_archive.py) -- same
+# reasoning as elf_archive/ above: a sibling of build/, not inside it, since
+# the M1 fix in docs/audits/review_elf_archive_move_a347e726_2026-09-15.md
+# (was itself inside build/ and lost with it). Machine-generated, never
+# committed. See elf_archive.kiln_provenance_path().
+flash_provenance.json
+
+# Durable coredump archive (kilnctrl coredump_fetch.py, 2026-09-16,
+# RELEASE_HARDENING_PLAN.md blocker 1 item 1) -- same "sibling of build/,
+# never inside it" reasoning as elf_archive/ above. Machine-generated raw
+# board dumps and their provenance sidecars, never committed.
+coredump_archive/
+*.o
+*.a
+*.out
+*.exe # For any host-side utilities compiled on Windows
+
+# ESP-IDF specific build outputs
+*.bin
+*.elf
+*.map
+flasher_args.json # Generated in build directory
+sdkconfig.old
+sdkconfig
+
+# ESP-IDF dependencies
+# For older versions or manual component management
+/components/.idf/
+**/components/.idf/
+# For modern ESP-IDF component manager
+managed_components/
+# If ESP-IDF tools are installed/referenced locally to the project
+.espressif/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# Python environment files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+dist/
+
+# Virtual environment folders
+venv/
+.venv/
+env/
+
+# Language Servers
+.clangd/
+.ccls-cache/
+compile_commands.json
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# User-specific configuration files
+*.user
+*.workspace # General workspace files, can be from various tools
+*.suo       # Visual Studio Solution User Options
+*.sln.docstates # Visual Studio

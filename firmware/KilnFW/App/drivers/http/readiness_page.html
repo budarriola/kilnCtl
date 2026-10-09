@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Ready to fire?</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Page-local palette (docs/UI_THEME.md / App/drivers/ui/ui_theme.h, TODO.md
+     10.6/10.6a). The shared --ui-* palette and .theme-btn now live in
+     /theme.css (linked above, EMBED_TXTFILES'd from App/drivers/http/theme.css) --
+     this block keeps only what's specific to this page: the --bg/--fg/etc
+     names the existing light/dark toggle uses as its interface (unchanged
+     behaviour); only the DARK variant points at the --ui-* values instead of
+     its own hex, so toggled-dark and default (no preference) match the LCD,
+     while explicit light mode is untouched. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --bad: #b00;
+    --warn: #a67c00;
+    /* WEB_UI_RESPONSIVE.md sec 5.1 item 2, resolved 2026-09-03: --neutral
+       is now the token actually used (was --cannot-yet). Same value as before
+       the rename -- see the plan doc for the decision record. Note
+       `.status-cannot_yet` below is a JS-generated status-enum class name
+       (readiness_page.html's own `cannot_yet` status value), unrelated to
+       this CSS custom property name and intentionally left alone. */
+    --neutral: #888;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
+      --warn: var(--ui-accent-1);
+      --neutral: var(--ui-text-secondary);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --bad: var(--ui-accent-5);
+    --warn: var(--ui-accent-1);
+    --neutral: var(--ui-text-secondary);
+  }
+  /* box-sizing reset, page-local only. Fluid width via min() rather than a
+     breakpoint: fills a 320px phone, caps at 640px on tablet/desktop
+     (matches the other *_page.html pages' cap) so a checklist item's detail
+     text doesn't run the full width of a 27" monitor. Reasoned about
+     320/360/390, 768/820, 1280/1920. */
+  *, *::before, *::after { box-sizing: border-box; }
+  /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 640px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
+         background: var(--bg); color: var(--fg); }
+  /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
+     rule in /theme.css (which loads first), and being `position: fixed`
+     made it overlap nav.js's topbar on a phone-width viewport -- see
+     theme.css's own comment on .theme-btn for the fix. */
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  p { color: var(--muted); }
+  .item { display: flex; align-items: flex-start; gap: 0.6em; background: var(--card-bg);
+          border: 1px solid var(--border); border-radius: var(--ui-radius); padding: 0.6em 0.9em;
+          margin-bottom: 0.5em; }
+  .item .mark { font-size: 1.1em; line-height: 1.3em; width: 1.2em; text-align: center; flex-shrink: 0; }
+  /* min-width: 0 -- the flex-shrink trap flagged in theme.css's
+     .kc-page-title comment: without it a flex item floors at its own
+     min-content width, which for a long unbroken detail string (a raw
+     error message, a hostname) could push .mark off a narrow phone instead
+     of wrapping the text as intended. */
+  .item .body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .item .label { font-weight: bold; }
+  .item .detail { color: var(--muted); font-size: 0.85em; margin-top: 0.15em; }
+  /* 2026-08-22: given a real tap target. At 60x15 this was the smallest
+     control left on the site, and it is the whole point of the page -- the
+     one affordance that takes an operator from "this is not ready" to the
+     screen that fixes it. It sits on its own line (not mid-sentence), so
+     padding it out costs nothing typographically. */
+  .item .fix { font-size: 0.85em; margin-top: 0.2em; display: inline-flex;
+               align-items: center; min-height: 32px; padding: 0 0.4em 0 0; }
+  .item.status-ok .mark { color: var(--ok); }
+  .item.status-not_done .mark { color: var(--bad); }
+  .item.status-cannot_yet .mark { color: var(--neutral); }
+  .item.status-deliberately_off .mark { color: var(--warn); }
+  .item.status-cannot_yet { opacity: 0.75; }
+  .legend { font-size: 0.8em; color: var(--muted); margin-bottom: 1em; }
+  .legend span { margin-right: 1em; white-space: nowrap; }
+  .empty { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<!-- Ad-hoc "&larr; Dashboard" back-link retired: nav.js's shared topbar
+     (Home button) provides this on every page. The <h1> that used to sit
+     here is also gone (2026-08-21 rework item 5) -- nav.js's topbar now
+     shows this page's name ("Ready to fire?", from <title> above) in the
+     brand's old spot, so the heading was pure duplication. -->
+<p>A status page, not a forced setup flow -- it answers "what
+is missing" on a board someone else configured a while ago, in the order
+each item actually becomes checkable.</p>
+<!-- 2026-09-09, owner decision. This paragraph used to end "Nothing here is
+     required to run a firing; it is a checklist, not a gate." That is no
+     longer true, and leaving it would have been the worst possible copy: an
+     operator refused a start would have been reading a page telling them
+     nothing on it can refuse a start. Four items are now a real interlock
+     (App/drivers/safety/readiness_gate.h, enforced in
+     profile_executor_run(), which every start path goes through -- web, both
+     LCD buttons and benchproto). The REST of the list is still advisory, and
+     saying which is which is the point of splitting this into two
+     sentences. There is deliberately no override for the four: if the E-stop
+     interlock is unverified, the kiln does not fire. -->
+<p><strong>Four of these items will refuse a firing:</strong> a latched
+safety-processor trip, a recovery-mode boot, an unacknowledged crash report,
+and an unverified E-stop interlock. There is no override -- clear the item and
+start again. Every other item on this page is advisory: it is worth reading,
+but it will not stop you.</p>
+<div class="legend">
+  <span>&#10003; ok</span>
+  <span style="color:var(--bad)">&#10007; not done</span>
+  <span style="color:var(--warn)">&#8212; deliberately off</span>
+  <span style="color:var(--neutral)">&#8943; can't check yet</span>
+</div>
+<div id="items"><p class="empty">Loading&hellip;</p></div>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+
+  var scrolledToHash = false;
+
+  var MARK = { ok: '✓', not_done: '✗', cannot_yet: '⋯', deliberately_off: '—' };
+
+  function render(items) {
+    var el = document.getElementById('items');
+    if (!items || !items.length) {
+      el.innerHTML = '<p class="empty">No checklist data.</p>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var mark = MARK[it.status] || '?';
+      // mark/detail are the live checklist verdict and its live-measured
+      // explanation (each item's current status/detail as read this poll,
+      // per readiness_http.c) -- kc-live-value on both. it.label is the
+      // item's fixed name ("Wi-Fi configured", etc.), never changes with the
+      // board's state, so it stays unmarked.
+      // id on the row so a refused start can link straight to the ONE item
+      // that blocked it (main_page.html sends the operator to
+      // /readiness#<key>, using the same key readiness_http.c renders and
+      // readiness_gate.h blocks on -- check_readiness_gate_display_agreement
+      // holds those to each other). Without this the link lands at the top of
+      // an eighteen-item list and the operator has to hunt for their own
+      // refusal.
+      html += '<div class="item status-' + it.status + '" id="' + window.kcEscapeHtml(it.key || ('item' + i)) + '">' +
+              '<div class="mark kc-live-value">' + mark + '</div>' +
+              '<div class="body">' +
+              '<div class="label">' + window.kcEscapeHtml(it.label) + '</div>' +
+              '<div class="detail kc-live-value">' + window.kcEscapeHtml(it.detail) + '</div>' +
+              (it.fix_url ? '<a class="fix" href="' + window.kcEscapeHtml(it.fix_url) + '">Fix this &rarr;</a>' : '') +
+              '</div></div>';
+    }
+    el.innerHTML = html;
+    // The rows are re-rendered every 5 s poll, so the browser's own one-shot
+    // scroll-to-#hash has long since happened against a "Loading..."
+    // placeholder. Re-target it here, on the FIRST render only -- repeating
+    // it every poll would yank the page back under an operator who has
+    // scrolled away to read something else.
+    if (!scrolledToHash && window.location.hash.length > 1) {
+      var target = document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+      if (target) {
+        target.scrollIntoView();
+        target.style.outline = '2px solid var(--bad)';
+        scrolledToHash = true;
+      }
+    }
+  }
+
+  function poll() {
+    fetch('/api/readiness').then(function (r) { return r.json(); }).then(function (j) {
+      render(j.items);
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      document.getElementById('items').innerHTML = '<p class="empty">Could not load readiness data.</p>';
+    });
+  }
+  poll();
+  setInterval(poll, 5000);
+})();
+</script>
+</body>
+</html>

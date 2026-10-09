@@ -1,0 +1,1337 @@
+#include "relay_cycles.h"
+
+#include <string.h>
+
+#include "esp_log.h"
+#include "hal_esp_common.h"
+#include "hal_time.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "hal_kv.h"
+#include "nvs_key_check.h"
+#include "pref_cfg_fs.h"
+#include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- relay_cycles_get_dualwrite_status() below */
+#include "flash_worker_wait.h" /* bounded wait for the flash-safe worker -- see relay_cycles_init()'s
+                                 * call site below and flash_worker_wait.h's header comment */
+
+static const char *TAG = "relay_cycles";
+
+/* Set true if relay_cycles_init()'s boot-time migrate-on-load write was
+ * attempted before the flash-safe worker existed and the bounded wait gave
+ * up (worker still not started after FLASH_WORKER_WAIT_CEILING_MS_DEFAULT).
+ * This is the exact "flash-safe worker not started -- job dropped" hazard
+ * (hardware verification 3e226f28): before this fix the migration attempt
+ * failed silently and the item stayed NVS-only with nothing surfaced.
+ * Surfaced read-only via relay_cycles_get_dualwrite_status() below into
+ * GET /api/cfgfs's dual_write.items[] (cfg_fs_status.c), never cleared
+ * mid-boot -- a dropped migration needs a reboot (or an explicit re-save)
+ * to resolve, so "still true" after boot correctly means "still NVS-only". */
+static bool s_migration_worker_wait_deferred = false;
+
+/* Hand-declared rather than #include "uart_bridge.h" -- same reasoning as
+ * safety_cfg_store.c's identical block: that header pulls in
+ * ILI9488.h/screen_idle.h/kiln_io.h for hardware-bridge task declarations
+ * this file needs none of, and which are not part of this module's
+ * host-test stub surface. Keep in sync with uart_bridge.h by hand if either
+ * signature ever changes. Used by relay_cycles_reset() (RELAY_LIFE_BUDGET_
+ * PLAN.md step 5) to persist a reset immediately from whichever task calls
+ * it -- the LCD diagnostics page's two-tap confirm runs on the LVGL task,
+ * whose stack is PSRAM-backed (DRAM_PSRAM_PLAN.md), so it cannot call
+ * persist_locked() directly any more than relay_cycles_flush() can. */
+esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+bool uart_bridge_ext_is_on_flash_worker(void);
+/* Bounded-wait sibling (flash_worker.h) used by relay_cycles_reset_timeout()
+ * below -- same hand-declaration reasoning as the unbounded call above. */
+esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), void *arg,
+                                                       uint32_t timeout_ms);
+
+/* Same namespace as the rest of this board's configuration (zones_http.c,
+ * rules_http.c) but its own key -- deliberately NOT folded into the
+ * zones_cfg blob, whose loader treats any size change as "corrupt, start
+ * unconfigured". Adding a field there would silently wipe a user's zone
+ * setup on the first boot after the update. */
+#define NVS_NAMESPACE "kiln_cfg"
+#define NVS_KEY_CYCLES "relay_cyc"
+NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
+NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES);
+
+/* TODO.md 8.1: this module's persisted store, split out of the default NVS
+ * partition into its own partition so a corrupt/erased default partition
+ * cannot take relay history with it. */
+#define KILN_NVS_PARTITION "kiln_nvs"
+NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
+
+/* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 6 (relay cycle counters,
+ * scheduled LAST -- "MOVE, but last, after everything else has flown"): the
+ * cfg-filesystem dual-write bridge for this module. Same generic bridge
+ * unit_pref.c/ramp_assist_cfg.c/display_power_cfg.c/relay_names use
+ * (pref_cfg_fs.h) rather than a bespoke module -- this blob (46-ish bytes,
+ * one _Static_assert-free struct, no wire-format migration OF THE FILE
+ * itself) is exactly the shape that bridge targets; the v1->v2 migration
+ * chain below is an NVS-only concern (a v1-era board never produced a
+ * cfg-file, since this bridge postdates v2) and stays entirely inside
+ * relay_cycles_init()'s existing NVS load. A separate rev key, same
+ * reasoning as every other pref_cfg_fs item (NVS_KEY_RAMP_ASSIST_REV etc). */
+/* RELAY_CYCLES_FILE_PATH now lives in relay_cycles.h (kiln-scope reset names it). */
+#define NVS_KEY_CYCLES_REV "relay_cyc_r"
+NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES_REV);
+
+/* The blob has no version field of its own on disk before this change (a
+ * bare uint32_t[KILN_IO_RELAY_COUNT]); wrapping it in a versioned struct
+ * changes the on-disk layout, which is fine here -- unlike run_state.c's
+ * blob, this one is diagnostic-only and already treats any size mismatch as
+ * "start at zero", so the version add rides the same tolerant path. */
+/* Version 2 (RELAY_LIFE_BUDGET.md): adds a fifth counted slot
+ * (RELAY_CYCLES_SAFETY_INDEX, the safety relay K4) and per-relay type +
+ * rated-life override, both persisted so a budget survives reboot before the
+ * zones/safety config steps that will actually set the type exist. A v1 blob
+ * (bare 4-count array, no types) loads into the first four slots with type
+ * defaulted to RELAY_TYPE_SSR and the fifth slot at 0 -- see the migration
+ * block in relay_cycles_init(). */
+#define RELAY_CYCLES_VERSION 2
+
+typedef struct {
+    uint8_t  version;
+    uint32_t counts[KILN_IO_RELAY_COUNT];
+} relay_cycles_blob_v1_t;
+
+typedef struct {
+    uint8_t  version;
+    uint32_t counts[RELAY_CYCLES_COUNT];
+    uint8_t  types[RELAY_CYCLES_COUNT];          /* relay_type_t, stored as uint8_t */
+    uint32_t rated_overrides[RELAY_CYCLES_COUNT]; /* 0 = use the type's table value */
+} relay_cycles_blob_t;
+
+typedef struct {
+    SemaphoreHandle_t lock;
+    /* opus review finding (LOW): serializes persist_snapshot_now()'s whole
+     * snapshot-then-write section against itself -- relay_cycles_maybe_persist()
+     * (tick path) and relay_cycles_flush() (executor stop path) can call it
+     * concurrently, and releasing `lock` between the snapshot and the NVS
+     * write (see persist_snapshot_now()'s own comment) left nothing
+     * ordering the two writes, so an older snapshot could land AFTER a
+     * newer one and silently win. Held only around persist_snapshot_now()'s
+     * body, never nested inside `lock` and never held across anything that
+     * takes `lock` on its own (the producers -- relay_cycles_add(), etc. --
+     * never touch this one), so lock order is persist_lock -> lock, always
+     * in that direction, never the reverse. */
+    SemaphoreHandle_t persist_lock;
+    uint32_t          counts[RELAY_CYCLES_COUNT];
+    uint8_t           types[RELAY_CYCLES_COUNT];
+    uint32_t          rated_overrides[RELAY_CYCLES_COUNT];
+    bool              dirty;
+    int64_t           last_persist_us;
+    bool              initialized;
+    uint32_t          rev; /* cfg-filesystem dual-write rev counter, see NVS_KEY_CYCLES_REV above */
+} relay_cycles_t;
+
+static relay_cycles_t s_rc;
+
+/* pref_cfg_fs_validate_fn_t for this blob: re-runs the SAME acceptance test
+ * relay_cycles_init()'s "current version, right size" branch already applies
+ * to an NVS candidate -- an older/newer/wrong-sized file is simply "not
+ * valid" here, exactly like relay_cycles_init() treats such an NVS blob,
+ * falling back to whichever side (NVS in practice, since a cfg-file can only
+ * ever have been written by firmware at or after this pass) is trustworthy. */
+static bool relay_cycles_file_validate(const void *bytes, size_t len)
+{
+    if (len != sizeof(relay_cycles_blob_t)) {
+        return false;
+    }
+    const relay_cycles_blob_t *blob = (const relay_cycles_blob_t *)bytes;
+    return blob->version == RELAY_CYCLES_VERSION;
+}
+
+/* Brings up KILN_NVS_PARTITION, erasing ONLY that partition if its contents
+ * are unusable. hal_kv_init_partition() already implements the
+ * erase-and-retry idiom this used to do by hand (see hal_kv_esp.c). */
+static hal_status_t nvs_partition_init(const char *partition)
+{
+    return hal_kv_init_partition(partition);
+}
+
+/* Forward declaration -- defined below, but this write path needs it before
+ * that point in the file. See its own definition for what it checks. */
+static bool caller_stack_is_external(void);
+
+/* One-time, one-directional copy of the old default-partition blob into
+ * KILN_NVS_PARTITION, for boards provisioned by firmware predating the
+ * split. The old copy is left in place (never deleted) so a rollback to
+ * pre-split firmware still finds its counts -- see wifi_prov.c's
+ * migrate_from_default_partition() for the fuller rationale (same convention
+ * as zones_config_store.c). Runs only when KILN_NVS_PARTITION has nothing
+ * under NVS_KEY_CYCLES yet: this function itself probes for that and
+ * returns without writing otherwise, because the old copy is never erased
+ * and an unconditional copy would overwrite live wear counts with the stale
+ * v1 copy on every boot (moving counts downward, which 752f9ac0 forbids). A
+ * kiln-partition blob that exists but cannot be read is NOT "nothing": fail
+ * closed, skip, and log.
+ *
+ * DRAM_PSRAM_PLAN.md section 9 write-path re-audit (2026-09-02): this
+ * function writes NVS (hal_kv_set_blob()/hal_kv_commit() below) exactly like
+ * persist_locked() does further down, but never got persist_locked()'s
+ * caller_stack_is_external() guard when that guard was added -- the earlier
+ * pass treated "this file is guarded" as true of the file's main write path
+ * and never re-checked every OTHER write call site inside it. In practice
+ * this function is only ever reached from relay_cycles_init(), itself only
+ * called once from app_main's own task (an internal-SRAM stack) before any
+ * PSRAM-stacked task exists, so it cannot fire the crash today -- but that
+ * makes it exactly the kind of gap a future audit would read as "covered"
+ * without this guard, the same false-confidence class the third pass's
+ * migrate_from_default_partition() finding described. Added for that reason,
+ * not because a live path was found. */
+static void migrate_from_default_partition(void)
+{
+    hal_kv_handle_t h;
+    hal_status_t err;
+
+    /* Guard: only migrate into an empty KILN_NVS_PARTITION. NOT_FOUND on the
+     * namespace open or on the key means genuinely absent; any other result
+     * (a readable blob, or an error such as a size/read failure) means
+     * something is there, so skip. */
+    err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_OK) {
+        relay_cycles_blob_t existing;
+        size_t existing_len = sizeof(existing);
+        hal_status_t gerr = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &existing, &existing_len);
+        hal_kv_close(&h);
+        if (gerr != HAL_NOT_FOUND) {
+            if (gerr != HAL_OK) {
+                ESP_LOGW(TAG, "migrate_from_default_partition: '%s' blob present but unreadable (%s) -- "
+                              "not migrating (fail closed)", KILN_NVS_PARTITION, hal_status_to_name(gerr));
+            }
+            return;
+        }
+    } else if (err != HAL_NOT_FOUND) {
+        ESP_LOGW(TAG, "migrate_from_default_partition: cannot probe '%s' (%s) -- not migrating (fail closed)",
+                 KILN_NVS_PARTITION, hal_status_to_name(err));
+        return;
+    }
+
+    err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL);
+    if (err != HAL_OK) {
+        return;
+    }
+    /* This reads whatever the OLDEST possible sibling wrote to the default
+     * partition before any board ever saw the partition split -- that could
+     * only ever be a v1 blob (bare 4-count array), since the split predates
+     * the v1->v2 type/fifth-slot change. Read it as v1 and upconvert, the
+     * same way relay_cycles_init()'s own migration block does for a v1 blob
+     * already in KILN_NVS_PARTITION. */
+    relay_cycles_blob_v1_t old_blob_v1;
+    size_t len = sizeof(old_blob_v1);
+    err = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &old_blob_v1, &len);
+    hal_kv_close(&h);
+    if (err != HAL_OK) {
+        /* Nothing in the old location either (or it's the pre-version-field
+         * bare uint32_t[] blob, a different size) -- nothing to migrate. */
+        return;
+    }
+    if (len != sizeof(old_blob_v1) || old_blob_v1.version != 1) {
+        return;
+    }
+
+    relay_cycles_blob_t old_blob;
+    memset(&old_blob, 0, sizeof(old_blob));
+    old_blob.version = RELAY_CYCLES_VERSION;
+    memcpy(old_blob.counts, old_blob_v1.counts, sizeof(old_blob_v1.counts));
+    /* types[]/rated_overrides[] stay zero -- RELAY_TYPE_SSR/no override,
+     * same default the in-place v1->v2 migration uses. */
+
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "migrate_from_default_partition: REFUSING -- calling task's stack is in "
+                      "external RAM (PSRAM). See persist_locked()'s guard comment in this file "
+                      "and DRAM_PSRAM_PLAN.md section 7.2/9.");
+        return;
+    }
+
+    hal_kv_handle_t hw;
+    err = hal_kv_open(&hw, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return;
+    }
+    err = hal_kv_set_blob(&hw, NVS_KEY_CYCLES, &old_blob, sizeof(old_blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&hw);
+    }
+    hal_kv_close(&hw);
+    if (err == HAL_OK) {
+        ESP_LOGI(TAG, "migrated relay cycle counts from default NVS partition to '%s'", KILN_NVS_PARTITION);
+    } else {
+        ESP_LOGW(TAG, "relay cycle count migration to '%s' failed: %s", KILN_NVS_PARTITION, hal_status_to_name(err));
+    }
+}
+
+static bool ensure_lock(void)
+{
+    if (!s_rc.lock) {
+        s_rc.lock = xSemaphoreCreateMutex();
+        if (!s_rc.lock) {
+            ESP_LOGE(TAG, "xSemaphoreCreateMutex failed -- cycle counts will not be kept");
+            return false;
+        }
+    }
+    if (!s_rc.persist_lock) {
+        s_rc.persist_lock = xSemaphoreCreateMutex();
+        if (!s_rc.persist_lock) {
+            ESP_LOGE(TAG, "xSemaphoreCreateMutex (persist_lock) failed -- cycle counts will not be kept");
+            return false;
+        }
+    }
+    return true;
+}
+
+/* True iff the CURRENTLY EXECUTING task's own stack lives in external RAM
+ * (PSRAM) -- i.e. the negation of hal_kv_write_safe_here(). Same predicate,
+ * same reasoning, and same incident class as kiln_cfg_store.c's/
+ * safety_cfg_store.c's/run_state.c's caller_stack_is_external(): a flash/NVS
+ * write disables the cache, which makes a PSRAM-resident stack unreachable
+ * and aborts the whole board via ESP-IDF's own
+ * esp_task_stack_is_sane_cache_disabled() rather than failing just this one
+ * call. This module's persist_locked() is called directly from
+ * profile_executor's tick path (relay_cycles_maybe_persist()) and its stop
+ * path (relay_cycles_flush()) -- see run_state.c's identical guard for the
+ * fuller rationale; this closes the same gap for this module. */
+static bool caller_stack_is_external(void)
+{
+    return !hal_kv_write_safe_here();
+}
+
+static hal_status_t persist_locked(void)
+{
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "persist_locked: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). A flash/NVS write from here would abort the whole board "
+                      "(ESP-IDF's esp_task_stack_is_sane_cache_disabled()). Route this call "
+                      "through a task with an internal-SRAM stack instead -- see "
+                      "DRAM_PSRAM_PLAN.md section 7.2 and uart_bridge_ext.c's flash-safe "
+                      "worker for the established pattern.");
+        return HAL_NOT_READY;
+    }
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return err;
+    }
+    relay_cycles_blob_t blob;
+    memset(&blob, 0, sizeof(blob)); /* padding is written to flash; keep it deterministic */
+    blob.version = RELAY_CYCLES_VERSION;
+    memcpy(blob.counts, s_rc.counts, sizeof(blob.counts));
+    memcpy(blob.types, s_rc.types, sizeof(blob.types));
+    memcpy(blob.rated_overrides, s_rc.rated_overrides, sizeof(blob.rated_overrides));
+    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    if (err == HAL_OK) {
+        s_rc.dirty = false;
+        s_rc.last_persist_us = (int64_t)hal_time_now_us();
+    }
+    return err;
+}
+
+esp_err_t relay_cycles_init(void)
+{
+    if (!ensure_lock()) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    hal_status_t part_err = nvs_partition_init(KILN_NVS_PARTITION);
+    if (part_err != HAL_OK) {
+        ESP_LOGE(TAG, "NVS partition '%s' init failed: %s -- relay cycle counts will not persist",
+                 KILN_NVS_PARTITION, hal_status_to_name(part_err));
+    }
+
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    memset(s_rc.counts, 0, sizeof(s_rc.counts));
+    memset(s_rc.types, RELAY_TYPE_SSR, sizeof(s_rc.types));
+    memset(s_rc.rated_overrides, 0, sizeof(s_rc.rated_overrides));
+
+    /* Migrate before the real load so a pre-split board's counts show up on
+     * the very first boot after the update, not one boot late. */
+    if (part_err == HAL_OK) {
+        migrate_from_default_partition();
+    }
+
+    bool nvs_have_value = false; /* true only for the two branches below that leave s_rc holding a
+                                    * trustworthy current-format blob (direct current-version load,
+                                    * or a successful v1->v2 migration) -- every other branch
+                                    * (missing, corrupt, wrong size, newer-than-firmware, unmigratable
+                                    * old version) leaves s_rc at its zeroed default and must NOT be
+                                    * offered to pref_cfg_fs_resolve() as a valid NVS candidate. */
+    uint32_t nvs_rev = 0;
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    if (err == HAL_OK) {
+        relay_cycles_blob_t blob;
+        size_t len = sizeof(blob);
+        err = hal_kv_get_blob(&h, NVS_KEY_CYCLES, &blob, &len);
+        /* BUG FIXED (matching zones_http.c's nvs_load_from()): this used to
+         * gate BOTH the current-version and newer-version branches on
+         * `len == sizeof(blob)` before ever looking at `version`, which
+         * would misclassify a genuinely OLDER (smaller) blob as unreadable
+         * corruption instead of the version check below. Only a blob too
+         * short to even contain the `version` byte is genuinely ambiguous;
+         * everything else must be classified by version first, with the
+         * exact-size check applied only to the current-version case (a real
+         * current-version blob is always written at exactly sizeof(blob)). */
+        if (err == HAL_OK && len < sizeof(blob.version)) {
+            ESP_LOGW(TAG, "relay cycle blob is too short to contain a version -- starting at zero");
+        } else if (err == HAL_OK && blob.version == RELAY_CYCLES_VERSION) {
+            if (len != sizeof(blob)) {
+                ESP_LOGW(TAG, "relay cycle blob claims current version but is the wrong size -- starting at zero");
+            } else {
+                memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
+                memcpy(s_rc.types, blob.types, sizeof(s_rc.types));
+                memcpy(s_rc.rated_overrides, blob.rated_overrides, sizeof(s_rc.rated_overrides));
+                nvs_have_value = true;
+            }
+        } else if (err == HAL_OK && blob.version > RELAY_CYCLES_VERSION) {
+            /* Newer than this firmware understands -- a firmware-rollback
+             * case (TODO.md 8.1). Refuse to load rather than guess at a
+             * layout this build doesn't know, and leave flash untouched so
+             * a subsequent boot on the newer firmware still finds it. */
+            ESP_LOGW(TAG, "relay cycle blob version %u is newer than this firmware's %u -- refusing to load, "
+                     "leaving flash untouched", blob.version, RELAY_CYCLES_VERSION);
+        } else if (err == HAL_OK && blob.version == 1 && len == sizeof(relay_cycles_blob_v1_t)) {
+            /* v1 -> v2 migration (RELAY_LIFE_BUDGET.md): the old
+             * blob is a bare 4-count array read through the SAME `blob`
+             * variable's first sizeof(relay_cycles_blob_v1_t) bytes, since
+             * v1's layout (version byte + 4 counts) is a strict prefix of
+             * v2's (version byte + 5 counts + ...) -- hal_kv_get_blob() above
+             * already wrote those bytes into `blob` before this branch is
+             * reached, only the trailing v2-only fields were left untouched
+             * by whatever hal_kv's fake/real backend does with a
+             * shorter-than-buffer read. Re-read explicitly as v1 to avoid
+             * depending on that. */
+            relay_cycles_blob_v1_t v1;
+            memcpy(&v1, &blob, sizeof(v1));
+            memcpy(s_rc.counts, v1.counts, sizeof(v1.counts));
+            /* Fifth slot (safety relay) starts at 0; types/overrides already
+             * memset to RELAY_TYPE_SSR/0 above. */
+            ESP_LOGI(TAG, "migrated relay cycle blob v1 -> v%u (fifth slot + types added, "
+                     "existing relays default to ssr)", RELAY_CYCLES_VERSION);
+            nvs_have_value = true;
+        } else if (err == HAL_OK) {
+            /* Anything else older than current with no migration defined. */
+            ESP_LOGW(TAG, "relay cycle blob version %u predates this firmware's %u with no migration defined -- "
+                     "starting at zero", blob.version, RELAY_CYCLES_VERSION);
+        } else if (err != HAL_NOT_FOUND) {
+            /* Missing (first boot, or nothing survived migration) is the
+             * only case treated identically to "start at zero" without a
+             * warning; anything else (unreadable) is logged as corrupt
+             * data. */
+            memset(s_rc.counts, 0, sizeof(s_rc.counts));
+            ESP_LOGW(TAG, "relay cycle blob load failed (%s) -- starting at zero",
+                     hal_status_to_name(err));
+        }
+        if (nvs_have_value) {
+            uint32_t rev = 0;
+            if (hal_kv_get_u32(&h, NVS_KEY_CYCLES_REV, &rev) == HAL_OK) {
+                nvs_rev = rev;
+            }
+        }
+        hal_kv_close(&h);
+    }
+
+    /* cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA_PLAN.md section
+     * 5 step 6): build the NVS candidate blob s_rc currently holds (zeroed
+     * if nvs_have_value is false) and let pref_cfg_fs_resolve() decide
+     * whether the file or the NVS side wins -- same policy every other
+     * pref_cfg_fs item uses (STRICT file_rev > nvs_rev tie-break, self-heal
+     * write on the losing side). Partition-absent/mount-failed makes this a
+     * no-op that returns nvs_have_value unchanged, so a board with no `cfg`
+     * partition (every board today) behaves byte-identically to before this
+     * change. */
+    relay_cycles_blob_t nvs_candidate;
+    /* Zero first: the struct has 3 padding bytes after `version` and 3 after
+     * `types`. pref_cfg_fs_resolve() memcmp()s this against the file's bytes,
+     * and stack garbage in the padding read as "differs" at equal revs (found
+     * on the bench 2026-10-04: GET /api/cfgfs relay_cycles diverged at
+     * file_rev == nvs_rev). */
+    memset(&nvs_candidate, 0, sizeof(nvs_candidate));
+    nvs_candidate.version = RELAY_CYCLES_VERSION;
+    memcpy(nvs_candidate.counts, s_rc.counts, sizeof(nvs_candidate.counts));
+    memcpy(nvs_candidate.types, s_rc.types, sizeof(nvs_candidate.types));
+    memcpy(nvs_candidate.rated_overrides, s_rc.rated_overrides, sizeof(nvs_candidate.rated_overrides));
+
+    /* relay_cycles_init() runs from main_control_bringup.c, BEFORE
+     * uart_bridge_ext_start_flash_worker() is called later in that same
+     * function -- the identical boot-ordering race cfg_fs_mount.c's auto-
+     * format path hit and 1136c0a9 fixed there. pref_cfg_fs_resolve()
+     * below writes through pref_cfg_fs's installed write function, which by
+     * this point in boot is already cfg_fs_write_atomic_device() (installed
+     * during cfg_fs_mount_device() in main_boot_early.c, well before this
+     * call) -- i.e. it dispatches to the flash worker, which does not exist
+     * yet here. Bounded wait first so a slow scheduler is not mistaken for
+     * "no migration needed"; if the worker still hasn't started after the
+     * ceiling, let the write attempt (and fail fast) but record it so it is
+     * not silently dropped. */
+    s_migration_worker_wait_deferred = !flash_worker_wait_default();
+    if (s_migration_worker_wait_deferred) {
+        ESP_LOGW(TAG, "flash-safe worker still not started -- relay-cycles migrate-on-load write may be "
+                      "dropped this boot; see GET /api/cfgfs");
+    }
+
+    relay_cycles_blob_t resolved;
+    uint32_t resolved_rev = nvs_rev;
+    bool used_file = false;
+    bool have_value = pref_cfg_fs_resolve(RELAY_CYCLES_FILE_PATH, &nvs_candidate, sizeof(nvs_candidate),
+                                           nvs_have_value, nvs_rev, relay_cycles_file_validate, &resolved,
+                                           &resolved_rev, &used_file);
+    if (have_value) {
+        memcpy(s_rc.counts, resolved.counts, sizeof(s_rc.counts));
+        memcpy(s_rc.types, resolved.types, sizeof(s_rc.types));
+        memcpy(s_rc.rated_overrides, resolved.rated_overrides, sizeof(s_rc.rated_overrides));
+        s_rc.rev = resolved_rev;
+        if (used_file) {
+            ESP_LOGI(TAG, "relay cycle counts loaded from cfg filesystem (rev=%lu)",
+                     (unsigned long)resolved_rev);
+        }
+    } else {
+        s_rc.rev = 0;
+    }
+
+    s_rc.dirty = false;
+    s_rc.last_persist_us = (int64_t)hal_time_now_us();
+    s_rc.initialized = true;
+    xSemaphoreGive(s_rc.lock);
+
+    ESP_LOGI(TAG, "relay contact cycles loaded: %lu %lu %lu %lu", (unsigned long)s_rc.counts[0],
+             (unsigned long)(KILN_IO_RELAY_COUNT > 1 ? s_rc.counts[1] : 0),
+             (unsigned long)(KILN_IO_RELAY_COUNT > 2 ? s_rc.counts[2] : 0),
+             (unsigned long)(KILN_IO_RELAY_COUNT > 3 ? s_rc.counts[3] : 0));
+    return ESP_OK;
+}
+
+void relay_cycles_add(uint8_t relay_mask, uint32_t cycles)
+{
+    if (cycles == 0 || relay_mask == 0 || !ensure_lock()) {
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+        if (relay_mask & (uint8_t)(1u << r)) {
+            /* Saturate rather than wrap: a wrapped contact-life counter reads
+             * as a brand-new relay, which is the one wrong answer that
+             * matters here. */
+            if (s_rc.counts[r] > UINT32_MAX - cycles) {
+                s_rc.counts[r] = UINT32_MAX;
+            } else {
+                s_rc.counts[r] += cycles;
+            }
+            s_rc.dirty = true;
+        }
+    }
+    xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_note_safety_edge(void)
+{
+    if (!ensure_lock()) {
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    uint32_t *c = &s_rc.counts[RELAY_CYCLES_SAFETY_INDEX];
+    /* Same saturate-rather-than-wrap rule as relay_cycles_add(). */
+    if (*c < UINT32_MAX) {
+        (*c)++;
+    }
+    s_rc.dirty = true;
+    xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_get(uint32_t *out)
+{
+    /* Deliberately still KILN_IO_RELAY_COUNT entries, not RELAY_CYCLES_COUNT:
+     * dashboard_http.c's only caller passes a KILN_IO_RELAY_COUNT-sized stack
+     * array (TODO.md 6A.1 predates the safety-relay slot), and this step is
+     * explicitly scoped to leave dashboard/HTTP files untouched. Widening
+     * this call's contract would silently overflow that caller's buffer.
+     * relay_cycles_get_all() below is the RELAY_CYCLES_COUNT-sized form for
+     * new callers (a later plan step wiring the fifth slot into the
+     * dashboard). */
+    if (!out) {
+        return;
+    }
+    if (!ensure_lock()) {
+        memset(out, 0, sizeof(uint32_t) * KILN_IO_RELAY_COUNT);
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    memcpy(out, s_rc.counts, sizeof(uint32_t) * KILN_IO_RELAY_COUNT);
+    xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_get_all(uint32_t *out)
+{
+    if (!out) {
+        return;
+    }
+    if (!ensure_lock()) {
+        memset(out, 0, sizeof(uint32_t) * RELAY_CYCLES_COUNT);
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    memcpy(out, s_rc.counts, sizeof(s_rc.counts));
+    xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_set_type(uint8_t relay, relay_type_t type, uint32_t rated_override)
+{
+    if (relay >= RELAY_CYCLES_COUNT || !ensure_lock()) {
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    /* opus review (LOW): only mark dirty when something actually changed --
+     * every boot's zones_config load path calls this once per relay
+     * (zones_config_store.c's zones_config_push_all_relay_types()) even when
+     * the persisted type/override already match, which previously
+     * guaranteed an NVS write on every single boot regardless of whether
+     * anything was new. */
+    if (s_rc.types[relay] != (uint8_t)type || s_rc.rated_overrides[relay] != rated_override) {
+        s_rc.types[relay] = (uint8_t)type;
+        s_rc.rated_overrides[relay] = rated_override;
+        s_rc.dirty = true; /* type/override are persisted alongside the counts */
+    }
+    xSemaphoreGive(s_rc.lock);
+}
+
+void relay_cycles_get_type(uint8_t relay, relay_type_t *type, uint32_t *rated_override)
+{
+    if (relay >= RELAY_CYCLES_COUNT) {
+        if (type) *type = RELAY_TYPE_SSR;
+        if (rated_override) *rated_override = 0;
+        return;
+    }
+    if (!ensure_lock()) {
+        if (type) *type = RELAY_TYPE_SSR;
+        if (rated_override) *rated_override = 0;
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    if (type) *type = (relay_type_t)s_rc.types[relay];
+    if (rated_override) *rated_override = s_rc.rated_overrides[relay];
+    xSemaphoreGive(s_rc.lock);
+}
+
+/* Table lookup for a type with no override -- the plan's rated-life table.
+ * RELAY_TYPE_SSR has no budget (returns 0, meaning "no budget" to callers
+ * that check has_budget rather than relying on this return alone). */
+static uint32_t rated_life_for_type(relay_type_t type)
+{
+    switch (type) {
+        case RELAY_TYPE_CONTACTOR: return RELAY_RATED_LIFE_CONTACTOR;
+        case RELAY_TYPE_MERCURY:   return RELAY_RATED_LIFE_MERCURY;
+        case RELAY_TYPE_SSR:
+        default:                   return 0;
+    }
+}
+
+void relay_cycles_budget(uint8_t relay, relay_cycles_budget_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (relay >= RELAY_CYCLES_COUNT) {
+        return;
+    }
+    if (!ensure_lock()) {
+        return;
+    }
+
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    uint32_t cycles = s_rc.counts[relay];
+    relay_type_t type = (relay_type_t)s_rc.types[relay];
+    uint32_t override_val = s_rc.rated_overrides[relay];
+    xSemaphoreGive(s_rc.lock);
+
+    if (type == RELAY_TYPE_SSR) {
+        /* No budget at all -- ssr never shows a percent (plan's "Design"
+         * section: "ssr = no budget (icon never shown, percent reported as
+         * null)"). An override on an ssr relay is ignored on purpose: the
+         * type itself is the "this relay has no wear budget" statement.
+         * cycles must still be the real live count -- only percent/rated/
+         * tier/has_budget are null for SSR (dashboard_status_http.c). */
+        out->cycles = cycles;
+        return;
+    }
+
+    uint32_t rated = (override_val != 0) ? override_val : rated_life_for_type(type);
+    if (rated == 0) {
+        /* A non-ssr type with a table value of 0 (shouldn't happen given the
+         * table above, but a future type addition could forget to fill it
+         * in) is treated the same as "no budget" rather than dividing by
+         * zero. */
+        return;
+    }
+
+    out->has_budget = true;
+    out->cycles = cycles;
+    out->rated = rated;
+    /* Computed on read, never stored, per the plan. Saturates past 100%
+     * rather than wrapping -- a relay well past its rated life should read
+     * as, say, 140%, not wrap back toward 0. */
+    out->percent = ((float)cycles / (float)rated) * 100.0f;
+    if (out->percent >= 90.0f) {
+        out->tier = RELAY_BUDGET_TIER_ERROR;
+    } else if (out->percent >= 80.0f) {
+        out->tier = RELAY_BUDGET_TIER_WARN;
+    } else {
+        out->tier = RELAY_BUDGET_TIER_NONE;
+    }
+}
+
+relay_budget_tier_t relay_cycles_max_budget_tier(void)
+{
+    relay_budget_tier_t max_tier = RELAY_BUDGET_TIER_NONE;
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        relay_cycles_budget_t b;
+        relay_cycles_budget(r, &b);
+        if (b.has_budget && b.tier > max_tier) {
+            max_tier = b.tier;
+        }
+    }
+    return max_tier;
+}
+
+/* Job payload for reset_persist_job() below: a self-contained snapshot of
+ * everything persist_locked() would otherwise read from s_rc directly, taken
+ * under s_rc.lock and handed to the flash worker AFTER the lock is released
+ * (see relay_cycles_reset()'s comment on why holding the lock across the
+ * whole dispatch, the previous fix, traded a data race for a stall). */
+typedef struct {
+    uint32_t counts[RELAY_CYCLES_COUNT];
+    uint8_t  types[RELAY_CYCLES_COUNT];
+    uint32_t rated_overrides[RELAY_CYCLES_COUNT];
+    uint32_t rev; /* cfg-filesystem dual-write rev this snapshot writes at, s_rc.rev+1 -- taken
+                     under s_rc.lock alongside the rest of the snapshot, same reasoning. */
+} reset_persist_job_arg_t;
+
+/* Same body as persist_locked(), minus the "read live s_rc" part -- writes
+ * exactly the snapshot it was handed. Runs ON the flash worker's own
+ * internal-SRAM stack (or inline, if the caller is already there -- see
+ * relay_cycles_reset() below), so caller_stack_is_external()'s guard still
+ * applies and is still checked.
+ *
+ * FILE FIRST (best-effort -- a failure is logged and swallowed, NVS below
+ * remains the persistence guarantee exactly as it always has been), THEN
+ * NVS (authoritative, a failure here is returned to the caller exactly as
+ * before this pass) -- same ordering and rationale every other pref_cfg_fs
+ * item uses (ramp_assist_cfg.c etc). The rev key is written in the SAME NVS
+ * transaction as the blob so a torn write can never leave rev ahead of a
+ * blob that was never actually committed. */
+static hal_status_t persist_snapshot(const reset_persist_job_arg_t *snap)
+{
+    if (caller_stack_is_external()) {
+        ESP_LOGE(TAG, "persist_snapshot: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM). See persist_locked()'s identical guard comment in this file.");
+        return HAL_NOT_READY;
+    }
+
+    relay_cycles_blob_t blob;
+    /* Zero first (2026-09-20 finding, surfaced by this pass's new restore
+     * tests): the struct has padding between `version` and `counts` (uint8_t
+     * followed by a uint32_t array) that field-by-field assignment below
+     * never touches, so an uninitialized stack blob wrote uninitialized
+     * padding bytes to flash. Harmless today (nothing reads padding back),
+     * but it also meant two writes of otherwise byte-identical content were
+     * not reliably byte-identical on disk, which is exactly what test_
+     * restore_all_is_idempotent() checks -- this was a latent flake, not a
+     * change in behavior from this pass's actual guard logic. */
+    memset(&blob, 0, sizeof(blob));
+    blob.version = RELAY_CYCLES_VERSION;
+    memcpy(blob.counts, snap->counts, sizeof(blob.counts));
+    memcpy(blob.types, snap->types, sizeof(blob.types));
+    memcpy(blob.rated_overrides, snap->rated_overrides, sizeof(blob.rated_overrides));
+
+    esp_err_t file_err = pref_cfg_fs_save(RELAY_CYCLES_FILE_PATH, &blob, sizeof(blob), snap->rev);
+    if (file_err != ESP_OK && file_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "relay cycle counts file write failed: %s -- NVS remains the source of truth "
+                      "this boot", esp_err_to_name(file_err));
+    }
+
+    hal_kv_handle_t h;
+    hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION);
+    if (err != HAL_OK) {
+        return err;
+    }
+    err = hal_kv_set_blob(&h, NVS_KEY_CYCLES, &blob, sizeof(blob));
+    if (err == HAL_OK) {
+        err = hal_kv_set_u32(&h, NVS_KEY_CYCLES_REV, snap->rev);
+    }
+    if (err == HAL_OK) {
+        err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return err;
+}
+
+/* The job run ON the flash worker's own internal-SRAM stack -- see
+ * safety_cfg_store.c's nvs_save_store_job()/adaptive_tune.c's
+ * save_kibase_job() for the identical shape. `arg` points at a small struct
+ * (job_ctx_t below) owned by the calling task's own stack frame, safe
+ * because uart_bridge_ext_run_on_flash_worker() blocks the caller for the
+ * whole call. */
+typedef struct {
+    const reset_persist_job_arg_t *snap;
+    esp_err_t err;
+} reset_persist_job_ctx_t;
+
+static void reset_persist_job(void *arg)
+{
+    reset_persist_job_ctx_t *ctx = (reset_persist_job_ctx_t *)arg;
+    ctx->err = hal_status_to_esp_err(persist_snapshot(ctx->snap));
+}
+
+/* THE one owning copy of this module's snapshot head, shared by EVERY writer
+ * here: relay_cycles_reset(), relay_cycles_reset_timeout(),
+ * relay_cycles_restore_all() and persist_snapshot_now().
+ *
+ * review docs/audits/review_crash_gate_followups_f07ad24d_2026-09-15.md N3
+ * extracted it for the reset()/reset_timeout() pair; the follow-up review
+ * (review_crash_gate_n1n3_120bba6f_2026-09-15.md) recorded that the same
+ * verbatim body -- three memcpys, rev + 1, dirty = false -- was still copied
+ * into restore_all() and persist_snapshot_now(), so a field added to
+ * reset_persist_job_arg_t still had three sites to be threaded through and
+ * the compiler could cross-check none of them. That is exactly the "reset
+ * one side of a pair" class CLAUDE.md names: the copies stay internally
+ * consistent while the relationship between them breaks silently. All four
+ * sites now route through this function, so there is one place to change.
+ *
+ * MUST be called with s_rc.lock HELD, and deliberately does not take the
+ * lock itself: it reads live s_rc and clears s_rc.dirty, which is precisely
+ * the work that lock serializes, and its callers need the critical section
+ * to span more than this body -- restore_all() mutates s_rc.counts inside
+ * the SAME section, and persist_snapshot_now() holds s_rc.persist_lock
+ * around it (lock order persist_lock -> s_rc.lock, never the reverse).
+ *
+ * relay_cycles_reset_snapshot() below is the reset-specific wrapper: it adds
+ * the bounds check and the zero-the-one-count step, then calls this. */
+static void relay_cycles_fill_snapshot_locked(reset_persist_job_arg_t *snap)
+{
+    memcpy(snap->counts, s_rc.counts, sizeof(snap->counts));
+    memcpy(snap->types, s_rc.types, sizeof(snap->types));
+    memcpy(snap->rated_overrides, s_rc.rated_overrides, sizeof(snap->rated_overrides));
+    /* Strictly-increasing cfg-filesystem dual-write rev -- never re-used,
+     * never reset, so whatever this snapshot writes always outranks the
+     * stale file/NVS content before it. Taken under the same lock as the
+     * rest of the snapshot so it can never be observed ahead of the blob it
+     * belongs to. */
+    snap->rev = s_rc.rev + 1;
+    s_rc.dirty = false;
+}
+
+static bool relay_cycles_reset_snapshot(unsigned relay, reset_persist_job_arg_t *snap,
+                                        uint32_t *out_old_count)
+{
+    /* LOW-1, docs/audits/review_crash_gate_n1n3_120bba6f_2026-09-15.md: the
+     * s_rc.counts[relay] write below used to rely entirely on a comment
+     * saying both callers validate `relay` first. They do, so there was no
+     * live defect -- but extracting this code out of the two functions that
+     * held the guard left the guard and the write in different functions,
+     * and a third caller added later would get an out-of-bounds write into
+     * s_rc with nothing to stop it. Refuse instead, and report it: the
+     * caller must NOT go on to dispatch a persist of a snapshot that was
+     * never taken. Nothing is touched on this path -- in particular
+     * s_rc.dirty is left as-is, so a caller bug can never silently discard
+     * a pending persist. */
+    if (relay >= RELAY_CYCLES_COUNT) {
+        ESP_LOGE(TAG, "relay_cycles_reset_snapshot: REFUSING -- relay %u out of range (valid 0..%u); "
+                      "no counts changed, nothing snapshotted, nothing persisted",
+                 relay, (unsigned)(RELAY_CYCLES_COUNT - 1));
+        return false;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    *out_old_count = s_rc.counts[relay];
+    s_rc.counts[relay] = 0;
+    relay_cycles_fill_snapshot_locked(snap);
+    xSemaphoreGive(s_rc.lock);
+    return true;
+}
+
+/* Shared tail for relay_cycles_reset()/relay_cycles_reset_timeout() below --
+ * both take the same snapshot-then-dispatch path and only differ in HOW they
+ * dispatch (unbounded vs. bounded wait). `submit_err` is the dispatch call's
+ * own return value; a bounded caller passes ESP_ERR_TIMEOUT through here so
+ * the "worker was busy, nothing ran" case gets the same RAM-only-zeroed
+ * bookkeeping as any other dispatch failure, distinguished for the caller
+ * via `out_timed_out`. `old_count` is logged on success only -- it is the one
+ * surviving record of a wear count that is about to be irreversibly zeroed
+ * (review N1: a prior refactor dropped this from the log). */
+static bool relay_cycles_reset_finish(unsigned relay, uint32_t old_count,
+                                       const reset_persist_job_arg_t *snap,
+                                       reset_persist_job_ctx_t *ctx, esp_err_t submit_err,
+                                       bool *out_timed_out)
+{
+    if (out_timed_out) {
+        *out_timed_out = false;
+    }
+    esp_err_t err = (submit_err != ESP_OK) ? submit_err : ctx->err;
+
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.rev = snap->rev;
+        xSemaphoreGive(s_rc.lock);
+        ESP_LOGI(TAG, "relay_cycles_reset(%u): count reset from %lu to 0", relay,
+                 (unsigned long)old_count);
+        return true;
+    }
+
+    /* The write failed (or was never dispatched): re-arm `dirty` so the next
+     * periodic persist retries it. A concurrent add()/note_safety_edge()
+     * during the dispatch already set dirty=true itself under the lock (see
+     * relay_cycles_reset()'s own comment) -- this is a plain assignment, not
+     * a clear-then-set, so it cannot un-set a flag a racing writer just
+     * set. */
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    s_rc.dirty = true;
+    xSemaphoreGive(s_rc.lock);
+
+    if (submit_err == ESP_ERR_TIMEOUT) {
+        if (out_timed_out) {
+            *out_timed_out = true;
+        }
+        ESP_LOGW(TAG, "relay_cycles_reset(%u): flash worker busy, timed out -- count zeroed in RAM "
+                      "only, try again", relay);
+        return false;
+    }
+
+    ESP_LOGW(TAG, "relay_cycles_reset(%u): persist failed (%s) -- count zeroed in RAM only; "
+                  "this is lost on reboot unless something calls relay_cycles_maybe_persist() "
+                  "again first (it will not tick in RECOVERY MODE)", relay, esp_err_to_name(err));
+    return false;
+}
+
+bool relay_cycles_reset(unsigned relay)
+{
+    if (relay >= RELAY_CYCLES_COUNT || !ensure_lock()) {
+        return false;
+    }
+
+    /* opus review finding (MEDIUM, RELAY_LIFE_BUDGET.md follow-up audit):
+     * the previous version held s_rc.lock across the ENTIRE flash-worker
+     * dispatch below to close a data race (see the superseded comment this
+     * replaced) -- but uart_bridge_ext_run_on_flash_worker() blocks for a
+     * full NVS commit, and relay_cycles_add()/relay_cycles_maybe_persist()
+     * take the same lock with portMAX_DELAY from the executor's tick path.
+     * Holding the lock that long stalls every tick's contact-cycle
+     * accounting for the duration of an NVS commit. Fixed by taking a
+     * snapshot of everything the write needs (and clearing `dirty`) under
+     * the lock, then releasing it BEFORE dispatching -- the write itself
+     * touches only the local snapshot, never s_rc again, so it needs no
+     * lock at all. A relay_cycles_add()/relay_cycles_note_safety_edge()
+     * that lands between the snapshot and the write's completion sets
+     * `dirty` again on its own (both take the lock themselves), so if the
+     * write fails, re-setting `dirty` below only needs to cover the "the
+     * write itself failed" case -- a concurrent add() has already left
+     * dirty=true on its own and this must not paper over that by
+     * unconditionally forcing it back to whatever it was pre-snapshot. */
+    reset_persist_job_arg_t snap;
+    uint32_t old_count = 0;
+    if (!relay_cycles_reset_snapshot(relay, &snap, &old_count)) {
+        return false; /* out of range -- nothing snapshotted, so nothing to persist */
+    }
+
+    /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): check whether we are
+     * already ON the flash worker before dispatching a second job onto it --
+     * dispatching from inside an already-dispatched job deadlocks the real
+     * board (see uart_bridge.h's doc comment and adaptive_tune.c's identical
+     * guard). Neither of this function's two known callers (the LCD
+     * diagnostics page's LVGL-task two-tap confirm, and diagnostics_http.c's
+     * httpd-task POST handler) is expected to already be on the worker
+     * today, but the check is cheap and this is exactly the class of bug
+     * that stays invisible until a caller changes. */
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    esp_err_t submit_err = ESP_OK;
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&ctx);
+    } else {
+        submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
+    }
+
+    return relay_cycles_reset_finish(relay, old_count, &snap, &ctx, submit_err, NULL);
+}
+
+/* Bounded-wait sibling of relay_cycles_reset() above -- for the LCD Relay
+ * Life Reset control (lvgl_task), which must not block the whole UI
+ * indefinitely behind some OTHER caller's long flash-worker job (LOW finding,
+ * docs/audits/review_crash_gate_medium_fixes_aa2c484d_2026-09-15.md: this
+ * function's unbounded sibling is the exact hazard crash_report_acknowledge_
+ * timeout() was already added to close for the Crash Report page's
+ * Acknowledge control, one page away on the same task). diagnostics_http.c's
+ * httpd-task POST handler keeps using the unbounded relay_cycles_reset()
+ * above -- an HTTP request has no equivalent "freeze the whole UI" hazard.
+ *
+ * `*out_timed_out` (if non-NULL) is set true only when the worker could not
+ * be acquired within timeout_ms -- i.e. nothing was read or written at all,
+ * as distinct from every other false-returning outcome (a dispatched write
+ * that failed), which are reported the normal way through the return value
+ * and relay_cycles_reset_finish()'s own logging. The caller (ui_page_
+ * diagnostics.c) uses this to show a distinct "busy, try again" result
+ * rather than the generic failure text -- same convention as crash_report.c's
+ * identical split. */
+bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_timed_out)
+{
+    if (out_timed_out) {
+        *out_timed_out = false;
+    }
+    if (relay >= RELAY_CYCLES_COUNT || !ensure_lock()) {
+        return false;
+    }
+
+    reset_persist_job_arg_t snap;
+    uint32_t old_count = 0;
+    if (!relay_cycles_reset_snapshot(relay, &snap, &old_count)) {
+        return false; /* out of range -- nothing snapshotted, so nothing to persist */
+    }
+
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&ctx);
+        return relay_cycles_reset_finish(relay, old_count, &snap, &ctx, ESP_OK, out_timed_out);
+    }
+    esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker_timeout(reset_persist_job, &ctx, timeout_ms);
+    return relay_cycles_reset_finish(relay, old_count, &snap, &ctx, submit_err, out_timed_out);
+}
+
+/* Backup/restore support (2026-09-07 backup-gate pass): full_board_backup.py
+ * captures relay cycle counters via GET /api/status but no restore path
+ * existed -- losing them on a partition-table reflash silently zeroes
+ * relay-life accounting the operator relies on to know when a contact is
+ * near end-of-life. Reuses the exact snapshot-then-flash-worker-dispatch
+ * shape relay_cycles_reset() already established just above, so this is not
+ * a parallel persistence mechanism. Idempotent: setting the same counts
+ * twice in a row writes the same blob both times. Validates before writing
+ * anything -- `counts` values above RELAY_CYCLES_RESTORE_MAX_COUNT are
+ * refused wholesale (all-or-nothing) rather than clamped, since a
+ * wildly-out-of-range value is much more likely a corrupt/truncated backup
+ * field than a real relay with that many operations. */
+#define RELAY_CYCLES_RESTORE_MAX_COUNT 100000000u /* 100M -- far past any rated life in this file's own table */
+
+bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
+                               relay_cycles_restore_result_t *out_result)
+{
+    if (!counts || !ensure_lock()) {
+        return false;
+    }
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        if (counts[r] > RELAY_CYCLES_RESTORE_MAX_COUNT) {
+            ESP_LOGE(TAG, "relay_cycles_restore_all: refusing -- counts[%u]=%lu exceeds sanity ceiling %u; "
+                          "no counts changed", r, (unsigned long)counts[r], RELAY_CYCLES_RESTORE_MAX_COUNT);
+            return false;
+        }
+    }
+
+    reset_persist_job_arg_t snap;
+    relay_cycles_restore_result_t local_result;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    /* MONOTONIC GUARD (2026-09-20 review finding): the ceiling loop above is
+     * the only validation that used to run -- a value below s_rc.counts[r]
+     * (the board's live count) sailed straight through and silently moved a
+     * wear counter backward. For every relay whose bit is unset in
+     * `allow_lower_mask`, clamp a lower request up to the live count instead;
+     * `local_result` records requested/applied/clamped for EVERY relay so the
+     * caller can name it, never silently. */
+    for (uint8_t r = 0; r < RELAY_CYCLES_COUNT; r++) {
+        uint32_t live = s_rc.counts[r];
+        uint32_t requested = counts[r];
+        bool allow_lower = (allow_lower_mask & (uint8_t)(1u << r)) != 0;
+        bool clamp = (requested < live) && !allow_lower;
+        uint32_t applied = clamp ? live : requested;
+        local_result.entries[r].requested = requested;
+        local_result.entries[r].applied = applied;
+        local_result.entries[r].clamped = clamp;
+        if (clamp) {
+            ESP_LOGW(TAG, "relay_cycles_restore_all: relay %u requested %lu is below live count %lu -- "
+                          "clamped to %lu (pass allow_lower_mask bit %u to override for a genuinely "
+                          "replaced relay)", r, (unsigned long)requested, (unsigned long)live,
+                     (unsigned long)applied, r);
+        }
+        s_rc.counts[r] = applied;
+    }
+    /* Restore composes with the cfg-filesystem bridge the same way it composes
+     * with NVS -- it is not a parallel persistence path, it drives the SAME
+     * rev-then-write mechanism this module's other writers use, which is why
+     * it takes its snapshot through the one shared head above rather than
+     * carrying its own copy of it. The new counts are written into s_rc
+     * FIRST, inside the same critical section, so the snapshot the head
+     * takes is the restored (post-clamp) state, not the pre-restore state. */
+    relay_cycles_fill_snapshot_locked(&snap);
+    xSemaphoreGive(s_rc.lock);
+
+    if (out_result) {
+        *out_result = local_result;
+    }
+
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    esp_err_t err;
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&ctx);
+        err = ctx.err;
+    } else {
+        esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
+        err = (submit_err != ESP_OK) ? submit_err : ctx.err;
+    }
+
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.rev = snap.rev;
+        xSemaphoreGive(s_rc.lock);
+    } else {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.dirty = true;
+        xSemaphoreGive(s_rc.lock);
+        ESP_LOGW(TAG, "relay_cycles_restore_all: persist failed (%s) -- counts restored in RAM only",
+                 esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "relay_cycles_restore_all: counts restored from backup and persisted");
+    return true;
+}
+
+/* opus review finding (MEDIUM): both of these used to hold s_rc.lock across
+ * the full persist_locked() NVS commit -- relay_cycles_add()/
+ * relay_cycles_note_safety_edge() take the same lock with portMAX_DELAY from
+ * the executor's tick path (and now also from the drained-UART-frame path,
+ * see safety_link_frames.c), so a commit taking place under the lock stalls
+ * every contact-cycle add for its duration. Fixed with the same
+ * snapshot-then-write pattern relay_cycles_reset() already uses above:
+ * snapshot + clear `dirty` under the lock, write the snapshot with the lock
+ * released, and on failure re-arm `dirty` with a plain assignment (never
+ * clobbering a `dirty=true` a concurrent add() may have set in the
+ * meantime).
+ *
+ * REVIEW FOLLOW-UP (MEDIUM, commit 1a04994's own persist_lock): that fix
+ * closed the ordering race but held persist_lock across the inline NVS
+ * commit itself, so relay_cycles_maybe_persist() (executor tick, every 10
+ * min) and relay_cycles_flush() (profile_executor_halt(), reachable from an
+ * httpd Stop request) could still stall each other for a full flash commit
+ * -- exactly the class of stall this module's own tick/lock comments above
+ * already call out for `lock`, just moved one level up to `persist_lock`.
+ * Two changes here:
+ *
+ *   1. The actual write now goes through the flash worker
+ *      (uart_bridge_ext_run_on_flash_worker(), with the same
+ *      uart_bridge_ext_is_on_flash_worker() re-entrancy check
+ *      relay_cycles_reset() already uses above) instead of calling
+ *      persist_snapshot() inline on whichever task is doing the persisting.
+ *      Both known callers' tasks already have internal-SRAM stacks today
+ *      (profile_executor_start.c's tick-loop comment and profile_executor_
+ *      status.c's halt()/httpd-task path), so this is not closing a live
+ *      PSRAM hazard -- it is matching relay_cycles_reset()'s established
+ *      pattern so the flash op always runs on the worker's own stack
+ *      regardless of which task later calls this, and it makes the
+ *      "resource in use" case below (2) meaningful: run_on_flash_worker()'s
+ *      own s_bx_lock is what actually serializes two overlapping writers
+ *      once persist_lock hands one off.
+ *
+ *   2. persist_lock is now taken with a caller-supplied wait instead of
+ *      portMAX_DELAY, and a failure to take it returns HAL_BUSY rather than
+ *      blocking. relay_cycles_maybe_persist() passes 0 (non-blocking): the
+ *      executor tick never waits on someone else's in-flight commit, it
+ *      just leaves `dirty` set and retries on the next tick.
+ *      relay_cycles_flush() passes a bounded wait
+ *      (RELAY_CYCLES_FLUSH_LOCK_WAIT_MS) instead of an unbounded one, so
+ *      waiting on `persist_lock` itself is now bounded -- it waits a bounded
+ *      amount, then gives up and reports failure (dirty stays set, so the
+ *      counts are not lost, only not yet on flash). This bounds only the
+ *      `persist_lock` wait: once past it, the dispatch into
+ *      bx_run_on_internal_stack() (uart_bridge_ext_run_on_flash_worker())
+ *      still waits portMAX_DELAY on the flash worker, so an operator's Stop
+ *      request can in principle still block indefinitely behind that call,
+ *      not just a tick's commit.
+ *
+ * persist_lock is still needed even with the write itself now serialized by
+ * the flash worker's own s_bx_lock: without it, two callers could each
+ * finish their own snapshot-then-release-lock step in either order and then
+ * race each other into run_on_flash_worker() as separate dispatches, in
+ * which case the OLDER snapshot could win the race into the worker's queue
+ * and be written after the newer one -- the exact bug 1a04994 fixed.
+ * persist_lock brackets snapshot-through-dispatch-completion for that
+ * reason, same as before; only how long a caller is willing to wait for it
+ * changed. Lock order is still persist_lock -> s_rc.lock, never the
+ * reverse -- unchanged from 1a04994. */
+#define RELAY_CYCLES_FLUSH_LOCK_WAIT_MS 3000
+
+static hal_status_t persist_snapshot_now(TickType_t persist_lock_wait_ticks)
+{
+    if (xSemaphoreTake(s_rc.persist_lock, persist_lock_wait_ticks) != pdTRUE) {
+        /* Someone else (the other of maybe_persist()/flush()) is already
+         * mid-persist. Nothing to undo -- this call never touched `dirty`
+         * or took a snapshot, so whatever made a persist "due" is still
+         * true and will be retried by the next caller. */
+        return HAL_BUSY;
+    }
+
+    reset_persist_job_arg_t snap;
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    relay_cycles_fill_snapshot_locked(&snap);
+    xSemaphoreGive(s_rc.lock);
+
+    /* Same re-entrancy guard as relay_cycles_reset(): run inline if already
+     * on the flash worker's own task, else dispatch (which blocks this
+     * caller until the write completes, same as reset()'s dispatch). */
+    reset_persist_job_ctx_t ctx = { .snap = &snap, .err = ESP_FAIL };
+    esp_err_t submit_err;
+    if (uart_bridge_ext_is_on_flash_worker()) {
+        reset_persist_job(&ctx);
+        submit_err = ctx.err;
+    } else {
+        esp_err_t dispatch_err = uart_bridge_ext_run_on_flash_worker(reset_persist_job, &ctx);
+        submit_err = (dispatch_err != ESP_OK) ? dispatch_err : ctx.err;
+    }
+    hal_status_t err = (submit_err == ESP_OK) ? HAL_OK : hal_esp_err_to_status(submit_err);
+
+    if (err == HAL_OK) {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.last_persist_us = (int64_t)hal_time_now_us();
+        s_rc.rev = snap.rev;
+        xSemaphoreGive(s_rc.lock);
+    } else {
+        xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+        s_rc.dirty = true;
+        xSemaphoreGive(s_rc.lock);
+    }
+
+    xSemaphoreGive(s_rc.persist_lock);
+    return err;
+}
+
+void relay_cycles_maybe_persist(void)
+{
+    if (!ensure_lock()) {
+        return;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    bool due = s_rc.dirty &&
+               ((int64_t)hal_time_now_us() - s_rc.last_persist_us) >= (int64_t)RELAY_CYCLES_PERSIST_INTERVAL_S * 1000000;
+    xSemaphoreGive(s_rc.lock);
+
+    /* Non-blocking: if relay_cycles_flush() (executor stop / httpd Stop) is
+     * already mid-persist, skip this tick entirely rather than stall the
+     * executor tick behind someone else's flash commit -- `dirty` was never
+     * cleared, so the next due tick (or the flush already in flight) picks
+     * it up. */
+    hal_status_t err = due ? persist_snapshot_now(0) : HAL_OK;
+
+    if (err == HAL_BUSY) {
+        ESP_LOGD(TAG, "periodic persist deferred -- a flush is already in progress");
+    } else if (err != HAL_OK) {
+        ESP_LOGW(TAG, "periodic persist failed: %s (counts kept in RAM, will retry)", hal_status_to_name(err));
+    }
+}
+
+esp_err_t relay_cycles_flush(void)
+{
+    if (!ensure_lock()) {
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    bool dirty = s_rc.dirty;
+    xSemaphoreGive(s_rc.lock);
+
+    /* Bounded wait, not portMAX_DELAY: an operator's Stop request must not
+     * hang indefinitely behind the executor tick's periodic persist. On
+     * timeout the counts are left dirty in RAM (not lost) and this reports
+     * failure rather than pretending the flush happened. */
+    hal_status_t err = dirty ? persist_snapshot_now(pdMS_TO_TICKS(RELAY_CYCLES_FLUSH_LOCK_WAIT_MS)) : HAL_OK;
+    if (err == HAL_BUSY) {
+        ESP_LOGW(TAG, "flush timed out waiting %d ms for an in-progress persist -- counts remain "
+                      "dirty in RAM, will retry on the next persist", RELAY_CYCLES_FLUSH_LOCK_WAIT_MS);
+        return ESP_ERR_TIMEOUT;
+    } else if (err != HAL_OK) {
+        ESP_LOGW(TAG, "flush failed: %s", hal_status_to_name(err));
+        return hal_status_to_esp_err(err);
+    }
+    return ESP_OK;
+}
+
+/* GET /api/cfgfs dual-write picture -- see relay_cycles.h's doc comment.
+ * Same shape as unit_pref_get_dualwrite_status()/display_power_cfg_get_
+ * dualwrite_status(): reads the file side via pref_cfg_fs_load_raw() (no
+ * resolve, no resync write) and the NVS side via its own direct read (not
+ * s_rc's in-RAM copy, which may already have absorbed an in-flight
+ * migration/resolve this boot -- this reports what is actually ON DISK in
+ * both places, independent of what booted into RAM), then compares the
+ * decoded bytes for a real content-equal check rather than a rev-only
+ * guess. */
+bool relay_cycles_migration_worker_wait_deferred(void)
+{
+    return s_migration_worker_wait_deferred;
+}
+
+void relay_cycles_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool *nvs_valid, uint32_t *nvs_rev,
+                                        bool *diverged)
+{
+    if (file_valid) {
+        *file_valid = false;
+    }
+    if (file_rev) {
+        *file_rev = 0;
+    }
+    if (nvs_valid) {
+        *nvs_valid = false;
+    }
+    if (nvs_rev) {
+        *nvs_rev = 0;
+    }
+    if (diverged) {
+        *diverged = false;
+    }
+
+    relay_cycles_blob_t f_blob;
+    memset(&f_blob, 0, sizeof(f_blob));
+    uint32_t f_rev = 0;
+    bool f_valid = false;
+    pref_cfg_fs_load_raw(RELAY_CYCLES_FILE_PATH, sizeof(f_blob), relay_cycles_file_validate, &f_blob, &f_rev,
+                          &f_valid);
+
+    relay_cycles_blob_t n_blob;
+    memset(&n_blob, 0, sizeof(n_blob));
+    bool n_valid = false;
+    uint32_t n_rev = 0;
+    if (nvs_partition_init(KILN_NVS_PARTITION) == HAL_OK) {
+        hal_kv_handle_t h;
+        if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
+            size_t len = sizeof(n_blob);
+            if (hal_kv_get_blob(&h, NVS_KEY_CYCLES, &n_blob, &len) == HAL_OK && len == sizeof(n_blob)
+                && n_blob.version == RELAY_CYCLES_VERSION) {
+                n_valid = true;
+                uint32_t rev = 0;
+                if (hal_kv_get_u32(&h, NVS_KEY_CYCLES_REV, &rev) == HAL_OK) {
+                    n_rev = rev;
+                }
+            }
+            hal_kv_close(&h);
+        }
+    }
+
+    /* Field by field, never memcmp() of the whole struct: relay_cycles_blob_t has
+     * padding after `version` and after `types`, and padding is not data. A file
+     * and an NVS copy with identical contents but different padding bytes (a
+     * writer that did not zero its buffer) must read as in sync. */
+    bool content_equal = f_valid && n_valid && f_blob.version == n_blob.version
+                         && memcmp(f_blob.counts, n_blob.counts, sizeof(f_blob.counts)) == 0
+                         && memcmp(f_blob.types, n_blob.types, sizeof(f_blob.types)) == 0
+                         && memcmp(f_blob.rated_overrides, n_blob.rated_overrides,
+                                   sizeof(f_blob.rated_overrides)) == 0;
+    if (file_valid) {
+        *file_valid = f_valid;
+    }
+    if (file_rev) {
+        *file_rev = f_rev;
+    }
+    if (nvs_valid) {
+        *nvs_valid = n_valid;
+    }
+    if (nvs_rev) {
+        *nvs_rev = n_rev;
+    }
+    if (diverged) {
+        *diverged = cfg_fs_status_item_diverged(f_valid, n_valid, content_equal);
+    }
+}

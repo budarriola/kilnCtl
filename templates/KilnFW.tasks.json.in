@@ -1,0 +1,75 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "openocd",
+      "type": "shell",
+      "command": "@@OPENOCD@@",
+      "args": [
+        "-s",
+        "@@OPENOCD_SCRIPTS@@",
+        "-f",
+        "board/esp32s3-builtin.cfg"
+      ],
+      "isBackground": true,
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      },
+      "problemMatcher": [
+        {
+          "owner": "openocd",
+          "source": "OpenOCD",
+          "fileLocation": [
+            "relative",
+            "${workspaceFolder}"
+          ],
+          "pattern": {
+            "regexp": "^Error: (.*)$",
+            "message": 1
+          },
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "^Open On-Chip Debugger",
+            "endsPattern": "^Info : Listening on port 3333 for gdb connections$"
+          }
+        }
+      ]
+    },
+    {
+      "label": "Flash device",
+      "type": "shell",
+      "command": "@@OPENOCD@@",
+      "args": [
+        "-s",
+        "@@OPENOCD_SCRIPTS@@",
+        "-f",
+        "board/esp32s3-builtin.cfg",
+        "-c",
+        "program_esp build/bootloader/bootloader.bin 0x0 verify; program_esp build/partition_table/partition-table.bin 0x8000 verify; program_esp build/KilnCtrl.bin 0x210000 verify reset exit"
+      ],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "OpenOCD: Start and Flash",
+      "dependsOn": [
+        "OpenOCD: Kill",
+        "Flash device",
+        "openocd"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "OpenOCD: Kill",
+      "type": "shell",
+      "command": "taskkill /F /IM openocd.exe; exit 0",
+      "problemMatcher": []
+    }
+  ]
+}

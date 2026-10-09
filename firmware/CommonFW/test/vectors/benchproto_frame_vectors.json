@@ -1,0 +1,60 @@
+{
+  "_comment": "Byte-exact vectors for benchproto's frame envelope (benchproto_frame.c/.h). Same convention as CommonFW/test/vectors/frame_vectors.json (kilnlink's own), but for the separate benchproto protocol family -- see firmware/CommonFW/docs/BENCHPROTO.md. Hand-computed by an independent Python implementation of the same spec (poly 0x1021, init 0xFFFF, no reflection, no xorout; SLIP-style 0x7E/0x7D byte stuffing) inlined in firmware/CommonFW/test/test_benchproto_frame.c, not generated from benchproto_frame.c itself, so a bug shared between the two would still show up as a mismatch here. Unlike kilnlink's manifest, this one has no second production implementation to cross-check against yet -- SimFW's PC-side `kilnsim` link layer (a separate, later piece of work per SimFW/docs/DESIGN_NOTES.md sec 6) is expected to become that second implementation and should be checked against this same manifest when it exists.",
+  "crc_known_answer": {
+    "input_ascii": "123456789",
+    "crc16_ccitt_false": "0x29B1"
+  },
+  "vectors": [
+    {
+      "name": "data_with_payload",
+      "msg_type": "DATA",
+      "msg_index": 5,
+      "src_device": 0,
+      "src_task": 3,
+      "dst_device": 1,
+      "dst_task": 3,
+      "payload_hex": "deadbeef",
+      "raw_hex": "0100050003010304deadbeefb659",
+      "wire_hex": "7e0100050003010304deadbeefb6597e"
+    },
+    {
+      "name": "ack_zero_length",
+      "msg_type": "ACK",
+      "msg_index": 0,
+      "src_device": 1,
+      "src_task": 7,
+      "dst_device": 0,
+      "dst_task": 7,
+      "payload_hex": "",
+      "raw_hex": "0200000107000700dc73",
+      "wire_hex": "7e0200000107000700dc737e"
+    },
+    {
+      "name": "broadcast_payload_needs_escaping",
+      "msg_type": "BROADCAST",
+      "msg_index": 300,
+      "src_device": 1,
+      "src_task": 5,
+      "dst_device": 0,
+      "dst_task": 5,
+      "payload_hex": "017e027d03",
+      "raw_hex": "04012c0105000505017e027d033f30",
+      "wire_hex": "7e04012c0105000505017d5e027d5d033f307e"
+    },
+    {
+      "name": "nack_zero_length",
+      "msg_type": "NACK",
+      "msg_index": 42,
+      "src_device": 1,
+      "src_task": 9,
+      "dst_device": 0,
+      "dst_task": 2,
+      "payload_hex": "",
+      "raw_hex": "03002a01090002007505",
+      "wire_hex": "7e03002a010900020075057e"
+    }
+  ],
+  "hostile_vectors": {
+    "_comment": "Not concrete byte sequences here (the C test constructs these directly, same as kilnlink's test_frame.c) -- listed for documentation/future PC-side parity: truncated frame, LENGTH byte exceeding BENCHPROTO_FRAME_MAX_PAYLOAD, LENGTH/buffer-size mismatch, corrupted CRC byte, unrecognized type byte, unterminated trailing 0x7D escape, output buffer too small for stuff()/encode_raw()."
+  }
+}

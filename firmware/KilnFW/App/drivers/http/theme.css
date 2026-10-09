@@ -1,0 +1,654 @@
+/* Shared KlipperScreen-derived palette (docs/UI_THEME.md / App/drivers/ui/ui_theme.h,
+   TODO.md 10.6/10.6a). Same hex values as the LCD side. Served at GET /theme.css
+   from wifi_provision_http.c (the module that owns httpd_start() / the one
+   httpd_handle_t every other *_http.c module registers routes onto -- see
+   wifi_provision_http_get_server()), so it's reachable from every page
+   regardless of mode: a phone on the fallback AP during first-boot
+   provisioning hits the same server instance as a browser on the home
+   network hitting the dashboard post-provisioning.
+
+   Only what was byte-identical across all six pages' old inline <style>
+   blocks was pulled out here -- the --bg/--fg/etc light-mode defaults and
+   their dark-mode overrides stayed page-local (each page maps a different
+   subset of those named variables onto this palette, e.g. --ok/--warn/--bad
+   on some pages vs --on-color/--off-color/--fault-color on others), only the
+   --ui-* palette itself and .theme-btn (verified identical byte-for-byte via
+   md5sum across all six files) were truly shared. 2026-08-21: every page's
+   own local re-declaration of .theme-btn (a byte-for-byte copy of this
+   file's rule, added back independently on ten pages after this file was
+   first written) has been removed -- this is again the single definition,
+   see .theme-btn's own comment below for why that duplication mattered. */
+:root {
+  --ui-bg: #1a1f2b; --ui-card: #242a3a; --ui-text-primary: #f0f0f0;
+  --ui-text-secondary: #9aa0ae; --ui-accent-1: #e8974e; --ui-accent-2: #a15fd6;
+  --ui-accent-3: #3ec6c6; --ui-accent-4: #5cc06e; --ui-accent-5: #d6555f;
+  /* --ui-accent-blue mirrors ui_theme.h's UI_THEME_ACCENT_BLUE (#2f6fe4):
+     the LCD dashboard's profile-selection button. Keep in step with
+     ui_theme.h and UI_THEME.md if it ever changes. No web page consumes
+     this yet. */
+  --ui-accent-blue: #2f6fe4;
+  --ui-radius: 10px; --ui-padding: var(--ui-space-2); --ui-touch: 72px; --ui-status-bar: 32px;
+  /* WEB_UI_RESPONSIVE.md sec 7.2 item 2, adopted 2026-09-03: a spacing
+     scale, additive alongside the existing --ui-padding (now an alias for
+     --ui-space-2 so nothing that already reads --ui-padding changes value).
+     Pages keep their existing ad hoc em spacing -- this gives NEW rules a
+     scale to reach for rather than forcing a rewrite of what already works;
+     see the plan doc sec 7 resolution for why a mass find/replace across all
+     13 pages was declined as out of scope for this pass. */
+  --ui-space-1: 4px; --ui-space-2: 8px; --ui-space-3: 12px; --ui-space-4: 20px;
+  --ui-space-5: 32px;
+  /* sec 7.2 item 3, adopted with one change from the proposal: plain
+     translucent-black shadows instead of `color-mix(in srgb, var(--ui-bg) …)`
+     -- --ui-bg is the dark palette's navy (#1a1f2b) even when the page is in
+     light mode (it's the LCD-parity token, not the light theme's --bg), so
+     mixing from it would have tinted light-mode shadows navy instead of
+     neutral. rgba(0,0,0,…) composites correctly over either theme's
+     background without needing a light/dark-specific rule. */
+  --ui-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.08);
+  --ui-shadow-2: 0 2px 6px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.1);
+  /* WEB_UI_RESPONSIVE.md sec 6 ("earn the width above the cap"): every
+     substantial page used to hardcode its own fixed `body { max-width: Npx }`
+     (420-620px depending on page -- sec 2.1's table), correct on a phone but
+     a narrow ribbon in the middle of an empty 1920px display. This is the one
+     shared replacement: a continuously-scaling width via clamp() instead of a
+     breakpoint list, so the column earns real desktop width but still stops
+     growing before body text lines get unreadably long. A page opts in by
+     using `max-width: var(--kc-shell-max)` in its own body rule in place of
+     its old fixed px value -- everything else about that rule (margin,
+     padding, background) stays page-local, same "rename not a rewrite"
+     principle sec 2.2 used for the status-token pass. Deliberately NOT
+     touching --ui-touch above -- sec 3.7 / sec 6 are explicit that the 72px
+     LCD-parity touch target is an owner decision, not something this pass
+     gets to fold in. */
+  --kc-shell-max: clamp(480px, 90vw, 1100px);
+}
+/* 2026-08-21: no longer `position: fixed`. It used to pin itself to the
+   viewport's top-right corner, which put it (and the unit toggle below,
+   which inherits this class) directly on top of nav.js's topbar actions
+   (Home/Menu) -- fine on a wide desktop viewport where there was slack, but
+   on a phone-width topbar the two fixed buttons landed squarely on the real
+   controls underneath. The fix dropped `position: fixed` entirely.
+   2026-08-21 (second pass): the theme control then moved off the topbar
+   altogether onto settings_page.html, where it is styled by .kc-pref-btn
+   below instead. This rule now applies only to the #themeBtn copies that
+   remain (hidden) in every other page's markup, kept solely because each
+   page's inline theme script looks the element up by id -- see nav.js's
+   buildTopbar().
+   Deliberately keeps relying on the generic `button { min-height: ... }`
+   rule below (no min-height override here) rather than shrinking to match
+   .kc-home-btn/.kc-menu-btn's smaller `min-height: 0` -- the owner's
+   instruction was "keep tap targets finger-sized, don't shrink them to fit". */
+.theme-btn { border: 1px solid var(--border);
+             background: var(--button-bg); color: var(--fg); border-radius: var(--ui-radius);
+             padding: 0.3em 0.6em; font-size: 0.9em; cursor: pointer; }
+/* Display preferences (theme, °C/°F) as full-width settings rows.
+   2026-08-21: both controls moved off the topbar onto settings_page.html, per
+   the owner's request; #kcDisplayPrefs is the container that page provides
+   and that nav.js/app.js look for (see nav.js's buildTopbar() and app.js's
+   buildUnitBtn()). On every other page #themeBtn keeps its .theme-btn class
+   and is simply hidden, so the rule above still describes it there.
+   Full width and left-aligned because these now read as labelled rows
+   ("Units: Celsius (switch to °F)"), not corner glyph buttons. */
+#kcDisplayPrefs { display: flex; flex-direction: column; gap: 0.5em; }
+.kc-pref-btn { display: block; width: 100%; text-align: left;
+               border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg);
+               border-radius: var(--ui-radius);
+               padding: 0.6em 0.8em; font-size: 1em; cursor: pointer; }
+/* UI_PLAN.md section 3, Web item 2: every real <button> across all six pages
+   independently redeclared `min-height: var(--ui-touch)` (profiles_page.html/
+   rules_page.html/zones_page.html/wifi_provision_page.html's plain `button {}`
+   rule, main_page.html's per-class button.relay-toggle/run-btn/danger-btn
+   rules) -- the exact six-copies-of-one-number duplication this file's own
+   header comment already flags as the mistake to avoid repeating. Consolidated
+   here once; each page's own `<style>` block keeps only what's actually
+   page/class-specific (padding, margin, font-size, colors) and no longer
+   repeats min-height itself. Deliberately just `button`, not `a.button` --
+   main_page.html's `a.button` is an anchor styled to look like a button, and
+   the bare-tag selector below does not match it, so that one rule keeps its
+   own explicit min-height (see main_page.html). readiness_page.html has no
+   real <button> elements needing this (its only button is `.theme-btn` above,
+   a small icon toggle, not a 72px action target) -- nothing to remove there.
+
+   2026-09-18 (owner report, phone screenshot, dark mode): min-height was the
+   ONLY property this rule ever set, so a classless <button> with no page-
+   local `button {}` rule of its own (e.g. settings_page.html's "Reboot both
+   processors" button, main_page.html's PID-popup Close/Cancel/"Use these"
+   buttons living inside `.pid-popup .btnrow button`, which sets only flex/
+   min-height) fell through to the browser's UA default chrome -- white
+   background, black text, default border -- sitting next to fully themed
+   siblings. Whether any given button looked right was purely a function of
+   whether its host page happened to redeclare `button {}` with colors in its
+   own <style> block; pages that never did kept shipping white buttons every
+   time a new one was added, which is why the owner reports "these keep
+   popping up". Fixed at the root by giving the shared, bare-tag rule the
+   same background/color/border/radius every page-local copy of it already
+   used, so a classless button anywhere is themed by default. This is
+   additive, not a repaint: every page-local `button {}` rule (login_page,
+   profiles_page, safety_commissioning_page, safety_config_page,
+   setup_wizard_page, zones_page, ota_page, wifi_provision_page) and the
+   scoped `a.button, button {}` rule (backup_page, kiln_configs_page) are
+   parsed AFTER this stylesheet and already set these same properties, so
+   they continue to win at equal specificity and nothing already-themed
+   changes appearance -- confirmed by rendering both before/after.
+   var(--button-bg)/var(--fg)/var(--border) are NOT defined in this file (see
+   this file's own header comment) -- they're page-local tokens every OTHER
+   page already declares in its own :root block. login_page.html is the one
+   exception (it has no --bg/--fg toggle at all, light-mode-only, no dark
+   mode support), so literal fallbacks matching the light-mode default every
+   other page uses (`#f2f2f2`/`#111`/`#888`) keep login's button themed too
+   without inventing a new color. */
+button { min-height: var(--ui-touch); background: var(--button-bg, #f2f2f2);
+         color: var(--fg, #111); border: 1px solid var(--border, #888);
+         border-radius: var(--ui-radius); font-family: inherit; cursor: pointer; }
+/* UI_PLAN.md section 3, Web item 1: shared horizontal-scroll wrapper for any
+   data table that could overflow a phone-width (~390px) viewport --
+   rules_page.html's #cycleTable and zones_page.html's generated
+   #couplingMatrix/#rgaMatrix coupling tables. One class, defined once,
+   wrapped around each call site rather than a per-page copy -- same
+   "byte-identical stuff belongs here" rule this file's own header comment
+   already states. profiles_page.html was checked for a #cycleTable/similar
+   this pass (UI_PLAN.md's audit named it) but has no <table> element at all
+   -- nothing to wrap there; noted here rather than silently skipped. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* UI_PLAN.md Web "page structure rework" section 4, items 1/2/4: shared nav
+   chrome (nav.js), sticky Stop (app.js) and the connection-lost banner
+   (app.js). Folded in here rather than per-page <style> blocks, same rule
+   as everything else in this file -- one copy, not seven. Uses the --bg/
+   --fg/--border/--button-bg/--card-bg names every one of the seven pages
+   already defines locally (verified identical in spelling, if not always
+   identical hex, across all seven <style> blocks) plus this file's own
+   --ui-* palette, so this block works unmodified regardless of which page
+   includes it. */
+
+.kc-topbar { display: flex; align-items: center; justify-content: space-between;
+             padding: 0.5em 1em; margin: 0 -1em 0.8em -1em; border-bottom: 1px solid var(--border);
+             background: var(--card-bg); box-shadow: var(--ui-shadow-2); }
+/* 2026-08-21 rework: the "kilnCtl" brand link that used to sit here is
+   gone -- item 5 of the spec replaces it with the page's own name (see
+   nav.js's pageTitle()/buildTopbar()), on the theory that "kilnCtl" told
+   the operator which product they were using but not which of twelve
+   pages they were on, and the <h1> underneath that used to answer that is
+   also being deleted (duplicate text, same information twice on one
+   screen). Plain text, not a link -- the topbar's "go home" job now
+   belongs solely to .kc-home-btn below, so this doesn't need to double as
+   one. */
+/* min-width: 0 is load-bearing, not decoration. This is a flex item of
+   .kc-topbar, and a flex item defaults to min-width: auto -- which floors it
+   at its min-content width. With white-space: nowrap that min-content width
+   is the ENTIRE untruncated title, so the ellipsis rules below never get a
+   chance to fire: instead of truncating, the title refuses to shrink and
+   shoves .kc-topbar-actions off the right edge on a narrow phone. Setting
+   min-width: 0 lets it actually shrink, which is what makes the ellipsis
+   work. Found 2026-08-21 while fixing the toggles that used to overlay this
+   bar; the ellipsis properties had been present and inert the whole time. */
+.kc-page-title { font-weight: bold; color: var(--fg); font-size: 1em; min-width: 0;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kc-topbar-actions { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
+/* min-height 0 -> 40px, 2026-08-22. A browser sweep at 320/390px measured
+   these at 27-30px tall, under the 32px floor a fingertip needs and well
+   under the 44px both platform guidelines suggest; they are the two controls
+   on every single page, so they are the worst two to have undersized. 40px is
+   the compromise the topbar can actually afford at 320px without the page
+   title losing its room (the title ellipsises rather than pushing them off --
+   see .kc-page-title's min-width: 0 note). Deliberately NOT var(--ui-touch)
+   (72px): that is sized for the LCD's gloved-hand panel case and would eat a
+   fifth of a phone's visible height on every page. inline-flex + center keeps
+   the glyph and word optically centred now that there is spare height. */
+/* box-sizing is declared HERE rather than left to each page. Measured
+   2026-08-22: the same button rendered 40px tall on pages that happen to
+   carry a `*{box-sizing:border-box}` reset (readiness, diagnostics, backup)
+   and 52px on pages that do not (profiles, zones) -- min-height 40 plus
+   padding plus border, under content-box. That is the owner's "make the
+   header consistent" report in its most literal form: identical markup and
+   identical rules, two different heights, decided by whether an unrelated
+   page-local reset existed. Shared chrome must not inherit its geometry from
+   whatever the host page happens to declare. */
+/* nav.js injects this topbar into EVERY page, so these two controls have to
+   be immune to whatever the host page happens to say about bare elements.
+   Nine of the pages carry their own `button { ... }` rule, and the Menu
+   button is a <button> while Home is an <a> -- so any property a page sets
+   on `button` lands on one of the pair and not the other, and the two drift
+   apart. That is exactly what the owner reported as "an odd offset on the
+   buttons": zones_page.html's `button { margin-top: 1em; }` was pushing Menu
+   13.6px below Home and stretching the whole topbar from 57px to 70.6px.
+
+   Hence the explicit resets below. They are not redundancy for its own sake:
+   each one closes a property a page-local `button` rule would otherwise win.
+     - margin: 0        -- the reported bug (margin-top: 1em)
+     - font-family      -- a <button> does NOT inherit the page font by
+                           default (UA stylesheet), so Menu was computing
+                           Arial while Home computed sans-serif. Different
+                           metrics put Menu's label 3px off-centre inside its
+                           own border on EVERY page, not just the two named.
+     - font-size/line-height/padding -- pages set these on `button` too, and
+                           any of them changes the button's height, which
+                           breaks the 40px tap target the sweep checks for.
+
+   line-height is `1`, not `normal`, and that is load-bearing rather than
+   stylistic. With `normal`, a <button>'s line box resolves taller than an
+   <a>'s from the same font, so the Menu label sat 3px below the Home label's
+   optical centre (measured: 14px above / 11px below the text, against Home's
+   even 12.5/12.5) on every page. Pinning line-height makes both elements
+   produce the same line box, and flex centring then lands them identically
+   (12.2/12.8 on both, i.e. within one device pixel). */
+.kc-home-btn, .kc-menu-btn { box-sizing: border-box;
+               margin: 0; font-family: inherit; line-height: 1;
+               min-height: 40px; display: inline-flex; align-items: center;
+               justify-content: center; padding: 0.35em 0.8em; font-size: 0.85em;
+               border-radius: var(--ui-radius); border: 1px solid var(--border);
+               background: var(--button-bg); color: var(--fg); cursor: pointer;
+               text-decoration: none; }
+
+/* Drop-down FROM THE TOP (2026-08-21 rework item 2 -- it used to slide up
+   from the bottom, `align-items: flex-end`, matching the old bottom-nav
+   convention below; now `flex-start` so the panel hangs from the topbar
+   instead). Scrollable via `max-height: 70vh; overflow-y: auto` on the
+   panel -- that pair was already present before this rework (the menu
+   already held enough links to risk overflowing a short landscape phone
+   screen) and needed no change to keep working now that the list has grown
+   to ten entries plus Reset; verified by eye at a 375x667-rotated
+   (landscape, ~375px tall) viewport with all eleven NAV_LINKS entries --
+   the panel caps at 70% of that height and scrolls internally rather than
+   pushing the backdrop or clipping off-screen.
+
+   2026-09-18: that eleven-entry sentence no longer describes the CLOSED
+   menu. NAV_LINKS is now three top-level groups with all fifteen
+   destinations nested inside them (see nav.js), so the menu opens as three
+   summary rows plus the children of whichever single group auto-expands
+   around the current page -- far short of the eleven rows measured above.
+   The 70vh cap still matters and is still correct, because the expanded
+   case is the tall one: three summaries plus the largest group's six
+   children ("Kiln setup") is nine rows, still under the eleven already
+   shown to scroll cleanly at that viewport. The original wording is kept
+   rather than rewritten because it records what was actually measured on a
+   real screen; this note records why that measurement still bounds the new
+   shape. The new shape itself has NOT been re-measured on a screen. */
+.kc-menu-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.45); z-index: 1000;
+                   display: flex; align-items: flex-start; }
+.kc-menu-overlay[hidden] { display: none; }
+.kc-menu-panel { background: var(--bg); color: var(--fg); width: 100%; box-sizing: border-box;
+                 border-bottom: 1px solid var(--border); border-radius: 0 0 var(--ui-radius) var(--ui-radius);
+                 padding: 0.5em 0; max-height: 70vh; overflow-y: auto; }
+.kc-menu-panel a { display: block; padding: 0.9em 1.2em; color: var(--fg); text-decoration: none;
+                    border-bottom: 1px solid var(--border); min-height: var(--ui-touch);
+                    box-sizing: border-box; display: flex; align-items: center; }
+.kc-menu-panel a:last-child { border-bottom: none; }
+.kc-menu-panel a.kc-menu-active { font-weight: bold; color: var(--ui-accent-3); }
+/* Expanding group (nav.js's NAV_LINKS `children` shape, owner request
+   2026-08-27: "the menu should just show them as sub items when the
+   main safty item is opened not a seprate page to hold the 3 page links").
+   This originally styled the one "Safety" group; since the 2026-09-18 menu
+   reorganisation it styles all three (Firing / Kiln setup / System), which
+   needed no rule change -- the markup shape is identical, only the count
+   of groups grew.
+   <details>/<summary> is the native disclosure widget nav.js builds this
+   from -- these rules make it read as part of the same list every plain
+   <a> sits in, not a visually distinct control. */
+.kc-menu-panel details.kc-menu-group { border-bottom: 1px solid var(--border); }
+.kc-menu-panel details.kc-menu-group:last-child { border-bottom: none; }
+/* Same padding/min-height/typography as a plain .kc-menu-panel a, so the
+   group heading is indistinguishable from any other top-level item until
+   it's opened -- the owner's complaint that prompted this rework was a
+   landing page with three links, not a menu item that looks different from
+   its siblings. list-style: none removes the default disclosure triangle
+   only on WebKit/Blink (::-webkit-details-marker below handles that engine
+   family separately); a plain +/- glyph is added instead so there is still
+   an affordance that this item expands, on every engine, without pulling in
+   an icon asset (web_encoding.h's flash-budget rule). */
+.kc-menu-panel summary { display: flex; align-items: center; justify-content: space-between;
+                          padding: 0.9em 1.2em; min-height: var(--ui-touch); box-sizing: border-box;
+                          color: var(--fg); cursor: pointer; list-style: none; }
+.kc-menu-panel summary::-webkit-details-marker { display: none; }
+.kc-menu-panel summary::after { content: '+'; color: var(--muted); font-size: 1.1em; }
+.kc-menu-panel details[open] summary::after { content: '\2212'; } /* U+2212 minus sign */
+/* Children indent slightly so the hierarchy reads at a glance, but keep the
+   same border-bottom-separated-row look as every top-level entry -- this is
+   "reveal in place", not a visually different sub-panel. */
+.kc-menu-panel details.kc-menu-group a { padding-left: 2.2em; border-bottom: 1px solid var(--border); }
+.kc-menu-panel details.kc-menu-group a:last-child { border-bottom: none; }
+
+/* docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs: the round "i" disclosure next to a field's one-line
+   label, hiding the longer explanatory paragraphs/tables that used to sit
+   inline on the zones page (relay-timing hints, cross-zone plausibility
+   text, PID/fuzzy notes). Reuses the page's existing <details>/<summary>
+   idiom (see .kc-menu-panel and .advguards above/on that page) and only
+   existing tokens -- no new colour. Small enough not to compete with the
+   field's own label/input for attention at phone width; content wraps in
+   normal flow (no fixed width) so it never causes horizontal scroll. */
+details.info { display: inline-block; margin: 0 0 0.4em; }
+/* Touch-target fix: the visible glyph stays a small 1.4em circle (drawn on
+   ::before, below), but the <summary> itself -- the actual tap target --
+   is padded out to var(--ui-touch) in both dimensions, same floor every
+   other tappable control on this page already meets (button, a.button,
+   .kc-menu-panel summary). The literal "i" text node written by
+   infoDetailsHtml() is kept for accessibility/copy-paste but visually
+   collapsed (font-size: 0) so it doesn't duplicate the ::before glyph. */
+details.info summary { display: inline-flex; align-items: center; justify-content: center;
+                        min-width: var(--ui-touch); min-height: var(--ui-touch);
+                        box-sizing: border-box; font-size: 0;
+                        cursor: pointer; list-style: none; user-select: none; }
+details.info summary::-webkit-details-marker { display: none; }
+details.info summary::before { content: 'i'; display: inline-flex; align-items: center;
+                                justify-content: center; width: 1.4em; height: 1.4em;
+                                border-radius: 50%; border: 1px solid var(--border);
+                                color: var(--muted); font-size: 0.95rem; font-style: italic;
+                                line-height: 1; }
+details.info[open] summary::before { color: var(--fg); border-color: var(--fg); }
+/* Info text renders as its own block below the summary, full width of
+   whatever container the field is in -- never inline with the glyph, so a
+   long paragraph or the fuzzy rule table never has to fight the summary's
+   1.4em circle for room, on a phone or otherwise. */
+details.info > *:not(summary) { display: block; margin: 0.4em 0 0; }
+
+/* .kc-bottom-nav / .kc-bottom-nav-item deleted outright (2026-08-21 rework
+   item 1) along with nav.js's buildBottomNav() -- the Dashboard/Profiles/
+   Menu links it held are now the topbar's Home button, the drop-down's own
+   "Firing profiles" entry, and the topbar's Menu button, respectively.
+   Nothing in this file references .kc-bottom-nav* any more; verified with
+   `grep -rn "kc-bottom-nav" *.css *.js *.html` over this directory after
+   this edit -- zero matches outside this comment. */
+
+/* Sticky Stop (app.js's setStopBarVisible()). Previously stacked above the
+   now-deleted bottom nav (`bottom: 56px`, matching that bar's own height,
+   so Stop sat just above it rather than under it); with the bottom nav
+   gone this is simply the bottom of the viewport, `bottom: 0`, same as the
+   bottom nav's own old position. Confirmed the ONLY other reference to
+   that 56px figure was this rule -- theme.css and app.js were grepped for
+   "56px" and "kc-bottom-nav" after the removal and found nothing else
+   depending on it. accent-5 matches the LCD/dashboard's existing
+   fault/danger colour (main_page.html's --fault-color already maps to
+   --ui-accent-5 in dark mode) so Stop reads as the same "this is the
+   serious one" colour everywhere. */
+.kc-stop-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 899;
+               padding: 0.4em 0.6em; background: var(--bg); border-top: 1px solid var(--ui-accent-5);
+               display: flex; gap: 0.5em; }
+.kc-stop-bar[hidden] { display: none; }
+.kc-stop-btn, .kc-pause-btn, .kc-edit-firing-btn { display: block; flex: 1; box-sizing: border-box; min-height: var(--ui-touch);
+               border: none; border-radius: var(--ui-radius);
+               font-size: 1em; font-weight: bold; cursor: pointer; }
+.kc-stop-btn { background: var(--ui-accent-5); color: #fff; }
+.kc-stop-btn:disabled, .kc-pause-btn:disabled { opacity: 0.6; }
+/* Pause/Resume is the one non-destructive control on the bar -- kept off the
+   Stop button's accent-5 (the "serious, aborts the run" colour) so it never
+   reads as equally dangerous. */
+/* sec 7.2 item 4: dropped the hand-picked `#468` fallback -- --ui-accent-1
+   is defined unconditionally in this file's own :root (line 22 above),
+   loaded before any page's inline <style>, so the fallback never actually
+   fired; it was a one-off hex that did not track its own token. */
+.kc-pause-btn { background: var(--ui-accent-1); color: #fff; }
+.kc-pause-btn[hidden] { display: none; }
+/* "Edit firing" (owner request: adjust the running firing's dwell/target/
+   ramp on the web GUI, next to Start/Stop) navigates to the existing
+   /live_profile page rather than acting itself, so it is neither the
+   Stop button's "aborts the run" red nor the Pause button's warm accent-1 --
+   accent-2 (purple) is otherwise unused on this bar and reads as a neutral
+   "go edit something" affordance. Shares the same box/touch-target rule as
+   Stop/Pause so it never reads as a lesser control at a glance. */
+.kc-edit-firing-btn { background: var(--ui-accent-2); color: #fff; }
+.kc-edit-firing-btn[hidden] { display: none; }
+
+/* Connection-lost banner (UI_PLAN.md item 4). Not fixed -- it sits in-flow
+   right after the topbar, so it pushes content down rather than overlapping
+   it, and disappears cleanly (no leftover gap) the instant the heartbeat
+   in app.js succeeds again. */
+.kc-conn-banner { background: var(--ui-accent-5); color: #fff; padding: 0.6em 1em;
+                  margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center; }
+.kc-conn-banner[hidden] { display: none; }
+
+/* Recovery-mode banner (owner report 2026-09-08). Same in-flow placement as
+   .kc-conn-banner above -- pushes content down, no overlap, disappears with
+   no leftover gap -- but built and inserted ABOVE it (app.js's
+   buildRecoveryBanner()) since a boot-time board state that explains WHY
+   firing/settings are degraded is more consequential than a transient
+   connection blip. accent-5 only, same token this file already uses for
+   "something is seriously wrong" (.kc-stop-btn, .kc-conn-banner above) --
+   no new colour introduced. Bold weight is the only extra emphasis, to
+   read as more urgent than the connection banner without a second colour.
+   Never dismissible -- see app.js's own comment on buildRecoveryBanner()
+   for why this element has no close control at all. */
+.kc-recovery-banner { background: var(--ui-accent-5); color: #fff; padding: 0.6em 1em;
+                       margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center;
+                       font-weight: bold; }
+.kc-recovery-banner[hidden] { display: none; }
+
+/* Setup-wizard OFFER banner (SETUP_WIZARD.md, "OFFER the wizard rather
+   than forcing a redirect" -- owner decision in force). Same in-flow
+   placement/no-leftover-gap shape as the two banners above, but
+   deliberately the mildest of the three: --ui-accent-1 (this file's
+   existing "warn", NOT "something is wrong") because an incomplete setup on
+   a board that is otherwise working fine is a nudge, not an alarm -- no new
+   colour, and never accent-5 (reserved for connection/recovery failures).
+   Dismissible for the CURRENT page load only (a plain in-memory hide, no
+   localStorage) -- app.js's setSetupOfferBanner() re-derives visibility from
+   a fresh readiness fetch every poll, so dismissing it does not fabricate a
+   "setup is done" memory that could go stale the way a persisted dismissal
+   flag would (the same reasoning the recovery banner's own comment gives
+   for having no persisted dismissal at all; this one is allowed a
+   *session*-local dismiss because unlike recovery mode, being reminded here
+   is a convenience, not a safety-relevant fact the operator must not lose
+   track of). */
+.kc-setup-banner { background: var(--ui-accent-1); color: #fff; padding: 0.6em 1em;
+                    margin: 0 -1em 0.8em -1em; font-size: 0.9em; text-align: center; }
+.kc-setup-banner[hidden] { display: none; }
+/* 2026-09-08 ui_responsive_sweep.mjs finding (new 'recovery_and_setup_shown'
+   fixture, the first sweep to ever force this banner visible): the plain
+   inline anchor had no real box of its own, so at 320px its zero-height
+   inline run let the "Dismiss" button's box land visually on top of it --
+   flagged as both an occlusion/overlap AND an undersized (154x16, < 32px)
+   touch target. inline-flex + min-height gives it a real, correctly
+   measured box, which fixes both findings together. */
+.kc-setup-banner a { color: #fff; text-decoration: underline; font-weight: bold;
+                      display: inline-flex; align-items: center; min-height: 32px; }
+.kc-setup-banner button { margin: 0 0 0 0.8em; padding: 0.2em 0.6em; font-size: 0.85em;
+                           min-height: 32px; min-width: 32px; background: transparent;
+                           color: #fff; border: 1px solid #fff; border-radius: var(--ui-radius);
+                           cursor: pointer; }
+
+/* WEB_AUTH_PLAN.md section 8: the inactivity-lock "stay unlocked" prompt.
+   Deliberately NOT .kc-menu-overlay's full-screen blocking pattern -- this
+   is a convenience nudge, not the enforcement (the server expires the
+   session regardless of whether this is ever seen/clicked), so it is a
+   small fixed corner card that never covers page content. Uses the same
+   card/text tokens as the rest of the UI, --ui-accent-1 ("warn", not
+   "something is wrong" -- an impending lock on an otherwise healthy board
+   is a nudge) -- no new colour introduced. */
+.kc-lock-prompt { position: fixed; right: 1em; bottom: calc(var(--ui-touch, 44px) + 1.2em);
+                   z-index: 950; background: var(--ui-card); color: var(--ui-text-primary);
+                   border: 2px solid var(--ui-accent-1); border-radius: var(--ui-radius);
+                   padding: 0.7em 1em; max-width: 260px; font-size: 0.9em;
+                   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4); display: flex;
+                   flex-direction: column; gap: 0.5em; }
+.kc-lock-prompt[hidden] { display: none; }
+.kc-lock-prompt button { align-self: flex-end; padding: 0.3em 0.8em; background: var(--ui-accent-1);
+                          color: #fff; border: none; border-radius: var(--ui-radius);
+                          cursor: pointer; min-height: 32px; }
+/* app.js's login-escalation modal (owner report, 2026-09-21: offer to log
+   into an admin account in place rather than showing a bare auth-error
+   body). Full-screen blocking overlay -- same pattern as .kc-menu-overlay
+   above, not the small non-blocking corner card .kc-lock-prompt is -- this
+   one genuinely must be answered (or cancelled) before the page underneath
+   is usable, since the action that triggered it is paused waiting on it. */
+.kc-login-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); z-index: 1100;
+                     display: flex; align-items: center; justify-content: center; }
+.kc-login-overlay[hidden] { display: none; }
+.kc-login-panel { background: var(--ui-card); color: var(--ui-text-primary);
+                   border-radius: var(--ui-radius); padding: 1.2em 1.4em; width: 18rem;
+                   max-width: calc(100vw - 2em); box-sizing: border-box; display: flex;
+                   flex-direction: column; gap: 0.6em; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+.kc-login-title { margin: 0 0 0.2em 0; font-size: 1.05em; }
+.kc-login-panel label { font-size: 0.85em; color: var(--ui-text-secondary); }
+.kc-login-panel input { padding: 0.5em; font-size: 1rem; border-radius: var(--ui-radius);
+                         border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+.kc-login-error { color: var(--ui-accent-5); min-height: 1.1em; font-size: 0.85em; }
+.kc-login-actions { display: flex; justify-content: flex-end; gap: 0.6em; }
+.kc-login-actions button { padding: 0.5em 0.9em; border-radius: var(--ui-radius); border: none;
+                            cursor: pointer; min-height: var(--ui-touch, 40px); }
+.kc-login-actions button[type="submit"] { background: var(--ui-accent-1); color: #fff; }
+.kc-login-actions button.kc-login-cancel { background: transparent; color: var(--fg);
+                                             border: 1px solid var(--border); }
+/* Forgot-password link under the login form, and its own reset-flow panel
+   (docs/TOTP_PASSWORD_RESET_PLAN.md, WT-B) -- deliberately reuses every
+   .kc-login-* token above rather than introducing new colors, per the
+   owner's "popup follows the color theme" requirement. */
+.kc-login-forgot { text-align: center; margin-top: 0.2em; }
+.kc-login-forgot-link { background: none; border: none; padding: 0; cursor: pointer;
+                         color: var(--ui-accent-1); font-size: 0.85em; text-decoration: underline;
+                         min-height: var(--ui-touch, 40px); }
+.kc-forgot-step[hidden] { display: none; }
+.kc-forgot-step { display: flex; flex-direction: column; gap: 0.6em; }
+/* app.js's shared kcConfirm/kcAlert modal (owner rule: every confirmation
+   popup follows the color theme) -- a wider .kc-login-panel for a
+   paragraph of confirmation text rather than a login form's two inputs.
+   Generalized from ota_page.html's page-local .ota-confirm-panel, which
+   this class replaces. */
+.kc-confirm-panel { width: 28rem; }
+/* pre-line: several messages carry single-
+ line breaks inside a
+   paragraph (backup_page.html's restore plan list, the CT auto-zero
+   measured/previous/delta lines) that the native dialog honoured. */
+.kc-confirm-panel p { margin: 0 0 0.6em 0; color: var(--ui-text-primary); white-space: pre-line;
+                       overflow-wrap: anywhere; }
+/* The OK button is type="button" (not a form submit), so the
+   button[type="submit"] accent rule above never reaches it. */
+.kc-login-actions button.kc-confirm-ok { background: var(--ui-accent-1); color: #fff; }
+.kc-confirm-panel #kc-confirm-text { max-height: 60vh; overflow-y: auto; }
+/* Dims (not hides) live-looking values while disconnected -- UI_PLAN.md
+   item 4's "dim its values" wording. Every *_page.html now annotates its
+   live device-reading elements with .kc-live-value (temperatures, relay/
+   exec state, link stats, heap/uptime figures, profile progress, Wi-Fi
+   RSSI) -- see each page's own script for the specific spans/elements this
+   was applied to and, in a per-file comment, what was deliberately left
+   unmarked (static labels, user-entered form values, build-time constants
+   like firmware version). */
+.kc-stale .kc-live-value { opacity: 0.45; }
+
+/* UI_PLAN.md item 7 ("Unit parity"): the °C/°F toggle app.js's
+   buildUnitBtn() injects. It has no rules of its own -- .kc-unit-btn is kept
+   purely as a hook for anything that needs to find it; its box comes from
+   .kc-pref-btn above, shared with the theme control it now sits beside on
+   settings_page.html.
+   Two dead offsets used to live here and are recorded only so neither gets
+   reintroduced: `right: 3.4em` (from when both buttons were pinned to the
+   same viewport corner by .theme-btn's `position: fixed`), then the topbar
+   flex placement that replaced it. Both controls are now settings rows, so
+   neither positioning scheme applies. */
+
+/* UI_PLAN.md "web page structure" section, items 2-4 (settings hub +
+   manual-relay split, 2026-08-2x pass): settings_page.html and
+   manual_page.html are new pages whose task instructions require NO
+   page-local CSS beyond the per-page --bg/--fg/etc :root token block every
+   page already carries (needed for the shared .theme-btn/.kc-topbar/etc
+   above, which read those names without defining them). Everything else
+   those two pages need is pulled from main_page.html's own <style> block,
+   verbatim, because that is where this markup and behaviour used to live
+   before this pass split it out -- these rules are a MOVE, not a redesign.
+   a.button is also still used by main_page.html itself (the "Manage fire
+   profiles" link), so it stays here rather than duplicated per page now
+   that two pages need it.
+   2026-09-18: the selector now also matches `button.button`, so a real
+   <button> can opt into this exact treatment instead of each page declaring
+   its own copy of it. That per-page copy is what this file's header comment
+   calls the mistake to avoid, and it had already happened twice
+   (backup_page.html's `a.button, button { ... }`, safety_config_page.html's
+   `button { ... }`) -- both of which restate these same four
+   border/radius/color/background declarations. Nothing is repainted by this:
+   the declarations are unchanged, and a page only picks them up by adding
+   class="button" to a button that previously had no shared class at all
+   (security_page.html's Save controls). */
+a.button, button.button { display: inline-flex; align-items: center; min-height: var(--ui-touch);
+           box-sizing: border-box; margin-top: 1.5em; padding: 0.7em 1.5em; font-size: 1em;
+           border: 1px solid var(--border); border-radius: var(--ui-radius); text-decoration: none;
+           color: var(--fg); background: var(--button-bg); }
+/* 2026-08-22: `display: flex; justify-content: space-between; align-items:
+   center` USED to live on this bare `.card` rule. It was written for the
+   manual-relay card, which is genuinely one row (label on the left, toggle on
+   the right) -- but `.card` is also the container class every other page uses
+   to wrap a STACK of `.row` children (diagnostics_page.html's Firmware/Memory
+   cards, safety_page.html, board_temps_page.html, backup_page.html). Making
+   the container a flex row laid those stacked rows out side by side instead
+   of one per line, which is what the owner reported as "the diagnostics pages
+   look cramped" / "the restore section is formatted in an unreadable block":
+   four separate bug reports, one shared rule.
+   The flex now lives on .zone-group .card below -- the relay card that
+   actually wanted it -- so a card is a plain block by default and only opts
+   in where a single row is the real intent. */
+/* WEB_UI_RESPONSIVE.md sec 6: `.card` now establishes an inline-size
+   containment context so a card can reflow off ITS OWN rendered width, not
+   the viewport's. This is what makes one `.card` rule correct both stacked
+   full-width on a phone and tiled 3-up in an auto-fit grid on a desktop
+   (main_page.html's #channels, zones_page.html's #zones, sec 6 below) --
+   a `@media` breakpoint keyed on viewport width cannot tell those two cases
+   apart; a container query can, because it measures the card itself.
+   Baseline-supported since 2023 per the plan; no JS, no library. The single
+   rule below covers every `.card` consumer page-wide (main_page.html's own
+   flex-row override included -- container-type/container-name aren't
+   re-declared there, so this still applies) rather than adding a per-page
+   copy, same "one copy, not seven" principle the rest of this file follows. */
+.card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+        padding: 0.7em 1em; margin-bottom: 0.5em; box-shadow: var(--ui-shadow-1);
+        container-type: inline-size; container-name: kc-card; }
+/* sec 7.2 item 1, adopted narrowly: --ui-accent-3 (teal) is the one accent
+   with no existing safety meaning (accent-1 is pause, accent-5 is stop/
+   danger -- sec 7.1's own inventory), so it becomes the site-wide focus
+   indicator instead of the default UA outline. Declined the rest of item 1
+   (repainting every page's Save/Start/Connect button as a "primary" accent):
+   this is an appliance UI an operator reads mid-firing, not a marketing
+   surface, and there is no existing "primary button" convention to hang the
+   change on -- inventing one means touching markup on all 13 pages for a
+   look-and-feel change, which is exactly the kind of scope this plan's
+   conservatism clause exists to decline. A visible, on-brand focus ring is
+   the part of "one recognizable action colour" that is a genuine
+   accessibility improvement over the default outline, at zero markup cost. */
+button:focus-visible, a.button:focus-visible, a:focus-visible {
+  outline: 2px solid var(--ui-accent-3); outline-offset: 2px;
+}
+/* Narrow-card reflow: a card whose OWN width has shrunk below 240px (e.g. a
+   3-up grid on a ~760px viewport, or main_page.html's flex-row label/value
+   card squeezed into a grid column) drops from a side-by-side row to a
+   stacked column so the value never gets crushed against the label. A card
+   that is not itself `display: flex` (the plain-block default used by
+   diagnostics/safety/backup/board_temps) is unaffected -- flex-direction is
+   a no-op on a block box, so this rule is safe to apply globally. */
+@container kc-card (max-width: 240px) {
+  .card { flex-direction: column; align-items: flex-start; gap: 0.3em; }
+}
+.empty { color: var(--muted); font-style: italic; }
+
+/* The `hidden` attribute only hides via the UA stylesheet's
+   `[hidden] { display: none }`, which ANY author `display` rule outranks --
+   including several pages' own `button { display: inline-block }`. That is
+   why the theme toggle, hidden by nav.js on every page that is not Settings,
+   still showed up in the corner of backup_page.html (owner report,
+   2026-08-22, with a photo). Making it !important means "hidden" means
+   hidden, everywhere, regardless of what a page-local rule says about the
+   element's display -- which is what every caller of it already assumes. */
+[hidden] { display: none !important; }
+
+/* .zone-group / .zone-group h3 / .zone-group .card rules deleted 2026-08-27:
+   manual_page.html was their only consumer, and another agent removed that
+   page today (owner request, once the kiln's relays were wired and
+   diagnostics_page.html's Danger Zone took over manual relay control -- see
+   nav.js's "Manual relay control removed" comment). Verified dead with
+   `grep -rn "zone-group" *.html *.js` over this directory after that removal
+   -- zero matches outside this file. button.relay-toggle/.relay-on/.relay-off
+   below stay: main_page.html still uses them for the dashboard's own relay
+   tiles, a separate (surviving) consumer. */
+button.relay-toggle { min-width: var(--ui-touch); padding: 0.4em 1em;
+                       font-size: 0.9em; border-radius: var(--ui-radius);
+                       border: 1px solid var(--border); cursor: pointer; }
+button.relay-on { background: var(--ok); color: #fff; }
+button.relay-off { background: var(--button-bg); color: var(--fg); }
+
+/* Danger zone (settings_page.html) -- moved verbatim off main_page.html;
+   see that file's git history for the pre-move markup/behaviour this
+   matches exactly (still confirm-gated via kcConfirm, per this pass's hard
+   requirement that no destructive action loses its confirm step in the
+   move). */
+button.danger-btn { display: block; width: 100%; box-sizing: border-box;
+                     text-align: left; padding: 0.6em 1em;
+                     font-size: 0.9em; border-radius: var(--ui-radius); border: 1px solid var(--fault-color);
+                     background: var(--button-bg); color: var(--fault-color); cursor: pointer;
+                     margin-bottom: 0.5em; }
+button.danger-btn:hover { background: var(--fault-color); color: #fff; }

@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Safety Timings</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- The owner's request, 2026-08-26 rework: "make it so that i can have
+     diffrent Safety timings and assign the zones to them. that way i dont
+     need to copy the data multipal times". Before this change the nine guard
+     timing fields were rendered and posted once PER ZONE, so three zones run
+     the same way meant typing the same nine numbers three times. Now the
+     nine fields live on named "timing profiles" (this page owns their
+     content) and each zone just picks one from a dropdown. The thresholds
+     that decide WHETHER a guard fires (max_temp_c, the runaway rate, the
+     cross-zone delta) stay on /settings/zones next to the rest of the zone
+     setup; what lives here is how long each guard waits before it acts, plus
+     the bands that decide when it is watching at all -- now shared across
+     however many zones point at the same profile.
+
+     This page and /settings/zones edit the SAME record through the same
+     whole-page endpoint, where an omitted field means "set it to zero". So
+     each page echoes back the fields the other one owns (see saveAll() below
+     and zones_page.html's dataset.* block) -- otherwise saving one would
+     silently wipe the other's work. That now includes the profiles
+     themselves: zones_page.html has to echo every tp<N>_* field too, or
+     saving a zone's relay mask would wipe every timing profile on the
+     board. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 760px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
+         background: var(--bg); color: var(--fg); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1.05em; margin-top: 1.6em; }
+  p, .hint { color: var(--muted); }
+  .hint { font-size: 0.85em; margin: 0.15em 0 0.9em 0; }
+  .zone { border: 1px solid var(--border); background: var(--card-bg);
+          border-radius: 6px; padding: 0.8em 1em; margin-bottom: 1em; }
+  .zone h3 { font-size: 1em; margin: 0 0 0.6em 0; }
+  label { display: block; font-weight: bold; font-size: 0.9em; margin-top: 0.7em; }
+  /* ui_responsive_sweep.mjs's 32px touch-target floor (WEB_UI_RESPONSIVE.md
+     sec 4, WCAG 2.5.8): #pcLink (the one number input present without a live
+     backend) measured 120x25 -- an ordinary text-style input, not a
+     platform-locked control, so min-height is a real fix rather than an
+     exemption. Applies to every input[type=number] on this page, including
+     the ones built at runtime from the safety processor's field list
+     (line ~208 below) -- they share this same rule and were equally
+     undersized, just not reachable from the static-file sweep run (no
+     backend to answer the fetch that builds them). */
+  input[type="number"] { width: 9em; min-height: 32px; box-sizing: border-box; padding: 0.3em; background: var(--bg);
+                         color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
+  input[type="text"] { width: 100%; max-width: 20em; padding: 0.3em; background: var(--bg);
+                       color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
+  select { padding: 0.3em; background: var(--bg); color: var(--fg);
+           border: 1px solid var(--border); border-radius: 3px; }
+  button { padding: 0.5em 1.1em; background: var(--button-bg); color: var(--fg);
+           border: 1px solid var(--border); border-radius: 4px; cursor: pointer; }
+  #msg { margin-left: 0.8em; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+
+<h1>Safety timings</h1>
+<p>How long each thermal guard waits before it acts, and how far out of band
+counts as a problem. Leave a box at <strong>0</strong> to use the firmware's
+own default &mdash; the default is printed next to every field, and 0 never
+turns a guard off.</p>
+<p>The limits that decide <em>whether</em> a guard fires at all &mdash; maximum
+temperature, runaway rate, cross-zone difference &mdash; are on
+<a href="/settings/zones">Thermocouples &amp; zones</a> with the rest of the
+zone setup.</p>
+
+<h2>Timing profiles</h2>
+<p>Name each profile once, set its nine timings, then assign zones to it below.
+Zones sharing a profile share these numbers automatically &mdash; edit the
+profile once instead of every zone that uses it.</p>
+<div id="profiles"></div>
+
+<h2>Zones</h2>
+<div id="zones"></div>
+
+<h2>Whole board</h2>
+<div class="zone">
+  <label for="pcLink">PC link silence before a firing aborts (ms)</label>
+  <input type="number" id="pcLink" step="1000" min="0" value="0">
+  <p class="hint">Default 30000 (30 s). How long the USB link to a controlling
+  PC may go quiet before a running firing is stopped. One setting for the whole
+  board &mdash; it is one cable, not something a single zone experiences.</p>
+</div>
+
+<p><button id="save">Save</button><span id="msg"></span></p>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀ Theme: Dark (switch to light)'
+                                : '🌙 Theme: Light (switch to dark)';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+
+/* The full config as last loaded. Every save reposts all of it with only the
+   fields below replaced, because /api/zones is a whole-page submit. */
+var current = null;
+var msg = document.getElementById('msg');
+
+/* One row per editable timing field, now on a PROFILE rather than a zone: the
+   CSS class used to find its input, the key it has in the GET response's
+   timing_profiles[] entries, the tp<N>_ form key it posts as, the label, the
+   step, and the default the firmware substitutes when it is 0. Keeping the
+   default in the label matters -- a box showing 0 otherwise reads as "no
+   protection", when it actually means the firmware's own number is in
+   force. */
+var FIELDS = [
+  ['pduty', 'guard_progress_duty_min', 'progressduty',
+   'Guard 1 arms above this commanded duty (0-1)', '0.05', '0.5'],
+  ['pwindow', 'guard_progress_window_s', 'progresswindow',
+   'Guard 1: heat commanded this long with no rise = failed element (s)', '10', '300'],
+  ['dhyst', 'guard_drift_hysteresis_c', 'drifthyst',
+   'Guard 4: how far off setpoint counts as drifting (°C)', '1', '25'],
+  ['feps', 'guard_frozen_eps_c', 'frozeneps',
+   'Guard 7: movement smaller than this reads as a stuck sensor (°C)', '0.01', '0.05'],
+  ['xperiod', 'guard_cross_zone_period_s', 'xzoneperiod',
+   'Guard 8: zones may disagree this long before tripping (s)', '30', '600'],
+  ['bbhyst', 'bangbang_hysteresis_c', 'bbhyst',
+   'Bang-bang switching band (°C)', '0.5', '2'],
+  ['cmargin', 'cooling_limited_margin_c', 'coolmargin',
+   'Counts as "cannot cool fast enough" this far above target (°C)', '0.5', '2'],
+  ['chold', 'cooling_limited_hold_s', 'coolhold',
+   '...sustained for this long (s)', '10', '60'],
+  ['rlock', 'ramp_lock_band_c', 'ramplock',
+   'Ramp holds if a zone falls this far behind the target (°C)', '1', '25'],
+];
+
+/* Fields this page does NOT show but must repost unchanged, or the server's
+   whole-page semantics would zero them. Same defence zones_page.html runs in
+   the other direction. This list no longer includes the nine timing fields
+   above -- those moved to the profile, not the zone -- but it gains
+   'timing_profile' being handled separately below since it now comes from a
+   <select> this page owns, not a passthrough. */
+var PASSTHROUGH = [
+  ['name', 'name', true], ['relay_mask', 'relay_mask', false], ['thermo_mask', 'thermo_mask', false],
+  ['ct_mask', 'ct_mask', false], ['tctype', 'tc_type', false], ['cal', 'cal_offset_c', false],
+  ['kp', 'pid_kp', false], ['ki', 'pid_ki', false], ['kd', 'pid_kd', false],
+  ['ramp', 'max_ramp_c_per_hr', false], ['sanity', 'sanity_rate_c_per_min', false],
+  ['mode', 'control_mode', false], ['maxtemp', 'max_temp_c', false], ['mintemp', 'min_temp_c', false],
+  ['window', 'heater_window_ms', false], ['minon', 'heater_min_on_ms', false],
+  ['minoff', 'heater_min_off_ms', false], ['xzone', 'cross_zone_max_delta_c', false],
+  ['wrongdirwindow', 'guard_wrong_dir_window_s', false],
+  ['wrongdirrate', 'guard_wrong_dir_rate_c_per_min', false],
+  ['offsettle', 'guard_off_settle_s', false],
+  ['runawayrate', 'guard_runaway_rate_c_per_min', false],
+  ['runawaymargin', 'guard_runaway_margin_c', false],
+  ['driftperiod', 'guard_drift_period_s', false],
+  ['debounce', 'guard_sensor_fault_debounce_ticks', false],
+  ['frozenwindow', 'guard_frozen_window_s', false],
+  ['k', 'model_k_dc', false], ['tau', 'model_tau_s', false], ['deadtime', 'model_dead_time_s', false],
+];
+
+// esc() used to be a local copy of this escape (missing the single-quote
+// replacement app.js's kcEscapeHtml has always had -- see
+// docs/audits/web_code_duplication_drift_2026-09-18.md section 2.4). app.js
+// is loaded on this page (see the <script defer src="/app.js"> above), so
+// this now delegates to the one shared, five-character-correct
+// implementation instead of keeping a second copy that can drift again.
+//
+// It MUST be a wrapper, not `var esc = window.kcEscapeHtml;`: app.js is
+// loaded with `defer`, so it has not executed yet while this inline script
+// is being parsed, and a plain alias would capture `undefined` -- every
+// esc() call would then throw and the page would render nothing but
+// "Could not load the current settings". Resolving window.kcEscapeHtml at
+// CALL time is what makes this safe: every caller runs from a fetch
+// callback or an event handler, i.e. after the deferred app.js has run.
+// Same pattern as live_profile_page.html's escapeHtml().
+function esc(s) {
+  return window.kcEscapeHtml(s);
+}
+
+function renderProfiles() {
+  var host = document.getElementById('profiles');
+  host.innerHTML = '';
+  var profiles = current.timing_profiles || [];
+  if (profiles.length === 0) {
+    host.innerHTML = '<p>No timing profiles reported by the board.</p>';
+    return;
+  }
+  profiles.forEach(function (p, idx) {
+    var div = document.createElement('div');
+    div.className = 'zone';
+    div.dataset.index = idx;
+    var html = '<h3>Profile ' + idx + '</h3>' +
+               '<label>Name</label>' +
+               /* maxlength MUST match TIMING_PROFILE_NAME_MAX_LEN in
+                  zones_http.h (7). It is 7, not 15, because zones_cfg_t is
+                  500 bytes against a 512-byte blob cap -- the profile array
+                  is what spent the budget. zones_http.c strncpy()s to that
+                  length, so a longer name here is not refused, it is silently
+                  truncated on save: the operator types "Fast bisque", presses
+                  Save, and the box comes back reading "Fast bi". Two copies
+                  of one number, and this is the copy the operator sees. */
+               '<input type="text" class="tpname" maxlength="7" value="' + esc(p.name || '') + '">';
+    FIELDS.forEach(function (f) {
+      html += '<label>' + f[3] + '</label>' +
+              '<input type="number" step="' + f[4] + '" min="0" class="' + f[0] +
+              '" value="' + (p[f[1]] || 0) + '">' +
+              '<p class="hint">0 = firmware default (' + f[5] + ')</p>';
+    });
+    div.innerHTML = html;
+    host.appendChild(div);
+  });
+}
+
+/* One <option> per profile, labelled with its (escaped) name so an operator
+   picks "Bisque" rather than having to remember what index 2 means. */
+function profileOptionsHtml(selectedIndex) {
+  var profiles = current.timing_profiles || [];
+  var html = '';
+  profiles.forEach(function (p) {
+    var sel = (p.index === selectedIndex) ? ' selected' : '';
+    html += '<option value="' + p.index + '"' + sel + '>' + p.index + ': ' + esc(p.name || '(unnamed)') + '</option>';
+  });
+  return html;
+}
+
+function renderZones() {
+  var host = document.getElementById('zones');
+  host.innerHTML = '';
+  var count = current.thermo_count || 0;
+  if (count === 0) {
+    host.innerHTML = '<p>No zones configured yet. Set the thermocouple count on ' +
+                     '<a href="/settings/zones">Thermocouples &amp; zones</a> first.</p>';
+    return;
+  }
+  for (var i = 0; i < count; i++) {
+    var z = current.zones[i] || {};
+    var div = document.createElement('div');
+    div.className = 'zone';
+    div.dataset.index = i;
+    var html = '<h3>Zone ' + i + (z.name ? ' &mdash; ' + esc(z.name) : '') + '</h3>' +
+               '<label>Timing profile</label>' +
+               '<select class="tprofile">' + profileOptionsHtml(z.timing_profile || 0) + '</select>';
+    div.innerHTML = html;
+    host.appendChild(div);
+  }
+}
+
+function render() {
+  renderProfiles();
+  renderZones();
+}
+
+function loadCurrent() {
+  msg.textContent = 'Loading…';
+  fetch('/api/zones').then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    current = d;
+    document.getElementById('pcLink').value = d.pc_link_abort_silence_ms || 0;
+    render();
+    msg.textContent = '';
+  }).catch(function (e) {
+    /* Never swallow this: an empty catch here is what turns a failed fetch
+       into a page that just sits on "Loading" with no explanation. A
+       cancelled sign-in gets a quiet note instead of the error text. */
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) {
+      msg.textContent = 'Sign-in cancelled -- current settings not loaded.';
+      return;
+    }
+    msg.textContent = 'Could not load the current settings: ' + e.message;
+  });
+}
+
+document.getElementById('save').addEventListener('click', function () {
+  if (!current) { msg.textContent = 'Nothing loaded yet.'; return; }
+  var params = [];
+  params.push('thermo_count=' + (current.thermo_count || 0));
+  params.push('relay_count=' + (current.relay_count || 0));
+  params.push('max_simultaneous_relays=' + (current.max_simultaneous_relays || 0));
+  /* 2026-09-15 (Opus re-review LOW): safety_tc_type is the Pico's own,
+     commissioning-page-owned value -- zones_http_post.c's handler already
+     ignores whatever this field carries (tmp.safety_tc_type =
+     s_zones.cfg.safety_tc_type, unconditionally), so echoing it here was
+     dead weight that could also mislead a reader of this page's source
+     into thinking a POST from here could ever change it. */
+  if (current.continue_on_zone_trip) params.push('continue_on_zone_trip=1');
+  params.push('pc_link_abort_silence_ms=' + document.getElementById('pcLink').value);
+  /* 2026-08-27+1, owner report ("name relays not assigned to a zone"):
+     relay<N>_name lives in the same whole-page record this endpoint edits.
+     This page has no UI for it -- naming an unassigned relay is
+     /settings/zones's job -- but /api/zones treats an omitted field for
+     THIS one as "keep the current value" (see zones_http.c's POST handler),
+     not as "clear it", so this echo is defense in depth rather than the
+     only thing standing between an operator and a wiped relay name. Same
+     "echo what was loaded, unconditionally" style as safety_tc_type/
+     pc_link_abort_silence_ms above. */
+  (current.relay_names || []).forEach(function (name, idx) {
+    params.push('relay' + (idx + 1) + '_name=' + encodeURIComponent(name || ''));
+  });
+
+  var ok = true;
+
+  document.querySelectorAll('#profiles .zone').forEach(function (div) {
+    var idx = parseInt(div.dataset.index, 10);
+    var nameEl = div.querySelector('.tpname');
+    params.push('tp' + idx + '_name=' + encodeURIComponent(nameEl.value));
+    FIELDS.forEach(function (f) {
+      var el = div.querySelector('.' + f[0]);
+      var v = parseFloat(el.value);
+      if (!isFinite(v) || v < 0) { ok = false; }
+      params.push('tp' + idx + '_' + f[2] + '=' + el.value);
+    });
+  });
+
+  document.querySelectorAll('#zones .zone').forEach(function (div) {
+    var i = parseInt(div.dataset.index, 10);
+    var z = current.zones[i] || {};
+    PASSTHROUGH.forEach(function (p) {
+      var v = z[p[1]];
+      if (v === undefined || v === null) v = p[2] ? '' : 0;
+      params.push('z' + i + '_' + p[0] + '=' + encodeURIComponent(v));
+    });
+    var profileSel = div.querySelector('.tprofile');
+    params.push('z' + i + '_timingprofile=' + profileSel.value);
+  });
+
+  if (!ok) { msg.textContent = 'Every timing box must be a number of 0 or more.'; return; }
+
+  msg.textContent = 'Saving…';
+  fetch('/api/zones', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.join('&'),
+  }).then(function (r) {
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    msg.textContent = 'Saved.';
+    loadCurrent();
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) {
+      msg.textContent = 'Sign-in cancelled -- not saved.';
+      return;
+    }
+    msg.textContent = 'Save failed: ' + e.message;
+  });
+});
+
+loadCurrent();
+</script>
+</body>
+</html>

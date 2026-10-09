@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Display Settings</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md "web page structure" section, item 2 twin: this page used to
+     be the "Display" <h2> section of settings_page.html. Split out 2026-08-22
+     (owner report: "both display theme and reset menu items take me to the
+     same page" -- nav.js's menu has always had two separate entries, one for
+     Display and one for Reset, but both pointed at /settings#display and
+     /settings#danger, two anchors on the ONE settings page, so picking either
+     menu item visibly landed on the same document; the two need to be
+     genuinely different destinations, not two anchors on one). This page is
+     now that destination for Display; settings_page.html keeps only the
+     Danger zone and no longer needs an anchor of its own to disambiguate them.
+     Same shared chrome as every other page (nav.js/app.js, sticky Stop +
+     connection-lost banner + kcConfirm). -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Page-local palette tokens only -- see settings_page.html's own comment on
+     this same block for why it exists (every real rule lives in /theme.css;
+     these are just the --bg/--fg/etc names theme.css's shared rules read).
+     --input-bg/--input-border/--hint added to match zones_page.html's own
+     token set: the controls below (select, checkboxes) now reuse that
+     page's shared label/input idiom instead of a page-local one, so they
+     need the same tokens that idiom reads. */
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --input-bg: #fff; --input-border: #999;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+  }
+  *, *::before, *::after { box-sizing: border-box; }
+  /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 640px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto;
+         background: var(--bg); color: var(--fg); }
+  h1 { font-size: 1.2em; }
+  p { color: var(--muted); }
+  h2 { font-size: 1em; margin-top: 1.6em; }
+  /* Owner report 2026-09-04: "the display power save button does not match
+     the style of any of the others." This card used to hand-roll its own
+     .kc-dp-card/.kc-dp-row/.kc-dp-note/.kc-dp-status classes -- a one-off
+     flex-row layout no other page used. Replaced with the same idiom
+     zones_page.html already uses for its own label+select/checkbox rows
+     (label{display:block;...} + full-width select/input, .hint for helper
+     text, plain <button> for Save) plus theme.css's shared .card for the
+     container, instead of inventing a page-local card style. See this
+     page's <body> markup for the class-by-class swap. */
+  label { display: block; margin-top: 0.7em; font-weight: bold; font-size: 0.9em; }
+  select {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em; min-height: 2.4em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  input[type="range"] { width: 100%; box-sizing: border-box; min-height: var(--ui-touch); }
+  .hint { font-size: 0.8em; font-weight: normal; color: var(--muted); margin: 0.2em 0 0; }
+  /* Checkbox rows: same inline-flex-label-wraps-checkbox idiom as
+     zones_page.html's #continueOnZoneTrip (32px floor is that row's own
+     tap-target fix, not a page-local invention). Overrides the block
+     `label` rule above for just these two labels via the more specific
+     selector, same as zones_page.html does inline. */
+  .kc-dp-check { display: inline-flex; align-items: center; min-height: 32px; gap: 0.4em;
+                 font-weight: normal; margin-top: 0.6em; }
+  .kc-dp-check input[type="checkbox"] { width: auto; margin: 0; }
+  .kc-dp-status { font-size: 0.85em; margin-left: 0.6em; }
+</style>
+</head>
+<body>
+<!-- Real markup, not script-created -- nav.js's topbar-building code looks
+     up #themeBtn by id and moves it (not creates it) into #kcDisplayPrefs
+     below; see nav.js's comment on that move. Moved verbatim off
+     settings_page.html along with the container div and its inline script. -->
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+
+<h1>Display</h1>
+<div id="kcDisplayPrefs"></div>
+<p>Temperature units are stored on the board, so this also changes what the
+LCD and every other browser shows. The dark/light theme is remembered by this
+browser only.</p>
+
+<!-- Display power: brightness/idle-timeout/keep-on-while-firing/display-on-
+     error, owner request 2026-09-04. Stored on the board (kc-dp-*), same
+     "device is the source of truth" reasoning as Units above -- these
+     settings drive the LCD's own on/off behaviour, so a phone changing them
+     must not disagree with what the board next to the kiln does. -->
+<h2>Display power</h2>
+<!-- theme.css's shared .card, same container every other settings-style
+     group uses (diagnostics/safety/backup's own .card sections) -- not the
+     page-local .kc-dp-card this used to be. -->
+<div class="card">
+  <label for="kcDpBrightness">Brightness (<span id="kcDpBrightnessVal">100%</span>)</label>
+  <input type="range" id="kcDpBrightness" min="10" max="100" step="5" value="100">
+  <!-- Text is set from JS, keyed off /api/settings/display_power's
+       brightness_inert field (settings_http.c derives that from
+       CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE) -- this markup default only
+       shows if that fetch hasn't landed yet. -->
+  <p class="hint" id="kcDpBrightnessNote">Inert on this board today: the backlight has no
+    hardware control line fitted yet. The setting is saved and will take
+    effect once that hardware is verified.</p>
+
+  <label for="kcDpTimeout">Turn off after</label>
+  <select id="kcDpTimeout">
+    <option value="0">1 minute</option>
+    <option value="1">5 minutes</option>
+    <option value="2">10 minutes</option>
+    <option value="3">15 minutes</option>
+    <option value="4">60 minutes</option>
+    <option value="5" selected>Never</option>
+  </select>
+
+  <label class="kc-dp-check"><input type="checkbox" id="kcDpKeepOnFiring">Keep display on while firing</label>
+  <label class="kc-dp-check"><input type="checkbox" id="kcDpOnError">Turn display on when an error occurs</label>
+
+  <button type="button" id="kcDpSave">Save</button>
+  <span id="kcDpStatus" class="kc-dp-status"></span>
+</div>
+
+<script>
+(function () {
+  // Same "one form, four fields, one POST" shape as the tz save elsewhere in
+  // this app -- see settings_http.c's settings_display_power_post_handler()
+  // header comment: all four fields are always posted together and either
+  // all apply or none do.
+  var brightness = document.getElementById('kcDpBrightness');
+  var brightnessVal = document.getElementById('kcDpBrightnessVal');
+  var timeout = document.getElementById('kcDpTimeout');
+  var keepOnFiring = document.getElementById('kcDpKeepOnFiring');
+  var onError = document.getElementById('kcDpOnError');
+  var saveBtn = document.getElementById('kcDpSave');
+  var status = document.getElementById('kcDpStatus');
+  var brightnessNote = document.getElementById('kcDpBrightnessNote');
+
+  brightness.addEventListener('input', function () {
+    brightnessVal.textContent = brightness.value + '%';
+  });
+
+  function loadCurrent() {
+    fetch('/api/settings/display_power')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        brightness.value = d.brightness_percent;
+        brightnessVal.textContent = d.brightness_percent + '%';
+        timeout.value = String(d.timeout_setting);
+        keepOnFiring.checked = !!d.keep_on_while_firing;
+        onError.checked = !!d.display_on_error;
+        // brightness_inert reflects CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
+        // (settings_http.c) -- since be02d34 that's on and the ON duty
+        // follows this setting, so only show the "no hardware line" hint
+        // on a board actually built without it.
+        brightnessNote.textContent = d.brightness_inert
+          ? 'Inert on this board today: the backlight has no hardware control line fitted yet. ' +
+            'The setting is saved and will take effect once that hardware ' +
+            'is verified.'
+          : 'Applies live to the panel backlight.';
+      })
+      .catch(function (authErr) {
+        // Best-effort, same convention as app.js's initial kcUnit fetch --
+        // leaves the form at its markup defaults (100%/Never/both off) if
+        // the board can't be reached yet.
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        status.textContent = '(could not load current settings)';
+      });
+  }
+  loadCurrent();
+
+  saveBtn.addEventListener('click', function () {
+    status.textContent = 'Saving...';
+    var body = 'brightness=' + encodeURIComponent(brightness.value) +
+               '&timeout=' + encodeURIComponent(timeout.value) +
+               '&keep_on_while_firing=' + (keepOnFiring.checked ? '1' : '0') +
+               '&display_on_error=' + (onError.checked ? '1' : '0');
+    fetch('/api/settings/display_power', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body,
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('save failed');
+        return r.json();
+      })
+      .then(function () { status.textContent = 'Saved.'; })
+      .catch(function (authErr) {
+        // Quiet note, never a stale "Saving...".
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
+          status.textContent = 'Sign-in cancelled -- not saved.';
+          return;
+        }
+        status.textContent = 'Save failed -- try again.';
+      });
+  });
+})();
+</script>
+
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    // Same labelled-row wording as this script's pre-move copy in
+    // settings_page.html -- this is a settings row, not a corner button, so
+    // it says which theme is on and what clicking does.
+    btn.textContent = isDark(t) ? '☀ Theme: Dark (switch to light)'
+                                : '🌙 Theme: Light (switch to dark)';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>

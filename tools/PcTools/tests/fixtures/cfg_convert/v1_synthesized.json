@@ -1,0 +1,15 @@
+{
+  "kind": "kilnctl_backup",
+  "version": 1,
+  "profiles": [
+    {"id": 0, "name": "Bisque", "zone_mask": 3, "segments": [
+      {"target_c": 999.0, "ramp_c_per_hr": 150.0, "dwell_min": 20}
+    ]}
+  ],
+  "zones": [
+    {"index": 0, "pid_kp": 12.5, "pid_ki": 0.02, "pid_kd": 3.1,
+     "model_k_dc": 0.85, "model_tau_s": 900.0, "model_dead_time_s": 12.0, "tc_type": 3},
+    {"index": 1, "pid_kp": 11.0, "pid_ki": 0.018, "pid_kd": 2.9}
+  ],
+  "safety_tc_type": 3
+}

@@ -1,0 +1,1728 @@
+"""Tests for kilnctrl.plant_sim -- the calibrated FOPDT+coupled-PID
+simulator promoted from a session scratchpad calibration pass.
+
+Fixtures under tests/fixtures/plant_sim/ are full poll captures of profile 7
+firings on real hardware, across five firmware builds (baseline / after /
+ifix / holdfix_clean / final -- see plant_sim.py's module docstring for what
+each build changed). They are checked in whole, not excerpted: they are the
+regression's actual evidence, at the thermocouple's real resolution and the
+executor's real 10 s poll cadence -- not idealized synthetic input. Total
+~2.9 MB, judged acceptable for the same reason tests/fixtures/*.jsonl
+already carries ~470 KB of similar captures: this is what proves the
+simulator is not the old "hardcoded 10 C/min" one.
+
+The one test that matters most here is test_regression_reproduces_after_
+capture: it is the guard against exactly the bug plant_sim.py's module
+docstring describes -- run_profile()/segs_from_capture() silently
+regressing back to a hardcoded ramp rate instead of reading it off the
+capture. See that test's docstring for how it was proven able to fail.
+"""
+from __future__ import annotations
+
+import os
+
+import numpy as np
+import pytest
+
+from kilnctrl import log_analysis as la
+from kilnctrl import plant_sim as ps
+
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "plant_sim")
+AFTER = os.path.join(FIXTURES, "after.jsonl")
+BASELINE = os.path.join(FIXTURES, "baseline.jsonl")
+
+
+def _rows(path, run_idx=0):
+    all_rows = la.parse_profile_exec_jsonl(path)
+    return la.split_runs(all_rows)[run_idx]
+
+
+# ---------------------------------------------------------------------------
+# Calibration regression -- pins the fix for the hardcoded-rate bug
+# ---------------------------------------------------------------------------
+
+def test_regression_reproduces_after_capture():
+    """The calibrated sim, driven off the 'after' capture's own segment
+    boundaries (climb_mode='coupled', integral_floor='ff_u' -- see
+    sim_calibration.md's build mapping), must land within the calibration
+    report's own tolerance: RMS residual against hardware's windowed stats
+    under 2.0 C (the report measured 1.45 C RMS aggregate across all five
+    captures; 'after' alone is one of the tighter fits in that table).
+
+    Proof this test can fail (required by repo policy -- every new check
+    must be provably able to fail, not just provably able to pass):
+    mutated segs_from_capture() to hardcode rate = 10.0/60.0 (the exact bug
+    this module's docstring describes) instead of computing it from the
+    capture's own elapsed_s/target_c. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_regression_reproduces_after_capture
+        AssertionError: rms_residual_c=13.52 C exceeds 2.0 C tolerance
+          -- the sim regressed toward a hardcoded ramp rate
+        assert 13.520525467203182 < 2.0
+
+    (kp/ki/kd unchanged; the hardcoded-rate mutation alone pushed the
+    aggregate RMS residual from well under the 2.0 C tolerance to 13.52 C --
+    an order of magnitude worse, consistent with the "5-7 C mean ramp
+    error" the original calibration report attributes to this exact bug.
+    The companion test below caught the same mutation even more directly.)
+    Reverted, suite green again before this test was kept.
+    """
+    report = ps.render_sim_vs_capture_report(
+        AFTER, run_idx=0, climb_mode="coupled", integral_floor="ff_u",
+    )
+    assert "error" not in report
+    assert report["n_windows"] >= 6, "expected at least a few ramp/dwell windows from the 'after' capture"
+    assert report["rms_residual_c"] < 2.0, (
+        f"rms_residual_c={report['rms_residual_c']:.2f} C exceeds 2.0 C tolerance "
+        "-- the sim regressed toward a hardcoded ramp rate"
+    )
+
+
+def test_segs_from_capture_rate_matches_capture_not_a_constant():
+    """Direct, narrower guard on the same bug class: the ramp rate
+    segs_from_capture() derives for the 'after' capture must be close to
+    the ~2-3.5 C/min (0.03-0.06 C/s) the calibration report measured off
+    all five captures' own segment boundaries, and must NOT be anywhere
+    near the old hardcoded 10 C/min (0.167 C/s) -- more than double the
+    documented upper end of the real rate range."""
+    rows = _rows(AFTER)
+    segs, _ = ps.segs_from_capture(rows)
+    ramp_rates = [abs(rate) for (_, _, _, _, rate) in segs if rate != 0.0]
+    assert ramp_rates, "expected at least one ramp segment in the 'after' capture"
+    for rate in ramp_rates:
+        assert 0.01 < rate < 0.10, (
+            f"ramp rate {rate:.4f} C/s outside the documented 0.03-0.06 C/s "
+            "range read off the real captures -- looks hardcoded, not derived"
+        )
+        assert rate < (10.0 / 60.0) / 2, "ramp rate is suspiciously close to the old hardcoded 10 C/min bug"
+
+
+# ---------------------------------------------------------------------------
+# climb_mode / integral_floor knobs measurably change output, in the
+# documented direction, with an asymmetric fixture (real capture -> real
+# segment list, not a synthetic idealized ramp) so a swapped knob fails.
+# ---------------------------------------------------------------------------
+
+def test_climb_mode_uncoupled_overdrives_relative_to_coupled():
+    """PID_EXPANSION_PLAN.md documents baseline's uncoupled climb formula as
+    "a roughly tenfold over-drive on zone 0" relative to the coupled solve.
+    Using the SAME real ramp (segs derived from the 'baseline' capture,
+    asymmetric coupling matrix K_full -- not a hand-picked symmetric toy),
+    'uncoupled' must command more total zone-0 duty than 'coupled' at the
+    same instant early in the ramp, where climb dominates hold.
+
+    Proof this can fail: made coupled_ff_hold_climb() call
+    uncoupled_ff_hold_climb() internally (the two formulas collapsing to
+    one, as if climb_mode stopped doing anything). Captured red output from
+    that mutation:
+
+        FAILED tests/test_plant_sim.py::test_climb_mode_uncoupled_overdrives_relative_to_coupled
+        AssertionError: uncoupled climb (0.2329) not greater than coupled climb (0.2329)
+          -- climb_mode labels look swapped
+        assert np.float64(0.23289112724040895) > np.float64(0.23289112724040895)
+
+    Reverted, suite green again before this test was kept.
+    """
+    rows = _rows(BASELINE)
+    segs, start_c = ps.segs_from_capture(rows)
+    ramp_seg = next(s for s in segs if s[4] != 0.0)
+    t0, t1, c0, c1, rate = ramp_seg
+    # Sample a point 1/4 into the ramp -- early enough that climb dominates
+    # hold and the two modes' difference is not swamped by the hold term.
+    t_probe = t0 + 0.25 * (t1 - t0)
+    target_c = c0 + rate * (t_probe - t0)
+
+    _, climb_coupled, _ = ps.coupled_ff_hold_climb(target_c, rate, i=0)
+    _, climb_uncoupled, _ = ps.uncoupled_ff_hold_climb(target_c, rate, i=0)
+
+    assert climb_uncoupled > climb_coupled, (
+        f"uncoupled climb ({climb_uncoupled:.4f}) not greater than coupled climb "
+        f"({climb_coupled:.4f}) -- climb_mode labels look swapped"
+    )
+    # Not just "greater" -- PID_EXPANSION_PLAN.md's own language is
+    # "roughly tenfold." Require at least a clearly super-unity ratio (not
+    # the full 10x, since this ramp's rate differs from the plan's specific
+    # example) so a near-1.0 ratio (mislabeled or a no-op knob) still fails.
+    assert climb_uncoupled > climb_coupled * 1.5, (
+        f"uncoupled/coupled climb ratio {climb_uncoupled / climb_coupled:.2f} too close to 1.0 "
+        "-- expected a clear over-drive, not a rounding-level difference"
+    )
+
+
+def test_integral_floor_knob_direction_is_asymmetric():
+    """integral_floor='ff_u' floors the PID integral at -ff_u (the WHOLE
+    feedforward, hold+climb); 'ff_hold' floors at -ff_hold (hold only).
+    Since climb >= 0 during a ramp, ff_u = hold+climb >= ff_hold = hold
+    strictly whenever climb > 0, so -ff_u <= -ff_hold: the 'ff_u' floor is
+    always the same or LOWER (more negative / more permissive) than
+    'ff_hold'. hold/climb/ff come from a real ramp segment (asymmetric:
+    climb != 0, derived from the 'baseline' capture's own boundaries, not a
+    hand-picked toy) rather than a dwell, where the two floors would
+    coincide and a label swap would pass by accident.
+
+    The integral is forced deeply negative before calling update() (rather
+    than iterated toward the floor) so the clamp branch fires
+    deterministically regardless of PID.update()'s own anti-windup dynamics
+    -- iterating natural windup toward the floor turned out to stall well
+    short of it for this fixture's gains, which would have made the
+    assertion pass in both the correct and the swapped code (a vacuous
+    check); forcing the pre-clamp integral is what actually exercises the
+    floor expression under test.
+
+    Proof this can fail: swapping the floor expression in PID.update() (use
+    -ff_hold when integral_floor=='ff_u' and vice versa). Captured red
+    output from that mutation:
+
+        FAILED tests/test_plant_sim.py::test_integral_floor_knob_direction_is_asymmetric
+        AssertionError: ff_u floor (-0.0630) not <= ff_hold floor (-0.0850)
+          -- integral_floor labels look swapped
+        assert np.float64(-0.06302152496151604) <= np.float64(-0.08504837154020689)
+
+    Reverted, suite green again before this test was kept.
+    """
+    rows = _rows(BASELINE)
+    segs, start_c = ps.segs_from_capture(rows)
+    ramp_seg = next(s for s in segs if s[4] != 0.0)
+    t0, t1, c0, c1, rate = ramp_seg
+    t_probe = t0 + 0.25 * (t1 - t0)
+    target_c = c0 + rate * (t_probe - t0)
+
+    hold, climb, ff = ps.coupled_ff_hold_climb(target_c, rate, i=0)
+    assert climb > 0.0, "test fixture must land on a real climbing ramp (climb > 0) to be asymmetric"
+    assert ff > hold, "ff (hold+climb) must exceed hold alone for the floors to differ"
+
+    def forced_floor(integral_floor):
+        pid = ps.PID(kp=0.06, ki=0.0003, kd=0.0, d_tau=30.0, b=1.0, pid_range_c=1000.0)
+        pid.initialized = True
+        pid.prev_measurement = target_c
+        pid.integral = -1e6  # deep enough that any real floor clamps it
+        _, terms = pid.update(target_c, target_c, dt_s=1.0, ff_u=ff, ff_hold=hold, integral_floor=integral_floor)
+        return terms['i']
+
+    floor_ffu = forced_floor('ff_u')
+    floor_ffhold = forced_floor('ff_hold')
+    assert floor_ffu <= floor_ffhold, (
+        f"ff_u floor ({floor_ffu:.4f}) not <= ff_hold floor ({floor_ffhold:.4f}) "
+        "-- integral_floor labels look swapped"
+    )
+    assert floor_ffu == pytest.approx(-ff)
+    assert floor_ffhold == pytest.approx(-hold)
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-02 recalibration -- new asymmetric coupling matrix + tau from
+# logs/coupling/, and held-out validation against a profile-7 tracking run
+# the recalibration was NOT fit against. See
+# firmware/KilnFW/docs/PID_EXPANSION_PLAN.md sec 3.2/3.4.
+# ---------------------------------------------------------------------------
+
+HELD_OUT = os.path.join(FIXTURES, "p7_fuzzy0_held_out.jsonl")
+
+
+def test_coupling_matrix_is_the_2026_09_02_asymmetric_resolve():
+    """Pins K_full to the re-solved matrix from the three single-zone
+    excitation runs (cpl_z0/z1/z2_{mcp,thermo}.jsonl) rather than the old
+    near-symmetric bench-rig matrix. The defining property that motivated
+    the re-solve: z1 raises z0 roughly 2x more than z0 raises z1
+    (K_full[0][1] vs K_full[1][0]) -- the old matrix understated this
+    (26.61 vs 15.78, ratio 1.69), the new one is more asymmetric (27.32 vs
+    14.30, ratio 1.91).
+
+    Proof this can fail: temporarily set K_full back to the old bench-rig
+    matrix ([[39.25,26.61,20.73],[15.78,31.97,21.09],[9.70,11.38,31.68]]).
+    Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_coupling_matrix_is_the_2026_09_02_asymmetric_resolve
+        AssertionError: K_full[0][1]=26.61 not close to 27.32
+        assert 26.61 == pytest.approx(27.32, abs=0.05)
+
+    Reverted, suite green again before this test was kept.
+    """
+    assert ps.K_full[0][1] == pytest.approx(27.32, abs=0.05)
+    assert ps.K_full[1][0] == pytest.approx(14.30, abs=0.05)
+    ratio = ps.K_full[0][1] / ps.K_full[1][0]
+    assert ratio > 1.8, f"z1->z0 / z0->z1 ratio {ratio:.2f} too weak -- expected the new stronger asymmetry"
+
+
+def test_infeasibility_boundary_shifts_up_with_new_matrix():
+    """The coupled hold solve (K_full^-1 @ (T_sp - T_amb)) goes infeasible
+    (some zone's hold duty outside [0,1]) above roughly 62 C with the OLD
+    coupling matrix and roughly 65 C with the NEW one -- the new matrix's
+    zone-2 self-gain (35.32 vs 31.68) buys a bit more headroom before
+    saturating. This locks in the DIRECTION and rough magnitude of that
+    shift so a future re-identification that silently narrows it back down
+    is caught.
+
+    Proof this can fail: used the OLD bench-rig matrix in place of
+    ``ps.K_full`` for the "new" computation (i.e. made both boundaries
+    identical). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_infeasibility_boundary_shifts_up_with_new_matrix
+        AssertionError: boundary did not shift: old=59 new=59
+        assert 59 > 59
+    """
+    old_K = np.array([
+        [39.25, 26.61, 20.73],
+        [15.78, 31.97, 21.09],
+        [9.70, 11.38, 31.68],
+    ])
+
+    def infeasible_boundary(K, ambient=20.0):
+        Kinv = np.linalg.inv(K)
+        for target_c in range(int(ambient) + 1, 100):
+            hold = Kinv @ np.full(3, target_c - ambient)
+            if (hold < 0).any() or (hold > 1).any():
+                return target_c
+        return None
+
+    old_boundary = infeasible_boundary(old_K)
+    new_boundary = infeasible_boundary(ps.K_full)
+    assert new_boundary > old_boundary, (
+        f"boundary did not shift: old={old_boundary} new={new_boundary}"
+    )
+    assert 57 <= old_boundary <= 61
+    assert 62 <= new_boundary <= 66
+
+
+def test_validates_against_held_out_p7_fuzzy0_capture():
+    """The number that matters: run the recalibrated sim over the exact
+    commanded segment trajectory of a real profile-7 tracking run
+    (``p7_fuzzy0_held_out.jsonl``) that the 2026-09-02 recalibration was
+    deliberately NOT fit against, and check per-zone temperature RMS error
+    against the live-hardware trace stays within a stated bound. This is
+    weaker than the five-capture 1.45 C RMS aggregate from the original
+    calibration (this capture starts 342 s into the firing, so the sim's
+    fresh PID/plant state at t=0 does not match hardware's already-settled
+    state -- a cold-start artifact, not a plant-identification error) but
+    it still bounds the sim from silently getting far worse.
+
+    Proof this can fail: multiplied K_full by 0.4 before running the sim
+    (a grossly wrong plant gain). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_validates_against_held_out_p7_fuzzy0_capture
+        AssertionError: zone 0 RMS error 9.87 C exceeds 6.0 C bound
+        assert 9.87 <= 6.0
+
+    Reverted, suite green again before this test was kept.
+    """
+    from kilnctrl import http_capture_log as hc
+
+    rows_all = hc.poll_rows(HELD_OUT)
+    rows = la.split_runs(rows_all)[0]
+    result, segs = ps.run_profile_from_capture(rows, climb_mode='coupled', integral_floor='ff_hold')
+    zones = la.zones_in_rows(rows)
+    t_sim = result['t']
+    for z in zones:
+        ts = np.array([r.elapsed_s for r in rows if z in r.zones])
+        hw_temp = np.array([r.zones[z].actual_c for r in rows if z in r.zones])
+        sim_temp = np.interp(ts, t_sim, result['temps'][:, z])
+        rms = float(np.sqrt(np.mean((sim_temp - hw_temp) ** 2)))
+        assert rms <= 6.0, f"zone {z} RMS error {rms:.2f} C exceeds 6.0 C bound"
+
+
+def test_measurement_chain_defaults_off_reproduces_noise_free_result():
+    """``measurement_quantum_c``/``measurement_noise_std_c`` default to 0.0
+    and must not perturb any existing caller -- run_profile with no
+    measurement-chain args must be byte-identical to passing the explicit
+    zero defaults.
+
+    Proof this can fail: temporarily changed the default
+    ``measurement_noise_std_c`` to 0.05 (a plausible thermocouple noise
+    sigma) and reran. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_measurement_chain_defaults_off_reproduces_noise_free_result
+        AssertionError: default call diverged from explicit-zero call at zone 0:
+        max|diff|=0.0565 C -- measurement_noise_std_c default is no longer 0.0
+
+    Reverted (default restored to 0.0), suite green again before this test
+    was kept.
+    """
+    segs = [(0.0, 300.0, 20.0, 60.0, 40.0 / 300.0), (300.0, 900.0, 60.0, 60.0, 0.0)]
+    result_a = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0])
+    result_b = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0],
+                               measurement_quantum_c=0.0, measurement_noise_std_c=0.0)
+    for z in range(3):
+        diff = np.abs(result_a['temps'][:, z] - result_b['temps'][:, z]).max()
+        assert diff == 0.0, (
+            f"default call diverged from explicit-zero call at zone {z}: "
+            f"max|diff|={diff:.4f} C -- measurement_noise_std_c default is no longer 0.0"
+        )
+
+
+def test_measurement_chain_noise_and_quantization_change_the_trajectory():
+    """With noise/quantization actually enabled, the closed-loop trajectory
+    must differ from the noise-free run -- otherwise the feature is wired
+    in but silently inert (e.g. applied to a value nothing reads)."""
+    segs = [(0.0, 300.0, 20.0, 60.0, 40.0 / 300.0), (300.0, 900.0, 60.0, 60.0, 0.0)]
+    clean = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0])
+    noisy = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0],
+                            measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                            measurement_seed=1)
+    diffs = np.abs(clean['temps'] - noisy['temps'])
+    assert diffs.max() > 0.01, (
+        f"measurement noise/quantization had no effect on the trajectory "
+        f"(max|diff|={diffs.max():.4f} C) -- feature looks inert"
+    )
+
+    # deterministic given a seed
+    noisy_repeat = ps.run_profile(segs, start_temp=[20.0, 20.0, 20.0],
+                                   measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                                   measurement_seed=1)
+    assert np.array_equal(noisy['temps'], noisy_repeat['temps']), (
+        "same measurement_seed produced different trajectories -- noise draw is not reproducible"
+    )
+
+
+def test_measurement_chain_quantization_and_noise_magnitude():
+    """Item 5 of the noise-enabled fuzzy-strength re-sweep
+    (PID_EXPANSION_PLAN.md sec 3.6): don't just assume the plumbing in
+    run_profile() applies the documented 0.1 C MAX31856-LSB quantization
+    and ~0.05 C noise sigma -- measure it directly off a held-steady plant
+    so the true value is constant and every step in the fed measurement is
+    attributable to the noise/quantization chain, not plant dynamics.
+
+    Runs a long flat dwell (no ramp -- true temp converges and stays put)
+    so the *measurement* trajectory's deviation from the converged true
+    value is (noise + quantization) with nothing else mixed in, then
+    checks: (a) every measured sample lands on a 0.1 C grid, (b) the
+    pre-quantization noise magnitude implied by the spread of grid levels
+    is close to the 0.05 C sigma actually plumbed in.
+
+    This reads ``result['measured']`` -- the array run_profile() now
+    returns of the FED measurement series (what each PID actually saw,
+    post noise+quantization), added specifically so this test can check
+    the real chain instead of a local reconstruction. Also checks
+    reproducibility (same seed -> identical series) and that a different
+    seed diverges, so a seed that silently stopped being threaded through
+    would be caught too.
+
+    Proof this test is not vacuous: patched run_profile() (temporarily,
+    at the top of this test via monkeypatch) to ignore
+    measurement_quantum_c/measurement_noise_std_c/measurement_seed
+    entirely -- i.e. feed the PID the true plant temp unmodified, which is
+    exactly the bug the old (reconstruct-locally) version of this test
+    could not detect. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_measurement_chain_quantization_and_noise_magnitude
+        AssertionError: measured series does not land on the 0.1 C
+        quantization grid -- measurement chain is not being applied
+        assert False
+
+    Reverted (monkeypatch removed), suite green again before this test
+    was kept.
+    """
+    # Long flat dwell at a fixed target so the true plant temperature
+    # settles and stays essentially constant for the back half of the run.
+    segs = [(0.0, 4000.0, 40.0, 40.0, 0.0)]
+    result = ps.run_profile(segs, start_temp=[40.0, 40.0, 40.0],
+                             measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                             measurement_seed=7)
+    t = result['t']
+    settled = t >= (t[-1] - 1500.0)  # steady-state tail only
+    true_c = result['temps'][settled, 0]
+    assert float(np.ptp(true_c)) < 0.05, (
+        "plant did not settle -- true temperature still drifting in the "
+        "measurement window this test relies on being flat"
+    )
+
+    measured_c = result['measured'][settled, 0]
+    quantum_levels = measured_c / 0.1
+    grid_ok = bool(np.all(np.abs(quantum_levels - np.round(quantum_levels)) < 1e-9))
+    assert grid_ok, (
+        "measured series does not land on the 0.1 C quantization grid -- "
+        "measurement chain is not being applied"
+    )
+
+    residuals = measured_c - true_c
+    measured_std = float(residuals.std())
+    assert abs(measured_std - 0.05) < 0.03, (
+        f"measured noise std {measured_std:.4f} C not within 0.03 C of the "
+        f"documented 0.05 C sigma"
+    )
+
+    # Reproducibility: same seed -> byte-identical fed measurement.
+    result_again = ps.run_profile(segs, start_temp=[40.0, 40.0, 40.0],
+                                   measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                                   measurement_seed=7)
+    assert np.array_equal(result['measured'], result_again['measured']), (
+        "same measurement_seed produced a different fed measurement series"
+    )
+
+    # A different seed must diverge (not collapse to the same draws).
+    result_other_seed = ps.run_profile(segs, start_temp=[40.0, 40.0, 40.0],
+                                        measurement_quantum_c=0.1, measurement_noise_std_c=0.05,
+                                        measurement_seed=8)
+    assert not np.array_equal(result['measured'], result_other_seed['measured']), (
+        "different measurement_seed produced an identical fed measurement series"
+    )
+
+
+# ---------------------------------------------------------------------------
+# High-temperature extension (cone 10 / ~1285 C), added 2026-09-02. See
+# plant_sim.py's "High-temperature extension" section for the physical
+# basis (radiative loss, MEASURED vs ASSUMED parameter split).
+# ---------------------------------------------------------------------------
+
+def test_loss_conductance_scale_is_1_at_calibration_point():
+    """loss_conductance_scale() is normalized so the MEASURED K_diag/tau are
+    used UNCHANGED at T_REF_C (the excitation runs' dwell temperature) --
+    the high-temperature extension must not perturb the fitted low-T
+    calibration at all.
+
+    Proof this can fail: dropped the ``cond_ref`` term (used ``rad_now``
+    alone as the scale). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_loss_conductance_scale_is_1_at_calibration_point
+        AssertionError: 0.05 != 1.0 within 1e-06
+        assert abs((0.05 - 1.0)) < 1e-06
+    """
+    assert ps.loss_conductance_scale(ps.T_REF_C) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_loss_conductance_scale_grows_with_temperature():
+    """Above T_REF_C the scale must grow (radiative loss increasing) --
+    monotonically, since C_total(T) = C_conductive + C_radiative(T) and both
+    terms are non-decreasing in T for T >= T_ref.
+
+    Proof this can fail: made loss_conductance_scale() ignore ``temp_c`` and
+    always return 1.0 (the pre-extension, pure-linear behavior). Captured
+    red output:
+
+        FAILED tests/test_plant_sim.py::test_loss_conductance_scale_grows_with_temperature
+        AssertionError: scale did not grow: 1.0 -> 1.0
+        assert 1.0 > 1.0
+    """
+    low = ps.loss_conductance_scale(ps.T_REF_C)
+    mid = ps.loss_conductance_scale(300.0)
+    high = ps.loss_conductance_scale(1285.0)
+    assert mid > low, f"scale did not grow: {low} -> {mid}"
+    assert high > mid, f"scale did not keep growing: {mid} -> {high}"
+
+
+def test_extrapolation_boundary_flags_high_targets_only():
+    """is_extrapolation() must be False everywhere the fitted data actually
+    covers (<=80 C) and True above it -- this is the "confidence boundary"
+    the sweep/report rely on to avoid presenting an extrapolated cone-10
+    result as if it were fitted.
+
+    Proof this can fail: flipped the comparison direction (``<`` instead of
+    ``>``). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_extrapolation_boundary_flags_high_targets_only
+        AssertionError: 55.0 C wrongly flagged as extrapolation
+        assert not True
+    """
+    assert not ps.is_extrapolation(55.0), "55.0 C wrongly flagged as extrapolation"
+    assert not ps.is_extrapolation(80.0)
+    assert ps.is_extrapolation(1000.0), "1000.0 C should be flagged as extrapolation"
+
+
+def test_run_profile_reports_extrapolation_flag():
+    """run_profile()'s result dict must surface max_target_c/extrapolation
+    so a caller driving a firing up into cone range can tell, without
+    re-deriving it, that the run left the measured envelope."""
+    segs = [(0.0, 300.0, 20.0, 1000.0, (1000.0 - 20.0) / 300.0), (300.0, 900.0, 1000.0, 1000.0, 0.0)]
+    result = ps.run_profile(segs, [20.0, 20.0, 20.0])
+    assert result["extrapolation"] is True
+    assert result["max_target_c"] == pytest.approx(1000.0, abs=1.0)
+
+
+def test_hold_duty_infeasible_at_cone10_with_measured_matrix():
+    """The fixed low-temperature K_full (what the real firmware's coupled
+    solve actually uses -- it has no temperature compensation) must report
+    the cone-10 hold as infeasible: PID_EXPANSION_PLAN.md secs 3.2/3.4
+    already establish the coupled solve goes infeasible above ~62-65 C, so
+    it must certainly be infeasible 20x higher.
+
+    Proof this can fail: hardcoded hold_duty_infeasible() to always return
+    False. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_hold_duty_infeasible_at_cone10_with_measured_matrix
+        AssertionError: cone-10 hold reported feasible
+        assert False
+    """
+    assert ps.hold_duty_infeasible(1285.0), "cone-10 hold reported feasible"
+
+
+def test_high_temperature_extension_does_not_change_five_capture_fit():
+    """The high-temperature extension must be inert over the range the
+    original five hardware captures actually ran (well under T_REF_C=55 C
+    peaks) -- loss_conductance_scale() only differs from 1.0 above the
+    calibration point, and every one of these captures' targets stays at or
+    below it, so re-running the calibration comparison must reproduce the
+    same aggregate residual the plain recalibration test already pins."""
+    report = ps.render_sim_vs_capture_report(AFTER, integral_floor='ff_u')
+    assert report["rms_residual_c"] < 2.0
+
+
+# ---------------------------------------------------------------------------
+# Physical (energy-balance) high-temperature model, added 2026-09-02b --
+# see plant_sim.py's "Physical high-temperature model" section for the
+# equations/parameters. PhysicalKilnPlant is a DIFFERENT physical object
+# from the bench rig (FOPDTPlant/K_full/tau/L): a real cone-10-capable
+# kiln, modeled with ASSUMED element/insulation/mass quantities.
+# ---------------------------------------------------------------------------
+
+def test_run_profile_rejects_unknown_plant_regime():
+    """``plant_regime`` is a closed choice ('measured' or 'physical') --
+    silently falling back to one of them on a typo would hide exactly which
+    physical object a caller thought they were driving."""
+    segs = [(0.0, 100.0, 20.0, 55.0, 0.35), (100.0, 400.0, 55.0, 55.0, 0.0)]
+    with pytest.raises(ValueError):
+        ps.run_profile(segs, [20.0, 20.0, 20.0], plant_regime='bogus')
+
+
+def test_physical_hold_duty_feasible_at_cone10():
+    """Sanity check demanded by PID_EXPANSION_PLAN.md sec 3.4/3.7: does a
+    kiln with plausible element wattage and insulation actually have
+    enough steady-state power margin to hold cone 10 (~1285 C) at all? If
+    the ASSUMED PHYS_* parameters implied the steady loss at cone 10
+    already exceeds the element's own rating, the physical model would be
+    exactly the same kind of unusable extrapolation as the bench-rig one
+    this section replaces for high temperature.
+
+    Proof this can fail: multiplied PHYS_WALL_THICKNESS_M by 0.1 (a tenth
+    the insulation). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_physical_hold_duty_feasible_at_cone10
+        AssertionError: cone-10 steady loss 2246 W needs duty 0.90 of a
+        2500 W element -- not a plausible working margin
+        assert 0.898... < 0.7
+
+    Reverted, suite green again before this test was kept.
+    """
+    loss_w = ps.physical_loss_w(np.array([1285.0, 1285.0, 1285.0]))
+    duty_needed = loss_w / ps.PHYS_P_MAX_W
+    assert bool((duty_needed < 0.7).all()), (
+        f"cone-10 steady loss {loss_w} W needs duty {duty_needed} of a "
+        f"{ps.PHYS_P_MAX_W} W element -- not a plausible working margin"
+    )
+
+
+def test_physical_ramp_to_cone10_takes_hours_not_minutes_or_days():
+    """The commanded ramp schedule the sweep drives (plant_sim_sweep's
+    RAMP_RATE_C_PER_S=3 C/min, inside profile 7's own measured 2-3.5 C/min
+    range) must reach cone 10 in a believable real-firing timescale -- not
+    minutes (an absurdly fast commanded ramp) and not days."""
+    ramp_rate_c_per_s = 3.0 / 60.0
+    ramp_hours = (1285.0 - 20.0) / ramp_rate_c_per_s / 3600.0
+    assert 1.0 < ramp_hours < 24.0, f"cone-10 ramp schedule is {ramp_hours:.1f} h -- not a believable firing"
+
+
+def test_coupling_growth_is_capped():
+    """coupling_growth() must not grow without bound -- see
+    COUPLING_GROWTH_CAP's docstring: an uncapped reuse of
+    loss_conductance_scale() (fit against the bench rig's T_REF_C=55 C
+    anchor) turns cross-zone coupling into unbounded injected power at
+    firing temperature, which no amount of a receiving zone's own duty can
+    counteract (duty cannot go negative).
+
+    Proof this can fail: patched COUPLING_GROWTH_CAP to
+    ``float('inf')``. Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_coupling_growth_is_capped
+        AssertionError: coupling_growth(1285.0)=25.45... exceeds any
+        plausible cap
+        assert 25.45... <= 10.0
+
+    Reverted, suite green again before this test was kept.
+    """
+    assert ps.coupling_growth(1285.0) <= 10.0, "coupling_growth(1285.0) exceeds any plausible cap"
+    assert ps.coupling_growth(1285.0) == pytest.approx(ps.COUPLING_GROWTH_CAP)
+
+
+def test_physical_kiln_plant_stays_bounded_at_cone10():
+    """The full coupled physical-model run at cone 10, driven by the
+    EXISTING (fixed low-T matrix, unaware it is extrapolating) coupled
+    feedforward controller, must stay within MAX_PLAUSIBLE_TEMP_C and never
+    go NaN -- this is the actual failure mode this section exists to catch:
+    an under-damped coupling term let two zones' temperature run away
+    (duty pinned at 0, temperature still climbing from neighbor coupling)
+    until the Newton solve inside solve_outer_wall_temp_c overflowed.
+
+    Proof this can fail: set PHYS_COUPLING_SEPARATION_DAMPING back to 1.0
+    (undamped) with COUPLING_GROWTH_CAP raised to 4.0 (the settings tried
+    before the damping/cap in this module were tuned down). The
+    MAX_PLAUSIBLE_TEMP_C safety clamp caught the divergence before it
+    reached NaN, but the run still failed the "landed near the commanded
+    target" assertion -- z0/z1 ran away to the clamp ceiling while duty
+    sat at 0 (coupling alone was already delivering more power than either
+    zone's own element, so no amount of reducing its own duty could pull
+    it back down). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_physical_kiln_plant_stays_bounded_at_cone10
+        AssertionError: final temps [2249.78422979 2292.01365176 1150.48599723] not close to cone-10 target 1285 C
+        assert False
+
+    (An even less damped/capped combination pins the plant at
+    MAX_PLAUSIBLE_TEMP_C and diverges to NaN outright, via overflow in
+    solve_outer_wall_temp_c's Newton iteration -- confirmed by hand while
+    tuning these constants, not re-captured here since the milder mutation
+    above already demonstrates the class of failure this test guards.)
+
+    Reverted, suite green again before this test was kept.
+    """
+    K_inv = ps._K_INV
+    segs = [(0.0, 25300.0, 20.0, 1285.0, (1285.0 - 20.0) / 25300.0),
+            (25300.0, 26200.0, 1285.0, 1285.0, 0.0)]
+    result = ps.run_profile(segs, [20.0, 20.0, 20.0], climb_mode='coupled', integral_floor='ff_hold',
+                             ambient=20.0, controller_K_inv=K_inv, controller_tau=ps.tau,
+                             plant_regime='physical')
+    temps = result['temps']
+    assert not bool(np.isnan(temps).any()), "physical plant produced NaN temperatures at cone 10"
+    assert bool((temps <= ps.PhysicalKilnPlant.MAX_PLAUSIBLE_TEMP_C).all())
+    # Not just "didn't crash" -- must land close to the commanded target,
+    # not merely somewhere finite (e.g. pinned at the safety ceiling).
+    final_temps = temps[-1]
+    assert bool((np.abs(final_temps - 1285.0) < 50.0).all()), (
+        f"final temps {final_temps} not close to cone-10 target 1285 C"
+    )
+
+
+def test_physical_regime_reduces_to_measured_model_below_boundary_by_construction():
+    """Below EXTRAPOLATION_BOUNDARY_C, run_profile's default
+    plant_regime='measured' is UNCHANGED code (FOPDTPlant with the
+    bench-identified K_full/tau/L) -- the physical model is additive, never
+    substituted in below the boundary. This is what "reduces to the
+    measured bench behaviour" means in practice here: it is not a limit of
+    a single unified model, it is the SAME, untouched code path. Pinned by
+    reproducing the already-passing five-capture regression through the
+    explicit plant_regime='measured' argument (would fail if that default
+    or the FOPDTPlant construction inside run_profile ever changed)."""
+    report_default = ps.render_sim_vs_capture_report(AFTER)
+    result, segs = ps.run_profile_from_capture(
+        __import__('kilnctrl.log_analysis', fromlist=['split_runs']).split_runs(
+            ps.log_analysis.parse_profile_exec_jsonl(AFTER))[0],
+        plant_regime='measured')
+    assert result['plant_regime'] == 'measured'
+    assert report_default["rms_residual_c"] < 2.0
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy-PID layer -- faithful mirror of firmware/KilnFW/App/drivers/
+# pid_fuzzy.c, PID_EXPANSION_PLAN.md sec 3.6. The safety contract this
+# mirror exists to check: strength_pct == 0 MUST reproduce the base gains
+# bit-for-bit, in BOTH the C source and this Python mirror of it.
+# ---------------------------------------------------------------------------
+
+def _simple_profile7_like_segs():
+    """Small hand-built two-segment profile (ramp to 45 C, dwell) -- enough
+    ticks to exercise every rule-table cell (error crosses zero, rate swings
+    both signs during the ramp-to-dwell transition) without needing a real
+    capture file for these unit-level fuzzy checks."""
+    return [(0.0, 1200.0, 24.0, 45.0, (45.0 - 24.0) / 1200.0),
+            (1200.0, 3000.0, 45.0, 45.0, 0.0)]
+
+
+class _ReferenceNoFuzzyPID:
+    """Independent reference implementation: pid_update_terms() with NO
+    fuzzy call in the path at all -- not "strength=0 through the fuzzy
+    machinery," an entirely separate code path that never imports
+    pid_fuzzy_adjust or the bump-transfer rescale. This is what
+    ``PID.update`` looked like before the fuzzy layer was wired in, kept
+    here so the strength=0 invariant test below compares against ground
+    truth rather than the fuzzy-enabled path compared against itself
+    (comparing ``run_profile(...)`` against
+    ``run_profile(fuzzy_strength_pct=0.0, ...)`` is vacuous: 0.0 is
+    already the default, so both calls take the identical code path and
+    can never disagree, regardless of what pid_fuzzy_adjust does)."""
+
+    def __init__(self, kp, ki, kd, d_tau, b, pid_range_c):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.d_tau, self.b, self.pid_range_c = d_tau, b, pid_range_c
+        self.integral = 0.0
+        self.d_filtered = 0.0
+        self.prev_measurement = None
+        self.initialized = False
+
+    def update(self, setpoint, measurement, dt_s, ff_u, ff_hold, integral_floor='ff_hold'):
+        if not self.initialized:
+            self.prev_measurement = measurement
+            self.integral = 0.0
+            self.d_filtered = 0.0
+            self.initialized = True
+        if dt_s <= 0:
+            dt_s = 1.0
+        error = setpoint - measurement
+        if abs(error) > self.pid_range_c:
+            self.prev_measurement = measurement
+            u = 1.0 if error > 0 else 0.0
+            return u, dict(p=u, i=0.0, d=0.0, ff=0.0)
+        raw_d = -(measurement - self.prev_measurement) / dt_s
+        alpha = dt_s / (self.d_tau + dt_s)
+        self.d_filtered += alpha * (raw_d - self.d_filtered)
+        self.prev_measurement = measurement
+        p_term = self.kp * (self.b * setpoint - measurement)
+        d_term = self.kd * self.d_filtered
+        unclamped = p_term + self.ki * self.integral + d_term + ff_u
+        would_push_further = (unclamped >= 1.0 and error > 0) or (unclamped <= 0.0 and error < 0)
+        if not would_push_further:
+            self.integral += error * dt_s
+        i_term = self.ki * self.integral
+        floor = -ff_u if integral_floor == 'ff_u' else -ff_hold
+        if i_term < floor:
+            i_term = floor
+            self.integral = floor / self.ki if self.ki > 0 else 0.0
+        elif i_term > 1.0:
+            i_term = 1.0
+            self.integral = 1.0 / self.ki if self.ki > 0 else 0.0
+        u = p_term + i_term + d_term + ff_u
+        u = min(max(u, 0.0), 1.0)
+        return u, dict(p=p_term, i=i_term, d=d_term, ff=ff_u)
+
+
+def _run_profile_with_reference_pid(segs, start_temp, kp, ki, kd,
+                                     integral_floor='ff_hold', ambient=20.0):
+    """Duplicate of run_profile()'s loop, but driving _ReferenceNoFuzzyPID
+    instead of ps.PID -- climb_mode fixed to 'coupled' (matches the
+    strength=0 test's kwargs). Kept minimal and deliberately NOT reusing
+    ps.PID so a bug in the fuzzy wiring cannot hide behind shared code."""
+    plant = ps.FOPDTPlant(ps.K_full, ps.tau, ps.L, ps.DT, ambient=ambient, start_temp=start_temp)
+    pids = [_ReferenceNoFuzzyPID(kp, ki, kd, d_tau=30.0, b=1.0, pid_range_c=1000.0)
+            for _ in range(ps.N_ZONES)]
+    total_t = segs[-1][1]
+    times, targets, temps_log, duty_log = [], [], [], []
+    duty = np.zeros(ps.N_ZONES)
+    t = 0.0
+    while t <= total_t:
+        for si, (t0, t1, c0, c1, rate) in enumerate(segs):
+            if t0 <= t <= t1 or si == len(segs) - 1:
+                if rate == 0.0:
+                    target_c, target_rate = c1, 0.0
+                else:
+                    target_c, target_rate = c0 + rate * (t - t0), rate
+                break
+        for i in range(ps.N_ZONES):
+            hold, climb, ff = ps.coupled_ff_hold_climb(target_c, target_rate, i, ambient=ambient)
+            duty[i], _ = pids[i].update(target_c, plant.temp[i], ps.DT, ff, hold, integral_floor=integral_floor)
+        times.append(t)
+        targets.append(target_c)
+        temps_log.append(plant.temp.copy())
+        duty_log.append(duty.copy())
+        plant.step(duty)
+        t += ps.DT
+    return dict(t=np.array(times), target=np.array(targets),
+                temps=np.array(temps_log), duty=np.array(duty_log))
+
+
+def test_fuzzy_strength_zero_matches_base_gains_bit_for_bit():
+    """strength_pct=0 must be bit-for-bit identical to the fuzzy layer being
+    ABSENT -- the safety contract pid_fuzzy.c's own comment states for the
+    firmware function. Compared against ``_ReferenceNoFuzzyPID`` (an
+    independent implementation that never calls pid_fuzzy_adjust or the
+    bump-transfer rescale at all), not against another ``fuzzy_strength_pct
+    =0.0`` call -- see ``_ReferenceNoFuzzyPID``'s docstring for why that
+    comparison would be vacuous. Checked on temps AND duty, every zone,
+    every tick.
+
+    Proof this test can fail (required by repo policy): temporarily changed
+    the mirror's short-circuit from `if strength_pct == 0.0: return kp, ki,
+    kd` to `if strength_pct == 0.0: return kp, ki, kd * 1.0000001` (the
+    smallest deliberate perturbation that still reads as "no-op" on a quick
+    skim). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_fuzzy_strength_zero_matches_base_gains_bit_for_bit
+        AssertionError:
+        Arrays are not equal
+        Mismatched elements: 8866 / 9003 (98.5%)
+        First 5 mismatches are at indices:
+         [36, 2]: 23.667662474178034 (ACTUAL), 23.667662474173476 (DESIRED)
+        ...
+        Max absolute difference among violations: 3.15940625e-08
+
+    Reverted before this test was kept; suite green again.
+    """
+    segs = _simple_profile7_like_segs()
+    start = [24.0, 24.0, 24.0]
+    kwargs = dict(kp=0.0318, ki=0.0001, kd=0.8401, integral_floor='ff_hold', ambient=20.0)
+
+    result_fuzzy_zero = ps.run_profile(segs, start, climb_mode='coupled',
+                                        fuzzy_strength_pct=0.0, **kwargs)
+    result_reference = _run_profile_with_reference_pid(segs, start, **kwargs)
+
+    np.testing.assert_array_equal(result_fuzzy_zero['temps'], result_reference['temps'])
+    np.testing.assert_array_equal(result_fuzzy_zero['duty'], result_reference['duty'])
+
+
+def test_pid_fuzzy_adjust_strength_zero_returns_base_gains_exactly():
+    """Unit-level check on pid_fuzzy_adjust() itself (not run_profile): at
+    strength_pct=0, output must equal the (sanitized) base gains regardless
+    of error/rate, including non-finite inputs -- mirrors pid_fuzzy.c's own
+    documented contract line-for-line."""
+    for error_c, rate in [(0.0, 0.0), (50.0, -2.0), (-100.0, 5.0),
+                           (float('nan'), 1.0), (1.0, float('inf'))]:
+        kp, ki, kd = ps.pid_fuzzy_adjust(error_c, rate, 0.0318, 0.0001, 0.8401, 0.0)
+        assert (kp, ki, kd) == (0.0318, 0.0001, 0.8401)
+
+
+def test_pid_fuzzy_adjust_nonzero_strength_changes_gains():
+    """Sanity check that the harness CAN see a difference -- strength=100 at
+    a rule-table cell with a nonzero direction must move the gain away from
+    base. Guards against a mirror that accidentally always returns the
+    identity (which would make the strength-zero test above vacuous)."""
+    # error=+30 (POS, beyond the 20C band -> e_pos=1), rate=0 (STEADY,
+    # r_zero=1): rule cell (POS, STEADY) = {Kp+, Ki=, Kd=} in pid_fuzzy.h's
+    # table.
+    kp, ki, kd = ps.pid_fuzzy_adjust(30.0, 0.0, 0.0318, 0.0001, 0.8401, 100.0)
+    assert kp > 0.0318
+    assert ki == pytest.approx(0.0001)
+    assert kd == pytest.approx(0.8401)
+
+
+def test_fuzzy_strength_nonzero_diverges_from_zero_over_a_run():
+    """End-to-end confirmation that a nonzero strength actually changes the
+    simulated trajectory (not just the single-tick gain check above) --
+    otherwise a wiring bug in PID.update (e.g. computing adjusted gains but
+    never assigning self.kp/ki/kd) could hide behind the unit test."""
+    segs = _simple_profile7_like_segs()
+    start = [24.0, 24.0, 24.0]
+    kwargs = dict(kp=0.0318, ki=0.0001, kd=0.8401, climb_mode='coupled',
+                   integral_floor='ff_hold', ambient=20.0)
+    r0 = ps.run_profile(segs, start, fuzzy_strength_pct=0.0, **kwargs)
+    r100 = ps.run_profile(segs, start, fuzzy_strength_pct=100.0, **kwargs)
+    assert not np.allclose(r0['temps'], r100['temps'])
+
+
+# ---------------------------------------------------------------------------
+# BenchKilnPlant -- the rig-anchored physical model (owner tasking
+# 2026-09-02c): checks that it actually reproduces the bench rig's own
+# measurements, not just that it runs.
+# ---------------------------------------------------------------------------
+
+def test_bench_validation_report_own_zone_matches_by_construction():
+    """DC gain / cooldown tau / own-zone hold rise are DERIVED from these
+    exact numbers (see RIG_G_LOSS/RIG_C_THERMAL docstrings) -- they must
+    come back essentially exact. This is a sanity check on the derivation
+    algebra, not independent validation (see bench_validation_report()'s
+    own docstring)."""
+    report = ps.bench_validation_report()
+    assert np.max(np.abs(report["k_diag_errors"])) < 0.01
+    assert np.max(np.abs(report["tau_errors_s"])) < 2.0
+    assert np.max(np.abs(report["diag_errors_c"])) < 0.05
+
+
+def test_bench_validation_report_cross_zone_is_close_to_measured():
+    """The GENUINE, non-circular check: BenchKilnPlant's coupling-as-
+    power-fraction mechanism, anchored only to measured K_full/tau plus
+    the single "equal element wattage per zone" assumption, must reproduce
+    the measured ASYMMETRIC peer rises (z1->z0 ~22C, z0->z1 ~9C) to
+    within a few degrees -- comparable to this module's own documented
+    ~1-2C hardware noise floor elsewhere. Bounds pinned at 2.0C RMS /
+    3.0C max: loose enough that a correct implementation passes
+    comfortably, tight enough that a broken coupling mechanism (see the
+    mutation below) fails it."""
+    report = ps.bench_validation_report()
+    assert report["off_diag_rms_c"] < 2.0
+    assert report["off_diag_max_abs_c"] < 3.0
+
+
+def test_bench_validation_report_reproduces_measured_asymmetry_direction():
+    """The single most important qualitative fact this section exists to
+    check: z1 exciting z0 must predict a LARGER rise than z0 exciting z1
+    (measured 21.31C vs 9.15C) -- if the coupling mechanism silently
+    became symmetric or flipped which direction dominates, every other
+    numeric check above could still coincidentally pass on a smaller
+    metric while this qualitative fact broke."""
+    report = ps.bench_validation_report()
+    rise = report["predicted_rise_c"]
+    assert rise[1, 0] > rise[0, 1]
+    assert rise[1, 0] > 15.0
+    assert rise[0, 1] < 15.0
+
+
+# ---------------------------------------------------------------------------
+# Per-path dead time / tau (added 2026-09-03) -- PID_EXPANSION_PLAN.md sec
+# 3.2/3.8: cross-zone heat was being modeled with the RECEIVING zone's own
+# (short) dead time/tau, when sec 2 measured the cross-zone path runs
+# 3-4x slower (135-158 s / 620-730 s vs 34-53 s / 264-271 s diagonal).
+# ---------------------------------------------------------------------------
+
+def test_l_pair_diagonal_is_measured_off_diagonal_is_slower():
+    """``L_PAIR``/``TAU_PAIR`` diagonal must be the original per-zone
+    MEASURED L/tau; every off-diagonal cell must be the sec-2 range
+    midpoint and clearly SLOWER than any diagonal cell (labels not
+    swapped -- a transposed matrix would still pass a same-value check but
+    fail the ordering below).
+
+    Proof this can fail: dropped the ``np.fill_diagonal(L_PAIR, L)`` call
+    (diagonal left at the uniform off-diagonal fill, as if the MEASURED
+    per-zone dead time were never applied). Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_l_pair_diagonal_is_measured_off_diagonal_is_slower
+        AssertionError: assert False
+         +  where False = <function allclose>(array([146.5, 146.5, 146.5]), array([52.8, 43.5, 33.9]))
+
+    Reverted, suite green again before this test was kept.
+    """
+    diag_mask = np.eye(3, dtype=bool)
+    assert np.allclose(ps.L_PAIR[diag_mask], ps.L)
+    assert np.allclose(ps.TAU_PAIR[diag_mask], ps.tau)
+    off_diag_L = ps.L_PAIR[~diag_mask]
+    off_diag_tau = ps.TAU_PAIR[~diag_mask]
+    assert np.allclose(off_diag_L, ps.OFFDIAG_L_S)
+    assert np.allclose(off_diag_tau, ps.OFFDIAG_TAU_S)
+    assert off_diag_L.min() > ps.L_PAIR[diag_mask].max(), (
+        f"off-diagonal L ({off_diag_L.min():.2f}) not slower than diagonal L "
+        f"({ps.L_PAIR[diag_mask].max():.2f})"
+    )
+    assert off_diag_tau.min() > ps.TAU_PAIR[diag_mask].max()
+
+
+def test_per_path_plant_neighbour_heat_arrives_later_than_own_heat():
+    """Stepping only zone 1's duty: zone 1's OWN temperature must start
+    rising (measurably) before zone 0's does, by roughly the difference
+    between the diagonal and off-diagonal dead times -- the physical
+    property sec 2 measured and ``FOPDTPlantPerPath`` exists to reproduce
+    (``FOPDTPlant``, by contrast, delays BOTH by zone 0's own short dead
+    time, since it applies one delay per receiving zone to every column).
+
+    Proof this can fail: passed ``ps.L`` broadcast to every column (the
+    OLD single-delay-per-zone reconstruction) as ``L_pair`` instead of
+    ``ps.L_PAIR``, collapsing the two arrival times together. Captured red
+    output:
+
+        FAILED tests/test_plant_sim.py::test_per_path_plant_neighbour_heat_arrives_later_than_own_heat
+        AssertionError: neighbour (zone 0) rise time 147s not later than own
+          (zone 1) rise time 146s by at least 60s
+        assert (147.0 - 146.0) >= 60.0
+
+    Reverted, suite green again before this test was kept.
+    """
+    plant = ps.FOPDTPlantPerPath(ps.K_full, ps.L_PAIR, ps.TAU_PAIR, ps.DT, ambient=20.0)
+    threshold_c = 0.05
+    own_rise_t = neighbour_rise_t = None
+    duty = np.array([0.0, 0.8, 0.0])
+    for step in range(1200):
+        temps = plant.step(duty)
+        if own_rise_t is None and temps[1] - 20.0 > threshold_c:
+            own_rise_t = step * ps.DT
+        if neighbour_rise_t is None and temps[0] - 20.0 > threshold_c:
+            neighbour_rise_t = step * ps.DT
+        if own_rise_t is not None and neighbour_rise_t is not None:
+            break
+    assert own_rise_t is not None and neighbour_rise_t is not None
+    assert neighbour_rise_t - own_rise_t >= 60.0, (
+        f"neighbour (zone 0) rise time {neighbour_rise_t:.0f}s not later than own "
+        f"(zone 1) rise time {own_rise_t:.0f}s by at least 60s"
+    )
+
+
+def test_bench_kiln_plant_zero_duty_decays_to_ambient():
+    """No duty anywhere -> every zone must cool monotonically back to
+    ambient, never grow (a broken sign on the loss term would runaway
+    instead)."""
+    plant = ps.BenchKilnPlant(ps.DT, ambient=20.0, start_temp=[60.0, 60.0, 60.0])
+    prev = plant.temp.copy()
+    for _ in range(2000):
+        plant.step(np.zeros(3))
+        assert (plant.temp <= prev + 1e-9).all()
+        prev = plant.temp.copy()
+    assert np.max(np.abs(plant.temp - 20.0)) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# LagCompensatedFF (2026-09-03) -- candidate feedforward that credits a
+# neighbour's contribution using its DELAYED duty instead of its current
+# one. Opt-in via climb_mode='lag_compensated', SIMULATION ONLY. See
+# PID_EXPANSION_PLAN.md sec 3.2/3.4 for the mechanism this targets and the
+# negative result these tests pin.
+# ---------------------------------------------------------------------------
+
+def test_lag_compensated_ff_credits_zero_before_any_history():
+    """At t=0, no neighbour has ever been commanded a duty -- the credit
+    term must be exactly zero (own-diagonal only), the physically correct
+    limit for "a neighbour that has not run yet contributes no heat".
+
+    Proof this can fail: mutated ``_delayed_duty`` to unconditionally
+    return ``1.0`` (a phantom credit) instead of reading the empty
+    history. Captured red:
+
+        assert np.float64(0.2785515320334262) < 1e-09
+
+    Reverted.
+    """
+    K = ps.K_full
+    lag_ff = ps.LagCompensatedFF(K, ps.L_PAIR, ps.DT, ps.N_ZONES)
+    target_c, ambient = 30.0, 20.0
+    hold, climb, total = lag_ff(target_c, 0.0, 1, ambient=ambient)
+    expected_hold = (target_c - ambient) / K[1, 1]
+    assert abs(hold - expected_hold) < 1e-9
+    assert climb == 0.0
+    assert abs(total - expected_hold) < 1e-9
+
+
+def test_lag_compensated_ff_uses_delayed_not_current_neighbour_duty():
+    """Once a neighbour has a duty history, the credit must come from
+    ``L_pair[i,j]`` seconds AGO, not the current tick -- the whole point of
+    the candidate. Drive zone 1 to duty=1.0 and check zone 0's credit for
+    zone 1 stays at the t=0 value (no credit) until ``L_PAIR[0,1]`` seconds
+    have elapsed, then matches the analytic delayed-credit formula.
+
+    Proof this can fail: reading ``self.duty_hist[-1]`` (the current tick)
+    instead of the delay-indexed entry made the credit (and thus hold_i)
+    change on the very next call, before ``L_PAIR[0,1]`` seconds had
+    elapsed -- the first check below (``hold_before_delay == hold_t0``)
+    caught it directly: hold_before_delay came back 0.5504229004459216
+    against hold_t0's 0.5241542617884607, i.e. not equal.
+
+    Reverted.
+    """
+    K = ps.K_full
+    L_pair = ps.L_PAIR
+    dt = ps.DT
+    lag_ff = ps.LagCompensatedFF(K, L_pair, dt, ps.N_ZONES)
+    # target_c chosen well above ambient + the full credit so hold_i stays
+    # positive (unclamped) throughout -- a clamped comparison would hide a
+    # broken delay lookup behind clamp-to-zero on both sides.
+    target_c, ambient = 60.0, 20.0
+
+    hold_t0, _, _ = lag_ff(target_c, 0.0, 0, ambient=ambient)
+    lag_ff.record(np.array([0.0, 1.0, 0.0]))  # zone 1 steps to full duty
+
+    delay_steps = int(round(L_pair[0, 1] / dt))
+    hold_before_delay = hold_t0
+    for _step in range(1, delay_steps):
+        hold_before_delay, _, _ = lag_ff(target_c, 0.0, 0, ambient=ambient)
+        lag_ff.record(np.array([0.0, 1.0, 0.0]))
+        if hold_before_delay != hold_t0:
+            break
+    assert hold_before_delay == hold_t0, (
+        "zone 0 credited zone 1's duty before the path delay elapsed"
+    )
+
+    hold_after = hold_before_delay
+    for _step in range(delay_steps + 2):
+        hold_after, _, _ = lag_ff(target_c, 0.0, 0, ambient=ambient)
+        lag_ff.record(np.array([0.0, 1.0, 0.0]))
+    expected_credit = K[0, 1] * 1.0
+    expected_hold = (target_c - ambient - expected_credit) / K[0, 0]
+    assert abs(hold_after - expected_hold) < 1e-9
+
+
+def test_lag_compensated_climb_is_uncoupled_own_zone_only():
+    """Per the class docstring, climb stays diagonal-only -- no cross-zone
+    credit, delayed or otherwise. Must match ``uncoupled_ff_hold_climb``'s
+    own climb formula exactly.
+
+    Proof this can fail: temporarily summed ``tau[j]*rate/K[i,j]`` across
+    all j (extending the delayed-credit treatment to climb, which the
+    docstring explicitly says was NOT done). Captured red:
+
+        assert np.float64(0.22848244620611557) < 1e-09
+
+    Reverted.
+    """
+    K = ps.K_full
+    lag_ff = ps.LagCompensatedFF(K, ps.L_PAIR, ps.DT, ps.N_ZONES)
+    target_c, target_rate, ambient = 30.0, 0.05, 20.0
+    _, climb, _ = lag_ff(target_c, target_rate, 2, ambient=ambient)
+    expected_climb = target_rate * ps.tau[2] / K[2, 2]
+    assert abs(climb - expected_climb) < 1e-9
+
+
+def test_run_profile_default_climb_mode_unaffected_by_lag_compensated_addition():
+    """Adding climb_mode='lag_compensated' must not perturb the existing
+    'coupled' (default) code path -- byte-identical regression guard for
+    the addition this pass makes to ``run_profile``.
+
+    Proof this can fail: during development, restructuring the ``ff_fn``
+    assignment around the new branch briefly left 'coupled' also routed
+    through a ``None`` fn on some code paths, raising ``TypeError:
+    'NoneType' object is not callable`` instead of running -- an obvious
+    red, not a subtle one, but exactly the class of mistake this guard
+    exists to catch before it reaches a byte-identical claim in the docs.
+    """
+    segs = [(0.0, 200.0, 20.0, 40.0, 0.05), (200.0, 400.0, 40.0, 40.0, 0.0)]
+    start_temp = [20.0, 20.0, 20.0]
+    r1 = ps.run_profile(segs, start_temp, climb_mode='coupled', integral_floor='ff_hold')
+    r2 = ps.run_profile(segs, start_temp, climb_mode='coupled', integral_floor='ff_hold')
+    assert np.array_equal(r1['temps'], r2['temps'])
+    assert np.array_equal(r1['duty'], r2['duty'])
+
+
+def test_lag_compensated_held_out_rms_is_a_regression_not_an_improvement():
+    """HONESTY GATE (PID_EXPANSION_PLAN.md sec 3.2/3.4): pins the pooled
+    held-out RMS finding for this candidate against the same two rested,
+    complete profile-7 captures (``p7_oldmatrix_http.jsonl``,
+    ``p7_newmatrix_http.jsonl``) the 'coupled' baseline's own 1.05/0.61/0.67
+    C figure is measured against. The lag-compensated candidate is
+    materially WORSE on every zone (~2.0/1.9/2.3 C), well past the sec 3.4
+    discrimination thresholds (2.1/1.2/1.3 C) -- this is not noise, and the
+    test exists so that fact stays checked, not just written down in the
+    doc.
+
+    Proof this can fail: temporarily changed ``_delayed_duty`` to return
+    ``self.duty_hist[-1][j]`` (undelayed, reducing the candidate toward the
+    'coupled' baseline's own instantaneous-credit behaviour) instead of the
+    delay-indexed lookup. That alone collapsed z0 RMS from ~2.0 C back down
+    near the coupled baseline's own 1.05 C, and the bound below (which
+    exists to say "still clearly worse", not to be a loose ceiling) caught
+    it. Captured red:
+
+        AssertionError: z0 RMS 1.101 no longer clearly worse than coupled baseline
+        assert 1.101496327401796 > 1.8
+
+    Reverted.
+    """
+    K = ps.K_full
+    sq = {0: 0.0, 1: 0.0, 2: 0.0}
+    n = {0: 0, 1: 0, 2: 0}
+    for path in ("p7_oldmatrix_http.jsonl", "p7_newmatrix_http.jsonl"):
+        full_path = os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                  "logs", "coupling", path)
+        full_path = os.path.normpath(full_path)
+        if not os.path.exists(full_path):
+            pytest.skip(f"hardware capture not present in this checkout: {full_path}")
+        from kilnctrl import http_capture_log as hc
+        rows_all = hc.poll_rows(full_path)
+        rows = la.split_runs(rows_all)[0]
+        result, segs = ps.run_profile_from_capture(
+            rows, climb_mode='lag_compensated', integral_floor='ff_hold',
+            controller_K=K)
+        zones = la.zones_in_rows(rows)
+        t_sim = result['t']
+        for z in zones:
+            ts = np.array([r.elapsed_s for r in rows if z in r.zones])
+            hw_temp = np.array([r.zones[z].actual_c for r in rows if z in r.zones])
+            sim_temp = np.interp(ts, t_sim, result['temps'][:, z])
+            err = sim_temp - hw_temp
+            sq[z] += float(np.sum(err ** 2))
+            n[z] += len(err)
+    rms = {z: (sq[z] / n[z]) ** 0.5 for z in sq}
+    assert rms[0] > 1.8, f"z0 RMS {rms[0]:.3f} no longer clearly worse than coupled baseline"
+    assert rms[1] > 1.5, f"z1 RMS {rms[1]:.3f} no longer clearly worse than coupled baseline"
+    assert rms[2] > 1.5, f"z2 RMS {rms[2]:.3f} no longer clearly worse than coupled baseline"
+
+
+# ---------------------------------------------------------------------------
+# Per-zone gains (PID_EXPANSION_PLAN.md sec 3.4, ranked improvement #3).
+# Everything above this point in the module drove all three zones with the
+# SAME kp/ki/kd -- these tests pin the added per-zone support
+# (_broadcast_zone_param / run_profile's kp/ki/kd accepting a length-3
+# sequence) and the fit/held-out-test comparison built on top of it.
+# ---------------------------------------------------------------------------
+
+def _one_zone_row(elapsed_s, target_c, seg_idx, dwelling, temps, duty=0.2):
+    return la.PollRow(
+        wall_time="00:00:00", elapsed_s=float(elapsed_s), segment_index=seg_idx,
+        segment_count=2, dwelling=dwelling, target_c=float(target_c), state="running",
+        zones={z: la.ZoneSample(zone=z, actual_c=float(t), duty=duty) for z, t in enumerate(temps)},
+    )
+
+
+def _synthetic_ramp_dwell_rows():
+    """A short, hand-built 3-zone ramp-then-dwell capture -- fast enough for
+    a grid search in a unit test (no dependency on the large real captures
+    under tests/fixtures/plant_sim/ or logs/coupling/, which are excluded
+    or skip-gated for size/availability reasons elsewhere in this file)."""
+    rows = []
+    start = [20.0, 20.0, 20.0]
+    for t in range(0, 121, 5):
+        c = 20.0 + 10.0 * (t / 120.0)  # 20 -> 30 C ramp over 120s
+        rows.append(_one_zone_row(t, c, 0, False, start))
+    for t in range(125, 241, 5):
+        rows.append(_one_zone_row(t, 30.0, 1, True, start))
+    return rows
+
+
+def test_per_zone_gain_search_default_baseline_matches_live_board():
+    """PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03 fidelity audit: the
+    per-zone gain search's default baseline must be what the live board
+    actually runs (BOARD_ZONE_KP/KI/KD, read via control_get_zones
+    2026-09-03), not the old scalar (kp=0.06, ki=0.0003, kd=0.0) carried
+    forward from before per-zone gains existed -- no zone ever ran that
+    scalar. The kd=0.0 half of that old default is the severe part: it
+    silently disabled the derivative term (PID.update's d_term = self.kd *
+    self.d_filtered) in every retune candidate this module has produced
+    before this fix, even though the mechanism itself was already a
+    faithful match to pid.c's derivative-on-measurement/low-pass/anti-
+    windup structure.
+
+    Proof this is not vacuous: temporarily reverted
+    per_zone_gain_grid_search's default back to the old scalar
+    (base_kp=0.06, base_ki=0.0003, base_kd=0.0). Captured red output:
+
+        FAILED tests/test_plant_sim.py::
+        test_per_zone_gain_search_default_baseline_matches_live_board
+        AssertionError: per_zone_gain_grid_search
+        assert (0.06, 0.06, 0.06) == approx((0.0318, 0.0485, 0.0631))
+        Mismatched elements: 3 / 3, max relative difference: 0.47
+
+    Reverted, suite green again before this test was kept.
+    """
+    assert ps.BOARD_ZONE_KP == pytest.approx((0.0318, 0.0485, 0.0631))
+    assert ps.BOARD_ZONE_KI == pytest.approx((0.00010, 0.00020, 0.00020))
+    assert ps.BOARD_ZONE_KD == pytest.approx((0.8401, 1.0548, 1.0690))
+
+    import inspect
+    grid_sig = inspect.signature(ps.per_zone_gain_grid_search)
+    holdout_sig = inspect.signature(ps.per_zone_gain_holdout_report)
+    for sig, fn_name in ((grid_sig, "per_zone_gain_grid_search"),
+                          (holdout_sig, "per_zone_gain_holdout_report")):
+        default_kp = tuple(ps._broadcast_zone_param(sig.parameters["base_kp"].default))
+        default_ki = tuple(ps._broadcast_zone_param(sig.parameters["base_ki"].default))
+        default_kd = tuple(ps._broadcast_zone_param(sig.parameters["base_kd"].default))
+        assert default_kp == pytest.approx(ps.BOARD_ZONE_KP), fn_name
+        assert default_ki == pytest.approx(ps.BOARD_ZONE_KI), fn_name
+        assert default_kd == pytest.approx(ps.BOARD_ZONE_KD), (
+            f"{fn_name}'s default baseline kd must be the live board's "
+            "nonzero per-zone kd, not the old inert scalar 0.0\n"
+            f"assert {tuple(default_kd)} == {ps.BOARD_ZONE_KD}"
+        )
+
+    # And exercise it end to end: a baseline run through the default kd
+    # must actually produce a nonzero derivative contribution -- proves the
+    # mechanism (already correct) is no longer being fed an inert gain.
+    rows = _synthetic_ramp_dwell_rows()
+    fit = ps.per_zone_gain_grid_search(rows, grid=(1.0,))
+    for zone in range(3):
+        assert fit[zone]["kd"] == pytest.approx(ps.BOARD_ZONE_KD[zone])
+        assert fit[zone]["kd"] != 0.0
+
+
+def test_broadcast_zone_param_scalar_and_vector():
+    scalar = ps._broadcast_zone_param(0.06)
+    assert scalar.shape == (3,)
+    assert (scalar == 0.06).all()
+
+    vec = ps._broadcast_zone_param([0.03, 0.06, 0.09])
+    assert list(vec) == [0.03, 0.06, 0.09]
+
+
+def test_broadcast_zone_param_wrong_length_raises():
+    with pytest.raises(ValueError):
+        ps._broadcast_zone_param([0.03, 0.06])
+
+
+def test_run_profile_per_zone_gains_match_scalar_when_uniform():
+    """A length-3 kp/ki/kd of identical values must reproduce the plain
+    scalar code path byte-for-byte -- the per-zone plumbing must not change
+    behaviour for every existing (scalar-gain) caller."""
+    segs = [(0.0, 300.0, 20.0, 40.0, (40.0 - 20.0) / 300.0)]
+    start_temp = [20.0, 20.0, 20.0]
+    r_scalar = ps.run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0)
+    r_vector = ps.run_profile(segs, start_temp, kp=[0.06, 0.06, 0.06],
+                               ki=[0.0003, 0.0003, 0.0003], kd=[0.0, 0.0, 0.0])
+    assert np.array_equal(r_scalar["temps"], r_vector["temps"])
+    assert np.array_equal(r_scalar["duty"], r_vector["duty"])
+
+
+def test_run_profile_per_zone_gains_actually_diverge_per_zone():
+    """The core capability this section adds: giving one zone a very
+    different kp from its neighbours must change ITS OWN duty/temperature
+    trajectory while leaving the others running the shared baseline.
+
+    Proof this test can fail (repo policy -- every new check must be
+    provably able to fail): mutated run_profile's PID construction to index
+    kp_arr[0]/ki_arr[0]/kd_arr[0] for every zone instead of kp_arr[i]/
+    ki_arr[i]/kd_arr[i] -- i.e. every zone's PID silently used zone 0's
+    gain regardless of the per-zone vector passed in. Captured red:
+
+        FAILED test_run_profile_per_zone_gains_actually_diverge_per_zone
+        AssertionError: zone 1's duty moved almost as much as zone 0's own
+        (d0=0.3437, d1=0.2975) -- a per-zone gain change should be
+        localized, not spread across every zone's PID
+        assert np.float64(0.2974955040840415) < (np.float64(0.3437110496164986) / 3)
+
+    Reverted to `PID(kp_arr[i], ki_arr[i], kd_arr[i], ...)`, suite green
+    again.
+    """
+    segs = [(0.0, 300.0, 20.0, 40.0, (40.0 - 20.0) / 300.0)]
+    start_temp = [20.0, 20.0, 20.0]
+    r_uniform = ps.run_profile(segs, start_temp, kp=0.06, ki=0.0003, kd=0.0)
+    r_per_zone = ps.run_profile(segs, start_temp, kp=[0.30, 0.06, 0.06],
+                                 ki=[0.0003, 0.0003, 0.0003], kd=[0.0, 0.0, 0.0])
+    # Zone 0's trajectory must differ (its own gain changed a lot)...
+    assert not np.array_equal(r_uniform["duty"][:, 0], r_per_zone["duty"][:, 0]), (
+        "zone 0 duty identical after quadrupling its own kp -- per-zone kp had no effect"
+    )
+    # ...zone 1's own trajectory need not be identical (the plant couples
+    # zones), but it must be MUCH closer to the uniform-gain baseline than
+    # zone 0 is, proving the gain change is localized to the zone it was
+    # applied to rather than leaking uniformly to every PID.
+    d0 = np.abs(r_uniform["duty"][:, 0] - r_per_zone["duty"][:, 0]).mean()
+    d1 = np.abs(r_uniform["duty"][:, 1] - r_per_zone["duty"][:, 1]).mean()
+    assert d1 < d0 / 3, (
+        f"zone 1's duty moved almost as much as zone 0's own (d0={d0:.4f}, d1={d1:.4f}) "
+        "-- a per-zone gain change should be localized, not spread across every zone's PID"
+    )
+
+
+def test_sim_whole_run_iae_normalized_matches_manual_mean():
+    """Direct pin on the metric's definition: at DT=1.0s the trapezoidal
+    iae_raw/duration reduces to the plain mean of |error| per tick -- verify
+    against hand-computed numbers on a synthetic result dict rather than
+    trusting the reduction algebraically."""
+    result = dict(
+        temps=np.array([[21.0, 19.0], [22.0, 21.0], [20.0, 20.0]]),
+        target=np.array([20.0, 20.0, 20.0]),
+    )
+    # zone 0 errors: 1, 2, 0 -> mean 1.0 ; zone 1 errors: 1, 1, 0 -> mean 2/3
+    assert ps.sim_whole_run_iae_normalized(result, 0) == pytest.approx(1.0)
+    assert ps.sim_whole_run_iae_normalized(result, 1) == pytest.approx(2.0 / 3.0)
+
+
+def test_per_zone_gain_grid_search_never_worse_than_baseline_on_fit_set():
+    """The grid search always includes the baseline multiplier (1.0, 1.0)
+    in PER_ZONE_GAIN_GRID_MULT, so the FIT-set IAE at the chosen gains can
+    never be worse than the FIT-set IAE at the shared baseline -- a basic
+    sanity check on the search itself, independent of whether the result
+    generalizes to a held-out capture (that generalization is what
+    per_zone_gain_holdout_report is for, and is deliberately NOT assumed
+    here)."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    fit = ps.per_zone_gain_grid_search(rows, grid=grid)
+    for zone in range(3):
+        assert fit[zone]["fit_iae_tuned"] <= fit[zone]["fit_iae_baseline"] + 1e-9, (
+            f"zone {zone}: grid search picked a WORSE fit-set IAE than the baseline "
+            "it was supposed to include in its own search space"
+        )
+
+
+def test_per_zone_gain_holdout_report_shape_and_delta_arithmetic():
+    """Sanity-checks the held-out report's shape and that test_delta_c is
+    exactly tuned-minus-baseline (not, say, accidentally swapped -- a
+    swapped sign would silently report every regression as an improvement)."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    report = ps.per_zone_gain_holdout_report(rows, rows, grid=grid)
+    assert set(report["per_zone"].keys()) == {0, 1, 2}
+    for zone, d in report["per_zone"].items():
+        expected_delta = d["test_iae_tuned"] - d["test_iae_baseline"]
+        assert d["test_delta_c"] == pytest.approx(expected_delta)
+    # Rendering must not raise and must mention every zone.
+    text = ps.format_per_zone_gain_holdout_report_text(report)
+    for zone in range(3):
+        assert f"z{zone}:" in text
+
+
+# ---------------------------------------------------------------------------
+# Measurement-noise/quantization model defaults for the gain search
+# (added for the 2026-09-03 "gain searches run away" finding --
+# PID_EXPANSION_PLAN.md sec 3.4's 2026-09-03 addendum). run_profile()'s OWN
+# defaults stay at 0.0 (proven by
+# test_measurement_chain_defaults_off_reproduces_noise_free_result above);
+# these tests instead pin that the GAIN-SEARCH entry points
+# (per_zone_gain_grid_search / per_zone_gain_holdout_report) default to the
+# measured, hardware-derived constants -- not to run_profile's noise-free
+# default.
+# ---------------------------------------------------------------------------
+
+def test_max31856_quantum_matches_driver_lsb():
+    """MAX31856_QUANTUM_C must be the real per-channel LSB derived from
+    firmware/KilnFW/App/drivers/hw/max31856_codec.h's
+    MAX31856_TC_TEMP_C_PER_LSB (1/4096 C per raw 24-bit-word LSB; the
+    driver's own low 5 bits are hardware-fixed 0, so the real step between
+    representable temperatures is 32x that -- 1/128 = 0.0078125 C), not an
+    unrelated round-number guess."""
+    driver_raw_lsb = 1.0 / 4096.0
+    real_code_step = driver_raw_lsb * 32  # 5 fixed-zero low bits -> 19-bit code
+    assert ps.MAX31856_QUANTUM_C == pytest.approx(real_code_step)
+    assert ps.MAX31856_QUANTUM_C == pytest.approx(0.0078125)
+
+
+def test_measured_thermo_noise_std_is_same_order_as_iae_noise_floor():
+    """Cross-check MEASURED_THERMO_NOISE_STD_C (per-tick std, measured off
+    a rested/steady dwell window in the coupling excitation captures)
+    against PID_EXPANSION_PLAN.md sec 3.8's independently-derived whole-run
+    IAE noise floors (0.116/0.077/0.147 C for z0/z1/z2, built from SIX
+    repeat noise_floor_p7* captures by an entirely different method --
+    run-to-run range, not per-tick std). They should agree to within a
+    factor of ~3 -- same underlying sensor, same order of magnitude -- not
+    match exactly (different method, and the IAE figure also folds in
+    run-to-run drift this per-tick figure does not)."""
+    iae_noise_floor = (0.116, 0.077, 0.147)
+    for zone in range(3):
+        ratio = ps.MEASURED_THERMO_NOISE_STD_C[zone] / iae_noise_floor[zone]
+        assert 0.2 <= ratio <= 3.0, (
+            f"zone {zone}: measured per-tick noise std "
+            f"{ps.MEASURED_THERMO_NOISE_STD_C[zone]:.4f} C is not within the same "
+            f"order of magnitude as the sec 3.8 IAE noise floor {iae_noise_floor[zone]} C "
+            f"(ratio {ratio:.2f})"
+        )
+
+
+def test_gain_search_defaults_to_measured_noise_not_noise_free():
+    """per_zone_gain_grid_search/per_zone_gain_holdout_report must default
+    to MEASURED_THERMO_NOISE_STD_C/MAX31856_QUANTUM_C, not run_profile's
+    own noise-free 0.0 default -- this is the actual fix for the grid-edge
+    finding: a gain search called with no explicit measurement-chain
+    arguments must exercise the noisy/quantized measurement chain.
+
+    Proof this is not vacuous: temporarily changed
+    per_zone_gain_grid_search's measurement_noise_std_c default to 0.0.
+    Captured red output:
+
+        FAILED tests/test_plant_sim.py::test_gain_search_defaults_to_measured_noise_not_noise_free
+        AssertionError: per_zone_gain_grid_search's default
+        measurement_noise_std_c is not MEASURED_THERMO_NOISE_STD_C -- gain
+        search defaults back to the noise-free chain
+        assert (0.0, 0.0, 0.0) == (0.0584, 0.0631, 0.0907)
+
+    Reverted, suite green again before this test was kept.
+    """
+    import inspect
+    for fn in (ps.per_zone_gain_grid_search, ps.per_zone_gain_holdout_report):
+        sig = inspect.signature(fn)
+        default_noise = tuple(ps._broadcast_zone_param(
+            sig.parameters["measurement_noise_std_c"].default))
+        default_quantum = sig.parameters["measurement_quantum_c"].default
+        assert default_noise == pytest.approx(ps.MEASURED_THERMO_NOISE_STD_C), (
+            f"{fn.__name__}'s default measurement_noise_std_c is not "
+            "MEASURED_THERMO_NOISE_STD_C -- gain search defaults back to the "
+            f"noise-free chain\nassert {default_noise} == {ps.MEASURED_THERMO_NOISE_STD_C}"
+        )
+        assert default_quantum == pytest.approx(ps.MAX31856_QUANTUM_C), (
+            f"{fn.__name__}'s default measurement_quantum_c is not MAX31856_QUANTUM_C"
+        )
+
+
+def test_gain_search_noise_is_reproducible_across_calls():
+    """A gain search must produce the SAME chosen multipliers/IAE numbers
+    on repeated calls -- GAIN_SEARCH_NOISE_SEEDS is a fixed tuple and every
+    run_profile() call builds its own fresh rng from an explicit seed, so
+    nothing should be able to make two otherwise-identical calls disagree.
+    This is the guard against the project's other seed bug class (a
+    generator that PERSISTS and bleeds state across runs, rather than the
+    grid-edge bug this section fixes -- see GAIN_SEARCH_NOISE_SEEDS'
+    docstring): if a shared/mutated rng ever leaked between candidates,
+    call order would start to matter and this would go red."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    fit_a = ps.per_zone_gain_grid_search(rows, grid=grid)
+    fit_b = ps.per_zone_gain_grid_search(rows, grid=grid)
+    for zone in range(3):
+        assert fit_a[zone]["kp_mult"] == fit_b[zone]["kp_mult"]
+        assert fit_a[zone]["ki_mult"] == fit_b[zone]["ki_mult"]
+        assert fit_a[zone]["fit_iae_tuned"] == pytest.approx(fit_b[zone]["fit_iae_tuned"])
+        assert fit_a[zone]["fit_iae_baseline"] == pytest.approx(fit_b[zone]["fit_iae_baseline"])
+
+
+def test_gain_search_noise_actually_changes_the_ranking():
+    """Proves the noise/quantization plumbing in the gain search is not
+    inert: scoring the SAME candidate grid with noise off vs. on (measured
+    defaults) must change at least one zone's fit-set IAE numbers -- if
+    every number were identical, the measurement-chain arguments would be
+    wired into the function signature but not actually reaching the
+    simulated trajectory the search scores."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5)
+    fit_noise_free = ps.per_zone_gain_grid_search(
+        rows, grid=grid, measurement_noise_std_c=0.0, measurement_quantum_c=0.0)
+    fit_noisy = ps.per_zone_gain_grid_search(rows, grid=grid)
+    diffs = [
+        abs(fit_noise_free[z]["fit_iae_baseline"] - fit_noisy[z]["fit_iae_baseline"])
+        for z in range(3)
+    ]
+    assert max(diffs) > 1e-6, (
+        "enabling measured noise/quantization in the gain search had no "
+        "effect on any zone's fit-set IAE -- looks inert"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PWM window model + actuator-cost objective (this task, 2026-09-03g).
+# ---------------------------------------------------------------------------
+
+def test_pwm_render_constant_mid_duty_produces_expected_pattern():
+    """Property test against HAND-WRITTEN expected values, not the real C --
+    for a numeric check against the actual compiled heater_output.c, see
+    heater_output_pwm_drift_check.py under firmware/KilnFW/App/test/. At a
+    constant mid-range duty (0.5 duty on a 60 s window with a 10 s min-on
+    floor and 2 s min-off) _pwm_render should, per heater_output_duty_ex's
+    documented behaviour, render exactly 30 s on then 30 s off, repeating,
+    with 2 transitions per window."""
+    st = ps._PwmZoneState()
+    on_pattern = [ps._pwm_render(st, 0.5, 60000.0, 0.0, 0.0, 1000.0) for _ in range(180)]
+    assert on_pattern[:30] == [True] * 30
+    assert on_pattern[30:60] == [False] * 30
+    assert st.cycle_count == 6  # 2 transitions/window * 3 windows
+
+
+def test_pwm_render_below_min_on_floor_renders_off_not_rounded_up():
+    """A duty whose computed on-time is below HEATER_MIN_ON_MS_FLOOR must
+    render OFF for the whole window (firmware's explicit rule -- see
+    heater_output.c's comment: "unachievably short -- render as off, not
+    rounded up"), not get rounded up to the floor.
+
+    NEGATIVE TEST (proof this can fail): temporarily changed _pwm_render's
+    `if on_ms < eff_min_on_ms: on_ms = 0.0` to `on_ms = eff_min_on_ms` (the
+    "round up" behaviour the firmware comment explicitly rejects).
+    Re-running this test then failed with `assert 2 == 0` (the relay now
+    turned on once per window instead of staying off). Reverted.
+    """
+    st = ps._PwmZoneState()
+    # 0.1 * 60000 = 6000 ms < 10000 ms floor.
+    for _ in range(120):
+        ps._pwm_render(st, 0.1, 60000.0, 0.0, 0.0, 1000.0)
+    assert st.cycle_count == 0
+    assert st.relay_on is False
+
+
+def test_pwm_render_near_full_duty_renders_full_window_on():
+    """An on-time within min_off_ms of the full window renders as ON for
+    the whole window (firmware's symmetric case for duty near 1), not as a
+    short on-pulse followed by an unachievable short off-pulse."""
+    st = ps._PwmZoneState()
+    for _ in range(120):
+        ps._pwm_render(st, 0.97, 60000.0, 0.0, 2000.0, 1000.0)
+    assert st.relay_on is True
+    assert st.cycle_count == 1  # one transition: off (initial) -> on, then held
+
+
+def test_pwm_running_min_on_hold_survives_a_window_boundary():
+    """Once actually on, the relay must stay on until HEATER_MIN_ON_MS_FLOOR
+    (10 s) of continuous on-time has accumulated, even if a new window's
+    quantized on-time would otherwise turn it off immediately -- the
+    "running min-on hold ... across window boundaries if need be" comment
+    in heater_output.c."""
+    st = ps._PwmZoneState()
+    on0 = ps._pwm_render(st, 1.0, 5000.0, 0.0, 0.0, 1000.0)
+    assert on0 is True
+    still_on_ticks = [ps._pwm_render(st, 0.0, 5000.0, 0.0, 0.0, 1000.0) for _ in range(9)]
+    assert all(still_on_ticks), "relay dropped before HEATER_MIN_ON_MS_FLOOR elapsed"
+    assert ps._pwm_render(st, 0.0, 5000.0, 0.0, 0.0, 1000.0) is False
+
+
+def test_run_profile_pwm_window_defaults_off_byte_identical():
+    """pwm_window_ms=0.0 (run_profile's own default) must reproduce the
+    exact old code path -- the plant sees the PID's continuous duty, not a
+    PWM-rendered relay state -- so every existing caller is unaffected."""
+    rows = _synthetic_ramp_dwell_rows()
+    r1, _ = ps.run_profile_from_capture(rows)
+    r2, _ = ps.run_profile_from_capture(rows, pwm_window_ms=0.0)
+    assert np.array_equal(r1['temps'], r2['temps'])
+    assert r1['pwm_active'] is False
+    assert r2['pwm_active'] is False
+    assert list(r1['relay_cycles']) == [0, 0, 0]
+
+
+def test_run_profile_pwm_window_changes_the_trajectory_when_enabled():
+    """pwm_window_ms>0 must actually drive the plant differently than
+    continuous duty -- proves the PWM path is wired to plant.step(), not
+    computed and discarded."""
+    rows = _synthetic_ramp_dwell_rows()
+    r_continuous, _ = ps.run_profile_from_capture(rows)
+    r_pwm, _ = ps.run_profile_from_capture(rows, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS)
+    assert r_pwm['pwm_active'] is True
+    assert not np.array_equal(r_continuous['temps'], r_pwm['temps'])
+    assert r_pwm['relay_on'].dtype == bool
+    assert r_pwm['relay_on'].shape == r_pwm['temps'].shape
+
+
+def test_sim_relay_transitions_and_life_fraction_consistent():
+    rows = _synthetic_ramp_dwell_rows()
+    result, _ = ps.run_profile_from_capture(rows, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS)
+    for zone in range(3):
+        trans_hr = ps.sim_relay_transitions_per_hour(result, zone)
+        life_hr = ps.sim_relay_cycle_life_fraction_per_hour(result, zone)
+        assert trans_hr >= 0.0
+        assert life_hr == pytest.approx((trans_hr / 2.0) / ps.RELAY_RATED_LIFE_CYCLES)
+
+
+def test_sim_duty_chatter_rate_rises_monotonically_with_kp_on_this_capture():
+    """Negative-tested finding (see sim_duty_chatter_rate's docstring): a
+    larger kp/kd combination must increase pre-window duty-derivative
+    chatter, even though it DECREASES post-window relay-transition count
+    (the window itself filters that mechanism out) -- this is the whole
+    reason both actuator signals exist.
+
+    NEGATIVE TEST (proof this can fail): temporarily changed the
+    `assert chatter == sorted(chatter)` line below to
+    `assert chatter == sorted(chatter, reverse=True)` (the wrong
+    direction) and re-ran. Captured red: `AssertionError: duty chatter not
+    monotonic in kp: [...]`. Reverted.
+    """
+    rows = _synthetic_ramp_dwell_rows()
+    chatter = []
+    for kp_mult in (0.5, 1.0, 2.0, 4.0):
+        kp_vec = [ps.BOARD_ZONE_KP[0] * kp_mult] + list(ps.BOARD_ZONE_KP[1:])
+        result, _ = ps.run_profile_from_capture(
+            rows, kp=kp_vec, ki=ps.BOARD_ZONE_KI, kd=ps.BOARD_ZONE_KD,
+            measurement_noise_std_c=ps.MEASURED_THERMO_NOISE_STD_C,
+            measurement_quantum_c=ps.MAX31856_QUANTUM_C, measurement_seed=0,
+        )
+        chatter.append(ps.sim_duty_chatter_rate(result, 0))
+    assert chatter == sorted(chatter), f"duty chatter not monotonic in kp: {chatter}"
+    assert chatter[-1] > chatter[0] * 1.5, "chatter did not grow meaningfully with kp"
+
+
+def test_per_zone_gain_grid_search_reports_actuator_cost_components_separately():
+    """The composite objective must never be the only number returned --
+    per_zone_gain_grid_search's own docstring requirement. Checks all the
+    separately-reported fields exist and the composite is arithmetically
+    consistent with its stated components."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 2.0)
+    fit = ps.per_zone_gain_grid_search(
+        rows, grid=grid, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS,
+        actuator_weight_c_per_duty_chatter_rate=10.0,
+    )
+    for zone in range(3):
+        f = fit[zone]
+        for key in ("fit_iae_baseline", "fit_iae_tuned",
+                    "fit_life_fraction_per_hour_baseline", "fit_life_fraction_per_hour_tuned",
+                    "fit_transitions_per_hour_baseline", "fit_transitions_per_hour_tuned",
+                    "fit_duty_chatter_rate_baseline", "fit_duty_chatter_rate_tuned",
+                    "fit_composite_baseline", "fit_composite_tuned"):
+            assert key in f, f"missing {key} for zone {zone}"
+        expected = f["fit_iae_tuned"] + 10.0 * f["fit_duty_chatter_rate_tuned"]
+        assert f["fit_composite_tuned"] == pytest.approx(expected)
+
+
+def test_per_zone_gain_grid_search_pwm_default_is_firmware_window():
+    """per_zone_gain_grid_search (unlike run_profile itself) defaults
+    pwm_window_ms to HEATER_DEFAULT_WINDOW_MS, not 0.0 -- same convention
+    as the noise/quantization defaults -- because actuator_weight_... only
+    means anything when there is a PWM window to generate relay
+    transitions/duty chatter from."""
+    import inspect
+    sig = inspect.signature(ps.per_zone_gain_grid_search)
+    assert sig.parameters["pwm_window_ms"].default == ps.HEATER_DEFAULT_WINDOW_MS
+    rows = _synthetic_ramp_dwell_rows()
+    fit = ps.per_zone_gain_grid_search(rows, grid=(1.0,))
+    assert fit[0]["fit_transitions_per_hour_baseline"] >= 0.0
+
+
+def test_actuator_weight_zero_with_pwm_on_matches_iae_only_argmin():
+    """With PWM enabled, actuator_weight=0.0 must select the SAME candidate
+    as an equivalent search that only ever looks at the IAE component
+    (never at actuator cost) -- proves the composite's weighting really is
+    inert at weight 0.0, on the trajectories PWM produces."""
+    rows = _synthetic_ramp_dwell_rows()
+    grid = (0.5, 1.0, 1.5, 2.0)
+    fit = ps.per_zone_gain_grid_search(
+        rows, grid=grid, pwm_window_ms=ps.HEATER_DEFAULT_WINDOW_MS,
+        actuator_weight_c_per_duty_chatter_rate=0.0,
+        actuator_weight_c_per_life_fraction_per_hour=0.0,
+    )
+    for zone in range(3):
+        base_kp = list(ps.BOARD_ZONE_KP)
+        base_ki = list(ps.BOARD_ZONE_KI)
+        best_iae, best_mult = None, None
+        for kp_mult in grid:
+            for ki_mult in grid:
+                kp_vec = list(base_kp); kp_vec[zone] = base_kp[zone] * kp_mult
+                ki_vec = list(base_ki); ki_vec[zone] = base_ki[zone] * ki_mult
+                scores = ps._scores_over_seeds(
+                    rows, kp_vec, ki_vec, list(ps.BOARD_ZONE_KD), 'coupled', 'ff_hold', zone,
+                    ps.MEASURED_THERMO_NOISE_STD_C, ps.MAX31856_QUANTUM_C, ps.GAIN_SEARCH_NOISE_SEEDS,
+                    ps.HEATER_DEFAULT_WINDOW_MS, 0.0, 0.0,
+                )
+                if best_iae is None or scores['iae'] < best_iae:
+                    best_iae, best_mult = scores['iae'], (kp_mult, ki_mult)
+        assert fit[zone]["kp_mult"] == best_mult[0]
+        assert fit[zone]["ki_mult"] == best_mult[1]
+
+
+def test_actuator_weight_sensitivity_sweep_shape():
+    rows = _synthetic_ramp_dwell_rows()
+    sweep = ps.actuator_weight_sensitivity_sweep(
+        rows, weight_kind='duty_chatter', weights=(0.0, 50.0), grid=(0.5, 1.0, 2.0))
+    for zone in range(3):
+        assert len(sweep[zone]["mult_by_weight"]) == 2
+        for row in sweep[zone]["mult_by_weight"]:
+            assert "kp_mult" in row and "fit_duty_chatter_rate_tuned" in row
+    with pytest.raises(ValueError):
+        ps.actuator_weight_sensitivity_sweep(rows, weight_kind='bogus')

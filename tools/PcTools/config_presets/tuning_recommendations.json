@@ -1,0 +1,155 @@
+{
+  "schema_version": 1,
+  "generated_from": "cae2497",
+  "sim_confidence": {
+    "held_out_rms_c": [
+      1.05,
+      0.61,
+      0.67
+    ],
+    "discrimination_threshold_c": [
+      2.1,
+      1.2,
+      1.3
+    ],
+    "extrapolation_boundary_c": 80.0
+  },
+  "noise_floor": {
+    "rig": "bench fixture (~60C peak firing) -- not a claim about a full-size kiln at cone temperature",
+    "source": "tools/PcTools/config_presets/noise_floor.json",
+    "generated_from": [
+      "logs/coupling/noise_floor_p7_run1.jsonl",
+      "logs/coupling/noise_floor_p7b_run1.jsonl",
+      "logs/coupling/noise_floor_p7c_run1.jsonl",
+      "logs/coupling/noise_floor_p7d_run1.jsonl",
+      "logs/coupling/noise_floor_p7d_run2.jsonl",
+      "logs/coupling/noise_floor_p7d_run3.jsonl"
+    ],
+    "n_repeats": 6,
+    "like_for_like": false,
+    "like_for_like_threshold_c": 1.0,
+    "start_temp_c_range": 1.287,
+    "warning": "start temperatures span 1.29C (min 27.60, max 28.88) across 6 runs, exceeding the 1.00C like-for-like threshold -- these runs are NOT a like-for-like repeat set, and the noise floor computed from them may be inflated by start-temperature drift (self-heating of the on-board cold junction) rather than measuring controller noise alone.",
+    "stat_caveat": "Each floor is the max-minus-min RANGE across the repeat captures. That statistic grows with sample size, so it is not a fixed property of the kiln and is not directly comparable to a floor built from a different number of runs.",
+    "transfer_caveat": "Measured on the reference bench rig only, at bench temperatures. It does not transfer to your own kiln, geometry, or firing temperature -- your own repeat campaign (pid_ab_compare.py / noise_floor.py) is what would give you your own floor.",
+    "reliability_rule": "A metric is 'reliable' when the ratio of its largest to smallest measured floor across all (zone, segment) entries is <= FLOOR_RELIABILITY_RATIO (6.0); see kilnctrl.pid_ab_compare.summarize_metric_floor_reliability, the same rule pid_ab_compare.py itself uses to flag an UNSTABLE floor before trusting a DISTINGUISHABLE/INDISTINGUISHABLE verdict.",
+    "multiplicity_caveat": "This report scores dozens of (zone, metric, segment) keys at once with no multiplicity correction. At the sample size most keys here have (n=6), a single key crossing its own floor happens by chance alone about 12% of the time even when nothing real changed (kilnctrl.pid_ab_compare._range_floor_false_positive_rate(6)) -- across a ~48-key report that adds up fast. A lone flagged metric is not evidence; the same metric moving the same direction across several zones is the one pattern worth trusting.",
+    "metrics": {
+      "iae_normalized_whole_c": {
+        "reliable": true,
+        "min_c": 0.077,
+        "max_c": 0.147,
+        "ratio": 1.911,
+        "unit": "C",
+        "note": "1.91x spread across zones/segments -- reliable (<= 6.0x)"
+      },
+      "ramp_worst_error_c": {
+        "reliable": true,
+        "min_c": 0.23,
+        "max_c": 0.59,
+        "ratio": 2.565,
+        "unit": "C",
+        "note": "2.57x spread across zones/segments -- reliable (<= 6.0x)"
+      },
+      "iae_normalized_c": {
+        "reliable": true,
+        "min_c": 0.066,
+        "max_c": 0.285,
+        "ratio": 4.297,
+        "unit": "C",
+        "note": "4.30x spread across zones/segments -- reliable (<= 6.0x)"
+      },
+      "dwell_entry_time_to_peak_s": {
+        "reliable": true,
+        "min_c": 11.0,
+        "max_c": 52.0,
+        "ratio": 4.727,
+        "unit": "s",
+        "note": "4.73x spread across zones/segments -- reliable (<= 6.0x)"
+      },
+      "ramp_mean_error_c": {
+        "reliable": true,
+        "min_c": 0.094,
+        "max_c": 0.514,
+        "ratio": 5.488,
+        "unit": "C",
+        "note": "5.49x spread across zones/segments -- reliable (<= 6.0x)"
+      },
+      "dwell_entry_overshoot_peak_c": {
+        "reliable": false,
+        "min_c": 0.11,
+        "max_c": 0.72,
+        "ratio": 6.545,
+        "unit": "C",
+        "note": "6.55x spread across zones/segments -- UNSTABLE (> 6.0x): floor too unstable to support a conclusion"
+      },
+      "dwell_steady_state_offset_c": {
+        "reliable": false,
+        "min_c": 0.06,
+        "max_c": 0.84,
+        "ratio": 13.98,
+        "unit": "C",
+        "note": "13.98x spread across zones/segments -- UNSTABLE (> 6.0x): floor too unstable to support a conclusion"
+      },
+      "settle_time_s": {
+        "reliable": false,
+        "min_c": 11.0,
+        "max_c": 168.0,
+        "ratio": 15.273,
+        "unit": "s",
+        "note": "15.27x spread across zones/segments -- UNSTABLE (> 6.0x): floor too unstable to support a conclusion"
+      }
+    }
+  },
+  "recommendations": [
+    {
+      "peak_temp_c_max": 60.0,
+      "load": "any",
+      "method": "cohen_coon",
+      "rule": "lowest worst-case feasible-load steady-state offset across empty_1.0x_identified, moderate_2.0x, full_4.0x at bench peak",
+      "confidence": "indistinguishable",
+      "why": "worst-case (feasible-load) steady-state offset is within the sim's own 2.1 C discrimination floor between cohen_coon and ziegler_nichols -- treat them as equivalent, pick either",
+      "runner_up": "ziegler_nichols",
+      "margin_c": 0.49
+    },
+    {
+      "peak_temp_c_max": 1000.0,
+      "load": "any",
+      "method": "ziegler_nichols",
+      "rule": "lowest worst-case feasible-load steady-state offset across empty_1.0x_identified, moderate_2.0x, full_4.0x at bisque peak",
+      "confidence": "indistinguishable",
+      "why": "worst-case (feasible-load) steady-state offset is within the sim's own 2.1 C discrimination floor between ziegler_nichols and tyreus_luyben -- treat them as equivalent, pick either",
+      "runner_up": "tyreus_luyben",
+      "margin_c": 1.056
+    },
+    {
+      "peak_temp_c_max": 1222.0,
+      "load": "any",
+      "method": "ziegler_nichols",
+      "rule": "lowest worst-case feasible-load steady-state offset across empty_1.0x_identified, moderate_2.0x, full_4.0x at cone6 peak",
+      "confidence": "indistinguishable",
+      "why": "worst-case (feasible-load) steady-state offset is within the sim's own 2.1 C discrimination floor between ziegler_nichols and tyreus_luyben -- treat them as equivalent, pick either",
+      "runner_up": "tyreus_luyben",
+      "margin_c": 1.005
+    },
+    {
+      "peak_temp_c_max": 1285.0,
+      "load": "any",
+      "method": "ziegler_nichols",
+      "rule": "lowest worst-case feasible-load steady-state offset across empty_1.0x_identified, moderate_2.0x, full_4.0x at cone10 peak",
+      "confidence": "indistinguishable",
+      "why": "worst-case (feasible-load) steady-state offset is within the sim's own 2.1 C discrimination floor between ziegler_nichols and tyreus_luyben -- treat them as equivalent, pick either",
+      "runner_up": "tyreus_luyben",
+      "margin_c": 0.991
+    }
+  ],
+  "caveats": [
+    "Tuning is always run on an EMPTY kiln; recommendations rank each method's empty-kiln gains by how well they hold up once loaded, not by best-case tuning-condition performance.",
+    "Single representative zone (coupling and 3-zone coordination are not modeled in the evaluation loop, only in the plant used to generate the trace); see tuning_campaign.py.",
+    "FOPDT fit uses the two-point crossing method without the firmware's iterative asymptote correction -- a documented simplification, not a formula change to the tuning-rule arithmetic itself (which is copied verbatim from pid_autotune.c).",
+    "Above 80 C every plant parameter is ASSUMED, not measured; confidence='extrapolated' rows are a mechanism comparison, not a calibrated prediction.",
+    "Evaluation runs a pure-PID loop (no feedforward) to isolate each tuning method's own gains from the shared ff_hold/ff_climb formula.",
+    "At the heaviest evaluated load (4.0x the identified mass), every method's firing-temperature gains failed to track the ramp (chronic >20 C undershoot, duty saturated) -- a shared ramp-rate-vs-thermal-mass ceiling this campaign's ramp schedule hits regardless of tuning method, excluded from the ranking score rather than left to swamp it (see EvalResult.unreachable / _worst_case_score).",
+    "At firing temperatures, SIMC's empty-kiln gains (tuned near the identification point's own lambda) were too weak to track this campaign's ramp rate even at the identified (1x) load -- the opposite failure from Cohen-Coon's guard-trip-worthy overshoot at the same loads; see the per-method table this artifact was generated from."
+  ]
+}

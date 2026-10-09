@@ -1,0 +1,66 @@
+[project]
+name = "kilnctrl"
+version = "0.2.0"
+description = "PC-side counterpart to the kilnCtl main board's hardened UART protocol (uart_protocol.c/.h)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial>=3.5",
+    "mcp>=1.2.0",
+    # The MCP servers serve streamable HTTP by default (docs/MCP_SERVERS.md),
+    # so the ASGI stack is a hard requirement here, not an extra: mcp pulls
+    # both in today, but a transport this project depends on should not be
+    # left to another package's optional dependency.
+    "uvicorn>=0.30",
+    "starlette>=0.37",
+    "logic2-automation>=1.0.11",
+    # Only used by the display page's "send an image" control (scaling and
+    # RGB565 conversion -- see display.py). Imported lazily so the rest of the
+    # package still works if the wheel is missing, and the About window's
+    # pinout PNG deliberately uses tk.PhotoImage instead.
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    # A hard runtime dependency, not a test-only one: plant_sim.py,
+    # coupled_ident.py, load_estimator.py, ramp_assist.py, tuning_campaign.py
+    # and friends import numpy at module scope, and mcp_server.py star-imports
+    # the mcp_server_* wrappers around them, so the live MCP server drags numpy
+    # in at import time. Four of those modules are also declared console
+    # scripts. Undeclared until 2026-09-15, when a clean worktree turned up 35
+    # pytest collection errors that were all this one missing line. The main
+    # tree's venv runs 2.5.2; the floor is kept at 2.0 so the declared
+    # requires-python >=3.10 stays resolvable.
+    "numpy>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    # Used by tests/test_no_undefined_names.py to catch a moved-function-left-
+    # its-import-behind defect (the devices_info.py/pin_function_label class of
+    # bug) before it ships silently in a function body no test happens to call.
+    "pyflakes>=3.0",
+    # Hand-installed in the shared venv but never declared here (found by
+    # `uv sync --locked --check` drift audit, 2026-09-19); execnet comes in
+    # transitively with pytest-xdist, so it is not declared separately.
+    "pytest-timeout>=2.0",
+    "pytest-xdist>=3.0",
+]
+
+[project.scripts]
+kilnctrl-gui = "kilnctrl.gui:main"
+kilnctrl-mcp-server = "kilnctrl.mcp_server:main"
+saleae-capture = "kilnctrl.logic_capture:main"
+kilnctrl-console-capture = "kilnctrl.console_capture:main"
+kilnctrl-telemetry = "kilnctrl.telemetry_capture:main"
+kilnctrl-log-analysis = "kilnctrl.log_analysis:main"
+kilnctrl-plant-sim = "kilnctrl.plant_sim:main"
+kilnctrl-coupled-ident = "kilnctrl.coupled_ident:main"
+kilnctrl-cfg-convert = "kilnctrl.cfg_convert:main"
+kilnctrl-config-convert = "kilnctrl.config_convert:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kilnctrl", "src/mcpkit"]

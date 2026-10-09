@@ -1,0 +1,755 @@
+# KilnCtl partition table -- ESP32-S3, N16R8 module (16 MB flash / 8 MB PSRAM,
+# confirmed 2026-08-17 against the LonelyBinary product page for the board in
+# hand). This table maps the first ~7.28 MB of that 16 MB chip: the original
+# 2 MB single-`factory` layout (untouched, see below) plus, as of this pass
+# (2026-08-17), the OTA dual-app-slot layout from
+# ../CommonFW/docs/UPDATE_PROTOCOL.md section 3 (ROADMAP.md M8). The remaining
+# ~8.7 MB above the new partitions is unmapped/unused headroom.
+#
+# Derived from ESP-IDF's stock partitions_singleapp_large.csv. The first three
+# entries are byte-identical to that stock table on purpose: this board has
+# already been flashed with the stock layout and has live data sitting in `nvs`
+# at 0x9000 (zone config, rules, profiles, the run-state breadcrumb). Moving or
+# resizing any of those three would silently invalidate everything stored in
+# them the moment the new table is flashed. The ONLY change here is the fourth
+# entry, appended into flash that was previously unused.
+#
+# Why `wifi_nvs` is a separate partition rather than another namespace inside
+# `nvs`:
+#   - NVS's own corruption recovery is partition-wide. When nvs_flash_init()
+#     reports NO_FREE_PAGES or NEW_VERSION_FOUND the only fix is to erase the
+#     whole partition, taking every namespace in it with it. With credentials
+#     living in the same partition as zones/rules/profiles, a corrupt profile
+#     blob meant the operator lost the Wi-Fi they needed to fix it -- i.e. the
+#     board dropped off the network exactly when it became unreachable by any
+#     other means. Splitting them means a wipe of one cannot reach the other.
+#   - It also makes "reset the kiln config" (erase `nvs`) a survivable
+#     operation that does not strand the board off Wi-Fi.
+#
+# Layout of the first 2 MB (0x200000) of the 16 MB flash mapped by this table:
+#   0x000000..0x008000  bootloader (implicit, below the table offset)
+#   0x008000..0x009000  partition table itself (CONFIG_PARTITION_TABLE_OFFSET)
+#   0x009000..0x00F000  nvs         24K   default NVS: legacy home of zones/rules/
+#                                         profiles/run_state, kept as-is for rollback
+#                                         and one-time migration reads (2026-08-13)
+#   0x00F000..0x010000  phy_init     4K   RF calibration data
+#   0x010000..0x187000  factory   1500K   application image
+#   0x187000..0x18D000  wifi_nvs    24K   Wi-Fi credentials ONLY
+#   0x18D000..0x19D000  kiln_nvs    64K   zones, rules, relay_cycles, run_state
+#                                         (2026-08-13 split, see App/drivers/net/wifi_prov.c
+#                                         nvs_partition_init() for the pattern reused)
+#   0x19D000..0x1FD000  profiles_nvs 384K fire profiles only -- the one section that
+#                                         grows with use, so it gets the most headroom
+#   0x1FD000..0x200000  unused      12K   remaining headroom
+#
+# wifi_nvs is 0x6000 = 24 KB, the same size as the default `nvs`. NVS needs a
+# minimum of three 4K sectors to operate (two data pages plus one spare to
+# compact into); 0x6000 gives six, which is far more than the handful of small
+# string/u8 entries wifi_prov.c stores, but the space above the app is free
+# anyway and the extra sectors mean the wear-levelling compaction that triggers
+# NO_FREE_PAGES essentially never has to run here.
+#
+# kiln_nvs/profiles_nvs (2026-08-13): same rationale as wifi_nvs above, applied
+# to the rest of the default `nvs` partition's former contents -- see TODO.md
+# 8.1. zones/rules/relay_cycles/run_state are bounded and small (64K, same
+# sector-count reasoning as wifi_nvs); profiles are the only section that
+# grows with use, so profiles_nvs gets the remaining headroom. The old
+# default `nvs` partition is deliberately left in place, unresized, so a
+# rollback to pre-split firmware still finds working data there, and so this
+# firmware's one-time migration (read old location, write through, do NOT
+# delete the old copy) has somewhere to read from.
+#
+# What this does NOT protect against: `esptool erase_flash`. That erases the
+# entire chip -- bootloader, partition table, and every partition including
+# this one. No partition layout can survive it. See wifi_prov.c's header for
+# the full survival matrix.
+#
+# --- OTA layout, added 2026-08-17 (UPDATE_PROTOCOL.md section 3) ----------
+#
+# Everything above is byte-identical to the pre-OTA table -- verified by diff,
+# not just by eye. Nothing that existed before this pass moved, resized, or
+# changed subtype. The new partitions start at 0x200000, which was unreachable
+# dead flash before CONFIG_ESPTOOLPY_FLASHSIZE was corrected from 2MB to 16MB
+# earlier this session; 0x1FD000..0x200000 (12K) stays unused exactly as
+# before.
+#
+# otadata      data, ota,       0x200000, 0x2000    8K   OTA slot-selection state
+# (pad)                         0x202000..0x210000  56K  see alignment note below
+# ota_0        app,  ota_0,     0x210000, 0x200000  2048K  OTA slot A
+# ota_1        app,  ota_1,     0x410000, 0x200000  2048K  OTA slot B
+# pico_img     data, undefined, 0x610000, 0xE0000   896K  Pico-image relay staging
+# coredump     data, coredump,  0x6F0000, 0x100000 1024K  panic/backtrace capture (see below)
+# spare                         0x7F0000..0x1000000 ~8.1M unused headroom (16 MB part)
+#
+# Fit arithmetic:
+#   otadata:  0x200000 + 0x002000 = 0x202000
+#   ota_0:    next 64K-aligned offset >= 0x202000 is 0x210000 (see below);
+#             0x210000 + 0x200000 = 0x410000
+#   ota_1:    0x410000 + 0x200000 = 0x610000
+#   pico_img: 0x610000 + 0x0E0000 = 0x6F0000
+#   coredump: 0x6F0000 + 0x100000 = 0x7F0000
+#   spare:    0x7F0000 .. 0x1000000 (16 MB) = 0x810000 = 8,454,144 B ~= 8.1 MB
+#   Even against the conservative 8 MB (0x800000) floor this table was
+#   designed for, 0x700000 < 0x800000 with ~1.0 MB to spare -- the layout does
+#   not depend on the 16 MB confirmation being right, per UPDATE_PROTOCOL.md.
+#
+# --- coredump partition, added 2026-08-20 (spontaneous-reboot diagnosability
+# pass -- see firmware/KilnFW/TODO.md) --------------------------------------
+# The board was seen rebooting spontaneously on the bench with the panic
+# handler's own text landing in a dead window of the serial capture (the
+# USB-Serial-JTAG device re-enumerates across the reset). CONFIG_ESP_COREDUMP_
+# ENABLE_TO_FLASH=y (see sdkconfig.defaults) writes the panic reason,
+# backtrace, and task states to THIS partition instead, where they survive the
+# reset and can be read back at leisure with espcoredump.py against the build
+# ELF -- no serial capture window to lose.
+#
+# SIZED AT 1024K (0x100000). Raised 64K -> 512K -> 1024K on 2026-08-20 as the
+# path was actually tested rather than assumed. 64K DID NOT WORK. The
+# panic handler wrote nothing and the next boot reported
+# ESP_ERR_NOT_FOUND, i.e. the whole diagnostic was silently dead. Captured
+# from the USB-Serial-JTAG console (COM3) at the moment of the panic:
+#
+#   E esp_core_dump_flash: Not enough space to save core dump!
+#   E esp_core_dump_elf: Failed to prepare core dump storage (257)!
+#   E esp_core_dump_common: Core dump write failed with error=257
+#   I esp_core_dump_flash: Core dump has been saved to flash.
+#
+# 257 is ESP_ERR_NO_MEM. Note the LAST line: ESP-IDF prints "Core dump has
+# been saved to flash." unconditionally, immediately after reporting the
+# failure. Read on its own it says the exact opposite of what happened --
+# worth knowing before trusting it during a real incident.
+#
+# 64K was chosen originally by analogy with ESP-IDF's examples, which is the
+# mistake: the dump size scales with the number of tasks and the size of
+# their stacks, and this firmware runs a few dozen tasks (every UART bridge,
+# LVGL, the owners, HTTP handlers, safety link).
+#
+# Then 512K -> 1024K when CONFIG_ESP_COREDUMP_CAPTURE_DRAM was turned on
+# (sdkconfig.defaults). Without it the dump held only per-task stacks, so the
+# TCBs -- which live in .bss/heap -- were absent, and every decoded thread
+# came back with an empty task name and "Corrupted TCB data" (GDB reading
+# unmapped memory). Backtraces resolved, but nothing said WHICH task died,
+# which is most of the value when chasing a spontaneous reboot. CAPTURE_DRAM
+# adds .bss/.data/heap; ESP-IDF's own Kconfig help says to reserve at least
+# 128K more for it. 1024K is deliberately well past that -- the flash above
+# is unused headroom that costs nothing, and a too-small partition fails in
+# the worst possible way: silently, at exactly the moment the diagnostic was
+# needed. That is not hypothetical here; it is what 64K did.
+# subtype `coredump` (0x03) is the reserved subtype
+# esp_core_dump_* uses to find this partition by type+subtype scan, not by
+# name, so the partition label itself is cosmetic but kept as `coredump` for
+# readability. Placed in the same 0x6F0000..0x1000000 spare region as
+# pico_img above it, immediately following pico_img and 64K-aligned already
+# (0x6F0000 = 111 x 0x10000), so no additional padding is needed the way
+# ota_0 needed after otadata.
+#
+# Why the 56K gap between otadata and ota_0: `gen_esp32part.py` requires `app`
+# type partitions (factory/ota_0/ota_1, but not `data` partitions like
+# otadata) to start on a 64 KB (0x10000) boundary. otadata is only 8K, so
+# placing ota_0 immediately after it at 0x202000 would fail partition-table
+# generation. 0x210000 is the next 64K boundary at or after 0x202000, and the
+# 56K between them is simply unused padding -- UPDATE_PROTOCOL.md's proposed
+# offsets already accounted for this, this table just spells out why.
+#
+# ota_0 / ota_1 sized at 2048K (2 MB) each against the confirmed 2026-08-16
+# measured image size of 1167 KB (KilnCtrl.bin) -- 1.75x headroom, matching
+# UPDATE_PROTOCOL.md's own sizing rationale (room for TODO.md 6A/8 growth
+# without another partition-table change). Both offsets and the size are
+# already 64K-aligned (0x200000 = 32 x 0x10000), so both app-partition
+# alignment and the general 4K-sector alignment requirement are satisfied by
+# construction.
+#
+# pico_img sized at 896K (0xE0000), NOT the 512K UPDATE_PROTOCOL.md originally
+# proposed. That figure predated checking it against the RP2040 side: SaftyFW's
+# own bootloader/flash_layout.h defines BOOTLOADER_SLOT_FLASH_SIZE as 0xD0000
+# (832K) per Pico application slot. 512K (0x80000) cannot hold an 832K image at
+# all. 896K gives 64K (~7.7%) of headroom over the real 832K slot size while
+# staying a clean 64K-aligned size; as a `data` partition pico_img only needs
+# 4K-sector alignment to be valid, but 64K keeps the arithmetic simple and costs
+# nothing given the ~9.3 MB still spare above it. This is a *staging* partition
+# for relaying a Pico image through the ESP (UPDATE_PROTOCOL.md section 3,
+# "A staging partition also solves the relay problem") -- it is never mapped,
+# executed, or interpreted as a filesystem by the ESP itself, only read/written
+# as a raw byte range, which is why its subtype is `undefined` (0x06) rather
+# than `fat` (0x81): `fat` tells tooling this partition holds an actual FAT
+# filesystem structure, which would be actively misleading for an opaque blob
+# staging area that nothing ever mounts.
+#
+# `factory` (above) is deliberately KEPT, not reclaimed for OTA space, even
+# though there is no shortage of room at 16 MB: with `otadata` erased or
+# invalid the bootloader falls back to `factory`, the one recovery path that
+# needs no serial cable. See UPDATE_PROTOCOL.md section 3.
+#
+# Still open (see firmware/KilnFW/TODO.md section 9 and
+# ../CommonFW/docs/UPDATE_PROTOCOL.md section 7 for the authoritative list):
+#   - Bootloader has NOT been reflashed against this new table on real
+#     hardware yet -- this pass is host-build-verified only (gen_esp32part.py
+#     validated a clean, non-overlapping table; nothing has touched the board).
+#   - `nvs`/`wifi_nvs`/`kiln_nvs`/`profiles_nvs` have NOT been read out and
+#     archived from the physical board. That is a one-time, irreversible-if-
+#     skipped bench step this pass cannot perform.
+#   - The streamed esp_ota_ops POST handler, challenge-response auth, the
+#     UPDATE_* frame relay into pico_img, and the web/MCP surface are all still
+#     unbuilt -- this pass is the partition-table + rollback foundation only.
+#
+# --- factory moved off 0x10000, added 2026-08-21 (build hard-failure fix) --
+#
+# The build started failing/warning with "The smallest app partition is
+# nearly full (2% free)". ESP-IDF's own check (components/partition_table/
+# check_sizes.py) takes min(size) over ALL app-type partitions, not just the
+# one being linked -- so `factory` at 1500K (0x177000), unchanged since the
+# very first entry in this file, was the partition driving the warning even
+# though `ota_0`/`ota_1` at 2048K had headroom. KilnCtrl.bin had grown to
+# ~1,500,000 bytes, roughly 35 KB from turning that warning into a hard link
+# failure.
+#
+# `factory` could not simply be grown in place: it sits at 0x10000, boxed in
+# immediately above by `wifi_nvs` at 0x187000, and wifi_nvs/kiln_nvs/
+# profiles_nvs (below) are the live data partitions this table exists to
+# protect (see the byte-identical-first-three-entries note above) -- none of
+# them may move or resize. The only way to give `factory` room was to move it
+# somewhere with space, which meant also growing `ota_0`/`ota_1` to match (an
+# OTA image must fit in either slot, so all three app partitions need to be
+# the same size for `factory` to stay a meaningful recovery image after an
+# OTA update).
+#
+# What changed and what didn't:
+#   - `nvs`, `phy_init`, `wifi_nvs`, `kiln_nvs`, `profiles_nvs`, `otadata`:
+#     UNCHANGED offsets and sizes. No data partition moved. This was the hard
+#     constraint on the whole exercise -- the board in hand has live data in
+#     `nvs` at 0x9000 (since archived off separately as an extra safety net,
+#     but the layout does not rely on that archive; nothing here was allowed
+#     to assume it).
+#   - `legacy_app` (data/undefined, 0x10000, 0x177000): NEW placeholder entry.
+#     It exists only so `gen_esp32part.py` has a name for the flash that
+#     `factory` used to occupy -- otherwise that region is simply a gap in
+#     the table between `phy_init` and `wifi_nvs`. It is declared `undefined`
+#     (not `app`) and is never written to or read by this firmware; it is
+#     documentation-as-CSV, marking "this hole is accounted for, not spare."
+#   - `ota_0`: 0x210000, grown 2048K -> 3072K (0x200000 -> 0x300000).
+#     Offset unchanged (still the next 64K boundary after otadata + its pad).
+#   - `ota_1`: MOVED 0x410000 -> 0x510000 (to sit immediately after the
+#     larger ota_0), grown 2048K -> 3072K.
+#   - `factory`: MOVED 0x10000 -> 0x810000 (immediately after the larger
+#     ota_1), grown 1500K -> 3072K to match the OTA slots.
+#   - `pico_img`: MOVED 0x610000 -> 0xB10000 (pushed up by factory's new
+#     position). Size (0xE0000, 896K) and rationale unchanged -- see below.
+#     This is a transient relay-staging buffer with no persistent data, so
+#     the move carries no data-loss risk the way the NVS partitions would.
+#   - `coredump`: MOVED 0x6F0000 -> 0xBF0000. Size (0x100000, 1024K) and
+#     rationale unchanged -- see below. IMPORTANT: this move orphans any
+#     core dump already captured at the old location. If a bench dump is
+#     sitting there waiting to be read with espcoredump.py, read it out
+#     BEFORE flashing this table; once the new table is written, that flash
+#     region is contextually pico_img/factory territory and the old dump's
+#     bytes are no longer where any tool will look for them.
+#
+# Recomputed fit arithmetic (all app partitions now 64K-aligned by
+# construction, same as before):
+#   otadata:  0x200000 + 0x2000   = 0x202000
+#   ota_0:    0x210000 + 0x300000 = 0x510000
+#   ota_1:    0x510000 + 0x300000 = 0x810000
+#   factory:  0x810000 + 0x300000 = 0xB10000
+#   pico_img: 0xB10000 + 0xE0000  = 0xBF0000
+#   coredump: 0xBF0000 + 0x100000 = 0xCF0000
+#   spare:    0xCF0000 .. 0x1000000 (16 MB) = 0x310000 = 3,211,264 B ~= 3.06 MB
+#   check_sizes.py's min() is now over {ota_0, ota_1, factory} = 0x300000
+#   (3,145,728 B) each -- against the ~1.5 MB KilnCtrl.bin that's roughly 52%
+#   free, clearing the 2%-free warning by a wide margin.
+#
+# OPERATIONAL NOTE: `otadata` should be erased as part of applying this
+# change. otadata records which OTA slot (ota_0/ota_1) the bootloader should
+# boot from; that slot-selection state was written against the OLD ota_0/
+# ota_1 offsets and sizes. Leaving stale otadata in place risks the
+# bootloader trusting an old slot index/CRC against partitions that no
+# longer mean what they used to. Erasing it makes the bootloader fall back
+# to `factory` (now at 0x810000) -- the same no-serial-cable recovery path
+# `factory` was kept around for in the first place.
+#
+# Name,       Type, SubType, Offset,   Size,     Flags
+nvs,          data, nvs,     0x9000,   0x6000,
+phy_init,     data, phy,     0xf000,   0x1000,
+pico_img,     data, undefined, 0x10000,  0xE0000,
+wifi_nvs,     data, nvs,     0x187000, 0x6000,
+kiln_nvs,     data, nvs,     0x18D000, 0x10000,
+profiles_nvs, data, nvs,     0x19D000, 0x60000,
+otadata,      data, ota,       0x200000, 0x2000,
+app,          app,  ota_0,     0x210000, 0x400000,
+stage,        data, undefined, 0x610000, 0x400000,
+recovery,     app,  factory,   0xA10000, 0x1E0000,
+coredump,     data, coredump,  0xBF0000, 0x100000,
+logs,         data, spiffs,    0xCF0000, 0xC0000,
+cfg,          data, littlefs,  0xDB0000, 0x250000,
+
+# --- `logs` partition, added 2026-09-01 (external-flash log storage gap) ---
+#
+# The owner asked that "configs the user writes as well as statistics and
+# logs are kept in external flash". Configs (nvs/wifi_nvs/kiln_nvs/
+# profiles_nvs above) and firing statistics (also NVS, 5 runs/profile) were
+# already covered; logs had NO partition at all -- the audit that found this
+# also found ~3.06 MB unallocated at 0xCF0000 (this file's own "spare"
+# comment above). NOTE ON WORDING: this board is an ESP32-S3 N16R8 -- ONE
+# on-module 16 MB SPI flash, no separate flash chip, no SD card. "External
+# flash" here means that on-module SPI flash, external only to the SoC die
+# itself, not a second physical device. log_store.c's own file banner
+# repeats this so the distinction survives independently of this comment.
+#
+# APPEND-ONLY CHANGE, per the same discipline as every partition added to
+# this table since the OTA pass: nothing above this line moved, resized, or
+# changed subtype. See this file's own before/after table in the commit
+# message that added this entry.
+#
+# Sized 3072K (0x300000) out of the 0x310000 (3,211,264 B, ~3.06 MB) spare
+# region computed above (0xCF0000..0x1000000) -- 0x300000 is 64K-aligned
+# (matching every other entry in this table) and leaves 0x10000 (64K) spare
+# above it, at 0xFF0000..0x1000000, rather than consuming the region to the
+# byte. subtype `spiffs` (0x82) is the reserved subtype esp_spiffs uses to
+# find this partition by type+subtype scan (esp_vfs_spiffs_register() with
+# partition_label="logs" also matches it by name -- log_store_mount.c passes
+# both), same convention `coredump` above uses for esp_core_dump_*.
+#
+# Filesystem choice: SPIFFS, not LittleFS, even though LittleFS is generally
+# preferred (wear-levelling, power-loss robustness) on ESP-IDF. Checked
+# before choosing:
+#   - This IDF version (v6.0.2, see build logs) ships `spiffs` as a BUILT-IN
+#     component -- already compiled into this project's build (esp-idf/
+#     spiffs/libspiffs.a exists in firmware/KilnFW/build/ already, pulled in
+#     transitively) and requires NO idf_component.yml entry, no network
+#     fetch from the component registry, no new managed_components/ tree.
+#   - LittleFS is NOT built into ESP-IDF proper; it would need
+#     joltwallet/littlefs added as a managed component (like espressif/mdns
+#     in App/idf_component.yml), which means a component-registry fetch the
+#     next time someone runs a clean `idf.py build` or `tools/setup.ps1`.
+#     With a firing in progress and no confirmation the build machine has
+#     registry access available/desired right now, adding a new external
+#     dependency mid-firing was the wrong tradeoff versus a component
+#     already proven to build in this exact tree.
+#   - The written volume here is small and rotation-bounded (log_store.h:
+#     LOG_STORE_MAX_TOTAL_BYTES, 1 MiB cap, well under this partition's 3 MB)
+#     at a low write rate (one line per 5-10s from telemetry_log.c) -- SPIFFS'
+#     known weaknesses (slower mount/GC at near-full, weaker wear-levelling
+#     than LittleFS) matter far less at this volume/rate than they would for
+#     a filesystem taking continuous high-frequency writes.
+#   - If LittleFS is added to this project later for another reason (the
+#     managed component becomes available), migrating `logs` to it is a
+#     partition subtype + esp_vfs_spiffs_register()->esp_vfs_littlefs_register()
+#     swap in log_store_mount.c; log_store.c's own logic (plain stdio fopen/
+#     fwrite/remove/rename over a mounted VFS path) does not change either
+#     way, which is why that split exists.
+
+# --- legacy_app reclaimed (pico_img relocated into it) + logs shrunk to a
+#     256K/kind retention cap, added 2026-09-02 (FLASH_BUDGET.md
+#     section 5.1 and 5.2, owner decisions recorded there) --------------
+#
+# TWO changes in this single table revision, per FLASH_BUDGET.md
+# section 8's suggested order ("single partition-table revision covering
+# legacy_app (5.1) and logs (5.2) together"). Section 7's hazard checklist
+# was worked in order before this revision: NVS partitions (nvs, wifi_nvs,
+# kiln_nvs, profiles_nvs) were confirmed already archived per the
+# 2026-08-17 archive (checklist item 4, re-confirmed rather than assumed);
+# coredump was NOT moved or resized (see below) so checklist item 2 (read it
+# out before a move) does not apply this pass; otadata still needs to be
+# erased and the bootloader reflashed when this table is actually applied
+# to hardware (checklist items 1 and 3) -- NEITHER HAS HAPPENED YET, this
+# commit is code + host-verification only, per this pass's own scope.
+#
+# 1) legacy_app (5.1): the 1500K dead hole at 0x10000..0x187000 (flash
+#    `factory` occupied before its 2026-08-21 move) is REUSED, not merely
+#    renamed -- the `legacy_app` placeholder entry is removed and `pico_img`
+#    (896K/0xE0000, unchanged size) is placed at its old start offset
+#    (0x10000). This is the one candidate from section 5.1's mutually-
+#    exclusive list that improves contiguity rather than just occupancy: it
+#    frees pico_img's OLD location (0xB10000..0xBF0000, 896K) as a
+#    genuinely unallocated gap in the high region, and leaves 0x97000
+#    (618,496 B, ~604 KiB) unallocated in the low region above the
+#    relocated pico_img (0xF0000..0x187000) -- still boxed in by phy_init
+#    below and wifi_nvs above, same as legacy_app always was, but now
+#    correctly sized to what is actually free rather than padded out to a
+#    stale 1500K placeholder.
+#
+#    pico_img is looked up by name+type+subtype at runtime
+#    (ota_pico_relay.c: esp_partition_find_first(..., "pico_img")), never by
+#    a hardcoded offset, so relocating it requires no code change -- only
+#    the reflash discussed above.
+#
+#    coredump (0xBF0000, 1024K, unchanged) was deliberately NOT moved down
+#    to close the 896K gap pico_img's old slot leaves behind, even though
+#    that would have merged it with the tail freed by the logs shrink below.
+#    FLASH_BUDGET.md section 5.3 already recommends leaving coredump
+#    alone, and section 7 item 2 requires reading any live dump out with
+#    espcoredump.py BEFORE a move -- moving it was out of scope for this
+#    pass. Consequence: the 896K freed here stays a separate, boxed-in
+#    fragment (0xB10000..0xBF0000, between the now-immovable `factory` and
+#    `coredump`), not merged with the large contiguous tail below. Merging
+#    it is a candidate for a future pass, gated on reading the coredump out
+#    first.
+#
+# 2) logs (5.2): retention cap lowered from 1 MiB/kind (32 segments) to
+#    256 KiB/kind (8 segments) -- log_store.h LOG_STORE_MAX_SEGMENTS, owner
+#    decision: "1Mb seems exsesive for logs. if we are logging that much we
+#    are loging too often. maybe 256k?". Applied per-kind, same as the
+#    original constant always was (LOG_STORE_MAX_TOTAL_BYTES is a per-kind
+#    cap, not a combined one -- see log_store.h's own rotation-policy
+#    comment), so the COMBINED worst case across both kinds (firing,
+#    autotune) is 512 KiB, not 256 KiB.
+#
+#    Partition shrunk from 3072K to 0xC0000 (768K) to match -- sized at the
+#    same ~2/3-fill ratio as the original table (512 KiB used of 768 KiB is
+#    ~66.7%, matching the original 2 MiB-of-3 MiB reasoning in this
+#    partition's 2026-09-01 comment block above), leaving SPIFFS the same
+#    proportional headroom against near-full GC thrashing it always had.
+#    Offset (0xCF0000) is UNCHANGED -- only the size shrank, so this is a
+#    pure shrink-in-place, not a move; no otadata/bootloader-adjacent hazard
+#    beyond what section 7 already requires for any app-partition-adjacent
+#    change (ota_0/ota_1/factory offsets and sizes are untouched by this
+#    pass either).
+#
+#    esp_vfs_spiffs_register()'s format_if_mount_failed=true
+#    (log_store_mount.c) means a first boot against the smaller partition
+#    self-reformats rather than needing a manual erase -- SPIFFS detects the
+#    mismatch between its stored size metadata and the partition's actual
+#    size and reformats automatically. Existing on-flash log segments are
+#    LOST on that first boot after reflashing this table. This is an
+#    accepted, pre-existing property of `logs` (see this file's 2026-09-01
+#    comment: "Losing whatever logs were already on it is an acceptable
+#    cost -- this is a rotating, bounded LOG store, not the NVS config/stats
+#    partitions"), not a new hazard introduced by this pass.
+#
+#    LOGGING-RATE FINDING (owner asked this be reported, not decided here):
+#    telemetry_log.c's own rate-arithmetic comments give a measured FIRE
+#    line at ~190 B every TELEMETRY_LOG_FIRING_PERIOD_S=5s, i.e. ~38 B/s =
+#    ~136 KiB/hour for a 3-zone firing (AUTOTUNE lines are far smaller and
+#    only run during an autotune session, not a normal firing, so they are
+#    not the binding constraint here). Real kiln firings -- bisque and glaze
+#    cycles alike -- commonly run 8-12+ hours, not the 30-minute example
+#    telemetry_log.c's comment uses to illustrate the rate. At ~136 KiB/hour,
+#    256 KiB (this kind's new per-kind cap) holds only ~1.9 HOURS of FIRE
+#    telemetry before the oldest 32 KiB segments start rotating out --
+#    NOT a comfortable fit for a full multi-hour firing's history, and would
+#    visibly truncate the early portion (ramp-up, first dwell) of any firing
+#    longer than about 2 hours. This is decision-relevant and reported here
+#    per the owner's explicit ask; the partition and the constant are set to
+#    256 KiB/kind as instructed, and this finding is not acted on further in
+#    this pass -- raising the cap (and this partition) back up, or lowering
+#    the logging rate/verbosity, is a follow-on product decision if a full
+#    firing's history is wanted from `logs` rather than just recent activity.
+#
+# Recomputed fit arithmetic (unaffected rows omitted -- see the 2026-08-21
+# block above for those):
+#   pico_img (new):  0x10000  + 0xE0000  = 0xF0000
+#   (free gap):      0xF0000  .. 0x187000  = 0x97000   (618,496 B, boxed)
+#   (free gap):      0xB10000 .. 0xBF0000  = 0xE0000   (917,504 B, boxed,
+#                                                        pico_img's old slot)
+#   logs (new):      0xCF0000 + 0xC0000  = 0xDB0000
+#   contiguous tail: 0xDB0000 .. 0x1000000 = 0x250000  (2,424,832 B, ~2.31 MiB)
+#
+#   Total newly reclaimed this pass: 618,496 + 917,504 + 2,359,296
+#   (0x900000 - 0xC0000 = the logs shrink) = 3,895,296 B, ~3.71 MiB, split
+#   across three fragments -- the 2.31 MiB contiguous tail is the largest
+#   single reclaimed chunk this table has ever had, and the first with real
+#   headroom for a future large `data` or (with further reclamation) `app`
+#   partition without another restructure.
+
+# --- `cfg` partition, added 2026-09-07 (user runtime state moves onto a
+#     filesystem -- docs/FILESYSTEM_PLAN.md, docs/FILESYSTEM_USER_DATA_PLAN.md)
+#
+# Owner decision 2026-09-07: user-changeable runtime state (zone/PID config,
+# user-created fire profiles, named kiln-config slots, preferences) moves off
+# NVS blobs and onto a filesystem, and "do the best option for flash space and
+# organization; ignore implementation time". This row is the flash-layout half
+# of that decision. NOTHING IS IMPLEMENTED AGAINST IT YET -- no mount call, no
+# reader, no writer; see FILESYSTEM_USER_DATA_PLAN.md section 5 step 1.
+#
+# APPEND-ONLY CHANGE, same discipline as every revision since the OTA pass:
+# nothing above this line moved, resized, or changed subtype. Diff the CSV
+# against the previous commit to confirm -- the only edit is this row plus this
+# comment block. Because no partition moves, NO PARTITION LOSES DATA when this
+# table is flashed, and because no `app` partition's offset or size changes,
+# `otadata` stays valid and does NOT need erasing for this revision (unlike
+# the 2026-08-21 `factory` move, whose OPERATIONAL NOTE above is specific to
+# that pass). The region this row claims is currently unallocated, so there is
+# nothing in it to lose either.
+#
+# ITS OWN PARTITION, not a corner of `logs`: same rationale the
+# `wifi_nvs`/`kiln_nvs`/`profiles_nvs` split at the top of this file records --
+# a filesystem-wide failure (SPIFFS/LittleFS reformat, GC corruption, a
+# near-full volume) is partition-wide, so a log-volume problem must not be able
+# to reach the tuned PID gains and the coupling matrix, which are the most
+# expensive data on this board to regenerate (hours of bench firings each).
+# Sharing a partition across unrelated data is exactly what once cost the Wi-Fi
+# credentials.
+#
+# SUBTYPE `littlefs` (0x83), a real subtype in this IDF's gen_esp32part.py
+# (v6.0.2, components/partition_table/gen_esp32part.py: 'fat' 0x81, 'spiffs'
+# 0x82, 'littlefs' 0x83), NOT `spiffs` reused. LittleFS, not SPIFFS, because
+# this partition holds the data whose loss is unacceptable: LittleFS is
+# power-loss-safe by design and its atomic rename() is what the plan's
+# temp-then-rename write helper depends on, and it will be mounted with
+# format_if_mount_failed=FALSE -- the opposite of `logs` -- so a corrupt volume
+# is reported, never silently reformatted. The managed component is already
+# pinned in idf_component.yml/dependencies.lock (ca5d90c5).
+#
+# SIZED 512K (0x80000), from the measured inventory, not a round guess.
+# Measured on the live board 2026-09-07 via GET /api/backup/export (compact
+# JSON): the whole export is 4,828 B, of which the 3-zone `zones` document
+# (PID gains, FOPDT, coupling matrix, guards, wiring) is 3,241 B and all 8
+# profile slots together are 1,411 B. Projected worst case, pretty-printed,
+# every cap filled (5 zones = MAX31856_CHANNEL_COUNT, 8 profiles =
+# PROFILES_MAX_COUNT at 12 segments each = PROFILE_MAX_SEGMENTS, 8 named
+# kiln-config slots, 5 runs/profile = PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH
+# from a 1,364 B PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 record):
+#
+#   /cfg/zones.json            1 x ~8K   =   8K   (3,241 B x 5/3 zones x ~1.4 pretty)
+#   /cfg/kilncfg/<slot>.json   8 x ~8K   =  64K   (same document shape as zones)
+#   /cfg/profiles/<id>.json    8 x ~2K   =  16K
+#   /cfg/stats/<id>.json       8 x ~4K   =  32K
+#   /cfg/{prefs,tune,hidden,relay_cycles}.json  4 x ~1K = 4K
+#   ------------------------------------------------------
+#   logical worst case                    ~124K across ~30 files
+#
+# On-media that is not 124K: LittleFS's block size here is the 4 KiB flash
+# sector, every file occupies whole blocks, each directory is a 2-block
+# metadata pair (4 directories = 32K), and copy-on-write plus the atomic
+# temp-then-rename write transiently need a second copy of the file being
+# written. Block-rounded that is ~160K, and LittleFS's own guidance is to keep
+# roughly 2x the live set free so garbage collection is not running against a
+# near-full volume -- ~320K. 512K is the next 64K-aligned size above that:
+# ~4x the block-rounded worst case, ~100x what the board actually holds today.
+#
+# Why not smaller (256K): ~1.6x the block-rounded worst case leaves LittleFS
+# almost no CoW headroom in exactly the near-full regime where it degrades,
+# and the atomic-write helper doubles the largest file in flight. Why not
+# larger (1M+): every count in the inventory above is HARD-CAPPED by a
+# compile-time constant -- there is no unbounded growth vector here -- and
+# 512K already absorbs a 4x rise in firing-history depth on its own. The
+# 1.81 MiB left contiguous above it is worth more unspent: it is the only
+# region large enough to raise `logs` retention back toward the 1 MiB/kind
+# that this file's own LOGGING-RATE FINDING says a real 8-12 hour firing
+# needs (256 KiB/kind holds ~1.9 hours).
+#
+# `logs` was deliberately NOT converted to `littlefs` in this same revision
+# even though the table is being edited anyway. The subtype row and
+# log_store_mount.c's register call have to land together, so bundling them
+# makes one flash a flag day for two filesystems at once, and
+# FILESYSTEM_PLAN.md's trigger for that swap has not fired (retention moved
+# DOWN, 1 MiB -> 256 KiB/kind, 2026-09-02). The saving from bundling is small:
+# a logs subtype change moves no offsets and needs no otadata erase either, so
+# the second table revision costs one more ordinary flash_firmware(), not a
+# restructure.
+#
+# Recomputed fit arithmetic:
+#   logs:            0xCF0000 + 0xC0000 = 0xDB0000
+#   cfg (new):       0xDB0000 + 0x80000 = 0xE30000
+#   contiguous tail: 0xE30000 .. 0x1000000 = 0x1D0000 (1,900,544 B, ~1.81 MiB)
+#   0xDB0000 = 219 x 0x10000 and 0x80000 = 8 x 0x10000, so both offset and
+#   size are 64K-aligned, matching every other entry in this table (a `data`
+#   partition only requires 4K, but the arithmetic stays simple).
+#
+# No build wiring is needed: sdkconfig.defaults already sets
+# CONFIG_PARTITION_TABLE_CUSTOM=y and CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=
+# "partitions.csv", so this row is picked up by the next build with no
+# further change.
+#
+# FLASHING THIS TABLE: flash_firmware() writes all three images -- bootloader
+# @0x0, partition-table @0x8000, app @0x810000 (mcp_server_flash.py's TCL
+# script) -- so it DOES apply a table change. What it does not do is touch
+# `otadata` or write anything but `factory`. If otadata points at ota_0/ota_1
+# (it does after any OTA), the board comes up on the OLD app image running
+# against the NEW table; that is harmless for an append-only revision like
+# this one, but it means the new `cfg` row is live before any firmware knows
+# about it. `ota_rollback_esp()` restores the factory boot target. See
+# docs/FILESYSTEM_PLAN.md "Applying the table change" for the ordered
+# procedure and the mandatory pre-change backup.
+#
+# --- single application slot + recovery image, added 2026-09-16
+#     (docs/OTA_SINGLE_SLOT_PLAN.md, section 1 and section 8 step 3) --------
+#
+# THIS IS NOT AN APPEND-ONLY REVISION. `ota_0`, `ota_1` and `factory` are
+# REMOVED and replaced by two new rows, `app` and `recovery`. This is the
+# tradeoff stated in the plan's section 0: giving up A/B OTA (two full
+# application images) for one large application slot plus one small,
+# content-restricted recovery image that can do nothing but receive and
+# write a new application image.
+#
+# NO DATA PARTITION MOVES OR CHANGES SIZE. `nvs`, `phy_init`, `pico_img`,
+# `wifi_nvs`, `kiln_nvs`, `profiles_nvs`, `otadata`, `coredump`, `logs` and
+# `cfg` all keep their offsets and sizes exactly as above -- zone config,
+# rules, profiles, Wi-Fi credentials, the coredump and the LittleFS `cfg`
+# volume all survive this table write by construction. Only the three
+# `app`-type rows between `otadata` and `coredump` change.
+#
+# Old app region (removed): `ota_0` 0x210000/0x300000, `ota_1`
+# 0x510000/0x300000, `factory` 0x810000/0x300000, then the 917,504-byte
+# free gap 0xB10000..0xBF0000 left over from `pico_img`'s 2026-09-02
+# relocation.
+#
+# New app region:
+#   app,          app,  ota_0,     0x210000, 0x800000,
+#   recovery,     app,  factory,   0xA10000, 0x1E0000,
+#
+# Fit arithmetic (bounded below by `otadata`, above by `coredump`, exactly
+# as the plan computes it):
+#   app:      0x210000 + 0x800000 = 0xA10000
+#   recovery: 0xA10000 + 0x1E0000 = 0xBF0000  <- exactly `coredump`'s
+#             unchanged offset, so the old 917,504 B gap is fully consumed
+#             rather than left stranded, and nothing below `coredump` moves.
+#   0x1E0000 = 1,966,080 B; 0x800000 = 8,388,608 B (8 MiB). Both offsets
+#   (0x210000, 0xA10000) are 64 KiB-aligned, as `gen_esp32part.py` requires
+#   for `app`-type partitions.
+#
+# `app` keeps subtype `ota_0` (0x10) and `recovery` keeps subtype `factory`
+# (0x00) so that: (a) `esp_ota_ops`'s rollback/PENDING_VERIFY machinery,
+# which is keyed to the `ota_0`/`ota_1`/... subtype family, continues to
+# work unmodified against a single OTA-capable slot; and (b) the bootloader's
+# stock "otadata invalid or absent -> boot `factory`" fallback, which is
+# keyed to the `factory` subtype specifically, continues to select
+# `recovery` with no bootloader change. Renaming the CSV labels (`app`,
+# `recovery`) is purely a labeling change for readability; the numeric
+# type/subtype encoding gen_esp32part.py emits is unchanged from what
+# `ota_0`/`factory` already produced.
+#
+# `otadata` MUST be erased and rewritten from `ota_data_initial.bin` when
+# this table is actually flashed to a board, because the `app`-type offsets
+# and sizes changed (same rule the 2026-08-21 `factory` move above already
+# states) -- NOT done as part of this revision, which is source-and-build
+# only per the plan's section 8 step 3 scope. See docs/OTA_SINGLE_SLOT_PLAN.md
+# section 2 for the full migration procedure and its pre-flight backup
+# requirements; nothing in that migration has been performed against the
+# bench board by this commit.
+#
+# check_sizes.py's min()-over-all-app-partitions gate is measurably NOT a
+# blocker for the size mismatch between `app` (8 MiB) and `recovery`
+# (1,966,080 B) -- see docs/OTA_SINGLE_SLOT_PLAN.md section 1 for the
+# empirical confirmation against the IDF version installed here
+# (`C:\esp\v6.0.2\esp-idf`): a binary that fits `app` but overflows
+# `recovery` prints a non-fatal `Warning:` and the build still exits 0.
+# `tools/check_recovery_image_size.py` (added 2026-09-16, ahead of this row
+# existing) is the hard gate that gap needs; it reads its bound from this
+# file's `recovery` row via `kilnctrl.partition_table.parse_partitions_csv`,
+# so it moves from SKIP ("no recovery row") to a second SKIP ("row exists,
+# but no recovery.bin has been built yet") the moment this row lands --
+# still not enforcing, because section 8 step 1 (the separate recovery-image
+# IDF project) has not landed. It will start enforcing for real once that
+# image exists at its default path or a caller passes --recovery-bin.
+#
+# `ota_1` and the recovery-mode plumbing it supported (A/B rollback between
+# two full application images) are gone. The plan's section 4 covers how the
+# bootloader now chooses between `app` and `recovery` using stock `otadata`
+# semantics plus the existing `boot_guard` counter, unchanged by this table
+# edit alone -- that wiring (retargeting `boot_guard`'s action, deleting
+# in-app RECOVERY MODE) is separate follow-on work (plan section 8 steps 4
+# and 7), not part of this table-only pass.
+
+# --- `cfg` grown to take the entire remaining tail, added 2026-09-19
+#     (docs/PROFILE_SLOTS_100_PLAN.md section 1, owner decision: "take the
+#     entire 1.81 MiB tail for cfg") -----------------------------------------
+#
+# APPEND-IN-PLACE SIZE CHANGE to `cfg` ONLY. Offset (0xDB0000) is UNCHANGED --
+# this is a pure grow-in-place, not a move. `cfg` sits last in the table, so
+# growing it cannot collide with or displace anything after it; nothing above
+# 0xDB0000 (nvs, phy_init, pico_img, wifi_nvs, kiln_nvs, profiles_nvs,
+# otadata, app, recovery, coredump, logs) moves, resizes, or changes subtype.
+#
+# WHY NOW: docs/PROFILE_SLOTS_100_PLAN.md raises PROFILES_MAX_COUNT from 8 to
+# 100 (task 6, not part of this commit) and its own section 3 capacity
+# arithmetic recomputes cfg's worst-case block-rounded footprint at that
+# count -- see tools/check_profiles_capacity.py (task 4, already landed at
+# c2e074c1) for the live numbers. The 512K (0x80000) size chosen on
+# 2026-09-07 was sized against an 8-slot worst case ("every count in the
+# inventory above is HARD-CAPPED by a compile-time constant" -- true then,
+# but that cap is about to move by 12.5x). Rather than re-deriving a new
+# "just enough" figure that would need a THIRD resize whenever
+# PROFILES_MAX_COUNT changes again, the owner's decision was to stop
+# rationing this partition against a moving compile-time constant and instead
+# take the entire remaining contiguous tail once, since nothing else in this
+# table has any present or planned claim on it (see the 2026-09-07 block
+# above: "the 1.81 MiB left contiguous above it is worth more unspent" --
+# that reasoning is superseded by this decision, not contradicted by it; the
+# 2026-09-07 pass simply had a different, smaller consumer in mind for the
+# leftover space than materialized).
+#
+# WHY THE WHOLE TAIL, NOT A SMALLER GROWN FIGURE: `cfg` is the last row in
+# the table and there is no other row above or below this line with any
+# claim, present or documented-planned, on the flash past 0xDB0000. Leaving
+# a fragment of it "spare" the way 0xFF0000..0x1000000 was left spare after
+# `logs` (2026-09-01 block above) only makes sense when something else might
+# plausibly want that fragment later; nothing does here, `logs` already grew
+# in 2026-09-01/09-02 and has its own separate rationale, and a future
+# resize of `cfg` past a partial grow would cost exactly the same
+# otadata-untouched, no-data-loss revision as this one, for no benefit over
+# doing it once now.
+#
+# Arithmetic: old cfg 0xDB0000/0x80000 ended at 0xE30000, leaving
+# 0x1000000 - 0xE30000 = 0x1D0000 (1,900,544 B, ~1.81 MiB) unallocated tail
+# (matching the 2026-09-07 block's own "contiguous tail" figure above).
+# New cfg size = old size + tail = 0x80000 + 0x1D0000 = 0x250000
+# (2,424,832 B, ~2.31 MiB). New end offset: 0xDB0000 + 0x250000 = 0x1000000,
+# exactly the 16 MiB chip boundary -- the tail is now fully consumed, by
+# construction, not by a rounded-down approximation.
+# 0x250000 = 37 x 0x10000, so the new size stays 64K-aligned, matching every
+# other entry in this table (a `data` partition only requires 4K alignment,
+# but the arithmetic stays simple and consistent with the rest of the file).
+#
+# NO DATA LOSS: LittleFS on `cfg` is mounted with format_if_mount_failed=
+# FALSE (2026-09-07 block above). Growing the partition's declared size
+# without touching its start offset or its existing superblock-formatted
+# region is the same class of change ESP-IDF's own wear-levelling/littlefs
+# examples treat as safe -- the filesystem's existing blocks are untouched;
+# only newly-available blocks past the old 0x80000 boundary become usable
+# once the board boots against this new table. (This has NOT been verified
+# against real hardware as part of this commit -- see the "still open" note
+# below.)
+#
+# otadata does NOT need erasing for this revision: no `app`-type partition's
+# offset or size changed (same rule stated in the 2026-09-07 and 2026-09-16
+# blocks above for their own append-only/tail-only edits).
+#
+# Still open, per this pass's source-and-build-only scope (matching every
+# other partition-table revision in this file): this has NOT been flashed to
+# or verified against the bench board. `tools/check_recovery_image_size.ps1`
+# and `tools/check_profiles_capacity.ps1` were both re-run against this
+# change in the same worktree (host-verification only) to confirm the parser
+# picks up the new bound and nothing else regresses.
+
+# --- `app` halved to 4 MiB, `stage` added, 2026-10-04
+#     (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 3, WP2) ---------------------
+#
+# `app` shrinks 0x800000 -> 0x400000 (offset 0x210000 UNCHANGED) and the freed
+# 4 MiB becomes a new data partition `stage` at 0x610000/0x400000. The
+# application cannot stage an image inside the running `app` partition (IDF
+# refuses writes/erases in the running partition), so a staged update needs a
+# partition of its own; the recovery image later copies `stage` -> `app`.
+#
+#   app:      0x210000 + 0x400000 = 0x610000
+#   stage:    0x610000 + 0x400000 = 0xA10000
+#   recovery: 0xA10000 + 0x1E0000 = 0xBF0000  (all UNCHANGED)
+#
+# NO EXISTING PARTITION MOVES. `nvs`, `phy_init`, `pico_img`, `wifi_nvs`,
+# `kiln_nvs`, `profiles_nvs`, `otadata`, `recovery`, `coredump`, `logs` and
+# `cfg` keep their exact offsets and sizes, so bench config, the coredump and
+# the LittleFS `cfg` volume survive the table write by construction. Only
+# `app` changes size, and the new row occupies the half it vacated.
+#
+# `stage` is `data`/`undefined` (0x06), the same subtype as `pico_img`;
+# firmware must therefore look it up BY LABEL ("stage"), never by subtype.
+#
+# SIZE GATE: KilnCtrl.bin must fit `app` (4,194,304 B). ESP-IDF's check_sizes.py
+# only hard-fails when a binary fits NO app partition, and `recovery` (the
+# other app-type row) is far smaller, so it never gates this. The hard gate is
+# tools/check_app_image_size.py (also run from
+# check_00_kilnfw_target_build.ps1 against the fresh build). It bounds against
+# this file's `app` row AND a pinned 0x400000 ceiling, and
+# check_flash_partition_map.ps1 pins the new rows below.
+#
+# OTADATA: `app` keeps its offset and subtype (ota_0), so a valid `otadata`
+# still selects it -- no erase is strictly required, but the one-time flash
+# procedure in docs/OTA_SINGLE_SLOT_PLAN.md section 10 handles it explicitly.
+#
+# This table has NO OTA path: it is applied once per board over JTAG
+# (flash_firmware()). A board still on the old table has no `stage` partition
+# and must report the update-from-stage feature as unavailable.
+#
+# STAGE IS NOT BLANK AFTER MIGRATION: 0x610000..0xA10000 was the upper half of
+# the old 8 MiB `app` and holds stale bytes. Consumers (WP4/WP5) must reject
+# `stage` unless it has a valid image header and sha. A one-time erase after
+# the table flash is optional.

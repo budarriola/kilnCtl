@@ -1,0 +1,49 @@
+# coupid6 run 1, 2026-09-02. Manual dwell observations captured over the UART
+# link after the board's HTTP server wedged (errno 23, descriptor exhaustion)
+# and the 5 s poll capture stopped at 22:27:28 / 197 lines.
+# Ambient at run start: 25.66 / 25.54 / 25.34 C (zones 0/1/2).
+# dwell_target_c  t_into_dwell_s  actual0 actual1 actual2  duty0 duty1 duty2
+30	442	28.9	29.4	29.3	0.14	0.16	0.21
+30	523	29.0	29.8	30.2	0.12	0.14	0.13
+30	599	28.8	29.4	29.7	0.15	0.17	0.18
+38	253	37.5	38.7	38.8	0.14	0.17	0.22
+38	492	38.1	38.5	38.6	0.12	0.17	0.19
+46	183	46.1	45.8	46.5	0.15	0.27	0.38
+46	382	46.2	46.6	46.6	0.13	0.22	0.34
+# CAVEAT: rows above are single INSTANTANEOUS duty samples read over UART, not
+# averages over a settled window. Duty fluctuates, dwells are 600 s against a
+# ~265 s tau (only ~2.3 tau, so each zone is still creeping), and ambient is
+# assumed shared at 25.5 C. Use the 5 s poll captures
+# (coupid6_run1.jsonl + coupid6_run1_part2.jsonl) and average over the settled
+# tail of each dwell before drawing any conclusion about linearity.
+46	552	45.3	46.4	46.3	0.17	0.24	0.36
+# NOT SETTLED. z0 duty rose 0.13 (382 s) -> 0.15 (430 s) -> 0.17 (552 s) while
+# its temperature DRIFTED DOWN 46.2 -> 45.8 -> 45.3 C. The 600 s dwell is only
+# ~2.3 tau against the ~265 s zone time constant, so none of these dwells reach
+# steady state and the apparent "z0 duty is flat with temperature" reading was
+# an artifact of that, not evidence about linearity.
+# CONSEQUENCE FOR THE EXPERIMENT: coupid6's 10 min dwells are too short to
+# measure DC gain. The single-zone excitation profiles (#4/#5/#6) use 35 min
+# dwells, which is ~8 tau and adequate. Treat coupid6 as ramp/trend data and
+# take the DC-gain measurement from the single-zone runs.
+62	53	64.5	63.4	63.0	0.07	0.34	0.72
+70	139	72.2	72.1	70.3	0.09	0.43	0.81
+70	163	71.6	71.7	70.2	0.11	0.46	0.83
+# ZONE 2 HEADROOM: at the 70 C dwell zone 2 sits at 0.81-0.83 duty and only just
+# holds target, while zone 0 overshoots +2.2 C at 0.09-0.11. Against the 80 C
+# zone ceiling this is close to saturation, so zone 2 likely cannot hold much
+# above 70 C on this rig. Worth confirming deliberately before any profile is
+# written that assumes it can.
+70	405	70.8	70.4	69.6	0.15	0.53	0.92
+# ZONE 2 AUTHORITY AT 70 C -- CORRECTED. An earlier note here said z2 "cannot
+# hold 70 C"; that was premature and is wrong. Trajectory through the dwell:
+#   405 s  69.6 C  duty 0.92  (below target, duty rising)
+#   423 s  69.8 C  duty 0.91
+#   446 s  70.0 C  duty 0.89  (AT target, duty easing -- equilibrium reached)
+# So z2 DOES hold 70 C, at ~0.89 duty, with roughly 10 % margin left. What is
+# real is the ASYMMETRY: z0 holds the same setpoint at 0.14-0.15 while z2 needs
+# ~0.89, a 6x difference in required duty for identical temperature. The
+# headroom is genuinely thin near 70 C and z2 would be the zone that saturates
+# first, but the ceiling has NOT been reached here. Determine the real ceiling
+# deliberately (a dedicated climb until z2 pins at 1.0 and falls behind) rather
+# than inferring it from this run.

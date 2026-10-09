@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl - Safety</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --muted: #444; --border: #888; --button-bg: #f2f2f2;
+    --card-bg: #f7f7f7; --link: #06c; --ok: #1a7a1a; --warn: #b00; --tripped-bg: #fdecec;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+      --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+      --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+      --tripped-bg: #3a1f22;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --muted: var(--ui-text-secondary);
+    --border: var(--ui-text-secondary); --button-bg: var(--ui-card); --card-bg: var(--ui-card);
+    --link: var(--ui-accent-3); --ok: var(--ui-accent-4); --warn: var(--ui-accent-5);
+    --tripped-bg: #3a1f22;
+  }
+  /* box-sizing reset, page-local only. Fluid width via min() rather than a
+     breakpoint -- fills a 320px phone, caps at 640px on anything wider so
+     the trip/diagnostics rows below don't stretch to a 1920px monitor's
+     full width. Reasoned about 320/360/390, 768/820, 1280/1920. */
+  *, *::before, *::after { box-sizing: border-box; }
+  /* WEB_UI_RESPONSIVE.md sec 6: min() shrink-to-fit stays, fixed 640px
+     cap becomes the shared --kc-shell-max -- see backup_page.html's
+     identical comment for the rationale. */
+  body { font-family: sans-serif; width: min(100% - 2rem, var(--kc-shell-max)); margin: 2em auto 5em;
+         background: var(--bg); color: var(--fg); }
+  /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
+     rule in /theme.css (which loads first), and being `position: fixed`
+     made it overlap nav.js's topbar on a phone-width viewport -- see
+     theme.css's own comment on .theme-btn for the fix. */
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin: 1.4em 0 0.4em; }
+  p.lead { color: var(--muted); }
+  .card { background: var(--card-bg); border: 1px solid var(--border); border-radius: var(--ui-radius);
+          padding: 0.2em 0.9em; margin-bottom: 0.6em; }
+  .card.tripped { background: var(--tripped-bg); border-color: var(--warn); }
+  .row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.3em 1em;
+         padding: 0.5em 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  /* min-width: 0 -- the flex-shrink trap flagged in theme.css's
+     .kc-page-title comment: without it, a long unbreakable token (a build
+     commit hash, a hex trip-reason code) floors this item at its
+     min-content width and can push its sibling off a narrow phone screen
+     instead of wrapping. overflow-wrap lets those tokens actually break.
+     2026-09-01: this is the "Last trip (Frame D)" section the owner
+     reported wrapping vertically on BOTH phone and desktop -- see
+     diagnostics_page.html's identical rule for the full write-up. Root
+     cause was `.row .label` and `.row .value` sharing flex-shrink:1: a
+     long `.value` (Cause/Remedy prose from the trip's cause/remedy text)
+     drags a short `.label` ("Reason", "Cause", "Age") down with it in
+     proportion to the VALUE's own huge content width, not the label's --
+     the label can end up a sliver wide even in this page's 640px-capped
+     body, which is why it happened on desktop too, not just a narrow
+     phone. Fixed the same way: `.row .label` gets its own `flex: 0 1 auto;
+     max-width: 55%` so it only shrinks against its own content, plus
+     `overflow-wrap: break-word` (not `anywhere` -- `anywhere` participates
+     in min-content sizing and collapses the column pre-emptively, which is
+     what crushed diagnostics_page.html's "Warning" label into
+     "War/nin/g"); `.row` gained `flex-wrap: wrap` so the couple of rows
+     that put a full sentence in the label slot (row('No trip event
+     received this boot', 'n/a')) can drop to their own line instead of
+     fighting `.value` for one. `.row .value` keeps `flex: 1 1 auto;
+     min-width: 0; overflow-wrap: anywhere` -- it is the column that
+     actually carries unbreakable tokens (hex trip-reason codes, build
+     hashes) and is meant to give up its width first. */
+  .row .label { min-width: 0; flex: 0 1 auto; max-width: 55%; overflow-wrap: break-word; }
+  .row .value { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right;
+                flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+  .row .value.warn { color: var(--warn); font-weight: bold; }
+  .row .value.ok { color: var(--ok); }
+  .note { font-size: 0.82em; color: var(--muted); margin: 0.3em 0 0.8em; }
+  button.clear-trip { width: 100%; margin-top: 0.6em; background: var(--warn); color: #fff;
+                       border: none; border-radius: var(--ui-radius); font-size: 1em; cursor: pointer; }
+  button.clear-trip:disabled { opacity: 0.5; cursor: default; }
+  #clearMsg { font-size: 0.85em; margin-top: 0.4em; min-height: 1.2em; }
+  .confirm-row { display: none; margin-top: 0.6em; gap: 0.5em; }
+  .confirm-row.show { display: flex; }
+  .confirm-row button { flex: 1; min-width: 0; }
+  .stale-banner { display: none; background: var(--warn); color: #fff; border-radius: var(--ui-radius);
+                  padding: 0.5em 0.9em; margin-bottom: 0.8em; font-size: 0.9em; }
+  .stale-banner.show { display: block; }
+  .row .value.near { color: var(--warn); }
+  .row .value.past { color: var(--warn); font-weight: bold; }
+  .placement-note { font-size: 0.85em; color: var(--muted); margin: 0.2em 0 0; }
+  /* TRIP_INEFFECTIVE (S9) must not look like an ordinary trip -- see
+     CommonFW/docs/LINK_PROTOCOL.md sec 7: "Different required action, so it
+     must not look like the others." An ordinary trip means "investigate the
+     kiln"; this one means "go to the breaker, right now." */
+  .card.ineffective { background: var(--warn); border-color: var(--warn); }
+  .card.ineffective .row .label, .card.ineffective .row .value { color: #fff; }
+  .card.ineffective .row { border-bottom-color: rgba(255,255,255,0.35); }
+  .breaker-banner { display: none; background: #000; /* lint-color-ok: deliberately black regardless of theme -- S9 TRIP_INEFFECTIVE's "go to the breaker, right now" banner must never be mistaken for an ordinary themed card, same idiom as .card.ineffective's solid --warn fill above but pushed one step louder. */
+                     color: #fff; border: 2px solid var(--warn);
+                     border-radius: var(--ui-radius); padding: 0.6em 0.9em; margin-bottom: 0.6em;
+                     font-weight: bold; font-size: 1.05em; text-align: center; }
+  .breaker-banner.show { display: block; }
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<!-- Ad-hoc back-link retired 2026-08-22: nav.js's shared topbar already
+     supplies Home and Menu on every page, and these hand-rolled links were
+     both redundant and undersized (measured 99x17 / 78x17 / 103x17 in a
+     headless browser, against the 32px minimum a fingertip needs). Same
+     removal readiness_page.html and diagnostics_page.html already record. -->
+<!-- <h1>Safety Processor</h1> removed 2026-08-21 (rework item 5): nav.js's
+     topbar now shows this page's name ("Safety", from <title> above) in the
+     brand's old spot, so the heading duplicated it. -->
+<p class="lead">The web twin of the LCD's Safety page, plus the DIAG/
+TRIP_EVENT detail the panel's ~264px budget had no room for -- everything
+here already rides on the same status data the dashboard uses; this page
+adds no new endpoint. "Clear trip" posts to the existing clear-trip
+action -- something this data has never had on the web before.</p>
+
+<div id="staleBanner" class="stale-banner">Disconnected -- last update <span id="staleAge">?</span>s ago. Values below are frozen, not live.</div>
+<div id="breakerBanner" class="breaker-banner">TRIP_INEFFECTIVE -- power is still flowing. Go to the breaker.</div>
+
+<h2>Link status</h2>
+<div class="card">
+  <div class="row"><span class="label">Safety link</span><span class="value" id="safetyReady">--</span></div>
+  <div class="row"><span class="label">Protocol version</span><span class="value" id="linkVersion">--</span></div>
+</div>
+
+<h2>Temperatures &amp; power</h2>
+<div class="card">
+  <div class="row"><span class="label">Safety-processor thermocouple</span><span class="value" id="safetyTemp">--</span></div>
+  <p class="placement-note" id="placementNote">Placement mode: loading...</p>
+  <p class="placement-note" id="borrowedNote">Reading source: loading...</p>
+  <p class="placement-note" id="tcInstalledNote"></p>
+  <div class="row"><span class="label">Enclosure temp (MAX31856 cold junction)</span><span class="value" id="enclosureTemp">--</span></div>
+  <div class="row"><span class="label">Power draw (estimate)</span><span class="value" id="powerW">--</span></div>
+</div>
+<p class="note">Power draw is an <strong>estimate</strong> -- SAFETY_CMD_POWER
+(Frame E) derives it from measured current times a configured mains voltage,
+not a direct wattage measurement. This firmware never invents a default mains
+voltage: an em-dash here means the Pico has no configured mains voltage (or no
+POWER frame has arrived at all), not zero watts.</p>
+
+<h2>Safety-processor build</h2>
+<div class="card" id="buildCard">
+  <div class="row"><span class="label">Not yet announced this boot</span><span class="value">n/a</span></div>
+</div>
+<p class="note">This shows the safety processor's own build identity, not just
+the main board's -- two processors means two firmwares that can be out of sync, and
+a config CRC of 0 means the safety processor is still running compiled-in defaults nobody has
+commissioned.</p>
+
+<h2>Diagnostics (Frame B)</h2>
+<div class="card" id="diagCard">
+  <div class="row"><span class="label">Not yet received this boot</span><span class="value">n/a</span></div>
+</div>
+<p class="note">diag_trip_mask / diag_warn_mask are raw per-guard bitmasks
+from the safety processor -- this firmware has no guard-name
+table to decode them against, so they render here as hex, not as named guards.</p>
+
+<h2>Last trip (Frame D)</h2>
+<div class="card" id="tripCard">
+  <div class="row"><span class="label">No trip event received this boot</span><span class="value">n/a</span></div>
+</div>
+<button id="clearTripBtn" class="clear-trip" disabled>Clear latched trip</button>
+<div class="confirm-row" id="confirmRow">
+  <button id="confirmYes">Yes, clear it</button>
+  <button id="confirmNo">Cancel</button>
+</div>
+<div id="clearMsg"></div>
+<p class="note">Clearing only hands the request to the UART link -- it is not
+proof the Pico accepted it. Watch the rows above on the next poll to confirm
+the trip actually cleared. Refused if there is no trip currently latched, or
+if the Pico's diagnostics are too stale to trust.</p>
+
+<script src="/nav.js"></script>
+<script src="/app.js"></script>
+<script>
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '\u{1F319}';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+
+  function set(id, text, cls) {
+    var el = document.getElementById(id);
+    el.textContent = text;
+    el.className = 'value kc-live-value' + (cls ? ' ' + cls : '');
+  }
+  function fmtC(v) { return window.kcUnit.fmt(v); }
+
+  var lastTripLatched = false;
+  var lastSafetyStatus = null;
+
+  // Every row on this page is either the safety link's current state (link
+  // status, protocol negotiation, diag counters) or an actively-latched
+  // trip -- there is no static config or build-time constant here at all,
+  // so set()/row() mark kc-live-value unconditionally rather than threading
+  // a flag through every call site. The trip card's Age/temperature/
+  // threshold stay live too, even though they describe a past trip moment,
+  // because the trip is still LATCHED (current alarm state) until cleared --
+  // unlike main_page.html's last-run banner, which reports a firing that is
+  // already fully over either way.
+  function render(st) {
+    lastSafetyStatus = st;
+    set('safetyReady', st.safety_ready ? 'linked' : 'not linked', st.safety_ready ? 'ok' : 'warn');
+
+    if (!st.link_version_known) {
+      set('linkVersion', 'not yet announced');
+    } else if (st.link_version_compatible) {
+      set('linkVersion', 'ESP ' + st.self_protocol_version + ' / Pico ' + st.peer_protocol_version + ' (OK)', 'ok');
+    } else {
+      var older = st.peer_protocol_version < st.self_protocol_version ? 'Pico'
+                : st.peer_protocol_version > st.self_protocol_version ? 'ESP' : 'neither';
+      set('linkVersion', 'ESP ' + st.self_protocol_version + ' / Pico ' + st.peer_protocol_version +
+                         ' -- INCOMPATIBLE, ' + older + ' is older', 'warn');
+    }
+
+    // Threshold colouring: diag_state is the one live signal this wire
+    // actually carries about how close the safety processor is to tripping
+    // (SAFETY_LINK_DIAG_STATE_* -- 0 init, 1 grace, 2 armed, 3 WARN, 4
+    // TRIPPED). There is no per-field numeric threshold on the wire to
+    // compare safety_temp_c/enclosure_temp_c against directly (the only
+    // threshold value this link ever reports is trip_deciding_threshold, and
+    // only at the moment of a trip), so the honest thing this page can show
+    // is "the guard state machine watching this reading is currently
+    // warning/tripped" rather than inventing a threshold comparison it
+    // cannot back up. See tripCard below for the trip-specific colouring.
+    var tempCls = null;
+    if (st.diag_ever_received) {
+      if (st.diag_state === 4) tempCls = 'past';       // TRIPPED
+      else if (st.diag_state === 3) tempCls = 'near';  // WARN
+    }
+    // .near/.past are colour-only in the CSS (--warn) -- WEB_UI_RESPONSIVE_
+    // PLAN.md's colour-contrast audit found --ok/--warn/--bad only 1.0-1.7:1
+    // apart in luminance against each other, so a reader relying on
+    // brightness (or with red/green colour vision deficiency) can't tell
+    // this reading apart from a normal one by colour alone. A plain text
+    // suffix is the minimal fix that adds no new element and repaints
+    // nothing -- same font, same colour rule, just more characters.
+    var tempSuffix = tempCls === 'past' ? ' -- TRIPPED' : (tempCls === 'near' ? ' -- WARN' : '');
+    set('safetyTemp', fmtC(st.safety_temp_c) + tempSuffix, tempCls);
+
+    // S12 (firmware/SaftyFW/docs/SAFETY_MODEL.md sec on "Cold junction /
+    // enclosure over-temperature"): cj_warn_c = 60 C, cj_max_c = 85 C,
+    // cj_time_s = 60 s. Unlike safetyTemp above, this is a real per-field
+    // numeric threshold this page can compare directly against -- S12's own
+    // documented defaults, not a guess -- so colour it against those numbers
+    // rather than only the coarse diag_state signal. (The cj_time_s
+    // debounce lives on the Pico; this page has no way to know how long the
+    // reading has been over cj_max_c, so it colours on the instantaneous
+    // value, which can flag "near"/"past" slightly before S12 actually
+    // trips -- an early warning, not a false one.)
+    var enclosureCls = null;
+    if (st.enclosure_temp_c != null && !isNaN(st.enclosure_temp_c)) {
+      if (st.enclosure_temp_c >= 85) enclosureCls = 'past';
+      else if (st.enclosure_temp_c >= 60) enclosureCls = 'near';
+    }
+    // Same colour-only gap as safetyTemp above -- see that comment.
+    var enclosureSuffix = enclosureCls === 'past' ? ' -- OVER LIMIT' : (enclosureCls === 'near' ? ' -- NEAR LIMIT' : '');
+    set('enclosureTemp', fmtC(st.enclosure_temp_c) + enclosureSuffix, enclosureCls);
+
+    // power_valid is already false whenever p_total_w came back NaN --
+    // including the "mains_voltage_v not configured" case (dashboard_http.h's
+    // field comment on power_valid) -- so an em-dash here, rather than a
+    // fabricated 0 W or a default mains voltage, is the honest rendering of
+    // "no trustworthy estimate exists yet".
+    set('powerW', (st.power_w != null && !isNaN(st.power_w)) ? st.power_w.toFixed(0) + ' W' : '—');
+
+    var buildCard = document.getElementById('buildCard');
+    if (st.safety_build_known) {
+      buildCard.innerHTML =
+        row('Commit', (st.safety_build_commit || '(hidden)') + (st.safety_build_dirty ? ' (dirty)' : '')) +
+        row('Built', st.safety_build_datetime || '(hidden)') +
+        row('Config version', st.safety_config_version) +
+        row('Config CRC', '0x' + hex16(st.safety_config_crc) +
+            (st.safety_config_crc === 0 ? ' -- UNCOMMISSIONED (compiled-in defaults)' : ''));
+    } else {
+      buildCard.innerHTML = row('Not yet announced this boot', 'n/a');
+    }
+
+    renderDiagCard(st);
+
+    var tripCard = document.getElementById('tripCard');
+    var clearBtn = document.getElementById('clearTripBtn');
+    var breakerBanner = document.getElementById('breakerBanner');
+    if (st.trip_event_ever_received) {
+      var ageS = Math.round(st.trip_event_age_ms / 1000);
+      var ineffective = st.trip_reason === SAFETY_TRIP_INEFFECTIVE;
+      tripCard.className = ineffective ? 'card ineffective' : 'card tripped';
+      tripCard.innerHTML =
+        (ineffective ? row('!! TRIP_INEFFECTIVE !!', 'power still flowing -- breaker, not kiln') : '') +
+        row('Reason', window.kcEscapeHtml(st.trip_reason_words) + ' (0x' + hex(st.trip_reason) + ')') +
+        row('Cause', window.kcEscapeHtml(st.trip_reason_cause)) +
+        row('Remedy', window.kcEscapeHtml(st.trip_reason_remedy)) +
+        row('Age', ageS + 's ago') +
+        row('Safety TC at trip', fmtC(st.trip_safety_tc_c)) +
+        row('Deciding threshold', fmtC(st.trip_deciding_threshold));
+      lastTripLatched = true;
+      clearBtn.disabled = false;
+      breakerBanner.classList.toggle('show', ineffective);
+    } else {
+      tripCard.className = 'card';
+      tripCard.innerHTML = row('No trip event received this boot', 'n/a');
+      lastTripLatched = false;
+      clearBtn.disabled = true;
+      breakerBanner.classList.remove('show');
+    }
+  }
+
+  // The ?diag=1 document's contents, held separately from the main
+  // /api/status payload rather than merged into it (2026-09-16 follow-up to
+  // adff1595). Merging absent keys into the main object is what made a
+  // failed diag fetch render as plausible-looking text: `undefined + ' / ' +
+  // undefined` is the literal string "undefined / undefined", and a value
+  // passed to window.kcEscapeHtml as `undefined` comes back as the empty
+  // string -- an empty row that reads as a real, known-zero-ish reading.
+  // Neither looks like an error, and neither made the page go stale. Keeping
+  // the detail in its own slot means the card renders from a value that is
+  // either present or explicitly absent, with no third "silently missing"
+  // state possible.
+  //   state -- 'pending' until the first ?diag=1 answer of this page load,
+  //            then 'ok' or 'failed'. Three states, not a boolean, so the
+  //            card can say which of "has not answered yet" and "asked and
+  //            failed" is true instead of picking one and being wrong half
+  //            the time. A later failure moves it back to 'failed', which
+  //            immediately replaces the numbers rather than leaving the
+  //            previous tick's values on screen still looking live.
+  //   data  -- that response, or null
+  var diagDetail = { state: 'pending', data: null };
+
+  // JS mirror of firmware/CommonFW/include/kilnlink/kilnlink_diag.h's
+  // kilnlink_diag_boot_flag_t -- same hand-maintained C/JS split as
+  // WARN_MASK_WORDS below, and test_safety_diag_card.js asserts this table
+  // against that header so the two cannot drift silently. Bits are flags,
+  // not an enum: KILNLINK_DIAG_BOOT_WATCHDOG commonly appears alongside
+  // whichever of STACK_OVERFLOW/MALLOC_FAILED/ASSERT_FAILED caused it (see
+  // that header's own comment), so this decodes every set bit rather than
+  // picking one.
+  var BOOT_REASON_WORDS = {
+    0x01: 'power-on',
+    0x02: 'watchdog',
+    0x04: 'brownout',
+    0x08: 'stack overflow',
+    0x10: 'malloc failed',
+    0x20: 'assert failed',
+  };
+  function bootReasonWords(v) {
+    if (v == null) { return 'unknown'; }
+    if (!v) { return 'none reported'; }
+    var words = [];
+    var known = 0;
+    for (var bit in BOOT_REASON_WORDS) {
+      var m = Number(bit);
+      if (v & m) { words.push(BOOT_REASON_WORDS[bit]); known |= m; }
+    }
+    if (v & ~known) { words.push('unrecognised bits 0x' + hex(v & ~known)); }
+    return words.join(', ');
+  }
+
+  // Split out of render() so the best-effort ?diag=1 fetch can refresh THIS
+  // card alone when it lands, without the main status poll ever waiting on
+  // it (defect 2) and without a repaint of the live temperature/relay rows.
+  function renderDiagCard(st) {
+    var diagCard = document.getElementById('diagCard');
+    if (!st || !st.diag_ever_received) {
+      diagCard.innerHTML = row('Not yet received this boot', 'n/a');
+      return;
+    }
+    var html =
+      row('State', st.diag_state) +
+      row('Trip reason', window.kcEscapeHtml(st.diag_trip_reason_words) + ' (0x' + hex(st.diag_trip_reason) + ')') +
+      row('Cause', window.kcEscapeHtml(st.diag_trip_reason_cause)) +
+      row('Remedy', window.kcEscapeHtml(st.diag_trip_reason_remedy)) +
+      row('Warn mask', window.kcEscapeHtml(warnMaskWords(st.diag_warn_mask)) + ' (0x' + hex16(st.diag_warn_mask) + ')') +
+      row('Trip mask', '0x' + hex(st.diag_trip_mask)) +
+      row('Context age', (st.diag_context_age_100ms * 100) + ' ms');
+    // Presence is tested on the value actually about to be rendered, not on
+    // the fetch having "succeeded": a 200 that omits these keys (the diag
+    // document carries them only inside its own diag_ever_received branch --
+    // dashboard_status_http.c) must take the unavailable path too.
+    var d = diagDetail.state === 'ok' ? diagDetail.data : null;
+    var haveDetail = d && typeof d.diag_context_frames_ok === 'number' &&
+                     typeof d.diag_context_frames_bad === 'number' &&
+                     typeof d.diag_tx_frames_dropped === 'number';
+    if (haveDetail) {
+      html += row('Safety-processor boot reason',
+                  window.kcEscapeHtml(bootReasonWords(d.diag_boot_reason)) +
+                  ' (0x' + hex(d.diag_boot_reason) + ')') +
+              row('Context frames ok/bad', d.diag_context_frames_ok + ' / ' + d.diag_context_frames_bad) +
+              row('TX frames dropped', d.diag_tx_frames_dropped);
+    } else {
+      // One explicit row, in the existing .warn idiom (no new colour), in
+      // place of the three it replaces. The rows above it come from the
+      // DEFAULT /api/status document and are still live -- only the
+      // ?diag=1 extras are missing, and this says exactly that rather than
+      // blanking or freezing the whole card. The three reasons are not
+      // interchangeable: "has not answered yet" is the normal first tick of
+      // a page load, "failed" is a real error, and a 200 that simply did not
+      // carry the keys is neither.
+      var why = diagDetail.state === 'failed'
+        ? 'the diagnostic (?diag=1) request failed'
+        : (diagDetail.state === 'pending'
+            ? 'the diagnostic (?diag=1) request has not answered yet'
+            : 'the diagnostic (?diag=1) document did not carry them');
+      html += row('Boot reason / frame counters',
+                  'UNAVAILABLE -- ' + why + '; rows above are still live',
+                  'warn');
+    }
+    diagCard.innerHTML = html;
+  }
+
+  function row(label, value, cls) {
+    return '<div class="row"><span class="label">' + window.kcEscapeHtml(label) +
+           '</span><span class="value kc-live-value' + (cls ? ' ' + cls : '') + '">' +
+           window.kcEscapeHtml(value) + '</span></div>';
+  }
+  function hex(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(2, '0'); }
+  function hex16(n) { return (n == null ? 0 : n).toString(16).toUpperCase().padStart(4, '0'); }
+  // JS mirror of safety_trip_words.h's safety_warn_words_short() -- same
+  // "kept in sync by hand across the C/JS boundary" split that file's own
+  // header comment documents for main_page.html's SAFETY_TRIP_WORDS. Decodes
+  // Frame B (SAFETY_CMD_DIAG)'s warn_mask (LINK_PROTOCOL.md "warn_mask bit
+  // numbering" table) so this page's "Warn mask" row shows names, not just
+  // raw hex -- S14/S15 (CT_COMMISSIONING_PLAN.md) had no decoded name
+  // anywhere on the ESP side before this.
+  var WARN_MASK_WORDS = {
+    3: 'S4 load-should-be-off current present',
+    4: 'S5 sensor invalid/missing (pre-trip)',
+    9: 'S9 current present, uncommissioned',
+    10: 'S10 safety TC disagrees with zone TCs',
+    12: 'S12 enclosure/CJ over-temp (pre-trip)',
+    13: 'S13 borrowed channel not updating (pre-trip)',
+    14: 'S14 current above measured normal',
+    15: 'S15 zone under-current (open heater)',
+  };
+  function warnMaskWords(mask) {
+    if (!mask) { return 'none'; }
+    var words = [];
+    for (var bit in WARN_MASK_WORDS) {
+      if ((mask >> bit) & 1) { words.push(WARN_MASK_WORDS[bit]); }
+    }
+    return words.length ? words.join(', ') : 'unrecognised warn bits 0x' + hex16(mask);
+  }
+  // SaftyFW's safety_trip_t (firmware/SaftyFW/docs/ARCHITECTURE.md) --
+  // SAFETY_TRIP_INEFFECTIVE = 10 (S9): the contactor is welded/bypassed and
+  // current is still flowing after the relay opened. Every other trip means
+  // "investigate the kiln"; this one means "the relay did not actually cut
+  // power -- go to the breaker."
+  var SAFETY_TRIP_INEFFECTIVE = 10;
+  /* UI_PLAN.md section 4 item 5: destructive/latched-state actions get an
+     explicit confirm step. Clearing a latched trip is exactly that class. */
+  var clearBtn = document.getElementById('clearTripBtn');
+  var confirmRow = document.getElementById('confirmRow');
+  var confirmYes = document.getElementById('confirmYes');
+  var confirmNo = document.getElementById('confirmNo');
+  var clearMsg = document.getElementById('clearMsg');
+  clearBtn.addEventListener('click', function () {
+    confirmRow.classList.add('show');
+    clearBtn.style.display = 'none';
+  });
+  confirmNo.addEventListener('click', function () {
+    confirmRow.classList.remove('show');
+    clearBtn.style.display = '';
+  });
+  confirmYes.addEventListener('click', function () {
+    confirmRow.classList.remove('show');
+    clearBtn.style.display = '';
+    clearMsg.textContent = 'Sending...';
+    fetch('/api/safety/clear_trip', { method: 'POST' })
+      .then(function (r) { return r.json().catch(function () { return { ok: r.ok }; }); })
+      .then(function (j) {
+        clearMsg.textContent = j.ok ? 'Sent -- watch the row above for it to clear.' :
+                               ('Refused: ' + (j.error || 'unknown reason'));
+      })
+      .catch(function (authErr) { if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return; clearMsg.textContent = 'Request failed.'; });
+  });
+
+  var lastGoodAt = null;
+  var failCount = 0;
+  function setStale(staleSeconds) {
+    var banner = document.getElementById('staleBanner');
+    if (staleSeconds == null) {
+      banner.classList.remove('show');
+    } else {
+      document.getElementById('staleAge').textContent = staleSeconds;
+      banner.classList.add('show');
+    }
+  }
+  function poll() {
+    // 2026-09-16: the safety-link frame counters (diag_context_frames_ok/_bad,
+    // diag_tx_frames_dropped) and diag_boot_reason moved OFF the default
+    // /api/status document and behind ?diag=1, which returns a small
+    // diag-only document. The default document had overflowed
+    // DASHBOARD_JSON_STATUS_BUF_SIZE, which made /api/status answer 500 for
+    // the WHOLE document -- this page included. This page is the only
+    // consumer of those counters, so it fetches both.
+    //
+    // The two fetches are deliberately INDEPENDENT, not a Promise.all (fixed
+    // 2026-09-16, same-day follow-up to adff1595). Promise.all waits for
+    // both, and the ESP's httpd serves one request at a time under load, so
+    // a slow ?diag=1 stalled the whole page poll -- including the live
+    // temperature and relay rows, which are the operationally important
+    // part. "Best-effort" has to mean the main render never waits on the
+    // optional document, not merely that its failure is caught.
+    // Promise.allSettled would have fixed the failure case but NOT this one:
+    // it still waits for the slow fetch to settle. So the main document
+    // drives render()/staleness on its own cadence, and the diag document
+    // refreshes only its own card whenever (or never) it arrives.
+    fetch('/api/status').then(function (r) { return r.json(); }).then(function (j) {
+      render(j);
+      lastGoodAt = Date.now();
+      failCount = 0;
+      setStale(null);
+    }).catch(function (authErr) {
+      failCount++;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      if (lastGoodAt != null) setStale(Math.round((Date.now() - lastGoodAt) / 1000));
+    });
+    pollDiagDetail();
+  }
+  // Best-effort, and failure is VISIBLE (defect 1): a rejected fetch clears
+  // diagDetail and re-renders the diag card, which then says UNAVAILABLE.
+  // It deliberately does NOT touch lastGoodAt/failCount/setStale -- the
+  // staleness banner describes the main status document, and a missing
+  // diagnostic extra must not make the live safety rows claim to be frozen
+  // any more than it may let them claim to be fresh when they are not.
+  function pollDiagDetail() {
+    fetch('/api/status?diag=1').then(function (r) { return r.json(); }).then(function (j) {
+      diagDetail = { state: 'ok', data: j };
+      renderDiagCard(lastSafetyStatus);
+    }).catch(function (authErr) {
+      diagDetail = { state: 'failed', data: null };
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      renderDiagCard(lastSafetyStatus);
+    });
+  }
+
+  // tc_placement_mode (CONFIG_STORE_TC_PLACEMENT_* / SaftyFW's config_store.h)
+  // is a commissioning field, not a status-frame value, so it does not ride
+  // /api/status -- it comes from GET /api/safety/commissioning
+  // (safety_cfg_http.c's build_commissioning_json(), the same endpoint
+  // safety_commissioning_page.html reads), param id 259 (0x0103). A wrong
+  // label here is worse than no label at all (SaftyFW/TODO.md Phase 8b), so
+  // every branch below says exactly what is known and what is not, rather
+  // than guessing CHAMBER_AGREED as a default.
+  var TC_PLACEMENT_PARAM_ID = 259;
+  function placementLabel(mode) {
+    if (mode === 0) return 'Chamber -- this reading tracks the zone temperatures and can be compared against them.';
+    if (mode === 1) return 'External -- this sensor watches a separate location and will NOT track the zone temperatures. Do not compare it against them.';
+    return null;
+  }
+  function renderPlacement(state) {
+    var el = document.getElementById('placementNote');
+    if (state.error) {
+      el.textContent = 'Placement mode: could not load (' + state.error + ').';
+      return;
+    }
+    if (!state.reliable) {
+      el.textContent = 'Placement mode: unknown -- the safety processor has not reported a ' +
+        'protocol version new enough for this board to trust its "set" reporting, so this ' +
+        'reading’s relationship to the zone temperatures cannot be labelled either way.';
+      return;
+    }
+    if (!state.set) {
+      el.textContent = 'Placement mode: not commissioned -- tc_placement_mode has never been ' +
+        'set on the safety processor, so this reading’s relationship to the zone ' +
+        'temperatures cannot be labelled either way.';
+      return;
+    }
+    var label = placementLabel(state.mode);
+    if (label == null) {
+      el.textContent = 'Placement mode: unrecognised value (' + state.mode + ').';
+      return;
+    }
+    el.textContent = 'Placement mode: ' + label;
+  }
+
+  // BORROWED status (2026-09-03, TASK 1) -- like tc_placement_mode above,
+  // this rides GET /api/safety/commissioning (safety_cfg_http.c), not
+  // /api/status: it is TASK 1's new byte on the isolated Pico<->ESP link
+  // frame, surfaced here rather than in dashboard_http.c. borrowed_known
+  // false means "not yet known" (an older Pico, or one this ESP hasn't
+  // confirmed as new enough for the V3 frame) -- distinct from, and NOT
+  // rendered the same as, a confirmed "not borrowed". Absence of a positive
+  // fact is shown as unknown, never silently defaulted to "fine".
+  function renderBorrowed(state) {
+    var el = document.getElementById('borrowedNote');
+    if (state.error) {
+      el.textContent = 'Reading source: could not load (' + state.error + ').';
+      return;
+    }
+    if (!state.known) {
+      el.textContent = 'Reading source: unknown -- the safety processor has not reported a ' +
+        'protocol version new enough for this board to know whether this reading is borrowed ' +
+        'from another zone.';
+      return;
+    }
+    if (!state.borrowed) {
+      el.textContent = 'Reading source: this board’s own thermocouple input.';
+      return;
+    }
+    if (state.zoneIndex == null) {
+      el.textContent = 'Reading source: BORROWED from another zone’s probe -- which zone is not ' +
+        'commissioned on the safety processor.';
+    } else {
+      el.textContent = 'Reading source: BORROWED from zone ' + (state.zoneIndex + 1) + '’s probe -- ' +
+        'not this board’s own sensor.';
+    }
+  }
+
+  // SAFETY_FLAG_TC_NOT_INSTALLED / SAFETY_FLAG_TC_INJECTED (2026-09-03, TASK
+  // 2) -- both were already SET by SaftyFW's link_frame_pack_status(), but
+  // this ESP had no name or reader for either bit until this pass. Only
+  // rendered when at least one is true (an empty note otherwise, rather than
+  // a permanent "nothing wrong" line crowding the card).
+  function renderTcInstalled(state) {
+    var el = document.getElementById('tcInstalledNote');
+    if (state.error) {
+      el.textContent = 'Safety TC status: could not load (' + state.error + ').';
+      return;
+    }
+    var parts = [];
+    if (state.notInstalled) parts.push('declared NOT INSTALLED -- heat is refused. To clear: commission ' +
+      'the safety thermocouple in the Advanced section of the Safety Commissioning page');
+    // Injection is NOT a config parameter -- it is armed over the wire by
+    // SAFETY_CMD_INJECT_TC (0x21) from the bench tooling, and SaftyFW exposes
+    // no clear command (thermo_task_inject_clear() has no caller). The two
+    // things that actually end it are the structural gate in
+    // thermo_task_get_snapshot() (safety_tc_installed back to 1 deactivates
+    // the override on the very next read) and a safety-processor reboot (the
+    // state is RAM-only, never persisted). So the remedy must NOT promise a
+    // "remove injection" control on the Commissioning page -- there isn't one.
+    if (state.injected) parts.push('reading is a test-injected synthetic value, not the real part. ' +
+      'To clear: commission the safety thermocouple (safety_tc_installed) in the Advanced ' +
+      'section of the Safety Commissioning page -- that drops the override on the next read. ' +
+      'Rebooting the safety processor also clears it; there is no separate "remove injection" control');
+    el.textContent = parts.length ? ('Safety TC status: ' + parts.join('; ') + '.') : '';
+  }
+
+  function pollPlacement() {
+    fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (j) {
+      var p = null;
+      if (j && Array.isArray(j.params)) {
+        for (var i = 0; i < j.params.length; i++) {
+          if (j.params[i].id === TC_PLACEMENT_PARAM_ID) { p = j.params[i]; break; }
+        }
+      }
+      if (!p) {
+        renderPlacement({ error: 'field not present in response' });
+      } else {
+        renderPlacement({ reliable: !!j.unset_reporting_reliable, set: !!p.set, mode: p.value });
+      }
+
+      if (!j || typeof j.borrowed_known === 'undefined') {
+        renderBorrowed({ error: 'field not present in response' });
+      } else {
+        renderBorrowed({
+          known: !!j.borrowed_known,
+          borrowed: !!j.borrowed,
+          zoneIndex: (typeof j.borrowed_zone_index === 'number') ? j.borrowed_zone_index : null
+        });
+      }
+
+      if (!j || typeof j.tc_not_installed === 'undefined') {
+        renderTcInstalled({ error: 'field not present in response' });
+      } else {
+        renderTcInstalled({ notInstalled: !!j.tc_not_installed, injected: !!j.tc_injected });
+      }
+    }).catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      renderPlacement({ error: 'request failed' });
+      renderBorrowed({ error: 'request failed' });
+      renderTcInstalled({ error: 'request failed' });
+    });
+  }
+  var timer = null;
+  function schedule() {
+    if (timer) clearTimeout(timer);
+    if (document.visibilityState === 'hidden') return;
+    var delay = 1000 * Math.min(1 + failCount, 8);
+    timer = setTimeout(function () { poll(); pollPlacement(); schedule(); }, delay);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') { poll(); pollPlacement(); schedule(); }
+  });
+  poll();
+  pollPlacement();
+  schedule();
+
+  // UI_PLAN.md item 7: re-render the two temperature rows in the new unit
+  // immediately on toggle, from the cached last-good payload.
+  window.addEventListener('kcunitchange', function () {
+    if (lastSafetyStatus) render(lastSafetyStatus);
+  });
+})();
+</script>
+</body>
+</html>

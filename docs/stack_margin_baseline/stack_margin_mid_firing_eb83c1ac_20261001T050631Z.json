@@ -1,0 +1,240 @@
+{
+  "captured_at_utc": "2026-10-01T05:06:31Z",
+  "condition": "mid_firing",
+  "entries": [
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1536,
+      "level": "OK",
+      "name": "wifi_prov_owner"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 4020,
+      "level": "OK",
+      "name": "httpd_worker"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2784,
+      "level": "OK",
+      "name": "i2c_owner_sx1509"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 3048,
+      "level": "OK",
+      "name": "spi_owner"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2664,
+      "level": "OK",
+      "name": "thermo_owner"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 6144,
+      "hwm_bytes": 3072,
+      "level": "OK",
+      "name": "screen_idle"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 1152,
+      "level": "OK",
+      "name": "backlight_pwm"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 2344,
+      "level": "OK",
+      "name": "safety_owner_evt"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 4628,
+      "level": "OK",
+      "name": "safety_proto_rx"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 5224,
+      "level": "OK",
+      "name": "safety_poll"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 2300,
+      "level": "OK",
+      "name": "danger_mode"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2708,
+      "level": "OK",
+      "name": "kiln_io_owner"
+    },
+    {
+      "alive": false,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 0,
+      "level": "OK",
+      "name": "pico_auto_update"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 10240,
+      "hwm_bytes": 5984,
+      "level": "OK",
+      "name": "bx_flash_worker"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 6144,
+      "hwm_bytes": 3428,
+      "level": "OK",
+      "name": "profile_executor"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1900,
+      "level": "OK",
+      "name": "profile_exec_wdt"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 3252,
+      "level": "OK",
+      "name": "autotune_engine"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 5784,
+      "level": "OK",
+      "name": "kiln_cfg_swap"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 2348,
+      "level": "OK",
+      "name": "uart_owner_evt_task"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 3956,
+      "level": "OK",
+      "name": "uart_proto_rx"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1648,
+      "level": "OK",
+      "name": "uart_log_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1488,
+      "level": "OK",
+      "name": "info_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 1144,
+      "level": "OK",
+      "name": "system_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1680,
+      "level": "OK",
+      "name": "thermo_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1508,
+      "level": "OK",
+      "name": "io_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 10240,
+      "hwm_bytes": 4032,
+      "level": "OK",
+      "name": "lvgl"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 2772,
+      "level": "OK",
+      "name": "touch_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 8192,
+      "hwm_bytes": 5668,
+      "level": "OK",
+      "name": "ui_test_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 4096,
+      "hwm_bytes": 1604,
+      "level": "OK",
+      "name": "safety_uart_bridge"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 6144,
+      "hwm_bytes": 4304,
+      "level": "OK",
+      "name": "telemetry_log"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 6144,
+      "hwm_bytes": 5040,
+      "level": "OK",
+      "name": "gpio_probe"
+    },
+    {
+      "alive": true,
+      "configured_stack_bytes": 3072,
+      "hwm_bytes": 2332,
+      "level": "OK",
+      "name": "link_watchdog"
+    }
+  ],
+  "fw_built": "2026-10-01 01:49:28Z",
+  "fw_commit": "eb83c1ac",
+  "fw_dirty": false,
+  "load": {
+    "autotune_active": false,
+    "firing_active": true,
+    "observations": 0,
+    "zones_heating": 2
+  },
+  "notes": "Warmed-up mid_firing baseline per owner warmup rule 2026-10-01. Captured at board uptime_s ~2820 (>= 10 min) on a boot with no reset since (reset_reason 'software (esp_restart)'); bench_test_run(suite=stack) already ran this boot (warmup runs logs/bench_test/20261001T045207Z_stack_bridgewarm3 and logs/bench_test/20261001T050213Z_stack). Warmup commands re-sent before capture: get_board_state, thermo_read, thermo_read_faults, io_read, get_fw_version, get_pin_config, get_stack_margin x2 (plus thermo_read/io_read/safety_get_status/profiles_get_exec_status polling through the firing). Firing: kiln_call(profiles_start, profile_id=0) started existing profile #0 M18C_TEST (zone_mask 0x7, seg0 40C ramp 900C/hr dwell 2min, seg1 30C dwell 1min; unedited, zones/PID config untouched). Captured read-only via kiln_call(get_stack_margin) ~51 s into the run while state=1 (ramping, not yet dwelling; target 38.9C), zones 1 and 2 relays physically ON at duty 1.00 (io_read R2=1 R3=1), K4 energized, CT current 0.12-0.14 A, zone actuals 27.4/26.4/26.4 C, no fault, fault_guard 0, no safety trip. profiles_stop() called immediately after; confirmed executor state=0, relays R1=R2=R3=0, K4 de-energized, safety armed not tripped. Post-stop temps peaked 27.8/26.7/26.8 C. Note kiln_io_owner, bx_flash_worker, profile_executor, uart_log_bridge, telemetry_log high-water marks moved under this load relative to the web_ui_open record on the same boot."
+}

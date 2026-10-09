@@ -1,0 +1,552 @@
+# Architecture decisions (KilnFW)
+
+Settled design decisions moved out of `TODO.md` once implemented, so the
+plan file only tracks work still to do. This is reference material — if a
+decision changes, update it here rather than leaving the old reasoning in
+the plan.
+
+## Web server / transport
+
+- Web UI runs on-device: `esp_http_server`, static pages `EMBED_TXTFILES`d
+  from flash. A third client alongside the UART PC link and the MCP server,
+  not a replacement for either.
+- Storage: NVS for credentials/config (small, wear-levelled), no LittleFS —
+  never needed once NVS was split into per-concern partitions (see
+  `docs/PROJECT_STATUS.md` and TODO.md 8).
+- Push (WebSocket/SSE) vs. 2s polling: **polling stays**. Revisit only if a
+  real firing shows 2s is too coarse.
+- Embedded pages are stored **gzip-only** in flash (budget: flash is at ~5%
+  free, see `docs/FLASH_BUDGET.md`) — there is no uncompressed fallback
+  representation. A request whose `Accept-Encoding` excludes `gzip` (an
+  explicit `gzip;q=0`, or `identity`/no header value that names `gzip`) gets
+  a real `406 Not Acceptable` (`web_encoding.c`'s `web_send_gzip_not_acceptable()`)
+  naming the cause, per RFC 9110 s12.5.3, rather than a silently mangled
+  body. This is deliberate, not a bug: **anyone scripting against this
+  board's HTTP API must ensure their client sends `Accept-Encoding: gzip`**
+  (most libraries — `requests`, `httpx`, browsers — do this by default and
+  transparently decompress; plain `urllib.request` and some `curl`
+  invocations do not and need `Accept-Encoding: gzip` set explicitly, or
+  `curl --compressed`). Storing an uncompressed fallback was considered and
+  rejected on the same flash budget.
+
+## Relay ownership / gating
+
+- One chokepoint for relay-ON: `relay_authority_on_blocked()` (global) plus
+  `relay_authority_zone_blocked()` (per-zone, layered on top). Every caller
+  (UART bridge, web UI, profile executor, autotune) goes through it.
+- Relay ownership tags: `NONE` / `MANUAL` / `PROFILE` / `RULE`, one owner
+  per relay. Starting a profile claims `PROFILE`; a manual `SET_RELAY`
+  against an owned relay is **refused**, not auto-paused. Pausing hands the
+  relay back to `MANUAL`; resuming reclaims `PROFILE`. Chosen deliberately
+  over auto-pause-on-touch — a Stop button must never have an unrelated
+  side effect. Built in `App/drivers/relay_authority.{c,h}`.
+- `AUTOTUNE` (TODO.md 6A.6, 2026-08-21): fifth tag, same claim/release shape
+  as `PROFILE`. `autotune_engine.c`'s `begin_run_locked()` claims the
+  zone's relay mask as `RELAY_OWNER_AUTOTUNE` before a step-test or
+  relay-test run starts; `force_relays_off()` — the single function every
+  terminal path (`finalize_fit()`, `finalize_relay_fit()`,
+  `escalate_and_abort()`, `abort_locked()`) calls before leaving a running
+  state — releases it. A manual `SET_RELAY`/`SET_RELAY_MASK` against a
+  relay owned by a live autotune run is refused the same way an
+  owned-by-`PROFILE` relay is (`kiln_io_owner.c`'s
+  `relay_authority_manual_blocked_by_owner()` check, `uart_bridge.c`'s
+  `bridge_reply_reject(..., "owned")`). Ownership is still layered strictly
+  under the safety gate: `relay_authority_on_blocked()`/
+  `relay_authority_zone_blocked()` run first and their answer is final when
+  it blocks, exactly as for every other owner.
+
+## Relay rule engine (v1 design)
+
+- One relay has a list of rules; each rule is a flat AND-of-conditions; any
+  rule true commands the relay ON (OR across rules, AND within one). No
+  nested boolean trees.
+- Condition types: zone temperature vs. threshold, elapsed time since
+  profile start, another relay's *commanded* (not physical) state.
+- A relay is either profile/manual-controlled or rule-driven (`RULE`
+  owner), never both.
+- Rule evaluation runs on the same 1Hz control tick as the profile
+  executor. Config/persistence built (`rules_http.{c,h}`); the evaluator
+  itself was never built — saved rules are inert.
+
+## PID / thermal guard / autotune
+
+- **Guard 8 (cross-zone plausibility)** compares a zone's reading against
+  every other zone's worst-disagreeing peer (not an average — an average
+  lets one badly-wrong channel hide behind a healthy one), trips after a
+  sustained window (600 s default), and blocks only its own zone. Ships with
+  `cross_zone_max_delta_c` defaulting to 0 = **disabled** — the threshold
+  needs a measured cross-gain matrix from a real coupled kiln, not a firmware
+  constant, and no such matrix has ever been captured on hardware. Armable
+  per-zone from Settings without a rebuild; `cross_zone_period_s` stays a
+  firmware constant on purpose (arming needs one knob, not two).
+- **Relative Gain Array** (`pid_autotune_rga()`) computes RGA over the
+  largest principal sub-block whose every cell is measured, refusing an
+  incomplete, singular, or non-finite matrix outright — a wrong RGA would
+  tell an operator their zones are independent when nobody measured that.
+  Cross-gain cells are filled by autotune's step test recording every
+  configured zone's reading at each tick, not just the zone under test.
+- **Feedforward** (`u_ff = (T_sp - T_amb)/K_dc + (dT_sp/dt)*tau/K_dc`) takes
+  its rate from the segment's commanded ramp, not a tick-to-tick difference
+  (timing noise at 1 Hz, amplified by tau). Ambient is the MAX31856 cold
+  junction sampled once at firing start, not re-sampled, since it warms with
+  the board over a long firing. Stays exactly 0 without an identified model
+  or on a non-finite `K_dc`/`tau`. `pid_seed_bumpless()` subtracts the ff
+  term internally (moved from the caller) so the bumpless-transfer seed
+  stays exact with feedforward live.
+- **Relay-feedback autotune** reuses the step-test engine's lock, tick task,
+  trace buffer, and relay-authority claim rather than a parallel state
+  machine; accepting a relay-test result writes gains but never a plant
+  model, since a relay test measures one frequency-response point and a
+  model from a prior step test must survive it.
+- **Electrical load staggering** is phase-offset only:
+  `heater_output_seed_phase()` truncates a zone's first time-proportioned
+  window (permanent shift, not a one-time transient), assigned by each
+  zone's rank among a run's active zones. The `max_simultaneous_relays` cap
+  (the harder half) was deliberately not built — capping correctly means
+  either changing what the pure `heater_output` module computes or
+  overriding its output in a way that desyncs its internal bookkeeping from
+  real hardware state, and neither was worked out with confidence.
+- **Config reload while running** (`zones_config_generation()`, bumped only
+  when in-RAM config actually changes) is checked once per control tick,
+  after readings are stored and before control math, so an edit can never be
+  half-applied across the decide/apply split. Tuning gains land bumplessly;
+  mode/relay-mask changes force relays off under the old mask first; guard
+  threshold edits apply immediately and are logged at WARN — chosen over
+  requiring idle, since an operator correcting a ceiling for the ware
+  currently in the kiln needs it to take effect now. A reload never touches
+  latched trip state — editing a threshold must not become an undocumented
+  way to clear a trip.
+- **Unowned-relay sweep**: every tick, `profile_executor.c` forces off the
+  intersection of (what the expander shows physically closed) ∩ (what this
+  run ever commanded) ∩ (complement of what may legitimately hold it —
+  active zones regardless of fault state, plus any zone under autotune).
+  The "commanded by this run" term is what stops the sweep from chattering
+  off a relay an operator is holding manually.
+- **Relay contact-cycle accounting** persists lifetime on/off transition
+  totals per relay in its own NVS key (`relay_cyc`), deliberately separate
+  from the `zones_cfg` blob (whose loader treats any size change as
+  corruption and would wipe every user's zone setup on an unrelated growth).
+  Writes at most once per 10 minutes plus a flush on halt; counts saturate
+  rather than wrap.
+- **Reboot breadcrumb** (`run_state.{c,h}`) persists a fixed-size record
+  (profile, zone mask, segment, target, elapsed, phase, fault guard/reason)
+  to its own NVS key on every meaningful transition plus a 300 s refresh —
+  not per tick (~200 writes over a 12h firing vs. ~43,000). A clean stop is
+  recorded distinctly from an unplanned loss of power; nothing currently
+  *acts* on a recovered record (no auto-resume), it is display/ack only.
+
+## Historical data / graph buffer
+
+- RAM-only ring buffer, discarded on reboot (no persisted per-firing log).
+- One sample per 30s; sized for a 24h firing (2880 samples).
+- Packed to 8 bytes/sample (single-zone) after a DRAM-exhaustion incident —
+  see `docs/BRINGUP_HAZARDS.md`.
+
+## Page organization
+
+- Dashboard (home), Profiles, Settings (Thermocouples & Zones incl. PID
+  tuning, Relays & Rules, Network) — see `docs/UI_PLAN.md` for the open
+  part of the page/route map.
+- LCD: a shared top-bar module (`App/drivers/ui_topbar.{c,h}`) puts
+  Back/Prev/Next as status-bar icons on every page and a Home icon on every
+  page but home, replacing the old per-page in-content "Back" row.
+  `ui_page_diagnostics.c` (Firmware / Internal RAM / PSRAM & storage,
+  paged), `ui_page_thermo_faults.c` (per-channel MAX31856 fault bits,
+  visibility only, no clear action), and the profile-creation flow
+  (`ui_page_profile_builder_{zones,segment,review}.c`, reachable from
+  `ui_page_config.c`'s hub) are all built. The nav hub itself now holds 11
+  destinations across 2 pages (3 rows x 2 cells each, fixed-height
+  internally-scrollable), up from the 7-destination/2-column layout of the
+  2026-08-18 pass.
+- **LCD profile browse/select/start is built**, reachable from the
+  Configuration hub's "Profiles" cell: `ui_page_profiles.c` plus
+  `ui_page_profiles_mine.c`/`_family.c`/`_builtin_list.c`,
+  `ui_page_profile_detail.c`, and `ui_page_profile_segments.c`. This was
+  blocked on flash headroom (`factory` partition down to 4% free); that
+  blocker is gone now that the partition table was reworked (`factory`
+  moved to `0x810000`, capacity `0x300000`, ~51% free on the last build —
+  see TODO.md 9.1). Hardware-verified 2026-08-21 via injected touch:
+  home -> config -> a Start confirm dialog raised and cancelled with relays
+  confirmed off. The home page's Start button keeps its own fallback chain
+  (current non-idle profile, else last boot record) independent of the new
+  browse page.
+- **Profile creation departs from its original graph-view plan.** No
+  `lv_chart` — the built flow is zone-pick -> per-segment ramp/hold-temp/
+  hold-time editing via numeric-stepper cards (same pattern as other pages'
+  +/- steppers) -> a review screen, then `profiles_save`. Simpler than the
+  originally-sketched "draw the curve, drag a point" design and fits the
+  ~264px no-scroll budget without a second sub-view.
+- Web: `safety_page.html`, `diagnostics_page.html` (merges the LCD's
+  diagnostics + board-health content since the web can scroll),
+  `diagnostics/thermo` (`thermo_faults_page.html`), `settings/manual`
+  (`manual_page.html`, the per-relay toggles moved off the dashboard), plus
+  shared `nav.js` and `app.js` (sticky Stop, connection-lost banner that
+  dims `.kc-live-value` under `.kc-stale`, confirm-on-destructive including
+  Start and Stop) are built and wired into all existing pages. `GET
+  /api/status` gained fw version, build string, uptime, reset reason and
+  heap figures for the new diagnostics page. `.kc-live-value` is annotated
+  on every page's live numeric fields, so the stale-dim behavior is live
+  everywhere, not just wired.
+- **Global chrome rework (2026-08-21):** the bottom nav bar is gone;
+  `nav.js`'s Menu button opens a top-down scrollable drop-down holding all
+  10 board-configuration destinations plus a "Reset" item
+  (`/settings#danger`); a Home button sits next to Menu on every page except
+  the dashboard. The "kilnCtl" brand text and each page's duplicate `<h1>`
+  are replaced by the page name in the top bar. `settings_page.html` now
+  holds only the danger zone. `main_page.html` (dashboard) is reordered
+  execCard -> history canvas -> picker row (profile select, Start) ->
+  channels, with cold-junction temps, both section `<h2>`s, and the
+  history/settings prose removed. Each thermocouple's relay status is shown
+  by joining `/api/zones`' `thermo_mask`/`relay_mask` against `/api/status`'
+  relay bits client-side; a channel with no mapping shows no relay state
+  (never a fabricated one) — this was the one open design question and it
+  resolved to "no state over guessed state."
+- Unit preference (°C/°F) is shared and device-backed (`unit_pref.c/.h`),
+  not an independent per-surface toggle: `GET /api/status`'s `temp_unit`,
+  `POST /api/unit_pref`, UART `CONTROL_CMD_GET/SET_UNIT_PREF`, and the LCD's
+  Configuration-hub toggle all read/write the same setting.
+
+## LCD thermocouple-type page
+
+- Third config-hub page (`ui_page_tc_types.c`), added 2026-08-21 because both
+  existing config hub pages were genuinely full. One row per channel plus the
+  safety processor, naming the type rather than the raw nibble, cycling
+  B/E/J/K/N/R/S/T on tap. `zones_http` gained per-channel
+  `get/set_tc_type`/`set_safety_tc_type`, shaped after `get/set_pid`.
+- Deliberately does **not** push to the MAX31856 register on write: the
+  existing web `POST /api/zones` doesn't either (only the boot-time apply
+  does), so LCD and web behave identically rather than the LCD acquiring a
+  side effect the web lacks.
+
+## Config hub page 1 — the tap-target dump undercounts by design
+
+Page 1 of the Configuration hub genuinely holds 6 items; the first two are
+non-clickable "not built yet" placeholders. `kiln_ui.c`'s tap-target dump
+only lists widgets carrying `LV_OBJ_FLAG_CLICKABLE`, so those two
+placeholders never appear in a dump even though they render. Reading a
+tap-target dump as a visual layout scan will therefore misreport an empty
+top row that isn't actually empty — check the rendered page, not just the
+dump, before concluding a layout is broken.
+
+## Profile builder: Celsius-only editable fields
+
+Profile pages honour the °C/°F display preference (segments list, builder
+review) — but the profile builder's three *editable* callbacks
+(`ui_page_profile_builder_segment.c`) deliberately stay Celsius. Converting
+them needs the min/max bounds, the num pad's seed value, and the stored
+result all converted, and `ui_num_pad_params_t` has no partial-conversion
+mode. Captions read "Target C" so what's being typed is never ambiguous —
+this is a visible, intentional seam, not a wrong setpoint, and must not be
+"fixed" by an agent unaware of the constraint. Commented at the exact spots
+in the source.
+
+## Idle chart / pinned dots
+
+The dashboard chart (web `main_page.html` and LCD `ui_page_home.c`) is always
+shown above the profile-picker/Start row, rather than appearing only once a
+profile is running. While idle, current per-channel temperatures render as
+dots pinned to the left edge, updated in place (no line, no trend, no
+rightward march); a profile start hands over to the existing trend rendering
+unchanged. Deliberately no backend change — the history ring's sampling
+gate, reset-at-start, and `elapsed_s` semantics are untouched; the idle dots
+come from live readings both surfaces already poll (`/api/status` on the
+web, the same zone reading `build_zone_row()` uses on the LCD). This mattered
+because a second ring buffer would cost ~23KB against ~4167 bytes of
+internal DRAM free after LVGL start.
+
+LCD home chart is deliberately smaller/simpler than the history detail
+page's (70px vs 110px, 30 points vs 60, actual-only, no legend) — a
+content-budget trade, not an oversight; the desired-vs-actual comparison
+stays on the history page. Its 120-byte backing array is kept separate from
+`ui_page_history.c`'s arrays deliberately, since those are that chart's live
+backing store and must not be aliased across two pages.
+
+## Backup / restore
+
+`backup_http.c` + `backup_page.html` (shipped 2026-08-21) export/import a
+JSON blob that is **deliberately narrower** than the zones page: only PID
+gains, FOPDT model, per-channel tc_type, and safety tc_type round-trip,
+because those are the only four things `zones_http.h` exposes a getter *and*
+setter for. Zone name, relay/thermocouple wiring, guard thresholds, temp
+limits, and heater timing have getters only — exporting them would produce a
+file that silently fails to restore, so they're excluded and the page states
+this. Wi-Fi credentials are excluded in both directions: restoring them onto
+a board on a different network either fails outright or silently joins
+whatever shares the SSID.
+
+Export streams JSON through a 256-byte chunk buffer, never a whole-document
+heap buffer. Import validates every entry in a first pass and commits only
+in a second, so a malformed file writes nothing; an unknown version is
+refused outright rather than migrated on a guess. `ZONE_MODEL_K_MAX`/
+`ZONE_MODEL_TIME_MAX_S` were moved (not mirrored) from `zones_http.c` into
+`zones_http.h` so the validation pass and `zones_config_set_model()`'s
+commit-time check cannot drift — closes a real half-applied-restore hole
+where an out-of-range plant model was only caught after earlier entries had
+already reached NVS.
+
+Import gates on `ota_http_check_interlocks()` (safety link must be up), not
+`heat_interlock` (the latter answers "may heat run during an update", the
+opposite question) — this is a deliberate reuse of the OTA gate, not a bug,
+but it means restore is refused whenever the safety link is down.
+
+**FIXED 2026-09-04**: the `"_":0` trailing-comma-guard sentinel this
+paragraph used to describe is gone. `backup_http.c` has since split into
+`backup_export.c`/`backup_import.c`; `backup_export.c`'s own comment
+(`:327-335`) says the sentinel was removed 2026-08-21 — before this decisions
+doc was even written — because `settings_source` became the object's
+unconditionally-last key, leaving no trailing comma to guard against. Every
+exported zone object now just closes cleanly with no junk key. Nothing
+currently reads or ignores a `"_"` field; a future agent does not need to
+preserve one.
+
+## NVS rollback-refusal vs. legacy-partition migration (TODO.md 8.1/8.2)
+
+Two "DONE" pieces of TODO.md 8.1/8.2 interact in a way that is easy to
+re-break: 8.2's refuse-newer-than-firmware discipline (`zones_http.c`'s
+`nvs_load_from()` — never wipe a blob whose version is newer than this
+build, memset the caller's copy but leave flash untouched) and 8.1's
+one-time migration off the old shared default `nvs` partition
+(`migrate_from_default_partition()`). A bug shipped and was fixed
+2026-08-24: the migration decision used to be made from `s_zones.cfg.version
+!= 0` *after* the load, which cannot tell "kiln_nvs has never had anything
+saved" from "kiln_nvs has a real blob that was just correctly refused as
+newer-than-firmware" — both read `version == 0`, because the refusal path
+memsets the caller's struct. A firmware rollback would refuse the newer
+blob exactly as designed, then immediately fall through to the migration
+and overwrite it with whatever stale pre-split copy the old `nvs` partition
+still holds (never deleted, by 8.1's own design, specifically to survive a
+rollback) — silently destroying the config the refusal had just gone out of
+its way to protect.
+
+**The rule going forward**: a version-checking loader that also feeds a
+migration decision must expose *found* (something is at this key, valid or
+not — including a refused newer-than-firmware blob) as a value distinct
+from *valid* (safe to run against right now), and the migration must key
+off *found*, never off whether the decoded struct happens to read as
+zeroed. `nvs_load_from()`'s `out_found`/`out_valid` pair is the reference
+implementation — see its header comment for the exact per-branch contract
+(newer-than-firmware is found-but-not-valid; too-short/wrong-size corruption
+is neither, since there is nothing there worth protecting from being
+overwritten by a migration). `kiln_cfg_store.c`'s `nvs_load_store()` follows
+the same refuse-newer/corrupt-is-different split for its own version check,
+even though it has no migration of its own yet (`KILN_CFG_STORE_VERSION`
+has only ever been 1) — get the distinction right before a future version
+bump adds one, not after.
+
+Any future module that adds its own versioned persisted section (rules,
+relay-cycles, profiles — see 8.2's note that they share the pre-fix
+version-vs-size-ordering pattern and haven't needed a migration yet) and
+later grows a migration path off another partition must apply this same
+found/valid split, not the single "did I get something back" boolean it
+might otherwise reach for.
+
+## Static-IP AP-fallback fix
+
+A wrong-but-parseable static IP (bad gateway/subnet) still associates at L2,
+so `esp_netif` raises `GOT_IP` with no real DHCP exchange having happened,
+and `do_ev_got_ip()` used to tear down the fallback AP on that signal alone —
+reporting `CONNECTED` while actually unreachable. Fixed 2026-08-21: a static
+join now stays in APSTA until an HTTP request is proven to have arrived at
+the static address (`getsockname()` on the request-handling thread, since
+the socket only lives for that request; the resulting state change is
+posted to `owner_task` to preserve the single-writer invariant). DHCP join
+behavior is unchanged. Worst case is now "AP stays up longer than needed",
+never "both AP and station are down with no recovery."
+
+## Zones page advisory warnings
+
+`zones_page.html` warns (does not block) on a zone with no thermocouples
+assigned and on a channel feeding two zones. Neither condition is blocked
+because the backend contract already allows both: `zones_http.c` documents
+accepting `thermo_mask=0`, and `thermo_combine()` has no exclusivity concept.
+Refusing either in the UI would contradict what the backend already permits,
+so advisory-only is the correct behavior, not a shortcut.
+
+## OTA-adjacent decisions
+
+- ESP first when both processors need updating (USB-recoverable, and the
+  Pico's own update path runs through the ESP) — unconditional rule, not
+  "whichever is older."
+- TLS for OTA and the web UI: planned (see `docs/UI_PLAN.md` §6), not
+  authorized to build as of 2026-08-20. The existing HMAC challenge scheme
+  proves knowledge of the AP password without transmitting it and is
+  unaffected by TLS landing later.
+- Pico image is staged in a dedicated `pico_img` partition (896K) then
+  relayed over the isolated UART link — never held whole in ESP RAM on
+  either side of the transfer.
+
+## PSRAM
+
+- Enabled 2026-08-17 once LVGL needed draw buffers for the ILI9488 (the
+  named trigger from the original off-by-default decision). See
+  `docs/BRINGUP_HAZARDS.md` for the measured effects and the two
+  internal-SRAM fires this caused/fixed along the way.
+- GPIO 33-37 must stay unassigned (consumed by the R8 module's own PSRAM
+  regardless of software config).
+
+## LVGL / LCD rendering
+
+- LVGL owns the ILI9488 outright; the old UART-remote-drawn `DISPLAY_CMD_*`
+  path was dead code in firmware (never started from `main.c`) and
+  `display_bridge_task`/`uart_bridge_start_display_task()` were deleted
+  2026-08-27, along with the PC-side MCP `display_*` tools that spoke that
+  old protocol (TODO.md 10.1, decided: delete). `DISPLAY_CMD_*`/
+  `UART_TASK_ID_DISPLAY` stay defined as wire-protocol constants — kilnctrl's
+  `gui.py`/`actions.py` Display panel still speaks them, even though nothing
+  on the firmware side answers any more.
+- Shared backend rule (10.1a): a page's data access and actions must go
+  through the same plain-C functions the HTTP handlers use — one backend,
+  two front ends (JSON serialization, LVGL widget updates), never two
+  independently-maintained readings of the same state.
+- No-scroll rule: LCD pages must fit within ~264px content height (320px
+  panel minus status bar/padding) with no page-level scrolling. A
+  fixed-height widget scrolling internally (e.g. a list) is fine.
+- Touch hit-testing: LVGL does first-match-in-z-order containment, not
+  nearest-center. `ui_theme_apply_touch_area()` (dynamic per-widget
+  extended click area) handles sizing; `ui_theme_register_touch_group()`
+  (opt-in nearest-center arbitration within a registered cluster) handles
+  the rare ambiguous-overlap case for dense layouts. See TODO.md 10.4.
+
+## Command-queue / task-ownership pattern (TODO.md 10.14)
+
+Full design and current phase status: `docs/ARCHITECTURE.md`. Summary of
+the settled pattern: one owning FreeRTOS task per state-owning domain, a
+small bounded queue, `<owner>_command_<verb>()` producer functions
+(fire-and-forget or request/response), owner drains with a **bounded**
+timeout so its own housekeeping isn't starved. Copied from
+`firmware/SaftyFW/src/tasks/relay_owner.c`.
+
+Ownership map: `kiln_io_owner` (relay/SX1509 writes), `thermo_owner`
+(MAX31856 SPI access), `wifi_prov` (its own owner task, added last —
+riskiest, touches the Wi-Fi driver's own event callbacks),
+`profile_executor` (deliberately NOT converted — already correctly
+mutex-guarded, converting a safety-critical state machine to a
+drop-on-full-queue path was reviewed and rejected).
+
+## Zones page clean-up (info disclosure, schema v20->v21, Chart.js)
+
+Closed 2026-09-06 (was tracked in a now-deleted per-feature plan doc — this
+is the surviving reference for the code that cites it):
+
+- **Info-glyph disclosure** (formerly "section 1"): the zones page's
+  explanatory prose/tables that used to sit inline are now behind a round
+  "i" disclosure next to each field, via `zones_page.html`'s `infoHtml()`
+  helper and `<details class="info">`. An operator who opens a section's
+  disclosure sees the same explanation that used to be always-on; nothing
+  was cut, only collapsed by default.
+- **Per-group "same as zone N", `ZONES_CFG_VERSION` 20->21** (formerly
+  "section 2"): the old single whole-zone `settings_source` (one zone-ID
+  a whole zone inherited from, or itself) was replaced by
+  `SRC_GROUP_COUNT` independent per-group `settings_source_<group>` bytes,
+  so each of the five settings groups (PID, guards, timing, thermocouple
+  cal, relay/heater) can independently point at "this zone" or another
+  zone. Landed `5672719`+`0126f24`. The whole-zone select in the UI is now
+  a SHORTCUT that writes all five group bytes at once, not a distinct
+  stored mode. `timing_profile` inheritance was narrowed in the same pass
+  (test provenance for that narrowing split across `09769f5a`/`51c084f9`).
+  Migration (v20 blobs with no per-group bytes) fans the single old value
+  out to all five groups on load; export/import and every accessor keyed
+  off the old single field were updated together so no caller could read a
+  stale whole-zone value after a per-group write.
+- **Chart.js** (formerly "section 3"): assessed, **not adopted**. ~60 KB
+  gzipped for zoom/pan the hand-rolled canvas graph already covers with a
+  ~40-line pointer-drag window if that's ever wanted.
+- **Display-power Save button** (formerly "section 4"): already fixed
+  2026-09-04, confirmed flashed in `05087f0`.
+- **Zone 0 gets the same per-group selectors, owner request 2026-09-19**:
+  zone 0 was previously hardcoded as the fixed inheritance root — no
+  `settingssrc`/`groupsrc` selects rendered for it, and both
+  `resolveTerminal()`/`resolveGroupTerminal()` (client) short-circuited to
+  "terminal 0, never forced" the moment the walk reached it. Zone 0 now
+  renders the same whole-zone `settingssrc` select and five per-group
+  `groupsrc` selects as zones 1..N-1, defaulting a *new* zone 0 to Custom
+  (255, unchanged from before) and can copy any other enabled zone's
+  settings; the existing frame-and-hide rule (a group's fields show only
+  while its select says Custom) applies to zone 0 identically.
+  `zones_http_post_parse.c`'s per-zone parser and
+  `zone_settings_source_chain.h`'s shared chain-walk were already fully
+  generic across zone index — no server-side change was needed there. The
+  one real server-side change is the tie-break for a settings_source cycle
+  that includes zone 0 (e.g. a stored/tampered 0<->1 link):
+  `zones_config_json_normalize_settings_source_cycles()` now resets only the
+  **highest-indexed** zone actually on a detected cycle (previously it reset
+  every member), so zone 0's own link survives whenever it's part of a
+  cycle, matching the page's long-standing "lowest index is the root"
+  intuition. This is also strictly less destructive than the prior
+  every-member reset: breaking any single node's outgoing edge already
+  breaks a cycle. This highest-indexed tie-break isn't zone-0-specific: a
+  non-zone-0 cycle (e.g. a stored 1<->2 link) resets only zone 2, leaving
+  zone 1 as a follower. Follow-up review fix (same day): the client's
+  `resolveTerminal()`/`updateInheritance()` used to reset whichever zone
+  called them, the opposite tie-break from the server for a live 0<->1
+  cycle; it now also resets only the cycle's highest-indexed member.
+
+## Zones page visual simplification and prose shortening (2026-09-19)
+
+Owner request, ROADMAP.md "Visually simplify the Thermocouples & Zones web
+page" plus a same-day follow-up scope addition to shorten all
+operator-visible prose on the page:
+
+- **Show-when-enabled sections**: Continuous Tuning, the cross-zone coupling
+  matrix + RGA, Tuning quality, PID Autotune, and Measure Zone Normal
+  Current now render only when their feature is actually in use on the
+  board (a zone opted into continuous tuning, a measured coupling row, a
+  zone with `tuning_valid`, a zone in PID/fuzzy control mode, and the
+  safety processor's `ct_installed` setting respectively) — see
+  `gateMeasureNormalCurrentSection()`/`gatePidAutotuneSection()`/
+  `gateTuningQualitySection()`/`gateCouplingSection()`/
+  `gateContinuousTuningSection()` in `zones_page.html`. Each hides via the
+  `hidden` DOM property, never inline `display`, and shows a single muted
+  `class="hint"` line in its place — the answered owner question on the
+  ROADMAP row. `ct_installed` reached the page as a new boolean field on the
+  already-polled `GET /api/zones/current_sweep/status` response (no new
+  HTTP route); it mirrors `zone_cfg_committed_ct_installed()`'s existing
+  default-to-installed rule.
+- **Relay-feedback (Åström–Hägglund) test**: removed from the UI entirely.
+  The firmware engine (`autotune_engine_relay.c`) and its shared
+  `/api/autotune/start` route (`method=relay`, always shared with the step
+  test — there was never a separate relay-only route) were left in place:
+  `test_autotune_engine_prestart.c` host-tests the relay engine directly,
+  so no URI-handler slot was freed by this change.
+- **PID Autotune**: the separate "Step test" panel and the "Which tuning
+  method should I use?" panel were folded into one "PID Autotune" section;
+  the method-recommendation panel is now inside that section's info-glyph
+  `<details>` rather than a always-visible panel of its own.
+- **Noise floor section**: "How much can a small difference actually tell
+  you?" and its `noiseFloorUsable()`/`renderNoiseFloorHtml()` renderers were
+  removed outright (`test_noise_floor_panel.js` deleted with them).
+  `tuning_recommendations.json`'s `noise_floor` field and its generator are
+  untouched — schema-additive, unread by the page now, not deleted.
+- **Prose**: descriptions across these sections were cut to one or two
+  plain sentences, repository/plan-doc/commit-hash references and
+  "honesty note" bench-provenance paragraphs were dropped from
+  operator-visible text, and the guard-suite/empty-kiln warning is now
+  stated once at the top of the PID Autotune section rather than per
+  sub-section. Longer explanations moved into existing info-glyph
+  `<details>` blocks rather than being deleted. This pass covered the
+  page's top-level sections; per-zone/per-field prose elsewhere on the page
+  was out of scope for this change.
+
+## Per-zone on/off vs PID relay-mode field — no schema bump (2026-09-19)
+
+Owner decision, 2026-09-19: the per-zone on/off (bang-bang) vs PID relay-mode
+setting is stored as a **new optional field** in the zones config JSON, with
+**no `ZONES_CFG_VERSION` bump**. Older firmware ignores the unknown key; a
+missing key means PID, today's behaviour — so the field is additive only,
+never a breaking schema change.
+
+Rationale: a version bump would revive the `ota_rollback_esp()` hazard
+already on record (`firmware/CommonFW/docs/UPDATE_PROTOCOL.md`) — older
+firmware refusing a newer-than-it-knows blob and running a firing on
+firmware-default PID gains after a rollback, with no separate warning. An
+optional, ignorable key sidesteps that entirely.
+
+Design constraint for whoever implements this: **optional key, absent = PID,
+no version bump; loader must accept both and the migration check must not
+require a step.** This field must NOT be added to
+`check_config_migration_steps.ps1`'s per-store step-table requirement (see
+ROADMAP.md's "One-step-at-a-time config migration" row) — that check exists
+for actual schema version bumps, and this field is deliberately not one.
+
+Not implemented by this decision — recorded here so the constraint isn't
+lost before the field lands.

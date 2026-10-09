@@ -1,0 +1,619 @@
+"""Client for the firmware's UI_TEST task (task 14): a PC-driven probe into
+the LCD's LVGL UI, for the LCD half of the UI regression-test framework.
+
+Same shape as :class:`kilnctrl.touch.TouchClient`: every subcommand here is a
+query (request DATA frame ACKed for delivery only, reply arrives as a
+separate DATA frame from ``(ESP, UART_TASK_ID_UI_TEST)``, matched by
+subcommand) -- nothing is ever pushed unsolicited on this task.
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import struct
+import threading
+import time
+from typing import Optional
+
+from .protocol import (
+    UART_TASK_ID_UI_TEST,
+    UI_TEST_CLICK_AMBIGUOUS,
+    UI_TEST_CLICK_HIDDEN,
+    UI_TEST_CLICK_INJECT_FAILED,
+    UI_TEST_CLICK_NOT_FOUND,
+    UI_TEST_CLICK_OFFSCREEN,
+    UI_TEST_CLICK_OK,
+    UI_TEST_CLICK_SWALLOWED,
+    UI_TEST_CLICK_VERDICT_UNKNOWN,
+    UI_TEST_CLICK_WALK_BUSY,
+    UI_TEST_CMD_CLICK_BY_NAME,
+    UI_TEST_CMD_GET_CURRENT_PAGE,
+    UI_TEST_CMD_LIST_TAP_TARGETS,
+    Device,
+    Frame,
+)
+from .serial_link import SendResult, UartLink
+
+log = logging.getLogger(__name__)
+
+#: None of these read the physical panel, only in-memory LVGL state -- short
+#: timeout is fine, same reasoning as touch.py's DEFAULT_REPLY_TIMEOUT_S.
+DEFAULT_REPLY_TIMEOUT_S = 2.0
+
+#: enter_pin()'s per-click not_found retry poll (any digit, or "OK").
+#: 2026-09-25 (LCD-19 bench root cause, 20260925T170357Z_full/summary.json):
+#: the keypad overlay was confirmed raised (list_tap_targets showed every
+#: digit plus OK/Cancel) immediately before enter_pin() ran, yet its very
+#: first click_by_name() call still came back "not_found". 2026-09-30
+#: (20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a/summary.json): the same
+#: "not_found" landed on an interior digit (digit 6 of 6) instead, proving
+#: this isn't specific to the first click -- see enter_pin()'s own docstring.
+#: The actual mechanism (kiln_ui.c / lvgl_port.c, not a registry/widget
+#: desync as originally guessed here): CLICK_BY_NAME walks the current LVGL
+#: tree on the lvgl_port_task and reports NOT_FOUND when either (a) the
+#: name genuinely isn't present in that walk, or (b) the 300 ms
+#: request-to-completion window (UI_WALK_WAIT_TIMEOUT_MS) expired while
+#: lvgl_port_task was busy elsewhere (rendering a frame, mid-transition), or
+#: (c), practically never, the 1 s requester-serializing lock
+#: (UI_WALK_LOCK_TIMEOUT_MS, `s_ui_walk.lock`) wait expired -- that lock is
+#: never taken by lvgl_port_task, only by UI_TEST requesters against each
+#: other, so it is not a wait for lvgl_port_task to pick the request up and
+#: in practice is never contended. The 300 ms window starts when the request
+#: is issued (right after the lock is acquired) and covers both dispatch and
+#: the walk itself, not a budget that only starts once lvgl_port_task picks
+#: the request up. Nothing is injected in either case, so a NOT_FOUND from
+#: (a) and (b) is indistinguishable to this client -- this is what actually
+#: made an already-rendered, already-tapped-before digit read back
+#: "not_found" once. Retry poll bumped 0.1s -> 0.15s: the pause only
+#: gives lvgl_port_task time to finish whatever it was busy with (the retry
+#: gets its own fresh 300 ms window), while staying well under
+#: DEFAULT_REPLY_TIMEOUT_S so a
+#: genuinely absent target still reports not_found promptly. Same
+#: bounded-retry discipline as the rest of this module (never a bare
+#: re-click).
+_ENTER_PIN_RETRY_POLL_S = 0.15
+
+#: enter_pin_verified()'s per-digit dot-count confirmation poll (LCD-19,
+#: 2026-09-30): how long to wait for the masked-PIN-dots read-only label
+#: (see UiTestClient._dots_text) to advance to the expected count after a
+#: digit click, and how often to re-read it while waiting. Bounded, never a
+#: blind re-click -- see enter_pin_verified()'s own docstring.
+_DOT_POLL_TIMEOUT_S = 1.5
+_DOT_POLL_INTERVAL_S = 0.05
+
+_CLICK_RESULT_NAMES = {
+    UI_TEST_CLICK_OK: "ok",
+    UI_TEST_CLICK_NOT_FOUND: "not_found",
+    UI_TEST_CLICK_AMBIGUOUS: "ambiguous",
+    UI_TEST_CLICK_HIDDEN: "hidden",
+    UI_TEST_CLICK_SWALLOWED: "swallowed",
+    #: 2026-09-24 follow-up: the bounded verdict wait in kiln_ui_click_by_name()
+    #: timed out before it could tell whether the press was swallowed. Neither
+    #: a pass nor a genuine_defect -- see click_by_name()'s own doc comment.
+    UI_TEST_CLICK_VERDICT_UNKNOWN: "verdict_unknown",
+    #: 2026-09-24 follow-up: no press was ever sent (lvgl_port_inject_touch()
+    #: itself refused) -- distinct from "verdict_unknown", where a press WAS
+    #: sent but its swallow verdict couldn't be confirmed. Never a pass, and
+    #: never grounds to poll for a page change.
+    UI_TEST_CLICK_INJECT_FAILED: "inject_failed",
+    #: 2026-09-25: the (first) match's centre lies off the panel entirely --
+    #: LVGL never clamps an injected point to the display, so a press there
+    #: used to be silently swallowed by the hit test and come back "ok", a
+    #: false pass. Checked ahead of the hidden/visible split.
+    UI_TEST_CLICK_OFFSCREEN: "offscreen",
+    #: 2026-09-30: the tap-target walk itself timed out (lvgl_port_task busy
+    #: or wedged past UI_WALK_WAIT_TIMEOUT_MS) before any name could be
+    #: matched -- distinct from "not_found", a completed walk that genuinely
+    #: found no match. This is the actual fix for the false-NOT_FOUND
+    #: mechanism documented above _ENTER_PIN_RETRY_POLL_S: firmware now
+    #: reports this case explicitly instead of folding it into NOT_FOUND.
+    UI_TEST_CLICK_WALK_BUSY: "walk_busy",
+}
+
+
+class UiTestQueryError(RuntimeError):
+    """Raised when a UI_TEST query cannot be completed.
+
+    :attr:`send_result` is set when the failure was at the delivery layer (the
+    request never got an ACK), and None when the request was delivered but no
+    valid reply came back in time.
+    """
+
+    def __init__(self, message: str, send_result: Optional[SendResult] = None) -> None:
+        super().__init__(message)
+        self.send_result = send_result
+
+
+class UiTestResponseError(ValueError):
+    """Raised when a UI_TEST response payload does not match its wire layout."""
+
+
+def _unpack_str8(payload: bytes, offset: int) -> "tuple[str, int]":
+    if offset >= len(payload):
+        raise UiTestResponseError(f"UI_TEST response truncated at string length, offset {offset}")
+    length = payload[offset]
+    start = offset + 1
+    end = start + length
+    if end > len(payload):
+        raise UiTestResponseError(f"UI_TEST response truncated: string of {length} bytes at {start}")
+    return payload[start:end].decode("ascii", errors="replace"), end
+
+
+class _Pending:
+    """A single outstanding query: what we asked for, and where to put it."""
+
+    def __init__(self, subcommand: int) -> None:
+        self.subcommand = subcommand
+        self.event = threading.Event()
+        self.value: object = None
+        self.error: "Optional[UiTestResponseError]" = None
+
+
+class UiTestClient:
+    """Owns task :data:`UART_TASK_ID_UI_TEST` on the PC side of a link."""
+
+    def __init__(self, link: UartLink, task_id: int = UART_TASK_ID_UI_TEST) -> None:
+        self.link = link
+        self.task_id = task_id
+
+        self._inbox: "queue.Queue[Frame]" = link.register_task(task_id)
+        self._pending: Optional[_Pending] = None
+        self._pending_lock = threading.Lock()
+        self._query_lock = threading.RLock()
+
+        self._stop = threading.Event()
+        self._consumer = threading.Thread(
+            target=self._consume_loop, name="uart-ui-test-rx", daemon=True
+        )
+        self._consumer.start()
+
+    # -- lifecycle ---------------------------------------------------------
+    def close(self) -> None:
+        """Stop the consumer thread and release task 14. Safe to call twice."""
+        self._stop.set()
+        if self._consumer.is_alive() and self._consumer is not threading.current_thread():
+            self._consumer.join(timeout=2.0)
+        self.link.unregister_task(self.task_id)
+
+    # -- queries -------------------------------------------------------------
+    def get_current_page(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> str:
+        """The name of whatever page is currently loaded on the LCD."""
+        payload = self._query(
+            UI_TEST_CMD_GET_CURRENT_PAGE, struct.pack("<B", UI_TEST_CMD_GET_CURRENT_PAGE), timeout
+        )
+        name, _ = _unpack_str8(payload, 1)
+        return name
+
+    def list_tap_targets(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
+        """Every currently-hittable tap target on the current page.
+
+        Returns ``{"targets": [{"name":str,"cx":int,"cy":int,"hidden":bool}, ...],
+        "truncated": bool, "busy": bool}`` -- ``truncated`` mirrors the
+        firmware's own flag byte (uart_task_ids.h's UI_TEST_CMD_LIST_TAP_TARGETS
+        layout): True means more targets existed than BRIDGE_REPLY_MAX could
+        carry (same log_tap_targets() tree the device log dump walks), so a
+        caller relying on completeness should fall back to touch.py's
+        log_tap_targets() + the device log instead.
+
+        ``"busy"`` (2026-09-30) is ``True`` only for the zero-targets,
+        truncated=True shape -- ``count == 0 and truncated`` -- which is
+        indistinguishable on the wire from a genuinely empty page (no
+        targets, nothing truncated) UNLESS truncated is also set: a real,
+        completed walk of an empty page reports ``truncated=False``, while a
+        walk that never completed (lvgl_port_task busy/wedged past
+        UI_WALK_WAIT_TIMEOUT_MS -- see
+        lvgl_port_collect_tap_targets()'s own doc comment,
+        uart_bridge_ui_test.c's `collect_truncated`) reports zero targets AND
+        truncated=True. This is
+        the same root cause and wire signal click_by_name()'s
+        ``"walk_busy"`` result names explicitly (see
+        UI_TEST_CLICK_WALK_BUSY); LIST_TAP_TARGETS has no equivalent
+        dedicated result byte to extend (it already reports count/truncated
+        unconditionally, never a click-style result code), so this method
+        derives the same distinction from the two fields it already gets
+        back rather than requiring a firmware wire change. A caller that
+        needs a real answer (not just "the page happened to have nothing
+        clickable") should retry on ``busy`` rather than trusting an empty
+        ``targets`` list at face value -- see cases_lcd.py's
+        ``_list_tap_targets_resolving_busy()``.
+        """
+        payload = self._query(
+            UI_TEST_CMD_LIST_TAP_TARGETS, struct.pack("<B", UI_TEST_CMD_LIST_TAP_TARGETS), timeout
+        )
+        if len(payload) < 3:
+            raise UiTestResponseError("LIST_TAP_TARGETS response too short for count/truncated bytes")
+        count = payload[1]
+        truncated = bool(payload[2])
+        offset = 3
+        targets = []
+        for _ in range(count):
+            name, offset = _unpack_str8(payload, offset)
+            if offset + 5 > len(payload):
+                raise UiTestResponseError("LIST_TAP_TARGETS response truncated in a target entry")
+            cx, cy, hidden = struct.unpack_from("<hhB", payload, offset)
+            offset += 5
+            targets.append({"name": name, "cx": cx, "cy": cy, "hidden": bool(hidden)})
+        busy = (count == 0) and truncated
+        return {"targets": targets, "truncated": truncated, "busy": busy}
+
+    def click_by_name(self, name: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
+        """Inject a tap at the named target's centre.
+
+        Returns ``{"result":"ok"|"not_found"|"ambiguous"|"hidden"|"swallowed"|"verdict_unknown"|"inject_failed"|"offscreen"|"walk_busy","cx":int,"cy":int}``
+        -- unlike touch.py's inject()/set_tap_dump(), a firmware-level refusal
+        here (target not found, ambiguous, or hidden) is not an
+        exceptional/transport failure, so it comes back as a result code
+        rather than raising: only delivery failure or a malformed reply
+        raises :class:`UiTestQueryError`/:class:`UiTestResponseError`.
+        ``"swallowed"`` means the press was delivered but
+        screen_idle_touch_swallow() ate it (a wake or ERROR_HOLD dismissal) --
+        the target was found and tapped, but nothing under it ran; a caller
+        should retry the click rather than treat it as a defect.
+        ``"verdict_unknown"`` (2026-09-24) means the press was injected (the
+        target was found and visible) but kiln_ui_click_by_name()'s own
+        bounded wait for the swallow verdict timed out before it could be
+        read -- a slow LVGL flush can outrun that wait even on a press that
+        landed cleanly. This is neither "ok" nor "swallowed": a caller must
+        not count it as a pass, and must not attribute it as a genuine
+        defect either -- see bench_test/cases_lcd.py's handling for the
+        expected shape (judged only by the observable page change that
+        follows, never blind re-clicked since the press may have landed,
+        its own distinct attribution, never folded into "ok" or
+        "swallowed").
+        ``"inject_failed"`` (2026-09-24) means lvgl_port_inject_touch() itself
+        refused the press (returned 0, its documented "never queued"
+        sentinel) -- no press was ever sent, so unlike "verdict_unknown"
+        there is nothing that might have landed. A caller must treat this
+        exactly like "not_found"/"ambiguous"/"hidden": never a pass, and
+        never grounds to poll for a page change this click could not have
+        caused.
+        """
+        payload = self._query(UI_TEST_CMD_CLICK_BY_NAME, _pack_click_request(name), timeout)
+        if len(payload) < 6:
+            raise UiTestResponseError(f"CLICK_BY_NAME response too short: {len(payload)} bytes")
+        result_code, cx, cy = struct.unpack_from("<Bhh", payload, 1)
+        result = _CLICK_RESULT_NAMES.get(result_code)
+        if result is None:
+            raise UiTestResponseError(f"unknown CLICK_BY_NAME result code {result_code}")
+        return {"result": result, "cx": cx, "cy": cy}
+
+    def enter_pin(self, pin: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
+        """Type ``pin``'s digits into an already-open PIN keypad overlay
+        (``ui_lcd_keypad.c``) via :meth:`click_by_name`, then press "OK".
+
+        Each digit and "OK" are individual buttonmatrix keys, each its own
+        named tap target (``kiln_ui.c``'s buttonmatrix walk reports the key's
+        own text as its name, e.g. "0".."9", "OK") -- so this is just a
+        sequence of ordinary click_by_name() calls, not a new wire command.
+        This method does not itself poll for the keypad appearing first or
+        for the submit's effect afterward (closing on a correct PIN,
+        resetting the dot count on a wrong one, or a lockout message) --
+        same click-then-read race as any other click_by_name() use here, so
+        callers must poll with their own ``_wait_for_*`` helper before
+        trusting the result of an entry, exactly as they already do around
+        any other click_by_name().
+
+        Returns ``{"digit_results": [...], "ok_result": {...}}``, each entry
+        shaped like click_by_name()'s own return value. A caller can inspect
+        ``digit_results`` for a "not_found"/"hidden"/"ambiguous" entry (e.g.
+        the keypad closed mid-entry) without this method itself raising or
+        guessing what that means for the case's verdict.
+
+        Any digit click, and the trailing "OK" click, is retried once, after
+        a short poll, if it comes back "not_found" -- see
+        ``_ENTER_PIN_RETRY_POLL_S``'s comment for the actual mechanism.
+        "not_found" here does not mean the key is genuinely absent from the
+        keypad. CLICK_BY_NAME reports NOT_FOUND when either the name is
+        absent from the walk, OR the 300 ms request-to-completion window
+        (UI_WALK_WAIT_TIMEOUT_MS) expired while lvgl_port_task was busy (or,
+        practically never, the 1 s requester-lock wait
+        (UI_WALK_LOCK_TIMEOUT_MS, `s_ui_walk.lock`) expired -- that lock only
+        serializes UI_TEST requesters against each other, is never taken by
+        lvgl_port_task, and in practice is never contended). The 300 ms
+        window starts when the request is issued and covers both pickup and
+        the walk itself, not a budget that starts only after pickup. Nothing
+        is injected in either case, so one retry after a short pause is
+        safe; it cannot distinguish the two -- the pause only gives
+        lvgl_port_task time to finish whatever it was busy with, and the
+        retry gets its own fresh 300 ms window. A click already reported clicked
+        ("ok"/"swallowed"/"verdict_unknown"/anything but "not_found") is
+        never re-sent, since doing so on a digit that actually landed would
+        type it twice and corrupt the PIN. 2026-09-25 bench evidence
+        (20260925T191709Z_lcd/summary.json): all 6 wrong-PIN digit clicks
+        reported "ok", yet the trailing "OK" click reported "not_found".
+        2026-09-30 bench evidence (20260930T043143Z_lcd_lcd19_rerun_0929_59c9306a/
+        summary.json): digits 1-5 of a 6-digit wrong-PIN entry reported "ok",
+        and digit 6 itself (not "OK") reported "not_found" -- the same race,
+        just landing on an interior digit instead of the first one or the
+        trailing "OK", proving the race is not specific to either endpoint of
+        the sequence. The retry therefore now applies to every digit click,
+        not only the first -- always gated on "not_found" so a click already
+        confirmed to have landed is never re-sent, since re-clicking a
+        landed "OK" would submit/resubmit and corrupt the wrong-PIN-reset or
+        granted-PIN path it just triggered.
+        """
+        digit_results = []
+        for ch in pin:
+            click_start = time.monotonic()
+            click = self.click_by_name(ch, timeout=timeout)
+            if click.get("result") in ("not_found", "walk_busy"):
+                # 2026-09-30 (LCD-19 bench evidence, 20260930T043143Z_lcd_lcd19_rerun):
+                # a 6-digit wrong-PIN entry saw digits 1-5 all report "ok" and
+                # digit 6 (the LAST digit, not "OK") report "not_found" --
+                # the same "widget momentarily not clickable" race this
+                # method already retried for the first digit (keypad just
+                # raised) and for "OK" (post-last-digit transition), just
+                # landing on a different digit this time. There is nothing
+                # about the race that is actually specific to index 0 -- any
+                # digit click can land in the same momentary window -- so the
+                # one-shot retry now applies to every digit, not only the
+                # first. This never re-clicks a digit already reported
+                # clicked (anything but "not_found"), for the same
+                # corrupt-the-PIN reason given above for "OK".
+                time.sleep(_ENTER_PIN_RETRY_POLL_S)
+                click = self.click_by_name(ch, timeout=timeout)
+            click = dict(click)
+            click["elapsed_s"] = time.monotonic() - click_start
+            digit_results.append(click)
+        ok_start = time.monotonic()
+        ok_result = self.click_by_name("OK", timeout=timeout)
+        if ok_result.get("result") in ("not_found", "walk_busy"):
+            time.sleep(_ENTER_PIN_RETRY_POLL_S)
+            ok_result = self.click_by_name("OK", timeout=timeout)
+        ok_result = dict(ok_result)
+        ok_result["elapsed_s"] = time.monotonic() - ok_start
+        return {"digit_results": digit_results, "ok_result": ok_result}
+
+    def _dots_text(self, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> Optional[str]:
+        """Current text of the masked-PIN-dots read-only label, or ``None``
+        if it can't be determined right now (a query failure, or the current
+        tap-target listing has no such entry -- e.g. no keypad is open).
+
+        This label (``ui_lcd_keypad.c``'s ``s_info_label``, shown via
+        ``refresh_dots()``) needs no firmware tag: ``kiln_ui.c``'s existing
+        generic grandchild-label walk (~line 556) already lets a clickable
+        container (the keypad msgbox's content area) "borrow" a descendant
+        label's live text into its own tap-target entry, so the dots text
+        (a run of ``'*'``, one per digit typed) shows up under that
+        container's name with no firmware change at all. Several OTHER tap
+        targets legitimately report an empty name too (the fullscreen
+        backdrop, the msgbox root) -- an empty string trivially satisfies
+        "every character is '*'", so those must be excluded explicitly
+        rather than relying on the character-set check alone. Real bench
+        evidence (logs/bench_test/20260930T090222Z_lcd/summary.json)
+        confirmed both the false-positive empty names AND -- separately --
+        that a genuinely lost digit/OK click can leave the dots count short
+        of what was clicked (the bug this whole verified-entry path exists
+        to catch).
+
+        Zero non-empty all-``'*'`` names means "no keypad open" (or the
+        borrowed name isn't in this reply for some other reason) and reads
+        as ``""`` -- a definite, trustworthy answer of "0 digits shown", not
+        an unknown. Two or more DISTINCT non-empty all-``'*'`` names is the
+        only genuinely ambiguous case, and reads as ``None``."""
+        try:
+            tap = self.list_tap_targets(timeout=timeout)
+        except Exception:
+            return None
+        candidates = {
+            t.get("name", "")
+            for t in tap.get("targets", [])
+            if not t.get("hidden")
+            and isinstance(t.get("name"), str)
+            and t.get("name")
+            and set(t.get("name")) == {"*"}
+        }
+        if not candidates:
+            # No non-empty all-'*' name anywhere: no keypad open, or 0
+            # digits typed so far -- either way, trustworthy as "0".
+            return ""
+        if len(candidates) > 1:
+            # Two or more DISTINCT '*'-only texts: genuinely ambiguous.
+            return None
+        return next(iter(candidates))
+
+    def _wait_for_dot_count(
+        self,
+        expected_count: int,
+        timeout: float = _DOT_POLL_TIMEOUT_S,
+        interval: float = _DOT_POLL_INTERVAL_S,
+    ) -> "tuple[bool, Optional[str], float]":
+        """Poll :meth:`_dots_text` until it reads exactly ``expected_count``
+        ``'*'`` characters, or `timeout` elapses. Returns ``(reached,
+        last_text, elapsed_s)`` -- `last_text` is whatever the last read was
+        (possibly ``None``), kept only so a caller can report an observed
+        count for diagnostics, never the PIN itself (a run of ``'*'``
+        carries no digit information)."""
+        start = time.monotonic()
+        last: Optional[str] = None
+        while True:
+            read = self._dots_text(timeout=DEFAULT_REPLY_TIMEOUT_S)
+            if read is not None:
+                last = read
+            if last is not None and len(last) == expected_count and set(last) <= {"*"}:
+                return True, last, time.monotonic() - start
+            if time.monotonic() - start >= timeout:
+                return False, last, time.monotonic() - start
+            time.sleep(interval)
+
+    def enter_pin_verified(self, pin: str, timeout: float = DEFAULT_REPLY_TIMEOUT_S) -> dict:
+        """LCD-19's entry path: like :meth:`enter_pin`, but confirms each
+        digit was actually APPLIED by ``bm_value_changed_cb()``
+        (``ui_lcd_keypad.c``) before typing the next one or pressing "OK".
+
+        :meth:`click_by_name`'s "ok" result only confirms a press was
+        injected -- not that firmware's buttonmatrix handler ran and
+        incremented ``s_ks.entry.len``. 2026-09-30 bench evidence
+        (logs/bench_test/20260930T090222Z_lcd) saw all 6 digit clicks and
+        the trailing "OK" click report "ok", yet the stabilized read
+        afterward still showed the keypad open with a 5-``'*'`` dots label
+        -- a click (a digit, or OK itself) was silently lost. This method
+        polls the masked-PIN-dots read-only label (see :meth:`_dots_text`)
+        after each digit click and requires the count to reach ``i + 1``
+        before continuing.
+
+        Never re-taps a digit -- a duplicate digit corrupts the PIN more
+        than a missing one does, so a stalled dot count stops entry
+        immediately rather than retrying the click. "OK" is pressed only
+        when every digit's dot count was confirmed, which by construction
+        already means the final count equals ``len(pin)`` -- no separate
+        pre-OK count check is needed.
+
+        Returns a dict shaped like :meth:`enter_pin`'s
+        (``{"digit_results": [...], "ok_result": {...} | None}``), plus:
+
+        - ``"entry_incomplete"``: ``True`` only when entry stopped early
+          (a digit's dot count never advanced in time). "OK" is never
+          pressed when this is ``True``, and ``"ok_result"`` is ``None``.
+        - ``"expected_dot_count"`` / ``"observed_dot_count"``: counts only
+          (never which digit, never the PIN) -- present only when
+          `entry_incomplete` is ``True``.
+        - ``"dot_wait_s"``: the wait time for each digit's dot-count
+          confirmation, one entry per digit attempted (timings only, safe
+          to log same as `elapsed_s` elsewhere in this module).
+        """
+        digit_results = []
+        dot_wait_s = []
+        for i, ch in enumerate(pin):
+            click_start = time.monotonic()
+            click = self.click_by_name(ch, timeout=timeout)
+            if click.get("result") in ("not_found", "walk_busy"):
+                time.sleep(_ENTER_PIN_RETRY_POLL_S)
+                click = self.click_by_name(ch, timeout=timeout)
+            click = dict(click)
+            click["elapsed_s"] = time.monotonic() - click_start
+            digit_results.append(click)
+
+            # A click that does not itself report "ok" stops entry
+            # immediately: OK must never be pressed on a PIN we know is
+            # incomplete, and typing further digits after a known-bad click
+            # only corrupts the PIN further.
+            if click.get("result") != "ok":
+                dot_wait_s.append(0.0)
+                return {
+                    "digit_results": digit_results,
+                    "ok_result": None,
+                    "entry_incomplete": True,
+                    "expected_dot_count": i + 1,
+                    "observed_dot_count": None,
+                    "dot_wait_s": dot_wait_s,
+                }
+
+            reached, observed, waited = self._wait_for_dot_count(i + 1)
+            dot_wait_s.append(waited)
+            if not reached:
+                return {
+                    "digit_results": digit_results,
+                    "ok_result": None,
+                    "entry_incomplete": True,
+                    "expected_dot_count": i + 1,
+                    "observed_dot_count": len(observed) if observed is not None else None,
+                    "dot_wait_s": dot_wait_s,
+                }
+
+        ok_start = time.monotonic()
+        ok_result = self.click_by_name("OK", timeout=timeout)
+        if ok_result.get("result") in ("not_found", "walk_busy"):
+            time.sleep(_ENTER_PIN_RETRY_POLL_S)
+            ok_result = self.click_by_name("OK", timeout=timeout)
+        ok_result = dict(ok_result)
+        ok_result["elapsed_s"] = time.monotonic() - ok_start
+        return {
+            "digit_results": digit_results,
+            "ok_result": ok_result,
+            "entry_incomplete": False,
+            "dot_wait_s": dot_wait_s,
+        }
+
+    def _query(self, subcommand: int, payload: bytes, timeout: float) -> bytes:
+        with self._query_lock:
+            pending = _Pending(subcommand)
+            with self._pending_lock:
+                self._pending = pending
+            try:
+                result = self.link.send(
+                    dst_task=self.task_id,
+                    src_task=self.task_id,
+                    payload=payload,
+                    dst_device=Device.ESP,
+                )
+                if not result.ok:
+                    raise UiTestQueryError(
+                        f"UI_TEST request 0x{subcommand:02X} not delivered: {result.describe()}",
+                        send_result=result,
+                    )
+                if not pending.event.wait(timeout):
+                    raise UiTestQueryError(
+                        f"UI_TEST request 0x{subcommand:02X} was ACKed but no reply "
+                        f"arrived within {timeout:.1f} s"
+                    )
+                if pending.error is not None:
+                    raise pending.error
+                return pending.value  # type: ignore[return-value]
+            finally:
+                with self._pending_lock:
+                    if self._pending is pending:
+                        self._pending = None
+
+    # -- receive -------------------------------------------------------------
+    def _consume_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                frame = self._inbox.get(timeout=0.2)
+            except queue.Empty:
+                continue  # poll interval so close() is noticed promptly
+            try:
+                self._handle_reply(frame)
+            except Exception:  # pragma: no cover - never kill the consumer
+                log.exception("error handling UI_TEST frame")
+
+    def _handle_reply(self, frame: Frame) -> None:
+        if not frame.payload:
+            log.warning("dropping empty UI_TEST response")
+            return
+        subcommand = frame.payload[0]
+
+        with self._pending_lock:
+            pending = self._pending
+        if pending is None or pending.subcommand != subcommand:
+            # Nothing outstanding: a stale reply to a query we already gave
+            # up on. Nothing on this task is ever pushed unsolicited.
+            log.debug("ignoring unsolicited UI_TEST response 0x%02X", subcommand)
+            return
+        pending.value = frame.payload
+        pending.event.set()
+
+
+#: uart_bridge_ui_test.c's CLICK_BY_NAME handler copies the name into a local
+#: `char name[32]` and null-terminates it, so the wire name must fit in 31
+#: bytes -- one byte short of the buffer -- or the firmware would otherwise
+#: truncate it silently. Refuse here instead of shipping a truncated name.
+_MAX_CLICK_NAME_BYTES = 31
+
+
+def _pack_click_request(name: str) -> bytes:
+    """Encode a CLICK_BY_NAME request.
+
+    uart_task_ids.h's CLICK_BY_NAME layout is ``byte0 = subcommand,
+    bytes1..(length-1) = ASCII target name, NOT null-terminated`` -- unlike
+    every reply on this task (GET_CURRENT_PAGE/LIST_TAP_TARGETS), the request
+    carries no length-prefix byte of its own: the frame's own `length` field
+    is the only length. A length-prefixed encoding (as an earlier, now-deleted
+    ``_pack_str8`` helper produced) would silently corrupt the name on the
+    wire -- the firmware reads the prefix byte as the first character of the
+    name and everything shifts by one.
+    """
+    if not name:
+        raise ValueError("target name must not be empty")
+    try:
+        encoded = name.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"target name {name!r} is not ASCII: {exc}") from exc
+    if len(encoded) > _MAX_CLICK_NAME_BYTES:
+        raise ValueError(
+            f"target name too long: {len(encoded)} bytes > {_MAX_CLICK_NAME_BYTES} "
+            "(uart_bridge_ui_test.c's CLICK_BY_NAME name buffer is 32 bytes "
+            "including the NUL terminator)"
+        )
+    return struct.pack("<B", UI_TEST_CMD_CLICK_BY_NAME) + encoded

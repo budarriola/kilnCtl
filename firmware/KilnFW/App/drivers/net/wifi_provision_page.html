@@ -1,0 +1,1151 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kilnCtl Wi-Fi Setup</title>
+<link rel="stylesheet" href="/theme.css">
+<script>(function(){var t=localStorage.getItem('kilnctl-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();</script>
+<!-- UI_PLAN.md Web section 4 items 1/2/4/5 -- see nav.js's header comment
+     for why `defer` matters to this page's own inline <script> below.
+     Reachable during AP-only provisioning too (see nav.js/app.js's own
+     comments): both are registered on the same s_server this file's
+     httpd_start() creates, regardless of provisioning state. -->
+<script defer src="/nav.js"></script>
+<script defer src="/app.js"></script>
+<style>
+  /* Page-local palette (docs/UI_THEME.md / App/drivers/ui/ui_theme.h, TODO.md
+     10.6/10.6a). The shared --ui-* palette and .theme-btn now live in
+     /theme.css (linked above, EMBED_TXTFILES'd from App/drivers/http/theme.css) --
+     this block keeps only what's specific to this page: the --bg/--fg/etc
+     names the existing light/dark toggle uses as its interface (unchanged
+     behaviour); only the DARK variant points at the --ui-* values instead of
+     its own hex, so toggled-dark and default (no preference) match the LCD,
+     while explicit light mode is untouched. */
+  :root {
+    /* --border is #888, matching every other page's light palette. It was
+       #ccc here, which is why the owner reported "wifi setup top banner is
+       diffrent stile from others": nav.js injects the same topbar everywhere
+       and it draws its bottom edge with var(--border), so this page alone
+       rendered that edge in a paler grey. Measured before the fix:
+       rgb(204,204,204) here against rgb(136,136,136) on /settings/zones,
+       with identical geometry otherwise. */
+    --bg: #fff; --fg: #111; --border: #888; --input-bg: #fff; --input-border: #999;
+    --button-bg: #f2f2f2; --hover-bg: #eee; --link: #06c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--ui-bg); --fg: var(--ui-text-primary); --border: var(--ui-text-secondary);
+      --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+      --button-bg: var(--ui-card); --hover-bg: var(--ui-card); --link: var(--ui-accent-3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: var(--ui-bg); --fg: var(--ui-text-primary); --border: var(--ui-text-secondary);
+    --input-bg: var(--ui-card); --input-border: var(--ui-text-secondary);
+    --button-bg: var(--ui-card); --hover-bg: var(--ui-card); --link: var(--ui-accent-3);
+  }
+  /* WEB_UI_RESPONSIVE.md sec 6: shared shell width instead of a fixed
+     420px cap -- see main_page.html's identical comment for the rationale
+     (clamp() earns desktop width, still shrinks to fit a phone below it). */
+  body { font-family: sans-serif; max-width: var(--kc-shell-max); margin: 2em auto; padding: 0 1em;
+         background: var(--bg); color: var(--fg); }
+  /* .theme-btn removed 2026-08-21: was a byte-for-byte duplicate of the one
+     rule in /theme.css (which loads first), and being `position: fixed`
+     made it overlap nav.js's topbar on a phone-width viewport -- see
+     theme.css's own comment on .theme-btn for the fix. */
+  a { color: var(--link); }
+  h1 { font-size: 1.2em; }
+  h2 { font-size: 1em; margin-top: 2em; border-top: 1px solid var(--border); padding-top: 1em; }
+  label { display: block; margin-top: 1em; font-weight: bold; }
+  input[type=text], input[type=password] {
+    width: 100%; box-sizing: border-box; padding: 0.5em; font-size: 1em;
+    background: var(--input-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius);
+  }
+  /* min-height now shared via theme.css's `button {}` rule (UI_PLAN.md
+     Web item 2) -- .mode-toggle button below deliberately overrides it back
+     down to 2.6em, that override is unaffected by this consolidation. */
+  button {
+    margin-top: 1em; padding: 0.7em 1.5em; font-size: 1em;
+    background: var(--button-bg); color: var(--fg); border: 1px solid var(--input-border);
+    border-radius: var(--ui-radius); cursor: pointer;
+  }
+  #status { margin-top: 1em; padding: 1em; border: 1px solid var(--border); border-radius: var(--ui-radius);
+            background: var(--button-bg); }
+  #statusRows { list-style: none; padding: 0; margin: 0; }
+  #statusRows li { display: flex; justify-content: space-between; padding: 0.4em 0;
+                    border-bottom: 1px solid var(--border); }
+  #statusRows li:last-child { border-bottom: none; }
+  .status-label { font-weight: bold; opacity: 0.8; }
+  .status-value { text-align: right; font-family: monospace; }
+  .rssi-excellent { color: var(--ui-accent-4); } .rssi-good { color: var(--ui-accent-4); }
+  .rssi-fair { color: var(--ui-accent-1); } .rssi-weak { color: var(--ui-accent-5); }
+  ul#networks { list-style: none; padding: 0; margin-top: 0.5em; }
+  ul#networks li { padding: 0.5em; border: 1px solid var(--border); border-radius: var(--ui-radius);
+                    margin-bottom: 0.3em; min-height: var(--ui-touch); box-sizing: border-box;
+                    cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+  ul#networks li:hover { background: var(--hover-bg); }
+  ul#networks li.connected { border-color: var(--link); }
+  ul#networks .net-left { display: flex; align-items: center; gap: 0.5em; overflow: hidden; }
+  ul#networks .net-ssid { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  ul#networks .net-right { display: flex; align-items: center; gap: 0.5em; flex-shrink: 0; }
+  .badge-saved { font-size: 0.75em; padding: 0.1em 0.4em; border-radius: 3px;
+                 background: var(--link); color: #fff; flex-shrink: 0; }
+  /* min-height 32px, not 0. The 0 was deliberately opting out of theme.css's
+   shared button floor to keep this button compact inside a network row, but
+   it measured 58x25 -- under the size a fingertip reliably hits, on a control
+   that DROPS a saved network. The row still fits: 32px is the touch floor,
+   not the 40px the topbar buttons use. */
+.forget-btn { min-height: 32px; margin-top: 0; padding: 0.3em 0.6em; font-size: 0.85em; }
+  #connectSection { margin-top: 0.5em; padding: 0.5em; border: 1px solid var(--border);
+                     border-radius: var(--ui-radius); display: none; }
+  /* #apSection had no default-hidden CSS, unlike #connectSection/#staticIpFields
+     above -- it relied entirely on applyModeUi()'s first poll() response to set
+     `style.display`. Until that first /status round-trip resolves (or if it
+     never does), BOTH #homeSection and #apSection rendered at once: two
+     "Save" buttons, two mutually-exclusive forms, on a page whose own
+     mode-toggle claims Home Wi-Fi and Access Point are exclusive states.
+     (An earlier version of this comment additionally blamed this for the
+     ui_responsive_sweep.mjs occlusion failure this page had against the
+     Stop bar -- that turned out to be a bug in the sweep itself, a
+     viewport-height measurement taken before the Stop bar's own
+     forced-visible mutation added height to the page; see
+     ui_responsive_sweep.mjs's SETUP_SCRIPT comment for the real fix. With
+     that fixed, this page passes the sweep whether or not apSection
+     defaults hidden. This rule stays because the double-form flash is a
+     genuine, independent correctness bug -- not because the sweep needs it.)
+     Defaulting to hidden here matches applyModeUi()'s own default assumption
+     (home mode) and JS still unhides it (`style.display = ''`) the moment a
+     real poll() confirms AP mode -- inline style always wins over this rule. */
+  #apSection { display: none; }
+  #connectSection label { margin-top: 0.5em; }
+  .mode-toggle { display: flex; border: 1px solid var(--input-border); border-radius: var(--ui-radius);
+                 overflow: hidden; margin-top: 0.5em; }
+  .mode-toggle button { flex: 1; min-height: 2.6em; margin: 0; border: none; border-radius: 0; padding: 0.7em 0.5em;
+                         background: var(--button-bg); color: var(--fg); }
+  .mode-toggle button.active { background: var(--link); color: #fff; }
+  .mode-toggle button + button { border-left: 1px solid var(--input-border); }
+  .hint { color: var(--fg); opacity: 0.7; font-size: 0.85em; margin-top: 0.3em; }
+  /* TODO.md 10.9: AP-join QR code, client-side generated -- see the
+     KilnQr IIFE in the script block below (a byte-mode-only port of
+     qrcodegen.c, the same MIT-licensed Nayuki library LVGL's lv_qrcode
+     already vendors for the LCD side of this feature). */
+  #apQrSection { margin-top: 1em; padding: 1em; border: 1px solid var(--border);
+                 border-radius: var(--ui-radius); text-align: center; }
+  #apQrSection canvas { background: #fff; border-radius: 4px; max-width: 100%; height: auto; } /* lint-color-ok: QR modules need real black-on-white quiet-zone contrast to scan; must stay white regardless of theme, not var(--bg) (goes dark in dark mode). */
+</style>
+</head>
+<body>
+<button id="themeBtn" class="theme-btn" title="Toggle dark/light theme"></button>
+<a href="/" id="mainLink" style="display:none">&larr; Main page</a>
+<!-- <h1>kilnCtl Wi-Fi Setup</h1> removed 2026-08-21 (rework item 5): nav.js's
+     topbar now shows this page's name ("Wi-Fi Setup", stripped from
+     <title> above by nav.js's pageTitle()) in the brand's old spot, so the
+     heading duplicated it. -->
+<div id="status">
+  <ul id="statusRows"></ul>
+</div>
+
+<h2>Mode</h2>
+<div class="mode-toggle">
+  <button id="modeHomeBtn" type="button">Home Wi-Fi</button>
+  <button id="modeApBtn" type="button">Access Point</button>
+</div>
+<div class="hint">Home Wi-Fi joins the network below (this board's own access point stays
+  up as a fallback until that join is confirmed). Access Point keeps this board's own
+  network on permanently and never attempts to join anything else.</div>
+
+<div id="homeSection">
+  <h2>Networks</h2>
+  <button id="scanBtn" type="button">Scan</button>
+  <ul id="networks"><li>Press Scan to list nearby networks.</li></ul>
+
+  <div id="connectSection">
+    <label for="ssid">Network name (SSID)</label>
+    <input type="text" id="ssid" name="ssid" maxlength="32" readonly disabled>
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" maxlength="64">
+    <button id="connectSubmitBtn" type="button">Connect</button>
+    <button id="connectCancelBtn" type="button">Cancel</button>
+  </div>
+
+  <h2>IP Address</h2>
+  <div class="mode-toggle">
+    <button id="ipModeDhcpBtn" type="button">DHCP</button>
+    <button id="ipModeStaticBtn" type="button">Static</button>
+  </div>
+  <div class="hint">DHCP (default) lets the home network assign this board's address
+    automatically. Static lets you fix it yourself.</div>
+  <form id="ipConfigForm">
+    <div id="staticIpFields" style="display:none">
+      <label for="staticIp">IP address</label>
+      <input type="text" id="staticIp" name="ip" maxlength="15" placeholder="192.168.1.50">
+      <label for="staticNetmask">Netmask</label>
+      <input type="text" id="staticNetmask" name="netmask" maxlength="15" placeholder="255.255.255.0">
+      <label for="staticGateway">Gateway</label>
+      <input type="text" id="staticGateway" name="gateway" maxlength="15" placeholder="192.168.1.1">
+      <label for="staticDns">DNS server (optional, defaults to the gateway)</label>
+      <input type="text" id="staticDns" name="dns" maxlength="15" placeholder="1.1.1.1">
+      <label for="staticDns2">Second DNS server (optional)</label>
+      <input type="text" id="staticDns2" name="dns2" maxlength="15" placeholder="8.8.8.8">
+    </div>
+    <button type="submit">Save</button>
+  </form>
+</div>
+
+<div id="apSection">
+  <h2>This board's access point</h2>
+  <div id="apQrSection">
+    <canvas id="apQrCanvas" width="200" height="200"></canvas>
+    <div class="hint">Scan with a phone camera to join this network directly (a second
+      device already on this page doesn't need it).</div>
+  </div>
+  <form id="apForm">
+    <label for="apSsid">Network name (SSID)</label>
+    <input type="text" id="apSsid" name="ap_ssid" maxlength="32" required>
+    <label for="apPassword">Password</label>
+    <input type="password" id="apPassword" name="ap_password" maxlength="64">
+    <div class="hint">Leave the password blank for an open (unsecured) network. A non-empty
+      password must be 8-63 characters (WPA2).</div>
+    <button type="submit">Save</button>
+  </form>
+</div>
+
+<script>
+/* ---- TODO.md 10.9: client-side QR encoder (no CDN/external requests, per
+   theme.css's own embedding precedent) --------------------------------
+   Minimal QR Code encoder, byte-mode only (sufficient for the WIFI: URI
+   below), ported line-for-line from Project Nayuki's "QR Code generator
+   library (C)" (MIT License) -- the same library already vendored in this
+   repo at components/lvgl/src/libs/qrcode/qrcodegen.c and used by LVGL's
+   lv_qrcode widget for the LCD side of this feature (see qrcodegen.h's
+   header comment for the upstream project). Every ported function mirrors
+   that C source's logic and constant tables (Reed-Solomon generator,
+   function-module placement, format/version info, masking + penalty
+   scoring) exactly; only the numeric/alphanumeric/kanji/ECI segment modes
+   were dropped, since a WIFI:/http: string always needs byte mode anyway.
+   Verified independently: encoded output for several WIFI:/URL strings
+   (short/long SSID+password, escaped special characters, empty password,
+   non-ASCII/emoji) was rendered to an image and round-tripped through
+   OpenCV's cv2.QRCodeDetector (a decoder with no code in common with this
+   encoder) -- all decoded back to the exact original string. See
+   TODO.md 10.9's status note for the verification session.
+   Original copyright notice (applies to the ported logic):
+     Copyright (c) Project Nayuki. (MIT License)
+     https://www.nayuki.io/page/qr-code-generator-library */
+var KilnQr = (function () {
+  'use strict';
+
+  var ECC_CODEWORDS_PER_BLOCK = [
+    [-1, 7, 10, 15, 20, 26, 18, 20, 24, 30, 18, 20, 24, 26, 30, 22, 24, 28, 30, 28, 28, 28, 28, 30, 30, 26, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26, 26, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28],
+    [-1, 13, 22, 18, 26, 18, 24, 18, 22, 20, 24, 28, 26, 24, 20, 30, 24, 28, 28, 26, 30, 28, 30, 30, 30, 30, 28, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+    [-1, 17, 28, 22, 16, 22, 28, 26, 26, 24, 28, 24, 28, 22, 24, 24, 30, 28, 28, 26, 28, 30, 24, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30],
+  ];
+  var NUM_ERROR_CORRECTION_BLOCKS = [
+    [-1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 4, 4, 6, 6, 6, 6, 7, 8, 8, 9, 9, 10, 12, 12, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 24, 25],
+    [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16, 17, 17, 18, 20, 21, 23, 25, 26, 28, 29, 31, 33, 35, 37, 38, 40, 43, 45, 47, 49],
+    [-1, 1, 1, 2, 2, 4, 4, 6, 6, 8, 8, 8, 10, 12, 16, 12, 17, 16, 18, 21, 20, 23, 23, 25, 27, 29, 34, 34, 35, 38, 40, 43, 45, 48, 51, 53, 56, 59, 62, 65, 68],
+    [-1, 1, 1, 2, 4, 4, 4, 5, 6, 8, 8, 11, 11, 16, 16, 18, 16, 19, 21, 25, 25, 25, 34, 30, 32, 35, 37, 40, 42, 45, 48, 51, 54, 57, 60, 63, 66, 70, 74, 77, 81],
+  ];
+  var PENALTY_N1 = 3, PENALTY_N2 = 3, PENALTY_N3 = 40, PENALTY_N4 = 10;
+  var ECC_LOW = 0, ECC_MEDIUM = 1, ECC_HIGH = 3;
+
+  function getNumRawDataModules(ver) {
+    var result = (16 * ver + 128) * ver + 64;
+    if (ver >= 2) {
+      var numAlign = Math.floor(ver / 7) + 2;
+      result -= (25 * numAlign - 10) * numAlign - 55;
+      if (ver >= 7) result -= 36;
+    }
+    return result;
+  }
+
+  function getNumDataCodewords(version, ecl) {
+    return Math.floor(getNumRawDataModules(version) / 8)
+      - ECC_CODEWORDS_PER_BLOCK[ecl][version] * NUM_ERROR_CORRECTION_BLOCKS[ecl][version];
+  }
+
+  function numCharCountBitsByte(version) {
+    return version <= 9 ? 8 : 16;
+  }
+
+  // ---- Bit buffer (MSB-first, matches qrcodegen.c's appendBitsToBuffer) ----
+  function BitBuf() { this.bits = []; }
+  BitBuf.prototype.append = function (val, numBits) {
+    for (var i = numBits - 1; i >= 0; i--) this.bits.push((val >>> i) & 1);
+  };
+  BitBuf.prototype.toBytes = function () {
+    var out = new Uint8Array(Math.ceil(this.bits.length / 8));
+    for (var i = 0; i < this.bits.length; i++) {
+      if (this.bits[i]) out[i >> 3] |= 1 << (7 - (i & 7));
+    }
+    return out;
+  };
+
+  // ---- GF(256) / Reed-Solomon ----
+  function finiteFieldMultiply(x, y) {
+    var z = 0;
+    for (var i = 7; i >= 0; i--) {
+      z = ((z << 1) ^ ((z >>> 7) * 0x11d)) & 0xff;
+      z ^= ((y >>> i) & 1) * x;
+      z &= 0xff;
+    }
+    return z;
+  }
+
+  function calcReedSolomonGenerator(degree) {
+    var result = new Uint8Array(degree);
+    result[degree - 1] = 1;
+    var root = 1;
+    for (var i = 0; i < degree; i++) {
+      for (var j = 0; j < degree; j++) {
+        result[j] = finiteFieldMultiply(result[j], root);
+        if (j + 1 < degree) result[j] ^= result[j + 1];
+      }
+      root = finiteFieldMultiply(root, 0x02);
+    }
+    return result;
+  }
+
+  function calcReedSolomonRemainder(data, generator, degree) {
+    var result = new Uint8Array(degree);
+    for (var i = 0; i < data.length; i++) {
+      var factor = data[i] ^ result[0];
+      for (var k = 0; k < degree - 1; k++) result[k] = result[k + 1];
+      result[degree - 1] = 0;
+      for (var j = 0; j < degree; j++) result[j] ^= finiteFieldMultiply(generator[j], factor);
+    }
+    return result;
+  }
+
+  function addEccAndInterleave(dataCodewords, version, ecl) {
+    var numBlocks = NUM_ERROR_CORRECTION_BLOCKS[ecl][version];
+    var blockEccLen = ECC_CODEWORDS_PER_BLOCK[ecl][version];
+    var rawCodewords = Math.floor(getNumRawDataModules(version) / 8);
+    var dataLen = getNumDataCodewords(version, ecl);
+    if (dataCodewords.length !== dataLen) throw new Error('data length mismatch');
+    var numShortBlocks = numBlocks - (rawCodewords % numBlocks);
+    var shortBlockDataLen = Math.floor(rawCodewords / numBlocks) - blockEccLen;
+
+    var generator = calcReedSolomonGenerator(blockEccLen);
+    var blocks = [];
+    var eccBlocks = [];
+    var offset = 0;
+    var i, j;
+    for (i = 0; i < numBlocks; i++) {
+      var datLen = shortBlockDataLen + (i < numShortBlocks ? 0 : 1);
+      var block = dataCodewords.slice(offset, offset + datLen);
+      offset += datLen;
+      blocks.push(block);
+      eccBlocks.push(calcReedSolomonRemainder(block, generator, blockEccLen));
+    }
+
+    var result = new Uint8Array(rawCodewords);
+    var k = 0;
+    for (j = 0; j < shortBlockDataLen + 1; j++) {
+      for (i = 0; i < numBlocks; i++) {
+        if (j < blocks[i].length) result[k++] = blocks[i][j];
+      }
+    }
+    for (j = 0; j < blockEccLen; j++) {
+      for (i = 0; i < numBlocks; i++) result[k++] = eccBlocks[i][j];
+    }
+    if (k !== rawCodewords) throw new Error('interleave count mismatch');
+    return result;
+  }
+
+  // ---- Alignment pattern positions ----
+  function getAlignmentPatternPositions(version) {
+    if (version === 1) return [];
+    var numAlign = Math.floor(version / 7) + 2;
+    var step = (version === 32) ? 26
+      : Math.floor((version * 4 + numAlign * 2 + 1) / (numAlign * 2 - 2)) * 2;
+    var result = new Array(numAlign);
+    var pos = version * 4 + 10;
+    for (var i = numAlign - 1; i >= 1; i--, pos -= step) result[i] = pos;
+    result[0] = 6;
+    return result;
+  }
+
+  // ---- Grid helpers ----
+  function makeGrid(size, fill) {
+    var g = [];
+    for (var y = 0; y < size; y++) g.push(new Array(size).fill(fill));
+    return g;
+  }
+
+  function fillRect(modules, isFunction, left, top, w, h) {
+    for (var dy = 0; dy < h; dy++) {
+      for (var dx = 0; dx < w; dx++) {
+        modules[top + dy][left + dx] = true;
+        isFunction[top + dy][left + dx] = true;
+      }
+    }
+  }
+
+  function initializeFunctionModules(version, size, modules, isFunction) {
+    fillRect(modules, isFunction, 6, 0, 1, size);
+    fillRect(modules, isFunction, 0, 6, size, 1);
+    fillRect(modules, isFunction, 0, 0, 9, 9);
+    fillRect(modules, isFunction, size - 8, 0, 8, 9);
+    fillRect(modules, isFunction, 0, size - 8, 9, 8);
+
+    var alignPos = getAlignmentPatternPositions(version);
+    var numAlign = alignPos.length;
+    for (var i = 0; i < numAlign; i++) {
+      for (var j = 0; j < numAlign; j++) {
+        if ((i === 0 && j === 0) || (i === 0 && j === numAlign - 1) || (i === numAlign - 1 && j === 0)) continue;
+        fillRect(modules, isFunction, alignPos[i] - 2, alignPos[j] - 2, 5, 5);
+      }
+    }
+    if (version >= 7) {
+      fillRect(modules, isFunction, size - 11, 0, 3, 6);
+      fillRect(modules, isFunction, 0, size - 11, 6, 3);
+    }
+  }
+
+  function setModule(modules, x, y, black) { modules[y][x] = black; }
+  function setModuleBounded(modules, size, x, y, black) {
+    if (x >= 0 && x < size && y >= 0 && y < size) modules[y][x] = black;
+  }
+  function getBit(x, i) { return ((x >>> i) & 1) !== 0; }
+
+  function drawWhiteFunctionModules(modules, size, version) {
+    var i, j, dx, dy;
+    for (i = 7; i < size - 7; i += 2) {
+      setModule(modules, 6, i, false);
+      setModule(modules, i, 6, false);
+    }
+    for (dy = -4; dy <= 4; dy++) {
+      for (dx = -4; dx <= 4; dx++) {
+        var dist = Math.max(Math.abs(dx), Math.abs(dy));
+        if (dist === 2 || dist === 4) {
+          setModuleBounded(modules, size, 3 + dx, 3 + dy, false);
+          setModuleBounded(modules, size, size - 4 + dx, 3 + dy, false);
+          setModuleBounded(modules, size, 3 + dx, size - 4 + dy, false);
+        }
+      }
+    }
+    var alignPos = getAlignmentPatternPositions(version);
+    var numAlign = alignPos.length;
+    for (i = 0; i < numAlign; i++) {
+      for (j = 0; j < numAlign; j++) {
+        if ((i === 0 && j === 0) || (i === 0 && j === numAlign - 1) || (i === numAlign - 1 && j === 0)) continue;
+        for (dy = -1; dy <= 1; dy++) {
+          for (dx = -1; dx <= 1; dx++) {
+            setModule(modules, alignPos[i] + dx, alignPos[j] + dy, dx === 0 && dy === 0);
+          }
+        }
+      }
+    }
+    if (version >= 7) {
+      var rem = version;
+      for (i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+      var bits = (version << 12) | rem;
+      for (i = 0; i < 6; i++) {
+        for (j = 0; j < 3; j++) {
+          var k = size - 11 + j;
+          setModule(modules, k, i, (bits & 1) !== 0);
+          setModule(modules, i, k, (bits & 1) !== 0);
+          bits >>>= 1;
+        }
+      }
+    }
+  }
+
+  function drawFormatBits(ecl, mask, modules, size) {
+    var table = [1, 0, 3, 2];
+    var data = (table[ecl] << 3) | mask;
+    var rem = data;
+    var i;
+    for (i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    var bits = ((data << 10) | rem) ^ 0x5412;
+
+    for (i = 0; i <= 5; i++) setModule(modules, 8, i, getBit(bits, i));
+    setModule(modules, 8, 7, getBit(bits, 6));
+    setModule(modules, 8, 8, getBit(bits, 7));
+    setModule(modules, 7, 8, getBit(bits, 8));
+    for (i = 9; i < 15; i++) setModule(modules, 14 - i, 8, getBit(bits, i));
+
+    for (i = 0; i < 8; i++) setModule(modules, size - 1 - i, 8, getBit(bits, i));
+    for (i = 8; i < 15; i++) setModule(modules, 8, size - 15 + i, getBit(bits, i));
+    setModule(modules, 8, size - 8, true);
+  }
+
+  function drawCodewords(data, dataLen, modules, isFunction, size) {
+    var i = 0;
+    for (var right = size - 1; right >= 1; right -= 2) {
+      if (right === 6) right = 5;
+      for (var vert = 0; vert < size; vert++) {
+        for (var j = 0; j < 2; j++) {
+          var x = right - j;
+          var upward = ((right + 1) & 2) === 0;
+          var y = upward ? size - 1 - vert : vert;
+          if (!isFunction[y][x] && i < dataLen * 8) {
+            var black = getBit(data[i >> 3], 7 - (i & 7));
+            modules[y][x] = black;
+            i++;
+          }
+        }
+      }
+    }
+    if (i !== dataLen * 8) throw new Error('codeword placement count mismatch');
+  }
+
+  function maskInvert(x, y, mask) {
+    switch (mask) {
+      case 0: return (x + y) % 2 === 0;
+      case 1: return y % 2 === 0;
+      case 2: return x % 3 === 0;
+      case 3: return (x + y) % 3 === 0;
+      case 4: return (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
+      case 5: return (x * y) % 2 + (x * y) % 3 === 0;
+      case 6: return ((x * y) % 2 + (x * y) % 3) % 2 === 0;
+      case 7: return (((x + y) % 2) + (x * y) % 3) % 2 === 0;
+    }
+    throw new Error('bad mask');
+  }
+
+  function applyMask(isFunction, modules, size, mask) {
+    for (var y = 0; y < size; y++) {
+      for (var x = 0; x < size; x++) {
+        if (isFunction[y][x]) continue;
+        modules[y][x] = modules[y][x] !== maskInvert(x, y, mask);
+      }
+    }
+  }
+
+  function addRunToHistory(run, history) {
+    for (var i = history.length - 1; i > 0; i--) history[i] = history[i - 1];
+    history[0] = run;
+  }
+
+  function hasFinderLikePattern(h) {
+    var n = h[1];
+    return n > 0 && h[2] === n && h[4] === n && h[5] === n &&
+      h[3] === n * 3 && (h[0] >= n * 4 || h[6] >= n * 4);
+  }
+
+  function getPenaltyScore(modules, size) {
+    var result = 0;
+    var y, x;
+    for (y = 0; y < size; y++) {
+      var runHistory = [0, 0, 0, 0, 0, 0, 0];
+      var color = false, runX = 0;
+      for (x = 0; x < size; x++) {
+        if (modules[y][x] === color) {
+          runX++;
+          if (runX === 5) result += PENALTY_N1;
+          else if (runX > 5) result++;
+        } else {
+          addRunToHistory(runX, runHistory);
+          if (!color && hasFinderLikePattern(runHistory)) result += PENALTY_N3;
+          color = modules[y][x];
+          runX = 1;
+        }
+      }
+      addRunToHistory(runX, runHistory);
+      if (color) addRunToHistory(0, runHistory);
+      if (hasFinderLikePattern(runHistory)) result += PENALTY_N3;
+    }
+    for (x = 0; x < size; x++) {
+      var runHistory2 = [0, 0, 0, 0, 0, 0, 0];
+      var color2 = false, runY = 0;
+      for (y = 0; y < size; y++) {
+        if (modules[y][x] === color2) {
+          runY++;
+          if (runY === 5) result += PENALTY_N1;
+          else if (runY > 5) result++;
+        } else {
+          addRunToHistory(runY, runHistory2);
+          if (!color2 && hasFinderLikePattern(runHistory2)) result += PENALTY_N3;
+          color2 = modules[y][x];
+          runY = 1;
+        }
+      }
+      addRunToHistory(runY, runHistory2);
+      if (color2) addRunToHistory(0, runHistory2);
+      if (hasFinderLikePattern(runHistory2)) result += PENALTY_N3;
+    }
+    for (y = 0; y < size - 1; y++) {
+      for (x = 0; x < size - 1; x++) {
+        var c = modules[y][x];
+        if (c === modules[y][x + 1] && c === modules[y + 1][x] && c === modules[y + 1][x + 1]) {
+          result += PENALTY_N2;
+        }
+      }
+    }
+    var black = 0;
+    for (y = 0; y < size; y++) for (x = 0; x < size; x++) if (modules[y][x]) black++;
+    var total = size * size;
+    var k = Math.floor((Math.abs(black * 20 - total * 10) + total - 1) / total) - 1;
+    result += k * PENALTY_N4;
+    return result;
+  }
+
+  // ---- Top level: encode a byte array as a QR code, auto version/mask, boosted ECC ----
+  function encodeBytes(dataBytes, minEcl) {
+    minEcl = (minEcl === undefined) ? ECC_LOW : minEcl;
+    var version, dataUsedBits, ecl = minEcl;
+    for (version = 1; version <= 40; version++) {
+      var dataCapacityBits = getNumDataCodewords(version, ecl) * 8;
+      var ccbits = numCharCountBitsByte(version);
+      if (dataBytes.length >= (1 << ccbits)) { dataUsedBits = -1; }
+      else { dataUsedBits = 4 + ccbits + dataBytes.length * 8; }
+      if (dataUsedBits !== -1 && dataUsedBits <= dataCapacityBits) break;
+      if (version === 40) throw new Error('data too long for any QR version');
+    }
+    for (var e = ECC_MEDIUM; e <= ECC_HIGH; e++) {
+      if (dataUsedBits <= getNumDataCodewords(version, e) * 8) ecl = e;
+    }
+
+    var buf = new BitBuf();
+    buf.append(0x4, 4); // mode indicator: byte mode
+    buf.append(dataBytes.length, numCharCountBitsByte(version));
+    for (var i = 0; i < dataBytes.length; i++) buf.append(dataBytes[i], 8);
+
+    var dataCapacityBits2 = getNumDataCodewords(version, ecl) * 8;
+    var terminatorBits = Math.min(4, dataCapacityBits2 - buf.bits.length);
+    buf.append(0, terminatorBits);
+    buf.append(0, (8 - buf.bits.length % 8) % 8);
+    var padByte = 0xec;
+    while (buf.bits.length < dataCapacityBits2) {
+      buf.append(padByte, 8);
+      padByte ^= 0xec ^ 0x11;
+    }
+
+    var dataCodewords = buf.toBytes();
+    var allCodewords = addEccAndInterleave(dataCodewords, version, ecl);
+
+    var size = version * 4 + 17;
+    var modules = makeGrid(size, false);
+    var isFunction = makeGrid(size, false);
+    initializeFunctionModules(version, size, modules, isFunction);
+    drawCodewords(allCodewords, allCodewords.length, modules, isFunction, size);
+    drawWhiteFunctionModules(modules, size, version);
+
+    var bestMask = 0, bestPenalty = Infinity, bestModules = null;
+    for (var m = 0; m < 8; m++) {
+      var candidate = modules.map(function (row) { return row.slice(); });
+      applyMask(isFunction, candidate, size, m);
+      drawFormatBits(ecl, m, candidate, size);
+      var penalty = getPenaltyScore(candidate, size);
+      if (penalty < bestPenalty) { bestPenalty = penalty; bestMask = m; bestModules = candidate; }
+    }
+
+    return { size: size, version: version, ecl: ecl, mask: bestMask, modules: bestModules };
+  }
+
+  function encodeText(text) {
+    var bytes = new TextEncoder().encode(text);
+    return encodeBytes(bytes);
+  }
+
+  return { encodeBytes: encodeBytes, encodeText: encodeText };
+})();
+
+// Escapes a value for embedding in a WIFI:/MECARD-style QR field, per the
+// format both iOS and Android camera apps parse natively (TODO.md 10.9):
+// backslash-escape the delimiter characters so a literal ';', ',', ':' or
+// '"' inside an SSID/password doesn't get parsed as a field separator.
+function wifiFieldEscape(s) {
+  return String(s).replace(/([\\;,":])/g, '\\$1');
+}
+
+// Renders the AP-join QR code (WIFI:T:WPA;S:<ssid>;P:<password>;;) onto
+// #apQrCanvas. Only called while apSection is visible (mode === 'ap'), per
+// TODO.md 10.9's placement note -- a saved-network password is never sent
+// by the backend, so this only ever encodes the board's own AP identity
+// (same status_get_handler() fields already shown as plain text above).
+function renderApQr(ssid, password) {
+  var canvas = document.getElementById('apQrCanvas');
+  if (!canvas || !ssid) return;
+  var uri = 'WIFI:T:WPA;S:' + wifiFieldEscape(ssid) + ';P:' + wifiFieldEscape(password || '') + ';;';
+  var qr;
+  try {
+    qr = KilnQr.encodeText(uri);
+  } catch (e) {
+    return; // leave any previously-rendered QR in place rather than blanking it
+  }
+  var quiet = 4;
+  var modulesPerSide = qr.size + quiet * 2;
+  var scale = Math.max(2, Math.floor(240 / modulesPerSide));
+  var px = modulesPerSide * scale;
+  canvas.width = px;
+  canvas.height = px;
+  var ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, px, px);
+  ctx.fillStyle = '#000';
+  for (var y = 0; y < qr.size; y++) {
+    for (var x = 0; x < qr.size; x++) {
+      if (qr.modules[y][x]) {
+        ctx.fillRect((x + quiet) * scale, (y + quiet) * scale, scale, scale);
+      }
+    }
+  }
+}
+
+function rssiClass(rssi) {
+  if (rssi >= -50) return 'rssi-excellent';
+  if (rssi >= -60) return 'rssi-good';
+  if (rssi >= -70) return 'rssi-fair';
+  return 'rssi-weak';
+}
+
+function rssiBar(rssi) {
+  if (rssi === -127) return '—';
+  var bars = Math.floor((rssi + 100) / 10);
+  if (bars < 0) bars = 0; if (bars > 5) bars = 5;
+  return '●'.repeat(bars) + '○'.repeat(5 - bars) + ' ' + rssi + ' dBm';
+}
+
+function renderStatus(s) {
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '';
+
+  // addRow's optional `live` flag marks the value cell kc-live-value.
+  // Mode/mDNS-hostname/AP-network-name are this board's configuration (what
+  // it's set to), not a reading that goes stale on disconnect, so those stay
+  // unmarked; connection Status, IP address, Signal (RSSI), and connected-
+  // client count all describe the link's condition RIGHT NOW and are exactly
+  // the "Wi-Fi RSSI"/"link stats" examples the live-reading definition names
+  // explicitly, so those are marked.
+  function addRow(label, value, live) {
+    var li = document.createElement('li');
+    var labelEl = document.createElement('span');
+    labelEl.className = 'status-label';
+    labelEl.textContent = label;
+    var valueEl = document.createElement('span');
+    valueEl.className = 'status-value' + (live ? ' kc-live-value' : '');
+    valueEl.textContent = value;
+    li.appendChild(labelEl);
+    li.appendChild(valueEl);
+    rows.appendChild(li);
+  }
+
+  addRow('Mode', s.mode === 'ap' ? 'Access Point' : 'Home Wi-Fi');
+
+  if (s.mode === 'home') {
+    addRow('Status', s.state === 'connected' ? 'Connected' :
+                      s.state === 'connecting' ? 'Joining…' :
+                      s.state === 'reconnecting' ? 'Reconnecting…' : 'Not connected', true);
+    if (s.ssid && s.state !== 'unprovisioned') {
+      addRow('Network', s.ssid || '—', true);
+    }
+    if (s.sta_ip) {
+      addRow('IP Address', s.sta_ip, true);
+    }
+    if (s.sta_connected) {
+      var rssiEl = document.createElement('li');
+      var label = document.createElement('span');
+      label.className = 'status-label'; label.textContent = 'Signal';
+      var value = document.createElement('span');
+      value.className = 'status-value kc-live-value ' + rssiClass(s.sta_rssi);
+      value.textContent = rssiBar(s.sta_rssi);
+      rssiEl.appendChild(label); rssiEl.appendChild(value);
+      rows.appendChild(rssiEl);
+    }
+  } else {
+    addRow('Status', 'Active');
+    addRow('AP Network', s.ap_ssid || '—');
+    addRow('Clients', s.ap_clients || '0', true);
+  }
+
+  addRow('mDNS', 'kilnctl.local');
+}
+
+/* 2026-08-20, web-GUI-only DHCP/static IP toggle. Mirrors applyModeUi()'s
+ * "only touch the DOM when the value actually changed" pattern below so
+ * repeated /status polls don't fight an operator mid-edit -- the static
+ * fields themselves are only ever repopulated from a fresh poll() when the
+ * user isn't actively focused in one (same guard poll() already uses for
+ * apSsid/apPassword). */
+let lastIpMode = null;
+function applyIpModeUi(ipMode) {
+  if (ipMode === lastIpMode) return;
+  lastIpMode = ipMode;
+  document.getElementById('ipModeDhcpBtn').classList.toggle('active', ipMode !== 'static');
+  document.getElementById('ipModeStaticBtn').classList.toggle('active', ipMode === 'static');
+  document.getElementById('staticIpFields').style.display = ipMode === 'static' ? '' : 'none';
+}
+
+function submitIpConfig(mode) {
+  var rows = document.getElementById('statusRows');
+  var body;
+  if (mode === 'dhcp') {
+    body = 'mode=dhcp';
+  } else {
+    body = 'mode=static' +
+      '&ip=' + encodeURIComponent(document.getElementById('staticIp').value) +
+      '&netmask=' + encodeURIComponent(document.getElementById('staticNetmask').value) +
+      '&gateway=' + encodeURIComponent(document.getElementById('staticGateway').value) +
+      '&dns=' + encodeURIComponent(document.getElementById('staticDns').value) +
+      '&dns2=' + encodeURIComponent(document.getElementById('staticDns2').value);
+  }
+  rows.innerHTML = '';
+  var applyingLi = document.createElement('li');
+  var applyingLabel = document.createElement('span');
+  applyingLabel.className = 'status-label'; applyingLabel.textContent = 'Status';
+  var applyingValue = document.createElement('span');
+  applyingValue.className = 'status-value'; applyingValue.textContent = 'Applying…';
+  applyingLi.appendChild(applyingLabel); applyingLi.appendChild(applyingValue);
+  rows.appendChild(applyingLi);
+  fetch('/ip_config', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(function (r) {
+      if (!r.ok) {
+        /* Show the server's own reason (e.g. the AP-subnet refusal) rather
+         * than a single generic line -- ip_config_post_handler() sends a
+         * distinct 400 body per failure kind (wifi_provision_http.c). Marked
+         * isHttpBody so the catch below can tell "we have real server text"
+         * apart from a network-level failure (TypeError etc, which also
+         * carries a non-empty .message -- without this marker that generic
+         * fallback text below would never actually be reached). */
+        return r.text().then(function (text) {
+          var e = new Error(text || 'The board rejected the IP configuration.');
+          e.isHttpBody = true;
+          throw e;
+        });
+      }
+      lastIpMode = null; /* force the next poll() to re-render the toggle/fields */
+      poll();
+    })
+    .catch(function (authErr) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      /* Review fix (2026-09-30, round 4): an HTTP-body error carries the
+       * server's own real reason text (never put into innerHTML -- built as
+       * text nodes below, same as addRow() above). Review fix (round 5): a
+       * non-HTTP-body failure here (network TypeError, abort, ...) is very
+       * often actually a SUCCESSFUL save -- reapply_sta_if_active() has the
+       * board disconnect and reconnect its STA interface to apply the new
+       * setting before the handler ever replies, which routinely drops this
+       * page's own connection out from under the fetch. The old "could not
+       * save, check address/subnet" wording was actively misleading in that
+       * common case (and shown for a plain DHCP switch too, where there's no
+       * address to check), so this fallback now says the save may well have
+       * gone through and points at reconnecting rather than treating it as
+       * a rejection. */
+      var reason = (authErr && authErr.isHttpBody && authErr.message) ? authErr.message :
+        'No response from the board. The new IP setting may already have been saved: the board ' +
+        'reconnects Wi-Fi to apply it, which can drop this page\'s connection. Reconnect (at the ' +
+        'new static address, or via the setup AP at 192.168.4.1) and check Status before trying again.';
+      rows.innerHTML = '';
+      var errLi = document.createElement('li');
+      var errLabel = document.createElement('span');
+      errLabel.className = 'status-label'; errLabel.textContent = 'Error';
+      var errValue = document.createElement('span');
+      errValue.className = 'status-value'; errValue.textContent = reason;
+      errLi.appendChild(errLabel); errLi.appendChild(errValue);
+      rows.appendChild(errLi);
+    });
+}
+
+document.getElementById('ipModeDhcpBtn').addEventListener('click', function () { submitIpConfig('dhcp'); });
+document.getElementById('ipConfigForm').addEventListener('submit', function (ev) {
+  ev.preventDefault();
+  var wantStatic = document.getElementById('ipModeStaticBtn').classList.contains('active') ||
+                    document.getElementById('staticIpFields').style.display !== 'none';
+  submitIpConfig(wantStatic ? 'static' : 'dhcp');
+});
+document.getElementById('ipModeStaticBtn').addEventListener('click', function () {
+  /* Clicking "Static" just reveals the fields -- it does not itself submit,
+   * since ip/netmask/gateway are very likely still blank at that point.
+   * The form's own Save button (above) submits whichever mode is currently
+   * shown. */
+  document.getElementById('ipModeDhcpBtn').classList.remove('active');
+  document.getElementById('ipModeStaticBtn').classList.add('active');
+  document.getElementById('staticIpFields').style.display = '';
+});
+
+let polling = false;
+let lastMode = null;
+/* Page-load auto-scan is decided ONCE, from the FIRST /status response --
+ * not fired blind at load (the old behaviour), and not re-evaluated on
+ * every subsequent poll() (poll() re-runs itself every 2s while
+ * state is connecting/reconnecting). On the ESP32 a Wi-Fi scan shares the
+ * radio with the STA connection, so scanning while already connected can
+ * briefly disrupt the very link the operator is viewing this page over --
+ * only auto-scan when we're on the home network and NOT connected, where
+ * there's nothing running on the radio to disrupt. AP mode never
+ * auto-scans either: a scan is unavailable from AP mode (see fetchNetworks'
+ * catch handler) so it would just be a guaranteed-useless fetch. If
+ * /status fails outright, fail closed -- an unknown state is not
+ * "disconnected". */
+let autoScanDecided = false;
+/* Whether this page holds the AP's REAL password (it only does when the
+ * request came in over the AP itself -- see the poll() handler). Starts
+ * false so a Save that somehow beats the first poll omits the field and
+ * leaves the stored password alone, rather than blanking it. */
+let apPasswordKnown = false;
+function applyModeUi(mode) {
+  if (mode === lastMode) return;
+  lastMode = mode;
+  document.getElementById('modeHomeBtn').classList.toggle('active', mode !== 'ap');
+  document.getElementById('modeApBtn').classList.toggle('active', mode === 'ap');
+  document.getElementById('homeSection').style.display = mode === 'ap' ? 'none' : '';
+  document.getElementById('apSection').style.display = mode === 'ap' ? '' : 'none';
+}
+
+function poll() {
+  fetch('/status').then(r => r.json()).then(s => {
+    renderStatus(s);
+    applyModeUi(s.mode);
+    if (document.activeElement !== document.getElementById('apSsid')) {
+      document.getElementById('apSsid').value = s.ap_ssid || '';
+    }
+    /* Pre-fill the board's own AP password too -- deliberately different
+     * from every saved *network* password (never sent by the backend at
+     * all, anywhere) -- see wifi_prov_get_ap_password()'s doc comment in
+     * wifi_prov.h for why this one specifically is shown.
+     *
+     * 2026-08-22: the backend now sends the real value ONLY to a client
+     * that reached this page over the board's own AP, where knowing it was
+     * already a precondition of connecting. Over the home network it sends
+     * "" with ap_password_known:false, and the field must then behave as
+     * "leave unchanged" -- NOT as "the password is blank". Getting that
+     * wrong would turn a Save the operator made to fix their SSID into a
+     * silent downgrade of the AP to an open network. */
+    var pwField = document.getElementById('apPassword');
+    apPasswordKnown = (s.ap_password_known === true);
+    if (document.activeElement !== pwField) {
+      pwField.value = s.ap_password || '';
+      if (!apPasswordKnown) {
+        pwField.placeholder = s.ap_password_set
+          ? 'unchanged -- open this page from the kiln’s own Wi-Fi to see it'
+          : 'no password set (open network)';
+      } else {
+        pwField.placeholder = '';
+      }
+    }
+    if (s.mode === 'ap') {
+      renderApQr(s.ap_ssid, s.ap_password);
+    }
+    applyIpModeUi(s.ip_mode);
+    if (document.activeElement !== document.getElementById('staticIp')) {
+      document.getElementById('staticIp').value = s.static_ip || '';
+    }
+    if (document.activeElement !== document.getElementById('staticNetmask')) {
+      document.getElementById('staticNetmask').value = s.static_netmask || '';
+    }
+    if (document.activeElement !== document.getElementById('staticGateway')) {
+      document.getElementById('staticGateway').value = s.static_gateway || '';
+    }
+    if (document.activeElement !== document.getElementById('staticDns')) {
+      document.getElementById('staticDns').value = s.static_dns || '';
+    }
+    if (document.activeElement !== document.getElementById('staticDns2')) {
+      document.getElementById('staticDns2').value = s.static_dns2 || '';
+    }
+    document.getElementById('mainLink').style.display = s.sta_connected ? '' : 'none';
+    if (!autoScanDecided) {
+      autoScanDecided = true;
+      if (s.mode === 'home' && !s.sta_connected) {
+        fetchNetworks();
+      }
+    }
+    if (s.state === 'connecting' || s.state === 'reconnecting') {
+      if (!polling) { polling = true; }
+      setTimeout(poll, 2000);
+    } else {
+      polling = false;
+    }
+  }).catch((authErr) => {
+    var rows = document.getElementById('statusRows');
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+    rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not reach the board</span></li>';
+  });
+}
+
+function openConnectSection(ssid) {
+  var section = document.getElementById('connectSection');
+  document.getElementById('ssid').value = ssid;
+  document.getElementById('password').value = '';
+  section.style.display = '';
+  document.getElementById('password').focus();
+}
+
+function closeConnectSection() {
+  var section = document.getElementById('connectSection');
+  section.style.display = 'none';
+  document.getElementById('ssid').value = '';
+  document.getElementById('password').value = '';
+}
+
+function submitConnect() {
+  var body = 'ssid=' + encodeURIComponent(document.getElementById('ssid').value) +
+             '&password=' + encodeURIComponent(document.getElementById('password').value);
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Submitting…</span></li>';
+  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(r => {
+      if (!r.ok) throw new Error('rejected');
+      document.getElementById('password').value = '';
+      closeConnectSection();
+      poll();
+      fetchNetworks();
+    })
+    .catch((authErr) => {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not submit</span></li>';
+    });
+}
+
+function forgetNetwork(ssid, savedCount) {
+  var msg = savedCount === 1
+    ? 'This is the last saved network. Forgetting it will switch this board to Access Point mode. Continue?'
+    : 'Forget this network?';
+  window.kcConfirm(msg).then((ok) => {
+    if (!ok) return;
+    var rows = document.getElementById('statusRows');
+    rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Forgetting…</span></li>';
+    return fetch('/forget', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'ssid=' + encodeURIComponent(ssid) })
+      .then(r => { if (!r.ok) throw new Error('rejected'); poll(); fetchNetworks(); })
+      .catch((authErr) => {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+        rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not forget network</span></li>';
+      });
+  });
+}
+
+function renderNetworkList(list) {
+  const ul = document.getElementById('networks');
+  ul.innerHTML = '';
+  const savedCount = list.filter(function (n) { return n.saved; }).length;
+  list.sort(function (a, b) {
+    if (a.in_range !== b.in_range) return a.in_range ? -1 : 1;
+    if (a.in_range && b.in_range) return b.rssi - a.rssi;
+    return a.ssid.localeCompare(b.ssid);
+  }).forEach(function (net) {
+    const li = document.createElement('li');
+    if (net.connected) li.classList.add('connected');
+
+    const left = document.createElement('span');
+    left.className = 'net-left';
+    const ssidEl = document.createElement('span');
+    ssidEl.className = 'net-ssid';
+    ssidEl.textContent = net.ssid + (net.secure ? ' 🔒' : '');
+    left.appendChild(ssidEl);
+    if (net.saved) {
+      const badge = document.createElement('span');
+      badge.className = 'badge-saved';
+      badge.textContent = 'Saved';
+      left.appendChild(badge);
+    }
+
+    const right = document.createElement('span');
+    right.className = 'net-right';
+    if (net.in_range && typeof net.rssi === 'number') {
+      const rssiEl = document.createElement('span');
+      rssiEl.className = rssiClass(net.rssi);
+      rssiEl.textContent = rssiBar(net.rssi);
+      right.appendChild(rssiEl);
+    }
+    if (net.saved) {
+      const forgetBtn = document.createElement('button');
+      forgetBtn.type = 'button';
+      forgetBtn.className = 'forget-btn';
+      forgetBtn.textContent = 'Forget';
+      forgetBtn.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        forgetNetwork(net.ssid, savedCount);
+      });
+      right.appendChild(forgetBtn);
+    }
+
+    li.appendChild(left);
+    li.appendChild(right);
+
+    if (!net.saved && net.in_range) {
+      li.addEventListener('click', function () {
+        openConnectSection(net.ssid);
+      });
+    }
+
+    ul.appendChild(li);
+  });
+}
+
+function fetchNetworks() {
+  fetch('/networks').then(r => {
+    if (!r.ok) throw new Error('networks unavailable');
+    return r.json();
+  }).then(renderNetworkList).catch(function () {
+    document.getElementById('networks').innerHTML = '<li>Network list unavailable (Access Point mode, or scan failed).</li>';
+  });
+}
+
+document.getElementById('scanBtn').addEventListener('click', function () {
+  document.getElementById('networks').innerHTML = '<li>Scanning…</li>';
+  fetchNetworks();
+});
+
+document.getElementById('connectSubmitBtn').addEventListener('click', function () {
+  submitConnect();
+});
+
+document.getElementById('connectCancelBtn').addEventListener('click', function () {
+  closeConnectSection();
+});
+
+document.getElementById('apForm').addEventListener('submit', function (ev) {
+  ev.preventDefault();
+  var body = 'ap_ssid=' + encodeURIComponent(document.getElementById('apSsid').value);
+  /* Send ap_password ONLY when this page actually holds the real one (we
+   * are on the AP) or the operator typed a new one. Omitting the field
+   * entirely is how the backend is told "leave the AP password alone" --
+   * wifi_provision_http.c only writes it when the field is present -- so
+   * this is what keeps a Save from an off-AP browser, where the field was
+   * deliberately not prefilled, from blanking the password. */
+  var pwValue = document.getElementById('apPassword').value;
+  if (apPasswordKnown || pwValue !== '') {
+    body += '&ap_password=' + encodeURIComponent(pwValue);
+  }
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Saving…</span></li>';
+  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+    .then(r => {
+      if (!r.ok) throw new Error('rejected');
+      poll();
+    })
+    .catch((authErr) => {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not submit</span></li>';
+    });
+});
+
+function postMode(mode) {
+  var rows = document.getElementById('statusRows');
+  rows.innerHTML = '<li><span class="status-label">Status</span><span class="status-value">Switching…</span></li>';
+  fetch('/provision', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'mode=' + mode })
+    .then(r => { if (!r.ok) throw new Error('rejected'); poll(); })
+    .catch((authErr) => {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      rows.innerHTML = '<li><span class="status-label">Error</span><span class="status-value">Could not switch</span></li>';
+    });
+}
+document.getElementById('modeHomeBtn').addEventListener('click', function () { postMode('home'); });
+document.getElementById('modeApBtn').addEventListener('click', function () { postMode('ap'); });
+
+poll();
+
+(function () {
+  var btn = document.getElementById('themeBtn');
+  function isDark(t) { return t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches); }
+  function apply(t) {
+    if (t) document.documentElement.setAttribute('data-theme', t);
+    else document.documentElement.removeAttribute('data-theme');
+    btn.textContent = isDark(t) ? '☀' : '🌙';
+  }
+  apply(localStorage.getItem('kilnctl-theme'));
+  btn.addEventListener('click', function () {
+    var next = isDark(document.documentElement.getAttribute('data-theme')) ? 'light' : 'dark';
+    localStorage.setItem('kilnctl-theme', next);
+    apply(next);
+  });
+})();
+</script>
+</body>
+</html>
