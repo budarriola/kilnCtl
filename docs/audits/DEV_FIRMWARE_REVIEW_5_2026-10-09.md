@@ -17,6 +17,8 @@ None.
 
 ### M1. Manifest commit gate compares the manifest with itself (review 3 LOW-6 not actually closed)
 
+Fixed in deaf8178: the embedded identity record carries a 16-byte short build commit (layout v2, new magic); the gate compares it with the manifest commit and fails closed for an image without a usable one.
+
 - Where: `firmware/KilnFW/App/drivers/update/update_stage.c:361-373` `update_stage_manifest_gate()`;
   `firmware/KilnFW/App/drivers/update/update_fetch.c:631-634` `stage_begin()`.
 
@@ -79,6 +81,8 @@ recovery wifi_reset and to the app's forget/clear path.
 
 ### L1. Wedge clean-up can miss an op that finishes exactly at the timeout
 
+Fixed in deaf8178 (`update_wr_arb.h`, one critical section in `wr_task`/`wr_call`).
+
 - Where: `firmware/KilnFW/App/drivers/update/update_fetch.c:357-364` (`wr_task` post-op check) and
   `:418-424` (`wr_call` timeout).
 
@@ -98,6 +102,8 @@ op as completed.
 
 ### L2. Stage status reason is overwritten for the rest of the boot after any wedge
 
+Fixed in deaf8178 (`update_stage_status_reason()`, new `fetch_writer_wedged` field).
+
 - Where: `firmware/KilnFW/App/drivers/update/update_http.c:454-456`.
 
 What happens: once `wr_wedged` is set, every `GET` of the stage status replaces `info.reason` with
@@ -112,6 +118,8 @@ Fix: report the wedge as its own boolean field (`fetch_writer_wedged`). Override
 stage is not valid.
 
 ### L3. `update_stage_upload_abort()` does not check which writer owns the upload
+
+Fixed in deaf8178 (`update_stage_upload_abort_owned()`).
 
 - Where: `firmware/KilnFW/App/drivers/update/update_stage.c:437-446`; called by the wedge clean-up at
   `update_fetch.c:362`.
