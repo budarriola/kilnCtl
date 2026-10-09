@@ -776,38 +776,119 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
  * Returns true and fills floors[] when the array is KNOWN: read OK, or the
  * namespace/key genuinely absent (nothing was ever persisted, floor 0). Returns
  * false when it cannot be established (open error, short/failed read). */
-/* A persisted rev array is acceptable when it is a positive multiple of 4 bytes
- * and no longer than the full array (legacy 8-slot firmware wrote 32 bytes). */
+/* Only two rev-array lengths were ever written: 32 B (the legacy 8-slot array)
+ * and 4*PROFILES_MAX_COUNT. Anything else is NOT trusted as "known" (a
+ * truncated blob would otherwise give its tail slots floor 0 and let a stale
+ * cfg file win resolve). A well-formed array LONGER than this build's (a
+ * newer firmware with more slots wrote it) is handled by rev_read(): the first
+ * PROFILES_MAX_COUNT entries are used and the tail ignored. */
 static bool rev_blob_len_ok(size_t len)
 {
-    return len > 0 && (len % sizeof(uint32_t)) == 0 && len <= sizeof(uint32_t) * PROFILES_MAX_COUNT;
+    return len == sizeof(uint32_t) * 8 || len == sizeof(uint32_t) * PROFILES_MAX_COUNT;
 }
 
-static bool nvs_read_rev_floors(const char *partition, uint32_t *floors)
+#define REV_LONGER_MAX_BYTES 4096u
+
+typedef enum {
+    REV_KNOWN,  /* floors[] valid (absent = zeros, legacy short, current, or longer-than-ours) */
+    REV_JUNK,   /* a blob is stored but its length is not one this firmware ever wrote: repairable */
+    REV_IO_ERR, /* could not be read (transient / open / alloc failure): NOT repairable here */
+} rev_state_t;
+
+/* Reads prof_rev from an OPEN handle into floors[PROFILES_MAX_COUNT]. */
+static rev_state_t rev_read(hal_kv_handle_t *h, uint32_t *floors)
+{
+    memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+    size_t len = 0;
+    hal_status_t e = hal_kv_get_blob(h, NVS_KEY_PROFILE_REV, NULL, &len);
+    if (e == HAL_NOT_FOUND) {
+        return REV_KNOWN;
+    }
+    if (e != HAL_OK) {
+        return REV_IO_ERR;
+    }
+    if (rev_blob_len_ok(len)) {
+        size_t rl = len;
+        e = hal_kv_get_blob(h, NVS_KEY_PROFILE_REV, floors, &rl);
+        if (e != HAL_OK || rl != len) {
+            memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+            return REV_IO_ERR;
+        }
+        return REV_KNOWN;
+    }
+    if (len > sizeof(uint32_t) * PROFILES_MAX_COUNT && (len % sizeof(uint32_t)) == 0 && len <= REV_LONGER_MAX_BYTES) {
+        /* Newer firmware, more slots: use our first entries, ignore the tail. */
+        uint32_t *tmp = persist_scratch_alloc(len);
+        if (tmp == NULL) {
+            return REV_IO_ERR;
+        }
+        size_t rl = len;
+        e = hal_kv_get_blob(h, NVS_KEY_PROFILE_REV, tmp, &rl);
+        if (e == HAL_OK && rl == len) {
+            memcpy(floors, tmp, sizeof(uint32_t) * PROFILES_MAX_COUNT);
+        }
+        free(tmp);
+        return (e == HAL_OK && rl == len) ? REV_KNOWN : REV_IO_ERR;
+    }
+    return REV_JUNK;
+}
+
+/* Bounded one-shot repair of a JUNK prof_rev (length this firmware never wrote;
+ * the old floors are unrecoverable). s_profile_rev[] already holds each
+ * file-backed slot's file rev. Every slot WITHOUT a file is raised to the
+ * highest rev observed on any slot, so a later save carries a rev above any
+ * plausible stale legacy value, then the whole array is written ONCE and read
+ * back (memcmp). Only a verified rewrite clears the unknown flag; otherwise
+ * saves/deletes stay refused this boot (fail closed) and the next boot retries.
+ * Boot-only; `used` is the post-resolve bitmap. */
+static bool rev_repair_junk(const char *partition, const profiles_slot_bitmap_t *used)
+{
+    uint32_t maxrev = 0;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (s_profile_rev[id] > maxrev) {
+            maxrev = s_profile_rev[id];
+        }
+    }
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (!profiles_slot_bitmap_test(used, id) && s_profile_rev[id] < maxrev) {
+            s_profile_rev[id] = maxrev;
+        }
+    }
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, partition) != HAL_OK) {
+        return false;
+    }
+    hal_status_t e = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
+    if (e == HAL_OK) {
+        e = hal_kv_commit(&h);
+    }
+    uint32_t back[PROFILES_MAX_COUNT];
+    bool ok = false;
+    if (e == HAL_OK) {
+        size_t bl = sizeof(back);
+        ok = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, back, &bl) == HAL_OK && bl == sizeof(back) &&
+             memcmp(back, s_profile_rev, sizeof(back)) == 0;
+    }
+    hal_kv_close(&h);
+    ESP_LOGW(PROFILES_TAG, "prof_rev had an unrecognised length: floors rebuilt from file revs (max %u), rewrite %s", (unsigned)maxrev,
+             ok ? "verified" : "FAILED -- saves/deletes refused this boot");
+    return ok;
+}
+
+static rev_state_t nvs_read_rev_floors(const char *partition, uint32_t *floors)
 {
     memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
     hal_kv_handle_t h;
     hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
     if (kv_err == HAL_NOT_FOUND) {
-        return true;
+        return REV_KNOWN;
     }
     if (kv_err != HAL_OK) {
-        return false;
+        return REV_IO_ERR;
     }
-    size_t len = sizeof(uint32_t) * PROFILES_MAX_COUNT;
-    hal_status_t get_err = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, floors, &len);
+    rev_state_t st = rev_read(&h, floors);
     hal_kv_close(&h);
-    if (get_err == HAL_NOT_FOUND) {
-        memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
-        return true;
-    }
-    if (get_err != HAL_OK || !rev_blob_len_ok(len)) {
-        memset(floors, 0, sizeof(uint32_t) * PROFILES_MAX_COUNT);
-        return false;
-    }
-    /* A legacy shorter array (8-slot firmware) is KNOWN: floors[] was zeroed up
-     * front, so slots beyond the old count read floor 0 (they never existed). */
-    return true;
+    return st;
 }
 
 /* nvs_load_all_from()'s no-legacy-namespace / NVS-load-failed path: every slot is
@@ -825,7 +906,8 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
         return ESP_OK;
     }
     uint32_t floors[PROFILES_MAX_COUNT];
-    bool floors_known = nvs_read_rev_floors(partition, floors);
+    rev_state_t floors_state = nvs_read_rev_floors(partition, floors);
+    bool floors_known = (floors_state == REV_KNOWN);
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         profile_t resolved;
         uint32_t resolved_rev = 0;
@@ -850,6 +932,9 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
         if (!floors_known) {
             s_profile_rev_unknown[id] = true;
         }
+    }
+    if (floors_state == REV_JUNK && rev_repair_junk(partition, &out->used_bitmap)) {
+        memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
     }
     return ESP_OK;
 }
@@ -895,12 +980,11 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
      * only updated once, after the resolve pass below, so a load failure
      * partway through never leaves s_profile_rev half from-NVS/half-stale. */
     uint32_t nvs_rev[PROFILES_MAX_COUNT];
-    memset(nvs_rev, 0, sizeof(nvs_rev));
-    size_t rev_len = sizeof(nvs_rev);
-    hal_status_t rev_err = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len);
-    /* NOT_FOUND = never written = genuine "no opinion". Any other failure, or a short
-     * blob, means the floors are unknown: slots without a file get refused saves. */
-    bool rev_floors_known = (rev_err == HAL_NOT_FOUND) || (rev_err == HAL_OK && rev_blob_len_ok(rev_len));
+    rev_state_t rev_state = rev_read(&h, nvs_rev);
+    /* NOT_FOUND = never written = genuine "no opinion"; a longer-than-ours array is
+     * KNOWN (tail ignored). A junk length or a read failure means the floors are
+     * unknown: every slot is refused saves, except a JUNK array is repaired below. */
+    bool rev_floors_known = (rev_state == REV_KNOWN);
     if (!rev_floors_known) {
         memset(nvs_rev, 0, sizeof(nvs_rev));
     }
@@ -1008,6 +1092,10 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
     }
     memcpy(s_profile_rev_unknown, slot_rev_unknown, sizeof(s_profile_rev_unknown));
+    if (rev_state == REV_JUNK && strcmp(partition, PROFILES_NVS_PARTITION) == 0 &&
+        rev_repair_junk(partition, &out->used_bitmap)) {
+        memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    }
 
     return ESP_OK;
 }
@@ -1053,7 +1141,8 @@ esp_err_t nvs_save_slot(uint8_t id)
     if (s_profile_rev_unknown[id]) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u): REFUSED -- this boot's profile NVS load failed and the slot's rev floor "
                                "could not be established; a save at rev 1 would be deleted as stale on the next normal boot. "
-                               "Reboot once NVS is healthy.", (unsigned)id);
+                               "A junk prof_rev is rebuilt at boot; this one could not be read or rewritten -- "
+                               "check the profiles NVS partition, then reboot.", (unsigned)id);
         return ESP_ERR_INVALID_STATE;
     }
     uint32_t new_rev = s_profile_rev[id] + 1;
@@ -1141,12 +1230,9 @@ esp_err_t nvs_erase_slot(uint8_t id)
             kv_err = HAL_NO_MEM;
         } else {
             memset(nvs_rev, 0, sizeof(s_profile_rev));
-            size_t rev_len = sizeof(s_profile_rev);
-            hal_status_t rget = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, nvs_rev, &rev_len);
-            if (rget == HAL_NOT_FOUND) {
-                memset(nvs_rev, 0, sizeof(s_profile_rev)); /* never written: genuine no-opinion */
-            } else if (rget != HAL_OK || !rev_blob_len_ok(rev_len)) {
-                /* Unreadable/short: writing zeros for the other slots would erase
+            rev_state_t rst = rev_read(&h, nvs_rev);
+            if (rst != REV_KNOWN) {
+                /* Unreadable/junk: writing zeros for the other slots would erase
                  * their floors. Refuse the rev-array write (and so the erase). */
                 kv_err = HAL_IO;
             }

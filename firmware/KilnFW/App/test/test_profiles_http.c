@@ -1099,6 +1099,7 @@ static void test_pcfg_files_only_unknown_floor_refuses_save(void)
     pcfg_corrupt_used_bitmap_and_set_revs(NULL, true);
     memset(&s_profiles, 0, sizeof(s_profiles));
     memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    fake_kv_script_next_write_status(HAL_IO); /* the one-shot prof_rev repair write fails -> floors stay unknown */
     TEST_CHECK(profiles_boot_load() != ESP_OK, "the NVS load reports its failure");
     TEST_CHECK(s_profile_rev_unknown[3], "file-less slot 3 has an unknown floor");
     TEST_CHECK(s_profile_rev_unknown[0], "file-backed slot 0 is flagged too (floors unknown)");
@@ -1153,6 +1154,7 @@ static void test_pcfg_full_load_short_rev_blob_marks_fileless_slots_unknown(void
     nvs_set_blob(h, NVS_KEY_PROFILE_REV, junk, sizeof(junk));
     nvs_commit(h);
     nvs_close(h);
+    fake_kv_script_next_write_status(HAL_IO); /* the one-shot prof_rev repair write fails -> floors stay unknown */
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
     bool any_found = false;
@@ -1199,6 +1201,7 @@ static void test_pcfg_non_multiple_of_4_rev_blob_stays_unknown(void)
     nvs_set_blob(h, NVS_KEY_PROFILE_REV, odd, sizeof(odd));
     nvs_commit(h);
     nvs_close(h);
+    fake_kv_script_next_write_status(HAL_IO); /* the one-shot prof_rev repair write fails -> floors stay unknown */
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
     bool any_found = false;
@@ -1221,6 +1224,7 @@ static void test_pcfg_unknown_floors_flag_file_backed_slots_too(void)
     nvs_set_blob(h, NVS_KEY_PROFILE_REV, junk, sizeof(junk));
     nvs_commit(h);
     nvs_close(h);
+    fake_kv_script_next_write_status(HAL_IO); /* the one-shot prof_rev repair write fails -> floors stay unknown */
     memset(&s_profiles, 0, sizeof(s_profiles));
     profiles_state_t out;
     bool any_found = false;
@@ -1249,6 +1253,115 @@ static void test_pcfg_corrupt_nvs_blob_keeps_live_file(void)
     TEST_CHECK(pcfg_file_profile(0, &fp), "the live file was NOT deleted");
     TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 loads from its file");
     TEST_CHECK(s_profile_rev[0] >= 5, "rev floor kept");
+}
+
+static void pcfg_set_rev_blob(const void *buf, size_t len)
+{
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, NVS_KEY_PROFILE_REV, buf, len);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void test_pcfg_longer_rev_array_is_known_tail_ignored(void)
+{
+    TEST_SECTION("nvs_load_all_from -- rev array longer than this build's (newer firmware) is KNOWN, tail ignored");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    uint32_t big[PROFILES_MAX_COUNT + 8];
+    memset(big, 0, sizeof(big));
+    big[0] = 5;
+    big[3] = 9;
+    big[PROFILES_MAX_COUNT + 2] = 77;
+    pcfg_set_rev_blob(big, sizeof(big));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    TEST_CHECK(!s_profile_rev_unknown[0] && !s_profile_rev_unknown[3], "no slot is rev-unknown");
+    TEST_CHECK(s_profile_rev[3] == 9, "slot 3 floor read from the first PROFILES_MAX_COUNT entries");
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 3);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save into slot 3 works");
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete of slot 3 works");
+}
+
+static void test_pcfg_truncated_rev_blob_not_known_lengths(void)
+{
+    TEST_SECTION("rev blob lengths 36 and 200 (never written) are NOT known as-is; repair rebuilds them");
+    size_t lens[2] = {36, 200};
+    for (int k = 0; k < 2; k++) {
+        pcfg_reset_all();
+        size_t reaped = 0;
+        cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+        profile_t p0 = make_stored_profile();
+        TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+        uint32_t buf[100];
+        memset(buf, 0, sizeof(buf));
+        pcfg_set_rev_blob(buf, lens[k]);
+        fake_kv_script_next_write_status(HAL_IO);
+        memset(&s_profiles, 0, sizeof(s_profiles));
+        profiles_state_t out;
+        bool any_found = false;
+        TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+        TEST_CHECK(s_profile_rev_unknown[3], "with the repair write failing the slots stay unknown (not floor 0)");
+        memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    }
+}
+
+static void test_pcfg_junk_rev_blob_is_repaired_once(void)
+{
+    TEST_SECTION("nvs_load_all_from -- junk rev blob: floors rebuilt from file revs, prof_rev rewritten, saves work");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    pcfg_set_rev_blob(junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+    TEST_CHECK(!s_profile_rev_unknown[0] && !s_profile_rev_unknown[3], "repair verified: nothing is unknown");
+    TEST_CHECK(s_profile_rev[0] == 5, "file-backed slot 0 keeps its file rev");
+    TEST_CHECK(s_profile_rev[3] == 5, "file-less slot 3 is raised to the max observed rev");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(back) && back[3] == 5 && back[0] == 5, "prof_rev rewritten full-width");
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 3);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save into file-less slot 3 now works");
+    uint32_t file_rev = 0;
+    bool valid = false;
+    profile_t fp;
+    profiles_cfg_fs_load_raw(3, &fp, &file_rev, &valid);
+    TEST_CHECK(valid && file_rev == 6, "slot 3 file written at max+1, above any stale value");
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete works (also exercises firing_stats_erase after the change)");
+}
+
+static void test_pcfg_files_only_junk_rev_is_repaired(void)
+{
+    TEST_SECTION("files-only path (bitmap corrupt) -- junk rev blob repaired too");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file at rev 5");
+    pcfg_corrupt_used_bitmap_and_set_revs(NULL, true);
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    TEST_CHECK(profiles_boot_load() != ESP_OK, "the NVS load reports its failure");
+    TEST_CHECK(!s_profile_rev_unknown[3] && !s_profile_rev_unknown[0], "repaired: not unknown");
+    TEST_CHECK(s_profile_rev[3] == 5, "slot 3 floor = max observed file rev");
 }
 
 static void test_nvs_erase_slot_refuses_when_rev_array_unreadable(void)
@@ -4038,6 +4151,10 @@ void run_test_profiles_http(void)
     test_pcfg_full_load_short_rev_blob_marks_fileless_slots_unknown();
     test_pcfg_legacy_32_byte_rev_array_is_known();
     test_pcfg_non_multiple_of_4_rev_blob_stays_unknown();
+    test_pcfg_longer_rev_array_is_known_tail_ignored();
+    test_pcfg_truncated_rev_blob_not_known_lengths();
+    test_pcfg_junk_rev_blob_is_repaired_once();
+    test_pcfg_files_only_junk_rev_is_repaired();
     test_pcfg_unknown_floors_flag_file_backed_slots_too();
     test_pcfg_corrupt_nvs_blob_keeps_live_file();
     test_nvs_erase_slot_refuses_when_rev_array_unreadable();
