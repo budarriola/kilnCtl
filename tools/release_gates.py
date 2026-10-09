@@ -25,6 +25,7 @@ Commands (stdlib only):
 """
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -137,6 +138,53 @@ def previous_tag(root, tag):
     return best
 
 
+def _load_manifest():
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "release_manifest.py")
+    spec = importlib.util.spec_from_file_location("release_manifest", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("release_manifest", mod)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _compat_at(root, rev, rm):
+    def reader(rel):
+        r = subprocess.run(["git", "-C", root, "show", "%s:%s" % (rev, rel.replace(os.sep, "/"))],
+                           capture_output=True)
+        if r.returncode != 0:
+            raise rm.ReleaseError("git show %s:%s failed: %s" % (rev, rel, r.stderr.decode("utf-8", "replace").strip()))
+        return r.stdout
+    return rm.read_compat(root, reader)
+
+
+def schema_section(root, tag, prev):
+    out = ["Schema changes:", ""]
+    if not prev:
+        return out + ["First release, no diff.", ""]
+    rm = _load_manifest()
+    try:
+        new_rev = tag if _git_ok(root, "rev-parse", "-q", "--verify", "refs/tags/" + tag) else "HEAD"
+        old, new = _compat_at(root, prev, rm), _compat_at(root, new_rev, rm)
+    except rm.ReleaseError as e:
+        return out + ["- cannot compute schema diff versus %s: %s" % (prev, e), ""]
+    changed = False
+    for key in ("zones_cfg_version", "kilnlink_version", "uart_version"):
+        if old[key] != new[key]:
+            changed = True
+            out.append("- %s: %s -> %s  ROLLBACK HAZARD: older firmware cannot read this" % (key, old[key], new[key]))
+    if old["partitions_sha256"] != new["partitions_sha256"]:
+        changed = True
+        out.append("- partitions_sha256: %s -> %s  requires USB reflash" % (old["partitions_sha256"][:12], new["partitions_sha256"][:12]))
+    if not changed:
+        out.append("- no schema version or partition table changes versus %s" % prev)
+    return out + [""]
+
+
+def _git_ok(root, *args):
+    return subprocess.run(["git", "-C", root] + list(args), capture_output=True).returncode == 0
+
+
 def build_notes(root, tag, max_commits=50):
     prev = previous_tag(root, tag)
     if prev:
@@ -148,8 +196,8 @@ def build_notes(root, tag, max_commits=50):
     lines = [l for l in log.splitlines() if l.strip()]
     out = ["kilnCtl %s" % tag, "", "Changes %s (%d):" % (rng, len(lines)), ""]
     out += ["- " + l for l in lines] or ["- (none)"]
-    out += ["", "Schema versions are in release.json (compat); rollback hazards versus the "
-                "previous release: docs/RELEASING.md gate 9. See SHA256SUMS for hashes.", ""]
+    out += [""] + schema_section(root, tag, prev)
+    out += ["See release.json (compat) and docs/RELEASING.md gate 9; SHA256SUMS for hashes.", ""]
     return "\n".join(out)
 
 

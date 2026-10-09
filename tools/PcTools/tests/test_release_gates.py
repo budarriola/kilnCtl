@@ -149,5 +149,66 @@ class Notes(unittest.TestCase):
             self.assertEqual(rg.previous_tag(d, "v1.0.0"), "v1.0.0-pre.10")
 
 
+class SchemaDiffNotes(unittest.TestCase):
+    Z = os.path.join("firmware", "KilnFW", "App", "drivers", "persist", "zones_config_json.h")
+    K = os.path.join("firmware", "CommonFW", "include", "kilnlink", "kilnlink_version.h")
+    U = os.path.join("firmware", "KilnFW", "App", "drivers", "common", "uart_task_ids.h")
+    P = os.path.join("firmware", "KilnFW", "partitions.csv")
+
+    def write(self, d, zones=22, link=16, uart=13, parts="app,0x10000\n"):
+        for rel, txt in ((self.Z, "#define ZONES_CFG_VERSION %d\n" % zones),
+                         (self.K, "#define KILNLINK_PROTOCOL_VERSION %d\n" % link),
+                         (self.U, "#define UART_PROTOCOL_VERSION %d\n" % uart),
+                         (self.P, parts)):
+            path = os.path.join(d, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", newline="\n") as f:
+                f.write(txt)
+
+    def repo(self, d, **second):
+        git(d, "init", "-q")
+        git(d, "config", "user.email", "t@t")
+        git(d, "config", "user.name", "t")
+        self.write(d)
+        git(d, "add", "-A")
+        git(d, "commit", "-qm", "one")
+        git(d, "tag", "v1.0.0-pre.1")
+        if second is not None:
+            self.write(d, **second)
+            git(d, "add", "-A")
+            git(d, "commit", "-q", "--allow-empty", "-m", "two")
+        git(d, "tag", "v1.0.0-pre.2")
+
+    def test_bumped(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d, zones=23, parts="app,0x20000\n")
+            n = rg.build_notes(d, "v1.0.0-pre.2")
+            self.assertIn("Schema changes:", n)
+            self.assertIn("zones_cfg_version: 22 -> 23  ROLLBACK HAZARD: older firmware cannot read this", n)
+            self.assertIn("requires USB reflash", n)
+            self.assertEqual(n.count("ROLLBACK HAZARD"), 1)
+
+    def test_unchanged_has_no_hazard(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.repo(d)
+            n = rg.build_notes(d, "v1.0.0-pre.2")
+            self.assertIn("Schema changes:", n)
+            self.assertNotIn("ROLLBACK HAZARD", n)
+            self.assertNotIn("requires USB reflash", n)
+
+    def test_no_previous_tag(self):
+        with tempfile.TemporaryDirectory() as d:
+            git(d, "init", "-q")
+            git(d, "config", "user.email", "t@t")
+            git(d, "config", "user.name", "t")
+            self.write(d)
+            git(d, "add", "-A")
+            git(d, "commit", "-qm", "one")
+            git(d, "tag", "v1.0.0-pre.1")
+            n = rg.build_notes(d, "v1.0.0-pre.1")
+            self.assertIn("irst release, no diff", n)
+            self.assertNotIn("ROLLBACK HAZARD", n)
+
+
 if __name__ == "__main__":
     unittest.main()
