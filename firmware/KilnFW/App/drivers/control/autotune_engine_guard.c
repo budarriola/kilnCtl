@@ -434,6 +434,35 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
     float predicted_max_ramp_ambient_c_per_hr = s_at.predicted_max_ramp_ambient_c_per_hr;
     xSemaphoreGive(s_at.lock);
 
+    /* Review finding 1b (cbc43a7f): the mode-gate snapshot at the top of this
+     * function predates s_at.lock and the reservation, so a profile start on
+     * another task can land in that window. Re-check now that the reservation
+     * is held and before the first write. relay_authority_heat_run_active()
+     * is a leaf spinlock (takes no other lock), so calling it here -- after
+     * s_at.lock was released, holding only the reservation flag -- cannot
+     * invert any lock order. A start that lands after this re-check is not
+     * closed here: profile_executor_run() has no cheap way to see the
+     * reservation, so a residual window of the few writes below remains.
+     * Other gated writers (e.g. zones_http_pid.c) share the same
+     * snapshot-then-write pattern; deliberately unchanged in this pass. */
+    {
+        sys_mode_snapshot_t recheck = {0};
+        relay_authority_heat_run_active(&recheck.profile_running, &recheck.autotune_running);
+        char recheck_reason[SYSTEM_MODE_GATE_REASON_MAX];
+        recheck_reason[0] = '\0';
+        if (system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, &recheck, recheck_reason,
+                                   sizeof(recheck_reason))) {
+            autotune_engine_release_zone_for_external_write(zone);
+            ESP_LOGW(AT_TAG, "autotune_engine_accept() refused by system mode gate (re-check): %s",
+                     recheck_reason);
+            if (out != NULL) {
+                out->refused_by_mode_gate = true;
+                snprintf(out->mode_reason, sizeof(out->mode_reason), "%s", recheck_reason);
+            }
+            return false;
+        }
+    }
+
     if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
         autotune_engine_release_zone_for_external_write(zone);
         return false;
