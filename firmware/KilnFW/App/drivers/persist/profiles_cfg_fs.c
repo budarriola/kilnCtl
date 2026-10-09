@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "persist_scratch.h"
 #include "profiles_http_internal.h" /* profile_decode_blob(), profile_encode_current_blob(),
                                       * PROFILE_BLOB_MAX_SIZE -- the exact same encode/decode
                                       * this file's NVS sibling (profiles_http.c) uses, so a
@@ -87,10 +88,21 @@ void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_
     char path[40];
     profiles_cfg_fs_path(id, path, sizeof(path));
 
-    uint8_t raw[PCFG_FILE_BUF_MAX];
+    /* Heap, not stack: this runs on the boot path (review 5 L4). An allocation failure reads as
+     * "no valid file", the same as an unreadable one, and the caller already fails closed on that. */
+    struct load_raw_scratch {
+        uint8_t raw[PCFG_FILE_BUF_MAX];
+        profile_t cand;
+    } *ls = persist_scratch_alloc(sizeof(*ls));
+    if (ls == NULL) {
+        ESP_LOGE(PCFG_FS_TAG, "prof%u load: no memory for scratch -- treating file as absent", id);
+        return;
+    }
+    uint8_t *raw = ls->raw;
     size_t len = 0;
-    esp_err_t err = cfg_fs_read(path, raw, sizeof(raw), &len);
+    esp_err_t err = cfg_fs_read(path, raw, sizeof(ls->raw), &len);
     if (err != ESP_OK) {
+        free(ls);
         /* Absent (never migrated/never saved), oversized, or unreadable --
          * none of these are "found but bad" on their own; the caller's
          * resolve() decides whether that's worth a divergence warning. */
@@ -99,20 +111,23 @@ void profiles_cfg_fs_load_raw(uint8_t id, profile_t *out_profile, uint32_t *out_
     if (len < 5) { /* rev prefix + at least a 1-byte version */
         ESP_LOGW(PCFG_FS_TAG, "prof%u file is %u bytes, too short to hold a rev + blob -- ignoring", id,
                  (unsigned)len);
+        free(ls);
         return;
     }
 
     uint32_t rev = get_u32_le(raw);
     const char *reason = "";
-    profile_t cand;
-    profile_decode_result_t result = profile_decode_blob(raw + 4, len - 4, &cand, &reason);
+    profile_t *cand = &ls->cand;
+    profile_decode_result_t result = profile_decode_blob(raw + 4, len - 4, cand, &reason);
     if (result != PROFILE_DECODE_OK) {
         ESP_LOGW(PCFG_FS_TAG, "prof%u file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides", id,
                  (unsigned long)rev, reason);
+        free(ls);
         return;
     }
 
-    *out_profile = cand;
+    *out_profile = *cand;
+    free(ls);
     *out_rev = rev;
     *out_valid = true;
 }

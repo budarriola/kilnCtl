@@ -1390,6 +1390,40 @@ static void test_pcfg_junk_rev_repair_raises_fileless_to_max(void)
     TEST_CHECK(blen == sizeof(back) && back[0] == 5 && back[1] == 9 && back[3] == 9, "persisted floors match");
 }
 
+/* OOM injection for persist_scratch_alloc() (KILNCTL_PERSIST_SCRATCH_TEST_HOOK, review 5 L4). */
+size_t persist_scratch_test_fail_size = 0;
+int persist_scratch_test_fail_nth = 0;
+int persist_scratch_test_seen = 0;
+
+static void test_pcfg_junk_rev_repair_scratch_oom_fails_closed(void)
+{
+    TEST_SECTION("junk rev repair: scratch allocation failure fails closed (review 5 L4)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(1, &p0, 9) == ESP_OK, "file at rev 9 (slot 1)");
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    pcfg_set_rev_blob(junk, sizeof(junk));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    persist_scratch_test_fail_size = sizeof(struct rev_repair_scratch);
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    profiles_state_t out;
+    bool any_found = false;
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen == 1, "the repair scratch allocation was reached");
+    TEST_CHECK(s_profile_rev_unknown[3], "slot 3 stays rev-unknown (fail closed)");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(junk), "rev blob not rewritten");
+}
+
 static void test_pcfg_junk_rev_repair_deferred_without_cfg(void)
 {
     TEST_SECTION("junk rev blob with cfg NOT mounted: repair deferred, stays fail-closed, prof_rev untouched");
@@ -4219,6 +4253,7 @@ void run_test_profiles_http(void)
     test_pcfg_non_multiple_of_4_rev_blob_stays_unknown();
     test_pcfg_longer_rev_array_is_known_tail_ignored();
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
+    test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_deferred_without_cfg();
     test_pcfg_truncated_rev_blob_not_known_lengths();
     test_pcfg_junk_rev_blob_is_repaired_once();

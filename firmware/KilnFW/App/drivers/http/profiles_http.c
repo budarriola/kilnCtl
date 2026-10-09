@@ -841,6 +841,12 @@ static rev_state_t rev_read(hal_kv_handle_t *h, uint32_t *floors)
  * back (memcmp). Only a verified rewrite clears the unknown flag; otherwise
  * saves/deletes stay refused this boot (fail closed) and the next boot retries.
  * Boot-only; `used` is the post-resolve bitmap. */
+struct rev_repair_scratch {
+    bool has_file[PROFILES_MAX_COUNT];
+    uint32_t back[PROFILES_MAX_COUNT];
+    profile_t fp;
+};
+
 static bool rev_repair_junk(const char *partition, const profiles_slot_bitmap_t *used)
 {
     if (caller_stack_is_external()) {
@@ -856,39 +862,44 @@ static bool rev_repair_junk(const char *partition, const profiles_slot_bitmap_t 
         ESP_LOGW(PROFILES_TAG, "prof_rev junk repair deferred: cfg not mounted (fail closed)");
         return false;
     }
-    bool has_file[PROFILES_MAX_COUNT];
+    /* Large buffers live on the heap, not this boot-path stack frame (review 5 L4); fail closed. */
+    struct rev_repair_scratch *sc = persist_scratch_alloc(sizeof(*sc));
+    if (sc == NULL) {
+        ESP_LOGE(PROFILES_TAG, "prof_rev junk repair: no memory for scratch -- saves/deletes refused this boot");
+        return false;
+    }
     uint32_t maxrev = 0;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        profile_t fp;
         uint32_t frev = 0;
         bool fvalid = false;
-        profiles_cfg_fs_load_raw(id, &fp, &frev, &fvalid);
-        has_file[id] = fvalid;
+        profiles_cfg_fs_load_raw(id, &sc->fp, &frev, &fvalid);
+        sc->has_file[id] = fvalid;
         if (s_profile_rev[id] > maxrev) {
             maxrev = s_profile_rev[id];
         }
     }
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        if (!has_file[id] && s_profile_rev[id] < maxrev) {
+        if (!sc->has_file[id] && s_profile_rev[id] < maxrev) {
             s_profile_rev[id] = maxrev;
         }
     }
     hal_kv_handle_t h;
     if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, partition) != HAL_OK) {
+        free(sc);
         return false;
     }
     hal_status_t e = hal_kv_set_blob(&h, NVS_KEY_PROFILE_REV, s_profile_rev, sizeof(s_profile_rev));
     if (e == HAL_OK) {
         e = hal_kv_commit(&h);
     }
-    uint32_t back[PROFILES_MAX_COUNT];
     bool ok = false;
     if (e == HAL_OK) {
-        size_t bl = sizeof(back);
-        ok = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, back, &bl) == HAL_OK && bl == sizeof(back) &&
-             memcmp(back, s_profile_rev, sizeof(back)) == 0;
+        size_t bl = sizeof(sc->back);
+        ok = hal_kv_get_blob(&h, NVS_KEY_PROFILE_REV, sc->back, &bl) == HAL_OK && bl == sizeof(sc->back) &&
+             memcmp(sc->back, s_profile_rev, sizeof(sc->back)) == 0;
     }
     hal_kv_close(&h);
+    free(sc);
     ESP_LOGW(PROFILES_TAG, "prof_rev had an unrecognised length: floors rebuilt from file revs (max %u), rewrite %s", (unsigned)maxrev,
              ok ? "verified" : "FAILED -- saves/deletes refused this boot");
     return ok;

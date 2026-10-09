@@ -784,9 +784,20 @@ esp_err_t nvs_save(void)
     uint32_t new_zones_rev = s_zones_cfg_rev + 1;
     zones_cfg_unlock();
     snap->crc32 = zones_config_json_compute_crc(snap);
-    /* Mirror the stamp into RAM (one scalar; the migration read-back compares RAM to the file). */
+    /* Mirror the stamp into RAM (one scalar) ONLY if RAM still equals the snapshot (L5): a setter
+     * that edited s_zones.cfg since the snapshot would otherwise be left with new fields under
+     * this snapshot's CRC. On a mismatch RAM keeps its own (older) CRC and that setter's own
+     * save stamps it. Compare is memcmp with the snapshot's crc field temporarily set to RAM's. */
     zones_cfg_lock();
-    s_zones.cfg.crc32 = snap->crc32;
+    {
+        uint32_t stamped = snap->crc32;
+        snap->crc32 = s_zones.cfg.crc32;
+        bool unchanged = memcmp(snap, &s_zones.cfg, sizeof(*snap)) == 0;
+        snap->crc32 = stamped;
+        if (unchanged) {
+            s_zones.cfg.crc32 = stamped;
+        }
+    }
     zones_cfg_unlock();
 
     esp_err_t err = zones_config_cfg_fs_save(snap, new_zones_rev);

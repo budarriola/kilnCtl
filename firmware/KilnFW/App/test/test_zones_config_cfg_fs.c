@@ -1223,6 +1223,28 @@ static void test_start_does_not_migrate_after_load_oom(void)
     (void)h;
 }
 
+static void l5_interleaved_setter(void)
+{
+    s_zones_cfg_unlock_test_hook = NULL; /* one shot: fire on the snapshot's unlock only */
+    s_zones.cfg.zones[0].pid_kp += 3.0f; /* a setter edit between the snapshot and the CRC write-back */
+}
+
+static void test_save_crc_writeback_skipped_when_ram_changed(void)
+{
+    TEST_SECTION("zones store: nvs_save() CRC write-back never stamps a newer RAM state (review 5 L5)");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    stage("l5", 7.0f);
+    uint32_t crc_before = s_zones.cfg.crc32;
+    s_zones_cfg_unlock_test_hook = l5_interleaved_setter;
+    TEST_CHECK(nvs_save() == ESP_OK, "save ok");
+    s_zones_cfg_unlock_test_hook = NULL;
+    TEST_CHECK(s_zones.cfg.crc32 == crc_before, "RAM crc not overwritten with the stale snapshot's CRC");
+    TEST_CHECK(nvs_save() == ESP_OK, "second save ok");
+    TEST_CHECK(s_zones.cfg.crc32 == zones_config_json_compute_crc(&s_zones.cfg),
+               "an uninterrupted save mirrors a CRC that matches RAM");
+}
+
 static void test_save_persists_locked_snapshot(void)
 {
     TEST_SECTION("zones store: nvs_save() persists a snapshot taken under zones_cfg_lock (LOW-4)");
@@ -1253,6 +1275,7 @@ static void test_save_persists_locked_snapshot(void)
 void run_test_zones_config_cfg_fs(void)
 {
     test_save_persists_locked_snapshot();
+    test_save_crc_writeback_skipped_when_ram_changed();
     test_partition_absent_falls_through_to_nvs_only();
     test_nvs_fallback_then_file_preferred_after_migration();
     test_dual_write_keeps_file_and_nvs_in_sync();

@@ -1028,7 +1028,7 @@ try {
     # <stdatomic.h> -- same MSVC requirement test_live_profile.c/
     # test_profile_executor_live_pickup.c already needed for the same reason
     # (see this file's own comment above them).
-    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics " +
+    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +

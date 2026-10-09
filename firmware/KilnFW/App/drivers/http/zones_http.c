@@ -420,9 +420,13 @@ void zones_cfg_lock(void)
     portENTER_CRITICAL(&s_zones_cfg_mux);
     s_zones_cfg_lock_acquires++;
 }
+void (*s_zones_cfg_unlock_test_hook)(void) = NULL; /* host-test seam: runs after the critical section is left */
 void zones_cfg_unlock(void)
 {
     portEXIT_CRITICAL(&s_zones_cfg_mux);
+    if (s_zones_cfg_unlock_test_hook != NULL) {
+        s_zones_cfg_unlock_test_hook();
+    }
 }
 
 /* ---- Hardware access for Tasks 1/2/3 (2026-08-27+2) ----------------------
