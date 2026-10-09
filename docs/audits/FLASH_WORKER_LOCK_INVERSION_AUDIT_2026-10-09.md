@@ -1,0 +1,297 @@
+# Flash-worker lock-inversion audit (2026-10-09)
+
+Read-only audit of KilnFW on origin/dev `a7433500`. No code changed.
+
+## The deadlock class
+
+`uart_bridge_ext_run_on_flash_worker()` (`drivers/bridge/uart_bridge_ext.c`,
+`bx_run_on_internal_stack()` around line 512) runs the job inline when the
+caller is already on `bx_flash_worker`. Otherwise it takes `s_bx_lock`, posts
+the job on the depth-1 queue `s_bx_jobs`, and waits on `s_bx_done`. Both waits
+are `portMAX_DELAY`.
+
+A deadlock needs three things:
+
+1. Task A (not the worker) holds lock L.
+2. While holding L, task A calls something that reaches the dispatch.
+3. The job the worker is running at that moment takes L.
+
+The worker is then blocked on L, and A is blocked on `s_bx_lock` or
+`s_bx_done`. Neither lock nor the worker is ever released. Every caller of the
+worker blocks next. That includes the PC UART bridge, because every UART
+command handler runs on the worker.
+
+UART command handlers that run entirely on the worker:
+
+- `control_handle_message`, dispatched at `uart_bridge_ext_control.c:220`.
+- `profiles_handle_message`, dispatched at `uart_bridge_ext_control.c:651`.
+- `autotune_handle_message`, dispatched at `uart_bridge_ext_autotune.c:222`.
+
+Any lock those handlers take is therefore a lock "acquired on the worker".
+
+**Excluded.** These known instances are being fixed by another agent and are
+not repeated here:
+
+- `zcfg_save_lock` (`zones_config_store.c` `nvs_save`, `relay_names_save`, `zone_normals_save`).
+- `profiles_save_lock` (the `nvs_save_slot` call sites in `profiles_http.c` and `profiles_edit_http.c`).
+- `cfg_save_lock.h` users (`unit_pref.c`, `profiles_favorites`).
+
+All paths below are relative to `firmware/KilnFW/App/`.
+
+## Method
+
+The call graph comes from grep, built by throwaway scripts that are not
+committed:
+
+1. Parse every non-test `.c` under `App/` into function bodies and call sites.
+2. Compute the backward closure from `uart_bridge_ext_run_on_flash_worker` and
+   `bx_run_on_internal_stack`: 269 functions that can reach a dispatch.
+3. Compute the forward closure from the worker entry points (the three UART
+   handlers, the posted `safety_link_poll.c:438` job, and every
+   `*_job` function passed to `uart_bridge_ext_run_on_flash_worker`): 391
+   functions that can run on the worker.
+4. Linear-scan each function for a `xSemaphoreTake` or a lock-wrapper call
+   that is held across a call into set 2.
+5. Intersect the result with the locks taken by functions in set 3.
+6. Verify every candidate by reading the code, and record the file:line of
+   each edge.
+
+Limits of the method:
+
+- The graph is name-based. Same-named `static` functions in different files
+  are merged, which produced some false positives (listed below).
+- Calls through function pointers (hooks, job function pointers) were
+  resolved by hand.
+- The linear held-lock scan ignores control flow. Early-return gives were
+  checked by hand.
+
+The reverse direction was checked separately: a worker job that blocks on a
+queue or semaphore given only by a task that may itself be waiting on the
+worker.
+
+## Findings, ranked
+
+### F1 HIGH: `s_exec.lock` held across `relay_cycles` persist dispatch
+
+**Holder path (executor task):**
+
+- `executor_task_entry` takes `s_exec.lock` at `drivers/control/profile_executor.c:737`
+  on the RUNNING-tick path and gives it at `profile_executor.c:2053`.
+- While holding it, it calls `relay_cycles_maybe_persist()` at `profile_executor.c:1970`.
+- `relay_cycles_maybe_persist` calls `persist_snapshot_now(0)` (`drivers/persist/relay_cycles.c`, around line 1196).
+- `persist_snapshot_now` dispatches `uart_bridge_ext_run_on_flash_worker(reset_persist_job)`
+  at `relay_cycles.c:1162`.
+- This path runs at most once every `RELAY_CYCLES_PERSIST_INTERVAL_S` (10 min),
+  and only when the cycle counts are dirty. During a firing they are always
+  dirty, so this dispatch happens every 10 minutes of every firing.
+
+**Worker takers of `s_exec.lock`:**
+
+| Worker path | Takes `s_exec.lock` at |
+|---|---|
+| `profiles_handle_message` -> `profile_executor_halt` (`uart_bridge_ext_control.c:568`) | `drivers/control/profile_executor_status.c:41` |
+| `profile_executor_pause` (`uart_bridge_ext_control.c:573`) | `profile_executor_status.c:278` |
+| `profile_executor_resume` | `profile_executor_status.c:330` |
+| `profile_executor_run` (UART run command) | `drivers/control/profile_executor_run.c:433` |
+| `autotune_handle_message` START -> `autotune_engine_run_relay` -> `autotune_begin_run_locked` -> `profile_executor_zone_is_active` (`autotune_engine.c:1175`) | `profile_executor_status.c:608` |
+| `profile_executor_get_active_id` (UART status) | `profile_executor_status.c:644` |
+| `fault_halt_run_halt_job` (dispatched at `profile_executor_status.c:259`) -> `profile_executor_halt` | `profile_executor_status.c:41` |
+
+**Trigger.** A PC sends halt, pause, resume or status, or a fault-halt job is
+running on the worker, at the moment the executor tick reaches the 10-minute
+persist.
+
+**Consequence:**
+
+- The executor task is wedged forever, so guard 9 (control-tick liveness) fires.
+- The PC UART is dead.
+- Every other user of the worker blocks behind it, including the profile and
+  zones saves.
+
+The comment at `relay_cycles.c:1088-1135` says the executor tick "never
+waits". That covers only the `persist_lock` try-take, not the worker dispatch
+that follows it.
+
+**Suggested fix (text only).** Set a flag under the lock and call
+`relay_cycles_maybe_persist()` after the give at `profile_executor.c:2053`.
+Alternatively, make the tick-path persist use the posted, fire-and-forget slot.
+
+### F2 HIGH: `s_at.lock` held across the coupling persist dispatch
+
+**Holder path (autotune task):**
+
+- `task_entry` takes `s_at.lock` at `drivers/control/autotune_engine.c:854` and
+  gives it at `autotune_engine.c:860`.
+- Between the two it calls `autotune_engine_tick_locked_impl` (`autotune_engine.c:858`).
+- That calls `autotune_finalize_fit()` at `autotune_engine.c:698` and `autotune_engine.c:726`.
+- `autotune_finalize_fit` dispatches `uart_bridge_ext_run_on_flash_worker(coupling_persist_job)`
+  at `drivers/control/autotune_engine_step_identify.c:525`. There is no give in
+  `autotune_engine_step_identify.c`, so the lock is held across the dispatch.
+
+**Worker takers of `s_at.lock`:**
+
+| Worker path (`autotune_handle_message`) | Takes `s_at.lock` at |
+|---|---|
+| `AUTOTUNE_CMD_GET_STATUS` -> `autotune_build_status` (`uart_bridge_ext_autotune.c:126`, `:32`) -> `autotune_engine_get_status` | `autotune_engine.c:1668` |
+| ABORT (`uart_bridge_ext_autotune.c:157`) | `drivers/control/autotune_engine_guard.c:274` |
+| ACCEPT (`uart_bridge_ext_autotune.c:182`) | `autotune_engine_guard.c:324` |
+| START -> `autotune_begin_run_locked` | `autotune_engine.c:1184` |
+| `autotune_engine_is_active_on_zone` | `autotune_engine.c:1798` |
+| `autotune_engine_release_zone_for_external_write` | `autotune_engine.c:1836` |
+
+**Trigger.** A PC polling autotune status (the normal autotune workflow) while
+a step-test fit finishes. The odds are high, because the PC polls throughout a
+run.
+
+**Consequence.** The autotune task and the worker are both wedged. Autotune
+never finishes, and the UART is dead.
+
+`coupling_persist_job` itself (which calls `zones_config_set_coupling_cell`)
+does not take `s_at.lock`, so the job cannot deadlock on its own. The comment
+at `autotune_engine_step_identify.c:521` ("Not reachable on-worker today")
+covers only re-entrancy, not this inversion.
+
+**Suggested fix (text only).** Capture the coupling-cell arguments under
+`s_at.lock`, return them to `task_entry`, and dispatch after the give at
+`autotune_engine.c:860`.
+
+### F3 MEDIUM: `adaptive_tune_lock` held across zones saves
+
+**Holder path (executor task, after a run ends):**
+
+- `adaptive_tune_run_end` takes `adaptive_tune_lock` at `drivers/control/adaptive_tune.c:634`
+  and gives it at `adaptive_tune.c:785`.
+- While holding it, it calls `adaptive_tune_refine_zone_locked` (`adaptive_tune.c:713`).
+  That reaches `zones_config_set_autotune_baseline_k_dc` (`drivers/control/adaptive_tune_model.c:116`),
+  `zones_config_set_model` (`adaptive_tune_model.c:225`) and `zones_config_set_pid` (`adaptive_tune_model.c:232`).
+- It also calls `adaptive_tune_refine_coupled_locked` (`adaptive_tune.c:714`),
+  which reaches `zones_config_set_coupling_cell` (`adaptive_tune_model.c:626`).
+- Each of those setters ends in the zones `nvs_save`. That takes `zcfg_save_lock`
+  (`drivers/persist/zones_config_store.c:829`) and dispatches at
+  `zones_config_store.c:852` and `zones_config_store.c:895`.
+- Off-worker caller: the executor task at `profile_executor.c:795`, on the
+  DONE/FAULTED path with `clean=true`. `s_exec.lock` has already been given at
+  `profile_executor.c:786`, so this finding does not involve F1.
+
+**Worker taker.** The UART `AUTOTUNE_CMD_ACCEPT` handler calls
+`autotune_engine_accept`, which calls `adaptive_tune_clear_ki_baseline`
+(`autotune_engine_guard.c:506`). That takes `adaptive_tune_lock` at `adaptive_tune.c:1015`.
+
+**Why the gate does not prevent it.** The system mode gate refuses zones and
+config writes only while `profile_running` or `autotune_running`
+(`drivers/safety/system_mode_gate.c:82-101`). A profile that has just reached
+DONE does not count as running, so an autotune accept can coincide with
+`run_end`. The window is narrow (one run end), hence MEDIUM.
+
+The worker-side halt path (`profile_executor_status.c:126`) reaches `run_end`
+only when `fs_need_persist` is set. That case runs inline on the worker, so it
+is not an inversion.
+
+**Interaction with the excluded `zcfg_save_lock` fix.** Fixing the zones save
+mutex alone does not fix F3: the worker would still block on
+`adaptive_tune_lock`.
+
+**Suggested fix (text only).** Compute the refined values under
+`adaptive_tune_lock`, release the lock, and then call the `zones_config_set_*`
+setters.
+
+### F4 LOW (bounded): `s_rc.persist_lock` across the dispatch
+
+- `persist_snapshot_now` takes `persist_lock` (`relay_cycles.c:1140`) and
+  holds it across the dispatch at `relay_cycles.c:1162`.
+- On the worker, `profile_executor_halt` calls `relay_cycles_flush`
+  (`profile_executor_status.c:151`), which calls `persist_snapshot_now` with
+  `RELAY_CYCLES_FLUSH_LOCK_WAIT_MS` = 3000.
+- The take is bounded, so the worst case is a 3 s worker stall and an
+  `ESP_ERR_TIMEOUT` flush (counts persisted later), not a deadlock.
+- This finding goes away if F1 is fixed by moving the persist off `s_exec.lock`.
+
+### F5 LOW (boot only): `s_rc.lock` in `relay_cycles_init`
+
+- `relay_cycles_init` holds `s_rc.lock` from `relay_cycles.c:343` to
+  `relay_cycles.c:496`.
+- During that time it calls `migrate` (`relay_cycles.c:351`) and
+  `pref_cfg_fs_resolve` (`relay_cycles.c:477`). Both can write back through
+  the cfg_fs write function, which dispatches at `drivers/persist/cfg_fs_mount.c:525`.
+
+Worker takers of `s_rc.lock`:
+
+- `relay_cycles_note_safety_edge` (`relay_cycles.c:532`), reached through
+  `safety_drain_inbox` -> `safety_apply_status` (`drivers/safety/safety_link_frames.c:766`).
+- `relay_cycles_set_type` (`relay_cycles.c:583`), reached through
+  `zones_config_push_all_relay_types` (`zones_config_store.c:943`).
+
+Boot order makes contention unlikely: `main.c:218` `main_control_bringup`
+(`relay_cycles_init` at `main_control_bringup.c:336`) runs before
+`main_network_http_bringup` and `main_bridges_bringup`, which start the UART
+bridges. Recorded so a
+reordering of boot does not silently turn this into a deadlock.
+
+## Held across a dispatch but not taken on the worker (safe today, latent)
+
+These locks are held across a dispatch but are never taken by worker code
+today. A future change that takes any of them on the worker creates a
+deadlock.
+
+- **`s_reconcile_lock`** (`drivers/safety/safety_ceiling_sync.c:767`, gives at
+  `:844`/`:873`/`:904`/`:917`). It is held around the whole reconcile body,
+  including `enforce_ceiling_divergence`. That function calls the
+  `s_disable_halt_run` hook (`safety_ceiling_sync.c:581`), and the hook reaches
+  `profile_executor_fault_halt`, which dispatches `fault_halt_run_halt_job` at
+  `profile_executor_status.c:259`.
+  - The divergence-state lock is correctly released around the hooks
+    (`safety_ceiling_sync.c:573-582`).
+  - `s_reconcile_lock` is taken only by `safety_poll_task` and
+    `kiln_cfg_swap_worker`. Neither is the worker, and no worker-reachable
+    function takes it: only `safety_ceiling_sync_is_diverged` and the
+    divergence-state lock wrappers are in the worker set.
+- **`safety_cfg_store` `s_store_lock`**, at refetch (`drivers/safety/safety_cfg_store.c:1743`)
+  and `refetch_nonblocking` (`safety_cfg_store.c:1783`, try-take 0). It is held
+  across the flush dispatch at `safety_cfg_store.c:709`, which is reached from
+  `safety_poll_task` -> `safety_update_health` (`safety_link_poll.c:676`) ->
+  `safety_sync_cfg_cache` (`:218`) -> maybe_refetch (`:170`).
+  - Separately: `safety_poll_task` is the ESP side of the link heartbeat, and
+    it blocks synchronously on the worker here. If the worker is wedged by F1
+    or F2, the heartbeat stops and the Pico trips S6b. That fails safe, but it
+    turns F1/F2 into a field-visible safety trip.
+- **`profiles_live_http` `s_decide_lock`** (`drivers/http/profiles_live_http.c:667`/`:673`).
+- **`update_settings` `s_write_lock`** (`drivers/update/update_settings.c:232`/`:233`).
+- **`aux_outputs_cfg` `s_set_lock`** (`drivers/persist/aux_outputs_cfg.c:315`) is held
+  across `pref_cfg_fs_commit` (`aux_outputs_cfg.c:338`).
+  - The worker takes only `s_lock` (via `aux_outputs_cfg_get` at `:233` and the
+    enabled mask at `:279`).
+  - `s_lock` is released at `aux_outputs_cfg.c:327`, before the commit.
+
+## Candidates rejected after reading the code
+
+| Candidate | Why it is not a finding |
+|---|---|
+| `adaptive_tune_revert` | Lock given at `adaptive_tune.c:1197`, before the writes at `:1205`/`:1206` |
+| `autotune_engine_accept` | `s_at.lock` given at `autotune_engine_guard.c:435`, before `set_pid` at `:466`; the re-take at `:521` only flips state |
+| executor `run_end` at `profile_executor.c:795` | Runs after the give at `:786` (F3 is about `adaptive_tune_lock`, not `s_exec.lock`) |
+| `relay_cycles` `restore_all` / persist `s_rc.lock` | `s_rc.lock` given at `relay_cycles.c:1041` and `:1151`, before the dispatch |
+| `zones_http_post.c:85-93` | `zones_cfg_lock` (portMUX) exits at `:88`, before `nvs_save` at `:93` |
+| `run_state` `s_rs.lock` in migrate | `run_state.c`'s `migrate_from_default_partition` does an inline `hal_kv_commit` with no dispatch; the scanner merged it by name with `relay_cycles`' `migrate` |
+
+## Reverse direction: worker waits on a task that waits on the worker
+
+| Worker wait | Verdict |
+|---|---|
+| `kiln_io_owner` post-and-wait (`drivers/owners/kiln_io_owner.c:683-715`) | No owner function reaches a dispatch, so there is no cycle |
+| `thermo_owner` post-and-wait (`drivers/owners/thermo_owner.c:275-304`) | Same: no cycle |
+| `safety_link` `xact_lock` in `safety_exchange` on the worker (`drivers/safety/safety_link_inbox.c:796`) | Bounded by `SAFETY_XACT_LOCK_TIMEOUT_MS`. `safety_poll_task`'s own exchange (`safety_link_poll.c:605`) releases the lock before its dispatch path (`:676`), and the drain at `:749` is a try-take |
+| `heat_enable` `he_flush_release_blocking` (`drivers/control/heat_enable.c:210-242`) | Bounded polling |
+| Posted `safety_poll` job (`safety_link_poll.c:438`) | Fire-and-forget post; the poster never waits |
+
+No function in `wifi_prov`, `update_fetch`, LVGL, `heat_enable` or
+`uart_protocol` reaches a dispatch. No reverse-direction deadlock was found.
+
+## Summary
+
+| Rank | Lock | Holder task | Status |
+|---|---|---|---|
+| F1 HIGH | `s_exec.lock` | profile executor | Open |
+| F2 HIGH | `s_at.lock` | autotune | Open |
+| F3 MEDIUM | `adaptive_tune_lock` | profile executor (run end) | Open, not fixed by the zones mutex fix |
+| F4 LOW | `s_rc.persist_lock` | executor / worker | Bounded 3 s stall |
+| F5 LOW | `s_rc.lock` | boot (`relay_cycles_init`) | Boot-order protected |
