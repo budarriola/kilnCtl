@@ -441,7 +441,7 @@ static void test_bad_images(void)
     make_image(30000, "v1.0.0");
     g_img[0] = 0x00;
     TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_BAD_IMAGE, "wrong image magic refused");
-    TEST_CHECK(!is_staged(), "a refused upload leaves nothing staged (old header was erased at begin)");
+    TEST_CHECK(is_staged(), "a refused upload leaves the previously staged image intact (header erased only after the checks)");
     TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE && !g_fl.sha_open, "idle and hash closed after a mid-upload refusal");
     TEST_CHECK(g_fl.mem[STAGE_IMAGE_OFFSET] == 0xFF || g_fl.mem[STAGE_IMAGE_OFFSET] == 0xE9,
                "no image byte was written for the refused head");
@@ -452,7 +452,7 @@ static void test_bad_images(void)
     make_image(30000, "v1.0.0");
     g_img[32] ^= 0xFF; // app descriptor magic
     TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_BAD_IMAGE, "missing app descriptor refused");
-    TEST_CHECK(!is_staged(), "still nothing staged");
+    TEST_CHECK(is_staged(), "still the baseline stage, untouched");
     // Head is held back until validated: a head split across many tiny writes behaves the same.
     make_image(30000, "v1.0.0");
     g_img[0] = 0x01;
@@ -479,7 +479,7 @@ static void test_wrong_project_refused(void)
     memset(g_img + 80, 0, 32);
     memcpy(g_img + 80, "OtherProject", 12);
     TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_ERR_WRONG_PROJECT, "wrong project_name refused");
-    TEST_CHECK(!is_staged(), "wrong-project upload leaves nothing staged");
+    TEST_CHECK(is_staged(), "wrong-project upload leaves the previous stage intact");
     TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE && !g_fl.sha_open, "idle and hash closed after wrong-project refusal");
     TEST_CHECK(strcmp(update_stage_err_name(UPDATE_STAGE_ERR_WRONG_PROJECT), "wrong_project") == 0, "error name");
 
@@ -950,6 +950,33 @@ static void test_install_gate(void)
     TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_OK && r.calls == 0, "begin clears a stale gate");
 }
 
+// A gate refusal (e.g. accidental downgrade) must leave the previously staged image byte-identical.
+static void test_gate_refusal_keeps_stage(void)
+{
+    TEST_SECTION("update_stage -- gate refusal leaves the existing stage byte-identical");
+    reset_board();
+    make_image(30000, "v2.0.0");
+    TEST_CHECK(upload(30000, 4096, NULL, NULL) == UPDATE_STAGE_OK, "image A staged");
+    uint8_t before_sha[32];
+    update_stage_info_t a = status();
+    TEST_CHECK(a.staged && a.hdr_status == STAGE_HDR_OK, "A valid before");
+    memcpy(before_sha, a.sha256, 32);
+    static uint8_t snap[0x400000];
+    TEST_CHECK(sizeof(snap) >= STAGE_IMAGE_OFFSET + 30000, "snapshot buffer large enough");
+    memcpy(snap, g_fl.mem, STAGE_IMAGE_OFFSET + 30000);
+
+    gate_rec_t r = { 0, "", UPDATE_STAGE_ERR_POLICY };
+    make_image(30000, "v1.0.0");
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_ERR_POLICY && r.calls == 1,
+               "downgrade refused by the gate");
+    TEST_CHECK(memcmp(snap, g_fl.mem, STAGE_IMAGE_OFFSET + 30000) == 0, "header sector and image bytes unchanged");
+    update_stage_info_t b = status();
+    TEST_CHECK(b.staged && b.hdr_status == STAGE_HDR_OK && memcmp(b.sha256, before_sha, 32) == 0 &&
+                   strcmp(b.semver, "2.0.0") == 0,
+               "stage still reads A: valid header, same sha and version");
+    TEST_CHECK(g_st.phase == UPDATE_STAGE_IDLE && !g_fl.sha_open, "idle, hash closed");
+}
+
 void run_test_update_stage(void)
 {
     test_sha_reference();
@@ -959,6 +986,7 @@ void run_test_update_stage(void)
     test_bad_images();
     test_wrong_project_refused();
     test_install_gate();
+    test_gate_refusal_keeps_stage();
     test_interrupted_and_blank();
     test_http_buffer_is_the_shared_internal_chunk();
     test_status_never_trusts_a_header_alone();

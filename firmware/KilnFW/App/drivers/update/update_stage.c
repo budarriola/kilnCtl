@@ -166,22 +166,15 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
             return e;
         }
     }
-    // From here the stage reads as blank until upload_finish writes a header.
-    if (st->io.erase(st->io.ctx, 0, STAGE_HEADER_SECTOR) != 0) {
-        set_phase(st, UPDATE_STAGE_IDLE);
-        return UPDATE_STAGE_ERR_FLASH;
-    }
-    if (st->io.sha_start(st->io.ctx) != 0) {
-        set_phase(st, UPDATE_STAGE_IDLE);
-        return UPDATE_STAGE_ERR_HASH;
-    }
+    // The header sector is NOT erased here: flush_head erases it only after the
+    // identity/version/policy checks pass, so a refused upload leaves the stage intact.
     return UPDATE_STAGE_OK;
 }
 
 static update_stage_err_t fail(update_stage_t *st, update_stage_err_t e)
 {
     sha_abort(st);
-    set_phase(st, UPDATE_STAGE_IDLE); // header already erased: stage stays blank
+    set_phase(st, UPDATE_STAGE_IDLE); // stage blank only if flush_head already erased the header
     return e;
 }
 
@@ -271,6 +264,15 @@ static update_stage_err_t flush_head(update_stage_t *st)
         if (g != UPDATE_STAGE_OK) {
             return UPDATE_STAGE_ERR_POLICY;
         }
+    }
+    // Checks passed: from here the stage reads as blank until upload_finish writes a header.
+    if (st->io.erase(st->io.ctx, 0, STAGE_HEADER_SECTOR) != 0) {
+        return UPDATE_STAGE_ERR_FLASH;
+    }
+    st->cache_valid = false;
+    st->bad_valid = false;
+    if (st->io.sha_start(st->io.ctx) != 0) {
+        return UPDATE_STAGE_ERR_HASH;
     }
     return put(st, st->head, UPDATE_STAGE_HEAD_LEN);
 }

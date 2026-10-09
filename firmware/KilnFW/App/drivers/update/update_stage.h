@@ -8,8 +8,11 @@
 //
 // On-flash order, chosen so that a power cut or a failed upload can only ever
 // leave "nothing staged", never a half-valid stage:
-//   1. upload_begin  : checks size/args, then erases the header sector.
-//                      From here the stage reads BLANK (not staged).
+//   1. upload_begin  : checks size/args only; flash is untouched, so a refused
+//                      upload keeps the previous stage. The first
+//                      UPDATE_STAGE_HEAD_LEN bytes are buffered; once they pass
+//                      the image/project/version/gate checks the header sector
+//                      is erased. From there the stage reads BLANK (not staged).
 //   2. upload_write  : image bytes go to STAGE_IMAGE_OFFSET.., erased ahead in
 //                      UPDATE_STAGE_ERASE_UNIT blocks, hashed as they arrive.
 //   3. upload_finish : re-reads the whole image from flash, hashes it again
@@ -173,8 +176,8 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
 void update_stage_set_gate(update_stage_t *st, update_stage_gate_fn gate, void *ctx);
 update_stage_err_t update_stage_upload_write(update_stage_t *st, const uint8_t *data, size_t len);
 update_stage_err_t update_stage_upload_finish(update_stage_t *st);
-// Ends a failed/cancelled upload. The header was erased at begin, so the stage
-// stays blank; safe to call when no upload is active.
+// Ends a failed/cancelled upload. If the header was already erased (checks
+// passed), the stage stays blank; safe to call when no upload is active.
 void update_stage_upload_abort(update_stage_t *st);
 
 // Erases the header sector (the image area is left; without a header it is

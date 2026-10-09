@@ -102,9 +102,11 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     one.
 
     With confirm: refuses while the board reports an upload already in
-    flight; the result notes when a previously staged image was erased (an
-    upload erases the previous stage first; a failed upload never leaves a
-    half-valid stage, but a previously good one is gone). After the POST it
+    flight; the result notes when a previously staged image may be replaced (the
+    board erases the previous stage only after the image head passes the
+    project, version and downgrade-gate checks, so an upload refused by
+    those leaves the old stage byte-identical; a later failure never leaves
+    a half-valid stage, but a previously good one is gone). After the POST it
     re-reads GET /api/update/stage and only reports ok when the board says
     staged with a verified header, the image length equals the file size and
     the board's sha256 equals the one computed locally; anything else is
@@ -184,8 +186,8 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
             return (f"FAILED: board refused the upload: HTTP 400 bad_version -- {why}. "
                     "Nothing was invented on your behalf. Retry with an explicit "
                     "version=\"x.y.z\" (e.g. \"1.4.0\"; an optional leading v is stripped) "
-                    "that you choose for this image; a previously staged image may have been "
-                    f"erased (host={resolved})")
+                    "that you choose for this image; the previously staged image is untouched "
+                    f"(host={resolved})")
         if exc.status == 409 and name in ("downgrade_refused", "needs_force"):
             body = uhc.refusal_body(exc)
             cand = body.get("candidate_version") or "?"
@@ -198,7 +200,7 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
                 hint = "Override with force=True (no typed confirm needed)."
             return (f"FAILED: board refused the upload by the downgrade gate: {name} -- "
                     f"{uhc.refusal_reason(exc)} (candidate {cand}, running {run}). {hint} "
-                    f"The previous stage may have been erased (host={resolved})")
+                    f"The previously staged image is untouched (host={resolved})")
         if exc.status == 409 and name == "version_mismatch":
             return ("FAILED: the declared version differs from the version inside the image; omit version= "
                     f"or pass the image's own (host={resolved})")
