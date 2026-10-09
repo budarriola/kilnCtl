@@ -115,7 +115,7 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
         return false;
 
     case SYS_ACTION_RECOVERY_BOOT:
-        // docs/OTA_SINGLE_SLOT_PLAN.md section 4: the app reboots into the
+        // docs/OTA_SINGLE_SLOT.md section 4: the app reboots into the
         // recovery image, where no relay driver exists at all -- so the
         // relays must already be off before we go, and no firing/autotune
         // may be cut off mid-run. Same two run facts as Q3 above, plus the

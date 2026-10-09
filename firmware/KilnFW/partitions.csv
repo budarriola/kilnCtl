@@ -563,7 +563,7 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 # procedure and the mandatory pre-change backup.
 #
 # --- single application slot + recovery image, added 2026-09-16
-#     (docs/OTA_SINGLE_SLOT_PLAN.md, section 1 and section 8 step 3) --------
+#     (docs/OTA_SINGLE_SLOT.md, section 1 and section 8 step 3) --------
 #
 # THIS IS NOT AN APPEND-ONLY REVISION. `ota_0`, `ota_1` and `factory` are
 # REMOVED and replaced by two new rows, `app` and `recovery`. This is the
@@ -613,14 +613,14 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 # this table is actually flashed to a board, because the `app`-type offsets
 # and sizes changed (same rule the 2026-08-21 `factory` move above already
 # states) -- NOT done as part of this revision, which is source-and-build
-# only per the plan's section 8 step 3 scope. See docs/OTA_SINGLE_SLOT_PLAN.md
+# only per the plan's section 8 step 3 scope. See docs/OTA_SINGLE_SLOT.md
 # section 2 for the full migration procedure and its pre-flight backup
 # requirements; nothing in that migration has been performed against the
 # bench board by this commit.
 #
 # check_sizes.py's min()-over-all-app-partitions gate is measurably NOT a
 # blocker for the size mismatch between `app` (8 MiB) and `recovery`
-# (1,966,080 B) -- see docs/OTA_SINGLE_SLOT_PLAN.md section 1 for the
+# (1,966,080 B) -- see docs/OTA_SINGLE_SLOT.md section 1 for the
 # empirical confirmation against the IDF version installed here
 # (`C:\esp\v6.0.2\esp-idf`): a binary that fits `app` but overflows
 # `recovery` prints a non-fatal `Warning:` and the build still exits 0.
@@ -744,7 +744,7 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 #
 # OTADATA: `app` keeps its offset and subtype (ota_0), so a valid `otadata`
 # still selects it -- no erase is strictly required, but the one-time flash
-# procedure in docs/OTA_SINGLE_SLOT_PLAN.md section 10 handles it explicitly.
+# procedure in docs/OTA_SINGLE_SLOT.md section 10 handles it explicitly.
 #
 # This table has NO OTA path: it is applied once per board over JTAG
 # (flash_firmware()). A board still on the old table has no `stage` partition

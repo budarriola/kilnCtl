@@ -511,7 +511,7 @@ def rollback_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
 def recovery_boot_esp(host: str, timeout: float = OTA_HTTP_TIMEOUT_S) -> dict:
     """POST /api/ota/esp/recovery_boot -- deliberately reboot the board into its
     RECOVERY image (App/drivers/http/ota_http_recovery.c's
-    ota_recovery_boot_post_handler(); docs/OTA_SINGLE_SLOT_PLAN.md section 4).
+    ota_recovery_boot_post_handler(); docs/OTA_SINGLE_SLOT.md section 4).
     With one OTA slot, ota_rollback_esp() has nothing to roll back to; this is
     the way to reach the image that can take a fresh push.
 

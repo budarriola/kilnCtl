@@ -31,7 +31,7 @@
 # build cached across runs. None of that applies here:
 #   * KilnFW_recovery's sdkconfig is NOT gitignored config drift risk -- its
 #     sdkconfig.defaults IS the whole configuration (docs/
-#     OTA_SINGLE_SLOT_PLAN.md section 3: deliberately minimal, no
+#     OTA_SINGLE_SLOT.md section 3: deliberately minimal, no
 #     board-specific tuning, same for every board). idf.py regenerates
 #     sdkconfig from it on every configure; there is nothing to diverge from
 #     in the sense of "which board" -- but this project's build\ directory

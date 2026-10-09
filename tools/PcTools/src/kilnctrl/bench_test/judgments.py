@@ -2125,7 +2125,7 @@ def judge_ota_self_push_refused(
 ) -> CaseResult:
     """OT-E01: the APPLICATION image runs from the only OTA slot, so
     POST /api/ota/esp must be refused (single-slot design,
-    docs/OTA_SINGLE_SLOT_PLAN.md). `refusal_form` is what the client saw:
+    docs/OTA_SINGLE_SLOT.md). `refusal_form` is what the client saw:
 
       http_409          -- HTTP 409 observed (the normal form); status_code
                            must be 409; elapsed_s is informational below a 120 s ceiling.

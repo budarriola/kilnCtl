@@ -186,7 +186,7 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
 
 
 // --- POST /api/ota/esp/recovery_boot -- deliberate entry into the recovery
-// image (docs/OTA_SINGLE_SLOT_PLAN.md section 4, "Deliberate entry into
+// image (docs/OTA_SINGLE_SLOT.md section 4, "Deliberate entry into
 // recovery"; section 7's ota_rollback_esp() -> ota_recovery_boot_esp() row).
 // With one OTA slot, POST /api/ota/esp/rollback has nothing to roll back to
 // (esp_ota_check_rollback_is_possible() is false); this is the replacement

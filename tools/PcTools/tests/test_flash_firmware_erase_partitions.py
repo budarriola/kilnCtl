@@ -35,7 +35,7 @@ from kilnctrl import mcp_server_flash as mf  # noqa: E402
 from kilnctrl import partition_table  # noqa: E402
 
 
-# The real single-slot table's data partitions (docs/OTA_SINGLE_SLOT_PLAN.md /
+# The real single-slot table's data partitions (docs/OTA_SINGLE_SLOT.md /
 # CLAUDE.md's nvs erase note), trimmed to what these tests need.
 _PARTITIONS_CSV = (
     "# Name,        Type, SubType,   Offset,    Size\n"

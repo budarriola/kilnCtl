@@ -109,7 +109,7 @@ typedef enum {
                                       // uart_bridge_system.c's factory_reset_execute()
     SYS_ACTION_CFGFS_FORMAT,         // wired: cfg_fs_format_http.c's format_confirm_post_handler()
     SYS_ACTION_RECOVERY_BOOT,        // wired: ota_http_recovery.c's ota_recovery_boot_post_handler()
-                                      // (POST /api/ota/esp/recovery_boot, docs/OTA_SINGLE_SLOT_PLAN.md
+                                      // (POST /api/ota/esp/recovery_boot, docs/OTA_SINGLE_SLOT.md
                                       // section 4 "Deliberate entry into recovery") -- refused while a
                                       // firing/autotune is active OR any relay is (or may be) energized
     SYS_ACTION_STAGE_WRITE,          // wired: update_http.c's stage upload and stage clear handlers

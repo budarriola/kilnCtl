@@ -4,7 +4,7 @@
 
 History: flash_firmware() resolves its write target dynamically from
 partitions.csv (the `app`/ota_0 slot as of the 2026-09-16 single-slot OTA
-redesign, docs/OTA_SINGLE_SLOT_PLAN.md) and never touches `otadata`. If an
+redesign, docs/OTA_SINGLE_SLOT.md) and never touches `otadata`. If an
 OTA ever pointed the boot target somewhere else, the bootloader keeps
 booting that OLD image forever -- every later flash_firmware() reports
 "flashed and verified OK" (OpenOCD's own byte-compare during the write)

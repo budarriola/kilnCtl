@@ -1,7 +1,7 @@
 # Recovery image rework plan
 
 Status: opened 2026-10-02. Pending work only; delete a wave's section when it lands and
-update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT_PLAN.md`
+update the ROADMAP row in the same commit. Background: `docs/OTA_SINGLE_SLOT.md`
 (why a separate recovery image exists). Code: `firmware/KilnFW_recovery/`, flashed to the
 `recovery` factory partition in `firmware/KilnFW/partitions.csv`.
 

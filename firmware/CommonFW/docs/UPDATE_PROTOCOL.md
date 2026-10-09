@@ -931,7 +931,7 @@ application image answers `409 Conflict` ("single-slot design ... recovery
 image") when `esp_ota_get_next_update_partition()` is the running `app`
 partition itself -- the single-slot table has no spare slot, so an ESP image is
 pushed through the recovery image's route instead (`recovery_enter`;
-`docs/OTA_SINGLE_SLOT_PLAN.md`). Every early refusal on both `POST /api/ota/esp`
+`docs/OTA_SINGLE_SLOT.md`). Every early refusal on both `POST /api/ota/esp`
 and `POST /api/ota/pico` (interlock 409/428, update-in-progress 409, size/magic/
 chip checks, staging failures, a failed transfer) now sends its response and
 then drains the unread body itself (`ota_http_refusal_drain()`: 4 KB reads into

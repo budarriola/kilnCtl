@@ -432,7 +432,7 @@ edits, both after moving the worktree to current `origin/main`:
   `'recovery' partition is defined ... but no recovery image was found at
   ...KilnFW_recovery\build\recovery.bin yet` — the single-slot-OTA recovery
   image is a concurrently in-progress feature (see
-  `docs/OTA_SINGLE_SLOT_PLAN.md` section 8) not yet built in this worktree,
+  `docs/OTA_SINGLE_SLOT.md` section 8) not yet built in this worktree,
   not a regression from this pass's own edits.
 
 This is one skip and two fails short of the 95/0/0 baseline, all three

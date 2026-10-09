@@ -84,7 +84,7 @@ bool ota_http_client_ip_finalize(char *out, size_t out_len, const char *formatte
  * next-update-partition returns ota_0, which is the running `app` itself, and
  * esp_ota_begin() then fails with ESP_ERR_OTA_PARTITION_CONFLICT. An ESP image
  * push goes through the recovery image's route instead
- * (docs/OTA_SINGLE_SLOT_PLAN.md); the application refuses up front with 409. */
+ * (docs/OTA_SINGLE_SLOT.md); the application refuses up front with 409. */
 bool ota_http_esp_target_usable(const void *target, const void *running);
 
 /* Verdict for one step of the bounded drain that follows an early refusal

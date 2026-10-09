@@ -114,7 +114,7 @@ FIXTURE_JTAG_SERIAL = serial_link.FIXTURE_JTAG_SERIAL
 # HISTORY (2026-09-17 fix): this used to write the app image to a HARDCODED
 # offset (APP_FLASH_OFFSET = 0x810000, the OLD dual-OTA-slot table's
 # `factory` partition), left deliberately unretargeted when the 2026-09-16
-# single-application-slot partitions.csv landed (docs/OTA_SINGLE_SLOT_PLAN.md
+# single-application-slot partitions.csv landed (docs/OTA_SINGLE_SLOT.md
 # step 3: `app`/ota_0 @0x210000/8 MiB, `recovery`/factory @0xA10000/1,966,080
 # B). That gap bit for real: the app image (~2,334,000 B) was written at
 # 0xa10000 -- `recovery`'s offset, reached via a separate, since-corrected
@@ -145,7 +145,7 @@ def _resolve_app_flash_target(kiln_fw_root: str) -> partition_table.PartitionEnt
     :class:`partition_table.PartitionEntry` the main application image
     (`KilnCtrl.bin`) must be flashed into -- the partition named
     `APP_PARTITION_NAME` ("app", the ota_0 slot introduced by the
-    2026-09-16 single-slot OTA redesign, docs/OTA_SINGLE_SLOT_PLAN.md).
+    2026-09-16 single-slot OTA redesign, docs/OTA_SINGLE_SLOT.md).
 
     Reading the CSV that ships alongside the binaries being flashed (rather
     than a fixed path, or the main tree's own copy) matters for the
@@ -322,7 +322,7 @@ def _check_app_flash_offset_matches_chip(
             f"own {chip_match.name!r} partition at 0x{chip_match.offset:x} instead. One side is "
             f"stale: either partitions.csv was retargeted ahead of a board that has not actually "
             f"been migrated yet, or this board's own table was migrated (see "
-            "docs/OTA_SINGLE_SLOT_PLAN.md) without a matching rebuild/reflash of partitions.csv. "
+            "docs/OTA_SINGLE_SLOT.md) without a matching rebuild/reflash of partitions.csv. "
             "Refusing rather than guessing which side is right -- confirm which side is actually "
             "stale with debug_check_partition_table(), fix that side, and only then pass "
             "allow_partition_offset_mismatch=True if you have concluded the write is intentional "
@@ -634,7 +634,7 @@ def _verify_flash_landed(
             f"flash_firmware() wrote the app image to the {app_partition_name!r} "
             "partition, but the bootloader fell back to recovery -- see "
             "CLAUDE.md's boot_guard recovery-mode notes and "
-            "docs/OTA_SINGLE_SLOT_PLAN.md for the blank/unset `otadata` gap "
+            "docs/OTA_SINGLE_SLOT.md for the blank/unset `otadata` gap "
             "this can indicate. ota_rollback_esp() does NOT fix this (it reverts "
             "between OTA images over the app's own HTTP API, which recovery does "
             "not run)."
@@ -688,7 +688,7 @@ def _verify_flash_landed(
             "refusing loudly here. A blank/erased `otadata` makes the bootloader "
             f"fall back to the factory-subtype partition ({running!r} here), not "
             f"{app_partition_name!r} -- this is a KNOWN GAP (docs/"
-            "OTA_SINGLE_SLOT_PLAN.md), not the stale-OTA-pointer case this "
+            "OTA_SINGLE_SLOT.md), not the stale-OTA-pointer case this "
             "message used to describe. ota_rollback_esp() does NOT fix this: it "
             "reverts a board that is ALREADY booting one OTA image back to a "
             "PREVIOUS one over its own HTTP API, and has no path to set an "
@@ -1203,7 +1203,7 @@ def flash_firmware(
     THAT, not a hardcoded constant (see `_resolve_app_flash_target()` --
     this used to be a hardcoded APP_FLASH_OFFSET, which is exactly what let
     a table redesign silently retarget the write into the wrong, undersized
-    partition; see docs/OTA_SINGLE_SLOT_PLAN.md). A hard size pre-flight
+    partition; see docs/OTA_SINGLE_SLOT.md). A hard size pre-flight
     check separately refuses, naming both byte counts, if `KilnCtrl.bin` is
     larger than that partition. Additionally, if the board is reachable
     right now, this tool reads the board's OWN live partition table
@@ -1296,7 +1296,7 @@ def flash_firmware(
         )
 
     # Resolve the write target from the actual partitions.csv for this tree
-    # (docs/OTA_SINGLE_SLOT_PLAN.md) rather than a hardcoded offset -- this is
+    # (docs/OTA_SINGLE_SLOT.md) rather than a hardcoded offset -- this is
     # exactly the class of bug that overflowed the `recovery` partition when
     # the table was redesigned out from under a hardcoded offset.
     try:

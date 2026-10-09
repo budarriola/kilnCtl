@@ -466,7 +466,7 @@ dropped its own AP-password HMAC on 2026-10-02: it is now unauthenticated
 
 **`recovery_enter` (2026-10-02):** wraps `POST /api/ota/esp/recovery_boot` (`ROUTE_TIER_ADMIN`), the deliberate way from the
 application into the recovery image once `ota_rollback_esp()` has nothing to roll back to
-(`docs/OTA_SINGLE_SLOT_PLAN.md` section 4). Lives in `mcp_server_ota.py` (it talks to the APPLICATION, unlike the
+(`docs/OTA_SINGLE_SLOT.md` section 4). Lives in `mcp_server_ota.py` (it talks to the APPLICATION, unlike the
 `recovery_*` tools below). Refuses unless `confirm is True` exactly, before any network access, and prints no
 credential. The board refuses 409 while a firing/autotune runs or any relay is on/unreadable, on an unmet OTA
 interlock, with another update in flight, on the old single-image layout, and when the recovery partition does not

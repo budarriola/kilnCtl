@@ -106,7 +106,7 @@ subject to the same one-step rule. **Take a backup before upgrading, and
 restore it by re-entering values, not by importing an unreadably-old blob.**
 
 **Does the single-slot OTA design actually permit stepping?** Checked against
-`docs/OTA_SINGLE_SLOT_PLAN.md` and the build config rather than assumed.
+`docs/OTA_SINGLE_SLOT.md` and the build config rather than assumed.
 **Yes, mechanically — with three frictions worth knowing, none prohibitive:**
 
 1. **No anti-rollback bars an older or intermediate image.**
@@ -135,7 +135,7 @@ write-back defect, internal to the config store — CLOSED 2026-09-17
 ### 0.4 One-way
 
 No downgrade step is written, ever. Consistent with
-`docs/OTA_SINGLE_SLOT_PLAN.md`, where the rollback target is a recovery image
+`docs/OTA_SINGLE_SLOT.md`, where the rollback target is a recovery image
 that does not fire the kiln, not an older application.
 
 ## 1. What a step is

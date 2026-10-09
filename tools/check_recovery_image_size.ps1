@@ -6,7 +6,7 @@
 # the image path come from) lives in the Python script's own module
 # docstring -- read that before editing behaviour here.
 #
-# Closes the gap measured into existence in docs/OTA_SINGLE_SLOT_PLAN.md:
+# Closes the gap measured into existence in docs/OTA_SINGLE_SLOT.md:
 # ESP-IDF's own check_sizes.py only hard-fails a build when a binary is too
 # large for EVERY matching `app`-type partition, so an oversized `recovery`
 # image builds clean (exit 0, just a warning) as long as it still fits the

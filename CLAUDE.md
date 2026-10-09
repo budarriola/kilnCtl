@@ -300,7 +300,7 @@ main tree, and `flash_provenance.json` records which path was used.
 
 `flash_firmware()` (2026-09-17 fix) resolves its write target dynamically
 from `<kiln_fw_root>/partitions.csv` — the partition named `app` (the ota_0
-slot introduced by the single-slot OTA redesign, `docs/OTA_SINGLE_SLOT_PLAN.md`)
+slot introduced by the single-slot OTA redesign, `docs/OTA_SINGLE_SLOT.md`)
 — rather than a hardcoded offset. That hardcoded offset used to point at the
 old table's `factory` partition; after the table redesign it silently
 pointed into the new, much smaller `recovery` partition instead and

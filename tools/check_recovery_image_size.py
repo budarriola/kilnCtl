@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """check_recovery_image_size.py -- hard build-time size gate for the OTA
-recovery image (docs/OTA_SINGLE_SLOT_PLAN.md).
+recovery image (docs/OTA_SINGLE_SLOT.md).
 
 THE GAP THIS CLOSES. ESP-IDF's own `check_sizes.py` only hard-fails a build
 when a binary is too large for EVERY matching `app`-type partition
@@ -20,7 +20,7 @@ WHAT EXISTS TODAY VS WHAT IS STILL PLANNED (checked at run time, not
 assumed): as of 2026-09-16 neither half of the plan had landed --
 `firmware/KilnFW/partitions.csv` had no `recovery` row yet (still the
 dual-OTA-slot table), and there was no separate recovery-image IDF project
-in the tree (`docs/OTA_SINGLE_SLOT_PLAN.md` section 8 listed both as future
+in the tree (`docs/OTA_SINGLE_SLOT.md` section 8 listed both as future
 steps: step 3 for the table, step 1 for the image). This script legitimately
 SKIP'd in that state -- there was nothing yet to bound -- and was written
 ahead of both landing precisely so the day either one landed the gate was
@@ -56,7 +56,7 @@ run, by construction. (Contrast with the mirror-drift bug class this repo
 keeps finding -- a hardcoded number nobody remembers to update when the
 table changes.)
 
-WHERE THE IMAGE COMES FROM. `docs/OTA_SINGLE_SLOT_PLAN.md` section 1 commits
+WHERE THE IMAGE COMES FROM. `docs/OTA_SINGLE_SLOT.md` section 1 commits
 to building the recovery image as a *separate* IDF project specifically so
 its much smaller content list can never accidentally become a copy of the
 main OTA app image -- so it will not appear under `firmware/KilnFW/build/`.
@@ -132,7 +132,7 @@ def run(partitions_csv: str, recovery_bin: str, partition_name: str) -> int:
     if not matches:
         return _skip(
             f"no {partition_name!r} partition defined yet in {partitions_csv} -- "
-            "see docs/OTA_SINGLE_SLOT_PLAN.md section 1 (table) / section 8 step 3 "
+            "see docs/OTA_SINGLE_SLOT.md section 1 (table) / section 8 step 3 "
             "(landing it). This gate activates automatically once that row exists."
         )
     if len(matches) > 1:
@@ -145,7 +145,7 @@ def run(partitions_csv: str, recovery_bin: str, partition_name: str) -> int:
         reason = (
             f"{partition_name!r} partition is defined ({bound} B / 0x{bound:x} at "
             f"{partitions_csv}) but no recovery image was found at {recovery_bin!r} yet -- "
-            "see docs/OTA_SINGLE_SLOT_PLAN.md section 8 step 1 (building it). "
+            "see docs/OTA_SINGLE_SLOT.md section 8 step 1 (building it). "
             "This gate activates automatically once that image is built at this path "
             "(or pass --recovery-bin to match wherever it actually lands)."
         )

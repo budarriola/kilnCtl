@@ -222,7 +222,7 @@ def ota_rollback_esp(host: Optional[str] = None) -> str:
 @_core._tool()
 def recovery_enter(host: Optional[str] = None, confirm: bool = False) -> str:
     """Deliberately reboot the ESP32-S3 into its RECOVERY image -- POST
-    /api/ota/esp/recovery_boot (docs/OTA_SINGLE_SLOT_PLAN.md section 4). With
+    /api/ota/esp/recovery_boot (docs/OTA_SINGLE_SLOT.md section 4). With
     one OTA slot, ota_rollback_esp() has nothing to roll back to; this is the
     way to reach the image that can take a fresh push (see the recovery_*
     tools, which only work once the board is running that image).

@@ -294,7 +294,7 @@ if (-not $PSBoundParameters.ContainsKey('CsvPath')) {
         @('profiles_nvs',0x19D000,   0x60000),
         @('otadata',     0x200000,   0x2000),
         # single application slot + recovery image, 2026-09-16
-        # (docs/OTA_SINGLE_SLOT_PLAN.md section 1 / section 8 step 3):
+        # (docs/OTA_SINGLE_SLOT.md section 1 / section 8 step 3):
         # 'ota_0'/'ota_1'/'factory' replaced by 'app'/'recovery'. See
         # partitions.csv's own "single application slot + recovery image"
         # header block for the fit arithmetic.

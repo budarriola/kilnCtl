@@ -778,7 +778,7 @@ esp_err_t ota_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_
 
     // Deliberate entry into the recovery image -- ota_http_recovery.c's
     // ota_recovery_boot_post_handler() doc comment has the contract
-    // (docs/OTA_SINGLE_SLOT_PLAN.md section 4).
+    // (docs/OTA_SINGLE_SLOT.md section 4).
     static const httpd_uri_t recovery_boot_uri = {
         .uri = "/api/ota/esp/recovery_boot", .method = HTTP_POST, .handler = ota_recovery_boot_post_handler
     };

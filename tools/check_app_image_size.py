@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """check_app_image_size.py -- hard size gate for the KilnFW application image
-(docs/GITHUB_RELEASE_UPDATE_PLAN.md section 3 / WP2, docs/OTA_SINGLE_SLOT_PLAN.md).
+(docs/GITHUB_RELEASE_UPDATE_PLAN.md section 3 / WP2, docs/OTA_SINGLE_SLOT.md).
 
 The `app` partition is 0x400000 (4 MiB) because the other 4 MiB became the
 `stage` partition. KilnCtrl.bin must fit `app`. ESP-IDF's own check_sizes.py

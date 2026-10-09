@@ -203,7 +203,7 @@ OUTCOME_REFUSED_STALE_BINARY = "refused_stale_binary"
 #: The board's own live partition table (read over GET /api/partitions, no
 #: reset involved) disagrees with the offset flash_firmware() is hardcoded
 #: to write the app image to. Added alongside the single-application-slot
-#: partitions.csv change (see docs/OTA_SINGLE_SLOT_PLAN.md step 3/4): that
+#: partitions.csv change (see docs/OTA_SINGLE_SLOT.md step 3/4): that
 #: change intentionally left mcp_server_flash.py's write offset matching the
 #: OLD table, since the bench board still carries the OLD table -- but
 #: nothing previously detected the day the two drift apart for real (a

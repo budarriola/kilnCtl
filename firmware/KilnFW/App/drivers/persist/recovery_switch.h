@@ -1,5 +1,5 @@
 // recovery_switch.h -- verify-then-select the `recovery` (factory-subtype)
-// partition as the next boot target. docs/OTA_SINGLE_SLOT_PLAN.md section 4.
+// partition as the next boot target. docs/OTA_SINGLE_SLOT.md section 4.
 //
 // ONE implementation shared by both ways into the recovery image:
 //   - the deliberate route, POST /api/ota/esp/recovery_boot

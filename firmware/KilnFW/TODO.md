@@ -1345,7 +1345,7 @@ overlap/overflow.
       path has never written an OTA slot (see 9.2's note on what that means
       for rollback confirmation).
 - [x] **Pre-change partition table archived** — MOOT 2026-10-07: the table was
-      redesigned (single-slot, `docs/OTA_SINGLE_SLOT_PLAN.md`) and flashed; there is
+      redesigned (single-slot, `docs/OTA_SINGLE_SLOT.md`) and flashed; there is
       no pre-OTA table to roll back to.
 - [x] **One-time serial flash documented as a prerequisite step**, not a
       footnote. DONE — added a dedicated bullet to
@@ -1401,7 +1401,7 @@ update). `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` deliberately left off.
       2026-10-07: no evidence in `docs/BENCH_TEST_LOG.md` or `logs/bench_test/`). The
       PENDING_VERIFY / rollback-cancel machinery has only run in host tests
       (`test_boot_guard.c`). Under the single-slot design
-      (`docs/OTA_SINGLE_SLOT_PLAN.md`) a direct push into the running `app` slot is
+      (`docs/OTA_SINGLE_SLOT.md`) a direct push into the running `app` slot is
       refused (OT-E01), so exercising it needs the recovery-image path
       (`recovery_enter` -> `recovery_apply_staged` -> `recovery_exit`); that apply
       has not been performed on the bench (the stage step only, BENCH_TEST_LOG).

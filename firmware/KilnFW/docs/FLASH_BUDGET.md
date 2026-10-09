@@ -73,7 +73,7 @@ without further reclamation.
 | *unallocated tail* | 0xDB0000 | 2368 K | contiguous, the largest this table has ever had |
 | **total** | | **16,384 K** | = 16,777,216 B ✓ |
 
-**Stale as of 2026-09-19**: this table predates both `docs/OTA_SINGLE_SLOT_PLAN.md`'s
+**Stale as of 2026-09-19**: this table predates both `docs/OTA_SINGLE_SLOT.md`'s
 `ota_0`/`ota_1`/`factory` -> `app`/`recovery` redesign and `cfg`, the LittleFS
 partition that now occupies the "unallocated tail" row above -- `cfg` was
 grown to take the entire remaining tail 2026-09-19
@@ -606,7 +606,7 @@ either is missing. Measured this pass, same worktree/toolchain/sdkconfig,
 
 Corrected 2026-09-20 (review finding D3): the partition figure below had been
 copied from the OLD three-way `factory`/`ota_0`/`ota_1` table pre-dating the
-single-slot OTA redesign (`docs/OTA_SINGLE_SLOT_PLAN.md`); the current
+single-slot OTA redesign (`docs/OTA_SINGLE_SLOT.md`); the current
 `app` row in `firmware/KilnFW/partitions.csv` is `0x800000` = 8,388,608 B, not
 3,145,728 B. Figures below re-measured in a clean worktree via
 `check_00_saftyfw_target_build.ps1` then `check_00_kilnfw_target_build.ps1`:

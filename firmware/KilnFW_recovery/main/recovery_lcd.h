@@ -1,5 +1,5 @@
 // recovery_lcd.h -- static recovery-mode status screen on the 480x320 ST7796
-// panel (docs/OTA_SINGLE_SLOT_PLAN.md section 3 item 4 / section 9.2).
+// panel (docs/OTA_SINGLE_SLOT.md section 3 item 4 / section 9.2).
 //
 // Independent, minimal driver -- NOT a port of firmware/KilnFW's
 // App/drivers/hw/panel_*.c stack (touch, panel auto-detect, full SX1509
