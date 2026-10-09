@@ -1020,6 +1020,60 @@ static void test_pcfg_unused_slot_keeps_nvs_rev_floor(void)
     TEST_CHECK(s_profile_rev[2] == 9, "unused slot 2 keeps rev floor 9 (not 0)");
 }
 
+static void test_pcfg_boot_load_failure_still_resolves_files(void)
+{
+    TEST_SECTION("profiles boot load -- F8: an NVS load failure still resolves cfg files and seeds their rev floors");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+
+    profile_t p0 = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p0, 5) == ESP_OK, "file-backed slot 0 at rev 5");
+    // Corrupt the used-bitmap key (5-byte blob: neither the 16-byte shape nor the legacy u8) so the NVS load errors.
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, NVS_KEY_USED, junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    TEST_CHECK(profiles_boot_load() != ESP_OK, "the NVS load reports its failure");
+    TEST_CHECK(profiles_slot_bitmap_test(&s_profiles.used_bitmap, 0), "file-backed slot 0 is NOT free after the NVS failure");
+    TEST_CHECK(s_profile_rev[0] == 5, "slot 0's rev floor is seeded from its file (5), not 0");
+    profile_t file_p;
+    TEST_CHECK(pcfg_file_profile(0, &file_p), "slot 0's file is untouched");
+}
+
+static void test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted(void)
+{
+    TEST_SECTION("profiles cfg_fs -- F9: nvs_rev 0 with a valid file adopts the file; legacy migration never writes rev 0");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+
+    profile_t p = make_stored_profile();
+    TEST_CHECK(profiles_cfg_fs_save(0, &p, 0) == ESP_OK, "file at rev 0");
+    profile_t out;
+    uint32_t out_rev = 99;
+    bool used_file = false;
+    TEST_CHECK(profiles_cfg_fs_resolve(0, &p, false, 0, &out, &out_rev, &used_file), "resolve returns a profile");
+    TEST_CHECK(used_file, "the rev-0 file is adopted");
+    TEST_CHECK(pcfg_file_profile(0, &out), "the file was NOT deleted as stale");
+
+    pcfg_reset_all();
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    out_rev = 0;
+    TEST_CHECK(profiles_cfg_fs_resolve(1, &p, true, 0, &out, &out_rev, &used_file), "NVS-only slot resolves");
+    TEST_CHECK(out_rev == 1, "migration reports rev max(nvs_rev, 1)");
+    uint32_t file_rev = 0;
+    bool valid = false;
+    profile_t fp;
+    profiles_cfg_fs_load_raw(1, &fp, &file_rev, &valid);
+    TEST_CHECK(valid && file_rev == 1, "the migrated file carries rev 1, never 0");
+}
+
 static void test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file(void)
 {
     TEST_SECTION("profiles cfg_fs -- DIVERGENCE: NVS with the higher rev wins and resyncs the file");
@@ -3706,6 +3760,8 @@ void run_test_profiles_http(void)
     test_pcfg_file_wins_when_it_has_the_higher_rev();
     test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file();
     test_pcfg_unused_slot_keeps_nvs_rev_floor();
+    test_pcfg_boot_load_failure_still_resolves_files();
+    test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
     test_pcfg_stale_file_after_delete_is_not_resurrected();
     test_pcfg_delete_does_not_revert_or_drop_other_file_only_slots();
     test_pcfg_partition_absent_behaves_exactly_like_before();

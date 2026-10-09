@@ -1758,19 +1758,21 @@ void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
     if (out_dwell_min_max) *out_dwell_min_max = PROFILE_DWELL_MIN_MAX;
 }
 
-esp_err_t profiles_http_start(void)
+/* Boot-time load. If the NVS side fails, the cfg files are STILL resolved
+ * (files-only, rev floors seeded from them): wiping to an empty table would
+ * make file-backed slots look free, so a save could overwrite a live file at
+ * rev 1 and a later NVS recovery would delete it as stale. Refusing saves
+ * instead was rejected: it would strand the operator on a board whose files are
+ * perfectly readable. Host tests include this file and call it directly. */
+static esp_err_t profiles_boot_load(void)
 {
-    /* profiles_nvs is used only by this module, but nvs_flash_init_partition()
-     * on an already-initialized partition is a harmless no-op (ESP_OK), so
-     * bringing it up here independently (rather than assuming some other
-     * module did it) is safe either way. */
     esp_err_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
     if (part_err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "NVS init for '%s' failed: %s -- profiles will not persist", PROFILES_NVS_PARTITION,
                  esp_err_to_name(part_err));
     }
 
-    esp_err_t err = ESP_OK;
+    esp_err_t err = part_err;
     if (part_err == ESP_OK) {
         bool found_in_profiles_nvs = false;
         err = nvs_load_all_from(PROFILES_NVS_PARTITION, &s_profiles, &found_in_profiles_nvs);
@@ -1782,9 +1784,18 @@ esp_err_t profiles_http_start(void)
         }
     }
     if (err != ESP_OK) {
-        ESP_LOGW(PROFILES_TAG, "profile NVS load failed: %s -- starting with no saved profiles", esp_err_to_name(err));
+        ESP_LOGW(PROFILES_TAG, "profile NVS load failed: %s -- resolving cfg files only", esp_err_to_name(err));
         memset(&s_profiles, 0, sizeof(s_profiles));
+        bool any = false;
+        (void)nvs_load_files_only(PROFILES_NVS_PARTITION, &s_profiles, &any);
     }
+    return err;
+}
+
+esp_err_t profiles_http_start(void)
+{
+    (void)profiles_boot_load();
+    esp_err_t err;
 
     httpd_handle_t server = wifi_provision_http_get_server();
     if (!server) {

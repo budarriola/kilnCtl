@@ -11847,6 +11847,37 @@ static void test_firing_stats_erase_deletes_file_and_nvs(void)
                "the history read path finds nothing for the erased id either");
 }
 
+static esp_err_t fscf_failing_delete_fn(const char *rel_path)
+{
+    (void)rel_path;
+    return ESP_FAIL;
+}
+
+static void test_firing_stats_erase_file_delete_failure_leaves_history_intact(void)
+{
+    TEST_SECTION("firing_stats_erase() -- F10: the file goes FIRST; a failed file delete touches nothing else");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    profile_firing_run_record_t rec = make_fscf_record(14, 5000, 4000);
+    firing_stats_persist(&rec);
+    stage_legacy_fscf(14, 100, 10, 1);
+
+    firing_stats_cfg_fs_set_delete_fn(fscf_failing_delete_fn);
+    TEST_CHECK(firing_stats_erase(14) != ESP_OK, "the erase reports the file-delete failure");
+    firing_stats_cfg_fs_reset_delete_fn_for_test();
+
+    hal_kv_handle_t h;
+    size_t len = 0;
+    TEST_CHECK(hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, FIRING_STATS_NVS_PARTITION) == HAL_OK,
+               "open NVS");
+    TEST_CHECK(hal_kv_get_blob(&h, "fs_14", NULL, &len) == HAL_OK, "the legacy fs_14 blob was NOT erased ahead of the file");
+    hal_kv_close(&h);
+    char path[64];
+    firing_stats_cfg_fs_path(14, path, sizeof(path));
+    bool exists = false;
+    TEST_CHECK(cfg_fs_exists(path, &exists) == ESP_OK && exists, "the file is still there");
+}
+
 static void test_firing_stats_erase_never_fired_id_is_a_safe_no_op(void)
 {
     TEST_SECTION("firing_stats_erase() -- NOT_FOUND-as-success: erasing an id that was never persisted "
@@ -12050,6 +12081,7 @@ int main(void)
     test_fscf_negative_no_file_write_means_file_never_catches_up();
     test_fscf_history_read_uses_the_heap_not_the_httpd_stack();
     test_firing_stats_erase_deletes_file_and_nvs();
+    test_firing_stats_erase_file_delete_failure_leaves_history_intact();
     test_firing_stats_erase_never_fired_id_is_a_safe_no_op();
     test_firing_stats_erase_degrades_when_cfg_fs_unmounted();
     reset_all_fscf();

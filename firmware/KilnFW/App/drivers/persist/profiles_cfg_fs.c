@@ -184,10 +184,11 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
         }
         /* File missing/corrupt, NVS has a real profile -- adopt NVS and
          * lazily migrate a fresh file, same as zones_config_cfg_fs.c. */
+        uint32_t mig_rev = nvs_rev > 0 ? nvs_rev : 1; /* a file at rev 0 would look "never saved" */
         *out_profile = *nvs_profile;
-        *out_rev = nvs_rev;
+        *out_rev = mig_rev;
         *out_used_file = false;
-        esp_err_t werr = profiles_cfg_fs_save(id, nvs_profile, nvs_rev);
+        esp_err_t werr = profiles_cfg_fs_save(id, nvs_profile, mig_rev);
         if (werr != ESP_OK && werr != ESP_ERR_INVALID_STATE) {
             ESP_LOGW(PCFG_FS_TAG, "could not migrate prof%u to file: %s", id, esp_err_to_name(werr));
         }
@@ -201,7 +202,9 @@ bool profiles_cfg_fs_resolve(uint8_t id, const profile_t *nvs_profile, bool nvs_
          * the file was written (file is a stale leftover). nvs_rev here is
          * profiles_http.c's persisted per-slot rev counter, which is bumped
          * on delete too -- so it still tells the two apart. */
-        if (file_rev > nvs_rev) {
+        /* nvs_rev == 0 means this slot was never deleted (a real delete always
+         * persists rev >= 1), so the file is live, not stale. */
+        if (file_rev > nvs_rev || nvs_rev == 0) {
             ESP_LOGW(PCFG_FS_TAG,
                      "prof%u file/NVS DIVERGED (file rev %lu valid, NVS unused at rev %lu) -- adopting FILE "
                      "(higher rev, looks like a failed NVS write)",

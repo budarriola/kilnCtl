@@ -875,9 +875,16 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
                          "worker for the established pattern.");
         return ESP_ERR_INVALID_STATE;
     }
-    // ERASE-FIRST: the legacy "fs_<id>" NVS blob goes first and is checked; on
-    // failure nothing else is touched (the file stays) and the error is
-    // returned, so the NVS fallback can never resurrect a half-deleted history.
+    // FILE-FIRST: the cfg file is the authoritative history and resolve()
+    // adopts a file whose NVS side is empty, so it (plus the rev key) goes
+    // first and is checked; on failure nothing else is touched and the error is
+    // returned. Only then is the legacy "fs_<id>" blob erased.
+    esp_err_t file_err = firing_stats_cfg_fs_delete(profile_id);
+    if (file_err != ESP_OK) {
+        ESP_LOGW(PE_TAG, "firing_stats_erase(%u): cfg-fs delete failed: %s", (unsigned)profile_id,
+                 esp_err_to_name(file_err));
+        return file_err;
+    }
     char key[16];
     snprintf(key, sizeof(key), "fs_%u", (unsigned)profile_id);
     hal_kv_handle_t h;
@@ -901,13 +908,6 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
         ESP_LOGW(PE_TAG, "firing_stats_erase(%u): commit failed: %s", (unsigned)profile_id,
                  hal_status_to_name(err));
         return hal_status_to_esp_err(err);
-    }
-
-    esp_err_t file_err = firing_stats_cfg_fs_delete(profile_id);
-    if (file_err != ESP_OK) {
-        ESP_LOGW(PE_TAG, "firing_stats_erase(%u): cfg-fs delete failed: %s", (unsigned)profile_id,
-                 esp_err_to_name(file_err));
-        return file_err;
     }
 
     // The legacy NVS keys and the file are both gone (or were already empty),
