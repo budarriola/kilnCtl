@@ -224,7 +224,7 @@ if ($pushedSlot.Reused) {
 Write-Host "No reusable PASS stamp for $originSha -- building (this run owns the build)."
 try {
 # Build lock FIRST; a gate slot is held only around the compile (never while queued on a lock).
-$lock = Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree"
+$lock = Enter-BuildLock -Name "kilnfw_checkbuild_origin_worktree" -ProgressPath @((Join-Path $WorktreePath "firmware\KilnFW\build"))
 try {
     # CREATION IS INSIDE THE LOCK (2026-09-16). It used to sit above, outside
     # it, so two concurrent first-runs from different trees both saw
