@@ -76,6 +76,7 @@
                                 * reused here so the Pico's i_normal_a[0..2] restore is never trusted on a
                                 * bare ACK -- see the push immediately after the ceiling guard below. */
 #include "update_settings.h" /* WP9: top-level "update_repo" */
+#include "relay_cycles.h" /* top-level "relay_cycles" wear counters */
 #include "aux_outputs_cfg.h" /* top-level "aux_outputs" (spare-relay on/off outputs) */
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
@@ -951,6 +952,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_parse_rule(const char *re, size
  * profile commit (see its commit-order comment). */
 static bool backup_import_update_repo(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
                                       size_t err_cap);
+static bool backup_import_relay_cycles(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
+                                       size_t err_cap);
 static bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote, char *err_msg,
                                              size_t err_cap);
 
@@ -2907,6 +2910,9 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     if (!backup_import_aux_outputs_commit(body, true, aux_wrote_out, err_msg, err_cap)) {
         return false;
     }
+    if (!backup_import_relay_cycles(body, true, NULL, err_msg, err_cap)) {
+        return false; // zones already landed: reported as a partial write by the caller
+    }
     /* ---- Pass 2: everything validated -- commit profiles ---- */
     for (size_t i = 0; i < candidate_count; i++) {
         profile_candidate_t *c = &candidates[i];
@@ -3013,6 +3019,62 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_update_repo(const char *body, b
     }
     if (commit && update_settings_set(repo) != ESP_OK) {
         snprintf(err_msg, err_cap, "update_repo could not be persisted -- the rest of the restore already landed");
+        return false;
+    }
+    return true;
+}
+
+/* Optional top-level "relay_cycles" {"hw_relays":N,"c0".."c4"} (backup_export_relay_cycles()). Absent =
+ * no-op. Present: hw_relays must equal this board's KILN_IO_RELAY_COUNT (counts from a different relay
+ * layout are not this board's wear history) and every c<i> must be an integer in
+ * [0, RELAY_CYCLES_RESTORE_MAX_COUNT]; anything else refuses the WHOLE restore in pass 1. Commit goes
+ * through relay_cycles_restore_all() with allow_lower_mask 0: a stale backup can never LOWER a live
+ * wear count (it is clamped up and reported), which on a freshly factory-reset board is the same as an
+ * exact restore. Types/rated overrides are not touched (relay type travels with the zones). */
+static BACKUP_IMPORT_NOINLINE bool backup_import_relay_cycles(const char *body, bool commit, kiln_cfg_plan_t *plan,
+                                                              char *err_msg, size_t err_cap)
+{
+    const char *obj = backup_json_obj_find(body, "relay_cycles");
+    if (obj == NULL) {
+        return true;
+    }
+    if (*backup_json_skip_ws(obj) != '{') {
+        snprintf(err_msg, err_cap, "relay_cycles must be an object");
+        return false;
+    }
+    double hw = 0.0;
+    if (!backup_json_field_num(obj, "hw_relays", &hw) || hw != (double)KILN_IO_RELAY_COUNT) {
+        snprintf(err_msg, err_cap, "relay_cycles: hw_relays missing or differs from this board's %u heater relays",
+                 (unsigned)KILN_IO_RELAY_COUNT);
+        return false;
+    }
+    uint32_t counts[RELAY_CYCLES_COUNT];
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "c%u", i);
+        double d = 0.0;
+        if (!backup_json_field_num(obj, key, &d) || d < 0 || d > (double)RELAY_CYCLES_RESTORE_MAX_COUNT ||
+            (double)(long long)d != d) {
+            snprintf(err_msg, err_cap, "relay_cycles: %s missing or not an integer in range", key);
+            return false;
+        }
+        counts[i] = (uint32_t)d;
+    }
+    if (!commit) {
+        if (plan != NULL) {
+            uint32_t live[RELAY_CYCLES_COUNT];
+            relay_cycles_get_all(live);
+            for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+                if (counts[i] < live[i]) {
+                    kiln_cfg_plan_add(plan, "relay_cycles c%u: backup %lu is below live %lu, live count is kept", i,
+                                      (unsigned long)counts[i], (unsigned long)live[i]);
+                }
+            }
+        }
+        return true;
+    }
+    if (!relay_cycles_restore_all(counts, 0, NULL)) {
+        snprintf(err_msg, err_cap, "relay_cycles could not be persisted -- the rest of the restore already landed");
         return false;
     }
     return true;
@@ -3511,6 +3573,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     }
     if (!backup_import_update_repo(body, false, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed update_repo refuses the WHOLE restore, nothing written
+    }
+    if (!backup_import_relay_cycles(body, false, plan, err_msg, err_cap)) {
+        return false; // pass 1: malformed relay_cycles refuses the WHOLE restore, nothing written
     }
     if (!backup_import_aux_outputs_validate(body, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed/conflicting aux_outputs refuses the WHOLE restore, nothing written

@@ -40,6 +40,7 @@
                                  * docs/audits for the field-by-field enumeration */
 #include "zones_http_internal.h" /* zone_normals_set()/zones_config_get_normal_current()
                                    * -- CT normals, the owner's own named example */
+#include "relay_cycles.h" /* top-level "relay_cycles" wear counters */
 #include "aux_outputs_cfg.h" /* top-level "aux_outputs" array (spare-relay on/off outputs) */
 #include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up: "kiln_configs"
                               * array below -- every saved kiln config slot, not just
@@ -236,6 +237,22 @@ static BACKUP_EXPORT_NOINLINE void backup_export_aux_outputs(backup_stream_t *s)
         first = false;
     }
     backup_stream_printf(s, "]");
+}
+
+/* Top-level "relay_cycles": the per-relay contact-wear counters (RELAY_CYCLES_COUNT slots: the four
+ * heater relays c0..c3 plus the safety relay K4 as c4) and "hw_relays", the heater relay count of the
+ * board that wrote them. Wear history the operator cannot regenerate, so it is exported (the kiln
+ * factory reset erases it). Import is raise-only (relay_cycles_restore_all's monotonic guard) and
+ * refuses a backup whose hw_relays differs. Optional key, no BACKUP_FORMAT_VERSION bump: absent = no-op. */
+static BACKUP_EXPORT_NOINLINE void backup_export_relay_cycles(backup_stream_t *s)
+{
+    uint32_t c[RELAY_CYCLES_COUNT];
+    relay_cycles_get_all(c);
+    backup_stream_printf(s, ",\"relay_cycles\":{\"hw_relays\":%u", (unsigned)KILN_IO_RELAY_COUNT);
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        backup_stream_printf(s, ",\"c%u\":%lu", i, (unsigned long)c[i]);
+    }
+    backup_stream_printf(s, "}");
 }
 
 esp_err_t backup_export_get_handler(httpd_req_t *req)
@@ -824,6 +841,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
         backup_stream_printf(&s, ",\"update_repo\":\"%s\"", repo_escaped);
     }
     backup_export_aux_outputs(&s);
+    backup_export_relay_cycles(&s);
     backup_stream_printf(&s, "}");
 
     backup_stream_flush(&s);

@@ -961,7 +961,6 @@ bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_t
  * refused wholesale (all-or-nothing) rather than clamped, since a
  * wildly-out-of-range value is much more likely a corrupt/truncated backup
  * field than a real relay with that many operations. */
-#define RELAY_CYCLES_RESTORE_MAX_COUNT 100000000u /* 100M -- far past any rated life in this file's own table */
 
 bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
                                relay_cycles_restore_result_t *out_result)

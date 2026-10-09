@@ -169,6 +169,7 @@ esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other h
 // executable's other files define it (ota_http.c/test_web_auth_store.c each
 // live in their own separate executables), so it is defined here.
 #include "web_auth_store.h"
+#include "relay_cycles.h"
 #include "update_settings.h"
 #include "fake_kv.h"
 #include "cfg_fs.h"
@@ -2255,6 +2256,38 @@ static uint8_t g_fake_aux_enabled_mask = 0;
 uint8_t zones_config_json_aux_enabled_mask(void)
 {
     return g_fake_aux_enabled_mask;
+}
+
+/* relay_cycles fakes (relay_cycles.c is not linked into this executable): live counts, with the
+ * real restore_all's monotonic clamp + ceiling check so backup_import's use of it is exercised. */
+uint32_t g_fake_rc_counts[RELAY_CYCLES_COUNT];
+int g_fake_rc_restore_calls;
+bool g_fake_rc_restore_fail;
+
+void relay_cycles_get_all(uint32_t *out)
+{
+    memcpy(out, g_fake_rc_counts, sizeof(g_fake_rc_counts));
+}
+
+bool relay_cycles_restore_all(const uint32_t counts[RELAY_CYCLES_COUNT], uint8_t allow_lower_mask,
+                              relay_cycles_restore_result_t *out_result)
+{
+    (void)out_result;
+    g_fake_rc_restore_calls++;
+    if (counts == NULL || g_fake_rc_restore_fail) {
+        return false;
+    }
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        if (counts[i] > RELAY_CYCLES_RESTORE_MAX_COUNT) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < RELAY_CYCLES_COUNT; i++) {
+        if (counts[i] >= g_fake_rc_counts[i] || (allow_lower_mask & (1u << i))) {
+            g_fake_rc_counts[i] = counts[i];
+        }
+    }
+    return true;
 }
 
 /* zones_config_push_relay_type() -- zones_http_internal.h declares this
@@ -6555,6 +6588,78 @@ static void test_aux_outputs_export_round_trip(void)
     aux_bk_fresh();
 }
 
+// ---- relay_cycles wear counters: export + import ----
+static const char *RC_OK = ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":10,\"c1\":20,\"c2\":30,\"c3\":40,\"c4\":50}";
+
+static void test_relay_cycles_round_trip_and_absent_preserves(void)
+{
+    TEST_SECTION("backup relay_cycles -- exported, restored after a reset, absent key preserves");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    uint32_t want[RELAY_CYCLES_COUNT] = {111, 222, 333, 444, 555};
+    memcpy(g_fake_rc_counts, want, sizeof(want));
+    TEST_CHECK(run_export() == ESP_OK, "export succeeds");
+    TEST_CHECK(strstr(s_export_body, "\"relay_cycles\":{\"hw_relays\":4,\"c0\":111,\"c1\":222,\"c2\":333,"
+                                     "\"c3\":444,\"c4\":555}") != NULL,
+               "all five counters and hw_relays are exported");
+    char *saved = strdup(s_export_body);
+    TEST_CHECK(saved != NULL, "copy the exported document");
+    if (saved != NULL) {
+        memset(g_fake_rc_counts, 0, sizeof(g_fake_rc_counts)); // factory reset
+        char err[160] = "";
+        TEST_CHECK(test_backup_import_apply(saved, err, sizeof(err)), "the exported document imports back");
+        TEST_CHECK(memcmp(g_fake_rc_counts, want, sizeof(want)) == 0, "every counter is restored exactly");
+        free(saved);
+    }
+    // Absent key (older backup): live counts untouched, restore not even called.
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    memcpy(g_fake_rc_counts, want, sizeof(want));
+    g_fake_rc_restore_calls = 0;
+    char err[160] = "";
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)), "a body without relay_cycles imports");
+    TEST_CHECK(memcmp(g_fake_rc_counts, want, sizeof(want)) == 0, "absent key preserves live counters");
+    TEST_CHECK(g_fake_rc_restore_calls == 0, "absent key never calls the restore");
+}
+
+static void test_relay_cycles_never_lowers_live_count(void)
+{
+    TEST_SECTION("backup relay_cycles -- a stale backup cannot lower a live count");
+    reset_stub_state();
+    wp9_fresh_repo_setting();
+    uint32_t live[RELAY_CYCLES_COUNT] = {5, 99, 0, 41, 1000};
+    memcpy(g_fake_rc_counts, live, sizeof(live));
+    char err[160] = "";
+    TEST_CHECK(wp9_import_with(RC_OK, err, sizeof(err)), "imports");
+    TEST_CHECK(g_fake_rc_counts[0] == 10 && g_fake_rc_counts[1] == 99 && g_fake_rc_counts[2] == 30 &&
+                   g_fake_rc_counts[3] == 41 && g_fake_rc_counts[4] == 1000,
+               "counts only move up");
+}
+
+static void test_relay_cycles_bad_input_refuses_whole_restore(void)
+{
+    TEST_SECTION("backup relay_cycles -- hardware mismatch / bad values refuse everything, nothing written");
+    const char *tails[] = {
+        ",\"relay_cycles\":{\"hw_relays\":6,\"c0\":1,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"c0\":1,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":1,\"c1\":1,\"c2\":1,\"c3\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":-1,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":1.5,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":{\"hw_relays\":4,\"c0\":100000001,\"c1\":1,\"c2\":1,\"c3\":1,\"c4\":1}",
+        ",\"relay_cycles\":[1,2,3]",
+    };
+    for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); i++) {
+        reset_stub_state();
+        wp9_fresh_repo_setting();
+        memset(g_fake_rc_counts, 0, sizeof(g_fake_rc_counts));
+        g_fake_rc_restore_calls = 0;
+        char err[160] = "";
+        TEST_CHECK(!wp9_import_with(tails[i], err, sizeof(err)), "a bad relay_cycles is refused");
+        TEST_CHECK(g_fake_rc_restore_calls == 0, "nothing was restored");
+        TEST_CHECK(strstr(err, "relay_cycles") != NULL, "the error names relay_cycles");
+    }
+}
+
 void run_test_backup_import(void)
 {
     test_update_settings_http_post();
@@ -6567,6 +6672,9 @@ void run_test_backup_import(void)
     test_update_repo_absent_is_noop();
     test_update_repo_invalid_refuses_whole_restore();
     test_update_repo_export_round_trip();
+    test_relay_cycles_round_trip_and_absent_preserves();
+    test_relay_cycles_never_lowers_live_count();
+    test_relay_cycles_bad_input_refuses_whole_restore();
     test_aux_outputs_import_applies_and_persists();
     test_aux_outputs_absent_is_noop();
     test_aux_outputs_malformed_refuses_whole_restore();

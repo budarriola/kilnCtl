@@ -182,6 +182,9 @@ bool relay_cycles_reset_timeout(unsigned relay, uint32_t timeout_ms, bool *out_t
  * unchecked-success classes), so this struct makes "was anything clamped"
  * mechanically visible rather than something a caller has to notice on its
  * own by re-deriving it from the request. */
+/* Sanity ceiling for a restored count: 100M, far past any rated life in the budget table. */
+#define RELAY_CYCLES_RESTORE_MAX_COUNT 100000000u
+
 typedef struct {
     uint32_t requested; /* the value the caller asked to restore */
     uint32_t applied;   /* the value actually written -- equals `requested`
