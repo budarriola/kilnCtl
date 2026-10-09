@@ -55,6 +55,9 @@ def _case_wifi02(ctx: dict) -> CaseResult:
     if len(match) != 1:
         return _R(Verdict.FAIL, reason=f"bench SSID appears {len(match)} times in /networks, expected 1")
     n = match[0]
+    if n.get("connected") is True and n.get("saved") is True and n.get("in_range") is False:
+        return _R(Verdict.INCONCLUSIVE, reason="connected but in_range false: scan miss or 20-entry scan cap, not a contract failure",
+                  observed={"entry_keys": sorted(n)})
     bad = [k for k in ("saved", "in_range", "connected") if n.get(k) is not True]
     if bad:
         return _R(Verdict.FAIL, reason=f"bench SSID entry has {bad} not true", observed={"entry_keys": sorted(n)})
@@ -353,6 +356,11 @@ def _case_bak03(ctx: dict) -> CaseResult:
         return _R(Verdict.INCONCLUSIVE, reason=f"second export failed: {e2}")
     h1, h2 = _canon_hash(p1), _canon_hash(p2)
     if h1 != h2:
+        if isinstance(p1, dict) and isinstance(p2, dict):
+            diff = {k for k in set(p1) | set(p2) if p1.get(k) != p2.get(k)}
+            if diff == {"relay_cycles"}:
+                return _R(Verdict.INCONCLUSIVE, reason="only relay_cycles wear counters differ (a relay toggled in the gap; not gated)",
+                          observed={"differs": ["relay_cycles"]})
         return _R(Verdict.FAIL, reason="two exports taken without writes differ", observed={"h1": h1[:12], "h2": h2[:12]})
     return _R(Verdict.PASS, observed={"hash": h1[:12], "reduction": "export determinism (owner 2026-10-09)"})
 
@@ -502,6 +510,8 @@ def _case_kcfg05(ctx: dict) -> CaseResult:
         return _R(Verdict.INCONCLUSIVE, reason=f"/api/readiness unreadable (status={st})")
     item = next((i for i in items if isinstance(i, dict) and i.get("key") == "safety_ceiling_match"), None)
     if item is None:
+        if any(isinstance(i, dict) and i.get("key") == "checklist_truncated" for i in items):
+            return _R(Verdict.INCONCLUSIVE, reason="readiness checklist was truncated (checklist_truncated item); safety_ceiling_match may have been dropped")
         return _R(Verdict.FAIL, reason="readiness has no safety_ceiling_match item")
     status = item.get("status")
     if status in ("cannot_yet", "deliberately_off"):

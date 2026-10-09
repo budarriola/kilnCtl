@@ -157,6 +157,8 @@ def _case_dash03(ctx: dict) -> CaseResult:
                           observed={"samples": samples})
     states = [s.get("state") for s in valid]
     obs = {"states": states, "profile_ids": [s.get("profile_id") for s in valid]}
+    if "unknown" in states:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="executor reported state 'unknown' (exec_state_name fallback)", observed=obs)
     bad = [s for s in states if s not in _EXEC_STATES]
     if bad:
         return CaseResult(Verdict.FAIL, reason=f"state outside vocabulary: {bad}", observed=obs)
@@ -301,6 +303,8 @@ def _case_dash06(ctx: dict) -> CaseResult:
                           observed={"samples": samples})
     states = [s.get("state") if isinstance(s, dict) else None for s in samples]
     obs = {"web_states": states, "mcp_paused_state": hp04.get("paused_state")}
+    if "unknown" in states:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="executor reported state 'unknown' (exec_state_name fallback)", observed=obs)
     bad = [s for s in states if s is not None and s not in _EXEC_STATES]
     if bad:
         return CaseResult(Verdict.FAIL, reason=f"state outside vocabulary: {bad}", observed=obs)
@@ -333,6 +337,8 @@ def _case_dash07(ctx: dict) -> CaseResult:
     if st != 200 or not isinstance(body, dict):
         return CaseResult(Verdict.FAIL, reason=f"GET /api/profile_exec status={st}", observed={"status": st})
     lr = body.get("last_run")
+    if lr is None:
+        return CaseResult(Verdict.FAIL, reason="last_run missing (or omitted by the firmware when its last_run snprintf overflowed)", observed={"body": body})
     if not isinstance(lr, dict) or not isinstance(lr.get("present"), bool):
         return CaseResult(Verdict.FAIL, reason="last_run missing or without boolean 'present'", observed={"body": body})
     obs: Dict[str, Any] = {"last_run": lr}
@@ -482,13 +488,14 @@ def _case_dash09(ctx: dict) -> CaseResult:
 # ---------------------------------------------------------------------------
 
 def _case_dash10(ctx: dict) -> CaseResult:
-    st, body = W._get_json(ctx, "/api/ota/esp/status")
+    # recovery_mode moved to the open /api/status (route tier review LOW-3); the banner polls it there.
+    st, body = W._get_json(ctx, "/api/status")
     if st != 200 or not isinstance(body, dict):
-        return CaseResult(Verdict.FAIL, reason=f"GET /api/ota/esp/status status={st}", observed={"status": st})
+        return CaseResult(Verdict.FAIL, reason=f"GET /api/status status={st}", observed={"status": st})
     rm = body.get("recovery_mode")
     if not isinstance(rm, bool):
         return CaseResult(Verdict.FAIL, reason="recovery_mode missing or not a boolean", observed={"body": body})
-    missing, err = _static_missing(ctx, "/app.js", ["kc-recovery-banner", "/api/ota/esp/status", "st.recovery_mode"])
+    missing, err = _static_missing(ctx, "/app.js", ["kc-recovery-banner", "/api/status", "st.recovery_mode"])
     if err:
         return CaseResult(Verdict.FAIL, reason=err, observed={"recovery_mode": rm})
     if missing:
@@ -510,7 +517,10 @@ def _case_dash11(ctx: dict) -> CaseResult:
             return CaseResult(Verdict.FAIL, reason=f"readiness item invalid: {it!r}", observed={"item": it})
     expected = any(it["status"] == "not_done" for it in items)
     obs = {"banner_expected": expected, "item_count": len(items)}
-    missing, err = _static_missing(ctx, "/app.js", ["kc-setup-banner", "/api/readiness", "'not_done'"])
+    needed = ["kc-setup-banner", "/api/readiness", "'not_done'"]
+    if expected:
+        needed.append("kc-setup-banner")  # banner expected visible: its element must exist in the served script
+    missing, err = _static_missing(ctx, "/app.js", needed)
     if err:
         return CaseResult(Verdict.FAIL, reason=err, observed=obs)
     if missing:

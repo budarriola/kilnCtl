@@ -332,10 +332,10 @@ class Dash09(unittest.TestCase):
 
 class Dash10to12(unittest.TestCase):
     def test_10(self):
-        pages = {"/app.js": "kc-recovery-banner /api/ota/esp/status st.recovery_mode"}
+        pages = {"/app.js": "kc-recovery-banner /api/status st.recovery_mode"}
 
         def mkc(b):
-            return mk({"/api/ota/esp/status": (200, b)}, pages)
+            return mk({"/api/status": (200, b)}, pages)
 
         self.assertEqual(run("WEB-DASH-10", mkc({"phase": "idle", "recovery_mode": False})).verdict, Verdict.PASS)
         self.assertEqual(run("WEB-DASH-10", mkc({"phase": "idle"})).verdict, Verdict.FAIL)

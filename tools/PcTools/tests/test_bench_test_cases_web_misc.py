@@ -24,6 +24,10 @@ class Wifi02(unittest.TestCase):
         nets = [{"ssid": "Bench", "saved": False, "in_range": True, "connected": True}]
         self.assertEqual(run("WEB-WIFI-02", ctx_for({"/status": HOME, "/networks": nets})).verdict, FAIL)
 
+    def test_scan_miss_while_connected_is_inconclusive(self):
+        nets = [{"ssid": "Bench", "saved": True, "in_range": False, "connected": True}]
+        self.assertEqual(run("WEB-WIFI-02", ctx_for({"/status": HOME, "/networks": nets})).verdict, INC)
+
     def test_inconclusive_not_home(self):
         self.assertEqual(run("WEB-WIFI-02", ctx_for({"/status": {"mode": "ap"}})).verdict, INC)
 
@@ -164,6 +168,11 @@ class Bak(unittest.TestCase):
         self.assertEqual(run("WEB-BAK-03", _bak_ctx([_export(), _export()])).verdict, PASS)
         self.assertEqual(run("WEB-BAK-03", _bak_ctx([_export(), _export(name="q")])).verdict, FAIL)
 
+    def test_03_relay_cycles_only_diff_inconclusive(self):
+        a, b = _export(), _export()
+        b["relay_cycles"] = [1, 2, 3, 4, 5]
+        self.assertEqual(run("WEB-BAK-03", _bak_ctx([a, b])).verdict, INC)
+
     def test_03_inconclusive_busy(self):
         c = _bak_ctx([_export(), _export()])
         c["http_get_json"] = lambda p: (200, {"state": "running"})
@@ -282,6 +291,8 @@ class Kcfg(unittest.TestCase):
         self.assertEqual(run("WEB-KCFG-05", ctx_for(rd("not_done"), pg)).verdict, FAIL)
         self.assertEqual(run("WEB-KCFG-05", ctx_for(rd("cannot_yet"), pg)).verdict, INC)
         self.assertEqual(run("WEB-KCFG-05", ctx_for({"/api/readiness": {"items": []}}, pg)).verdict, FAIL)
+        trunc = {"/api/readiness": {"items": [{"key": "checklist_truncated", "status": "cannot_yet"}]}}
+        self.assertEqual(run("WEB-KCFG-05", ctx_for(trunc, pg)).verdict, INC)
 
 
 class FakeSec:

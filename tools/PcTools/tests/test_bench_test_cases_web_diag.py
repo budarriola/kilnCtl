@@ -107,8 +107,11 @@ class Diag04(unittest.TestCase):
     def test_pass(self):
         self.assertEqual(run("WEB-DIAG-04", ctx_for({"/api/cfgfs": CFG}, _fl07_cfgfs=CFG)).verdict, PASS)
 
+    def test_file_count_growth_is_not_a_failure(self):
+        self.assertEqual(run("WEB-DIAG-04", ctx_for({"/api/cfgfs": CFG}, _fl07_cfgfs=dict(CFG, file_count=3))).verdict, PASS)
+
     def test_fail_vs_fl07(self):
-        other = dict(CFG, file_count=3)
+        other = dict(CFG, status="degraded")
         self.assertEqual(run("WEB-DIAG-04", ctx_for({"/api/cfgfs": CFG}, _fl07_cfgfs=other)).verdict, FAIL)
 
     def test_inconclusive_unmounted(self):
@@ -126,6 +129,13 @@ class Diag05(unittest.TestCase):
 
     def test_fail(self):
         self.assertEqual(run("WEB-DIAG-05", ctx_for({"/api/thermo/faults": _tc("faulted", 0)})).verdict, FAIL)
+
+    def test_safety_tc_absent_is_inconclusive_not_fail(self):
+        d = _tc()
+        d["safety"] = {"state": "not_converting", "not_installed": True, "tc_is_separate_sensor": False}
+        self.assertEqual(run("WEB-DIAG-05", ctx_for({"/api/thermo/faults": d})).verdict, INC)
+        d["safety"] = {"state": "not_converting", "not_installed": False, "tc_is_separate_sensor": True}
+        self.assertEqual(run("WEB-DIAG-05", ctx_for({"/api/thermo/faults": d})).verdict, FAIL)
 
     def test_inconclusive_no_link(self):
         d = _tc()

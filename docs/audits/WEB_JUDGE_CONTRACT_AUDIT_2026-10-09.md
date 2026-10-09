@@ -22,6 +22,18 @@ relative to `tools/PcTools/src/kilnctrl/bench_test/` (judge side) and
 `firmware/KilnFW/App/drivers/http/` (firmware side) unless a path is
 given in full.
 
+## Status
+
+All findings fixed in the commit that adds this section (judge changes plus fake-board tests in
+`tools/PcTools/tests/test_bench_test_cases_web_*.py`): H1, M1-M4 fixed with healthy/broken test
+pairs. L1 (generic bypass-key check), L2 (shared tuple), L3 (file_count dropped), L4
+(not_installed / tc_is_separate_sensor gate), L5, L7 (setup-banner token required when expected),
+L8 (`unknown` is INCONCLUSIVE), L9 (KCFG-05 INCONCLUSIVE on `checklist_truncated`; DASH-07 reason
+names the overflow), L10 (relay_cycles-only diff is INCONCLUSIVE), L11 (`_short_zones`) fixed.
+L6 and L12 need no judge change: L6 is a firmware comment only (judge already accepts `nan`),
+L12 stays recorded under DEV_REVIEW_9 LOW-2 (no judge reads a gzip POST reply). Also fixed in
+passing: WEB-ZONE-06 crashed on `r.verdict.value` (verdicts are plain strings).
+
 ## HIGH
 
 ### H1. WEB-ZONE-11 FAILs a healthy board after HP-01 (wrong field names)

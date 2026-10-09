@@ -524,6 +524,9 @@ def _case_prof10(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.FAIL, reason=f"relay_names has {len(names)} entries, fewer than relay_count {rc}")
     tc = z.get("thermo_count", len(z.get("zones") or []))
     mask = 0
+    _sz = _short_zones(z, tc)
+    if _sz:
+        return _sz
     for zz in (z.get("zones") or [])[:tc]:
         rm = zz.get("relay_mask")
         if not isinstance(rm, int):
@@ -626,6 +629,9 @@ def _case_stim02(ctx: dict) -> CaseResult:
     for k, p in enumerate(tp):
         if not isinstance(p, dict) or p.get("index") != k:
             return CaseResult(Verdict.FAIL, reason=f"timing_profiles[{k}].index is not {k}: {p}")
+    _sz = _short_zones(z, tc)
+    if _sz:
+        return _sz
     for i, zz in enumerate((z.get("zones") or [])[:tc]):
         t = zz.get("timing_profile")
         if not isinstance(t, int) or isinstance(t, bool) or not 0 <= t < len(tp):
@@ -691,6 +697,9 @@ def _case_zone03(ctx: dict) -> CaseResult:
     tc = z.get("thermo_count", 0)
     if not tc:
         return CaseResult(Verdict.INCONCLUSIVE, reason="thermo_count is 0")
+    _sz = _short_zones(z, tc)
+    if _sz:
+        return _sz
     for i, zz in enumerate((z.get("zones") or [])[:tc]):
         for k in ("zone_type", "tc_type", "relay_type"):
             v = zz.get(k)
@@ -706,8 +715,8 @@ def _case_zone03(ctx: dict) -> CaseResult:
         if zz["zone_type"] not in (0, 1) or zz["failsafe_state"] not in (0, 1):
             return CaseResult(Verdict.FAIL, reason=f"zone {i} zone_type/failsafe_state out of range: {zz['zone_type']}/{zz['failsafe_state']}")
     rt, rc = z.get("relay_types"), z.get("relay_count")
-    if not isinstance(rt, list) or len(rt) != rc:
-        return CaseResult(Verdict.FAIL, reason=f"relay_types length {len(rt) if isinstance(rt, list) else rt!r} != relay_count {rc!r}")
+    if not isinstance(rt, list) or not isinstance(rc, int) or len(rt) < rc:
+        return CaseResult(Verdict.FAIL, reason=f"relay_types length {len(rt) if isinstance(rt, list) else rt!r} < relay_count {rc!r}")
     html = _html(ctx, "/settings/zones")
     miss = _missing_tokens(html, ["tcTypeSelectHtml(", "failsafestate"])
     if miss:
@@ -731,6 +740,9 @@ def _case_zone04(ctx: dict) -> CaseResult:
     for g in _GROUPS:
         if not re.search(r"data-group\s*=\s*\\?[\"']?" + g + r"\b", html):
             return CaseResult(Verdict.FAIL, reason=f"no data-group={g} groupsrc marker in the served HTML")
+    _sz = _short_zones(z, tc)
+    if _sz:
+        return _sz
     for i, zz in enumerate((z.get("zones") or [])[:tc]):
         sg = zz.get("settings_source_groups")
         if not isinstance(sg, dict):
@@ -793,11 +805,21 @@ def _case_zone05(ctx: dict) -> CaseResult:
     return verdict
 
 
-_ACTIVE_AT = ("stepping", "running", "settling", "analyzing", "waiting", "preparing", "tuning", "starting")
+#: autotune_state_name() emits idle/settling/stepping/relay_approach/relay_cycling/done/aborted/unknown;
+#: anything outside the terminal set is treated as active (same convention as cases_web_dash).
+_AT_NOT_ACTIVE = ("idle", "done", "aborted")
 
 
 def _host_result(ctx: dict, cid: str):
     return (ctx.get("_results") or {}).get(cid)
+
+
+def _short_zones(z: dict, tc: int) -> Optional[CaseResult]:
+    """FAIL when the zones array is missing/short, so zone loops cannot pass vacuously."""
+    zs = z.get("zones")
+    if not isinstance(zs, list) or len(zs) < tc:
+        return CaseResult(Verdict.FAIL, reason=f"/api/zones zones array has {len(zs) if isinstance(zs, list) else zs!r} entries, thermo_count {tc}")
+    return None
 
 
 def _case_zone06(ctx: dict) -> CaseResult:
@@ -813,13 +835,13 @@ def _case_zone06(ctx: dict) -> CaseResult:
     state = st.get("state") if isinstance(st, dict) else None
     if s != 200 or not isinstance(state, str) or not state:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/autotune malformed (status={s}, state={state!r})")
-    obs = {"state": state, "hosts": {c: (r.verdict.value if r else None) for c, r in hosts.items()}}
+    obs = {"state": state, "hosts": {c: (r.verdict if r else None) for c, r in hosts.items()}}
     for cid in ("AT-02", "AT-03"):
         r = hosts[cid]
-        if r is not None and r.verdict == Verdict.PASS and state.lower() in _ACTIVE_AT:
+        if r is not None and r.verdict == Verdict.PASS and state.lower() not in _AT_NOT_ACTIVE:
             return CaseResult(Verdict.FAIL, reason=f"{cid} PASSed but GET /api/autotune still reports active state {state!r}", observed=obs)
     r1 = hosts["AT-01"]
-    if r1 is not None and r1.verdict == Verdict.PASS and state.lower() in _ACTIVE_AT:
+    if r1 is not None and r1.verdict == Verdict.PASS and state.lower() not in _AT_NOT_ACTIVE:
         return CaseResult(Verdict.FAIL, reason=f"AT-01 finished PASS but autotune is still {state!r}", observed=obs)
     return CaseResult(Verdict.PASS, observed=obs)
 
@@ -990,14 +1012,18 @@ def _case_zone11(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/zones unusable (status={s})")
     tc = z.get("thermo_count", len(z.get("zones") or []))
     valid_any = False
+    _sz = _short_zones(z, tc)
+    if _sz:
+        return _sz
     for i, zz in enumerate((z.get("zones") or [])[:tc]):
         tv = zz.get("tuning_valid")
         if tv is not None and not isinstance(tv, (bool, int)):
             return CaseResult(Verdict.FAIL, reason=f"zone {i} tuning_valid malformed: {tv!r}")
         if tv:
             valid_any = True
-            if not isinstance(zz.get("method"), (str, int)) or not isinstance(zz.get("settled", False), (bool, int)):
-                return CaseResult(Verdict.FAIL, reason=f"zone {i} tuning_* fields malformed")
+            tm, ts = zz.get("tuning_method"), zz.get("tuning_settled")
+            if not isinstance(tm, (str, int)) or isinstance(tm, bool) or not isinstance(ts, (bool, int)):
+                return CaseResult(Verdict.FAIL, reason=f"zone {i} tuning_method/tuning_settled missing or malformed: {tm!r}/{ts!r}")
     _s, pe = _GET(ctx, "/api/profile_exec")
     counts = _fs_counts(pe.get("zones") if isinstance(pe, dict) else None)
     pid = (ctx.get("_hp01") or {}).get("profile_id") if isinstance(ctx.get("_hp01"), dict) else None

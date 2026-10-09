@@ -240,7 +240,8 @@ class ZoneTests(unittest.TestCase):
     def test_zone11_exact_key_paths(self):
         z = zones_body()
         z["zones"][0]["tuning_valid"] = True
-        z["zones"][0]["method"] = "x"
+        z["zones"][0]["tuning_method"] = "x"
+        z["zones"][0]["tuning_settled"] = True
         html = "tuningQuality firingStatsCurrent firingStatsHistory"
 
         def mk(pe, fh):
@@ -259,6 +260,41 @@ class ZoneTests(unittest.TestCase):
         self.assertEqual(run("WEB-ZONE-11", mk(zero, good_fh)).verdict, Verdict.PASS)
         # a sample_count NOT at zones[].firing_stats must not count
         self.assertEqual(run("WEB-ZONE-11", mk({"x": {"firing_stats": {"sample_count": 9}}}, {})).verdict, Verdict.FAIL)
+
+    def test_zone11_tuning_field_names(self):
+        html = "tuningQuality firingStatsCurrent firingStatsHistory"
+        pe = {"zones": [{"firing_stats": {"sample_count": 5}}]}
+
+        def ctx(zz):
+            z = zones_body()
+            z["zones"][0].update(zz)
+            return {"http_get_json": lambda p: (200, z) if p == "/api/zones" else (200, pe if p == "/api/profile_exec" else {}),
+                    "web_client": Web(html), "_results": {"HP-01": CaseResult(Verdict.PASS)}}
+        # healthy board after HP-01: real firmware keys
+        self.assertEqual(run("WEB-ZONE-11", ctx({"tuning_valid": True, "tuning_method": 1, "tuning_settled": True})).verdict, Verdict.PASS)
+        # old invented names are not accepted; the real ones are required
+        self.assertEqual(run("WEB-ZONE-11", ctx({"tuning_valid": True, "method": "x", "settled": True})).verdict, Verdict.FAIL)
+        self.assertEqual(run("WEB-ZONE-11", ctx({"tuning_valid": True, "tuning_method": 1})).verdict, Verdict.FAIL)
+
+    def test_zone06_relay_states_are_active(self):
+        html = "atStartBtn atAbortBtn atAcceptBtn atAckUnsettled /api/autotune/start /api/autotune/abort /api/autotune/accept"
+
+        def ctx(state):
+            return {"http_get_json": lambda p: (200, {"state": state}), "web_client": Web(html),
+                    "_results": {"AT-02": CaseResult(Verdict.PASS)}}
+        for ok in ("idle", "done", "aborted"):
+            self.assertEqual(run("WEB-ZONE-06", ctx(ok)).verdict, Verdict.PASS)
+        for active in ("relay_approach", "relay_cycling", "settling", "stepping"):
+            self.assertEqual(run("WEB-ZONE-06", ctx(active)).verdict, Verdict.FAIL)
+
+    def test_zone03_fewer_relays_ok_and_short_zones_fail(self):
+        z = zones_body(relay_count=2)
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(z)).verdict, Verdict.PASS)
+        z = zones_body(relay_count=5)
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(z)).verdict, Verdict.FAIL)
+        z = zones_body()
+        z["zones"] = []
+        self.assertEqual(run("WEB-ZONE-03", self.ctx(z)).verdict, Verdict.FAIL)
 
     def test_zone03(self):
         self.assertEqual(run("WEB-ZONE-03", self.ctx(zones_body())).verdict, Verdict.PASS)

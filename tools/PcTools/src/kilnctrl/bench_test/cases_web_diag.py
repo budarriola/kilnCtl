@@ -59,7 +59,7 @@ def mutating_gate(ctx: dict) -> Optional[str]:
     st, at = _get_json(ctx, "/api/autotune")
     if st != 200 or not isinstance(at, dict):
         return f"GET /api/autotune unreadable (status={st}); cannot confirm autotune is inactive"
-    if at.get("state") not in ("idle", "done", "complete", "failed", "aborted", "accepted"):
+    if at.get("state") not in ("idle", "done", "aborted"):
         return f"autotune is active (state={at.get('state')!r})"
     return None
 
@@ -88,7 +88,7 @@ def _case_diag02(ctx: dict) -> CaseResult:
     miss = _missing(html, ('id="crashCard"', "crashAckBtn", "crashClearBtn"))
     if miss:
         return _R(Verdict.FAIL, reason=f"/diagnostics HTML missing {miss}", observed={"missing": miss})
-    return _R(Verdict.PASS, observed={"present": present, "acknowledged": bool(present)})
+    return _R(Verdict.PASS, observed={"present": present, "acknowledged": body.get("acknowledged")})
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +181,7 @@ def _cfgfs_stable(d: dict) -> dict:
     items = (d.get("dual_write") or {}).get("items") if isinstance(d.get("dual_write"), dict) else None
     names = sorted(i.get("name") for i in items if isinstance(i, dict)) if isinstance(items, list) else None
     return {"mounted": d.get("mounted"), "status": d.get("status"),
-            "total_bytes": cap.get("total_bytes"), "file_count": d.get("file_count"), "items": names}
+            "total_bytes": cap.get("total_bytes"), "items": names}  # file_count excluded: writing cases add cfg files
 
 
 def _case_diag04(ctx: dict) -> CaseResult:
@@ -240,6 +240,10 @@ def _case_diag05(ctx: dict) -> CaseResult:
                 problems.append(f"channel {c.get('channel')} stale {c.get('stale')!r}")
     safety = d.get("safety")
     sstate = safety.get("state") if isinstance(safety, dict) else None
+    if isinstance(safety, dict) and (safety.get("not_installed") is True or safety.get("tc_is_separate_sensor") is False) \
+            and sstate in ("not_converting", "no_link", None):
+        return _R(Verdict.INCONCLUSIVE, reason="safety TC absent or borrowed (not_installed / not a separate sensor)",
+                  observed={"safety": safety, "channel_problems": problems})
     if sstate in ("faulted", "probe_fault", "not_converting"):
         problems.append(f"safety TC state {sstate!r}")
     elif sstate not in ("ok", "no_link"):
@@ -519,9 +523,11 @@ def _case_ota07(ctx: dict) -> CaseResult:
     st, d = _get_json(ctx, "/api/status")
     if st != 200 or not isinstance(d, dict):
         return _R(Verdict.FAIL, reason=f"GET /api/status not 200/JSON (status={st})", observed={"status": st})
-    if d.get("boot_button_bypass_active") not in (None, False):
-        return _R(Verdict.FAIL, reason="/api/status reports boot_button_bypass_active true",
-                  observed={"boot_button_bypass_active": d.get("boot_button_bypass_active")})
+    # boot_button_bypass_active was retired 2026-09-29 and is no longer emitted; any
+    # bypass-flavoured key reappearing true in /api/status is a regression.
+    stale = sorted(k for k in d if "bypass" in k.lower() and d.get(k) not in (None, False))
+    if stale:
+        return _R(Verdict.FAIL, reason=f"/api/status reports a bypass flag: {stale}", observed={"keys": stale})
     return _R(Verdict.PASS)
 
 
