@@ -20,9 +20,9 @@ APPEND_WINDOWS = frozenset({"hp01_tick", "hp04_states"})
 def register_probes(ctx: dict, requested, get_case) -> None:
     probes: dict = {}
     for cid in requested:
-        wp = get_case(cid).window_probe
-        if wp is not None:
-            name, fn = wp
+        spec = get_case(cid)
+        wps = ([spec.window_probe] if spec.window_probe is not None else []) + list(spec.extra_window_probes)
+        for name, fn in wps:
             probes.setdefault(name, []).append((cid, fn))
     ctx["_window_probes"] = probes
     ctx["_probe_results"] = {}

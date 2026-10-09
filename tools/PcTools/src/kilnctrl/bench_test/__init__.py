@@ -25,6 +25,7 @@ from . import cases_lcd as _cases_lcd  # noqa: F401 - import wires LCD-01/08/21 
 from . import cases_heat as _cases_heat  # noqa: F401 - import wires judge functions into REGISTRY
 from . import cases_safety as _cases_safety  # noqa: F401 - import wires judge functions into REGISTRY
 from . import cases_fl as _cases_fl  # noqa: F401 - import wires judge functions into REGISTRY
+from . import cases_web_dash as _cases_web_dash  # noqa: F401 - WEB-DASH-02..12 judges
 from . import cases_web_rw as _cases_web_rw  # noqa: F401 - import wires WEB read/write round-trip judge functions into REGISTRY
 from . import cases_ota as _cases_ota  # noqa: F401 - import wires OTA judge functions into REGISTRY
 from . import cases_autotune as _cases_autotune  # noqa: F401 - import wires AT-01..05 judge functions into REGISTRY

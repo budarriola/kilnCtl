@@ -449,6 +449,7 @@ class BenchTestRunner:
         # heat stays opt-in for LCD-19 even though allow_heat=True is the
         # default for everything else.
         self.ctx["allow_heat"] = allow_heat
+        self.ctx["suite"] = suite
         self.ctx["lcd19_allow_heat"] = lcd_stop_heat
         # LCD-22/23/24 (Edit firing live edit) ARE spec.heat-marked, so a False
         # allow_heat skips it outright, but allow_heat defaults True, so it

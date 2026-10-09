@@ -73,6 +73,8 @@ class CaseSpec:
     operator_only: bool = False
     #: Optional (window name, probe fn) -- see bench_test/windows.py.
     window_probe: Optional[Tuple[str, Callable[[dict], dict]]] = None
+    #: Further (window, fn) probes for an observer that reads several windows.
+    extra_window_probes: Tuple[Tuple[str, Callable[[dict], dict]], ...] = ()
 
 
 def _c(id: str, area: str, description: str, **kw) -> CaseSpec:

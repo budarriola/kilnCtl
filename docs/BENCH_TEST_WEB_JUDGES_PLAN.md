@@ -297,7 +297,7 @@ Each block lists:
 - **Fake-board test:** positive: a fake `/app.js` with the tokens plus `/api/profile_exec`=`{"state":"idle"}` → PASS; negative: a fake `/app.js` with `FAILURES_BEFORE_BANNER = 3` → FAIL.
 - **NEEDS OWNER:** The closed-port simulation proves nothing without a browser. — recommended: the static-constant check above, with the behavioural coverage living in a node unit test next to `firmware/KilnFW/App/test/test_recovery_banner.js` (none exists today for the connection banner).
 
-NEEDS OWNER ids: WEB-DASH-04, WEB-DASH-07, WEB-DASH-12
+NEEDS OWNER ids: WEB-DASH-04, WEB-DASH-07, WEB-DASH-12 (resolved 2026-10-09: accepted recommendation)
 
 ### 4.2 Profiles `/profiles` (WEB-PROF, WEB-STIM)
 
@@ -1719,9 +1719,9 @@ recommended form unless the owner rules otherwise.
 
 | Id | Question | Recommended |
 |---|---|---|
-| WEB-DASH-04 | The plan says max-ramp popup. The code shows a model-feasibility popup, and refuses an over-max ramp at start. | Read-only over `feasibility`. Never start an infeasible profile. |
-| WEB-DASH-07 | May the harness ack `last_run`? The ack is permanent. | Read-only. Ack only when `last_run.profile_id == 7` (the bench slot). |
-| WEB-DASH-12 | The disconnected banner needs a browser. | A static constant check now. A node unit test later. |
+| WEB-DASH-04 | The plan says max-ramp popup. The code shows a model-feasibility popup, and refuses an over-max ramp at start. | Read-only over `feasibility`. Never start an infeasible profile. **Owner 2026-10-09: accepted recommendation (resolved).** |
+| WEB-DASH-07 | May the harness ack `last_run`? The ack is permanent. | Read-only. Ack only when `last_run.profile_id == 7` (the bench slot). **Owner 2026-10-09: accepted recommendation (resolved).** |
+| WEB-DASH-12 | The disconnected banner needs a browser. | A static constant check now. A node unit test later. **Owner 2026-10-09: accepted recommendation (resolved).** |
 | WEB-STIM-02 | The timing-profile write is a whole-page POST, which resyncs the Pico abs_max. | Read-only. Add a narrow writer first if a write is wanted. |
 | WEB-ZONE-02 | The whole-page identity POST may resync the Pico abs_max, because GET prints the ceiling at `%.1f`. | Strict ceiling gate plus stripped model keys. Otherwise reduce to read-only. |
 | WEB-ZONE-03 | The selects have no narrow writer, and writing tc_type reconfigures hardware. | Read-only plus a static check. Never write tc_type. |
