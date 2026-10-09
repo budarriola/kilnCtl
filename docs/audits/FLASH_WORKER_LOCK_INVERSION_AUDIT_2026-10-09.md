@@ -155,7 +155,7 @@ covers only re-entrancy, not this inversion.
 `s_at.lock`, return them to `task_entry`, and dispatch after the give at
 `autotune_engine.c:860`.
 
-### F3 MEDIUM: `adaptive_tune_lock` held across zones saves
+### F3 MEDIUM: `adaptive_tune_lock` held across zones saves -- FIXED (see "Fix" below)
 
 **Holder path (executor task, after a run ends):**
 
@@ -194,6 +194,17 @@ mutex alone does not fix F3: the worker would still block on
 **Suggested fix (text only).** Compute the refined values under
 `adaptive_tune_lock`, release the lock, and then call the `zones_config_set_*`
 setters.
+
+**Fix (FIXED, SHA below).** `adaptive_tune_run_end` now runs three passes:
+plan under the lock (`adaptive_tune_plan_zone_locked` /
+`adaptive_tune_plan_coupled_locked`, no setter), release, apply the zones setters
+(`adaptive_tune_apply_zone_plan` / `_apply_coupled_plan`), retake the lock and
+commit the outcome (`_commit_*_locked`, ki refine, confidence, kibase snapshot).
+`adaptive_tune_ki_clear_gen` (bumped by `adaptive_tune_clear_ki_baseline`) stops
+the commit re-latching a SIMC Ki baseline that an Accept in the unlocked window
+made stale. Host test `test_run_end_holds_no_lock_across_zones_setters`
+(plus a check in the coupled-cell test) fails if a setter sees a held lock;
+negtest (removing the unlock) CAUGHT.
 
 ### F4 LOW (bounded): `s_rc.persist_lock` across the dispatch
 
@@ -292,6 +303,6 @@ No function in `wifi_prov`, `update_fetch`, LVGL, `heat_enable` or
 |---|---|---|---|
 | F1 HIGH | `s_exec.lock` | profile executor | Open |
 | F2 HIGH | `s_at.lock` | autotune | Open |
-| F3 MEDIUM | `adaptive_tune_lock` | profile executor (run end) | Open, not fixed by the zones mutex fix |
+| F3 MEDIUM | `adaptive_tune_lock` | profile executor (run end) | FIXED (plan/apply/commit split) |
 | F4 LOW | `s_rc.persist_lock` | executor / worker | Bounded 3 s stall |
 | F5 LOW | `s_rc.lock` | boot (`relay_cycles_init`) | Boot-order protected |
