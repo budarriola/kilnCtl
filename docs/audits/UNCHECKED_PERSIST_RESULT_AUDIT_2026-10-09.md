@@ -178,7 +178,9 @@ adaptive-tune training data, with a single entry.
 Fix direction: on a false return from the load, skip the persist, or refuse it
 unless the record is genuinely absent.
 
-### L4. SaftyFW update metadata write: return code checked, but no read-back or erased-slot check (cosmetic / update reliability)
+### L4. SaftyFW update metadata write: return code checked, but no read-back or erased-slot check (cosmetic / update reliability) -- FIXED (see Fix status below)
+
+**FIXED 2026-10-09:** `update_task_metadata_write_verified()` (`update_task_metadata_write.c`, host-tested by `test_update_task_metadata_write.c`) adds the erased-slot check and byte-for-byte read-back; `update_metadata_write_cb` maps any failure to `HAL_IO`, so no COMPLETE is reported.
 
 `firmware/SaftyFW/src/tasks/update_task.c:534-549` (`update_metadata_write_cb`)
 and `:584-590` check `hal_flash_safe_execute()` and `args.result`. Unlike the D2
