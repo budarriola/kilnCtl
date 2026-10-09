@@ -237,6 +237,75 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
     return PROFILE_DECODE_OK;
 }
 
+// ---- operator-preference fakes (backup gaps 1+2) ---------------------------
+// unit_pref/ramp_assist/display_power/time_sync/relay-name accessors are not linked in this
+// executable; these keep the same validation contract as the real setters.
+#include "unit_pref.h"
+#include "ramp_assist_cfg.h"
+#include "display_power_cfg.h"
+#include "time_sync.h"
+const size_t g_builtin_profile_count = 3;
+static char g_pf_tz[TIME_SYNC_TZ_MAX_LEN + 1] = "UTC0";
+void time_sync_get_status(time_sync_status_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    strcpy(out->tz, g_pf_tz);
+}
+esp_err_t time_sync_set_tz(const char *tz)
+{
+    if (!time_sync_tz_is_valid(tz)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    strcpy(g_pf_tz, tz);
+    return ESP_OK;
+}
+static bool g_pf_hidden[3];
+static bool g_pf_ids_valid = false;
+bool profiles_builtin_is_hidden(uint8_t id) { return id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 3 && g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE]; }
+esp_err_t profiles_builtin_set_hidden(uint8_t id, bool h)
+{
+    if (id < PROFILE_BUILTIN_ID_BASE || id >= PROFILE_BUILTIN_ID_BASE + 3) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE] = h;
+    return ESP_OK;
+}
+static char g_pf_rname[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 1];
+static relay_device_type_t g_pf_rtype[KILN_IO_RELAY_COUNT];
+bool zones_config_get_relay_name(uint8_t n, char *out, size_t cap)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || !out || cap == 0) { return false; }
+    strncpy(out, g_pf_rname[n - 1], cap - 1);
+    out[cap - 1] = '\0';
+    return true;
+}
+bool zones_config_set_relay_name(uint8_t n, const char *name)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || (name && strlen(name) > RELAY_NAME_MAX_LEN)) { return false; }
+    strncpy(g_pf_rname[n - 1], name ? name : "", RELAY_NAME_MAX_LEN);
+    return true;
+}
+bool zones_config_get_relay_device_type(uint8_t n, relay_device_type_t *out)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || !out) { return false; }
+    *out = g_pf_rtype[n - 1];
+    return true;
+}
+bool zones_config_set_relay_device_type(uint8_t n, relay_device_type_t t)
+{
+    if (n < 1 || n > KILN_IO_RELAY_COUNT || (uint8_t)t >= RELAY_DEVICE_TYPE_COUNT) { return false; }
+    g_pf_rtype[n - 1] = t;
+    return true;
+}
+static void pf_reset(void)
+{
+    g_pf_ids_valid = true;
+    fake_kv_reset_all();
+    (void)unit_pref_start(); (void)ramp_assist_cfg_start(); (void)display_power_cfg_start();
+    strcpy(g_pf_tz, "UTC0"); memset(g_pf_hidden, 0, sizeof(g_pf_hidden));
+    memset(g_pf_rname, 0, sizeof(g_pf_rname)); memset(g_pf_rtype, 0, sizeof(g_pf_rtype));
+}
+
 // ---- profiles_builtin.h stub bodies ---------------------------------------
 // live_profile.c (linked for real, see build_host_tests.ps1's comment on this
 // executable's $sources entry -- Opus review of 5dd23944 finding B) also
@@ -257,7 +326,8 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
 static bool g_fake_builtin_on = false;
 bool profiles_builtin_id_valid(uint8_t id)
 {
-    return g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE;
+    return (g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE) ||
+           (g_pf_ids_valid && id >= PROFILE_BUILTIN_ID_BASE && id < PROFILE_BUILTIN_ID_BASE + 3);
 }
 const builtin_profile_t *profiles_builtin_entry(uint8_t id)
 {
@@ -6660,8 +6730,122 @@ static void test_relay_cycles_bad_input_refuses_whole_restore(void)
     }
 }
 
+// ---- operator preferences (backup gaps 1+2): unit, ramp_assist, display_power, hidden profiles, tz, relay_names ----
+static const char *PF_FULL =
+    ",\"unit\":1,\"ramp_assist\":false,\"display_power\":{\"brightness_percent\":40,\"timeout_setting\":2,"
+    "\"keep_on_while_firing\":true,\"display_on_error\":true},\"hidden_builtin_profiles\":[128,130],"
+    "\"tz\":\"EST5EDT,M3.2.0,M11.1.0\",\"relay_names\":[{\"relay\":1,\"name\":\"Vent \\\"fan\\\"\",\"type\":4},"
+    "{\"relay\":3,\"name\":\"Lamp\",\"type\":5}]";
+
+static void test_prefs_import_applies_each_key(void)
+{
+    TEST_SECTION("backup_import_apply -- every operator preference key is applied through its setter");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with(PF_FULL, err, sizeof(err)), "a document with all six preference keys imports");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "unit applied");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "ramp_assist applied");
+    TEST_CHECK(display_power_cfg_brightness_percent() == 40 && display_power_cfg_timeout_setting() == DISPLAY_TIMEOUT_10_MIN &&
+                   display_power_cfg_keep_on_while_firing() && display_power_cfg_display_on_error(),
+               "display_power applied");
+    TEST_CHECK(g_pf_hidden[0] && !g_pf_hidden[1] && g_pf_hidden[2], "hidden_builtin_profiles applied as a full set");
+    TEST_CHECK(strcmp(g_pf_tz, "EST5EDT,M3.2.0,M11.1.0") == 0, "tz applied");
+    TEST_CHECK(strcmp(g_pf_rname[0], "Vent \"fan\"") == 0 && g_pf_rtype[0] == 4, "relay 1 name (escaped quotes) and type");
+    TEST_CHECK(strcmp(g_pf_rname[2], "Lamp") == 0 && g_pf_rtype[2] == 5 && g_pf_rname[1][0] == '\0',
+               "relay 3 applied, unnamed relay 2 untouched");
+}
+
+static void test_prefs_absent_keys_preserve(void)
+{
+    TEST_SECTION("backup_import_apply -- absent preference keys preserve the live values");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    (void)unit_pref_set(UNIT_PREF_FAHRENHEIT); (void)ramp_assist_cfg_set_enabled(false);
+    (void)display_power_cfg_set(55, DISPLAY_TIMEOUT_NEVER, false, false); g_pf_hidden[1] = true;
+    strcpy(g_pf_tz, "JST-9"); strcpy(g_pf_rname[1], "Keep"); g_pf_rtype[1] = RELAY_DEVICE_TYPE_OUTLET;
+    TEST_CHECK(wp9_import_with("", err, sizeof(err)), "a document with none of the keys imports");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT && !ramp_assist_cfg_enabled() &&
+                   display_power_cfg_brightness_percent() == 55 && g_pf_hidden[1] &&
+                   strcmp(g_pf_tz, "JST-9") == 0 && strcmp(g_pf_rname[1], "Keep") == 0 &&
+                   g_pf_rtype[1] == RELAY_DEVICE_TYPE_OUTLET,
+               "all six values unchanged");
+}
+
+static void test_prefs_invalid_refuses_whole_restore(void)
+{
+    TEST_SECTION("backup_import_apply -- an invalid preference (incl. relay_names) refuses the whole restore");
+    static const char *bad[] = {
+        ",\"unit\":2",
+        ",\"unit\":\"C\"",
+        ",\"ramp_assist\":1",
+        ",\"display_power\":{\"brightness_percent\":101,\"timeout_setting\":0,\"keep_on_while_firing\":true,\"display_on_error\":true}",
+        ",\"display_power\":{\"brightness_percent\":50,\"timeout_setting\":99,\"keep_on_while_firing\":true,\"display_on_error\":true}",
+        ",\"display_power\":{\"brightness_percent\":50}",
+        ",\"hidden_builtin_profiles\":[5]",
+        ",\"hidden_builtin_profiles\":3",
+        ",\"tz\":\"\"",
+        ",\"tz\":5",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"0123456789abcdef\"}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":5}]",
+        ",\"relay_names\":[{\"relay\":5,\"name\":\"x\"}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"a\"},{\"relay\":1,\"name\":\"b\"}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"a\",\"type\":99}]",
+        ",\"relay_names\":[{\"relay\":1}]",
+        ",\"relay_names\":[{\"relay\":1,\"name\":\"ok\"}],\"unit\":9",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_stub_state();
+        pf_reset();
+        char err[200] = "";
+        bool ramp0 = ramp_assist_cfg_enabled();
+        unit_pref_t unit0 = unit_pref_get();
+        bool ok = wp9_import_with(bad[i], err, sizeof(err));
+        TEST_CHECK(!ok && err[0] != '\0', "invalid preference refused with a message");
+        TEST_CHECK(unit_pref_get() == unit0 && g_pf_rname[0][0] == '\0' && !g_pf_hidden[0] &&
+                       ramp_assist_cfg_enabled() == ramp0,
+                   "nothing was written");
+    }
+}
+
+static void test_prefs_export_round_trip(void)
+{
+    TEST_SECTION("backup_export_get_handler -- the six preference keys round-trip export, import, export");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    TEST_CHECK(wp9_import_with(PF_FULL, err, sizeof(err)), "seed all preferences");
+    TEST_CHECK(run_export() == ESP_OK, "export succeeds");
+    const char *u = strstr(s_export_body, "\"unit\":1,\"ramp_assist\":false,\"display_power\":{");
+    TEST_CHECK(u != NULL && strstr(u, "\"hidden_builtin_profiles\":[128,130]") != NULL &&
+                   strstr(u, "\"tz\":\"EST5EDT,M3.2.0,M11.1.0\"") != NULL &&
+                   strstr(u, "\"relay_names\":[{\"relay\":1,\"name\":\"Vent \\\"fan\\\"\",\"type\":4}") != NULL,
+               "exported keys carry the seeded values");
+    char *saved = strdup(s_export_body);
+    TEST_CHECK(saved != NULL, "copy the document");
+    if (saved != NULL) {
+        char first[900] = "", second[900] = "";
+        const char *a = strstr(saved, "\"unit\":");
+        snprintf(first, sizeof(first), "%.*s", (int)sizeof(first) - 1, a ? a : "");
+        pf_reset();
+        TEST_CHECK(test_backup_import_apply(saved, err, sizeof(err)), "the exported document imports back");
+        TEST_CHECK(run_export() == ESP_OK, "re-export succeeds");
+        a = strstr(s_export_body, "\"unit\":");
+        snprintf(second, sizeof(second), "%.*s", (int)sizeof(second) - 1, a ? a : "");
+        TEST_CHECK(first[0] != '\0' && strcmp(first, second) == 0, "preference keys byte-identical after the round trip");
+        free(saved);
+    }
+    pf_reset();
+}
+
 void run_test_backup_import(void)
 {
+    test_prefs_import_applies_each_key();
+    test_prefs_absent_keys_preserve();
+    test_prefs_invalid_refuses_whole_restore();
+    test_prefs_export_round_trip();
+    g_pf_ids_valid = false;
     test_update_settings_http_post();
     test_update_repo_backslash_refused();
     test_update_repo_default_value_is_unset();

@@ -42,6 +42,11 @@
                                    * -- CT normals, the owner's own named example */
 #include "relay_cycles.h" /* top-level "relay_cycles" wear counters */
 #include "aux_outputs_cfg.h" /* top-level "aux_outputs" array (spare-relay on/off outputs) */
+#include "display_power_cfg.h" /* top-level "display_power" object */
+#include "profiles_builtin.h" /* top-level "hidden_builtin_profiles" array */
+#include "ramp_assist_cfg.h" /* top-level "ramp_assist" bool */
+#include "time_sync.h" /* top-level "tz" string */
+#include "unit_pref.h" /* top-level "unit" number */
 #include "kiln_cfg_store.h" /* KILN_PROFILES_PLAN.md item 17 follow-up: "kiln_configs"
                               * array below -- every saved kiln config slot, not just
                               * the active one, is now part of the backup document. */
@@ -253,6 +258,51 @@ static BACKUP_EXPORT_NOINLINE void backup_export_relay_cycles(backup_stream_t *s
         backup_stream_printf(s, ",\"c%u\":%lu", i, (unsigned long)c[i]);
     }
     backup_stream_printf(s, "}");
+}
+
+/* Operator preferences that factory reset erases (docs/audits/BACKUP_CFGFS_COVERAGE_AUDIT_2026-10-09.md
+ * gaps 1+2): "unit" (0 C / 1 F), "hidden_builtin_profiles" (ids), "ramp_assist" (bool),
+ * "display_power" (object), "tz" (POSIX string) and "relay_names" (4 x {relay,name,type}). All
+ * optional on import (absent = preserve), so no BACKUP_FORMAT_VERSION bump. Small locals only. */
+static BACKUP_EXPORT_NOINLINE void backup_export_prefs(backup_stream_t *s)
+{
+    backup_stream_printf(s, ",\"unit\":%u", (unsigned)unit_pref_get());
+    backup_stream_printf(s, ",\"ramp_assist\":%s", ramp_assist_cfg_enabled() ? "true" : "false");
+    backup_stream_printf(s, ",\"display_power\":{\"brightness_percent\":%u,\"timeout_setting\":%u,"
+                         "\"keep_on_while_firing\":%s,\"display_on_error\":%s}",
+                         (unsigned)display_power_cfg_brightness_percent(),
+                         (unsigned)display_power_cfg_timeout_setting(),
+                         display_power_cfg_keep_on_while_firing() ? "true" : "false",
+                         display_power_cfg_display_on_error() ? "true" : "false");
+    backup_stream_printf(s, ",\"hidden_builtin_profiles\":[");
+    bool first = true;
+    for (size_t i = 0; i < g_builtin_profile_count; i++) {
+        uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
+        if (profiles_builtin_is_hidden(id)) {
+            backup_stream_printf(s, "%s%u", first ? "" : ",", (unsigned)id);
+            first = false;
+        }
+    }
+    backup_stream_printf(s, "]");
+    time_sync_status_t ts;
+    time_sync_get_status(&ts);
+    char tz_escaped[TIME_SYNC_TZ_MAX_LEN * 2 + 1];
+    json_escape(ts.tz, tz_escaped, sizeof(tz_escaped));
+    backup_stream_printf(s, ",\"tz\":\"%s\"", tz_escaped);
+    backup_stream_printf(s, ",\"relay_names\":[");
+    for (uint8_t r = 1; r <= KILN_IO_RELAY_COUNT; r++) {
+        char name[RELAY_NAME_MAX_LEN + 1];
+        char name_escaped[RELAY_NAME_MAX_LEN * 2 + 1];
+        relay_device_type_t ty = RELAY_DEVICE_TYPE_UNSET;
+        if (!zones_config_get_relay_name(r, name, sizeof(name))) {
+            name[0] = '\0';
+        }
+        (void)zones_config_get_relay_device_type(r, &ty);
+        json_escape(name, name_escaped, sizeof(name_escaped));
+        backup_stream_printf(s, "%s{\"relay\":%u,\"name\":\"%s\",\"type\":%u}", r == 1 ? "" : ",", (unsigned)r,
+                             name_escaped, (unsigned)ty);
+    }
+    backup_stream_printf(s, "]");
 }
 
 esp_err_t backup_export_get_handler(httpd_req_t *req)
@@ -842,6 +892,7 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
     }
     backup_export_aux_outputs(&s);
     backup_export_relay_cycles(&s);
+    backup_export_prefs(&s);
     backup_stream_printf(&s, "}");
 
     backup_stream_flush(&s);

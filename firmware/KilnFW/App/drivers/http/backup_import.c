@@ -78,6 +78,11 @@
 #include "update_settings.h" /* WP9: top-level "update_repo" */
 #include "relay_cycles.h" /* top-level "relay_cycles" wear counters */
 #include "aux_outputs_cfg.h" /* top-level "aux_outputs" (spare-relay on/off outputs) */
+#include "display_power_cfg.h" /* top-level "display_power" */
+#include "profiles_builtin.h" /* top-level "hidden_builtin_profiles" */
+#include "ramp_assist_cfg.h" /* top-level "ramp_assist" */
+#include "time_sync.h" /* top-level "tz" */
+#include "unit_pref.h" /* top-level "unit" */
 #include "zones_config_accessors.h"
 #include "zones_config_json.h" /* relay_type/ease_off_window_mult/approach_rate_cap/
                                  * error_band_c/rate_band_c_per_s setters --
@@ -954,6 +959,8 @@ static bool backup_import_update_repo(const char *body, bool commit, kiln_cfg_pl
                                       size_t err_cap);
 static bool backup_import_relay_cycles(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
                                        size_t err_cap);
+static bool backup_import_prefs(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
+                               size_t err_cap);
 static bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote, char *err_msg,
                                              size_t err_cap);
 
@@ -2913,6 +2920,9 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     if (!backup_import_relay_cycles(body, true, NULL, err_msg, err_cap)) {
         return false; // zones already landed: reported as a partial write by the caller
     }
+    if (!backup_import_prefs(body, true, NULL, err_msg, err_cap)) {
+        return false; // zones already landed: reported as a partial write by the caller
+    }
     /* ---- Pass 2: everything validated -- commit profiles ---- */
     for (size_t i = 0; i < candidate_count; i++) {
         profile_candidate_t *c = &candidates[i];
@@ -3078,6 +3088,222 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_relay_cycles(const char *body, 
         return false;
     }
     return true;
+}
+
+/* Operator preferences (docs/audits/BACKUP_CFGFS_COVERAGE_AUDIT_2026-10-09.md gaps 1+2): the
+ * optional top-level keys backup_export_prefs() writes -- unit, ramp_assist, display_power,
+ * hidden_builtin_profiles, tz, relay_names. Each absent key preserves the live value. Present
+ * keys are held to the validation of their live path (unit_pref_set / ramp_assist / display_power
+ * range + timeout enum / time_sync_tz_is_valid / relay<N>_name <= RELAY_NAME_MAX_LEN and
+ * relay<N>_type < RELAY_DEVICE_TYPE_COUNT, as POST /api/zones) and ANY invalid value refuses the
+ * WHOLE restore in pass 1 (commit=false). With commit=true the same parse is applied through the
+ * validated setters. Parsed state is a few hundred bytes; nothing large lives here. */
+typedef struct {
+    bool has_unit, has_ramp, has_display, has_hidden, has_tz, has_names;
+    unit_pref_t unit;
+    bool ramp;
+    uint8_t brightness;
+    display_timeout_setting_t timeout;
+    bool keep_on, on_error;
+    bool hidden[8]; /* indexed by builtin id - PROFILE_BUILTIN_ID_BASE */
+    char tz[TIME_SYNC_TZ_MAX_LEN + 2];
+    bool name_set[KILN_IO_RELAY_COUNT];
+    char name[KILN_IO_RELAY_COUNT][RELAY_NAME_MAX_LEN + 2];
+    bool type_set[KILN_IO_RELAY_COUNT];
+    relay_device_type_t type[KILN_IO_RELAY_COUNT];
+} backup_prefs_t;
+
+static bool backup_prefs_int(const char *v, double lo, double hi, double *out)
+{
+    char *end = NULL;
+    if (v == NULL || *v == '"' || *v == '\0') {
+        return false;
+    }
+    double d = strtod(v, &end);
+    if (end == v || d < lo || d > hi || d != (double)(long long)d) {
+        return false;
+    }
+    *out = d;
+    return true;
+}
+
+static bool backup_prefs_bool(const char *v, bool *out)
+{
+    if (v != NULL && strncmp(v, "true", 4) == 0) {
+        *out = true;
+        return true;
+    }
+    if (v != NULL && strncmp(v, "false", 5) == 0) {
+        *out = false;
+        return true;
+    }
+    return false;
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_prefs_parse(const char *body, backup_prefs_t *p, char *err_msg,
+                                                      size_t err_cap)
+{
+    memset(p, 0, sizeof(*p));
+    double d;
+    const char *v = backup_json_obj_find(body, "unit");
+    if (v != NULL) {
+        if (!backup_prefs_int(v, 0, 1, &d)) {
+            snprintf(err_msg, err_cap, "unit must be 0 (C) or 1 (F)");
+            return false;
+        }
+        p->has_unit = true;
+        p->unit = (unit_pref_t)(int)d;
+    }
+    v = backup_json_obj_find(body, "ramp_assist");
+    if (v != NULL) {
+        if (!backup_prefs_bool(v, &p->ramp)) {
+            snprintf(err_msg, err_cap, "ramp_assist must be true or false");
+            return false;
+        }
+        p->has_ramp = true;
+    }
+    v = backup_json_obj_find(body, "display_power");
+    if (v != NULL) {
+        const char *b = backup_json_obj_find(v, "brightness_percent");
+        const char *t = backup_json_obj_find(v, "timeout_setting");
+        double bd = 0, td = 0;
+        if (*backup_json_skip_ws(v) != '{' || !backup_prefs_int(b, 0, 100, &bd) || !backup_prefs_int(t, 0, 255, &td) ||
+            !display_power_timeout_setting_is_valid((display_timeout_setting_t)(int)td) ||
+            !backup_prefs_bool(backup_json_obj_find(v, "keep_on_while_firing"), &p->keep_on) ||
+            !backup_prefs_bool(backup_json_obj_find(v, "display_on_error"), &p->on_error)) {
+            snprintf(err_msg, err_cap,
+                     "display_power is not a valid {brightness_percent 0-100, timeout_setting, "
+                     "keep_on_while_firing, display_on_error}");
+            return false;
+        }
+        p->has_display = true;
+        p->brightness = (uint8_t)bd;
+        p->timeout = (display_timeout_setting_t)(int)td;
+    }
+    v = backup_json_obj_find(body, "hidden_builtin_profiles");
+    if (v != NULL) {
+        if (*backup_json_skip_ws(v) != '[') {
+            snprintf(err_msg, err_cap, "hidden_builtin_profiles must be an array");
+            return false;
+        }
+        for (const char *e = backup_json_arr_first(v); e != NULL; e = backup_json_arr_next(e)) {
+            if (!backup_prefs_int(e, PROFILE_BUILTIN_ID_BASE, 255, &d) || !profiles_builtin_id_valid((uint8_t)d) ||
+                (size_t)((uint8_t)d - PROFILE_BUILTIN_ID_BASE) >= sizeof(p->hidden)) {
+                snprintf(err_msg, err_cap, "hidden_builtin_profiles holds an id that is not a builtin profile");
+                return false;
+            }
+            p->hidden[(uint8_t)d - PROFILE_BUILTIN_ID_BASE] = true;
+        }
+        p->has_hidden = true;
+    }
+    v = backup_json_obj_find(body, "tz");
+    if (v != NULL) {
+        if (!backup_json_field_str(body, "tz", p->tz, sizeof(p->tz)) || strlen(p->tz) > TIME_SYNC_TZ_MAX_LEN ||
+            !time_sync_tz_is_valid(p->tz)) {
+            snprintf(err_msg, err_cap, "tz is not a valid POSIX TZ string");
+            return false;
+        }
+        p->has_tz = true;
+    }
+    v = backup_json_obj_find(body, "relay_names");
+    if (v != NULL) {
+        if (*backup_json_skip_ws(v) != '[') {
+            snprintf(err_msg, err_cap, "relay_names must be an array");
+            return false;
+        }
+        unsigned n = 0;
+        for (const char *e = backup_json_arr_first(v); e != NULL; e = backup_json_arr_next(e), n++) {
+            double rd = 0;
+            if (*backup_json_skip_ws(e) != '{' ||
+                !backup_prefs_int(backup_json_obj_find(e, "relay"), 1, KILN_IO_RELAY_COUNT, &rd)) {
+                snprintf(err_msg, err_cap, "relay_names[%u]: relay missing or not 1-%u", n,
+                         (unsigned)KILN_IO_RELAY_COUNT);
+                return false;
+            }
+            unsigned ri = (unsigned)rd - 1u;
+            if (p->name_set[ri] || p->type_set[ri]) {
+                snprintf(err_msg, err_cap, "relay_names[%u]: relay %u listed twice", n, ri + 1u);
+                return false;
+            }
+            if (backup_json_obj_find(e, "name") != NULL) {
+                if (!backup_json_field_str(e, "name", p->name[ri], sizeof(p->name[ri])) ||
+                    strlen(p->name[ri]) > RELAY_NAME_MAX_LEN) {
+                    snprintf(err_msg, err_cap, "relay_names[%u]: name must be a string of at most %u characters", n,
+                             (unsigned)RELAY_NAME_MAX_LEN);
+                    return false;
+                }
+                p->name_set[ri] = true;
+            }
+            const char *tv = backup_json_obj_find(e, "type");
+            if (tv != NULL) {
+                double td = 0;
+                if (!backup_prefs_int(tv, 0, RELAY_DEVICE_TYPE_COUNT - 1, &td)) {
+                    snprintf(err_msg, err_cap, "relay_names[%u]: type out of range", n);
+                    return false;
+                }
+                p->type[ri] = (relay_device_type_t)(int)td;
+                p->type_set[ri] = true;
+            }
+            if (!p->name_set[ri] && !p->type_set[ri]) {
+                snprintf(err_msg, err_cap, "relay_names[%u]: neither name nor type given", n);
+                return false;
+            }
+        }
+        p->has_names = true;
+    }
+    return true;
+}
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_prefs(const char *body, bool commit, kiln_cfg_plan_t *plan,
+                                                       char *err_msg, size_t err_cap)
+{
+    backup_prefs_t p;
+    if (!backup_prefs_parse(body, &p, err_msg, err_cap)) {
+        return false;
+    }
+    if (!commit) {
+        if (plan != NULL && (p.has_unit || p.has_ramp || p.has_display || p.has_hidden || p.has_tz || p.has_names)) {
+            kiln_cfg_plan_add(plan, "preferences in this backup (unit/ramp_assist/display_power/hidden profiles/tz/"
+                                    "relay names) are restored; keys absent from it are kept");
+        }
+        return true;
+    }
+    bool ok = true;
+    if (p.has_unit && unit_pref_set(p.unit) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_ramp && ramp_assist_cfg_set_enabled(p.ramp) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_display && display_power_cfg_set(p.brightness, p.timeout, p.keep_on, p.on_error) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_hidden) {
+        for (size_t i = 0; i < g_builtin_profile_count && i < sizeof(p.hidden); i++) {
+            uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
+            if (profiles_builtin_is_hidden(id) != p.hidden[i] &&
+                profiles_builtin_set_hidden(id, p.hidden[i]) != ESP_OK) {
+                ok = false;
+            }
+        }
+    }
+    if (p.has_tz && time_sync_set_tz(p.tz) != ESP_OK) {
+        ok = false;
+    }
+    if (p.has_names) {
+        for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
+            if (p.name_set[r] && !zones_config_set_relay_name((uint8_t)(r + 1u), p.name[r])) {
+                ok = false;
+            }
+            if (p.type_set[r] && !zones_config_set_relay_device_type((uint8_t)(r + 1u), p.type[r])) {
+                ok = false;
+            }
+        }
+    }
+    if (!ok) {
+        snprintf(err_msg, err_cap, "a preference could not be persisted -- the rest of the restore already landed");
+    }
+    return ok;
 }
 
 /* Top-level "aux_outputs": the spare-relay on/off outputs (docs/SPARE_RELAY_ONOFF_PLAN.md), the
@@ -3576,6 +3802,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     }
     if (!backup_import_relay_cycles(body, false, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed relay_cycles refuses the WHOLE restore, nothing written
+    }
+    if (!backup_import_prefs(body, false, plan, err_msg, err_cap)) {
+        return false; // pass 1: an invalid preference refuses the WHOLE restore, nothing written
     }
     if (!backup_import_aux_outputs_validate(body, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed/conflicting aux_outputs refuses the WHOLE restore, nothing written
