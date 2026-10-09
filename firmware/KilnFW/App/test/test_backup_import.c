@@ -6920,8 +6920,77 @@ static void test_prefs_commit_failure_is_partial_write_profiles_untouched(void)
     }
 }
 
+/* HOST_TEST_GAP_AUDIT gap 7 remainder: candidate-buffer allocation failure, err_msg truncation, thermo_count. */
+static void test_gap7_candidate_oom_truncation_thermo_count(void)
+{
+    TEST_SECTION("backup_import_apply -- PSRAM candidate buffer OOM is a clean partial-write refusal");
+    {
+        reset_stub_state();
+        pf_reset();
+        kiln_cfg_plan_t plan;
+        bool partial = false;
+        char err[200] = "";
+        heap_caps_malloc_test_set_fail(true);
+        bool ok = wp9_apply_full("", KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial, err, sizeof(err));
+        heap_caps_malloc_test_set_fail(false);
+        TEST_CHECK(!ok, "import refused when the profile candidate array cannot be allocated");
+        TEST_CHECK(partial, "reported as a partial write (past the kiln_configs commit pass)");
+        TEST_CHECK(strstr(err, "out of memory (profile candidates)") != NULL, "error names the candidate array");
+        TEST_CHECK(g_profile_save_calls == 0, "no profile written");
+    }
+
+    TEST_SECTION("backup_import_apply -- pass-1 profile error prefix truncates safely into a small err buffer");
+    {
+        const char *body = bi_profile_backup(BI_IO_SEG(9), "", "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,"
+                                                                "\"settings_source\":255}", "");
+        char full[256] = "";
+        reset_stub_state();
+        aux_bk_fresh();
+        TEST_CHECK(!test_backup_import_apply(body, full, sizeof(full)), "baseline: io_target 9 refused");
+        TEST_CHECK(strncmp(full, "profile entry 0: ", 17) == 0, "full-size buffer carries the entry prefix");
+        /* Every capacity from below the prefix length to past the full message, so the case where the
+         * unprefixed message fits but the prefixed one does not (needs the explicit NUL) is covered. */
+        size_t caps_n = strlen(full) + 12u;
+        for (size_t cap = 10; cap < caps_n; cap++) {
+            char small[320];
+            memset(small, 'X', sizeof(small));
+            reset_stub_state();
+            aux_bk_fresh();
+            bool ok = test_backup_import_apply(body, small, cap);
+            TEST_CHECK(!ok, "refused with a small error buffer");
+            size_t len = strnlen(small, sizeof(small));
+            TEST_CHECK(len < cap, "message is NUL-terminated inside the caller's capacity");
+            TEST_CHECK(small[cap] == 'X' || cap >= sizeof(small), "nothing written past the capacity");
+            if (cap > 17) {
+                TEST_CHECK(strncmp(small, "profile entry 0: ", 17) == 0, "prefix kept, message truncated after it");
+                TEST_CHECK(strncmp(small + 17, full + 17, len - 17) == 0, "truncated tail is a prefix of the full message");
+            }
+        }
+    }
+
+    TEST_SECTION("backup_import_apply -- thermo_count is the live count: zone entries past it are refused");
+    {
+        reset_stub_state();
+        test_stub_zones_set_thermo_count(1);
+        char err[256] = "";
+        g_total_write_calls = 0;
+        g_profile_save_calls = 0;
+        char zbody[256];
+        snprintf(zbody, sizeof(zbody),
+                 "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"zones\":["
+                 "{\"index\":2,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}",
+                 BACKUP_FORMAT_VERSION);
+        bool ok = test_backup_import_apply(zbody, err, sizeof(err));
+        test_stub_zones_set_thermo_count(3);
+        TEST_CHECK(!ok, "zone index 2 refused when the live thermo_count is 1");
+        TEST_CHECK(strstr(err, "not a configured zone") != NULL, "error says the zone is not configured");
+        TEST_CHECK(g_total_write_calls == 0, "nothing written");
+    }
+}
+
 void run_test_backup_import(void)
 {
+    test_gap7_candidate_oom_truncation_thermo_count();
     test_prefs_commit_failure_is_partial_write_profiles_untouched();
     test_prefs_hidden_catalogue_overflow_refused_before_writes();
     test_prefs_import_applies_each_key();
