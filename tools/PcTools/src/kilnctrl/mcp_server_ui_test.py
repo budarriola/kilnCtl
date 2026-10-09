@@ -141,7 +141,8 @@ FACTORY_RESET_REBOOT_TIMEOUT_S = 20.0
 def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN,
                                       host: Optional[str] = None,
                                       safety_host: Optional[str] = None,
-                                      use_ct_map_backup: bool = False) -> str:
+                                      use_ct_map_backup: bool = False,
+                                      confirm: bool = False) -> str:
     """Factory-default the board, then apply a known-good preset -- one
     callable step so a test always starts from the same place.
 
@@ -192,8 +193,15 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     This is the disruptive lever in this module: it reboots the board and
     then writes PID/model gains (and, with `host`, zones config too). Never
     invoke it against a bench with a firing in progress or with the safety
-    processor ARMED.
+    processor ARMED. Refuses unless ``confirm is True`` exactly (it erases
+    NVS partitions).
     """
+    if confirm is not True:
+        return (
+            "error: refusing to factory-default the board without confirm=True -- "
+            f"scope {scope} erases NVS partition(s) and reboots the board. Pass "
+            "confirm=True once you have reviewed exactly what this will destroy."
+        )
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
 
     try:

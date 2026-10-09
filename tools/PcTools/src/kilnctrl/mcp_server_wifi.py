@@ -156,7 +156,10 @@ def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None)
 
     Leave ssid unset to auto-connect using the credentials most recently
     saved from the GUI's Wi-Fi Settings popup (see wifi_credentials.py) --
-    fails with a clear error if nothing has been saved that way yet."""
+    fails with a clear error if nothing has been saved that way yet.
+
+    Not confirm-gated by design: network credentials are not destructive and are re-addable; passwords are never echoed (note: the password travels as a tool parameter, which MCP clients may log -- prefer the settings page or an env-var-fed path for a real credential).
+    """
     if ssid is None:
         saved = wifi_credentials.load()
         if saved is None:
@@ -193,7 +196,10 @@ def wifi_set_mode(mode: str) -> str:
 @_core._tool()
 def wifi_set_ap_identity(ap_ssid: Optional[str] = None, ap_password: Optional[str] = None) -> str:
     """Rename the board's own provisioning AP and/or change its password.
-    Leave either argument unset (None) to keep it unchanged."""
+    Leave either argument unset (None) to keep it unchanged.
+
+    Not confirm-gated by design: the AP identity is re-settable; the AP password is never echoed (note: it travels as a tool parameter, which MCP clients may log).
+    """
     try:
         result = _srv._wifi.set_ap_identity(ap_ssid, ap_password)
     except WifiUartQueryError as exc:

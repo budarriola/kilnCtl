@@ -134,7 +134,7 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
     `host`: board IP or hostname. Defaults to the board's current station IP
     if connected, else the fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return (
             "error: current sweep refused without confirm=True -- this ENERGIZES HEATER "
             "RELAYS one zone at a time (see this tool's own docstring for the sequence, "

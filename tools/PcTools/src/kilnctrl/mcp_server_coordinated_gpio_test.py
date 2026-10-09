@@ -133,7 +133,7 @@ def coordinated_gpio_test(confirm: bool = False, host: Optional[str] = None) -> 
     resolution as every other HTTP-backed tool here: explicit host wins,
     else the board's current station IP, else the fallback-AP address.
     """
-    if not confirm:
+    if confirm is not True:
         return (
             "REFUSED -- confirm=True was not passed -- refusing to drive any pin.\n"
             "This test halts the Pico and detaches GPIO4/5/10 from both firmwares' "

@@ -109,6 +109,7 @@ Severity is HIGH, MED or LOW. Lines refer to `tools/PcTools/src/kilnctrl/` unles
 otherwise.
 
 **F1 HIGH: `factory_default_then_load_preset` erases NVS with no confirm gate.**
+Status: FIXED (2026-10-09).
 `mcp_server_ui_test.py:141`.
 
 - The default scope is KILN, which wipes all of `kiln_nvs`: zones, relay names, rules,
@@ -119,6 +120,7 @@ otherwise.
   `cfgfs_format`, requires `confirm is True`.
 
 **F2 MED: `flash_firmware` has no `confirm`, and its erase gate is not strict.**
+Status: FIXED (2026-10-09).
 
 - `mcp_server_flash.py:1017`: a JTAG flash of bootloader, partition table and app has no
   `confirm` parameter at all. `flash_recovery` (`mcp_server_flash.py:1781`) requires
@@ -131,6 +133,7 @@ otherwise.
   for an owner-decided destructive path.
 
 **F3 MED: Safety-processor flash writers have no confirm gate.**
+Status: FIXED (2026-10-09).
 `safety_set_tc_type` (`mcp_server_safety.py:362`) and `safety_set_commissioning_fields`
 (`mcp_server_safety.py:1034`) write RP2040 config flash with no `confirm`.
 `safety_set_commissioning_fields` accepts arbitrary field names, including `abs_max_temp_c` and
@@ -139,6 +142,7 @@ refuses without `confirm` (`mcp_server_safety.py:1245`). Both docstrings stress 
 SAFETY PROCESSOR'S FLASH" but neither is gated.
 
 **F4 MED: The safety-side mid-run check fails open.**
+Status: FIXED (2026-10-09).
 `_profile_or_autotune_running()` (`mcp_server_safety.py:1127-1149`) swallows
 `ProfilesQueryError` and `AutotuneQueryError` (`pass` at 1141-1142 and 1147-1148) and returns
 `None`, which means "not running".
@@ -151,6 +155,7 @@ SAFETY PROCESSOR'S FLASH" but neither is gated.
   fails closed. The two disagree.
 
 **F5 LOW: About 25 gated tools check `not confirm` instead of `confirm is not True`.**
+Status: FIXED (2026-10-09).
 These are strict only through the facade. A direct Python caller passing `"no"`, `1` or any
 non-empty object passes the gate.
 
@@ -169,6 +174,7 @@ None of these docstrings claims "exactly", so this is inconsistency, not a false
 `estop_verify`, `recovery_*`, `update_*`, aux and the control writers already use the exact form.
 
 **F6 MED: `load_config_preset` writes a whole page with no confirm and no mid-run precheck.**
+Status: FIXED (2026-10-09).
 `mcp_server_config_presets.py:87`.
 
 - It writes PID gains over UART for every zone.
@@ -178,6 +184,7 @@ None of these docstrings claims "exactly", so this is inconsistency, not a false
 - The narrow writers exist because this tool is too broad, yet the broad one is the ungated one.
 
 **F7 MED: The aux convert resume path has no read-back, contradicting the module docstring.**
+Status: FIXED (2026-10-09).
 `mcp_server_aux.py:279-292`.
 
 - The `resume_relay` branch POSTs `move_zone_to_aux` and returns "ok" on the firmware ack alone.
@@ -187,6 +194,7 @@ None of these docstrings claims "exactly", so this is inconsistency, not a false
 - The normal (non-resume) path does verify.
 
 **F8 MED: `control_set_zone_pid` and `control_set_zone_model` have no gate, no mid-run precheck
+Status: FIXED (2026-10-09).
 and no read-back.** `mcp_server_control.py:445, 458`.
 
 - These are UART writes of tuned gains and model with one-line docstrings.
@@ -195,6 +203,7 @@ and no read-back.** `mcp_server_control.py:445, 458`.
 - Whether the firmware's mode gate covers the UART CONTROL path was not verified here.
 
 **F9 MED: Several consequential mutators are ungated, and their docstrings never say so.**
+Status: DECIDED (documented ungated by design in each docstring) (2026-10-09).
 
 - OTA: `ota_update_esp`, `ota_rollback_esp`, `ota_recovery_exit_esp`, `ota_update_pico`
   (`mcp_server_ota.py:120, 165, 263, 375`), and `ota_rollback_pico` (`mcp_server_safety.py:1284`).
@@ -209,18 +218,21 @@ Compare `recovery_enter` and `sw_reset_esp` (both gated) with `ota_rollback_esp`
 If the owner intends these to be ungated, each docstring should say so, as `web_auth_logout`'s does.
 
 **F10 LOW: `ack_*` flags are coerced, not strictly checked.**
+Status: FIXED (facade strict-bool covers confirm*/force*/allow_*/ack_*) (2026-10-09).
 Examples: `autotune_accept(ack_unsettled)` (`mcp_server_autotune.py:180`) and `kiln_config_apply`'s
 `ack_hardware_differs` (`mcp_server_info.py:793`). These are acknowledgement gates, but their names do not match
 `_is_gate_flag_name` (`mcpkit/registry.py:529-530`), so `"yes"` passes. `update_stage_release`'s
 `ack_no_safety` is safe because its body uses `is True` (`mcp_server_update.py:404`).
 
 **F11 LOW: "confirmed by the board" overstates what is checked.**
+Status: FIXED (wording says POST accepted, or read-back added) (2026-10-09).
 `adaptive_tune_set_enabled` (`mcp_server_adaptive_tune.py:172`) and `ramp_assist_set_enabled`
 (`mcp_server_ramp_assist.py:121`) report "confirmed by the board" from the POST's own
 `{"ok":true}`. No read-back happens. `ramp_assist`'s docstring itself admits that `ok:false` can
 still mean the value applied live.
 
 **F12 LOW: Wi-Fi passwords travel as tool parameters.**
+Status: DECIDED (left as is, docstring note) (2026-10-09).
 `wifi_add_network(password=...)` (`mcp_server_wifi.py:144`) and
 `wifi_set_ap_identity(ap_password=...)` (`mcp_server_wifi.py:194`) take secrets as tool
 parameters. The tools never echo them; the AP password is shown as `[set]`/`[unset]` at
@@ -230,6 +242,7 @@ parameters. The tools never echo them; the AP password is shown as `[set]`/`[uns
 prints a credential value.
 
 **F13 LOW: `bench_test_run` and `bench_test_start` default `allow_heat=True`.**
+Status: DECIDED (left as is) (2026-10-09).
 `mcp_server_bench_test.py:29`. Every other `allow_*` heat gate in this package defaults to False:
 `ota_matrix_run`'s `allow_heat` and `bench_test_run`'s own `ota_allow_heat`. An agent running
 `bench_test_run(suite=...)` with defaults gets the heat-marked cases. The docstring
@@ -237,6 +250,7 @@ prints a credential value.
 claim.
 
 **F14 LOW: `fixture_flash` is described as a tool but is not registered.**
+Status: FIXED (fixture_flash is a Python helper; docstring and CLAUDE.md wording corrected, tool count unchanged) (2026-10-09).
 `mcp_server_flash.py:1908` has no `@_core._tool()` decorator. Yet `flash_firmware`'s docstring
 (`mcp_server_flash.py:1054`, "Flashing the fixture is `fixture_flash()`") and CLAUDE.md's flash
 notes refer to it as if it were a callable tool. `kiln_call(name="fixture_flash")` fails.

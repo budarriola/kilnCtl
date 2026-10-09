@@ -204,13 +204,24 @@ class ConvertTest(unittest.TestCase):
             p.assert_not_called()
             g.assert_not_called()
 
-    def test_resume_posts_resume_fields_only(self):
-        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", return_value={"ok": True}) as p, \
-             unittest.mock.patch.object(zones_http_client, "get_zones") as g:
+    def _resume(self, zones_after=None, aux_after=None):
+        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", return_value={"ok": True}) as p,              unittest.mock.patch.object(zones_http_client, "get_zones",
+                                        return_value=zones_after or _zones_after()),              unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=aux_after or _aux_after()),              unittest.mock.patch.object(ahc, "get_stored_profile_rules", return_value={0: []}):
             r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=3)
+        return r, p
+
+    def test_resume_posts_resume_fields_only_and_reads_back(self):
+        r, p = self._resume()
         self.assertTrue(r.startswith("ok - resumed"), r)
         p.assert_called_once_with("10.0.0.5", ZONE, resume_relay=3)
-        g.assert_not_called()
+
+    def test_resume_readback_zone_unchanged_fails_loud(self):
+        r, _ = self._resume(zones_after=_zones())
+        self.assertTrue(r.startswith("FAILED"), r)
+
+    def test_resume_readback_aux_not_enabled_fails_loud(self):
+        r, _ = self._resume(aux_after=_aux())
+        self.assertTrue(r.startswith("FAILED"), r)
 
     def test_resume_409_is_a_refusal(self):
         exc = ahc.AuxHttpError("x", 409, "no interrupted conversion is recorded -- nothing to resume")

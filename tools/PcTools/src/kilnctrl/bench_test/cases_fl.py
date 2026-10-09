@@ -388,7 +388,7 @@ def _case_fl11(ctx: dict) -> CaseResult:
 
     srv = _srv(ctx)
     try:
-        flash_text = srv.debug_program(peer="pico")
+        flash_text = srv.debug_program(peer="pico", confirm=True)
     except Exception as exc:  # noqa: BLE001
         return J.judge_flash_round_trip(None, None, "pico", error=str(exc))
     if isinstance(flash_text, str) and flash_text.lower().startswith("error"):

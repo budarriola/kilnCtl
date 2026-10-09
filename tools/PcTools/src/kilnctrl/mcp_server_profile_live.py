@@ -76,7 +76,7 @@ def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return "error: refused -- confirm=True is required. This forks the running profile into a new working copy."
     resolved = _profile_live_resolve_host(host)
     try:
@@ -123,7 +123,7 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return "error: refused -- confirm=True is required. This overwrites the working copy's content."
     resolved = _profile_live_resolve_host(host)
     try:
@@ -160,7 +160,7 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return (f"error: refused -- confirm=True is required for action={action!r}. "
                  "This resolves (and may discard) the pending working copy.")
     if action not in ("discard", "save_as", "overwrite"):

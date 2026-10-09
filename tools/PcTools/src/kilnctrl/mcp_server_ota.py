@@ -145,6 +145,8 @@ def ota_update_esp(image_path: str, host: Optional[str] = None) -> str:
     NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/
     response-parsing are unit-tested with mocked HTTP only (see
     ota_http_client.py's module doc comment).
+
+    Not confirm-gated by design: a deliberate operator OTA push; the board interlocks it against a live run and rolls back an unhealthy image.
     """
     resolved = _ota_resolve_host(host)
     try:
@@ -205,6 +207,8 @@ def ota_rollback_esp(host: Optional[str] = None) -> str:
     response-parsing are unit-tested with mocked HTTP only (see
     ota_http_client.py's module doc comment); no ESP32-S3 was available in
     this environment to actually trigger a reboot/rollback.
+
+    Not confirm-gated by design: a deliberate operator recovery step; the board interlocks it against a live run.
     """
     resolved = _ota_resolve_host(host)
     try:
@@ -285,6 +289,8 @@ def ota_recovery_exit_esp(host: Optional[str] = None) -> str:
     response-parsing are unit-tested with mocked HTTP only; no ESP32-S3 was
     available in this environment to actually trigger recovery mode and
     exit it.
+
+    Not confirm-gated by design: a deliberate operator recovery step; the board interlocks it against a live run.
     """
     resolved = _ota_resolve_host(host)
     try:
@@ -352,7 +358,7 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
     suite -- request construction/response-parsing are unit-tested with
     mocked HTTP only; see test_ota_http_client.py.
     """
-    if not confirm:
+    if confirm is not True:
         return ("error: refused -- confirm=True is required. This reboots BOTH processors right "
                 "now and may latch an S6a main-fault trip on the safety processor (not observed on "
                 "the bench for sw_reset, 2026-10-01); if one latches you must "
@@ -416,6 +422,8 @@ def ota_update_pico(image_path: str, host: Optional[str] = None,
     the RP2040 relay has been exercised against physical boards from this
     tool; only request construction/response-parsing are unit-tested,
     with mocked HTTP.
+
+    Not confirm-gated by design: a deliberate operator OTA push; the board interlocks it against a live run.
     """
     resolved = _ota_resolve_host(host)
     try:

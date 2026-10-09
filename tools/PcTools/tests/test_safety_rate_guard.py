@@ -77,21 +77,24 @@ class SafetySetRateGuardBusyGateTests(unittest.TestCase):
         self.assertIn("autotune", result)
         mock_apply.assert_not_called()
 
-    def test_link_down_for_status_checks_does_not_block_the_write(self):
-        # A dead link answering the exec-status queries with a QueryError must
-        # not be treated as "busy" -- that would make this tool unusable
-        # exactly when the link is down, which is unrelated to whether a run
-        # is in progress.
+    def test_link_down_for_status_checks_refuses_the_write(self):
+        # Audit F4: a dead link must NOT read as "nothing is running" -- fail
+        # closed, like mcp_server_control's twin.
         with unittest.mock.patch.object(mcp_server._profiles, "get_exec_status",
-                                        side_effect=ProfilesQueryError("timed out")), \
-             unittest.mock.patch.object(mcp_server._autotune, "get_status",
-                                        side_effect=AutotuneQueryError("timed out")), \
-             unittest.mock.patch.object(
-                 sc, "apply_safety_fields",
-                 return_value=sc.SafetyApplyResult(ok=True, confirmed=["max_rate_c_per_min", "rate_window_s"]),
-             ):
+                                        side_effect=ProfilesQueryError("timed out")),              unittest.mock.patch.object(mcp_server._autotune, "get_status",
+                                        side_effect=AutotuneQueryError("timed out")),              unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
             result = mcp_server.safety_set_rate_guard(33.3, confirm=True)
-        self.assertTrue(result.startswith("ok"))
+        self.assertTrue(result.startswith("refused"), result)
+        self.assertIn("could not read", result)
+        mock_apply.assert_not_called()
+
+    def test_unconfirmed_new_gates_refuse_without_writing(self):
+        with unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
+            for bad in (False, "yes", 1):
+                self.assertTrue(mcp_server.safety_set_tc_type("K", confirm=bad).startswith("refused"))
+                self.assertTrue(mcp_server.safety_set_commissioning_fields(
+                    {"ct_installed": 1}, confirm=bad).startswith("refused"))
+        mock_apply.assert_not_called()
 
 
 class SafetySetRateGuardWriteTests(unittest.TestCase):
@@ -247,7 +250,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
 
     def test_empty_fields_refused_without_touching_the_wire(self):
         with unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
-            result = mcp_server.safety_set_commissioning_fields({})
+            result = mcp_server.safety_set_commissioning_fields({}, confirm=True)
         self.assertTrue(result.startswith("error"))
         mock_apply.assert_not_called()
 
@@ -258,7 +261,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
         running = unittest.mock.MagicMock(state=1, state_name="running", profile_id=3, name="Cone 6")
         with unittest.mock.patch.object(mcp_server._profiles, "get_exec_status", return_value=running), \
              unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
-            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1}, confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn("running", result)
         mock_apply.assert_not_called()
@@ -267,7 +270,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
         at = unittest.mock.MagicMock(state=3, state_name="relay_approach", zone=1)
         with unittest.mock.patch.object(mcp_server._autotune, "get_status", return_value=at), \
              unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
-            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1}, confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn("autotune", result)
         mock_apply.assert_not_called()
@@ -279,7 +282,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
                 ok=True, confirmed=["ct_installed", "ct_topology"], commissioned_after=True,
             ),
         ) as mock_apply:
-            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1, "ct_topology": 1})
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1, "ct_topology": 1}, confirm=True)
         self.assertTrue(result.startswith("ok"))
         self.assertIn("ct_installed=1", result)
         self.assertIn("commissioned: True", result)
@@ -292,7 +295,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
             sc, "apply_safety_fields",
             side_effect=sc.SafetyCfgUnknownParamError("the board's parameter table has no field named 'bogus_field'"),
         ):
-            result = mcp_server.safety_set_commissioning_fields({"bogus_field": 1})
+            result = mcp_server.safety_set_commissioning_fields({"bogus_field": 1}, confirm=True)
         self.assertTrue(result.startswith("error"))
         self.assertIn("bogus_field", result)
 
@@ -305,7 +308,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
                             "config writes are refused while ARMED -- values were staged but NOT written",
             ),
         ):
-            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1}, confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn('debug_reset(peer="pico")', result)
         self.assertIn("60 seconds", result)
@@ -322,7 +325,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
                 mismatches=["ct_topology: expected 1, board reports 0"],
             ),
         ):
-            result = mcp_server.safety_set_commissioning_fields({"ct_topology": 1})
+            result = mcp_server.safety_set_commissioning_fields({"ct_topology": 1}, confirm=True)
         self.assertTrue(result.startswith("failed"))
         self.assertIn("ct_topology", result)
         self.assertIn("expected 1, board reports 0", result)
@@ -331,7 +334,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
         with unittest.mock.patch.object(
             sc, "apply_safety_fields", side_effect=sc.SafetyCfgHttpError("unreachable")
         ):
-            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1}, confirm=True)
         self.assertTrue(result.startswith("error"))
 
     def test_still_unset_fields_reported(self):
@@ -342,7 +345,7 @@ class SafetySetCommissioningFieldsTests(unittest.TestCase):
                 still_unset=["abs_max_temp_c"],
             ),
         ):
-            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1})
+            result = mcp_server.safety_set_commissioning_fields({"ct_installed": 1}, confirm=True)
         self.assertTrue(result.startswith("ok"))
         self.assertIn("still UNSET", result)
         self.assertIn("abs_max_temp_c", result)

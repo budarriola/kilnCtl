@@ -1051,7 +1051,7 @@ def flash_firmware(
     apart, so this pins OpenOCD's `adapter serial` to the main board's
     (MAIN_BOARD_JTAG_SERIAL) and refuses BEFORE calling OpenOCD at all if
     that serial isn't currently enumerated, naming whichever 303A:1001
-    serial(s) ARE seen instead. Flashing the fixture is `fixture_flash()`,
+    serial(s) ARE seen instead. Flashing the fixture is `fixture_flash()` (a Python helper in this module, NOT a registered MCP tool),
     pinned the same way to its own serial -- never this tool.
 
     Before flashing, refuses if KilnCtrl.bin looks stale relative to the
@@ -1327,7 +1327,7 @@ def flash_firmware(
     # get as far as checking whether the board is plugged in.
     erase_targets: "list[partition_table.PartitionEntry]" = []
     if erase_partitions:
-        if not confirm_erase:
+        if confirm_erase is not True:
             return (
                 "error: refusing to erase partition(s) " + ", ".join(erase_partitions) +
                 " without confirm_erase=True -- pass confirm_erase=True alongside "

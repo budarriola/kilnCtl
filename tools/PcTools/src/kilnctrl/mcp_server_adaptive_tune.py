@@ -152,7 +152,7 @@ def adaptive_tune_set_enabled(zone: int, enabled: bool, confirm: bool = False,
     already in effect either way; only persistence across a reboot is in
     question when that warning appears.
     """
-    if not confirm:
+    if confirm is not True:
         return (
             "error: adaptive-tune enable/disable refused without confirm=True -- "
             "this writes board config that changes what a firing's run-end does "
@@ -169,7 +169,7 @@ def adaptive_tune_set_enabled(zone: int, enabled: bool, confirm: bool = False,
     state = "enabled" if enabled else "disabled"
     if warning:
         return f"ok - zone {zone} adaptive tuning {state} (host={resolved}) -- WARNING: {warning}"
-    return f"ok - zone {zone} adaptive tuning {state}, confirmed by the board (host={resolved})"
+    return f"ok - zone {zone} adaptive tuning {state} (POST accepted by the board, not read back) (host={resolved})"
 
 
 @_core._tool()
@@ -193,7 +193,7 @@ def adaptive_tune_revert(zone: int, confirm: bool = False, host: Optional[str] =
     `zone`: 0-based zone index. `host`: board IP or hostname, same
     resolution as adaptive_tune_get_status()/adaptive_tune_set_enabled().
     """
-    if not confirm:
+    if confirm is not True:
         return (
             "error: adaptive-tune revert refused without confirm=True -- "
             "this writes board config, rewriting this zone's PID gains back "

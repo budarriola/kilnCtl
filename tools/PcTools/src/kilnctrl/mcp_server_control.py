@@ -441,31 +441,88 @@ def control_get_zones(host: Optional[str] = None) -> str:
     )
 
 
+def _close_enough(want: float, got: Optional[float], tol: float) -> bool:
+    return isinstance(got, (int, float)) and abs(float(got) - float(want)) <= max(tol, 1e-4 * abs(want))
+
+
 @_core._tool()
-def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float) -> str:
-    """Set a zone's PID gains."""
+def control_set_zone_pid(zone: int, kp: float, ki: float, kd: float,
+                         confirm: bool = False) -> str:
+    """Set a zone's PID gains (UART CONTROL write; persistent tuned gains).
+
+    Refuses unless ``confirm is True`` exactly, refuses while a profile
+    firing or autotune run is live (or if that cannot be read), and verifies
+    the gains by a GET_ZONES read-back -- FAILED if they do not match."""
+    if confirm is not True:
+        return (f"refused: control_set_zone_pid overwrites zone {zone}'s tuned PID gains "
+                f"(kp={kp}, ki={ki}, kd={kd}); pass confirm=True, exactly, to write.")
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not change zone PID gains mid-run"
     try:
         result = _srv._control.set_zone_pid(zone, kp, ki, kd)
     except ControlQueryError as exc:
         return f"error: {exc}"
-    if result.ok:
-        return f"ok - zone {zone} PID set"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - could not set zone {zone} PID{detail}"
+    if not result.ok:
+        detail = f": {result.reason}" if result.reason else ""
+        return f"refused - could not set zone {zone} PID{detail}"
+    try:
+        _tc, _rc, zones = _srv._control.get_zones()
+    except ControlQueryError as exc:
+        return (f"error: zone {zone} PID write was acknowledged but the read-back failed "
+                f"({exc}) -- state UNKNOWN, re-check before trusting this")
+    got = next((z for z in zones if z.index == zone), None)
+    if got is None:
+        return f"FAILED: zone {zone} missing from the GET_ZONES read-back"
+    bad = [f"{n}: wanted {w}, board reports {g}"
+           for n, w, g in (("kp", kp, got.pid_kp), ("ki", ki, got.pid_ki), ("kd", kd, got.pid_kd))
+           if not _close_enough(w, g, 1e-5)]
+    if bad:
+        return (f"FAILED: zone {zone} PID write was acknowledged but read-back disagrees -- "
+                + "; ".join(bad) + ". Do not trust this as applied.")
+    return f"ok - zone {zone} PID set (read back)"
 
 
 @_core._tool()
-def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: float) -> str:
+def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: float,
+                           confirm: bool = False, host: Optional[str] = None) -> str:
     """Set a zone's feedforward thermal model (steady-state gain, time
-    constant, dead time), used for model feedforward and autotune seeding."""
+    constant, dead time), used for model feedforward and autotune seeding.
+
+    Refuses unless ``confirm is True`` exactly, refuses while a profile firing
+    or autotune run is live (or if that cannot be read), and verifies the
+    model by an HTTP GET /api/zones read-back (``host`` resolved like
+    control_get_zones) -- FAILED if it does not match or cannot be read."""
+    if confirm is not True:
+        return (f"refused: control_set_zone_model overwrites zone {zone}'s plant model "
+                f"(k_dc={k_dc}, tau_s={tau_s}, dead_time_s={dead_time_s}); pass confirm=True, "
+                f"exactly, to write.")
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not change the zone model mid-run"
     try:
         result = _srv._control.set_zone_model(zone, k_dc, tau_s, dead_time_s)
     except ControlQueryError as exc:
         return f"error: {exc}"
-    if result.ok:
-        return f"ok - zone {zone} model set"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - could not set zone {zone} model{detail}"
+    if not result.ok:
+        detail = f": {result.reason}" if result.reason else ""
+        return f"refused - could not set zone {zone} model{detail}"
+    resolved = _control_resolve_host(host)
+    try:
+        zones_json = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: zone {zone} model write was acknowledged but the read-back failed "
+                f"(host={resolved}): {exc} -- state UNKNOWN, re-check before trusting this")
+    z = _zone_by_index(zones_json.get("zones") or [], zone)
+    if z is None:
+        return f"FAILED: zone {zone} missing from the GET /api/zones read-back (host={resolved})"
+    bad = [f"{n}: wanted {w}, board reports {z.get(n)!r}"
+           for n, w in (("model_k_dc", k_dc), ("model_tau_s", tau_s), ("model_dead_time_s", dead_time_s))
+           if not _close_enough(w, z.get(n), 0.06)]
+    if bad:
+        return (f"FAILED: zone {zone} model write was acknowledged but read-back disagrees -- "
+                + "; ".join(bad) + f" (host={resolved}). Do not trust this as applied.")
+    return f"ok - zone {zone} model set (read back)"
 
 
 # ---------------------------------------------------------------------------

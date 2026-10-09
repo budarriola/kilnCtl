@@ -140,6 +140,8 @@ def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str
     Passing a built-in id (128+) does NOT overwrite the shipped schedule --
     those are read-only flash -- it saves the submitted profile as a copy into
     the first free user slot. The reply names the slot it landed in.
+
+    Not confirm-gated by design: saving a profile is a routine, recoverable edit; the board validates and locks it.
     """
     try:
         raw_segments = json.loads(segments_json)
@@ -173,6 +175,8 @@ def profiles_delete(profile_id: int) -> str:
     Built-in schedules (ids 128+) cannot be deleted -- they are const data in
     flash. Hide one instead, via the web UI / POST /api/profile/builtin/hide,
     which is reversible.
+
+    Not confirm-gated by design: deleting a user profile slot is a routine edit; builtins cannot be deleted.
     """
     if profile_id_is_builtin(profile_id):
         return (
@@ -222,6 +226,8 @@ def profiles_start(profile_id: int) -> str:
     ``profile_id`` is a user slot (0-7) or one of the read-only schedules
     shipped in flash (ids 128+); both run the same way. A built-in fires every
     configured zone, since the catalogue itself is zone-agnostic.
+
+    Not confirm-gated by design: starting a firing is the routine purpose of this tool and the operator-visible start path; the board gates it on readiness and the safety processor.
     """
     try:
         result = _srv._profiles.start(profile_id)

@@ -86,7 +86,8 @@ def list_config_presets() -> str:
 @_core._tool()
 def load_config_preset(name: str, host: Optional[str] = None,
                         safety_host: Optional[str] = None,
-                        use_ct_map_backup: bool = False) -> str:
+                        use_ct_map_backup: bool = False,
+                        confirm: bool = False) -> str:
     """Apply a known-good preset's zone config to the live board.
 
     PID gains and (when the preset carries one) the thermal model go over
@@ -127,7 +128,19 @@ def load_config_preset(name: str, host: Optional[str] = None,
     path) and know the map is fabricated.
 
     Does NOT reset, does NOT touch relays, does NOT request enable.
+
+    Refuses unless ``confirm is True`` exactly (whole-page writes of PID
+    gains, zones and optionally safety fields), and refuses while a profile
+    firing or autotune run is live or cannot be ruled out.
     """
+    if confirm is not True:
+        return (f"refused: load_config_preset({name!r}) overwrites PID gains for every zone "
+                "(and zones/safety config when host/safety_host is given); pass "
+                "confirm=True, exactly, to apply.")
+    from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not apply a config preset mid-run"
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
 
     try:

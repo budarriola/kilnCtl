@@ -259,7 +259,7 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
             "debug_program esp path fails flash-bank detection on this board -- see CLAUDE.md"
         )
 
-    if not confirm:
+    if confirm is not True:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
 
     stale_prefix = ""
@@ -620,7 +620,7 @@ def debug_write_memory(peer: str, address: int, value: int, width: int = 32, con
     reads ARMED, OR if it could not be confidently determined at all (fail
     closed -- an unreadable state is never treated as "not armed"). This is
     additive to, never a replacement for, the confirm=True gate below."""
-    if not confirm:
+    if confirm is not True:
         return "error: memory write refused without confirm=True -- this writes live RAM/flash-mapped memory on a running board"
     if peer == debug_probe.PEER_PICO:
         armed, detail = debug_probe.pico_armed_state()

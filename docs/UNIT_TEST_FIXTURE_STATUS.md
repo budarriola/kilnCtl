@@ -148,7 +148,7 @@ when the main board was unplugged, instead of refusing.
 the old text-only check) and never falls back to an unidentified port.
 `mcp_server_flash.py`'s `flash_firmware()` now passes `adapter serial
 <main board's serial>` to OpenOCD and refuses, before calling OpenOCD at
-all, if that serial isn't currently enumerated; a new `fixture_flash()` tool
+all, if that serial isn't currently enumerated; a new `fixture_flash()` Python helper (not a registered MCP tool)
 does the same pinned to the fixture's serial. Tests:
 `tests/test_serial_link_board_identity.py`, `tests/test_flash_board_pinning.py`,
 plus additions to `tests/test_fixture.py`. No firmware was flashed as part

@@ -374,7 +374,7 @@ def crash_report_ack(confirm: bool = False, host: Optional[str] = None) -> str:
     if before.get("acknowledged"):
         return f"already acknowledged, nothing to do -- {summary} (host={resolved})"
 
-    if not confirm:
+    if confirm is not True:
         return (
             f"DRY RUN (pass confirm=True to actually acknowledge) -- pending crash: {summary} "
             f"(host={resolved})"
@@ -650,7 +650,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
             f"to clear an unreviewed crash anyway -- {summary}; {image_summary} (host={resolved})"
         )
 
-    if not confirm:
+    if confirm is not True:
         return (
             f"DRY RUN (pass confirm=True to actually clear) -- {summary}; {image_summary} "
             f"(host={resolved})"
@@ -766,7 +766,7 @@ def kiln_configs_quarantine_clear(confirm: bool = False, host: Optional[str] = N
         return (f"not quarantined, nothing to do -- {count} saved config(s) visible "
                 f"(host={resolved}): {detail}")
 
-    if not confirm:
+    if confirm is not True:
         return (f"DRY RUN (pass confirm=True to actually clear) -- store IS quarantined: "
                 f"{detail} ({count} saved config(s) currently visible, host={resolved})")
 
@@ -834,7 +834,7 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
 
     resolved = _ota_resolve_host(host)
 
-    if not confirm:
+    if confirm is not True:
         return (f"DRY RUN (pass confirm=True to actually apply) -- would POST "
                 f"/api/kiln_configs/apply for id={id} (ack_hardware_differs={ack_hardware_differs}, "
                 f"host={resolved})")
@@ -1480,7 +1480,7 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None, force_health
         return f"error: could not read GET /api/cfgfs (host={resolved}): {exc}"
     before_count = before.get("file_count")
 
-    if not confirm:
+    if confirm is not True:
         healthy_note = ""
         if before.get("mounted") is True and not force_healthy:
             healthy_note = ("; cfg is mounted and healthy, so the firmware would refuse (409) unless "

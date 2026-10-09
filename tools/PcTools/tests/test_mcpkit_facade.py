@@ -198,7 +198,8 @@ class ConfirmGateTests(unittest.TestCase):
 
         @mcp.tool()
         def risky(confirm: bool = False, allow_heat: bool = False,
-                  force: bool = False, active: bool = False) -> str:
+                  force: bool = False, active: bool = False,
+                  confirm_erase: bool = False, ack_unsettled: bool = False) -> str:
             """Do a risky thing."""
             calls.append((confirm, allow_heat, force, active))
             return "ran"
@@ -222,6 +223,16 @@ class ConfirmGateTests(unittest.TestCase):
             self.assertTrue(result.startswith("error:"), result)
             self.assertIn(key, result)
         self.assertEqual(calls, [])
+
+    def test_confirm_prefixed_and_ack_flags_refused_too(self):
+        registry, calls = self._server()
+        for key in ("confirm_erase", "ack_unsettled"):
+            for bad in ("yes", "1", 1):
+                result = registry.invoke("risky", {key: bad})
+                self.assertTrue(result.startswith("error:"), (key, bad, result))
+                self.assertIn(key, result)
+        self.assertEqual(calls, [])
+        self.assertEqual(registry.invoke("risky", {"confirm_erase": True, "ack_unsettled": True}), "ran")
 
     def test_real_true_proceeds(self):
         registry, calls = self._server()

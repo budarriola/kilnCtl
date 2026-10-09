@@ -285,9 +285,31 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
             ack = ahc.post_move_zone_to_aux(resolved, zone, resume_relay=resume_relay)
         except ahc.AuxHttpError as exc:
             return _gate_or_error(exc, "POST /api/zones move_zone_to_aux resume", resolved)
-        return (f"ok - resumed and finished the conversion of zone {zone} to aux relay {resume_relay}; the "
-                f"firmware read it back (zones, aux store from NVS, every profile slot) before clearing its "
-                f"marker; firmware ack: {ack}; host={resolved}")
+        # Tool-side read-back (audit F7): final-state checks only, since the pre-state of an
+        # interrupted conversion is unknown.
+        try:
+            zones_after = zones_http_client.get_zones(resolved)
+            aux_after = ahc.get_aux_outputs(resolved)
+            profiles_after = ahc.get_stored_profile_rules(resolved)
+        except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+            return (f"error: resume POST answered ok, but the confirming re-read failed (host={resolved}): "
+                    f"{exc} -- state UNKNOWN, re-check zones, aux outputs and profiles before trusting this")
+        bad = []
+        za = _zone_entry(zones_after, zone)
+        if za is None or za.get("zone_type") != 0 or za.get("relay_mask") != 0:
+            bad.append(f"zone {zone} is not a relay-less heater (zone_type={za and za.get('zone_type')!r}, "
+                       f"relay_mask={za and za.get('relay_mask')!r})")
+        ea = ahc.aux_entry(aux_after, resume_relay)
+        if ea is None or not ea.get("enabled") or ea.get("conflicted"):
+            bad.append(f"aux relay {resume_relay} does not read enabled/unconflicted: {ea!r}")
+        if _count_rules(profiles_after, zone):
+            bad.append(f"{_count_rules(profiles_after, zone)} rule(s) still target zone {zone}")
+        if bad:
+            return (f"FAILED: resume POST answered ok but the read-back does not confirm it -- "
+                    f"{'; '.join(bad)} (host={resolved}). Do not trust this; compare with the backup_export.")
+        return (f"ok - resumed and finished the conversion of zone {zone} to aux relay {resume_relay} "
+                f"(confirmed by read-back of zones, aux outputs and every profile; firmware ack: {ack}; "
+                f"host={resolved})")
 
     try:
         zones_before = zones_http_client.get_zones(resolved)

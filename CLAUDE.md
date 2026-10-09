@@ -312,7 +312,7 @@ pre-flight size check now also refuses, naming both byte counts, if
 `flash_firmware()` now also hard-requires and flashes `bootloader.bin` and
 `partition-table.bin` alongside `KilnCtrl.bin` (2026-09-23), resolving the
 partition-table write offset from `CONFIG_PARTITION_TABLE_OFFSET` in
-`<kiln_fw_root>/sdkconfig` rather than a hardcoded 0x8000 (`fixture_flash()`
+`<kiln_fw_root>/sdkconfig` rather than a hardcoded 0x8000 (the `fixture_flash()` Python helper, not an MCP tool,
 uses the same resolver). Full detail: `docs/MCP_SERVERS.md`'s flash section.
 
 **That gap is now reachable from ordinary firmware (2026-10-02):** the boot_guard

@@ -266,7 +266,7 @@ class _FakeFlashAndSafetySrv:
         self._polls_since_clear = None
         self.clear_called = 0
 
-    def debug_program(self, peer=None):
+    def debug_program(self, peer=None, confirm=False):
         return self._flash_text
 
     def safety_get_diag(self):

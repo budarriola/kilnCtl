@@ -241,6 +241,8 @@ def safety_request_enable(enable: bool) -> str:
     that outcome never comes back here. What this DOES report is an ESP-side
     refusal (a truncated frame) caught before the request ever reached the
     Pico.
+
+    Not confirm-gated by design: the Pico decides whether to grant enable; the request cannot override a latched trip.
     """
     try:
         result = _srv._safety.request_enable(enable)
@@ -311,6 +313,8 @@ def safety_clear_trip() -> str:
 
     Fire-and-forget: no reply on the wire. Check `safety_get_status()`
     afterwards to see whether it actually cleared.
+
+    Not confirm-gated by design: clearing a trip is a routine operator step; the Pico refuses it while the cause persists and the post-trip dwell applies.
     """
     return _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
 
@@ -359,7 +363,8 @@ def safety_set_log_level(level: int, peer: Optional[str] = None, host: Optional[
 
 
 @_core._tool()
-def safety_set_tc_type(tc_type_name: str, host: Optional[str] = None) -> str:
+def safety_set_tc_type(tc_type_name: str, confirm: bool = False,
+                       host: Optional[str] = None) -> str:
     """Commission the safety processor's thermocouple type (config_store.h's
     ``tc_type`` field, config_params.c id ``0x0105``).
 
@@ -411,12 +416,18 @@ def safety_set_tc_type(tc_type_name: str, host: Optional[str] = None) -> str:
     safety_set_rate_guard() do; pass `host` explicitly for kilnctl.local or
     a board reachable only from a different network than this link's serial
     port.
+
+    REFUSES UNLESS ``confirm is True`` exactly (audit F3).
     """
     name = tc_type_name.strip().upper()
     if name not in devices.SAFETY_TC_TYPE_NAMES:
         known = ", ".join(sorted(devices.SAFETY_TC_TYPE_NAMES))
         return f"error: unknown tc_type_name {tc_type_name!r} -- expected one of {known}"
     value = devices.SAFETY_TC_TYPE_NAMES[name]
+
+    if confirm is not True:
+        return (f"refused: pass confirm=True, exactly, to write the safety processor's flash "
+                f"(tc_type={name})")
 
     busy = _profile_or_autotune_running()
     if busy is not None:
@@ -1031,7 +1042,8 @@ def safety_get_unset_commissioning_params(host: Optional[str] = None) -> str:
 
 
 @_core._tool()
-def safety_set_commissioning_fields(fields: "dict[str, Any]", host: Optional[str] = None) -> str:
+def safety_set_commissioning_fields(fields: "dict[str, Any]", confirm: bool = False,
+                                    host: Optional[str] = None) -> str:
     """Commission ARBITRARY named fields on the safety processor's config
     record over GET/POST /api/safety/commissioning -- the MCP-facade
     replacement for the paste-ready ``safety_cfg_http_client.apply_safety_
@@ -1080,9 +1092,15 @@ def safety_set_commissioning_fields(fields: "dict[str, Any]", host: Optional[str
     safety_set_rate_guard() do; pass `host` explicitly for kilnctl.local or
     a board reachable only from a different network than this link's
     serial port.
+
+    REFUSES UNLESS ``confirm is True`` exactly (audit F3).
     """
     if not fields:
         return "error: fields is empty -- nothing to write"
+
+    if confirm is not True:
+        return ("refused: pass confirm=True, exactly, to write the safety processor's flash "
+                f"(fields: {', '.join(sorted(map(str, fields)))})")
 
     busy = _profile_or_autotune_running()
     if busy is not None:
@@ -1138,14 +1156,16 @@ def _profile_or_autotune_running() -> Optional[str]:
         prof = _srv._profiles.get_exec_status()
         if prof.state in (1, 2):  # running, paused (still armed/heating-capable)
             return f"a profile is currently {prof.state_name} (#{prof.profile_id} {prof.name!r})"
-    except ProfilesQueryError:
-        pass  # link down / no reply -- not this check's job to report that
+    except ProfilesQueryError as exc:
+        # Fail closed (audit F4), like mcp_server_control's twin: a down/slow
+        # link must not read as "nothing is running".
+        return f"could not read profile exec status ({exc}) -- refusing to guess"
     try:
         at = _srv._autotune.get_status()
         if at.state in (1, 2, 3, 4):  # settling, stepping, relay_approach, relay_cycling
             return f"an autotune run is currently {at.state_name} (zone {at.zone})"
-    except AutotuneQueryError:
-        pass
+    except AutotuneQueryError as exc:
+        return f"could not read autotune status ({exc}) -- refusing to guess"
     return None
 
 
@@ -1242,7 +1262,7 @@ def safety_set_rate_guard(max_rate_c_per_min: float, rate_window_s: float = 60.0
     read-back verify -- an ACK is not proof, see that module's docstring) --
     an ``{"ok":true}`` alone is never enough to report success here.
     """
-    if not confirm:
+    if confirm is not True:
         return ("refused: pass confirm=True to actually write S8's rate-of-rise guard -- "
                 f"this would set max_rate_c_per_min={max_rate_c_per_min:g}C/min, "
                 f"rate_window_s={rate_window_s:g}s")
@@ -1333,6 +1353,8 @@ def ota_rollback_pico() -> str:
     NOT YET VERIFIED AGAINST REAL HARDWARE -- no RP2040 attached in this
     environment; only the wire codec and host-tested decision logic are
     exercised here.
+
+    Not confirm-gated by design: a deliberate operator recovery step; the Pico refuses it while ARMED.
     """
     return _srv._send(UART_TASK_ID_SAFETY, devices.safety_request_rollback())
 

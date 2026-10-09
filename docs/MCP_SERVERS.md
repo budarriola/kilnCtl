@@ -427,7 +427,7 @@ their native USB-Serial-JTAG interface -- indistinguishable to OpenOCD's
 now pins `adapter serial` to the main board's USB serial number and refuses,
 before calling OpenOCD at all, if that serial isn't currently enumerated
 (naming whichever 303A:1001 serial(s) are seen instead); a parallel
-`fixture_flash()` tool does the same pinned to the fixture's serial.
+`fixture_flash()` Python helper (not a registered MCP tool) does the same pinned to the fixture's serial.
 `serial_link.recommend_port()` (the main board's own port picker) and
 `fixture.recommend_fixture_port()` got the same serial/VID:PID-anchored
 identity check, since either picker returning the other board's port

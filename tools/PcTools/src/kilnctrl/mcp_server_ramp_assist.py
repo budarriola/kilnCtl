@@ -104,7 +104,7 @@ def ramp_assist_set_enabled(enabled: bool, confirm: bool = False, host: Optional
     only that it will not survive a reboot; call ramp_assist_get_enabled()
     afterward if that distinction matters to the caller.
     """
-    if not confirm:
+    if confirm is not True:
         return (
             "error: ramp_assist enable/disable refused without confirm=True -- this writes board "
             "config that changes whether the executor may stretch ramps/shorten dwells during a "
@@ -118,7 +118,7 @@ def ramp_assist_set_enabled(enabled: bool, confirm: bool = False, host: Optional
     if not result.get("ok"):
         return f"error: board reported failure: {result} (host={resolved})"
     state = "enabled" if enabled else "disabled"
-    return f"ok - ramp assist {state}, confirmed by the board (host={resolved})"
+    return f"ok - ramp assist {state} (POST accepted by the board, not read back) (host={resolved})"
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

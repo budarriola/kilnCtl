@@ -287,7 +287,7 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     # because the pre-fetch was denied) uses the bootstrap route; case 2
     # (web auth confirmed OFF) sets the password directly, since that route
     # requires no session at all while web_enabled is false.
-    if not confirm:
+    if confirm is not True:
         if not config_readable:
             action = "POST /api/auth/bootstrap_password (config unreadable; see above)"
         elif web_enabled:
