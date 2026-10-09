@@ -158,7 +158,7 @@ mark the function `noinline`, and either use `frev` in `maxrev` or drop the out-
 
 ### L5. `nvs_save()` mirrors the CRC into RAM outside the snapshot critical section
 
-**Fixed in f19b7c62 (CRC write-back only).** The second locked section now writes the CRC back only if RAM still equals the snapshot, so a setter in between is never stamped with a stale CRC. Host test `test_save_crc_writeback_skipped_when_ram_changed` (seam: `s_zones_cfg_unlock_test_hook`). **Still open:** the concurrent-save same-rev race (two `nvs_save()` callers both deriving `rev + 1`) needs a save mutex; not done here. The RAM CRC mirror itself is kept because existing tests and the migration log read it.
+**Fixed in f19b7c62 (CRC write-back only).** The second locked section now writes the CRC back only if RAM still equals the snapshot, so a setter in between is never stamped with a stale CRC. Host test `test_save_crc_writeback_skipped_when_ram_changed` (seam: `s_zones_cfg_unlock_test_hook`). **Same-rev race fixed in SHA_PLACEHOLDER:** `nvs_save()`, `relay_names_save()` and `zone_normals_save()` now hold one lazily-created save mutex (outer lock; `zones_cfg_lock()` is taken inside, never the reverse) across rev read, cfg write and rev bump. Host test `test_nvs_save_runs_under_save_mutex_with_distinct_revs`. The RAM CRC mirror itself is kept because existing tests and the migration log read it.
 
 - Where: `firmware/KilnFW/App/drivers/persist/zones_config_store.c:780-790` (667578a9).
 

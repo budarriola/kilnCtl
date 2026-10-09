@@ -19,6 +19,7 @@
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h" /* s_zcfg_save_mutex */
 #include "freertos/task.h" /* xTaskGetCurrentTaskHandle() -- autosave dispatcher identity, 2026-09-16 */
 #include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- docs/KILN_PROFILES_PLAN.md
                              * section 2.4, item 13. */
@@ -49,6 +50,53 @@
 NVS_KEY_LEN_CHECK(NVS_KEY_ZONES_REV);
 
 static uint32_t s_zones_cfg_rev = 0;
+
+/* SAVE MUTEX (dev review 5 L5, modeled on profiles_http.c's profiles_save_lock()).
+ * nvs_save(), relay_names_save() and zone_normals_save() each compute rev+1 from a
+ * file-scope counter, write the cfg file, then publish the counter; callers span httpd,
+ * the profile executor and adaptive tune, so two concurrent saves could both stamp the
+ * same rev. One static mutex makes rev read + write + rev bump one critical section per
+ * store (a single mutex covers all three: they are short and never nest).
+ * LOCK ORDER: s_zcfg_save_mutex is the OUTER lock; zones_cfg_lock() (portMUX critical
+ * section, copy-only) is taken INSIDE it and never the other way round -- no code may
+ * call these savers, or take the save mutex, while holding zones_cfg_lock().
+ * Held across the module's own cfg-file I/O only, never across a producer call
+ * (the kiln-config autosave dispatch in nvs_save() runs after the unlock). Created on
+ * first use under a claim flag so every take sees a non-NULL handle. */
+static StaticSemaphore_t s_zcfg_save_mutex_storage;
+static SemaphoreHandle_t s_zcfg_save_mutex = NULL;
+static portMUX_TYPE s_zcfg_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_zcfg_save_mutex_claimed = false;
+#if defined(__GNUC__)
+#define ZCFG_SAVE_MUTEX_LOAD() __atomic_load_n(&s_zcfg_save_mutex, __ATOMIC_ACQUIRE)
+#define ZCFG_SAVE_MUTEX_STORE(v) __atomic_store_n(&s_zcfg_save_mutex, (v), __ATOMIC_RELEASE)
+#else
+#define ZCFG_SAVE_MUTEX_LOAD() (*(SemaphoreHandle_t volatile *)&s_zcfg_save_mutex)
+#define ZCFG_SAVE_MUTEX_STORE(v) (*(SemaphoreHandle_t volatile *)&s_zcfg_save_mutex = (v))
+#endif
+
+static void zcfg_save_lock(void)
+{
+    if (ZCFG_SAVE_MUTEX_LOAD() == NULL) {
+        bool mine = false;
+        portENTER_CRITICAL(&s_zcfg_save_mutex_mux);
+        if (!s_zcfg_save_mutex_claimed) {
+            s_zcfg_save_mutex_claimed = true;
+            mine = true;
+        }
+        portEXIT_CRITICAL(&s_zcfg_save_mutex_mux);
+        if (mine) {
+            ZCFG_SAVE_MUTEX_STORE(xSemaphoreCreateMutexStatic(&s_zcfg_save_mutex_storage));
+        } else {
+            while (ZCFG_SAVE_MUTEX_LOAD() == NULL) {
+                vTaskDelay(1);
+            }
+        }
+    }
+    (void)xSemaphoreTake(ZCFG_SAVE_MUTEX_LOAD(), portMAX_DELAY);
+}
+
+static void zcfg_save_unlock(void) { (void)xSemaphoreGive(ZCFG_SAVE_MUTEX_LOAD()); }
 
 /* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16 -- see
  * zones_cfg_load_fault_t's own doc comment (zones_config_accessors.h) for
@@ -778,6 +826,7 @@ esp_err_t nvs_save(void)
         ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: no memory for the snapshot");
         return ESP_ERR_NO_MEM;
     }
+    zcfg_save_lock(); /* outer lock; rev read .. rev bump below; see s_zcfg_save_mutex */
     zones_cfg_lock();
     s_zones.cfg.version = ZONES_CFG_VERSION;
     memcpy(snap, &s_zones.cfg, sizeof(*snap));
@@ -806,7 +855,9 @@ esp_err_t nvs_save(void)
         zones_cfg_lock();
         s_zones_cfg_rev = new_zones_rev;
         zones_cfg_unlock();
+        zcfg_save_unlock();
     } else {
+        zcfg_save_unlock();
         ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: %s -- NVS is no longer written, the change "
                                  "lives in RAM until reboot",
                  esp_err_to_name(err));
@@ -1266,6 +1317,7 @@ void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool
 
 esp_err_t relay_names_save(void)
 {
+    zcfg_save_lock(); /* rev read .. rev bump; see s_zcfg_save_mutex */
     s_relay_names.cfg.version = RELAY_NAMES_CFG_VERSION;
     s_relay_names.cfg.crc32 = compute_relay_names_crc(&s_relay_names.cfg);
     uint32_t new_rev = s_relay_names_rev + 1;
@@ -1276,6 +1328,7 @@ esp_err_t relay_names_save(void)
     if (err == ESP_OK) {
         s_relay_names_rev = new_rev;
     }
+    zcfg_save_unlock();
     return err;
 }
 
@@ -1437,6 +1490,7 @@ void zone_normals_load(void)
 
 static esp_err_t zone_normals_save(void)
 {
+    zcfg_save_lock(); /* rev read .. rev bump; see s_zcfg_save_mutex */
     s_zone_normals.cfg.version = ZONE_NORMALS_CFG_VERSION;
     s_zone_normals.cfg.crc32 = compute_zone_normals_crc(&s_zone_normals.cfg);
     uint32_t new_rev = s_zone_normals_rev + 1;
@@ -1447,6 +1501,7 @@ static esp_err_t zone_normals_save(void)
     if (err == ESP_OK) {
         s_zone_normals_rev = new_rev;
     }
+    zcfg_save_unlock();
     return err;
 }
 

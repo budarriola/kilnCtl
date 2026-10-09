@@ -3146,6 +3146,53 @@ static void test_nvs_load_from_failed_validation_is_rejected(void)
     nvs_test_clear();
 }
 
+/* Save mutex (dev review 5 L5): nvs_save()'s rev read, cfg write and rev bump run under the
+ * save mutex. The host semaphore stub is single-threaded, so this proves ownership at each
+ * seam (g_test_stub_lock_depth > 0) -- the rev read (observed through the first
+ * zones_cfg_unlock() hook after it) and the file write -- and that consecutive saves get
+ * distinct, increasing revs; it does not exercise a real race. */
+static int s_zm_depth_at_write;
+static int s_zm_min_depth_at_unlock;
+static uint32_t s_zm_revs[4];
+static unsigned s_zm_writes;
+static esp_err_t zm_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    if (s_zm_writes == 0 || g_test_stub_lock_depth < s_zm_depth_at_write) {
+        s_zm_depth_at_write = g_test_stub_lock_depth;
+    }
+    s_zm_writes++;
+    (void)rel_path; (void)data; (void)len;
+    return ESP_OK;
+}
+static void zm_unlock_hook(void)
+{
+    if (g_test_stub_lock_depth < s_zm_min_depth_at_unlock) {
+        s_zm_min_depth_at_unlock = g_test_stub_lock_depth;
+    }
+}
+static void test_nvs_save_runs_under_save_mutex_with_distinct_revs(void)
+{
+    TEST_SECTION("nvs_save -- rev read and cfg write run under the save mutex; revs are distinct");
+    nvs_test_enable(true);
+    s_zm_min_depth_at_unlock = 99;
+    s_zm_depth_at_write = 99;
+    s_zm_writes = 0;
+    zones_config_cfg_fs_set_write_fn(zm_write_fn);
+    s_zones_cfg_unlock_test_hook = zm_unlock_hook;
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(nvs_save() == ESP_OK, "save ok");
+        s_zm_revs[i] = s_zones_cfg_rev;
+    }
+    s_zones_cfg_unlock_test_hook = NULL;
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_zm_writes == 3, "three file writes");
+    TEST_CHECK(s_zm_min_depth_at_unlock >= 1, "rev read (zones_cfg_unlock after it) ran with the save mutex held");
+    TEST_CHECK(s_zm_depth_at_write >= 1, "the cfg file write ran with the save mutex held");
+    TEST_CHECK(s_zm_revs[1] == s_zm_revs[0] + 1 && s_zm_revs[2] == s_zm_revs[1] + 1, "revs distinct and increasing");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "mutex released after the saves");
+    nvs_test_enable(false);
+}
+
 // Round-trip: nvs_save() then nvs_load() (the real save/load pair, not just
 // nvs_load_from() in isolation) must hand back every field identical,
 // including the newly-added crc32-stamping behavior itself.
@@ -16131,6 +16178,7 @@ void run_test_zones_http(void)
     test_nvs_load_from_failed_validation_is_rejected();
     test_nvs_save_load_round_trip_current_version();
     test_nvs_save_dispatches_the_kiln_config_autosave();
+    test_nvs_save_runs_under_save_mutex_with_distinct_revs();
     test_nvs_load_from_v1_blob_upconverts_fields_correctly();
     test_nvs_load_from_v2_blob_upconverts_fields_correctly();
     test_nvs_load_from_v3_blob_upconverts_guard_thresholds_correctly();
