@@ -520,16 +520,14 @@ void autotune_finalize_fit(void)
             job.count++;
         }
         if (job.count > 0) {
-            // Not reachable on-worker today; covered by bx_run_on_internal_
-            // stack()'s generic backstop if that ever changes.
-            esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(coupling_persist_job, &job);
-            if (submit_err != ESP_OK) {
-                ESP_LOGW(AT_TAG, "autotune zone %u: could not submit %u coupling cell(s) to the flash worker: %s",
-                         s_at.zone_index, (unsigned)job.count, esp_err_to_name(submit_err));
-            } else if (job.fail_count > 0) {
-                ESP_LOGW(AT_TAG, "autotune zone %u: %u of %u coupling cell(s) failed to persist", s_at.zone_index,
-                         (unsigned)job.fail_count, (unsigned)job.count);
-            }
+            /* Flash-worker lock-inversion audit 2026-10-09 F2: this runs under
+             * s_at.lock, so the job is NOT dispatched here. task_entry()
+             * takes it after the tick and dispatches it once s_at.lock is
+             * given -- see autotune_dispatch_coupling_persist(). The job is
+             * a by-value snapshot, so nothing the tick changes afterwards
+             * can alter what gets written. */
+            s_at.pending_coupling = job;
+            s_at.pending_coupling_valid = true;
         }
     } else {
         /* Deliberately not wired to autotune_engine_accept(): a later

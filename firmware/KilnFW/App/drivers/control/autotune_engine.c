@@ -801,6 +801,9 @@ static void autotune_engine_tick_locked_impl(const ThermoChannelSnapshot *pre_lo
     }
 }
 
+static bool autotune_engine_tick_under_lock(bool other_zone_active_hint, bool peek_active,
+                                            const ThermoChannelSnapshot *pre_lock_snap);
+
 static void task_entry(void *arg)
 {
     (void)arg;
@@ -851,13 +854,7 @@ static void task_entry(void *arg)
             thermo_channels_read(s_at.thermo_bus, &pre_lock_snap);
         }
 
-        xSemaphoreTake(s_at.lock, portMAX_DELAY);
-        bool not_running = !state_is_running(s_at.state);
-        if (!not_running && peek_active) {
-            s_at.other_zone_profile_active_hint = other_zone_active_hint;
-            autotune_engine_tick_locked_impl(&pre_lock_snap);
-        }
-        xSemaphoreGive(s_at.lock);
+        bool not_running = autotune_engine_tick_under_lock(other_zone_active_hint, peek_active, &pre_lock_snap);
 
         if (not_running) {
             /* Backstop, same shape and reasoning as profile_executor.c's in
@@ -874,6 +871,37 @@ static void task_entry(void *arg)
             continue;
         }
     }
+}
+
+/* One tick of task_entry() from taking s_at.lock onward: the definitive
+ * running check and the tick body under the lock, then -- with the lock
+ * given -- any coupling persist the tick decided on. Returns true when the
+ * engine was not running. Split out of task_entry() so host tests drive the
+ * real lock/dispatch ordering.
+ *
+ * Flash-worker lock-inversion audit 2026-10-09 F2: autotune_finalize_fit()
+ * (reached from the tick body) only parks its coupling persist in
+ * s_at.pending_coupling. It is taken under the lock and dispatched to
+ * bx_flash_worker only after xSemaphoreGive(), because the UART autotune
+ * handlers (status, abort, accept, start) run on that worker and take
+ * s_at.lock. Dispatching with the lock held deadlocked both tasks. */
+static bool autotune_engine_tick_under_lock(bool other_zone_active_hint, bool peek_active,
+                                            const ThermoChannelSnapshot *pre_lock_snap)
+{
+    xSemaphoreTake(s_at.lock, portMAX_DELAY);
+    bool not_running = !state_is_running(s_at.state);
+    if (!not_running && peek_active) {
+        s_at.other_zone_profile_active_hint = other_zone_active_hint;
+        autotune_engine_tick_locked_impl(pre_lock_snap);
+    }
+    coupling_persist_job_t coupling_job;
+    bool coupling_pending = autotune_take_pending_coupling_locked(&coupling_job);
+    xSemaphoreGive(s_at.lock);
+
+    if (coupling_pending) {
+        autotune_dispatch_coupling_persist(&coupling_job);
+    }
+    return not_running;
 }
 
 esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_bus_or_null,

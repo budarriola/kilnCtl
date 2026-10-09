@@ -547,8 +547,19 @@ void relay_cycles_add(uint8_t relay_mask, uint32_t cycles)
     g_relay_cycles_last_mask = relay_mask;
 }
 
+/* Flash-worker lock-inversion audit 2026-10-09 F1: the real
+ * relay_cycles_maybe_persist() dispatches reset_persist_job to bx_flash_worker
+ * and waits portMAX_DELAY, while the worker's UART profile handlers take
+ * s_exec.lock -- so calling it with s_exec.lock held deadlocks. Count calls
+ * and record any made while a stub semaphore is held. */
+static int g_relay_cycles_persist_calls = 0;
+static int g_relay_cycles_persist_under_lock = 0;
 void relay_cycles_maybe_persist(void)
 {
+    g_relay_cycles_persist_calls++;
+    if (g_test_stub_lock_depth > 0) {
+        g_relay_cycles_persist_under_lock++;
+    }
 }
 
 esp_err_t relay_cycles_flush(void)
@@ -10910,6 +10921,28 @@ static void monitor_only_one_tick(int i, float zone1_c)
     aux_test_run_task_ticks(1);
 }
 
+/* F1 (docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md): the
+ * RUNNING tick must call relay_cycles_maybe_persist() only after it gives
+ * s_exec.lock. Drives the real executor_task_entry for one RUNNING tick. */
+static void test_relay_cycles_persist_runs_after_lock_give(void)
+{
+    char err[128];
+    monitor_only_tick_setup(false);
+    err[0] = '\0';
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "F1: run starts");
+    g_test_stub_lock_depth = 0;
+    g_relay_cycles_persist_calls = 0;
+    g_relay_cycles_persist_under_lock = 0;
+    monitor_only_one_tick(0, 25.0f);
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "F1: still RUNNING after one tick");
+    TEST_CHECK(g_relay_cycles_persist_calls >= 1, "F1: the RUNNING tick calls relay_cycles_maybe_persist()");
+    TEST_CHECK(g_relay_cycles_persist_under_lock == 0,
+               "F1: relay_cycles_maybe_persist() is never called with s_exec.lock held "
+               "(it waits on the flash worker, whose handlers take s_exec.lock)");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "F1: the tick leaves no lock held");
+    profile_executor_halt();
+}
+
 /* Run-start baseline / warm-start pick must ignore a monitor-only zone
  * (HEATER, relay_mask==0). Zone 0 is monitor-only and is the LOWEST zone in
  * the mask, so a first_active that does not skip it would seed the run from
@@ -11406,6 +11439,7 @@ static void run_test_aux_wp3(void)
     test_aux_off_pending_retried_by_task_loop();
     test_aux_fault_drop_via_task_tick();
     test_monitor_only_zone_tick_wiring();
+    test_relay_cycles_persist_runs_after_lock_give();
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();
     test_zone_drives_run_predicate();

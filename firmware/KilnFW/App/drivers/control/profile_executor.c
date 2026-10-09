@@ -2007,10 +2007,8 @@ void executor_task_entry(void *arg)
         }
 
         /* --- Reboot breadcrumb (TODO.md 6A.3) -------------------------------
-         * Captured under the lock, written outside it. relay_cycles_maybe_
-         * persist() above already does its NVS write with the lock held, so
-         * the precedent for "a flash write inside the tick" exists -- but
-         * this one is easy to keep outside, and the lock also serves
+         * Captured under the lock, written outside it, same as the
+         * relay_cycles persist below: the lock also serves
          * profile_executor_get_status(), which the dashboard polls every 2 s.
          * There is no reason to make a status request wait behind an erase. */
         /* ROADMAP.md M15 "Mode-state sprawl" -- see profile_executor_
@@ -2061,7 +2059,8 @@ void executor_task_entry(void *arg)
          * reads the executor. Lock order is s_bx_lock -> s_exec.lock; see
          * docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, "Save mutex vs. flash
          * worker". Nothing here reads executor state, so the move changes only
-         * which lock the persist runs under. */
+         * which lock the persist runs under.
+         * Also docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md F1. */
         relay_cycles_maybe_persist();
 
         if (faulted_now) {

@@ -27,6 +27,47 @@ void coupling_persist_job(void *arg)
     }
 }
 
+/* Caller holds s_at.lock. Moves the coupling persist autotune_finalize_fit()
+ * parked in s_at.pending_coupling into *out and clears it. Returns false when
+ * nothing is pending. */
+bool autotune_take_pending_coupling_locked(coupling_persist_job_t *out)
+{
+    if (!s_at.pending_coupling_valid) {
+        return false;
+    }
+    *out = s_at.pending_coupling;
+    s_at.pending_coupling_valid = false;
+    memset(&s_at.pending_coupling, 0, sizeof(s_at.pending_coupling));
+    return true;
+}
+
+/* Flash-worker lock-inversion audit 2026-10-09 F2. MUST be called with
+ * s_at.lock NOT held. uart_bridge_ext_run_on_flash_worker() waits
+ * portMAX_DELAY for bx_flash_worker, and every UART autotune command
+ * (GET_STATUS, ABORT, ACCEPT, START) runs on that worker and takes s_at.lock.
+ * Dispatching with the lock held deadlocked the autotune task and the worker
+ * whenever a PC status poll was in flight as a step-test fit finished.
+ *
+ * Dispatch (not inline) is still required: task_entry()'s stack is in PSRAM
+ * and zones_config_set_coupling_cell() ends in an NVS commit that disables
+ * the flash cache -- see coupling_persist_job()'s comment. */
+void autotune_dispatch_coupling_persist(coupling_persist_job_t *job)
+{
+    if (job == NULL || job->count == 0) {
+        return;
+    }
+    // Not reachable on-worker today; covered by bx_run_on_internal_
+    // stack()'s generic backstop if that ever changes.
+    esp_err_t submit_err = uart_bridge_ext_run_on_flash_worker(coupling_persist_job, job);
+    if (submit_err != ESP_OK) {
+        ESP_LOGW(AT_TAG, "autotune zone %u: could not submit %u coupling cell(s) to the flash worker: %s",
+                 job->stepped_zone, (unsigned)job->count, esp_err_to_name(submit_err));
+    } else if (job->fail_count > 0) {
+        ESP_LOGW(AT_TAG, "autotune zone %u: %u of %u coupling cell(s) failed to persist", job->stepped_zone,
+                 (unsigned)job->fail_count, (unsigned)job->count);
+    }
+}
+
 void autotune_engine_get_coupling_matrix(autotune_coupling_matrix_t *out)
 {
     if (!out) return;

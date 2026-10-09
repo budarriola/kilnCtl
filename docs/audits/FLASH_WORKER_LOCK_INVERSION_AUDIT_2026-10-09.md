@@ -73,6 +73,13 @@ worker.
 
 ### F1 HIGH: `s_exec.lock` held across `relay_cycles` persist dispatch
 
+**Fixed** in 4271767d (save mutex vs flash worker), which moved the call; the regression test came with the F2 commit:
+`relay_cycles_maybe_persist()` now runs right after the RUNNING tick's
+`xSemaphoreGive(s_exec.lock)`. It takes no argument and reads only `s_rc`
+state, so nothing needed snapshotting. Host test
+`test_relay_cycles_persist_runs_after_lock_give` (test_profile_executor_prestart.c)
+drives one real RUNNING tick and fails if the persist is called with a lock held.
+
 **Holder path (executor task):**
 
 - `executor_task_entry` takes `s_exec.lock` at `drivers/control/profile_executor.c:737`
@@ -117,6 +124,17 @@ that follows it.
 Alternatively, make the tick-path persist use the posted, fire-and-forget slot.
 
 ### F2 HIGH: `s_at.lock` held across the coupling persist dispatch
+
+**Fixed** (same commit as F1): `autotune_finalize_fit()` parks the by-value
+`coupling_persist_job_t` in `s_at.pending_coupling` instead of dispatching.
+The tick helper `autotune_engine_tick_under_lock()` takes it under
+`s_at.lock` and dispatches it after the give. One ordering change: the run's
+DONE state is now visible to readers a moment before the coupling cells are
+written (the write still happens in the same tick). Host tests
+`test_finalize_fit_under_lock_does_not_dispatch_coupling_persist` and
+`test_tick_under_lock_dispatches_coupling_persist_after_give`
+(test_autotune_engine_prestart.c) use a worker stub that refuses to run when
+a lock is held.
 
 **Holder path (autotune task):**
 
@@ -301,8 +319,8 @@ No function in `wifi_prov`, `update_fetch`, LVGL, `heat_enable` or
 
 | Rank | Lock | Holder task | Status |
 |---|---|---|---|
-| F1 HIGH | `s_exec.lock` | profile executor | Open |
-| F2 HIGH | `s_at.lock` | autotune | Open |
+| F1 HIGH | `s_exec.lock` | profile executor | Fixed |
+| F2 HIGH | `s_at.lock` | autotune | Fixed |
 | F3 MEDIUM | `adaptive_tune_lock` | profile executor (run end) | FIXED (plan/apply/commit split) |
 | F4 LOW | `s_rc.persist_lock` | executor / worker | Bounded 3 s stall |
 | F5 LOW | `s_rc.lock` | boot (`relay_cycles_init`) | Boot-order protected |
