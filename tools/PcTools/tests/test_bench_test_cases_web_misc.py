@@ -222,7 +222,7 @@ class FakeKcfg:
         return 200, json.dumps({"id": self.next - 1})
 
     def ctx(self):
-        return {"http_get_json": self.get, "http_post_json": self.post, "http_get_text": self.text,
+        return {"suite": "web", "http_get_json": self.get, "http_post_json": self.post, "http_get_text": self.text,
                 "http_post_json_body": self.body, "web_client": None}
 
 

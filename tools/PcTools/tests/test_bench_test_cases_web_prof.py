@@ -113,7 +113,7 @@ class FakeBoard:
         return 200, json.dumps({"ok": True, "id": n})
 
     def ctx(self):
-        return {"http_get_json": self.get, "http_post_json": self.post, "http_post_raw": self.post_raw,
+        return {"suite": "web", "http_get_json": self.get, "http_post_json": self.post, "http_post_raw": self.post_raw,
                 "http_post_json_body": self.post_body, "web_client": Web(HTML_OK)}
 
 
@@ -228,7 +228,7 @@ def zones_body(**kw):
 
 class ZoneTests(unittest.TestCase):
     def ctx(self, z, html="tprofile _timingprofile profileOptionsHtml tcTypeSelectHtml( failsafestate"):
-        return {"http_get_json": lambda p: (200, z) if p == "/api/zones" else (200, {"state": "idle"}),
+        return {"suite": "web", "http_get_json": lambda p: (200, z) if p == "/api/zones" else (200, {"state": "idle"}),
                 "web_client": Web(html)}
 
     def test_stim02(self):

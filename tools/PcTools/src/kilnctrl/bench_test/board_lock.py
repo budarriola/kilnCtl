@@ -127,6 +127,18 @@ def suite_is_mutating(suite: str) -> bool:
     return suite not in READ_ONLY_SUITES
 
 
+def write_refusal(ctx: dict) -> Optional[str]:
+    """Fail-closed write gate shared by every judge that writes to the board.
+    Returns a refusal reason, or None when ctx["suite"] is present and names a
+    mutating suite. An ABSENT suite is a refusal, never a pass-through."""
+    suite = ctx.get("suite")
+    if not isinstance(suite, str) or not suite:
+        return "ctx['suite'] is absent; refusing to write (fail closed)"
+    if not suite_is_mutating(suite):
+        return f"suite {suite!r} is not a mutating suite"
+    return None
+
+
 class BoardLockHeld(RuntimeError):
     """Raised when another live process already holds the board lock, or
     when the lock file exists but cannot be read/parsed (refuse rather than

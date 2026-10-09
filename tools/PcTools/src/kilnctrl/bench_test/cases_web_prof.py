@@ -29,6 +29,7 @@ import re
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import board_lock
 from . import cases_web_rw as W
 from .cases_web import _web_client
 from .registry import CaseResult, Verdict, get_case
@@ -62,6 +63,9 @@ def _mutating_gate(ctx: dict, need_autotune_idle: bool) -> Optional[CaseResult]:
     """Standard mutating gate (plan section 2 rule 3). The suite check is
     the runner's board lock (only mutating suites hold it); this reads the
     executor (and autotune) over HTTP and SKIPs on anything but idle."""
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     s, body = _GET(ctx, "/api/profile_exec")
     if s != 200 or not _is_idle_state(body):
         state = body.get("state") if isinstance(body, dict) else None

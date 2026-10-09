@@ -4321,7 +4321,7 @@ class WebSec04ThenLcd19Test(unittest.TestCase):
         os.environ[CW._LCD_PIN_ENV] = "1234"
         try:
             sec = _SharedBoardSecClient()
-            ctx = {"sec_client": sec}
+            ctx = {"suite": "web", "sec_client": sec}
 
             sec04_result = CW._case_web_sec04(ctx)
             self.assertEqual(sec04_result.verdict, Verdict.PASS)

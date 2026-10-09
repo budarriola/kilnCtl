@@ -145,7 +145,7 @@ class BoolToggleAdminAuthTest(_CredsMixin, unittest.TestCase):
             # GET-verify restore
             _response(b'{"panic_disabled": false}'),
         )
-        ctx = {"host": HOST}
+        ctx = {"suite": "web", "host": HOST}
         with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
             result = CWR._case_diag07(ctx)
         self.assertEqual(result.verdict, "PASS", result.reason)
@@ -164,7 +164,7 @@ class BoolToggleAdminAuthTest(_CredsMixin, unittest.TestCase):
             _unauthorized(get_url),
             _unauthorized(f"{ORIGIN}{http_auth.LOGIN_PATH}"),
         )
-        ctx = {"host": HOST}
+        ctx = {"suite": "web", "host": HOST}
         with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
             result = CWR._case_diag08(ctx)
         self.assertEqual(result.verdict, "FAIL")

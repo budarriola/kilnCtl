@@ -34,7 +34,7 @@ def ctx_for(routes=None, pages=None, posts=None, **extra):
         posted.append((path, fields))
         return (posts or {}).get(path, (200, {"ok": True}))
 
-    c = {"http_get_json": get, "http_post_json": post, "web_client": _Web(pages or {}), "_posted": posted}
+    c = {"suite": "web", "http_get_json": get, "http_post_json": post, "web_client": _Web(pages or {}), "_posted": posted}
     c.update(extra)
     return c
 

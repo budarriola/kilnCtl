@@ -48,9 +48,9 @@ def _is_num(v: Any) -> bool:
 def mutating_gate(ctx: dict) -> Optional[str]:
     """Standard mutating gate (plan section 2 rule 3): returns a SKIP reason,
     or None when the case may write. Checked immediately before a first write."""
-    suite = ctx.get("suite")
-    if suite is not None and not board_lock.suite_is_mutating(suite):
-        return f"suite {suite!r} is read-only"
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return refusal
     st, ex = _get_json(ctx, "/api/profile_exec")
     if st != 200 or not isinstance(ex, dict):
         return f"GET /api/profile_exec unreadable (status={st}); cannot confirm the executor is idle"
@@ -59,7 +59,7 @@ def mutating_gate(ctx: dict) -> Optional[str]:
     st, at = _get_json(ctx, "/api/autotune")
     if st != 200 or not isinstance(at, dict):
         return f"GET /api/autotune unreadable (status={st}); cannot confirm autotune is inactive"
-    if at.get("state") not in (None, "idle", "done", "complete", "failed", "aborted", "accepted"):
+    if at.get("state") not in ("idle", "done", "complete", "failed", "aborted", "accepted"):
         return f"autotune is active (state={at.get('state')!r})"
     return None
 

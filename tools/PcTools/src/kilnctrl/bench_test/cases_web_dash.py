@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import cases_web
 from . import cases_web_rw as W
-from .board_lock import READ_ONLY_SUITES
+from . import board_lock
 from .registry import CaseResult, Verdict, get_case
 
 BENCH_PROFILE_SLOT_ID = 7
@@ -66,9 +66,9 @@ def _exec_probe(ctx: dict) -> dict:
 def _mutating_gate(ctx: dict) -> Optional[str]:
     """Standard mutating gate (plan section 2 rule 3). Returns a reason when
     the gate does not hold, else None."""
-    suite = ctx.get("suite")
-    if suite is None or suite in READ_ONLY_SUITES:
-        return f"suite {suite!r} is not a mutating suite"
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return refusal
     st, body = W._get_json(ctx, "/api/profile_exec")
     if st != 200 or not isinstance(body, dict) or body.get("state") != "idle":
         return f"executor not idle (status={st}, state={(body or {}).get('state') if isinstance(body, dict) else None})"

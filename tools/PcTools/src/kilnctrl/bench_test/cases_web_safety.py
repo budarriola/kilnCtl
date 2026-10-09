@@ -98,9 +98,9 @@ def _mutating_gate(ctx: dict) -> Optional[CaseResult]:
 
     Checked immediately before the first write: mutating suite, profile
     executor idle, autotune not active (plan section 2 rule 4)."""
-    suite = ctx.get("suite")
-    if suite is not None and not board_lock.suite_is_mutating(suite):
-        return _r(INCONC, f"gate: suite {suite!r} is not a mutating suite; no write attempted")
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return _r(INCONC, f"gate: {refusal}; no write attempted")
     pe, err = _json(ctx, "/api/profile_exec")
     if pe is None:
         return _r(INCONC, f"gate: cannot read profile_exec state ({err}); no write attempted")
@@ -420,7 +420,7 @@ def _case_comm07(ctx: dict) -> CaseResult:
             restored = (r2 or {}).get("relay_type")
     obs = {"original": original, "after_write": after, "restored": restored}
     if not restore_ok or restored != original:
-        return _r(FAIL, f"relay_type restore did not round-trip: expected {original!r}, board reads {restored!r}", **obs)
+        return _r(FAIL, f"ERROR: relay_type restore did not round-trip: expected {original!r}, board reads {restored!r}", **obs)
     if not write_ok or after != original:
         return _r(FAIL, f"relay_type same-value write did not round-trip (write_ok={write_ok}, read-back {after!r})", **obs)
     return _r(PASS, **obs)

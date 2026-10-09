@@ -57,6 +57,7 @@ import zlib
 from typing import Any, Dict, Optional, Tuple
 
 from . import cases_web
+from . import board_lock
 from . import judgments as J
 from .. import http_auth
 from .registry import CaseResult, Verdict, get_case
@@ -273,6 +274,9 @@ def _post_json_body(ctx: dict, path: str, body: Any) -> "Tuple[Optional[int], Op
 
 def _bool_toggle_case(ctx: dict, get_path: str, post_path: str, get_field: str,
                        post_form_field: str) -> CaseResult:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     status0, body0 = _get_json(ctx, get_path)
     if status0 != 200 or body0 is None or get_field not in body0:
         return CaseResult(
@@ -306,6 +310,9 @@ def _case_dash13(ctx: dict) -> CaseResult:
     """WEB-DASH-13: ``POST /api/unit_pref F`` then ``/api/status``
     ``temp_unit`` F, restore C (plan doc section 3.7's own wording for this
     case)."""
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     status0, body0 = _get_json(ctx, "/api/status")
     if status0 != 200 or body0 is None or body0.get("temp_unit") not in ("C", "F"):
         return CaseResult(
@@ -574,6 +581,9 @@ def _probe_dashboard(client: Any) -> "Tuple[Optional[int], Optional[str]]":
 
 
 def _case_web_sec03(ctx: dict) -> CaseResult:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     client = _sec_client(ctx)
     username = ctx.get("web_username") or os.environ.get("KILNCTL_WEB_USERNAME")
     password = ctx.get("web_password") or os.environ.get("KILNCTL_WEB_PASSWORD")
@@ -857,6 +867,9 @@ def seed_lcd_pin(ctx: dict) -> Dict[str, Any]:
 
 
 def _case_web_sec04(ctx: dict) -> CaseResult:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
     try:
         resolved = _resolve_lcd_pin(ctx)
     except LcdPinSeedError as exc:
