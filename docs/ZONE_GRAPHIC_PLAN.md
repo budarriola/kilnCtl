@@ -8,12 +8,10 @@
 > unknown glyph, the array costing a measured 24 bytes with no buffer growth
 > (stage 2); and the artwork, the unknown/fail-closed rules, and the badges
 > with click popups (stages 3-5), covered by `tools/check_zone_graphic_render.ps1`.
-> **2026-09-22:** the bench board now runs firmware that includes this page
-> (`dde785bf`, the most recent commit touching these files, is an ancestor of
-> the bench firmware commit `63a48ab3`); the on-hardware set/reboot/read-back
-> round trip is still unexecuted — that is the only remaining item. Until
-> then, the render function is verified against real captured `/api/zones`
-> and `/api/status` JSON instead. **Opened:** 2026-09-18.
+> **2026-10-06:** the on-hardware set/reboot/read-back round trip passed (`control_set_relay_type`,
+> BENCH_TEST_LOG, M17); the page's served JS was run under node against the live `/api/zones`. The only
+> remaining item is a real-browser look at the page (not done); note the live page shows relays 1-3 only
+> while `relay_count` is 3. **Opened:** 2026-09-18.
 >
 > **Visual target:** [`docs/images/zone_graphic_reference_stacked_rings.jpg`](images/zone_graphic_reference_stacked_rings.jpg),
 > owner-supplied. The artwork stages build against that image rather than
