@@ -224,6 +224,45 @@ made stale. Host test `test_run_end_holds_no_lock_across_zones_setters`
 (plus a check in the coupled-cell test) fails if a setter sees a held lock;
 negtest (removing the unlock) CAUGHT.
 
+**Follow-up review of the fix (FIXED in the commit that added this paragraph).**
+Dropping the lock opened a window that the revert path could enter. The executor
+calls `run_end` with its state already DONE/FAULTED, so `adaptive_tune_revert`
+(HTTP) is not refused. The plan pass captures the revert snapshot
+(`revert_available=true`) before the setters run, which made two bad outcomes
+possible:
+
+- A revert landing between plan and apply, or between `set_model` and `set_pid`,
+  reported OK. Then `run_end`'s own setters overwrote the restore, and the commit
+  marked the change applied and latched its SIMC Ki baseline.
+- A `run_end` landing inside a revert's own unlocked write left its model behind.
+
+The fix adds a per-zone `write_in_flight` flag (`adaptive_tune_internal.h`):
+
+- `run_end` sets it from plan to commit, and `adaptive_tune_revert` sets it for its write.
+- While `run_end` holds it, a revert refuses with the new `ADAPTIVE_TUNE_REVERT_BUSY`.
+- `run_end` skips a zone that a revert is writing.
+
+`adaptive_tune_ki_clear_gen` is now per zone, so an Accept on one zone no longer
+suppresses another zone's re-latch. The gen guard previously had no test.
+
+Host tests (`test_adaptive_tune_status.c`) land the competing call inside the
+unlocked window through one-shot setter hooks:
+
+- `test_revert_during_run_end_apply_is_refused_busy`
+- `test_run_end_during_revert_write_skips_the_zone`
+- `test_ki_clear_gen_is_per_zone`
+
+negtest CAUGHT four mutations: no BUSY refusal, no `run_end` skip, global gen,
+and gen guard removed.
+
+Still open (pre-existing, narrower):
+
+- A zones POST or an Accept that writes PID for the same zone inside the `run_end`
+  apply window is a last-writer-wins race with the `run_end` setters. This existed
+  before F3, as an ordering race outside the lock, and F3 only widens it.
+- The revert snapshot survives an Accept, so a later revert restores the
+  pre-adaptive gains over the accepted ones.
+
 ### F4 LOW (bounded): `s_rc.persist_lock` across the dispatch
 
 - `persist_snapshot_now` takes `persist_lock` (`relay_cycles.c:1140`) and
