@@ -35,6 +35,8 @@ reason once the fetch writer is wedged, apart from a hand upload, which the uplo
 with the wedge name at `update_http.c:132`). Alternatively, teach the page and `update_status` to read
 `fetch_writer_wedged`. Add a test case for `reason = "busy"` with `busy = true`.
 
+**Fixed in 2841144c.**
+
 ### L2. Owned abort reads `source` unlocked, and begin sets `source` after the claim
 
 - Where: `update_stage.c:462-470` (`update_stage_upload_abort_owned()`), `:142-151`
@@ -55,6 +57,8 @@ only covers the sequential case.
 Fix: set `source` inside `claim()` (under `lk`), and do the source/phase test and the IDLE transition in
 one `lk` section in `abort_owned`. Better still, capture a per-upload generation counter at begin and abort
 only when it is unchanged.
+
+**Fixed in 2841144c.**
 
 ### L3. `profiles_cfg_fs_load_raw()` allocation failure now reads as "file absent", and resolve then overwrites the file with the stale NVS copy
 
@@ -87,6 +91,8 @@ works only with force plus the typed confirm, because the image reads as "no sch
 released firmware is affected, but the bench board probably is. Either note in the release notes that the
 first post-change update must be a hand upload, or emit a v1 record as well (the 20-byte v1 record at
 offset 288 followed by the v2 record; this needs `UPDATE_STAGE_HEAD_LEN` at 344 or more).
+
+**Fixed in 2841144c.**
 
 ### L5. The zones unlock test hook ships in production firmware
 
