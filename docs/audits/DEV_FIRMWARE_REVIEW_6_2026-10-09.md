@@ -95,7 +95,7 @@ Fix: rewrite the comments to describe the one-shot erase and its rollback conseq
 - Review 4 M3 / review 5 L6 (write gates fail-open on suite): closed in production code by
   `board_lock.write_refusal()` in every `_mutating_gate` / `mutating_gate`, and in the
   `cases_web_rw.py` writers. The test that is meant to guard it is vacuous; see M2.
-- M1 and L1-L5 of review 5: no commit in range touches them. They remain open.
+- M1 and L1-L5 of review 5: not in this range. They were addressed by `dcd67f54` and `f19b7c62`, which landed on dev while this review was being written and were not reviewed here.
 
 ## Checked, no defect found
 
