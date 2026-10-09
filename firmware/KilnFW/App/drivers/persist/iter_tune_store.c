@@ -191,8 +191,24 @@ esp_err_t iter_tune_store_start(void) {
     iter_tune_store_blob_t resolved;
     uint32_t resolved_rev = 0;
     bool used_file = false;
-    bool have = pref_cfg_fs_resolve(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
-                                    validate_and_note, &resolved, &resolved_rev, &used_file);
+    // A size-changing newer-firmware cfg file fails the length check and would
+    // read as corruption -- and resolve() would then overwrite it with the NVS
+    // copy. Probe first: report NEWER and keep the file untouched (NVS, if
+    // valid, serves this boot without being migrated).
+    bool have;
+    uint8_t newer_ver = 0;
+    if (pref_cfg_fs_probe_newer_wrong_size(ITER_TUNE_CFG_FILE_PATH, sizeof(nvs_blob), 0, ITER_TUNE_STORE_VERSION,
+                                           &newer_ver)) {
+        note_version_byte(newer_ver);
+        have = nvs_ok;
+        if (nvs_ok) {
+            resolved = nvs_blob;
+            resolved_rev = nvs_rev;
+        }
+    } else {
+        have = pref_cfg_fs_resolve(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
+                                   validate_and_note, &resolved, &resolved_rev, &used_file);
+    }
     if (have) {
         s_blob = resolved;
         s_rev = resolved_rev;

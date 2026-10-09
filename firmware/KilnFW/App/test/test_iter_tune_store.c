@@ -549,6 +549,45 @@ static void test_current_version_wrong_size_still_corruption(void)
     TEST_CHECK(!iter_tune_store_schema_refused(NULL), "invalid current-version blob is corruption, not newer");
 }
 
+// cfg-file twin of the NVS oversized-blob fix: a size-changing NEWER file is
+// reported newer and preserved byte-identical; a current-version wrong-size
+// file stays plain corruption (no report).
+static void test_cfg_wrong_size_newer_vs_corrupt(void)
+{
+    tit_scratch_clean();
+    TIT_MKDIR(TIT_SCRATCH_BASE);
+    TEST_CHECK(cfg_fs_init(TIT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts for wrong-size cfg test");
+    tit_reset_all();
+    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
+
+    uint8_t big[4 + sizeof(iter_tune_store_blob_t) + 8];
+    memset(big, 0, sizeof(big));
+    big[0] = 7; // rev
+    big[4] = (uint8_t)(ITER_TUNE_STORE_VERSION + 1);
+    big[sizeof(big) - 1] = 0xAB;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "newer file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates larger newer cfg file");
+    uint8_t rv = 0;
+    TEST_CHECK(iter_tune_store_schema_refused(&rv) && rv == (uint8_t)(ITER_TUNE_STORE_VERSION + 1),
+               "larger newer cfg file reported as NEWER");
+    uint8_t back[sizeof(big) + 16];
+    size_t got = 0;
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, back, sizeof(back), &got) == ESP_OK && got == sizeof(big) &&
+                   memcmp(back, big, sizeof(big)) == 0,
+               "newer cfg file preserved byte-identical");
+
+    // Current-version wrong size: corruption, not a newer report.
+    big[4] = ITER_TUNE_STORE_VERSION;
+    TEST_CHECK(cfg_fs_write_atomic(ITER_TUNE_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "wrong-size file written");
+    iter_tune_store_reset_for_test();
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start tolerates wrong-size current-version file");
+    TEST_CHECK(!iter_tune_store_schema_refused(NULL), "current-version wrong-size file is corruption, not newer");
+
+    cfg_fs_deinit();
+    tit_scratch_clean();
+}
+
 static void test_cfg_fs_dual_write_tie_break(void)
 {
     tit_scratch_clean(); // pre-clean: a prior run's crash/abort can leave files behind
@@ -609,6 +648,7 @@ void run_test_iter_tune_store(void)
 {
     test_blob_validate();
     test_cfg_round_trip();
+    test_cfg_wrong_size_newer_vs_corrupt();
     test_set_zone_refused_when_unmounted();
     test_nvs_copy_migrates_into_cfg_at_start();
     test_nvs_fallback_serves_when_unmounted();
