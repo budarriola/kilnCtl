@@ -271,6 +271,10 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
 {
     zones_cfg_t tmp;
     memset(&tmp, 0, sizeof(tmp));
+    /* Lost-update guard: tmp is assembled from s_zones.cfg (preserved fields) and committed whole at
+     * the commit point, after blocking work (Pico ceiling confirm). Any other writer in between bumps
+     * s_config_generation; the commit re-checks it and refuses rather than overwrite that write. */
+    const uint32_t gen_at_snapshot = s_config_generation;
 
     if (!zones_config_json_parse_u8_field(body, "thermo_count", 0, MAX31856_CHANNEL_COUNT, &tmp.thermo_count)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "thermo_count missing or out of range");
@@ -645,6 +649,15 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
          * why that direction goes AFTER, not before. */
     }
 
+    if (s_config_generation != gen_at_snapshot) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: zones config changed concurrently (generation %u -> %u)",
+                 (unsigned)gen_at_snapshot, (unsigned)s_config_generation);
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"zones_config_changed_concurrently\",\"reason\":\"another writer changed the zones config while this submit was being processed; reload and retry\"}");
+        free(body);
+        return ESP_OK;
+    }
     /* Commit point: every rejection above returned before touching s_zones,
      * so this is the first and only line at which the submission becomes the
      * live config -- and therefore the only place in this handler the
