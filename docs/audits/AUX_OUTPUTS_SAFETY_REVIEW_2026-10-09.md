@@ -101,6 +101,8 @@ Yes, apart from F1 (PAUSED) and a narrow retry gap.
 
 ### F7 (LOW): misleading handoff comment
 
+**Fixed in SHAHERE.**
+
 The comment at `control/profile_executor_run.c:1399-1421` says a failed handoff OFF is retried by the `aux_off_pending` branch. That branch only runs when the state is not RUNNING. In practice the first `profile_executor_aux_tick()` rewrites every claimed aux on the next tick, so the behaviour is safe.
 
 Fix: correct the comment.
@@ -121,6 +123,8 @@ It cannot mask a fault:
 - The ramp lock skips the monitor zone (`control/profile_executor_ramp_assist.c:262`, `:297`, `:332`), so it cannot stall the run. Coupling is masked (`persist/zones_config_accessors.c:687-692`, `control/adaptive_tune_model.c:556`).
 
 ### F5 (LOW): monitor-only zone is not a cross-zone peer
+
+**Fixed in SHAHERE.**
 
 `peer_is_on_off = zone_guard_exempt` (`control/profile_executor.c:1743`) drops the monitor zone from the far side of guard 8 for every other zone (`control/thermal_guard.c:563-580`). This matches plan section 10.
 
@@ -158,6 +162,8 @@ The HTTP caller gets an error. This is config divergence, the class this reposit
 Fix: apply the RAM update only after `ESP_OK`, or restore the previous entry and masks when the commit fails.
 
 ### F6 (LOW): rollback leaves aux rules silently inert
+
+**Fixed in SHAHERE.**
 
 `persist/profile_rule_target.h:11-12` states this. After a rollback to firmware that predates aux, the freed zone runs as an ordinary HEATER with an empty relay mask. It gets PID and guards 1-4, but nothing can heat it, so it is likely to trip a heat-rise guard. That fails safe, but it can be confusing. I could not determine how a specific older build behaves without that build.
 

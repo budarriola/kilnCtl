@@ -10772,7 +10772,7 @@ static void test_aux_handoff_write_failure_sets_pending(void)
     g_relay_write_fail = false;
     TEST_CHECK(ok, "a failed handoff write does not refuse the run");
     TEST_CHECK(s_exec.aux_off_pending, "pending raised so the retry branch re-writes OFF");
-    TEST_CHECK(esp_log_test_capture_contains("retrying via aux_off_pending"), "log names the real mechanism");
+    TEST_CHECK(esp_log_test_capture_contains("retried by aux_off_pending / the first aux tick"), "log names the real mechanism");
     profile_executor_halt();
 }
 

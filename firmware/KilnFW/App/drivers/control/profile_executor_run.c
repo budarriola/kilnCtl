@@ -1425,11 +1425,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (aux_take != 0 && s_exec.io) {
             esp_err_t aux_err = kiln_io_owner_command_set_relay_mask_authorized(aux_take, 0);
             if (aux_err != ESP_OK) {
-                ESP_LOGW(PE_TAG, "aux start handoff OFF write failed (mask 0x%02X): %s -- retrying via aux_off_pending",
+                ESP_LOGW(PE_TAG, "aux start handoff OFF write failed (mask 0x%02X): %s -- retried by aux_off_pending / the first aux tick",
                          (unsigned)aux_take, esp_err_to_name(aux_err));
-                /* The retry branch of the task loop re-writes OFF to the
-                 * claim; without this the aux would stay as the operator
-                 * left it until the first rule decision. */
+                /* aux_off_pending's retry branch only runs when not RUNNING; in
+                 * practice profile_executor_aux_tick() rewrites every claimed
+                 * aux on the next tick, so the aux does not stay as the
+                 * operator left it until the first rule decision. */
                 s_exec.aux_off_pending = true;
             } else {
                 relay_off_tracker_note_write(aux_take, 0);

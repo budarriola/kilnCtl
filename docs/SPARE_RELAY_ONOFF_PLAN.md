@@ -423,6 +423,8 @@ every heater-only site reads that, never `relay_mask == 0` itself:
 
 Existing ON_OFF zones keep working unchanged until the operator converts.
 
+**Known coverage loss (aux review F5, 2026-10-09):** a converted (monitor-only) zone is excluded from guard 8 as a peer (`peer_is_on_off = zone_guard_exempt`, `thermal_guard.c`), so on a 2-zone kiln with one zone converted guard 8 has no peer and is inert. Guards 1-4 still run on the remaining heater. Accepted; a one-way wider-delta peer is not built.
+
 ## 11. Host tests (all host-only; no board)
 
 - `test_aux_outputs_store.c` (new): defaults on all-zero blob, CRC reject,

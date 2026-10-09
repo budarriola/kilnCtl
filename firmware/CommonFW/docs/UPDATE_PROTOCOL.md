@@ -838,6 +838,7 @@ during development will be driven by an agent:
       without noticing is firing on default gains. Check `GET
       /api/zones/config` (or `kiln_call(name="control_get_zones")`) reads back
       the expected gains before heating after any rollback.
+      **Aux hazard (aux review F6, 2026-10-09)**: rolling back to firmware that predates spare-relay aux outputs leaves stored aux rules (targets 8..11) silently inert, and a zone converted to aux runs as an ordinary HEATER with an empty relay mask. It gets PID and guards 1-4 but nothing can heat it, so it likely trips a heat-rise guard (fails safe, but confusing). Re-check zones and profiles after any rollback across the aux change.
 - [x] Every push tool's board-reported result (including refusals) is
       returned verbatim to the caller. **Not yet true**: neither tool
       computes or logs a local SHA-256 of the image before sending — the doc
