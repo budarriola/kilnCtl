@@ -457,7 +457,7 @@ static void forget_confirm_yes_cb(void *user_data)
     ui_lcd_lock_run_gated("Admin PIN to forget network", LCD_PIN_ROLE_ADMIN, forget_apply, NULL);
 }
 
-static char s_forget_body[96];
+static char s_forget_body[128];
 
 static void forget_row_clicked_cb(lv_event_t *e)
 {
