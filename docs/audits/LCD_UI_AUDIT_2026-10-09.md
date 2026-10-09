@@ -48,6 +48,13 @@ Context that shapes the findings:
 | L21 | LOW | cost | Home and Diagnostics refresh callbacks keep calling `dashboard_get_status()` (and a thermocouple read-all) while hidden. |
 | L22 | LOW | misc | Start confirm re-resolves the profile at Confirm time, not the one shown; picker id cache can go stale (mislabel only); live-decide Save As has no confirm. |
 | L23 | INFO | threads | Debug flags and 64-bit flush stats shared across tasks without atomics; startup `lv_*` calls on app_main are an undocumented exception. |
+| L24 | MED | chart | Home chart looks up history by `t / 30 s` as a ring index; once the 640-sample ring wraps (5 h 20 min) the actual trace is time-shifted and then flat. |
+| L25 | LOW | chart | The dashed planned-line hook never runs: `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS` is never set, so the plan draws solid (home and profile detail). |
+| L26 | LOW | chart | The time axis ends at the plan's nominal horizon; a run that outlasts its plan stops drawing the actual trace and pins the now-dot to the last bucket. |
+| L27 | LOW | cost | Each home tick makes up to 31 `s_exec.lock` acquisitions (`portMAX_DELAY`) plus a plan-curve rebuild on the LVGL task, also while hidden. |
+| L28 | LOW | overflow | A valid but tiny ramp rate gives a horizon above 2^31 s; `lroundf()` into a 32-bit `long` then overflows in the tick labels and history index. |
+| L29 | INFO | geometry | Tick and legend positions add the chart's content offset twice (2 px); the top Y label sits 3 px above the content box. |
+| L30 | INFO | rail | Rail zone name/temp labels are rewritten every tick; zone names are read without the zones lock; aux caption table hard-codes 4 relays. |
 
 L9 (second pass, below) is the only HIGH finding: it opens every gate, Clear Trip included, on one boot path. Otherwise Clear Trip itself is correct: ADMIN gate, role
 re-checked inside the action, and the same `dashboard_safety_clear_trip()`
@@ -372,6 +379,150 @@ that must stay live.
   clears the admin credential with no PIN. Intended physical-presence reset:
   needs E-stop asserted, no firing, heat not enabled, four corner taps and a confirm.
 
+## Third pass (home chart, graph, rail helpers)
+
+Read line by line at origin/dev 26fa740e: `ui/ui_page_home_chart.c`,
+`ui/ui_page_home_graph.c`, `ui/ui_page_home_rail.c`,
+`ui/ui_page_home_internal.h`, plus their call sites in
+`ui/ui_page_home_refresh.c` and `ui/ui_page_home.c` where a finding depends on
+them. LVGL behaviour checked against the pinned submodule (v9.5.0, 85aa60d1).
+
+### L24 (MED) Chart history lookup breaks once the ring wraps
+
+`ui/ui_page_home_refresh.c:679` maps a bucket time to a history entry with
+`idx = lroundf(t_i / HISTORY_SAMPLE_PERIOD_S)`, where `t_i` is seconds since
+run start (`:651`). `profile_executor_get_history()` takes `start_index`
+relative to the OLDEST RETAINED sample (`control/profile_executor.h`, its doc
+comment; `control/profile_executor_status.c:753`). The ring holds
+`HISTORY_MAX_SAMPLES` = 640 samples at 30 s (`control/profile_executor.h:406`,
+`:440`), about 5 h 20 min. A normal glaze firing runs longer than that.
+
+After the wrap, bucket time `t` shows the sample taken at
+`t + (elapsed - 19200 s)`, so the actual trace is shifted left against the
+plan, and every bucket past `t` = 19200 s clamps to the newest sample (`:680`),
+drawing a flat line at the current temperature. The now-dot uses that
+shifted trace (`:819`-`:823`). Before the wrap, gaps also skew it: no sample
+is taken on a faulted tick or with no zone active
+(`control/profile_executor.c:1987`), while `total_elapsed_s` keeps counting.
+
+Scenario: 8 h into a 10 h firing the LCD chart shows the first 2 h 40 min of
+the curve as if it were the start of the run and a flat line from 5 h 20 min
+to now. The plan line is right, so the kiln reads as far behind or ahead of
+schedule. Display only; control is not affected.
+
+Fix: each entry carries `elapsed_s`. Read the oldest entry's `elapsed_s` once
+per tick and index by `(t_i - oldest_elapsed) / 30`, leaving buckets before
+the oldest sample empty; or binary-search on `elapsed_s`. Add a host test with
+a wrapped ring.
+
+### L25 (LOW) Dashed planned line never dashes
+
+`ui/ui_page_home.c:875` registers `ui_home_chart_draw_event_cb()`
+(`ui/ui_page_home_chart.c:46`) for `LV_EVENT_DRAW_TASK_ADDED`. In LVGL 9.5
+that event is sent only to objects with `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS`
+(LVGL `src/draw/lv_draw.c:148`). No file under
+`firmware/KilnFW/App/` sets that flag, so the hook never runs and the planned
+series draws solid, the same style as the actual series. The profile detail
+chart has the same gap (`ui/ui_page_profile_detail.c:632`). Colour still tells
+the two lines apart. The legend and the code comments say the plan is dashed.
+
+Fix: `lv_obj_add_flag(chart, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS)` on both
+charts. Check on the panel; dashed line drawing costs render time.
+
+### L26 (LOW) Time axis stops at the plan horizon
+
+While a run is active, `horizon_s` is the last plan point's time
+(`ui/ui_page_home_refresh.c:619`), the nominal schedule length.
+`total_elapsed_s` counts through ramp-lock stalls
+(`control/profile_executor.c:825`-`:830`), so a slow kiln outlasts the plan.
+Buckets only reach `horizon_s`, so the actual trace past the plan end is
+never drawn, and `ui_page_home_now_bucket_index()`
+(`ui/ui_page_home_graph.c:47`) clamps the now-dot to the last bucket. The
+chart stops moving for the rest of the run.
+
+Fix: use `max(plan horizon, total_elapsed_s)` as the horizon while active.
+
+### L27 (LOW) Chart reads take the executor lock up to 31 times per tick
+
+Each refresh calls `profile_executor_get_history_count()` and then
+`profile_executor_get_history(&entry, idx, 1)` once per bucket
+(`ui/ui_page_home_refresh.c:609`, `:681`). Each call takes `s_exec.lock` with
+`portMAX_DELAY` (`control/profile_executor_status.c:735`) and unpacks one
+PSRAM slot. It also rebuilds the plan curve every tick (`:616`). No lock is
+held across producer calls here: each acquisition is separate. But the LVGL
+task waits behind every executor tick up to 31 times per second, and it does
+so while the page is hidden too (L21 covers the `dashboard_get_status()` part
+of the same callback).
+
+Fix: one paged read of the needed indices per tick (they are monotonic), skip
+the chart block while hidden, and rebuild the plan curve only when the run
+changes.
+
+### L28 (LOW) Time-axis overflow with a tiny ramp rate
+
+`http/profiles_http.c:1674` accepts any `ramp_c_per_hr` in `[0, 1000]`, so 0.01 C/h
+is valid. `profile_feasibility_plan_curve()` then makes a segment of
+`dist / 0.01 * 3600` seconds: 2000 C gives 7.2e8 s, and several such
+segments pass 2^31 s. On ESP32 `long` is 32 bits, so `lroundf()` overflows
+(undefined behaviour) at `ui/ui_page_home_chart.c:217`,
+`ui/ui_page_home_graph.c:70`-`:72` and, through `t_i / 30`,
+`ui/ui_page_home_refresh.c:679` (the result is clamped to `count - 1`
+afterwards, so no out-of-range index follows). The `%lu:%02lu` buffers
+(16 bytes, at most 11 characters) cannot overflow. Effect: garbage tick text.
+Float precision on the bucket times is also lost far below that size.
+
+Fix: clamp `horizon_s` to a display maximum (for example 99 h) before tick
+math, or set a non-zero minimum ramp rate in the validator.
+
+### L29 (INFO) Tick and legend geometry off by the chart padding
+
+`lv_obj_set_pos()` on a child is relative to the parent's content area
+(LVGL `src/core/lv_obj_pos.c:901`-`:902` adds the parent's padding).
+`ui_home_chart_set_y_ticks()`, `ui_home_chart_set_x_ticks()` and
+`ui_home_chart_set_legend()` add `content.* - chart_coords.*` (the 2 px pad,
+`ui/ui_page_home.c:812`) as well (`ui/ui_page_home_chart.c:131`, `:203`-`:204`,
+`:276`-`:277`). Every label sits 2 px right and down of the intended spot; the
+top Y label lands at content y = -3, so its top pixel row is outside the chart
+and clipped; bottom X labels touch the card's outer edge. The chart is not
+scrollable (`ui/ui_page_home.c:883`), so nothing scrolls. Cosmetic.
+
+### L30 (INFO) Rail helper notes
+
+- `ui_home_rail_refresh()` (`ui/ui_page_home_refresh.c:995`) sets each zone's
+  name and temperature text every tick even when unchanged, which invalidates
+  those labels every second. The aux caption next to it is already
+  write-on-change (`:1006`).
+- `zones_config_get_name()` (`persist/zones_config_accessors.c:423`) copies
+  the name with no lock while the HTTP task can rename a zone; a torn copy
+  shows a garbled name for one tick. Always NUL-terminated; 20-byte buffer
+  holds `ZONE_NAME_MAX_LEN` 15.
+- `ui_page_home_rail_aux_caption()` (`ui/ui_page_home_rail.c:14`) hard-codes 4
+  captions; it bounds-checks, so a fifth relay would just get no caption. A
+  `_Static_assert` against `KILN_IO_RELAY_COUNT` would make that loud.
+
+### Third pass: checked and found clean
+
+- Threads: every function in the three `.c` files is called from
+  `ui_home_refresh_cb()` (LVGL timer) or `ui_page_home_build()`; the graph and
+  rail helpers make no `lv_*` call at all. No call from a non-LVGL task.
+- Locks: these files take no lock. See L27 for the caller's executor reads.
+- Indexing: `now_idx` is clamped to `point_count - 1`
+  (`ui/ui_page_home_graph.c:53`-`:58`); `hist_zone` comes from a loop over
+  `MAX31856_CHANNEL_COUNT` (`ui/ui_page_home_refresh.c:572`-`:575`); the plan
+  buffer (`1 + 2 * PROFILE_MAX_SEGMENTS`) matches the curve's worst case and
+  the curve writer checks `n < out_cap`; `lagging_zone_indices()` bounds by
+  `out_cap` and 8 bits; the rail loops stop at `KILN_IO_RELAY_COUNT` /
+  `MAX31856_CHANNEL_COUNT`, and `dashboard_status_t.channels[]` and
+  `profile_exec_status_t.zones[]` are both that size.
+- Leaks: no allocation in any of the four files; all chart children are built
+  once.
+- Scrolling: the chart, its legend rows and now-dot clear
+  `LV_OBJ_FLAG_SCROLLABLE`; labels are positioned inside the chart.
+- Integer math: `quantize_floor_i32()` handles negatives; the lag counter
+  saturates at `UINT32_MAX`; `y_axis_range()` guarantees `hi > lo` and the
+  5-degree minimum on the returned integers; `axis_ratchet_should_reset()` is
+  driven by `uint32_t` elapsed with no subtraction.
+
 ## Checked and found clean
 
 - Clear Trip: ADMIN gate, role re-checked inside the action, same backend
@@ -400,7 +551,8 @@ that must stay live.
 The second pass covered `ui/kiln_ui.c`, `ui/lvgl_port.c`, `ui/screen_idle.c`,
 `ui/ui_lcd_lock.c`, `ui/ui_lcd_keypad.c`, `ui/ui_confirm.c`, the theme and
 topbar code, `ui/ui_page_home.c`, `ui/ui_page_home_actions.c`,
-`ui/ui_page_home_refresh.c` and `ui/ui_page_diagnostics.c`. Not read line by
-line: `ui/ui_page_home_chart.c`, `ui/ui_page_home_graph.c`,
-`ui/ui_page_home_rail.c`, `ui/ui_page_home_internal.h`. L12, L15, L19 and the
-Trip detail part of L20 are estimates from source, not reproduced on the panel.
+`ui/ui_page_home_refresh.c` and `ui/ui_page_diagnostics.c`. The third pass
+covered `ui/ui_page_home_chart.c`, `ui/ui_page_home_graph.c`,
+`ui/ui_page_home_rail.c` and `ui/ui_page_home_internal.h`. L12, L15, L19, the
+Trip detail part of L20 and L24-L29 are estimates from source, not reproduced
+on the panel.
