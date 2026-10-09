@@ -30,6 +30,24 @@ assert(run(q('/\\evil.example')) === '/', 'backslash rejected');
 assert(run(q('https://evil.example/')) === '/', 'absolute rejected');
 assert(run('') === '/', 'missing -> /');
 
+// The URL(...) same-origin re-check is defence in depth: no input can pass the
+// control-char/charAt guard (starts with "/", second char neither "/" nor "\\",
+// no tab/LF/CR/space/control) and still resolve cross-origin against a
+// special-scheme base, so no real URL input can reach its reject branch. Test
+// the layer in isolation with a URL stub that reports a foreign origin, and
+// pin that the resolved (normalised) form is what is returned.
+function runWithUrl(search, UrlImpl) {
+  const ctx = { URLSearchParams, URL: UrlImpl, window: { location: { search, origin: 'http://board.local' } } };
+  vm.createContext(ctx);
+  vm.runInContext(m[0], ctx);
+  return vm.runInContext('loginReturnPath()', ctx);
+}
+class ForeignUrl { constructor() { this.origin = 'http://evil.example'; this.pathname = '/x'; this.search = ''; this.hash = ''; } }
+assert(runWithUrl(q('/settings'), ForeignUrl) === '/', 'origin re-check rejects a cross-origin resolution');
+class ThrowUrl { constructor() { throw new TypeError('bad'); } }
+assert(runWithUrl(q('/settings'), ThrowUrl) === '/', 'URL parse failure falls back to /');
+assert(run(q('/a/../b?x=1')) === '/b?x=1', 'returns the resolved form, not the raw input');
+
 // F1/F2/F3: the cited sinks must route names through an escaper.
 const main = read('main_page.html');
 assert(!/notice \S+ ' \+ name \+/.test(main) && !/Start "' \+ name/.test(main), 'F1 main_page names escaped');
