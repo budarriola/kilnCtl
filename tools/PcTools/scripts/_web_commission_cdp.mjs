@@ -127,6 +127,7 @@ import { existsSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { writeFile, mkdtemp, rm, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { sweepStaleProfileDirs } from './_web_commission_sweep.mjs';
 
 const CDP_CALL_TIMEOUT_MS = 20000;
 
@@ -858,32 +859,6 @@ async function main() {
       spawn(process.execPath, ['-e', rmScript, userDataDir], { detached: true, stdio: 'ignore' }).unref();
     } catch { /* best effort */ }
   }
-}
-
-// Chrome's sandbox adds AppContainer ACEs the user cannot delete; grant
-// ourselves full control first (win32 only, failure ignored).
-function grantProfileDirAcl(p) {
-  if (process.platform !== 'win32') return;
-  try { spawnSync('icacls', [p, '/grant', `${os.userInfo().username}:(OI)(CI)F`, '/T', '/C', '/Q'], { stdio: 'ignore', timeout: 5000 }); } catch { /* best effort */ }
-}
-
-// Best-effort sweep of leftover kc-web-commission-* dirs older than 1 h
-// (a previous run's detached rm can lose to AV/indexer). Bounded to ~2 s.
-function sweepStaleProfileDirs() {
-  const deadline = Date.now() + 2000;
-  try {
-    const tmp = os.tmpdir();
-    for (const name of readdirSync(tmp)) {
-      if (Date.now() > deadline) break;
-      if (!name.startsWith('kc-web-commission-')) continue;
-      const p = path.join(tmp, name);
-      try {
-        if (Date.now() - statSync(p).mtimeMs < 3600 * 1000) continue;
-        grantProfileDirAcl(p);
-        rmSync(p, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
-      } catch { /* best effort */ }
-    }
-  } catch { /* best effort */ }
 }
 
 main().then(() => process.exit(0), (err) => {
