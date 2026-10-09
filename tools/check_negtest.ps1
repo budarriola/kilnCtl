@@ -70,6 +70,7 @@ if (-not $Group) {
                 $r = Join-Path $scratchOf[$g] 'repo'
                 if (Test-Path -LiteralPath $r) {
                     Get-ChildItem -LiteralPath (Join-Path $scratchOf[$g] 'copies') -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'negtest_*' -and $_.PSIsContainer } | ForEach-Object {
+                        try { Remove-ReparsePointsUnder -Path $_.FullName | Out-Null } catch { }
                         & git -C $r worktree remove --force --force $_.FullName 2>&1 | Out-Null
                     }
                 }
