@@ -16,6 +16,7 @@
                           // boundary.ps1's EspRandomAllowlist comment.
 #include "http_auth_http.h"       // kiln_http_register()
 #include "http_auth_policy_iface.h" // http_auth_policy_web_enabled()
+#include "http_body_recv.h"       // http_body_recv_full()
 #include "http_form.h"             // http_form_find_field()
 #include "http_session_iface.h"    // http_session_table() -- item 2: the real
                                     // web session table this backend must
@@ -439,6 +440,14 @@ void security_backend_web_auth_install(void)
 // invents or writes a placeholder/default password anywhere.
 #define AUTH_BOOTSTRAP_BODY_MAX 512
 
+static void auth_bootstrap_wipe(char *buf, size_t len)
+{
+    volatile char *p = buf; // volatile: the compiler must not elide the wipe
+    while (len--) {
+        *p++ = 0;
+    }
+}
+
 static esp_err_t auth_bootstrap_password_post_handler(httpd_req_t *req)
 {
     // Defence in depth (see comment above) -- re-resolves through the same
@@ -461,23 +470,27 @@ static esp_err_t auth_bootstrap_password_post_handler(httpd_req_t *req)
     }
 
     char body[AUTH_BOOTSTRAP_BODY_MAX];
-    int received = httpd_req_recv(req, body, req->content_len);
-    if (received <= 0) {
+    // Loop to content_len: a body split over two segments must not store a
+    // truncated password (HTTP audit E2 #1). Wipes body itself on failure.
+    if (!http_body_recv_full(req, body, (size_t)req->content_len)) {
+        auth_bootstrap_wipe(body, sizeof(body));
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
         return ESP_OK;
     }
-    body[received] = '\0';
 
     char username[SECURITY_HTTP_USERNAME_MAX + 1];
     char password[SECURITY_HTTP_PASSWORD_MAX + 1];
     int username_len = http_form_find_field(body, "username", username, sizeof(username));
     int password_len = http_form_find_field(body, "password", password, sizeof(password));
+    auth_bootstrap_wipe(body, sizeof(body)); // plaintext password: wiped on every exit below
     if (username_len < 0 || password_len < 0) {
+        auth_bootstrap_wipe(password, sizeof(password));
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username and password are required");
         return ESP_OK;
     }
 
     security_err_t result = web_auth_backend_set_web_password(SECURITY_ROLE_ADMIN, username, password);
+    auth_bootstrap_wipe(password, sizeof(password));
     switch (result) {
         case SECURITY_OK:
             httpd_resp_set_type(req, "application/json");

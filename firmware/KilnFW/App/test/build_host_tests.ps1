@@ -2921,6 +2921,18 @@ try {
 
     Invoke-HostTestExe -Name "recovery_switch" -ExePath $exeRsw -BuildCmd $cmdRsw
 
+    # ---- test_http_body_recv.c: its own SEPARATE executable ------------------
+    # HTTP audit E2 #1: http_body_recv_full() loops httpd_req_recv() to
+    # content_len (bootstrap_password stored a truncated password on a split
+    # body). Header-only helper plus a recv stub; no other sources linked.
+    $exeHbr = Join-Path $outDir "kilnctl_host_tests_http_body_recv.exe"
+    $hbrObjDir = Join-Path $outDir "hbr"
+    New-Item -ItemType Directory -Force -Path $hbrObjDir | Out-Null
+    $cmdHbr = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$hbrObjDir\\`" /Fe:`"$exeHbr`" `"$(Join-Path $testDir 'test_http_body_recv.c')`""
+
+    Invoke-HostTestExe -Name "http_body_recv" -ExePath $exeHbr -BuildCmd $cmdHbr
+
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
@@ -3112,8 +3124,9 @@ try {
     # call (real profiles_http.c store feeding the real profile_executor_run()).
     # 68 -> 69: added test_recovery_switch.c's own Invoke-HostTestExe
     # (recovery_switch_at_boot_threshold() restores the boot target on SET_FAILED).
+    # 69 -> 70: added test_http_body_recv.c (looped httpd_req_recv helper).
     Complete-HostTestQueue
-    $totalExpected = 69
+    $totalExpected = 70
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

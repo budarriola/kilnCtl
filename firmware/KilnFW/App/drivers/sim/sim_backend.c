@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "http_body_recv.h"
 #include "http_form.h"
 #include "uart_task_ids.h" /* THERMO_FAULT_* */
 #include "wifi_provision_state.h" /* wifi_provision_get_httpd_handle() -- item 13 */
@@ -268,11 +269,9 @@ static esp_err_t sim_post_handler(httpd_req_t *req)
     }
 
     char buf[SIM_MAX_BODY];
-    int received = httpd_req_recv(req, buf, req->content_len);
-    if (received <= 0) {
+    if (!http_body_recv_full(req, buf, (size_t)req->content_len)) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "read failed");
     }
-    buf[received] = '\0';
 
     /* Connector swap: `swap=a,b` exchanges which physical thermocouple two
      * zones read, which is what a miswired kiln actually looks like and the
