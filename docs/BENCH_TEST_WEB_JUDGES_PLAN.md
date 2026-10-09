@@ -1,6 +1,6 @@
 # Bench test WEB judges: spec for the judge-less WEB-* cases
 
-> **Status:** spec, 2026-10-09. Nothing here is built. Parent plan:
+> **Status:** spec, 2026-10-09; judges implemented the same day on origin/dev (fake-board tests only, never run on hardware): harness prerequisites `d44a3b4c`, DASH `424f4129`, PROF/STIM/ZONE `1c9d6bb7`, SAF/COMM/RDY/WIZ/SET/DISP `6d6d04e5`, DIAG/OTA/WIFI/SEC/BAK/KCFG/LOG/X `139471ff`, follow-ups `15748a19`, `8340e540`. Parent plan:
 > [`BENCH_TEST_SYSTEM_PLAN.md`](BENCH_TEST_SYSTEM_PLAN.md) section 3.7, which gives each WEB id
 > a one-line intent. This doc turns those lines into judges that an implementer can write
 > without making anything up. Every route, field and line number below was read from source at
