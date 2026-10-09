@@ -33,8 +33,12 @@ if "update_stage_set_gate(st, update_stage_manifest_gate" not in fetch:
     bad.append("MED-2: fetch does not install update_stage_manifest_gate")
 if "writer_wedged_reboot_required" not in fetch or "writer_timeout" in fetch:
     bad.append("LOW-1: wedge must report writer_wedged_reboot_required (not writer_timeout)")
-if not re.search(r"if \(s_c->wr_wedged\) \{[^}]*?update_stage_clear\(st\)", fetch, re.S):
-    bad.append("LOW-1: abandoned writer must undo a late finish (update_stage_clear)")
+# Arbiter-based undo (review 5 L1/L3): the writer asks the arbiter whether the caller already timed out,
+# and an abandoned finish is undone with update_stage_clear, an abandoned begin/write with the owned abort.
+if not re.search(r"abandoned\s*=\s*update_wr_arb_writer_done\(", fetch):
+    bad.append("LOW-1: writer must ask the arbiter (update_wr_arb_writer_done) whether it was abandoned")
+if not re.search(r"if \(abandoned\) \{.*?WR_FINISH[^}]*?update_stage_clear\(st\).*?update_stage_upload_abort_owned\(", fetch, re.S):
+    bad.append("LOW-1: abandoned writer must undo a late finish (update_stage_clear) and abort via the owned abort")
 if "update_fetch_writer_wedged()" not in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "drivers", "update", "update_http.c")).read():
     bad.append("LOW-1: stage routes must surface the wedged writer")
 

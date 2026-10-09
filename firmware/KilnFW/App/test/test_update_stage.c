@@ -230,7 +230,17 @@ static void fl_sha_abort(void *c)
     f->sha_open = false;
 }
 static void fl_lock(void *c) { ((fl_t *)c)->lock_n++; }
-static void fl_unlock(void *c) { ((fl_t *)c)->unlock_n++; }
+static update_stage_t g_st;
+// Review 7 L2 probe: at every unlock, an UPLOADING phase must already carry the owner it was begun with.
+static int g_expect_src = -1;
+static int g_torn_unlocks;
+static void fl_unlock(void *c)
+{
+    ((fl_t *)c)->unlock_n++;
+    if (g_expect_src >= 0 && g_st.phase == UPDATE_STAGE_UPLOADING && (int)g_st.source != g_expect_src) {
+        g_torn_unlocks++;
+    }
+}
 
 static fl_t g_fl;
 static update_stage_t g_st;
@@ -986,6 +996,64 @@ static void put_record_c(uint32_t z, uint32_t k, uint32_t u, const char *commit)
     memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM, &id, sizeof(id));
 }
 
+// Review 7 L4: a v1-only record (builds 735875b6..dcd67f54) is found without a commit, and the manifest
+// gate then skips the commit check; the layout the new image emits has v1 at 288 and v2 at 308.
+static void test_v1_record(void)
+{
+    TEST_SECTION("update_stage -- legacy v1 identity record (review 7 L4)");
+    update_identity_t want;
+    memset(&want, 0, sizeof(want));
+    want.zones_cfg_version = 24;
+    want.kilnlink_version = 16;
+    want.uart_version = 13;
+    memcpy(want.commit, "0123456789abcdef0123456789abcdef01234567", 40);
+    uint32_t v1[5] = { UPDATE_IMAGE_ID_MAGIC_V1, 24, 16, 13, 0 };
+    v1[4] = v1[0] ^ v1[1] ^ v1[2] ^ v1[3] ^ 0xA5A5A5A5u;
+
+    reset_board();
+    make_image(30000, "v1.2.3");
+    memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM, v1, sizeof(v1));
+    gate_rec_t r;
+    memset(&r, 0, sizeof(r));
+    r.verdict = UPDATE_STAGE_OK;
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.have_id &&
+                   r.id.magic == UPDATE_IMAGE_ID_MAGIC_V1 && r.id.uart_version == 13,
+               "R7 L4: v1-only record is found");
+    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id) == UPDATE_STAGE_OK,
+               "R7 L4: v1 record passes the manifest gate with no commit check");
+    r.id.uart_version = 14;
+    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id) == UPDATE_STAGE_ERR_POLICY,
+               "R7 L4: v1 record still gets the schema comparison");
+
+    // New-image layout: v1 first (what an old gate scans for inside its 320-byte head), v2 right after.
+    update_image_id_t v2;
+    update_image_id_make(&v2, 24, 16, 13, "0123456");
+    reset_board();
+    make_image(30000, "v1.2.3");
+    memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM, v1, sizeof(v1));
+    memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM + UPDATE_IMAGE_ID_V1_SIZE, &v2, sizeof(v2));
+    TEST_CHECK(UPDATE_STAGE_IMAGE_ID_FROM + UPDATE_IMAGE_ID_V1_SIZE + UPDATE_IMAGE_ID_SIZE <= UPDATE_STAGE_HEAD_LEN,
+               "R7 L4: both records fit inside the held-back head");
+    memset(&r, 0, sizeof(r));
+    r.verdict = UPDATE_STAGE_OK;
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.id.magic == UPDATE_IMAGE_ID_MAGIC &&
+                   strcmp(r.id.commit, "0123456") == 0,
+               "R7 L4: with both present the v2 record (commit) wins");
+    // Old gate: scans a 320-byte head from 288; the 20-byte v1 record must be found there.
+    uint32_t oldmagic = 0;
+    for (size_t o = UPDATE_STAGE_IMAGE_ID_FROM; o + UPDATE_IMAGE_ID_V1_SIZE <= 320; o += 4) {
+        uint32_t w;
+        memcpy(&w, g_img + o, 4);
+        if (w == UPDATE_IMAGE_ID_MAGIC_V1) {
+            oldmagic = w;
+        }
+    }
+    TEST_CHECK(oldmagic == UPDATE_IMAGE_ID_MAGIC_V1, "R7 L4: a v1-only scanner with a 320-byte head finds the v1 copy");
+    memcpy(want.commit, "ffffffffffffffffffffffffffffffffffffffff", 40);
+    TEST_CHECK(update_stage_manifest_gate(&want, "1.2.3", "", &r.id) == UPDATE_STAGE_ERR_POLICY,
+               "R7 L4: a v2 record still gets the commit check");
+}
+
 static void test_manifest_gate(void)
 {
     TEST_SECTION("update_stage -- fetch manifest cross-check gate");
@@ -1100,6 +1168,16 @@ static void test_status_reason(void)
     TEST_CHECK(strcmp(update_stage_status_reason(&i, false), "blank") == 0, "L2: not wedged: reason untouched");
     i.reason = "sha_mismatch";
     TEST_CHECK(strcmp(update_stage_status_reason(&i, true), "sha_mismatch") == 0, "L2: a real fault reason is not masked");
+    i.reason = "busy";
+    i.busy = true;
+    i.source = STAGE_SOURCE_GITHUB;
+    TEST_CHECK(strcmp(update_stage_status_reason(&i, true), "writer_wedged_reboot_required") == 0,
+               "R7 L1: wedged + busy GitHub-owned phase: wedge reason shown");
+    TEST_CHECK(strcmp(update_stage_status_reason(&i, false), "busy") == 0, "R7 L1: busy, not wedged: untouched");
+    i.source = STAGE_SOURCE_UPLOAD;
+    TEST_CHECK(strcmp(update_stage_status_reason(&i, true), "busy") == 0, "R7 L1: hand-upload busy is not the wedge");
+    i.busy = false;
+    i.source = STAGE_SOURCE_UNKNOWN;
     i.reason = "";
     i.staged = true;
     TEST_CHECK(strcmp(update_stage_status_reason(&i, true), "") == 0, "L2: a valid stage is not reported as wedged");
@@ -1119,10 +1197,32 @@ static void test_abort_owned(void)
     TEST_CHECK(update_stage_upload_abort_owned(&g_st, STAGE_SOURCE_UPLOAD) && g_st.phase == UPDATE_STAGE_IDLE,
                "L3: the owner can abort its own upload");
     TEST_CHECK(!update_stage_upload_abort_owned(&g_st, STAGE_SOURCE_UPLOAD), "L3: nothing active: false");
+
+    // Review 7 L2: the owner is recorded by the claim itself, so a stale source from an earlier GitHub
+    // upload can never be seen together with a newer hand upload's UPLOADING phase.
+    reset_board();
+    make_image(30000, "v1.2.3");
+    g_st.source = STAGE_SOURCE_GITHUB; // abandoned fetch left this behind
+    g_expect_src = STAGE_SOURCE_UPLOAD;
+    g_torn_unlocks = 0;
+    TEST_CHECK(update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 30000, "v1.2.3", NULL, STAGE_SOURCE_UPLOAD) ==
+                   UPDATE_STAGE_OK,
+               "R7 L2: hand upload begun over a stale GitHub source");
+    TEST_CHECK(g_st.source == STAGE_SOURCE_UPLOAD, "R7 L2: source set by begin");
+    TEST_CHECK(g_torn_unlocks == 0, "R7 L2: the lock is never released with UPLOADING and a stale owner");
+    g_expect_src = -1;
+    TEST_CHECK(!update_stage_upload_abort_owned(&g_st, STAGE_SOURCE_GITHUB) && g_st.phase == UPDATE_STAGE_UPLOADING,
+               "R7 L2: stale-source abort leaves the hand upload alone");
+    // A refused begin (busy) must not overwrite the running upload's source.
+    TEST_CHECK(update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 30000, "v1.2.3", NULL, STAGE_SOURCE_GITHUB) ==
+                   UPDATE_STAGE_ERR_BUSY && g_st.source == STAGE_SOURCE_UPLOAD,
+               "R7 L2: a losing begin does not touch the owner");
+    update_stage_upload_abort(&g_st);
 }
 
 void run_test_update_stage(void)
 {
+    test_v1_record();
     test_manifest_gate();
     test_wr_arb();
     test_status_reason();

@@ -27,7 +27,7 @@ assert(!!m, 'sanity: found the pure block in ota_page.html');
 const api = new Function(m[1] +
   '; return { GH_ERRORS: GH_ERRORS, GH_VERDICTS: GH_VERDICTS, ghErrorText: ghErrorText,' +
   ' ghVerdictText: ghVerdictText, ghDownloadQuery: ghDownloadQuery, ghCheckQuery: ghCheckQuery, ghCanDownload: ghCanDownload,' +
-  ' stageInstallable: stageInstallable, ghRefusalText: ghRefusalText };')();
+  ' stageInstallable: stageInstallable, ghRefusalText: ghRefusalText, stageWedgeNote: stageWedgeNote };')();
 
 // Every verdict name the firmware can emit has a sentence.
 const verdicts = Array.from(POLICY_C.matchAll(/return "([a-z_]+)";/g)).map(x => x[1])
@@ -79,6 +79,11 @@ assert(api.ghCanDownload({ state: 'checking', tag: 'v1' }, {}) === false, 'not w
 assert(api.ghCanDownload(null, {}) === false, 'no status -> no download');
 
 // Install only for a verified, idle stage.
+// Review 7 L1: the wedge flag drives the notice, independent of the (busy) reason.
+assert(api.stageWedgeNote({ busy: true, reason: 'busy', fetch_writer_wedged: true }).indexOf('restarted') > 0, 'L1: wedged flag shows reboot notice');
+assert(api.stageWedgeNote({ reason: 'writer_wedged_reboot_required' }) !== '', 'L1: wedge reason shows reboot notice');
+assert(api.stageWedgeNote({ reason: 'blank', fetch_writer_wedged: false }) === '', 'L1: no notice when not wedged');
+assert(SRC.indexOf("stageWedgeNote(s)") > 0 && SRC.indexOf("row('Warning', wedge)") > 0, 'L1: renderStageInfo uses the notice');
 assert(api.stageInstallable({ staged: true, header: 'ok', state: 'verified', busy: false }) === true, 'verified stage installable');
 assert(api.stageInstallable({ staged: true, header: 'ok', state: 'verified', busy: true }) === false, 'not while busy');
 assert(api.stageInstallable({ staged: false, header: 'ok', state: 'verified' }) === false, 'not when unstaged');

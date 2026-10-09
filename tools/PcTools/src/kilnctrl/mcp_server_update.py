@@ -59,6 +59,11 @@ def _fmt_status(st: dict) -> str:
         parts.append(f"sha256={st.get('sha256')}")
         parts.append(f"source={_SOURCES.get(st.get('source'), st.get('source'))}")
     parts.append(f"capacity={st.get('capacity')}")
+    if st.get("fetch_writer_wedged"):
+        parts.append("fetch_writer_wedged=True (WARNING: the board's flash writer is wedged; reboot required "
+                     "before another update can run)")
+    elif "fetch_writer_wedged" in st:
+        parts.append("fetch_writer_wedged=False")
     return ", ".join(parts)
 
 
@@ -489,6 +494,15 @@ def update_fetch_status(host: Optional[str] = None) -> str:
     except uhc.UpdateHttpError as exc:
         return f"error: could not read GET {uhc.FETCH_PATH} (host={resolved}): {exc}"
     extra = f", http_status={st.get('http_status')}" if st.get("error") else ""
+    # The wedge flag lives on the stage route (review 7 L1); best-effort read, never fails this tool.
+    try:
+        stg = uhc.get_stage_status(resolved)
+    except uhc.UpdateHttpError:
+        stg = {}
+    if stg.get("fetch_writer_wedged"):
+        extra += ", fetch_writer_wedged=True (WARNING: flash writer wedged; reboot required)"
+    elif "fetch_writer_wedged" in stg:
+        extra += ", fetch_writer_wedged=False"
     return f"ok - {_fmt_fetch(st)}, busy={st.get('busy')}{extra}; (host={resolved})"
 
 

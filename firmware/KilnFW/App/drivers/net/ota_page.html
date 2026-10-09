@@ -683,6 +683,8 @@ function renderStageInfo(s) {
     row('Staged', 'no' + (s.reason ? ' (' + s.reason + ')' : ''));
   }
   row('Capacity', s.capacity + ' bytes');
+  var wedge = stageWedgeNote(s);
+  if (wedge) row('Warning', wedge);
   box.innerHTML = rows.join('');
   document.getElementById('stageInstallBtn').disabled = !stageInstallable(s);
 }
@@ -929,6 +931,13 @@ function ghRefusalText(status, text) {
   if (body && typeof body.error === 'string') return ghErrorText(body.error);
   if (status === 409 || status === 428) return text ? String(text).trim() : 'Refused (HTTP ' + status + ').';
   return text ? String(text).trim() : ('HTTP ' + status);
+}
+/* Review 7 L1: a wedged fetch writer is shown as a reboot notice whatever the stage phase reads. */
+function stageWedgeNote(s) {
+  if (s && (s.fetch_writer_wedged === true || s.reason === 'writer_wedged_reboot_required')) {
+    return GH_ERRORS.writer_wedged_reboot_required;
+  }
+  return '';
 }
 /* UPDATE_CARD_PURE_END */
 

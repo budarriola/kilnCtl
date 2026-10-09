@@ -283,14 +283,30 @@ static void json_safe_copy(char *dst, size_t cap, const char *src)
 // The linker places .rodata_custom_desc directly after esp_app_desc_t (first DROM segment), so a hand
 // upload's stager reads the schema versions out of the image head (update_image_id_find) instead of
 // trusting headers. Needs `used`: nothing references it.
+// v1 record (20 bytes, no commit) FIRST at offset 288, then the v2 record at 308 (ends 344 =
+// UPDATE_STAGE_HEAD_LEN): boards running the v1-only gate (735875b6..dcd67f54) scan for the v1 magic in
+// their 320-byte head and would refuse every image without one (review 7 L4).
+typedef struct {
+    uint32_t v1_magic, v1_zones, v1_kilnlink, v1_uart, v1_check;
+    update_image_id_t v2;
+} image_id_pair_t;
+_Static_assert(sizeof(image_id_pair_t) == UPDATE_IMAGE_ID_V1_SIZE + UPDATE_IMAGE_ID_SIZE, "no padding");
+
 __attribute__((section(".rodata_custom_desc"), used, aligned(4)))
-const update_image_id_t g_update_image_id = {
-    .magic = UPDATE_IMAGE_ID_MAGIC,
-    .zones_cfg_version = ZONES_CFG_VERSION,
-    .kilnlink_version = KILNLINK_PROTOCOL_VERSION,
-    .uart_version = UART_PROTOCOL_VERSION,
-    .commit = FW_GIT_COMMIT,
-    .check = UPDATE_IMAGE_ID_MAGIC ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
+const image_id_pair_t g_update_image_id = {
+    .v1_magic = UPDATE_IMAGE_ID_MAGIC_V1,
+    .v1_zones = ZONES_CFG_VERSION,
+    .v1_kilnlink = KILNLINK_PROTOCOL_VERSION,
+    .v1_uart = UART_PROTOCOL_VERSION,
+    .v1_check = UPDATE_IMAGE_ID_MAGIC_V1 ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
+    .v2 = {
+        .magic = UPDATE_IMAGE_ID_MAGIC,
+        .zones_cfg_version = ZONES_CFG_VERSION,
+        .kilnlink_version = KILNLINK_PROTOCOL_VERSION,
+        .uart_version = UART_PROTOCOL_VERSION,
+        .commit = FW_GIT_COMMIT,
+        .check = UPDATE_IMAGE_ID_MAGIC ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
+    },
 };
 
 // ---- running identity ------------------------------------------------------------------------

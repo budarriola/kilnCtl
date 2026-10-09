@@ -226,6 +226,28 @@ class DowngradeGateTest(_Base):
         self.assertIn("differs from the version inside the image", out)
 
 
+class WedgeShownTest(_Base):
+    """Review 7 L1: fetch_writer_wedged is surfaced by update_status and update_fetch_status."""
+
+    _STAGE = {"phase": "uploading", "busy": True, "staged": False, "header": "blank",
+              "reason": "writer_wedged_reboot_required", "capacity": 1, "fetch_writer_wedged": True}
+
+    def test_update_status_shows_wedge(self):
+        with unittest.mock.patch.object(uhc, "get_stage_status", return_value=dict(self._STAGE)):
+            out = msu.update_status()
+        self.assertIn("fetch_writer_wedged=True", out)
+        self.assertIn("reboot required", out)
+        with unittest.mock.patch.object(uhc, "get_stage_status",
+                                        return_value=dict(self._STAGE, fetch_writer_wedged=False)):
+            self.assertIn("fetch_writer_wedged=False", msu.update_status())
+
+    def test_update_fetch_status_shows_wedge(self):
+        fetch = {"state": "failed", "kind": "download", "repo": "a/b", "busy": False}
+        with unittest.mock.patch.object(uhc, "get_fetch_status", return_value=fetch),                 unittest.mock.patch.object(uhc, "get_stage_status", return_value=dict(self._STAGE)):
+            out = msu.update_fetch_status()
+        self.assertIn("fetch_writer_wedged=True", out)
+
+
 class StatusTest(_Base):
     def test_status_reports_blank_then_staged(self):
         self.assertIn("staged=False", msu.update_status())

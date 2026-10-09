@@ -32,6 +32,21 @@ static bool claim(update_stage_t *st, update_stage_phase_t phase)
     return won;
 }
 
+// Same as claim(), but records the upload's owner inside the same locked section (review 7 L2): the
+// owned abort must never see the new phase with the previous upload's source.
+static bool claim_upload(update_stage_t *st, stage_source_t source)
+{
+    bool won = false;
+    lk(st);
+    if (st->phase == UPDATE_STAGE_IDLE) {
+        st->phase = UPDATE_STAGE_UPLOADING;
+        st->source = source;
+        won = true;
+    }
+    ul(st);
+    return won;
+}
+
 static void set_phase(update_stage_t *st, update_stage_phase_t phase)
 {
     lk(st);
@@ -139,7 +154,7 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
         memcpy(cm, commit, STAGE_COMMIT_HEX_LEN);
     }
 
-    if (!claim(st, UPDATE_STAGE_UPLOADING)) {
+    if (!claim_upload(st, source)) {
         return UPDATE_STAGE_ERR_BUSY;
     }
     st->scratch = scratch;
@@ -148,7 +163,6 @@ update_stage_err_t update_stage_upload_begin(update_stage_t *st, uint8_t *scratc
     st->received = 0;
     st->written = 0;
     st->erased_upto = 0;
-    st->source = source;
     memcpy(st->semver, sv, sizeof(st->semver));
     memcpy(st->commit, cm, sizeof(st->commit));
     st->semver_given = given;
@@ -370,7 +384,8 @@ update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, con
     // Review 3 LOW-6 / review 5 M1: when the manifest carries a commit, the commit embedded in the IMAGE
     // must be a prefix of it (the build embeds the short hash). An image with no usable commit
     // ("", "unknown", non-hex, under 7 chars) fails closed.
-    if (want->commit[0] != '\0') {
+    // A legacy v1 record carries no commit: nothing to compare (images from builds before the commit field).
+    if (want->commit[0] != '\0' && id->magic != UPDATE_IMAGE_ID_MAGIC_V1) {
         const size_t n = strnlen(id->commit, UPDATE_IMAGE_ID_COMMIT_LEN);
         if (n < 7u || n > STAGE_COMMIT_HEX_LEN) {
             return UPDATE_STAGE_ERR_POLICY;
@@ -461,14 +476,20 @@ void update_stage_upload_abort(update_stage_t *st)
 
 bool update_stage_upload_abort_owned(update_stage_t *st, stage_source_t source)
 {
-    if (st == NULL || st->source != source) {
+    if (st == NULL) {
         return false;
     }
-    if (st->phase != UPDATE_STAGE_UPLOADING && st->phase != UPDATE_STAGE_VERIFYING) {
-        return false;
+    // Owner test, hash abort and IDLE transition in ONE locked section (review 7 L2). sha_abort takes no
+    // stage lock, so calling it here cannot deadlock.
+    bool aborted = false;
+    lk(st);
+    if (st->source == source && (st->phase == UPDATE_STAGE_UPLOADING || st->phase == UPDATE_STAGE_VERIFYING)) {
+        sha_abort(st);
+        st->phase = UPDATE_STAGE_IDLE;
+        aborted = true;
     }
-    update_stage_upload_abort(st);
-    return true;
+    ul(st);
+    return aborted;
 }
 
 const char *update_stage_status_reason(const update_stage_info_t *info, bool writer_wedged)
@@ -476,7 +497,10 @@ const char *update_stage_status_reason(const update_stage_info_t *info, bool wri
     if (info == NULL) {
         return "";
     }
-    if (writer_wedged && !info->staged && info->reason != NULL && strcmp(info->reason, "blank") == 0) {
+    // Review 7 L1: while the wedged op hangs the stage is UPLOADING/VERIFYING and reads "busy"; that busy is
+    // the wedge when the GitHub fetch owns it. A real fault reason (sha_mismatch, ...) is never masked.
+    if (writer_wedged && !info->staged && info->reason != NULL &&
+        (strcmp(info->reason, "blank") == 0 || (strcmp(info->reason, "busy") == 0 && info->source == STAGE_SOURCE_GITHUB))) {
         return "writer_wedged_reboot_required";
     }
     return info->reason;
@@ -510,6 +534,7 @@ update_stage_err_t update_stage_get_status(update_stage_t *st, uint8_t *scratch,
         out->phase = st->phase;
         out->bytes_done = st->received;
         out->bytes_total = st->total;
+        out->source = st->source;
         ul(st);
         out->busy = true;
         out->reason = "busy";
