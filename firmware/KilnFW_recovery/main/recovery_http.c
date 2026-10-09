@@ -43,6 +43,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "http_origin_check.h"
 #include "recovery_apply.h"
 #include "recovery_apply_esp.h"
 #include "recovery_health_policy.h"
@@ -237,6 +238,49 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
 }
 
 // GET / -- the embedded self-contained recovery page.
+// MED-1: refuse cross-origin state-changing requests (same rule as the
+// application's kiln_http_prehandler()). Each route's real handler rides in
+// user_ctx; the guard runs first, before the body is read.
+static esp_err_t origin_guard(httpd_req_t *req)
+{
+    esp_err_t (*real)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
+    if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
+        char origin[HTTP_ORIGIN_HDR_BUF], referer[HTTP_ORIGIN_HDR_BUF], host[HTTP_ORIGIN_HDR_BUF];
+        const char *o = NULL, *r = NULL, *h = NULL;
+        bool overlong = false;
+        size_t n = httpd_req_get_hdr_value_len(req, "Origin");
+        if (n >= sizeof(origin)) {
+            overlong = true;
+        } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) == ESP_OK) {
+            o = origin;
+        }
+        if (o == NULL && !overlong) {
+            n = httpd_req_get_hdr_value_len(req, "Referer");
+            if (n >= sizeof(referer)) {
+                overlong = true;
+            } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Referer", referer, sizeof(referer)) == ESP_OK) {
+                r = referer;
+            }
+        }
+        if (o != NULL || r != NULL) {
+            n = httpd_req_get_hdr_value_len(req, "Host");
+            if (n >= sizeof(host)) {
+                overlong = true;
+            } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) == ESP_OK) {
+                h = host;
+            }
+        }
+        if (http_origin_is_cross_origin(o, r, h, overlong)) {
+            ESP_LOGW(TAG, "cross-origin refused: method=%d uri=%s", (int)req->method, req->uri);
+            httpd_resp_set_status(req, "403 Forbidden");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"error\":\"cross_origin\"}", HTTPD_RESP_USE_STRLEN);
+            return ESP_FAIL; // close: do not purge an unread (possibly huge) body
+        }
+    }
+    return real(req);
+}
+
 static esp_err_t root_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -1012,7 +1056,10 @@ esp_err_t recovery_http_start(void)
     unsigned registered = 0;
     if (start_rc == ESP_OK) {
         for (size_t i = 0; i < expected; i++) {
-            esp_err_t rr = httpd_register_uri_handler(server, &routes[i]);
+            httpd_uri_t wrapped = routes[i];
+            wrapped.user_ctx = (void *)routes[i].handler;
+            wrapped.handler = origin_guard;
+            esp_err_t rr = httpd_register_uri_handler(server, &wrapped);
             if (rr == ESP_OK) {
                 registered++;
             } else {

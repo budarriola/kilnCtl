@@ -11,6 +11,7 @@
 #include "esp_log.h"
 
 #include "http_auth_enforce.h"
+#include "http_origin_check.h"
 #include "http_auth_policy_iface.h"
 #include "http_session_iface.h"
 #include "wifi_prov.h" // wifi_prov_request_arrived_on_ap() -- 2026-09-29 via_ap tagging
@@ -281,6 +282,38 @@ static esp_err_t refusal_result(const httpd_req_t *req) {
     return http_auth_refusal_should_close(req->content_len) ? ESP_FAIL : ESP_OK;
 }
 
+// MED-1 (ROUTE_TIER_REVIEW_2026-10-09): refuse a cross-origin state-changing
+// request. Fixed small buffers (3 x HTTP_ORIGIN_HDR_BUF on the httpd stack).
+static bool request_is_cross_origin(httpd_req_t *req) {
+    char origin[HTTP_ORIGIN_HDR_BUF], referer[HTTP_ORIGIN_HDR_BUF], host[HTTP_ORIGIN_HDR_BUF];
+    const char *o = NULL, *r = NULL, *h = NULL;
+    bool overlong = false;
+    size_t n = httpd_req_get_hdr_value_len(req, "Origin");
+    if (n >= sizeof(origin)) {
+        overlong = true;
+    } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Origin", origin, sizeof(origin)) == ESP_OK) {
+        o = origin;
+    }
+    if (o == NULL && !overlong) {
+        n = httpd_req_get_hdr_value_len(req, "Referer");
+        if (n >= sizeof(referer)) {
+            overlong = true;
+        } else if (n > 0 &&
+                   httpd_req_get_hdr_value_str(req, "Referer", referer, sizeof(referer)) == ESP_OK) {
+            r = referer;
+        }
+    }
+    if (o != NULL || r != NULL) {
+        n = httpd_req_get_hdr_value_len(req, "Host");
+        if (n >= sizeof(host)) {
+            overlong = true;
+        } else if (n > 0 && httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) == ESP_OK) {
+            h = host;
+        }
+    }
+    return http_origin_is_cross_origin(o, r, h, overlong);
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever
@@ -292,6 +325,16 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_send(req, "auth wiring error", HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
+    }
+
+    // MED-1: cross-origin refusal comes first -- before any handler work, before
+    // the body is read, and regardless of auth state.
+    if (ctx->method != HTTP_GET && ctx->method != HTTP_HEAD && request_is_cross_origin(req)) {
+        ESP_LOGW(AUTH_HTTP_TAG, "cross-origin refused: method=%d uri=%s", (int)ctx->method, ctx->uri);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send(req, "{\"error\":\"cross_origin\"}", HTTPD_RESP_USE_STRLEN);
+        return refusal_result(req);
     }
 
     bool web_enabled = http_auth_policy_web_enabled();

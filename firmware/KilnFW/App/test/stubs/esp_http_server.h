@@ -43,6 +43,7 @@ typedef struct httpd_req {
 typedef enum {
     HTTP_GET = 0,
     HTTP_POST = 1,
+    HTTP_HEAD = 2,
 } httpd_method_t;
 
 typedef enum {

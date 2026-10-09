@@ -12,6 +12,7 @@
 #include "test_common.h"
 
 #include "../drivers/http/http_auth_enforce.h"
+#include "../drivers/http/http_origin_check.h"
 
 static void test_lookup_tier_real_routes(void) {
     TEST_SECTION("http_auth_lookup_tier -- against the real route_tier_table.h, not a mirror");
@@ -591,7 +592,26 @@ static void test_refusal_close_threshold(void) {
     TEST_CHECK(http_auth_refusal_should_close(2500000u), "a multi-MB OTA image body: close");
 }
 
+static void test_origin_check(void) {
+    TEST_SECTION("http_origin_is_cross_origin -- MED-1 CSRF guard");
+    TEST_CHECK(!http_origin_is_cross_origin("http://192.168.1.50", NULL, "192.168.1.50", false), "match");
+    TEST_CHECK(!http_origin_is_cross_origin("http://Kiln.Local:80", NULL, "kiln.local", false), "case + port default 80");
+    TEST_CHECK(!http_origin_is_cross_origin("http://10.0.0.2:8080", NULL, "10.0.0.2:8080", false), "explicit port match");
+    TEST_CHECK(http_origin_is_cross_origin("http://evil.example", NULL, "192.168.1.50", false), "host mismatch");
+    TEST_CHECK(http_origin_is_cross_origin("http://192.168.1.50:8080", NULL, "192.168.1.50", false), "port mismatch");
+    TEST_CHECK(http_origin_is_cross_origin("null", NULL, "192.168.1.50", false), "Origin: null refused");
+    TEST_CHECK(http_origin_is_cross_origin("null", "http://192.168.1.50/x", "192.168.1.50", false), "null Origin beats good Referer");
+    TEST_CHECK(!http_origin_is_cross_origin(NULL, "http://192.168.1.50/settings?a=1", "192.168.1.50", false), "Referer fallback match");
+    TEST_CHECK(http_origin_is_cross_origin(NULL, "http://evil.example/p", "192.168.1.50", false), "Referer fallback mismatch");
+    TEST_CHECK(!http_origin_is_cross_origin(NULL, NULL, "192.168.1.50", false), "both absent allowed");
+    TEST_CHECK(!http_origin_is_cross_origin(NULL, NULL, NULL, false), "both absent, no Host allowed");
+    TEST_CHECK(http_origin_is_cross_origin("http://192.168.1.50", NULL, NULL, false), "Origin without Host refused");
+    TEST_CHECK(http_origin_is_cross_origin("http://192.168.1.50", NULL, "192.168.1.50", true), "overlong header refused");
+    TEST_CHECK(http_origin_is_cross_origin("garbage", NULL, "192.168.1.50", false), "unparseable Origin refused");
+}
+
 void run_test_http_auth_enforce(void) {
+    test_origin_check();
     test_page_shell_allowlist();
     test_lookup_tier_real_routes();
     test_effective_tier_fail_closed_default();

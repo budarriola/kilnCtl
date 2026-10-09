@@ -147,6 +147,7 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
 }
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status) { (void)r; (void)status; return ESP_OK; }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value) { (void)r; (void)field; (void)value; return ESP_OK; }
+esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 
 // ota_http_get_client_ip() -- http_auth_http.c's resolve_role_for_request()
 // path calls this to bind a session lookup to the caller's IP (ca7a7d31).

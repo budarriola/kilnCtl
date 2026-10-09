@@ -1656,6 +1656,10 @@ at 149/149 and the combined `kilnctl_host_tests.exe` at 8789/8789.
 
 ---
 
+### Cross-origin guard (2026-10-09, ROUTE_TIER_REVIEW MED-1)
+
+With web auth off, any page a LAN user visits could POST a plain form to the board. `kiln_http_prehandler()` (and the recovery image's `origin_guard` wrapper) now refuses every non-GET/HEAD request whose `Origin` (else `Referer`) host[:port] differs from the `Host` header (missing port = 80), whose `Origin` is `null`, or whose header exceeds the 96-byte buffer, with 403 `{"error":"cross_origin"}` before any handler work or body read, regardless of auth state. Requests carrying neither header (MCP tools, curl, LCD) pass. Logic is the header-only `http_origin_check.h`, tested in `test_http_auth_enforce.c`.
+
 ## 13. Owner decisions — settled
 
 Settled 2026-09-16. Two went against this plan's first-draft recommendation;
