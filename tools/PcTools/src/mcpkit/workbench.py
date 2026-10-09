@@ -207,7 +207,7 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
     except FileNotFoundError:
         return f"{tag}: error: {argv[0]} not found on PATH"
     except subprocess.TimeoutExpired as exc:
-        proc.kill()
+        _kill_proc_tree(proc)
         try:
             out, err = proc.communicate(timeout=10)
         except Exception:  # pragma: no cover
@@ -219,6 +219,24 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
     output = (completed.stdout or "") + (completed.stderr or "")
     return _summarize(tag, argv, completed.returncode, output, time.monotonic() - started,
                       output_check=output_check)
+
+
+def _kill_proc_tree(proc: "subprocess.Popen") -> None:
+    """Kill ``proc`` and every descendant (idf.py, ninja, compilers).
+
+    ``proc.kill()`` alone ends only the PowerShell wrapper on Windows and
+    leaves the build running, orphaned, after the lock/slot are released.
+    Reuses buildgate's tree-kill; falls back to ``proc.kill()``.
+    """
+    try:
+        from .buildgate import _kill_tree
+        _kill_tree(proc.pid)
+    except Exception:  # pragma: no cover - non-Windows / helper failure
+        pass
+    try:
+        proc.kill()
+    except Exception:  # pragma: no cover
+        pass
 
 
 def _watch_stall(tag: str, argv: "Sequence[str]", proc: "subprocess.Popen", started: float,
@@ -251,7 +269,7 @@ def _watch_stall(tag: str, argv: "Sequence[str]", proc: "subprocess.Popen", star
             reason = (f"stalled: no build output for {idle:.0f}s "
                       f"(stall limit {stall_seconds:.0f}s, ran {now - started:.0f}s total)")
         if reason:
-            proc.kill()
+            _kill_proc_tree(proc)
             break
         time.sleep(poll_seconds)
     try:
@@ -273,6 +291,18 @@ def _env_seconds(name: str, default: float) -> float:
         return value if value > 0 else default
     except ValueError:
         return default
+
+
+def _build_ceiling_seconds() -> float:
+    """Absolute build ceiling, clamped under the gate's hard max-hold.
+
+    The gate kills a slot holder at ``max_hold_hard_seconds()`` (default
+    7200 s) with no KILLED: reason, so a larger ceiling is unreachable.
+    Stay 60 s under it so our own kill (with a reason) fires first.
+    """
+    from .buildgate import max_hold_hard_seconds
+    return max(60.0, min(_env_seconds("KILNCTL_BUILD_CEILING_S", 10800),
+                         max_hold_hard_seconds() - 60.0))
 
 
 def _powershell(script: str, extra: "Sequence[str]" = ()) -> "list[str]":
@@ -564,7 +594,7 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     kilnfw_report = _run_locked(
         f"kilnfw-{target}", build_dir,
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
-        timeout=_env_seconds("KILNCTL_BUILD_CEILING_S", 10800),
+        timeout=_build_ceiling_seconds(),
         stall_seconds=_env_seconds("KILNCTL_BUILD_STALL_S", 900),
         gate_label=f"kilnfw-{target}", gate_wait=wait_result)
     if "FAILED (lock contention)" in kilnfw_report and saftyfw_report:

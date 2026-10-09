@@ -31,3 +31,60 @@ def test_ceiling_still_applies_to_a_progressing_build():
     result = _run(code, timeout=2, stall_seconds=30)
     assert "TIMEOUT" in result
     assert "absolute ceiling" in result
+
+
+def _pid_alive(pid):
+    from mcpkit.buildgate import pid_alive
+    return pid_alive(pid)
+
+
+def _spawn_parent_code(pidfile):
+    return (
+        "import subprocess, sys, time\n"
+        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+        "print('start', flush=True)\n"
+        "time.sleep(120)\n"
+    )
+
+
+def _wait_gone(pid, secs=10):
+    import time
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def test_stall_kill_takes_down_grandchildren(tmp_path):
+    import os
+    pidfile = tmp_path / "child.pid"
+    result = _run(_spawn_parent_code(pidfile), timeout=60, stall_seconds=2.0)
+    assert "KILLED: stalled" in result
+    pid = int(pidfile.read_text())
+    try:
+        assert _wait_gone(pid), "grandchild survived the stall kill"
+    finally:
+        if _pid_alive(pid):
+            os.kill(pid, 9)
+
+
+def test_timeout_kill_takes_down_grandchildren(tmp_path):
+    import os
+    pidfile = tmp_path / "child.pid"
+    result = workbench._run("tt", [_PY, "-u", "-c", _spawn_parent_code(pidfile)], timeout=3)
+    assert "TIMEOUT" in result
+    pid = int(pidfile.read_text())
+    try:
+        assert _wait_gone(pid), "grandchild survived the timeout kill"
+    finally:
+        if _pid_alive(pid):
+            os.kill(pid, 9)
+
+
+def test_build_ceiling_clamped_under_gate_hard_max(monkeypatch):
+    monkeypatch.setenv("KILNCTL_BUILD_CEILING_S", "10800")
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_HARD_SEC", "7200")
+    assert workbench._build_ceiling_seconds() == 7140.0
