@@ -359,108 +359,22 @@ Wire rules for all three (review of WT-B, 2026-09-24):
   exceeded. `cmd_val[24]` already fits the longest new command
   (`totp_enroll_confirm`, 19 chars).
 
-## 7. Work tranches
+## 7. Pending: live-board verification (only open item)
 
-**WT-A — firmware: TOTP core + NVS + routes. DONE 2026-09-24**,
-`totproutes_6k74k3` worktree: core (`drivers/net/totp.c`/`.h`) and
-`totp_config.c`/`.h` were already DONE/host-tested (WT-D below). This pass
-added `firmware/KilnFW/App/drivers/http/auth_totp_http.c`/`.h` (`GET
-/api/auth/totp_status`, `POST /api/auth/forgot`, `POST /api/auth/reset` --
-2 handlers plus the status read, section 6a's 503/429/202/200 shapes, the
-per-IP backoff ladder, the single-use reset-token table) and
-`totp_http_core.c`/`.h` (pure pending-secret/reset-token logic, host-tested
-in `test_totp_http_core.c`, 11 cases). Enrollment/disable ended up folding
-into the existing `POST /api/auth/security` cmd= dispatch instead of new
-routes, per section 6b (WT-B's chosen shape, confirmed against WT-B's
-landed `security_page.html`/`app.js` at `e8750924` after a rebase) --
-`security_http.c` gained `cmd=totp_enroll_begin`/`totp_enroll_confirm`/
-`totp_disable`, all returning `{"ok":bool}` (begin also carries
-`secret_base32`/`otpauth_uri`/`board_time_utc`/`sntp_synced`), an unsynced
-clock reported as `{"ok":false,"clock_unsynced":true}` rather than a raised
-503 (this route's page JS only reads the JSON body). Only 3 new routes
-total (`totp_status` GET ADMIN, `forgot`/`reset` POST OPEN) --
-`check_uri_handler_cap.ps1` reports 163/170, 7 spare. Also fixed in this
-commit: `check_flash_worker_lint.ps1` (added a `totp_config.c` allowlist
-entry -- Pattern 3, reached only from `security_http.c`'s cmd= handlers and
-the reset-gesture path, both internal-SRAM-stack, never PSRAM, never the
-flash worker) and the additive TOTP clear in
-`auth_reset_gesture_wiring.c`'s four-corner confirm path. Negative-tested:
-byte-sabotaged `totp_http_core.c`'s reset-token single-use check, confirmed
-`check_00_kilnfw_host_tests.ps1` failed, restored by hand (empty
-`git diff`), forced full rebuild, confirmed pass again.
+WT-A (firmware routes + NVS), WT-B (web UI), WT-C (PcTools MCP wrappers), WT-D
+(host tests, RFC 6238 Appendix B) and the 2026-09-25 owner decisions (credential
+wipe disenrolls TOTP via `totp_wipe_disenroll()`; enrollment refused while web
+auth is off) are all built, host-tested and negative-tested. Host coverage:
+`test_totp.c`, `test_totp_config_persist.c`, `test_totp_http_core.c`. The
+`security_backend_web_auth.c` vtable wiring is ESP-only (target build + inspection).
 
-**WT-B — web UI: enrollment page + forgot-password modal flow. DONE
-2026-09-24** (`62f8bd4e`, gesture follow-up `cafc80f3`): the login modal's
-forgot-password flow, settings-page enrollment with a client-side-rendered
-QR, `test_forgot_password_modal.js` (48) and `test_qrcode_encoder.js` (17).
-Plan section 6b's field names are the shape WT-A must implement against; do
-not rewrite that section here.
-
-**WT-C — PcTools MCP wrappers. DONE 2026-09-24 (code side; live-board
-verification still pending WT-A).** Sizes: small. Files: new
-`tools/PcTools/src/kilnctrl/totp_http_client.py`, MCP registration for two
-tools: `totp_enroll_status` (read-only — reports `{"enrolled": bool}` only,
-never a secret, ADMIN session) and `totp_reset_password(confirm=True)` —
-**takes the TOTP code from the environment variable `KILNCTL_TOTP_CODE`,
-never as a call parameter**, per this task's explicit instruction (keeps a
-live code out of any MCP call log the way credentials are already kept out
-per this repo's Credentials rule). Depends on: WT-A's routes. Checks:
-`run_pctools_tests` via the pytest runner. Acceptance: `totp_reset_password`
-refuses without `confirm=True` and refuses if `KILNCTL_TOTP_CODE` is unset
-or empty, reporting presence as `[bool]` only; both tools callable via
-`kiln_find`/`kiln_call` after a server restart.
-
-**WT-D — host tests: RFC 6238 Appendix B vectors + code lifecycle.** DONE,
-`totpfw` worktree: `test_totp.c` (Appendix B 8-digit vectors truncated to
-each's own digit count directly via `totp_hotp_truncate(secret, len, ctr,
-digits)`, SHA1/HMAC-SHA1 known vectors, +-1 window, replay refusal, base32
-round trip incl. RFC 4648 SS10 examples, otpauth URI) and
-`test_totp_config_persist.c` (absent/OK/UNREADABLE tri-state, re-enroll
-resets counter, RAM cache lazy-load, clear erases + read-back verifies,
-idempotent clear, corrupt-CRC->UNREADABLE never ABSENT) both join the main
-combined host-test executable. Negative-tested: flipped the dynamic-
-truncation mask (`0x7Fu` -> `0xFFu`) in `totp_hotp_truncate()`, reran
-`check_00_kilnfw_host_tests.ps1`, confirmed 4 Appendix-B vectors FAIL,
-restored the source by hand from a byte copy (never `git checkout`/stash),
-then forced a rebuild and confirmed 9-of-9 local sub-suites + the combined
-executable pass clean again. Sizes: small-medium. HTTP handlers are target-build only (per
-`project_http_handlers_are_target_build_only`) — do not attempt to
-host-test the routes themselves. Host-testable pieces: the HMAC-SHA1 TOTP
-compute itself, validated directly against **RFC 6238 Appendix B's**
-published test vectors (the SHA1 rows: 8-digit truncation at the RFC's own
-listed test seed/counter values, or the equivalent 6-digit truncation of
-the same computed value, since Appendix B's vectors are stated as 8-digit
-but the underlying HMAC/counter math this board reuses for 6-digit codes is
-identical up to the final modulus), the ±1-step window/replay-counter
-state machine, the base32 encode/decode round trip, and the NVS
-struct/write-only-secret serializer (assert no secret key in any GET JSON
-output — same discipline the email plan specified for `smtp_password`).
-Files: new `firmware/KilnFW/App/test/test_totp.c`,
-`test_totp_config_persist.c`. Checks: `-Only "check_00_kilnfw_host_tests"`.
-Acceptance: RFC 6238 Appendix B vectors pass exactly; a negative test that
-corrupts the counter-window check (or the replay-rejection logic) and
-confirms the host-test suite catches it, then a forced full rebuild before
-restoring by hand — not a hand-restore alone, per this repo's
-negative-test-every-check rule.
-
-**Dependency summary:** WT-A, WT-B, WT-C (code side) and WT-D are all done
-2026-09-24. WT-C's live-board verification against these routes is the only
-remaining follow-up, not tracked as its own tranche.
-
-## 8. Two 2026-09-25 owner decisions -- DONE except live-board verification
-
-Credential wipe now also disenrolls TOTP (`web_auth_backend_clear_all_credentials()`)
-and enrollment (not disable) now requires web auth on (`totp_enroll_allowed()`),
-both negative-tested and host/target-build verified. The LCD four-corner
-gesture's own reset-token gap (it clears the secret but not outstanding
-`/api/auth/forgot` tokens) is not a hole: `reset_post_handler` rechecks
-`totp_config_enrolled()` and the admin record at token-use time, so a stale
-token cannot outlive a disenrollment either way.
-
-**Host coverage (2026-10-07):** the wipe's TOTP half is now `totp_wipe_disenroll()` in
-`totp_http_core.h`, called by `web_auth_backend_clear_all_credentials()`; `test_totp_http_core.c`
-runs it against the real `totp_config` on the fake KV and asserts secret ABSENT, enrolled=false,
-counter cleared, reset tokens and pending secret dropped, and `totp_enroll_allowed(false)`.
-
-**Pending:** live-board verification only (the vtable wiring in `security_backend_web_auth.c` is
-ESP-only and checked by target build + inspection).
+Steps, on the bench board with web auth on and an authenticator app:
+1. Settings page: enroll (`totp_enroll_begin`, scan QR, `totp_enroll_confirm`);
+   `totp_enroll_status` must report `enrolled: true` and no secret.
+2. Set `KILNCTL_TOTP_CODE` from the app and `KILNCTL_WEB_PASSWORD_NEW`; call
+   `totp_reset_password(confirm=True)`; it must report success and the
+   follow-up login with the new password must work.
+3. Replay the same code: must be refused (single use / replay counter).
+4. Credential wipe (or LCD four-corner gesture): `totp_enroll_status` must go
+   back to `enrolled: false`.
+5. With web auth off, enrollment must be refused.
