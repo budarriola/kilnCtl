@@ -324,27 +324,49 @@ function New-KilnBuildGateTicket {
 }
 
 # Names of live tickets, oldest first. Deletes tickets whose pid is dead.
+# Cost matters: every waiter runs this every 500 ms, and with ~100 queued tickets a
+# per-ticket Get-Content + ConvertFrom-Json + Get-Process took >13 s per scan on a loaded
+# box, starving the head waiter's own heartbeat. So: ONE process snapshot per scan, the pid
+# is read from the ticket NAME (<ms>-<pid>-<guid>), and the JSON is parsed only to compare the
+# start time of a ticket whose pid is alive.
 function Get-KilnBuildGateLiveTickets {
     param([string]$Lane)
     $dir = Get-KilnBuildGateQueueDir -Lane $Lane
-    $live = @()
-    if (-not (Test-Path -LiteralPath $dir)) { return $live }
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
     $now = [DateTime]::UtcNow
-    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter "*.ticket" -ErrorAction SilentlyContinue)) {
-        $alive = $false
-        try {
-            $t = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
-            $alive = Test-KilnPidAlive -ProcessId ([int]$t.pid) -StartEpoch $t.proc_start
-        } catch { $alive = $true }   # half-written: assume live this pass
-        if (-not $alive) {
+    # One cheap process listing (no per-pid exceptions, no StartTime). A ticket whose pid is
+    # gone is deleted; a hung one (no heartbeat) is skipped. Only the first few survivors, the
+    # ones that can actually be head, pay for the JSON read + start-time (pid-reuse) check.
+    $pids = @{}
+    foreach ($p in [System.Diagnostics.Process]::GetProcesses()) { $pids[[int]$p.Id] = $p }
+    $cand = @()
+    foreach ($f in @([System.IO.DirectoryInfo]::new($dir).GetFiles("*.ticket") | Sort-Object Name)) {
+        $tpid = $null
+        if ($f.Name -match '^\d+-(\d+)-') { $tpid = [int]$Matches[1] }
+        if ($null -ne $tpid -and -not $pids.ContainsKey($tpid)) {
             try { Remove-Item -LiteralPath $f.FullName -Force } catch { }
             continue
         }
-        # A live pid that stopped touching its ticket (hung) is skipped, not deleted.
         if (($now - $f.LastWriteTimeUtc).TotalSeconds -gt $script:KilnGateTicketStaleSec) { continue }
-        $live += $f.Name
+        $cand += [PSCustomObject]@{ File = $f; Pid = $tpid }
     }
-    return @($live | Sort-Object)
+    $live = @()
+    $checked = 0
+    foreach ($c in $cand) {
+        if ($checked -lt 3 -and $null -ne $c.Pid) {
+            $checked++
+            try {
+                $t = Get-Content -LiteralPath $c.File.FullName -Raw | ConvertFrom-Json
+                if ($null -ne $t.proc_start -and -not (Test-KilnPidAlive -ProcessId $c.Pid -StartEpoch $t.proc_start)) {
+                    try { Remove-Item -LiteralPath $c.File.FullName -Force } catch { }
+                    $checked--
+                    continue
+                }
+            } catch { }   # half-written: assume live this pass
+        }
+        $live += $c.File.Name
+    }
+    return @($live)
 }
 
 function Remove-KilnBuildGateTicket {

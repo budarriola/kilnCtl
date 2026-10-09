@@ -699,3 +699,42 @@ def test_ps_hold_decision_pure():
     p = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
                        capture_output=True, text=True, timeout=60)
     assert "R keep kill keep keep kill" in p.stdout, (p.stdout, p.stderr)
+
+
+def test_ps_ticket_scan_skips_stale_and_dead_and_is_cheap(monkeypatch, tmp_path):
+    """A hung head ticket (live pid, no heartbeat) and a dead-pid ticket must not block the
+    FIFO, and the scan every waiter runs each 500 ms must stay cheap with ~200 queued tickets
+    (it took >13 s per scan with 119 tickets before the one-process-listing rewrite)."""
+    import json
+    import shutil
+    import subprocess
+    import time
+
+    ps = shutil.which("powershell")
+    if ps is None:
+        pytest.fail("powershell not available")
+    q = tmp_path / "gate" / "light" / "queue"
+    q.mkdir(parents=True)
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_DIR", str(tmp_path / "gate"))
+    me = os.getpid()
+    body = json.dumps({"pid": me, "proc_start": None, "label": "t", "lane": "light"})
+    stale = q / f"{1:015d}-{me}-aaaaaaaa.ticket"
+    stale.write_text(body)
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    (q / f"{2:015d}-999999-bbbbbbbb.ticket").write_text(body)  # dead pid
+    for i in range(200):
+        (q / f"{10 + i:015d}-{me}-{i:08x}.ticket").write_text(body)
+    gate_ps1 = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+        "tools", "build_gate.ps1")
+    script = (f". '{gate_ps1}'; $sw=[Diagnostics.Stopwatch]::StartNew(); "
+              "$l=@(Get-KilnBuildGateLiveTickets -Lane light); "
+              "Write-Output \"COUNT=$($l.Count) FIRST=$($l[0]) MS=$($sw.ElapsedMilliseconds)\"")
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                       capture_output=True, text=True, timeout=120, env=os.environ.copy())
+    assert "COUNT=200 " in r.stdout, (r.stdout, r.stderr)
+    assert f"FIRST={10:015d}-" in r.stdout, r.stdout
+    assert not (q / f"{2:015d}-999999-bbbbbbbb.ticket").exists()
+    ms = int(r.stdout.rsplit("MS=", 1)[1].split()[0])
+    assert ms < 2500, f"ticket scan took {ms} ms"
