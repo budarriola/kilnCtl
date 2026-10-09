@@ -35,17 +35,21 @@ firmware/:
 
 Expectations judged (exit 1 if any fails):
   E1 link reported down (age_ms > 1500 or link_up false) inside the window.
-  E2 a relay-on re-assert (only for a relay ALREADY commanded on, so it
-     changes nothing if accepted) is refused while the link is down; noted
-     "not probed" if no relay is on at that moment.
+  E2 while the link is down the ESP's isolated fault line is asserted
+     (safety status FAULT flag, driven by SAFETY_FAULT_SRC_SAFETY_LINK at
+     safety_link_poll.c:313, which blocks every heater-on). FAIL if the fault
+     line reads clear while the link is down (heat still being granted);
+     "not observable" (reported, not failed) if the flag cannot be read.
+     No relay write is ever made: the owner's system_mode_gate refuses relay
+     and zone writes (409) during any firing regardless of link state, so a
+     write probe would prove nothing, and we do not poke relays mid-firing.
   E3 link recovers and the Pico fw_version is reported with a changed
      boot_id, within the 45 s window.
   E4 link down for < 30 s and the firing is RUNNING afterwards, never FAULTED.
   E5 Pico trip_reason unchanged vs the pre-snapshot (no S6b or other trip).
 
 SAFETY: reboots the safety processor under a live firing on purpose. It never
-starts a firing, never turns on a relay that was not already on, never clears
-a trip.
+starts a firing, never writes a relay, never clears a trip.
 
 Usage:
     uv run --project tools/PcTools python \\
@@ -90,7 +94,8 @@ class RealBoard:
 
     def link(self):
         st = self.m._safety.get_status()
-        return {"link_up": bool(st.link_up), "age_ms": st.age_ms}
+        return {"link_up": bool(st.link_up), "age_ms": st.age_ms,
+                "fault_asserted": bool(st.fault_asserted)}
 
     def pico_version(self):
         v = self.m._safety.get_fw_version()
@@ -106,14 +111,6 @@ class RealBoard:
                 "trip_event_ever_received": t.ever_received,
                 "frames_sent": s.frames_sent, "frames_received": s.frames_received,
                 "crc_errors": s.crc_errors, "timeouts": s.timeouts}
-
-    def relays_on(self):
-        state = self.m._io.read()
-        return [n for n in range(1, 5) if state.relay(n)]
-
-    def relay_on_refused(self, relay):
-        """Re-assert ON for a relay already on. True = refused."""
-        return not bool(self.m._io.set_relay(relay, True))
 
     def reset_pico(self):
         return self.m.debug_reset(peer="pico")
@@ -141,7 +138,7 @@ def run_reboot(board, *, window_s=DEFAULT_WINDOW_S, poll_s=DEFAULT_POLL_S,
                clock=time.time, sleep=time.sleep, emit=None):
     """Pre-snapshot, reset the Pico, poll, post-snapshot. Returns evidence."""
     ev = {"pre": snapshot(board), "t_reset_call_s": None, "reset_result": None,
-          "t_link_down_s": None, "relay_probe": {"done": False},
+          "t_link_down_s": None, "link_down_fault": None,
           "t_link_recovered_s": None, "t_version_back_s": None,
           "firing_state_samples": [], "post": None, "window_s": window_s}
     t0 = clock()
@@ -159,15 +156,9 @@ def run_reboot(board, *, window_s=DEFAULT_WINDOW_S, poll_s=DEFAULT_POLL_S,
             ev["t_link_down_s"] = t
             if emit:
                 emit(f"  t+{t:6.2f}s link DOWN {link}")
-        if down and not ev["relay_probe"]["done"]:
-            on = _safe(board.relays_on, [])
-            on = on if isinstance(on, list) else []
-            if on:
-                refused = _safe(lambda: board.relay_on_refused(on[0]), None)
-                ev["relay_probe"] = {"done": True, "relay": on[0], "t_s": t,
-                                     "refused": refused if isinstance(refused, bool) else None}
-            else:
-                ev["relay_probe"] = {"done": True, "skipped": "no relay on", "t_s": t}
+        if down and ev["link_down_fault"] is None:
+            fa = link.get("fault_asserted")
+            ev["link_down_fault"] = fa if isinstance(fa, bool) else "unreadable"
         ex = _safe(board.exec_status)
         if len(ev["firing_state_samples"]) < 600:
             ev["firing_state_samples"].append([round(t, 2), (ex or {}).get("state")])
@@ -192,13 +183,13 @@ def judge(ev):
     checks = {}
     pre, post = ev["pre"], ev["post"] or {}
     checks["E1_link_down_seen"] = ev["t_link_down_s"] is not None
-    rp = ev["relay_probe"]
-    if rp.get("skipped"):
-        checks["E2_relay_refused_while_down"] = None  # not probed
-    elif rp.get("done"):
-        checks["E2_relay_refused_while_down"] = rp.get("refused") is True
+    fa = ev["link_down_fault"]
+    if fa is True:
+        checks["E2_heat_blocked_while_down"] = True
+    elif fa is False:
+        checks["E2_heat_blocked_while_down"] = False
     else:
-        checks["E2_relay_refused_while_down"] = False
+        checks["E2_heat_blocked_while_down"] = None  # not observable
     checks["E3_link_and_version_back"] = (
         ev["t_link_recovered_s"] is not None and ev["t_version_back_s"] is not None)
     down_s = None
@@ -216,11 +207,11 @@ def judge(ev):
     checks["E5_no_new_trip"] = pre_trip is not None and pre_trip == post_trip
     out = [f"link down at t+{ev['t_link_down_s']}s, recovered t+{ev['t_link_recovered_s']}s, "
            f"version back t+{ev['t_version_back_s']}s (down {down_s}s)",
-           f"relay probe: {rp}",
+           f"fault line asserted while link down: {fa}",
            f"firing state final={final_state} faulted_seen={PROFILE_EXEC_FAULTED in states}",
            f"trip_reason pre={pre_trip} post={post_trip}"]
     for k, v in checks.items():
-        out.append(f"  {k}: " + ("n/a (not probed)" if v is None else "PASS" if v else "FAIL"))
+        out.append(f"  {k}: " + ("n/a (not observable)" if v is None else "PASS" if v else "FAIL"))
     ok = all(v is not False for v in checks.values())
     out.append("PASS" if ok else "FAIL")
     return ok, out, checks

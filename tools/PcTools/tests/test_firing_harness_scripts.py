@@ -564,11 +564,10 @@ class FakeRebootBoard:
     """2 s link-down window after reset, then recovery (scriptable)."""
 
     def __init__(self, clk, running=True, down_s=2.0, recover=True,
-                 relay_refused=True, firing_faults_at=None, trip_after=0,
-                 relays=(1,)):
+                 heat_blocked=True, firing_faults_at=None, trip_after=0):
         self.clk, self.running, self.down_s, self.recover = clk, running, down_s, recover
-        self.relay_refused, self.firing_faults_at = relay_refused, firing_faults_at
-        self.trip_after, self.relays = trip_after, list(relays)
+        self.heat_blocked, self.firing_faults_at = heat_blocked, firing_faults_at
+        self.trip_after = trip_after
         self.t_reset = None
         self.resets = 0
 
@@ -591,8 +590,8 @@ class FakeRebootBoard:
     def link(self):
         s = self._since()
         if s is not None and s < self.down_s or (s is not None and not self.recover):
-            return {"link_up": False, "age_ms": 3000}
-        return {"link_up": True, "age_ms": 100}
+            return {"link_up": False, "age_ms": 3000, "fault_asserted": self.heat_blocked}
+        return {"link_up": True, "age_ms": 100, "fault_asserted": False}
 
     def pico_version(self):
         s = self._since()
@@ -606,12 +605,6 @@ class FakeRebootBoard:
         s = self._since()
         tr = self.trip_after if (s is not None and s >= self.down_s) else 0
         return {"trip_reason": tr, "trip_mask": 0}
-
-    def relays_on(self):
-        return self.relays
-
-    def relay_on_refused(self, relay):
-        return self.relay_refused
 
     def reset_pico(self):
         self.resets += 1
@@ -656,9 +649,9 @@ def test_pico_reboot_firing_aborts_fails():
     assert run_reboot_main(FakeRebootBoard(clk, firing_faults_at=1.0), clk) == 1
 
 
-def test_pico_reboot_relay_accepted_while_down_fails():
+def test_pico_reboot_heat_still_granted_while_down_fails():
     clk = FakeClock()
-    assert run_reboot_main(FakeRebootBoard(clk, relay_refused=False), clk) == 1
+    assert run_reboot_main(FakeRebootBoard(clk, heat_blocked=False), clk) == 1
 
 
 def test_pico_reboot_new_trip_fails():
