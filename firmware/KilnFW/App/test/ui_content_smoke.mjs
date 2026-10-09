@@ -311,4 +311,6 @@ async function main() {
   }
   console.log('ui_content_smoke: All 4 page content checks passed.');
 }
-main();
+// Exit explicitly once cleanup is done: a lingering handle (keep-alive CDP/HTTP sockets,
+// the spawned Chrome handle) otherwise keeps the loop alive until the 120 s watchdog fires (exit 4).
+main().then(() => process.exit(process.exitCode || 0));
